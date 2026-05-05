@@ -11,11 +11,11 @@ effect tracking) with Python as the host harness while LLVM/WASM backends mature
 
 ## Status
 
-**v0.2.4** — hardened desktop UI, pairing, persistence, ghost-peer pruning, and single-instance daemon startup.
+**v0.2.5** — sovereign-network pass: MIT license, audit doctrine, content-defined dedup primitives, and Merkle drift sync.
 
 - Native-feeling browser app: dark theme, peer sidebar with online dots,
   message bubbles, drag-drop file send, live updates over WebSocket
-- 206+ passing tests across identity, wire, channel, discovery, paths, CLI,
+- 219+ passing tests across identity, wire, channel, discovery, paths, CLI,
   integration, raw-protocol attacks, resilience, tail subscription,
   chat REPL, and the new HTTP/WS server
 - Full path-traversal defense at both the wire-protocol and HTTP layers
@@ -130,13 +130,19 @@ src/one_link/
 ├── chat.py        terminal REPL (legacy, still useful)
 ├── cli.py         click-based CLI dispatch
 ├── state.py       (v0.2) sqlite persistent state
+├── cdc.py         content-defined chunking + dedup transfer planning
+├── merkle.py      Merkle drift detection for manifests/blob indexes
+├── sovereign.py   mission/principles/capability audit surface
 └── paths.py       cross-platform config/data dirs
 ```
 
-Coherence Language ecosystem hooks (planned for v0.2):
-- `coherence_lang.bootstrap.runtime.crdt.VectorClock` for sync ordering
-- `coherence_lang.bootstrap.runtime.effects` for declared-effect boundaries
-- `coherence_lang.bootstrap.runtime.linear` for crypto-key linearity
+Coherence / OneField ecosystem hooks:
+- `coherence_lang.bootstrap.runtime.crdt.VectorClock` inspired the active
+  `one_link.crdt.VectorClock` folder-sync primitive
+- OneField Mesh `cdc_dedup.cl` inspired `one_link.cdc`
+- OneField Mesh `merkle_drift_sync.cl` inspired `one_link.merkle`
+- Session-protocol and capability concepts are tracked in
+  `docs/SOVEREIGN_NETWORK_BLUEPRINT.md`
 
 ---
 
@@ -202,5 +208,5 @@ ONE_LINK_HOME=/tmp/ol-B one-link app    # different port, different identity
 
 ## License
 
-Copyright (c) 2026 One Link contributor (weareone@oneunity.earth). All rights reserved.
-See [LICENSE](LICENSE).
+Copyright (c) 2026 One Link contributor (weareone@oneunity.earth).
+Released under the MIT License. See [LICENSE](LICENSE).

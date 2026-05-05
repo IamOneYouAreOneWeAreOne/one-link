@@ -177,6 +177,15 @@ def audit():
     click.echo(f"  UI bind:           {res.get('ui_bind')}")
     click.echo(f"  UI auth:           {res.get('ui_auth')}")
     click.echo(f"  External telemetry: {'NO' if res.get('no_external_telemetry') else 'YES'}")
+    doctrine = res.get("sovereign_network", {})
+    if doctrine:
+        click.echo(f"  Mission:            {doctrine.get('mission', '')}")
+        click.echo("  Principles:")
+        for p in doctrine.get("principles", []):
+            click.echo(f"    - {p}")
+        click.echo("  Sovereign capabilities:")
+        for c in doctrine.get("capabilities", []):
+            click.echo(f"    - {c['name']} [{c['status']}]")
     pp = res.get("peer_protocol", {})
     click.echo("  Peer protocol:")
     click.echo(f"    transport:   {pp.get('transport')}")
@@ -280,6 +289,127 @@ def _print_event(m: dict) -> None:
         )
     else:
         click.echo(f"[{m.get('ts','')}] {arrow} {peer} {t}")
+
+
+def _ui_request(method: str, path: str, *, payload=None) -> dict:
+    """Helper for hitting the daemon's UI API from CLI commands."""
+    from one_link import server as server_mod
+    try:
+        ui_port = server_mod.read_server_port()
+        token = server_mod.read_ui_token()
+    except RuntimeError as e:
+        raise click.ClickException(f"daemon not running ({e})")
+
+    import urllib.error
+    import urllib.request
+    import json as _json
+    body = None
+    headers = {"Authorization": f"Bearer {token}"}
+    if payload is not None:
+        body = _json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{ui_port}{path}",
+        data=body, headers=headers, method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return _json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return _json.loads(e.read())
+        except Exception:
+            raise click.ClickException(f"{path} failed: {e}")
+    except Exception as e:
+        raise click.ClickException(f"{path} failed: {e}")
+
+
+@cli.group()
+def folder():
+    """Synced-folder management. Folders sync between paired peers."""
+
+
+@folder.command("add")
+@click.argument("name")
+@click.argument("local_path", type=click.Path(file_okay=False, path_type=Path))
+@click.option("--share", "share", multiple=True,
+              help="Peer fingerprint to share with (repeatable).")
+def folder_add(name, local_path, share):
+    """Designate a folder to sync. NAME is a label, LOCAL_PATH is the directory."""
+    res = _ui_request("POST", "/api/folders", payload={
+        "name": name,
+        "local_path": str(local_path.expanduser().resolve()),
+        "shared_with": list(share),
+    })
+    if res.get("error"):
+        raise click.ClickException(res["error"])
+    f = res.get("folder", {})
+    click.echo(f"added: {f.get('name')}  ->  {f.get('local_path')}")
+    if f.get("shared_with"):
+        click.echo("  shared with:")
+        for fp in f["shared_with"]:
+            click.echo(f"    {fp[:16]}…")
+
+
+@folder.command("list")
+def folder_list():
+    """List all configured sync folders."""
+    res = _ui_request("GET", "/api/folders")
+    folders = res.get("folders", [])
+    if not folders:
+        click.echo("(no folders configured — try: one-link folder add)")
+        return
+    click.echo(f"{'name':16} {'files':>6} {'in_store':>9}  path")
+    click.echo("-" * 60)
+    for f in folders:
+        click.echo(
+            f"{f['name']:16} {f.get('files', 0):>6} {f.get('in_store', 0):>9}  "
+            f"{f['local_path']}"
+        )
+        if f.get("shared_with"):
+            click.echo(f"{'':16} shared with: " + ", ".join(
+                fp[:8] + "…" for fp in f["shared_with"]
+            ))
+
+
+@folder.command("share")
+@click.argument("name")
+@click.argument("fingerprint")
+def folder_share(name, fingerprint):
+    """Add a peer FINGERPRINT to the sharing list of folder NAME."""
+    res = _ui_request("POST", f"/api/folders/{name}/share",
+                      payload={"peer_fp": fingerprint})
+    if res.get("error"):
+        raise click.ClickException(res["error"])
+    click.echo(f"shared {name!r} with {fingerprint[:16]}…")
+
+
+@folder.command("remove")
+@click.argument("name")
+def folder_remove(name):
+    """Stop syncing folder NAME. Local files are not deleted."""
+    res = _ui_request("DELETE", f"/api/folders/{name}")
+    if res.get("error"):
+        raise click.ClickException(res["error"])
+    click.echo(f"removed: {name}")
+
+
+@folder.command("sync")
+@click.argument("name")
+def folder_sync(name):
+    """Force an immediate sync cycle for folder NAME."""
+    res = _ui_request("POST", f"/api/folders/{name}/sync", payload={})
+    if res.get("error"):
+        raise click.ClickException(res["error"])
+    for r in res.get("results", []):
+        peer = r.get("peer_fp", "?")[:8] + "…"
+        if r["status"] == "pushed":
+            click.echo(
+                f"  {peer}  pushed  wants={r.get('wants', 0)}  "
+                f"blobs_sent={r.get('blobs_sent', 0)}"
+            )
+        else:
+            click.echo(f"  {peer}  {r['status']}")
 
 
 def main():

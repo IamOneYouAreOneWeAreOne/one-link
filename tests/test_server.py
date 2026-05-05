@@ -15,6 +15,7 @@ import os
 import socket
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import aiohttp
 import pytest
@@ -33,6 +34,52 @@ def _server_addr(home: Path) -> tuple[str, str]:
     port = _read(home, "server.port")
     token = _read(home, "ui.token")
     return f"http://127.0.0.1:{port}", token
+
+
+@pytest.mark.asyncio
+async def test_api_peers_hides_offline_pending_ghosts(tmp_path: Path):
+    from one_link.server import UIServer
+    from one_link.state import State
+
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        me_fp = "aa" * 32
+        state.upsert_peer(
+            fingerprint=me_fp,
+            short_id="aaaaaaaa",
+            pubkey=b"\xaa" * 32,
+            trust_default="pinned",
+        )
+        state.upsert_peer(
+            fingerprint="bb" * 32,
+            short_id="bbbbbbbb",
+            pubkey=b"\xbb" * 32,
+            hostname="WeareOne",
+            address="192.168.1.142",
+            port=50000,
+        )
+        state.upsert_peer(
+            fingerprint="cc" * 32,
+            short_id="cccccccc",
+            pubkey=b"\xcc" * 32,
+            hostname="PairedBox",
+            trust_default="pinned",
+        )
+
+        daemon = SimpleNamespace(
+            state=state,
+            discovery=None,
+            me=SimpleNamespace(fingerprint=me_fp, short_id="aaaaaaaa", hostname="me"),
+        )
+        server = UIServer(daemon)
+        resp = await server.api_peers(None)
+        body = json.loads(resp.text)
+        short_ids = {p["short_id"] for p in body["peers"]}
+
+        assert "bbbbbbbb" not in short_ids
+        assert "cccccccc" in short_ids
+    finally:
+        state.close()
 
 
 # ─── helpers ──────────────────────────────────────────────────────────
@@ -370,6 +417,13 @@ async def test_api_audit_describes_surface():
             assert "PAIR_REQUEST" in j["peer_protocol"]["message_types"]
             assert "CAPS" in j["peer_protocol"]["message_types"]
             assert any("mdns" in d["kind"] for d in j["outbound_destinations"])
+            doctrine = j["sovereign_network"]
+            assert doctrine["privacy_guarantees"]["mandatory_relay"] is False
+            assert "open-source distribution" in doctrine["principles"]
+            assert any(
+                c["name"] == "merkle_drift_sync"
+                for c in doctrine["capabilities"]
+            )
 
 
 @pytest.mark.asyncio

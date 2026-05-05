@@ -52,14 +52,33 @@ class Registry:
             self.on_change()
 
     def find(self, needle: str) -> Peer | None:
+        matches = self.candidates(needle)
+        return matches[0] if matches else None
+
+    def candidates(self, needle: str) -> list[Peer]:
+        """Return peer matches in safest order.
+
+        Short IDs are stable and unambiguous, so exact/prefix identity matches
+        beat hostname matches. Hostnames are human-friendly but many devices on
+        one test machine share the same name, and stale mDNS records can linger.
+        """
         if needle in self.peers:
-            return self.peers[needle]
+            return [self.peers[needle]]
+
+        lowered = needle.lower()
+        seen: set[str] = set()
+        out: list[Peer] = []
         for p in self.peers.values():
-            if p.hostname.lower() == needle.lower():
-                return p
             if p.short_id.startswith(needle):
-                return p
-        return None
+                out.append(p)
+                seen.add(p.short_id)
+        for p in self.peers.values():
+            if p.short_id in seen:
+                continue
+            if p.hostname.lower() == lowered:
+                out.append(p)
+                seen.add(p.short_id)
+        return out
 
     def list(self) -> list[Peer]:
         return sorted(self.peers.values(), key=lambda p: p.hostname)

@@ -40,6 +40,26 @@ def test_find_by_short_id_prefix():
     assert r.find("abcde") is p
 
 
+def test_candidates_prefer_identity_matches_over_hostname():
+    r = Registry()
+    host_match = _peer("bbbbbbbb", "abc")
+    prefix_match = _peer("abcdef12", "shared-host")
+    r.upsert(host_match)
+    r.upsert(prefix_match)
+
+    assert r.candidates("abc")[0] is prefix_match
+
+
+def test_candidates_return_all_hostname_matches_for_retry():
+    r = Registry()
+    old = _peer("aaaaaaaa", "Shared", "127.0.0.1", 1)
+    new = _peer("bbbbbbbb", "Shared", "127.0.0.1", 2)
+    r.upsert(old)
+    r.upsert(new)
+
+    assert r.candidates("shared") == [old, new]
+
+
 def test_find_returns_none_for_unknown():
     r = Registry()
     r.upsert(_peer("abcdef12"))

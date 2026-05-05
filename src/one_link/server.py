@@ -131,6 +131,11 @@ class UIServer:
         r.add_post("/api/settings", self._guarded(self.api_set_settings))
         r.add_get("/api/peers", self._guarded(self.api_peers))
         r.add_post("/api/peers/prune", self._guarded(self.api_prune_peers))
+        r.add_get("/api/folders", self._guarded(self.api_list_folders))
+        r.add_post("/api/folders", self._guarded(self.api_add_folder))
+        r.add_delete(r"/api/folders/{name}", self._guarded(self.api_remove_folder))
+        r.add_post(r"/api/folders/{name}/share", self._guarded(self.api_share_folder))
+        r.add_post(r"/api/folders/{name}/sync", self._guarded(self.api_sync_folder_now))
         r.add_post(r"/api/peers/{fp}/trust", self._guarded(self.api_set_trust))
         r.add_post(r"/api/peers/{fp}/pair", self._guarded(self.api_pair_init))
         r.add_post(r"/api/peers/{fp}/pair-confirm", self._guarded(self.api_pair_confirm))
@@ -327,6 +332,127 @@ class UIServer:
             return web.json_response({"error": str(e)}, status=500)
         after = len(self.daemon.discovery.registry.peers)
         return web.json_response({"removed": removed, "before": before, "after": after})
+
+    # ─── /api/folders ─────────────────────────────────────────────────
+    async def api_list_folders(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"folders": []})
+        out = []
+        for f in self.daemon.state.list_folders():
+            entries = self.daemon.state.list_manifest(f["name"]) if self.daemon.folder_engine else []
+            local = sum(1 for e in entries if e["blob_hash"] is not None)
+            in_store = 0
+            if self.daemon.blob_store:
+                in_store = sum(
+                    1 for e in entries
+                    if e["blob_hash"] and self.daemon.blob_store.has(e["blob_hash"])
+                )
+            out.append({
+                "name": f["name"],
+                "local_path": f["local_path"],
+                "shared_with": f["shared_with"],
+                "created_ms": f["created_ms"],
+                "files": local,
+                "in_store": in_store,
+            })
+        return web.json_response({"folders": out})
+
+    async def api_add_folder(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None or self.daemon.folder_engine is None:
+            return web.json_response(
+                {"error": "folder sync not initialized"}, status=503,
+            )
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        name = (data.get("name") or "").strip()
+        local_path = (data.get("local_path") or "").strip()
+        shared_with = data.get("shared_with") or []
+        if not name or not local_path:
+            return web.json_response(
+                {"error": "name and local_path required"}, status=400,
+            )
+        if not isinstance(shared_with, list):
+            return web.json_response(
+                {"error": "shared_with must be a list of fingerprints"}, status=400,
+            )
+        try:
+            f = self.daemon.folder_engine.add_folder(
+                name=name,
+                local_path=Path(local_path),
+                shared_with=[str(fp) for fp in shared_with],
+            )
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=409)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+        return web.json_response({"ok": True, "folder": f})
+
+    async def api_remove_folder(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None or self.daemon.folder_engine is None:
+            return web.json_response(
+                {"error": "folder sync not initialized"}, status=503,
+            )
+        name = request.match_info["name"]
+        try:
+            self.daemon.folder_engine.remove_folder(name)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+        return web.json_response({"ok": True})
+
+    async def api_share_folder(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None or self.daemon.folder_engine is None:
+            return web.json_response(
+                {"error": "folder sync not initialized"}, status=503,
+            )
+        name = request.match_info["name"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        peer_fp = (data.get("peer_fp") or "").strip()
+        if not peer_fp:
+            return web.json_response({"error": "peer_fp required"}, status=400)
+        try:
+            self.daemon.folder_engine.share_with(name, peer_fp)
+        except KeyError as e:
+            return web.json_response({"error": str(e)}, status=404)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+        return web.json_response({"ok": True})
+
+    async def api_sync_folder_now(self, request: web.Request) -> web.Response:
+        """Force an immediate sync cycle for one folder. Used by the UI 'sync now' button."""
+        if self.daemon.state is None or self.daemon.folder_engine is None:
+            return web.json_response(
+                {"error": "folder sync not initialized"}, status=503,
+            )
+        name = request.match_info["name"]
+        f = self.daemon.state.get_folder(name)
+        if not f:
+            return web.json_response({"error": "no such folder"}, status=404)
+        results = []
+        for peer_fp in f["shared_with"]:
+            if not self.daemon._is_pinned(peer_fp):
+                results.append({"peer_fp": peer_fp, "status": "not_pinned"})
+                continue
+            peer = None
+            if self.daemon.discovery:
+                for p in self.daemon.discovery.registry.list():
+                    cand = self.daemon._peer_fp_from_peer(p)
+                    if cand == peer_fp:
+                        peer = p
+                        break
+            if peer is None:
+                results.append({"peer_fp": peer_fp, "status": "offline"})
+                continue
+            try:
+                r = await self.daemon.push_folder_to_peer(peer, name)
+                results.append({"peer_fp": peer_fp, "status": "pushed", **r})
+            except Exception as e:
+                results.append({"peer_fp": peer_fp, "status": "error", "error": str(e)})
+        return web.json_response({"ok": True, "results": results})
 
     # ─── POST /api/peers/{fp}/trust ───────────────────────────────────
     async def api_set_trust(self, request: web.Request) -> web.Response:
@@ -631,6 +757,7 @@ class UIServer:
         enumerated from the registered routes and the peer protocol's
         declared message types."""
         from one_link import wire as wire_mod
+        from one_link.sovereign import doctrine
         # Local UI surface
         local_routes = []
         for resource in self.app.router.resources():
@@ -677,6 +804,7 @@ class UIServer:
             },
             "outbound_destinations": outbound,
             "no_external_telemetry": True,
+            "sovereign_network": doctrine(),
         })
 
     async def api_file_download(self, request: web.Request) -> web.StreamResponse:

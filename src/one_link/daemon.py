@@ -26,7 +26,8 @@ from pathlib import Path
 
 import blake3
 
-from one_link import channel as ch
+from one_link import blobstore, channel as ch, foldersync
+from one_link.crdt import ManifestEntry, VectorClock
 from one_link.discovery import Discovery, Peer
 from one_link.identity import Identity, fingerprint_of, load_or_create
 from one_link.pairing import PairingTracker, PairState, compute_sas
@@ -102,11 +103,16 @@ class Daemon:
         self._control_server: asyncio.base_events.Server | None = None
         self._tail_subs: set[asyncio.StreamWriter] = set()
         self._incoming_files: dict[str, IncomingFile] = {}
+        self._incoming_blobs: dict[str, dict] = {}
         self.ui_server = None  # one_link.server.UIServer | None
         self.state: State | None = None
         self.pairing = PairingTracker()
         self._prune_task: asyncio.Task | None = None
         self._lock_file = None
+        # Folder sync — populated in start() when state + blob store are up.
+        self.folder_engine = None  # type: foldersync.FolderEngine | None
+        self.blob_store = None     # type: blobstore.BlobStore | None
+        self._folder_sync_task: asyncio.Task | None = None
 
     def _acquire_instance_lock(self) -> None:
         """Prevent duplicate daemons for the same config/data home."""
@@ -425,6 +431,191 @@ class Daemon:
             log.info("pair rejected by %s", peer_sid)
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
 
+        # ─── folder sync wire protocol ──────────────────────────────────
+        elif t == "MANIFEST_PUSH":
+            # Peer is offering us their view of a shared folder.
+            await self._handle_manifest_push(channel, msg, peer_fp)
+        elif t == "MANIFEST_WANTS":
+            # Peer is asking for specific blobs that they don't have.
+            await self._handle_manifest_wants(channel, msg, peer_fp)
+        elif t == "BLOB_OFFER":
+            await self._handle_blob_offer(channel, msg, peer_fp)
+        elif t == "BLOB_CHUNK":
+            await self._handle_blob_chunk(channel, msg, peer_fp)
+
+    # ─── folder sync handlers ──────────────────────────────────────────
+    def _is_pinned(self, peer_fp: str) -> bool:
+        if self.state is None:
+            return False
+        rec = self.state.get_peer(peer_fp)
+        return bool(rec and rec.trust == "pinned")
+
+    async def _handle_manifest_push(self, channel, msg, peer_fp):
+        if self.folder_engine is None or self.state is None:
+            return
+        # Only sync folders the peer is explicitly shared with AND is pinned.
+        if not self._is_pinned(peer_fp):
+            log.info("ignoring MANIFEST_PUSH from non-pinned peer %s", peer_fp[:8])
+            return
+        folder_name = msg.get("folder")
+        if not folder_name:
+            return
+        f = self.state.get_folder(folder_name)
+        if not f or peer_fp not in f["shared_with"]:
+            log.info("MANIFEST_PUSH for folder we don't share with this peer")
+            return
+        entries = msg.get("entries", []) or []
+        try:
+            wants_data = self.folder_engine.receive_remote_manifest(
+                folder_name=folder_name, entries=entries,
+            )
+        except Exception as e:
+            log.warning("manifest merge failed: %s", e)
+            return
+        wants = [
+            d["blob_hash"] for d in wants_data
+            if d.get("blob_hash")
+        ]
+        await channel.send(encode_msg(make_msg(
+            "MANIFEST_WANTS", self.me.short_id,
+            folder=folder_name, wants=wants,
+        )))
+        log.info("MANIFEST_PUSH from %s: %d entries, %d wants",
+                 peer_fp[:8], len(entries), len(wants))
+
+    async def _handle_manifest_wants(self, channel, msg, peer_fp):
+        if self.folder_engine is None or self.state is None:
+            return
+        if not self._is_pinned(peer_fp):
+            return
+        folder_name = msg.get("folder")
+        wants = msg.get("wants", []) or []
+        if not folder_name:
+            return
+        f = self.state.get_folder(folder_name)
+        if not f or peer_fp not in f["shared_with"]:
+            return
+        for blob_hex in wants:
+            if not self._valid_blob_hex(blob_hex):
+                continue
+            if not self.blob_store or not self.blob_store.has(blob_hex):
+                continue
+            size = self.blob_store.size(blob_hex)
+            await channel.send(encode_msg(make_msg(
+                "BLOB_OFFER", self.me.short_id,
+                blob=blob_hex, size=size,
+            )))
+            seq = 0
+            try:
+                with self.blob_store.open_read(blob_hex) as fh:
+                    prev = fh.read(CHUNK_SIZE)
+                    while prev:
+                        cur = fh.read(CHUNK_SIZE)
+                        eof = not cur
+                        await channel.send(encode_msg(make_msg(
+                            "BLOB_CHUNK", self.me.short_id,
+                            blob=blob_hex, seq=seq,
+                            data=base64.b64encode(prev).decode("ascii"),
+                            eof=eof,
+                        )))
+                        seq += 1
+                        prev = cur
+            except OSError as e:
+                log.warning("blob stream %s failed: %s", blob_hex[:8], e)
+
+    async def _handle_blob_offer(self, channel, msg, peer_fp):
+        if not self._is_pinned(peer_fp) or self.blob_store is None:
+            return
+        blob = msg.get("blob")
+        size = msg.get("size", 0)
+        if not self._valid_blob_hex(blob or ""):
+            return
+        if size < 0 or size > MAX_INCOMING_FILE_BYTES:
+            return
+        # If we already have this blob, ignore the offer (peer wasted work).
+        if self.blob_store.has(blob):
+            return
+        # Open a streaming writer.
+        cm = self.blob_store.writer()
+        writer, tmp_path = cm.__enter__()
+        self._incoming_blobs[blob] = {
+            "size": int(size),
+            "received": 0,
+            "next_seq": 0,
+            "writer": writer,
+            "cm": cm,
+            "tmp_path": tmp_path,
+        }
+
+    async def _handle_blob_chunk(self, channel, msg, peer_fp):
+        if not self._is_pinned(peer_fp) or self.blob_store is None:
+            return
+        blob = msg.get("blob")
+        ctx = self._incoming_blobs.get(blob)
+        if ctx is None:
+            return
+        seq = msg.get("seq", -1)
+        if seq != ctx["next_seq"]:
+            log.warning("BLOB_CHUNK seq mismatch for %s (got %s, want %d)",
+                        blob[:8], seq, ctx["next_seq"])
+            self._abort_blob(blob)
+            return
+        try:
+            data = base64.b64decode(msg.get("data", ""))
+        except (binascii.Error, ValueError):
+            self._abort_blob(blob)
+            return
+        ctx["received"] += len(data)
+        ctx["next_seq"] += 1
+        if ctx["received"] > ctx["size"] + (8 * 1024):
+            self._abort_blob(blob)
+            return
+        try:
+            ctx["writer"].write(data)
+        except Exception:
+            self._abort_blob(blob)
+            return
+        if msg.get("eof"):
+            try:
+                got_hash = ctx["writer"].commit()
+            except Exception as e:
+                log.warning("blob commit failed: %s", e)
+                self._abort_blob(blob)
+                return
+            ctx["cm"].__exit__(None, None, None)
+            self._incoming_blobs.pop(blob, None)
+            if got_hash != blob:
+                log.warning("blob hash mismatch: got %s, want %s",
+                            got_hash[:12], blob[:12])
+                # Hash didn't match; remove what we stored
+                self.blob_store.remove(got_hash)
+                return
+            self.blob_store.path(got_hash)  # confirms it lives
+            try:
+                self.state.record_blob(got_hash, ctx["received"])
+            except Exception:
+                pass
+            n_files = self.folder_engine.materialize_after_blob_arrived(
+                blob_hash=got_hash,
+            )
+            if self.ui_server is not None:
+                self.ui_server.broadcast({
+                    "type": "folder_synced",
+                    "blob": got_hash,
+                    "files": n_files,
+                })
+            log.info("blob received %s (%d files materialized)",
+                     got_hash[:12], n_files)
+
+    def _abort_blob(self, blob: str) -> None:
+        ctx = self._incoming_blobs.pop(blob, None)
+        if not ctx:
+            return
+        try:
+            ctx["cm"].__exit__(None, None, None)
+        except Exception:
+            pass
+
     # ─── outbound to a peer ─────────────────────────────────────────────
     def _peer_fp_from_peer(self, peer: Peer) -> str | None:
         if not peer.ed_pub_hex:
@@ -698,6 +889,105 @@ class Daemon:
         acks = await self.send_to(peer, [m])
         return {"sent": m, "ack": acks[0] if acks else None}
 
+    # ─── folder sync orchestration ─────────────────────────────────────
+    async def push_folder_to_peer(self, peer: Peer, folder_name: str) -> dict:
+        """One-way folder push to peer. Single connection cycle:
+            1. Open + handshake + caps
+            2. Send our manifest for this folder
+            3. Receive MANIFEST_WANTS
+            4. Stream BLOB_OFFER + BLOB_CHUNKs for each wanted blob
+            5. Close
+
+        Reverse direction happens when peer initiates their own cycle.
+        """
+        block = self._check_outbound_trust(peer)
+        if block:
+            return {"ok": False, "error": block, "blobs_sent": 0}
+        if self.folder_engine is None or self.state is None or self.blob_store is None:
+            return {"ok": False, "error": "folder sync not initialized", "blobs_sent": 0}
+
+        peer_fp = self._peer_fp_from_peer(peer)
+        if not peer_fp or not self._is_pinned(peer_fp):
+            return {"ok": False, "error": "peer not pinned", "blobs_sent": 0}
+
+        f = self.state.get_folder(folder_name)
+        if not f or peer_fp not in f["shared_with"]:
+            return {"ok": False, "error": "folder not shared with peer", "blobs_sent": 0}
+
+        entries = self.folder_engine.manifest_for(folder_name)
+
+        reader, writer = await asyncio.open_connection(peer.address, peer.port)
+        blobs_sent = 0
+        try:
+            channel = await ch.initiate(reader, writer, self.me)
+            if channel.peer_short_id != peer.short_id:
+                raise RuntimeError(
+                    f"fingerprint mismatch: expected {peer.short_id}"
+                )
+            try:
+                await channel.send(encode_msg(_build_caps(self.me.short_id)))
+            except Exception:
+                pass
+
+            await channel.send(encode_msg(make_msg(
+                "MANIFEST_PUSH", self.me.short_id,
+                folder=folder_name, entries=entries,
+            )))
+
+            # Drain replies until MANIFEST_WANTS arrives (skipping CAPS).
+            wants: list[str] = []
+            try:
+                while True:
+                    reply = await asyncio.wait_for(channel.recv(), timeout=15.0)
+                    m = decode_msg(reply)
+                    if m.get("t") == "CAPS":
+                        channel.peer_caps = {
+                            "protocol": m.get("protocol", "?"),
+                            "features": list(m.get("features", [])),
+                            "from": m.get("from"),
+                        }
+                        continue
+                    if m.get("t") == "MANIFEST_WANTS" and m.get("folder") == folder_name:
+                        wants = list(m.get("wants", []) or [])
+                        break
+                    # Anything else: ignore and keep listening briefly.
+            except asyncio.TimeoutError:
+                wants = []
+
+            for blob_hex in wants:
+                if not self._valid_blob_hex(blob_hex):
+                    continue
+                if not self.blob_store.has(blob_hex):
+                    continue
+                size = self.blob_store.size(blob_hex)
+                await channel.send(encode_msg(make_msg(
+                    "BLOB_OFFER", self.me.short_id,
+                    blob=blob_hex, size=size,
+                )))
+                seq = 0
+                with self.blob_store.open_read(blob_hex) as fh:
+                    prev = fh.read(CHUNK_SIZE)
+                    while prev:
+                        cur = fh.read(CHUNK_SIZE)
+                        eof = not cur
+                        await channel.send(encode_msg(make_msg(
+                            "BLOB_CHUNK", self.me.short_id,
+                            blob=blob_hex, seq=seq,
+                            data=base64.b64encode(prev).decode("ascii"),
+                            eof=eof,
+                        )))
+                        seq += 1
+                        prev = cur
+                blobs_sent += 1
+
+            await channel.close()
+            return {"ok": True, "wants": len(wants), "blobs_sent": blobs_sent}
+        except Exception as e:
+            with contextlib.suppress(Exception):
+                writer.close()
+                await writer.wait_closed()
+            return {"ok": False, "error": str(e), "blobs_sent": blobs_sent}
+
     async def send_file(self, peer: Peer, path: Path) -> dict:
         block = self._check_outbound_trust(peer)
         if block:
@@ -838,17 +1128,27 @@ class Daemon:
                 }
                 await self._reply(writer, {"ok": True, "me": me, "peers": peers})
             elif cmd == "send":
-                peer = self._resolve_peer(req["peer"])
-                if not peer:
+                peers = self._resolve_peer_candidates(req["peer"])
+                if not peers:
                     await self._reply(
                         writer, {"ok": False, "error": f"no peer {req['peer']!r}"}
                     )
                     return
-                result = await self.send_text(peer, req["body"])
-                await self._reply(writer, {"ok": True, "result": result})
+                last_error = None
+                for peer in peers:
+                    try:
+                        result = await self.send_text(peer, req["body"])
+                        await self._reply(writer, {"ok": True, "result": result})
+                        return
+                    except OSError as e:
+                        last_error = e
+                        if self.discovery:
+                            self.discovery.registry.remove(peer.short_id)
+                        continue
+                await self._reply(writer, {"ok": False, "error": str(last_error)})
             elif cmd == "send_file":
-                peer = self._resolve_peer(req["peer"])
-                if not peer:
+                peers = self._resolve_peer_candidates(req["peer"])
+                if not peers:
                     await self._reply(
                         writer, {"ok": False, "error": f"no peer {req['peer']!r}"}
                     )
@@ -857,8 +1157,18 @@ class Daemon:
                 if not p.is_file():
                     await self._reply(writer, {"ok": False, "error": f"no file: {p}"})
                     return
-                result = await self.send_file(peer, p)
-                await self._reply(writer, {"ok": True, "result": result})
+                last_error = None
+                for peer in peers:
+                    try:
+                        result = await self.send_file(peer, p)
+                        await self._reply(writer, {"ok": True, "result": result})
+                        return
+                    except OSError as e:
+                        last_error = e
+                        if self.discovery:
+                            self.discovery.registry.remove(peer.short_id)
+                        continue
+                await self._reply(writer, {"ok": False, "error": str(last_error)})
             elif cmd == "tail":
                 self._tail_subs.add(writer)
                 await self._reply(writer, {"ok": True, "tailing": True})
@@ -885,6 +1195,9 @@ class Daemon:
 
     def _resolve_peer(self, needle: str) -> Peer | None:
         return self.discovery.registry.find(needle) if self.discovery else None
+
+    def _resolve_peer_candidates(self, needle: str) -> list[Peer]:
+        return self.discovery.registry.candidates(needle) if self.discovery else []
 
     def _broadcast_tail(self, msg: dict) -> None:
         line = (json.dumps({"event": "msg", "msg": msg}) + "\n").encode("utf-8")
@@ -991,6 +1304,25 @@ class Daemon:
 
         self._prune_task = asyncio.create_task(_prune_loop())
 
+        # Folder sync: blob store + manifest engine. Both lazy: even if user
+        # never adds a folder, these are cheap to construct.
+        if self.state is not None:
+            try:
+                self.blob_store = blobstore.BlobStore(data_dir() / "blobs")
+                self.folder_engine = foldersync.FolderEngine(
+                    state=self.state,
+                    blob_store=self.blob_store,
+                    my_fingerprint=self.me.fingerprint,
+                    loop=asyncio.get_running_loop(),
+                    on_local_change=self._on_local_folder_change,
+                )
+                await self.folder_engine.start()
+                self._folder_sync_task = asyncio.create_task(self._folder_sync_loop())
+            except Exception as e:
+                log.warning("folder sync init failed: %s", e)
+                self.folder_engine = None
+                self.blob_store = None
+
         # Start UI server if available
         if UIServer is not None:
             try:
@@ -1012,6 +1344,62 @@ class Daemon:
             ui_port,
         )
 
+    async def _on_local_folder_change(self, folder_name: str, entry) -> None:
+        """Called by the FolderEngine when a watched file is added / changed
+        / deleted. Notify the UI so the folder status indicator updates;
+        peer push happens on the next sync tick."""
+        if self.ui_server is not None:
+            try:
+                self.ui_server.broadcast({
+                    "type": "folder_change",
+                    "folder": folder_name,
+                    "file": entry.file_path,
+                    "deleted": entry.blob_hash is None,
+                })
+            except Exception:
+                pass
+
+    async def _folder_sync_loop(self) -> None:
+        """Periodically push our manifest for each shared folder to every
+        pinned peer that's currently reachable. One-way per cycle; the
+        reverse direction happens when the peer initiates."""
+        # Initial settle delay so discovery + state are fully up.
+        try:
+            await asyncio.sleep(8.0)
+            while True:
+                await self._run_one_folder_sync_cycle()
+                await asyncio.sleep(30.0)
+        except asyncio.CancelledError:
+            pass
+
+    async def _run_one_folder_sync_cycle(self) -> None:
+        if (
+            self.folder_engine is None
+            or self.state is None
+            or self.discovery is None
+        ):
+            return
+        folders = self.state.list_folders()
+        if not folders:
+            return
+        for folder in folders:
+            for peer_fp in folder["shared_with"]:
+                if not self._is_pinned(peer_fp):
+                    continue
+                # Find the peer in discovery.
+                peer = None
+                for p in self.discovery.registry.list():
+                    cand_fp = self._peer_fp_from_peer(p)
+                    if cand_fp == peer_fp:
+                        peer = p
+                        break
+                if peer is None:
+                    continue
+                try:
+                    await self.push_folder_to_peer(peer, folder["name"])
+                except Exception as e:
+                    log.info("folder sync to %s failed: %s", peer.short_id, e)
+
     async def serve_forever(self) -> None:
         assert self._peer_server and self._control_server
         await asyncio.gather(
@@ -1020,6 +1408,17 @@ class Daemon:
         )
 
     async def stop(self) -> None:
+        if self._folder_sync_task and not self._folder_sync_task.done():
+            self._folder_sync_task.cancel()
+            try:
+                await self._folder_sync_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self.folder_engine is not None:
+            try:
+                await self.folder_engine.stop()
+            except Exception:
+                pass
         if self._prune_task and not self._prune_task.done():
             self._prune_task.cancel()
             try:
