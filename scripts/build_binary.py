@@ -55,6 +55,11 @@ def main() -> int:
     if spec.exists():
         spec.unlink()
 
+    # PyInstaller's --add-data uses ';' on Windows, ':' elsewhere.
+    sep = ";" if platform.system() == "Windows" else ":"
+    web_dir = repo / "src" / "one_link" / "web"
+    add_data_web = f"{web_dir}{sep}one_link/web"
+
     cmd = [
         sys.executable,
         "-m",
@@ -70,6 +75,11 @@ def main() -> int:
         "zeroconf",
         "--collect-submodules",
         "cryptography",
+        "--collect-submodules",
+        "aiohttp",
+        # Bundle the web UI (HTML/CSS/JS) into the exe:
+        "--add-data",
+        add_data_web,
         # Entry point:
         str(entry),
     ]

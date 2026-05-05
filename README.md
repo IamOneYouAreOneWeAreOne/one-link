@@ -1,7 +1,8 @@
 # One_link
 
 Peer-to-peer LAN chat + file sync. No accounts, no servers, no cloud.
-Your computers find each other on your network and talk directly.
+Your computers find each other on your network and talk directly,
+end-to-end encrypted, mutually authenticated.
 
 Built on the Coherence Language ecosystem (CRDT runtime, identity primitives,
 effect tracking) with Python as the host harness while LLVM/WASM backends mature.
@@ -10,87 +11,77 @@ effect tracking) with Python as the host harness while LLVM/WASM backends mature
 
 ## Status
 
-**v0.0.3** — interactive chat command + desktop shortcut.
-Foundation under test: 102 passing tests across identity, wire,
-channel, discovery, paths, CLI, integration, raw-protocol attacks,
-resilience, tail subscription, and chat REPL. Folder-watch sync
-and full GUI still on the roadmap.
+**v0.1.0** — modern desktop UI.
+
+- Native-feeling browser app: dark theme, peer sidebar with online dots,
+  message bubbles, drag-drop file send, live updates over WebSocket
+- 115 passing tests across identity, wire, channel, discovery, paths, CLI,
+  integration, raw-protocol attacks, resilience, tail subscription,
+  chat REPL, and the new HTTP/WS server
+- Full path-traversal defense at both the wire-protocol and HTTP layers
+- LAN mDNS discovery, X25519 + ChaCha20-Poly1305 channel, Ed25519 identity
 
 ---
 
 ## Install
 
-### Windows — single-file binary (easiest)
+### Windows (single binary)
 
-Download `one-link.exe` from the latest [Release](https://github.com/IamOneYouAreOneWeAreOne/one-link/releases) and run it from a terminal:
+Download `one-link.exe` from the [latest release](https://github.com/IamOneYouAreOneWeAreOne/one-link/releases) and run:
 
 ```cmd
-one-link.exe daemon
+one-link.exe app
 ```
 
-### macOS / Linux — from source
+The first time you launch, Windows Defender / SmartScreen may flag the
+unsigned exe — click "More info → Run anyway." (EV code-signing is
+on the v0.2 roadmap.)
 
-macOS comes with Python 3 already; on Linux install `python3.11+` from your package manager.
+### Windows / macOS / Linux (from source)
 
 ```bash
 git clone https://github.com/IamOneYouAreOneWeAreOne/one-link
 cd one-link
 pip install -e .
-one-link daemon
+one-link app
 ```
 
-### Windows — from source (alternate)
+On Windows, you can also drop a Desktop shortcut:
 
-Same as above; install Python 3.11+ from python.org first if you don't have it.
+```powershell
+PowerShell -ExecutionPolicy Bypass -File scripts\install_desktop_shortcut.ps1
+```
+
+Now there's a `One_link` icon on your Desktop. Double-click → app opens.
 
 ---
 
 ## Use
 
-### Easiest: interactive chat window
+`one-link app` starts the daemon (if not already running) and opens
+the desktop UI in your browser. The window has:
+
+- **Sidebar** — every peer One_link finds on your LAN, with hostname,
+  short_id, and an online indicator
+- **Conversation pane** — pick a peer; chat with bubbles + timestamps
+- **Drag-drop file zone** — drop any file anywhere on the window to send
+- **Files panel** — toggle `Files` to see everything you've received
+- **Live updates** — incoming messages and files appear instantly via
+  WebSocket; no refresh needed
+
+Files of any size, no upload limits, no third party in the middle.
+
+### Lower-level commands (still available)
 
 ```bash
-one-link chat
-```
-
-Auto-starts a daemon and drops you into a REPL where you can chat
-and see incoming traffic in one window. Type `/help` once it's running.
-
-```
->>> /peers
->>> Alex-MacBook: hello mac
->>> /send-file Alex-MacBook ~/Pictures/photo.jpg
->>> /quit
-```
-
-`<peer>` is a hostname or any prefix of a device's short_id.
-
-On Windows you can run `scripts/install_desktop_shortcut.ps1` (one-time)
-to drop a `One_link.lnk` on your Desktop — double-click to open chat.
-
-### Headless service mode
-
-Leave a daemon running in a terminal so you stay reachable while the
-chat window is closed:
-
-```bash
-one-link daemon
-```
-
-### Lower-level CLI commands
-
-```bash
-one-link whoami           # show this device's identity
-one-link peers            # list discovered devices on the LAN
-one-link send <peer> "hi" # one-shot chat message
+one-link daemon            # headless service mode
+one-link chat              # terminal REPL alternative to the GUI
+one-link whoami            # show this device's identity
+one-link peers             # list discovered devices
+one-link send <peer> "hi"
 one-link send-file <peer> /path/to/file.zip
-one-link tail             # stream incoming + outgoing events live
+one-link tail              # stream events as JSON lines
 ```
-
-Received files land in the recipient's inbox:
-- Windows: `%LOCALAPPDATA%\Coherence\One_link\inbox\`
-- macOS:   `~/Library/Application Support/One_link/inbox/`
-- Linux:   `~/.local/share/One_link/inbox/`
 
 ---
 
@@ -99,26 +90,27 @@ Received files land in the recipient's inbox:
 ```
                        [ LAN ]
    computer A  <─── mDNS discovery ───>  computer B
-   one-link.exe        _onelink._tcp        one-link.exe
+   one-link                _onelink._tcp     one-link
 
    per message:
      1. open TCP to peer (port advertised in mDNS)
      2. exchange Ed25519 pubkeys + sigs (mutual authn)
-     3. X25519 handshake -> shared secret -> HKDF -> AEAD keys
+     3. X25519 handshake → shared secret → HKDF → AEAD keys
      4. ChaCha20-Poly1305 framed messages, both directions
      5. close
 ```
 
-- **Identity** is a long-term Ed25519 keypair generated on first run,
-  stored in your user config dir. The BLAKE3 fingerprint of your public
-  key is your device ID.
-- **Encryption** is per-connection. Each new connection generates fresh
-  X25519 ephemeral keys for forward secrecy. ChaCha20-Poly1305 with a
-  64-bit counter nonce, AAD-tagged.
-- **Discovery** is `_onelink._tcp.local.` mDNS. TXT record carries the
-  Ed25519 public-key hex so peers can verify identity at first contact.
-- **Files** are streamed in 256 KiB chunks, BLAKE3-hashed end-to-end for
-  integrity verification on receive.
+The local UI is served by the daemon on a token-gated 127.0.0.1 port.
+Only your browser, with the cookie set on first GET, can talk to it.
+The daemon does not listen on any external interface for HTTP — only
+the encrypted peer protocol on TCP for LAN traffic.
+
+- **Identity:** long-term Ed25519 keypair, BLAKE3 fingerprint = device ID
+- **Encryption:** per-connection X25519 ephemerals → forward secrecy.
+  ChaCha20-Poly1305 with a 64-bit counter nonce, AAD-tagged
+- **Discovery:** `_onelink._tcp.local.` mDNS. TXT record carries
+  the Ed25519 public-key hex
+- **Files:** streamed in 256 KiB chunks, BLAKE3 verified end-to-end
 
 ---
 
@@ -131,15 +123,43 @@ src/one_link/
 ├── wire.py        length-prefixed frame protocol + JSON envelopes
 ├── channel.py     X25519 handshake + ChaCha20-Poly1305 stream
 ├── discovery.py   mDNS via async zeroconf
-├── daemon.py      asyncio TCP server + local control socket
-├── cli.py         click-based CLI
+├── daemon.py      asyncio peer + control + UI servers
+├── server.py      aiohttp HTTP + WebSocket UI API
+├── web/index.html the desktop UI (single file, ~700 lines, no build step)
+├── app.py         `one-link app` launcher
+├── chat.py        terminal REPL (legacy, still useful)
+├── cli.py         click-based CLI dispatch
+├── state.py       (v0.2) sqlite persistent state
 └── paths.py       cross-platform config/data dirs
 ```
 
-Coherence Language ecosystem hooks (planned for v0.1):
+Coherence Language ecosystem hooks (planned for v0.2):
 - `coherence_lang.bootstrap.runtime.crdt.VectorClock` for sync ordering
 - `coherence_lang.bootstrap.runtime.effects` for declared-effect boundaries
 - `coherence_lang.bootstrap.runtime.linear` for crypto-key linearity
+
+---
+
+## Security notes
+
+- **Loopback-only UI.** The HTTP/WebSocket server binds to 127.0.0.1.
+  No remote-attacker surface; only browsers running on this exact machine
+  can reach it.
+- **Per-process token.** Every daemon restart rotates a 256-bit URL-safe
+  token. Required as cookie or Authorization header for every API call.
+- **Path-traversal defense in two layers** (verified across 7 wire-level
+  vectors and 7 HTTP-level vectors): basename-only writes to inbox, raw
+  HTTP requests with `..` in the URL get rejected.
+- **AEAD-protected wire protocol.** Tampering with any frame after
+  the handshake closes the connection.
+- **Trust on first use.** v0.1.0 silently accepts any new peer's
+  fingerprint. A confirmation prompt is on the v0.2 list.
+- **Identity key is unencrypted on disk** (file mode 0600 on Unix; user-
+  only ACL via `%APPDATA%` on Windows). Passphrase-encrypted keystore
+  is on the roadmap.
+
+This is alpha software. Don't use it for anything you wouldn't be okay
+losing or having someone else read if your device were compromised.
 
 ---
 
@@ -147,62 +167,37 @@ Coherence Language ecosystem hooks (planned for v0.1):
 
 ```bash
 pip install -e .[dev]
-python tests/smoke_loopback.py     # full two-daemon round-trip on this PC
-python scripts/build_binary.py     # build standalone one-link[.exe]
+python -m pytest tests/ --ignore=tests/smoke_loopback.py -v
+python scripts/build_binary.py     # produces dist/one-link[.exe]
 ```
 
-The smoke test starts two independent daemons in temporary directories,
-waits for mDNS discovery, sends a TEXT message, sends a 750 KB file,
-and verifies the bytes arrive identical (BLAKE3-checked).
+The smoke test (`tests/smoke_loopback.py`) starts two daemons in temp
+directories and runs a complete end-to-end round-trip including a
+multi-chunk file. The pytest suite covers everything in much greater
+depth — see `TESTING.md`.
 
 ### Running multiple daemons on one machine
 
 Set `ONE_LINK_HOME` to override config + data dirs:
 
 ```bash
-ONE_LINK_HOME=/tmp/ol-A one-link daemon
-ONE_LINK_HOME=/tmp/ol-B one-link daemon   # in another terminal
+ONE_LINK_HOME=/tmp/ol-A one-link app
+ONE_LINK_HOME=/tmp/ol-B one-link app    # different port, different identity
 ```
-
----
-
-## Background service
-
-Not yet packaged as a system service. Workaround for now:
-
-- **Windows**: drop a shortcut to `one-link.exe daemon` in
-  `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`.
-- **macOS**: a `launchctl` plist or just leave it running in a tmux/screen.
-- **Linux**: a `systemd --user` unit.
-
-A proper tray-icon background service is on the v0.0.2 roadmap.
 
 ---
 
 ## Roadmap
 
-- **v0.0.2** — tray icon, auto-start, peer trust prompts (TOFU acceptance UI),
-  signed macOS .app + Windows installer
-- **v0.1** — folder-watch sync engine using CRDT manifests, content-addressed
-  blob store, conflict-free merge across peers
-- **v0.2** — GUI (Tauri + React or Qt), group chat, voice/video
-- **v0.3+** — internet P2P (NAT traversal via Iroh or libp2p), multi-modal
-  transports from OneField Mesh (RF, audio fallback) for offline-resilient comms
-
----
-
-## Security notes
-
-- **Trust on first use.** v0.0.1 silently accepts any new peer's fingerprint.
-  A confirmation prompt is on the v0.0.2 list.
-- **No replay protection** beyond the per-channel nonce counter. Adequate for
-  LAN; will need hardening for any future internet-facing mode.
-- **Identity key is unencrypted on disk.** File mode 0600 on Unix; on Windows
-  it inherits user-only ACL via `%APPDATA%`. A passphrase-encrypted keystore
-  is on the roadmap.
-
-This is alpha software. Don't use it for anything you wouldn't be okay
-losing or having someone else read if your device were compromised.
+- **v0.2** — Persistent message history (sqlite + FTS5), encrypted-on-disk
+  identity, peer-trust prompts (TOFU upgrade), CRDT folder sync engine,
+  group rooms, audit command surfacing declared network effects
+- **v0.3** — Native window via Tauri (proper app, not a browser tab),
+  signed installers (EV cert) for Win + Mac, tray icon, auto-start
+- **v0.4** — Internet P2P (NAT traversal via Iroh), persistent peers
+  beyond mDNS range, distributed gossip discovery
+- **v1.0** — Multi-modal transports from OneField (RF, audio, DSSS sub-noise),
+  voice/video, mobile (iOS/Android via React Native)
 
 ---
 

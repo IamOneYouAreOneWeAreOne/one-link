@@ -34,6 +34,12 @@ from one_link.paths import (
 )
 from one_link.wire import decode_msg, encode_msg, make_msg
 
+# Forward import to avoid hard dep when server.py loads daemon.py
+try:
+    from one_link.server import UIServer  # noqa: F401
+except Exception:
+    UIServer = None  # type: ignore[assignment]
+
 log = logging.getLogger("one_link.daemon")
 
 CONTROL_PORT_FILE = "control.port"
@@ -68,6 +74,7 @@ class Daemon:
         self._control_server: asyncio.base_events.Server | None = None
         self._tail_subs: set[asyncio.StreamWriter] = set()
         self._incoming_files: dict[str, IncomingFile] = {}
+        self.ui_server = None  # one_link.server.UIServer | None
 
     # ─── peer (encrypted) side ──────────────────────────────────────────
     async def _handle_peer(
@@ -367,6 +374,12 @@ class Daemon:
                 dead.append(w)
         for w in dead:
             self._tail_subs.discard(w)
+        # Push to UI subscribers too
+        if self.ui_server is not None:
+            try:
+                self.ui_server.broadcast({"type": "msg", "msg": msg})
+            except Exception:
+                pass
 
     def _append_log(self, entry: dict) -> None:
         path = message_log_path()
@@ -395,12 +408,46 @@ class Daemon:
         )
         await self.discovery.start()
 
+        # Hook the registry to broadcast peer changes to UI clients
+        def _on_peer_change():
+            if self.ui_server is not None:
+                try:
+                    peers = [
+                        {
+                            "short_id": p.short_id,
+                            "hostname": p.hostname,
+                            "address": p.address,
+                            "port": p.port,
+                            "ed_pub_hex": p.ed_pub_hex,
+                            "online": True,
+                        }
+                        for p in self.discovery.registry.list()
+                    ]
+                    self.ui_server.broadcast({"type": "peers", "peers": peers})
+                except Exception:
+                    pass
+
+        self.discovery.registry.on_change = _on_peer_change
+
+        # Start UI server if available
+        if UIServer is not None:
+            try:
+                self.ui_server = UIServer(self)
+                ui_port = await self.ui_server.start()
+            except Exception as e:
+                log.warning("UI server failed to start: %s", e)
+                self.ui_server = None
+                ui_port = 0
+        else:
+            ui_port = 0
+
         log.info(
-            "One_link daemon up — id=%s host=%s peer=:%d ctrl=:%d",
+            "One_link daemon up — id=%s host=%s peer=:%d ctrl=:%d ui=:%d",
             self.me.short_id,
             self.me.hostname,
             peer_port,
             ctrl_port,
+            ui_port,
         )
 
     async def serve_forever(self) -> None:
@@ -411,6 +458,11 @@ class Daemon:
         )
 
     async def stop(self) -> None:
+        if self.ui_server is not None:
+            try:
+                await self.ui_server.stop()
+            except Exception:
+                pass
         if self.discovery:
             await self.discovery.stop()
         if self._peer_server:

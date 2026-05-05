@@ -125,8 +125,16 @@ def send_file(peer, path):
 
 
 @cli.command()
+@click.option("--no-browser", is_flag=True, help="Don't auto-open a browser tab.")
+def app(no_browser):
+    """Open the One_link desktop app (auto-starts daemon, opens browser UI)."""
+    from one_link.app import run_app
+    raise SystemExit(run_app(no_browser=no_browser))
+
+
+@cli.command()
 def chat():
-    """Open the interactive chat window. Auto-starts a daemon if none running."""
+    """Open the interactive terminal REPL. Auto-starts a daemon if none running."""
     from one_link.chat import run_chat
     raise SystemExit(run_chat())
 
