@@ -100,13 +100,50 @@ def _spawn(home: Path, log: Path) -> subprocess.Popen:
 
 
 def _stop(proc: subprocess.Popen) -> None:
+    """Stop a test daemon GRACEFULLY so it has a chance to send mDNS goodbye
+    packets — this is what stops cross-test pollution where a dead daemon's
+    record lingers in another daemon's discovery registry.
+
+    On Windows we send Ctrl+Break (the daemon is in its own process group).
+    The daemon's outer try/except turns it into KeyboardInterrupt, which
+    triggers Daemon.stop() → Discovery.stop() → async_unregister_service.
+
+    On POSIX, SIGTERM does the same job via Python's default signal handling.
+    SIGKILL (terminate's behaviour on Windows, .kill() everywhere) is the
+    last-resort fallback.
+    """
     if proc.poll() is not None:
         return
+
+    import signal
+
+    sent_graceful = False
+    try:
+        if os.name == "nt":
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            proc.send_signal(signal.SIGTERM)
+        sent_graceful = True
+    except Exception:
+        pass
+
+    if sent_graceful:
+        try:
+            proc.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+
+    # Fall through: hard terminate / kill
     try:
         proc.terminate()
-        proc.wait(timeout=5)
+        proc.wait(timeout=3)
     except subprocess.TimeoutExpired:
         proc.kill()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
         proc.wait(timeout=5)
 
 
