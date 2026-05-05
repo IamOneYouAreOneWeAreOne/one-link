@@ -29,7 +29,9 @@ def test_version_works():
     r = _cli("--version")
     assert r.returncode == 0
     assert "one-link" in r.stdout
-    assert "0.0" in r.stdout
+    # match a semver-shaped token; specific value isn't the point
+    import re
+    assert re.search(r"\d+\.\d+\.\d+", r.stdout), r.stdout
 
 
 def test_help_works():
@@ -97,8 +99,13 @@ def test_full_cli_round_trip():
         assert "ack" in r.stdout.lower()
 
         time.sleep(0.5)
-        log_b = (p.b.home / "data" / "messages.jsonl").read_text(encoding="utf-8")
-        assert "hi from CLI" in log_b
+        from tests.harness import message_log
+        bodies = [
+            m.get("body")
+            for m in message_log(p.b.home)
+            if m.get("t") == "TEXT" and m.get("dir") == "in"
+        ]
+        assert "hi from CLI" in bodies, bodies
 
 
 @pytest.mark.timeout(120)

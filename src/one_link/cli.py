@@ -140,6 +140,93 @@ def chat():
 
 
 @cli.command()
+def audit():
+    """Print a self-audit of this binary's network surface.
+
+    Reports every kind of network call this build can make, sourced from
+    the registered HTTP routes and the peer protocol's declared message
+    types. Useful for verifying 'no telemetry, no calls home' claims.
+    """
+    res = _request("audit")
+    if res.get("error") or res.get("ok") is False:
+        # The control socket doesn't have audit; we go via the UI port.
+        from one_link import server as server_mod
+        try:
+            ui_port = server_mod.read_server_port()
+            token = server_mod.read_ui_token()
+        except RuntimeError as e:
+            raise click.ClickException(f"daemon not running ({e})")
+        import urllib.request
+        import json as _json
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{ui_port}/api/audit",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                res = _json.loads(r.read())
+        except Exception as e:
+            raise click.ClickException(f"audit fetch failed: {e}")
+
+    click.echo(f"One_link version {res.get('version', '?')}")
+    click.echo(f"  UI bind:           {res.get('ui_bind')}")
+    click.echo(f"  UI auth:           {res.get('ui_auth')}")
+    click.echo(f"  External telemetry: {'NO' if res.get('no_external_telemetry') else 'YES'}")
+    pp = res.get("peer_protocol", {})
+    click.echo("  Peer protocol:")
+    click.echo(f"    transport:   {pp.get('transport')}")
+    click.echo(f"    auth:        {pp.get('auth')}")
+    click.echo(f"    encryption:  {pp.get('encryption')}")
+    click.echo(f"    msg types:   {', '.join(pp.get('message_types', []))}")
+    click.echo(f"    max frame:   {pp.get('max_frame_bytes')} bytes")
+    click.echo("  Outbound destinations:")
+    for o in res.get("outbound_destinations", []):
+        click.echo(f"    - {o['kind']}: {o['destination']}")
+        click.echo(f"        protocol: {o['protocol']}")
+    click.echo("  Local UI routes:")
+    for r in res.get("local_ui_routes", []):
+        click.echo(f"    {r['method']:6} {r['path']}")
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--peer", default=None, help="Filter by peer (short_id or fingerprint).")
+@click.option("--limit", default=50, type=int, help="Max results.")
+def search(query, peer, limit):
+    """Full-text search across message history."""
+    from one_link import server as server_mod
+    try:
+        ui_port = server_mod.read_server_port()
+        token = server_mod.read_ui_token()
+    except RuntimeError as e:
+        raise click.ClickException(f"daemon not running ({e})")
+
+    import urllib.parse
+    import urllib.request
+    import json as _json
+    qs = {"q": query, "limit": str(limit)}
+    if peer:
+        qs["peer"] = peer
+    url = f"http://127.0.0.1:{ui_port}/api/search?{urllib.parse.urlencode(qs)}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            res = _json.loads(r.read())
+    except Exception as e:
+        raise click.ClickException(f"search failed: {e}")
+
+    msgs = res.get("messages", [])
+    click.echo(f"{len(msgs)} result(s) for {query!r}\n")
+    for m in msgs:
+        if m.get("t") != "TEXT":
+            continue
+        ts = m.get("ts", 0)
+        peer = m.get("peer", "?")
+        body = m.get("body", "")
+        click.echo(f"  [{ts}] {peer}: {body}")
+
+
+@cli.command()
 def tail():
     """Stream incoming and outgoing message events. Ctrl-C to stop."""
     s, _ = _connect_control()

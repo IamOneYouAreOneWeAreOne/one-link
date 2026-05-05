@@ -57,6 +57,9 @@ class Channel:
     rx_aead: ChaCha20Poly1305
     tx_seq: int = 0
     rx_seq: int = 0
+    # Set after CAPS exchange (post-handshake first encrypted message).
+    # None = peer hasn't sent CAPS yet (legacy or pre-CAPS).
+    peer_caps: dict | None = None
 
     def _nonce(self, seq: int) -> bytes:
         return seq.to_bytes(12, "little")

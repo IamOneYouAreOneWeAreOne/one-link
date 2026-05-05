@@ -60,6 +60,17 @@ def main() -> int:
     web_dir = repo / "src" / "one_link" / "web"
     add_data_web = f"{web_dir}{sep}one_link/web"
 
+    icon_arg: list[str] = []
+    if platform.system() == "Windows":
+        ico = web_dir / "assets" / "one-glyph.ico"
+        if ico.is_file():
+            icon_arg = ["--icon", str(ico)]
+    elif platform.system() == "Darwin":
+        # PyInstaller can take .icns on Mac; .ico is also accepted in recent versions.
+        ico = web_dir / "assets" / "one-glyph.ico"
+        if ico.is_file():
+            icon_arg = ["--icon", str(ico)]
+
     cmd = [
         sys.executable,
         "-m",
@@ -77,9 +88,10 @@ def main() -> int:
         "cryptography",
         "--collect-submodules",
         "aiohttp",
-        # Bundle the web UI (HTML/CSS/JS) into the exe:
+        # Bundle the web UI (HTML/CSS/JS/assets) into the exe:
         "--add-data",
         add_data_web,
+        *icon_arg,
         # Entry point:
         str(entry),
     ]

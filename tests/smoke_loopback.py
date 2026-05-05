@@ -141,22 +141,24 @@ def main() -> int:
 
         # Verify B logged it
         time.sleep(0.5)
-        log_b_path = home_b / "data" / "messages.jsonl"
-        if not log_b_path.exists():
-            print("[smoke] FAIL — B has no message log")
+        import sqlite3
+        db = home_b / "data" / "state.db"
+        if not db.exists():
+            print("[smoke] FAIL — B has no state.db")
             failed = True
             return 1
-        log_lines = log_b_path.read_text(encoding="utf-8").strip().splitlines()
-        text_in = [
-            json.loads(L)
-            for L in log_lines
-            if json.loads(L).get("t") == "TEXT" and json.loads(L).get("dir") == "in"
-        ]
-        if not text_in or text_in[-1]["body"] != "hello from A":
-            print(f"[smoke] FAIL — B did not receive text. log={log_lines}")
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT body FROM messages WHERE msg_type='TEXT' AND direction='in' ORDER BY ts_ms"
+        ).fetchall()
+        conn.close()
+        bodies = [r["body"] for r in rows]
+        if not bodies or bodies[-1] != "hello from A":
+            print(f"[smoke] FAIL — B did not receive text. bodies={bodies}")
             failed = True
             return 1
-        print("   B received: " + text_in[-1]["body"])
+        print("   B received: " + bodies[-1])
 
         # Send a file A -> B
         sample = tmp / "sample.bin"

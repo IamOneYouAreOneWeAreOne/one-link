@@ -117,8 +117,13 @@ async def test_api_send_text_round_trip():
 
         # Verify B received it (give the daemon a moment)
         await asyncio.sleep(0.5)
-        log_b = (p.b.home / "data" / "messages.jsonl").read_text(encoding="utf-8")
-        assert "hi via api" in log_b
+        from tests.harness import message_log
+        bodies = [
+            m.get("body")
+            for m in message_log(p.b.home)
+            if m.get("t") == "TEXT" and m.get("dir") == "in"
+        ]
+        assert "hi via api" in bodies, bodies
 
 
 @pytest.mark.asyncio
@@ -295,6 +300,127 @@ async def test_websocket_event_stream_pushes_messages():
                         got = True
                         break
                 assert got, "WS never delivered the inbound TEXT"
+
+
+@pytest.mark.asyncio
+async def test_api_search_finds_message_by_word():
+    with daemon_pair() as p:
+        from tests.harness import request as ctrl_request
+        ctrl_request(p.a.control_port, cmd="send", peer=p.b.short_id, body="the quick brown fox")
+        ctrl_request(p.a.control_port, cmd="send", peer=p.b.short_id, body="lazy dog")
+        await asyncio.sleep(0.6)
+
+        base_b, tok_b = _server_addr(p.b.home)
+        async with aiohttp.ClientSession() as s:
+            status, j = await _get_json(
+                s, f"{base_b}/api/search?q=quick", token=tok_b
+            )
+            assert status == 200
+            bodies = [m.get("body") for m in j["messages"]]
+            assert "the quick brown fox" in bodies
+
+
+@pytest.mark.asyncio
+async def test_api_search_q_required():
+    with daemon_pair() as p:
+        base_a, tok_a = _server_addr(p.a.home)
+        async with aiohttp.ClientSession() as s:
+            status, _ = await _get_json(s, f"{base_a}/api/search", token=tok_a)
+            assert status == 400
+
+
+@pytest.mark.asyncio
+async def test_api_audit_describes_surface():
+    with daemon_pair() as p:
+        base_a, tok_a = _server_addr(p.a.home)
+        async with aiohttp.ClientSession() as s:
+            status, j = await _get_json(s, f"{base_a}/api/audit", token=tok_a)
+            assert status == 200
+            assert j["ui_bind"].startswith("127.0.0.1")
+            assert j["no_external_telemetry"] is True
+            assert "TEXT" in j["peer_protocol"]["message_types"]
+            assert any("mdns" in d["kind"] for d in j["outbound_destinations"])
+
+
+@pytest.mark.asyncio
+async def test_api_set_trust_round_trip():
+    with daemon_pair() as p:
+        # First, drive A to send to B so B records A in its peer DB
+        from tests.harness import request as ctrl_request
+        ctrl_request(p.a.control_port, cmd="send", peer=p.b.short_id, body="trust-test")
+        await asyncio.sleep(0.6)
+
+        # B's view: list peers, find A by short_id, get fingerprint
+        base_b, tok_b = _server_addr(p.b.home)
+        async with aiohttp.ClientSession() as s:
+            _, j = await _get_json(s, f"{base_b}/api/peers", token=tok_b)
+            target = next(
+                (pp for pp in j["peers"] if pp["short_id"] == p.a.short_id),
+                None,
+            )
+            assert target is not None and target.get("fingerprint")
+            fp = target["fingerprint"]
+            assert target["trust"] in ("pending", "pinned")
+
+            # Set rejected
+            status, j2 = await _post_json(
+                s, f"{base_b}/api/peers/{fp}/trust",
+                {"trust": "rejected"}, token=tok_b,
+            )
+            assert status == 200
+            assert j2["trust"] == "rejected"
+
+            # Verify it stuck
+            _, j3 = await _get_json(s, f"{base_b}/api/peers", token=tok_b)
+            target3 = next(pp for pp in j3["peers"] if pp["fingerprint"] == fp)
+            assert target3["trust"] == "rejected"
+
+            # Bad trust value
+            status_bad, _ = await _post_json(
+                s, f"{base_b}/api/peers/{fp}/trust",
+                {"trust": "yolo"}, token=tok_b,
+            )
+            assert status_bad == 400
+
+            # Unknown peer
+            status_404, _ = await _post_json(
+                s, f"{base_b}/api/peers/{'00' * 32}/trust",
+                {"trust": "pinned"}, token=tok_b,
+            )
+            assert status_404 == 404
+
+
+@pytest.mark.asyncio
+async def test_outbound_blocked_for_rejected_peer():
+    """If we mark a peer 'rejected', outbound sends to them must error."""
+    with daemon_pair() as p:
+        # Seed: A sends to B so B has A's fingerprint pinned-trust.
+        # Then B marks A rejected. Subsequent B → A sends must fail.
+        from tests.harness import request as ctrl_request
+
+        ctrl_request(p.a.control_port, cmd="send", peer=p.b.short_id, body="seed")
+        await asyncio.sleep(0.6)
+
+        base_b, tok_b = _server_addr(p.b.home)
+        async with aiohttp.ClientSession() as s:
+            _, j = await _get_json(s, f"{base_b}/api/peers", token=tok_b)
+            target = next(pp for pp in j["peers"] if pp["short_id"] == p.a.short_id)
+            fp = target["fingerprint"]
+
+            # B rejects A
+            await _post_json(
+                s, f"{base_b}/api/peers/{fp}/trust",
+                {"trust": "rejected"}, token=tok_b,
+            )
+
+            # B tries to send to A → must error
+            status, j2 = await _post_json(
+                s, f"{base_b}/api/send",
+                {"peer": p.a.short_id, "body": "hi"},
+                token=tok_b,
+            )
+            assert status >= 400
+            assert "rejected" in j2["error"].lower()
 
 
 @pytest.mark.asyncio

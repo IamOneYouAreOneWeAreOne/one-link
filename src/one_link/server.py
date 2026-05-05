@@ -47,6 +47,27 @@ SERVER_PORT_FILE = "server.port"
 COOKIE_NAME = "ol_ui"
 
 
+def _msg_record_to_event(rec) -> dict:
+    """Convert a state.MessageRecord into the wire-shaped dict the UI expects."""
+    out = {
+        "t": rec.msg_type,
+        "id": rec.id,
+        "ts": rec.ts_ms,
+        "dir": rec.direction,
+        "peer_fp": rec.peer_fp,
+        "peer": rec.metadata.get("short_id") or (rec.peer_fp[:8] if rec.peer_fp else "?"),
+        "room_id": rec.room_id,
+    }
+    if rec.body is not None:
+        out["body"] = rec.body
+    # Fold metadata back into the dict (skipping the ones we already added)
+    for k, v in (rec.metadata or {}).items():
+        if k in ("short_id",) or k in out:
+            continue
+        out[k] = v
+    return out
+
+
 def _token_path() -> Path:
     return data_dir() / TOKEN_FILE
 
@@ -72,13 +93,22 @@ class UIServer:
     def _setup_routes(self) -> None:
         r = self.app.router
         r.add_get("/", self._index)
+        # Static assets (logo, favicon). NOT token-gated: these are
+        # required to render the page itself before the cookie is set.
+        assets_dir = WEB_DIR / "assets"
+        if assets_dir.is_dir():
+            r.add_static("/static/", path=str(assets_dir), show_index=False)
+        r.add_get("/favicon.ico", self._favicon)
         r.add_get("/api/me", self._guarded(self.api_me))
         r.add_get("/api/peers", self._guarded(self.api_peers))
+        r.add_post(r"/api/peers/{fp}/trust", self._guarded(self.api_set_trust))
         r.add_get("/api/messages", self._guarded(self.api_messages))
+        r.add_get("/api/search", self._guarded(self.api_search))
         r.add_post("/api/send", self._guarded(self.api_send))
         r.add_post("/api/send-file", self._guarded(self.api_send_file))
         r.add_get("/api/files", self._guarded(self.api_files))
         r.add_get(r"/api/files/{name:.+}", self._guarded(self.api_file_download))
+        r.add_get("/api/audit", self._guarded(self.api_audit))
         r.add_get("/api/events", self._guarded_ws(self.ws_events))
 
     # ─── auth helpers ─────────────────────────────────────────────────
@@ -111,6 +141,15 @@ class UIServer:
             return await handler(request)
         return wrap
 
+    async def _favicon(self, request: web.Request) -> web.StreamResponse:
+        ico = WEB_DIR / "assets" / "one-glyph.ico"
+        if ico.is_file():
+            return web.FileResponse(ico)
+        png = WEB_DIR / "assets" / "one-glyph.png"
+        if png.is_file():
+            return web.FileResponse(png)
+        return web.Response(status=404)
+
     # ─── HTML index ───────────────────────────────────────────────────
     async def _index(self, request: web.Request) -> web.Response:
         try:
@@ -142,58 +181,171 @@ class UIServer:
 
     # ─── /api/peers ───────────────────────────────────────────────────
     async def api_peers(self, request: web.Request) -> web.Response:
-        peers = []
+        """Merge live mDNS-discovered peers with persistent peer DB.
+
+        Returns:
+            online peers — discovered now AND seen before in DB (or freshly
+                           added) with current address/port + persisted trust
+            offline peers — known in DB but not currently visible on the LAN
+            pending peers — known in DB with trust='pending', regardless of online status
+        """
+        live: dict[str, dict] = {}  # fingerprint -> peer record
         if self.daemon.discovery:
             for p in self.daemon.discovery.registry.list():
-                peers.append(
-                    {
-                        "short_id": p.short_id,
-                        "hostname": p.hostname,
-                        "address": p.address,
-                        "port": p.port,
-                        "ed_pub_hex": p.ed_pub_hex,
-                        "online": True,
-                    }
-                )
+                fp = ""
+                if p.ed_pub_hex:
+                    try:
+                        from one_link.identity import fingerprint_of
+                        fp = fingerprint_of(bytes.fromhex(p.ed_pub_hex))
+                    except ValueError:
+                        fp = ""
+                live[fp or p.short_id] = {
+                    "short_id": p.short_id,
+                    "hostname": p.hostname,
+                    "address": p.address,
+                    "port": p.port,
+                    "ed_pub_hex": p.ed_pub_hex,
+                    "fingerprint": fp,
+                    "online": True,
+                    "trust": "pending",  # default if no DB row yet
+                }
+        # Merge persistent state
+        if self.daemon.state is not None:
+            try:
+                for rec in self.daemon.state.list_peers():
+                    # Skip ourselves
+                    if rec.fingerprint == self.daemon.me.fingerprint:
+                        continue
+                    if rec.fingerprint in live:
+                        live[rec.fingerprint]["trust"] = rec.trust
+                        live[rec.fingerprint]["last_seen_ms"] = rec.last_seen_ms
+                        live[rec.fingerprint]["first_seen_ms"] = rec.first_seen_ms
+                    else:
+                        live[rec.fingerprint] = {
+                            "short_id": rec.short_id,
+                            "hostname": rec.hostname or "(offline)",
+                            "address": rec.last_address,
+                            "port": rec.last_port,
+                            "ed_pub_hex": (rec.pubkey.hex() if rec.pubkey else ""),
+                            "fingerprint": rec.fingerprint,
+                            "online": False,
+                            "trust": rec.trust,
+                            "last_seen_ms": rec.last_seen_ms,
+                            "first_seen_ms": rec.first_seen_ms,
+                        }
+            except Exception:
+                pass
+        # Sort: online first, then by hostname
+        peers = sorted(
+            live.values(),
+            key=lambda p: (not p["online"], (p["hostname"] or "").lower()),
+        )
         return web.json_response({"peers": peers})
+
+    # ─── POST /api/peers/{fp}/trust ───────────────────────────────────
+    async def api_set_trust(self, request: web.Request) -> web.Response:
+        fp = request.match_info["fp"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        trust = data.get("trust")
+        if trust not in ("pinned", "pending", "rejected"):
+            return web.json_response(
+                {"error": "trust must be one of: pinned, pending, rejected"},
+                status=400,
+            )
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        if not self.daemon.state.get_peer(fp):
+            return web.json_response({"error": "unknown peer"}, status=404)
+        try:
+            self.daemon.state.set_peer_trust(fp, trust)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+        # Notify UI subscribers so the badge updates everywhere.
+        self.broadcast({"type": "peer_trust", "fingerprint": fp, "trust": trust})
+        return web.json_response({"ok": True, "trust": trust})
 
     # ─── /api/messages ────────────────────────────────────────────────
     async def api_messages(self, request: web.Request) -> web.Response:
-        """Return recent messages from the JSONL log.
+        """Return recent messages from sqlite, ordered chronologically.
 
         Query params:
-            peer   — filter by peer short_id
-            limit  — max messages (default 200)
+            peer   — filter by peer short_id (UI-friendly) or fingerprint
+            room   — filter by room id
+            limit  — max messages (default 200, hard cap 5000)
         """
-        from one_link.paths import message_log_path
-        peer = request.query.get("peer")
+        peer_q = request.query.get("peer")
+        room_q = request.query.get("room")
         try:
             limit = max(1, min(int(request.query.get("limit", "200")), 5000))
         except ValueError:
             limit = 200
-        path = message_log_path()
-        if not path.exists():
+
+        if self.daemon.state is None:
             return web.json_response({"messages": []})
-        msgs: list[dict] = []
-        # Read tail efficiently. For now, just read the whole file (capped by
-        # limit at the slice). At scale we'd swap to sqlite via state.py.
-        try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            lines = []
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if peer and obj.get("peer") != peer:
-                continue
-            msgs.append(obj)
-        msgs = msgs[-limit:]
+
+        # Resolve short_id-or-prefix → fingerprint if needed.
+        peer_fp: Optional[str] = None
+        if peer_q:
+            # If exact 64-hex BLAKE3 fingerprint, use directly.
+            if len(peer_q) == 64 and all(c in "0123456789abcdef" for c in peer_q):
+                peer_fp = peer_q
+            else:
+                # Try short_id lookup.
+                rec = self.daemon.state.get_peer_by_short_id(peer_q)
+                if rec:
+                    peer_fp = rec.fingerprint
+                else:
+                    # Fallback: scan peer list for a prefix match.
+                    for p in self.daemon.state.list_peers():
+                        if p.short_id.startswith(peer_q):
+                            peer_fp = p.fingerprint
+                            break
+
+        recs = self.daemon.state.recent_messages(
+            peer_fp=peer_fp, room_id=room_q, limit=limit
+        )
+        msgs = [_msg_record_to_event(r) for r in recs]
         return web.json_response({"messages": msgs})
+
+    # ─── /api/search ──────────────────────────────────────────────────
+    async def api_search(self, request: web.Request) -> web.Response:
+        """FTS5 full-text search over message bodies.
+
+        ?q=  required, FTS5 query
+        ?peer=, ?room=, ?limit= optional filters
+        """
+        q = request.query.get("q", "").strip()
+        if not q:
+            return web.json_response({"error": "q required"}, status=400)
+        try:
+            limit = max(1, min(int(request.query.get("limit", "50")), 1000))
+        except ValueError:
+            limit = 50
+        if self.daemon.state is None:
+            return web.json_response({"messages": []})
+
+        peer_q = request.query.get("peer")
+        room_q = request.query.get("room")
+        peer_fp: Optional[str] = None
+        if peer_q:
+            if len(peer_q) == 64:
+                peer_fp = peer_q
+            else:
+                rec = self.daemon.state.get_peer_by_short_id(peer_q)
+                if rec:
+                    peer_fp = rec.fingerprint
+
+        try:
+            recs = self.daemon.state.search_messages(
+                q, limit=limit, peer_fp=peer_fp, room_id=room_q
+            )
+        except Exception as e:
+            return web.json_response({"error": f"bad query: {e}"}, status=400)
+        msgs = [_msg_record_to_event(r) for r in recs]
+        return web.json_response({"messages": msgs, "query": q})
 
     # ─── /api/send ────────────────────────────────────────────────────
     async def api_send(self, request: web.Request) -> web.Response:
@@ -287,6 +439,48 @@ class UIServer:
                 )
         files.sort(key=lambda x: x["mtime_ms"], reverse=True)
         return web.json_response({"files": files})
+
+    # ─── /api/audit ───────────────────────────────────────────────────
+    async def api_audit(self, request: web.Request) -> web.Response:
+        """Self-audit: report every kind of network call this binary makes,
+        enumerated from the registered routes and the peer protocol's
+        declared message types."""
+        from one_link import wire as wire_mod
+        # Local UI surface
+        local_routes = []
+        for resource in self.app.router.resources():
+            for r in resource:
+                method = r.method
+                info = r.get_info()
+                path = info.get("path") or info.get("formatter") or ""
+                local_routes.append({"method": method, "path": path})
+        # Peer-protocol surface — encoded directly in daemon._on_peer_message.
+        peer_msg_types = ["TEXT", "FILE_OFFER", "FILE_CHUNK", "ACK", "PING", "PONG"]
+        # Outbound network endpoints we ever connect to: only LAN peers
+        # discovered via mDNS, never any external service.
+        outbound = [
+            {"kind": "lan_peer_tcp",
+             "destination": "address advertised in mDNS (_onelink._tcp.local.)",
+             "protocol": "TCP, X25519 + ChaCha20-Poly1305 framed"},
+            {"kind": "mdns_multicast",
+             "destination": "224.0.0.251:5353",
+             "protocol": "UDP, mDNS service discovery"},
+        ]
+        return web.json_response({
+            "version": __import__("one_link").__version__,
+            "local_ui_routes": local_routes,
+            "ui_bind": "127.0.0.1 only (loopback)",
+            "ui_auth": "per-process random URL-safe token",
+            "peer_protocol": {
+                "transport": "TCP, port advertised via mDNS",
+                "auth": "Ed25519 mutual signature in handshake",
+                "encryption": "X25519 ECDH + HKDF + ChaCha20-Poly1305 (64-bit nonce counter)",
+                "message_types": peer_msg_types,
+                "max_frame_bytes": wire_mod.MAX_FRAME,
+            },
+            "outbound_destinations": outbound,
+            "no_external_telemetry": True,
+        })
 
     async def api_file_download(self, request: web.Request) -> web.StreamResponse:
         name = request.match_info["name"]

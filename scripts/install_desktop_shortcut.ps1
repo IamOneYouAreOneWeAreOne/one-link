@@ -1,7 +1,8 @@
 # Create a One_link desktop shortcut on Windows.
 #
-# Targets python.exe with `-m one_link.cli chat` so it works whether or not
+# Targets python.exe with `-m one_link.cli app` so it works whether or not
 # the bundled exe is signed/allowed by Defender / Application Control.
+# Uses the ONE Glyph icon shipped inside the installed package.
 #
 # Usage (from a Windows PowerShell prompt):
 #   pip install -e .
@@ -19,23 +20,40 @@ if (-not $pythonExe) {
     exit 1
 }
 
-# Sanity-check that the Python we found actually has one_link installed.
-$check = & $pythonExe -c "import one_link, sys; sys.stdout.write(one_link.__version__)" 2>&1
+# Sanity-check that the Python we found actually has one_link installed,
+# and discover the icon path inside the package.
+$probe = & $pythonExe -c @"
+import one_link, pathlib, sys
+sys.stdout.write(one_link.__version__)
+sys.stdout.write('|')
+sys.stdout.write(str(pathlib.Path(one_link.__file__).parent / 'web' / 'assets' / 'one-glyph.ico'))
+"@ 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Error "one_link is not installed in this Python. Run: pip install -e .  first."
     exit 1
 }
-Write-Host "Found one_link $check at $pythonExe"
+$parts = $probe -split '\|'
+$version = $parts[0]
+$iconPath = $parts[1]
+Write-Host "Found one_link $version at $pythonExe"
+if (Test-Path $iconPath) {
+    Write-Host "Icon: $iconPath"
+} else {
+    Write-Host "Icon not found at $iconPath (shortcut will use python.exe default icon)"
+}
 
 # Create the shortcut.
 $shell = New-Object -ComObject WScript.Shell
 $lnk = $shell.CreateShortcut($shortcutPath)
 $lnk.TargetPath = $pythonExe
-$lnk.Arguments = "-m one_link.cli chat"
+$lnk.Arguments = "-m one_link.cli app"
 $lnk.WorkingDirectory = "$env:USERPROFILE"
-$lnk.Description = "One_link — peer-to-peer LAN chat + file sync"
+$lnk.Description = "One_link - peer-to-peer LAN chat + file sync"
 $lnk.WindowStyle = 1  # Normal window
+if (Test-Path $iconPath) {
+    $lnk.IconLocation = "$iconPath,0"
+}
 $lnk.Save()
 
 Write-Host "Created shortcut: $shortcutPath"
-Write-Host "Double-click it to start One_link chat."
+Write-Host "Double-click it to open One_link."

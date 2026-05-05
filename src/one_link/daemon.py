@@ -26,12 +26,13 @@ import blake3
 
 from one_link import channel as ch
 from one_link.discovery import Discovery, Peer
-from one_link.identity import Identity, load_or_create
+from one_link.identity import Identity, fingerprint_of, load_or_create
 from one_link.paths import (
     data_dir,
     inbox_dir,
     message_log_path,
 )
+from one_link.state import State
 from one_link.wire import decode_msg, encode_msg, make_msg
 
 # Forward import to avoid hard dep when server.py loads daemon.py
@@ -45,6 +46,27 @@ log = logging.getLogger("one_link.daemon")
 CONTROL_PORT_FILE = "control.port"
 PEER_PORT_FILE = "peer.port"
 CHUNK_SIZE = 256 * 1024  # 256 KiB plaintext per FILE_CHUNK
+
+# Capabilities this build advertises in CAPS messages.
+PROTOCOL_VERSION = "OL1.1"
+CAPS_FEATURES: list[str] = [
+    "text",
+    "file",
+    "audit",
+    "fts",
+    "trust",
+    # Future flags will appear here as features land:
+    # "folder_sync", "rooms", "indexcodec", "rs_fec", ...
+]
+
+
+def _build_caps(short_id: str) -> dict:
+    return make_msg(
+        "CAPS",
+        short_id,
+        protocol=PROTOCOL_VERSION,
+        features=list(CAPS_FEATURES),
+    )
 
 
 def _control_port_path() -> Path:
@@ -75,6 +97,35 @@ class Daemon:
         self._tail_subs: set[asyncio.StreamWriter] = set()
         self._incoming_files: dict[str, IncomingFile] = {}
         self.ui_server = None  # one_link.server.UIServer | None
+        self.state: State | None = None
+
+    # ─── persistence helper ─────────────────────────────────────────────
+    def _persist(self, *, msg: dict, direction: str, peer_fp: str, peer_short_id: str) -> dict:
+        """Record a message in sqlite and return the canonical event dict
+        (with peer_fp + peer short_id) for tail / UI broadcast."""
+        body = msg.get("body") if msg.get("t") == "TEXT" else None
+        # Store everything-except-the-canonical fields as metadata so we
+        # round-trip cleanly for tests and history reads.
+        canonical = {"t", "id", "ts", "body"}
+        metadata = {
+            **{k: v for k, v in msg.items() if k not in canonical},
+            "short_id": peer_short_id,
+        }
+        if self.state is not None:
+            try:
+                self.state.record_message(
+                    id=msg["id"],
+                    ts_ms=int(msg["ts"]),
+                    direction=direction,
+                    peer_fp=peer_fp,
+                    msg_type=msg["t"],
+                    body=body,
+                    room_id=msg.get("room_id"),
+                    metadata=metadata,
+                )
+            except Exception as e:
+                log.warning("state.record_message failed: %s", e)
+        return {**msg, "dir": direction, "peer": peer_short_id, "peer_fp": peer_fp}
 
     # ─── peer (encrypted) side ──────────────────────────────────────────
     async def _handle_peer(
@@ -92,6 +143,31 @@ class Daemon:
                 await writer.wait_closed()
             return
         log.info("peer connected: %s @ %s", channel.peer_short_id, addr)
+        peer_fp = fingerprint_of(channel.peer_ed_pub)
+        if self.state is not None:
+            try:
+                hostname: str | None = None
+                if self.discovery:
+                    pinfo = self.discovery.registry.find(channel.peer_short_id)
+                    if pinfo:
+                        hostname = pinfo.hostname
+                self.state.upsert_peer(
+                    fingerprint=peer_fp,
+                    short_id=channel.peer_short_id,
+                    pubkey=channel.peer_ed_pub,
+                    hostname=hostname,
+                    address=addr[0] if addr else None,
+                    port=addr[1] if addr else None,
+                )
+            except Exception as e:
+                log.warning("upsert_peer failed: %s", e)
+
+        # Send our capabilities eagerly (no ACK expected).
+        try:
+            await channel.send(encode_msg(_build_caps(self.me.short_id)))
+        except Exception as e:
+            log.warning("CAPS send failed: %s", e)
+
         try:
             while True:
                 try:
@@ -107,13 +183,25 @@ class Daemon:
             log.info("peer disconnected: %s", channel.peer_short_id)
 
     async def _on_peer_message(self, channel: ch.Channel, msg: dict) -> None:
+        peer_fp = fingerprint_of(channel.peer_ed_pub)
+        peer_sid = channel.peer_short_id
         t = msg.get("t")
-        if t == "TEXT":
-            self._append_log({**msg, "dir": "in", "peer": channel.peer_short_id})
-            self._broadcast_tail({**msg, "dir": "in", "peer": channel.peer_short_id})
-            await channel.send(
-                encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"]))
+        if t == "CAPS":
+            channel.peer_caps = {
+                "protocol": msg.get("protocol", "?"),
+                "features": list(msg.get("features", [])),
+                "from": msg.get("from"),
+            }
+            log.info(
+                "peer caps from %s: %s features=%s",
+                peer_sid, channel.peer_caps["protocol"],
+                channel.peer_caps["features"],
             )
+            return  # no ACK needed
+        if t == "TEXT":
+            ev = self._persist(msg=msg, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
+            self._broadcast_tail(ev)
+            await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_OFFER":
             blob = msg["blob"]
             name = Path(msg["name"]).name
@@ -129,14 +217,11 @@ class Daemon:
             )
             log.info(
                 "file offer: %s (%d bytes) blob=%s from %s",
-                name,
-                msg["size"],
-                blob[:8],
-                channel.peer_short_id,
+                name, msg["size"], blob[:8], peer_sid,
             )
-            await channel.send(
-                encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"]))
-            )
+            ev = self._persist(msg=msg, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
+            self._broadcast_tail(ev)
+            await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_CHUNK":
             blob = msg["blob"]
             f = self._incoming_files.get(blob)
@@ -161,26 +246,40 @@ class Daemon:
                     "path": str(f.out_path),
                     "blob": f.blob_hex,
                     "ok": ok,
-                    "dir": "in",
-                    "peer": channel.peer_short_id,
                 }
-                self._append_log(done)
-                self._broadcast_tail(done)
+                ev = self._persist(msg=done, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
+                self._broadcast_tail(ev)
                 self._incoming_files.pop(blob, None)
-                log.info(
-                    "file done: %s ok=%s -> %s",
-                    f.name,
-                    ok,
-                    f.out_path,
-                )
-            await channel.send(
-                encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"]))
-            )
+                log.info("file done: %s ok=%s -> %s", f.name, ok, f.out_path)
+            await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "PING":
             await channel.send(encode_msg(make_msg("PONG", self.me.short_id)))
 
     # ─── outbound to a peer ─────────────────────────────────────────────
+    def _peer_fp_from_peer(self, peer: Peer) -> str | None:
+        if not peer.ed_pub_hex:
+            return None
+        try:
+            return fingerprint_of(bytes.fromhex(peer.ed_pub_hex))
+        except ValueError:
+            return None
+
+    def _check_outbound_trust(self, peer: Peer) -> str | None:
+        """Returns None if outbound is allowed; otherwise an error string."""
+        if self.state is None:
+            return None
+        fp = self._peer_fp_from_peer(peer)
+        if not fp:
+            return None
+        rec = self.state.get_peer(fp)
+        if rec and rec.trust == "rejected":
+            return f"peer {peer.short_id} is marked as rejected; cannot send"
+        return None
+
     async def send_to(self, peer: Peer, msgs: list[dict]) -> list[dict]:
+        block = self._check_outbound_trust(peer)
+        if block:
+            raise RuntimeError(block)
         reader, writer = await asyncio.open_connection(peer.address, peer.port)
         try:
             channel = await ch.initiate(reader, writer, self.me)
@@ -189,12 +288,46 @@ class Daemon:
                     f"peer fingerprint mismatch: expected {peer.short_id}, "
                     f"got {channel.peer_short_id}"
                 )
+            peer_fp = fingerprint_of(channel.peer_ed_pub)
+            # Record outbound peer too — first time we send to them, they'll
+            # appear in our peer DB with trust='pending'.
+            if self.state is not None:
+                try:
+                    self.state.upsert_peer(
+                        fingerprint=peer_fp,
+                        short_id=channel.peer_short_id,
+                        pubkey=channel.peer_ed_pub,
+                        hostname=peer.hostname,
+                        address=peer.address,
+                        port=peer.port,
+                    )
+                except Exception:
+                    pass
+            # Send our caps first (no ACK expected).
+            try:
+                await channel.send(encode_msg(_build_caps(self.me.short_id)))
+            except Exception as e:
+                log.warning("CAPS send (outbound) failed: %s", e)
             results: list[dict] = []
             for m in msgs:
                 await channel.send(encode_msg(m))
-                ack = decode_msg(await channel.recv())
+                while True:
+                    ack = decode_msg(await channel.recv())
+                    if ack.get("t") == "CAPS":
+                        # Capture peer caps that arrived between our messages.
+                        channel.peer_caps = {
+                            "protocol": ack.get("protocol", "?"),
+                            "features": list(ack.get("features", [])),
+                            "from": ack.get("from"),
+                        }
+                        continue  # await the actual ACK
+                    break
                 results.append(ack)
-                self._append_log({**m, "dir": "out", "peer": peer.short_id})
+                ev = self._persist(
+                    msg=m, direction="out", peer_fp=peer_fp,
+                    peer_short_id=peer.short_id,
+                )
+                self._broadcast_tail(ev)
             await channel.close()
             return results
         except Exception:
@@ -209,6 +342,9 @@ class Daemon:
         return {"sent": m, "ack": acks[0] if acks else None}
 
     async def send_file(self, peer: Peer, path: Path) -> dict:
+        block = self._check_outbound_trust(peer)
+        if block:
+            raise RuntimeError(block)
         size = path.stat().st_size
         h = blake3.blake3()
         with open(path, "rb") as f:
@@ -232,10 +368,44 @@ class Daemon:
                     f"peer fingerprint mismatch: expected {peer.short_id}, "
                     f"got {channel.peer_short_id}"
                 )
+            peer_fp = fingerprint_of(channel.peer_ed_pub)
+            if self.state is not None:
+                try:
+                    self.state.upsert_peer(
+                        fingerprint=peer_fp,
+                        short_id=channel.peer_short_id,
+                        pubkey=channel.peer_ed_pub,
+                        hostname=peer.hostname,
+                        address=peer.address,
+                        port=peer.port,
+                    )
+                except Exception:
+                    pass
+
+            # Send our caps before any application traffic.
+            try:
+                await channel.send(encode_msg(_build_caps(self.me.short_id)))
+            except Exception as e:
+                log.warning("CAPS send (file outbound) failed: %s", e)
+
+            async def _await_ack(ch_: ch.Channel) -> dict:
+                while True:
+                    m = decode_msg(await ch_.recv())
+                    if m.get("t") == "CAPS":
+                        ch_.peer_caps = {
+                            "protocol": m.get("protocol", "?"),
+                            "features": list(m.get("features", [])),
+                            "from": m.get("from"),
+                        }
+                        continue
+                    return m
 
             await channel.send(encode_msg(offer))
-            decode_msg(await channel.recv())  # offer ACK
-            self._append_log({**offer, "dir": "out", "peer": peer.short_id})
+            await _await_ack(channel)
+            ev = self._persist(
+                msg=offer, direction="out", peer_fp=peer_fp, peer_short_id=peer.short_id,
+            )
+            self._broadcast_tail(ev)
 
             chunks_sent = 0
             with open(path, "rb") as f:
@@ -253,7 +423,7 @@ class Daemon:
                         eof=eof,
                     )
                     await channel.send(encode_msg(chunk_msg))
-                    decode_msg(await channel.recv())
+                    await _await_ack(channel)
                     chunks_sent += 1
                     prev = cur
                     seq += 1
@@ -268,7 +438,7 @@ class Daemon:
                     eof=True,
                 )
                 await channel.send(encode_msg(empty))
-                decode_msg(await channel.recv())
+                await _await_ack(channel)
                 chunks_sent = 1
 
             await channel.close()
@@ -381,13 +551,26 @@ class Daemon:
             except Exception:
                 pass
 
-    def _append_log(self, entry: dict) -> None:
-        path = message_log_path()
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     # ─── lifecycle ──────────────────────────────────────────────────────
     async def start(self) -> None:
+        # Persistent state (sqlite) — created early so peer/handshake hooks
+        # can record into it.
+        try:
+            self.state = State()
+            # Pin our own identity so it's a known peer.
+            self.state.upsert_peer(
+                fingerprint=self.me.fingerprint,
+                short_id=self.me.short_id,
+                pubkey=self.me.public_bytes,
+                hostname=self.me.hostname,
+                trust_default="pinned",
+            )
+            self.state.set_peer_trust(self.me.fingerprint, "pinned")
+        except Exception as e:
+            log.warning("state init failed (continuing without persistence): %s", e)
+            self.state = None
+
         self._peer_server = await asyncio.start_server(
             self._handle_peer, host="0.0.0.0", port=0
         )
@@ -471,6 +654,11 @@ class Daemon:
         if self._control_server:
             self._control_server.close()
             await self._control_server.wait_closed()
+        if self.state is not None:
+            try:
+                self.state.close()
+            except Exception:
+                pass
 
 
 async def run() -> None:

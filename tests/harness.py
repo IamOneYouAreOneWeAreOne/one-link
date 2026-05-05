@@ -191,10 +191,46 @@ def daemon_pair() -> Iterator[DaemonPair]:
 
 
 def message_log(home: Path) -> list[dict]:
-    p = home / "data" / "messages.jsonl"
-    if not p.exists():
+    """Read message history from the daemon's sqlite state, returning dicts
+    in the same wire-shape the JSONL log used. Tests written before the
+    sqlite migration still work."""
+    db = home / "data" / "state.db"
+    if not db.exists():
         return []
-    return [json.loads(L) for L in p.read_text(encoding="utf-8").splitlines() if L.strip()]
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT id, ts_ms, direction, peer_fp, msg_type, body, room_id, "
+            "metadata_json FROM messages ORDER BY ts_ms"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    finally:
+        conn.close()
+    out: list[dict] = []
+    for r in rows:
+        try:
+            md = json.loads(r["metadata_json"]) if r["metadata_json"] else {}
+        except Exception:
+            md = {}
+        d = {
+            "t": r["msg_type"],
+            "id": r["id"],
+            "ts": r["ts_ms"],
+            "dir": r["direction"],
+            "peer_fp": r["peer_fp"],
+            "peer": md.get("short_id") or (r["peer_fp"][:8] if r["peer_fp"] else "?"),
+            "room_id": r["room_id"],
+        }
+        if r["body"] is not None:
+            d["body"] = r["body"]
+        for k, v in md.items():
+            if k != "short_id" and k not in d:
+                d[k] = v
+        out.append(d)
+    return out
 
 
 def inbox_files(home: Path) -> list[Path]:
