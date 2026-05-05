@@ -111,6 +111,11 @@ CREATE TABLE IF NOT EXISTS blobs (
     size          INTEGER NOT NULL,
     received_ms   INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -550,6 +555,30 @@ class State:
             "SELECT hash, size, received_ms FROM blobs ORDER BY received_ms DESC"
         ).fetchall()
         return [{"hash": r["hash"], "size": r["size"], "received_ms": r["received_ms"]} for r in rows]
+
+    # ─── settings (kv) ────────────────────────────────────────────────
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._write_lock:
+            self._conn.execute(
+                "INSERT INTO settings(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+    def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        row = self._conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else default
+
+    def all_settings(self) -> dict[str, str]:
+        rows = self._conn.execute("SELECT key, value FROM settings").fetchall()
+        return {r["key"]: r["value"] for r in rows}
+
+    def delete_setting(self, key: str) -> None:
+        with self._write_lock:
+            self._conn.execute("DELETE FROM settings WHERE key = ?", (key,))
 
     # ─── lifecycle ────────────────────────────────────────────────────
 

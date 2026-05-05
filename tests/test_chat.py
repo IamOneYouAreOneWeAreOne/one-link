@@ -127,7 +127,7 @@ def test_chat_command_runs_and_exits_cleanly():
             timeout=30,
         )
         out = proc.stdout
-        assert "One_link chat" in out, out
+        assert "One Link chat" in out, out
         assert "starting daemon" in out or "you:" in out, out
         # /peers output
         assert "short_id" in out or "no peers" in out, out

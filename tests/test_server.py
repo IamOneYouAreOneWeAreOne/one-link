@@ -480,3 +480,42 @@ async def test_websocket_unauthorized_closes():
                     aiohttp.WSMsgType.CLOSED,
                     aiohttp.WSMsgType.CLOSING,
                 )
+
+
+@pytest.mark.asyncio
+async def test_settings_round_trip():
+    with daemon_pair() as p:
+        base_a, tok_a = _server_addr(p.a.home)
+        async with aiohttp.ClientSession() as s:
+            # Default
+            status, j = await _get_json(s, f"{base_a}/api/settings", token=tok_a)
+            assert status == 200
+            assert j["display_name"] is None
+            assert j["auto_accept_lan"] is False
+
+            # Set
+            status, _ = await _post_json(
+                s, f"{base_a}/api/settings",
+                {"display_name": "Alex's Studio", "auto_accept_lan": True},
+                token=tok_a,
+            )
+            assert status == 200
+
+            # Read back
+            _, j2 = await _get_json(s, f"{base_a}/api/settings", token=tok_a)
+            assert j2["display_name"] == "Alex's Studio"
+            assert j2["auto_accept_lan"] is True
+
+            # /api/me reflects the override
+            _, me = await _get_json(s, f"{base_a}/api/me", token=tok_a)
+            assert me["display_name"] == "Alex's Studio"
+
+            # Clear display_name (empty / null)
+            await _post_json(
+                s, f"{base_a}/api/settings",
+                {"display_name": None}, token=tok_a,
+            )
+            _, j3 = await _get_json(s, f"{base_a}/api/settings", token=tok_a)
+            assert j3["display_name"] is None
+            _, me2 = await _get_json(s, f"{base_a}/api/me", token=tok_a)
+            assert me2["display_name"] == me2["hostname"]

@@ -211,3 +211,31 @@ def test_blob_record(state: State):
     state.record_blob("ab" * 32, 1024)
     assert state.has_blob("ab" * 32)
     assert not state.has_blob("cd" * 32)
+
+
+# ───────── settings (kv) ──────────────────────────────────────────────
+
+def test_set_get_setting(state: State):
+    assert state.get_setting("foo") is None
+    assert state.get_setting("foo", "default") == "default"
+    state.set_setting("foo", "bar")
+    assert state.get_setting("foo") == "bar"
+
+
+def test_setting_upsert(state: State):
+    state.set_setting("color", "red")
+    state.set_setting("color", "blue")
+    assert state.get_setting("color") == "blue"
+
+
+def test_all_settings(state: State):
+    state.set_setting("a", "1")
+    state.set_setting("b", "2")
+    out = state.all_settings()
+    assert out == {"a": "1", "b": "2"}
+
+
+def test_delete_setting(state: State):
+    state.set_setting("k", "v")
+    state.delete_setting("k")
+    assert state.get_setting("k") is None

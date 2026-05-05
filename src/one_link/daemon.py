@@ -27,6 +27,7 @@ import blake3
 from one_link import channel as ch
 from one_link.discovery import Discovery, Peer
 from one_link.identity import Identity, fingerprint_of, load_or_create
+from one_link.pairing import PairingTracker, PairState, compute_sas
 from one_link.paths import (
     data_dir,
     inbox_dir,
@@ -98,6 +99,7 @@ class Daemon:
         self._incoming_files: dict[str, IncomingFile] = {}
         self.ui_server = None  # one_link.server.UIServer | None
         self.state: State | None = None
+        self.pairing = PairingTracker()
 
     # ─── persistence helper ─────────────────────────────────────────────
     def _persist(self, *, msg: dict, direction: str, peer_fp: str, peer_short_id: str) -> dict:
@@ -254,6 +256,81 @@ class Daemon:
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "PING":
             await channel.send(encode_msg(make_msg("PONG", self.me.short_id)))
+        elif t == "PAIR_REQUEST":
+            # Peer wants to pair with us. Compute the SAS (deterministic),
+            # store as incoming, surface to UI for the user to verify.
+            sas = compute_sas(self.me.public_bytes, channel.peer_ed_pub)
+            ctx = self.pairing.get(peer_fp)
+            if ctx is None or ctx.state in (PairState.NONE, PairState.PAIRED, PairState.REJECTED):
+                ctx = self.pairing.begin(peer_fp=peer_fp, sas=sas, incoming=True)
+            if self.ui_server is not None:
+                self.ui_server.broadcast({
+                    "type": "pair_request",
+                    "peer_fp": peer_fp,
+                    "peer_short_id": peer_sid,
+                    "sas": sas,
+                })
+            log.info("PAIR_REQUEST from %s sas=%s ctx.state=%s",
+                     peer_sid, sas, ctx.state.value)
+            # ACK so the sender can close the connection cleanly.
+            await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+        elif t == "PAIR_CONFIRM":
+            # Peer says SAS matched on their side.
+            ctx = self.pairing.they_confirm(peer_fp)
+            if ctx is None:
+                # We never started pairing on our side; treat as a fresh
+                # incoming so the UI can prompt.
+                sas = compute_sas(self.me.public_bytes, channel.peer_ed_pub)
+                ctx = self.pairing.begin(peer_fp=peer_fp, sas=sas, incoming=True)
+                self.pairing.they_confirm(peer_fp)
+                ctx = self.pairing.get(peer_fp)
+            # Re-fetch the latest ctx (in case other handlers mutated it
+            # while we were processing).
+            ctx = self.pairing.get(peer_fp) or ctx
+            if ctx and ctx.both_confirmed and self.state is not None:
+                # Defensive upsert in case the peer record was missed.
+                try:
+                    self.state.upsert_peer(
+                        fingerprint=peer_fp,
+                        short_id=peer_sid,
+                        pubkey=channel.peer_ed_pub,
+                    )
+                except Exception:
+                    pass
+                self.state.set_peer_trust(peer_fp, "pinned")
+                if self.ui_server is not None:
+                    self.ui_server.broadcast({
+                        "type": "peer_trust",
+                        "fingerprint": peer_fp,
+                        "trust": "pinned",
+                    })
+                log.info("paired with %s (sas=%s)", peer_sid, ctx.sas)
+            elif self.ui_server is not None:
+                self.ui_server.broadcast({
+                    "type": "pair_progress",
+                    "peer_fp": peer_fp,
+                    "they_confirmed": True,
+                })
+            await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+        elif t == "PAIR_REJECT":
+            self.pairing.reject(peer_fp)
+            if self.state is not None:
+                try:
+                    self.state.upsert_peer(
+                        fingerprint=peer_fp, short_id=peer_sid,
+                        pubkey=channel.peer_ed_pub,
+                    )
+                except Exception:
+                    pass
+                self.state.set_peer_trust(peer_fp, "rejected")
+            if self.ui_server is not None:
+                self.ui_server.broadcast({
+                    "type": "pair_rejected",
+                    "peer_fp": peer_fp,
+                    "peer_short_id": peer_sid,
+                })
+            log.info("pair rejected by %s", peer_sid)
+            await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
 
     # ─── outbound to a peer ─────────────────────────────────────────────
     def _peer_fp_from_peer(self, peer: Peer) -> str | None:
@@ -335,6 +412,159 @@ class Daemon:
                 writer.close()
                 await writer.wait_closed()
             raise
+
+    async def _send_control(self, peer: Peer, msg: dict) -> None:
+        """Open a one-shot connection, send a single control msg, wait for
+        ACK, close cleanly. Waiting for the ACK forces the receiver to fully
+        process the message before our close — avoids Win10053 abort races."""
+        reader, writer = await asyncio.open_connection(peer.address, peer.port)
+        try:
+            channel = await ch.initiate(reader, writer, self.me)
+            if channel.peer_short_id != peer.short_id:
+                raise RuntimeError(
+                    f"peer fingerprint mismatch: expected {peer.short_id}, "
+                    f"got {channel.peer_short_id}"
+                )
+            try:
+                await channel.send(encode_msg(_build_caps(self.me.short_id)))
+            except Exception:
+                pass
+            await channel.send(encode_msg(msg))
+            # Wait for ACK (skipping any peer-CAPS that arrives interleaved)
+            try:
+                while True:
+                    ack = decode_msg(await asyncio.wait_for(channel.recv(), timeout=5.0))
+                    if ack.get("t") == "CAPS":
+                        channel.peer_caps = {
+                            "protocol": ack.get("protocol", "?"),
+                            "features": list(ack.get("features", [])),
+                            "from": ack.get("from"),
+                        }
+                        continue
+                    if ack.get("t") == "ACK":
+                        break
+                    # Unknown response type — break, message was sent
+                    break
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+                # Peer didn't ACK in time; the message was still transmitted
+                # but the peer may have closed early. Acceptable for control.
+                pass
+            await channel.close()
+        except Exception:
+            with contextlib.suppress(Exception):
+                writer.close()
+                await writer.wait_closed()
+            raise
+
+    async def initiate_pair(self, peer: Peer) -> str:
+        """Start pairing with peer. Returns the SAS to display in our UI."""
+        peer_fp = self._peer_fp_from_peer(peer) or fingerprint_of(
+            bytes.fromhex(peer.ed_pub_hex)
+        )
+        sas = compute_sas(
+            self.me.public_bytes, bytes.fromhex(peer.ed_pub_hex)
+        )
+        existing = self.pairing.get(peer_fp)
+        if existing is None or existing.state in (
+            PairState.NONE, PairState.PAIRED, PairState.REJECTED
+        ):
+            self.pairing.begin(peer_fp=peer_fp, sas=sas, incoming=False)
+        # Make sure the peer DB has a row so trust changes can attach later
+        if self.state is not None:
+            self.state.upsert_peer(
+                fingerprint=peer_fp,
+                short_id=peer.short_id,
+                pubkey=bytes.fromhex(peer.ed_pub_hex),
+                hostname=peer.hostname,
+                address=peer.address,
+                port=peer.port,
+            )
+        await self._send_control(
+            peer, make_msg("PAIR_REQUEST", self.me.short_id),
+        )
+        return sas
+
+    async def confirm_pair(self, peer: Peer) -> dict:
+        """User confirms the SAS matched. Send PAIR_CONFIRM; if peer also
+        confirmed already, both sides become paired now."""
+        peer_fp = self._peer_fp_from_peer(peer) or fingerprint_of(
+            bytes.fromhex(peer.ed_pub_hex)
+        )
+        # Be defensive: ensure peer exists in state DB so set_peer_trust works.
+        if self.state is not None:
+            try:
+                self.state.upsert_peer(
+                    fingerprint=peer_fp,
+                    short_id=peer.short_id,
+                    pubkey=bytes.fromhex(peer.ed_pub_hex),
+                    hostname=peer.hostname,
+                    address=peer.address,
+                    port=peer.port,
+                )
+            except Exception:
+                pass
+
+        ctx = self.pairing.we_confirm(peer_fp)
+        if ctx is None:
+            # No ctx — could be the case where we receive PAIR_REQUEST after
+            # we already pressed confirm. Begin one and mark we_confirmed.
+            sas = compute_sas(
+                self.me.public_bytes, bytes.fromhex(peer.ed_pub_hex)
+            )
+            ctx = self.pairing.begin(peer_fp=peer_fp, sas=sas, incoming=False)
+            ctx = self.pairing.we_confirm(peer_fp)
+
+        await self._send_control(
+            peer, make_msg("PAIR_CONFIRM", self.me.short_id),
+        )
+        # Re-check after the await — they_confirmed might have flipped
+        # while _send_control was running and yielding to the event loop.
+        ctx = self.pairing.get(peer_fp) or ctx
+        if ctx and ctx.both_confirmed and self.state is not None:
+            self.state.set_peer_trust(peer_fp, "pinned")
+            if self.ui_server is not None:
+                self.ui_server.broadcast({
+                    "type": "peer_trust", "fingerprint": peer_fp, "trust": "pinned",
+                })
+            log.info("paired with %s via confirm_pair", peer.short_id)
+        else:
+            log.info(
+                "confirm_pair: still waiting for peer (we=%s they=%s)",
+                ctx.we_confirmed if ctx else "?",
+                ctx.they_confirmed if ctx else "?",
+            )
+        return {
+            "state": ctx.state.value if ctx else "unknown",
+            "both_confirmed": bool(ctx and ctx.both_confirmed),
+        }
+
+    async def reject_pair(self, peer: Peer) -> None:
+        """User says SAS did NOT match — possible MITM. Block the peer."""
+        peer_fp = self._peer_fp_from_peer(peer) or fingerprint_of(
+            bytes.fromhex(peer.ed_pub_hex)
+        )
+        self.pairing.reject(peer_fp)
+        if self.state is not None:
+            try:
+                # Ensure the peer exists in the DB so trust update sticks
+                self.state.upsert_peer(
+                    fingerprint=peer_fp,
+                    short_id=peer.short_id,
+                    pubkey=bytes.fromhex(peer.ed_pub_hex),
+                    hostname=peer.hostname,
+                    address=peer.address,
+                    port=peer.port,
+                )
+            except Exception:
+                pass
+            self.state.set_peer_trust(peer_fp, "rejected")
+        try:
+            await self._send_control(
+                peer, make_msg("PAIR_REJECT", self.me.short_id),
+            )
+        except Exception:
+            # Peer may already be unreachable; that's fine.
+            pass
 
     async def send_text(self, peer: Peer, body: str) -> dict:
         m = make_msg("TEXT", self.me.short_id, body=body)

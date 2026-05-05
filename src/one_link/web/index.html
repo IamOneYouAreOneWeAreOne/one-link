@@ -385,6 +385,140 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 8px; }
   ::-webkit-scrollbar-thumb:hover { background: #2c3243; }
+
+  /* ── Modal (pair, settings, confirm) ────────────────────────────── */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(8, 10, 16, .72);
+    display: none; align-items: center; justify-content: center;
+    backdrop-filter: blur(8px); z-index: 300;
+    animation: fade .18s ease-out;
+  }
+  .modal-backdrop.show { display: flex; }
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+
+  .modal {
+    background: linear-gradient(180deg, var(--bg-1), var(--bg-elev));
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: 18px; padding: 30px 32px; min-width: 380px; max-width: 460px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(124,92,255,.08);
+    animation: pop-in .2s ease-out;
+  }
+  @keyframes pop-in {
+    from { transform: translateY(8px) scale(.98); opacity: 0; }
+    to   { transform: none; opacity: 1; }
+  }
+  .modal h2 { font-size: 18px; font-weight: 600; margin-bottom: 10px; }
+  .modal p  { color: var(--text-dim); line-height: 1.5; margin-bottom: 16px; }
+  .modal .actions { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
+  .modal .btn-primary {
+    background: var(--accent); color: white; padding: 9px 18px;
+    border-radius: 8px; font-weight: 600; transition: filter .12s;
+  }
+  .modal .btn-primary:hover { filter: brightness(1.1); }
+  .modal .btn-danger {
+    background: transparent; color: var(--bad); padding: 9px 18px;
+    border-radius: 8px; font-weight: 500;
+  }
+  .modal .btn-danger:hover { background: rgba(255,107,107,.1); }
+  .modal .btn-ghost {
+    background: transparent; color: var(--text-dim); padding: 9px 18px;
+    border-radius: 8px;
+  }
+  .modal .btn-ghost:hover { background: var(--bg-3); color: var(--text); }
+
+  /* SAS code display */
+  .sas-display {
+    text-align: center;
+    padding: 24px 0 18px;
+    margin: 8px 0 14px;
+    background: linear-gradient(180deg, rgba(124,92,255,.08), rgba(78,193,255,.04));
+    border-radius: 12px;
+    border: 1px solid rgba(124,92,255,.18);
+  }
+  .sas-display .sas-code {
+    font-family: var(--mono);
+    font-size: 32px; font-weight: 700;
+    letter-spacing: 6px;
+    background: linear-gradient(135deg, #a896ff 0%, #74d4ff 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .sas-display .sas-label {
+    color: var(--text-dim); font-size: 11px;
+    text-transform: uppercase; letter-spacing: 1px;
+    margin-top: 4px;
+  }
+  .pair-peer-info {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 14px; background: var(--bg-2);
+    border-radius: 10px; margin-bottom: 12px;
+  }
+  .pair-peer-info .avatar { width: 36px; height: 36px; }
+  .pair-peer-info .who-name { font-weight: 600; }
+  .pair-peer-info .who-sub  { font-size: 12px; color: var(--text-dim); }
+
+  /* Settings form */
+  .settings-row {
+    display: grid; grid-template-columns: 130px 1fr; gap: 14px;
+    align-items: center; margin-bottom: 14px;
+  }
+  .settings-row label { color: var(--text-dim); font-size: 13px; }
+  .settings-row input[type="text"], .settings-row input[type="password"] {
+    background: var(--bg-2); border: 1px solid var(--bg-3);
+    border-radius: 8px; padding: 9px 11px; color: var(--text);
+    outline: none; transition: border-color .12s;
+  }
+  .settings-row input:focus { border-color: var(--accent); }
+  .settings-row .toggle {
+    position: relative; display: inline-block; width: 38px; height: 22px;
+  }
+  .settings-row .toggle input { display: none; }
+  .settings-row .toggle .slider {
+    position: absolute; inset: 0; background: var(--bg-3); border-radius: 22px;
+    cursor: pointer; transition: background .15s;
+  }
+  .settings-row .toggle .slider::before {
+    content: ""; position: absolute; left: 3px; top: 3px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: white; transition: transform .18s;
+  }
+  .settings-row .toggle input:checked + .slider { background: var(--accent); }
+  .settings-row .toggle input:checked + .slider::before { transform: translateX(16px); }
+
+  /* Top-bar settings gear */
+  .gear {
+    background: transparent; color: var(--text-dim);
+    width: 32px; height: 32px; border-radius: 8px;
+    display: grid; place-items: center;
+    transition: background .12s, color .12s;
+    margin-left: 6px;
+    font-size: 16px;
+  }
+  .gear:hover { background: var(--bg-2); color: var(--text); }
+
+  /* Peer card detail-on-hover (verify info) */
+  .peer .verify {
+    display: none; position: absolute;
+    background: var(--bg-elev); border: 1px solid var(--bg-3);
+    border-radius: 8px; padding: 8px 10px;
+    font-size: 11px; color: var(--text-dim); font-family: var(--mono);
+    box-shadow: var(--shadow); z-index: 50;
+    white-space: nowrap;
+    left: 100%; top: 0; margin-left: 4px;
+  }
+  .peer { position: relative; }
+  .peer:hover .verify { display: block; }
+
+  /* New-peer prompt — replaces the loud "Accept / Block" buttons */
+  .peer.unpaired { position: relative; }
+  .peer.unpaired::after {
+    content: "tap to pair";
+    position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+    font-size: 10px; padding: 3px 8px; border-radius: 999px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: white; font-weight: 600; letter-spacing: .3px;
+    box-shadow: 0 2px 8px rgba(124,92,255,.4);
+  }
 </style>
 </head>
 <body>
@@ -399,7 +533,7 @@
     <div class="me">
       <span class="dot"></span>
       <span id="me-host">…</span>
-      <code id="me-id">…</code>
+      <button class="gear" id="btn-settings" title="Settings">⚙</button>
     </div>
   </header>
 
@@ -492,6 +626,57 @@
 
   <!-- HIDDEN FILE INPUT -->
   <input type="file" id="file-input" style="display:none" multiple />
+
+  <!-- PAIR MODAL -->
+  <div class="modal-backdrop" id="pair-backdrop">
+    <div class="modal" id="pair-modal">
+      <h2 id="pair-title">Pair this device</h2>
+      <p id="pair-explain">Compare the code below with the same code shown on the other device. They must be identical.</p>
+      <div class="pair-peer-info" id="pair-peer-info">
+        <div class="avatar" id="pair-peer-avatar">?</div>
+        <div>
+          <div class="who-name" id="pair-peer-name">…</div>
+          <div class="who-sub"  id="pair-peer-sub">…</div>
+        </div>
+      </div>
+      <div class="sas-display">
+        <div class="sas-code" id="pair-sas">000 000</div>
+        <div class="sas-label">verification code · check both devices</div>
+      </div>
+      <div class="actions">
+        <button class="btn-danger" id="pair-mismatch">Codes don't match</button>
+        <button class="btn-ghost"  id="pair-cancel">Cancel</button>
+        <button class="btn-primary" id="pair-match">Codes match</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SETTINGS MODAL -->
+  <div class="modal-backdrop" id="settings-backdrop">
+    <div class="modal" style="max-width:480px;">
+      <h2>Settings</h2>
+      <p>Defaults are fine for almost everyone. Only change these if you know what you're doing.</p>
+      <div class="settings-row">
+        <label for="set-name">Display name</label>
+        <input type="text" id="set-name" placeholder="leave blank to use hostname" />
+      </div>
+      <div class="settings-row">
+        <label for="set-autoaccept">Auto-pair on LAN</label>
+        <span class="toggle">
+          <input type="checkbox" id="set-autoaccept" />
+          <span class="slider"></span>
+        </span>
+      </div>
+      <div class="settings-row">
+        <label for="set-passphrase">Passphrase</label>
+        <input type="password" id="set-passphrase" placeholder="(set ONE_LINK_PASSPHRASE env var; restart required)" disabled />
+      </div>
+      <div class="actions">
+        <button class="btn-ghost" id="settings-cancel">Close</button>
+        <button class="btn-primary" id="settings-save">Save</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -549,9 +734,10 @@
     peers: new Map(),     // short_id -> peer
     selectedPeer: null,   // short_id
     messages: [],         // recent across all peers
-    searchQuery: "",      // active search query (empty = no search)
-    searchResults: null,  // null = not searching; array = active results
+    searchQuery: "",
+    searchResults: null,
     showFiles: false,
+    pairing: { peerFp: null, sas: null, weConfirmed: false },
   };
 
   // ── API client ─────────────────────────────────────────────────────
@@ -591,44 +777,55 @@
       return;
     }
     for (const p of state.peers.values()) {
-      const row = el("div", "peer " + (p.online ? "online" : "offline"));
+      const isUnpaired = p.trust !== "pinned" && p.trust !== "rejected" && p.online;
+      const cls = ["peer",
+        p.online ? "online" : "offline",
+        isUnpaired ? "unpaired" : "",
+        p.trust === "rejected" ? "rejected" : "",
+      ].filter(Boolean).join(" ");
+      const row = el("div", cls);
       row.dataset.short = p.short_id;
       if (state.selectedPeer === p.short_id) row.classList.add("active");
 
       const av = el("div", "avatar", initials(p.hostname || p.short_id));
 
       const txt = el("div", "text");
-      const nameLine = el("div", "name");
-      nameLine.appendChild(document.createTextNode(p.hostname || "(unknown)"));
-      if (p.trust === "pending") nameLine.appendChild(el("span", "trust-tag pending", "new"));
-      else if (p.trust === "rejected") nameLine.appendChild(el("span", "trust-tag rejected", "blocked"));
-      txt.appendChild(nameLine);
-      txt.appendChild(el("div", "sub", p.short_id + (p.online ? "" : " · offline")));
+      txt.appendChild(el("div", "name", p.hostname || "(unknown)"));
+      // Subtle, debug-only details — only visible on hover via .verify
+      txt.appendChild(el("div", "sub",
+        p.online ? "online" : "offline"
+      ));
+
+      // Hover-only "verify identity" detail — IP + fingerprint short-id
+      const verify = el("div", "verify");
+      verify.textContent = `${p.short_id} · ${p.address || "?"}:${p.port || "?"}`;
+      row.appendChild(verify);
 
       row.appendChild(av);
       row.appendChild(txt);
 
-      // Trust action buttons for pending peers
-      if (p.trust === "pending" && p.fingerprint) {
-        const actions = el("div", "actions");
-        const accept = el("button", null, "Accept");
-        accept.onclick = (e) => { e.stopPropagation(); setTrust(p.fingerprint, "pinned"); };
-        const reject = el("button", "danger", "Block");
-        reject.onclick = (e) => { e.stopPropagation(); setTrust(p.fingerprint, "rejected"); };
-        actions.appendChild(accept);
-        actions.appendChild(reject);
-        row.appendChild(actions);
-      }
-
-      row.onclick = () => selectPeer(p.short_id);
+      row.onclick = () => {
+        if (isUnpaired && p.fingerprint) {
+          openPairModal(p);  // unpaired → pair modal flow
+        } else {
+          selectPeer(p.short_id);
+        }
+      };
       list.appendChild(row);
+    }
+
+    // Auto-select if there's exactly one paired peer and nothing currently selected
+    const paired = [...state.peers.values()].filter(p => p.trust === "pinned");
+    if (paired.length === 1 && !state.selectedPeer) {
+      selectPeer(paired[0].short_id);
     }
   }
 
+  // Trust API — kept for power-user paths (right-click menu later); the
+  // primary trust UX is the pair modal now.
   async function setTrust(fingerprint, trust) {
     try {
       await api.post(`/api/peers/${fingerprint}/trust`, { trust });
-      toast(trust === "pinned" ? "Peer accepted" : (trust === "rejected" ? "Peer blocked" : "Trust updated"), trust === "rejected" ? "bad" : "good");
       await refreshPeers();
     } catch (e) {
       toast(`Trust update failed: ${e.message || e}`, "bad");
@@ -739,8 +936,7 @@
     try {
       const me = await api.get("/api/me");
       state.me = me;
-      $("#me-host").textContent = me.hostname;
-      $("#me-id").textContent = me.short_id;
+      $("#me-host").textContent = me.display_name || me.hostname;
     } catch (e) {
       toast("Couldn't reach the daemon. Is it running?", "bad", 8000);
       console.error(e);
@@ -782,8 +978,26 @@
         for (const p of m.peers) state.peers.set(p.short_id, p);
         renderPeers();
       } else if (m.type === "peer_trust") {
-        // refresh peers to update badges
+        if (state.pairing.peerFp === m.fingerprint && m.trust === "pinned") {
+          closePairModal(true);
+          toast("Paired", "good");
+        }
         refreshPeers();
+      } else if (m.type === "pair_request") {
+        // Incoming pair request from another device. Open the same modal
+        // automatically so the user verifies the SAS.
+        const peer = [...state.peers.values()].find(p => p.fingerprint === m.peer_fp);
+        if (peer) {
+          openPairModalIncoming(peer, m.sas);
+        }
+      } else if (m.type === "pair_progress") {
+        // Peer confirmed on their side; if we already confirmed, daemon
+        // pins. Otherwise the modal stays open waiting for our user.
+      } else if (m.type === "pair_rejected") {
+        if (state.pairing.peerFp === m.peer_fp) {
+          closePairModal(false);
+          toast("The other device rejected pairing", "bad");
+        }
       } else if (m.type === "msg") {
         const msg = m.msg;
         state.messages.push(msg);
@@ -956,6 +1170,126 @@
         $("#main").classList.remove("with-files");
       }
     };
+  });
+
+  // ── Pair modal ─────────────────────────────────────────────────────
+  const pairBackdrop = $("#pair-backdrop");
+  const pairTitle    = $("#pair-title");
+  const pairExplain  = $("#pair-explain");
+  const pairAvatar   = $("#pair-peer-avatar");
+  const pairName     = $("#pair-peer-name");
+  const pairSub      = $("#pair-peer-sub");
+  const pairSasEl    = $("#pair-sas");
+  const pairMatch    = $("#pair-match");
+  const pairMismatch = $("#pair-mismatch");
+  const pairCancel   = $("#pair-cancel");
+
+  function _formatSas(s) {
+    s = (s || "").toString().padStart(6, "0");
+    return s.slice(0, 3) + " " + s.slice(3);
+  }
+
+  async function openPairModal(peer) {
+    state.pairing = { peerFp: peer.fingerprint, sas: null, weConfirmed: false };
+    pairTitle.textContent = "Pair this device";
+    pairExplain.textContent = "Compare the code below with the same code shown on the other device. They must be identical.";
+    pairAvatar.textContent = initials(peer.hostname || peer.short_id);
+    pairName.textContent = peer.hostname || "(unknown)";
+    pairSub.textContent = peer.short_id;
+    pairSasEl.textContent = "…";
+    pairBackdrop.classList.add("show");
+    try {
+      const res = await api.post(`/api/peers/${peer.fingerprint}/pair`, {});
+      state.pairing.sas = res.sas;
+      pairSasEl.textContent = _formatSas(res.sas);
+    } catch (e) {
+      pairSasEl.textContent = "—";
+      toast(`Could not initiate pairing: ${e.message || e}`, "bad");
+    }
+  }
+
+  function openPairModalIncoming(peer, sas) {
+    state.pairing = { peerFp: peer.fingerprint, sas, weConfirmed: false };
+    pairTitle.textContent = "Pair this device";
+    pairExplain.textContent = "The other device asked to pair. Verify the code below matches what it shows.";
+    pairAvatar.textContent = initials(peer.hostname || peer.short_id);
+    pairName.textContent = peer.hostname || "(unknown)";
+    pairSub.textContent = peer.short_id;
+    pairSasEl.textContent = _formatSas(sas);
+    pairBackdrop.classList.add("show");
+  }
+
+  function closePairModal(succeeded) {
+    pairBackdrop.classList.remove("show");
+    state.pairing = { peerFp: null, sas: null, weConfirmed: false };
+  }
+
+  pairMatch.onclick = async () => {
+    if (!state.pairing.peerFp) return;
+    pairMatch.disabled = true;
+    try {
+      const res = await api.post(`/api/peers/${state.pairing.peerFp}/pair-confirm`, {});
+      state.pairing.weConfirmed = true;
+      if (res.both_confirmed) {
+        closePairModal(true);
+        toast("Paired", "good");
+      } else {
+        pairExplain.textContent = "Waiting for the other device to confirm…";
+      }
+    } catch (e) {
+      toast(`Pair confirm failed: ${e.message || e}`, "bad");
+    } finally {
+      pairMatch.disabled = false;
+    }
+  };
+  pairMismatch.onclick = async () => {
+    if (!state.pairing.peerFp) return;
+    try {
+      await api.post(`/api/peers/${state.pairing.peerFp}/pair-reject`, {});
+    } catch (e) { /* ignore */ }
+    closePairModal(false);
+    toast("Pairing rejected — possible MITM", "bad", 6000);
+    refreshPeers();
+  };
+  pairCancel.onclick = () => closePairModal(false);
+
+  // ── Settings modal ─────────────────────────────────────────────────
+  const settingsBackdrop = $("#settings-backdrop");
+  $("#btn-settings").onclick = async () => {
+    try {
+      const r = await api.get("/api/settings");
+      $("#set-name").value = r.display_name || "";
+      $("#set-autoaccept").checked = !!r.auto_accept_lan;
+    } catch (e) {
+      $("#set-name").value = "";
+      $("#set-autoaccept").checked = false;
+    }
+    settingsBackdrop.classList.add("show");
+  };
+  $("#settings-cancel").onclick = () => settingsBackdrop.classList.remove("show");
+  $("#settings-save").onclick = async () => {
+    const payload = {
+      display_name: $("#set-name").value.trim() || null,
+      auto_accept_lan: $("#set-autoaccept").checked,
+    };
+    try {
+      await api.post("/api/settings", payload);
+      toast("Settings saved", "good");
+      settingsBackdrop.classList.remove("show");
+      refreshPeers();
+      // refresh own identity in case display name changed
+      try {
+        const me = await api.get("/api/me");
+        $("#me-host").textContent = me.display_name || me.hostname;
+      } catch {}
+    } catch (e) {
+      toast(`Save failed: ${e.message || e}`, "bad");
+    }
+  };
+
+  // Click outside modal closes
+  [pairBackdrop, settingsBackdrop].forEach(b => {
+    b.addEventListener("click", (e) => { if (e.target === b) b.classList.remove("show"); });
   });
 
   init();

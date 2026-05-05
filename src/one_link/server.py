@@ -100,8 +100,14 @@ class UIServer:
             r.add_static("/static/", path=str(assets_dir), show_index=False)
         r.add_get("/favicon.ico", self._favicon)
         r.add_get("/api/me", self._guarded(self.api_me))
+        r.add_get("/api/settings", self._guarded(self.api_get_settings))
+        r.add_post("/api/settings", self._guarded(self.api_set_settings))
         r.add_get("/api/peers", self._guarded(self.api_peers))
         r.add_post(r"/api/peers/{fp}/trust", self._guarded(self.api_set_trust))
+        r.add_post(r"/api/peers/{fp}/pair", self._guarded(self.api_pair_init))
+        r.add_post(r"/api/peers/{fp}/pair-confirm", self._guarded(self.api_pair_confirm))
+        r.add_post(r"/api/peers/{fp}/pair-reject", self._guarded(self.api_pair_reject))
+        r.add_get(r"/api/peers/{fp}/sas", self._guarded(self.api_get_sas))
         r.add_get("/api/messages", self._guarded(self.api_messages))
         r.add_get("/api/search", self._guarded(self.api_search))
         r.add_post("/api/send", self._guarded(self.api_send))
@@ -171,13 +177,45 @@ class UIServer:
     # ─── /api/me ──────────────────────────────────────────────────────
     async def api_me(self, request: web.Request) -> web.Response:
         me = self.daemon.me
-        return web.json_response(
-            {
-                "short_id": me.short_id,
-                "fingerprint": me.fingerprint,
-                "hostname": me.hostname,
-            }
-        )
+        display_name = None
+        if self.daemon.state is not None:
+            display_name = self.daemon.state.get_setting("display_name")
+        return web.json_response({
+            "short_id": me.short_id,
+            "fingerprint": me.fingerprint,
+            "hostname": me.hostname,
+            "display_name": display_name or me.hostname,
+        })
+
+    # ─── /api/settings ────────────────────────────────────────────────
+    async def api_get_settings(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({})
+        s = self.daemon.state.all_settings()
+        return web.json_response({
+            "display_name": s.get("display_name"),
+            "auto_accept_lan": s.get("auto_accept_lan", "false") == "true",
+        })
+
+    async def api_set_settings(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        if "display_name" in data:
+            v = data["display_name"]
+            if v is None or v == "":
+                self.daemon.state.delete_setting("display_name")
+            else:
+                self.daemon.state.set_setting("display_name", str(v))
+        if "auto_accept_lan" in data:
+            self.daemon.state.set_setting(
+                "auto_accept_lan",
+                "true" if data["auto_accept_lan"] else "false",
+            )
+        return web.json_response({"ok": True})
 
     # ─── /api/peers ───────────────────────────────────────────────────
     async def api_peers(self, request: web.Request) -> web.Response:
@@ -296,6 +334,73 @@ class UIServer:
         # Notify UI subscribers so the badge updates everywhere.
         self.broadcast({"type": "peer_trust", "fingerprint": fp, "trust": trust})
         return web.json_response({"ok": True, "trust": trust})
+
+    # ─── pairing ──────────────────────────────────────────────────────
+    def _resolve_peer_for_pairing(self, fp: str):
+        """Find a Peer object whose fingerprint matches `fp`. Pulls from
+        live mDNS discovery; pairing requires the peer to be reachable."""
+        if not self.daemon.discovery:
+            return None
+        from one_link.identity import fingerprint_of
+        for p in self.daemon.discovery.registry.list():
+            if not p.ed_pub_hex:
+                continue
+            try:
+                pub = bytes.fromhex(p.ed_pub_hex)
+            except ValueError:
+                continue
+            if fingerprint_of(pub) == fp:
+                return p
+        return None
+
+    async def api_get_sas(self, request: web.Request) -> web.Response:
+        """Return the SAS for a peer (deterministic — both sides see same)."""
+        fp = request.match_info["fp"]
+        peer = self._resolve_peer_for_pairing(fp)
+        if peer is None:
+            return web.json_response({"error": "peer not visible on LAN"}, status=404)
+        from one_link.pairing import compute_sas, format_sas
+        sas = compute_sas(self.daemon.me.public_bytes, bytes.fromhex(peer.ed_pub_hex))
+        return web.json_response({"sas": sas, "formatted": format_sas(sas)})
+
+    async def api_pair_init(self, request: web.Request) -> web.Response:
+        fp = request.match_info["fp"]
+        peer = self._resolve_peer_for_pairing(fp)
+        if peer is None:
+            return web.json_response({"error": "peer not visible on LAN"}, status=404)
+        try:
+            sas = await self.daemon.initiate_pair(peer)
+        except Exception as e:
+            log.exception("pair init failed")
+            return web.json_response({"error": str(e)}, status=500)
+        from one_link.pairing import format_sas
+        return web.json_response({"ok": True, "sas": sas, "formatted": format_sas(sas)})
+
+    async def api_pair_confirm(self, request: web.Request) -> web.Response:
+        fp = request.match_info["fp"]
+        peer = self._resolve_peer_for_pairing(fp)
+        if peer is None:
+            return web.json_response({"error": "peer not visible on LAN"}, status=404)
+        try:
+            result = await self.daemon.confirm_pair(peer)
+            return web.json_response({"ok": True, **result})
+        except Exception as e:
+            log.exception("pair confirm failed")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def api_pair_reject(self, request: web.Request) -> web.Response:
+        fp = request.match_info["fp"]
+        peer = self._resolve_peer_for_pairing(fp)
+        if peer is None:
+            # Even if peer isn't reachable, we can still mark them rejected.
+            if self.daemon.state and self.daemon.state.get_peer(fp):
+                self.daemon.state.set_peer_trust(fp, "rejected")
+            return web.json_response({"ok": True, "note": "peer offline; marked rejected locally"})
+        try:
+            await self.daemon.reject_pair(peer)
+        except Exception as e:
+            log.warning("pair reject send failed (still locally rejected): %s", e)
+        return web.json_response({"ok": True})
 
     # ─── /api/messages ────────────────────────────────────────────────
     async def api_messages(self, request: web.Request) -> web.Response:
