@@ -11,7 +11,14 @@
 $ErrorActionPreference = "Stop"
 
 $desktop = [Environment]::GetFolderPath("Desktop")
-$shortcutPath = Join-Path $desktop "One_link.lnk"
+$shortcutPath = Join-Path $desktop "One Link.lnk"
+
+# Clean up an older legacy shortcut name if it's still on the desktop
+$legacyShortcut = Join-Path $desktop "One_link.lnk"
+if (Test-Path $legacyShortcut) {
+    Remove-Item $legacyShortcut -Force -ErrorAction SilentlyContinue
+    Write-Host "Removed legacy shortcut: $legacyShortcut"
+}
 
 # Find the Python that has one_link installed.
 $pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
