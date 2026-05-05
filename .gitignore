@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Build output
+build/
+dist/
+*.spec
+!one_link.spec  # checked-in PyInstaller spec, if any
+
+# Local runtime data (NEVER commit identity keys or message logs)
+*.key
+identity.key
+control.port
+peer.port
+inbox/
+messages.jsonl
+peers.json
+
+# Smoke test scratch
+.smoke_tmp/
+
+# Coverage
+.coverage
+htmlcov/
