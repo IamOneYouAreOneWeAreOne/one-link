@@ -13,12 +13,15 @@ $ErrorActionPreference = "Stop"
 $desktop = [Environment]::GetFolderPath("Desktop")
 $shortcutPath = Join-Path $desktop "One Link.lnk"
 
-# Clean up an older legacy shortcut name if it's still on the desktop
-$legacyShortcut = Join-Path $desktop "One_link.lnk"
-if (Test-Path $legacyShortcut) {
-    Remove-Item $legacyShortcut -Force -ErrorAction SilentlyContinue
-    Write-Host "Removed legacy shortcut: $legacyShortcut"
-}
+# Hard rule: one and only one One Link desktop shortcut.
+# Remove EVERY pre-existing shortcut whose name starts with "One " or "One_"
+# before creating the canonical one. No duplicates. Ever.
+Get-ChildItem -Path $desktop -Filter "*.lnk" -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like "One *.lnk" -or $_.Name -like "One_*.lnk" } |
+    ForEach-Object {
+        Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
+        Write-Host "Removed stale shortcut: $($_.Name)"
+    }
 
 # Find the Python that has one_link installed.
 $pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
