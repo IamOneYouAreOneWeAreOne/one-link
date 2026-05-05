@@ -17,7 +17,12 @@ from one_link.identity import load_or_create
 
 
 def _connect_control() -> tuple[socket.socket, int]:
-    port = daemon_mod.read_control_port()
+    try:
+        port = daemon_mod.read_control_port()
+    except RuntimeError as e:
+        raise click.ClickException(
+            f"daemon not running ({e}).\nstart it with:  one-link daemon"
+        )
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(5.0)
     try:
