@@ -11,11 +11,11 @@ effect tracking) with Python as the host harness while LLVM/WASM backends mature
 
 ## Status
 
-**v0.2.5** — sovereign-network pass: MIT license, audit doctrine, content-defined dedup primitives, and Merkle drift sync.
+**v0.2.7** — optimized CDC transfer path with streaming indexing, adaptive compression, cache accounting/GC, Merkle subtree drift walks, and benchmark gates.
 
 - Native-feeling browser app: dark theme, peer sidebar with online dots,
   message bubbles, drag-drop file send, live updates over WebSocket
-- 219+ passing tests across identity, wire, channel, discovery, paths, CLI,
+- 232 passing tests across identity, wire, channel, discovery, paths, CLI,
   integration, raw-protocol attacks, resilience, tail subscription,
   chat REPL, and the new HTTP/WS server
 - Full path-traversal defense at both the wire-protocol and HTTP layers
@@ -132,6 +132,8 @@ src/one_link/
 ├── state.py       (v0.2) sqlite persistent state
 ├── cdc.py         content-defined chunking + dedup transfer planning
 ├── merkle.py      Merkle drift detection for manifests/blob indexes
+├── capabilities.py per-peer feature/capability names
+├── sessions.py    explicit peer session-protocol catalog
 ├── sovereign.py   mission/principles/capability audit surface
 └── paths.py       cross-platform config/data dirs
 ```
@@ -139,10 +141,11 @@ src/one_link/
 Coherence / OneField ecosystem hooks:
 - `coherence_lang.bootstrap.runtime.crdt.VectorClock` inspired the active
   `one_link.crdt.VectorClock` folder-sync primitive
-- OneField Mesh `cdc_dedup.cl` inspired `one_link.cdc`
-- OneField Mesh `merkle_drift_sync.cl` inspired `one_link.merkle`
-- Session-protocol and capability concepts are tracked in
-  `docs/SOVEREIGN_NETWORK_BLUEPRINT.md`
+- OneField Mesh `cdc_dedup.cl` inspired live `FILE_WANTS` /
+  `FILE_CDC_CHUNK` transfer skipping
+- OneField Mesh `merkle_drift_sync.cl` inspired live manifest root checks
+- Session-protocol and capability concepts now ship as `one_link.sessions`
+  and `one_link.capabilities`
 
 ---
 
@@ -176,6 +179,7 @@ losing or having someone else read if your device were compromised.
 pip install -e .[dev]
 python -m pytest tests/ --ignore=tests/smoke_loopback.py -v
 python scripts/build_binary.py     # produces dist/one-link[.exe]
+python scripts/bench_transfer_primitives.py
 ```
 
 The smoke test (`tests/smoke_loopback.py`) starts two daemons in temp

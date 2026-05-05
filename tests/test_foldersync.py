@@ -60,3 +60,24 @@ def test_remote_tombstone_rejects_path_traversal_delete(tmp_path: Path):
     finally:
         state.close()
         loop.close()
+
+
+def test_manifest_root_changes_with_manifest(tmp_path: Path):
+    state, _blobs, loop, engine = _engine(tmp_path)
+    try:
+        root = tmp_path / "sync"
+        state.add_folder(name="docs", local_path=str(root), shared_with=[])
+        empty = engine.manifest_root("docs")
+        state.upsert_manifest_entry(
+            folder_name="docs",
+            file_path="a.txt",
+            blob_hash="aa" * 32,
+            size=1,
+            mtime_ms=1,
+            vclock={"aa": 1},
+        )
+        changed = engine.manifest_root("docs")
+        assert empty != changed
+    finally:
+        state.close()
+        loop.close()

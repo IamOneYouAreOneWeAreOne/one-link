@@ -51,6 +51,26 @@ def test_send_by_short_id_prefix():
         assert res["ok"], res
 
 
+def test_peer_capabilities_persist_after_contact():
+    with daemon_pair() as p:
+        res = request(p.a.control_port, cmd="send", peer=p.b.short_id, body="caps")
+        assert res["ok"], res
+        time.sleep(0.5)
+        peers = request(p.a.control_port, cmd="peers")
+        assert peers["ok"]
+        # Capability details are exposed through the HTTP API; this verifies the
+        # state path directly without opening another UI client here.
+        from one_link.state import State
+        st = State(db_path=p.a.home / "data" / "state.db")
+        try:
+            b_fp = st.get_peer_by_short_id(p.b.short_id).fingerprint
+            caps = st.get_peer_capabilities(b_fp)
+        finally:
+            st.close()
+        assert "file_cdc" in caps
+        assert "folder_sync" in caps
+
+
 # ─────────────────────────── File sizes ────────────────────────────
 
 @pytest.mark.parametrize(
@@ -87,6 +107,55 @@ def test_file_send_various_sizes(size: int):
         got = match[0]
         assert got.stat().st_size == size
         assert got.read_bytes() == src.read_bytes()
+
+
+def test_file_send_cdc_skips_chunks_receiver_already_has():
+    with daemon_pair() as p:
+        base = p.tmp / "base.bin"
+        derived = p.tmp / "derived.bin"
+        payload = bytes((i * 17 + 3) & 0xFF for i in range(900_000))
+        base.write_bytes(payload)
+        derived.write_bytes(payload + b"small tail")
+
+        first = request(
+            p.a.control_port, cmd="send_file", peer=p.b.short_id, path=str(base)
+        )
+        assert first["ok"], first
+        time.sleep(0.8)
+
+        second = request(
+            p.a.control_port, cmd="send_file", peer=p.b.short_id, path=str(derived)
+        )
+        assert second["ok"], second
+        result = second["result"]
+        assert result["cdc"] is True
+        assert result["cdc_skipped"] > 0
+
+        time.sleep(0.8)
+        files = inbox_files(p.b.home)
+        match = [f for f in files if f.name.endswith("derived.bin")]
+        assert match
+        assert match[0].read_bytes() == derived.read_bytes()
+
+
+def test_file_send_compresses_easy_payloads():
+    with daemon_pair() as p:
+        src = p.tmp / "compressible.bin"
+        src.write_bytes((b"one-link-compress-me\n" * 50_000))
+
+        res = request(
+            p.a.control_port, cmd="send_file", peer=p.b.short_id, path=str(src)
+        )
+        assert res["ok"], res
+        result = res["result"]
+        assert result["cdc"] is True
+        assert result["compressed_chunks"] > 0
+        assert result["wire_bytes_sent"] < result["raw_bytes_sent"]
+
+        time.sleep(0.8)
+        match = [f for f in inbox_files(p.b.home) if f.name.endswith(src.name)]
+        assert match
+        assert match[0].read_bytes() == src.read_bytes()
 
 
 # ─────────────────────── Filename safety ───────────────────────────

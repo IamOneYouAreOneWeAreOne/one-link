@@ -116,6 +116,12 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS peer_capabilities (
+    fingerprint TEXT PRIMARY KEY,
+    caps_json   TEXT NOT NULL,
+    updated_ms  INTEGER NOT NULL
+);
 """
 
 
@@ -252,6 +258,32 @@ class State:
             "SELECT * FROM peers ORDER BY last_seen_ms DESC"
         ).fetchall()
         return [self._row_to_peer(r) for r in rows]
+
+    def set_peer_capabilities(self, fingerprint: str, caps: Iterable[str]) -> None:
+        values = sorted({str(c) for c in caps if str(c)})
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO peer_capabilities(fingerprint, caps_json, updated_ms)
+                VALUES(?, ?, ?)
+                ON CONFLICT(fingerprint) DO UPDATE SET
+                    caps_json = excluded.caps_json,
+                    updated_ms = excluded.updated_ms
+                """,
+                (fingerprint, json.dumps(values), _now_ms()),
+            )
+
+    def get_peer_capabilities(self, fingerprint: str) -> list[str]:
+        row = self._conn.execute(
+            "SELECT caps_json FROM peer_capabilities WHERE fingerprint = ?",
+            (fingerprint,),
+        ).fetchone()
+        if not row:
+            return []
+        try:
+            return list(json.loads(row["caps_json"]))
+        except Exception:
+            return []
 
     def _row_to_peer(self, row: sqlite3.Row) -> PeerRecord:
         return PeerRecord(

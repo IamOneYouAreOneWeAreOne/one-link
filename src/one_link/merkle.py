@@ -60,15 +60,42 @@ def build_tree(leaf_hashes: Iterable[str]) -> MerkleTree:
 
 
 def divergent_leaf_indexes(local: MerkleTree, remote: MerkleTree) -> tuple[int, ...]:
-    """Return leaf positions whose digests differ between two trees."""
+    """Return leaf positions whose digests differ between two trees.
+
+    Uses internal-node digests to prune identical subtrees, so a one-file drift
+    in a huge manifest does not require comparing every leaf.
+    """
+
+    if local.root == remote.root and local.leaf_count == remote.leaf_count:
+        return ()
 
     max_len = max(local.leaf_count, remote.leaf_count)
+    if not local.leaves:
+        return tuple(range(remote.leaf_count))
+    if not remote.leaves:
+        return tuple(range(local.leaf_count))
+
+    height = max(len(local.levels), len(remote.levels)) - 1
     out: list[int] = []
-    for i in range(max_len):
-        a = local.leaves[i] if i < local.leaf_count else None
-        b = remote.leaves[i] if i < remote.leaf_count else None
-        if a != b:
-            out.append(i)
+
+    def walk(level: int, idx: int, start: int, width: int) -> None:
+        if start >= max_len:
+            return
+        a = _digest_at(local, level, idx)
+        b = _digest_at(remote, level, idx)
+        if a == b:
+            return
+        if level == 0 or width <= 1:
+            leaf_idx = start
+            if leaf_idx < max_len:
+                out.append(leaf_idx)
+            return
+        half = max(1, width // 2)
+        walk(level - 1, idx * 2, start, half)
+        walk(level - 1, idx * 2 + 1, start + half, half)
+
+    root_width = 1 << height
+    walk(height, 0, 0, root_width)
     return tuple(out)
 
 
@@ -86,3 +113,15 @@ def _validate_hash(h: str) -> str:
         raise ValueError(f"Merkle hash must be 64 hex chars, got {len(h)}")
     int(h, 16)
     return h.lower()
+
+
+def _digest_at(tree: MerkleTree, level: int, idx: int) -> str | None:
+    if level >= len(tree.levels):
+        return None
+    values = tree.levels[level]
+    if not values:
+        return None
+    if idx < len(values):
+        return values[idx]
+    # Odd leaf counts are padded upward by duplicating the final digest.
+    return values[-1]

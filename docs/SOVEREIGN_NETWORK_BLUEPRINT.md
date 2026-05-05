@@ -43,19 +43,30 @@ Current active foundation:
 - vector-clock manifest merge primitives
 - single-instance daemon lock
 
-New primitives added in this pass:
+Live protocol features:
 
 - `one_link.cdc`: content-defined chunking and dedup planning
 - `one_link.merkle`: Merkle manifest drift detection
 - `one_link.sovereign`: auditable doctrine/capability surface
+- `FILE_WANTS` / `FILE_CDC_CHUNK`: receivers ask for only the CDC chunks
+  missing from their local chunk cache
+- `MANIFEST_PUSH.merkle_root`: folder sync can fast-path already-matching
+  roots and avoid needless blob requests
+- `one_link.capabilities`: peers persist advertised powers such as chat,
+  files, CDC transfer, folder sync, and future transports
+- `one_link.sessions`: explicit protocol catalog for chat, file transfer,
+  folder sync, and pairing
+- Adaptive compression: CDC chunks use zlib level 1 only when it actually
+  reduces wire bytes.
+- Cache accounting and GC: the receiver chunk cache exposes size/count in
+  audit and prunes least-recently-touched chunks over budget.
+- Benchmark gate: `scripts/bench_transfer_primitives.py` measures CDC
+  indexing throughput, dedup hit rate, Merkle drift latency, and compression
+  throughput.
 
 ## Next Frontier
 
-1. Wire CDC into file transfer as an optional offer: sender advertises chunk
-   hashes, receiver asks for missing chunks only.
-2. Use Merkle roots for folder sync so peers can detect drift with one digest.
-3. Add per-peer capabilities: chat, file receive, folder sync, future group
-   authority.
-4. Promote the current peer message list into explicit session protocols.
-5. Keep the audit endpoint as a truth surface for "no telemetry" and "no
+1. Add per-peer user-facing controls for each capability.
+2. Add group/session capabilities for future rooms and multi-device swarms.
+3. Keep the audit endpoint as a truth surface for "no telemetry" and "no
    mandatory relay" claims.

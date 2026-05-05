@@ -415,7 +415,14 @@ async def test_api_audit_describes_surface():
             assert j["no_external_telemetry"] is True
             assert "TEXT" in j["peer_protocol"]["message_types"]
             assert "PAIR_REQUEST" in j["peer_protocol"]["message_types"]
+            assert "FILE_WANTS" in j["peer_protocol"]["message_types"]
+            assert "FILE_CDC_CHUNK" in j["peer_protocol"]["message_types"]
+            assert "MANIFEST_PUSH" in j["peer_protocol"]["message_types"]
             assert "CAPS" in j["peer_protocol"]["message_types"]
+            assert any(s["name"] == "file_cdc_transfer" for s in j["peer_protocol"]["sessions"])
+            assert "file_cdc" in j["local_capabilities"]
+            assert j["performance"]["cdc_cache"]["max_bytes"] > 0
+            assert "adaptive zlib" in j["performance"]["file_transfer"]["compression"]
             assert any("mdns" in d["kind"] for d in j["outbound_destinations"])
             doctrine = j["sovereign_network"]
             assert doctrine["privacy_guarantees"]["mandatory_relay"] is False

@@ -279,6 +279,7 @@ class UIServer:
                     "fingerprint": fp,
                     "online": True,
                     "trust": "pending",  # default if no DB row yet
+                    "capabilities": [],
                 }
         # Merge persistent state
         if self.daemon.state is not None:
@@ -289,6 +290,9 @@ class UIServer:
                         continue
                     if rec.fingerprint in live:
                         live[rec.fingerprint]["trust"] = rec.trust
+                        live[rec.fingerprint]["capabilities"] = (
+                            self.daemon.state.get_peer_capabilities(rec.fingerprint)
+                        )
                         live[rec.fingerprint]["last_seen_ms"] = rec.last_seen_ms
                         live[rec.fingerprint]["first_seen_ms"] = rec.first_seen_ms
                     else:
@@ -306,6 +310,9 @@ class UIServer:
                             "fingerprint": rec.fingerprint,
                             "online": False,
                             "trust": rec.trust,
+                            "capabilities": self.daemon.state.get_peer_capabilities(
+                                rec.fingerprint
+                            ),
                             "last_seen_ms": rec.last_seen_ms,
                             "first_seen_ms": rec.first_seen_ms,
                         }
@@ -771,7 +778,9 @@ class UIServer:
             "CAPS",
             "TEXT",
             "FILE_OFFER",
+            "FILE_WANTS",
             "FILE_CHUNK",
+            "FILE_CDC_CHUNK",
             "FILE_DONE",
             "ACK",
             "PING",
@@ -779,6 +788,10 @@ class UIServer:
             "PAIR_REQUEST",
             "PAIR_CONFIRM",
             "PAIR_REJECT",
+            "MANIFEST_PUSH",
+            "MANIFEST_WANTS",
+            "BLOB_OFFER",
+            "BLOB_CHUNK",
         ]
         # Outbound network endpoints we ever connect to: only LAN peers
         # discovered via mDNS, never any external service.
@@ -801,6 +814,20 @@ class UIServer:
                 "encryption": "X25519 ECDH + HKDF + ChaCha20-Poly1305 (64-bit nonce counter)",
                 "message_types": peer_msg_types,
                 "max_frame_bytes": wire_mod.MAX_FRAME,
+                "sessions": __import__("one_link.sessions").sessions.protocol_catalog(),
+            },
+            "local_capabilities": __import__(
+                "one_link.capabilities"
+            ).capabilities.LOCAL_CAPABILITIES,
+            "performance": {
+                "cdc_cache": self.daemon._chunk_cache_stats(),
+                "file_transfer": {
+                    "strategy": "content-defined chunk offer, receiver wants only missing chunks",
+                    "compression": "adaptive zlib level 1 per CDC chunk when it saves at least 8%",
+                },
+                "folder_sync": {
+                    "strategy": "Merkle root fast path plus CRDT manifest merge",
+                },
             },
             "outbound_destinations": outbound,
             "no_external_telemetry": True,

@@ -193,6 +193,12 @@ def audit():
     click.echo(f"    encryption:  {pp.get('encryption')}")
     click.echo(f"    msg types:   {', '.join(pp.get('message_types', []))}")
     click.echo(f"    max frame:   {pp.get('max_frame_bytes')} bytes")
+    if res.get("local_capabilities"):
+        click.echo(f"    local caps:  {', '.join(res.get('local_capabilities', []))}")
+    if pp.get("sessions"):
+        click.echo("    sessions:")
+        for s in pp.get("sessions", []):
+            click.echo(f"      - {s.get('name')}")
     click.echo("  Outbound destinations:")
     for o in res.get("outbound_destinations", []):
         click.echo(f"    - {o['kind']}: {o['destination']}")

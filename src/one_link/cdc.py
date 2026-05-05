@@ -18,9 +18,8 @@ import blake3
 MIN_CHUNK_BYTES = 16 * 1024
 AVG_CHUNK_BYTES = 64 * 1024
 MAX_CHUNK_BYTES = 256 * 1024
-ROLLING_WINDOW_BYTES = 64
-
 _MASK_64 = (1 << 64) - 1
+_BOUNDARY_MASK = AVG_CHUNK_BYTES - 1
 _GEAR = tuple(
     int.from_bytes(blake3.blake3(bytes([i])).digest(length=8), "little")
     for i in range(256)
@@ -39,6 +38,15 @@ class Chunk:
     @property
     def size(self) -> int:
         return self.end - self.start
+
+
+@dataclass(frozen=True)
+class FileIndex:
+    """Whole-file BLAKE3 plus its CDC chunks."""
+
+    blob_hash: str
+    size: int
+    chunks: tuple[Chunk, ...]
 
 
 @dataclass(frozen=True)
@@ -61,24 +69,12 @@ class DedupPlan:
         return self.total_bytes - self.bytes_to_send
 
 
-def _rotl64(value: int, shift: int) -> int:
-    shift &= 63
-    return ((value << shift) | (value >> (64 - shift))) & _MASK_64
-
-
-def _roll(rolling: int, incoming: int, outgoing: int | None) -> int:
-    rolling = _rotl64(rolling, 1) ^ _GEAR[incoming]
-    if outgoing is not None:
-        rolling ^= _rotl64(_GEAR[outgoing], ROLLING_WINDOW_BYTES)
-    return rolling & _MASK_64
-
-
 def _should_cut(chunk_len: int, rolling_hash: int) -> bool:
     if chunk_len < MIN_CHUNK_BYTES:
         return False
     if chunk_len >= MAX_CHUNK_BYTES:
         return True
-    return (rolling_hash % AVG_CHUNK_BYTES) == 0
+    return (rolling_hash & _BOUNDARY_MASK) == 0
 
 
 def chunk_bytes(data: bytes) -> tuple[Chunk, ...]:
@@ -92,40 +88,80 @@ def chunk_bytes(data: bytes) -> tuple[Chunk, ...]:
     chunks: list[Chunk] = []
     start = 0
     rolling = 0
-    window: list[int] = []
+    gear = _GEAR
+    mask = _MASK_64
 
     for pos, b in enumerate(data):
-        outgoing = None
-        if len(window) >= ROLLING_WINDOW_BYTES:
-            outgoing = window.pop(0)
-        window.append(b)
-        rolling = _roll(rolling, b, outgoing)
+        rolling = ((rolling << 1) + gear[b]) & mask
 
         end = pos + 1
         if _should_cut(end - start, rolling):
             chunks.append(_make_chunk(len(chunks), start, end, data))
             start = end
             rolling = 0
-            window.clear()
 
     if start < len(data) or not chunks:
         chunks.append(_make_chunk(len(chunks), start, len(data), data))
     return tuple(chunks)
 
 
-def chunk_path(path: Path, *, read_size: int = 1024 * 1024) -> tuple[Chunk, ...]:
-    """Chunk a file from disk. Reads incrementally, then hashes ranges.
+def index_path(path: Path, *, read_size: int = 1024 * 1024) -> FileIndex:
+    """Hash and CDC-index a file in one streaming pass.
 
-    The current implementation keeps file bytes in memory for simplicity and
-    deterministic testing. It is isolated here so the future streaming variant
-    can land without touching callers.
+    Memory stays bounded by MAX_CHUNK_BYTES plus the rolling window. This is
+    the path used by live transfer, so very large files do not need a full
+    in-memory copy just to build the dedup offer.
     """
 
-    hunk = bytearray()
+    chunks: list[Chunk] = []
+    file_hasher = blake3.blake3()
+    chunk_buf = bytearray()
+    rolling = 0
+    gear = _GEAR
+    mask = _MASK_64
+    offset = 0
+
     with open(path, "rb") as f:
         for part in iter(lambda: f.read(read_size), b""):
-            hunk.extend(part)
-    return chunk_bytes(bytes(hunk))
+            file_hasher.update(part)
+            for b in part:
+                rolling = ((rolling << 1) + gear[b]) & mask
+                chunk_buf.append(b)
+                if _should_cut(len(chunk_buf), rolling):
+                    end = offset + len(chunk_buf)
+                    chunks.append(
+                        Chunk(
+                            index=len(chunks),
+                            start=offset,
+                            end=end,
+                            hash=blake3.blake3(chunk_buf).hexdigest(),
+                        )
+                    )
+                    offset = end
+                    chunk_buf = bytearray()
+                    rolling = 0
+
+    if chunk_buf or not chunks:
+        end = offset + len(chunk_buf)
+        chunks.append(
+            Chunk(
+                index=len(chunks),
+                start=offset,
+                end=end,
+                hash=blake3.blake3(chunk_buf).hexdigest(),
+            )
+        )
+    return FileIndex(
+        blob_hash=file_hasher.hexdigest(),
+        size=path.stat().st_size,
+        chunks=tuple(chunks),
+    )
+
+
+def chunk_path(path: Path, *, read_size: int = 1024 * 1024) -> tuple[Chunk, ...]:
+    """Chunk a file from disk with bounded memory."""
+
+    return index_path(path, read_size=read_size).chunks
 
 
 def build_dedup_plan(chunks: Iterable[Chunk], receiver_hashes: set[str]) -> DedupPlan:

@@ -11,6 +11,7 @@ from one_link.cdc import (
     MIN_CHUNK_BYTES,
     build_dedup_plan,
     chunk_bytes,
+    index_path,
 )
 from one_link.merkle import build_tree, divergent_leaf_indexes, hash_leaf, manifest_leaf_hashes
 
@@ -48,6 +49,20 @@ def test_dedup_plan_counts_missing_bytes():
     assert plan.hit_rate > 0
 
 
+def test_index_path_streams_whole_file_hash_and_chunks(tmp_path):
+    p = tmp_path / "big.bin"
+    data = random.Random(88).randbytes(MAX_CHUNK_BYTES * 3 + 99)
+    p.write_bytes(data)
+
+    idx = index_path(p, read_size=8192)
+
+    import blake3
+
+    assert idx.blob_hash == blake3.blake3(data).hexdigest()
+    assert idx.size == len(data)
+    assert idx.chunks == chunk_bytes(data)
+
+
 def test_merkle_root_changes_when_leaf_changes():
     a = build_tree([hash_leaf("a"), hash_leaf("b"), hash_leaf("c")])
     b = build_tree([hash_leaf("a"), hash_leaf("B"), hash_leaf("c")])
@@ -72,3 +87,11 @@ def test_merkle_reports_added_leaf():
     b = build_tree([hash_leaf("a"), hash_leaf("b")])
 
     assert divergent_leaf_indexes(a, b) == (1,)
+
+
+def test_merkle_walk_prunes_identical_subtrees():
+    leaves_a = [hash_leaf(f"item-{i}") for i in range(128)]
+    leaves_b = list(leaves_a)
+    leaves_b[73] = hash_leaf("changed")
+
+    assert divergent_leaf_indexes(build_tree(leaves_a), build_tree(leaves_b)) == (73,)

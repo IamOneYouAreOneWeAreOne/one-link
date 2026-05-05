@@ -4,7 +4,7 @@ Spins up a daemon pair, pairs them via SAS so trust is 'pinned', creates
 a folder on A, shares it with B, drops a file in A's folder, and verifies
 B's copy receives the file byte-identical.
 
-This is the marquee test for v0.2.5 — it's the single thing that proves
+This is the marquee test for live folder sync: it proves
 the folder-sync wire protocol actually moves bytes between peers.
 """
 
@@ -133,6 +133,7 @@ async def test_folder_sync_round_trip():
             ) as r:
                 sync_res = await r.json()
             assert sync_res["ok"], sync_res
+            assert sync_res["results"][0]["merkle_root"]
 
             # Wait for B to materialize the file
             target = local_b / "hello.bin"
@@ -150,6 +151,14 @@ async def test_folder_sync_round_trip():
                     f"--- B log ---\n{b_log}\n"
                 )
             assert target.read_bytes() == payload
+
+            async with s.post(
+                f"{base_a}/api/folders/shared/sync",
+                headers={"Authorization": f"Bearer {tok_a}"}, json={},
+            ) as r:
+                sync_res_2 = await r.json()
+            assert sync_res_2["ok"], sync_res_2
+            assert sync_res_2["results"][0]["wants"] == 0
 
 
 @pytest.mark.asyncio

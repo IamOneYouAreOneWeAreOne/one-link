@@ -38,6 +38,7 @@ from watchdog.observers import Observer
 
 from one_link.blobstore import BlobStore
 from one_link.crdt import ManifestEntry, VectorClock, merge_manifest_entries
+from one_link.merkle import build_tree, manifest_leaf_hashes
 from one_link.state import State
 
 log = logging.getLogger("one_link.foldersync")
@@ -200,6 +201,13 @@ class FolderEngine:
     # ─── peer protocol callbacks ──────────────────────────────────────
     def manifest_for(self, name: str) -> list[dict]:
         return [m for m in self.state.list_manifest(name)]
+
+    def manifest_root(self, name: str) -> str:
+        rows = [
+            (m["file_path"], m.get("blob_hash") or "", int(m.get("size") or 0))
+            for m in self.state.list_manifest(name)
+        ]
+        return build_tree(manifest_leaf_hashes(rows)).root
 
     def receive_remote_manifest(
         self, *, folder_name: str, entries: list[dict]

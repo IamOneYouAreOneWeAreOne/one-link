@@ -20,13 +20,17 @@ import contextlib
 import json
 import logging
 import os
+import secrets
 import socket
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
 import blake3
 
 from one_link import blobstore, channel as ch, foldersync
+from one_link.capabilities import LOCAL_CAPABILITIES, normalize_caps
+from one_link.cdc import Chunk, chunk_path, index_path
 from one_link.crdt import ManifestEntry, VectorClock
 from one_link.discovery import Discovery, Peer
 from one_link.identity import Identity, fingerprint_of, load_or_create
@@ -52,17 +56,17 @@ PEER_PORT_FILE = "peer.port"
 DAEMON_LOCK_FILE = "daemon.lock"
 CHUNK_SIZE = 256 * 1024  # 256 KiB plaintext per FILE_CHUNK
 MAX_INCOMING_FILE_BYTES = 1024 * 1024 * 1024  # match UI upload cap
+CDC_CACHE_MAX_BYTES = 512 * 1024 * 1024
+COMPRESSION_MIN_BYTES = 2048
+COMPRESSION_MIN_SAVINGS = 0.08
 
 # Capabilities this build advertises in CAPS messages.
 PROTOCOL_VERSION = "OL1.1"
 CAPS_FEATURES: list[str] = [
-    "text",
-    "file",
+    *LOCAL_CAPABILITIES,
     "audit",
     "fts",
     "trust",
-    # Future flags will appear here as features land:
-    # "folder_sync", "rooms", "indexcodec", "rs_fec", ...
 ]
 
 
@@ -93,6 +97,9 @@ class IncomingFile:
     received: int = 0
     next_seq: int = 0
     hasher: object = None
+    cdc_chunks: list[dict] | None = None
+    cdc_missing: set[int] | None = None
+    cdc_parts: dict[int, bytes] | None = None
 
 
 class Daemon:
@@ -260,11 +267,15 @@ class Daemon:
         peer_sid = channel.peer_short_id
         t = msg.get("t")
         if t == "CAPS":
+            features = list(normalize_caps(msg.get("features", [])))
             channel.peer_caps = {
                 "protocol": msg.get("protocol", "?"),
-                "features": list(msg.get("features", [])),
+                "features": features,
                 "from": msg.get("from"),
             }
+            if self.state is not None:
+                with contextlib.suppress(Exception):
+                    self.state.set_peer_capabilities(peer_fp, features)
             log.info(
                 "peer caps from %s: %s features=%s",
                 peer_sid, channel.peer_caps["protocol"],
@@ -285,8 +296,15 @@ class Daemon:
             name = Path(str(msg["name"])).name
             if not name or name in (".", ".."):
                 name = "unnamed.bin"
+            cdc_chunks = self._normalize_cdc_chunks(msg.get("chunks"))
             out_path = inbox_dir() / f"{blob[:8]}_{name}"
             handle = open(out_path, "wb")
+            missing = None
+            if cdc_chunks:
+                missing = {
+                    int(c["index"]) for c in cdc_chunks
+                    if not self._chunk_cache_path(str(c["hash"])).is_file()
+                }
             self._incoming_files[blob] = IncomingFile(
                 name=name,
                 size=size,
@@ -294,6 +312,9 @@ class Daemon:
                 out_path=out_path,
                 handle=handle,
                 hasher=blake3.blake3(),
+                cdc_chunks=cdc_chunks,
+                cdc_missing=missing,
+                cdc_parts={},
             )
             log.info(
                 "file offer: %s (%d bytes) blob=%s from %s",
@@ -301,7 +322,15 @@ class Daemon:
             )
             ev = self._persist(msg=msg, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
             self._broadcast_tail(ev)
-            await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+            if cdc_chunks is not None:
+                await channel.send(encode_msg(make_msg(
+                    "FILE_WANTS", self.me.short_id,
+                    of=msg["id"], blob=blob, wants=sorted(missing or []),
+                )))
+                if not missing:
+                    await self._finish_cdc_file(blob, peer_fp, peer_sid, msg)
+            else:
+                await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_CHUNK":
             blob = str(msg["blob"])
             f = self._incoming_files.get(blob)
@@ -351,8 +380,12 @@ class Daemon:
                 if not ok:
                     with contextlib.suppress(OSError):
                         f.out_path.unlink()
+                else:
+                    self._cache_file_chunks(f.out_path)
                 log.info("file done: %s ok=%s -> %s", f.name, ok, f.out_path)
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+        elif t == "FILE_CDC_CHUNK":
+            await self._handle_file_cdc_chunk(channel, msg, peer_fp, peer_sid)
         elif t == "PING":
             await channel.send(encode_msg(make_msg("PONG", self.me.short_id)))
         elif t == "PAIR_REQUEST":
@@ -443,6 +476,209 @@ class Daemon:
         elif t == "BLOB_CHUNK":
             await self._handle_blob_chunk(channel, msg, peer_fp)
 
+    # ─── CDC file-transfer helpers ─────────────────────────────────────
+    def _chunk_cache_dir(self) -> Path:
+        p = data_dir() / "file_chunks"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def _chunk_cache_path(self, hash_hex: str) -> Path:
+        return self._chunk_cache_dir() / hash_hex[:2] / hash_hex[2:]
+
+    def _normalize_cdc_chunks(self, raw) -> list[dict] | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, list):
+            return None
+        out = []
+        for i, item in enumerate(raw):
+            if not isinstance(item, dict):
+                return None
+            h = str(item.get("hash", ""))
+            if not self._valid_blob_hex(h):
+                return None
+            start = int(item.get("start", 0))
+            end = int(item.get("end", 0))
+            size = int(item.get("size", end - start))
+            if start < 0 or end < start or size != end - start:
+                return None
+            out.append({"index": i, "start": start, "end": end, "size": size, "hash": h})
+        return out
+
+    def _store_chunk_cache(self, chunk_hash: str, data: bytes) -> None:
+        if blake3.blake3(data).hexdigest() != chunk_hash:
+            raise RuntimeError("CDC chunk hash mismatch")
+        dst = self._chunk_cache_path(chunk_hash)
+        if dst.is_file():
+            return
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.parent / f".{os.getpid()}_{secrets.token_hex(8)}.tmp"
+        tmp.write_bytes(data)
+        os.replace(tmp, dst)
+
+    def _read_chunk_cache(self, chunk_hash: str) -> bytes | None:
+        p = self._chunk_cache_path(chunk_hash)
+        if not p.is_file():
+            return None
+        with contextlib.suppress(OSError):
+            os.utime(p, None)
+        return p.read_bytes()
+
+    def _cache_file_chunks(self, path: Path) -> None:
+        try:
+            chunks = chunk_path(path)
+            with open(path, "rb") as fh:
+                for c in chunks:
+                    fh.seek(c.start)
+                    self._store_chunk_cache(c.hash, fh.read(c.size))
+        except Exception as e:
+            log.debug("CDC cache fill skipped for %s: %s", path, e)
+
+    def _chunk_cache_stats(self) -> dict:
+        root = self._chunk_cache_dir()
+        count = 0
+        total = 0
+        oldest_ms = None
+        newest_ms = None
+        for shard in root.iterdir():
+            if not shard.is_dir():
+                continue
+            for p in shard.iterdir():
+                if not p.is_file():
+                    continue
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                count += 1
+                total += st.st_size
+                mtime_ms = int(st.st_mtime * 1000)
+                oldest_ms = mtime_ms if oldest_ms is None else min(oldest_ms, mtime_ms)
+                newest_ms = mtime_ms if newest_ms is None else max(newest_ms, mtime_ms)
+        return {
+            "chunks": count,
+            "bytes": total,
+            "max_bytes": CDC_CACHE_MAX_BYTES,
+            "oldest_mtime_ms": oldest_ms,
+            "newest_mtime_ms": newest_ms,
+        }
+
+    def _prune_chunk_cache(self, max_bytes: int = CDC_CACHE_MAX_BYTES) -> dict:
+        root = self._chunk_cache_dir()
+        entries = []
+        total = 0
+        for shard in root.iterdir():
+            if not shard.is_dir():
+                continue
+            for p in shard.iterdir():
+                if not p.is_file():
+                    continue
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                entries.append((st.st_mtime, st.st_size, p))
+                total += st.st_size
+        removed = 0
+        freed = 0
+        for _mtime, size, p in sorted(entries):
+            if total <= max_bytes:
+                break
+            with contextlib.suppress(OSError):
+                p.unlink()
+                removed += 1
+                freed += size
+                total -= size
+                with contextlib.suppress(OSError):
+                    p.parent.rmdir()
+        return {"removed": removed, "freed_bytes": freed, "bytes": total}
+
+    def _encode_payload(self, data: bytes) -> tuple[str, bytes]:
+        if len(data) < COMPRESSION_MIN_BYTES:
+            return "raw", data
+        compressed = zlib.compress(data, level=1)
+        if len(compressed) <= len(data) * (1.0 - COMPRESSION_MIN_SAVINGS):
+            return "zlib", compressed
+        return "raw", data
+
+    def _decode_payload(self, encoding: str, data: bytes) -> bytes:
+        if encoding == "raw" or not encoding:
+            return data
+        if encoding == "zlib":
+            dec = zlib.decompressobj()
+            out = dec.decompress(data, MAX_INCOMING_FILE_BYTES + 1)
+            if dec.unconsumed_tail or len(out) > MAX_INCOMING_FILE_BYTES:
+                raise RuntimeError("compressed payload exceeds maximum size")
+            out += dec.flush()
+            if len(out) > MAX_INCOMING_FILE_BYTES:
+                raise RuntimeError("compressed payload exceeds maximum size")
+            return out
+        raise RuntimeError(f"unknown payload encoding: {encoding}")
+
+    async def _handle_file_cdc_chunk(self, channel, msg, peer_fp, peer_sid) -> None:
+        blob = str(msg.get("blob", ""))
+        f = self._incoming_files.get(blob)
+        if not f or f.cdc_chunks is None or f.cdc_missing is None:
+            return
+        idx = int(msg.get("index", -1))
+        if idx < 0 or idx >= len(f.cdc_chunks) or idx not in f.cdc_missing:
+            self._abort_incoming_file(blob, f)
+            raise RuntimeError(f"unexpected FILE_CDC_CHUNK index {idx}")
+        try:
+            data = base64.b64decode(msg.get("data", ""), validate=True)
+            data = self._decode_payload(str(msg.get("enc", "raw")), data)
+        except (binascii.Error, ValueError) as e:
+            self._abort_incoming_file(blob, f)
+            raise RuntimeError(f"invalid FILE_CDC_CHUNK base64: {e}") from e
+        expected = f.cdc_chunks[idx]
+        if len(data) != expected["size"] or blake3.blake3(data).hexdigest() != expected["hash"]:
+            self._abort_incoming_file(blob, f)
+            raise RuntimeError("FILE_CDC_CHUNK integrity failure")
+        f.cdc_parts[idx] = data
+        f.cdc_missing.remove(idx)
+        await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+        if not f.cdc_missing:
+            await self._finish_cdc_file(blob, peer_fp, peer_sid, msg)
+
+    async def _finish_cdc_file(self, blob: str, peer_fp: str, peer_sid: str, src_msg: dict) -> None:
+        f = self._incoming_files.get(blob)
+        if not f or f.cdc_chunks is None:
+            return
+        try:
+            f.handle.seek(0)
+            f.handle.truncate()
+            h = blake3.blake3()
+            written = 0
+            for c in f.cdc_chunks:
+                data = f.cdc_parts.get(c["index"]) if f.cdc_parts else None
+                if data is None:
+                    data = self._read_chunk_cache(c["hash"])
+                if data is None:
+                    return
+                f.handle.write(data)
+                h.update(data)
+                self._store_chunk_cache(c["hash"], data)
+                written += len(data)
+            f.handle.close()
+            ok = h.hexdigest() == blob and written == f.size
+            done = {
+                "t": "FILE_DONE", "id": src_msg["id"], "ts": src_msg["ts"],
+                "from": src_msg["from"], "name": f.name, "size": f.size,
+                "path": str(f.out_path), "blob": blob, "ok": ok,
+                "cdc": True,
+            }
+            ev = self._persist(msg=done, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
+            self._broadcast_tail(ev)
+            self._incoming_files.pop(blob, None)
+            if not ok:
+                with contextlib.suppress(OSError):
+                    f.out_path.unlink()
+            else:
+                self._cache_file_chunks(f.out_path)
+        except Exception:
+            self._abort_incoming_file(blob, f)
+            raise
+
     # ─── folder sync handlers ──────────────────────────────────────────
     def _is_pinned(self, peer_fp: str) -> bool:
         if self.state is None:
@@ -464,6 +700,16 @@ class Daemon:
         if not f or peer_fp not in f["shared_with"]:
             log.info("MANIFEST_PUSH for folder we don't share with this peer")
             return
+        remote_root = msg.get("merkle_root")
+        local_root = self.folder_engine.manifest_root(folder_name)
+        if remote_root and remote_root == local_root:
+            await channel.send(encode_msg(make_msg(
+                "MANIFEST_WANTS", self.me.short_id,
+                folder=folder_name, wants=[], merkle_root=local_root,
+                already_in_sync=True,
+            )))
+            log.info("MANIFEST_PUSH from %s: Merkle roots already match", peer_fp[:8])
+            return
         entries = msg.get("entries", []) or []
         try:
             wants_data = self.folder_engine.receive_remote_manifest(
@@ -479,6 +725,7 @@ class Daemon:
         await channel.send(encode_msg(make_msg(
             "MANIFEST_WANTS", self.me.short_id,
             folder=folder_name, wants=wants,
+            merkle_root=self.folder_engine.manifest_root(folder_name),
         )))
         log.info("MANIFEST_PUSH from %s: %d entries, %d wants",
                  peer_fp[:8], len(entries), len(wants))
@@ -714,11 +961,15 @@ class Daemon:
                     ack = decode_msg(await channel.recv())
                     if ack.get("t") == "CAPS":
                         # Capture peer caps that arrived between our messages.
+                        features = list(normalize_caps(ack.get("features", [])))
                         channel.peer_caps = {
                             "protocol": ack.get("protocol", "?"),
-                            "features": list(ack.get("features", [])),
+                            "features": features,
                             "from": ack.get("from"),
                         }
+                        if self.state is not None:
+                            with contextlib.suppress(Exception):
+                                self.state.set_peer_capabilities(peer_fp, features)
                         continue  # await the actual ACK
                     break
                 results.append(ack)
@@ -753,11 +1004,17 @@ class Daemon:
                 while True:
                     ack = decode_msg(await asyncio.wait_for(channel.recv(), timeout=5.0))
                     if ack.get("t") == "CAPS":
+                        features = list(normalize_caps(ack.get("features", [])))
                         channel.peer_caps = {
                             "protocol": ack.get("protocol", "?"),
-                            "features": list(ack.get("features", [])),
+                            "features": features,
                             "from": ack.get("from"),
                         }
+                        if self.state is not None:
+                            with contextlib.suppress(Exception):
+                                fp = self._peer_fp_from_peer(peer)
+                                if fp:
+                                    self.state.set_peer_capabilities(fp, features)
                         continue
                     if ack.get("t") == "ACK":
                         break
@@ -915,6 +1172,7 @@ class Daemon:
             return {"ok": False, "error": "folder not shared with peer", "blobs_sent": 0}
 
         entries = self.folder_engine.manifest_for(folder_name)
+        merkle_root = self.folder_engine.manifest_root(folder_name)
 
         reader, writer = await asyncio.open_connection(peer.address, peer.port)
         blobs_sent = 0
@@ -931,7 +1189,7 @@ class Daemon:
 
             await channel.send(encode_msg(make_msg(
                 "MANIFEST_PUSH", self.me.short_id,
-                folder=folder_name, entries=entries,
+                folder=folder_name, entries=entries, merkle_root=merkle_root,
             )))
 
             # Drain replies until MANIFEST_WANTS arrives (skipping CAPS).
@@ -943,9 +1201,14 @@ class Daemon:
                     if m.get("t") == "CAPS":
                         channel.peer_caps = {
                             "protocol": m.get("protocol", "?"),
-                            "features": list(m.get("features", [])),
+                            "features": list(normalize_caps(m.get("features", []))),
                             "from": m.get("from"),
                         }
+                        if self.state is not None:
+                            with contextlib.suppress(Exception):
+                                fp = self._peer_fp_from_peer(peer)
+                                if fp:
+                                    self.state.set_peer_capabilities(fp, channel.peer_caps["features"])
                         continue
                     if m.get("t") == "MANIFEST_WANTS" and m.get("folder") == folder_name:
                         wants = list(m.get("wants", []) or [])
@@ -981,7 +1244,12 @@ class Daemon:
                 blobs_sent += 1
 
             await channel.close()
-            return {"ok": True, "wants": len(wants), "blobs_sent": blobs_sent}
+            return {
+                "ok": True,
+                "wants": len(wants),
+                "blobs_sent": blobs_sent,
+                "merkle_root": merkle_root,
+            }
         except Exception as e:
             with contextlib.suppress(Exception):
                 writer.close()
@@ -993,11 +1261,19 @@ class Daemon:
         if block:
             raise RuntimeError(block)
         size = path.stat().st_size
-        h = blake3.blake3()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                h.update(chunk)
-        blob_hex = h.hexdigest()
+        file_index = index_path(path)
+        blob_hex = file_index.blob_hash
+        cdc_chunks = file_index.chunks
+        cdc_index = [
+            {
+                "index": c.index,
+                "start": c.start,
+                "end": c.end,
+                "size": c.size,
+                "hash": c.hash,
+            }
+            for c in cdc_chunks
+        ]
 
         offer = make_msg(
             "FILE_OFFER",
@@ -1005,6 +1281,8 @@ class Daemon:
             name=path.name,
             size=size,
             blob=blob_hex,
+            chunks=cdc_index,
+            mode="cdc",
         )
 
         reader, writer = await asyncio.open_connection(peer.address, peer.port)
@@ -1034,59 +1312,105 @@ class Daemon:
                 while True:
                     m = decode_msg(await ch_.recv())
                     if m.get("t") == "CAPS":
+                        features = list(normalize_caps(m.get("features", [])))
                         ch_.peer_caps = {
                             "protocol": m.get("protocol", "?"),
-                            "features": list(m.get("features", [])),
+                            "features": features,
                             "from": m.get("from"),
                         }
+                        if self.state is not None:
+                            with contextlib.suppress(Exception):
+                                self.state.set_peer_capabilities(peer_fp, features)
                         continue
                     return m
 
             await channel.send(encode_msg(offer))
-            await _await_ack(channel)
+            first_reply = await _await_ack(channel)
             ev = self._persist(
                 msg=offer, direction="out", peer_fp=peer_fp, peer_short_id=peer.short_id,
             )
             self._broadcast_tail(ev)
 
             chunks_sent = 0
-            with open(path, "rb") as f:
-                seq = 0
-                prev = f.read(CHUNK_SIZE)
-                while prev:
-                    cur = f.read(CHUNK_SIZE)
-                    eof = not cur
-                    chunk_msg = make_msg(
+            wire_bytes_sent = 0
+            raw_bytes_sent = 0
+            compressed_chunks = 0
+            cdc_used = first_reply.get("t") == "FILE_WANTS"
+            wanted_indexes = (
+                {int(i) for i in first_reply.get("wants", [])}
+                if cdc_used else set()
+            )
+            if cdc_used:
+                with open(path, "rb") as f:
+                    for c in cdc_chunks:
+                        if c.index not in wanted_indexes:
+                            continue
+                        f.seek(c.start)
+                        data = f.read(c.size)
+                        enc, payload = self._encode_payload(data)
+                        raw_bytes_sent += len(data)
+                        wire_bytes_sent += len(payload)
+                        if enc != "raw":
+                            compressed_chunks += 1
+                        chunk_msg = make_msg(
+                            "FILE_CDC_CHUNK",
+                            self.me.short_id,
+                            blob=blob_hex,
+                            index=c.index,
+                            hash=c.hash,
+                            enc=enc,
+                            wire_size=len(payload),
+                            data=base64.b64encode(payload).decode("ascii"),
+                        )
+                        await channel.send(encode_msg(chunk_msg))
+                        await _await_ack(channel)
+                        chunks_sent += 1
+            else:
+                with open(path, "rb") as f:
+                    seq = 0
+                    prev = f.read(CHUNK_SIZE)
+                    while prev:
+                        cur = f.read(CHUNK_SIZE)
+                        eof = not cur
+                        chunk_msg = make_msg(
+                            "FILE_CHUNK",
+                            self.me.short_id,
+                            blob=blob_hex,
+                            seq=seq,
+                            data=base64.b64encode(prev).decode("ascii"),
+                            eof=eof,
+                        )
+                        await channel.send(encode_msg(chunk_msg))
+                        await _await_ack(channel)
+                        chunks_sent += 1
+                        raw_bytes_sent += len(prev)
+                        wire_bytes_sent += len(prev)
+                        prev = cur
+                        seq += 1
+
+                if chunks_sent == 0:
+                    empty = make_msg(
                         "FILE_CHUNK",
                         self.me.short_id,
                         blob=blob_hex,
-                        seq=seq,
-                        data=base64.b64encode(prev).decode("ascii"),
-                        eof=eof,
+                        seq=0,
+                        data="",
+                        eof=True,
                     )
-                    await channel.send(encode_msg(chunk_msg))
+                    await channel.send(encode_msg(empty))
                     await _await_ack(channel)
-                    chunks_sent += 1
-                    prev = cur
-                    seq += 1
-
-            if chunks_sent == 0:
-                empty = make_msg(
-                    "FILE_CHUNK",
-                    self.me.short_id,
-                    blob=blob_hex,
-                    seq=0,
-                    data="",
-                    eof=True,
-                )
-                await channel.send(encode_msg(empty))
-                await _await_ack(channel)
-                chunks_sent = 1
+                    chunks_sent = 1
 
             await channel.close()
             return {
                 "offer": offer,
                 "chunks": chunks_sent,
+                "total_chunks": len(cdc_chunks),
+                "cdc": cdc_used,
+                "cdc_skipped": len(cdc_chunks) - chunks_sent if cdc_used else 0,
+                "raw_bytes_sent": raw_bytes_sent,
+                "wire_bytes_sent": wire_bytes_sent,
+                "compressed_chunks": compressed_chunks,
                 "blob": blob_hex,
                 "size": size,
             }
@@ -1291,6 +1615,12 @@ class Daemon:
                     n = await self.discovery.prune_unreachable(timeout=0.4)
                     if n:
                         log.info("startup prune: removed %d unreachable peers", n)
+                cache_prune = self._prune_chunk_cache()
+                if cache_prune["removed"]:
+                    log.info(
+                        "startup CDC cache prune: removed %d chunks freed=%d",
+                        cache_prune["removed"], cache_prune["freed_bytes"],
+                    )
                 # Then steady-state every 20 seconds.
                 while True:
                     await asyncio.sleep(20.0)
@@ -1299,6 +1629,8 @@ class Daemon:
                             await self.discovery.prune_unreachable(timeout=0.4)
                         except Exception as e:
                             log.warning("prune cycle failed: %s", e)
+                    with contextlib.suppress(Exception):
+                        self._prune_chunk_cache()
             except asyncio.CancelledError:
                 pass
 
