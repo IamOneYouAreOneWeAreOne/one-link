@@ -46,6 +46,13 @@ TOKEN_FILE = "ui.token"
 SERVER_PORT_FILE = "server.port"
 COOKIE_NAME = "ol_ui"
 
+# Stable UI port. When the daemon restarts, the browser tab at this URL
+# stays alive. We fall through to 7118..7132 if the port is taken (other
+# user on the same machine, dev test daemon, etc.), and to OS-assigned
+# random port only as a last resort.
+PREFERRED_UI_PORT = 7117
+UI_PORT_FALLBACK_RANGE = 16
+
 
 def _msg_record_to_event(rec) -> dict:
     """Convert a state.MessageRecord into the wire-shaped dict the UI expects."""
@@ -81,13 +88,33 @@ class UIServer:
 
     def __init__(self, daemon: "Daemon"):
         self.daemon = daemon
-        self.token = secrets.token_urlsafe(32)
+        # Persistent token: load from disk if a previous daemon left one,
+        # so any open browser tab keeps working across restarts. New
+        # install → fresh token. Token is never embedded in any wire
+        # protocol; it's purely for the local UI surface.
+        self.token = self._load_or_create_token()
         self.app = web.Application(client_max_size=1024 * 1024 * 1024)  # 1 GiB upload
         self.runner: Optional[web.AppRunner] = None
         self.site: Optional[web.TCPSite] = None
         self.port: int = 0
         self._ws_clients: set[web.WebSocketResponse] = set()
         self._setup_routes()
+
+    @staticmethod
+    def _load_or_create_token() -> str:
+        p = _token_path()
+        try:
+            existing = p.read_text(encoding="utf-8").strip()
+            # Tokens we generate are 43 base64url chars (32 raw bytes).
+            # Be lenient on length but enforce at least 32 chars so a
+            # corrupted file can't turn into an unsafe short token.
+            if len(existing) >= 32 and all(
+                c.isalnum() or c in "-_" for c in existing
+            ):
+                return existing
+        except (OSError, UnicodeDecodeError):
+            pass
+        return secrets.token_urlsafe(32)
 
     # ─── routes ───────────────────────────────────────────────────────
     def _setup_routes(self) -> None:
@@ -535,7 +562,9 @@ class UIServer:
             if part.name == "peer":
                 peer_needle = (await part.text()).strip()
             elif part.name == "file":
-                upload_name = part.filename or "upload.bin"
+                upload_name = Path(part.filename or "upload.bin").name
+                if not upload_name or upload_name in (".", ".."):
+                    upload_name = "upload.bin"
                 # Stream to a temp file inside data_dir so we don't OOM on big uploads.
                 staging = data_dir() / "uploads"
                 staging.mkdir(parents=True, exist_ok=True)
@@ -606,7 +635,19 @@ class UIServer:
                 path = info.get("path") or info.get("formatter") or ""
                 local_routes.append({"method": method, "path": path})
         # Peer-protocol surface — encoded directly in daemon._on_peer_message.
-        peer_msg_types = ["TEXT", "FILE_OFFER", "FILE_CHUNK", "ACK", "PING", "PONG"]
+        peer_msg_types = [
+            "CAPS",
+            "TEXT",
+            "FILE_OFFER",
+            "FILE_CHUNK",
+            "FILE_DONE",
+            "ACK",
+            "PING",
+            "PONG",
+            "PAIR_REQUEST",
+            "PAIR_CONFIRM",
+            "PAIR_REJECT",
+        ]
         # Outbound network endpoints we ever connect to: only LAN peers
         # discovered via mDNS, never any external service.
         outbound = [
@@ -690,13 +731,31 @@ class UIServer:
     async def start(self) -> int:
         self.runner = web.AppRunner(self.app, access_log=None)
         await self.runner.setup()
-        self.site = web.TCPSite(self.runner, host="127.0.0.1", port=0)
-        await self.site.start()
-        sock = self.site._server.sockets[0]  # type: ignore[union-attr]
-        self.port = sock.getsockname()[1]
+        # Try the well-known port first so browser tabs survive restarts.
+        # Fall through 7118..7132 if taken, then OS-assigned random as
+        # last resort.
+        bound = False
+        for candidate in range(
+            PREFERRED_UI_PORT, PREFERRED_UI_PORT + UI_PORT_FALLBACK_RANGE
+        ):
+            try:
+                site = web.TCPSite(self.runner, host="127.0.0.1", port=candidate)
+                await site.start()
+                self.site = site
+                self.port = candidate
+                bound = True
+                break
+            except OSError:
+                # Port in use — try the next.
+                continue
+        if not bound:
+            self.site = web.TCPSite(self.runner, host="127.0.0.1", port=0)
+            await self.site.start()
+            sock = self.site._server.sockets[0]  # type: ignore[union-attr]
+            self.port = sock.getsockname()[1]
         _server_port_path().write_text(str(self.port))
         _token_path().write_text(self.token)
-        log.info("UI server up — http://127.0.0.1:%d/  (token gated)", self.port)
+        log.info("UI server up — http://127.0.0.1:%d/", self.port)
         return self.port
 
     async def stop(self) -> None:
