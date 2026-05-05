@@ -11,7 +11,7 @@ effect tracking) with Python as the host harness while LLVM/WASM backends mature
 
 ## Status
 
-**v0.2.8** — long-lived encrypted chat sessions, resumable CDC chunk caching, peer capability policies, and stronger rejected-peer enforcement.
+**v0.2.9** — persistent transfer tracking, live transfer progress, folder-sync UI, per-peer capability controls, status API, long-lived encrypted chat sessions, and resumable CDC chunk caching.
 
 - Native-feeling browser app: dark theme, peer sidebar with online dots,
   message bubbles, drag-drop file send, live updates over WebSocket
@@ -66,6 +66,12 @@ the desktop UI in your browser. The window has:
 - **Conversation pane** — pick a peer; chat with bubbles + timestamps
 - **Drag-drop file zone** — drop any file anywhere on the window to send
 - **Files panel** — toggle `Files` to see everything you've received
+- **Folders panel** — add local sync folders and push Merkle/CDC folder
+  drift rounds to paired peers
+- **Mesh panel** — see recent transfers with durable progress and
+  completion/failure state
+- **Peer controls** — allow/deny chat, file transfer, or folder sync per
+  paired device
 - **Live updates** — incoming messages and files appear instantly via
   WebSocket; no refresh needed
 
@@ -110,7 +116,9 @@ the encrypted peer protocol on TCP for LAN traffic.
   ChaCha20-Poly1305 with a 64-bit counter nonce, AAD-tagged
 - **Discovery:** `_onelink._tcp.local.` mDNS. TXT record carries
   the Ed25519 public-key hex
-- **Files:** streamed in 256 KiB chunks, BLAKE3 verified end-to-end
+- **Files:** BLAKE3 verified end-to-end. Related files use
+  content-defined chunking so receivers ask only for missing chunks; the
+  transfer ledger survives UI refreshes and reports live progress.
 
 ---
 

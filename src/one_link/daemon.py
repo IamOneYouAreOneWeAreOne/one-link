@@ -23,6 +23,7 @@ import os
 import secrets
 import socket
 import time
+import uuid
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,6 +103,7 @@ class IncomingFile:
     cdc_chunks: list[dict] | None = None
     cdc_missing: set[int] | None = None
     cdc_parts: dict[int, bytes] | None = None
+    transfer_id: str | None = None
 
 
 @dataclass
@@ -215,6 +217,58 @@ class Daemon:
             except Exception as e:
                 log.warning("state.record_message failed: %s", e)
         return {**msg, "dir": direction, "peer": peer_short_id, "peer_fp": peer_fp}
+
+    def _transfer_event(self, rec) -> dict:
+        pct = 0.0
+        if rec.total_bytes > 0:
+            pct = min(100.0, max(0.0, (rec.progress_bytes / rec.total_bytes) * 100.0))
+        return {
+            "id": rec.id,
+            "direction": rec.direction,
+            "peer_fp": rec.peer_fp,
+            "kind": rec.kind,
+            "name": rec.name,
+            "size": rec.size,
+            "blob_hash": rec.blob_hash,
+            "status": rec.status,
+            "progress_bytes": rec.progress_bytes,
+            "total_bytes": rec.total_bytes,
+            "progress_pct": round(pct, 2),
+            "chunks_done": rec.chunks_done,
+            "chunks_total": rec.chunks_total,
+            "raw_bytes": rec.raw_bytes,
+            "wire_bytes": rec.wire_bytes,
+            "updated_ms": rec.updated_ms,
+            "metadata": rec.metadata,
+        }
+
+    def _broadcast_transfer(self, rec) -> None:
+        if self.ui_server is None or rec is None:
+            return
+        with contextlib.suppress(Exception):
+            self.ui_server.broadcast({"type": "transfer", "transfer": self._transfer_event(rec)})
+
+    def _upsert_transfer(self, **kwargs):
+        if self.state is None:
+            return None
+        try:
+            rec = self.state.upsert_transfer(**kwargs)
+            self._broadcast_transfer(rec)
+            return rec
+        except Exception as e:
+            log.warning("state.upsert_transfer failed: %s", e)
+            return None
+
+    def _update_transfer(self, transfer_id: str | None, **kwargs):
+        if self.state is None or not transfer_id:
+            return None
+        try:
+            rec = self.state.update_transfer(transfer_id, **kwargs)
+            self._broadcast_transfer(rec)
+            return rec
+        except Exception as e:
+            log.warning("state.update_transfer failed: %s", e)
+            return None
 
     # ─── peer (encrypted) side ──────────────────────────────────────────
     async def _handle_peer(
@@ -335,6 +389,7 @@ class Daemon:
                     int(c["index"]) for c in cdc_chunks
                     if not self._chunk_cache_path(str(c["hash"])).is_file()
                 }
+            transfer_id = f"in:{blob}"
             self._incoming_files[blob] = IncomingFile(
                 name=name,
                 size=size,
@@ -345,6 +400,26 @@ class Daemon:
                 cdc_chunks=cdc_chunks,
                 cdc_missing=missing,
                 cdc_parts={},
+                transfer_id=transfer_id,
+            )
+            self._upsert_transfer(
+                id=transfer_id,
+                direction="in",
+                peer_fp=peer_fp,
+                kind="file",
+                name=name,
+                size=size,
+                blob_hash=blob,
+                status="offered",
+                progress_bytes=0 if missing else size if cdc_chunks else 0,
+                total_bytes=size,
+                chunks_done=(len(cdc_chunks) - len(missing or [])) if cdc_chunks else 0,
+                chunks_total=len(cdc_chunks) if cdc_chunks else 0,
+                metadata={
+                    "mode": "cdc" if cdc_chunks else "stream",
+                    "path": str(out_path),
+                    "missing_chunks": len(missing or []),
+                },
             )
             log.info(
                 "file offer: %s (%d bytes) blob=%s from %s",
@@ -389,6 +464,14 @@ class Daemon:
             f.hasher.update(data)
             f.received += len(data)
             f.next_seq += 1
+            self._update_transfer(
+                f.transfer_id,
+                status="active",
+                progress_bytes=f.received,
+                total_bytes=f.size,
+                chunks_done=f.next_seq,
+                chunks_total=max(f.next_seq, (f.size + CHUNK_SIZE - 1) // CHUNK_SIZE),
+            )
             if msg.get("eof"):
                 f.handle.close()
                 got = f.hasher.hexdigest()
@@ -410,8 +493,15 @@ class Daemon:
                 if not ok:
                     with contextlib.suppress(OSError):
                         f.out_path.unlink()
+                    self._update_transfer(f.transfer_id, status="failed")
                 else:
                     self._cache_file_chunks(f.out_path)
+                    self._update_transfer(
+                        f.transfer_id,
+                        status="complete",
+                        progress_bytes=f.size,
+                        total_bytes=f.size,
+                    )
                 log.info("file done: %s ok=%s -> %s", f.name, ok, f.out_path)
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_CDC_CHUNK":
@@ -669,6 +759,21 @@ class Daemon:
         self._store_chunk_cache(expected["hash"], data)
         f.cdc_parts[idx] = data
         f.cdc_missing.remove(idx)
+        cached = len(f.cdc_chunks) - len(f.cdc_missing)
+        done_bytes = sum(int(c["size"]) for c in f.cdc_chunks if int(c["index"]) not in f.cdc_missing)
+        self._update_transfer(
+            f.transfer_id,
+            status="active",
+            progress_bytes=done_bytes,
+            total_bytes=f.size,
+            chunks_done=cached,
+            chunks_total=len(f.cdc_chunks),
+            metadata={
+                "mode": "cdc",
+                "path": str(f.out_path),
+                "missing_chunks": len(f.cdc_missing),
+            },
+        )
         await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         if not f.cdc_missing:
             await self._finish_cdc_file(blob, peer_fp, peer_sid, msg)
@@ -706,9 +811,19 @@ class Daemon:
             if not ok:
                 with contextlib.suppress(OSError):
                     f.out_path.unlink()
+                self._update_transfer(f.transfer_id, status="failed")
             else:
                 self._cache_file_chunks(f.out_path)
+                self._update_transfer(
+                    f.transfer_id,
+                    status="complete",
+                    progress_bytes=f.size,
+                    total_bytes=f.size,
+                    chunks_done=len(f.cdc_chunks),
+                    chunks_total=len(f.cdc_chunks),
+                )
         except Exception:
+            self._update_transfer(f.transfer_id, status="failed")
             self._abort_incoming_file(blob, f)
             raise
 
@@ -920,6 +1035,7 @@ class Daemon:
         self._incoming_files.pop(blob, None)
         with contextlib.suppress(OSError):
             f.out_path.unlink()
+        self._update_transfer(f.transfer_id, status="failed")
 
     def _check_inbound_trust(self, peer_fp: str) -> bool:
         if self.state is None:
@@ -1437,9 +1553,11 @@ class Daemon:
         )
 
         reader, writer = await asyncio.open_connection(peer.address, peer.port)
+        transfer_id: str | None = None
         try:
             channel = await ch.initiate(reader, writer, self.me)
             peer_fp = self._verify_channel_peer(peer, channel)
+            transfer_id = f"out:{blob_hex}:{uuid.uuid4().hex[:12]}"
             if self.state is not None:
                 try:
                     self.state.upsert_peer(
@@ -1452,6 +1570,21 @@ class Daemon:
                     )
                 except Exception:
                     pass
+            self._upsert_transfer(
+                id=transfer_id,
+                direction="out",
+                peer_fp=peer_fp,
+                kind="file",
+                name=path.name,
+                size=size,
+                blob_hash=blob_hex,
+                status="offered",
+                progress_bytes=0,
+                total_bytes=size,
+                chunks_done=0,
+                chunks_total=len(cdc_chunks),
+                metadata={"mode": "cdc", "path": str(path)},
+            )
 
             # Send our caps before any application traffic.
             try:
@@ -1492,6 +1625,22 @@ class Daemon:
                 if cdc_used else set()
             )
             if cdc_used:
+                skipped_bytes = sum(
+                    int(c.size) for c in cdc_chunks if c.index not in wanted_indexes
+                )
+                self._update_transfer(
+                    transfer_id,
+                    status="active",
+                    progress_bytes=skipped_bytes,
+                    total_bytes=size,
+                    chunks_done=len(cdc_chunks) - len(wanted_indexes),
+                    chunks_total=len(cdc_chunks),
+                    metadata={
+                        "mode": "cdc",
+                        "path": str(path),
+                        "skipped_chunks": len(cdc_chunks) - len(wanted_indexes),
+                    },
+                )
                 with open(path, "rb") as f:
                     for c in cdc_chunks:
                         if c.index not in wanted_indexes:
@@ -1516,10 +1665,21 @@ class Daemon:
                         await channel.send(encode_msg(chunk_msg))
                         await _await_ack(channel)
                         chunks_sent += 1
+                        self._update_transfer(
+                            transfer_id,
+                            status="active",
+                            progress_bytes=skipped_bytes + raw_bytes_sent,
+                            total_bytes=size,
+                            chunks_done=(len(cdc_chunks) - len(wanted_indexes)) + chunks_sent,
+                            chunks_total=len(cdc_chunks),
+                            raw_bytes=raw_bytes_sent,
+                            wire_bytes=wire_bytes_sent,
+                        )
             else:
                 with open(path, "rb") as f:
                     seq = 0
                     prev = f.read(CHUNK_SIZE)
+                    total_stream_chunks = max(1, (size + CHUNK_SIZE - 1) // CHUNK_SIZE)
                     while prev:
                         cur = f.read(CHUNK_SIZE)
                         eof = not cur
@@ -1536,6 +1696,16 @@ class Daemon:
                         chunks_sent += 1
                         raw_bytes_sent += len(prev)
                         wire_bytes_sent += len(prev)
+                        self._update_transfer(
+                            transfer_id,
+                            status="active",
+                            progress_bytes=raw_bytes_sent,
+                            total_bytes=size,
+                            chunks_done=chunks_sent,
+                            chunks_total=total_stream_chunks,
+                            raw_bytes=raw_bytes_sent,
+                            wire_bytes=wire_bytes_sent,
+                        )
                         prev = cur
                         seq += 1
 
@@ -1551,8 +1721,32 @@ class Daemon:
                     await channel.send(encode_msg(empty))
                     await _await_ack(channel)
                     chunks_sent = 1
+                    self._update_transfer(
+                        transfer_id,
+                        status="active",
+                        progress_bytes=0,
+                        total_bytes=0,
+                        chunks_done=1,
+                        chunks_total=1,
+                    )
 
             await channel.close()
+            self._update_transfer(
+                transfer_id,
+                status="complete",
+                progress_bytes=size,
+                total_bytes=size,
+                chunks_done=len(cdc_chunks) if cdc_used else chunks_sent,
+                chunks_total=len(cdc_chunks) if cdc_used else chunks_sent,
+                raw_bytes=raw_bytes_sent,
+                wire_bytes=wire_bytes_sent,
+                metadata={
+                    "mode": "cdc" if cdc_used else "stream",
+                    "path": str(path),
+                    "skipped_chunks": len(cdc_chunks) - chunks_sent if cdc_used else 0,
+                    "compressed_chunks": compressed_chunks,
+                },
+            )
             return {
                 "offer": offer,
                 "chunks": chunks_sent,
@@ -1564,8 +1758,10 @@ class Daemon:
                 "compressed_chunks": compressed_chunks,
                 "blob": blob_hex,
                 "size": size,
+                "transfer_id": transfer_id,
             }
         except Exception:
+            self._update_transfer(transfer_id, status="failed")
             with contextlib.suppress(Exception):
                 writer.close()
                 await writer.wait_closed()

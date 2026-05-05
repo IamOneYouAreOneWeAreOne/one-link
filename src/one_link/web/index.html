@@ -330,10 +330,45 @@
   .file-row .meta { flex: 1; min-width: 0; }
   .file-row .meta .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
   .file-row .meta .size { font-size: 11px; color: var(--text-dim); }
-  .file-row a {
+  .file-row a, .file-row button {
     color: var(--text-dim); padding: 6px 10px; border-radius: 6px; background: var(--bg-2); font-size: 12px;
   }
-  .file-row a:hover { color: var(--text); background: var(--bg-3); }
+  .file-row a:hover, .file-row button:hover { color: var(--text); background: var(--bg-3); }
+  .file-row .bar {
+    height: 5px; background: var(--bg-3); border-radius: 999px;
+    overflow: hidden; margin-top: 6px;
+  }
+  .file-row .bar span {
+    display: block; height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  }
+  .panel-form {
+    border-top: 1px solid var(--line);
+    padding: 12px 14px; display: grid; gap: 8px;
+  }
+  .panel-form input {
+    width: 100%; background: var(--bg-2); border: 1px solid var(--bg-3);
+    color: var(--text); border-radius: 8px; padding: 9px 10px;
+    outline: none; font-size: 12px;
+  }
+  .panel-form input:focus { border-color: var(--accent); }
+  .mini-actions { display: flex; gap: 8px; align-items: center; }
+  .mini-actions button, .cap-toggle {
+    background: var(--bg-2); color: var(--text-dim); border-radius: 8px;
+    padding: 7px 9px; font-size: 12px; border: 1px solid transparent;
+  }
+  .mini-actions button:hover, .cap-toggle:hover { color: var(--text); background: var(--bg-3); }
+  .cap-toggle.on {
+    color: var(--text); border-color: rgba(124,92,255,.4);
+    background: rgba(124,92,255,.16);
+  }
+  .peer-tools {
+    display: none; gap: 10px; padding: 10px 14px;
+    border-bottom: 1px solid var(--line); background: rgba(255,255,255,.015);
+    align-items: center; flex-wrap: wrap;
+  }
+  .peer-tools.show { display: flex; }
+  .peer-tools .label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .8px; }
 
   /* ── Toast ─────────────────────────────────────────────────────────── */
   .toast-stack { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 200; }
@@ -555,6 +590,8 @@
       <div class="side-foot">
         <button class="btn active" data-pane="convo">Chat</button>
         <button class="btn" data-pane="files" id="btn-files">Files</button>
+        <button class="btn" data-pane="folders" id="btn-folders">Folders</button>
+        <button class="btn" data-pane="mesh" id="btn-mesh">Mesh</button>
       </div>
     </aside>
 
@@ -590,6 +627,13 @@
           <button id="btn-clear-search">Clear</button>
         </div>
 
+        <div class="peer-tools" id="peer-tools">
+          <span class="label">Allow</span>
+          <button class="cap-toggle" data-cap="chat">Chat</button>
+          <button class="cap-toggle" data-cap="files">Files</button>
+          <button class="cap-toggle" data-cap="folder_sync">Folders</button>
+        </div>
+
         <div class="messages" id="messages"></div>
 
         <div class="composer">
@@ -608,6 +652,34 @@
       </div>
       <div id="filelist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
         <div class="empty">no files yet</div>
+      </div>
+    </aside>
+
+    <aside class="files" id="folders-panel" style="display:none;">
+      <div class="section-h">
+        <span>Sync folders</span>
+        <span class="count" id="folders-count">0</span>
+      </div>
+      <div id="folderlist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
+        <div class="empty">no folders yet</div>
+      </div>
+      <div class="panel-form">
+        <input id="folder-name" type="text" placeholder="Folder name" />
+        <input id="folder-path" type="text" placeholder="Local path" />
+        <div class="mini-actions">
+          <button id="btn-add-folder">Add</button>
+          <button id="btn-refresh-folders">Refresh</button>
+        </div>
+      </div>
+    </aside>
+
+    <aside class="files" id="mesh-panel" style="display:none;">
+      <div class="section-h">
+        <span>Transfers</span>
+        <span class="count" id="transfers-count">0</span>
+      </div>
+      <div id="transferlist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
+        <div class="empty">no transfers yet</div>
       </div>
     </aside>
 
@@ -734,9 +806,11 @@
     peers: new Map(),     // short_id -> peer
     selectedPeer: null,   // short_id
     messages: [],         // recent across all peers
+    transfers: [],
+    folders: [],
     searchQuery: "",
     searchResults: null,
-    showFiles: false,
+    activePane: "convo",
     pairing: { peerFp: null, sas: null, weConfirmed: false },
   };
 
@@ -758,6 +832,8 @@
       if (!r.ok) throw new Error(j.error || `upload ${r.status}`);
       return j;
     },
+    folders() { return this.get("/api/folders"); },
+    transfers() { return this.get("/api/transfers?limit=80"); },
   };
 
   // ── Toasts ─────────────────────────────────────────────────────────
@@ -911,6 +987,75 @@
     } catch (e) { console.warn(e); }
   }
 
+  async function refreshFolders() {
+    try {
+      const { folders } = await api.folders();
+      state.folders = folders || [];
+      const list = $("#folderlist");
+      list.innerHTML = "";
+      $("#folders-count").textContent = state.folders.length;
+      if (state.folders.length === 0) {
+        list.appendChild(el("div", "empty", "no folders yet"));
+        return;
+      }
+      for (const f of state.folders) {
+        const row = el("div", "file-row");
+        row.appendChild(el("div", "icon", "Folder"));
+        const meta = el("div", "meta");
+        meta.appendChild(el("div", "name", f.name));
+        meta.appendChild(el("div", "size", `${f.files || 0} files · ${f.shared_with?.length || 0} peers`));
+        meta.appendChild(el("div", "size", f.local_path));
+        row.appendChild(meta);
+        const sync = el("button", null, "Sync");
+        sync.onclick = async () => {
+          try {
+            const r = await api.post(`/api/folders/${encodeURIComponent(f.name)}/sync`, {});
+            const pushed = (r.results || []).filter(x => x.status === "pushed").length;
+            toast(`Folder sync queued for ${pushed} peer${pushed === 1 ? "" : "s"}`, "good");
+            await refreshFolders();
+          } catch (e) {
+            toast(`Folder sync failed: ${e.message || e}`, "bad", 6000);
+          }
+        };
+        row.appendChild(sync);
+        list.appendChild(row);
+      }
+    } catch (e) { console.warn(e); }
+  }
+
+  async function refreshTransfers() {
+    try {
+      const { transfers } = await api.transfers();
+      state.transfers = transfers || [];
+      renderTransfers();
+    } catch (e) { console.warn(e); }
+  }
+
+  function renderTransfers() {
+    const list = $("#transferlist");
+    if (!list) return;
+    list.innerHTML = "";
+    $("#transfers-count").textContent = state.transfers.length;
+    if (state.transfers.length === 0) {
+      list.appendChild(el("div", "empty", "no transfers yet"));
+      return;
+    }
+    for (const t of state.transfers) {
+      const row = el("div", "file-row");
+      row.appendChild(el("div", "icon", t.direction === "in" ? "In" : "Out"));
+      const meta = el("div", "meta");
+      meta.appendChild(el("div", "name", t.name || "file"));
+      meta.appendChild(el("div", "size", `${t.status} · ${fmtBytes(t.progress_bytes)} / ${fmtBytes(t.total_bytes)}`));
+      const bar = el("div", "bar");
+      const fill = el("span");
+      fill.style.width = `${Math.max(0, Math.min(100, t.progress_pct || 0))}%`;
+      bar.appendChild(fill);
+      meta.appendChild(bar);
+      row.appendChild(meta);
+      list.appendChild(row);
+    }
+  }
+
   // ── Selection ──────────────────────────────────────────────────────
   function selectPeer(shortId) {
     state.selectedPeer = shortId;
@@ -927,8 +1072,42 @@
     $("#convo-sub").textContent = `${peer.short_id} · ${peer.address}:${peer.port}`;
     renderPeers();
     renderMessages();
+    renderPeerControls();
     $("#input").focus();
     $("#drop-peer").textContent = peer.hostname || peer.short_id;
+  }
+
+  function renderPeerControls() {
+    const tools = $("#peer-tools");
+    const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
+    if (!peer || !peer.fingerprint || peer.trust !== "pinned") {
+      tools.classList.remove("show");
+      return;
+    }
+    tools.classList.add("show");
+    const allowed = peer.allowed_capabilities == null
+      ? new Set(["chat", "files", "folder_sync"])
+      : new Set(peer.allowed_capabilities || []);
+    tools.querySelectorAll(".cap-toggle").forEach(btn => {
+      btn.classList.toggle("on", allowed.has(btn.dataset.cap));
+    });
+  }
+
+  async function setCapability(cap, enabled) {
+    const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
+    if (!peer?.fingerprint) return;
+    const current = peer.allowed_capabilities == null
+      ? new Set(["chat", "files", "folder_sync"])
+      : new Set(peer.allowed_capabilities || []);
+    if (enabled) current.add(cap); else current.delete(cap);
+    try {
+      const res = await api.post(`/api/peers/${peer.fingerprint}/capabilities`, { allowed: [...current] });
+      peer.allowed_capabilities = res.allowed;
+      renderPeerControls();
+      toast("Peer policy updated", "good");
+    } catch (e) {
+      toast(`Policy update failed: ${e.message || e}`, "bad");
+    }
   }
 
   // ── Initial load ───────────────────────────────────────────────────
@@ -943,8 +1122,11 @@
     }
     await refreshPeers();
     await loadHistory();
+    await refreshFolders();
+    await refreshTransfers();
     connectWS();
     setInterval(refreshPeers, 5000);
+    setInterval(refreshTransfers, 4000);
   }
 
   async function refreshPeers() {
@@ -953,6 +1135,7 @@
       state.peers.clear();
       for (const p of peers) state.peers.set(p.short_id, p);
       renderPeers();
+      renderPeerControls();
     } catch (e) { console.warn(e); }
   }
 
@@ -1011,6 +1194,13 @@
           refreshFiles();
         }
         if (msg.peer === state.selectedPeer) renderMessages();
+      } else if (m.type === "transfer") {
+        const idx = state.transfers.findIndex(t => t.id === m.transfer.id);
+        if (idx >= 0) state.transfers.splice(idx, 1, m.transfer);
+        else state.transfers.unshift(m.transfer);
+        state.transfers.sort((a, b) => (b.updated_ms || 0) - (a.updated_ms || 0));
+        state.transfers = state.transfers.slice(0, 80);
+        renderTransfers();
       }
     };
     ws.onclose = () => setTimeout(connectWS, 1500);
@@ -1124,6 +1314,10 @@
   });
   clearSearch.onclick = () => { searchInput.value = ""; finishSearch(); };
 
+  document.querySelectorAll(".cap-toggle").forEach(btn => {
+    btn.onclick = () => setCapability(btn.dataset.cap, !btn.classList.contains("on"));
+  });
+
   async function runSearch(q) {
     if (!state.selectedPeer) {
       searchBanner.style.display = "flex";
@@ -1159,18 +1353,48 @@
       document.querySelectorAll(".side-foot .btn").forEach(x => x.classList.remove("active"));
       b.classList.add("active");
       const pane = b.dataset.pane;
+      state.activePane = pane;
+      $("#files-panel").style.display = "none";
+      $("#folders-panel").style.display = "none";
+      $("#mesh-panel").style.display = "none";
       if (pane === "files") {
-        state.showFiles = true;
         $("#files-panel").style.display = "flex";
         $("#main").classList.add("with-files");
         refreshFiles();
+      } else if (pane === "folders") {
+        $("#folders-panel").style.display = "flex";
+        $("#main").classList.add("with-files");
+        refreshFolders();
+      } else if (pane === "mesh") {
+        $("#mesh-panel").style.display = "flex";
+        $("#main").classList.add("with-files");
+        refreshTransfers();
       } else {
-        state.showFiles = false;
-        $("#files-panel").style.display = "none";
         $("#main").classList.remove("with-files");
       }
     };
   });
+
+  $("#btn-refresh-folders").onclick = refreshFolders;
+  $("#btn-add-folder").onclick = async () => {
+    const name = $("#folder-name").value.trim();
+    const local_path = $("#folder-path").value.trim();
+    if (!name || !local_path) {
+      toast("Folder name and path are required", "info");
+      return;
+    }
+    const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
+    const shared_with = peer?.fingerprint && peer.trust === "pinned" ? [peer.fingerprint] : [];
+    try {
+      await api.post("/api/folders", { name, local_path, shared_with });
+      $("#folder-name").value = "";
+      $("#folder-path").value = "";
+      toast("Folder added", "good");
+      await refreshFolders();
+    } catch (e) {
+      toast(`Folder add failed: ${e.message || e}`, "bad", 6000);
+    }
+  };
 
   // ── Pair modal ─────────────────────────────────────────────────────
   const pairBackdrop = $("#pair-backdrop");

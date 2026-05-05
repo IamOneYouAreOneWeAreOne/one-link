@@ -66,13 +66,21 @@ Live protocol features:
   transfer can retry and ask only for chunks still missing.
 - Capability policies: the local API can allow/deny chat, files, and folder
   sync per peer.
+- Transfer ledger: incoming/outgoing file transfers are persisted with
+  progress, raw/wire byte counts, chunk counts, and live WebSocket updates.
+- User-facing mesh controls: the browser app exposes received files, sync
+  folders, transfer progress, and per-peer capability policy without exposing
+  protocol complexity.
+- Status API: `/api/status` summarizes identity, peer counts, folder counts,
+  active transfers, CDC cache state, and session reuse for audit/debug UI.
 - Benchmark gate: `scripts/bench_transfer_primitives.py` measures CDC
   indexing throughput, dedup hit rate, Merkle drift latency, and compression
   throughput.
 
 ## Next Frontier
 
-1. Add per-peer user-facing controls for each capability.
+1. Add native desktop packaging polish: tray, startup, signed installers, and
+   a non-browser window shell.
 2. Add group/session capabilities for future rooms and multi-device swarms.
 3. Keep the audit endpoint as a truth surface for "no telemetry" and "no
    mandatory relay" claims.

@@ -128,6 +128,27 @@ CREATE TABLE IF NOT EXISTS peer_capability_policy (
     allowed_json TEXT NOT NULL,
     updated_ms INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS transfers (
+    id             TEXT PRIMARY KEY,
+    direction      TEXT NOT NULL,
+    peer_fp        TEXT NOT NULL,
+    kind           TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    size           INTEGER NOT NULL,
+    blob_hash      TEXT,
+    status         TEXT NOT NULL,
+    progress_bytes INTEGER NOT NULL,
+    total_bytes    INTEGER NOT NULL,
+    chunks_done    INTEGER NOT NULL,
+    chunks_total   INTEGER NOT NULL,
+    raw_bytes      INTEGER NOT NULL,
+    wire_bytes     INTEGER NOT NULL,
+    updated_ms     INTEGER NOT NULL,
+    metadata_json  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_transfers_updated ON transfers(updated_ms);
+CREATE INDEX IF NOT EXISTS idx_transfers_peer ON transfers(peer_fp);
 """
 
 
@@ -157,6 +178,26 @@ class MessageRecord:
     msg_type: str
     body: Optional[str]
     room_id: Optional[str]
+    metadata: dict
+
+
+@dataclass
+class TransferRecord:
+    id: str
+    direction: str
+    peer_fp: str
+    kind: str
+    name: str
+    size: int
+    blob_hash: Optional[str]
+    status: str
+    progress_bytes: int
+    total_bytes: int
+    chunks_done: int
+    chunks_total: int
+    raw_bytes: int
+    wire_bytes: int
+    updated_ms: int
     metadata: dict
 
 
@@ -424,6 +465,151 @@ class State:
             body=row["body"],
             room_id=row["room_id"],
             metadata=md,
+        )
+
+    # --- transfers ---------------------------------------------------------
+
+    def upsert_transfer(
+        self,
+        *,
+        id: str,
+        direction: str,
+        peer_fp: str,
+        kind: str,
+        name: str,
+        size: int,
+        blob_hash: Optional[str] = None,
+        status: str = "queued",
+        progress_bytes: int = 0,
+        total_bytes: Optional[int] = None,
+        chunks_done: int = 0,
+        chunks_total: int = 0,
+        raw_bytes: int = 0,
+        wire_bytes: int = 0,
+        metadata: Optional[dict] = None,
+    ) -> TransferRecord:
+        if direction not in ("in", "out"):
+            raise ValueError(f"invalid transfer direction: {direction!r}")
+        if status not in ("queued", "offered", "active", "complete", "failed"):
+            raise ValueError(f"invalid transfer status: {status!r}")
+        total = int(size if total_bytes is None else total_bytes)
+        now = _now_ms()
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO transfers(
+                    id, direction, peer_fp, kind, name, size, blob_hash, status,
+                    progress_bytes, total_bytes, chunks_done, chunks_total,
+                    raw_bytes, wire_bytes, updated_ms, metadata_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    direction = excluded.direction,
+                    peer_fp = excluded.peer_fp,
+                    kind = excluded.kind,
+                    name = excluded.name,
+                    size = excluded.size,
+                    blob_hash = excluded.blob_hash,
+                    status = excluded.status,
+                    progress_bytes = excluded.progress_bytes,
+                    total_bytes = excluded.total_bytes,
+                    chunks_done = excluded.chunks_done,
+                    chunks_total = excluded.chunks_total,
+                    raw_bytes = excluded.raw_bytes,
+                    wire_bytes = excluded.wire_bytes,
+                    updated_ms = excluded.updated_ms,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    id, direction, peer_fp, kind, name, int(size), blob_hash,
+                    status, int(progress_bytes), total, int(chunks_done),
+                    int(chunks_total), int(raw_bytes), int(wire_bytes), now,
+                    json.dumps(metadata or {}, separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            row = self._conn.execute(
+                "SELECT * FROM transfers WHERE id = ?", (id,)
+            ).fetchone()
+        return self._row_to_transfer(row)
+
+    def update_transfer(self, id: str, **fields: Any) -> Optional[TransferRecord]:
+        allowed = {
+            "status", "progress_bytes", "total_bytes", "chunks_done",
+            "chunks_total", "raw_bytes", "wire_bytes", "metadata",
+        }
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"unknown transfer fields: {sorted(bad)!r}")
+        current = self.get_transfer(id)
+        if current is None:
+            return None
+        metadata = fields.pop("metadata", current.metadata)
+        data = {
+            "id": current.id,
+            "direction": current.direction,
+            "peer_fp": current.peer_fp,
+            "kind": current.kind,
+            "name": current.name,
+            "size": current.size,
+            "blob_hash": current.blob_hash,
+            "status": current.status,
+            "progress_bytes": current.progress_bytes,
+            "total_bytes": current.total_bytes,
+            "chunks_done": current.chunks_done,
+            "chunks_total": current.chunks_total,
+            "raw_bytes": current.raw_bytes,
+            "wire_bytes": current.wire_bytes,
+            "metadata": metadata,
+        }
+        data.update(fields)
+        return self.upsert_transfer(**data)
+
+    def get_transfer(self, id: str) -> Optional[TransferRecord]:
+        row = self._conn.execute(
+            "SELECT * FROM transfers WHERE id = ?", (id,)
+        ).fetchone()
+        return self._row_to_transfer(row) if row else None
+
+    def list_transfers(
+        self,
+        *,
+        peer_fp: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[TransferRecord]:
+        limit = max(1, min(int(limit), 500))
+        if peer_fp:
+            rows = self._conn.execute(
+                "SELECT * FROM transfers WHERE peer_fp = ? ORDER BY updated_ms DESC LIMIT ?",
+                (peer_fp, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM transfers ORDER BY updated_ms DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_transfer(r) for r in rows]
+
+    def _row_to_transfer(self, row: sqlite3.Row) -> TransferRecord:
+        try:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        except Exception:
+            metadata = {}
+        return TransferRecord(
+            id=row["id"],
+            direction=row["direction"],
+            peer_fp=row["peer_fp"],
+            kind=row["kind"],
+            name=row["name"],
+            size=row["size"],
+            blob_hash=row["blob_hash"],
+            status=row["status"],
+            progress_bytes=row["progress_bytes"],
+            total_bytes=row["total_bytes"],
+            chunks_done=row["chunks_done"],
+            chunks_total=row["chunks_total"],
+            raw_bytes=row["raw_bytes"],
+            wire_bytes=row["wire_bytes"],
+            updated_ms=row["updated_ms"],
+            metadata=metadata,
         )
 
     # ─── rooms ────────────────────────────────────────────────────────

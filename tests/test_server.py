@@ -82,6 +82,48 @@ async def test_api_peers_hides_offline_pending_ghosts(tmp_path: Path):
         state.close()
 
 
+@pytest.mark.asyncio
+async def test_api_status_and_transfers_surface_ledger(tmp_path: Path):
+    from one_link.server import UIServer
+    from one_link.state import State
+
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        state.upsert_transfer(
+            id="t1",
+            direction="in",
+            peer_fp="aa" * 32,
+            kind="file",
+            name="photo.png",
+            size=100,
+            status="active",
+            progress_bytes=50,
+            total_bytes=100,
+            chunks_done=1,
+            chunks_total=2,
+        )
+        daemon = SimpleNamespace(
+            state=state,
+            discovery=None,
+            me=SimpleNamespace(fingerprint="ff" * 32, short_id="ffffffff", hostname="me"),
+            _session_stats=lambda: {"open": 0, "sessions": []},
+            _chunk_cache_stats=lambda: {"chunks": 0, "bytes": 0},
+        )
+        server = UIServer(daemon)
+
+        transfers_resp = await server.api_transfers(SimpleNamespace(query={}))
+        transfers = json.loads(transfers_resp.text)["transfers"]
+        assert transfers[0]["id"] == "t1"
+        assert transfers[0]["progress_pct"] == 50.0
+
+        status_resp = await server.api_status(None)
+        status = json.loads(status_resp.text)
+        assert status["transfers"]["active"] == 1
+        assert status["performance"]["sessions"]["open"] == 0
+    finally:
+        state.close()
+
+
 # ─── helpers ──────────────────────────────────────────────────────────
 
 async def _get(session, url, *, token=None):

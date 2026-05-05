@@ -75,6 +75,31 @@ def _msg_record_to_event(rec) -> dict:
     return out
 
 
+def _transfer_record_to_event(rec) -> dict:
+    pct = 0.0
+    if rec.total_bytes > 0:
+        pct = min(100.0, max(0.0, (rec.progress_bytes / rec.total_bytes) * 100.0))
+    return {
+        "id": rec.id,
+        "direction": rec.direction,
+        "peer_fp": rec.peer_fp,
+        "kind": rec.kind,
+        "name": rec.name,
+        "size": rec.size,
+        "blob_hash": rec.blob_hash,
+        "status": rec.status,
+        "progress_bytes": rec.progress_bytes,
+        "total_bytes": rec.total_bytes,
+        "progress_pct": round(pct, 2),
+        "chunks_done": rec.chunks_done,
+        "chunks_total": rec.chunks_total,
+        "raw_bytes": rec.raw_bytes,
+        "wire_bytes": rec.wire_bytes,
+        "updated_ms": rec.updated_ms,
+        "metadata": rec.metadata,
+    }
+
+
 def _token_path() -> Path:
     return data_dir() / TOKEN_FILE
 
@@ -127,6 +152,7 @@ class UIServer:
             r.add_static("/static/", path=str(assets_dir), show_index=False)
         r.add_get("/favicon.ico", self._favicon)
         r.add_get("/api/me", self._guarded(self.api_me))
+        r.add_get("/api/status", self._guarded(self.api_status))
         r.add_get("/api/settings", self._guarded(self.api_get_settings))
         r.add_post("/api/settings", self._guarded(self.api_set_settings))
         r.add_get("/api/peers", self._guarded(self.api_peers))
@@ -148,6 +174,7 @@ class UIServer:
         r.add_post("/api/send", self._guarded(self.api_send))
         r.add_post("/api/send-file", self._guarded(self.api_send_file))
         r.add_get("/api/files", self._guarded(self.api_files))
+        r.add_get("/api/transfers", self._guarded(self.api_transfers))
         r.add_get(r"/api/files/{name:.+}", self._guarded(self.api_file_download))
         r.add_get("/api/audit", self._guarded(self.api_audit))
         r.add_get("/api/events", self._guarded_ws(self.ws_events))
@@ -220,6 +247,39 @@ class UIServer:
             "fingerprint": me.fingerprint,
             "hostname": me.hostname,
             "display_name": display_name or me.hostname,
+        })
+
+    async def api_status(self, request: web.Request) -> web.Response:
+        state = self.daemon.state
+        peers = state.list_peers() if state is not None else []
+        folders = state.list_folders() if state is not None else []
+        transfers = state.list_transfers(limit=25) if state is not None else []
+        live = self.daemon.discovery.registry.list() if self.daemon.discovery else []
+        return web.json_response({
+            "version": __import__("one_link").__version__,
+            "me": {
+                "short_id": self.daemon.me.short_id,
+                "fingerprint": self.daemon.me.fingerprint,
+                "hostname": self.daemon.me.hostname,
+            },
+            "peers": {
+                "known": len(peers),
+                "online": len(live),
+                "pinned": sum(1 for p in peers if p.trust == "pinned"),
+                "rejected": sum(1 for p in peers if p.trust == "rejected"),
+            },
+            "folders": {
+                "count": len(folders),
+                "shared": sum(1 for f in folders if f["shared_with"]),
+            },
+            "transfers": {
+                "recent": [_transfer_record_to_event(t) for t in transfers[:10]],
+                "active": sum(1 for t in transfers if t.status in ("queued", "offered", "active")),
+            },
+            "performance": {
+                "sessions": self.daemon._session_stats(),
+                "cdc_cache": self.daemon._chunk_cache_stats(),
+            },
         })
 
     # ─── /api/settings ────────────────────────────────────────────────
@@ -795,6 +855,19 @@ class UIServer:
                 )
         files.sort(key=lambda x: x["mtime_ms"], reverse=True)
         return web.json_response({"files": files})
+
+    async def api_transfers(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"transfers": []})
+        peer_fp = request.query.get("peer_fp") or None
+        try:
+            limit = int(request.query.get("limit", "100"))
+        except ValueError:
+            limit = 100
+        transfers = self.daemon.state.list_transfers(peer_fp=peer_fp, limit=limit)
+        return web.json_response({
+            "transfers": [_transfer_record_to_event(t) for t in transfers],
+        })
 
     # ─── /api/audit ───────────────────────────────────────────────────
     async def api_audit(self, request: web.Request) -> web.Response:
