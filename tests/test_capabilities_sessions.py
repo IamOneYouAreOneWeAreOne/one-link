@@ -13,6 +13,11 @@ def test_capability_normalization_and_state_roundtrip(tmp_path):
         fp = "aa" * 32
         state.set_peer_capabilities(fp, [FILE_CDC, FOLDER_SYNC, FILE_CDC])
         assert state.get_peer_capabilities(fp) == [FILE_CDC, FOLDER_SYNC]
+        assert state.get_peer_capability_policy(fp) is None
+        state.set_peer_capability_policy(fp, ["chat", FILE_CDC, "chat"])
+        assert state.get_peer_capability_policy(fp) == ["chat", FILE_CDC]
+        state.clear_peer_capability_policy(fp)
+        assert state.get_peer_capability_policy(fp) is None
     finally:
         state.close()
 

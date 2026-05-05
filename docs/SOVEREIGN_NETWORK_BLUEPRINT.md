@@ -60,6 +60,12 @@ Live protocol features:
   reduces wire bytes.
 - Cache accounting and GC: the receiver chunk cache exposes size/count in
   audit and prunes least-recently-touched chunks over budget.
+- Long-lived sessions: chat/control-style sends can reuse an encrypted
+  outbound session instead of reconnecting for every message.
+- Resumable CDC: verified chunks are cached immediately, so an interrupted
+  transfer can retry and ask only for chunks still missing.
+- Capability policies: the local API can allow/deny chat, files, and folder
+  sync per peer.
 - Benchmark gate: `scripts/bench_transfer_primitives.py` measures CDC
   indexing throughput, dedup hit rate, Merkle drift latency, and compression
   throughput.

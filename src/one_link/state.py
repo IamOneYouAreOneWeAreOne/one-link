@@ -122,6 +122,12 @@ CREATE TABLE IF NOT EXISTS peer_capabilities (
     caps_json   TEXT NOT NULL,
     updated_ms  INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS peer_capability_policy (
+    fingerprint TEXT PRIMARY KEY,
+    allowed_json TEXT NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
 """
 
 
@@ -282,6 +288,39 @@ class State:
             return []
         try:
             return list(json.loads(row["caps_json"]))
+        except Exception:
+            return []
+
+    def set_peer_capability_policy(self, fingerprint: str, allowed: Iterable[str]) -> None:
+        values = sorted({str(c) for c in allowed if str(c)})
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO peer_capability_policy(fingerprint, allowed_json, updated_ms)
+                VALUES(?, ?, ?)
+                ON CONFLICT(fingerprint) DO UPDATE SET
+                    allowed_json = excluded.allowed_json,
+                    updated_ms = excluded.updated_ms
+                """,
+                (fingerprint, json.dumps(values), _now_ms()),
+            )
+
+    def clear_peer_capability_policy(self, fingerprint: str) -> None:
+        with self._write_lock:
+            self._conn.execute(
+                "DELETE FROM peer_capability_policy WHERE fingerprint = ?",
+                (fingerprint,),
+            )
+
+    def get_peer_capability_policy(self, fingerprint: str) -> Optional[list[str]]:
+        row = self._conn.execute(
+            "SELECT allowed_json FROM peer_capability_policy WHERE fingerprint = ?",
+            (fingerprint,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return list(json.loads(row["allowed_json"]))
         except Exception:
             return []
 

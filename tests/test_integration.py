@@ -71,6 +71,55 @@ def test_peer_capabilities_persist_after_contact():
         assert "folder_sync" in caps
 
 
+def test_chat_reuses_long_lived_session_and_capability_policy():
+    with daemon_pair() as p:
+        from one_link.state import State
+        import urllib.request
+        import json as _json
+
+        port = int((p.a.home / "data" / "server.port").read_text())
+        token = (p.a.home / "data" / "ui.token").read_text().strip()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/peers",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            peers = _json.loads(r.read())
+        fp_b = next(pp["fingerprint"] for pp in peers["peers"] if pp["short_id"] == p.b.short_id)
+
+        st = State(db_path=p.a.home / "data" / "state.db")
+        try:
+            st.set_peer_capability_policy(fp_b, [])
+        finally:
+            st.close()
+
+        denied = request(p.a.control_port, cmd="send", peer=p.b.short_id, body="nope")
+        assert not denied["ok"]
+        assert "chat capability disabled" in denied["error"]
+
+        st = State(db_path=p.a.home / "data" / "state.db")
+        try:
+            st.set_peer_capability_policy(fp_b, ["chat"])
+        finally:
+            st.close()
+
+        first = request(p.a.control_port, cmd="send", peer=p.b.short_id, body="one")
+        second = request(p.a.control_port, cmd="send", peer=p.b.short_id, body="two")
+        assert first["ok"], first
+        assert second["ok"], second
+
+        time.sleep(0.5)
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/audit",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            audit = _json.loads(r.read())
+        sessions = audit["performance"]["sessions"]
+        assert sessions["open"] >= 1
+        assert any(s["messages_sent"] >= 2 for s in sessions["sessions"])
+
+
 # ─────────────────────────── File sizes ────────────────────────────
 
 @pytest.mark.parametrize(

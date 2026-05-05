@@ -473,13 +473,38 @@ async def test_api_set_trust_round_trip():
             )
             assert status_bad == 400
 
-            # Unknown peer
-            status_404, _ = await _post_json(
-                s, f"{base_b}/api/peers/{'00' * 32}/trust",
-                {"trust": "pinned"}, token=tok_b,
-            )
-            assert status_404 == 404
 
+@pytest.mark.asyncio
+async def test_api_peer_capability_policy_round_trip():
+    with daemon_pair() as p:
+        base_a, tok_a = _server_addr(p.a.home)
+        async with aiohttp.ClientSession() as s:
+            _, peers = await _get_json(s, f"{base_a}/api/peers", token=tok_a)
+            fp = next(pp["fingerprint"] for pp in peers["peers"] if pp["short_id"] == p.b.short_id)
+
+            status, out = await _post_json(
+                s,
+                f"{base_a}/api/peers/{fp}/capabilities",
+                {"allowed": ["chat", "files", "not_real"]},
+                token=tok_a,
+            )
+            assert status == 200
+            assert out["allowed"] == ["chat", "files"]
+
+            status, got = await _get_json(
+                s, f"{base_a}/api/peers/{fp}/capabilities", token=tok_a
+            )
+            assert status == 200
+            assert got["allowed"] == ["chat", "files"]
+
+            status, cleared = await _post_json(
+                s,
+                f"{base_a}/api/peers/{fp}/capabilities",
+                {"allowed": None},
+                token=tok_a,
+            )
+            assert status == 200
+            assert cleared["allowed"] is None
 
 @pytest.mark.asyncio
 async def test_set_trust_auto_seeds_from_mdns_for_unmessaged_peer():

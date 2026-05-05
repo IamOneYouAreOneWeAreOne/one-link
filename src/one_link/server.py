@@ -137,6 +137,8 @@ class UIServer:
         r.add_post(r"/api/folders/{name}/share", self._guarded(self.api_share_folder))
         r.add_post(r"/api/folders/{name}/sync", self._guarded(self.api_sync_folder_now))
         r.add_post(r"/api/peers/{fp}/trust", self._guarded(self.api_set_trust))
+        r.add_get(r"/api/peers/{fp}/capabilities", self._guarded(self.api_get_peer_capabilities))
+        r.add_post(r"/api/peers/{fp}/capabilities", self._guarded(self.api_set_peer_capabilities))
         r.add_post(r"/api/peers/{fp}/pair", self._guarded(self.api_pair_init))
         r.add_post(r"/api/peers/{fp}/pair-confirm", self._guarded(self.api_pair_confirm))
         r.add_post(r"/api/peers/{fp}/pair-reject", self._guarded(self.api_pair_reject))
@@ -280,6 +282,7 @@ class UIServer:
                     "online": True,
                     "trust": "pending",  # default if no DB row yet
                     "capabilities": [],
+                    "allowed_capabilities": None,
                 }
         # Merge persistent state
         if self.daemon.state is not None:
@@ -292,6 +295,9 @@ class UIServer:
                         live[rec.fingerprint]["trust"] = rec.trust
                         live[rec.fingerprint]["capabilities"] = (
                             self.daemon.state.get_peer_capabilities(rec.fingerprint)
+                        )
+                        live[rec.fingerprint]["allowed_capabilities"] = (
+                            self.daemon.state.get_peer_capability_policy(rec.fingerprint)
                         )
                         live[rec.fingerprint]["last_seen_ms"] = rec.last_seen_ms
                         live[rec.fingerprint]["first_seen_ms"] = rec.first_seen_ms
@@ -311,6 +317,9 @@ class UIServer:
                             "online": False,
                             "trust": rec.trust,
                             "capabilities": self.daemon.state.get_peer_capabilities(
+                                rec.fingerprint
+                            ),
+                            "allowed_capabilities": self.daemon.state.get_peer_capability_policy(
                                 rec.fingerprint
                             ),
                             "last_seen_ms": rec.last_seen_ms,
@@ -515,6 +524,35 @@ class UIServer:
         # Notify UI subscribers so the badge updates everywhere.
         self.broadcast({"type": "peer_trust", "fingerprint": fp, "trust": trust})
         return web.json_response({"ok": True, "trust": trust})
+
+    async def api_get_peer_capabilities(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        return web.json_response({
+            "fingerprint": fp,
+            "advertised": self.daemon.state.get_peer_capabilities(fp),
+            "allowed": self.daemon.state.get_peer_capability_policy(fp),
+        })
+
+    async def api_set_peer_capabilities(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        allowed = data.get("allowed")
+        if allowed is None:
+            self.daemon.state.clear_peer_capability_policy(fp)
+            return web.json_response({"ok": True, "fingerprint": fp, "allowed": None})
+        if not isinstance(allowed, list):
+            return web.json_response({"error": "allowed must be a list or null"}, status=400)
+        from one_link.capabilities import LOCAL_CAPABILITIES, normalize_caps
+        clean = [c for c in normalize_caps(allowed) if c in LOCAL_CAPABILITIES]
+        self.daemon.state.set_peer_capability_policy(fp, clean)
+        return web.json_response({"ok": True, "fingerprint": fp, "allowed": clean})
 
     # ─── pairing ──────────────────────────────────────────────────────
     def _resolve_peer_for_pairing(self, fp: str):
@@ -828,6 +866,7 @@ class UIServer:
                 "folder_sync": {
                     "strategy": "Merkle root fast path plus CRDT manifest merge",
                 },
+                "sessions": self.daemon._session_stats(),
             },
             "outbound_destinations": outbound,
             "no_external_telemetry": True,

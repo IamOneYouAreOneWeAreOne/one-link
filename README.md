@@ -11,11 +11,11 @@ effect tracking) with Python as the host harness while LLVM/WASM backends mature
 
 ## Status
 
-**v0.2.7** — optimized CDC transfer path with streaming indexing, adaptive compression, cache accounting/GC, Merkle subtree drift walks, and benchmark gates.
+**v0.2.8** — long-lived encrypted chat sessions, resumable CDC chunk caching, peer capability policies, and stronger rejected-peer enforcement.
 
 - Native-feeling browser app: dark theme, peer sidebar with online dots,
   message bubbles, drag-drop file send, live updates over WebSocket
-- 232 passing tests across identity, wire, channel, discovery, paths, CLI,
+- 235 passing tests across identity, wire, channel, discovery, paths, CLI,
   integration, raw-protocol attacks, resilience, tail subscription,
   chat REPL, and the new HTTP/WS server
 - Full path-traversal defense at both the wire-protocol and HTTP layers

@@ -22,6 +22,7 @@ import logging
 import os
 import secrets
 import socket
+import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,7 +30,7 @@ from pathlib import Path
 import blake3
 
 from one_link import blobstore, channel as ch, foldersync
-from one_link.capabilities import LOCAL_CAPABILITIES, normalize_caps
+from one_link.capabilities import CHAT, FILES, FOLDER_SYNC, LOCAL_CAPABILITIES, normalize_caps
 from one_link.cdc import Chunk, chunk_path, index_path
 from one_link.crdt import ManifestEntry, VectorClock
 from one_link.discovery import Discovery, Peer
@@ -59,6 +60,7 @@ MAX_INCOMING_FILE_BYTES = 1024 * 1024 * 1024  # match UI upload cap
 CDC_CACHE_MAX_BYTES = 512 * 1024 * 1024
 COMPRESSION_MIN_BYTES = 2048
 COMPRESSION_MIN_SAVINGS = 0.08
+OUTBOUND_SESSION_IDLE_S = 300.0
 
 # Capabilities this build advertises in CAPS messages.
 PROTOCOL_VERSION = "OL1.1"
@@ -102,6 +104,16 @@ class IncomingFile:
     cdc_parts: dict[int, bytes] | None = None
 
 
+@dataclass
+class OutboundSession:
+    peer_fp: str
+    peer: Peer
+    channel: ch.Channel
+    lock: asyncio.Lock
+    last_used: float
+    messages_sent: int = 0
+
+
 class Daemon:
     def __init__(self, me: Identity):
         self.me = me
@@ -120,6 +132,7 @@ class Daemon:
         self.folder_engine = None  # type: foldersync.FolderEngine | None
         self.blob_store = None     # type: blobstore.BlobStore | None
         self._folder_sync_task: asyncio.Task | None = None
+        self._outbound_sessions: dict[str, OutboundSession] = {}
 
     def _acquire_instance_lock(self) -> None:
         """Prevent duplicate daemons for the same config/data home."""
@@ -266,6 +279,13 @@ class Daemon:
         peer_fp = fingerprint_of(channel.peer_ed_pub)
         peer_sid = channel.peer_short_id
         t = msg.get("t")
+        if self._check_inbound_trust(peer_fp) and t not in ("CAPS",):
+            with contextlib.suppress(Exception):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id,
+                    of=msg.get("id"), rejected="peer_rejected",
+                )))
+            raise RuntimeError(f"rejected peer attempted message: {peer_fp[:8]}")
         if t == "CAPS":
             features = list(normalize_caps(msg.get("features", [])))
             channel.peer_caps = {
@@ -283,10 +303,20 @@ class Daemon:
             )
             return  # no ACK needed
         if t == "TEXT":
+            if not self._capability_allowed(peer_fp, CHAT):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg["id"], rejected="capability_disabled",
+                )))
+                return
             ev = self._persist(msg=msg, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
             self._broadcast_tail(ev)
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_OFFER":
+            if not self._capability_allowed(peer_fp, FILES):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg["id"], rejected="capability_disabled",
+                )))
+                return
             blob = str(msg["blob"])
             if not self._valid_blob_hex(blob):
                 raise RuntimeError("invalid FILE_OFFER blob hash")
@@ -467,6 +497,8 @@ class Daemon:
         # ─── folder sync wire protocol ──────────────────────────────────
         elif t == "MANIFEST_PUSH":
             # Peer is offering us their view of a shared folder.
+            if not self._capability_allowed(peer_fp, FOLDER_SYNC):
+                return
             await self._handle_manifest_push(channel, msg, peer_fp)
         elif t == "MANIFEST_WANTS":
             # Peer is asking for specific blobs that they don't have.
@@ -634,6 +666,7 @@ class Daemon:
         if len(data) != expected["size"] or blake3.blake3(data).hexdigest() != expected["hash"]:
             self._abort_incoming_file(blob, f)
             raise RuntimeError("FILE_CDC_CHUNK integrity failure")
+        self._store_chunk_cache(expected["hash"], data)
         f.cdc_parts[idx] = data
         f.cdc_missing.remove(idx)
         await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
@@ -927,6 +960,76 @@ class Daemon:
             return f"peer {peer.short_id} is marked as rejected; cannot send"
         return None
 
+    def _capability_allowed(self, peer_fp: str, cap: str) -> bool:
+        if self.state is None:
+            return True
+        policy = self.state.get_peer_capability_policy(peer_fp)
+        return policy is None or cap in policy
+
+    def _session_stats(self) -> dict:
+        now = time.time()
+        return {
+            "open": len(self._outbound_sessions),
+            "idle_timeout_s": OUTBOUND_SESSION_IDLE_S,
+            "sessions": [
+                {
+                    "peer": s.peer.short_id,
+                    "peer_fp": s.peer_fp,
+                    "idle_s": round(now - s.last_used, 3),
+                    "messages_sent": s.messages_sent,
+                }
+                for s in self._outbound_sessions.values()
+            ],
+        }
+
+    async def _drop_outbound_session(self, peer_fp: str) -> None:
+        sess = self._outbound_sessions.pop(peer_fp, None)
+        if sess is not None:
+            with contextlib.suppress(Exception):
+                await sess.channel.close()
+
+    async def _get_outbound_session(self, peer: Peer) -> OutboundSession:
+        peer_fp = self._peer_fp_from_peer(peer)
+        if not peer_fp:
+            raise RuntimeError("peer has no verifiable public key for persistent session")
+        existing = self._outbound_sessions.get(peer_fp)
+        now = time.time()
+        if existing and now - existing.last_used <= OUTBOUND_SESSION_IDLE_S:
+            return existing
+        await self._drop_outbound_session(peer_fp)
+
+        reader, writer = await asyncio.open_connection(peer.address, peer.port)
+        try:
+            channel = await ch.initiate(reader, writer, self.me)
+            actual_fp = self._verify_channel_peer(peer, channel)
+            if actual_fp != peer_fp:
+                raise RuntimeError("peer fingerprint changed while opening session")
+            if self.state is not None:
+                with contextlib.suppress(Exception):
+                    self.state.upsert_peer(
+                        fingerprint=peer_fp,
+                        short_id=channel.peer_short_id,
+                        pubkey=channel.peer_ed_pub,
+                        hostname=peer.hostname,
+                        address=peer.address,
+                        port=peer.port,
+                    )
+            await channel.send(encode_msg(_build_caps(self.me.short_id)))
+            sess = OutboundSession(
+                peer_fp=peer_fp,
+                peer=peer,
+                channel=channel,
+                lock=asyncio.Lock(),
+                last_used=now,
+            )
+            self._outbound_sessions[peer_fp] = sess
+            return sess
+        except Exception:
+            with contextlib.suppress(Exception):
+                writer.close()
+                await writer.wait_closed()
+            raise
+
     async def send_to(self, peer: Peer, msgs: list[dict]) -> list[dict]:
         block = self._check_outbound_trust(peer)
         if block:
@@ -984,6 +1087,49 @@ class Daemon:
             with contextlib.suppress(Exception):
                 writer.close()
                 await writer.wait_closed()
+            raise
+
+    async def send_to(self, peer: Peer, msgs: list[dict]) -> list[dict]:
+        """Send chat/control messages over a reusable encrypted session."""
+        block = self._check_outbound_trust(peer)
+        if block:
+            raise RuntimeError(block)
+        peer_fp = self._peer_fp_from_peer(peer)
+        if peer_fp and not self._capability_allowed(peer_fp, CHAT):
+            raise RuntimeError(f"chat capability disabled for peer {peer.short_id}")
+        sess = await self._get_outbound_session(peer)
+        try:
+            async with sess.lock:
+                results: list[dict] = []
+                for m in msgs:
+                    await sess.channel.send(encode_msg(m))
+                    while True:
+                        ack = decode_msg(await sess.channel.recv())
+                        if ack.get("t") == "CAPS":
+                            features = list(normalize_caps(ack.get("features", [])))
+                            sess.channel.peer_caps = {
+                                "protocol": ack.get("protocol", "?"),
+                                "features": features,
+                                "from": ack.get("from"),
+                            }
+                            if self.state is not None:
+                                with contextlib.suppress(Exception):
+                                    self.state.set_peer_capabilities(sess.peer_fp, features)
+                            continue
+                        break
+                    if ack.get("rejected"):
+                        raise RuntimeError(str(ack.get("rejected")))
+                    results.append(ack)
+                    sess.messages_sent += 1
+                    sess.last_used = time.time()
+                    ev = self._persist(
+                        msg=m, direction="out", peer_fp=sess.peer_fp,
+                        peer_short_id=peer.short_id,
+                    )
+                    self._broadcast_tail(ev)
+                return results
+        except Exception:
+            await self._drop_outbound_session(sess.peer_fp)
             raise
 
     async def _send_control(self, peer: Peer, msg: dict) -> None:
@@ -1166,6 +1312,8 @@ class Daemon:
         peer_fp = self._peer_fp_from_peer(peer)
         if not peer_fp or not self._is_pinned(peer_fp):
             return {"ok": False, "error": "peer not pinned", "blobs_sent": 0}
+        if not self._capability_allowed(peer_fp, FOLDER_SYNC):
+            return {"ok": False, "error": "folder_sync capability disabled", "blobs_sent": 0}
 
         f = self.state.get_folder(folder_name)
         if not f or peer_fp not in f["shared_with"]:
@@ -1260,6 +1408,9 @@ class Daemon:
         block = self._check_outbound_trust(peer)
         if block:
             raise RuntimeError(block)
+        peer_fp_for_policy = self._peer_fp_from_peer(peer)
+        if peer_fp_for_policy and not self._capability_allowed(peer_fp_for_policy, FILES):
+            raise RuntimeError(f"files capability disabled for peer {peer.short_id}")
         size = path.stat().st_size
         file_index = index_path(path)
         blob_hex = file_index.blob_hash
@@ -1740,6 +1891,8 @@ class Daemon:
         )
 
     async def stop(self) -> None:
+        for peer_fp in list(self._outbound_sessions):
+            await self._drop_outbound_session(peer_fp)
         if self._folder_sync_task and not self._folder_sync_task.done():
             self._folder_sync_task.cancel()
             try:
