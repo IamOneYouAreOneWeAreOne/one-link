@@ -125,6 +125,13 @@ def send_file(peer, path):
 
 
 @cli.command()
+def chat():
+    """Open the interactive chat window. Auto-starts a daemon if none running."""
+    from one_link.chat import run_chat
+    raise SystemExit(run_chat())
+
+
+@cli.command()
 def tail():
     """Stream incoming and outgoing message events. Ctrl-C to stop."""
     s, _ = _connect_control()

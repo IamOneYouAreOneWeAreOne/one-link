@@ -10,10 +10,11 @@ effect tracking) with Python as the host harness while LLVM/WASM backends mature
 
 ## Status
 
-**v0.0.1** — first working slice. Two computers find each other on the LAN
-via mDNS, mutually authenticate by Ed25519 fingerprint, establish an
-X25519 + ChaCha20-Poly1305 channel, and exchange chat messages and files
-of any size. CLI only, no GUI yet, no folder-watch sync yet.
+**v0.0.3** — interactive chat command + desktop shortcut.
+Foundation under test: 102 passing tests across identity, wire,
+channel, discovery, paths, CLI, integration, raw-protocol attacks,
+resilience, tail subscription, and chat REPL. Folder-watch sync
+and full GUI still on the roadmap.
 
 ---
 
@@ -46,25 +47,45 @@ Same as above; install Python 3.11+ from python.org first if you don't have it.
 
 ## Use
 
-On every computer, leave the daemon running in a terminal (or set it to
-auto-start — see "Background service" below):
+### Easiest: interactive chat window
+
+```bash
+one-link chat
+```
+
+Auto-starts a daemon and drops you into a REPL where you can chat
+and see incoming traffic in one window. Type `/help` once it's running.
+
+```
+>>> /peers
+>>> Alex-MacBook: hello mac
+>>> /send-file Alex-MacBook ~/Pictures/photo.jpg
+>>> /quit
+```
+
+`<peer>` is a hostname or any prefix of a device's short_id.
+
+On Windows you can run `scripts/install_desktop_shortcut.ps1` (one-time)
+to drop a `One_link.lnk` on your Desktop — double-click to open chat.
+
+### Headless service mode
+
+Leave a daemon running in a terminal so you stay reachable while the
+chat window is closed:
 
 ```bash
 one-link daemon
 ```
 
-In another terminal on any of those computers:
+### Lower-level CLI commands
 
 ```bash
 one-link whoami           # show this device's identity
 one-link peers            # list discovered devices on the LAN
-one-link send <peer> "hi" # send a chat message
+one-link send <peer> "hi" # one-shot chat message
 one-link send-file <peer> /path/to/file.zip
 one-link tail             # stream incoming + outgoing events live
 ```
-
-`<peer>` accepts either the hostname (e.g. `Alex-MacBook`) or the first 8 chars
-of the device fingerprint (shown by `one-link peers`).
 
 Received files land in the recipient's inbox:
 - Windows: `%LOCALAPPDATA%\Coherence\One_link\inbox\`
