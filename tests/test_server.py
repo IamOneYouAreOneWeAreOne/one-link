@@ -391,6 +391,49 @@ async def test_api_set_trust_round_trip():
 
 
 @pytest.mark.asyncio
+async def test_set_trust_auto_seeds_from_mdns_for_unmessaged_peer():
+    """User clicks Accept/Block on a peer they've only seen via mDNS, never
+    actually messaged. The endpoint must auto-populate the peer DB from the
+    discovery record rather than rejecting with 'unknown peer'."""
+    with daemon_pair() as p:
+        # B has seen A via mDNS but they have NOT exchanged messages yet,
+        # so B's peer DB likely doesn't have an A record.
+        # Find A in B's discovery view.
+        base_b, tok_b = _server_addr(p.b.home)
+        async with aiohttp.ClientSession() as s:
+            _, j = await _get_json(s, f"{base_b}/api/peers", token=tok_b)
+            target = next(pp for pp in j["peers"] if pp["short_id"] == p.a.short_id)
+            fp = target["fingerprint"]
+
+            # Pin them — should succeed even if state.get_peer(fp) returns None
+            status, j2 = await _post_json(
+                s, f"{base_b}/api/peers/{fp}/trust",
+                {"trust": "pinned"}, token=tok_b,
+            )
+            assert status == 200, j2
+            assert j2["trust"] == "pinned"
+
+            # Now confirmed in DB
+            _, j3 = await _get_json(s, f"{base_b}/api/peers", token=tok_b)
+            after = next(pp for pp in j3["peers"] if pp["fingerprint"] == fp)
+            assert after["trust"] == "pinned"
+
+
+@pytest.mark.asyncio
+async def test_set_trust_for_truly_unknown_peer_returns_404():
+    """If a fingerprint isn't in the DB and isn't visible via mDNS either,
+    the endpoint should still 404 (genuine unknown)."""
+    with daemon_pair() as p:
+        base_a, tok_a = _server_addr(p.a.home)
+        async with aiohttp.ClientSession() as s:
+            status, j = await _post_json(
+                s, f"{base_a}/api/peers/{'00' * 32}/trust",
+                {"trust": "pinned"}, token=tok_a,
+            )
+            assert status == 404
+
+
+@pytest.mark.asyncio
 async def test_outbound_blocked_for_rejected_peer():
     """If we mark a peer 'rejected', outbound sends to them must error."""
     with daemon_pair() as p:

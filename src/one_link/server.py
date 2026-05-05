@@ -257,8 +257,38 @@ class UIServer:
             )
         if self.daemon.state is None:
             return web.json_response({"error": "state not available"}, status=503)
+
+        # If this peer isn't in the DB yet, try to auto-populate from mDNS
+        # discovery info. This lets the user accept/block a peer they've
+        # only seen via discovery, without first having to message them.
         if not self.daemon.state.get_peer(fp):
-            return web.json_response({"error": "unknown peer"}, status=404)
+            seeded = False
+            if self.daemon.discovery:
+                from one_link.identity import fingerprint_of
+                for p in self.daemon.discovery.registry.list():
+                    if not p.ed_pub_hex:
+                        continue
+                    try:
+                        pub = bytes.fromhex(p.ed_pub_hex)
+                    except ValueError:
+                        continue
+                    if fingerprint_of(pub) == fp:
+                        self.daemon.state.upsert_peer(
+                            fingerprint=fp,
+                            short_id=p.short_id,
+                            pubkey=pub,
+                            hostname=p.hostname,
+                            address=p.address,
+                            port=p.port,
+                        )
+                        seeded = True
+                        break
+            if not seeded:
+                return web.json_response(
+                    {"error": "peer not seen on the LAN (mDNS-stale or unknown)"},
+                    status=404,
+                )
+
         try:
             self.daemon.state.set_peer_trust(fp, trust)
         except Exception as e:
