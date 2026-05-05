@@ -73,6 +73,12 @@ Live protocol features:
   protocol complexity.
 - Status API: `/api/status` summarizes identity, peer counts, folder counts,
   active transfers, CDC cache state, and session reuse for audit/debug UI.
+- Mesh operations console: the UI now shows online/active/session/cache
+  metrics, can clear completed transfer history, and lets users share,
+  sync, or remove folders from the folder panel.
+- Folder-sync observability: each manual or background folder push is recorded
+  as a transfer ledger entry with Merkle root, wanted blob count, bytes sent,
+  completion/failure state, and live progress events.
 - Benchmark gate: `scripts/bench_transfer_primitives.py` measures CDC
   indexing throughput, dedup hit rate, Merkle drift latency, and compression
   throughput.

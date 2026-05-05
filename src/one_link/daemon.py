@@ -1437,9 +1437,32 @@ class Daemon:
 
         entries = self.folder_engine.manifest_for(folder_name)
         merkle_root = self.folder_engine.manifest_root(folder_name)
+        total_bytes = sum(int(e.get("size") or 0) for e in entries if e.get("blob_hash"))
+        transfer_id = f"folder:{folder_name}:{peer_fp[:12]}:{uuid.uuid4().hex[:10]}"
+        self._upsert_transfer(
+            id=transfer_id,
+            direction="out",
+            peer_fp=peer_fp,
+            kind="folder",
+            name=folder_name,
+            size=total_bytes,
+            blob_hash=merkle_root,
+            status="active",
+            progress_bytes=0,
+            total_bytes=total_bytes,
+            chunks_done=0,
+            chunks_total=len(entries),
+            metadata={
+                "folder": folder_name,
+                "entries": len(entries),
+                "merkle_root": merkle_root,
+                "peer": peer.short_id,
+            },
+        )
 
         reader, writer = await asyncio.open_connection(peer.address, peer.port)
         blobs_sent = 0
+        bytes_sent = 0
         try:
             channel = await ch.initiate(reader, writer, self.me)
             if channel.peer_short_id != peer.short_id:
@@ -1487,6 +1510,7 @@ class Daemon:
                 if not self.blob_store.has(blob_hex):
                     continue
                 size = self.blob_store.size(blob_hex)
+                bytes_sent += int(size)
                 await channel.send(encode_msg(make_msg(
                     "BLOB_OFFER", self.me.short_id,
                     blob=blob_hex, size=size,
@@ -1506,8 +1530,43 @@ class Daemon:
                         seq += 1
                         prev = cur
                 blobs_sent += 1
+                self._update_transfer(
+                    transfer_id,
+                    status="active",
+                    progress_bytes=bytes_sent,
+                    total_bytes=max(total_bytes, bytes_sent),
+                    chunks_done=blobs_sent,
+                    chunks_total=max(len(wants), blobs_sent),
+                    raw_bytes=bytes_sent,
+                    wire_bytes=bytes_sent,
+                    metadata={
+                        "folder": folder_name,
+                        "entries": len(entries),
+                        "wanted_blobs": len(wants),
+                        "merkle_root": merkle_root,
+                        "peer": peer.short_id,
+                    },
+                )
 
             await channel.close()
+            self._update_transfer(
+                transfer_id,
+                status="complete",
+                progress_bytes=bytes_sent if wants else total_bytes,
+                total_bytes=max(total_bytes, bytes_sent),
+                chunks_done=len(wants),
+                chunks_total=len(wants),
+                raw_bytes=bytes_sent,
+                wire_bytes=bytes_sent,
+                metadata={
+                    "folder": folder_name,
+                    "entries": len(entries),
+                    "wanted_blobs": len(wants),
+                    "blobs_sent": blobs_sent,
+                    "merkle_root": merkle_root,
+                    "peer": peer.short_id,
+                },
+            )
             return {
                 "ok": True,
                 "wants": len(wants),
@@ -1518,6 +1577,17 @@ class Daemon:
             with contextlib.suppress(Exception):
                 writer.close()
                 await writer.wait_closed()
+            self._update_transfer(
+                transfer_id,
+                status="failed",
+                metadata={
+                    "folder": folder_name,
+                    "entries": len(entries),
+                    "merkle_root": merkle_root,
+                    "peer": peer.short_id,
+                    "error": str(e),
+                },
+            )
             return {"ok": False, "error": str(e), "blobs_sent": blobs_sent}
 
     async def send_file(self, peer: Peer, path: Path) -> dict:

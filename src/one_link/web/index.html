@@ -353,6 +353,7 @@
   }
   .panel-form input:focus { border-color: var(--accent); }
   .mini-actions { display: flex; gap: 8px; align-items: center; }
+  .mini-actions.wrap { flex-wrap: wrap; }
   .mini-actions button, .cap-toggle {
     background: var(--bg-2); color: var(--text-dim); border-radius: 8px;
     padding: 7px 9px; font-size: 12px; border: 1px solid transparent;
@@ -369,6 +370,16 @@
   }
   .peer-tools.show { display: flex; }
   .peer-tools .label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .8px; }
+  .mesh-summary {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    padding: 10px 12px; border-bottom: 1px solid var(--line);
+  }
+  .metric {
+    background: var(--bg-2); border: 1px solid rgba(255,255,255,.04);
+    border-radius: 8px; padding: 9px 10px; min-width: 0;
+  }
+  .metric .num { color: var(--text); font-weight: 700; font-size: 16px; }
+  .metric .lbl { color: var(--text-dim); font-size: 10px; text-transform: uppercase; letter-spacing: .7px; }
 
   /* ── Toast ─────────────────────────────────────────────────────────── */
   .toast-stack { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 200; }
@@ -678,8 +689,20 @@
         <span>Transfers</span>
         <span class="count" id="transfers-count">0</span>
       </div>
+      <div class="mesh-summary" id="mesh-summary">
+        <div class="metric"><div class="num" id="metric-online">0</div><div class="lbl">online</div></div>
+        <div class="metric"><div class="num" id="metric-active">0</div><div class="lbl">active</div></div>
+        <div class="metric"><div class="num" id="metric-cache">0 B</div><div class="lbl">CDC cache</div></div>
+        <div class="metric"><div class="num" id="metric-sessions">0</div><div class="lbl">sessions</div></div>
+      </div>
       <div id="transferlist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
         <div class="empty">no transfers yet</div>
+      </div>
+      <div class="panel-form">
+        <div class="mini-actions">
+          <button id="btn-refresh-mesh">Refresh</button>
+          <button id="btn-clear-transfers">Clear done</button>
+        </div>
       </div>
     </aside>
 
@@ -808,6 +831,7 @@
     messages: [],         // recent across all peers
     transfers: [],
     folders: [],
+    status: null,
     searchQuery: "",
     searchResults: null,
     activePane: "convo",
@@ -823,6 +847,12 @@
       if (!r.ok) throw new Error(j.error || `${p} ${r.status}`);
       return j;
     },
+    async del(p) {
+      const r = await fetch(p, { method: "DELETE", credentials: "include" });
+      const j = await r.json().catch(()=>({}));
+      if (!r.ok) throw new Error(j.error || `${p} ${r.status}`);
+      return j;
+    },
     async upload(peer, file) {
       const fd = new FormData();
       fd.append("peer", peer);
@@ -834,6 +864,7 @@
     },
     folders() { return this.get("/api/folders"); },
     transfers() { return this.get("/api/transfers?limit=80"); },
+    status() { return this.get("/api/status"); },
   };
 
   // ── Toasts ─────────────────────────────────────────────────────────
@@ -1003,9 +1034,24 @@
         row.appendChild(el("div", "icon", "Folder"));
         const meta = el("div", "meta");
         meta.appendChild(el("div", "name", f.name));
-        meta.appendChild(el("div", "size", `${f.files || 0} files · ${f.shared_with?.length || 0} peers`));
+        meta.appendChild(el("div", "size", `${f.files || 0} files · ${f.in_store || 0} local blobs · ${f.shared_with?.length || 0} peers`));
         meta.appendChild(el("div", "size", f.local_path));
         row.appendChild(meta);
+        const share = el("button", null, "Share");
+        share.onclick = async () => {
+          const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
+          if (!peer?.fingerprint || peer.trust !== "pinned") {
+            toast("Pick a paired peer first", "info");
+            return;
+          }
+          try {
+            await api.post(`/api/folders/${encodeURIComponent(f.name)}/share`, { peer_fp: peer.fingerprint });
+            toast("Folder shared", "good");
+            await refreshFolders();
+          } catch (e) {
+            toast(`Share failed: ${e.message || e}`, "bad", 6000);
+          }
+        };
         const sync = el("button", null, "Sync");
         sync.onclick = async () => {
           try {
@@ -1017,9 +1063,31 @@
             toast(`Folder sync failed: ${e.message || e}`, "bad", 6000);
           }
         };
+        const remove = el("button", null, "Remove");
+        remove.onclick = async () => {
+          try {
+            await api.del(`/api/folders/${encodeURIComponent(f.name)}`);
+            toast("Folder removed", "good");
+            await refreshFolders();
+          } catch (e) {
+            toast(`Remove failed: ${e.message || e}`, "bad", 6000);
+          }
+        };
+        row.appendChild(share);
         row.appendChild(sync);
+        row.appendChild(remove);
         list.appendChild(row);
       }
+    } catch (e) { console.warn(e); }
+  }
+
+  async function refreshStatus() {
+    try {
+      state.status = await api.status();
+      $("#metric-online").textContent = state.status.peers?.online ?? 0;
+      $("#metric-active").textContent = state.status.transfers?.active ?? 0;
+      $("#metric-cache").textContent = fmtBytes(state.status.performance?.cdc_cache?.bytes || 0);
+      $("#metric-sessions").textContent = state.status.performance?.sessions?.open ?? 0;
     } catch (e) { console.warn(e); }
   }
 
@@ -1028,6 +1096,7 @@
       const { transfers } = await api.transfers();
       state.transfers = transfers || [];
       renderTransfers();
+      await refreshStatus();
     } catch (e) { console.warn(e); }
   }
 
@@ -1052,6 +1121,20 @@
       bar.appendChild(fill);
       meta.appendChild(bar);
       row.appendChild(meta);
+      if (["complete", "failed"].includes(t.status)) {
+        const del = el("button", null, "Clear");
+        del.onclick = async () => {
+          try {
+            await api.del(`/api/transfers/${encodeURIComponent(t.id)}`);
+            state.transfers = state.transfers.filter(x => x.id !== t.id);
+            renderTransfers();
+            await refreshStatus();
+          } catch (e) {
+            toast(`Clear failed: ${e.message || e}`, "bad");
+          }
+        };
+        row.appendChild(del);
+      }
       list.appendChild(row);
     }
   }
@@ -1124,9 +1207,11 @@
     await loadHistory();
     await refreshFolders();
     await refreshTransfers();
+    await refreshStatus();
     connectWS();
     setInterval(refreshPeers, 5000);
     setInterval(refreshTransfers, 4000);
+    setInterval(refreshStatus, 8000);
   }
 
   async function refreshPeers() {
@@ -1201,6 +1286,7 @@
         state.transfers.sort((a, b) => (b.updated_ms || 0) - (a.updated_ms || 0));
         state.transfers = state.transfers.slice(0, 80);
         renderTransfers();
+        refreshStatus();
       }
     };
     ws.onclose = () => setTimeout(connectWS, 1500);
@@ -1376,6 +1462,19 @@
   });
 
   $("#btn-refresh-folders").onclick = refreshFolders;
+  $("#btn-refresh-mesh").onclick = async () => {
+    await refreshTransfers();
+    await refreshStatus();
+  };
+  $("#btn-clear-transfers").onclick = async () => {
+    try {
+      const r = await api.post("/api/transfers/prune", { keep_latest: 0 });
+      toast(`Cleared ${r.removed || 0} transfer${r.removed === 1 ? "" : "s"}`, "good");
+      await refreshTransfers();
+    } catch (e) {
+      toast(`Clear failed: ${e.message || e}`, "bad");
+    }
+  };
   $("#btn-add-folder").onclick = async () => {
     const name = $("#folder-name").value.trim();
     const local_path = $("#folder-path").value.trim();

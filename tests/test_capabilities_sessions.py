@@ -59,6 +59,8 @@ def test_transfer_ledger_tracks_progress_and_metadata(tmp_path):
 
         listed = state.list_transfers(peer_fp="aa" * 32)
         assert [t.id for t in listed] == ["xfer-1"]
+        assert state.prune_transfers(keep_latest=0) == 1
+        assert state.list_transfers() == []
     finally:
         state.close()
 

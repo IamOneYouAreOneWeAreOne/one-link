@@ -198,6 +198,9 @@ class FolderEngine:
     def share_with(self, name: str, peer_fp: str) -> None:
         self.state.share_folder_with(name, peer_fp)
 
+    def unshare_with(self, name: str, peer_fp: str) -> None:
+        self.state.unshare_folder_with(name, peer_fp)
+
     # ─── peer protocol callbacks ──────────────────────────────────────
     def manifest_for(self, name: str) -> list[dict]:
         return [m for m in self.state.list_manifest(name)]

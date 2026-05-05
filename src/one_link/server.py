@@ -161,6 +161,7 @@ class UIServer:
         r.add_post("/api/folders", self._guarded(self.api_add_folder))
         r.add_delete(r"/api/folders/{name}", self._guarded(self.api_remove_folder))
         r.add_post(r"/api/folders/{name}/share", self._guarded(self.api_share_folder))
+        r.add_post(r"/api/folders/{name}/unshare", self._guarded(self.api_unshare_folder))
         r.add_post(r"/api/folders/{name}/sync", self._guarded(self.api_sync_folder_now))
         r.add_post(r"/api/peers/{fp}/trust", self._guarded(self.api_set_trust))
         r.add_get(r"/api/peers/{fp}/capabilities", self._guarded(self.api_get_peer_capabilities))
@@ -175,6 +176,8 @@ class UIServer:
         r.add_post("/api/send-file", self._guarded(self.api_send_file))
         r.add_get("/api/files", self._guarded(self.api_files))
         r.add_get("/api/transfers", self._guarded(self.api_transfers))
+        r.add_post("/api/transfers/prune", self._guarded(self.api_prune_transfers))
+        r.add_delete(r"/api/transfers/{transfer_id:.+}", self._guarded(self.api_delete_transfer))
         r.add_get(r"/api/files/{name:.+}", self._guarded(self.api_file_download))
         r.add_get("/api/audit", self._guarded(self.api_audit))
         r.add_get("/api/events", self._guarded_ws(self.ws_events))
@@ -492,6 +495,27 @@ class UIServer:
             return web.json_response({"error": "peer_fp required"}, status=400)
         try:
             self.daemon.folder_engine.share_with(name, peer_fp)
+        except KeyError as e:
+            return web.json_response({"error": str(e)}, status=404)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+        return web.json_response({"ok": True})
+
+    async def api_unshare_folder(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None or self.daemon.folder_engine is None:
+            return web.json_response(
+                {"error": "folder sync not initialized"}, status=503,
+            )
+        name = request.match_info["name"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        peer_fp = (data.get("peer_fp") or "").strip()
+        if not peer_fp:
+            return web.json_response({"error": "peer_fp required"}, status=400)
+        try:
+            self.daemon.folder_engine.unshare_with(name, peer_fp)
         except KeyError as e:
             return web.json_response({"error": str(e)}, status=404)
         except Exception as e:
@@ -868,6 +892,32 @@ class UIServer:
         return web.json_response({
             "transfers": [_transfer_record_to_event(t) for t in transfers],
         })
+
+    async def api_delete_transfer(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        transfer_id = request.match_info["transfer_id"]
+        deleted = self.daemon.state.delete_transfer(transfer_id)
+        return web.json_response({"ok": True, "deleted": deleted})
+
+    async def api_prune_transfers(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        statuses = data.get("statuses") or ["complete", "failed"]
+        if not isinstance(statuses, list):
+            return web.json_response({"error": "statuses must be a list"}, status=400)
+        keep_latest = int(data.get("keep_latest", 50))
+        older_than_ms = data.get("older_than_ms")
+        removed = self.daemon.state.prune_transfers(
+            statuses=[str(s) for s in statuses],
+            older_than_ms=int(older_than_ms) if older_than_ms is not None else None,
+            keep_latest=keep_latest,
+        )
+        return web.json_response({"ok": True, "removed": removed})
 
     # ─── /api/audit ───────────────────────────────────────────────────
     async def api_audit(self, request: web.Request) -> web.Response:

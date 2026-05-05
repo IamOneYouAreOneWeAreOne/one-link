@@ -588,6 +588,42 @@ class State:
             ).fetchall()
         return [self._row_to_transfer(r) for r in rows]
 
+    def delete_transfer(self, id: str) -> bool:
+        with self._write_lock:
+            cur = self._conn.execute("DELETE FROM transfers WHERE id = ?", (id,))
+            return cur.rowcount > 0
+
+    def prune_transfers(
+        self,
+        *,
+        statuses: Iterable[str] = ("complete", "failed"),
+        older_than_ms: Optional[int] = None,
+        keep_latest: int = 200,
+    ) -> int:
+        clean_statuses = [str(s) for s in statuses if str(s)]
+        if not clean_statuses:
+            return 0
+        keep_latest = max(0, int(keep_latest))
+        params: list[Any] = clean_statuses
+        where = f"status IN ({','.join('?' for _ in clean_statuses)})"
+        if older_than_ms is not None:
+            where += " AND updated_ms < ?"
+            params.append(int(older_than_ms))
+        keep_clause = ""
+        if keep_latest:
+            keep_clause = (
+                " AND id NOT IN ("
+                "SELECT id FROM transfers ORDER BY updated_ms DESC LIMIT ?"
+                ")"
+            )
+            params.append(keep_latest)
+        with self._write_lock:
+            cur = self._conn.execute(
+                f"DELETE FROM transfers WHERE {where}{keep_clause}",
+                params,
+            )
+            return int(cur.rowcount)
+
     def _row_to_transfer(self, row: sqlite3.Row) -> TransferRecord:
         try:
             metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
@@ -724,6 +760,19 @@ class State:
         if peer_fp in f["shared_with"]:
             return
         new = f["shared_with"] + [peer_fp]
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE folders SET shared_with_json = ? WHERE name = ?",
+                (json.dumps(new), folder_name),
+            )
+
+    def unshare_folder_with(self, folder_name: str, peer_fp: str) -> None:
+        f = self.get_folder(folder_name)
+        if not f:
+            raise KeyError(f"no such folder: {folder_name!r}")
+        if peer_fp not in f["shared_with"]:
+            return
+        new = [fp for fp in f["shared_with"] if fp != peer_fp]
         with self._write_lock:
             self._conn.execute(
                 "UPDATE folders SET shared_with_json = ? WHERE name = ?",

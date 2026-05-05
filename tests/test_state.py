@@ -189,6 +189,8 @@ def test_share_folder_with(state: State):
     state.share_folder_with("docs", "bb" * 32)
     members = state.get_folder("docs")["shared_with"]
     assert sorted(members) == sorted(["aa" * 32, "bb" * 32])
+    state.unshare_folder_with("docs", "aa" * 32)
+    assert state.get_folder("docs")["shared_with"] == ["bb" * 32]
 
 
 def test_manifest_upsert_and_list(state: State):

@@ -120,6 +120,28 @@ async def test_api_status_and_transfers_surface_ledger(tmp_path: Path):
         status = json.loads(status_resp.text)
         assert status["transfers"]["active"] == 1
         assert status["performance"]["sessions"]["open"] == 0
+
+        delete_resp = await server.api_delete_transfer(
+            SimpleNamespace(match_info={"transfer_id": "t1"})
+        )
+        assert json.loads(delete_resp.text)["deleted"] is True
+        assert state.list_transfers() == []
+
+        state.upsert_transfer(
+            id="t2",
+            direction="out",
+            peer_fp="aa" * 32,
+            kind="file",
+            name="done.bin",
+            size=1,
+            status="complete",
+            progress_bytes=1,
+        )
+        async def _prune_json():
+            return {"keep_latest": 0}
+        prune_req = SimpleNamespace(json=_prune_json)
+        prune_resp = await server.api_prune_transfers(prune_req)
+        assert json.loads(prune_resp.text)["removed"] == 1
     finally:
         state.close()
 

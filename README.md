@@ -11,7 +11,7 @@ effect tracking) with Python as the host harness while LLVM/WASM backends mature
 
 ## Status
 
-**v0.2.9** — persistent transfer tracking, live transfer progress, folder-sync UI, per-peer capability controls, status API, long-lived encrypted chat sessions, and resumable CDC chunk caching.
+**v0.2.10** — mesh operations console, folder share/remove controls, folder-sync transfer ledger entries, transfer cleanup APIs, persistent transfer tracking, per-peer capability controls, and resumable CDC chunk caching.
 
 - Native-feeling browser app: dark theme, peer sidebar with online dots,
   message bubbles, drag-drop file send, live updates over WebSocket
