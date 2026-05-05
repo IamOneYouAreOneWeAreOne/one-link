@@ -77,7 +77,7 @@ def _spawn_daemon() -> subprocess.Popen:
 
 
 def run_app(*, no_browser: bool = False) -> int:
-    click.echo("One_link")
+    click.echo("One Link")
     spawned: Optional[subprocess.Popen] = None
     info = _resolve_running_daemon()
     if info is None:

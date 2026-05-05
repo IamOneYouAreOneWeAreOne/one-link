@@ -21,12 +21,18 @@ if (-not $pythonExe) {
 }
 
 # Sanity-check that the Python we found actually has one_link installed,
-# and discover the icon path inside the package.
+# and discover the icon path inside the package. Prefer the freshly-named
+# `one-link-app.ico` which sidesteps Windows shell icon-cache holds on the
+# legacy `one-glyph.ico` path.
 $probe = & $pythonExe -c @"
 import one_link, pathlib, sys
 sys.stdout.write(one_link.__version__)
 sys.stdout.write('|')
-sys.stdout.write(str(pathlib.Path(one_link.__file__).parent / 'web' / 'assets' / 'one-glyph.ico'))
+base = pathlib.Path(one_link.__file__).parent / 'web' / 'assets'
+ico = base / 'one-link-app.ico'
+if not ico.exists():
+    ico = base / 'one-glyph.ico'
+sys.stdout.write(str(ico))
 "@ 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Error "one_link is not installed in this Python. Run: pip install -e .  first."
@@ -48,7 +54,7 @@ $lnk = $shell.CreateShortcut($shortcutPath)
 $lnk.TargetPath = $pythonExe
 $lnk.Arguments = "-m one_link.cli app"
 $lnk.WorkingDirectory = "$env:USERPROFILE"
-$lnk.Description = "One_link - peer-to-peer LAN chat + file sync"
+$lnk.Description = "One Link - peer-to-peer LAN chat + file sync"
 $lnk.WindowStyle = 1  # Normal window
 if (Test-Path $iconPath) {
     $lnk.IconLocation = "$iconPath,0"

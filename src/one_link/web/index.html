@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>One_link</title>
+<title>One Link</title>
 <link rel="icon" type="image/png" href="/static/one-glyph.png" />
 <link rel="apple-touch-icon" href="/static/one-glyph.png" />
 <meta name="theme-color" content="#0b0d12" />
@@ -394,7 +394,7 @@
   <header class="top">
     <div class="brand">
       <div class="logo"><img src="/static/one-glyph.png" alt="" /></div>
-      <span class="wm">One_link</span>
+      <span class="wm">One Link</span>
     </div>
     <div class="me">
       <span class="dot"></span>
@@ -429,7 +429,7 @@
       <div id="convo-empty" class="empty-pane">
         <div class="glyph"><img src="/static/one-glyph.png" alt="" /></div>
         <h3>Pick a peer to start</h3>
-        <div>Once another One_link device shows up on your LAN, you can chat with them and drop files anywhere on this window to send.</div>
+        <div>Once another One Link device shows up on your LAN, you can chat with them and drop files anywhere on this window to send.</div>
       </div>
 
       <div id="convo-active" style="display:none; flex:1; flex-direction:column; min-height:0;">
@@ -587,7 +587,7 @@
     list.innerHTML = "";
     $("#peers-count").textContent = state.peers.size;
     if (state.peers.size === 0) {
-      list.appendChild(el("div", "empty", "no peers yet — make sure One_link is running on your other devices on the same network"));
+      list.appendChild(el("div", "empty", "no peers yet — make sure One Link is running on your other devices on the same network"));
       return;
     }
     for (const p of state.peers.values()) {

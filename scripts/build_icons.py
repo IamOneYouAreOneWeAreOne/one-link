@@ -71,41 +71,85 @@ def _vertical_gradient(size: int) -> Image.Image:
     return Image.fromarray(arr, "RGB").convert("RGBA")
 
 
-def make_app_icon(size: int, glyph_rgba: Image.Image) -> Image.Image:
-    """Rounded-rect gradient background with a centered white glyph."""
-    icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    bg = _vertical_gradient(size)
+def _radial_gradient(size: int) -> Image.Image:
+    """Diagonal-radial gradient: top-left bright purple → bottom-right deep violet,
+    with a vibrant cyan highlight in the upper-right. Pops on any wallpaper.
+    Vectorized with numpy."""
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    cx_a, cy_a = size * 0.25, size * 0.18
+    cx_b, cy_b = size * 0.85, size * 0.92
+    cx_c, cy_c = size * 0.78, size * 0.18
+    diag = float(((cx_b - cx_a) ** 2 + (cy_b - cy_a) ** 2) ** 0.5)
+    d_a = np.sqrt((xx - cx_a) ** 2 + (yy - cy_a) ** 2)
+    d_c = np.sqrt((xx - cx_c) ** 2 + (yy - cy_c) ** 2)
+    t = np.clip(d_a / diag, 0.0, 1.0)
+    r_base = 140 + (60 - 140) * t
+    g_base = 80 + (38 - 80) * t
+    b_base = 255 + (200 - 255) * t
+    hl = np.clip(1.0 - d_c / (size * 0.42), 0.0, 1.0)
+    r = np.clip(r_base + hl * 60, 0, 255).astype(np.uint8)
+    g = np.clip(g_base + hl * 110, 0, 255).astype(np.uint8)
+    b = np.clip(b_base + hl * 30, 0, 255).astype(np.uint8)
+    arr = np.dstack([r, g, b])
+    return Image.fromarray(arr, "RGB").convert("RGBA")
 
-    # Rounded corners — radius ~22% of side (matches modern Win/Mac app icon look)
-    radius = max(2, int(size * 0.22))
-    mask = Image.new("L", (size, size), 0)
+
+def make_app_icon(size: int, glyph_rgba: Image.Image) -> Image.Image:
+    """Modern app icon: vibrant rounded-rect, white glyph with soft glow."""
+    # We render at 4x then downsample for crisp rounded corners + smooth gradient.
+    s4 = size * 4 if size <= 128 else size * 2
+    icon = Image.new("RGBA", (s4, s4), (0, 0, 0, 0))
+    bg = _radial_gradient(s4) if s4 >= 64 else _vertical_gradient(s4)
+
+    # Rounded corners — radius ~22% of side
+    radius = max(2, int(s4 * 0.22))
+    mask = Image.new("L", (s4, s4), 0)
     ImageDraw.Draw(mask).rounded_rectangle(
-        (0, 0, size - 1, size - 1), radius=radius, fill=255,
+        (0, 0, s4 - 1, s4 - 1), radius=radius, fill=255,
     )
     icon.paste(bg, (0, 0), mask)
 
-    # Subtle inner highlight along the top — sells the 3D feel
-    if size >= 64:
-        hl = Image.new("L", (size, size), 0)
-        ImageDraw.Draw(hl).rounded_rectangle(
-            (1, 1, size - 2, size - 2), radius=radius - 1, outline=70, width=1,
+    # Inner top-left sheen — diagonal highlight selling the 3D feel (vectorized)
+    if s4 >= 64:
+        yy, xx = np.mgrid[0:s4, 0:s4].astype(np.float32)
+        sheen_arr = np.clip(80 - 60 * (xx + yy) / (s4 * 0.6), 0, 80).astype(np.uint8)
+        sheen = Image.fromarray(sheen_arr, "L")
+        sheen_mask = Image.new("L", (s4, s4), 0)
+        ImageDraw.Draw(sheen_mask).rounded_rectangle(
+            (0, 0, s4 - 1, s4 - 1), radius=radius, fill=255,
         )
-        white = Image.new("RGBA", (size, size), (255, 255, 255, 0))
-        white.putalpha(hl)
+        sheen = Image.composite(sheen, Image.new("L", (s4, s4), 0), sheen_mask)
+        white = Image.new("RGBA", (s4, s4), (255, 255, 255, 0))
+        white.putalpha(sheen)
         icon = Image.alpha_composite(icon, white)
 
-    # White-tinted glyph centered. Glyph occupies ~60% of icon side.
-    g_size = int(size * 0.60)
+    # Glyph: 64% of icon, with a soft outer glow underneath for depth
+    g_size = int(s4 * 0.64)
     g = glyph_rgba.resize((g_size, g_size), Image.LANCZOS)
     g_arr = np.array(g)
-    # Force RGB to white (alpha is preserved → anti-aliasing intact)
     g_arr[:, :, 0] = 255
     g_arr[:, :, 1] = 255
     g_arr[:, :, 2] = 255
     g_white = Image.fromarray(g_arr, "RGBA")
-    off = ((size - g_size) // 2, (size - g_size) // 2)
+    off = ((s4 - g_size) // 2, (s4 - g_size) // 2)
+
+    # Glow: blurred copy of the glyph alpha, tinted darker (creates lift)
+    if s4 >= 96:
+        from PIL import ImageFilter
+        glow_layer = Image.new("RGBA", (s4, s4), (0, 0, 0, 0))
+        glow_layer.alpha_composite(g_white, dest=off)
+        glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(radius=s4 * 0.018))
+        # Reduce alpha to ~25% for subtle lift
+        ga = np.array(glow_layer)
+        ga[:, :, 3] = (ga[:, :, 3].astype(np.float32) * 0.45).astype(np.uint8)
+        glow_layer = Image.fromarray(ga, "RGBA")
+        # Composite glow first, then the crisp glyph on top
+        icon = Image.alpha_composite(icon, glow_layer)
+
     icon.alpha_composite(g_white, dest=off)
-    return icon
+
+    # Final downsample to target size with high-quality filter
+    return icon.resize((size, size), Image.LANCZOS)
 
 
 def main() -> int:
@@ -128,32 +172,37 @@ def main() -> int:
     transparent.save(png_path, "PNG", optimize=True)
     print(f"wrote {png_path}  size={transparent.size}  bytes={png_path.stat().st_size}")
 
-    # Multi-resolution app icon
+    # Multi-resolution app icon. We write to BOTH "one-glyph.ico" (legacy /
+    # favicon) and a fresh-named "one-link-app.ico" so Windows shell can't
+    # present a stale cached icon under the old path.
     sizes = [16, 24, 32, 48, 64, 128, 256]
     icons = [make_app_icon(s, transparent) for s in sizes]
-    ico_path = OUT_DIR / "one-glyph.ico"
-    icons[-1].save(
-        ico_path,
-        format="ICO",
-        sizes=[(s, s) for s in sizes],
-        append_images=icons[:-1],
-    )
-    # Also save a PNG preview of the app icon for documentation
+
+    for name in ("one-glyph.ico", "one-link-app.ico"):
+        ico_path = OUT_DIR / name
+        icons[-1].save(
+            ico_path,
+            format="ICO",
+            sizes=[(s, s) for s in sizes],
+            append_images=icons[:-1],
+        )
+        print(f"wrote {ico_path}  embedded sizes={sizes}  bytes={ico_path.stat().st_size}")
+
+    # Save a PNG preview of the app icon for documentation
     preview = make_app_icon(512, transparent)
     preview_path = OUT_DIR / "one-glyph-app.png"
     preview.save(preview_path, "PNG", optimize=True)
-    print(f"wrote {ico_path}  embedded sizes={sizes}  bytes={ico_path.stat().st_size}")
     print(f"wrote {preview_path}  size={preview.size}  bytes={preview_path.stat().st_size}")
 
-    # Verify ICO embeds all sizes
-    print("\nverifying ICO …")
-    im = Image.open(ico_path)
-    embedded = sorted(im.info.get("sizes", set()))
-    print(f"  embedded sizes: {embedded}")
-    if embedded != [(s, s) for s in sizes]:
-        print("  WARNING: ICO did not embed all expected sizes")
-        return 3
-    print("  OK — all expected sizes present")
+    # Verify ICOs embed all sizes
+    print("\nverifying ICOs …")
+    for name in ("one-glyph.ico", "one-link-app.ico"):
+        im = Image.open(OUT_DIR / name)
+        embedded = sorted(im.info.get("sizes", set()))
+        if embedded != [(s, s) for s in sizes]:
+            print(f"  WARNING: {name} missing sizes: got {embedded}")
+            return 3
+        print(f"  {name}: embedded sizes OK")
     return 0
 
 

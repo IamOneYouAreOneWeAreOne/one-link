@@ -155,7 +155,7 @@ class UIServer:
         try:
             html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
         except FileNotFoundError:
-            html = "<h1>One_link UI not bundled</h1>"
+            html = "<h1>One Link UI not bundled</h1>"
         # Set the auth cookie on first GET / from this browser.
         resp = web.Response(text=html, content_type="text/html")
         resp.set_cookie(

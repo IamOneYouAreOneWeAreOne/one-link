@@ -246,7 +246,7 @@ def _print_help() -> None:
 
 
 def run_chat() -> int:
-    click.echo("One_link chat\n")
+    click.echo("One Link chat\n")
     spawned: Optional[subprocess.Popen] = None
 
     port = _daemon_alive()

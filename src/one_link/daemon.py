@@ -625,7 +625,7 @@ class Daemon:
             ui_port = 0
 
         log.info(
-            "One_link daemon up — id=%s host=%s peer=:%d ctrl=:%d ui=:%d",
+            "One Link daemon up — id=%s host=%s peer=:%d ctrl=:%d ui=:%d",
             self.me.short_id,
             self.me.hostname,
             peer_port,

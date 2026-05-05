@@ -53,13 +53,13 @@ def _request(cmd: str, **kwargs) -> dict:
 @click.group()
 @click.version_option(__version__, prog_name="one-link")
 def cli():
-    """One_link — peer-to-peer LAN chat + file sync."""
+    """One Link — peer-to-peer LAN chat + file sync."""
 
 
 @cli.command()
 @click.option("-v", "--verbose", is_flag=True)
 def daemon(verbose):
-    """Run the One_link daemon (leave this in a terminal/service)."""
+    """Run the One Link daemon (leave this in a terminal/service)."""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -127,7 +127,7 @@ def send_file(peer, path):
 @cli.command()
 @click.option("--no-browser", is_flag=True, help="Don't auto-open a browser tab.")
 def app(no_browser):
-    """Open the One_link desktop app (auto-starts daemon, opens browser UI)."""
+    """Open the One Link desktop app (auto-starts daemon, opens browser UI)."""
     from one_link.app import run_app
     raise SystemExit(run_app(no_browser=no_browser))
 
@@ -168,7 +168,7 @@ def audit():
         except Exception as e:
             raise click.ClickException(f"audit fetch failed: {e}")
 
-    click.echo(f"One_link version {res.get('version', '?')}")
+    click.echo(f"One Link version {res.get('version', '?')}")
     click.echo(f"  UI bind:           {res.get('ui_bind')}")
     click.echo(f"  UI auth:           {res.get('ui_auth')}")
     click.echo(f"  External telemetry: {'NO' if res.get('no_external_telemetry') else 'YES'}")
