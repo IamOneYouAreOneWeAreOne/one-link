@@ -64,7 +64,12 @@ def daemon(verbose):
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    asyncio.run(daemon_mod.run())
+    try:
+        asyncio.run(daemon_mod.run())
+    except RuntimeError as e:
+        if "already running" in str(e):
+            raise click.ClickException(str(e))
+        raise
 
 
 @cli.command()

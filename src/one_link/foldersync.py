@@ -56,6 +56,20 @@ def _safe_relpath(folder_root: Path, p: Path) -> Optional[str]:
     return rel.as_posix()
 
 
+def _safe_child(root: Path, rel_path: str) -> Optional[Path]:
+    """Resolve a remote manifest path under root, rejecting traversal."""
+    rel = Path(str(rel_path).replace("\\", "/"))
+    if rel.is_absolute() or any(part in ("", ".", "..") for part in rel.parts):
+        return None
+    root_resolved = root.resolve()
+    candidate = (root_resolved / rel).resolve()
+    try:
+        candidate.relative_to(root_resolved)
+    except ValueError:
+        return None
+    return candidate
+
+
 class _Handler(FileSystemEventHandler):
     """Pushes events into a thread-safe dirty set + a wakeup function."""
 
@@ -257,8 +271,10 @@ class FolderEngine:
         if not f:
             return
         root = Path(f["local_path"])
-        rel = entry.file_path.replace("\\", "/")
-        dst = root / rel
+        dst = _safe_child(root, entry.file_path)
+        if dst is None:
+            log.warning("refusing unsafe manifest path: %r", entry.file_path)
+            return
         if entry.blob_hash is None:
             # Tombstone: remove if present
             if dst.is_file():
@@ -287,7 +303,10 @@ class FolderEngine:
         f = self.state.get_folder(folder_name)
         if not f:
             return
-        p = Path(f["local_path"]) / rel_path.replace("\\", "/")
+        p = _safe_child(Path(f["local_path"]), rel_path)
+        if p is None:
+            log.warning("refusing unsafe tombstone path: %r", rel_path)
+            return
         if p.is_file():
             try:
                 p.unlink()

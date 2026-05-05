@@ -118,10 +118,9 @@ def test_daemon_survives_burst_of_disconnects():
 def test_two_daemons_in_same_home_second_fails_gracefully():
     """Spinning a second daemon at the same ONE_LINK_HOME — what happens?
 
-    Currently: both daemons start servers on auto-allocated ports, both
-    overwrite the .port files. The second one wins. This is sub-optimal
-    but not a crash. Test asserts no crash; we'll harden the actual lock
-    logic later if needed."""
+    The second process must not stay alive and advertise the same local
+    device again; that duplicate advertising is what fills the sidebar
+    with repeated entries."""
     tmp = Path(tempfile.mkdtemp(prefix="one_link_dup_"))
     try:
         home = tmp / "H"
@@ -142,9 +141,10 @@ def test_two_daemons_in_same_home_second_fails_gracefully():
             )
             time.sleep(2.0)
             try:
-                # Both processes should still be alive (no crash from race).
                 assert p1.poll() is None, "p1 unexpectedly exited"
-                assert p2.poll() is None, "p2 unexpectedly exited"
+                assert p2.poll() is not None, "p2 should exit under instance lock"
+                log_text = log2.read_text(encoding="utf-8", errors="replace")
+                assert "already running" in log_text
             finally:
                 for p in (p1, p2):
                     p.terminate()

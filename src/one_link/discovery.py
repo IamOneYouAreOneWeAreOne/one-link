@@ -35,6 +35,14 @@ class Registry:
     on_change: Callable[[], None] | None = None
 
     def upsert(self, peer: Peer) -> None:
+        # mDNS can briefly surface multiple service names for the same device
+        # after restarts. The public key is the durable identity; keep the
+        # newest advertisement and remove older aliases so the UI does not
+        # fill with duplicates.
+        if peer.ed_pub_hex:
+            for sid, existing in list(self.peers.items()):
+                if sid != peer.short_id and existing.ed_pub_hex == peer.ed_pub_hex:
+                    self.peers.pop(sid, None)
         self.peers[peer.short_id] = peer
         if self.on_change:
             self.on_change()
@@ -94,6 +102,7 @@ class _AsyncListener(ServiceListener):
         self.self_short_id = self_short_id
         self.zc = zc
         self.loop = loop
+        self.service_to_short_id: dict[str, str] = {}
 
     def _schedule_resolve(self, type_: str, name: str) -> None:
         asyncio.run_coroutine_threadsafe(self._resolve(type_, name), self.loop)
@@ -105,6 +114,7 @@ class _AsyncListener(ServiceListener):
             return
         peer = _info_to_peer(info, self.self_short_id)
         if peer:
+            self.service_to_short_id[name] = peer.short_id
             self.registry.upsert(peer)
 
     def add_service(self, _zc, type_: str, name: str) -> None:
@@ -114,7 +124,7 @@ class _AsyncListener(ServiceListener):
         self._schedule_resolve(type_, name)
 
     def remove_service(self, _zc, _type, name: str) -> None:
-        sid = name.split(".", 1)[0]
+        sid = self.service_to_short_id.pop(name, None) or name.split(".", 1)[0]
         self.registry.remove(sid)
 
 

@@ -181,6 +181,34 @@ async def test_api_send_file_round_trip(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_api_send_file_sanitizes_uploaded_filename():
+    with daemon_pair() as p:
+        base_a, tok_a = _server_addr(p.a.home)
+        payload = b"safe upload name"
+
+        form = aiohttp.FormData()
+        form.add_field("peer", p.b.short_id)
+        form.add_field(
+            "file", payload, filename="../evil.bin",
+            content_type="application/octet-stream",
+        )
+        async with aiohttp.ClientSession() as s:
+            async with s.post(
+                f"{base_a}/api/send-file", data=form,
+                headers={"Authorization": f"Bearer {tok_a}"},
+            ) as r:
+                assert r.status == 200, await r.text()
+
+        await asyncio.sleep(1.0)
+        inbox = p.b.home / "data" / "inbox"
+        files = list(inbox.iterdir())
+        match = [f for f in files if f.name.endswith("evil.bin")]
+        assert match, files
+        assert all(f.parent == inbox for f in files)
+        assert not (p.b.home / "data" / "evil.bin").exists()
+
+
+@pytest.mark.asyncio
 async def test_api_files_lists_and_downloads():
     with daemon_pair() as p:
         # Send a file from A to B first so B has something in inbox
@@ -339,6 +367,8 @@ async def test_api_audit_describes_surface():
             assert j["ui_bind"].startswith("127.0.0.1")
             assert j["no_external_telemetry"] is True
             assert "TEXT" in j["peer_protocol"]["message_types"]
+            assert "PAIR_REQUEST" in j["peer_protocol"]["message_types"]
+            assert "CAPS" in j["peer_protocol"]["message_types"]
             assert any("mdns" in d["kind"] for d in j["outbound_destinations"])
 
 
@@ -464,6 +494,37 @@ async def test_outbound_blocked_for_rejected_peer():
             )
             assert status >= 400
             assert "rejected" in j2["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_inbound_blocked_for_rejected_peer():
+    """Rejecting a peer must stop their future inbound messages too."""
+    with daemon_pair() as p:
+        from tests.harness import message_log, request as ctrl_request
+
+        ctrl_request(p.a.control_port, cmd="send", peer=p.b.short_id, body="seed")
+        await asyncio.sleep(0.6)
+
+        base_b, tok_b = _server_addr(p.b.home)
+        async with aiohttp.ClientSession() as s:
+            _, j = await _get_json(s, f"{base_b}/api/peers", token=tok_b)
+            target = next(pp for pp in j["peers"] if pp["short_id"] == p.a.short_id)
+            await _post_json(
+                s, f"{base_b}/api/peers/{target['fingerprint']}/trust",
+                {"trust": "rejected"}, token=tok_b,
+            )
+
+        res = ctrl_request(
+            p.a.control_port, cmd="send", peer=p.b.short_id, body="blocked inbound"
+        )
+        assert not res["ok"]
+        await asyncio.sleep(0.6)
+        bodies = [
+            m.get("body")
+            for m in message_log(p.b.home)
+            if m.get("t") == "TEXT" and m.get("dir") == "in"
+        ]
+        assert "blocked inbound" not in bodies
 
 
 @pytest.mark.asyncio

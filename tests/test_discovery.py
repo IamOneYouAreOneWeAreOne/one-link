@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from one_link.discovery import Peer, Registry
 
 
@@ -11,7 +13,7 @@ def _peer(short_id: str, host: str = "host", addr: str = "10.0.0.2", port: int =
         hostname=host,
         address=addr,
         port=port,
-        ed_pub_hex="00" * 32,
+        ed_pub_hex=hashlib.sha256(short_id.encode("utf-8")).hexdigest(),
     )
 
 
@@ -75,6 +77,18 @@ def test_upsert_overwrites_same_id():
     assert p.hostname == "alice2"
     assert p.address == "10.0.0.2"
     assert p.port == 2222
+
+
+def test_upsert_replaces_same_public_key_alias():
+    r = Registry()
+    pub = "11" * 32
+    r.upsert(Peer("aaaa1111", "WeareOne", "10.0.0.2", 1111, pub))
+    r.upsert(Peer("bbbb2222", "WeareOne", "10.0.0.2", 2222, pub))
+
+    out = r.list()
+    assert len(out) == 1
+    assert out[0].short_id == "bbbb2222"
+    assert out[0].port == 2222
 
 
 def test_on_change_callback():

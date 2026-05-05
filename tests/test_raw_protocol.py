@@ -32,6 +32,13 @@ async def _open_to(host: str, port: int, key_path: Path):
     return me, channel
 
 
+async def _recv_non_caps(channel):
+    while True:
+        msg = decode_msg(await channel.recv())
+        if msg.get("t") != "CAPS":
+            return msg
+
+
 async def _send_file_with_arbitrary_name(
     host: str,
     port: int,
@@ -49,7 +56,7 @@ async def _send_file_with_arbitrary_name(
         blob=blob_hex,
     )
     await channel.send(encode_msg(offer))
-    decode_msg(await channel.recv())  # offer ACK
+    await _recv_non_caps(channel)  # offer ACK
 
     chunk = make_msg(
         "FILE_CHUNK",
@@ -60,7 +67,7 @@ async def _send_file_with_arbitrary_name(
         eof=True,
     )
     await channel.send(encode_msg(chunk))
-    decode_msg(await channel.recv())  # chunk ACK
+    await _recv_non_caps(channel)  # chunk ACK
     await channel.close()
     return blob_hex
 
@@ -110,6 +117,87 @@ def test_malicious_filename_stays_in_inbox(evil_name: str):
         ]
         for bad in bad_locations:
             assert not bad.exists(), f"attack succeeded: {bad}"
+
+
+def test_invalid_file_offer_blob_is_rejected_without_file():
+    with daemon_pair() as p:
+        async def _attack():
+            me, channel = await _open_to("127.0.0.1", p.b.peer_port, p.tmp / "attacker.key")
+            offer = make_msg(
+                "FILE_OFFER",
+                me.short_id,
+                name="bad.bin",
+                size=4,
+                blob="not-a-blob",
+            )
+            await channel.send(encode_msg(offer))
+            await channel.close()
+
+        asyncio.run(_attack())
+        time.sleep(0.5)
+        assert inbox_files(p.b.home) == []
+
+
+def test_file_chunk_sequence_mismatch_deletes_partial_file():
+    with daemon_pair() as p:
+        async def _attack():
+            me, channel = await _open_to("127.0.0.1", p.b.peer_port, p.tmp / "attacker.key")
+            content = b"abcd"
+            blob_hex = blake3.blake3(content).hexdigest()
+            offer = make_msg(
+                "FILE_OFFER",
+                me.short_id,
+                name="seq.bin",
+                size=len(content),
+                blob=blob_hex,
+            )
+            await channel.send(encode_msg(offer))
+            await _recv_non_caps(channel)
+            chunk = make_msg(
+                "FILE_CHUNK",
+                me.short_id,
+                blob=blob_hex,
+                seq=1,
+                data=base64.b64encode(content).decode("ascii"),
+                eof=True,
+            )
+            await channel.send(encode_msg(chunk))
+            await channel.close()
+
+        asyncio.run(_attack())
+        time.sleep(0.5)
+        assert inbox_files(p.b.home) == []
+
+
+def test_file_chunk_declared_size_overrun_deletes_partial_file():
+    with daemon_pair() as p:
+        async def _attack():
+            me, channel = await _open_to("127.0.0.1", p.b.peer_port, p.tmp / "attacker.key")
+            content = b"too long"
+            blob_hex = blake3.blake3(content).hexdigest()
+            offer = make_msg(
+                "FILE_OFFER",
+                me.short_id,
+                name="overrun.bin",
+                size=1,
+                blob=blob_hex,
+            )
+            await channel.send(encode_msg(offer))
+            await _recv_non_caps(channel)
+            chunk = make_msg(
+                "FILE_CHUNK",
+                me.short_id,
+                blob=blob_hex,
+                seq=0,
+                data=base64.b64encode(content).decode("ascii"),
+                eof=True,
+            )
+            await channel.send(encode_msg(chunk))
+            await channel.close()
+
+        asyncio.run(_attack())
+        time.sleep(0.5)
+        assert inbox_files(p.b.home) == []
 
 
 # ─────────────────── Frame-size / oversize attacks ─────────────────

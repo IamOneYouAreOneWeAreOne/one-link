@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import contextlib
 import json
 import logging
+import os
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,7 +48,9 @@ log = logging.getLogger("one_link.daemon")
 
 CONTROL_PORT_FILE = "control.port"
 PEER_PORT_FILE = "peer.port"
+DAEMON_LOCK_FILE = "daemon.lock"
 CHUNK_SIZE = 256 * 1024  # 256 KiB plaintext per FILE_CHUNK
+MAX_INCOMING_FILE_BYTES = 1024 * 1024 * 1024  # match UI upload cap
 
 # Capabilities this build advertises in CAPS messages.
 PROTOCOL_VERSION = "OL1.1"
@@ -86,6 +90,7 @@ class IncomingFile:
     out_path: Path
     handle: object
     received: int = 0
+    next_seq: int = 0
     hasher: object = None
 
 
@@ -101,6 +106,61 @@ class Daemon:
         self.state: State | None = None
         self.pairing = PairingTracker()
         self._prune_task: asyncio.Task | None = None
+        self._lock_file = None
+
+    def _acquire_instance_lock(self) -> None:
+        """Prevent duplicate daemons for the same config/data home."""
+        lock_path = data_dir() / DAEMON_LOCK_FILE
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(lock_path, "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                f.seek(0)
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError as e:
+                    raise RuntimeError(
+                        "One Link daemon is already running for this ONE_LINK_HOME"
+                    ) from e
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as e:
+                    raise RuntimeError(
+                        "One Link daemon is already running for this ONE_LINK_HOME"
+                    ) from e
+            f.seek(0)
+            f.truncate()
+            f.write(str(os.getpid()).encode("ascii"))
+            f.flush()
+            self._lock_file = f
+        except Exception:
+            f.close()
+            raise
+
+    def _release_instance_lock(self) -> None:
+        if self._lock_file is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                self._lock_file.seek(0)
+                with contextlib.suppress(OSError):
+                    msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                with contextlib.suppress(OSError):
+                    fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            with contextlib.suppress(OSError):
+                self._lock_file.close()
+            self._lock_file = None
 
     # ─── persistence helper ─────────────────────────────────────────────
     def _persist(self, *, msg: dict, direction: str, peer_fp: str, peer_short_id: str) -> dict:
@@ -147,6 +207,10 @@ class Daemon:
             return
         log.info("peer connected: %s @ %s", channel.peer_short_id, addr)
         peer_fp = fingerprint_of(channel.peer_ed_pub)
+        if self._check_inbound_trust(peer_fp):
+            log.warning("rejected peer attempted inbound connection: %s", peer_fp[:8])
+            await channel.close()
+            return
         if self.state is not None:
             try:
                 hostname: str | None = None
@@ -206,13 +270,20 @@ class Daemon:
             self._broadcast_tail(ev)
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_OFFER":
-            blob = msg["blob"]
-            name = Path(msg["name"]).name
+            blob = str(msg["blob"])
+            if not self._valid_blob_hex(blob):
+                raise RuntimeError("invalid FILE_OFFER blob hash")
+            size = int(msg["size"])
+            if size < 0 or size > MAX_INCOMING_FILE_BYTES:
+                raise RuntimeError(f"invalid FILE_OFFER size: {size}")
+            name = Path(str(msg["name"])).name
+            if not name or name in (".", ".."):
+                name = "unnamed.bin"
             out_path = inbox_dir() / f"{blob[:8]}_{name}"
             handle = open(out_path, "wb")
             self._incoming_files[blob] = IncomingFile(
                 name=name,
-                size=int(msg["size"]),
+                size=size,
                 blob_hex=blob,
                 out_path=out_path,
                 handle=handle,
@@ -226,19 +297,37 @@ class Daemon:
             self._broadcast_tail(ev)
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_CHUNK":
-            blob = msg["blob"]
+            blob = str(msg["blob"])
             f = self._incoming_files.get(blob)
             if not f:
                 log.warning("FILE_CHUNK with no offer: %s", blob[:8])
                 return
-            data = base64.b64decode(msg["data"])
+            seq = int(msg.get("seq", -1))
+            if seq != f.next_seq:
+                self._abort_incoming_file(blob, f)
+                raise RuntimeError(
+                    f"FILE_CHUNK sequence mismatch for {blob[:8]}: "
+                    f"expected {f.next_seq}, got {seq}"
+                )
+            try:
+                data = base64.b64decode(msg["data"], validate=True)
+            except (binascii.Error, ValueError) as e:
+                self._abort_incoming_file(blob, f)
+                raise RuntimeError(f"invalid FILE_CHUNK base64: {e}") from e
+            if f.received + len(data) > f.size:
+                self._abort_incoming_file(blob, f)
+                raise RuntimeError(
+                    f"FILE_CHUNK exceeds declared size for {blob[:8]}: "
+                    f"{f.received + len(data)} > {f.size}"
+                )
             f.handle.write(data)
             f.hasher.update(data)
             f.received += len(data)
+            f.next_seq += 1
             if msg.get("eof"):
                 f.handle.close()
                 got = f.hasher.hexdigest()
-                ok = got == f.blob_hex
+                ok = got == f.blob_hex and f.received == f.size
                 done = {
                     "t": "FILE_DONE",
                     "id": msg["id"],
@@ -253,6 +342,9 @@ class Daemon:
                 ev = self._persist(msg=done, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
                 self._broadcast_tail(ev)
                 self._incoming_files.pop(blob, None)
+                if not ok:
+                    with contextlib.suppress(OSError):
+                        f.out_path.unlink()
                 log.info("file done: %s ok=%s -> %s", f.name, ok, f.out_path)
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "PING":
@@ -342,6 +434,49 @@ class Daemon:
         except ValueError:
             return None
 
+    def _valid_blob_hex(self, blob: str) -> bool:
+        if len(blob) != 64:
+            return False
+        try:
+            int(blob, 16)
+            return True
+        except ValueError:
+            return False
+
+    def _abort_incoming_file(self, blob: str, f: IncomingFile) -> None:
+        with contextlib.suppress(Exception):
+            f.handle.close()
+        self._incoming_files.pop(blob, None)
+        with contextlib.suppress(OSError):
+            f.out_path.unlink()
+
+    def _check_inbound_trust(self, peer_fp: str) -> bool:
+        if self.state is None:
+            return False
+        rec = self.state.get_peer(peer_fp)
+        return bool(rec and rec.trust == "rejected")
+
+    def _verify_channel_peer(self, peer: Peer, channel: ch.Channel) -> str:
+        actual_fp = fingerprint_of(channel.peer_ed_pub)
+        if peer.ed_pub_hex:
+            try:
+                expected_pub = bytes.fromhex(peer.ed_pub_hex)
+            except ValueError as e:
+                raise RuntimeError(f"peer {peer.short_id} advertised invalid pubkey") from e
+            expected_fp = fingerprint_of(expected_pub)
+            if channel.peer_ed_pub != expected_pub:
+                raise RuntimeError(
+                    "peer identity mismatch: expected full fingerprint "
+                    f"{expected_fp}, got {actual_fp}"
+                )
+            return actual_fp
+        if channel.peer_short_id != peer.short_id:
+            raise RuntimeError(
+                f"peer fingerprint mismatch: expected short id {peer.short_id}, "
+                f"got {channel.peer_short_id}"
+            )
+        return actual_fp
+
     def _check_outbound_trust(self, peer: Peer) -> str | None:
         """Returns None if outbound is allowed; otherwise an error string."""
         if self.state is None:
@@ -361,12 +496,7 @@ class Daemon:
         reader, writer = await asyncio.open_connection(peer.address, peer.port)
         try:
             channel = await ch.initiate(reader, writer, self.me)
-            if channel.peer_short_id != peer.short_id:
-                raise RuntimeError(
-                    f"peer fingerprint mismatch: expected {peer.short_id}, "
-                    f"got {channel.peer_short_id}"
-                )
-            peer_fp = fingerprint_of(channel.peer_ed_pub)
+            peer_fp = self._verify_channel_peer(peer, channel)
             # Record outbound peer too — first time we send to them, they'll
             # appear in our peer DB with trust='pending'.
             if self.state is not None:
@@ -421,11 +551,7 @@ class Daemon:
         reader, writer = await asyncio.open_connection(peer.address, peer.port)
         try:
             channel = await ch.initiate(reader, writer, self.me)
-            if channel.peer_short_id != peer.short_id:
-                raise RuntimeError(
-                    f"peer fingerprint mismatch: expected {peer.short_id}, "
-                    f"got {channel.peer_short_id}"
-                )
+            self._verify_channel_peer(peer, channel)
             try:
                 await channel.send(encode_msg(_build_caps(self.me.short_id)))
             except Exception:
@@ -594,12 +720,7 @@ class Daemon:
         reader, writer = await asyncio.open_connection(peer.address, peer.port)
         try:
             channel = await ch.initiate(reader, writer, self.me)
-            if channel.peer_short_id != peer.short_id:
-                raise RuntimeError(
-                    f"peer fingerprint mismatch: expected {peer.short_id}, "
-                    f"got {channel.peer_short_id}"
-                )
-            peer_fp = fingerprint_of(channel.peer_ed_pub)
+            peer_fp = self._verify_channel_peer(peer, channel)
             if self.state is not None:
                 try:
                     self.state.upsert_peer(
@@ -785,6 +906,7 @@ class Daemon:
 
     # ─── lifecycle ──────────────────────────────────────────────────────
     async def start(self) -> None:
+        self._acquire_instance_lock()
         # Persistent state (sqlite) — created early so peer/handshake hooks
         # can record into it.
         try:
@@ -922,6 +1044,7 @@ class Daemon:
                 self.state.close()
             except Exception:
                 pass
+        self._release_instance_lock()
 
 
 async def run() -> None:

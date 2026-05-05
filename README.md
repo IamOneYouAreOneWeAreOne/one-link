@@ -11,11 +11,11 @@ effect tracking) with Python as the host harness while LLVM/WASM backends mature
 
 ## Status
 
-**v0.1.0** — modern desktop UI.
+**v0.2.4** — hardened desktop UI, pairing, persistence, ghost-peer pruning, and single-instance daemon startup.
 
 - Native-feeling browser app: dark theme, peer sidebar with online dots,
   message bubbles, drag-drop file send, live updates over WebSocket
-- 115 passing tests across identity, wire, channel, discovery, paths, CLI,
+- 206+ passing tests across identity, wire, channel, discovery, paths, CLI,
   integration, raw-protocol attacks, resilience, tail subscription,
   chat REPL, and the new HTTP/WS server
 - Full path-traversal defense at both the wire-protocol and HTTP layers
@@ -152,8 +152,9 @@ Coherence Language ecosystem hooks (planned for v0.2):
   HTTP requests with `..` in the URL get rejected.
 - **AEAD-protected wire protocol.** Tampering with any frame after
   the handshake closes the connection.
-- **Trust on first use.** v0.1.0 silently accepts any new peer's
-  fingerprint. A confirmation prompt is on the v0.2 list.
+- **Trust on first use with pairing upgrade.** New peers start as pending;
+  SAS pairing lets you pin or reject devices, and rejected peers are blocked
+  in both outbound and inbound directions.
 - **Identity key is unencrypted on disk** (file mode 0600 on Unix; user-
   only ACL via `%APPDATA%` on Windows). Passphrase-encrypted keystore
   is on the roadmap.
@@ -189,10 +190,8 @@ ONE_LINK_HOME=/tmp/ol-B one-link app    # different port, different identity
 
 ## Roadmap
 
-- **v0.2** — Persistent message history (sqlite + FTS5), encrypted-on-disk
-  identity, peer-trust prompts (TOFU upgrade), CRDT folder sync engine,
-  group rooms, audit command surfacing declared network effects
-- **v0.3** — Native window via Tauri (proper app, not a browser tab),
+- **v0.3** — Complete folder sync wire integration, group rooms,
+  native window via Tauri (proper app, not a browser tab),
   signed installers (EV cert) for Win + Mac, tray icon, auto-start
 - **v0.4** — Internet P2P (NAT traversal via Iroh), persistent peers
   beyond mDNS range, distributed gossip discovery

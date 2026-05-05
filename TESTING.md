@@ -7,7 +7,7 @@ pip install -e .[dev]
 python -m pytest tests/ --ignore=tests/smoke_loopback.py -v
 ```
 
-Expect ~94 tests, ~90 seconds. The integration tests spin real daemons in
+Expect ~200 tests, ~2-3 minutes. The integration tests spin real daemons in
 subprocesses and use mDNS, which is the slow part.
 
 ## Test layout
@@ -77,7 +77,7 @@ python tests/smoke_loopback.py
 
 GitHub Actions matrix (`.github/workflows/tests.yml`):
 - Windows + macOS, Python 3.11 + 3.12
-- Unit tests must pass; integration tests run with `continue-on-error` because
-  mDNS reliability on hosted runners is hit-or-miss.
+- Unit and integration tests must pass. If hosted-runner mDNS flakes become
+  noisy, fix the harness or isolate the flaky scenario rather than hiding failures.
 - On push to `master`, builds Windows + macOS binaries and uploads them as
   workflow artifacts.

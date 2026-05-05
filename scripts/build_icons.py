@@ -12,14 +12,16 @@ Run:
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
 
 REPO = Path(__file__).resolve().parent.parent
-SRC = Path(r"$HOME\Projects\Coherence_Energy_Labs_Website\assets\brand\logos\ONE Glyph.png")
 OUT_DIR = REPO / "src" / "one_link" / "web" / "assets"
+DEFAULT_SRC = OUT_DIR / "one-glyph.png"
+SRC = Path(os.environ.get("ONE_LINK_GLYPH_SRC", str(DEFAULT_SRC))).expanduser()
 
 # Brand colors (match index.html CSS tokens)
 ACCENT_TOP = (124, 92, 255)
@@ -154,7 +156,12 @@ def make_app_icon(size: int, glyph_rgba: Image.Image) -> Image.Image:
 
 def main() -> int:
     if not SRC.exists():
-        print(f"source not found: {SRC}", file=sys.stderr)
+        print(
+            f"source not found: {SRC}\n"
+            "Set ONE_LINK_GLYPH_SRC to a source glyph PNG or keep the bundled "
+            f"fallback at {DEFAULT_SRC}.",
+            file=sys.stderr,
+        )
         return 2
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 

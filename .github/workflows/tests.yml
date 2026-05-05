@@ -37,9 +37,6 @@ jobs:
           python -m pytest tests/test_integration.py tests/test_raw_protocol.py tests/test_resilience.py tests/test_tail.py -v
         env:
           PYTHONUNBUFFERED: "1"
-        # mDNS reliability varies by runner. Don't fail the build on flakes,
-        # but surface them in the log.
-        continue-on-error: true
 
   build_windows_binary:
     name: build Windows binary

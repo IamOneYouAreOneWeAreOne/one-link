@@ -287,6 +287,11 @@ class UIServer:
                         live[rec.fingerprint]["last_seen_ms"] = rec.last_seen_ms
                         live[rec.fingerprint]["first_seen_ms"] = rec.first_seen_ms
                     else:
+                        # Pending peers are only TOFU candidates. If they are
+                        # offline and never accepted/rejected, they are usually
+                        # stale mDNS ghosts from a previous daemon/process.
+                        if rec.trust == "pending":
+                            continue
                         live[rec.fingerprint] = {
                             "short_id": rec.short_id,
                             "hostname": rec.hostname or "(offline)",
