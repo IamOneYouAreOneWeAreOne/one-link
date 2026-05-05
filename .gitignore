@@ -44,3 +44,7 @@ peers.json
 # Coverage
 .coverage
 htmlcov/
+
+# stray daemon-test log files
+_exe_test.log
+*.log
