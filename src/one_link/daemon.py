@@ -100,6 +100,7 @@ class Daemon:
         self.ui_server = None  # one_link.server.UIServer | None
         self.state: State | None = None
         self.pairing = PairingTracker()
+        self._prune_task: asyncio.Task | None = None
 
     # ─── persistence helper ─────────────────────────────────────────────
     def _persist(self, *, msg: dict, direction: str, peer_fp: str, peer_short_id: str) -> dict:
@@ -842,6 +843,32 @@ class Daemon:
 
         self.discovery.registry.on_change = _on_peer_change
 
+        # Background prune of unreachable mDNS entries. mDNS records can
+        # outlive the daemon that announced them (OS-level / router caches);
+        # a periodic TCP-probe is the only reliable way to keep the peer
+        # list honest.
+        async def _prune_loop():
+            # Initial settle: wait a bit for mDNS to fully populate, then
+            # an aggressive first prune to clear ghosts.
+            try:
+                await asyncio.sleep(3.0)
+                if self.discovery:
+                    n = await self.discovery.prune_unreachable(timeout=0.4)
+                    if n:
+                        log.info("startup prune: removed %d unreachable peers", n)
+                # Then steady-state every 20 seconds.
+                while True:
+                    await asyncio.sleep(20.0)
+                    if self.discovery:
+                        try:
+                            await self.discovery.prune_unreachable(timeout=0.4)
+                        except Exception as e:
+                            log.warning("prune cycle failed: %s", e)
+            except asyncio.CancelledError:
+                pass
+
+        self._prune_task = asyncio.create_task(_prune_loop())
+
         # Start UI server if available
         if UIServer is not None:
             try:
@@ -871,6 +898,12 @@ class Daemon:
         )
 
     async def stop(self) -> None:
+        if self._prune_task and not self._prune_task.done():
+            self._prune_task.cancel()
+            try:
+                await self._prune_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self.ui_server is not None:
             try:
                 await self.ui_server.stop()

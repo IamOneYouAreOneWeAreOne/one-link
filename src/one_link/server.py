@@ -103,6 +103,7 @@ class UIServer:
         r.add_get("/api/settings", self._guarded(self.api_get_settings))
         r.add_post("/api/settings", self._guarded(self.api_set_settings))
         r.add_get("/api/peers", self._guarded(self.api_peers))
+        r.add_post("/api/peers/prune", self._guarded(self.api_prune_peers))
         r.add_post(r"/api/peers/{fp}/trust", self._guarded(self.api_set_trust))
         r.add_post(r"/api/peers/{fp}/pair", self._guarded(self.api_pair_init))
         r.add_post(r"/api/peers/{fp}/pair-confirm", self._guarded(self.api_pair_confirm))
@@ -279,6 +280,21 @@ class UIServer:
             key=lambda p: (not p["online"], (p["hostname"] or "").lower()),
         )
         return web.json_response({"peers": peers})
+
+    # ─── POST /api/peers/prune ────────────────────────────────────────
+    async def api_prune_peers(self, request: web.Request) -> web.Response:
+        """Force a TCP-probe of every discovered peer; remove unreachable.
+        Surfaces the same prune the daemon runs every 20s in the background,
+        so the user can trigger an immediate cleanup."""
+        if not self.daemon.discovery:
+            return web.json_response({"removed": 0})
+        before = len(self.daemon.discovery.registry.peers)
+        try:
+            removed = await self.daemon.discovery.prune_unreachable(timeout=0.5)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+        after = len(self.daemon.discovery.registry.peers)
+        return web.json_response({"removed": removed, "before": before, "after": after})
 
     # ─── POST /api/peers/{fp}/trust ───────────────────────────────────
     async def api_set_trust(self, request: web.Request) -> web.Response:

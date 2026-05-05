@@ -161,6 +161,38 @@ class Discovery:
             listener=_AsyncListener(self.registry, self.short_id, self._zc, loop),
         )
 
+    async def prune_unreachable(self, *, timeout: float = 0.6) -> int:
+        """TCP-probe every peer in the registry; remove any that don't accept
+        a connection within `timeout` seconds. Returns count removed.
+
+        Catches the "ghost peer" case where mDNS broadcasts (cached by the
+        OS or a network device) outlive the daemon that announced them.
+        """
+        peers = list(self.registry.peers.values())
+        if not peers:
+            return 0
+
+        async def _probe(p: Peer) -> tuple[Peer, bool]:
+            try:
+                fut = asyncio.open_connection(p.address, p.port)
+                reader, writer = await asyncio.wait_for(fut, timeout=timeout)
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+                return p, True
+            except (asyncio.TimeoutError, OSError):
+                return p, False
+
+        results = await asyncio.gather(*(_probe(p) for p in peers), return_exceptions=False)
+        removed = 0
+        for peer, ok in results:
+            if not ok:
+                self.registry.remove(peer.short_id)
+                removed += 1
+        return removed
+
     async def stop(self) -> None:
         try:
             if self._browser:
