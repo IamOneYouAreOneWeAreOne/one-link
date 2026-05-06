@@ -167,6 +167,8 @@ class UIServer:
         r.add_get(r"/api/peers/{fp}/capabilities", self._guarded(self.api_get_peer_capabilities))
         r.add_post(r"/api/peers/{fp}/capabilities", self._guarded(self.api_set_peer_capabilities))
         r.add_get("/api/capability-audit", self._guarded(self.api_capability_audit))
+        r.add_get("/api/rendezvous", self._guarded(self.api_get_rendezvous))
+        r.add_post("/api/rendezvous", self._guarded(self.api_set_rendezvous))
         r.add_post(r"/api/peers/{fp}/pair", self._guarded(self.api_pair_init))
         r.add_post(r"/api/peers/{fp}/pair-confirm", self._guarded(self.api_pair_confirm))
         r.add_post(r"/api/peers/{fp}/pair-reject", self._guarded(self.api_pair_reject))
@@ -732,6 +734,56 @@ class UIServer:
         )
         return web.json_response({"events": rows})
 
+    # ─── /api/rendezvous (v0.5.1) ─────────────────────────────────────
+    async def api_get_rendezvous(self, request: web.Request) -> web.Response:
+        """Report the daemon's current rendezvous status:
+          - configured URLs
+          - active client (running yes/no)
+          - last self-observation per URL (so the user can confirm
+            the rendezvous saw the right public IP)."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        urls = self.daemon.state.get_rendezvous_urls()
+        observed: dict[str, dict] = {}
+        if self.daemon.rendezvous is not None:
+            for url, obs in self.daemon.rendezvous.observed_self.items():
+                observed[url] = {
+                    "observed_host": obs.observed_host,
+                    "observed_port": obs.observed_port,
+                    "expires_at_ms": obs.expires_at_ms,
+                    "server_time_ms": obs.server_time_ms,
+                }
+        return web.json_response({
+            "urls": urls,
+            "active": self.daemon.rendezvous is not None,
+            "observed_self": observed,
+        })
+
+    async def api_set_rendezvous(self, request: web.Request) -> web.Response:
+        """Update the rendezvous URL list. Stored to state and applied
+        on next daemon restart. (Live re-config of the running client
+        is a v0.5.2 polish — for now restart to pick up changes.)"""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        urls = data.get("urls")
+        if urls is None or not isinstance(urls, list):
+            return web.json_response({"error": "urls must be a list"}, status=400)
+        if not all(isinstance(u, str) for u in urls):
+            return web.json_response({"error": "urls must be a list of strings"}, status=400)
+        try:
+            self.daemon.state.set_rendezvous_urls(urls)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response({
+            "ok": True,
+            "urls": self.daemon.state.get_rendezvous_urls(),
+            "note": "Restart One Link to apply.",
+        })
+
     # ─── pairing ──────────────────────────────────────────────────────
     def _resolve_peer_for_pairing(self, fp: str):
         """Find a Peer object whose fingerprint matches `fp`. Pulls from
@@ -889,11 +941,8 @@ class UIServer:
         body = data.get("body", "")
         if not peer_needle or not body:
             return web.json_response({"error": "peer and body required"}, status=400)
-        peer = (
-            self.daemon.discovery.registry.find(peer_needle)
-            if self.daemon.discovery
-            else None
-        )
+        # v0.5.1: also tries the rendezvous if the peer isn't on mDNS.
+        peer = await self.daemon.resolve_for_send(peer_needle)
         if peer is None:
             return web.json_response({"error": f"no peer {peer_needle!r}"}, status=404)
         try:
@@ -935,11 +984,8 @@ class UIServer:
         if not upload_path or not upload_path.is_file():
             return web.json_response({"error": "missing 'file' field"}, status=400)
 
-        peer = (
-            self.daemon.discovery.registry.find(peer_needle)
-            if self.daemon.discovery
-            else None
-        )
+        # v0.5.1: also tries the rendezvous if the peer isn't on mDNS.
+        peer = await self.daemon.resolve_for_send(peer_needle)
         if peer is None:
             return web.json_response({"error": f"no peer {peer_needle!r}"}, status=404)
 

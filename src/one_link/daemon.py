@@ -245,6 +245,10 @@ class Daemon:
         # so the dicts stay bounded.
         self._handshake_history: dict[str, list[float]] = {}
         self._handshake_inflight: dict[str, int] = {}
+        # v0.5.1: optional rendezvous client. Started in start() iff URLs
+        # are configured in state; stopped on shutdown. None when offline /
+        # unconfigured — daemon falls back to mDNS-only behaviour.
+        self.rendezvous = None  # type: rendezvous_client.RendezvousClient | None
 
     def _acquire_instance_lock(self) -> None:
         """Prevent duplicate daemons for the same config/data home.
@@ -1324,6 +1328,106 @@ class Daemon:
         except ValueError:
             return None
 
+    # ─── v0.5.1: rendezvous lifecycle + peer-endpoint resolution ───────
+    async def _start_rendezvous(self, *, peer_port: int) -> None:
+        """Start a RendezvousClient if URLs are configured. No-op
+        otherwise. Failures are logged, not raised — the daemon must
+        keep working LAN-only when rendezvous is unreachable.
+        """
+        if self.state is None:
+            return
+        try:
+            urls = self.state.get_rendezvous_urls()
+        except Exception as e:
+            log.warning("could not read rendezvous URLs: %s", e)
+            return
+        if not urls:
+            log.info("rendezvous: no URLs configured; LAN-only mode")
+            return
+        from one_link import rendezvous_client
+        try:
+            advertise = rendezvous_client.discover_local_endpoints(peer_port=peer_port)
+        except Exception as e:
+            log.warning("rendezvous: failed to enumerate local endpoints: %s", e)
+            advertise = []
+        client = rendezvous_client.RendezvousClient(
+            private_key=self.me.private,
+            pubkey=self.me.public_bytes,
+            rendezvous_urls=urls,
+            advertise_endpoints=advertise,
+            capabilities=list(CAPS_FEATURES),
+        )
+        try:
+            await client.start()
+        except Exception as e:
+            log.warning("rendezvous: client.start failed: %s", e)
+            return
+        self.rendezvous = client
+        log.info(
+            "rendezvous: connected to %d endpoint(s); advertising %d local ip(s)",
+            len(urls), len(advertise),
+        )
+
+    async def resolve_peer_endpoint(self, peer_fp: str) -> Peer | None:
+        """Find a way to reach a paired peer. mDNS first (LAN), then
+        the rendezvous (cross-internet). Returns None if no endpoint
+        is currently known.
+
+        The returned Peer is synthesized from the best-available data:
+        if the peer is on mDNS we use that record; otherwise the
+        rendezvous-observed public IP and port.
+        """
+        # mDNS path — current state already has the freshest LAN view.
+        if self.discovery is not None:
+            for p in self.discovery.registry.list():
+                if not p.ed_pub_hex:
+                    continue
+                try:
+                    if fingerprint_of(bytes.fromhex(p.ed_pub_hex)) == peer_fp:
+                        return p
+                except ValueError:
+                    continue
+
+        # Rendezvous fallback — only meaningful for paired peers since
+        # we need their pubkey from the persistent DB.
+        if self.rendezvous is None or self.state is None:
+            return None
+        rec = self.state.get_peer(peer_fp)
+        if not rec or not rec.pubkey:
+            return None
+        try:
+            ack = await self.rendezvous.lookup(rec.pubkey)
+        except Exception as e:
+            log.debug("rendezvous lookup for %s failed: %s", peer_fp[:8], e)
+            return None
+        if ack is None:
+            return None
+
+        # Pick the best endpoint to dial. Priority:
+        #   1. Rendezvous-observed (public IP — works across NATs without
+        #      hole-punch as long as the peer is fully open or already
+        #      mapped to its peer port).
+        #   2. Advertised endpoints in order (LAN IPs come first if the
+        #      peer was on the same network at register time).
+        # Hole-punch logic in v0.5.2 will additionally schedule a
+        # rendezvous-coordinated PUNCH attempt before falling back to
+        # relay in v0.5.3.
+        candidates: list[tuple[str, int]] = []
+        if ack.observed_endpoint is not None:
+            candidates.append((ack.observed_endpoint.host, ack.observed_endpoint.port))
+        for e in ack.advertised_endpoints:
+            candidates.append((e.host, e.port))
+        if not candidates:
+            return None
+        host, port = candidates[0]
+        return Peer(
+            short_id=rec.short_id,
+            hostname=rec.hostname or rec.short_id,
+            address=host,
+            port=int(port),
+            ed_pub_hex=rec.pubkey.hex(),
+        )
+
     def _valid_blob_hex(self, blob: str) -> bool:
         if len(blob) != 64:
             return False
@@ -2173,6 +2277,11 @@ class Daemon:
                 await self._reply(writer, {"ok": True, "me": me, "peers": peers})
             elif cmd == "send":
                 peers = self._resolve_peer_candidates(req["peer"])
+                # v0.5.1: rendezvous fallback for paired peers off-LAN.
+                if not peers:
+                    fallback = await self.resolve_for_send(req["peer"])
+                    if fallback is not None:
+                        peers = [fallback]
                 if not peers:
                     await self._reply(
                         writer, {"ok": False, "error": f"no peer {req['peer']!r}"}
@@ -2192,6 +2301,10 @@ class Daemon:
                 await self._reply(writer, {"ok": False, "error": str(last_error)})
             elif cmd == "send_file":
                 peers = self._resolve_peer_candidates(req["peer"])
+                if not peers:
+                    fallback = await self.resolve_for_send(req["peer"])
+                    if fallback is not None:
+                        peers = [fallback]
                 if not peers:
                     await self._reply(
                         writer, {"ok": False, "error": f"no peer {req['peer']!r}"}
@@ -2242,6 +2355,35 @@ class Daemon:
 
     def _resolve_peer_candidates(self, needle: str) -> list[Peer]:
         return self.discovery.registry.candidates(needle) if self.discovery else []
+
+    async def resolve_for_send(self, needle: str) -> Peer | None:
+        """v0.5.1: send-path peer resolution. mDNS first, rendezvous
+        fallback for paired peers.
+
+        `needle` may be a hostname, short_id prefix, or full fingerprint.
+        Returns the best Peer record we can construct, or None.
+        """
+        # mDNS path — same as before.
+        peer = self._resolve_peer(needle)
+        if peer is not None:
+            return peer
+
+        # Fingerprint or short_id lookup against the persistent peer DB —
+        # only for peers we've explicitly trusted (pinned).
+        if self.state is None:
+            return None
+        rec = None
+        # Full fingerprint?
+        if len(needle) == 64:
+            rec = self.state.get_peer(needle)
+        # Short ID?
+        if rec is None and len(needle) <= 16:
+            rec = self.state.get_peer_by_short_id(needle)
+        if rec is None or rec.trust != "pinned":
+            return None
+
+        # Rendezvous fallback — only if the daemon has a client running.
+        return await self.resolve_peer_endpoint(rec.fingerprint)
 
     def _broadcast_tail(self, msg: dict) -> None:
         line = (json.dumps({"event": "msg", "msg": msg}) + "\n").encode("utf-8")
@@ -2390,6 +2532,11 @@ class Daemon:
         else:
             ui_port = 0
 
+        # v0.5.1: rendezvous client. Optional — only starts if URLs are
+        # configured. The daemon stays fully functional on LAN-only when
+        # rendezvous is disabled or unreachable.
+        await self._start_rendezvous(peer_port=peer_port)
+
         log.info(
             "One Link daemon up — id=%s host=%s peer=:%d ctrl=:%d ui=:%d",
             self.me.short_id,
@@ -2463,6 +2610,14 @@ class Daemon:
         )
 
     async def stop(self) -> None:
+        # v0.5.1: revoke rendezvous registration first so peers learn
+        # we're going offline before we tear down anything else.
+        if self.rendezvous is not None:
+            try:
+                await self.rendezvous.stop()
+            except Exception:
+                pass
+            self.rendezvous = None
         for peer_fp in list(self._outbound_sessions):
             await self._drop_outbound_session(peer_fp)
         if self._folder_sync_task and not self._folder_sync_task.done():

@@ -1022,6 +1022,32 @@ class State:
         with self._write_lock:
             self._conn.execute("DELETE FROM settings WHERE key = ?", (key,))
 
+    # ─── rendezvous (v0.5.1) ──────────────────────────────────────────
+    # Stored as a JSON list under the `rendezvous_urls` setting key.
+    # The daemon registers its presence with each on startup and uses
+    # them for cross-internet peer lookup when mDNS doesn't have the
+    # peer.
+
+    def get_rendezvous_urls(self) -> list[str]:
+        raw = self.get_setting("rendezvous_urls")
+        if not raw:
+            return []
+        try:
+            v = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(v, list):
+            return []
+        return [str(u) for u in v if isinstance(u, str) and u]
+
+    def set_rendezvous_urls(self, urls: Iterable[str]) -> None:
+        clean = sorted({u.strip().rstrip("/") for u in urls if u and u.strip()})
+        # Light validation — protocol prefix only.
+        for u in clean:
+            if not (u.startswith("http://") or u.startswith("https://")):
+                raise ValueError(f"rendezvous URL must be http(s): {u!r}")
+        self.set_setting("rendezvous_urls", json.dumps(clean))
+
     # ─── lifecycle ────────────────────────────────────────────────────
 
     def close(self) -> None:
