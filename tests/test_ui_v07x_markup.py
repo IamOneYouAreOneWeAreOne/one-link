@@ -37,10 +37,10 @@ EXPECTED_IDS = [
     "btn-attach2",
     "btn-screenshot",
     "btn-send",
-    # Notification permission banner
-    "notif-banner",
-    "notif-enable",
-    "notif-dismiss",
+    # v0.7.x post-cleanup: notification permission lives in the
+    # Settings modal now, not as a top banner. The button is the
+    # only entry point.
+    "set-notif",
     # v0.7.x version-mismatch banner (warns before crypto fails)
     "version-banner",
     "version-banner-text",
@@ -69,7 +69,6 @@ EXPECTED_CLASSES = [
     "progress-mini",
     "status-icon",
     "files-toggle",
-    "notif-banner",
     "shortcuts-list",
     "lat-dot",
     "copyable",
@@ -249,7 +248,7 @@ async def test_daemon_serves_v07x_ui():
         for needle in [
             'id="attach-tray"',
             'id="btn-screenshot"',
-            'id="notif-banner"',
+            'id="set-notif"',
             'id="btn-files-received"',
             'id="btn-files-sent"',
             'id="btn-open-inbox"',

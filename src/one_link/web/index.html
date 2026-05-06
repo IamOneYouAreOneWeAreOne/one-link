@@ -328,6 +328,10 @@
     position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
     color: var(--text-dim); pointer-events: none; font-size: 13px;
   }
+  /* Hide the icon-trigger when search is collapsed — otherwise it
+     orphan-floats next to the toggle button and looks like two
+     separate search icons (only one of which is clickable). */
+  .convo-h .search:not(.open) .icon-trigger { display: none; }
   .search-results-banner {
     background: var(--bg-1); border-bottom: 1px solid var(--line);
     padding: 8px 22px; font-size: 12px; color: var(--text-dim);
@@ -993,14 +997,10 @@
     </div>
   </header>
 
-  <!-- One-time notification permission banner -->
-  <div class="notif-banner" id="notif-banner">
-    <span>Get a desktop alert when a message or file arrives.</span>
-    <div>
-      <button class="dismiss" id="notif-dismiss">Not now</button>
-      <button id="notif-enable">Enable</button>
-    </div>
-  </div>
+  <!-- v0.7.x: notification opt-in lives in the Settings modal now,
+       so the chat surface stays uncluttered. The version-mismatch
+       banner below is intentionally still here — it's a
+       transient warning, not a recurring permission prompt. -->
 
   <!-- Version-mismatch banner (orange) — appears when at least one
        paired peer is on a different app_version than this device. -->
@@ -1072,13 +1072,10 @@
           <button id="btn-clear-search">Clear</button>
         </div>
 
-        <div class="peer-tools" id="peer-tools">
-          <span class="label">Allow</span>
-          <button class="cap-toggle" data-cap="chat">Chat</button>
-          <button class="cap-toggle" data-cap="files">Files</button>
-          <button class="cap-toggle" data-cap="folder_sync">Folders</button>
-          <span class="scope">This paired device only</span>
-        </div>
+        <!-- v0.7.x: per-device Allow toggles (Chat/Files/Folders)
+             moved into the Settings modal so the chat surface stays
+             uncluttered. Open Settings (gear icon, top right, or
+             Ctrl+,) → "Permissions for this device". -->
 
         <div class="messages" id="messages"></div>
 
@@ -1243,6 +1240,29 @@
       <div class="settings-row">
         <label for="set-passphrase">Passphrase</label>
         <input type="password" id="set-passphrase" placeholder="(set ONE_LINK_PASSPHRASE env var; restart required)" disabled />
+      </div>
+
+      <!-- v0.7.x: desktop notifications (was the giant top banner). -->
+      <div class="settings-row">
+        <label for="set-notif">Desktop notifications</label>
+        <button id="set-notif" class="btn-ghost">Enable</button>
+      </div>
+
+      <!-- v0.7.x: per-device permissions (was the cluttered chat header row). -->
+      <div class="settings-section" id="set-perm-section" style="display:none;">
+        <div class="settings-section-h">
+          <span>Permissions for <span id="set-perm-peer">this device</span></span>
+        </div>
+        <p class="settings-help">
+          Choose what this paired device can do with you. Chat is allowed
+          right after pairing; Files and Folders require explicit consent
+          (deny-by-default — see security audit finding A).
+        </p>
+        <div class="mini-actions wrap">
+          <button class="cap-toggle" data-cap="chat">Chat</button>
+          <button class="cap-toggle" data-cap="files">Files</button>
+          <button class="cap-toggle" data-cap="folder_sync">Folders</button>
+        </div>
       </div>
 
       <!-- v0.5.3: Connect across networks (rendezvous) -->
@@ -1453,6 +1473,10 @@
     err.status = status;
     err.code = j && j.code || null;
     err.hint = j && j.hint || null;
+    // v0.7.x: surface the underlying exception text on catch-all
+    // 500s so the user (and us) can see what actually failed,
+    // instead of just "Send failed."
+    err.error_detail = j && j.error_detail || null;
     return err;
   }
 
@@ -1488,7 +1512,15 @@
   function errorToastBody(e) {
     const headline = (e && e.message) ? e.message : String(e);
     const hint = e?.hint;
-    return hint ? `${headline} — ${hint}` : headline;
+    // v0.7.x: append the error_detail (server-side exception text)
+    // for catch-all "Send failed." errors. Without this the user
+    // just sees "Send failed." and the actual cause is invisible.
+    const detail = e?.error_detail;
+    let body = hint ? `${headline} — ${hint}` : headline;
+    if (detail && (e?.code === "send_failed" || !e?.code)) {
+      body += ` (${detail})`;
+    }
+    return body;
   }
 
   // ── rAF-throttled schedulers ───────────────────────────────────────
@@ -1549,10 +1581,30 @@
     return typeof Notification !== "undefined";
   }
   function maybeShowNotifBanner() {
-    if (!notifySupported()) return;
-    if (Notification.permission !== "default") return;
-    if (localStorage.getItem("ol_notif_dismissed") === "1") return;
-    $("#notif-banner")?.classList.add("show");
+    // v0.7.x: notification opt-in moved into Settings. This helper
+    // is kept as a no-op so existing call sites stay valid; the
+    // status now renders in the settings modal's "Desktop
+    // notifications" row, populated by populateNotifSettings().
+  }
+  function populateNotifSettings() {
+    const btn = $("#set-notif");
+    if (!btn) return;
+    if (!notifySupported()) {
+      btn.textContent = "Not supported";
+      btn.disabled = true;
+      return;
+    }
+    btn.disabled = false;
+    if (Notification.permission === "granted") {
+      btn.textContent = "Enabled ✓";
+      btn.classList.add("on");
+    } else if (Notification.permission === "denied") {
+      btn.textContent = "Blocked by browser";
+      btn.disabled = true;
+    } else {
+      btn.textContent = "Enable";
+      btn.classList.remove("on");
+    }
   }
   function notifyIncoming(title, body) {
     if (!notifySupported()) return;
@@ -2244,17 +2296,27 @@
   }
 
   function renderPeerControls() {
-    const tools = $("#peer-tools");
+    // v0.7.x: per-device permission toggles moved into the Settings
+    // modal. This function is kept as a no-op so call sites that
+    // ran on every peer/state refresh don't need to be touched.
+    // The actual UI lives in populatePeerPermSettings(), which
+    // runs when the Settings modal is opened.
+  }
+
+  function populatePeerPermSettings() {
+    const section = $("#set-perm-section");
+    if (!section) return;
     const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
     if (!peer || !peer.fingerprint || peer.trust !== "pinned") {
-      tools.classList.remove("show");
+      section.style.display = "none";
       return;
     }
-    tools.classList.add("show");
+    section.style.display = "";
+    $("#set-perm-peer").textContent = peer.hostname || peer.short_id;
     const allowed = peer.allowed_capabilities == null
       ? new Set(["chat", "files", "folder_sync"])
       : new Set(peer.allowed_capabilities || []);
-    tools.querySelectorAll(".cap-toggle").forEach(btn => {
+    section.querySelectorAll(".cap-toggle").forEach(btn => {
       btn.classList.toggle("on", allowed.has(btn.dataset.cap));
     });
   }
@@ -2269,7 +2331,7 @@
     try {
       const res = await api.post(`/api/peers/${peer.fingerprint}/capabilities`, { allowed: [...current] });
       peer.allowed_capabilities = res.allowed;
-      renderPeerControls();
+      populatePeerPermSettings();
       toast("Peer policy updated", "good");
     } catch (e) {
       toast(`Policy update failed: ${e.message || e}`, "bad");
@@ -2298,25 +2360,34 @@
     maybeShowNotifBanner();
   }
 
-  // Notification banner buttons
-  $("#notif-enable")?.addEventListener("click", async () => {
+  // v0.7.x: notification toggle in Settings modal.
+  $("#set-notif")?.addEventListener("click", async () => {
     if (!notifySupported()) {
       toast("This browser doesn't support notifications.", "bad");
-      $("#notif-banner").classList.remove("show");
+      return;
+    }
+    if (Notification.permission === "granted") {
+      toast(
+        "Notifications are already enabled. To turn them off, use your browser's site settings.",
+        "info", 5000,
+      );
+      return;
+    }
+    if (Notification.permission === "denied") {
+      toast(
+        "Browser is blocking notifications for this site. Open browser site settings to allow.",
+        "bad", 5000,
+      );
       return;
     }
     try {
       const res = await Notification.requestPermission();
-      $("#notif-banner").classList.remove("show");
       if (res === "granted") toast("Notifications enabled", "good");
       else toast("Notifications declined", "info");
+      populateNotifSettings();
     } catch (e) {
-      $("#notif-banner").classList.remove("show");
+      toast(`Permission request failed: ${e.message || e}`, "bad");
     }
-  });
-  $("#notif-dismiss")?.addEventListener("click", () => {
-    localStorage.setItem("ol_notif_dismissed", "1");
-    $("#notif-banner").classList.remove("show");
   });
 
   $("#version-banner-dismiss")?.addEventListener("click", () => {
@@ -3035,6 +3106,10 @@
       $("#set-rendezvous").value = "";
       renderRendezvousStatus({});
     }
+    // v0.7.x: populate the moved-from-the-top-banner notification
+    // status + the moved-from-the-chat-header per-device permissions.
+    populateNotifSettings();
+    populatePeerPermSettings();
     settingsBackdrop.classList.add("show");
   };
   $("#settings-cancel").onclick = () => settingsBackdrop.classList.remove("show");
