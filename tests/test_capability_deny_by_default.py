@@ -97,10 +97,33 @@ def test_default_allow_plus_prompt_covers_user_facing_local_caps():
 
 # ─── _apply_default_capability_policy ──────────────────────────────
 
-def test_apply_default_policy_sets_chat_only(tmp_path: Path):
+def test_apply_default_policy_allow_all_by_default(tmp_path: Path):
+    """v0.7.3: with pair_default_allow_all=true (the new default),
+    SAS-pair finalize leaves policy=None — legacy allow-everything."""
     me = _new_identity()
     them = _new_identity()
     state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    daemon._apply_default_capability_policy(them.fingerprint)
+    policy = state.get_peer_capability_policy(them.fingerprint)
+    assert policy is None
+    state.close()
+
+
+def test_apply_default_policy_strict_when_setting_off(tmp_path: Path):
+    """When pair_default_allow_all is set to false, the v0.7.2 audit
+    behavior kicks back in: policy=[CHAT] only."""
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    state.set_setting("pair_default_allow_all", "false")
     daemon = Daemon(me)
     daemon.state = state
     state.upsert_peer(
@@ -137,10 +160,14 @@ def test_apply_default_policy_does_not_overwrite_existing(tmp_path: Path):
     state.close()
 
 
-def test_apply_default_policy_records_audit(tmp_path: Path):
+def test_apply_default_policy_records_audit_when_strict(tmp_path: Path):
+    """Audit row only fires when strict mode is active (it's the
+    one path that actually writes a policy). With allow-all
+    default, no policy is written so no audit row should appear."""
     me = _new_identity()
     them = _new_identity()
     state = State(db_path=tmp_path / "s.db")
+    state.set_setting("pair_default_allow_all", "false")
     daemon = Daemon(me)
     daemon.state = state
     state.upsert_peer(
@@ -177,12 +204,16 @@ def test_capability_allowed_legacy_none_policy_allows_everything(tmp_path: Path)
     state.close()
 
 
-def test_capability_allowed_strict_policy_after_pair(tmp_path: Path):
-    """After SAS pair finalize sets policy=[CHAT], FILES/FOLDER_SYNC
-    are denied until the user explicitly grants them."""
+def test_capability_allowed_strict_policy_after_pair_when_setting_off(
+    tmp_path: Path,
+):
+    """When pair_default_allow_all=false (opt-in strict), SAS-pair
+    finalize sets policy=[CHAT]; FILES/FOLDER_SYNC are denied until
+    the user explicitly grants them in the device drawer."""
     me = _new_identity()
     them = _new_identity()
     state = State(db_path=tmp_path / "s.db")
+    state.set_setting("pair_default_allow_all", "false")
     daemon = Daemon(me)
     daemon.state = state
     state.upsert_peer(

@@ -4499,12 +4499,23 @@ class Daemon:
                 if share is None or share.lower() in ("1", "true", "yes"):
                     rdz_to_advertise = self.state.get_rendezvous_urls()
 
+        # v0.7.3: smart device-kind detection. Cached after first call.
+        from one_link import device_info as _device_info
+        try:
+            di = _device_info.detect()
+            kind_tag = di.compact()
+            self._device_info = di
+        except Exception:
+            kind_tag = ""
+            self._device_info = _device_info.DeviceInfo()
+
         self.discovery = Discovery(
             short_id=self.me.short_id,
             hostname=advertised_name,
             port=peer_port,
             ed_pub_hex=self.me.public_bytes.hex(),
             rendezvous_urls=rdz_to_advertise,
+            device_kind=kind_tag,
         )
         await self.discovery.start()
 

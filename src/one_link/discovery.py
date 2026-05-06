@@ -34,6 +34,10 @@ class Peer:
     # auto-discover. Stored as a list of strings; never None
     # (empty list when the peer didn't advertise any).
     rendezvous_urls: list[str] = field(default_factory=list)
+    # v0.7.3: compact `<os>-<kind>` device tag advertised by the peer
+    # (e.g. "macos-laptop", "windows-desktop", "linux-server"). Empty
+    # when the peer is on a pre-v0.7.3 build that didn't advertise.
+    device_kind: str = ""
 
 
 @dataclass
@@ -124,6 +128,10 @@ def _info_to_peer(info: AsyncServiceInfo, self_short_id: str) -> Peer | None:
         port=info.port or 0,
         ed_pub_hex=props.get("pub", ""),
         rendezvous_urls=rdz_urls,
+        # v0.7.3: device kind ("macos-laptop", etc). Bounded length;
+        # we don't trust arbitrary strings inside the UI but the
+        # /api/peers serializer + display path treats it as opaque text.
+        device_kind=(props.get("kind") or "")[:32],
     )
 
 
@@ -175,6 +183,7 @@ class Discovery:
         port: int,
         ed_pub_hex: str,
         rendezvous_urls: list[str] | None = None,
+        device_kind: str = "",
     ):
         self.short_id = short_id
         self.hostname = hostname
@@ -183,6 +192,9 @@ class Discovery:
         # v0.5.4: rendezvous URLs we advertise in our mDNS TXT record
         # so other daemons on this LAN auto-discover them.
         self.rendezvous_urls: list[str] = list(rendezvous_urls or [])
+        # v0.7.3: compact device kind (e.g. "macos-laptop"). Empty
+        # string means "don't advertise".
+        self.device_kind: str = (device_kind or "")[:32]
         self.registry = Registry()
         self._zc: AsyncZeroconf | None = None
         self._info: AsyncServiceInfo | None = None
@@ -206,6 +218,8 @@ class Discovery:
         }
         if rdz_value:
             properties["rdz"] = rdz_value
+        if self.device_kind:
+            properties["kind"] = self.device_kind
         self._info = AsyncServiceInfo(
             type_=SERVICE_TYPE,
             name=f"{self.short_id}.{SERVICE_TYPE}",
@@ -239,6 +253,8 @@ class Discovery:
         }
         if rdz_value:
             new_props["rdz"] = rdz_value
+        if self.device_kind:
+            new_props["kind"] = self.device_kind
         # `update_service` re-broadcasts the TXT record without
         # cycling the service registration (which would briefly remove
         # us from peers' registries and surface as a flap).

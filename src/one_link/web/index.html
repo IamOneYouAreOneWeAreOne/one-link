@@ -1552,6 +1552,47 @@
     return false;
   }
 
+  // v0.7.3: pretty-print the compact `<os>-<kind>` mDNS tag.
+  // Maps to a short label + an emoji icon. Returns "" when the
+  // peer is on a pre-v0.7.3 build that didn't advertise.
+  const _DEVICE_KIND_LABELS = {
+    "windows-desktop": { label: "Windows desktop", icon: "🖥️" },
+    "windows-laptop":  { label: "Windows laptop",  icon: "💻" },
+    "windows-server":  { label: "Windows server",  icon: "🗄️" },
+    "macos-desktop":   { label: "Mac desktop",     icon: "🖥️" },
+    "macos-laptop":    { label: "MacBook",         icon: "💻" },
+    "linux-desktop":   { label: "Linux desktop",   icon: "🖥️" },
+    "linux-laptop":    { label: "Linux laptop",    icon: "💻" },
+    "linux-server":    { label: "Linux server",    icon: "🗄️" },
+    "linux-embedded":  { label: "Linux embedded",  icon: "🔌" },
+    "linux-mobile":    { label: "Linux mobile",    icon: "📱" },
+    "linux-tablet":    { label: "Linux tablet",    icon: "📱" },
+    "ios-mobile":      { label: "iPhone",          icon: "📱" },
+    "ios-tablet":      { label: "iPad",            icon: "📱" },
+    "android-mobile":  { label: "Android phone",   icon: "📱" },
+    "android-tablet":  { label: "Android tablet",  icon: "📱" },
+    "bsd-desktop":     { label: "BSD",             icon: "🖥️" },
+  };
+  function deviceKindLabel(p) {
+    const k = (p && p.device_kind) || "";
+    if (!k) return null;
+    if (_DEVICE_KIND_LABELS[k]) return _DEVICE_KIND_LABELS[k];
+    // Generic fallback for unknown OS/kind combos.
+    const [osPart, kindPart] = k.split("-");
+    const icon =
+      kindPart === "laptop"   ? "💻" :
+      kindPart === "desktop"  ? "🖥️" :
+      kindPart === "server"   ? "🗄️" :
+      kindPart === "mobile"   ? "📱" :
+      kindPart === "tablet"   ? "📱" :
+      kindPart === "embedded" ? "🔌" : "❔";
+    const niceOs = ({
+      windows: "Windows", macos: "macOS", linux: "Linux",
+      bsd: "BSD", ios: "iOS", android: "Android",
+    })[osPart] || (osPart || "Device");
+    return { label: `${niceOs} ${kindPart || ""}`.trim(), icon };
+  }
+
   function reachLabel(p) {
     // v0.5.6: server-side regime is authoritative when present —
     // it knows whether the actual transport went through the relay.
@@ -1823,7 +1864,15 @@
 
       const av = el("div", "avatar", initials(p.display_name || p.hostname || p.short_id));
       const txt = el("div", "text");
-      txt.appendChild(el("div", "name", p.display_name || p.hostname || "(unknown)"));
+      const kind = deviceKindLabel(p);
+      const nameEl = el("div", "name");
+      if (kind) {
+        const ic = el("span", "kind-icon", kind.icon + " ");
+        ic.title = kind.label;
+        nameEl.appendChild(ic);
+      }
+      nameEl.appendChild(document.createTextNode(p.display_name || p.hostname || "(unknown)"));
+      txt.appendChild(nameEl);
       const sub = el("div", "sub");
       const lc = latencyClass(p);
       if (lc) {
@@ -1926,9 +1975,18 @@
       const row = el("div", "discover-row");
       const av = el("div", "avatar", initials(p.hostname || p.short_id));
       const meta = el("div", "meta");
-      meta.appendChild(el("div", "name", p.hostname || "(unknown)"));
-      meta.appendChild(el("div", "sub",
-        `${p.short_id} · ${p.address || "?"}:${p.port || "?"}`));
+      const kind = deviceKindLabel(p);
+      const nameRow = el("div", "name");
+      if (kind) {
+        const ic = el("span", "kind-icon", kind.icon + " ");
+        nameRow.appendChild(ic);
+      }
+      nameRow.appendChild(document.createTextNode(p.hostname || "(unknown)"));
+      meta.appendChild(nameRow);
+      const subText = kind
+        ? `${kind.label} · ${p.short_id} · ${p.address || "?"}:${p.port || "?"}`
+        : `${p.short_id} · ${p.address || "?"}:${p.port || "?"}`;
+      meta.appendChild(el("div", "sub", subText));
       const btn = el("button", "pair-btn", "Pair");
       row.appendChild(av);
       row.appendChild(meta);
@@ -2559,10 +2617,20 @@
       muted: !!peer.muted,
     };
 
-    $("#device-drawer-name").textContent =
-      peer.display_name || peer.hostname || peer.short_id;
-    $("#device-drawer-sub").textContent =
-      `${peer.short_id} · ${reachLabel(peer)}`;
+    const kind = deviceKindLabel(peer);
+    const drawerNameEl = $("#device-drawer-name");
+    drawerNameEl.textContent = "";
+    if (kind) {
+      const ic = el("span", "kind-icon", kind.icon + " ");
+      ic.title = kind.label;
+      drawerNameEl.appendChild(ic);
+    }
+    drawerNameEl.appendChild(document.createTextNode(
+      peer.display_name || peer.hostname || peer.short_id
+    ));
+    const subParts = [peer.short_id, reachLabel(peer)];
+    if (kind) subParts.push(kind.label);
+    $("#device-drawer-sub").textContent = subParts.join(" · ");
 
     $("#dev-alias").value = peer.local_alias || "";
     $("#dev-mute").checked = !!peer.muted;
@@ -2573,6 +2641,17 @@
     document.querySelectorAll("#dev-cap-row .cap-toggle").forEach(btn => {
       btn.classList.toggle("on", allowed.has(btn.dataset.cap));
     });
+    // v0.7.3: Allow-all master toggle reflects the union state.
+    // policy=null is the canonical "allow everything" state — it
+    // wins regardless of which individual toggles are visible.
+    const allowAllNow = (
+      peer.allowed_capabilities == null
+      || (
+        allowed.has("chat") && allowed.has("files")
+        && allowed.has("folder_sync")
+      )
+    );
+    $("#dev-allow-all").checked = !!allowAllNow;
 
     $("#dev-regime").textContent = reachLabel(peer);
     const lat = peer.health?.latency_ewma_ms;
@@ -2630,6 +2709,36 @@
         btn.classList.toggle("on", isOn);
       }
     };
+  });
+
+  // v0.7.3: master "Allow all" toggle. ON sets policy=null (legacy
+  // allow-everything). OFF sets policy=[] (explicit deny everything;
+  // user grants individually below).
+  $("#dev-allow-all")?.addEventListener("change", async (e) => {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    const wantsAll = !!e.target.checked;
+    try {
+      const body = { allowed: wantsAll ? null : [] };
+      const res = await api.post(`/api/peers/${fp}/capabilities`, body);
+      // Reflect the new state in the drawer's individual toggles
+      // immediately so the user sees consistent UI.
+      const allowed = res.allowed == null
+        ? new Set(["chat", "files", "folder_sync"])
+        : new Set(res.allowed || []);
+      document.querySelectorAll("#dev-cap-row .cap-toggle").forEach(btn => {
+        btn.classList.toggle("on", allowed.has(btn.dataset.cap));
+      });
+      // Update local state.peers cache so refreshPeers doesn't flip
+      // the toggle back on the next render-coalesce tick.
+      const peer = [...state.peers.values()]
+        .find(p => p.fingerprint === fp);
+      if (peer) peer.allowed_capabilities = res.allowed;
+      toast(wantsAll ? "Allowing all capabilities" : "Permissions cleared", "good");
+    } catch (err) {
+      e.target.checked = !wantsAll;
+      toast(`Update failed: ${err.message || err}`, "bad");
+    }
   });
   $("#dev-shortid").onclick = () => {
     if (state.deviceDrawerFp) {
@@ -3482,9 +3591,13 @@
       const r = await api.get("/api/settings");
       $("#set-name").value = r.display_name || "";
       $("#set-autoaccept").checked = !!r.auto_accept_lan;
+      // v0.7.3: default-allow-all on pair (true by default).
+      $("#set-pair-allow-all").checked =
+        r.pair_default_allow_all !== false;
     } catch (e) {
       $("#set-name").value = "";
       $("#set-autoaccept").checked = false;
+      $("#set-pair-allow-all").checked = true;
     }
     // v0.5.3: load current rendezvous URLs + status
     try {
@@ -3506,6 +3619,7 @@
     const payload = {
       display_name: $("#set-name").value.trim() || null,
       auto_accept_lan: $("#set-autoaccept").checked,
+      pair_default_allow_all: $("#set-pair-allow-all").checked,
     };
     let savedSettings = false;
     try {

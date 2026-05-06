@@ -398,9 +398,20 @@ class UIServer:
         if self.daemon.state is None:
             return web.json_response({})
         s = self.daemon.state.all_settings()
+        # v0.7.3: pair_default_allow_all defaults to TRUE — every
+        # SAS-paired device gets full caps unless the user opts in
+        # to deny-by-default. (Reverses the v0.7.2 audit-finding-A
+        # default after user feedback that the friction wasn't
+        # worth it for trusted SAS-verified peers.)
+        pair_allow_all_raw = s.get("pair_default_allow_all")
+        pair_allow_all = (
+            pair_allow_all_raw is None
+            or pair_allow_all_raw.lower() in ("1", "true", "yes")
+        )
         return web.json_response({
             "display_name": s.get("display_name"),
             "auto_accept_lan": s.get("auto_accept_lan", "false") == "true",
+            "pair_default_allow_all": pair_allow_all,
         })
 
     async def api_set_settings(self, request: web.Request) -> web.Response:
@@ -420,6 +431,11 @@ class UIServer:
             self.daemon.state.set_setting(
                 "auto_accept_lan",
                 "true" if data["auto_accept_lan"] else "false",
+            )
+        if "pair_default_allow_all" in data:
+            self.daemon.state.set_setting(
+                "pair_default_allow_all",
+                "true" if data["pair_default_allow_all"] else "false",
             )
         return web.json_response({"ok": True})
 
@@ -483,6 +499,9 @@ class UIServer:
                     "capabilities": [],
                     "allowed_capabilities": None,
                     "same_host": same_host,
+                    # v0.7.3: device kind advertised via mDNS TXT
+                    # (e.g. "macos-laptop", "windows-desktop").
+                    "device_kind": getattr(p, "device_kind", "") or "",
                 }
         # Merge persistent state
         if self.daemon.state is not None:
