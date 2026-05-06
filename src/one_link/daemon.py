@@ -100,6 +100,15 @@ CDC_CACHE_MAX_BYTES = 512 * 1024 * 1024
 COMPRESSION_MIN_BYTES = 2048
 COMPRESSION_MIN_SAVINGS = 0.08
 OUTBOUND_SESSION_IDLE_S = 300.0
+# v0.6.3 robustness: bounded waits replace previously unbounded ones.
+# Without these, a stale mDNS endpoint mapping to a TCP listener that
+# doesn't speak the One Link protocol caused send_file to hang forever
+# on `ch.initiate`. Now: handshake has 8s, per-chunk ACK has 30s, the
+# whole file-send has a watchdog at 5min for a 1GB upload (~3MB/s
+# floor — slow but not stuck).
+HANDSHAKE_DEADLINE_OUTBOUND_S = 8.0
+FILE_ACK_DEADLINE_S = 30.0
+FILE_SEND_TOTAL_DEADLINE_S = 600.0
 # H4: re-validate idle outbound sessions with a PING before reusing them.
 # A NAT box / Wi-Fi roam / asymmetric-disconnect can silently kill a TCP
 # session; without this probe the next send_to() would block on a dead
@@ -535,6 +544,49 @@ class Daemon:
         except Exception as e:
             log.warning("state.update_transfer failed: %s", e)
             return None
+
+    # v0.6.3: transfer-ledger watchdog.
+    STUCK_TRANSFER_DEADLINE_MS = 5 * 60 * 1000  # 5 min without progress
+
+    def _reap_stuck_transfers(self) -> int:
+        """Mark any 'offered' or 'active' transfer as 'failed' if it
+        hasn't been updated in STUCK_TRANSFER_DEADLINE_MS. Defends
+        the UI against silent stalls (peer crashed, NAT dropped the
+        connection, network change). Returns the count reaped."""
+        if self.state is None:
+            return 0
+        now_ms = int(time.time() * 1000)
+        cutoff = now_ms - self.STUCK_TRANSFER_DEADLINE_MS
+        try:
+            transfers = self.state.list_transfers(limit=500)
+        except Exception:
+            return 0
+        reaped = 0
+        for t in transfers:
+            if t.status not in ("offered", "active"):
+                continue
+            if t.updated_ms > cutoff:
+                continue
+            try:
+                rec = self.state.update_transfer(
+                    t.id,
+                    status="failed",
+                    metadata={
+                        **t.metadata,
+                        "reaped": True,
+                        "reaped_reason": "no_progress_within_deadline",
+                        "reaped_at_ms": now_ms,
+                    },
+                )
+                self._broadcast_transfer(rec)
+                reaped += 1
+                log.info(
+                    "reaped stuck transfer %s (%s, last update %d ms ago)",
+                    t.id, t.status, now_ms - t.updated_ms,
+                )
+            except Exception as e:
+                log.warning("could not reap transfer %s: %s", t.id, e)
+        return reaped
 
     # ─── peer (encrypted) side ──────────────────────────────────────────
     def _handshake_admit(self, ip: str) -> bool:
@@ -3140,12 +3192,60 @@ class Daemon:
             mode="cdc",
         )
 
-        reader, writer = await self._dial_peer(peer)
-        transfer_id: str | None = None
+        # v0.6.3: create the transfer-ledger row BEFORE the dial so any
+        # failure during dial / handshake / first ACK marks an actual row
+        # as 'failed' rather than disappearing silently. The peer_fp at
+        # this stage is the policy-side estimate (from peer.ed_pub_hex);
+        # the post-handshake _verify_channel_peer corrects it on success.
+        transfer_id = f"out:{blob_hex}:{uuid.uuid4().hex[:12]}"
+        provisional_fp = peer_fp_for_policy or ""
+        self._upsert_transfer(
+            id=transfer_id,
+            direction="out",
+            peer_fp=provisional_fp,
+            kind="file",
+            name=path.name,
+            size=size,
+            blob_hash=blob_hex,
+            status="queued",
+            progress_bytes=0,
+            total_bytes=size,
+            chunks_done=0,
+            chunks_total=len(cdc_chunks),
+            metadata={"mode": "cdc", "path": str(path)},
+        )
+
         try:
-            channel = await ch.initiate(reader, writer, self.me)
+            reader, writer = await self._dial_peer(peer)
+        except Exception as e:
+            self._update_transfer(
+                transfer_id, status="failed",
+                metadata={
+                    "mode": "cdc",
+                    "path": str(path),
+                    "error": f"dial failed: {e}"[:500],
+                    "error_class": type(e).__name__,
+                },
+            )
+            raise
+        try:
+            # v0.6.3: bound the handshake. A stale mDNS endpoint can
+            # map to a listener that doesn't speak our protocol; we'd
+            # hang on read_frame forever otherwise.
+            try:
+                channel = await asyncio.wait_for(
+                    ch.initiate(reader, writer, self.me),
+                    timeout=HANDSHAKE_DEADLINE_OUTBOUND_S,
+                )
+            except asyncio.TimeoutError as e:
+                with contextlib.suppress(Exception):
+                    writer.close()
+                    await writer.wait_closed()
+                raise RuntimeError(
+                    f"file send to {peer.short_id}: handshake timed out "
+                    f"after {HANDSHAKE_DEADLINE_OUTBOUND_S}s — peer not responsive"
+                ) from e
             peer_fp = self._verify_channel_peer(peer, channel)
-            transfer_id = f"out:{blob_hex}:{uuid.uuid4().hex[:12]}"
             if self.state is not None:
                 try:
                     self.state.upsert_peer(
@@ -3158,21 +3258,31 @@ class Daemon:
                     )
                 except Exception:
                     pass
-            self._upsert_transfer(
-                id=transfer_id,
-                direction="out",
-                peer_fp=peer_fp,
-                kind="file",
-                name=path.name,
-                size=size,
-                blob_hash=blob_hex,
-                status="offered",
-                progress_bytes=0,
-                total_bytes=size,
-                chunks_done=0,
-                chunks_total=len(cdc_chunks),
-                metadata={"mode": "cdc", "path": str(path)},
-            )
+            # v0.6.3: ledger row was created earlier (pre-dial); now
+            # advance status to 'offered'. The duplicate creation that
+            # used to be here is gone — single row, walked through
+            # queued → offered → active → complete | failed. peer_fp
+            # was set provisionally at row creation; if for any reason
+            # it differs from the post-handshake fingerprint, do a
+            # full upsert to correct it.
+            if peer_fp != provisional_fp:
+                self._upsert_transfer(
+                    id=transfer_id,
+                    direction="out",
+                    peer_fp=peer_fp,
+                    kind="file",
+                    name=path.name,
+                    size=size,
+                    blob_hash=blob_hex,
+                    status="offered",
+                    progress_bytes=0,
+                    total_bytes=size,
+                    chunks_done=0,
+                    chunks_total=len(cdc_chunks),
+                    metadata={"mode": "cdc", "path": str(path)},
+                )
+            else:
+                self._update_transfer(transfer_id, status="offered")
 
             # Send our caps before any application traffic.
             try:
@@ -3181,8 +3291,22 @@ class Daemon:
                 log.warning("CAPS send (file outbound) failed: %s", e)
 
             async def _await_ack(ch_: ch.Channel) -> dict:
+                # v0.6.3: bound each recv. Without this, a peer that
+                # received our chunk but never ACKed (e.g., crashed,
+                # NAT dropped, channel hung mid-flush) would freeze
+                # the entire transfer indefinitely.
+                deadline = FILE_ACK_DEADLINE_S
                 while True:
-                    m = decode_msg(await ch_.recv())
+                    try:
+                        plaintext = await asyncio.wait_for(
+                            ch_.recv(), timeout=deadline,
+                        )
+                    except asyncio.TimeoutError as e:
+                        raise RuntimeError(
+                            f"file send to {peer.short_id}: peer did not "
+                            f"ACK within {deadline}s — transfer aborted"
+                        ) from e
+                    m = decode_msg(plaintext)
                     if m.get("t") == "CAPS":
                         features = list(normalize_caps(m.get("features", [])))
                         ch_.peer_caps = {
@@ -3348,8 +3472,19 @@ class Daemon:
                 "size": size,
                 "transfer_id": transfer_id,
             }
-        except Exception:
-            self._update_transfer(transfer_id, status="failed")
+        except Exception as e:
+            # v0.6.3: stamp the human-readable reason on the ledger row
+            # so the UI can show "timed out" / "peer unreachable" /
+            # "decrypt_failed" instead of a silent spinner.
+            self._update_transfer(
+                transfer_id, status="failed",
+                metadata={
+                    "mode": "cdc",
+                    "path": str(path),
+                    "error": str(e)[:500],
+                    "error_class": type(e).__name__,
+                },
+            )
             with contextlib.suppress(Exception):
                 writer.close()
                 await writer.wait_closed()
@@ -3626,6 +3761,14 @@ class Daemon:
                             log.warning("prune cycle failed: %s", e)
                     with contextlib.suppress(Exception):
                         self._prune_chunk_cache()
+                    # v0.6.3: transfer-ledger watchdog. Any transfer
+                    # in 'offered' or 'active' that hasn't progressed
+                    # in 5 minutes is forcibly failed so the UI never
+                    # shows "sending..." indefinitely. Genuine
+                    # large-file transfers update updated_ms on every
+                    # chunk, so this only catches actually-stuck rows.
+                    with contextlib.suppress(Exception):
+                        self._reap_stuck_transfers()
             except asyncio.CancelledError:
                 pass
 

@@ -1024,7 +1024,22 @@ class UIServer:
             return web.json_response({"error": f"no peer {peer_needle!r}"}, status=404)
 
         try:
-            result = await self.daemon.send_file(peer, upload_path)
+            # v0.6.3: auto-retry once on transient failure. The peer
+            # might have a stale connection or the rendezvous lookup
+            # could give us a freshly-rotated endpoint. One retry with
+            # a re-resolved peer fixes the common case at zero
+            # cost when everything's fine.
+            try:
+                result = await self.daemon.send_file(peer, upload_path)
+            except (RuntimeError, OSError) as first_err:
+                log.warning(
+                    "send_file first attempt failed (%s) — retrying with "
+                    "fresh resolve", first_err,
+                )
+                fresh_peer = await self.daemon.resolve_for_send(peer_needle)
+                if fresh_peer is None:
+                    raise first_err
+                result = await self.daemon.send_file(fresh_peer, upload_path)
             return web.json_response({"ok": True, "result": result})
         except Exception as e:
             log.exception("send_file failed: %s", e)

@@ -1183,7 +1183,10 @@
   const toast = (text, kind = "info", ttl = 3500) => {
     const t = el("div", `toast ${kind}`, text);
     $("#toasts").appendChild(t);
+    // v0.6.3: return the element so callers (long-running uploads,
+    // group sends) can remove it early when the operation completes.
     setTimeout(() => { t.style.opacity = 0; t.style.transition = "opacity .25s"; setTimeout(() => t.remove(), 280); }, ttl);
+    return t;
   };
 
   // ── Render: peer list ──────────────────────────────────────────────
@@ -1791,14 +1794,65 @@
       toast("This device is blocked. Use Allow device first.", "bad");
       return;
     }
-    toast(`Sending ${file.name}…`, "info");
+    // v0.6.3: show progress with a sticky "sending" toast tied to a
+    // unique handle so the user can see the status, and replace it
+    // on either success or failure with a concrete message.
+    const sendingToast = toast(`Sending ${file.name}…`, "info", 60000);
     try {
       const r = await api.upload(state.selectedPeer, file);
+      try { sendingToast?.remove?.(); } catch {}
       toast(`Sent ${file.name}`, "good");
     } catch (e) {
-      toast(`Send failed: ${e.message || e}`, "bad", 6000);
+      try { sendingToast?.remove?.(); } catch {}
+      // The server now returns a meaningful error string for known
+      // failure modes (timeout, peer unreachable, capability
+      // disabled). Surface it directly.
+      const reason = (e && e.message) ? e.message : String(e);
+      toast(`Send failed (${file.name}): ${reason}`, "bad", 8000);
     }
   }
+
+  // v0.6.3: paste-image and clipboard-image. When the user pastes
+  // an image into the chat input or anywhere on the page while a
+  // peer is selected, attach it as a file send. Same code path as
+  // drag-and-drop.
+  function handlePasteImage(e) {
+    if (!state.selectedPeer) return false;
+    const items = e.clipboardData?.items;
+    if (!items) return false;
+    let attached = false;
+    for (const item of items) {
+      if (item.kind !== "file") continue;
+      const file = item.getAsFile();
+      if (!file) continue;
+      // Browsers serve clipboard images as nameless blobs; give
+      // them a sane name so the receiver sees something useful.
+      const ext = (file.type || "image/png").split("/")[1] || "png";
+      const named = file.name && file.name.length > 0
+        ? file
+        : new File([file], `pasted-${Date.now()}.${ext}`, { type: file.type });
+      uploadFile(named);
+      attached = true;
+    }
+    if (attached) {
+      e.preventDefault();
+      return true;
+    }
+    return false;
+  }
+  // Bind on the input AND the document so paste works regardless of
+  // whether focus is inside the textarea or somewhere else (settings
+  // modal, peer list, conversation pane).
+  $("#input").addEventListener("paste", handlePasteImage);
+  document.addEventListener("paste", (e) => {
+    // Skip if focus is in an input/textarea OTHER than our chat
+    // input — the user is probably pasting text for that field.
+    const t = e.target;
+    const isOurInput = t && t.id === "input";
+    const isAnyInput = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
+    if (isAnyInput && !isOurInput) return;
+    handlePasteImage(e);
+  });
 
   // ── Drag-drop ──────────────────────────────────────────────────────
   let dragCounter = 0;
