@@ -1428,6 +1428,158 @@ class Daemon:
             ed_pub_hex=rec.pubkey.hex(),
         )
 
+    # ─── v0.5.2: happy-eyeballs multi-endpoint dial ─────────────────
+    HAPPY_EYEBALLS_TIMEOUT_S = 5.0
+    HAPPY_EYEBALLS_STAGGER_S = 0.25  # delay between staggered starts
+
+    async def _collect_dial_candidates(
+        self, peer: Peer
+    ) -> list[tuple[str, int]]:
+        """All (host, port) pairs we'd consider dialing for this peer.
+
+        Starts with the primary `peer.address:peer.port` (current LAN /
+        mDNS view), then appends rendezvous-known endpoints if we have
+        a rendezvous client and the peer's pubkey resolves there.
+        Duplicates are removed in-order.
+        """
+        seen: set[tuple[str, int]] = set()
+        out: list[tuple[str, int]] = []
+
+        def _add(host: str | None, port: int | None) -> None:
+            if not host or not port:
+                return
+            key = (host, int(port))
+            if key in seen:
+                return
+            seen.add(key)
+            out.append(key)
+
+        _add(peer.address, peer.port)
+
+        if self.rendezvous is None or not peer.ed_pub_hex:
+            return out
+        try:
+            pub = bytes.fromhex(peer.ed_pub_hex)
+        except ValueError:
+            return out
+        try:
+            ack = await self.rendezvous.lookup(pub)
+        except Exception:
+            return out
+        if ack is None:
+            return out
+        if ack.observed_endpoint is not None:
+            _add(ack.observed_endpoint.host, ack.observed_endpoint.port)
+        for e in ack.advertised_endpoints:
+            _add(e.host, e.port)
+        return out
+
+    async def _dial_first_responsive(
+        self,
+        candidates: list[tuple[str, int]],
+        *,
+        timeout: float | None = None,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, tuple[str, int]]:
+        """Open TCP connections to each candidate in parallel with a
+        small stagger; return the first that succeeds + the
+        (host, port) it connected to. Cancels and closes the rest.
+
+        Raises OSError on full failure (mirrors asyncio.open_connection).
+        """
+        if not candidates:
+            raise OSError("no candidates to dial")
+        deadline = self.HAPPY_EYEBALLS_TIMEOUT_S if timeout is None else float(timeout)
+
+        async def _attempt(host_port: tuple[str, int], delay: float):
+            if delay > 0:
+                await asyncio.sleep(delay)
+            host, port = host_port
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=deadline
+            )
+            return reader, writer, host_port
+
+        tasks = [
+            asyncio.create_task(_attempt(c, i * self.HAPPY_EYEBALLS_STAGGER_S))
+            for i, c in enumerate(candidates)
+        ]
+        pending: set[asyncio.Task] = set(tasks)
+        winner: tuple | None = None
+        try:
+            while pending and winner is None:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                for t in done:
+                    if t.cancelled():
+                        continue
+                    if t.exception() is not None:
+                        continue
+                    if winner is None:
+                        winner = t.result()
+                    else:
+                        # Two completed in the same iteration — close the
+                        # extra successful connection.
+                        _r, w, _hp = t.result()
+                        w.close()
+                        with contextlib.suppress(BaseException):
+                            await w.wait_closed()
+        finally:
+            # Cancel anything still in-flight, drain. We don't await
+            # the cancellation indefinitely: on Windows, an in-flight
+            # `open_connection` against a non-listening port can take
+            # multiple seconds to acknowledge a cancel because the
+            # SYN retry runs in the OS network stack outside our
+            # control. Best-effort drain with a short cap is fine —
+            # the kernel will close the half-open sockets eventually.
+            for t in pending:
+                t.cancel()
+            if pending:
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait_for(
+                        asyncio.gather(*pending, return_exceptions=True),
+                        timeout=0.5,
+                    )
+            # Close any sockets from late-completing losers (those that
+            # finished after `winner` was set but their task wasn't
+            # observed in the same `done` set).
+            winner_writer = winner[1] if winner is not None else None
+            for t in tasks:
+                if not t.done() or t.cancelled():
+                    continue
+                if t.exception() is not None:
+                    continue
+                _r, w, _hp = t.result()
+                if w is winner_writer:
+                    continue
+                w.close()
+                with contextlib.suppress(BaseException):
+                    await w.wait_closed()
+        if winner is None:
+            raise OSError(f"all candidates failed: {candidates}")
+        return winner
+
+    async def _dial_peer(
+        self, peer: Peer, *, timeout: float | None = None
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Connect to a peer using all known endpoints in parallel.
+
+        Replaces direct `asyncio.open_connection(peer.address, peer.port)`
+        calls. Falls back to single-endpoint dial if no rendezvous /
+        no extra candidates are available — same behavior as before
+        for the LAN-only path.
+        """
+        candidates = await self._collect_dial_candidates(peer)
+        if not candidates:
+            raise OSError(f"peer {peer.short_id} has no dialable endpoints")
+        if len(candidates) == 1:
+            host, port = candidates[0]
+            return await asyncio.open_connection(host, port)
+        reader, writer, _winning = await self._dial_first_responsive(
+            candidates, timeout=timeout
+        )
+        return reader, writer
+
     def _valid_blob_hex(self, blob: str) -> bool:
         if len(blob) != 64:
             return False
@@ -1579,7 +1731,7 @@ class Daemon:
             )
         await self._drop_outbound_session(peer_fp)
 
-        reader, writer = await asyncio.open_connection(peer.address, peer.port)
+        reader, writer = await self._dial_peer(peer)
         try:
             channel = await ch.initiate(reader, writer, self.me)
             actual_fp = self._verify_channel_peer(peer, channel)
@@ -1658,7 +1810,7 @@ class Daemon:
         """Open a one-shot connection, send a single control msg, wait for
         ACK, close cleanly. Waiting for the ACK forces the receiver to fully
         process the message before our close — avoids Win10053 abort races."""
-        reader, writer = await asyncio.open_connection(peer.address, peer.port)
+        reader, writer = await self._dial_peer(peer)
         try:
             channel = await ch.initiate(reader, writer, self.me)
             self._verify_channel_peer(peer, channel)
@@ -1866,7 +2018,7 @@ class Daemon:
             },
         )
 
-        reader, writer = await asyncio.open_connection(peer.address, peer.port)
+        reader, writer = await self._dial_peer(peer)
         blobs_sent = 0
         bytes_sent = 0
         try:
@@ -2029,7 +2181,7 @@ class Daemon:
             mode="cdc",
         )
 
-        reader, writer = await asyncio.open_connection(peer.address, peer.port)
+        reader, writer = await self._dial_peer(peer)
         transfer_id: str | None = None
         try:
             channel = await ch.initiate(reader, writer, self.me)
