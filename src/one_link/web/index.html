@@ -1138,7 +1138,14 @@
   }
 
   function reachLabel(p) {
-    if (!p.online) return "offline";
+    // v0.5.6: server-side regime is authoritative when present —
+    // it knows whether the actual transport went through the relay.
+    // Fall back to client-side classification if the server didn't
+    // stamp one (offline DB peers, older builds).
+    if (p.regime === "relay") return "via relay";
+    if (p.regime === "lan") return "on Wi-Fi";
+    if (p.regime === "internet") return "via internet";
+    if (p.regime === "offline" || !p.online) return "offline";
     if (isPrivateAddress(p.address)) return "on Wi-Fi";
     return "via internet";
   }

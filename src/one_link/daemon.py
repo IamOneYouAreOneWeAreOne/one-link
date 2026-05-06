@@ -162,6 +162,50 @@ def _build_caps(
     )
 
 
+def _classify_address_regime(host: str) -> str:
+    """v0.5.6: classify a remote host string as 'lan' (RFC 1918,
+    loopback, link-local, IPv6 ULA, IPv6 link-local, carrier-grade
+    NAT) or 'internet' (public). Pure string-based — same set the
+    UI uses, kept consistent so server-side and client-side
+    classification can't disagree.
+    """
+    if not host or not isinstance(host, str):
+        return "internet"
+    if host == "127.0.0.1" or host.startswith("127."):
+        return "lan"
+    if host == "::1":
+        return "lan"
+    if host.startswith("169.254."):
+        return "lan"
+    if host.startswith("10."):
+        return "lan"
+    if host.startswith("192.168."):
+        return "lan"
+    lower = host.lower()
+    if lower.startswith("fe80:"):
+        return "lan"
+    if lower.startswith("fc") or lower.startswith("fd"):
+        return "lan"
+    # 172.16.0.0 – 172.31.255.255
+    parts = host.split(".")
+    if len(parts) >= 2 and parts[0] == "172":
+        try:
+            oct1 = int(parts[1])
+            if 16 <= oct1 <= 31:
+                return "lan"
+        except ValueError:
+            pass
+    # 100.64.0.0/10 (carrier-grade NAT)
+    if len(parts) >= 2 and parts[0] == "100":
+        try:
+            oct1 = int(parts[1])
+            if 64 <= oct1 <= 127:
+                return "lan"
+        except ValueError:
+            pass
+    return "internet"
+
+
 def _control_port_path() -> Path:
     return data_dir() / CONTROL_PORT_FILE
 
@@ -237,6 +281,12 @@ class OutboundSession:
     lock: asyncio.Lock
     last_used: float
     messages_sent: int = 0
+    # v0.5.6: which transport regime carried this session?
+    #   "lan"      — direct TCP, peer.address is RFC-1918/loopback/etc.
+    #   "internet" — direct TCP, peer.address is a public address
+    #   "relay"    — went through the encrypted-relay fallback
+    #   "unknown"  — pre-v0.5.6 session, regime not stamped
+    regime: str = "unknown"
 
 
 class Daemon:
@@ -288,6 +338,9 @@ class Daemon:
         # `update_rendezvous_urls`. None when relay isn't enabled or
         # not running.
         self._relay_listener_clients: list = []
+        # v0.5.6: per-peer connection regime, last-seen.
+        # peer_fp -> {"outbound": str, "inbound": str, "ts": float}
+        self._inbound_regime: dict[str, str] = {}
 
     def _build_my_caps(self) -> dict:
         """Build a CAPS frame for THIS daemon. Includes our rendezvous
@@ -525,7 +578,16 @@ class Daemon:
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
+        *,
+        regime: str | None = None,
     ) -> None:
+        """Inbound peer handler. `regime` is set by the caller:
+          - None (TCP path): classified post-handshake from the
+            socket's peer address.
+          - "relay" (relay tunnel path): set by
+            _handle_relay_inbound_session — the writer is a synthetic
+            relay stream and `peername` would be misleading.
+        """
         addr = writer.get_extra_info("peername")
         peer_ip = addr[0] if addr else ""
         if not self._handshake_admit(peer_ip):
@@ -556,6 +618,11 @@ class Daemon:
             self._handshake_release(peer_ip)
         log.info("peer connected: %s @ %s", channel.peer_short_id, addr)
         peer_fp = fingerprint_of(channel.peer_ed_pub)
+        # v0.5.6: stamp regime so /api/peers can surface "via relay" /
+        # "internet" / "lan" badges for the inbound side. Outbound
+        # sessions are stamped separately on OutboundSession.
+        inbound_regime = regime if regime is not None else _classify_address_regime(peer_ip)
+        self._inbound_regime[peer_fp] = inbound_regime
         if self._inbound_is_rejected(peer_fp):
             log.warning("rejected peer attempted inbound connection: %s", peer_fp[:8])
             await channel.close()
@@ -1750,9 +1817,13 @@ class Daemon:
         rate-limit + capability gates all run unchanged on top of
         the relay-streamed bytes — `_handle_peer` doesn't care
         whether the bytes came from a TCP socket or a WebSocket
-        relay tunnel."""
+        relay tunnel.
+
+        v0.5.6: pass `regime="relay"` so the channel knows it came
+        in over a relay tunnel; the regime is surfaced via /api/peers.
+        """
         try:
-            await self._handle_peer(reader, writer)
+            await self._handle_peer(reader, writer, regime="relay")
         finally:
             with contextlib.suppress(Exception):
                 writer.close()
@@ -1973,19 +2044,23 @@ class Daemon:
     async def _dial_peer(
         self, peer: Peer, *, timeout: float | None = None
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Connect to a peer using all known endpoints in parallel.
+        """Connect to a peer; backwards-compat shim that drops regime."""
+        reader, writer, _regime = await self._dial_peer_with_regime(
+            peer, timeout=timeout
+        )
+        return reader, writer
 
-        Replaces direct `asyncio.open_connection(peer.address, peer.port)`
-        calls. Falls back to single-endpoint dial if no rendezvous /
-        no extra candidates are available.
+    async def _dial_peer_with_regime(
+        self, peer: Peer, *, timeout: float | None = None
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, str]:
+        """Connect to a peer using all known endpoints in parallel,
+        and report which transport regime won. Regime is one of:
+          - "lan":      direct TCP to a private/loopback/link-local address
+          - "internet": direct TCP to a public address
+          - "relay":    encrypted relay fallback (v0.5.5)
 
-        v0.5.5: If direct dial fails entirely AND we have at least
-        one rendezvous configured AND the peer has an ed_pub_hex,
-        fall through to the encrypted relay path. This catches
-        symmetric NATs and other "no direct route possible" cases —
-        the bytes go up to the rendezvous, sealed-sender-routed to
-        the destination, then down to the peer's daemon. Same
-        encrypted channel runs on top.
+        Falls back to relay when direct dial fails entirely AND a
+        rendezvous client is configured AND the peer has an ed_pub_hex.
         """
         candidates = await self._collect_dial_candidates(peer)
         direct_err: BaseException | None = None
@@ -1993,18 +2068,20 @@ class Daemon:
             try:
                 if len(candidates) == 1:
                     host, port = candidates[0]
-                    return await asyncio.open_connection(host, port)
-                reader, writer, _winning = await self._dial_first_responsive(
+                    reader, writer = await asyncio.open_connection(host, port)
+                    return reader, writer, _classify_address_regime(host)
+                reader, writer, winning = await self._dial_first_responsive(
                     candidates, timeout=timeout
                 )
-                return reader, writer
+                return reader, writer, _classify_address_regime(winning[0])
             except (OSError, asyncio.TimeoutError) as e:
                 direct_err = e
 
         # Fall through to relay if available.
         relay_pair = await self._dial_via_relay(peer)
         if relay_pair is not None:
-            return relay_pair
+            reader, writer = relay_pair
+            return reader, writer, "relay"
 
         if direct_err is not None:
             raise direct_err
@@ -2205,7 +2282,7 @@ class Daemon:
             )
         await self._drop_outbound_session(peer_fp)
 
-        reader, writer = await self._dial_peer(peer)
+        reader, writer, regime = await self._dial_peer_with_regime(peer)
         try:
             channel = await ch.initiate(reader, writer, self.me)
             actual_fp = self._verify_channel_peer(peer, channel)
@@ -2228,6 +2305,7 @@ class Daemon:
                 channel=channel,
                 lock=asyncio.Lock(),
                 last_used=now,
+                regime=regime,
             )
             self._outbound_sessions[peer_fp] = sess
             return sess

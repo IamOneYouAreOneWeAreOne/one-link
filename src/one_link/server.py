@@ -467,6 +467,26 @@ class UIServer:
 
         kept = [p for p in live.values() if _keep(p)]
 
+        # v0.5.6: stamp connection regime per peer. Outbound session
+        # regime (most authoritative — that's the path our chat sends
+        # would actually take). Falls back to inbound regime if we've
+        # only received from the peer. Otherwise, classify by
+        # peer.address (lan/internet) for online peers, or "offline".
+        outbound = getattr(self.daemon, "_outbound_sessions", {}) or {}
+        inbound = getattr(self.daemon, "_inbound_regime", {}) or {}
+        from one_link.daemon import _classify_address_regime
+        for p in kept:
+            fp = p.get("fingerprint") or ""
+            sess = outbound.get(fp)
+            if sess is not None and getattr(sess, "regime", None):
+                p["regime"] = sess.regime
+            elif fp in inbound:
+                p["regime"] = inbound[fp]
+            elif p.get("online"):
+                p["regime"] = _classify_address_regime(p.get("address") or "")
+            else:
+                p["regime"] = "offline"
+
         # Sort: paired first, then online, then by hostname
         peers = sorted(
             kept,
