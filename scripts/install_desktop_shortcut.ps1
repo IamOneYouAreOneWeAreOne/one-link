@@ -31,17 +31,18 @@ if (-not $pythonExe) {
 }
 
 # Sanity-check that the Python we found actually has one_link installed,
-# and discover the icon path inside the package. Prefer the freshly-named
-# `one-link-app.ico` which sidesteps Windows shell icon-cache holds on the
-# legacy `one-glyph.ico` path.
+# and discover the icon path inside the package. Prefer `one-link-black.ico`
+# because its fresh filename sidesteps Windows shell icon-cache holds on the
+# old purple app-icon paths.
 $probe = & $pythonExe -c @"
 import one_link, pathlib, sys
 sys.stdout.write(one_link.__version__)
 sys.stdout.write('|')
 base = pathlib.Path(one_link.__file__).parent / 'web' / 'assets'
-ico = base / 'one-link-app.ico'
-if not ico.exists():
-    ico = base / 'one-glyph.ico'
+for name in ('one-link-black.ico', 'one-link-app.ico', 'one-glyph.ico'):
+    ico = base / name
+    if ico.exists():
+        break
 sys.stdout.write(str(ico))
 "@ 2>&1
 if ($LASTEXITCODE -ne 0) {

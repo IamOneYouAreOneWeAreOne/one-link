@@ -181,13 +181,12 @@ def main() -> int:
     transparent.save(png_path, "PNG", optimize=True)
     print(f"wrote {png_path}  size={transparent.size}  bytes={png_path.stat().st_size}")
 
-    # Multi-resolution app icon. We write to BOTH "one-glyph.ico" (legacy /
-    # favicon) and a fresh-named "one-link-app.ico" so Windows shell can't
-    # present a stale cached icon under the old path.
+    # Multi-resolution app icon. `one-link-black.ico` gives Windows Explorer
+    # a fresh cache key after the old purple app tile.
     sizes = [16, 24, 32, 48, 64, 128, 256]
     icons = [make_app_icon(s, transparent) for s in sizes]
 
-    for name in ("one-glyph.ico", "one-link-app.ico"):
+    for name in ("one-glyph.ico", "one-link-app.ico", "one-link-black.ico"):
         ico_path = OUT_DIR / name
         icons[-1].save(
             ico_path,
@@ -205,7 +204,7 @@ def main() -> int:
 
     # Verify ICOs embed all sizes
     print("\nverifying ICOs …")
-    for name in ("one-glyph.ico", "one-link-app.ico"):
+    for name in ("one-glyph.ico", "one-link-app.ico", "one-link-black.ico"):
         im = Image.open(OUT_DIR / name)
         embedded = sorted(im.info.get("sizes", set()))
         if embedded != [(s, s) for s in sizes]:

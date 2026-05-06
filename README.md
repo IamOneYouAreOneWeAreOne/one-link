@@ -11,7 +11,7 @@ effect tracking) with Python as the host harness while LLVM/WASM backends mature
 
 ## Status
 
-**v0.2.14** — black desktop/app icon, automatic same-computer ghost hiding, no manual cleanup UI, obvious file sending from the Files panel, clearer people-facing labels, activity/folder guidance, and persistent transfer tracking.
+**v0.2.15** — black desktop/app icon with a fresh Windows shortcut icon path, automatic same-computer ghost hiding, no manual cleanup UI, obvious file sending from the Files panel, clearer people-facing labels, activity/folder guidance, and persistent transfer tracking.
 
 - Native-feeling browser app: dark theme, peer sidebar with online dots,
   message bubbles, drag-drop file send, live updates over WebSocket
