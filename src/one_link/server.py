@@ -28,6 +28,7 @@ import contextlib
 import json
 import logging
 import mimetypes
+import os
 import secrets
 import time
 from pathlib import Path
@@ -256,6 +257,7 @@ class UIServer:
         r.add_get("/api/files", self._guarded(self.api_files))
         r.add_get("/api/transfers", self._guarded(self.api_transfers))
         r.add_post("/api/transfers/prune", self._guarded(self.api_prune_transfers))
+        r.add_post(r"/api/transfers/{transfer_id:.+}/retry", self._guarded(self.api_retry_transfer))
         r.add_get("/api/outbox", self._guarded(self.api_list_outbox))
         r.add_post(r"/api/outbox/{id:\d+}/cancel", self._guarded(self.api_cancel_outbox))
         r.add_post(r"/api/outbox/flush", self._guarded(self.api_flush_outbox))
@@ -1527,6 +1529,57 @@ class UIServer:
         deleted = self.daemon.state.delete_transfer(transfer_id)
         return web.json_response({"ok": True, "deleted": deleted})
 
+    async def api_retry_transfer(self, request: web.Request) -> web.Response:
+        """v0.7.x: re-run send_file for a failed outbound transfer.
+        Reads the original local path off the ledger row's metadata.
+        Inbound transfers can't be retried from the receiver side."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        transfer_id = request.match_info["transfer_id"]
+        rec = self.daemon.state.get_transfer(transfer_id)
+        if rec is None:
+            return web.json_response({"error": "transfer not found"}, status=404)
+        if rec.direction != "out":
+            return web.json_response(
+                {"error": "only outbound transfers can be retried"}, status=400,
+            )
+        if rec.status not in ("failed", "complete"):
+            return web.json_response(
+                {"error": f"transfer is {rec.status} — not retriable"}, status=409,
+            )
+        path_str = (rec.metadata or {}).get("path")
+        if not path_str:
+            return web.json_response(
+                {"error": "retry not possible — original path not recorded"},
+                status=410,
+            )
+        path = Path(path_str)
+        if not path.is_file():
+            return web.json_response(
+                {"error": f"source file no longer exists: {path}"},
+                status=410,
+            )
+        # Resolve peer fresh — don't trust the cached endpoint that
+        # might have caused the original failure.
+        try:
+            peers_for_fp = self.daemon.state.get_peer(rec.peer_fp)
+        except Exception:
+            peers_for_fp = None
+        if peers_for_fp is None:
+            return web.json_response(
+                {"error": "peer record missing"}, status=404,
+            )
+        peer = await self.daemon.resolve_for_send(rec.peer_fp)
+        if peer is None:
+            return web.json_response({"error": "peer offline"}, status=404)
+        try:
+            result = await self.daemon.send_file(peer, path)
+            return web.json_response({"ok": True, "result": result})
+        except Exception as e:
+            log.exception("retry_transfer failed: %s", e)
+            translated = _translate_send_error(e)
+            return web.json_response(translated, status=translated["status"])
+
     async def api_prune_transfers(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:
             return web.json_response({"error": "state not available"}, status=503)
@@ -1744,6 +1797,12 @@ class UIServer:
             return web.json_response({"error": "not found"}, status=404)
         if self._reveal_throttled():
             return web.json_response({"ok": True, "throttled": True})
+        # v0.7.x: ONE_LINK_DISABLE_REVEAL=1 short-circuits the actual
+        # subprocess.Popen so test runs (which may exercise reveal
+        # endpoints via the integration suite) don't pop File Explorer
+        # windows on the developer's screen.
+        if os.environ.get("ONE_LINK_DISABLE_REVEAL") == "1":
+            return web.json_response({"ok": True, "disabled": True})
         import subprocess
         import sys
         try:
@@ -1770,6 +1829,10 @@ class UIServer:
         path = inbox_dir().resolve()
         if self._reveal_throttled():
             return web.json_response({"ok": True, "path": str(path), "throttled": True})
+        # See api_file_reveal — same env-gate so tests don't spawn
+        # actual Explorer windows.
+        if os.environ.get("ONE_LINK_DISABLE_REVEAL") == "1":
+            return web.json_response({"ok": True, "path": str(path), "disabled": True})
         import subprocess
         import sys
         try:

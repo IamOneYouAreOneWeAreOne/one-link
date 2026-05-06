@@ -119,6 +119,12 @@ async def test_file_reveal_invokes_correct_platform_command(tmp_path: Path, monk
     from one_link.server import UIServer
     import one_link.server as server_mod
 
+    # conftest sets ONE_LINK_DISABLE_REVEAL=1 to keep the integration
+    # suite from popping real Explorer windows. This test explicitly
+    # asks "did the subprocess path run with the right argv?" so we
+    # need the gate off here while still mocking subprocess.Popen.
+    monkeypatch.delenv("ONE_LINK_DISABLE_REVEAL", raising=False)
+
     inbox = tmp_path / "inbox"
     inbox.mkdir()
     target = inbox / "received.png"
@@ -160,6 +166,8 @@ async def test_file_reveal_translates_oserror_to_500(tmp_path: Path, monkeypatch
     from one_link.server import UIServer
     import one_link.server as server_mod
 
+    monkeypatch.delenv("ONE_LINK_DISABLE_REVEAL", raising=False)
+
     inbox = tmp_path / "inbox"
     inbox.mkdir()
     (inbox / "x.txt").write_text("x")
@@ -186,6 +194,8 @@ async def test_inbox_reveal_invokes_correct_platform_command(tmp_path: Path, mon
     """Inbox reveal opens the inbox folder itself — no /select."""
     from one_link.server import UIServer
     import one_link.server as server_mod
+
+    monkeypatch.delenv("ONE_LINK_DISABLE_REVEAL", raising=False)
 
     inbox = tmp_path / "inbox"
     inbox.mkdir()

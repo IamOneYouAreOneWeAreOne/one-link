@@ -1634,11 +1634,36 @@
   // ── Render: peer list ──────────────────────────────────────────────
   // v0.4: sidebar is paired-only. The server filters; the UI renders
   // whatever it gets. Unpaired peers live in the discovery modal, not here.
+  function _peerListHash(peers, selected) {
+    // v0.7.x: stable signature of everything renderPeers reads off
+    // each peer record. If this is unchanged across two refreshPeers
+    // ticks, skip the DOM rebuild — the previous version was tearing
+    // down + re-attaching every peer row every 5s, which the user
+    // sees as a visible flicker. We coalesce latency into 80/250 ms
+    // buckets so a few ms of jitter don't trigger redraws.
+    const parts = [];
+    parts.push(`sel=${selected || ""}`);
+    for (const p of peers) {
+      const lat = p?.health?.latency_ewma_ms;
+      const latBucket = lat == null ? -1 : (lat < 80 ? 0 : lat < 250 ? 1 : 2);
+      parts.push([
+        p.short_id, p.hostname || "", p.address || "", p.port || 0,
+        p.online ? 1 : 0, p.trust || "", latBucket,
+        (p.allowed_capabilities || ["*"]).join(","),
+      ].join("|"));
+    }
+    return parts.join("§");
+  }
+
   function renderPeers() {
     const list = $("#peerlist");
-    list.innerHTML = "";
     const peers = [...state.peers.values()];
     $("#peers-count").textContent = peers.length;
+    // v0.7.x: skip a full DOM rebuild when nothing visible changed.
+    const sig = _peerListHash(peers, state.selectedPeer);
+    if (list._renderSig === sig) return;
+    list._renderSig = sig;
+    list.innerHTML = "";
 
     if (peers.length === 0) {
       const wrap = el("div", "empty-state");
@@ -2234,6 +2259,30 @@
       bar.appendChild(fill);
       meta.appendChild(bar);
       row.appendChild(meta);
+      // v0.7.x: Retry button for failed outbound transfers. The
+      // server reads the original local path off the ledger row's
+      // metadata.path and re-runs send_file. Inbound failures
+      // can't be retried from the receiver side (the sender owns
+      // the source file), so it's out-only.
+      if (t.status === "failed" && t.direction === "out") {
+        const retry = el("button", null, "Retry");
+        retry.onclick = async () => {
+          retry.disabled = true;
+          retry.textContent = "Retrying…";
+          try {
+            await api.post(
+              `/api/transfers/${encodeURIComponent(t.id)}/retry`, {}
+            );
+            toast(`Retrying ${t.name || "transfer"}`, "info", 3000);
+            await refreshTransfers();
+          } catch (e) {
+            toast(`Retry failed: ${errorToastBody(e)}`, "bad", 8000);
+            retry.disabled = false;
+            retry.textContent = "Retry";
+          }
+        };
+        row.appendChild(retry);
+      }
       if (["complete", "failed"].includes(t.status)) {
         const del = el("button", null, "Clear");
         del.onclick = async () => {

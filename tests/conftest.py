@@ -8,6 +8,15 @@ from pathlib import Path
 import pytest
 
 
+# v0.7.x: process-wide gate so any subprocess daemon the test
+# harness spawns inherits ONE_LINK_DISABLE_REVEAL=1. Without this,
+# tests that exercise reveal endpoints (or anywhere the UI can
+# trigger them) pop real File Explorer windows on the developer's
+# machine. Set as early as possible — module-import time — so
+# subprocess.Popen calls before any test runs already inherit it.
+os.environ.setdefault("ONE_LINK_DISABLE_REVEAL", "1")
+
+
 @pytest.fixture
 def isolated_home(tmp_path: Path, monkeypatch) -> Path:
     """Point ONE_LINK_HOME at a fresh temp dir for the test."""
