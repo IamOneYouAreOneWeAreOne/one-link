@@ -1256,6 +1256,19 @@ class UIServer:
         mime = mimetypes.guess_type(safe)[0] or "application/octet-stream"
         return web.FileResponse(path, headers={"Content-Type": mime})
 
+    # Server-side debounce: explorer.exe spawns a new window each call,
+    # so repeated rapid clicks from the UI (or a runaway loop) would
+    # stack windows on top of the user's other work. One reveal per
+    # second is the most a human would intentionally do.
+    _last_reveal_ms: float = 0.0
+
+    def _reveal_throttled(self) -> bool:
+        now = time.time() * 1000
+        if now - self._last_reveal_ms < 1000:
+            return True
+        self._last_reveal_ms = now
+        return False
+
     async def api_file_reveal(self, request: web.Request) -> web.Response:
         # Open the OS file manager with the inbox file selected.
         # Same path-traversal defense as download.
@@ -1263,14 +1276,24 @@ class UIServer:
         safe = Path(name).name
         if safe != name or not safe:
             return web.json_response({"error": "bad name"}, status=400)
-        path = inbox_dir() / safe
+        path = (inbox_dir() / safe).resolve()
         if not path.is_file():
             return web.json_response({"error": "not found"}, status=404)
+        if self._reveal_throttled():
+            return web.json_response({"ok": True, "throttled": True})
         import subprocess
         import sys
         try:
             if sys.platform == "win32":
-                subprocess.Popen(["explorer.exe", f"/select,{path}"])
+                # explorer.exe /select,<path> is the canonical pattern,
+                # but it's notoriously brittle to subprocess quoting.
+                # Use the raw command line so Windows can parse it the
+                # way Explorer expects.
+                norm = str(path).replace("/", "\\")
+                subprocess.Popen(
+                    f'explorer.exe /select,"{norm}"',
+                    shell=False,
+                )
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", "-R", str(path)])
             else:
@@ -1281,12 +1304,15 @@ class UIServer:
 
     async def api_inbox_reveal(self, request: web.Request) -> web.Response:
         # Open the inbox folder itself (no specific file selected).
-        path = inbox_dir()
+        path = inbox_dir().resolve()
+        if self._reveal_throttled():
+            return web.json_response({"ok": True, "path": str(path), "throttled": True})
         import subprocess
         import sys
         try:
             if sys.platform == "win32":
-                subprocess.Popen(["explorer.exe", str(path)])
+                norm = str(path).replace("/", "\\")
+                subprocess.Popen(f'explorer.exe "{norm}"', shell=False)
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", str(path)])
             else:

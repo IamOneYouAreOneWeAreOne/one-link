@@ -141,15 +141,15 @@ async def test_file_reveal_invokes_correct_platform_command(tmp_path: Path, monk
     popen.assert_called_once()
     args = popen.call_args.args[0]
     if sys.platform == "win32":
-        assert args[0] == "explorer.exe"
-        # /select,<path>  (note: /select must be in the same arg as the path)
-        assert args[1].startswith("/select,")
-        assert "received.png" in args[1]
+        # We pass a single command-line string (not a list) so Windows
+        # parses /select,<path> the way Explorer expects.
+        assert isinstance(args, str)
+        assert args.lower().startswith("explorer.exe /select,")
+        assert "received.png" in args
     elif sys.platform == "darwin":
-        assert args == ["open", "-R", str(target)]
+        assert args == ["open", "-R", str(target.resolve())]
     else:
-        # Linux fallback: open the parent dir.
-        assert args == ["xdg-open", str(target.parent)]
+        assert args == ["xdg-open", str(target.resolve().parent)]
 
 
 @pytest.mark.asyncio
@@ -205,12 +205,16 @@ async def test_inbox_reveal_invokes_correct_platform_command(tmp_path: Path, mon
 
     popen.assert_called_once()
     args = popen.call_args.args[0]
+    resolved = str(inbox.resolve())
     if sys.platform == "win32":
-        assert args == ["explorer.exe", str(inbox)]
+        assert isinstance(args, str)
+        assert args.lower().startswith("explorer.exe ")
+        # No /select, — opens the folder itself.
+        assert "/select," not in args
     elif sys.platform == "darwin":
-        assert args == ["open", str(inbox)]
+        assert args == ["open", resolved]
     else:
-        assert args == ["xdg-open", str(inbox)]
+        assert args == ["xdg-open", resolved]
 
 
 # ─── End-to-end auth tests against a real daemon ───────────────────────

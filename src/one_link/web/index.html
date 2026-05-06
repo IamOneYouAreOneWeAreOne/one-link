@@ -1459,6 +1459,35 @@
     status() { return this.get("/api/status"); },
   };
 
+  // ── rAF-throttled schedulers ───────────────────────────────────────
+  // A stuck or retrying transfer can fire many "transfer" WS events per
+  // second; rebuilding the chat DOM each time makes the page visibly
+  // flicker. These schedulers coalesce all the rebuilds into a single
+  // animation-frame callback so the UI updates smoothly.
+  const _scheduled = { msgs: false, transfers: false, files: false, status: false };
+  function scheduleRenderMessages() {
+    if (_scheduled.msgs) return;
+    _scheduled.msgs = true;
+    requestAnimationFrame(() => { _scheduled.msgs = false; renderMessages(); });
+  }
+  function scheduleRenderTransfers() {
+    if (_scheduled.transfers) return;
+    _scheduled.transfers = true;
+    requestAnimationFrame(() => { _scheduled.transfers = false; renderTransfers(); });
+  }
+  function scheduleRenderFilesPanel() {
+    if (_scheduled.files) return;
+    _scheduled.files = true;
+    requestAnimationFrame(() => { _scheduled.files = false; renderFilesPanel(); });
+  }
+  // refreshStatus does a network call; throttle to at most once per
+  // 500 ms so a flurry of transfer events doesn't hammer the daemon.
+  let _statusPending = null;
+  function scheduleRefreshStatus() {
+    if (_statusPending) return;
+    _statusPending = setTimeout(() => { _statusPending = null; refreshStatus(); }, 500);
+  }
+
   // ── Click-to-copy helper ───────────────────────────────────────────
   async function copyToClipboard(text, label) {
     if (!text) return;
@@ -2350,14 +2379,15 @@
         state.transfers.sort((a, b) => (b.updated_ms || 0) - (a.updated_ms || 0));
         state.transfers = state.transfers.slice(0, 80);
         state.transfersById.set(m.transfer.id, m.transfer);
-        renderTransfers();
-        // Live progress on file bubbles in the active conversation.
-        renderMessages();
-        // Refresh sent files view if it's active.
+        // Coalesce UI rebuilds: a stuck/retrying transfer can fire
+        // many events per second, and rebuilding the chat DOM each
+        // time causes visible flicker. Once-per-frame is plenty.
+        scheduleRenderTransfers();
+        scheduleRenderMessages();
         if (state.activePane === "files" && state.filesMode === "sent") {
-          renderFilesPanel();
+          scheduleRenderFilesPanel();
         }
-        refreshStatus();
+        scheduleRefreshStatus();
       }
     };
     ws.onclose = () => setTimeout(connectWS, 1500);
