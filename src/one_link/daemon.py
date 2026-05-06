@@ -287,6 +287,13 @@ class OutboundSession:
     #   "relay"    — went through the encrypted-relay fallback
     #   "unknown"  — pre-v0.5.6 session, regime not stamped
     regime: str = "unknown"
+    # v0.6.x audit: when the regime is "relay", the inbound-pump task
+    # that drains the relay WebSocket needs to be awaited on cleanup
+    # so the per-session aiohttp ClientSession can flush+close before
+    # the loop exits. Otherwise pytest under -W error::ResourceWarning
+    # surfaces "Unclosed client session" warnings as test ends race
+    # with task finally-blocks.
+    relay_pump_task: asyncio.Task | None = None
 
 
 class Daemon:
@@ -2078,9 +2085,12 @@ class Daemon:
                 direct_err = e
 
         # Fall through to relay if available.
-        relay_pair = await self._dial_via_relay(peer)
-        if relay_pair is not None:
-            reader, writer = relay_pair
+        relay_triple = await self._dial_via_relay(peer)
+        if relay_triple is not None:
+            reader, writer, pump = relay_triple
+            # Stash pump task on the writer so the OutboundSession
+            # creator can attach it (see _get_outbound_session).
+            setattr(writer, "_relay_pump_task", pump)
             return reader, writer, "relay"
 
         if direct_err is not None:
@@ -2089,18 +2099,22 @@ class Daemon:
 
     async def _dial_via_relay(
         self, peer: Peer
-    ) -> tuple[object, object] | None:
+    ) -> tuple[object, object, asyncio.Task] | None:
         """v0.5.5: open an encrypted-relay session targeting the
-        peer's pubkey. Returns a (reader, writer) compatible pair, or
-        None if no relay is available / peer can't be addressed via
-        relay.
+        peer's pubkey. Returns a (reader, writer, pump_task) triple,
+        or None if no relay is available / peer can't be addressed
+        via relay.
 
         Tries each configured rendezvous URL in order; the first
         whose listener slot for the peer's pubkey is occupied wins.
+
+        Audit fix (v0.6.1+): the pump task that drains the relay
+        WS into the reader is returned so the caller can attach it
+        to the OutboundSession lifecycle. Without this the per-call
+        aiohttp ClientSession leaks if the daemon stops before the
+        pump's finally block runs to completion.
         """
         if not self._relay_listener_clients:
-            # We don't have any rendezvous configured. Even if we did,
-            # caller should have a peer pubkey for sealed-sender routing.
             return None
         if not peer.ed_pub_hex:
             return None
@@ -2112,20 +2126,26 @@ class Daemon:
             return None
         from one_link.relay_client import open_relay_outbound
 
-        # Use the same URL set as our listener clients — those are
-        # the rendezvous our paired peer is also (likely) registered
-        # with. First success wins.
+        # Route through the rendezvous client's daemon-lifetime aiohttp
+        # session if available. Avoids per-dial session leaks under
+        # cancellation races at test/daemon teardown.
+        shared_session = (
+            self.rendezvous.session
+            if self.rendezvous is not None
+            else None
+        )
+
         for listener in list(self._relay_listener_clients):
             url = listener._rendezvous_url  # type: ignore[attr-defined]
             try:
-                reader, writer, _pump = await open_relay_outbound(
-                    url, dst_pubkey
+                reader, writer, pump = await open_relay_outbound(
+                    url, dst_pubkey, session=shared_session,
                 )
                 log.info(
                     "relay dial succeeded for %s via %s",
                     peer.short_id, url,
                 )
-                return reader, writer
+                return reader, writer, pump
             except Exception as e:
                 log.debug("relay dial via %s failed: %s", url, e)
                 continue
@@ -2220,9 +2240,24 @@ class Daemon:
 
     async def _drop_outbound_session(self, peer_fp: str) -> None:
         sess = self._outbound_sessions.pop(peer_fp, None)
-        if sess is not None:
-            with contextlib.suppress(Exception):
-                await sess.channel.close()
+        if sess is None:
+            return
+        with contextlib.suppress(Exception):
+            await sess.channel.close()
+        # Audit fix: if this was a relay-tunneled session, the inbound
+        # pump task owns an aiohttp ClientSession that must flush+close
+        # before the event loop tears down. Channel.close() triggers
+        # the WS close cascade via _RelayStreamWriter._on_close, which
+        # ends the pump's `async for msg in ws`. We give it a bounded
+        # window to drain its finally block; if it doesn't, cancel.
+        pump = sess.relay_pump_task
+        if pump is not None and not pump.done():
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(pump, timeout=2.0)
+            if not pump.done():
+                pump.cancel()
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait_for(pump, timeout=0.5)
 
     async def _probe_outbound_session(self, sess: OutboundSession) -> bool:
         """H4: send a PING and wait briefly for a PONG. Returns True if the
@@ -2283,6 +2318,9 @@ class Daemon:
         await self._drop_outbound_session(peer_fp)
 
         reader, writer, regime = await self._dial_peer_with_regime(peer)
+        # Audit fix: when the regime is "relay", _dial_peer_with_regime
+        # stashes the inbound-pump task on the writer for cleanup.
+        relay_pump = getattr(writer, "_relay_pump_task", None)
         try:
             channel = await ch.initiate(reader, writer, self.me)
             actual_fp = self._verify_channel_peer(peer, channel)
@@ -2306,6 +2344,7 @@ class Daemon:
                 lock=asyncio.Lock(),
                 last_used=now,
                 regime=regime,
+                relay_pump_task=relay_pump,
             )
             self._outbound_sessions[peer_fp] = sess
             return sess

@@ -131,6 +131,8 @@ async def test_resolve_peer_endpoint_falls_back_to_rendezvous(
         finally:
             if daemon.rendezvous is not None:
                 await daemon.rendezvous.stop()
+            for listener in list(daemon._relay_listener_clients):
+                await listener.stop()
             await b_client.stop()
     finally:
         state.close()
@@ -164,6 +166,8 @@ async def test_resolve_peer_endpoint_returns_none_when_unknown(
         finally:
             if daemon.rendezvous is not None:
                 await daemon.rendezvous.stop()
+            for listener in list(daemon._relay_listener_clients):
+                await listener.stop()
     finally:
         state.close()
 
@@ -208,6 +212,8 @@ async def test_resolve_peer_endpoint_skips_unpaired(
         finally:
             if daemon.rendezvous is not None:
                 await daemon.rendezvous.stop()
+            for listener in list(daemon._relay_listener_clients):
+                await listener.stop()
             await b_client.stop()
     finally:
         state.close()
@@ -262,6 +268,8 @@ async def test_resolve_peer_endpoint_prefers_mdns_when_available(
         finally:
             if daemon.rendezvous is not None:
                 await daemon.rendezvous.stop()
+            for listener in list(daemon._relay_listener_clients):
+                await listener.stop()
             await b_client.stop()
     finally:
         state.close()

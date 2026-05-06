@@ -188,6 +188,14 @@ class RendezvousClient:
         Populated after a successful register."""
         return dict(self._last_observed)
 
+    @property
+    def session(self) -> aiohttp.ClientSession | None:
+        """v0.6.2 audit: expose the daemon-lifetime aiohttp session
+        so other components (the relay outbound dial, in particular)
+        can route through it instead of creating their own per-call
+        session that's prone to leaking under cancellation races."""
+        return self._session
+
     def update_advertised_endpoints(self, endpoints: list[Endpoint]) -> None:
         """Called when the daemon learns its own LAN IPs / NAT-mapped
         addresses change. Next refresh will pick this up."""

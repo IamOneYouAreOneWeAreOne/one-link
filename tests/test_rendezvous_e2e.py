@@ -177,6 +177,11 @@ async def test_chat_through_rendezvous_when_mdns_is_bypassed(
             await daemon_a.rendezvous.stop()
         if daemon_b.rendezvous is not None:
             await daemon_b.rendezvous.stop()
+        # Audit fix: relay-listener clients each own a ClientSession.
+        for listener in list(daemon_a._relay_listener_clients):  # type: ignore[attr-defined]
+            await listener.stop()
+        for listener in list(daemon_b._relay_listener_clients):  # type: ignore[attr-defined]
+            await listener.stop()
         server_b.close()
         with contextlib.suppress(Exception):
             await asyncio.wait_for(server_b.wait_closed(), timeout=2.0)
@@ -245,6 +250,10 @@ async def test_chat_via_rendezvous_uses_resolve_for_send_path(
     finally:
         if daemon_a.rendezvous is not None:
             await daemon_a.rendezvous.stop()
+        # Audit fix: also stop relay-listener clients spun up by
+        # update_rendezvous_urls — each owns its own aiohttp session.
+        for listener in list(daemon_a._relay_listener_clients):
+            await listener.stop()
         await client_b.stop()
         await client_c.stop()
         state_a.close()
@@ -279,4 +288,7 @@ async def test_resolve_returns_none_when_rendezvous_offline(
     finally:
         if daemon.rendezvous is not None:
             await daemon.rendezvous.stop()
+        # Audit fix: relay-listener clients also own a ClientSession.
+        for listener in list(daemon._relay_listener_clients):
+            await listener.stop()
         state_a.close()

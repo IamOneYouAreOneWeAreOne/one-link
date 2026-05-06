@@ -30,6 +30,11 @@ class DaemonHandle:
     peer_port: int
     short_id: str
     hostname: str
+    # Audit fix: keep the log file handle on the handle so it can be
+    # closed deterministically on _stop. Without this Python's GC
+    # closes the BufferedWriter at finalization time, emitting a
+    # ResourceWarning that shows up under pytest -W error::ResourceWarning.
+    log_fh: object | None = None
 
 
 @dataclass
@@ -85,18 +90,23 @@ def request(control_port: int, *, timeout: float = 30.0, **req) -> dict:
         s.close()
 
 
-def _spawn(home: Path, log: Path) -> subprocess.Popen:
+def _spawn(home: Path, log: Path) -> tuple[subprocess.Popen, object]:
+    """Returns (proc, log_fh). Caller stores the log_fh on the handle
+    and closes it after the proc exits — keeps Python's GC from
+    emitting ResourceWarning at random later moments."""
     env = dict(os.environ)
-    env["ONE_LINK_HOME"] = str(home)
+    env["ONE_LINK_HOME"] = str(env.get("ONE_LINK_HOME") or "") or str(home)
+    env["ONE_LINK_HOME"] = str(home)  # always per-test
     log.parent.mkdir(parents=True, exist_ok=True)
     f = open(log, "wb")
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [sys.executable, "-m", "one_link.cli", "daemon", "-v"],
         env=env,
         stdout=f,
         stderr=subprocess.STDOUT,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
     )
+    return proc, f
 
 
 def _stop(proc: subprocess.Popen) -> None:
@@ -155,7 +165,7 @@ def _read_log(p: Path, n: int = 4000) -> str:
 
 
 def _bring_up(home: Path, log: Path, label: str) -> DaemonHandle:
-    proc = _spawn(home, log)
+    proc, log_fh = _spawn(home, log)
     try:
         ctrl = _read_port(home, "control.port")
         peer = _read_port(home, "peer.port")
@@ -175,9 +185,14 @@ def _bring_up(home: Path, log: Path, label: str) -> DaemonHandle:
             peer_port=peer,
             short_id=info["me"]["short_id"],
             hostname=info["me"]["hostname"],
+            log_fh=log_fh,
         )
     except Exception:
         _stop(proc)
+        try:
+            log_fh.close()
+        except Exception:
+            pass
         raise
 
 
@@ -217,8 +232,18 @@ def daemon_pair() -> Iterator[DaemonPair]:
     finally:
         if a is not None:
             _stop(a.proc)
+            try:
+                if a.log_fh is not None:
+                    a.log_fh.close()
+            except Exception:
+                pass
         if b is not None:
             _stop(b.proc)
+            try:
+                if b.log_fh is not None:
+                    b.log_fh.close()
+            except Exception:
+                pass
         # Best-effort cleanup. Keep on failure so logs survive — pytest
         # passes/fails are signalled separately.
         try:
