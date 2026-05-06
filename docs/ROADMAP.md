@@ -1,0 +1,202 @@
+# One Link Roadmap
+
+Status: living document. Updated as releases ship. Last updated: 2026-05-06.
+
+This is the post-v0.7.2 plan to take One Link from "entry level" to
+best-in-class P2P chat + file sync. Driven by the user audit that
+followed v0.7.2 (deny-by-default, outbox, sandbox, supply-chain,
+Double Ratchet primitive landed). The big picture: protocol is
+strong; UX is not yet matching the protocol's strength.
+
+Each version is a single ship-sized chunk: implementation + tests +
+docs + tag. Sequence is the proposed order; reorder freely.
+
+---
+
+## Settings architecture (cross-cutting)
+
+The split that drives every UI change in this roadmap:
+
+**App-wide settings** (gear top-right of the chat surface):
+things about YOU, the daemon owner.
+
+  - Display name
+  - Identity export/import
+  - Default permission policy for new pairings
+    (deny-by-default vs permissive vs prompt)
+  - Rendezvous URLs, auto-accept LAN
+  - Desktop notifications (browser-level permission)
+  - Theme, language, default download folder
+  - Log verbosity, auto-update channel
+
+**Per-device settings** (gear/⋮ next to each device row, OR
+a click on the conversation header device card): things about
+THAT one paired device.
+
+  - Identity & trust: fingerprint (copyable), SAS code, key change
+    history, "verified in person" toggle
+  - Permissions: chat / files / folders / groups (moves out of
+    app settings entirely)
+  - Reachability: live regime (LAN/internet/relay/offline),
+    latency (EWMA), last-alive, advertised endpoints list
+  - Display: custom name override, color/avatar, custom alert sound
+  - Notifications: per-device mute, do-not-disturb hours
+  - Activity: messages/files exchanged, audit log, link to history
+  - Trust actions: unpair, block, force-rekey
+
+**Per-conversation settings** (becomes meaningful when groups
+land): retention policy, member list, custom theme, mute.
+
+---
+
+## Tier 1 — chat fundamentals every modern chat app has
+
+These are non-negotiable for a chat product to feel competent.
+Most are backwards-compatible wire additions (new message kinds
+or fields older peers ignore).
+
+  - **v0.7.3 — Per-device drawer + settings split.** Move per-
+    device controls (Allow toggles, mute, custom name, view SAS,
+    unpair) into a dedicated drawer keyed by peer fingerprint.
+    Global settings keeps only app-wide concerns. Closes the
+    "Allow row clutters the chat header" frustration permanently.
+
+  - **v0.7.4 — Resume-on-reconnect for transfers.** A WinError
+    10053 mid-transfer (or any network drop) shouldn't lose work.
+    Ledger already tracks chunks_done; add wire-protocol resume
+    + UI "paused — will resume" status pill. Auto-resume when
+    peer reconnects.
+
+  - **v0.7.5 — Reply / quote + reactions.** Wire: message has
+    optional `reply_to: msg_id` field; reactions are a new
+    `REACTION` frame `{target_msg_id, emoji, op: add|remove}`.
+    UI: right-click → reply, hover → react. Threaded view shows
+    inline quote.
+
+  - **v0.7.6 — Edit / delete + read receipts + typing.** Wire:
+    new `EDIT_MSG`, `DELETE_MSG`, `READ_MARKER`, `TYPING_START`
+    /`TYPING_STOP` frames. UI: edit / delete from message context
+    menu (with a 5-min cooldown after which edits are blocked);
+    optional read-receipts (per-device toggle); subtle "typing…"
+    indicator under conversation name.
+
+---
+
+## Tier 2 — security UX that matches the protocol's strength
+
+We have Double Ratchet, deny-by-default, sandbox, transcript
+binding. Users can't see any of it. These changes surface the
+crypto so trust decisions are obvious.
+
+  - **v0.7.7 — Verified-in-person checkmark.** Trust state goes
+    `pinned` → `pinned-verified` after a side-channel SAS confirm.
+    UI: a "Verify in person" prompt during the first 24h after
+    pairing; stable green check on conversation header once done.
+
+  - **v0.7.8 — Key-change warning.** If a paired peer's pubkey
+    rotates (re-install, identity replacement), prominent
+    full-conversation warning and a re-pair prompt. Today this
+    case silently drops the peer to pending.
+
+  - **v0.7.9 — QR-code SAS + audio SAS.** In-person verification
+    via webcam scan of the SAS QR (existing 6-digit SAS encoded);
+    audio SAS reads digits aloud for over-the-phone verification.
+
+  - **v0.8.0 — Group UI** (depends on v0.7.5/.6 chat features).
+    Wire all the existing v0.6.x group protocol into the UI:
+    create group, member list, invite-by-link, leave group.
+    Group chat reuses the chat fundamentals from .5/.6.
+
+---
+
+## Tier 3 — P2P/file features that beat AirDrop and Syncthing
+
+Pure capability advantages over centralized chat. Each one closes
+a specific competitive gap.
+
+  - **v0.8.1 — Live bandwidth + transfer progress in chat.**
+    Per-bubble progress bar with B/s rate; aggregate "sending 3
+    files at 14 MB/s" pill in the conversation header.
+
+  - **v0.8.2 — Folder sync conflict UI.** When two peers diverge
+    on a file, show both versions side-by-side; user picks. Today
+    we silently latest-wins.
+
+  - **v0.8.3 — Multi-path send.** When LAN + internet both
+    reachable, send chunks in parallel over both, fastest path
+    wins per chunk. CDC dedup makes this nearly free.
+
+  - **v0.8.4 — Voice messages.** Browser MediaRecorder → opus
+    blob → file send pipeline. UI: hold-to-record button.
+
+  - **v0.8.5 — Inline previews for PDFs / markdown / code.**
+    Already have image inline. Add PDF (PDF.js), markdown (with
+    the existing markdown-lite renderer), syntax-highlighted code.
+
+  - **v0.8.6 — Large file streaming.** Don't materialize the
+    full file before playback; stream chunks to a video/audio
+    element as they arrive. Especially for voice messages and
+    forwarded video.
+
+---
+
+## Tier 4 — platform reach
+
+These are major efforts (each its own multi-month project).
+Listed in dependency order.
+
+  - **v0.9.0 — Mobile-friendly responsive web UI.** Same daemon,
+    new layout that works on iPad/iPhone Safari, Android Chrome.
+    Touch-first interactions. Drawer becomes a fullscreen sheet.
+
+  - **v0.9.1 — System tray + global hotkey.** Minimize-to-tray;
+    Win+L (or configurable) sends clipboard/selected file to
+    last-used device.
+
+  - **v1.0.0 — Multi-device-per-identity.** One identity (one
+    keypair shown to peers) but many local devices that all sync
+    messages between themselves over the same protocol. Requires
+    a new "device cluster" abstraction in state.
+
+  - **v1.1+ — Native iOS/Android apps.** Same daemon ported.
+    Background-service constraints on mobile mean significant
+    lifecycle work.
+
+  - **v1.2+ — Voice / video calls.** WebRTC over the same
+    encrypted channel. Major undertaking; depends on stable
+    multi-device-per-identity.
+
+---
+
+## Sequencing rules
+
+  - Each version ships independently. Don't bundle.
+  - Wire-format additions stay backward-compatible: older peers
+    ignore unknown fields / message kinds.
+  - Every cap that affects what a peer can request gets:
+    1. capability advertised in CAPS
+    2. deny-by-default policy entry
+    3. UI grant prompt on first request from a peer
+  - Tier 2 security UX must keep up with new wire features —
+    don't ship a feature that creates a new key-trust pathway
+    without first surfacing it in the trust UI.
+  - Resume-on-reconnect (v0.7.4) is a prerequisite for the
+    larger file features in Tier 3 — don't build voice-message /
+    streaming on a flaky transport layer.
+
+---
+
+## Cross-cutting tech debt to attend to as we go
+
+  - **Wire-format channel-level Double Ratchet activation.** v0.7.2
+    shipped the audited primitive; v0.7.3+ should detect mutual
+    `double_ratchet_v1` capability and switch the channel. Aim
+    to land this inside v0.7.4 (transfer resume) since both touch
+    the channel layer.
+  - **pip-audit / bandit findings.** Currently report-only. After
+    triage, tighten to fail-the-build in v0.8.x.
+  - **Group sender-key rotation cadence.** Currently never rotates;
+    add periodic rotation tied to group event log advancement
+    when v0.8.0 group UI lands.
+  - **Mobile responsive readiness.** Every UI commit from v0.7.3
+    forward should be mobile-aware so v0.9.0 isn't a full rewrite.

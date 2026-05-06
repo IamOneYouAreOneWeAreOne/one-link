@@ -2478,19 +2478,30 @@ class Daemon:
         return policy is None or cap in policy
 
     def _apply_default_capability_policy(self, peer_fp: str) -> None:
-        """v0.7.1: at SAS-pair finalize, install the deny-by-default
-        policy ([CHAT]) only if the user hasn't already configured
-        one for this peer. The user's manual override (chosen via
-        the Capabilities UI before the pair completed) wins.
+        """v0.7.3: at SAS-pair finalize, the per-peer policy default
+        is driven by the `pair_default_allow_all` setting.
 
-        Files/folder/group requests will now hit `_capability_allowed`
-        and be denied — the deny path emits a `capability_request` WS
-        event so the UI can surface a one-click Allow prompt."""
+          - True (default in v0.7.3+): leave policy = None.
+            policy=None means legacy allow-all — every advertised
+            capability flows. Aligns with the user mental model
+            "I just SAS-verified this device, of course I trust it."
+          - False: install [CHAT] only (the v0.7.2 audit-finding-A
+            deny-by-default for files/folders/groups).
+
+        Either way, the user can still flip individual caps in the
+        per-device drawer — this only sets the initial state."""
         if self.state is None:
             return
         existing = self.state.get_peer_capability_policy(peer_fp)
         if existing is not None:
             return
+        try:
+            v = self.state.get_setting("pair_default_allow_all")
+            allow_all = v is None or v.lower() in ("1", "true", "yes")
+        except Exception:
+            allow_all = True
+        if allow_all:
+            return  # leave policy = None (legacy allow-all semantics)
         from one_link.capabilities import DEFAULT_ALLOW_AFTER_PAIRING
         with contextlib.suppress(Exception):
             self.state.set_peer_capability_policy(

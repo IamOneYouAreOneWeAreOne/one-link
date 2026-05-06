@@ -243,6 +243,7 @@ class UIServer:
         r.add_post(r"/api/peers/{fp}/capabilities", self._guarded(self.api_set_peer_capabilities))
         r.add_post(r"/api/peers/{fp}/capabilities/grant", self._guarded(self.api_grant_capability))
         r.add_post(r"/api/peers/{fp}/capabilities/revoke", self._guarded(self.api_revoke_capability))
+        r.add_post(r"/api/peers/{fp}/profile", self._guarded(self.api_set_peer_profile))
         r.add_get("/api/capability-audit", self._guarded(self.api_capability_audit))
         r.add_get("/api/rendezvous", self._guarded(self.api_get_rendezvous))
         r.add_post("/api/rendezvous", self._guarded(self.api_set_rendezvous))
@@ -500,6 +501,10 @@ class UIServer:
                         )
                         live[rec.fingerprint]["last_seen_ms"] = rec.last_seen_ms
                         live[rec.fingerprint]["first_seen_ms"] = rec.first_seen_ms
+                        # v0.7.3: per-device profile overlays.
+                        live[rec.fingerprint]["local_alias"] = rec.local_alias
+                        live[rec.fingerprint]["muted"] = bool(rec.muted)
+                        live[rec.fingerprint]["display_name"] = rec.display_name
                     else:
                         # Pending peers in the DB but not visible on mDNS are
                         # usually stale ghosts from a previous daemon/process.
@@ -523,6 +528,10 @@ class UIServer:
                             ),
                             "last_seen_ms": rec.last_seen_ms,
                             "first_seen_ms": rec.first_seen_ms,
+                            # v0.7.3: per-device profile overlays.
+                            "local_alias": rec.local_alias,
+                            "muted": bool(rec.muted),
+                            "display_name": rec.display_name,
                         }
             except Exception:
                 pass
@@ -1087,6 +1096,60 @@ class UIServer:
         return web.json_response({
             "ok": True, "fingerprint": fp,
             "allowed": new_policy, "removed": True,
+        })
+
+    async def api_set_peer_profile(self, request: web.Request) -> web.Response:
+        """v0.7.3: update per-device profile fields. Body keys are
+        all optional; missing keys leave the field unchanged.
+          - local_alias: string or null (clears alias)
+          - muted: bool"""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        rec = self.daemon.state.get_peer(fp)
+        if rec is None:
+            return web.json_response({"error": "peer not found"}, status=404)
+        kwargs: dict = {}
+        if "local_alias" in data:
+            v = data["local_alias"]
+            if v is not None and not isinstance(v, str):
+                return web.json_response(
+                    {"error": "local_alias must be a string or null"},
+                    status=400,
+                )
+            if isinstance(v, str) and len(v) > 64:
+                return web.json_response(
+                    {"error": "local_alias too long (max 64 chars)"},
+                    status=400,
+                )
+            kwargs["local_alias"] = v
+        if "muted" in data:
+            v = data["muted"]
+            if not isinstance(v, bool):
+                return web.json_response(
+                    {"error": "muted must be true or false"}, status=400,
+                )
+            kwargs["muted"] = v
+        if not kwargs:
+            return web.json_response({"error": "no fields to update"}, status=400)
+        updated = self.daemon.state.set_peer_profile(fp, **kwargs)
+        # Broadcast so every open tab refreshes its sidebar / drawer.
+        self.broadcast({
+            "type": "peer_profile",
+            "fingerprint": fp,
+            "local_alias": updated.local_alias if updated else None,
+            "muted": bool(updated.muted) if updated else False,
+            "display_name": updated.display_name if updated else None,
+        })
+        return web.json_response({
+            "ok": True, "fingerprint": fp,
+            "local_alias": updated.local_alias if updated else None,
+            "muted": bool(updated.muted) if updated else False,
+            "display_name": updated.display_name if updated else None,
         })
 
     async def api_capability_audit(self, request: web.Request) -> web.Response:

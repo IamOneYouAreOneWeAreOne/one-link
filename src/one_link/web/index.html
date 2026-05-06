@@ -332,6 +332,40 @@
      orphan-floats next to the toggle button and looks like two
      separate search icons (only one of which is clickable). */
   .convo-h .search:not(.open) .icon-trigger { display: none; }
+
+  /* v0.7.3 per-device drawer surfaces */
+  .peer .gear-btn {
+    background: transparent; color: var(--text-dim);
+    border: 1px solid transparent; border-radius: 6px;
+    padding: 2px 7px; font-size: 13px;
+    opacity: 0; transition: opacity .15s, background .15s;
+    align-self: center;
+  }
+  .peer:hover .gear-btn, .peer.active .gear-btn { opacity: 1; }
+  .peer .gear-btn:hover {
+    background: var(--bg-3); color: var(--text);
+    border-color: var(--bg-3);
+  }
+  .convo-h .who { cursor: pointer; }
+  .convo-h .who:hover .name { color: var(--accent); }
+  .device-drawer h2 { display: flex; align-items: baseline; gap: 12px; }
+  .device-drawer .device-drawer-sub {
+    color: var(--text-dim); font-size: 12px; font-weight: 400;
+  }
+  .device-reach, .device-identity {
+    display: flex; flex-direction: column; gap: 6px;
+    background: var(--bg-2); border-radius: 8px; padding: 10px 12px;
+    font-size: 13px;
+  }
+  .reach-row { display: flex; gap: 12px; align-items: baseline; }
+  .reach-row .lbl {
+    color: var(--text-dim); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .8px;
+    min-width: 90px;
+  }
+  .reach-row .val { color: var(--text); }
+  .reach-row .val.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .reach-row .val.small { font-size: 11px; word-break: break-all; }
   .search-results-banner {
     background: var(--bg-1); border-bottom: 1px solid var(--line);
     padding: 8px 22px; font-size: 12px; color: var(--text-dim);
@@ -1049,7 +1083,7 @@
 
       <div id="convo-active" style="display:none; flex:1; flex-direction:column; min-height:0;">
         <div class="convo-h">
-          <div class="who">
+          <div class="who" id="convo-who" title="Open device settings">
             <div class="avatar" id="convo-avatar">?</div>
             <div class="text">
               <div class="name" id="convo-name">…</div>
@@ -1238,6 +1272,13 @@
         </span>
       </div>
       <div class="settings-row">
+        <label for="set-pair-allow-all">Trust new pairings fully</label>
+        <span class="toggle">
+          <input type="checkbox" id="set-pair-allow-all" />
+          <span class="slider"></span>
+        </span>
+      </div>
+      <div class="settings-row">
         <label for="set-passphrase">Passphrase</label>
         <input type="password" id="set-passphrase" placeholder="(set ONE_LINK_PASSPHRASE env var; restart required)" disabled />
       </div>
@@ -1248,21 +1289,18 @@
         <button id="set-notif" class="btn-ghost">Enable</button>
       </div>
 
-      <!-- v0.7.x: per-device permissions (was the cluttered chat header row). -->
-      <div class="settings-section" id="set-perm-section" style="display:none;">
-        <div class="settings-section-h">
-          <span>Permissions for <span id="set-perm-peer">this device</span></span>
-        </div>
+      <!-- v0.7.3: per-device controls moved into the dedicated
+           Device drawer (gear next to each device row, OR click
+           the device card in the conversation header). This
+           settings modal is now app-wide concerns only. -->
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Per-device settings</span></div>
         <p class="settings-help">
-          Choose what this paired device can do with you. Chat is allowed
-          right after pairing; Files and Folders require explicit consent
-          (deny-by-default — see security audit finding A).
+          Permissions, custom name, mute, and trust details for each
+          paired device live in that device's drawer. Click the gear
+          (⚙) next to a device in the sidebar, or the device card at
+          the top of the conversation, to open it.
         </p>
-        <div class="mini-actions wrap">
-          <button class="cap-toggle" data-cap="chat">Chat</button>
-          <button class="cap-toggle" data-cap="files">Files</button>
-          <button class="cap-toggle" data-cap="folder_sync">Folders</button>
-        </div>
       </div>
 
       <!-- v0.5.3: Connect across networks (rendezvous) -->
@@ -1284,6 +1322,84 @@
       <div class="actions">
         <button class="btn-ghost" id="settings-cancel">Close</button>
         <button class="btn-primary" id="settings-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v0.7.3 PER-DEVICE DRAWER -->
+  <div class="modal-backdrop" id="device-backdrop">
+    <div class="modal device-drawer" style="max-width:560px;">
+      <h2>
+        <span id="device-drawer-name">Device</span>
+        <span class="device-drawer-sub" id="device-drawer-sub"></span>
+      </h2>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Display</span></div>
+        <div class="settings-row">
+          <label for="dev-alias">Custom name</label>
+          <input type="text" id="dev-alias" maxlength="64" placeholder="(use device's own name)" />
+        </div>
+        <div class="settings-row">
+          <label for="dev-mute">Mute desktop notifications</label>
+          <span class="toggle">
+            <input type="checkbox" id="dev-mute" />
+            <span class="slider"></span>
+          </span>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Permissions</span></div>
+        <div class="settings-row">
+          <label for="dev-allow-all">Allow all</label>
+          <span class="toggle">
+            <input type="checkbox" id="dev-allow-all" />
+            <span class="slider"></span>
+          </span>
+        </div>
+        <p class="settings-help">
+          Default for paired devices is allow all (chat + files +
+          folders). Toggle off if you want to grant capabilities
+          individually below.
+        </p>
+        <div class="mini-actions wrap" id="dev-cap-row">
+          <button class="cap-toggle" data-cap="chat">Chat</button>
+          <button class="cap-toggle" data-cap="files">Files</button>
+          <button class="cap-toggle" data-cap="folder_sync">Folders</button>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Reachability</span></div>
+        <div class="device-reach" id="dev-reach">
+          <div class="reach-row"><span class="lbl">Connection</span><span class="val" id="dev-regime">—</span></div>
+          <div class="reach-row"><span class="lbl">Latency</span><span class="val" id="dev-latency">—</span></div>
+          <div class="reach-row"><span class="lbl">Last seen</span><span class="val" id="dev-lastalive">—</span></div>
+          <div class="reach-row"><span class="lbl">Address</span><span class="val" id="dev-address">—</span></div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Identity &amp; trust</span></div>
+        <div class="device-identity">
+          <div class="reach-row"><span class="lbl">Short ID</span><span class="val copyable" id="dev-shortid">—</span></div>
+          <div class="reach-row"><span class="lbl">Fingerprint</span><span class="val copyable mono small" id="dev-fp">—</span></div>
+          <div class="reach-row"><span class="lbl">SAS</span><span class="val mono" id="dev-sas">—</span></div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Trust actions</span></div>
+        <div class="mini-actions wrap">
+          <button class="btn-ghost" id="dev-unpair">Unpair</button>
+          <button class="btn-ghost" id="dev-block">Block</button>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="btn-ghost" id="device-cancel">Close</button>
+        <button class="btn-primary" id="device-save">Save</button>
       </div>
     </div>
   </div>
@@ -1606,10 +1722,17 @@
       btn.classList.remove("on");
     }
   }
-  function notifyIncoming(title, body) {
+  function notifyIncoming(title, body, opts = {}) {
     if (!notifySupported()) return;
     if (Notification.permission !== "granted") return;
     if (document.hasFocus()) return;
+    // v0.7.3: respect per-device mute. Caller passes peer_fp; if
+    // that peer's record is `muted`, swallow the notification.
+    if (opts.peer_fp) {
+      const peer = [...state.peers.values()]
+        .find(p => p.fingerprint === opts.peer_fp);
+      if (peer?.muted) return;
+    }
     try {
       const n = new Notification(title, {
         body: body || "",
@@ -1698,9 +1821,9 @@
       row.dataset.short = p.short_id;
       if (state.selectedPeer === p.short_id) row.classList.add("active");
 
-      const av = el("div", "avatar", initials(p.hostname || p.short_id));
+      const av = el("div", "avatar", initials(p.display_name || p.hostname || p.short_id));
       const txt = el("div", "text");
-      txt.appendChild(el("div", "name", p.hostname || "(unknown)"));
+      txt.appendChild(el("div", "name", p.display_name || p.hostname || "(unknown)"));
       const sub = el("div", "sub");
       const lc = latencyClass(p);
       if (lc) {
@@ -1720,6 +1843,19 @@
       row.appendChild(verify);
       row.appendChild(av);
       row.appendChild(txt);
+
+      // v0.7.3: gear opens the per-device drawer for THIS peer.
+      // Only render for paired (pinned/rejected) peers; unpaired
+      // peers are managed via the discovery / pair flow instead.
+      if (p.fingerprint && p.trust !== "pending") {
+        const gear = el("button", "gear-btn", "⚙");
+        gear.title = `${p.display_name || p.hostname || p.short_id} settings`;
+        gear.onclick = (ev) => {
+          ev.stopPropagation();
+          openDeviceDrawer(p.short_id);
+        };
+        row.appendChild(gear);
+      }
 
       row.onclick = () => selectPeer(p.short_id);
       list.appendChild(row);
@@ -1937,10 +2073,40 @@
   }
 
   // ── Render: messages ───────────────────────────────────────────────
+  function _messageRenderHash(peer, messages, transfersById, searchActive) {
+    const parts = [`peer=${peer || ""}`, `search=${searchActive ? 1 : 0}`];
+    for (const msg of messages) {
+      const blob = (msg.blob || "").toLowerCase();
+      let transferSig = "";
+      if (blob && (msg.t === "FILE_OFFER" || msg.t === "FILE_DONE")) {
+        for (const t of transfersById.values()) {
+          if (t.direction === msg.dir && (t.blob_hash || "").toLowerCase() === blob) {
+            transferSig = [
+              t.id, t.status, t.progress_bytes, t.total_bytes,
+              t.progress_pct, t.updated_ms,
+            ].join(":");
+            break;
+          }
+        }
+      }
+      parts.push([
+        msg.id || "", msg.t || "", msg.dir || "", msg.ts || "",
+        msg.body || "", msg.name || "", msg.size || "", blob,
+        msg.ok == null ? "" : msg.ok, msg.path || "", transferSig,
+      ].join("|"));
+    }
+    return parts.join("Â¶");
+  }
+
   function renderMessages() {
     const m = $("#messages");
-    m.innerHTML = "";
-    if (!state.selectedPeer) return;
+    if (!state.selectedPeer) {
+      if (m._renderSig !== "no-peer") {
+        m._renderSig = "no-peer";
+        m.innerHTML = "";
+      }
+      return;
+    }
 
     const source = state.searchResults != null
       ? state.searchResults.filter(x => x.peer === state.selectedPeer)
@@ -1958,6 +2124,14 @@
       const blob = (msg.blob || "").toLowerCase();
       return !blob || !offerBlobs.has(`${msg.dir}:${blob}`);
     });
+
+    const sig = _messageRenderHash(
+      state.selectedPeer, filtered, state.transfersById,
+      state.searchResults != null,
+    );
+    if (m._renderSig === sig) return;
+    m._renderSig = sig;
+    m.innerHTML = "";
 
     let lastTs = null;
     for (const msg of filtered) {
@@ -2312,8 +2486,8 @@
     }
     $("#convo-empty").style.display = "none";
     $("#convo-active").style.display = "flex";
-    $("#convo-avatar").textContent = initials(peer.hostname || peer.short_id);
-    $("#convo-name").textContent = peer.hostname || "(unknown)";
+    $("#convo-avatar").textContent = initials(peer.display_name || peer.hostname || peer.short_id);
+    $("#convo-name").textContent = peer.display_name || peer.hostname || "(unknown)";
     const subEl = $("#convo-sub");
     subEl.innerHTML = "";
     subEl.classList.add("copyable");
@@ -2345,45 +2519,206 @@
   }
 
   function renderPeerControls() {
-    // v0.7.x: per-device permission toggles moved into the Settings
-    // modal. This function is kept as a no-op so call sites that
-    // ran on every peer/state refresh don't need to be touched.
-    // The actual UI lives in populatePeerPermSettings(), which
-    // runs when the Settings modal is opened.
+    // v0.7.3: per-device permission toggles moved out of the chat
+    // header AND out of the global Settings modal. They now live in
+    // the Device drawer (gear next to each peer row, or click the
+    // device card in the conversation header). This function is
+    // kept as a no-op so legacy call sites don't need to change.
   }
 
-  function populatePeerPermSettings() {
-    const section = $("#set-perm-section");
-    if (!section) return;
-    const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
-    if (!peer || !peer.fingerprint || peer.trust !== "pinned") {
-      section.style.display = "none";
+  // v0.7.3: per-device drawer.
+  state.deviceDrawerFp = null;
+  state.deviceDrawerPending = null;  // pending unsaved changes
+
+  function _humanRelMs(ms) {
+    if (!ms) return "—";
+    const d = Date.now() - ms;
+    if (d < 0) return "just now";
+    const m = Math.floor(d / 60000);
+    if (m < 1) return "just now";
+    if (m < 60) return `${m} min ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h} h ago`;
+    const days = Math.floor(h / 24);
+    return `${days} d ago`;
+  }
+
+  function _peerFromShort(shortId) {
+    return state.peers.get(shortId) || null;
+  }
+
+  async function openDeviceDrawer(shortId) {
+    const peer = _peerFromShort(shortId);
+    if (!peer || !peer.fingerprint) {
+      toast("This device isn't paired yet.", "info");
       return;
     }
-    section.style.display = "";
-    $("#set-perm-peer").textContent = peer.hostname || peer.short_id;
+    state.deviceDrawerFp = peer.fingerprint;
+    state.deviceDrawerPending = {
+      local_alias: peer.local_alias ?? "",
+      muted: !!peer.muted,
+    };
+
+    $("#device-drawer-name").textContent =
+      peer.display_name || peer.hostname || peer.short_id;
+    $("#device-drawer-sub").textContent =
+      `${peer.short_id} · ${reachLabel(peer)}`;
+
+    $("#dev-alias").value = peer.local_alias || "";
+    $("#dev-mute").checked = !!peer.muted;
+
     const allowed = peer.allowed_capabilities == null
       ? new Set(["chat", "files", "folder_sync"])
       : new Set(peer.allowed_capabilities || []);
-    section.querySelectorAll(".cap-toggle").forEach(btn => {
+    document.querySelectorAll("#dev-cap-row .cap-toggle").forEach(btn => {
       btn.classList.toggle("on", allowed.has(btn.dataset.cap));
     });
+
+    $("#dev-regime").textContent = reachLabel(peer);
+    const lat = peer.health?.latency_ewma_ms;
+    $("#dev-latency").textContent =
+      lat == null ? "—" : `${Math.round(lat)} ms`;
+    $("#dev-lastalive").textContent =
+      _humanRelMs(peer.health?.last_alive_ms || peer.last_seen_ms);
+    $("#dev-address").textContent =
+      `${peer.address || "?"}:${peer.port || "?"}`;
+
+    $("#dev-shortid").textContent = peer.short_id;
+    $("#dev-fp").textContent = peer.fingerprint;
+
+    // SAS — we recompute server-side via /api/peers/{fp}/sas.
+    $("#dev-sas").textContent = "…";
+    try {
+      const sas = await api.get(`/api/peers/${peer.fingerprint}/sas`);
+      $("#dev-sas").textContent = sas.sas || "—";
+    } catch {
+      $("#dev-sas").textContent = "(unavailable)";
+    }
+
+    $("#device-backdrop").classList.add("show");
   }
 
-  async function setCapability(cap, enabled) {
-    const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
-    if (!peer?.fingerprint) return;
-    const current = peer.allowed_capabilities == null
-      ? new Set(["chat", "files", "folder_sync"])
-      : new Set(peer.allowed_capabilities || []);
+  function closeDeviceDrawer() {
+    state.deviceDrawerFp = null;
+    state.deviceDrawerPending = null;
+    $("#device-backdrop").classList.remove("show");
+  }
+
+  // Wire drawer interactions.
+  $("#device-cancel").onclick = closeDeviceDrawer;
+  $("#dev-alias").addEventListener("input", (e) => {
+    if (state.deviceDrawerPending) {
+      state.deviceDrawerPending.local_alias = e.target.value;
+    }
+  });
+  $("#dev-mute").addEventListener("change", (e) => {
+    if (state.deviceDrawerPending) {
+      state.deviceDrawerPending.muted = !!e.target.checked;
+    }
+  });
+  document.querySelectorAll("#dev-cap-row .cap-toggle").forEach(btn => {
+    btn.onclick = async () => {
+      const fp = state.deviceDrawerFp;
+      if (!fp) return;
+      const cap = btn.dataset.cap;
+      const isOn = btn.classList.contains("on");
+      // Optimistic toggle; revert if API errors.
+      btn.classList.toggle("on", !isOn);
+      try {
+        await setCapability(cap, !isOn, { fingerprint: fp });
+      } catch {
+        btn.classList.toggle("on", isOn);
+      }
+    };
+  });
+  $("#dev-shortid").onclick = () => {
+    if (state.deviceDrawerFp) {
+      const peer = state.peers.get(
+        [...state.peers.values()].find(p => p.fingerprint === state.deviceDrawerFp)?.short_id || ""
+      );
+      if (peer) copyToClipboard(peer.short_id, "device ID");
+    }
+  };
+  $("#dev-fp").onclick = () => {
+    if (state.deviceDrawerFp) {
+      copyToClipboard(state.deviceDrawerFp, "fingerprint");
+    }
+  };
+  $("#dev-unpair").onclick = async () => {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    if (!confirm(
+      "Unpair this device? You'll need to re-verify before chatting again."
+    )) return;
+    try {
+      await setTrust(fp, "pending");
+      closeDeviceDrawer();
+      toast("Device unpaired", "info");
+    } catch (e) {
+      toast(`Unpair failed: ${e.message || e}`, "bad");
+    }
+  };
+  $("#dev-block").onclick = async () => {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    if (!confirm(
+      "Block this device? Outgoing sends will be refused; incoming will be dropped."
+    )) return;
+    try {
+      await setTrust(fp, "rejected");
+      closeDeviceDrawer();
+      toast("Device blocked", "info");
+    } catch (e) {
+      toast(`Block failed: ${e.message || e}`, "bad");
+    }
+  };
+  $("#device-save").onclick = async () => {
+    const fp = state.deviceDrawerFp;
+    const pending = state.deviceDrawerPending;
+    if (!fp || !pending) return;
+    const payload = {};
+    payload.local_alias = (pending.local_alias || "").trim() || null;
+    payload.muted = !!pending.muted;
+    try {
+      await api.post(`/api/peers/${fp}/profile`, payload);
+      toast("Device settings saved", "good");
+      closeDeviceDrawer();
+      await refreshPeers();
+    } catch (e) {
+      toast(`Save failed: ${errorToastBody(e)}`, "bad");
+    }
+  };
+
+  // Conversation header click → open drawer for the selected peer.
+  $("#convo-who")?.addEventListener("click", () => {
+    if (state.selectedPeer) openDeviceDrawer(state.selectedPeer);
+  });
+
+  async function setCapability(cap, enabled, opts = {}) {
+    // v0.7.3: drawer can pass an explicit `fingerprint`; otherwise
+    // we fall back to the currently-selected peer (legacy callers).
+    let fp = opts.fingerprint || null;
+    let peer = null;
+    if (fp) {
+      peer = [...state.peers.values()].find(p => p.fingerprint === fp) || null;
+    } else {
+      peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
+      fp = peer?.fingerprint || null;
+    }
+    if (!fp) return;
+    const current = peer && peer.allowed_capabilities != null
+      ? new Set(peer.allowed_capabilities)
+      : new Set(["chat", "files", "folder_sync"]);
     if (enabled) current.add(cap); else current.delete(cap);
     try {
-      const res = await api.post(`/api/peers/${peer.fingerprint}/capabilities`, { allowed: [...current] });
-      peer.allowed_capabilities = res.allowed;
-      populatePeerPermSettings();
+      const res = await api.post(
+        `/api/peers/${fp}/capabilities`, { allowed: [...current] }
+      );
+      if (peer) peer.allowed_capabilities = res.allowed;
       toast("Peer policy updated", "good");
     } catch (e) {
       toast(`Policy update failed: ${e.message || e}`, "bad");
+      throw e;
     }
   }
 
@@ -2524,6 +2859,10 @@
           toast("Paired", "good");
         }
         refreshPeers();
+      } else if (m.type === "peer_profile" || m.type === "peer_capabilities") {
+        // v0.7.3: alias / mute / cap changes — refresh the sidebar so
+        // the new display name and toggle states show up immediately.
+        refreshPeers();
       } else if (m.type === "pair_request") {
         // Incoming pair request from another device. Open the same modal
         // so the user verifies the SAS. v0.4: requester is by definition
@@ -2557,17 +2896,17 @@
         if (state.messages.length > 1000) state.messages = state.messages.slice(-800);
         if (msg.t === "TEXT" && msg.dir === "in") {
           const peer = state.peers.get(msg.peer);
-          const who = peer?.hostname || msg.peer;
-          if (msg.peer !== state.selectedPeer) {
+          const who = peer?.display_name || peer?.hostname || msg.peer;
+          if (msg.peer !== state.selectedPeer && !peer?.muted) {
             toast(`${who}: ${msg.body || ""}`, "info");
           }
-          notifyIncoming(who, msg.body || "");
+          notifyIncoming(who, msg.body || "", { peer_fp: peer?.fingerprint });
         }
         if (msg.t === "FILE_DONE" && msg.dir === "in" && msg.ok) {
           const peer = state.peers.get(msg.peer);
-          const who = peer?.hostname || msg.peer;
-          toast(`Received ${msg.name || "file"}`, "good");
-          notifyIncoming(`File from ${who}`, msg.name || "file");
+          const who = peer?.display_name || peer?.hostname || msg.peer;
+          if (!peer?.muted) toast(`Received ${msg.name || "file"}`, "good");
+          notifyIncoming(`File from ${who}`, msg.name || "file", { peer_fp: peer?.fingerprint });
           refreshFiles();
         }
         if (msg.peer === state.selectedPeer) renderMessages();
@@ -2939,9 +3278,12 @@
   });
   clearSearch.onclick = () => { searchInput.value = ""; finishSearch(); };
 
-  document.querySelectorAll(".cap-toggle").forEach(btn => {
-    btn.onclick = () => setCapability(btn.dataset.cap, !btn.classList.contains("on"));
-  });
+  // v0.7.3: the previous global `.cap-toggle` binding lived here.
+  // It was leftover from the now-deleted chat-header peer-tools
+  // row, and it ran AFTER the drawer-specific binding — silently
+  // overwriting the drawer's onclick handlers, which is why the
+  // drawer's toggles + Save flow appeared dead. Drawer wiring is
+  // now self-contained inside openDeviceDrawer.
 
   async function runSearch(q) {
     if (!state.selectedPeer) {
@@ -3155,10 +3497,8 @@
       $("#set-rendezvous").value = "";
       renderRendezvousStatus({});
     }
-    // v0.7.x: populate the moved-from-the-top-banner notification
-    // status + the moved-from-the-chat-header per-device permissions.
+    // v0.7.x: populate the moved-from-the-top-banner notification status.
     populateNotifSettings();
-    populatePeerPermSettings();
     settingsBackdrop.classList.add("show");
   };
   $("#settings-cancel").onclick = () => settingsBackdrop.classList.remove("show");

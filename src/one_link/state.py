@@ -283,6 +283,14 @@ class PeerRecord:
     trust: str
     first_seen_ms: int
     last_seen_ms: int
+    # v0.7.3 per-device profile.
+    local_alias: Optional[str] = None
+    muted: bool = False
+
+    @property
+    def display_name(self) -> str:
+        """Resolves to local_alias if set, else hostname, else short_id."""
+        return self.local_alias or self.hostname or self.short_id
 
 
 @dataclass
@@ -376,8 +384,27 @@ class State:
                 self._migrate_v2_folder_sandboxes(c)
                 if current < 2:
                     c.execute("INSERT INTO schema_version(version) VALUES(2)")
+                # v0.7.3: per-device profile fields (local alias + mute).
+                self._migrate_v3_peer_profile(c)
+                if current < 3:
+                    c.execute("INSERT INTO schema_version(version) VALUES(3)")
             finally:
                 c.close()
+
+    def _migrate_v3_peer_profile(self, c: sqlite3.Cursor) -> None:
+        """v0.7.3: add per-peer profile columns. local_alias is a
+        user-set name override that wins over remote-advertised
+        hostname in the UI. muted suppresses desktop notifications
+        for messages from this peer (no protocol effect).
+        Idempotent."""
+        rows = c.execute("PRAGMA table_info(peers)").fetchall()
+        existing = {row[1] for row in rows}
+        if "local_alias" not in existing:
+            c.execute("ALTER TABLE peers ADD COLUMN local_alias TEXT")
+        if "muted" not in existing:
+            c.execute(
+                "ALTER TABLE peers ADD COLUMN muted INTEGER NOT NULL DEFAULT 0"
+            )
 
     def _migrate_v2_folder_sandboxes(self, c: sqlite3.Cursor) -> None:
         """Add per-folder sandbox columns: root_id (stable id),
@@ -867,6 +894,7 @@ class State:
         ]
 
     def _row_to_peer(self, row: sqlite3.Row) -> PeerRecord:
+        cols = row.keys()
         return PeerRecord(
             fingerprint=row["fingerprint"],
             short_id=row["short_id"],
@@ -877,7 +905,42 @@ class State:
             trust=row["trust"],
             first_seen_ms=row["first_seen_ms"],
             last_seen_ms=row["last_seen_ms"],
+            local_alias=(
+                row["local_alias"] if "local_alias" in cols else None
+            ),
+            muted=bool(row["muted"]) if "muted" in cols else False,
         )
+
+    def set_peer_profile(
+        self,
+        fingerprint: str,
+        *,
+        local_alias: Optional[str] = ...,  # type: ignore[assignment]
+        muted: Optional[bool] = ...,       # type: ignore[assignment]
+    ) -> Optional[PeerRecord]:
+        """v0.7.3: update per-device profile fields. Pass `Ellipsis`
+        (the default) to leave a field unchanged; pass None to
+        explicitly clear the alias. Returns the refreshed record."""
+        sets: list[str] = []
+        params: list[Any] = []
+        if local_alias is not Ellipsis:
+            v = local_alias
+            if v is not None:
+                v = str(v).strip() or None
+            sets.append("local_alias = ?")
+            params.append(v)
+        if muted is not Ellipsis:
+            sets.append("muted = ?")
+            params.append(1 if muted else 0)
+        if not sets:
+            return self.get_peer(fingerprint)
+        params.append(fingerprint)
+        with self._write_lock:
+            self._conn.execute(
+                f"UPDATE peers SET {', '.join(sets)} WHERE fingerprint = ?",
+                params,
+            )
+        return self.get_peer(fingerprint)
 
     # ─── messages ─────────────────────────────────────────────────────
 
