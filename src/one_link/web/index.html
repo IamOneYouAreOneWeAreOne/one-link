@@ -747,6 +747,158 @@
      "tap to pair" affordance moved to the discovery modal. The
      `.peer.unpaired` styles below are kept dormant; if a future
      mode ever surfaces unpaired in the sidebar again, they apply. */
+
+  /* ── Attachment staging tray (above composer) ──────────────────────── */
+  .attach-tray {
+    grid-column: 1 / -1;
+    display: none;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0 0 10px;
+  }
+  .attach-tray.show { display: flex; }
+  .chip {
+    position: relative;
+    display: flex; align-items: center; gap: 8px;
+    background: var(--bg-2);
+    border: 1px solid var(--bg-3);
+    border-radius: 10px;
+    padding: 6px 30px 6px 6px;
+    max-width: 220px;
+  }
+  .chip .thumb {
+    width: 36px; height: 36px;
+    border-radius: 6px;
+    background: var(--bg-3);
+    display: grid; place-items: center;
+    font-size: 16px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .chip .thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .chip .meta { min-width: 0; }
+  .chip .meta .name {
+    font-size: 12px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 140px;
+  }
+  .chip .meta .size {
+    font-size: 11px; color: var(--text-dim);
+  }
+  .chip .x {
+    position: absolute; top: 4px; right: 4px;
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    background: var(--bg-3);
+    color: var(--text-dim);
+    display: grid; place-items: center;
+    font-size: 13px; line-height: 1;
+  }
+  .chip .x:hover { background: var(--bad); color: white; }
+
+  /* ── File message bubble — progress + status icon ──────────────────── */
+  .msg.file .progress-mini {
+    height: 3px;
+    background: rgba(255,255,255,.10);
+    border-radius: 999px;
+    overflow: hidden;
+    margin-top: 5px;
+  }
+  .msg.file .progress-mini span {
+    display: block; height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width .25s ease;
+  }
+  .msg.out.file .progress-mini { background: rgba(255,255,255,.18); }
+  .msg.file .status-icon {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px;
+  }
+  .msg.file .status-icon.queued  { color: var(--text-dimmer); }
+  .msg.file .status-icon.sending { color: var(--accent-2); }
+  .msg.file .status-icon.sent    { color: var(--good); }
+  .msg.file .status-icon.failed  { color: var(--bad); }
+  .msg.out.file .status-icon.queued  { color: rgba(255,255,255,.55); }
+  .msg.out.file .status-icon.sending { color: rgba(255,255,255,.85); }
+  .msg.out.file .status-icon.sent    { color: white; }
+  .msg.out.file .status-icon.failed  { color: #ffd0d0; }
+  .msg.file .actions {
+    display: flex; gap: 6px; margin-top: 6px;
+  }
+  .msg.file .actions button, .msg.file .actions a {
+    color: inherit; background: rgba(255,255,255,.10);
+    padding: 4px 8px; border-radius: 5px;
+    font-size: 11px; text-decoration: none;
+    border: 0; cursor: pointer;
+  }
+  .msg.file .actions button:hover, .msg.file .actions a:hover {
+    background: rgba(255,255,255,.18);
+  }
+  .msg.file .img-preview {
+    margin-top: 6px;
+    max-width: 100%;
+    max-height: 240px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: block;
+  }
+  .msg.file .img-preview:hover { filter: brightness(1.05); }
+
+  /* ── Files panel: Received|Sent toggle ─────────────────────────────── */
+  .files-toggle {
+    display: flex; gap: 4px;
+    margin: 0 12px 8px;
+    padding: 3px;
+    background: var(--bg-2);
+    border-radius: 8px;
+  }
+  .files-toggle button {
+    flex: 1;
+    padding: 6px 10px;
+    border-radius: 6px;
+    color: var(--text-dim);
+    font-size: 12px; font-weight: 500;
+  }
+  .files-toggle button.active {
+    background: var(--bg-3); color: var(--text);
+  }
+  .file-row .when {
+    font-size: 10px; color: var(--text-dimmer);
+    margin-top: 2px;
+  }
+  .file-row .badge {
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .4px;
+    padding: 1px 6px; border-radius: 999px;
+    margin-left: 6px;
+  }
+  .file-row .badge.complete { background: rgba(70,211,154,.15); color: var(--good); }
+  .file-row .badge.active   { background: rgba(78,193,255,.15); color: var(--accent-2); }
+  .file-row .badge.failed   { background: rgba(255,107,107,.15); color: var(--bad); }
+  .file-row .badge.queued   { background: rgba(245,196,81,.15); color: var(--warn); }
+
+  /* ── Notification banner (one-time prompt) ─────────────────────────── */
+  .notif-banner {
+    display: none;
+    align-items: center; justify-content: space-between;
+    gap: 12px; padding: 10px 18px;
+    background: linear-gradient(90deg, rgba(124,92,255,.15), rgba(78,193,255,.08));
+    border-bottom: 1px solid var(--line);
+    font-size: 13px; color: var(--text);
+  }
+  .notif-banner.show { display: flex; }
+  .notif-banner button {
+    background: var(--accent); color: white;
+    padding: 6px 14px; border-radius: 6px;
+    font-size: 12px; font-weight: 600;
+  }
+  .notif-banner .dismiss {
+    background: transparent; color: var(--text-dim);
+    padding: 6px 10px;
+  }
+
+  /* ── Composer screenshot button (Tier 3 placeholder, hidden for now) ─ */
+  .composer .icon-btn.cam { display: none; }
 </style>
 </head>
 <body>
@@ -764,6 +916,15 @@
       <button class="gear" id="btn-settings" title="Settings">⚙</button>
     </div>
   </header>
+
+  <!-- One-time notification permission banner -->
+  <div class="notif-banner" id="notif-banner">
+    <span>Get a desktop alert when a message or file arrives.</span>
+    <div>
+      <button class="dismiss" id="notif-dismiss">Not now</button>
+      <button id="notif-enable">Enable</button>
+    </div>
+  </div>
 
   <!-- MAIN -->
   <main class="main" id="main">
@@ -836,6 +997,7 @@
         <div class="messages" id="messages"></div>
 
         <div class="composer">
+          <div class="attach-tray" id="attach-tray"></div>
           <button class="icon-btn" id="btn-attach2" title="Attach file">📎</button>
           <textarea id="input" placeholder="Message your peer… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
           <button class="send" id="btn-send" disabled>Send</button>
@@ -849,8 +1011,9 @@
         <span>Files</span>
         <span class="count" id="files-count">0</span>
       </div>
-      <div class="help-card">
-        Send files to the selected paired device, or open files you received here.
+      <div class="files-toggle">
+        <button class="active" data-files-mode="received" id="btn-files-received">Received</button>
+        <button data-files-mode="sent" id="btn-files-sent">Sent</button>
       </div>
       <div id="filelist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
         <div class="empty">No received files yet.</div>
@@ -858,6 +1021,7 @@
       <div class="panel-form">
         <div class="mini-actions">
           <button id="btn-send-file-panel">Send file</button>
+          <button id="btn-open-inbox">Open inbox folder</button>
           <button id="btn-refresh-files">Refresh</button>
         </div>
       </div>
@@ -1101,13 +1265,20 @@
     selectedPeer: null,   // short_id
     messages: [],         // recent across all peers
     transfers: [],
+    transfersById: new Map(),  // id -> transfer record (fast lookup for msg status)
     folders: [],
     status: null,
     searchQuery: "",
     searchResults: null,
     activePane: "convo",
     pairing: { peerFp: null, sas: null, weConfirmed: false },
+    staged: [],           // [{id, file, dataUrl?}] pending send
+    stagedSeq: 0,
+    filesMode: "received",  // "received" | "sent"
   };
+
+  const IMAGE_EXT = new Set(["png","jpg","jpeg","gif","webp","bmp","svg"]);
+  const isImageName = (name) => IMAGE_EXT.has((name?.split(".").pop() || "").toLowerCase());
 
   // ── v0.5.3: connection-regime classifier ───────────────────────────
   // Tells users where a peer's connection is coming from. Pure
@@ -1178,6 +1349,31 @@
     transfers() { return this.get("/api/transfers?limit=80"); },
     status() { return this.get("/api/status"); },
   };
+
+  // ── Desktop notifications ──────────────────────────────────────────
+  function notifySupported() {
+    return typeof Notification !== "undefined";
+  }
+  function maybeShowNotifBanner() {
+    if (!notifySupported()) return;
+    if (Notification.permission !== "default") return;
+    if (localStorage.getItem("ol_notif_dismissed") === "1") return;
+    $("#notif-banner")?.classList.add("show");
+  }
+  function notifyIncoming(title, body) {
+    if (!notifySupported()) return;
+    if (Notification.permission !== "granted") return;
+    if (document.hasFocus()) return;
+    try {
+      const n = new Notification(title, {
+        body: body || "",
+        icon: "/static/one-glyph.png",
+        silent: false,
+      });
+      n.onclick = () => { window.focus(); n.close(); };
+      setTimeout(() => { try { n.close(); } catch {} }, 8000);
+    } catch {}
+  }
 
   // ── Toasts ─────────────────────────────────────────────────────────
   const toast = (text, kind = "info", ttl = 3500) => {
@@ -1341,6 +1537,43 @@
     }
   }
 
+  // Look up the transfer record matching a FILE_OFFER message.
+  // FILE_OFFER carries `blob` (hex); transfer carries `blob_hash`.
+  // Direction must match too (out vs in are distinct ledger rows).
+  function transferForMessage(msg) {
+    const blob = (msg.blob || "").toLowerCase();
+    if (!blob) return null;
+    for (const t of state.transfersById.values()) {
+      if (t.direction === msg.dir && (t.blob_hash || "").toLowerCase() === blob) {
+        return t;
+      }
+    }
+    return null;
+  }
+
+  function statusLabel(t, fallback) {
+    if (!t) return fallback;
+    if (t.status === "queued")   return "Queued";
+    if (t.status === "offered")  return "Sending…";
+    if (t.status === "active")   return `Sending… ${Math.round(t.progress_pct || 0)}%`;
+    if (t.status === "complete") return t.direction === "in" ? "Received" : "Sent";
+    if (t.status === "failed")   return "Failed";
+    return t.status || fallback;
+  }
+  function statusKind(t) {
+    if (!t) return "queued";
+    if (t.status === "complete") return "sent";
+    if (t.status === "failed")   return "failed";
+    if (t.status === "active" || t.status === "offered") return "sending";
+    return "queued";
+  }
+  function statusGlyph(kind) {
+    if (kind === "sent") return "✓";
+    if (kind === "failed") return "✗";
+    if (kind === "sending") return "⏳";
+    return "•";
+  }
+
   // ── Render: messages ───────────────────────────────────────────────
   function renderMessages() {
     const m = $("#messages");
@@ -1350,7 +1583,20 @@
     const source = state.searchResults != null
       ? state.searchResults.filter(x => x.peer === state.selectedPeer)
       : state.messages.filter(x => x.peer === state.selectedPeer);
-    const filtered = source;
+
+    // Hide redundant FILE_DONE messages when we already have FILE_OFFER for
+    // the same blob — the FILE_OFFER bubble will reflect completion via its
+    // matching transfer record, and showing both is duplicative.
+    const offerBlobs = new Set();
+    for (const msg of source) {
+      if (msg.t === "FILE_OFFER" && msg.blob) offerBlobs.add(`${msg.dir}:${msg.blob.toLowerCase()}`);
+    }
+    const filtered = source.filter(msg => {
+      if (msg.t !== "FILE_DONE") return true;
+      const blob = (msg.blob || "").toLowerCase();
+      return !blob || !offerBlobs.has(`${msg.dir}:${blob}`);
+    });
+
     let lastTs = null;
     for (const msg of filtered) {
       if (!lastTs || !sameDay(lastTs, msg.ts)) {
@@ -1363,45 +1609,117 @@
         b.appendChild(document.createTextNode(msg.body || ""));
         b.appendChild(el("span", "when", fmtTime(msg.ts)));
         m.appendChild(b);
-      } else if (msg.t === "FILE_OFFER") {
-        const b = el("div", `msg ${msg.dir} file`);
-        const icon = el("div", "icon", fileIcon(msg.name || ""));
-        const meta = el("div", "meta");
-        meta.appendChild(el("div", "name", msg.name || "file"));
-        meta.appendChild(el("div", "size", `${fmtBytes(msg.size)} · sending…`));
-        b.appendChild(icon); b.appendChild(meta);
-        b.appendChild(el("span", "when", fmtTime(msg.ts)));
-        m.appendChild(b);
-      } else if (msg.t === "FILE_DONE") {
-        const b = el("div", `msg ${msg.dir} file`);
-        const icon = el("div", "icon", fileIcon(msg.name || ""));
-        const meta = el("div", "meta");
-        meta.appendChild(el("div", "name", msg.name || "file"));
-        meta.appendChild(el("div", "size", `${fmtBytes(msg.size)} · ${msg.ok ? "received" : "FAILED"}`));
-        b.appendChild(icon); b.appendChild(meta);
-        if (msg.dir === "in" && msg.ok && msg.path) {
-          const fname = msg.path.split(/[\\\/]/).pop();
-          const link = el("a", null, "Open");
-          link.href = `/api/files/${encodeURIComponent(fname)}`;
-          link.target = "_blank";
-          b.appendChild(link);
-        }
-        b.appendChild(el("span", "when", fmtTime(msg.ts)));
-        m.appendChild(b);
+      } else if (msg.t === "FILE_OFFER" || msg.t === "FILE_DONE") {
+        m.appendChild(renderFileBubble(msg));
       }
     }
     m.scrollTop = m.scrollHeight;
   }
 
-  // ── Render: files panel ────────────────────────────────────────────
+  function renderFileBubble(msg) {
+    const t = transferForMessage(msg);
+    // Determine effective status. FILE_DONE messages without a transfer
+    // (e.g. legacy history before transfers were tracked) fall back to
+    // msg.ok / msg.dir for display.
+    let kind, label;
+    if (t) {
+      kind = statusKind(t);
+      label = statusLabel(t, "Sending…");
+    } else if (msg.t === "FILE_DONE") {
+      kind = msg.ok ? "sent" : "failed";
+      label = msg.ok ? (msg.dir === "in" ? "Received" : "Sent") : "Failed";
+    } else {
+      kind = "sending";
+      label = "Sending…";
+    }
+
+    const b = el("div", `msg ${msg.dir} file`);
+    const icon = el("div", "icon", fileIcon(msg.name || ""));
+    const meta = el("div", "meta");
+    meta.appendChild(el("div", "name", msg.name || "file"));
+
+    // Size + status icon line
+    const sizeLine = el("div", "size");
+    sizeLine.textContent = fmtBytes(msg.size) + " · ";
+    const statusEl = el("span", `status-icon ${kind}`);
+    statusEl.textContent = `${statusGlyph(kind)} ${label}`;
+    sizeLine.appendChild(statusEl);
+    meta.appendChild(sizeLine);
+
+    // Progress bar (only while in-flight)
+    if (kind === "sending" && t) {
+      const bar = el("div", "progress-mini");
+      const fill = el("span");
+      fill.style.width = `${Math.max(0, Math.min(100, t.progress_pct || 0))}%`;
+      bar.appendChild(fill);
+      meta.appendChild(bar);
+    }
+
+    // Inline image preview for received images that are on disk
+    const incomingPath = msg.path || (t?.metadata?.path);
+    if (msg.dir === "in" && kind === "sent" && isImageName(msg.name)) {
+      const fname = (incomingPath || msg.name || "").toString().split(/[\\\/]/).pop();
+      if (fname) {
+        const img = document.createElement("img");
+        img.className = "img-preview";
+        img.src = `/api/files/${encodeURIComponent(fname)}`;
+        img.alt = msg.name || "image";
+        img.onclick = () => window.open(img.src, "_blank");
+        meta.appendChild(img);
+      }
+    }
+
+    // Action row — Open / Reveal / Retry depending on state
+    const actions = el("div", "actions");
+    if (msg.dir === "in" && kind === "sent") {
+      const fname = (incomingPath || msg.name || "").toString().split(/[\\\/]/).pop();
+      if (fname) {
+        const open = el("a", null, "Open");
+        open.href = `/api/files/${encodeURIComponent(fname)}`;
+        open.target = "_blank";
+        actions.appendChild(open);
+        const reveal = el("button", null, "Reveal");
+        reveal.onclick = async () => {
+          try { await api.post(`/api/files/${encodeURIComponent(fname)}/reveal`, {}); }
+          catch (e) { toast(`Reveal failed: ${e.message || e}`, "bad"); }
+        };
+        actions.appendChild(reveal);
+      }
+    }
+    if (kind === "failed") {
+      const why = (t?.metadata?.error) ? ` (${t.metadata.error_class || "error"})` : "";
+      if (why) {
+        const detail = el("div", "size");
+        detail.textContent = (t.metadata.error || "").slice(0, 120) + why;
+        meta.appendChild(detail);
+      }
+    }
+
+    b.appendChild(icon);
+    b.appendChild(meta);
+    if (actions.children.length > 0) b.appendChild(actions);
+    b.appendChild(el("span", "when", fmtTime(msg.ts)));
+    return b;
+  }
+
+  // ── Render: files panel (Received | Sent toggle) ──────────────────
+  let _receivedFilesCache = [];
   async function refreshFiles() {
     try {
       const { files } = await api.get("/api/files");
-      const list = $("#filelist");
-      list.innerHTML = "";
+      _receivedFilesCache = files;
+      renderFilesPanel();
+    } catch (e) { console.warn(e); }
+  }
+  function renderFilesPanel() {
+    const list = $("#filelist");
+    if (!list) return;
+    list.innerHTML = "";
+    if (state.filesMode === "received") {
+      const files = _receivedFilesCache;
       $("#files-count").textContent = files.length;
       if (files.length === 0) {
-        list.appendChild(el("div", "empty", "No received files yet. Use Send file after you pick and pair a device."));
+        list.appendChild(el("div", "empty", "No received files yet. Files sent to you from a paired device land here."));
         return;
       }
       for (const f of files) {
@@ -1410,14 +1728,54 @@
         const meta = el("div", "meta");
         meta.appendChild(el("div", "name", f.name));
         meta.appendChild(el("div", "size", `${fmtBytes(f.size)}`));
+        if (f.mtime_ms) meta.appendChild(el("div", "when", new Date(f.mtime_ms).toLocaleString()));
         row.appendChild(meta);
-        const link = el("a", null, "Open");
-        link.href = `/api/files/${encodeURIComponent(f.name)}`;
-        link.target = "_blank";
-        row.appendChild(link);
+        const open = el("a", null, "Open");
+        open.href = `/api/files/${encodeURIComponent(f.name)}`;
+        open.target = "_blank";
+        row.appendChild(open);
+        const reveal = el("button", null, "Reveal");
+        reveal.onclick = async () => {
+          try { await api.post(`/api/files/${encodeURIComponent(f.name)}/reveal`, {}); }
+          catch (e) { toast(`Reveal failed: ${e.message || e}`, "bad"); }
+        };
+        row.appendChild(reveal);
         list.appendChild(row);
       }
-    } catch (e) { console.warn(e); }
+    } else {
+      // Sent: pull from /api/transfers, direction=out, kind=file.
+      const sent = state.transfers
+        .filter(t => t.direction === "out" && t.kind === "file")
+        .sort((a, b) => (b.updated_ms || 0) - (a.updated_ms || 0));
+      $("#files-count").textContent = sent.length;
+      if (sent.length === 0) {
+        list.appendChild(el("div", "empty", "Nothing sent yet. Files you send will be tracked here."));
+        return;
+      }
+      for (const t of sent) {
+        const row = el("div", "file-row");
+        row.appendChild(el("div", "icon", fileIcon(t.name)));
+        const meta = el("div", "meta");
+        const nameLine = el("div", "name", t.name || "file");
+        const badge = el("span", `badge ${t.status}`, t.status);
+        nameLine.appendChild(badge);
+        meta.appendChild(nameLine);
+        if (t.status === "active" || t.status === "queued" || t.status === "offered") {
+          meta.appendChild(el("div", "size",
+            `${fmtBytes(t.progress_bytes)} / ${fmtBytes(t.total_bytes)} · ${Math.round(t.progress_pct || 0)}%`));
+          const bar = el("div", "bar");
+          const fill = el("span");
+          fill.style.width = `${Math.max(0, Math.min(100, t.progress_pct || 0))}%`;
+          bar.appendChild(fill);
+          meta.appendChild(bar);
+        } else {
+          meta.appendChild(el("div", "size", fmtBytes(t.size)));
+        }
+        if (t.updated_ms) meta.appendChild(el("div", "when", new Date(t.updated_ms).toLocaleString()));
+        row.appendChild(meta);
+        list.appendChild(row);
+      }
+    }
   }
 
   async function refreshFolders() {
@@ -1508,7 +1866,12 @@
     try {
       const { transfers } = await api.transfers();
       state.transfers = transfers || [];
+      state.transfersById = new Map();
+      for (const t of state.transfers) state.transfersById.set(t.id, t);
       renderTransfers();
+      // Status of file bubbles is driven by transfersById — re-render
+      // the active conversation so progress reflects the fresh data.
+      renderMessages();
       await refreshStatus();
     } catch (e) { console.warn(e); }
   }
@@ -1630,7 +1993,29 @@
     setInterval(refreshPeers, 5000);
     setInterval(refreshTransfers, 4000);
     setInterval(refreshStatus, 8000);
+    maybeShowNotifBanner();
   }
+
+  // Notification banner buttons
+  $("#notif-enable")?.addEventListener("click", async () => {
+    if (!notifySupported()) {
+      toast("This browser doesn't support notifications.", "bad");
+      $("#notif-banner").classList.remove("show");
+      return;
+    }
+    try {
+      const res = await Notification.requestPermission();
+      $("#notif-banner").classList.remove("show");
+      if (res === "granted") toast("Notifications enabled", "good");
+      else toast("Notifications declined", "info");
+    } catch (e) {
+      $("#notif-banner").classList.remove("show");
+    }
+  });
+  $("#notif-dismiss")?.addEventListener("click", () => {
+    localStorage.setItem("ol_notif_dismissed", "1");
+    $("#notif-banner").classList.remove("show");
+  });
 
   async function refreshPeers() {
     try {
@@ -1701,12 +2086,19 @@
         const msg = m.msg;
         state.messages.push(msg);
         if (state.messages.length > 1000) state.messages = state.messages.slice(-800);
-        if (msg.t === "TEXT" && msg.dir === "in" && msg.peer !== state.selectedPeer) {
+        if (msg.t === "TEXT" && msg.dir === "in") {
           const peer = state.peers.get(msg.peer);
-          toast(`${peer?.hostname || msg.peer}: ${msg.body || ""}`, "info");
+          const who = peer?.hostname || msg.peer;
+          if (msg.peer !== state.selectedPeer) {
+            toast(`${who}: ${msg.body || ""}`, "info");
+          }
+          notifyIncoming(who, msg.body || "");
         }
         if (msg.t === "FILE_DONE" && msg.dir === "in" && msg.ok) {
+          const peer = state.peers.get(msg.peer);
+          const who = peer?.hostname || msg.peer;
           toast(`Received ${msg.name || "file"}`, "good");
+          notifyIncoming(`File from ${who}`, msg.name || "file");
           refreshFiles();
         }
         if (msg.peer === state.selectedPeer) renderMessages();
@@ -1716,7 +2108,14 @@
         else state.transfers.unshift(m.transfer);
         state.transfers.sort((a, b) => (b.updated_ms || 0) - (a.updated_ms || 0));
         state.transfers = state.transfers.slice(0, 80);
+        state.transfersById.set(m.transfer.id, m.transfer);
         renderTransfers();
+        // Live progress on file bubbles in the active conversation.
+        renderMessages();
+        // Refresh sent files view if it's active.
+        if (state.activePane === "files" && state.filesMode === "sent") {
+          renderFilesPanel();
+        }
         refreshStatus();
       }
     };
@@ -1724,11 +2123,18 @@
     ws.onerror = () => { try { ws.close(); } catch {} };
   }
 
-  // ── Send text ──────────────────────────────────────────────────────
+  // ── Composer: text + staged files share one Send button ───────────
   const input = $("#input");
   const sendBtn = $("#btn-send");
+  const tray = $("#attach-tray");
+
+  function refreshSendEnabled() {
+    const hasText = input.value.trim().length > 0;
+    const hasFiles = state.staged.length > 0;
+    sendBtn.disabled = (!hasText && !hasFiles) || !state.selectedPeer;
+  }
   input.addEventListener("input", () => {
-    sendBtn.disabled = !input.value.trim() || !state.selectedPeer;
+    refreshSendEnabled();
     input.style.height = "auto";
     input.style.height = Math.min(160, input.scrollHeight) + "px";
   });
@@ -1739,28 +2145,96 @@
     }
   });
   sendBtn.addEventListener("click", sendCurrent);
+
+  // ── Staging tray (paste/drop/attach all stage instead of auto-send) ─
+  function readDataUrl(file) {
+    return new Promise((resolve) => {
+      if (!file.type?.startsWith("image/")) { resolve(null); return; }
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => resolve(null);
+      r.readAsDataURL(file);
+    });
+  }
+  async function stageFile(file) {
+    if (!file) return;
+    const id = ++state.stagedSeq;
+    const dataUrl = await readDataUrl(file);
+    state.staged.push({ id, file, dataUrl });
+    renderStaging();
+    refreshSendEnabled();
+  }
+  function removeStaged(id) {
+    state.staged = state.staged.filter(s => s.id !== id);
+    renderStaging();
+    refreshSendEnabled();
+  }
+  function renderStaging() {
+    tray.innerHTML = "";
+    if (state.staged.length === 0) {
+      tray.classList.remove("show");
+      return;
+    }
+    tray.classList.add("show");
+    for (const s of state.staged) {
+      const chip = el("div", "chip");
+      const thumb = el("div", "thumb");
+      if (s.dataUrl) {
+        const img = document.createElement("img");
+        img.src = s.dataUrl;
+        thumb.appendChild(img);
+      } else {
+        thumb.textContent = fileIcon(s.file.name);
+      }
+      const meta = el("div", "meta");
+      meta.appendChild(el("div", "name", s.file.name));
+      meta.appendChild(el("div", "size", fmtBytes(s.file.size)));
+      const x = el("button", "x", "×");
+      x.title = "Remove";
+      x.onclick = () => removeStaged(s.id);
+      chip.appendChild(thumb);
+      chip.appendChild(meta);
+      chip.appendChild(x);
+      tray.appendChild(chip);
+    }
+  }
+
   async function sendCurrent() {
-    const body = input.value.trim();
-    if (!body || !state.selectedPeer) return;
+    if (!state.selectedPeer) return;
     const peer = state.peers.get(state.selectedPeer);
     if (peer?.trust === "rejected") {
       toast("This device is blocked. Use Allow device first.", "bad");
       return;
     }
+    const body = input.value.trim();
+    const filesToSend = state.staged.slice();
+    if (!body && filesToSend.length === 0) return;
+
     sendBtn.disabled = true;
     try {
-      await api.post("/api/send", { peer: state.selectedPeer, body });
-      input.value = "";
-      input.style.height = "auto";
-    } catch (e) {
-      toast(`Send failed: ${e.message || e}`, "bad");
+      if (body) {
+        try {
+          await api.post("/api/send", { peer: state.selectedPeer, body });
+          input.value = "";
+          input.style.height = "auto";
+        } catch (e) {
+          toast(`Send failed: ${e.message || e}`, "bad");
+        }
+      }
+      // Clear tray immediately so the user sees the staged files leaving;
+      // each upload still tracks its own progress in the chat bubble.
+      state.staged = [];
+      renderStaging();
+      for (const s of filesToSend) {
+        uploadFile(s.file);
+      }
     } finally {
-      sendBtn.disabled = false;
+      refreshSendEnabled();
       input.focus();
     }
   }
 
-  // ── Send file (button) ─────────────────────────────────────────────
+  // ── Attach button + file picker ────────────────────────────────────
   const fileInput = $("#file-input");
   const triggerAttach = () => {
     if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
@@ -1781,10 +2255,24 @@
   });
   $("#btn-send-file-panel").addEventListener("click", triggerAttach);
   $("#btn-refresh-files").addEventListener("click", refreshFiles);
+  $("#btn-open-inbox").addEventListener("click", async () => {
+    try { await api.post("/api/inbox/reveal", {}); }
+    catch (e) { toast(`Open failed: ${e.message || e}`, "bad"); }
+  });
+  document.querySelectorAll(".files-toggle button").forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll(".files-toggle button").forEach(x => x.classList.remove("active"));
+      btn.classList.add("active");
+      state.filesMode = btn.dataset.filesMode;
+      if (state.filesMode === "sent") refreshTransfers();
+      else refreshFiles();
+      renderFilesPanel();
+    };
+  });
   fileInput.addEventListener("change", async (e) => {
     const files = Array.from(e.target.files || []);
     fileInput.value = "";
-    for (const f of files) await uploadFile(f);
+    for (const f of files) await stageFile(f);
   });
 
   async function uploadFile(file) {
@@ -1794,28 +2282,17 @@
       toast("This device is blocked. Use Allow device first.", "bad");
       return;
     }
-    // v0.6.3: show progress with a sticky "sending" toast tied to a
-    // unique handle so the user can see the status, and replace it
-    // on either success or failure with a concrete message.
-    const sendingToast = toast(`Sending ${file.name}…`, "info", 60000);
     try {
-      const r = await api.upload(state.selectedPeer, file);
-      try { sendingToast?.remove?.(); } catch {}
-      toast(`Sent ${file.name}`, "good");
+      await api.upload(state.selectedPeer, file);
+      // Per-bubble status will reflect the matching transfer record;
+      // no toast needed for happy path.
     } catch (e) {
-      try { sendingToast?.remove?.(); } catch {}
-      // The server now returns a meaningful error string for known
-      // failure modes (timeout, peer unreachable, capability
-      // disabled). Surface it directly.
       const reason = (e && e.message) ? e.message : String(e);
       toast(`Send failed (${file.name}): ${reason}`, "bad", 8000);
     }
   }
 
-  // v0.6.3: paste-image and clipboard-image. When the user pastes
-  // an image into the chat input or anywhere on the page while a
-  // peer is selected, attach it as a file send. Same code path as
-  // drag-and-drop.
+  // Paste — stage instead of auto-send.
   function handlePasteImage(e) {
     if (!state.selectedPeer) return false;
     const items = e.clipboardData?.items;
@@ -1825,13 +2302,11 @@
       if (item.kind !== "file") continue;
       const file = item.getAsFile();
       if (!file) continue;
-      // Browsers serve clipboard images as nameless blobs; give
-      // them a sane name so the receiver sees something useful.
       const ext = (file.type || "image/png").split("/")[1] || "png";
       const named = file.name && file.name.length > 0
         ? file
         : new File([file], `pasted-${Date.now()}.${ext}`, { type: file.type });
-      uploadFile(named);
+      stageFile(named);
       attached = true;
     }
     if (attached) {
@@ -1840,13 +2315,8 @@
     }
     return false;
   }
-  // Bind on the input AND the document so paste works regardless of
-  // whether focus is inside the textarea or somewhere else (settings
-  // modal, peer list, conversation pane).
   $("#input").addEventListener("paste", handlePasteImage);
   document.addEventListener("paste", (e) => {
-    // Skip if focus is in an input/textarea OTHER than our chat
-    // input — the user is probably pasting text for that field.
     const t = e.target;
     const isOurInput = t && t.id === "input";
     const isAnyInput = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
@@ -1854,7 +2324,7 @@
     handlePasteImage(e);
   });
 
-  // ── Drag-drop ──────────────────────────────────────────────────────
+  // Drag-drop — stage instead of auto-send.
   let dragCounter = 0;
   document.addEventListener("dragenter", (e) => {
     if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) {
@@ -1873,7 +2343,7 @@
     $("#drop-overlay").classList.remove("show");
     if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
     const files = Array.from(e.dataTransfer?.files || []);
-    for (const f of files) await uploadFile(f);
+    for (const f of files) await stageFile(f);
   });
 
   // ── Search wiring ──────────────────────────────────────────────────

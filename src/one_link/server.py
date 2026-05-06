@@ -181,6 +181,8 @@ class UIServer:
         r.add_get("/api/transfers", self._guarded(self.api_transfers))
         r.add_post("/api/transfers/prune", self._guarded(self.api_prune_transfers))
         r.add_delete(r"/api/transfers/{transfer_id:.+}", self._guarded(self.api_delete_transfer))
+        r.add_post("/api/inbox/reveal", self._guarded(self.api_inbox_reveal))
+        r.add_post(r"/api/files/{name:.+}/reveal", self._guarded(self.api_file_reveal))
         r.add_get(r"/api/files/{name:.+}", self._guarded(self.api_file_download))
         r.add_get("/api/audit", self._guarded(self.api_audit))
         r.add_get("/api/events", self._guarded_ws(self.ws_events))
@@ -1218,6 +1220,45 @@ class UIServer:
             return web.json_response({"error": "not found"}, status=404)
         mime = mimetypes.guess_type(safe)[0] or "application/octet-stream"
         return web.FileResponse(path, headers={"Content-Type": mime})
+
+    async def api_file_reveal(self, request: web.Request) -> web.Response:
+        # Open the OS file manager with the inbox file selected.
+        # Same path-traversal defense as download.
+        name = request.match_info["name"]
+        safe = Path(name).name
+        if safe != name or not safe:
+            return web.json_response({"error": "bad name"}, status=400)
+        path = inbox_dir() / safe
+        if not path.is_file():
+            return web.json_response({"error": "not found"}, status=404)
+        import subprocess
+        import sys
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer.exe", f"/select,{path}"])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path.parent)])
+        except OSError as e:
+            return web.json_response({"error": f"reveal failed: {e}"}, status=500)
+        return web.json_response({"ok": True})
+
+    async def api_inbox_reveal(self, request: web.Request) -> web.Response:
+        # Open the inbox folder itself (no specific file selected).
+        path = inbox_dir()
+        import subprocess
+        import sys
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer.exe", str(path)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except OSError as e:
+            return web.json_response({"error": f"reveal failed: {e}"}, status=500)
+        return web.json_response({"ok": True, "path": str(path)})
 
     # ─── WebSocket events ─────────────────────────────────────────────
     async def ws_events(self, request: web.Request) -> web.WebSocketResponse:
