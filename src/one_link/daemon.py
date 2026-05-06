@@ -868,6 +868,10 @@ class Daemon:
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_CDC_CHUNK":
             await self._handle_file_cdc_chunk(channel, msg, peer_fp, peer_sid)
+        elif t == "GROUP_KEY_OFFER":
+            await self._handle_group_key_offer(channel, msg, peer_fp)
+        elif t == "GROUP_MSG":
+            await self._handle_group_msg(channel, msg, peer_fp, peer_sid)
         elif t == "PING":
             await channel.send(encode_msg(make_msg("PONG", self.me.short_id)))
         elif t == "PAIR_REQUEST":
@@ -2387,11 +2391,19 @@ class Daemon:
                     results.append(ack)
                     sess.messages_sent += 1
                     sess.last_used = time.time()
-                    ev = self._persist(
-                        msg=m, direction="out", peer_fp=sess.peer_fp,
-                        peer_short_id=peer.short_id,
-                    )
-                    self._broadcast_tail(ev)
+                    # v0.6.2: group-protocol frames (GROUP_*) are not chat
+                    # messages — they're transport-layer envelopes carrying
+                    # encrypted multi-recipient payloads. Skip the regular
+                    # message-log persist + UI broadcast so they don't
+                    # clutter the 1-on-1 chat history. The receiver-side
+                    # _handle_group_msg persists the decrypted plaintext
+                    # into the dedicated group_messages table.
+                    if not m.get("t", "").startswith("GROUP_"):
+                        ev = self._persist(
+                            msg=m, direction="out", peer_fp=sess.peer_fp,
+                            peer_short_id=peer.short_id,
+                        )
+                        self._broadcast_tail(ev)
                 return results
         except Exception:
             await self._drop_outbound_session(sess.peer_fp)
@@ -2523,6 +2535,362 @@ class Daemon:
             "state": ctx.state.value if ctx else "unknown",
             "both_confirmed": bool(ctx and ctx.both_confirmed),
         }
+
+    # ─── groups (v0.6.2) ───────────────────────────────────────────
+
+    async def _handle_group_key_offer(
+        self, channel: ch.Channel, msg: dict, peer_fp: str,
+    ) -> None:
+        """A pinned peer is sharing their sender chain for a group
+        we both belong to. Validate + persist. Idempotent on retransmit
+        (same group_id + sender + epoch overwrites only if newer
+        chain_key — receiver's existing chain_key may have advanced
+        past the offered one).
+        """
+        if not self._is_pinned(peer_fp):
+            log.info("GROUP_KEY_OFFER from non-pinned peer dropped: %s", peer_fp[:8])
+            return
+        if self.state is None:
+            return
+        try:
+            from one_link import groups_crypto as gc
+            group_id = gc._b64d(msg["group_id_b64"])
+            epoch = int(msg["epoch"])
+            chain_key = gc._b64d(msg["chain_key_b64"])
+        except Exception as e:
+            log.warning("malformed GROUP_KEY_OFFER from %s: %s", peer_fp[:8], e)
+            return
+        if len(group_id) != 16 or len(chain_key) != 32 or epoch <= 0:
+            log.warning("invalid GROUP_KEY_OFFER fields from %s", peer_fp[:8])
+            return
+        sender_pub = channel.peer_ed_pub  # 32 bytes
+        # Don't overwrite an in-progress chain at the same epoch — the
+        # offered key is the *initial* state of that epoch, but we may
+        # have already received and decrypted a few messages, advancing
+        # past it. Only accept if we have NO chain at this epoch yet.
+        existing = self.state.get_sender_chain(
+            group_id=group_id,
+            sender_pub=sender_pub,
+            direction="in",
+            epoch=epoch,
+        )
+        if existing is not None:
+            log.debug(
+                "GROUP_KEY_OFFER for (%s, ep=%d) already known; ignoring",
+                sender_pub.hex()[:8], epoch,
+            )
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+            )))
+            return
+        self.state.upsert_sender_chain(
+            group_id=group_id,
+            sender_pub=sender_pub,
+            direction="in",
+            epoch=epoch,
+            chain_key=chain_key,
+            counter=0,
+        )
+        log.info(
+            "GROUP_KEY_OFFER accepted for group=%s sender=%s epoch=%d",
+            group_id.hex()[:8], sender_pub.hex()[:8], epoch,
+        )
+        await channel.send(encode_msg(make_msg(
+            "ACK", self.me.short_id, of=msg.get("id"),
+        )))
+
+    async def _handle_group_msg(
+        self, channel: ch.Channel, msg: dict, peer_fp: str, peer_sid: str,
+    ) -> None:
+        """Decrypt + verify + persist a group message from a pinned peer.
+        ACKs on success or with a `rejected` reason on failure."""
+        if not self._is_pinned(peer_fp):
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="peer_not_pinned",
+            )))
+            return
+        if self.state is None:
+            return
+        from one_link import groups_crypto as gc
+
+        try:
+            group_id = gc._b64d(msg["group_id_b64"])
+            wire = msg["wire"]
+            if not isinstance(wire, dict):
+                raise ValueError("wire must be a dict")
+        except Exception as e:
+            log.warning("malformed GROUP_MSG from %s: %s", peer_fp[:8], e)
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="malformed",
+            )))
+            return
+
+        sender_pub = channel.peer_ed_pub
+        epoch = int(wire.get("epoch", -1))
+        if epoch <= 0:
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="malformed",
+            )))
+            return
+
+        chain_row = self.state.get_sender_chain(
+            group_id=group_id,
+            sender_pub=sender_pub,
+            direction="in",
+            epoch=epoch,
+        )
+        if chain_row is None:
+            log.info(
+                "GROUP_MSG with no chain for group=%s sender=%s epoch=%d",
+                group_id.hex()[:8], sender_pub.hex()[:8], epoch,
+            )
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="no_chain_for_epoch",
+            )))
+            return
+
+        receiving = gc.ReceivingChain(
+            group_id=group_id,
+            sender_pubkey=sender_pub,
+            epoch=epoch,
+            chain_key=chain_row["chain_key"],
+            counter=int(chain_row["counter"]),
+        )
+        try:
+            plaintext, advanced = gc.decrypt_message(wire=wire, chain=receiving)
+        except ValueError as e:
+            log.warning(
+                "GROUP_MSG decrypt failed for sender=%s epoch=%d counter=%d: %s",
+                sender_pub.hex()[:8], epoch, wire.get("counter"), e,
+            )
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="decrypt_failed",
+            )))
+            return
+
+        # Persist new chain state + the decrypted message.
+        self.state.upsert_sender_chain(
+            group_id=group_id,
+            sender_pub=sender_pub,
+            direction="in",
+            epoch=epoch,
+            chain_key=advanced.chain_key,
+            counter=advanced.counter,
+        )
+        msg_id = msg.get("id") or uuid.uuid4().hex
+        self.state.insert_group_message(
+            id=msg_id,
+            group_id=group_id,
+            sender_pub=sender_pub,
+            epoch=epoch,
+            counter=int(wire.get("counter", 0)),
+            direction="in",
+            body=plaintext.decode("utf-8", errors="replace"),
+        )
+        # Surface to UI subscribers.
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "group_msg",
+                    "group_id_hex": group_id.hex(),
+                    "sender_pub_hex": sender_pub.hex(),
+                    "epoch": epoch,
+                    "counter": int(wire.get("counter", 0)),
+                    "body": plaintext.decode("utf-8", errors="replace"),
+                    "ts_ms": int(time.time() * 1000),
+                    "direction": "in",
+                })
+        await channel.send(encode_msg(make_msg(
+            "ACK", self.me.short_id, of=msg.get("id"),
+        )))
+
+    async def send_group_message(
+        self, *, group_id: bytes, body: str,
+    ) -> dict:
+        """v0.6.2: encrypt a message under our sender chain for the
+        group, then fan out to every member via their 1-on-1 outbound
+        session.
+
+        Returns:
+            {"recipients": int, "delivered": int, "failures": [...]}
+        """
+        if self.state is None:
+            raise RuntimeError("state not available")
+        from one_link import groups as gmod
+        from one_link import groups_crypto as gc
+
+        # Materialize current group state from the persisted event log.
+        wire_events = self.state.list_group_events(group_id)
+        if not wire_events:
+            raise RuntimeError(f"unknown group {group_id.hex()[:8]}")
+        events = [gmod.GroupEvent.from_wire(w) for w in wire_events]
+        gstate = gmod.reduce_events(events)
+        if gstate is None:
+            raise RuntimeError(f"group {group_id.hex()[:8]} has no valid events")
+        if not gstate.is_member(self.me.public_bytes):
+            raise RuntimeError("we are not a member of this group")
+
+        # Get or create our outbound chain for this group + epoch.
+        # Epoch 1 is the initial epoch; rotation comes in v0.6.x later.
+        epoch = 1
+        chain_row = self.state.get_sender_chain(
+            group_id=group_id,
+            sender_pub=self.me.public_bytes,
+            direction="out",
+            epoch=epoch,
+        )
+        if chain_row is None:
+            # Start a fresh outbound chain. We must distribute its
+            # initial chain key to every other member as a
+            # GROUP_KEY_OFFER before they can decrypt our messages.
+            initial = gc.begin_new_epoch(
+                group_id=group_id,
+                sender_pubkey=self.me.public_bytes,
+                new_epoch=epoch,
+            )
+            self.state.upsert_sender_chain(
+                group_id=group_id,
+                sender_pub=self.me.public_bytes,
+                direction="out",
+                epoch=epoch,
+                chain_key=initial.chain_key,
+                counter=0,
+            )
+            await self._broadcast_group_key_offer(
+                group_id=group_id,
+                epoch=epoch,
+                initial_chain_key=initial.chain_key,
+                members=gstate.members,
+            )
+            chain_row = self.state.get_sender_chain(
+                group_id=group_id,
+                sender_pub=self.me.public_bytes,
+                direction="out",
+                epoch=epoch,
+            )
+
+        sender_chain = gc.SenderChain(
+            group_id=group_id,
+            sender_pubkey=self.me.public_bytes,
+            epoch=int(chain_row["epoch"]),
+            chain_key=chain_row["chain_key"],
+            counter=int(chain_row["counter"]),
+        )
+        body_bytes = body.encode("utf-8")
+        wire, advanced = gc.encrypt_message(
+            plaintext=body_bytes,
+            chain=sender_chain,
+            private_key=self.me.private,
+        )
+        # Persist advance immediately — even if some recipients fail,
+        # the chain has moved on.
+        self.state.upsert_sender_chain(
+            group_id=group_id,
+            sender_pub=self.me.public_bytes,
+            direction="out",
+            epoch=advanced.epoch,
+            chain_key=advanced.chain_key,
+            counter=advanced.counter,
+        )
+        # Save outbound message in our own store.
+        msg_id = uuid.uuid4().hex
+        self.state.insert_group_message(
+            id=msg_id,
+            group_id=group_id,
+            sender_pub=self.me.public_bytes,
+            epoch=sender_chain.epoch,
+            counter=sender_chain.counter,
+            direction="out",
+            body=body,
+        )
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "group_msg",
+                    "group_id_hex": group_id.hex(),
+                    "sender_pub_hex": self.me.public_bytes.hex(),
+                    "epoch": sender_chain.epoch,
+                    "counter": sender_chain.counter,
+                    "body": body,
+                    "ts_ms": int(time.time() * 1000),
+                    "direction": "out",
+                })
+
+        # Fan out to every other member.
+        recipients = [
+            pk for pk in gstate.members.keys()
+            if pk != self.me.public_bytes
+        ]
+        delivered = 0
+        failures: list[dict] = []
+        outer = make_msg(
+            "GROUP_MSG", self.me.short_id,
+            group_id_b64=gc._b64(group_id),
+            wire=wire,
+        )
+        for member_pub in recipients:
+            try:
+                member_fp = fingerprint_of(member_pub)
+                peer = await self.resolve_for_send(member_fp)
+                if peer is None:
+                    failures.append({
+                        "fingerprint": member_fp,
+                        "error": "peer_unreachable",
+                    })
+                    continue
+                await self.send_to(peer, [outer])
+                delivered += 1
+            except Exception as e:
+                failures.append({
+                    "fingerprint": fingerprint_of(member_pub),
+                    "error": str(e),
+                })
+        return {
+            "recipients": len(recipients),
+            "delivered": delivered,
+            "failures": failures,
+            "msg_id": msg_id,
+        }
+
+    async def _broadcast_group_key_offer(
+        self,
+        *,
+        group_id: bytes,
+        epoch: int,
+        initial_chain_key: bytes,
+        members: dict,
+    ) -> None:
+        """Send GROUP_KEY_OFFER to every group member except self.
+        Best-effort — failures are logged, not raised. Membership
+        rotation in later versions will retry on reconnect."""
+        from one_link import groups_crypto as gc
+        outer = make_msg(
+            "GROUP_KEY_OFFER", self.me.short_id,
+            group_id_b64=gc._b64(group_id),
+            epoch=epoch,
+            chain_key_b64=gc._b64(initial_chain_key),
+        )
+        for member_pub in list(members.keys()):
+            if member_pub == self.me.public_bytes:
+                continue
+            try:
+                fp = fingerprint_of(member_pub)
+                peer = await self.resolve_for_send(fp)
+                if peer is None:
+                    log.info(
+                        "GROUP_KEY_OFFER: peer unreachable %s",
+                        fp[:8],
+                    )
+                    continue
+                await self.send_to(peer, [outer])
+            except Exception as e:
+                log.warning("GROUP_KEY_OFFER to %s failed: %s",
+                            fingerprint_of(member_pub)[:8], e)
 
     async def reject_pair(self, peer: Peer) -> None:
         """User says SAS did NOT match — possible MITM. Block the peer."""

@@ -145,6 +145,62 @@ CREATE TABLE IF NOT EXISTS capability_audit (
 CREATE INDEX IF NOT EXISTS idx_cap_audit_ts ON capability_audit(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_cap_audit_fp ON capability_audit(fingerprint);
 
+-- v0.6.2: groups + group events + per-(group, sender, epoch) sender keys.
+-- The event log is the source of truth for group state; reduce_events
+-- materializes the membership/role/name lazily. Sender chains are
+-- stored separately because they advance per message and need fast
+-- per-row update.
+CREATE TABLE IF NOT EXISTS groups (
+    group_id    BLOB    PRIMARY KEY,        -- 16-byte stable id
+    name        TEXT    NOT NULL DEFAULT '',-- cached from latest reduce
+    created_ms  INTEGER NOT NULL DEFAULT 0,
+    state_hash  TEXT    NOT NULL DEFAULT '',-- last computed Merkle of events
+    updated_ms  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_events (
+    group_id    BLOB    NOT NULL,
+    event_id    TEXT    NOT NULL,           -- content-addressed hash
+    timestamp_ms INTEGER NOT NULL,
+    wire_json   TEXT    NOT NULL,           -- full serialized event
+    PRIMARY KEY (group_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_group_events_ts
+    ON group_events(group_id, timestamp_ms);
+
+-- Sender chains: my own outbound chain per group AND every peer's
+-- chain that they shared with me via GROUP_KEY_OFFER. Direction
+-- ('out' / 'in') tells us which we're tracking. Counter is
+-- materialized per row and bumped after every encrypt/decrypt.
+CREATE TABLE IF NOT EXISTS group_sender_chains (
+    group_id    BLOB NOT NULL,
+    sender_pub  BLOB NOT NULL,              -- 32-byte Ed25519 pubkey
+    direction   TEXT NOT NULL,              -- 'out' | 'in'
+    epoch       INTEGER NOT NULL,
+    chain_key   BLOB NOT NULL,              -- 32 bytes
+    counter     INTEGER NOT NULL DEFAULT 0,
+    updated_ms  INTEGER NOT NULL,
+    PRIMARY KEY (group_id, sender_pub, direction, epoch)
+);
+CREATE INDEX IF NOT EXISTS idx_group_chains_lookup
+    ON group_sender_chains(group_id, sender_pub, direction);
+
+-- Per-group inbox of decrypted-and-verified plaintext messages.
+-- Persisted so the UI can render history; encryption-side info kept
+-- so the audit endpoint can show provenance.
+CREATE TABLE IF NOT EXISTS group_messages (
+    id           TEXT PRIMARY KEY,
+    group_id     BLOB NOT NULL,
+    sender_pub   BLOB NOT NULL,
+    epoch        INTEGER NOT NULL,
+    counter      INTEGER NOT NULL,
+    direction    TEXT NOT NULL,             -- 'in' | 'out'
+    body         TEXT NOT NULL,
+    ts_ms        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_group_messages_group_ts
+    ON group_messages(group_id, ts_ms);
+
 CREATE TABLE IF NOT EXISTS transfers (
     id             TEXT PRIMARY KEY,
     direction      TEXT NOT NULL,
@@ -500,6 +556,212 @@ class State:
                 "note": r["note"],
             })
         return out
+
+    # ─── groups (v0.6.2) ──────────────────────────────────────────────
+    # `event` is a one_link.groups.GroupEvent — we serialize via to_wire().
+    # This module avoids importing groups directly to dodge a cycle; the
+    # daemon does that work and passes `wire_dict`.
+
+    def upsert_group_event(
+        self,
+        *,
+        group_id: bytes,
+        event_id: str,
+        timestamp_ms: int,
+        wire_dict: dict,
+    ) -> bool:
+        """Persist a group event. Returns True if newly inserted,
+        False if already present (content-addressed, idempotent)."""
+        with self._write_lock:
+            cur = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO group_events(
+                    group_id, event_id, timestamp_ms, wire_json
+                ) VALUES(?, ?, ?, ?)
+                """,
+                (group_id, event_id, int(timestamp_ms), json.dumps(wire_dict)),
+            )
+            return cur.rowcount > 0
+
+    def list_group_events(self, group_id: bytes) -> list[dict]:
+        """All events for a group, returned as wire dicts ready to feed
+        through GroupEvent.from_wire()."""
+        rows = self._conn.execute(
+            "SELECT wire_json FROM group_events WHERE group_id = ? "
+            "ORDER BY timestamp_ms ASC, event_id ASC",
+            (group_id,),
+        ).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            try:
+                out.append(json.loads(r["wire_json"]))
+            except Exception:
+                continue
+        return out
+
+    def list_group_ids(self) -> list[bytes]:
+        rows = self._conn.execute(
+            "SELECT group_id FROM groups ORDER BY updated_ms DESC"
+        ).fetchall()
+        return [r["group_id"] for r in rows]
+
+    def upsert_group_meta(
+        self,
+        *,
+        group_id: bytes,
+        name: str,
+        created_ms: int,
+        state_hash: str,
+    ) -> None:
+        """Cache the materialized state of a group (name, hash) so the
+        UI can render the list without re-reducing every event log."""
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO groups(group_id, name, created_ms, state_hash, updated_ms)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                    name = excluded.name,
+                    state_hash = excluded.state_hash,
+                    updated_ms = excluded.updated_ms
+                """,
+                (group_id, name, int(created_ms), state_hash, _now_ms()),
+            )
+
+    def get_group_meta(self, group_id: bytes) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT group_id, name, created_ms, state_hash, updated_ms "
+            "FROM groups WHERE group_id = ?",
+            (group_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "group_id": row["group_id"],
+            "name": row["name"],
+            "created_ms": row["created_ms"],
+            "state_hash": row["state_hash"],
+            "updated_ms": row["updated_ms"],
+        }
+
+    # Sender chains.
+    def upsert_sender_chain(
+        self,
+        *,
+        group_id: bytes,
+        sender_pub: bytes,
+        direction: str,
+        epoch: int,
+        chain_key: bytes,
+        counter: int,
+    ) -> None:
+        if direction not in ("in", "out"):
+            raise ValueError(f"direction must be 'in' or 'out', got {direction!r}")
+        if len(chain_key) != 32:
+            raise ValueError("chain_key must be 32 bytes")
+        if len(sender_pub) != 32:
+            raise ValueError("sender_pub must be 32 bytes")
+        if len(group_id) != 16:
+            raise ValueError("group_id must be 16 bytes")
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO group_sender_chains(
+                    group_id, sender_pub, direction, epoch,
+                    chain_key, counter, updated_ms
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(group_id, sender_pub, direction, epoch)
+                DO UPDATE SET
+                    chain_key = excluded.chain_key,
+                    counter = excluded.counter,
+                    updated_ms = excluded.updated_ms
+                """,
+                (group_id, sender_pub, direction, int(epoch),
+                 chain_key, int(counter), _now_ms()),
+            )
+
+    def get_sender_chain(
+        self,
+        *,
+        group_id: bytes,
+        sender_pub: bytes,
+        direction: str,
+        epoch: Optional[int] = None,
+    ) -> Optional[dict]:
+        """Get the latest chain for (group, sender, direction). If
+        `epoch` is given, returns that exact epoch; otherwise the
+        highest known epoch."""
+        if epoch is not None:
+            row = self._conn.execute(
+                "SELECT epoch, chain_key, counter FROM group_sender_chains "
+                "WHERE group_id = ? AND sender_pub = ? AND direction = ? AND epoch = ?",
+                (group_id, sender_pub, direction, int(epoch)),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT epoch, chain_key, counter FROM group_sender_chains "
+                "WHERE group_id = ? AND sender_pub = ? AND direction = ? "
+                "ORDER BY epoch DESC LIMIT 1",
+                (group_id, sender_pub, direction),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "epoch": row["epoch"],
+            "chain_key": row["chain_key"],
+            "counter": row["counter"],
+        }
+
+    def insert_group_message(
+        self,
+        *,
+        id: str,
+        group_id: bytes,
+        sender_pub: bytes,
+        epoch: int,
+        counter: int,
+        direction: str,
+        body: str,
+        ts_ms: Optional[int] = None,
+    ) -> None:
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO group_messages(
+                    id, group_id, sender_pub, epoch, counter,
+                    direction, body, ts_ms
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (id, group_id, sender_pub, int(epoch), int(counter),
+                 direction, body, int(ts_ms if ts_ms is not None else _now_ms())),
+            )
+
+    def recent_group_messages(
+        self,
+        *,
+        group_id: bytes,
+        limit: int = 100,
+    ) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT id, group_id, sender_pub, epoch, counter, direction, "
+            "body, ts_ms FROM group_messages WHERE group_id = ? "
+            "ORDER BY ts_ms DESC LIMIT ?",
+            (group_id, int(limit)),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "group_id": r["group_id"],
+                "sender_pub": r["sender_pub"],
+                "epoch": r["epoch"],
+                "counter": r["counter"],
+                "direction": r["direction"],
+                "body": r["body"],
+                "ts_ms": r["ts_ms"],
+            }
+            for r in rows
+        ]
 
     def _row_to_peer(self, row: sqlite3.Row) -> PeerRecord:
         return PeerRecord(
