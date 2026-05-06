@@ -26,8 +26,27 @@ from tests.harness import daemon_pair
 pytestmark = pytest.mark.timeout(120)
 
 
-def _read(home: Path, name: str) -> str:
-    return (home / "data" / name).read_text(encoding="utf-8").strip()
+def _read(home: Path, name: str, timeout: float = 15.0) -> str:
+    """Read a daemon-written status file with a tolerant retry loop.
+
+    The daemon writes server.port / ui.token after the UI HTTP server
+    binds — which can race the test harness, especially on Windows under
+    load. Retry rather than fail spuriously."""
+    p = home / "data" / name
+    import time as _time
+    end = _time.time() + timeout
+    last_err: Exception | None = None
+    while _time.time() < end:
+        try:
+            txt = p.read_text(encoding="utf-8").strip()
+            if txt:
+                return txt
+        except (FileNotFoundError, OSError) as e:
+            last_err = e
+        _time.sleep(0.05)
+    if last_err is not None:
+        raise last_err
+    raise FileNotFoundError(p)
 
 
 def _server_addr(home: Path) -> tuple[str, str]:

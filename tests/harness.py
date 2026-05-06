@@ -227,6 +227,48 @@ def daemon_pair() -> Iterator[DaemonPair]:
             pass
 
 
+async def await_peer_in_api(
+    session,
+    base: str,
+    token: str,
+    short_id: str,
+    *,
+    timeout: float = 8.0,
+) -> dict:
+    """Poll GET /api/peers until a peer with `short_id` appears, or fail.
+
+    Eliminates an entire class of cross-test flakes: under heavy CI load the
+    HTTP /api/peers endpoint can momentarily return an empty list even after
+    mDNS has converged at the daemon's discovery registry, because the daemon
+    coalesces some state via async tasks. Bare `next(p for p in peers if ...)`
+    against the snapshot then raises StopIteration which Python turns into
+    `RuntimeError: coroutine raised StopIteration`. Use this helper instead.
+    """
+    import time as _time
+    deadline = _time.time() + timeout
+    last: list[dict] = []
+    while _time.time() < deadline:
+        async with session.get(
+            base + "/api/peers",
+            headers={"X-One-Link-Token": token},
+        ) as r:
+            j = await r.json()
+        last = j.get("peers", [])
+        for pp in last:
+            if pp.get("short_id") == short_id:
+                return pp
+        await _async_sleep_short()
+    raise AssertionError(
+        f"peer {short_id} did not appear in /api/peers within {timeout}s; "
+        f"last snapshot: {last!r}"
+    )
+
+
+async def _async_sleep_short() -> None:
+    import asyncio as _asyncio
+    await _asyncio.sleep(0.05)
+
+
 def message_log(home: Path) -> list[dict]:
     """Read message history from the daemon's sqlite state, returning dicts
     in the same wire-shape the JSONL log used. Tests written before the

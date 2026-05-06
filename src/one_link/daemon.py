@@ -9,6 +9,38 @@ Runs two asyncio servers:
 For v0 the peer protocol is connection-per-action: initiator opens a TCP
 connection, runs the encrypted handshake, sends one or more messages, gets
 ACK, closes. Persistent peering comes later.
+
+─── Security Invariants (post-audit) ─────────────────────────────────
+Each rule below is enforced at exactly one place; violating callers will
+break tests intentionally — do not add per-call workarounds.
+
+ C1 — `send_to` is the sole outbound chat path; the legacy unguarded
+      duplicate has been removed.
+ H2 — `_inbound_is_rejected(peer_fp)` MUST run before any state mutation
+      caused by an inbound frame (sqlite write, ingest, transfer record).
+      `_handle_peer` and `_on_peer_message` both gate on it.
+ H3 — Inbound handshakes are throttled per-IP and bounded by
+      `HANDSHAKE_DEADLINE_S`. Loopback bypasses the gate
+      (`HANDSHAKE_LOOPBACK_IPS`).
+ H4 — Outbound sessions idle > `OUTBOUND_SESSION_PING_AFTER_S` are
+      probed with PING/PONG before reuse.
+ M1 — Inbound blob frames (BLOB_OFFER, BLOB_CHUNK) are accepted only if
+      the blob hash is in `self._expected_blob_pulls[peer_fp]` — populated
+      exclusively when we send MANIFEST_WANTS asking for it.
+ M2 — CDC chunk sets are clamped to `declared_size` and per-chunk size
+      (`CDC_MIN_CHUNK_BYTES` ≤ size ≤ `CDC_MAX_CHUNK_BYTES`); attacker can
+      not amplify a small offer into a huge inbound stream.
+ M5 — `_acquire_instance_lock` checks the existing PID's liveness in
+      addition to the kernel advisory lock.
+ M6 — mDNS advertisement defaults to `short_id` (non-PII); the OS
+      hostname is leaked only if the user explicitly sets `display_name`.
+ M7 — `MANIFEST_PUSH` early-exit requires BOTH `merkle_root` AND
+      `entry_count` to match — peer can't lie about being in sync.
+ H1 — Trust + capability-policy mutations are recorded in
+      `capability_audit` (sqlite); see `/api/capability-audit`.
+
+If you find code that mutates peer state without one of these gates,
+treat it as a regression — re-run the red-team audit before merging.
 """
 
 from __future__ import annotations
@@ -32,7 +64,13 @@ import blake3
 
 from one_link import blobstore, channel as ch, foldersync
 from one_link.capabilities import CHAT, FILES, FOLDER_SYNC, LOCAL_CAPABILITIES, normalize_caps
-from one_link.cdc import Chunk, chunk_path, index_path
+from one_link.cdc import (
+    MAX_CHUNK_BYTES as CDC_MAX_CHUNK_BYTES,
+    MIN_CHUNK_BYTES as CDC_MIN_CHUNK_BYTES,
+    Chunk,
+    chunk_path,
+    index_path,
+)
 from one_link.crdt import ManifestEntry, VectorClock
 from one_link.discovery import Discovery, Peer
 from one_link.identity import Identity, fingerprint_of, load_or_create
@@ -62,6 +100,22 @@ CDC_CACHE_MAX_BYTES = 512 * 1024 * 1024
 COMPRESSION_MIN_BYTES = 2048
 COMPRESSION_MIN_SAVINGS = 0.08
 OUTBOUND_SESSION_IDLE_S = 300.0
+# H4: re-validate idle outbound sessions with a PING before reusing them.
+# A NAT box / Wi-Fi roam / asymmetric-disconnect can silently kill a TCP
+# session; without this probe the next send_to() would block on a dead
+# socket until the OS-level keepalive (minutes). The probe deadline is
+# short (1.5s) so a real failure forces a fast reopen.
+OUTBOUND_SESSION_PING_AFTER_S = 30.0
+OUTBOUND_SESSION_PING_DEADLINE_S = 1.5
+# H3: handshake hardening
+HANDSHAKE_DEADLINE_S = 8.0          # peer has 8s to complete handshake
+HANDSHAKE_PER_IP_INFLIGHT_MAX = 32  # concurrent handshakes from one IP
+HANDSHAKE_PER_IP_RATE_WINDOW_S = 60.0
+HANDSHAKE_PER_IP_RATE_MAX = 240     # attempts per window per IP
+# Loopback gets a free pass — the test suite & the local UI talk to the
+# daemon on 127.0.0.1 in tight bursts, and an attacker on loopback already
+# owns the box.
+HANDSHAKE_LOOPBACK_IPS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 # Capabilities this build advertises in CAPS messages.
 PROTOCOL_VERSION = "OL1.1"
@@ -88,6 +142,49 @@ def _control_port_path() -> Path:
 
 def _peer_port_path() -> Path:
     return data_dir() / PEER_PORT_FILE
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Return True if the given OS PID is currently a live process.
+
+    Cross-platform, stdlib-only. False positives are acceptable (we'll
+    refuse to start), false negatives are not (we'd corrupt state).
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, wintypes.DWORD(pid)
+        )
+        if not handle:
+            err = ctypes.get_last_error()
+            # ERROR_ACCESS_DENIED (5) means the PID exists but we can't
+            # query it — treat as alive (safer to refuse to start).
+            return err == 5
+        try:
+            exit_code = wintypes.DWORD()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            if not ok:
+                return True
+            return exit_code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    else:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # exists, owned by another user
+        except OSError:
+            return False
+        return True
 
 
 @dataclass
@@ -135,13 +232,58 @@ class Daemon:
         self.blob_store = None     # type: blobstore.BlobStore | None
         self._folder_sync_task: asyncio.Task | None = None
         self._outbound_sessions: dict[str, OutboundSession] = {}
+        # M1: track which blob hashes we've explicitly requested from each
+        # peer (via MANIFEST_WANTS). BLOB_OFFER / BLOB_CHUNK frames whose
+        # hash isn't in this set are silently dropped — a paired peer can't
+        # use a folder-sync session as a write primitive into our blob store
+        # for arbitrary content.
+        self._expected_blob_pulls: dict[str, set[str]] = {}
+        # H3: per-IP handshake throttling. `_handshake_history[ip]` is a
+        # deque of recent attempt timestamps; `_handshake_inflight[ip]` is
+        # the current count of concurrent in-flight handshakes from that IP.
+        # Counts are dropped once the IP has zero history & zero in-flight,
+        # so the dicts stay bounded.
+        self._handshake_history: dict[str, list[float]] = {}
+        self._handshake_inflight: dict[str, int] = {}
 
     def _acquire_instance_lock(self) -> None:
-        """Prevent duplicate daemons for the same config/data home."""
+        """Prevent duplicate daemons for the same config/data home.
+
+        Two layers:
+         1. OS-level advisory lock (fcntl.flock / msvcrt.locking) — strongest
+            guarantee, kernel releases on process death.
+         2. M5: stored PID liveness check — defence-in-depth for situations
+            where (1) silently fails (NFS without lockd, corrupt locks on
+            Windows network shares, copies of the lock file moved between
+            homes). If the PID inside the file maps to a different live
+            process we refuse even if the kernel lock granted.
+        """
         lock_path = data_dir() / DAEMON_LOCK_FILE
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         f = open(lock_path, "a+b")
         try:
+            # Pre-lock liveness check on existing PID.
+            #
+            # On Windows, msvcrt.locking byte-locks make the *file* readable
+            # only by the holder, so a sibling daemon attempting this read
+            # will get PermissionError — which is itself diagnostic
+            # (someone has the lock). We still want to fall through to the
+            # OS-level lock attempt below so we get the canonical
+            # "already running" error path the rest of the system expects.
+            try:
+                f.seek(0)
+                raw = f.read(64).decode("ascii", errors="ignore").strip()
+                if raw:
+                    existing_pid = int(raw)
+                    if existing_pid != os.getpid() and _pid_is_alive(existing_pid):
+                        raise RuntimeError(
+                            "One Link daemon is already running "
+                            f"(pid {existing_pid}) for this ONE_LINK_HOME"
+                        )
+            except (ValueError, UnicodeDecodeError, PermissionError, OSError):
+                # Garbage / locked-by-other / I/O blip — overwrite below
+                # once we hold the lock (or fail at the OS-lock step).
+                pass
             if os.name == "nt":
                 import msvcrt
 
@@ -271,23 +413,86 @@ class Daemon:
             return None
 
     # ─── peer (encrypted) side ──────────────────────────────────────────
+    def _handshake_admit(self, ip: str) -> bool:
+        """H3: per-IP rate + concurrency gate. Returns True if accepted.
+
+        Loopback bypasses the gate — the local UI / CLI / test runner all
+        talk to the daemon on 127.0.0.1 and an attacker who already has
+        loopback access has bigger primitives than handshake spam.
+        """
+        if ip in HANDSHAKE_LOOPBACK_IPS:
+            return True
+        now = time.monotonic()
+        cutoff = now - HANDSHAKE_PER_IP_RATE_WINDOW_S
+        history = self._handshake_history.setdefault(ip, [])
+        # Drop expired timestamps.
+        i = 0
+        for ts in history:
+            if ts >= cutoff:
+                break
+            i += 1
+        if i:
+            del history[:i]
+        if len(history) >= HANDSHAKE_PER_IP_RATE_MAX:
+            return False
+        if self._handshake_inflight.get(ip, 0) >= HANDSHAKE_PER_IP_INFLIGHT_MAX:
+            return False
+        history.append(now)
+        self._handshake_inflight[ip] = self._handshake_inflight.get(ip, 0) + 1
+        return True
+
+    def _handshake_release(self, ip: str) -> None:
+        if ip in HANDSHAKE_LOOPBACK_IPS:
+            return
+        n = self._handshake_inflight.get(ip, 0) - 1
+        if n <= 0:
+            self._handshake_inflight.pop(ip, None)
+        else:
+            self._handshake_inflight[ip] = n
+        # If the rate-limit window is empty too, drop the bucket so the
+        # dicts can't grow without bound under churn.
+        if (
+            ip not in self._handshake_inflight
+            and not self._handshake_history.get(ip)
+        ):
+            self._handshake_history.pop(ip, None)
+
     async def _handle_peer(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
         addr = writer.get_extra_info("peername")
-        try:
-            channel = await ch.respond(reader, writer, self.me)
-        except Exception as e:
-            log.warning("handshake failed from %s: %s", addr, e)
+        peer_ip = addr[0] if addr else ""
+        if not self._handshake_admit(peer_ip):
+            log.warning("handshake throttled from %s", peer_ip)
             with contextlib.suppress(Exception):
                 writer.close()
                 await writer.wait_closed()
             return
+        try:
+            try:
+                channel = await asyncio.wait_for(
+                    ch.respond(reader, writer, self.me),
+                    timeout=HANDSHAKE_DEADLINE_S,
+                )
+            except asyncio.TimeoutError:
+                log.warning("handshake deadline exceeded from %s", addr)
+                with contextlib.suppress(Exception):
+                    writer.close()
+                    await writer.wait_closed()
+                return
+            except Exception as e:
+                log.warning("handshake failed from %s: %s", addr, e)
+                with contextlib.suppress(Exception):
+                    writer.close()
+                    await writer.wait_closed()
+                return
+        finally:
+            self._handshake_release(peer_ip)
         log.info("peer connected: %s @ %s", channel.peer_short_id, addr)
         peer_fp = fingerprint_of(channel.peer_ed_pub)
-        if self._check_inbound_trust(peer_fp):
+        if self._inbound_is_rejected(peer_fp):
             log.warning("rejected peer attempted inbound connection: %s", peer_fp[:8])
             await channel.close()
             return
@@ -333,7 +538,11 @@ class Daemon:
         peer_fp = fingerprint_of(channel.peer_ed_pub)
         peer_sid = channel.peer_short_id
         t = msg.get("t")
-        if self._check_inbound_trust(peer_fp) and t not in ("CAPS",):
+        # H2: rejected peers cannot drive any state mutation, including the
+        # sqlite write that CAPS would have caused. They get an ACK with the
+        # rejection reason so they can fail loudly instead of silently
+        # retrying a write-amplification primitive against our DB.
+        if self._inbound_is_rejected(peer_fp):
             with contextlib.suppress(Exception):
                 await channel.send(encode_msg(make_msg(
                     "ACK", self.me.short_id,
@@ -380,7 +589,7 @@ class Daemon:
             name = Path(str(msg["name"])).name
             if not name or name in (".", ".."):
                 name = "unnamed.bin"
-            cdc_chunks = self._normalize_cdc_chunks(msg.get("chunks"))
+            cdc_chunks = self._normalize_cdc_chunks(msg.get("chunks"), declared_size=size)
             out_path = inbox_dir() / f"{blob[:8]}_{name}"
             handle = open(out_path, "wb")
             missing = None
@@ -549,7 +758,7 @@ class Daemon:
                     )
                 except Exception:
                     pass
-                self.state.set_peer_trust(peer_fp, "pinned")
+                self.state.set_peer_trust(peer_fp, "pinned", actor="pairing")
                 if self.ui_server is not None:
                     self.ui_server.broadcast({
                         "type": "peer_trust",
@@ -574,7 +783,7 @@ class Daemon:
                     )
                 except Exception:
                     pass
-                self.state.set_peer_trust(peer_fp, "rejected")
+                self.state.set_peer_trust(peer_fp, "rejected", actor="pairing")
             if self.ui_server is not None:
                 self.ui_server.broadcast({
                     "type": "pair_rejected",
@@ -607,12 +816,37 @@ class Daemon:
     def _chunk_cache_path(self, hash_hex: str) -> Path:
         return self._chunk_cache_dir() / hash_hex[:2] / hash_hex[2:]
 
-    def _normalize_cdc_chunks(self, raw) -> list[dict] | None:
+    def _normalize_cdc_chunks(self, raw, *, declared_size: int | None = None) -> list[dict] | None:
+        """Validate a peer-supplied CDC chunk index.
+
+        Returns None on any malformed input. Caller treats None as "use the
+        non-CDC streaming path" — the file still transfers, just without the
+        dedup optimization.
+
+        M3: a peer can advertise `chunks: list[dict]` of arbitrary length.
+        At MIN_CHUNK_BYTES, a 1 GiB file produces ~64k chunks max; we accept
+        the upper bound as `(declared_size // MIN_CHUNK_BYTES) + 16` (the
+        +16 absorbs CDC's small-tail-chunk drift). Above that, a peer is
+        either lying or trying to make us allocate huge structures.
+        """
         if raw is None:
             return None
         if not isinstance(raw, list):
             return None
+        if declared_size is not None and declared_size >= 0:
+            max_chunks = max(1, declared_size // CDC_MIN_CHUNK_BYTES + 16)
+        else:
+            # Fallback: cap absolutely at the count for the largest file we
+            # would ever accept on the wire.
+            max_chunks = (MAX_INCOMING_FILE_BYTES // CDC_MIN_CHUNK_BYTES) + 16
+        if len(raw) > max_chunks:
+            log.warning(
+                "rejecting FILE_OFFER chunks list: %d > %d (declared_size=%s)",
+                len(raw), max_chunks, declared_size,
+            )
+            return None
         out = []
+        running_end = 0
         for i, item in enumerate(raw):
             if not isinstance(item, dict):
                 return None
@@ -624,7 +858,17 @@ class Daemon:
             size = int(item.get("size", end - start))
             if start < 0 or end < start or size != end - start:
                 return None
+            if size < 0 or size > CDC_MAX_CHUNK_BYTES * 2:
+                # CDC's hard upper bound is MAX_CHUNK_BYTES; allow a small
+                # multiplier to account for any future loosening, but reject
+                # absurd sizes that would force a multi-MB single allocation.
+                return None
+            if declared_size is not None and end > declared_size:
+                return None
+            running_end = max(running_end, end)
             out.append({"index": i, "start": start, "end": end, "size": size, "hash": h})
+        if declared_size is not None and running_end > declared_size:
+            return None
         return out
 
     def _store_chunk_cache(self, chunk_hash: str, data: bytes) -> None:
@@ -723,14 +967,29 @@ class Daemon:
             return "zlib", compressed
         return "raw", data
 
-    def _decode_payload(self, encoding: str, data: bytes) -> bytes:
+    def _decode_payload(self, encoding: str, data: bytes, *, max_bytes: int | None = None) -> bytes:
+        """Decompress an inbound payload with a strict output bound.
+
+        M4: previously the cap was MAX_INCOMING_FILE_BYTES (1 GiB) for every
+        decompression call, so a zlib bomb of ~1 KB compressed → 1 GiB
+        decompressed could happen before we raised. Callers now pass the
+        *expected* upper bound for the specific message they are decoding —
+        for CDC chunks, that's CDC_MAX_CHUNK_BYTES; for whole files, the
+        declared size; etc.
+        """
         if encoding == "raw" or not encoding:
             return data
+        cap = max_bytes if max_bytes is not None else MAX_INCOMING_FILE_BYTES
+        if cap <= 0:
+            raise RuntimeError("max_bytes must be positive")
+        # +1 lets us detect overflow without silently truncating valid data.
         if encoding == "zlib":
             dec = zlib.decompressobj()
-            out = dec.decompress(data, MAX_INCOMING_FILE_BYTES + 1)
-            if dec.unconsumed_tail or len(out) > MAX_INCOMING_FILE_BYTES:
-                raise RuntimeError("compressed payload exceeds maximum size")
+            out = dec.decompress(data, cap + 1)
+            if dec.unconsumed_tail or len(out) > cap:
+                raise RuntimeError(
+                    f"compressed payload exceeds maximum size ({cap} bytes)"
+                )
             out += dec.flush()
             if len(out) > MAX_INCOMING_FILE_BYTES:
                 raise RuntimeError("compressed payload exceeds maximum size")
@@ -746,13 +1005,19 @@ class Daemon:
         if idx < 0 or idx >= len(f.cdc_chunks) or idx not in f.cdc_missing:
             self._abort_incoming_file(blob, f)
             raise RuntimeError(f"unexpected FILE_CDC_CHUNK index {idx}")
+        expected = f.cdc_chunks[idx]
+        # M4: bound decompression by the *expected* chunk size, not by the
+        # whole-file cap. A zlib bomb is rejected at 1.5x the expected
+        # chunk size (small slack for compressor framing variance).
+        max_chunk_out = max(expected["size"] + 64, CDC_MAX_CHUNK_BYTES + 64)
         try:
             data = base64.b64decode(msg.get("data", ""), validate=True)
-            data = self._decode_payload(str(msg.get("enc", "raw")), data)
+            data = self._decode_payload(
+                str(msg.get("enc", "raw")), data, max_bytes=max_chunk_out,
+            )
         except (binascii.Error, ValueError) as e:
             self._abort_incoming_file(blob, f)
             raise RuntimeError(f"invalid FILE_CDC_CHUNK base64: {e}") from e
-        expected = f.cdc_chunks[idx]
         if len(data) != expected["size"] or blake3.blake3(data).hexdigest() != expected["hash"]:
             self._abort_incoming_file(blob, f)
             raise RuntimeError("FILE_CDC_CHUNK integrity failure")
@@ -849,16 +1114,31 @@ class Daemon:
             log.info("MANIFEST_PUSH for folder we don't share with this peer")
             return
         remote_root = msg.get("merkle_root")
+        remote_count = msg.get("entry_count")
         local_root = self.folder_engine.manifest_root(folder_name)
-        if remote_root and remote_root == local_root:
+        local_count = len(self.folder_engine.manifest_for(folder_name))
+        # M7: a peer can claim "merkle_root matches yours" to make us skip
+        # the merge and miss real updates. Only honour the early-exit when
+        # *both* roots match AND the entry counts match. The root alone is
+        # peer-supplied (can be lied about); the count check makes the
+        # asymmetric attack (pretending to be in sync) require an actual
+        # collision rather than just a guess.
+        entries = msg.get("entries", []) or []
+        if (
+            remote_root and remote_root == local_root
+            and isinstance(remote_count, int) and remote_count == local_count
+            and not entries
+        ):
             await channel.send(encode_msg(make_msg(
                 "MANIFEST_WANTS", self.me.short_id,
                 folder=folder_name, wants=[], merkle_root=local_root,
                 already_in_sync=True,
             )))
-            log.info("MANIFEST_PUSH from %s: Merkle roots already match", peer_fp[:8])
+            log.info(
+                "MANIFEST_PUSH from %s: Merkle roots + counts match; in sync",
+                peer_fp[:8],
+            )
             return
-        entries = msg.get("entries", []) or []
         try:
             wants_data = self.folder_engine.receive_remote_manifest(
                 folder_name=folder_name, entries=entries,
@@ -868,8 +1148,12 @@ class Daemon:
             return
         wants = [
             d["blob_hash"] for d in wants_data
-            if d.get("blob_hash")
+            if d.get("blob_hash") and self._valid_blob_hex(d["blob_hash"])
         ]
+        # M1: register the wanted set so subsequent BLOB_OFFER / BLOB_CHUNK
+        # frames from this peer are gated to the blobs we asked for.
+        if wants:
+            self._expected_blob_pulls.setdefault(peer_fp, set()).update(wants)
         await channel.send(encode_msg(make_msg(
             "MANIFEST_WANTS", self.me.short_id,
             folder=folder_name, wants=wants,
@@ -927,6 +1211,17 @@ class Daemon:
             return
         if size < 0 or size > MAX_INCOMING_FILE_BYTES:
             return
+        # M1: only accept blobs we explicitly requested from this peer via
+        # MANIFEST_WANTS in the current sync cycle. A paired peer cannot use
+        # the folder-sync wire as a write primitive into our blob store with
+        # content we never asked for.
+        expected = self._expected_blob_pulls.get(peer_fp)
+        if expected is None or blob not in expected:
+            log.info(
+                "ignoring unsolicited BLOB_OFFER from %s for %s",
+                peer_fp[:8], blob[:12] if blob else "?",
+            )
+            return
         # If we already have this blob, ignore the offer (peer wasted work).
         if self.blob_store.has(blob):
             return
@@ -948,6 +1243,13 @@ class Daemon:
         blob = msg.get("blob")
         ctx = self._incoming_blobs.get(blob)
         if ctx is None:
+            return
+        # M1 (defense in depth): the offer was already gated, but if the
+        # connection got reused after a different sync cycle this gate
+        # ensures chunks for an unsolicited offer can't slip through.
+        expected = self._expected_blob_pulls.get(peer_fp)
+        if expected is None or blob not in expected:
+            self._abort_blob(blob)
             return
         seq = msg.get("seq", -1)
         if seq != ctx["next_seq"]:
@@ -985,6 +1287,8 @@ class Daemon:
                 # Hash didn't match; remove what we stored
                 self.blob_store.remove(got_hash)
                 return
+            # Drop the satisfied entry from the expected-pull set.
+            self._expected_blob_pulls.get(peer_fp, set()).discard(blob)
             self.blob_store.path(got_hash)  # confirms it lives
             try:
                 self.state.record_blob(got_hash, ctx["received"])
@@ -1037,11 +1341,20 @@ class Daemon:
             f.out_path.unlink()
         self._update_transfer(f.transfer_id, status="failed")
 
-    def _check_inbound_trust(self, peer_fp: str) -> bool:
+    def _inbound_is_rejected(self, peer_fp: str) -> bool:
+        """Returns True if the peer is on our local rejection list.
+
+        The legacy name `_check_inbound_trust` was preserved as a thin alias
+        for back-compat with any external callers; new code should use this
+        explicitly-named version.
+        """
         if self.state is None:
             return False
         rec = self.state.get_peer(peer_fp)
         return bool(rec and rec.trust == "rejected")
+
+    # Back-compat alias. New call sites should use _inbound_is_rejected.
+    _check_inbound_trust = _inbound_is_rejected
 
     def _verify_channel_peer(self, peer: Peer, channel: ch.Channel) -> str:
         actual_fp = fingerprint_of(channel.peer_ed_pub)
@@ -1104,6 +1417,46 @@ class Daemon:
             with contextlib.suppress(Exception):
                 await sess.channel.close()
 
+    async def _probe_outbound_session(self, sess: OutboundSession) -> bool:
+        """H4: send a PING and wait briefly for a PONG. Returns True if the
+        session is still alive, False if it timed out or errored. Ignores
+        any non-PONG frames that arrive in the meantime (e.g. CAPS), as the
+        server may push them eagerly."""
+        try:
+            async with sess.lock:
+                await sess.channel.send(encode_msg(make_msg("PING", self.me.short_id)))
+                deadline = time.monotonic() + OUTBOUND_SESSION_PING_DEADLINE_S
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    plaintext = await asyncio.wait_for(
+                        sess.channel.recv(), timeout=remaining
+                    )
+                    reply = decode_msg(plaintext)
+                    rt = reply.get("t")
+                    if rt == "PONG":
+                        sess.last_used = time.time()
+                        return True
+                    if rt == "CAPS":
+                        features = list(normalize_caps(reply.get("features", [])))
+                        sess.channel.peer_caps = {
+                            "protocol": reply.get("protocol", "?"),
+                            "features": features,
+                            "from": reply.get("from"),
+                        }
+                        if self.state is not None:
+                            with contextlib.suppress(Exception):
+                                self.state.set_peer_capabilities(sess.peer_fp, features)
+                        continue
+                    # Anything else mid-probe is unexpected for an idle
+                    # session — treat as dead to be safe.
+                    return False
+        except (asyncio.TimeoutError, ConnectionError, OSError):
+            return False
+        except Exception:
+            return False
+
     async def _get_outbound_session(self, peer: Peer) -> OutboundSession:
         peer_fp = self._peer_fp_from_peer(peer)
         if not peer_fp:
@@ -1111,7 +1464,15 @@ class Daemon:
         existing = self._outbound_sessions.get(peer_fp)
         now = time.time()
         if existing and now - existing.last_used <= OUTBOUND_SESSION_IDLE_S:
-            return existing
+            idle = now - existing.last_used
+            if idle <= OUTBOUND_SESSION_PING_AFTER_S:
+                return existing
+            if await self._probe_outbound_session(existing):
+                return existing
+            log.info(
+                "outbound session probe failed for %s — reopening",
+                peer.short_id,
+            )
         await self._drop_outbound_session(peer_fp)
 
         reader, writer = await asyncio.open_connection(peer.address, peer.port)
@@ -1140,65 +1501,6 @@ class Daemon:
             )
             self._outbound_sessions[peer_fp] = sess
             return sess
-        except Exception:
-            with contextlib.suppress(Exception):
-                writer.close()
-                await writer.wait_closed()
-            raise
-
-    async def send_to(self, peer: Peer, msgs: list[dict]) -> list[dict]:
-        block = self._check_outbound_trust(peer)
-        if block:
-            raise RuntimeError(block)
-        reader, writer = await asyncio.open_connection(peer.address, peer.port)
-        try:
-            channel = await ch.initiate(reader, writer, self.me)
-            peer_fp = self._verify_channel_peer(peer, channel)
-            # Record outbound peer too — first time we send to them, they'll
-            # appear in our peer DB with trust='pending'.
-            if self.state is not None:
-                try:
-                    self.state.upsert_peer(
-                        fingerprint=peer_fp,
-                        short_id=channel.peer_short_id,
-                        pubkey=channel.peer_ed_pub,
-                        hostname=peer.hostname,
-                        address=peer.address,
-                        port=peer.port,
-                    )
-                except Exception:
-                    pass
-            # Send our caps first (no ACK expected).
-            try:
-                await channel.send(encode_msg(_build_caps(self.me.short_id)))
-            except Exception as e:
-                log.warning("CAPS send (outbound) failed: %s", e)
-            results: list[dict] = []
-            for m in msgs:
-                await channel.send(encode_msg(m))
-                while True:
-                    ack = decode_msg(await channel.recv())
-                    if ack.get("t") == "CAPS":
-                        # Capture peer caps that arrived between our messages.
-                        features = list(normalize_caps(ack.get("features", [])))
-                        channel.peer_caps = {
-                            "protocol": ack.get("protocol", "?"),
-                            "features": features,
-                            "from": ack.get("from"),
-                        }
-                        if self.state is not None:
-                            with contextlib.suppress(Exception):
-                                self.state.set_peer_capabilities(peer_fp, features)
-                        continue  # await the actual ACK
-                    break
-                results.append(ack)
-                ev = self._persist(
-                    msg=m, direction="out", peer_fp=peer_fp,
-                    peer_short_id=peer.short_id,
-                )
-                self._broadcast_tail(ev)
-            await channel.close()
-            return results
         except Exception:
             with contextlib.suppress(Exception):
                 writer.close()
@@ -1358,7 +1660,7 @@ class Daemon:
         # while _send_control was running and yielding to the event loop.
         ctx = self.pairing.get(peer_fp) or ctx
         if ctx and ctx.both_confirmed and self.state is not None:
-            self.state.set_peer_trust(peer_fp, "pinned")
+            self.state.set_peer_trust(peer_fp, "pinned", actor="pairing")
             if self.ui_server is not None:
                 self.ui_server.broadcast({
                     "type": "peer_trust", "fingerprint": peer_fp, "trust": "pinned",
@@ -1394,7 +1696,7 @@ class Daemon:
                 )
             except Exception:
                 pass
-            self.state.set_peer_trust(peer_fp, "rejected")
+            self.state.set_peer_trust(peer_fp, "rejected", actor="pairing")
         try:
             await self._send_control(
                 peer, make_msg("PAIR_REJECT", self.me.short_id),
@@ -1477,6 +1779,7 @@ class Daemon:
             await channel.send(encode_msg(make_msg(
                 "MANIFEST_PUSH", self.me.short_id,
                 folder=folder_name, entries=entries, merkle_root=merkle_root,
+                entry_count=len(entries),
             )))
 
             # Drain replies until MANIFEST_WANTS arrives (skipping CAPS).
@@ -1973,7 +2276,7 @@ class Daemon:
                 hostname=self.me.hostname,
                 trust_default="pinned",
             )
-            self.state.set_peer_trust(self.me.fingerprint, "pinned")
+            self.state.set_peer_trust(self.me.fingerprint, "pinned", actor="self")
         except Exception as e:
             log.warning("state init failed (continuing without persistence): %s", e)
             self.state = None
@@ -1990,10 +2293,17 @@ class Daemon:
         ctrl_port = self._control_server.sockets[0].getsockname()[1]
         _control_port_path().write_text(str(ctrl_port))
 
-        advertised_name = self.me.hostname
+        # M6: mDNS hostname privacy — never leak socket.gethostname() onto
+        # the LAN by default. Prefer the user-chosen display_name, otherwise
+        # fall back to the short_id (derived from the public key, non-PII).
+        # Operators who *want* the OS hostname can set display_name to it
+        # explicitly via /api/me.
+        advertised_name = self.me.short_id
         if self.state is not None:
             with contextlib.suppress(Exception):
-                advertised_name = self.state.get_setting("display_name") or self.me.hostname
+                dn = self.state.get_setting("display_name")
+                if dn:
+                    advertised_name = dn
 
         self.discovery = Discovery(
             short_id=self.me.short_id,

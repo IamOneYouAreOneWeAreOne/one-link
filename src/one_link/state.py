@@ -129,6 +129,22 @@ CREATE TABLE IF NOT EXISTS peer_capability_policy (
     updated_ms INTEGER NOT NULL
 );
 
+-- H1: capability-policy + trust audit log. Append-only.
+-- `kind` is one of: cap_policy_set, cap_policy_clear, trust_set
+-- `before_json` / `after_json` capture the previous and new value for diff.
+CREATE TABLE IF NOT EXISTS capability_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms       INTEGER NOT NULL,
+    fingerprint TEXT    NOT NULL,
+    kind        TEXT    NOT NULL,
+    before_json TEXT,
+    after_json  TEXT,
+    actor       TEXT,
+    note        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cap_audit_ts ON capability_audit(ts_ms);
+CREATE INDEX IF NOT EXISTS idx_cap_audit_fp ON capability_audit(fingerprint);
+
 CREATE TABLE IF NOT EXISTS transfers (
     id             TEXT PRIMARY KEY,
     direction      TEXT NOT NULL,
@@ -279,14 +295,34 @@ class State:
             finally:
                 c.close()
 
-    def set_peer_trust(self, fingerprint: str, trust: str) -> None:
+    def set_peer_trust(
+        self,
+        fingerprint: str,
+        trust: str,
+        *,
+        actor: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> None:
         if trust not in ("pinned", "pending", "rejected"):
             raise ValueError(f"invalid trust state: {trust!r}")
         with self._write_lock:
+            row = self._conn.execute(
+                "SELECT trust FROM peers WHERE fingerprint = ?", (fingerprint,)
+            ).fetchone()
+            before = row["trust"] if row else None
             self._conn.execute(
                 "UPDATE peers SET trust = ? WHERE fingerprint = ?",
                 (trust, fingerprint),
             )
+            if before != trust:
+                self._record_capability_audit(
+                    fingerprint=fingerprint,
+                    kind="trust_set",
+                    before=before,
+                    after=trust,
+                    actor=actor,
+                    note=note,
+                )
 
     def get_peer(self, fingerprint: str) -> Optional[PeerRecord]:
         row = self._conn.execute(
@@ -332,9 +368,17 @@ class State:
         except Exception:
             return []
 
-    def set_peer_capability_policy(self, fingerprint: str, allowed: Iterable[str]) -> None:
+    def set_peer_capability_policy(
+        self,
+        fingerprint: str,
+        allowed: Iterable[str],
+        *,
+        actor: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> None:
         values = sorted({str(c) for c in allowed if str(c)})
         with self._write_lock:
+            before = self.get_peer_capability_policy(fingerprint)
             self._conn.execute(
                 """
                 INSERT INTO peer_capability_policy(fingerprint, allowed_json, updated_ms)
@@ -345,13 +389,38 @@ class State:
                 """,
                 (fingerprint, json.dumps(values), _now_ms()),
             )
+            if before != values:
+                self._record_capability_audit(
+                    fingerprint=fingerprint,
+                    kind="cap_policy_set",
+                    before=before,
+                    after=values,
+                    actor=actor,
+                    note=note,
+                )
 
-    def clear_peer_capability_policy(self, fingerprint: str) -> None:
+    def clear_peer_capability_policy(
+        self,
+        fingerprint: str,
+        *,
+        actor: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> None:
         with self._write_lock:
+            before = self.get_peer_capability_policy(fingerprint)
             self._conn.execute(
                 "DELETE FROM peer_capability_policy WHERE fingerprint = ?",
                 (fingerprint,),
             )
+            if before is not None:
+                self._record_capability_audit(
+                    fingerprint=fingerprint,
+                    kind="cap_policy_clear",
+                    before=before,
+                    after=None,
+                    actor=actor,
+                    note=note,
+                )
 
     def get_peer_capability_policy(self, fingerprint: str) -> Optional[list[str]]:
         row = self._conn.execute(
@@ -364,6 +433,73 @@ class State:
             return list(json.loads(row["allowed_json"]))
         except Exception:
             return []
+
+    # ─── capability / trust audit log (H1) ────────────────────────────
+    def _record_capability_audit(
+        self,
+        *,
+        fingerprint: str,
+        kind: str,
+        before: Any,
+        after: Any,
+        actor: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> None:
+        # Caller already holds _write_lock.
+        self._conn.execute(
+            """
+            INSERT INTO capability_audit(
+                ts_ms, fingerprint, kind, before_json, after_json, actor, note
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _now_ms(),
+                fingerprint,
+                kind,
+                None if before is None else json.dumps(before),
+                None if after is None else json.dumps(after),
+                actor,
+                note,
+            ),
+        )
+
+    def recent_capability_audit(
+        self,
+        *,
+        fingerprint: Optional[str] = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        sql = (
+            "SELECT id, ts_ms, fingerprint, kind, before_json, after_json,"
+            " actor, note FROM capability_audit"
+        )
+        params: list[Any] = []
+        if fingerprint is not None:
+            sql += " WHERE fingerprint = ?"
+            params.append(fingerprint)
+        sql += " ORDER BY ts_ms DESC, id DESC LIMIT ?"
+        params.append(int(limit))
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            def _parse(s: Optional[str]) -> Any:
+                if s is None:
+                    return None
+                try:
+                    return json.loads(s)
+                except Exception:
+                    return s
+            out.append({
+                "id": r["id"],
+                "ts_ms": r["ts_ms"],
+                "fingerprint": r["fingerprint"],
+                "kind": r["kind"],
+                "before": _parse(r["before_json"]),
+                "after": _parse(r["after_json"]),
+                "actor": r["actor"],
+                "note": r["note"],
+            })
+        return out
 
     def _row_to_peer(self, row: sqlite3.Row) -> PeerRecord:
         return PeerRecord(

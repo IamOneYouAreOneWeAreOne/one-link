@@ -166,6 +166,7 @@ class UIServer:
         r.add_post(r"/api/peers/{fp}/trust", self._guarded(self.api_set_trust))
         r.add_get(r"/api/peers/{fp}/capabilities", self._guarded(self.api_get_peer_capabilities))
         r.add_post(r"/api/peers/{fp}/capabilities", self._guarded(self.api_set_peer_capabilities))
+        r.add_get("/api/capability-audit", self._guarded(self.api_capability_audit))
         r.add_post(r"/api/peers/{fp}/pair", self._guarded(self.api_pair_init))
         r.add_post(r"/api/peers/{fp}/pair-confirm", self._guarded(self.api_pair_confirm))
         r.add_post(r"/api/peers/{fp}/pair-reject", self._guarded(self.api_pair_reject))
@@ -627,7 +628,7 @@ class UIServer:
                 )
 
         try:
-            self.daemon.state.set_peer_trust(fp, trust)
+            self.daemon.state.set_peer_trust(fp, trust, actor="ui")
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
         # Notify UI subscribers so the badge updates everywhere.
@@ -653,15 +654,30 @@ class UIServer:
         except Exception as e:
             return web.json_response({"error": f"bad json: {e}"}, status=400)
         allowed = data.get("allowed")
+        note = data.get("note") if isinstance(data.get("note"), str) else None
         if allowed is None:
-            self.daemon.state.clear_peer_capability_policy(fp)
+            self.daemon.state.clear_peer_capability_policy(fp, actor="ui", note=note)
             return web.json_response({"ok": True, "fingerprint": fp, "allowed": None})
         if not isinstance(allowed, list):
             return web.json_response({"error": "allowed must be a list or null"}, status=400)
         from one_link.capabilities import LOCAL_CAPABILITIES, normalize_caps
         clean = [c for c in normalize_caps(allowed) if c in LOCAL_CAPABILITIES]
-        self.daemon.state.set_peer_capability_policy(fp, clean)
+        self.daemon.state.set_peer_capability_policy(fp, clean, actor="ui", note=note)
         return web.json_response({"ok": True, "fingerprint": fp, "allowed": clean})
+
+    async def api_capability_audit(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.query.get("fp")
+        try:
+            limit = int(request.query.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        limit = max(1, min(limit, 1000))
+        rows = self.daemon.state.recent_capability_audit(
+            fingerprint=fp, limit=limit
+        )
+        return web.json_response({"events": rows})
 
     # ─── pairing ──────────────────────────────────────────────────────
     def _resolve_peer_for_pairing(self, fp: str):
@@ -722,7 +738,7 @@ class UIServer:
         if peer is None:
             # Even if peer isn't reachable, we can still mark them rejected.
             if self.daemon.state and self.daemon.state.get_peer(fp):
-                self.daemon.state.set_peer_trust(fp, "rejected")
+                self.daemon.state.set_peer_trust(fp, "rejected", actor="ui")
             return web.json_response({"ok": True, "note": "peer offline; marked rejected locally"})
         try:
             await self.daemon.reject_pair(peer)
