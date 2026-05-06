@@ -1381,6 +1381,91 @@ class Daemon:
         rec = self.state.get_peer(peer_fp)
         return bool(rec and rec.trust == "pinned")
 
+    def _sandbox_filter_manifest_entries(
+        self, *, folder: dict, peer_fp: str, entries: list,
+    ) -> list:
+        """v0.7.2 sandbox: per-entry policy gate for incoming manifest
+        rows. Each entry is either accepted (returned + audited as
+        'write' or 'delete') or rejected (dropped + audited).
+
+        Rejection reasons:
+          - reject_pattern   — file_path matches an ignored glob
+          - reject_size      — declared size > max_file_bytes
+          - reject_traversal — file_path contains '..' or absolute root
+        """
+        if self.state is None:
+            return entries
+        folder_name = folder["name"]
+        max_size = folder.get("max_file_bytes")
+        patterns = folder.get("ignored_patterns") or []
+        kept: list = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            file_path = str(e.get("file_path", "") or "")
+            blob_hash = e.get("blob_hash")
+            size = e.get("size")
+            # Path-traversal guard: reject any entry whose path
+            # would escape the sandbox root or look like an absolute
+            # path. Existing code in foldersync also normalizes; this
+            # is a belt-and-suspenders check at the policy layer with
+            # an audited reject so the user can see attempts.
+            norm = file_path.replace("\\", "/").lstrip("/")
+            if (
+                not norm
+                or ".." in norm.split("/")
+                or file_path.startswith("/")
+                or (len(file_path) > 1 and file_path[1] == ":")
+            ):
+                with contextlib.suppress(Exception):
+                    self.state.record_folder_audit_event(
+                        folder_name=folder_name, peer_fp=peer_fp,
+                        action="reject_traversal", file_path=file_path,
+                        blob_hash=blob_hash if isinstance(blob_hash, str) else None,
+                        size=int(size) if isinstance(size, int) else None,
+                        note="path traversal or absolute path",
+                    )
+                continue
+            # Pattern deny-list.
+            if patterns and self.state.folder_path_matches_ignored(
+                norm, patterns,
+            ):
+                with contextlib.suppress(Exception):
+                    self.state.record_folder_audit_event(
+                        folder_name=folder_name, peer_fp=peer_fp,
+                        action="reject_pattern", file_path=norm,
+                        blob_hash=blob_hash if isinstance(blob_hash, str) else None,
+                        size=int(size) if isinstance(size, int) else None,
+                    )
+                continue
+            # Size cap.
+            if (
+                max_size is not None
+                and isinstance(size, int)
+                and size > int(max_size)
+            ):
+                with contextlib.suppress(Exception):
+                    self.state.record_folder_audit_event(
+                        folder_name=folder_name, peer_fp=peer_fp,
+                        action="reject_size", file_path=norm,
+                        blob_hash=blob_hash if isinstance(blob_hash, str) else None,
+                        size=int(size),
+                        note=f"exceeds max_file_bytes={max_size}",
+                    )
+                continue
+            # Accept. Audit as write/delete depending on whether
+            # this is a tombstone.
+            kept.append(e)
+            with contextlib.suppress(Exception):
+                self.state.record_folder_audit_event(
+                    folder_name=folder_name, peer_fp=peer_fp,
+                    action="delete" if blob_hash is None else "write",
+                    file_path=norm,
+                    blob_hash=blob_hash if isinstance(blob_hash, str) else None,
+                    size=int(size) if isinstance(size, int) else None,
+                )
+        return kept
+
     async def _handle_manifest_push(self, channel, msg, peer_fp):
         if self.folder_engine is None or self.state is None:
             return
@@ -1424,6 +1509,14 @@ class Daemon:
                 peer_fp[:8],
             )
             return
+        # v0.7.2 sandbox: filter remote entries against the folder's
+        # capability policy (max_file_bytes, ignored_patterns, path
+        # traversal). Each accept/reject decision is audited so the
+        # user can review what the peer tried to do. The filtered
+        # list is what the manifest engine actually merges.
+        entries = self._sandbox_filter_manifest_entries(
+            folder=f, peer_fp=peer_fp, entries=entries,
+        )
         try:
             wants_data = self.folder_engine.receive_remote_manifest(
                 folder_name=folder_name, entries=entries,

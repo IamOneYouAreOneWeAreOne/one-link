@@ -23,6 +23,7 @@ import json
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -243,6 +244,27 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_peer ON outbox(peer_fp);
 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(peer_fp, delivered_ms);
+
+-- v0.7.2: folder sandbox capability audit. Append-only log of
+-- accepted and rejected remote writes against a sync root, so the
+-- user can answer "what did this peer do to my folder last week".
+-- root_id binds the audit event to a stable identifier even if the
+-- folder is renamed or recreated.
+CREATE TABLE IF NOT EXISTS folder_audit (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms         INTEGER NOT NULL,
+    folder_name   TEXT    NOT NULL,
+    root_id       TEXT    NOT NULL,
+    peer_fp       TEXT    NOT NULL,
+    action        TEXT    NOT NULL,
+    file_path     TEXT    NOT NULL,
+    blob_hash     TEXT,
+    size          INTEGER,
+    note          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_folder_audit_ts ON folder_audit(ts_ms);
+CREATE INDEX IF NOT EXISTS idx_folder_audit_folder ON folder_audit(folder_name);
+CREATE INDEX IF NOT EXISTS idx_folder_audit_peer ON folder_audit(peer_fp);
 """
 
 
@@ -347,8 +369,48 @@ class State:
                 current = row[0] if row and row[0] is not None else 0
                 if current < 1:
                     c.execute("INSERT INTO schema_version(version) VALUES(1)")
+                # v0.7.2: folder sandbox columns. Add only if not
+                # present so existing dbs upgrade cleanly. SQLite
+                # has no `ADD COLUMN IF NOT EXISTS`, so we PRAGMA-
+                # introspect first.
+                self._migrate_v2_folder_sandboxes(c)
+                if current < 2:
+                    c.execute("INSERT INTO schema_version(version) VALUES(2)")
             finally:
                 c.close()
+
+    def _migrate_v2_folder_sandboxes(self, c: sqlite3.Cursor) -> None:
+        """Add per-folder sandbox columns: root_id (stable id),
+        max_file_bytes (size cap), ignored_patterns_json (deny-list
+        globs), conflict_policy (latest-wins | local-priority |
+        peer-priority). Idempotent — safe to re-run."""
+        rows = c.execute("PRAGMA table_info(folders)").fetchall()
+        existing = {row[1] for row in rows}  # column name index
+        if "root_id" not in existing:
+            c.execute("ALTER TABLE folders ADD COLUMN root_id TEXT")
+        if "max_file_bytes" not in existing:
+            c.execute("ALTER TABLE folders ADD COLUMN max_file_bytes INTEGER")
+        if "ignored_patterns_json" not in existing:
+            c.execute(
+                "ALTER TABLE folders ADD COLUMN ignored_patterns_json"
+                " TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "conflict_policy" not in existing:
+            c.execute(
+                "ALTER TABLE folders ADD COLUMN conflict_policy"
+                " TEXT NOT NULL DEFAULT 'latest-wins'"
+            )
+        # Backfill root_id for any folder still missing one — needed
+        # the moment we start writing it into folder_audit rows.
+        rows = c.execute(
+            "SELECT name FROM folders WHERE root_id IS NULL OR root_id = ''"
+        ).fetchall()
+        for row in rows:
+            new_id = uuid.uuid4().hex
+            c.execute(
+                "UPDATE folders SET root_id = ? WHERE name = ?",
+                (new_id, row["name"]),
+            )
 
     # ─── peers ────────────────────────────────────────────────────────
 
@@ -1297,14 +1359,32 @@ class State:
 
     # ─── folders ──────────────────────────────────────────────────────
 
-    def add_folder(self, *, name: str, local_path: str, shared_with: list[str]) -> None:
+    def add_folder(
+        self, *, name: str, local_path: str, shared_with: list[str],
+        max_file_bytes: Optional[int] = None,
+        ignored_patterns: Optional[list[str]] = None,
+        conflict_policy: str = "latest-wins",
+    ) -> None:
+        if conflict_policy not in ("latest-wins", "local-priority", "peer-priority"):
+            raise ValueError(f"invalid conflict_policy: {conflict_policy!r}")
+        ip_json = json.dumps(list(ignored_patterns or []))
+        root_id = uuid.uuid4().hex
         with self._write_lock:
             self._conn.execute(
                 """
-                INSERT INTO folders(name, local_path, shared_with_json, created_ms)
-                VALUES(?, ?, ?, ?)
+                INSERT INTO folders(
+                    name, local_path, shared_with_json, created_ms,
+                    root_id, max_file_bytes, ignored_patterns_json,
+                    conflict_policy
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (name, local_path, json.dumps(shared_with), _now_ms()),
+                (
+                    name, local_path, json.dumps(shared_with), _now_ms(),
+                    root_id,
+                    int(max_file_bytes) if max_file_bytes is not None else None,
+                    ip_json,
+                    conflict_policy,
+                ),
             )
             for peer_fp in shared_with:
                 self._set_folder_peer_permission_locked(name, peer_fp, "rw")
@@ -1322,26 +1402,37 @@ class State:
         ).fetchone()
         if not row:
             return None
-        return {
-            "name": row["name"],
-            "local_path": row["local_path"],
-            "shared_with": json.loads(row["shared_with_json"]),
-            "created_ms": row["created_ms"],
-        }
+        return self._row_to_folder(row)
 
     def list_folders(self) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM folders ORDER BY name"
         ).fetchall()
-        return [
-            {
-                "name": r["name"],
-                "local_path": r["local_path"],
-                "shared_with": json.loads(r["shared_with_json"]),
-                "created_ms": r["created_ms"],
-            }
-            for r in rows
-        ]
+        return [self._row_to_folder(r) for r in rows]
+
+    def _row_to_folder(self, r: sqlite3.Row) -> dict:
+        cols = r.keys()
+        try:
+            ignored = json.loads(r["ignored_patterns_json"]) if (
+                "ignored_patterns_json" in cols
+                and r["ignored_patterns_json"]
+            ) else []
+        except Exception:
+            ignored = []
+        return {
+            "name": r["name"],
+            "local_path": r["local_path"],
+            "shared_with": json.loads(r["shared_with_json"]),
+            "created_ms": r["created_ms"],
+            "root_id": r["root_id"] if "root_id" in cols else None,
+            "max_file_bytes": (
+                r["max_file_bytes"] if "max_file_bytes" in cols else None
+            ),
+            "ignored_patterns": ignored,
+            "conflict_policy": (
+                r["conflict_policy"] if "conflict_policy" in cols else "latest-wins"
+            ),
+        }
 
     def share_folder_with(self, folder_name: str, peer_fp: str) -> None:
         f = self.get_folder(folder_name)
@@ -1415,6 +1506,152 @@ class State:
             return "rw" if peer_fp in (self.get_folder(folder_name) or {}).get("shared_with", []) else None
         mode = str(row["value"])
         return mode if mode in ("push", "pull", "rw") else None
+
+    # ─── v0.7.2 sandbox policy setters + audit ──────────────────────
+
+    def set_folder_max_file_bytes(
+        self, folder_name: str, max_file_bytes: Optional[int],
+    ) -> None:
+        if not self.get_folder(folder_name):
+            raise KeyError(f"no such folder: {folder_name!r}")
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE folders SET max_file_bytes = ? WHERE name = ?",
+                (
+                    int(max_file_bytes) if max_file_bytes is not None else None,
+                    folder_name,
+                ),
+            )
+
+    def set_folder_ignored_patterns(
+        self, folder_name: str, patterns: list[str],
+    ) -> None:
+        if not self.get_folder(folder_name):
+            raise KeyError(f"no such folder: {folder_name!r}")
+        clean = [str(p) for p in patterns if str(p).strip()]
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE folders SET ignored_patterns_json = ? WHERE name = ?",
+                (json.dumps(clean), folder_name),
+            )
+
+    def set_folder_conflict_policy(
+        self, folder_name: str, policy: str,
+    ) -> None:
+        if policy not in ("latest-wins", "local-priority", "peer-priority"):
+            raise ValueError(f"invalid conflict_policy: {policy!r}")
+        if not self.get_folder(folder_name):
+            raise KeyError(f"no such folder: {folder_name!r}")
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE folders SET conflict_policy = ? WHERE name = ?",
+                (policy, folder_name),
+            )
+
+    def record_folder_audit_event(
+        self,
+        *,
+        folder_name: str,
+        peer_fp: str,
+        action: str,
+        file_path: str,
+        blob_hash: Optional[str] = None,
+        size: Optional[int] = None,
+        note: Optional[str] = None,
+    ) -> int:
+        """v0.7.2: append an immutable audit row for any peer write
+        attempt against a sandbox root. Action values:
+          - 'write'           — accepted manifest entry update
+          - 'delete'          — accepted tombstone
+          - 'reject_size'     — declined: exceeds max_file_bytes
+          - 'reject_pattern'  — declined: matches ignored pattern
+          - 'reject_unshared' — declined: peer not on shared_with
+          - 'reject_perm'     — declined: peer mode forbids write
+        """
+        f = self.get_folder(folder_name)
+        if not f:
+            raise KeyError(f"no such folder: {folder_name!r}")
+        root_id = f.get("root_id") or ""
+        with self._write_lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO folder_audit(
+                    ts_ms, folder_name, root_id, peer_fp, action,
+                    file_path, blob_hash, size, note
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _now_ms(), folder_name, root_id, peer_fp, action,
+                    file_path,
+                    blob_hash,
+                    int(size) if size is not None else None,
+                    note,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def list_folder_audit(
+        self,
+        *,
+        folder_name: Optional[str] = None,
+        peer_fp: Optional[str] = None,
+        actions: Optional[Iterable[str]] = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        sql = (
+            "SELECT id, ts_ms, folder_name, root_id, peer_fp, action,"
+            " file_path, blob_hash, size, note FROM folder_audit"
+        )
+        clauses: list[str] = []
+        params: list[Any] = []
+        if folder_name is not None:
+            clauses.append("folder_name = ?")
+            params.append(folder_name)
+        if peer_fp is not None:
+            clauses.append("peer_fp = ?")
+            params.append(peer_fp)
+        action_list = list(actions or [])
+        if action_list:
+            clauses.append("action IN (" + ",".join("?" for _ in action_list) + ")")
+            params.extend(action_list)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ts_ms DESC, id DESC LIMIT ?"
+        params.append(int(limit))
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "ts_ms": int(r["ts_ms"]),
+                "folder_name": r["folder_name"],
+                "root_id": r["root_id"],
+                "peer_fp": r["peer_fp"],
+                "action": r["action"],
+                "file_path": r["file_path"],
+                "blob_hash": r["blob_hash"],
+                "size": r["size"],
+                "note": r["note"],
+            }
+            for r in rows
+        ]
+
+    @staticmethod
+    def folder_path_matches_ignored(
+        file_path: str, patterns: Iterable[str],
+    ) -> bool:
+        """Does the given relative path match any of the glob patterns?
+        Uses fnmatch over both the full path and the basename — same
+        semantics as gitignore-style ignores for typical use."""
+        from fnmatch import fnmatch
+        norm = (file_path or "").replace("\\", "/").lstrip("/")
+        base = norm.split("/")[-1] if norm else ""
+        for raw in patterns or []:
+            p = str(raw).strip()
+            if not p:
+                continue
+            if fnmatch(norm, p) or fnmatch(base, p):
+                return True
+        return False
 
     def folder_peer_allows(self, folder_name: str, peer_fp: str, action: str) -> bool:
         mode = self.get_folder_peer_permission(folder_name, peer_fp)

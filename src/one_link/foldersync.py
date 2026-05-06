@@ -167,7 +167,10 @@ class FolderEngine:
 
     # ─── folder management ────────────────────────────────────────────
     def add_folder(
-        self, *, name: str, local_path: Path, shared_with: Iterable[str]
+        self, *, name: str, local_path: Path, shared_with: Iterable[str],
+        max_file_bytes: int | None = None,
+        ignored_patterns: list[str] | None = None,
+        conflict_policy: str = "latest-wins",
     ) -> dict:
         local_path = Path(local_path).expanduser().resolve()
         local_path.mkdir(parents=True, exist_ok=True)
@@ -176,6 +179,9 @@ class FolderEngine:
             raise ValueError(f"folder named {name!r} already exists")
         self.state.add_folder(
             name=name, local_path=str(local_path), shared_with=list(shared_with),
+            max_file_bytes=max_file_bytes,
+            ignored_patterns=list(ignored_patterns or []),
+            conflict_policy=conflict_policy,
         )
         try:
             self._start_watch(name, local_path)

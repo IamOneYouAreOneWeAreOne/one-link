@@ -235,6 +235,8 @@ class UIServer:
         r.add_post(r"/api/folders/{name}/share", self._guarded(self.api_share_folder))
         r.add_post(r"/api/folders/{name}/unshare", self._guarded(self.api_unshare_folder))
         r.add_post(r"/api/folders/{name}/sync", self._guarded(self.api_sync_folder_now))
+        r.add_post(r"/api/folders/{name}/policy", self._guarded(self.api_set_folder_policy))
+        r.add_get(r"/api/folders/{name}/audit", self._guarded(self.api_folder_audit))
         r.add_post(r"/api/peers/{fp}/trust", self._guarded(self.api_set_trust))
         r.add_get(r"/api/peers/{fp}/capabilities", self._guarded(self.api_get_peer_capabilities))
         r.add_post(r"/api/peers/{fp}/capabilities", self._guarded(self.api_set_peer_capabilities))
@@ -686,11 +688,34 @@ class UIServer:
             return web.json_response(
                 {"error": "shared_with must be a list of fingerprints"}, status=400,
             )
+        # v0.7.2 sandbox optionals
+        max_file_bytes = data.get("max_file_bytes")
+        if max_file_bytes is not None and (
+            not isinstance(max_file_bytes, int) or max_file_bytes < 0
+        ):
+            return web.json_response(
+                {"error": "max_file_bytes must be a non-negative integer or null"},
+                status=400,
+            )
+        ignored_patterns = data.get("ignored_patterns") or []
+        if not isinstance(ignored_patterns, list):
+            return web.json_response(
+                {"error": "ignored_patterns must be a list of strings"}, status=400,
+            )
+        conflict_policy = data.get("conflict_policy", "latest-wins")
+        if conflict_policy not in ("latest-wins", "local-priority", "peer-priority"):
+            return web.json_response(
+                {"error": f"invalid conflict_policy: {conflict_policy!r}"},
+                status=400,
+            )
         try:
             f = self.daemon.folder_engine.add_folder(
                 name=name,
                 local_path=Path(local_path),
                 shared_with=[str(fp) for fp in shared_with],
+                max_file_bytes=max_file_bytes,
+                ignored_patterns=[str(p) for p in ignored_patterns],
+                conflict_policy=conflict_policy,
             )
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=409)
@@ -792,6 +817,77 @@ class UIServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
         return web.json_response({"ok": True})
+
+    async def api_set_folder_policy(self, request: web.Request) -> web.Response:
+        """v0.7.2: update sandbox policy on a folder.
+        Body: { max_file_bytes?, ignored_patterns?, conflict_policy? }
+        Each field is optional; only the supplied ones are written."""
+        if self.daemon.state is None or self.daemon.folder_engine is None:
+            return web.json_response(
+                {"error": "folder sync not initialized"}, status=503,
+            )
+        name = request.match_info["name"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        if "max_file_bytes" in data:
+            v = data["max_file_bytes"]
+            if v is not None and (not isinstance(v, int) or v < 0):
+                return web.json_response(
+                    {"error": "max_file_bytes must be a non-negative integer or null"},
+                    status=400,
+                )
+            try:
+                self.daemon.state.set_folder_max_file_bytes(name, v)
+            except KeyError as e:
+                return web.json_response({"error": str(e)}, status=404)
+        if "ignored_patterns" in data:
+            v = data["ignored_patterns"]
+            if not isinstance(v, list):
+                return web.json_response(
+                    {"error": "ignored_patterns must be a list of strings"},
+                    status=400,
+                )
+            try:
+                self.daemon.state.set_folder_ignored_patterns(name, v)
+            except KeyError as e:
+                return web.json_response({"error": str(e)}, status=404)
+        if "conflict_policy" in data:
+            try:
+                self.daemon.state.set_folder_conflict_policy(
+                    name, str(data["conflict_policy"])
+                )
+            except KeyError as e:
+                return web.json_response({"error": str(e)}, status=404)
+            except ValueError as e:
+                return web.json_response({"error": str(e)}, status=400)
+        return web.json_response({
+            "ok": True, "folder": self.daemon.state.get_folder(name),
+        })
+
+    async def api_folder_audit(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        name = request.match_info["name"]
+        f = self.daemon.state.get_folder(name)
+        if not f:
+            return web.json_response({"error": "no such folder"}, status=404)
+        peer_fp = request.query.get("peer_fp") or None
+        action_filter = request.query.get("action") or None
+        actions = [action_filter] if action_filter else None
+        try:
+            limit = int(request.query.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        limit = max(1, min(limit, 1000))
+        events = self.daemon.state.list_folder_audit(
+            folder_name=name, peer_fp=peer_fp, actions=actions, limit=limit,
+        )
+        return web.json_response({
+            "folder": name, "root_id": f.get("root_id"),
+            "events": events,
+        })
 
     async def api_sync_folder_now(self, request: web.Request) -> web.Response:
         """Force an immediate sync cycle for one folder. Used by the UI 'sync now' button."""
