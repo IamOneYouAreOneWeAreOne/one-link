@@ -84,11 +84,15 @@ def test_default_allow_and_prompt_are_disjoint():
     assert not (set(DEFAULT_ALLOW_AFTER_PAIRING) & set(PROMPT_REQUIRED))
 
 
-def test_default_allow_plus_prompt_covers_local_caps():
-    """Every capability we advertise must be classified as either
-    auto-allow-on-pair or prompt-required. No silent third bucket."""
+def test_default_allow_plus_prompt_covers_user_facing_local_caps():
+    """Every USER-FACING capability we advertise must be classified
+    as either auto-allow-on-pair or prompt-required. Transport-layer
+    capabilities (e.g. double_ratchet_v1) are negotiated between
+    channels and don't appear in either bucket."""
+    from one_link.capabilities import TRANSPORT_LAYER_CAPS
+    user_caps = set(LOCAL_CAPABILITIES) - set(TRANSPORT_LAYER_CAPS)
     union = set(DEFAULT_ALLOW_AFTER_PAIRING) | set(PROMPT_REQUIRED)
-    assert set(LOCAL_CAPABILITIES) == union
+    assert user_caps == union
 
 
 # ─── _apply_default_capability_policy ──────────────────────────────

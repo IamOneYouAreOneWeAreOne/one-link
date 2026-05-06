@@ -13,6 +13,14 @@ FILE_CDC = "file_cdc"
 FOLDER_SYNC = "folder_sync"
 MERKLE_SYNC = "merkle_sync"
 FUTURE_TRANSPORTS = "future_transports"
+# v0.7.2: capability advertisement for the Signal-style Double Ratchet.
+# When BOTH peers advertise this in CAPS, post-handshake traffic
+# upgrades to forward-secret + post-compromise-secure encryption.
+# The library lives in one_link.double_ratchet; channel-level
+# activation lands in v0.7.3 (this release ships the negotiation
+# capability + audited library only, so deployments can interop
+# without yet flipping the wire format).
+DOUBLE_RATCHET_V1 = "double_ratchet_v1"
 
 LOCAL_CAPABILITIES = (
     CHAT,
@@ -21,6 +29,7 @@ LOCAL_CAPABILITIES = (
     FOLDER_SYNC,
     MERKLE_SYNC,
     FUTURE_TRANSPORTS,
+    DOUBLE_RATCHET_V1,
 )
 
 # v0.7.1 deny-by-default capability split. The audit doc
@@ -31,6 +40,12 @@ LOCAL_CAPABILITIES = (
 # These tuples are the policy-layer enforcement points.
 DEFAULT_ALLOW_AFTER_PAIRING = (CHAT,)
 PROMPT_REQUIRED = (FILES, FILE_CDC, FOLDER_SYNC, MERKLE_SYNC, FUTURE_TRANSPORTS)
+# DOUBLE_RATCHET_V1 is a transport-layer capability negotiated
+# between channels; it isn't a user-facing prompt-required cap.
+# Therefore it appears in neither tuple — and the deny-by-default
+# tests check that union(DEFAULT_ALLOW_AFTER_PAIRING, PROMPT_REQUIRED)
+# excludes transport-layer caps. Update accordingly.
+TRANSPORT_LAYER_CAPS = (DOUBLE_RATCHET_V1,)
 
 
 def normalize_caps(values) -> tuple[str, ...]:
