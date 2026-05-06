@@ -165,6 +165,14 @@ def _build_caps(
         extra["share_rdz"] = list(rendezvous_urls)[:MAX_SHARED_RENDEZVOUS_URLS]
     if channel_bind:
         extra["channel_bind"] = dict(channel_bind)
+    # v0.7.x: advertise the build version so peers can show "your other
+    # device is on an older version" before a wire-format mismatch
+    # turns into a cryptic InvalidTag. Old peers ignore unknown fields.
+    try:
+        from one_link import __version__ as _ol_ver
+        extra["app_version"] = _ol_ver
+    except Exception:
+        pass
     return make_msg(
         "CAPS",
         short_id,
@@ -788,6 +796,7 @@ class Daemon:
                 "features": features,
                 "from": msg.get("from"),
                 "channel_bind": bind if isinstance(bind, dict) else None,
+                "app_version": msg.get("app_version"),
             }
             if self.state is not None:
                 with contextlib.suppress(Exception):
@@ -2428,6 +2437,7 @@ class Daemon:
                             "protocol": reply.get("protocol", "?"),
                             "features": features,
                             "from": reply.get("from"),
+                            "app_version": reply.get("app_version"),
                         }
                         if self.state is not None:
                             with contextlib.suppress(Exception):
@@ -2527,6 +2537,7 @@ class Daemon:
                                 "protocol": ack.get("protocol", "?"),
                                 "features": features,
                                 "from": ack.get("from"),
+                                "app_version": ack.get("app_version"),
                             }
                             if self.state is not None:
                                 with contextlib.suppress(Exception):
@@ -2579,6 +2590,7 @@ class Daemon:
                             "protocol": ack.get("protocol", "?"),
                             "features": features,
                             "from": ack.get("from"),
+                            "app_version": ack.get("app_version"),
                         }
                         if self.state is not None:
                             with contextlib.suppress(Exception):
@@ -3484,6 +3496,7 @@ class Daemon:
                             "protocol": m.get("protocol", "?"),
                             "features": list(normalize_caps(m.get("features", []))),
                             "from": m.get("from"),
+                            "app_version": m.get("app_version"),
                         }
                         if self.state is not None:
                             with contextlib.suppress(Exception):
@@ -3746,6 +3759,7 @@ class Daemon:
                         "protocol": m.get("protocol", "?"),
                         "features": features,
                         "from": m.get("from"),
+                        "app_version": m.get("app_version"),
                     }
                     if self.state is not None:
                         with contextlib.suppress(Exception):

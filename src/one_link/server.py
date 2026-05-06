@@ -55,6 +55,77 @@ PREFERRED_UI_PORT = 7117
 UI_PORT_FALLBACK_RANGE = 16
 
 
+def _translate_send_error(exc: BaseException) -> dict:
+    """Map a raised exception from daemon.send_text / send_file into a
+    user-facing response body. The goal is that no one ever sees an
+    opaque '/api/send 500' toast — every failure mode here gets a
+    plain-English explanation and a suggested action.
+
+    Returns a dict with at least: {status, code, error, hint}.
+    Status is the HTTP status the caller should set.
+    """
+    # Crypto-level mismatch: AAD or key derivation diverged between
+    # peers. The single most common cause is one device running an
+    # older build than the other — the v0.7.0 wire-format change
+    # binds AAD to the handshake transcript, which old builds don't.
+    try:
+        from cryptography.exceptions import InvalidTag
+    except Exception:  # pragma: no cover
+        InvalidTag = ()  # type: ignore[assignment]
+    if isinstance(exc, InvalidTag):
+        return {
+            "status": 502,
+            "code": "wire_version_mismatch",
+            "error": "The other device is running a different version of One Link.",
+            "hint": "Update One Link on whichever device hasn't been updated yet, then try again.",
+        }
+    msg = str(exc).lower()
+    if "capability" in msg and "disabled" in msg:
+        return {
+            "status": 403,
+            "code": "capability_disabled",
+            "error": "Sending to this device is disabled in your local policy.",
+            "hint": "Open the conversation header and turn on the Files (or Chat) toggle in the Allow row.",
+        }
+    if "rejected" in msg:
+        return {
+            "status": 403,
+            "code": "peer_rejected",
+            "error": "This device is blocked.",
+            "hint": "Click Allow device above to unblock, then re-pair.",
+        }
+    if "handshake" in msg or "0 bytes read" in msg:
+        return {
+            "status": 502,
+            "code": "handshake_failed",
+            "error": "Could not establish a secure connection with the other device.",
+            "hint": "Make sure One Link is running there and try again. If this persists, both devices may need updating.",
+        }
+    if "timeout" in msg or "timed out" in msg:
+        return {
+            "status": 504,
+            "code": "timeout",
+            "error": "The other device didn't respond in time.",
+            "hint": "Check that One Link is open and on the same network on the other device.",
+        }
+    if "no peer" in msg or "unreachable" in msg or "not visible" in msg:
+        return {
+            "status": 502,
+            "code": "peer_unreachable",
+            "error": "The other device is not reachable.",
+            "hint": "Make sure One Link is open on the other device and on the same Wi-Fi.",
+        }
+    # Catch-all: still better than a bare 500. Keep the original text
+    # in error_detail for diagnostics.
+    return {
+        "status": 500,
+        "code": "send_failed",
+        "error": "Send failed.",
+        "hint": "Try again. If this keeps happening, check that both devices are running the same version of One Link.",
+        "error_detail": str(exc),
+    }
+
+
 def _msg_record_to_event(rec) -> dict:
     """Convert a state.MessageRecord into the wire-shaped dict the UI expects."""
     out = {
@@ -267,11 +338,16 @@ class UIServer:
         display_name = None
         if self.daemon.state is not None:
             display_name = self.daemon.state.get_setting("display_name")
+        try:
+            from one_link import __version__ as ol_ver
+        except Exception:
+            ol_ver = "?"
         return web.json_response({
             "short_id": me.short_id,
             "fingerprint": me.fingerprint,
             "hostname": me.hostname,
             "display_name": display_name or me.hostname,
+            "app_version": ol_ver,
         })
 
     async def api_status(self, request: web.Request) -> web.Response:
@@ -505,6 +581,14 @@ class UIServer:
                 p["regime"] = _classify_address_regime(p.get("address") or "")
             else:
                 p["regime"] = "offline"
+            # v0.7.x: surface the peer's advertised app_version (from
+            # CAPS) so the UI can warn before a wire-mismatch turns into
+            # an opaque InvalidTag. None until first CAPS exchange.
+            p["app_version"] = None
+            if sess is not None:
+                ch = getattr(sess, "channel", None)
+                if ch is not None and getattr(ch, "peer_caps", None):
+                    p["app_version"] = ch.peer_caps.get("app_version")
             # v0.7.0: per-pairing health metrics. last_alive_ms is wall-
             # clock time of the last bytes seen from this peer (in or
             # out). latency_ewma_ms is the rolling round-trip time
@@ -1034,7 +1118,8 @@ class UIServer:
             return web.json_response({"ok": True, "result": result})
         except Exception as e:
             log.exception("send failed: %s", e)
-            return web.json_response({"error": str(e)}, status=500)
+            translated = _translate_send_error(e)
+            return web.json_response(translated, status=translated["status"])
 
     # ─── /api/send-file ───────────────────────────────────────────────
     async def api_send_file(self, request: web.Request) -> web.Response:
@@ -1102,7 +1187,8 @@ class UIServer:
             return web.json_response({"ok": True, "result": result})
         except Exception as e:
             log.exception("send_file failed: %s", e)
-            return web.json_response({"error": str(e)}, status=500)
+            translated = _translate_send_error(e)
+            return web.json_response(translated, status=translated["status"])
         finally:
             try:
                 if upload_path:

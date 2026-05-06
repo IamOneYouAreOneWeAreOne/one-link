@@ -896,6 +896,10 @@
     background: transparent; color: var(--text-dim);
     padding: 6px 10px;
   }
+  .notif-banner.version-banner {
+    background: linear-gradient(90deg, rgba(245,196,81,.20), rgba(245,196,81,.08));
+    border-bottom-color: rgba(245,196,81,.45);
+  }
 
   /* ── Inline message styling (links, code, mentions) ────────────────── */
   .msg a {
@@ -995,6 +999,16 @@
     <div>
       <button class="dismiss" id="notif-dismiss">Not now</button>
       <button id="notif-enable">Enable</button>
+    </div>
+  </div>
+
+  <!-- Version-mismatch banner (orange) — appears when at least one
+       paired peer is on a different app_version than this device. -->
+  <div class="notif-banner version-banner" id="version-banner">
+    <span id="version-banner-text">…</span>
+    <div>
+      <button class="dismiss" id="version-banner-dismiss">Dismiss</button>
+      <a id="version-banner-howto" href="https://github.com/IamOneYouAreOneWeAreOne/one-link" target="_blank" rel="noopener noreferrer" style="color:white;text-decoration:none;background:var(--warn);padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;">How to update</a>
     </div>
   </div>
 
@@ -1430,19 +1444,31 @@
     return `${Math.round(ms)} ms round-trip`;
   }
 
+  // Build a richer Error object so callers can get both the short
+  // headline and the suggested next step. Server returns
+  // {error, hint, code} for translated failures.
+  function _apiError(j, status) {
+    const headline = (j && j.error) || `request failed (${status})`;
+    const err = new Error(headline);
+    err.status = status;
+    err.code = j && j.code || null;
+    err.hint = j && j.hint || null;
+    return err;
+  }
+
   // ── API client ─────────────────────────────────────────────────────
   const api = {
     async get(p)  { const r = await fetch(p, { credentials: "include" }); if (!r.ok) throw new Error(`${p} ${r.status}`); return r.json(); },
     async post(p, body) {
       const r = await fetch(p, { method: "POST", credentials: "include", headers: {"content-type":"application/json"}, body: JSON.stringify(body) });
       const j = await r.json().catch(()=>({}));
-      if (!r.ok) throw new Error(j.error || `${p} ${r.status}`);
+      if (!r.ok) throw _apiError(j, r.status);
       return j;
     },
     async del(p) {
       const r = await fetch(p, { method: "DELETE", credentials: "include" });
       const j = await r.json().catch(()=>({}));
-      if (!r.ok) throw new Error(j.error || `${p} ${r.status}`);
+      if (!r.ok) throw _apiError(j, r.status);
       return j;
     },
     async upload(peer, file) {
@@ -1451,13 +1477,19 @@
       fd.append("file", file, file.name);
       const r = await fetch("/api/send-file", { method:"POST", credentials:"include", body: fd });
       const j = await r.json().catch(()=>({}));
-      if (!r.ok) throw new Error(j.error || `upload ${r.status}`);
+      if (!r.ok) throw _apiError(j, r.status);
       return j;
     },
     folders() { return this.get("/api/folders"); },
     transfers() { return this.get("/api/transfers?limit=80"); },
     status() { return this.get("/api/status"); },
   };
+
+  function errorToastBody(e) {
+    const headline = (e && e.message) ? e.message : String(e);
+    const hint = e?.hint;
+    return hint ? `${headline} — ${hint}` : headline;
+  }
 
   // ── rAF-throttled schedulers ───────────────────────────────────────
   // A stuck or retrying transfer can fire many "transfer" WS events per
@@ -2287,6 +2319,13 @@
     $("#notif-banner").classList.remove("show");
   });
 
+  $("#version-banner-dismiss")?.addEventListener("click", () => {
+    if (state._versionDismissKey) {
+      localStorage.setItem(state._versionDismissKey, "1");
+    }
+    $("#version-banner").classList.remove("show");
+  });
+
   async function refreshPeers() {
     try {
       const { peers } = await api.get("/api/peers");
@@ -2294,7 +2333,47 @@
       for (const p of peers) state.peers.set(p.short_id, p);
       renderPeers();
       renderPeerControls();
+      maybeShowVersionBanner();
     } catch (e) { console.warn(e); }
+  }
+
+  // Compare every known peer's advertised app_version against ours.
+  // If any mismatch, show the orange banner with concrete guidance.
+  // Once user dismisses for a given peer-version pair, don't re-show it
+  // until either side updates.
+  function maybeShowVersionBanner() {
+    const banner = $("#version-banner");
+    if (!banner) return;
+    const myV = state.me?.app_version;
+    if (!myV) { banner.classList.remove("show"); return; }
+    const mismatched = [];
+    for (const p of state.peers.values()) {
+      if (p.trust !== "pinned") continue;
+      const pv = p.app_version;
+      // Unknown (no CAPS yet) is silent — once they connect we'll know.
+      if (pv && pv !== myV) {
+        mismatched.push({ name: p.hostname || p.short_id, version: pv });
+      }
+    }
+    if (mismatched.length === 0) {
+      banner.classList.remove("show");
+      return;
+    }
+    const dismissKey = "ol_vers_dismissed:" + mismatched
+      .map(m => `${m.name}@${m.version}`).sort().join("|") + ":vs:" + myV;
+    if (localStorage.getItem(dismissKey) === "1") {
+      banner.classList.remove("show");
+      return;
+    }
+    state._versionDismissKey = dismissKey;
+    const txt = $("#version-banner-text");
+    if (mismatched.length === 1) {
+      const m = mismatched[0];
+      txt.textContent = `${m.name} is on One Link v${m.version}; this device is on v${myV}. Both must match for messages to send.`;
+    } else {
+      txt.textContent = `${mismatched.length} paired devices are on a different version of One Link than this one (v${myV}). Update them so all are on the same version.`;
+    }
+    banner.classList.add("show");
   }
 
   async function loadHistory() {
@@ -2489,7 +2568,7 @@
           input.value = "";
           input.style.height = "auto";
         } catch (e) {
-          toast(`Send failed: ${e.message || e}`, "bad");
+          toast(errorToastBody(e), "bad", 8000);
         }
       }
       // Clear tray immediately so the user sees the staged files leaving;
@@ -2587,8 +2666,7 @@
       // no toast needed for happy path.
     } catch (e) {
       sendingToast?.remove();
-      const reason = (e && e.message) ? e.message : String(e);
-      toast(`Send failed (${file.name}): ${reason}`, "bad", 8000);
+      toast(`${file.name}: ${errorToastBody(e)}`, "bad", 9000);
     }
   }
 

@@ -985,7 +985,10 @@ async def test_outbound_blocked_for_rejected_peer():
                 token=tok_b,
             )
             assert status >= 400
-            assert "rejected" in j2["error"].lower()
+            # The user-facing error text was rewritten in v0.7.x; assert
+            # on the stable `code` field (peer_rejected) rather than the
+            # English wording.
+            assert j2.get("code") == "peer_rejected", j2
 
 
 @pytest.mark.asyncio

@@ -41,6 +41,11 @@ EXPECTED_IDS = [
     "notif-banner",
     "notif-enable",
     "notif-dismiss",
+    # v0.7.x version-mismatch banner (warns before crypto fails)
+    "version-banner",
+    "version-banner-text",
+    "version-banner-dismiss",
+    "version-banner-howto",
     # Files panel: Received/Sent toggle + open-inbox button
     "btn-files-received",
     "btn-files-sent",
@@ -93,6 +98,11 @@ EXPECTED_JS_HELPERS = [
     "function renderFilesPanel",
     "function readAllEntries",
     "function collectFromEntry",
+    # v0.7.x: cross-peer version mismatch banner
+    "function maybeShowVersionBanner",
+    # Structured-error helper used to surface error.code + error.hint
+    "function _apiError",
+    "function errorToastBody",
 ]
 
 
