@@ -221,6 +221,28 @@ CREATE TABLE IF NOT EXISTS transfers (
 );
 CREATE INDEX IF NOT EXISTS idx_transfers_updated ON transfers(updated_ms);
 CREATE INDEX IF NOT EXISTS idx_transfers_peer ON transfers(peer_fp);
+
+-- v0.7.1: store-and-forward outbox. Holds chat messages addressed to
+-- a paired peer that's offline at send time. The daemon re-tries
+-- delivery on every fresh outbound session for that peer; rows are
+-- marked `delivered_ms` non-null on the first successful ACK.
+-- (peer_fp, msg_id) is unique so the same message can't be enqueued
+-- twice. attempts/last_error let the UI explain stuck deliveries.
+CREATE TABLE IF NOT EXISTS outbox (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    peer_fp         TEXT    NOT NULL,
+    msg_id          TEXT    NOT NULL,
+    msg_kind        TEXT    NOT NULL DEFAULT 'TEXT',
+    msg_body_json   TEXT    NOT NULL,
+    enqueued_ms     INTEGER NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    last_attempt_ms INTEGER,
+    last_error      TEXT,
+    delivered_ms    INTEGER,
+    UNIQUE(peer_fp, msg_id)
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_peer ON outbox(peer_fp);
+CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(peer_fp, delivered_ms);
 """
 
 
@@ -271,6 +293,25 @@ class TransferRecord:
     wire_bytes: int
     updated_ms: int
     metadata: dict
+
+
+@dataclass
+class OutboxEntry:
+    """v0.7.1: pending or delivered store-and-forward message row."""
+    id: int
+    peer_fp: str
+    msg_id: str
+    msg_kind: str
+    msg_body: dict
+    enqueued_ms: int
+    attempts: int
+    last_attempt_ms: Optional[int]
+    last_error: Optional[str]
+    delivered_ms: Optional[int]
+
+    @property
+    def delivered(self) -> bool:
+        return self.delivered_ms is not None
 
 
 class State:
@@ -1021,6 +1062,155 @@ class State:
                 params,
             )
             return int(cur.rowcount)
+
+    # ─── outbox (v0.7.1: store-and-forward) ──────────────────────────
+
+    def enqueue_outbox(
+        self,
+        *,
+        peer_fp: str,
+        msg_id: str,
+        msg_body: dict,
+        msg_kind: str = "TEXT",
+    ) -> int:
+        """Queue a chat message for delivery to peer when next online.
+        Returns the row id. If (peer_fp, msg_id) is already enqueued
+        (delivered or not), returns the existing row id — idempotent."""
+        if not peer_fp or not msg_id:
+            raise ValueError("peer_fp and msg_id required")
+        body_json = json.dumps(msg_body, separators=(",", ":"))
+        now = _now_ms()
+        with self._write_lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO outbox(
+                    peer_fp, msg_id, msg_kind, msg_body_json, enqueued_ms
+                ) VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(peer_fp, msg_id) DO NOTHING
+                """,
+                (peer_fp, msg_id, msg_kind, body_json, now),
+            )
+            if cur.rowcount > 0:
+                return int(cur.lastrowid)
+            row = self._conn.execute(
+                "SELECT id FROM outbox WHERE peer_fp = ? AND msg_id = ?",
+                (peer_fp, msg_id),
+            ).fetchone()
+            return int(row["id"]) if row else -1
+
+    def list_outbox(
+        self,
+        *,
+        peer_fp: Optional[str] = None,
+        pending_only: bool = True,
+        limit: int = 200,
+    ) -> list[OutboxEntry]:
+        sql = (
+            "SELECT id, peer_fp, msg_id, msg_kind, msg_body_json, enqueued_ms,"
+            " attempts, last_attempt_ms, last_error, delivered_ms"
+            " FROM outbox"
+        )
+        clauses: list[str] = []
+        params: list[Any] = []
+        if peer_fp is not None:
+            clauses.append("peer_fp = ?")
+            params.append(peer_fp)
+        if pending_only:
+            clauses.append("delivered_ms IS NULL")
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY enqueued_ms ASC, id ASC LIMIT ?"
+        params.append(int(limit))
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [self._row_to_outbox(r) for r in rows]
+
+    def get_outbox_entry(self, entry_id: int) -> Optional[OutboxEntry]:
+        row = self._conn.execute(
+            "SELECT id, peer_fp, msg_id, msg_kind, msg_body_json, enqueued_ms,"
+            " attempts, last_attempt_ms, last_error, delivered_ms"
+            " FROM outbox WHERE id = ?",
+            (int(entry_id),),
+        ).fetchone()
+        return self._row_to_outbox(row) if row else None
+
+    def mark_outbox_delivered(self, entry_id: int) -> bool:
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE outbox SET delivered_ms = ?, last_error = NULL"
+                " WHERE id = ? AND delivered_ms IS NULL",
+                (_now_ms(), int(entry_id)),
+            )
+            return cur.rowcount > 0
+
+    def record_outbox_attempt(
+        self, entry_id: int, *, error: Optional[str] = None,
+    ) -> None:
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE outbox SET attempts = attempts + 1,"
+                " last_attempt_ms = ?, last_error = ? WHERE id = ?",
+                (_now_ms(), error[:500] if error else None, int(entry_id)),
+            )
+
+    def cancel_outbox(self, entry_id: int) -> bool:
+        """Drop a pending entry without delivery. Idempotent."""
+        with self._write_lock:
+            cur = self._conn.execute(
+                "DELETE FROM outbox WHERE id = ? AND delivered_ms IS NULL",
+                (int(entry_id),),
+            )
+            return cur.rowcount > 0
+
+    def clear_outbox_for_peer(self, peer_fp: str) -> int:
+        """Drop every (delivered or not) outbox row for a peer.
+        Hooked from revoke_peer so we don't keep messages addressed
+        to a peer the user no longer trusts."""
+        with self._write_lock:
+            cur = self._conn.execute(
+                "DELETE FROM outbox WHERE peer_fp = ?", (peer_fp,),
+            )
+            return int(cur.rowcount)
+
+    def prune_outbox(
+        self,
+        *,
+        older_than_ms: Optional[int] = None,
+        delivered_only: bool = True,
+    ) -> int:
+        """Cleanup. Default: drop delivered rows. Pass
+        `delivered_only=False, older_than_ms=...` to also drop
+        ancient undelivered rows (e.g. peer never came back)."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if delivered_only:
+            clauses.append("delivered_ms IS NOT NULL")
+        if older_than_ms is not None:
+            clauses.append("enqueued_ms < ?")
+            params.append(int(older_than_ms))
+        if not clauses:
+            return 0
+        sql = "DELETE FROM outbox WHERE " + " AND ".join(clauses)
+        with self._write_lock:
+            cur = self._conn.execute(sql, tuple(params))
+            return int(cur.rowcount)
+
+    def _row_to_outbox(self, row: sqlite3.Row) -> OutboxEntry:
+        try:
+            body = json.loads(row["msg_body_json"]) if row["msg_body_json"] else {}
+        except Exception:
+            body = {}
+        return OutboxEntry(
+            id=int(row["id"]),
+            peer_fp=row["peer_fp"],
+            msg_id=row["msg_id"],
+            msg_kind=row["msg_kind"],
+            msg_body=body,
+            enqueued_ms=int(row["enqueued_ms"]),
+            attempts=int(row["attempts"]),
+            last_attempt_ms=row["last_attempt_ms"],
+            last_error=row["last_error"],
+            delivered_ms=row["delivered_ms"],
+        )
 
     def _row_to_transfer(self, row: sqlite3.Row) -> TransferRecord:
         try:

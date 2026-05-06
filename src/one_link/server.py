@@ -254,6 +254,9 @@ class UIServer:
         r.add_get("/api/files", self._guarded(self.api_files))
         r.add_get("/api/transfers", self._guarded(self.api_transfers))
         r.add_post("/api/transfers/prune", self._guarded(self.api_prune_transfers))
+        r.add_get("/api/outbox", self._guarded(self.api_list_outbox))
+        r.add_post(r"/api/outbox/{id:\d+}/cancel", self._guarded(self.api_cancel_outbox))
+        r.add_post(r"/api/outbox/flush", self._guarded(self.api_flush_outbox))
         r.add_delete(r"/api/transfers/{transfer_id:.+}", self._guarded(self.api_delete_transfer))
         r.add_post("/api/inbox/reveal", self._guarded(self.api_inbox_reveal))
         r.add_post(r"/api/files/{name:.+}/reveal", self._guarded(self.api_file_reveal))
@@ -1221,11 +1224,31 @@ class UIServer:
             return web.json_response({"error": f"bad json: {e}"}, status=400)
         peer_needle = data.get("peer", "")
         body = data.get("body", "")
+        # v0.7.1: by default, fall back to outbox when the peer is
+        # offline or the send fails with a transient/network error.
+        # Set `queue_on_failure: false` to opt out (e.g. for the
+        # control plane's strict send command).
+        queue_on_failure = bool(data.get("queue_on_failure", True))
         if not peer_needle or not body:
             return web.json_response({"error": "peer and body required"}, status=400)
         # v0.5.1: also tries the rendezvous if the peer isn't on mDNS.
         peer = await self.daemon.resolve_for_send(peer_needle)
+        target_fp = self._resolve_pinned_fp(peer_needle, peer)
+
         if peer is None:
+            # Peer is offline. If we can address them as a pinned
+            # fingerprint, queue the message instead of erroring.
+            if queue_on_failure and target_fp:
+                try:
+                    entry = self.daemon.enqueue_text_outbox(target_fp, body)
+                    return web.json_response({
+                        "ok": True, "queued": True,
+                        "outbox_id": entry["outbox_id"],
+                        "msg": entry["msg"],
+                        "reason": "peer_offline",
+                    }, status=202)
+                except Exception as enqueue_err:
+                    log.warning("offline-enqueue failed: %s", enqueue_err)
             return web.json_response({"error": f"no peer {peer_needle!r}"}, status=404)
         try:
             result = await self.daemon.send_text(peer, body)
@@ -1233,7 +1256,67 @@ class UIServer:
         except Exception as e:
             log.exception("send failed: %s", e)
             translated = _translate_send_error(e)
+            # Queue on transient/network errors. Sticky deny errors
+            # (capability_disabled, peer_rejected, wire_version_mismatch)
+            # stay as immediate 4xx — re-attempting them won't help.
+            queueable_codes = {
+                "peer_unreachable", "handshake_failed",
+                "timeout", "send_failed",
+            }
+            if (
+                queue_on_failure
+                and target_fp
+                and translated.get("code") in queueable_codes
+            ):
+                try:
+                    entry = self.daemon.enqueue_text_outbox(target_fp, body)
+                    return web.json_response({
+                        "ok": True, "queued": True,
+                        "outbox_id": entry["outbox_id"],
+                        "msg": entry["msg"],
+                        "reason": translated.get("code"),
+                        "after_failure": translated,
+                    }, status=202)
+                except Exception as enqueue_err:
+                    log.warning(
+                        "queue-on-failure enqueue failed: %s", enqueue_err
+                    )
             return web.json_response(translated, status=translated["status"])
+
+    def _resolve_pinned_fp(self, needle: str, peer_obj) -> str | None:
+        """v0.7.1: best-effort map a UI peer needle (short id, fp,
+        or hostname) to a pinned-peer fingerprint, even when the
+        peer isn't currently visible. Used by the outbox-fallback
+        path so a send to a sleeping device queues instead of 404s."""
+        if self.daemon.state is None:
+            return None
+        # If we already resolved a live Peer with an ed_pub, derive its fp.
+        if peer_obj is not None:
+            try:
+                from one_link.identity import fingerprint_of
+                if getattr(peer_obj, "ed_pub_hex", None):
+                    fp = fingerprint_of(bytes.fromhex(peer_obj.ed_pub_hex))
+                    rec = self.daemon.state.get_peer(fp)
+                    if rec and rec.trust == "pinned":
+                        return fp
+            except Exception:
+                pass
+        # Otherwise, try the needle as fp / short_id directly.
+        n = (needle or "").strip()
+        if not n:
+            return None
+        try:
+            if len(n) == 64:
+                rec = self.daemon.state.get_peer(n)
+                if rec and rec.trust == "pinned":
+                    return n
+            if len(n) <= 16:
+                rec = self.daemon.state.get_peer_by_short_id(n)
+                if rec and rec.trust == "pinned":
+                    return rec.fingerprint
+        except Exception:
+            pass
+        return None
 
     # ─── /api/send-file ───────────────────────────────────────────────
     async def api_send_file(self, request: web.Request) -> web.Response:
@@ -1366,6 +1449,90 @@ class UIServer:
             keep_latest=keep_latest,
         )
         return web.json_response({"ok": True, "removed": removed})
+
+    # ─── /api/outbox (v0.7.1) ─────────────────────────────────────────
+    async def api_list_outbox(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        peer_fp = request.query.get("peer_fp") or None
+        pending_only = (request.query.get("pending", "1") != "0")
+        try:
+            limit = int(request.query.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        limit = max(1, min(limit, 1000))
+        rows = self.daemon.state.list_outbox(
+            peer_fp=peer_fp, pending_only=pending_only, limit=limit,
+        )
+        return web.json_response({
+            "entries": [
+                {
+                    "id": r.id,
+                    "peer_fp": r.peer_fp,
+                    "msg_id": r.msg_id,
+                    "msg_kind": r.msg_kind,
+                    "msg_body": r.msg_body,
+                    "enqueued_ms": r.enqueued_ms,
+                    "attempts": r.attempts,
+                    "last_attempt_ms": r.last_attempt_ms,
+                    "last_error": r.last_error,
+                    "delivered_ms": r.delivered_ms,
+                    "delivered": r.delivered,
+                }
+                for r in rows
+            ],
+        })
+
+    async def api_cancel_outbox(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            entry_id = int(request.match_info["id"])
+        except (KeyError, ValueError):
+            return web.json_response({"error": "bad id"}, status=400)
+        # Look up first so we can broadcast the right peer fingerprint.
+        entry = self.daemon.state.get_outbox_entry(entry_id)
+        if entry is None:
+            return web.json_response({"error": "not found"}, status=404)
+        if entry.delivered:
+            return web.json_response(
+                {"error": "already delivered"}, status=409,
+            )
+        removed = self.daemon.state.cancel_outbox(entry_id)
+        if removed:
+            self.broadcast({
+                "type": "outbox_cancelled",
+                "fingerprint": entry.peer_fp,
+                "outbox_id": entry_id,
+                "msg_id": entry.msg_id,
+            })
+        return web.json_response({"ok": True, "removed": removed})
+
+    async def api_flush_outbox(self, request: web.Request) -> web.Response:
+        """Force a flush attempt for one peer (or all paired peers
+        with pending entries)."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        peer_fp = data.get("peer_fp") if isinstance(data, dict) else None
+        if peer_fp:
+            result = await self.daemon.flush_outbox_for(str(peer_fp))
+            return web.json_response({
+                "ok": True, "results": [{"peer_fp": peer_fp, **result}],
+            })
+        # No peer specified: enumerate every peer with pending rows.
+        pending = self.daemon.state.list_outbox(
+            peer_fp=None, pending_only=True, limit=1000,
+        )
+        peer_fps = sorted({r.peer_fp for r in pending})
+        results = []
+        for fp in peer_fps:
+            r = await self.daemon.flush_outbox_for(fp)
+            results.append({"peer_fp": fp, **r})
+        return web.json_response({"ok": True, "results": results})
 
     # ─── /api/audit ───────────────────────────────────────────────────
     async def api_audit(self, request: web.Request) -> web.Response:

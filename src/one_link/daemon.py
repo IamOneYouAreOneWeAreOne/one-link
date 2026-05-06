@@ -381,6 +381,11 @@ class Daemon:
         # v0.7.1: dedup table for capability_request WS events.
         # (peer_fp, cap) -> monotonic ts of last UI prompt fired.
         self._capability_request_seen: dict[tuple[str, str], float] = {}
+        # v0.7.1: outbox flush concurrency. One in-flight flush per
+        # peer at a time — multiple session-up events shouldn't fire
+        # parallel deliveries that ACK out of order.
+        self._outbox_flush_locks: dict[str, asyncio.Lock] = {}
+        self._outbox_flush_inflight: set[str] = set()
         # Endpoint announcements are untrusted route candidates until a
         # fresh encrypted handshake at that address proves the expected
         # peer fingerprint. Tracks background verification tasks.
@@ -2569,6 +2574,12 @@ class Daemon:
                 relay_pump_task=relay_pump,
             )
             self._outbound_sessions[peer_fp] = sess
+            # v0.7.1: a fresh session means the peer just came back
+            # online (or we just dialed them for the first time
+            # this session). Schedule any pending outbox messages
+            # for delivery in the background — the caller doesn't
+            # block on the flush.
+            self._schedule_outbox_flush(peer_fp)
             return sess
         except Exception:
             with contextlib.suppress(Exception):
@@ -2856,6 +2867,13 @@ class Daemon:
                     )
             except Exception as e:
                 log.debug("clearing group chains for revoked peer failed: %s", e)
+        # v0.7.1: drop any queued outbox messages for the revoked
+        # peer. We're not delivering messages to a peer the user
+        # no longer trusts.
+        try:
+            self.state.clear_outbox_for_peer(peer_fp)
+        except Exception as e:
+            log.debug("clearing outbox for revoked peer failed: %s", e)
         # Step 5.
         if self.ui_server is not None:
             with contextlib.suppress(Exception):
@@ -3472,6 +3490,155 @@ class Daemon:
         m = make_msg("TEXT", self.me.short_id, body=body)
         acks = await self.send_to(peer, [m])
         return {"sent": m, "ack": acks[0] if acks else None}
+
+    # ─── outbox / store-and-forward (v0.7.1) ──────────────────────────
+
+    def enqueue_text_outbox(self, peer_fp: str, body: str) -> dict:
+        """Queue a TEXT message for a paired peer that's currently
+        offline. Returns {ok, outbox_id, msg}. The caller wrote the
+        send-attempt; this is the durable fallback. Persists the
+        wire-shape `make_msg` dict so the eventual send goes out
+        with the same id/ts the user expects."""
+        if self.state is None:
+            raise RuntimeError("state not available")
+        rec = self.state.get_peer(peer_fp)
+        if rec is None or rec.trust != "pinned":
+            raise RuntimeError(
+                "outbox enqueue requires a pinned peer fingerprint"
+            )
+        m = make_msg("TEXT", self.me.short_id, body=body)
+        entry_id = self.state.enqueue_outbox(
+            peer_fp=peer_fp, msg_id=m["id"], msg_body=m, msg_kind="TEXT",
+        )
+        # Persist + broadcast so the UI can render a "queued" bubble
+        # immediately. The matching deliver event will flip it to
+        # "delivered" once the peer is reachable.
+        with contextlib.suppress(Exception):
+            ev = self._persist(
+                msg=m, direction="out", peer_fp=peer_fp,
+                peer_short_id=rec.short_id,
+            )
+            self._broadcast_tail(ev)
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "outbox_enqueued",
+                    "fingerprint": peer_fp,
+                    "outbox_id": entry_id,
+                    "msg_id": m["id"],
+                    "kind": "TEXT",
+                    "ts_ms": int(time.time() * 1000),
+                })
+        return {"ok": True, "outbox_id": entry_id, "msg": m}
+
+    def _outbox_lock_for(self, peer_fp: str) -> asyncio.Lock:
+        lk = self._outbox_flush_locks.get(peer_fp)
+        if lk is None:
+            lk = asyncio.Lock()
+            self._outbox_flush_locks[peer_fp] = lk
+        return lk
+
+    async def flush_outbox_for(self, peer_fp: str) -> dict:
+        """Deliver every pending outbox row for `peer_fp` over the
+        existing (or freshly opened) encrypted session. Idempotent
+        per peer (per-peer asyncio lock). Returns counts.
+
+        Errors during a single message attempt are stamped onto the
+        row's last_error and the row stays pending — next session-up
+        retries it. Only `capability_disabled` rejections are sticky
+        terminal: the UI can either grant the cap (then re-flush) or
+        cancel the row."""
+        if self.state is None:
+            return {"ok": False, "error": "state not available", "delivered": 0}
+        rec = self.state.get_peer(peer_fp)
+        if rec is None:
+            return {"ok": False, "error": "unknown peer", "delivered": 0}
+        if rec.trust != "pinned":
+            return {"ok": False, "error": "peer not pinned", "delivered": 0}
+        # Lazy peer construction (mDNS first, rendezvous fallback).
+        peer = await self.resolve_for_send(peer_fp)
+        if peer is None:
+            return {"ok": False, "error": "peer offline", "delivered": 0}
+
+        lock = self._outbox_lock_for(peer_fp)
+        if lock.locked():
+            # Another flush is already running. Skip — that flush
+            # picks up any rows we'd have processed.
+            return {"ok": True, "delivered": 0, "skipped_concurrent": True}
+
+        async with lock:
+            self._outbox_flush_inflight.add(peer_fp)
+            delivered = 0
+            errors = 0
+            try:
+                pending = self.state.list_outbox(
+                    peer_fp=peer_fp, pending_only=True, limit=200,
+                )
+                for entry in pending:
+                    try:
+                        # We send the original wire dict directly so
+                        # the persisted message's id/ts is what the
+                        # peer ACKs against.
+                        await self.send_to(peer, [entry.msg_body])
+                        self.state.mark_outbox_delivered(entry.id)
+                        delivered += 1
+                        if self.ui_server is not None:
+                            with contextlib.suppress(Exception):
+                                self.ui_server.broadcast({
+                                    "type": "outbox_delivered",
+                                    "fingerprint": peer_fp,
+                                    "outbox_id": entry.id,
+                                    "msg_id": entry.msg_id,
+                                    "ts_ms": int(time.time() * 1000),
+                                })
+                    except Exception as e:
+                        errors += 1
+                        err = str(e)[:500]
+                        self.state.record_outbox_attempt(entry.id, error=err)
+                        # capability_disabled is sticky: don't keep
+                        # retrying every 60s. The UI surfaces the
+                        # row + the deny reason; user must grant.
+                        log.info(
+                            "outbox flush deferred for %s msg=%s: %s",
+                            peer_fp[:8], entry.msg_id, err,
+                        )
+                        # First error short-circuits: if a session
+                        # broke mid-stream, the next attempts would
+                        # also fail and we'd burn through the queue
+                        # marking every row with the same error.
+                        # Better to surface one error and resume on
+                        # the next session-up.
+                        break
+            finally:
+                self._outbox_flush_inflight.discard(peer_fp)
+            return {
+                "ok": True,
+                "delivered": delivered,
+                "errors": errors,
+                "remaining": len(self.state.list_outbox(
+                    peer_fp=peer_fp, pending_only=True, limit=1,
+                )),
+            }
+
+    def _schedule_outbox_flush(self, peer_fp: str) -> None:
+        """Fire-and-forget background flush. Called from the
+        session-up hook. Idempotent: if a flush for this peer is
+        already inflight, the new task no-ops."""
+        if self.state is None or not peer_fp:
+            return
+        if peer_fp in self._outbox_flush_inflight:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._flush_outbox_swallow(peer_fp))
+
+    async def _flush_outbox_swallow(self, peer_fp: str) -> None:
+        try:
+            await self.flush_outbox_for(peer_fp)
+        except Exception as e:
+            log.warning("outbox flush task errored for %s: %s", peer_fp[:8], e)
 
     # ─── folder sync orchestration ─────────────────────────────────────
     async def push_folder_to_peer(self, peer: Peer, folder_name: str) -> dict:
