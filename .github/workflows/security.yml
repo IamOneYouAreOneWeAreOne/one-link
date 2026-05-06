@@ -1,0 +1,72 @@
+name: security
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  schedule:
+    # weekly Tuesday 06:00 UTC — catch newly-published OSV records
+    # against existing dependencies even when nothing in the repo
+    # has changed. Same cadence as most upstream advisories.
+    - cron: "0 6 * * 2"
+
+jobs:
+  audit:
+    name: pip-audit + bandit + sbom
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,security]"
+
+      - name: regenerate lockfile
+        run: |
+          python scripts/lock_deps.py
+
+      - name: pip-audit (OSV vulnerability scan)
+        # Run audit on the freshly-resolved lockfile, not the project
+        # dependency declaration — that way transitive vulnerabilities
+        # are caught too. --strict would fail the build on any finding;
+        # for v0.7.2 we report-only to surface findings without blocking
+        # development. Tighten to --strict in a follow-up release.
+        run: |
+          python -m pip_audit --requirement requirements.lock --format json --output pip-audit.json || true
+          python -m pip_audit --requirement requirements.lock || true
+
+      - name: bandit (SAST)
+        # Excludes + skip-list configured in pyproject.toml [tool.bandit].
+        # Output JSON for the CI artifact + readable text to stderr.
+        run: |
+          bandit -c pyproject.toml -r src/one_link -f json -o bandit.json || true
+          bandit -c pyproject.toml -r src/one_link
+
+      - name: generate SBOM
+        run: |
+          python scripts/gen_sbom.py --from requirements --output dist/sbom.cdx.json
+
+      - name: upload supply-chain artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain
+          path: |
+            requirements.lock
+            pip-audit.json
+            bandit.json
+            dist/sbom.cdx.json
+          if-no-files-found: warn
+
+      - name: lockfile drift check
+        # If pyproject.toml moved ahead of the in-tree lockfile,
+        # tell the developer to regenerate. Non-blocking on PRs;
+        # the upload above is the source of truth for CI.
+        run: |
+          python scripts/lock_deps.py --check || echo "::warning::requirements.lock is out of date"

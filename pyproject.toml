@@ -19,6 +19,17 @@ dependencies = [
 [project.optional-dependencies]
 window = ["pywebview>=5.0"]  # optional native-window wrapper (Tier 2)
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+# v0.7.2 supply-chain gates (audit finding C):
+#   - pip-audit: scans the lockfile against the OSV vulnerability DB
+#   - bandit: SAST for common Python issues (subprocess shell=True, etc)
+#   - cyclonedx-bom: SBOM generator (CycloneDX JSON)
+#   - pip-tools: reproducible lockfile regeneration via `pip-compile`
+security = [
+  "pip-audit>=2.7",
+  "bandit>=1.7",
+  "cyclonedx-bom>=4.4",
+  "pip-tools>=7.4",
+]
 
 [project.scripts]
 one-link = "one_link.cli:main"
@@ -29,3 +40,14 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# v0.7.2 bandit config (audit finding C). We exclude tests because
+# fake-data + pytest harness use patterns bandit flags but are safe
+# in a test context (e.g. assert in tests, hardcoded keys for
+# fixtures). Production code is fully scanned.
+[tool.bandit]
+exclude_dirs = ["tests", "scripts", ".venv", "build", "dist"]
+# Skips: B101 (assert) is fine in production checks here; B404 (subprocess
+# import) is unavoidable for the reveal-in-folder feature; B603 (subprocess
+# without shell=True) is what we want, not what we avoid.
+skips = ["B101", "B404", "B603"]
