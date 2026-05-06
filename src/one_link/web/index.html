@@ -153,6 +153,126 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  /* v0.4: empty state for zero-paired sidebar — friendly, not alarming. */
+  .side .empty-state {
+    padding: 28px 18px 16px;
+    text-align: center;
+    color: var(--text-dim);
+  }
+  .side .empty-state .glyph {
+    width: 56px; height: 56px; margin: 0 auto 14px;
+    background: radial-gradient(circle at 50% 40%, rgba(124,92,255,.55), rgba(124,92,255,0) 70%);
+    border-radius: 50%;
+    display: grid; place-items: center;
+  }
+  .side .empty-state .glyph img {
+    width: 36px; height: 36px;
+    filter: invert(1) drop-shadow(0 0 8px rgba(124,92,255,.5));
+  }
+  .side .empty-state h4 {
+    color: var(--text); font-weight: 600; font-size: 15px; margin-bottom: 6px;
+  }
+  .side .empty-state p { font-size: 12px; line-height: 1.5; margin-bottom: 16px; }
+
+  /* v0.4: prominent "+ Pair a device" CTA above the peer list. */
+  .pair-cta {
+    margin: 8px 12px 12px;
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    background: linear-gradient(135deg, rgba(124,92,255,.18), rgba(78,193,255,.12));
+    border: 1px solid rgba(124,92,255,.35);
+    color: var(--text);
+    font-size: 13px; font-weight: 600;
+    display: flex; align-items: center; gap: 8px; justify-content: center;
+    cursor: pointer;
+    transition: background .12s, border-color .12s;
+  }
+  .pair-cta:hover {
+    background: linear-gradient(135deg, rgba(124,92,255,.28), rgba(78,193,255,.18));
+    border-color: rgba(124,92,255,.6);
+  }
+  .pair-cta .plus {
+    width: 18px; height: 18px; border-radius: 50%;
+    background: var(--accent); color: white;
+    display: grid; place-items: center; font-size: 14px; font-weight: 700;
+    flex-shrink: 0;
+  }
+  .pair-cta.large { padding: 14px 16px; font-size: 14px; }
+
+  /* v0.4: discovery modal — "Pair a new device" picker. */
+  .discover-overlay {
+    position: fixed; inset: 0;
+    background: rgba(8, 10, 14, 0.55);
+    backdrop-filter: blur(6px);
+    display: none; align-items: center; justify-content: center;
+    z-index: 200;
+  }
+  .discover-overlay.show { display: flex; }
+  .discover-modal {
+    width: min(520px, 92vw);
+    max-height: min(640px, 90vh);
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .discover-h {
+    padding: 18px 22px 14px;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .discover-h .title h3 { font-size: 16px; font-weight: 600; }
+  .discover-h .title p { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  .discover-h .close {
+    width: 32px; height: 32px; border-radius: 50%;
+    background: var(--bg-2); color: var(--text-dim); font-size: 16px;
+    display: grid; place-items: center;
+  }
+  .discover-h .close:hover { background: var(--bg-3); color: var(--text); }
+  .discover-body {
+    flex: 1; overflow-y: auto;
+    padding: 8px 14px 14px;
+  }
+  .discover-section-h {
+    padding: 14px 8px 6px;
+    color: var(--text-dimmer);
+    font-size: 11px; font-weight: 600; letter-spacing: .8px; text-transform: uppercase;
+  }
+  .discover-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background .12s;
+  }
+  .discover-row:hover { background: var(--bg-2); }
+  .discover-row .meta { flex: 1; min-width: 0; }
+  .discover-row .name { font-weight: 500; line-height: 1.2; }
+  .discover-row .sub  { font-size: 11px; color: var(--text-dim); font-family: var(--mono); margin-top: 2px; }
+  .discover-row .pair-btn {
+    padding: 6px 12px; border-radius: 999px;
+    background: var(--accent); color: white; font-size: 12px; font-weight: 600;
+  }
+  .discover-row .pair-btn:hover { filter: brightness(1.15); }
+  .discover-foot {
+    padding: 12px 18px; border-top: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between;
+    color: var(--text-dim); font-size: 12px;
+  }
+  .discover-foot .refresh {
+    background: var(--bg-2); padding: 6px 12px; border-radius: var(--radius-sm);
+    color: var(--text-dim); font-size: 12px;
+  }
+  .discover-foot .refresh:hover { background: var(--bg-3); color: var(--text); }
+  .discover-foot .refresh.spinning::before {
+    content: ""; display: inline-block; width: 10px; height: 10px;
+    border-radius: 50%; border: 2px solid var(--bg-3); border-top-color: var(--accent);
+    margin-right: 6px; vertical-align: -1px;
+    animation: spin 1s linear infinite;
+  }
+
   .side-foot {
     border-top: 1px solid var(--line); padding: 10px 12px;
     display: flex; gap: 8px;
@@ -568,16 +688,10 @@
   .peer { position: relative; }
   .peer:hover .verify { display: block; }
 
-  /* New-peer prompt — replaces the loud "Accept / Block" buttons */
-  .peer.unpaired { position: relative; }
-  .peer.unpaired::after {
-    content: "tap to pair";
-    position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
-    font-size: 10px; padding: 3px 8px; border-radius: 999px;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    color: white; font-weight: 600; letter-spacing: .3px;
-    box-shadow: 0 2px 8px rgba(124,92,255,.4);
-  }
+  /* v0.4: the sidebar now only renders paired devices, so the
+     "tap to pair" affordance moved to the discovery modal. The
+     `.peer.unpaired` styles below are kept dormant; if a future
+     mode ever surfaces unpaired in the sidebar again, they apply. */
 </style>
 </head>
 <body>
@@ -602,13 +716,17 @@
     <!-- SIDEBAR -->
     <aside class="side">
       <div class="section-h">
-        <span>Nearby devices</span>
+        <span>My devices</span>
         <span class="count" id="peers-count">0</span>
       </div>
+      <button class="pair-cta" id="open-discover-modal">
+        <span class="plus">+</span>
+        <span>Pair a new device</span>
+      </button>
       <div class="peerlist" id="peerlist">
         <div class="empty">
           <div class="spinner"></div>
-          searching…
+          loading…
         </div>
       </div>
       <div class="side-foot">
@@ -752,6 +870,29 @@
 
   <!-- HIDDEN FILE INPUT -->
   <input type="file" id="file-input" style="display:none" multiple />
+
+  <!-- v0.4: DISCOVERY MODAL — "Pair a new device" picker -->
+  <div class="discover-overlay" id="discover-overlay" role="dialog" aria-modal="true" aria-labelledby="discover-title">
+    <div class="discover-modal">
+      <div class="discover-h">
+        <div class="title">
+          <h3 id="discover-title">Pair a new device</h3>
+          <p>Open One Link on the other computer or phone and it will show up here.</p>
+        </div>
+        <button class="close" id="discover-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="discover-body" id="discover-body">
+        <div class="empty">
+          <div class="spinner"></div>
+          looking for devices…
+        </div>
+      </div>
+      <div class="discover-foot">
+        <span id="discover-status">Tap a device to pair. Both screens will show a 6-digit verification code.</span>
+        <button class="refresh" id="discover-refresh">Refresh</button>
+      </div>
+    </div>
+  </div>
 
   <!-- PAIR MODAL -->
   <div class="modal-backdrop" id="pair-backdrop">
@@ -907,64 +1048,132 @@
   };
 
   // ── Render: peer list ──────────────────────────────────────────────
+  // v0.4: sidebar is paired-only. The server filters; the UI renders
+  // whatever it gets. Unpaired peers live in the discovery modal, not here.
   function renderPeers() {
     const list = $("#peerlist");
     list.innerHTML = "";
-    const visiblePeers = [...state.peers.values()].filter(p => {
-      const unpaired = p.trust !== "pinned" && p.trust !== "rejected";
-      return !(p.local_duplicate && unpaired);
-    });
-    state.hiddenLocalPeers = state.peers.size - visiblePeers.length;
-    $("#peers-count").textContent = visiblePeers.length;
-    if (visiblePeers.length === 0) {
-      list.appendChild(el("div", "empty", "No other devices yet. Open One Link on another computer on this Wi-Fi."));
-      if (state.hiddenLocalPeers > 0) {
-        list.appendChild(el("div", "empty", `${state.hiddenLocalPeers} local test entr${state.hiddenLocalPeers === 1 ? "y is" : "ies are"} hidden.`));
-      }
+    const peers = [...state.peers.values()];
+    $("#peers-count").textContent = peers.length;
+
+    if (peers.length === 0) {
+      const wrap = el("div", "empty-state");
+      const glyph = el("div", "glyph");
+      const img = document.createElement("img");
+      img.src = "/static/one-glyph.png";
+      img.alt = "";
+      glyph.appendChild(img);
+      wrap.appendChild(glyph);
+      wrap.appendChild(el("h4", "", "No paired devices yet"));
+      wrap.appendChild(el("p", "",
+        "Open One Link on another computer or phone, then tap " +
+        "“Pair a new device” above to add it."));
+      list.appendChild(wrap);
       return;
     }
-    for (const p of visiblePeers) {
-      const isUnpaired = p.trust !== "pinned" && p.trust !== "rejected" && p.online;
-      const cls = ["peer",
-        p.online ? "online" : "offline",
-        isUnpaired ? "unpaired" : "",
-        p.trust === "rejected" ? "rejected" : "",
-      ].filter(Boolean).join(" ");
+
+    for (const p of peers) {
+      const cls = ["peer", p.online ? "online" : "offline"].join(" ");
       const row = el("div", cls);
       row.dataset.short = p.short_id;
       if (state.selectedPeer === p.short_id) row.classList.add("active");
 
       const av = el("div", "avatar", initials(p.hostname || p.short_id));
-
       const txt = el("div", "text");
       txt.appendChild(el("div", "name", p.hostname || "(unknown)"));
-      // Subtle, debug-only details — only visible on hover via .verify
-      txt.appendChild(el("div", "sub",
-        p.trust === "rejected" ? "blocked" : p.same_host ? "same computer" : p.online ? "online" : "offline"
-      ));
+      txt.appendChild(el("div", "sub", p.online ? "online" : "offline"));
 
-      // Hover-only "verify identity" detail — IP + fingerprint short-id
       const verify = el("div", "verify");
       verify.textContent = `${p.short_id} · ${p.address || "?"}:${p.port || "?"}`;
       row.appendChild(verify);
-
       row.appendChild(av);
       row.appendChild(txt);
 
-      row.onclick = () => {
-        if (isUnpaired && p.fingerprint) {
-          openPairModal(p);  // unpaired → pair modal flow
-        } else {
-          selectPeer(p.short_id);
-        }
-      };
+      row.onclick = () => selectPeer(p.short_id);
       list.appendChild(row);
     }
 
-    // Auto-select if there's exactly one paired peer and nothing currently selected
-    const paired = [...state.peers.values()].filter(p => p.trust === "pinned");
-    if (paired.length === 1 && !state.selectedPeer) {
-      selectPeer(paired[0].short_id);
+    // Auto-select if there's exactly one paired peer and nothing currently selected.
+    if (peers.length === 1 && !state.selectedPeer) {
+      selectPeer(peers[0].short_id);
+    }
+  }
+
+  // ── v0.4: Discovery modal ──────────────────────────────────────────
+  // Opening prunes ghosts (TCP probe), then loads the unpaired view.
+  // Stays in sync with mDNS via the WS peers_changed signal while open.
+  state.discoverable = [];
+  state.discoverOpen = false;
+  state.discoverLoading = false;
+
+  async function openDiscoverModal() {
+    state.discoverOpen = true;
+    $("#discover-overlay").classList.add("show");
+    await loadDiscoverable({ prune: true });
+  }
+
+  function closeDiscoverModal() {
+    state.discoverOpen = false;
+    state.discoverable = [];
+    $("#discover-overlay").classList.remove("show");
+  }
+
+  async function loadDiscoverable({ prune = false } = {}) {
+    if (state.discoverLoading) return;
+    state.discoverLoading = true;
+    const refreshBtn = $("#discover-refresh");
+    if (refreshBtn) refreshBtn.classList.add("spinning");
+    try {
+      if (prune) {
+        try { await api.post("/api/peers/prune", {}); } catch {}
+      }
+      const { peers } = await api.get("/api/peers?include_unpaired=1");
+      // Sidebar already shows paired; modal lists only unpaired (online).
+      state.discoverable = peers.filter(
+        (p) => p.trust !== "pinned" && p.online
+      );
+      renderDiscoverable();
+    } catch (e) {
+      console.warn(e);
+      const body = $("#discover-body");
+      if (body) body.innerHTML = `<div class="empty">Couldn't load devices: ${e.message || e}</div>`;
+    } finally {
+      state.discoverLoading = false;
+      if (refreshBtn) refreshBtn.classList.remove("spinning");
+    }
+  }
+
+  function renderDiscoverable() {
+    const body = $("#discover-body");
+    if (!body) return;
+    body.innerHTML = "";
+    if (state.discoverable.length === 0) {
+      body.appendChild(el("div", "empty",
+        "No new devices found. Open One Link on the other computer; " +
+        "it will appear here within a few seconds."));
+      return;
+    }
+    body.appendChild(el("div", "discover-section-h", "Discoverable on this network"));
+    for (const p of state.discoverable) {
+      const row = el("div", "discover-row");
+      const av = el("div", "avatar", initials(p.hostname || p.short_id));
+      const meta = el("div", "meta");
+      meta.appendChild(el("div", "name", p.hostname || "(unknown)"));
+      meta.appendChild(el("div", "sub",
+        `${p.short_id} · ${p.address || "?"}:${p.port || "?"}`));
+      const btn = el("button", "pair-btn", "Pair");
+      row.appendChild(av);
+      row.appendChild(meta);
+      row.appendChild(btn);
+      row.onclick = () => {
+        if (!p.fingerprint) {
+          toast("Device hasn't published a public key yet — try again in a moment.", "warn");
+          return;
+        }
+        closeDiscoverModal();
+        openPairModal(p);
+      };
+      body.appendChild(row);
     }
   }
 
@@ -1286,10 +1495,11 @@
     ws.onmessage = (ev) => {
       let m;
       try { m = JSON.parse(ev.data); } catch { return; }
-      if (m.type === "peers") {
-        state.peers.clear();
-        for (const p of m.peers) state.peers.set(p.short_id, p);
-        renderPeers();
+      if (m.type === "peers" || m.type === "peers_changed") {
+        // v0.4: daemon now signals "peers_changed"; legacy "peers" event
+        // tolerated for forward/backward compat.
+        refreshPeers();
+        if (state.discoverOpen) loadDiscoverable();
       } else if (m.type === "peer_trust") {
         if (state.pairing.peerFp === m.fingerprint && m.trust === "pinned") {
           closePairModal(true);
@@ -1298,11 +1508,22 @@
         refreshPeers();
       } else if (m.type === "pair_request") {
         // Incoming pair request from another device. Open the same modal
-        // automatically so the user verifies the SAS.
-        const peer = [...state.peers.values()].find(p => p.fingerprint === m.peer_fp);
-        if (peer) {
-          openPairModalIncoming(peer, m.sas);
-        }
+        // so the user verifies the SAS. v0.4: requester is by definition
+        // unpaired, so it lives in state.discoverable, not state.peers.
+        // Fetch fresh to make sure we have current address/port info.
+        (async () => {
+          try {
+            const { peers } = await api.get("/api/peers?include_unpaired=1");
+            const peer = peers.find(p => p.fingerprint === m.peer_fp);
+            if (peer) {
+              openPairModalIncoming(peer, m.sas);
+            } else {
+              toast("Incoming pair request — refreshing devices…", "info");
+            }
+          } catch (e) {
+            console.warn(e);
+          }
+        })();
       } else if (m.type === "pair_progress") {
         // Peer confirmed on their side; if we already confirmed, daemon
         // pins. Otherwise the modal stays open waiting for our user.
@@ -1311,6 +1532,7 @@
           closePairModal(false);
           toast("The other device rejected pairing", "bad");
         }
+        if (state.discoverOpen) loadDiscoverable();
       } else if (m.type === "msg") {
         const msg = m.msg;
         state.messages.push(msg);
@@ -1500,6 +1722,20 @@
     searchBanner.style.display = "none";
     renderMessages();
   }
+
+  // ── Discovery modal bindings (v0.4) ───────────────────────────────
+  $("#open-discover-modal").addEventListener("click", openDiscoverModal);
+  $("#discover-close").addEventListener("click", closeDiscoverModal);
+  $("#discover-refresh").addEventListener("click", () =>
+    loadDiscoverable({ prune: true })
+  );
+  // Close on overlay click (outside the modal box) or Esc.
+  $("#discover-overlay").addEventListener("click", (e) => {
+    if (e.target.id === "discover-overlay") closeDiscoverModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.discoverOpen) closeDiscoverModal();
+  });
 
   // ── Sidebar toggles ────────────────────────────────────────────────
   document.querySelectorAll(".side-foot .btn").forEach(b => {

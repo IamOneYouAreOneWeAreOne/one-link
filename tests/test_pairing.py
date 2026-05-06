@@ -134,22 +134,29 @@ async def test_pairing_round_trip_pins_both_sides():
         base_b = f"http://127.0.0.1:{port_b}"
 
         async with aiohttp.ClientSession() as s:
-            # Find B's fingerprint from A's view
+            # Pre-pair lookups: peers are unpaired, so use the modal feed.
             async with s.get(
-                f"{base_a}/api/peers",
+                f"{base_a}/api/peers?include_unpaired=1",
                 headers={"Authorization": f"Bearer {ta}"},
             ) as r:
                 jb = await r.json()
-            fp_b = next(pp["fingerprint"] for pp in jb["peers"]
-                        if pp["short_id"] == p.b.short_id)
-            # And A's fingerprint from B's view
+            fp_b = next(
+                (pp["fingerprint"] for pp in jb["peers"]
+                 if pp["short_id"] == p.b.short_id),
+                None,
+            )
+            assert fp_b, f"peer {p.b.short_id} not visible from A"
             async with s.get(
-                f"{base_b}/api/peers",
+                f"{base_b}/api/peers?include_unpaired=1",
                 headers={"Authorization": f"Bearer {tb}"},
             ) as r:
                 ja = await r.json()
-            fp_a = next(pp["fingerprint"] for pp in ja["peers"]
-                        if pp["short_id"] == p.a.short_id)
+            fp_a = next(
+                (pp["fingerprint"] for pp in ja["peers"]
+                 if pp["short_id"] == p.a.short_id),
+                None,
+            )
+            assert fp_a, f"peer {p.a.short_id} not visible from B"
 
             # Both sides compute SAS — must be equal
             async with s.get(
@@ -191,9 +198,11 @@ async def test_pairing_round_trip_pins_both_sides():
                 cb = await r.json()
             assert ca["ok"] and cb["ok"]
 
-            # Wait for the second-leg PAIR_CONFIRM to propagate
+            # Wait for the second-leg PAIR_CONFIRM to propagate. Default
+            # /api/peers (paired-only) is the right feed once pinning lands.
             deadline = time.time() + 5
             both_pinned = False
+            a_view = b_view = None
             while time.time() < deadline:
                 async with s.get(
                     f"{base_a}/api/peers",
@@ -205,9 +214,9 @@ async def test_pairing_round_trip_pins_both_sides():
                     headers={"Authorization": f"Bearer {tb}"},
                 ) as r:
                     jb2 = await r.json()
-                a_view = next(pp for pp in ja2["peers"] if pp["fingerprint"] == fp_b)
-                b_view = next(pp for pp in jb2["peers"] if pp["fingerprint"] == fp_a)
-                if a_view["trust"] == "pinned" and b_view["trust"] == "pinned":
+                a_view = next((pp for pp in ja2["peers"] if pp["fingerprint"] == fp_b), None)
+                b_view = next((pp for pp in jb2["peers"] if pp["fingerprint"] == fp_a), None)
+                if a_view and b_view and a_view["trust"] == "pinned" and b_view["trust"] == "pinned":
                     both_pinned = True
                     break
                 await asyncio.sleep(0.2)
@@ -215,7 +224,8 @@ async def test_pairing_round_trip_pins_both_sides():
                 a_log = (p.a.log).read_text(encoding="utf-8", errors="replace")[-3000:]
                 b_log = (p.b.log).read_text(encoding="utf-8", errors="replace")[-3000:]
                 pytest.fail(
-                    f"trust = ({a_view['trust']}, {b_view['trust']})\n"
+                    f"trust = ({a_view and a_view.get('trust')}, "
+                    f"{b_view and b_view.get('trust')})\n"
                     f"--- A log ---\n{a_log}\n"
                     f"--- B log ---\n{b_log}\n"
                 )
@@ -233,12 +243,16 @@ async def test_pair_reject_blocks_outbound():
 
         async with aiohttp.ClientSession() as s:
             async with s.get(
-                f"{base_a}/api/peers",
+                f"{base_a}/api/peers?include_unpaired=1",
                 headers={"Authorization": f"Bearer {ta}"},
             ) as r:
                 jb = await r.json()
-            fp_b = next(pp["fingerprint"] for pp in jb["peers"]
-                        if pp["short_id"] == p.b.short_id)
+            fp_b = next(
+                (pp["fingerprint"] for pp in jb["peers"]
+                 if pp["short_id"] == p.b.short_id),
+                None,
+            )
+            assert fp_b, f"peer {p.b.short_id} not visible from A"
 
             async with s.post(
                 f"{base_a}/api/peers/{fp_b}/pair-reject",

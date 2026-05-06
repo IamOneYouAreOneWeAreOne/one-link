@@ -2313,24 +2313,15 @@ class Daemon:
         )
         await self.discovery.start()
 
-        # Hook the registry to broadcast peer changes to UI clients
+        # v0.4: notify UI to re-query /api/peers rather than pushing
+        # raw discovery state. The /api/peers handler is the single
+        # source of truth for filter mode (paired-only by default,
+        # ?include_unpaired=1 for the discovery modal). Pushing only a
+        # signal avoids duplicating that policy here.
         def _on_peer_change():
             if self.ui_server is not None:
-                try:
-                    peers = [
-                        {
-                            "short_id": p.short_id,
-                            "hostname": p.hostname,
-                            "address": p.address,
-                            "port": p.port,
-                            "ed_pub_hex": p.ed_pub_hex,
-                            "online": True,
-                        }
-                        for p in self.discovery.registry.list()
-                    ]
-                    self.ui_server.broadcast({"type": "peers", "peers": peers})
-                except Exception:
-                    pass
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({"type": "peers_changed"})
 
         self.discovery.registry.on_change = _on_peer_change
 

@@ -55,6 +55,18 @@ def _server_addr(home: Path) -> tuple[str, str]:
     return f"http://127.0.0.1:{port}", token
 
 
+class _FakeReq:
+    """Minimal aiohttp.web.Request stand-in for unit tests of API
+    handlers that read `.query`. Real handlers receive a real
+    aiohttp Request; tests historically passed `None`, which broke
+    once handlers started reading query params.
+    """
+
+    def __init__(self, **query):
+        self.query = {k: str(v) for k, v in query.items()}
+        self.match_info: dict[str, str] = {}
+
+
 @pytest.mark.asyncio
 async def test_api_peers_hides_offline_pending_ghosts(tmp_path: Path):
     from one_link.server import UIServer
@@ -91,7 +103,8 @@ async def test_api_peers_hides_offline_pending_ghosts(tmp_path: Path):
             me=SimpleNamespace(fingerprint=me_fp, short_id="aaaaaaaa", hostname="me"),
         )
         server = UIServer(daemon)
-        resp = await server.api_peers(None)
+        # Default: paired only — pending ghost should be filtered, pinned remains.
+        resp = await server.api_peers(_FakeReq())
         body = json.loads(resp.text)
         short_ids = {p["short_id"] for p in body["peers"]}
 
@@ -132,7 +145,8 @@ async def test_api_peers_filters_live_self_advertisements(tmp_path: Path):
         )
 
         server = UIServer(daemon)
-        resp = await server.api_peers(None)
+        # Live unpaired peers only show up in modal mode (?include_unpaired=1).
+        resp = await server.api_peers(_FakeReq(include_unpaired=1))
         body = json.loads(resp.text)
         short_ids = {p["short_id"] for p in body["peers"]}
 
@@ -143,7 +157,10 @@ async def test_api_peers_filters_live_self_advertisements(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_api_peers_flags_unpaired_same_host_duplicate_adverts(tmp_path: Path):
+async def test_api_peers_collapses_same_host_pending_ghosts(tmp_path: Path):
+    """v0.4 contract: when multiple pending peers advertise one of *our*
+    hostnames, only the freshest survives in the modal. The user sees
+    one entry instead of N stale daemon-instance ghosts."""
     from one_link.server import UIServer
     from one_link.state import State
 
@@ -153,8 +170,8 @@ async def test_api_peers_flags_unpaired_same_host_duplicate_adverts(tmp_path: Pa
         live_local_1 = SimpleNamespace(
             short_id="11111111",
             hostname="WeareOne",
-            address="192.168.1.10",
-            port=50000,
+            address="",
+            port=0,
             ed_pub_hex=("11" * 32),
         )
         live_local_2 = SimpleNamespace(
@@ -180,17 +197,169 @@ async def test_api_peers_flags_unpaired_same_host_duplicate_adverts(tmp_path: Pa
         )
 
         server = UIServer(daemon)
-        resp = await server.api_peers(None)
+        resp = await server.api_peers(_FakeReq(include_unpaired=1))
         body = json.loads(resp.text)
         peers = {p["short_id"]: p for p in body["peers"]}
 
-        assert set(peers) == {"11111111", "22222222", "33333333"}
-        assert peers["11111111"]["same_host"] is True
-        assert peers["22222222"]["same_host"] is True
-        assert peers["11111111"]["local_duplicate"] is True
-        assert peers["22222222"]["local_duplicate"] is True
-        assert peers["33333333"].get("same_host") is False
-        assert peers["33333333"]["local_duplicate"] is False
+        # Only the freshest (with address+port) of the same-host pair survives.
+        assert "22222222" in peers
+        assert "11111111" not in peers
+        # Off-host peer is untouched.
+        assert "33333333" in peers
+        assert peers["33333333"]["same_host"] is False
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_peers_default_returns_paired_only(tmp_path: Path):
+    """v0.4 contract — sidebar feed: only trust='pinned' peers come back
+    by default. Pending mDNS hits, rejected peers, offline ghosts: all
+    excluded unless the modal explicitly asks for them."""
+    from one_link.server import UIServer
+    from one_link.state import State
+
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        me_fp = "aa" * 32
+        # A paired peer (offline — only in DB).
+        state.upsert_peer(
+            fingerprint="bb" * 32,
+            short_id="bbbbbbbb",
+            pubkey=b"\xbb" * 32,
+            hostname="HomeMac",
+            trust_default="pinned",
+        )
+        # A rejected peer (offline — only in DB).
+        state.upsert_peer(
+            fingerprint="cc" * 32,
+            short_id="cccccccc",
+            pubkey=b"\xcc" * 32,
+            hostname="BlockedBox",
+        )
+        state.set_peer_trust("cc" * 32, "rejected")
+
+        # A live, unpaired mDNS hit.
+        live_unpaired = SimpleNamespace(
+            short_id="33333333",
+            hostname="OfficeLaptop",
+            address="192.168.1.50",
+            port=50000,
+            ed_pub_hex="33" * 32,
+        )
+        daemon = SimpleNamespace(
+            state=state,
+            discovery=SimpleNamespace(
+                registry=SimpleNamespace(list=lambda: [live_unpaired])
+            ),
+            me=SimpleNamespace(fingerprint=me_fp, short_id="aaaaaaaa", hostname="me"),
+        )
+
+        server = UIServer(daemon)
+        resp = await server.api_peers(_FakeReq())
+        body = json.loads(resp.text)
+        ids = {p["short_id"] for p in body["peers"]}
+
+        assert ids == {"bbbbbbbb"}  # paired only
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_peers_modal_mode_includes_live_unpaired(tmp_path: Path):
+    """v0.4 contract — modal feed: include_unpaired=1 returns paired
+    devices (top of list) plus live unpaired mDNS hits (bottom).
+    Offline pending DB rows are still hidden — those are stale."""
+    from one_link.server import UIServer
+    from one_link.state import State
+
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        me_fp = "aa" * 32
+        state.upsert_peer(
+            fingerprint="bb" * 32,
+            short_id="bbbbbbbb",
+            pubkey=b"\xbb" * 32,
+            hostname="HomeMac",
+            trust_default="pinned",
+        )
+        # Stale offline-pending row (would have been a ghost).
+        state.upsert_peer(
+            fingerprint="dd" * 32,
+            short_id="dddddddd",
+            pubkey=b"\xdd" * 32,
+            hostname="GhostBox",
+        )
+
+        live_unpaired = SimpleNamespace(
+            short_id="33333333",
+            hostname="OfficeLaptop",
+            address="192.168.1.50",
+            port=50000,
+            ed_pub_hex="33" * 32,
+        )
+        daemon = SimpleNamespace(
+            state=state,
+            discovery=SimpleNamespace(
+                registry=SimpleNamespace(list=lambda: [live_unpaired])
+            ),
+            me=SimpleNamespace(fingerprint=me_fp, short_id="aaaaaaaa", hostname="me"),
+        )
+
+        server = UIServer(daemon)
+        resp = await server.api_peers(_FakeReq(include_unpaired=1))
+        body = json.loads(resp.text)
+        peers = body["peers"]
+        ids = [p["short_id"] for p in peers]
+
+        # Paired comes first; live unpaired included; stale pending excluded.
+        assert "bbbbbbbb" in ids
+        assert "33333333" in ids
+        assert "dddddddd" not in ids
+        # Sort order — paired first.
+        assert ids[0] == "bbbbbbbb"
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_peers_excludes_rejected_unless_explicitly_asked(tmp_path: Path):
+    """v0.4 contract — rejected peers are only visible with
+    ?include_rejected=1, even in modal mode."""
+    from one_link.server import UIServer
+    from one_link.state import State
+
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        state.upsert_peer(
+            fingerprint="cc" * 32,
+            short_id="cccccccc",
+            pubkey=b"\xcc" * 32,
+            hostname="BlockedBox",
+        )
+        state.set_peer_trust("cc" * 32, "rejected")
+
+        daemon = SimpleNamespace(
+            state=state,
+            discovery=None,
+            me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa", hostname="me"),
+        )
+        server = UIServer(daemon)
+
+        # Default: rejected hidden.
+        resp = await server.api_peers(_FakeReq())
+        ids = {p["short_id"] for p in json.loads(resp.text)["peers"]}
+        assert "cccccccc" not in ids
+
+        # Modal: still hidden.
+        resp = await server.api_peers(_FakeReq(include_unpaired=1))
+        ids = {p["short_id"] for p in json.loads(resp.text)["peers"]}
+        assert "cccccccc" not in ids
+
+        # Explicit opt-in: visible.
+        resp = await server.api_peers(_FakeReq(include_rejected=1))
+        ids = {p["short_id"] for p in json.loads(resp.text)["peers"]}
+        assert "cccccccc" in ids
     finally:
         state.close()
 
@@ -316,13 +485,24 @@ async def test_api_me_returns_identity():
 
 @pytest.mark.asyncio
 async def test_api_peers_lists_other_peer():
+    """The two paired daemons spun up by `daemon_pair()` have not gone
+    through the SAS pairing flow, so the discovered peer is unpaired
+    (trust=pending). It must appear under the modal endpoint
+    (?include_unpaired=1) but not in the default sidebar feed."""
     with daemon_pair() as p:
         base, token = _server_addr(p.a.home)
         async with aiohttp.ClientSession() as s:
+            # Default: paired-only — should NOT contain the unpaired peer.
             status, j = await _get_json(s, f"{base}/api/peers", token=token)
             assert status == 200
-            short_ids = {pp["short_id"] for pp in j["peers"]}
-            assert p.b.short_id in short_ids
+            assert p.b.short_id not in {pp["short_id"] for pp in j["peers"]}
+
+            # Modal: should contain it.
+            status, j = await _get_json(
+                s, f"{base}/api/peers?include_unpaired=1", token=token
+            )
+            assert status == 200
+            assert p.b.short_id in {pp["short_id"] for pp in j["peers"]}
 
 
 @pytest.mark.asyncio
@@ -618,10 +798,13 @@ async def test_api_set_trust_round_trip():
         ctrl_request(p.a.control_port, cmd="send", peer=p.b.short_id, body="trust-test")
         await asyncio.sleep(0.6)
 
-        # B's view: list peers, find A by short_id, get fingerprint
+        # B's view: list peers, find A by short_id, get fingerprint.
+        # Pre-trust-set the peer is unpaired, so use modal feed.
         base_b, tok_b = _server_addr(p.b.home)
         async with aiohttp.ClientSession() as s:
-            _, j = await _get_json(s, f"{base_b}/api/peers", token=tok_b)
+            _, j = await _get_json(
+                s, f"{base_b}/api/peers?include_unpaired=1", token=tok_b
+            )
             target = next(
                 (pp for pp in j["peers"] if pp["short_id"] == p.a.short_id),
                 None,
@@ -638,8 +821,11 @@ async def test_api_set_trust_round_trip():
             assert status == 200
             assert j2["trust"] == "rejected"
 
-            # Verify it stuck
-            _, j3 = await _get_json(s, f"{base_b}/api/peers", token=tok_b)
+            # Verify it stuck — rejected peers are hidden by default,
+            # so opt-in with include_rejected=1.
+            _, j3 = await _get_json(
+                s, f"{base_b}/api/peers?include_rejected=1", token=tok_b
+            )
             target3 = next(pp for pp in j3["peers"] if pp["fingerprint"] == fp)
             assert target3["trust"] == "rejected"
 
@@ -656,8 +842,14 @@ async def test_api_peer_capability_policy_round_trip():
     with daemon_pair() as p:
         base_a, tok_a = _server_addr(p.a.home)
         async with aiohttp.ClientSession() as s:
-            _, peers = await _get_json(s, f"{base_a}/api/peers", token=tok_a)
-            fp = next(pp["fingerprint"] for pp in peers["peers"] if pp["short_id"] == p.b.short_id)
+            _, peers = await _get_json(
+                s, f"{base_a}/api/peers?include_unpaired=1", token=tok_a
+            )
+            fp = next(
+                (pp["fingerprint"] for pp in peers["peers"] if pp["short_id"] == p.b.short_id),
+                None,
+            )
+            assert fp, f"peer {p.b.short_id} not visible: {peers['peers']!r}"
 
             status, out = await _post_json(
                 s,
@@ -691,11 +883,17 @@ async def test_set_trust_auto_seeds_from_mdns_for_unmessaged_peer():
     with daemon_pair() as p:
         # B has seen A via mDNS but they have NOT exchanged messages yet,
         # so B's peer DB likely doesn't have an A record.
-        # Find A in B's discovery view.
+        # Find A in B's discovery view (modal feed since A is unpaired).
         base_b, tok_b = _server_addr(p.b.home)
         async with aiohttp.ClientSession() as s:
-            _, j = await _get_json(s, f"{base_b}/api/peers", token=tok_b)
-            target = next(pp for pp in j["peers"] if pp["short_id"] == p.a.short_id)
+            _, j = await _get_json(
+                s, f"{base_b}/api/peers?include_unpaired=1", token=tok_b
+            )
+            target = next(
+                (pp for pp in j["peers"] if pp["short_id"] == p.a.short_id),
+                None,
+            )
+            assert target, f"peer {p.a.short_id} not visible: {j['peers']!r}"
             fp = target["fingerprint"]
 
             # Pin them — should succeed even if state.get_peer(fp) returns None
@@ -706,7 +904,7 @@ async def test_set_trust_auto_seeds_from_mdns_for_unmessaged_peer():
             assert status == 200, j2
             assert j2["trust"] == "pinned"
 
-            # Now confirmed in DB
+            # Now confirmed in DB — paired-only feed should now contain it.
             _, j3 = await _get_json(s, f"{base_b}/api/peers", token=tok_b)
             after = next(pp for pp in j3["peers"] if pp["fingerprint"] == fp)
             assert after["trust"] == "pinned"
@@ -739,8 +937,15 @@ async def test_outbound_blocked_for_rejected_peer():
 
         base_b, tok_b = _server_addr(p.b.home)
         async with aiohttp.ClientSession() as s:
-            _, j = await _get_json(s, f"{base_b}/api/peers", token=tok_b)
-            target = next(pp for pp in j["peers"] if pp["short_id"] == p.a.short_id)
+            # The inbound TEXT didn't auto-pin A; A is still pending on B.
+            _, j = await _get_json(
+                s, f"{base_b}/api/peers?include_unpaired=1", token=tok_b
+            )
+            target = next(
+                (pp for pp in j["peers"] if pp["short_id"] == p.a.short_id),
+                None,
+            )
+            assert target, f"peer {p.a.short_id} not visible from B"
             fp = target["fingerprint"]
 
             # B rejects A
@@ -770,8 +975,14 @@ async def test_inbound_blocked_for_rejected_peer():
 
         base_b, tok_b = _server_addr(p.b.home)
         async with aiohttp.ClientSession() as s:
-            _, j = await _get_json(s, f"{base_b}/api/peers", token=tok_b)
-            target = next(pp for pp in j["peers"] if pp["short_id"] == p.a.short_id)
+            _, j = await _get_json(
+                s, f"{base_b}/api/peers?include_unpaired=1", token=tok_b
+            )
+            target = next(
+                (pp for pp in j["peers"] if pp["short_id"] == p.a.short_id),
+                None,
+            )
+            assert target, f"peer {p.a.short_id} not visible from B"
             await _post_json(
                 s, f"{base_b}/api/peers/{target['fingerprint']}/trust",
                 {"trust": "rejected"}, token=tok_b,

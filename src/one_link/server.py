@@ -320,12 +320,27 @@ class UIServer:
     async def api_peers(self, request: web.Request) -> web.Response:
         """Merge live mDNS-discovered peers with persistent peer DB.
 
-        Returns:
-            online peers — discovered now AND seen before in DB (or freshly
-                           added) with current address/port + persisted trust
-            offline peers — known in DB but not currently visible on the LAN
-            pending peers — known in DB with trust='pending', regardless of online status
+        v0.4 contract — the sidebar problem:
+
+        Default response (`/api/peers`): paired peers ONLY (trust='pinned').
+        That's the user's ongoing list of devices they actually talk to.
+        Online or offline, pinned is what gets rendered in the sidebar.
+
+        Discovery-modal response (`/api/peers?include_unpaired=1`): paired
+        + pending unpaired. This is the picker the user opens when they
+        explicitly want to add a device. Aggressive ghost collapsing
+        applies here:
+
+          - own-pubkey peers are filtered (already handled below)
+          - same-host pending peers are collapsed: if N>1 entries share
+            the same advertised hostname AND we recognize that hostname
+            as our own, only the most-recently-seen entry survives
+          - rejected peers are not returned in either mode (use
+            `?include_rejected=1` if a future UI surfaces a "blocked" view)
         """
+        include_unpaired = request.query.get("include_unpaired") in ("1", "true", "yes")
+        include_rejected = request.query.get("include_rejected") in ("1", "true", "yes")
+
         live: dict[str, dict] = {}  # fingerprint -> peer record
         local_names = {self.daemon.me.hostname}
         if self.daemon.state is not None:
@@ -380,9 +395,9 @@ class UIServer:
                         live[rec.fingerprint]["last_seen_ms"] = rec.last_seen_ms
                         live[rec.fingerprint]["first_seen_ms"] = rec.first_seen_ms
                     else:
-                        # Pending peers are only TOFU candidates. If they are
-                        # offline and never accepted/rejected, they are usually
-                        # stale mDNS ghosts from a previous daemon/process.
+                        # Pending peers in the DB but not visible on mDNS are
+                        # usually stale ghosts from a previous daemon/process.
+                        # Drop them — the discovery modal only shows live mDNS hits.
                         if rec.trust == "pending":
                             continue
                         live[rec.fingerprint] = {
@@ -405,21 +420,59 @@ class UIServer:
                         }
             except Exception:
                 pass
-        same_host_pending_counts: dict[str, int] = {}
+
+        # Same-host pending collapse: if multiple pending peers advertise
+        # one of our own hostnames, keep only the most-recently-seen one.
+        # The rest are almost always stale daemon instances on this box
+        # whose mDNS records haven't expired yet.
+        by_local_hostname: dict[str, list[dict]] = {}
         for p in live.values():
             if p.get("same_host") and p.get("trust") == "pending":
-                name = p.get("hostname") or ""
-                same_host_pending_counts[name] = same_host_pending_counts.get(name, 0) + 1
-        for p in live.values():
-            p["local_duplicate"] = bool(
-                p.get("same_host")
-                and p.get("trust") == "pending"
-                and same_host_pending_counts.get(p.get("hostname") or "", 0) > 1
-            )
-        # Sort: online first, then by hostname
+                key = (p.get("hostname") or "").lower()
+                by_local_hostname.setdefault(key, []).append(p)
+        ghosted_keys: set[str] = set()
+        for group in by_local_hostname.values():
+            if len(group) <= 1:
+                continue
+            # Keep the freshest (highest last_seen_ms; pending records may
+            # not have one, fall back to address presence + port nonzero).
+            def _freshness(rec: dict) -> tuple:
+                return (
+                    int(rec.get("last_seen_ms") or 0),
+                    1 if rec.get("address") else 0,
+                    int(rec.get("port") or 0),
+                )
+            group.sort(key=_freshness, reverse=True)
+            for stale in group[1:]:
+                ghosted_keys.add(stale.get("fingerprint") or stale.get("short_id"))
+
+        # Filter according to mode + ghost collapse.
+        # Order matters: rejected gets its own gate so include_rejected
+        # works independently of include_unpaired.
+        def _keep(p: dict) -> bool:
+            key = p.get("fingerprint") or p.get("short_id")
+            if key in ghosted_keys:
+                return False
+            trust = p.get("trust")
+            if trust == "rejected":
+                return include_rejected
+            if trust == "pinned":
+                return True
+            # Pending: only in modal mode, and only if currently online
+            if not include_unpaired:
+                return False
+            return bool(p.get("online"))
+
+        kept = [p for p in live.values() if _keep(p)]
+
+        # Sort: paired first, then online, then by hostname
         peers = sorted(
-            live.values(),
-            key=lambda p: (not p["online"], (p["hostname"] or "").lower()),
+            kept,
+            key=lambda p: (
+                p.get("trust") != "pinned",
+                not p.get("online"),
+                (p.get("hostname") or "").lower(),
+            ),
         )
         return web.json_response({"peers": peers})
 

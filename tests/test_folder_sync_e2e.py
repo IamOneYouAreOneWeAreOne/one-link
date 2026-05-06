@@ -30,14 +30,29 @@ def _read(home: Path, name: str) -> str:
 
 async def _pair_two_daemons(s, base_a, tok_a, base_b, tok_b, p):
     """Drive the SAS pairing dance via API so both peers end up trust=pinned."""
-    # B fingerprint from A's view
-    async with s.get(f"{base_a}/api/peers", headers={"Authorization": f"Bearer {tok_a}"}) as r:
+    # Pre-pair lookups need ?include_unpaired=1 since the v0.4 default
+    # /api/peers feed is paired-only (sidebar contract).
+    async with s.get(
+        f"{base_a}/api/peers?include_unpaired=1",
+        headers={"Authorization": f"Bearer {tok_a}"},
+    ) as r:
         ja = await r.json()
-    fp_b = next(pp["fingerprint"] for pp in ja["peers"] if pp["short_id"] == p.b.short_id)
+    fp_b = next(
+        (pp["fingerprint"] for pp in ja["peers"] if pp["short_id"] == p.b.short_id),
+        None,
+    )
+    assert fp_b, f"peer {p.b.short_id} not visible from A: {ja['peers']!r}"
 
-    async with s.get(f"{base_b}/api/peers", headers={"Authorization": f"Bearer {tok_b}"}) as r:
+    async with s.get(
+        f"{base_b}/api/peers?include_unpaired=1",
+        headers={"Authorization": f"Bearer {tok_b}"},
+    ) as r:
         jb = await r.json()
-    fp_a = next(pp["fingerprint"] for pp in jb["peers"] if pp["short_id"] == p.a.short_id)
+    fp_a = next(
+        (pp["fingerprint"] for pp in jb["peers"] if pp["short_id"] == p.a.short_id),
+        None,
+    )
+    assert fp_a, f"peer {p.a.short_id} not visible from B: {jb['peers']!r}"
 
     # A initiates pair
     async with s.post(
@@ -59,19 +74,25 @@ async def _pair_two_daemons(s, base_a, tok_a, base_b, tok_b, p):
     ) as r:
         assert (await r.json())["ok"]
 
-    # Wait for both sides to be pinned
+    # Wait for both sides to be pinned. Default /api/peers (paired-only)
+    # is appropriate here — once pinning lands, the peer must be visible
+    # in the sidebar feed.
     deadline = time.time() + 8
+    a_view = b_view = None
     while time.time() < deadline:
         async with s.get(f"{base_a}/api/peers", headers={"Authorization": f"Bearer {tok_a}"}) as r:
             ja2 = await r.json()
         async with s.get(f"{base_b}/api/peers", headers={"Authorization": f"Bearer {tok_b}"}) as r:
             jb2 = await r.json()
-        a_view = next(pp for pp in ja2["peers"] if pp["fingerprint"] == fp_b)
-        b_view = next(pp for pp in jb2["peers"] if pp["fingerprint"] == fp_a)
-        if a_view["trust"] == "pinned" and b_view["trust"] == "pinned":
+        a_view = next((pp for pp in ja2["peers"] if pp["fingerprint"] == fp_b), None)
+        b_view = next((pp for pp in jb2["peers"] if pp["fingerprint"] == fp_a), None)
+        if a_view and b_view and a_view["trust"] == "pinned" and b_view["trust"] == "pinned":
             return fp_a, fp_b
         await asyncio.sleep(0.2)
-    raise RuntimeError(f"pairing did not pin: A={a_view['trust']} B={b_view['trust']}")
+    raise RuntimeError(
+        f"pairing did not pin: A={a_view and a_view.get('trust')} "
+        f"B={b_view and b_view.get('trust')}"
+    )
 
 
 @pytest.mark.asyncio
@@ -174,13 +195,27 @@ async def test_folder_sync_blocked_for_unpaired_peer():
         base_b = f"http://127.0.0.1:{port_b}"
 
         async with aiohttp.ClientSession() as s:
-            # Get fingerprints
-            async with s.get(f"{base_a}/api/peers", headers={"Authorization": f"Bearer {tok_a}"}) as r:
+            # Get fingerprints — peers are unpaired so use modal feed.
+            async with s.get(
+                f"{base_a}/api/peers?include_unpaired=1",
+                headers={"Authorization": f"Bearer {tok_a}"},
+            ) as r:
                 ja = await r.json()
-            fp_b = next(pp["fingerprint"] for pp in ja["peers"] if pp["short_id"] == p.b.short_id)
-            async with s.get(f"{base_b}/api/peers", headers={"Authorization": f"Bearer {tok_b}"}) as r:
+            fp_b = next(
+                (pp["fingerprint"] for pp in ja["peers"] if pp["short_id"] == p.b.short_id),
+                None,
+            )
+            assert fp_b, f"peer {p.b.short_id} not visible from A"
+            async with s.get(
+                f"{base_b}/api/peers?include_unpaired=1",
+                headers={"Authorization": f"Bearer {tok_b}"},
+            ) as r:
                 jb = await r.json()
-            fp_a = next(pp["fingerprint"] for pp in jb["peers"] if pp["short_id"] == p.a.short_id)
+            fp_a = next(
+                (pp["fingerprint"] for pp in jb["peers"] if pp["short_id"] == p.a.short_id),
+                None,
+            )
+            assert fp_a, f"peer {p.a.short_id} not visible from B"
 
             # NO pairing — peers are 'pending'
             local_a = p.tmp / "shared_a"

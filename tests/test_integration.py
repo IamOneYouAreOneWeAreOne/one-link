@@ -86,13 +86,18 @@ def test_chat_reuses_long_lived_session_and_capability_policy():
 
         port = int((p.a.home / "data" / "server.port").read_text())
         token = (p.a.home / "data" / "ui.token").read_text().strip()
+        # v0.4: peers are unpaired here, so use the modal feed.
         req = urllib.request.Request(
-            f"http://127.0.0.1:{port}/api/peers",
+            f"http://127.0.0.1:{port}/api/peers?include_unpaired=1",
             headers={"Authorization": f"Bearer {token}"},
         )
         with urllib.request.urlopen(req, timeout=10) as r:
             peers = _json.loads(r.read())
-        fp_b = next(pp["fingerprint"] for pp in peers["peers"] if pp["short_id"] == p.b.short_id)
+        fp_b = next(
+            (pp["fingerprint"] for pp in peers["peers"] if pp["short_id"] == p.b.short_id),
+            None,
+        )
+        assert fp_b, f"peer {p.b.short_id} not visible from A: {peers['peers']!r}"
 
         st = State(db_path=p.a.home / "data" / "state.db")
         try:
