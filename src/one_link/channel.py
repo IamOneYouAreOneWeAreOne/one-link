@@ -11,12 +11,13 @@ Handshake (Noise-IK-flavored, simplified):
 After both sides verify the other's signature, they:
     shared = X25519(my_x25519_priv, peer_x25519_pub)
     salt   = nonce_init || nonce_resp
-    keys   = HKDF(shared, salt, info="OL1/keys", L=64)
+    transcript = SHA256(HELLO || REPLY)
+    keys   = HKDF(shared, salt, info="OL1/keys|" + transcript, L=64)
     tx_key = keys[0:32]   # initiator -> responder
     rx_key = keys[32:64]  # responder -> initiator
 
 Each side keeps a 64-bit send counter (starts at 0) used as the ChaCha20-Poly1305 nonce
-(little-endian, padded to 12 bytes). AAD = "OL1/data".
+(little-endian, padded to 12 bytes). AAD = "OL1/data|" + transcript.
 
 This is a deliberately small, auditable handshake — not full Noise. Good enough for
 LAN trust-on-first-use; we'll harden it (replay cache, rotation, full Noise pattern)
@@ -44,7 +45,7 @@ PROTO = b"OL1"
 NONCE_LEN = 16
 HELLO_TAG = b"OL1|HELLO|"
 REPLY_TAG = b"OL1|REPLY|"
-AAD = b"OL1/data"
+AAD_PREFIX = b"OL1/data|"
 
 
 @dataclass
@@ -57,6 +58,7 @@ class Channel:
     rx_aead: ChaCha20Poly1305
     tx_seq: int = 0
     rx_seq: int = 0
+    transcript_hash: bytes = b""
     # Set after CAPS exchange (post-handshake first encrypted message).
     # None = peer hasn't sent CAPS yet (legacy or pre-CAPS).
     peer_caps: dict | None = None
@@ -64,17 +66,24 @@ class Channel:
     def _nonce(self, seq: int) -> bytes:
         return seq.to_bytes(12, "little")
 
+    @property
+    def transcript_hex(self) -> str:
+        return self.transcript_hash.hex()
+
+    def _aad(self) -> bytes:
+        return AAD_PREFIX + self.transcript_hash
+
     async def send(self, plaintext: bytes) -> None:
         nonce = self._nonce(self.tx_seq)
         self.tx_seq += 1
-        ct = self.tx_aead.encrypt(nonce, plaintext, AAD)
+        ct = self.tx_aead.encrypt(nonce, plaintext, self._aad())
         await write_frame(self.writer, ct)
 
     async def recv(self) -> bytes:
         ct = await read_frame(self.reader)
         nonce = self._nonce(self.rx_seq)
         self.rx_seq += 1
-        return self.rx_aead.decrypt(nonce, ct, AAD)
+        return self.rx_aead.decrypt(nonce, ct, self._aad())
 
     async def close(self) -> None:
         try:
@@ -93,9 +102,20 @@ def _x25519_keypair() -> tuple[X25519PrivateKey, bytes]:
     return priv, pub
 
 
-def _derive_keys(shared: bytes, salt: bytes) -> tuple[bytes, bytes]:
+def _sha256(data: bytes) -> bytes:
+    digest = hashes.Hash(hashes.SHA256())
+    digest.update(data)
+    return digest.finalize()
+
+
+def _derive_keys(
+    shared: bytes, salt: bytes, transcript_hash: bytes,
+) -> tuple[bytes, bytes]:
     out = HKDF(
-        algorithm=hashes.SHA256(), length=64, salt=salt, info=b"OL1/keys"
+        algorithm=hashes.SHA256(),
+        length=64,
+        salt=salt,
+        info=b"OL1/keys|" + transcript_hash,
     ).derive(shared)
     return out[:32], out[32:64]
 
@@ -121,8 +141,9 @@ async def initiate(
     if not verify(r_ed, sig_r, REPLY_TAG + nonce_i + r_ed + r_x + nonce_r):
         raise RuntimeError("REPLY signature invalid")
 
+    transcript_hash = _sha256(hello + reply)
     shared = x_priv.exchange(X25519PublicKey.from_public_bytes(r_x))
-    k_i_to_r, k_r_to_i = _derive_keys(shared, nonce_i + nonce_r)
+    k_i_to_r, k_r_to_i = _derive_keys(shared, nonce_i + nonce_r, transcript_hash)
     return Channel(
         reader=reader,
         writer=writer,
@@ -130,6 +151,7 @@ async def initiate(
         peer_short_id=fingerprint_of(r_ed)[:8],
         tx_aead=ChaCha20Poly1305(k_i_to_r),
         rx_aead=ChaCha20Poly1305(k_r_to_i),
+        transcript_hash=transcript_hash,
     )
 
 
@@ -154,8 +176,9 @@ async def respond(
     reply = me.public_bytes + x_pub + nonce_r + sig_r
     await write_frame(writer, reply)
 
+    transcript_hash = _sha256(hello + reply)
     shared = x_priv.exchange(X25519PublicKey.from_public_bytes(i_x))
-    k_i_to_r, k_r_to_i = _derive_keys(shared, nonce_i + nonce_r)
+    k_i_to_r, k_r_to_i = _derive_keys(shared, nonce_i + nonce_r, transcript_hash)
     return Channel(
         reader=reader,
         writer=writer,
@@ -163,4 +186,5 @@ async def respond(
         peer_short_id=fingerprint_of(i_ed)[:8],
         tx_aead=ChaCha20Poly1305(k_r_to_i),
         rx_aead=ChaCha20Poly1305(k_i_to_r),
+        transcript_hash=transcript_hash,
     )

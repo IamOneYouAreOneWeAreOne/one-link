@@ -1116,6 +1116,8 @@ class State:
                 """,
                 (name, local_path, json.dumps(shared_with), _now_ms()),
             )
+            for peer_fp in shared_with:
+                self._set_folder_peer_permission_locked(name, peer_fp, "rw")
 
     def remove_folder(self, name: str) -> None:
         with self._write_lock:
@@ -1163,6 +1165,7 @@ class State:
                 "UPDATE folders SET shared_with_json = ? WHERE name = ?",
                 (json.dumps(new), folder_name),
             )
+            self._set_folder_peer_permission_locked(folder_name, peer_fp, "rw")
 
     def unshare_folder_with(self, folder_name: str, peer_fp: str) -> None:
         f = self.get_folder(folder_name)
@@ -1176,6 +1179,60 @@ class State:
                 "UPDATE folders SET shared_with_json = ? WHERE name = ?",
                 (json.dumps(new), folder_name),
             )
+            self._delete_folder_peer_permission_locked(folder_name, peer_fp)
+
+    def _folder_perm_key(self, folder_name: str, peer_fp: str) -> str:
+        return f"folder_permission:{folder_name}:{peer_fp}"
+
+    def _set_folder_peer_permission_locked(
+        self, folder_name: str, peer_fp: str, mode: str
+    ) -> None:
+        if mode not in ("push", "pull", "rw"):
+            raise ValueError("folder permission must be push, pull, or rw")
+        self._conn.execute(
+            """
+            INSERT INTO settings(key, value) VALUES(?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (self._folder_perm_key(folder_name, peer_fp), mode),
+        )
+
+    def _delete_folder_peer_permission_locked(
+        self, folder_name: str, peer_fp: str
+    ) -> None:
+        self._conn.execute(
+            "DELETE FROM settings WHERE key = ?",
+            (self._folder_perm_key(folder_name, peer_fp),),
+        )
+
+    def set_folder_peer_permission(
+        self, folder_name: str, peer_fp: str, mode: str
+    ) -> None:
+        f = self.get_folder(folder_name)
+        if not f:
+            raise KeyError(f"no such folder: {folder_name!r}")
+        if peer_fp not in f["shared_with"]:
+            raise KeyError(f"folder {folder_name!r} is not shared with {peer_fp!r}")
+        with self._write_lock:
+            self._set_folder_peer_permission_locked(folder_name, peer_fp, mode)
+
+    def get_folder_peer_permission(self, folder_name: str, peer_fp: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (self._folder_perm_key(folder_name, peer_fp),),
+        ).fetchone()
+        if not row:
+            return "rw" if peer_fp in (self.get_folder(folder_name) or {}).get("shared_with", []) else None
+        mode = str(row["value"])
+        return mode if mode in ("push", "pull", "rw") else None
+
+    def folder_peer_allows(self, folder_name: str, peer_fp: str, action: str) -> bool:
+        mode = self.get_folder_peer_permission(folder_name, peer_fp)
+        if action == "push":
+            return mode in ("push", "rw")
+        if action == "pull":
+            return mode in ("pull", "rw")
+        raise ValueError("folder action must be push or pull")
 
     # ─── manifest (CRDT entries per file) ─────────────────────────────
 

@@ -24,6 +24,7 @@ first GET /). Token is rotated each daemon restart.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import mimetypes
@@ -189,13 +190,13 @@ class UIServer:
 
     # ─── auth helpers ─────────────────────────────────────────────────
     def _check_token(self, request: web.Request) -> bool:
-        # Accept token from cookie OR Authorization header OR ?t= query.
+        # Accept token from cookie or Authorization header. Query tokens
+        # are intentionally limited to GET / bootstrap in _index so they
+        # cannot leak into API/WebSocket URLs, logs, or browser history.
         if request.cookies.get(COOKIE_NAME) == self.token:
             return True
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer ") and auth[7:] == self.token:
-            return True
-        if request.query.get("t") == self.token:
             return True
         return False
 
@@ -228,20 +229,36 @@ class UIServer:
 
     # ─── HTML index ───────────────────────────────────────────────────
     async def _index(self, request: web.Request) -> web.Response:
+        bootstrap_ok = request.query.get("t") == self.token
+        if request.query.get("t") and not bootstrap_ok:
+            return web.Response(status=401, text="unauthorized")
         try:
             html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
         except FileNotFoundError:
             html = "<h1>One Link UI not bundled</h1>"
-        # Set the auth cookie on first GET / from this browser.
+        if bootstrap_ok:
+            scrub = (
+                "<script>"
+                "try{if(location.search){history.replaceState(null,'',location.pathname+location.hash)}}"
+                "catch(e){}"
+                "</script>"
+            )
+            if "</head>" in html:
+                html = html.replace("</head>", scrub + "</head>", 1)
+            else:
+                html += scrub
         resp = web.Response(text=html, content_type="text/html")
-        resp.set_cookie(
-            COOKIE_NAME,
-            self.token,
-            httponly=True,
-            samesite="Strict",
-            max_age=86400,
-            path="/",
-        )
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        if bootstrap_ok or request.cookies.get(COOKIE_NAME) == self.token:
+            resp.set_cookie(
+                COOKIE_NAME,
+                self.token,
+                httponly=True,
+                samesite="Strict",
+                max_age=86400,
+                path="/",
+            )
         return resp
 
     # ─── /api/me ──────────────────────────────────────────────────────
@@ -550,6 +567,10 @@ class UIServer:
                 "name": f["name"],
                 "local_path": f["local_path"],
                 "shared_with": f["shared_with"],
+                "peer_permissions": {
+                    fp: self.daemon.state.get_folder_peer_permission(f["name"], fp)
+                    for fp in f["shared_with"]
+                },
                 "created_ms": f["created_ms"],
                 "files": local,
                 "in_store": in_store,
@@ -611,10 +632,15 @@ class UIServer:
         except Exception as e:
             return web.json_response({"error": f"bad json: {e}"}, status=400)
         peer_fp = (data.get("peer_fp") or "").strip()
+        mode = (data.get("mode") or "rw").strip()
         if not peer_fp:
             return web.json_response({"error": "peer_fp required"}, status=400)
+        if mode not in ("push", "pull", "rw"):
+            return web.json_response(
+                {"error": "mode must be push, pull, or rw"}, status=400,
+            )
         try:
-            self.daemon.folder_engine.share_with(name, peer_fp)
+            self.daemon.folder_engine.share_with(name, peer_fp, mode=mode)
         except KeyError as e:
             return web.json_response({"error": str(e)}, status=404)
         except Exception as e:
@@ -1019,23 +1045,32 @@ class UIServer:
         upload_path: Optional[Path] = None
         upload_name: str = "upload.bin"
 
-        async for part in reader:
-            if part.name == "peer":
-                peer_needle = (await part.text()).strip()
-            elif part.name == "file":
-                upload_name = Path(part.filename or "upload.bin").name
-                if not upload_name or upload_name in (".", ".."):
-                    upload_name = "upload.bin"
-                # Stream to a temp file inside data_dir so we don't OOM on big uploads.
-                staging = data_dir() / "uploads"
-                staging.mkdir(parents=True, exist_ok=True)
-                upload_path = staging / f"{int(time.time()*1000)}_{upload_name}"
-                with open(upload_path, "wb") as f:
-                    while True:
-                        chunk = await part.read_chunk(size=1024 * 1024)
-                        if not chunk:
-                            break
-                        f.write(chunk)
+        try:
+            async for part in reader:
+                if part.name == "peer":
+                    peer_needle = (await part.text()).strip()
+                elif part.name == "file":
+                    upload_name = Path(part.filename or "upload.bin").name
+                    if not upload_name or upload_name in (".", ".."):
+                        upload_name = "upload.bin"
+                    # Stream to a temp file inside data_dir so we don't OOM on big uploads.
+                    staging = data_dir() / "uploads"
+                    staging.mkdir(parents=True, exist_ok=True)
+                    upload_path = staging / (
+                        f"{int(time.time()*1000)}_{secrets.token_hex(8)}_{upload_name}"
+                    )
+                    with open(upload_path, "wb") as f:
+                        while True:
+                            chunk = await part.read_chunk(size=1024 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+        except Exception as e:
+            if upload_path is not None:
+                with contextlib.suppress(OSError):
+                    upload_path.unlink(missing_ok=True)
+            log.warning("multipart upload failed before send: %s", e)
+            return web.json_response({"error": "upload failed before send"}, status=400)
 
         if not peer_needle:
             return web.json_response({"error": "missing 'peer' field"}, status=400)

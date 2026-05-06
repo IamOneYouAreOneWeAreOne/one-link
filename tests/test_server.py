@@ -462,13 +462,35 @@ async def test_server_unauth_returns_401():
 @pytest.mark.asyncio
 async def test_server_index_serves_html_and_sets_cookie():
     with daemon_pair() as p:
-        base, _ = _server_addr(p.a.home)
+        base, token = _server_addr(p.a.home)
         async with aiohttp.ClientSession() as s:
-            async with s.get(f"{base}/") as r:
+            async with s.get(f"{base}/?t={token}") as r:
                 assert r.status == 200
                 txt = await r.text()
                 assert "<!doctype html>" in txt.lower() or "<html" in txt.lower()
                 assert any(c.key == "ol_ui" for c in r.cookies.values())
+                assert r.headers.get("Cache-Control") == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_query_token_only_bootstraps_index_not_api():
+    with daemon_pair() as p:
+        base, token = _server_addr(p.a.home)
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{base}/") as r:
+                assert r.status == 200
+                assert not any(c.key == "ol_ui" for c in r.cookies.values())
+
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{base}/?t={token}") as r:
+                assert r.status == 200
+                txt = await r.text()
+                assert "history.replaceState" in txt
+                assert any(c.key == "ol_ui" for c in r.cookies.values())
+
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{base}/api/me?t={token}") as r:
+                assert r.status == 401
 
 
 @pytest.mark.asyncio
@@ -706,9 +728,11 @@ async def test_api_messages_returns_list():
 async def test_websocket_event_stream_pushes_messages():
     with daemon_pair() as p:
         base_b, tok_b = _server_addr(p.b.home)
-        ws_url = base_b.replace("http://", "ws://") + f"/api/events?t={tok_b}"
+        ws_url = base_b.replace("http://", "ws://") + "/api/events"
         async with aiohttp.ClientSession() as s:
-            async with s.ws_connect(ws_url) as ws:
+            async with s.ws_connect(
+                ws_url, headers={"Authorization": f"Bearer {tok_b}"}
+            ) as ws:
                 # First frame should be the hello with our identity
                 msg = await asyncio.wait_for(ws.receive(), timeout=5)
                 assert msg.type == aiohttp.WSMsgType.TEXT

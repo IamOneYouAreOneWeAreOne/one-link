@@ -195,8 +195,9 @@ class FolderEngine:
                 pass
         self.state.remove_folder(name)
 
-    def share_with(self, name: str, peer_fp: str) -> None:
+    def share_with(self, name: str, peer_fp: str, mode: str = "rw") -> None:
         self.state.share_folder_with(name, peer_fp)
+        self.state.set_folder_peer_permission(name, peer_fp, mode)
 
     def unshare_with(self, name: str, peer_fp: str) -> None:
         self.state.unshare_folder_with(name, peer_fp)

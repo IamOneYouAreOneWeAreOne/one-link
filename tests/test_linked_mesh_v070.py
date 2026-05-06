@@ -81,12 +81,18 @@ class _FakeChannel:
 # ─── ENDPOINT_UPDATE: pinned-only ─────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_endpoint_update_from_pinned_peer_updates_state(tmp_path: Path):
+async def test_endpoint_update_from_pinned_peer_queues_verified_promotion(tmp_path: Path):
     me = _new_identity()
     them = _new_identity()
     state = State(db_path=tmp_path / "state.db")
     daemon = Daemon(me)
     daemon.state = state
+    queued = []
+
+    async def _fake_verify(peer_fp, peer_sid, host, port):
+        queued.append((peer_fp, peer_sid, host, port))
+
+    daemon._verify_and_promote_endpoint = _fake_verify  # type: ignore[method-assign]
     state.upsert_peer(
         fingerprint=them.fingerprint, short_id=them.short_id,
         pubkey=them.public_bytes,
@@ -100,14 +106,56 @@ async def test_endpoint_update_from_pinned_peer_updates_state(tmp_path: Path):
         endpoints=[{"host": "192.168.1.42", "port": 6000}],
     )
     await daemon._handle_endpoint_update(chan, msg, them.fingerprint, them.short_id)
+    await asyncio.sleep(0)
 
     rec = state.get_peer(them.fingerprint)
-    assert rec.last_address == "192.168.1.42"
-    assert rec.last_port == 6000
+    assert rec.last_address == "10.0.0.1"
+    assert rec.last_port == 5000
+    assert queued == [
+        (them.fingerprint, them.short_id, "192.168.1.42", 6000)
+    ]
 
     # ACK was sent
     assert any(s.get("t") == "ACK" for s in chan.sent)
     state.close()
+
+
+@pytest.mark.asyncio
+async def test_endpoint_candidate_promotes_after_verified_handshake(tmp_path: Path):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+        hostname="them-host",
+        address="10.0.0.1",
+        port=5000,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    them_daemon = Daemon(them)
+    them_daemon.state = State(db_path=tmp_path / "them.db")
+    server = await asyncio.start_server(
+        them_daemon._handle_peer, host="127.0.0.1", port=0
+    )
+    port = server.sockets[0].getsockname()[1]
+    try:
+        await daemon._verify_and_promote_endpoint(
+            them.fingerprint, them.short_id, "127.0.0.1", port
+        )
+        rec = state.get_peer(them.fingerprint)
+        assert rec.last_address == "127.0.0.1"
+        assert rec.last_port == port
+    finally:
+        server.close()
+        with contextlib.suppress(Exception):
+            await server.wait_closed()
+        state.close()
+        them_daemon.state.close()
 
 
 @pytest.mark.asyncio
@@ -150,6 +198,12 @@ async def test_endpoint_update_caps_at_max_endpoints(tmp_path: Path):
     state = State(db_path=tmp_path / "state.db")
     daemon = Daemon(me)
     daemon.state = state
+    queued = []
+
+    async def _fake_verify(peer_fp, peer_sid, host, port):
+        queued.append((host, port))
+
+    daemon._verify_and_promote_endpoint = _fake_verify  # type: ignore[method-assign]
     state.upsert_peer(
         fingerprint=them.fingerprint, short_id=them.short_id,
         pubkey=them.public_bytes,
@@ -160,11 +214,13 @@ async def test_endpoint_update_caps_at_max_endpoints(tmp_path: Path):
     flood = [{"host": f"10.0.0.{i}", "port": 5000 + i} for i in range(100)]
     msg = make_msg("ENDPOINT_UPDATE", them.short_id, endpoints=flood)
     await daemon._handle_endpoint_update(chan, msg, them.fingerprint, them.short_id)
+    await asyncio.sleep(0)
 
     rec = state.get_peer(them.fingerprint)
-    # The picked anchor is the first valid entry within the capped slice.
-    assert rec.last_address == "10.0.0.0"
-    assert rec.last_port == 5000
+    assert rec.last_address is None
+    assert rec.last_port is None
+    assert len(queued) == daemon.MAX_ENDPOINTS_PER_ANNOUNCEMENT
+    assert queued[0] == ("10.0.0.0", 5000)
     state.close()
 
 

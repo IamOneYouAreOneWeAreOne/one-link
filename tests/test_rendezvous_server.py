@@ -96,6 +96,26 @@ async def test_register_then_lookup_returns_advertised_endpoints(server):
         assert sorted(lookup.capabilities) == ["chat", "files"]
 
 
+async def test_register_does_not_trust_x_forwarded_for_by_default(server):
+    base, _rdz = server
+    sk, pk = _new_key()
+    req = sign_register(
+        private_key=sk,
+        pubkey=pk,
+        ttl_s=300,
+        advertised_endpoints=[Endpoint("192.168.1.10", 51234)],
+    )
+    async with aiohttp.ClientSession() as s:
+        async with s.post(
+            f"{base}/api/v1/register",
+            json=req.to_wire(),
+            headers={"X-Forwarded-For": "203.0.113.66"},
+        ) as r:
+            assert r.status == 200, await r.text()
+            ack = RegisterAck.from_wire(await r.json())
+        assert ack.observed_host == "127.0.0.1"
+
+
 async def test_revoke_removes_registration(server):
     base, _rdz = server
     sk, pk = _new_key()
@@ -178,6 +198,44 @@ async def test_register_rejects_future_timestamp(server):
 
 
 # ─── security: signature ────────────────────────────────────────────
+
+async def test_register_rejects_exact_signed_replay(server):
+    base, _rdz = server
+    sk, pk = _new_key()
+    req = sign_register(
+        private_key=sk,
+        pubkey=pk,
+        ttl_s=300,
+        advertised_endpoints=[Endpoint("h", 1)],
+    )
+    wire = req.to_wire()
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"{base}/api/v1/register", json=wire) as r:
+            assert r.status == 200, await r.text()
+        async with s.post(f"{base}/api/v1/register", json=wire) as r:
+            assert r.status == 409
+            assert "replayed" in (await r.text()).lower()
+
+
+async def test_revoke_rejects_exact_signed_replay(server):
+    base, _rdz = server
+    sk, pk = _new_key()
+    reg = sign_register(
+        private_key=sk,
+        pubkey=pk,
+        ttl_s=300,
+        advertised_endpoints=[Endpoint("h", 1)],
+    )
+    rev = sign_revoke(private_key=sk, pubkey=pk)
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"{base}/api/v1/register", json=reg.to_wire()) as r:
+            assert r.status == 200
+        async with s.post(f"{base}/api/v1/revoke", json=rev.to_wire()) as r:
+            assert r.status == 200, await r.text()
+        async with s.post(f"{base}/api/v1/revoke", json=rev.to_wire()) as r:
+            assert r.status == 409
+            assert "replayed" in (await r.text()).lower()
+
 
 async def test_register_rejects_bad_signature(server):
     base, _rdz = server

@@ -56,6 +56,8 @@ async def test_handshake_succeeds(tmp_path: Path):
     assert b_chan.peer_short_id == alice.short_id
     assert a_chan.peer_ed_pub == bob.public_bytes
     assert b_chan.peer_ed_pub == alice.public_bytes
+    assert len(a_chan.transcript_hash) == 32
+    assert a_chan.transcript_hash == b_chan.transcript_hash
     await a_chan.close()
     await b_chan.close()
 
@@ -231,6 +233,7 @@ async def test_each_handshake_uses_fresh_ephemeral(tmp_path: Path):
     # least verify both channels work independently with no key reuse:
     assert await c1b.recv() == pt
     assert await c2b.recv() == pt
+    assert c1a.transcript_hash != c2a.transcript_hash
 
     await c1a.close()
     await c1b.close()

@@ -280,10 +280,32 @@ def test_inherit_remembers_seen_peers_in_session(tmp_path: Path):
 
 # ─── mDNS-LAN inheritance ───────────────────────────────────────────
 
-def test_mdns_inherit_when_state_is_empty(tmp_path: Path):
+def test_mdns_inherit_disabled_by_default(tmp_path: Path):
     me = _new_identity()
     state = State(db_path=tmp_path / "state.db")
     try:
+        daemon = Daemon(me)
+        daemon.state = state
+        peer = Peer(
+            short_id="abcd1234", hostname="lan-host", address="192.168.1.10",
+            port=51234, ed_pub_hex="11" * 32,
+            rendezvous_urls=["https://shared.example"],
+        )
+        daemon.discovery = SimpleNamespace(
+            registry=SimpleNamespace(list=lambda: [peer]),
+        )
+
+        daemon._maybe_inherit_rendezvous_from_mdns()
+        assert state.get_rendezvous_urls() == []
+    finally:
+        state.close()
+
+
+def test_mdns_inherit_when_state_is_empty_and_opted_in(tmp_path: Path):
+    me = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        state.set_setting("inherit_rendezvous_from_mdns", "true")
         daemon = Daemon(me)
         daemon.state = state
         # Mock discovery with one LAN peer advertising rendezvous URL.
@@ -350,6 +372,7 @@ def test_mdns_inherit_drops_invalid_protocols(tmp_path: Path):
     me = _new_identity()
     state = State(db_path=tmp_path / "state.db")
     try:
+        state.set_setting("inherit_rendezvous_from_mdns", "true")
         daemon = Daemon(me)
         daemon.state = state
         peer = Peer(

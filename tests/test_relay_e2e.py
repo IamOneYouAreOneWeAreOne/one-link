@@ -191,6 +191,40 @@ async def test_chat_through_encrypted_relay(relay_rendezvous, tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_relay_listen_auth_nonce_cannot_be_replayed(relay_rendezvous):
+    """A captured listen auth blob cannot reclaim or replace a listener
+    inside the timestamp window."""
+    base, rdz = relay_rendezvous
+    me = _new_identity("listener")
+
+    from one_link.relay_proto import sign_listen_auth
+    auth = sign_listen_auth(private_key=me.private, pubkey=me.public_bytes)
+
+    async with aiohttp.ClientSession() as s:
+        ws1 = await s.ws_connect(f"{base}/api/v1/relay/listen")
+        try:
+            await ws1.send_json(auth.to_wire())
+            await asyncio.sleep(0.1)
+            assert rdz._relay_listeners.get(me.public_bytes) is not None
+
+            ws2 = await s.ws_connect(f"{base}/api/v1/relay/listen")
+            try:
+                await ws2.send_json(auth.to_wire())
+                msg = await asyncio.wait_for(ws2.receive(), timeout=2.0)
+                assert msg.type in (
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.ERROR,
+                )
+                assert ws2.close_code == 4001
+                assert rdz._relay_listeners.get(me.public_bytes) is not None
+            finally:
+                await ws2.close()
+        finally:
+            await ws1.close()
+
+
+@pytest.mark.asyncio
 async def test_relay_fallback_only_used_when_direct_dial_fails(
     relay_rendezvous, tmp_path: Path
 ):

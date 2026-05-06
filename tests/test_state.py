@@ -178,6 +178,8 @@ def test_add_remove_folder(state: State):
     state.add_folder(name="docs", local_path="/tmp/docs", shared_with=["aa" * 32])
     f = state.get_folder("docs")
     assert f["local_path"] == "/tmp/docs"
+    assert state.folder_peer_allows("docs", "aa" * 32, "push")
+    assert state.folder_peer_allows("docs", "aa" * 32, "pull")
     state.remove_folder("docs")
     assert state.get_folder("docs") is None
 
@@ -189,8 +191,12 @@ def test_share_folder_with(state: State):
     state.share_folder_with("docs", "bb" * 32)
     members = state.get_folder("docs")["shared_with"]
     assert sorted(members) == sorted(["aa" * 32, "bb" * 32])
+    state.set_folder_peer_permission("docs", "aa" * 32, "push")
+    assert state.folder_peer_allows("docs", "aa" * 32, "push")
+    assert not state.folder_peer_allows("docs", "aa" * 32, "pull")
     state.unshare_folder_with("docs", "aa" * 32)
     assert state.get_folder("docs")["shared_with"] == ["bb" * 32]
+    assert state.get_folder_peer_permission("docs", "aa" * 32) is None
 
 
 def test_manifest_upsert_and_list(state: State):

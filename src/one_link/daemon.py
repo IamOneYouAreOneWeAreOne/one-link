@@ -149,6 +149,7 @@ def _build_caps(
     short_id: str,
     *,
     rendezvous_urls: list[str] | None = None,
+    channel_bind: dict | None = None,
 ) -> dict:
     """Build a CAPS frame.
 
@@ -162,6 +163,8 @@ def _build_caps(
     if rendezvous_urls:
         # Cap to a sane size — see MAX_SHARED_RENDEZVOUS_URLS comment.
         extra["share_rdz"] = list(rendezvous_urls)[:MAX_SHARED_RENDEZVOUS_URLS]
+    if channel_bind:
+        extra["channel_bind"] = dict(channel_bind)
     return make_msg(
         "CAPS",
         short_id,
@@ -363,6 +366,10 @@ class Daemon:
         # from mDNS visibility.
         # peer_fp -> {"last_alive_ms": int, "latency_ewma_ms": float}
         self._pair_health: dict[str, dict[str, float]] = {}
+        # Endpoint announcements are untrusted route candidates until a
+        # fresh encrypted handshake at that address proves the expected
+        # peer fingerprint. Tracks background verification tasks.
+        self._endpoint_verify_tasks: set[asyncio.Task] = set()
 
     def _build_my_caps(self) -> dict:
         """Build a CAPS frame for THIS daemon. Includes our rendezvous
@@ -384,6 +391,20 @@ class Daemon:
             self.me.short_id,
             rendezvous_urls=urls if share else None,
         )
+
+    def _channel_bind_for(self, channel: ch.Channel) -> dict:
+        """Session binding advertised inside encrypted CAPS."""
+        return {
+            "self_fp": self.me.fingerprint,
+            "peer_fp": fingerprint_of(channel.peer_ed_pub),
+            "transcript": getattr(channel, "transcript_hex", ""),
+            "features": list(CAPS_FEATURES),
+        }
+
+    def _build_my_caps_for_channel(self, channel: ch.Channel) -> dict:
+        msg = self._build_my_caps()
+        msg["channel_bind"] = self._channel_bind_for(channel)
+        return msg
 
     def _acquire_instance_lock(self) -> None:
         """Prevent duplicate daemons for the same config/data home.
@@ -712,7 +733,7 @@ class Daemon:
 
         # Send our capabilities eagerly (no ACK expected).
         try:
-            await channel.send(encode_msg(self._build_my_caps()))
+            await channel.send(encode_msg(self._build_my_caps_for_channel(channel)))
         except Exception as e:
             log.warning("CAPS send failed: %s", e)
 
@@ -749,10 +770,24 @@ class Daemon:
             raise RuntimeError(f"rejected peer attempted message: {peer_fp[:8]}")
         if t == "CAPS":
             features = list(normalize_caps(msg.get("features", [])))
+            bind = msg.get("channel_bind")
+            if isinstance(bind, dict):
+                expected_peer_fp = self.me.fingerprint
+                expected_self_fp = peer_fp
+                transcript = getattr(channel, "transcript_hex", "")
+                if (
+                    bind.get("peer_fp") != expected_peer_fp
+                    or bind.get("self_fp") != expected_self_fp
+                    or bind.get("transcript") != transcript
+                ):
+                    raise RuntimeError(
+                        f"CAPS channel binding mismatch from {peer_fp[:8]}"
+                    )
             channel.peer_caps = {
                 "protocol": msg.get("protocol", "?"),
                 "features": features,
                 "from": msg.get("from"),
+                "channel_bind": bind if isinstance(bind, dict) else None,
             }
             if self.state is not None:
                 with contextlib.suppress(Exception):
@@ -1332,6 +1367,9 @@ class Daemon:
         if not f or peer_fp not in f["shared_with"]:
             log.info("MANIFEST_PUSH for folder we don't share with this peer")
             return
+        if not self.state.folder_peer_allows(folder_name, peer_fp, "pull"):
+            log.info("MANIFEST_PUSH denied by folder capability for %s", peer_fp[:8])
+            return
         remote_root = msg.get("merkle_root")
         remote_count = msg.get("entry_count")
         local_root = self.folder_engine.manifest_root(folder_name)
@@ -1392,6 +1430,8 @@ class Daemon:
             return
         f = self.state.get_folder(folder_name)
         if not f or peer_fp not in f["shared_with"]:
+            return
+        if not self.state.folder_peer_allows(folder_name, peer_fp, "push"):
             return
         for blob_hex in wants:
             if not self._valid_blob_hex(blob_hex):
@@ -1582,7 +1622,7 @@ class Daemon:
         await self.update_rendezvous_urls(urls)
 
     def _maybe_inherit_rendezvous_from_mdns(self) -> None:
-        """v0.5.4: zero-step household bootstrap.
+        """v0.5.4: opt-in household bootstrap from ambient LAN peers.
 
         If we currently have NO rendezvous URLs configured, harvest
         any URLs that LAN-discovered peers are advertising in their
@@ -1590,6 +1630,10 @@ class Daemon:
         and trigger a live re-config.
 
         Guarded:
+          - Disabled by default. Ambient mDNS is unauthenticated, so
+            users must opt into this lower-trust bootstrap with
+            `inherit_rendezvous_from_mdns=true`. Pinned CAPS inheritance
+            remains the default zero-friction path for trusted peers.
           - Only runs when our list is empty. The user's first
             explicit `set_rendezvous_urls(...)` (UI save, API call,
             or a successful inherit) "claims" the slot and we stop
@@ -1603,6 +1647,9 @@ class Daemon:
         if self.state is None or self.discovery is None:
             return
         try:
+            mdns_v = self.state.get_setting("inherit_rendezvous_from_mdns")
+            if mdns_v is None or mdns_v.lower() not in ("1", "true", "yes", "on"):
+                return
             v = self.state.get_setting("inherit_rendezvous")
             if v is not None and v.lower() in ("0", "false", "no"):
                 return
@@ -1651,6 +1698,27 @@ class Daemon:
                     "from_peer_fp": "lan-mdns",
                     "added": urls,
                 })
+
+    def _group_state_for(self, group_id: bytes):
+        """Materialize a group's current signed event state from storage."""
+        if self.state is None:
+            return None
+        try:
+            from one_link import groups as gmod
+
+            wire_events = self.state.list_group_events(group_id)
+            if not wire_events:
+                return None
+            events = [gmod.GroupEvent.from_wire(w) for w in wire_events]
+            return gmod.reduce_events(events)
+        except Exception as e:
+            log.warning("could not reduce group %s: %s", group_id.hex()[:8], e)
+            return None
+
+    def _peer_is_current_group_member(self, group_id: bytes, peer_pub: bytes) -> bool:
+        """True only when peer_pub is a member in the current group log."""
+        gstate = self._group_state_for(group_id)
+        return bool(gstate is not None and gstate.is_member(peer_pub))
 
     def _harvest_default_rendezvous_seeds(self) -> list[str]:
         """v0.5.4: Sources for first-run rendezvous URLs, in priority order.
@@ -2419,7 +2487,7 @@ class Daemon:
                         address=peer.address,
                         port=peer.port,
                     )
-            await channel.send(encode_msg(self._build_my_caps()))
+            await channel.send(encode_msg(self._build_my_caps_for_channel(channel)))
             sess = OutboundSession(
                 peer_fp=peer_fp,
                 peer=peer,
@@ -2497,7 +2565,7 @@ class Daemon:
             channel = await ch.initiate(reader, writer, self.me)
             self._verify_channel_peer(peer, channel)
             try:
-                await channel.send(encode_msg(self._build_my_caps()))
+                await channel.send(encode_msg(self._build_my_caps_for_channel(channel)))
             except Exception:
                 pass
             await channel.send(encode_msg(msg))
@@ -2780,31 +2848,74 @@ class Daemon:
         # peer announces a public one, prefer the LAN one — same Wi-Fi
         # is fastest. The send-path's happy-eyeballs falls through if
         # the picked one is wrong.
-        host, port = cleaned[0]
-        try:
-            existing = self.state.get_peer(peer_fp)
-        except Exception:
-            existing = None
-        if existing:
-            try:
-                self.state.upsert_peer(
-                    fingerprint=peer_fp,
-                    short_id=existing.short_id,
-                    pubkey=existing.pubkey,
-                    hostname=existing.hostname,
-                    address=host,
-                    port=port,
-                )
-                log.info(
-                    "ENDPOINT_UPDATE accepted from %s: %s:%d (%d total endpoints)",
-                    peer_sid, host, port, len(cleaned),
-                )
-            except Exception as e:
-                log.warning("ENDPOINT_UPDATE upsert failed: %s", e)
+        for host, port in cleaned:
+            task = asyncio.create_task(
+                self._verify_and_promote_endpoint(peer_fp, peer_sid, host, port)
+            )
+            self._endpoint_verify_tasks.add(task)
+            task.add_done_callback(self._endpoint_verify_tasks.discard)
+        log.info(
+            "ENDPOINT_UPDATE queued %d route verification(s) from %s",
+            len(cleaned), peer_sid,
+        )
         # ACK so the sender's send_to() succeeds.
         await channel.send(encode_msg(make_msg(
             "ACK", self.me.short_id, of=msg.get("id"),
         )))
+
+    async def _verify_and_promote_endpoint(
+        self, peer_fp: str, peer_sid: str, host: str, port: int,
+    ) -> None:
+        """Promote an announced endpoint only after key-confirmed dial."""
+        if self.state is None or not self._is_pinned(peer_fp):
+            return
+        try:
+            rec = self.state.get_peer(peer_fp)
+        except Exception:
+            rec = None
+        if rec is None or not rec.pubkey:
+            return
+        writer = None
+        channel = None
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=3.0
+            )
+            channel = await asyncio.wait_for(
+                ch.initiate(reader, writer, self.me), timeout=3.0
+            )
+            got_fp = fingerprint_of(channel.peer_ed_pub)
+            if got_fp != peer_fp:
+                log.warning(
+                    "ENDPOINT_UPDATE verification rejected %s:%d for %s: got %s",
+                    host, port, peer_fp[:8], got_fp[:8],
+                )
+                return
+            self.state.upsert_peer(
+                fingerprint=peer_fp,
+                short_id=rec.short_id,
+                pubkey=rec.pubkey,
+                hostname=rec.hostname,
+                address=host,
+                port=port,
+            )
+            log.info(
+                "ENDPOINT_UPDATE promoted verified route for %s: %s:%d",
+                peer_sid, host, port,
+            )
+        except Exception as e:
+            log.debug(
+                "ENDPOINT_UPDATE candidate failed verification for %s at %s:%d: %s",
+                peer_fp[:8], host, port, e,
+            )
+        finally:
+            if channel is not None:
+                with contextlib.suppress(Exception):
+                    await channel.close()
+            elif writer is not None:
+                with contextlib.suppress(Exception):
+                    writer.close()
+                    await writer.wait_closed()
 
     async def broadcast_endpoint_to_paired(self) -> int:
         """v0.7.0: tell every pinned peer where to find us right now.
@@ -2907,6 +3018,16 @@ class Daemon:
             log.warning("invalid GROUP_KEY_OFFER fields from %s", peer_fp[:8])
             return
         sender_pub = channel.peer_ed_pub  # 32 bytes
+        if not self._peer_is_current_group_member(group_id, sender_pub):
+            log.warning(
+                "GROUP_KEY_OFFER from non-member dropped: group=%s sender=%s peer=%s",
+                group_id.hex()[:8], sender_pub.hex()[:8], peer_fp[:8],
+            )
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="group_not_member",
+            )))
+            return
         # Don't overwrite an in-progress chain at the same epoch — the
         # offered key is the *initial* state of that epoch, but we may
         # have already received and decrypted a few messages, advancing
@@ -2971,6 +3092,16 @@ class Daemon:
             return
 
         sender_pub = channel.peer_ed_pub
+        if not self._peer_is_current_group_member(group_id, sender_pub):
+            log.warning(
+                "GROUP_MSG from non-member dropped: group=%s sender=%s peer=%s",
+                group_id.hex()[:8], sender_pub.hex()[:8], peer_fp[:8],
+            )
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="group_not_member",
+            )))
+            return
         epoch = int(wire.get("epoch", -1))
         if epoch <= 0:
             await channel.send(encode_msg(make_msg(
@@ -3294,6 +3425,8 @@ class Daemon:
         f = self.state.get_folder(folder_name)
         if not f or peer_fp not in f["shared_with"]:
             return {"ok": False, "error": "folder not shared with peer", "blobs_sent": 0}
+        if not self.state.folder_peer_allows(folder_name, peer_fp, "push"):
+            return {"ok": False, "error": "folder capability forbids push", "blobs_sent": 0}
 
         entries = self.folder_engine.manifest_for(folder_name)
         merkle_root = self.folder_engine.manifest_root(folder_name)
@@ -3330,7 +3463,7 @@ class Daemon:
                     f"fingerprint mismatch: expected {peer.short_id}"
                 )
             try:
-                await channel.send(encode_msg(self._build_my_caps()))
+                await channel.send(encode_msg(self._build_my_caps_for_channel(channel)))
             except Exception:
                 pass
 

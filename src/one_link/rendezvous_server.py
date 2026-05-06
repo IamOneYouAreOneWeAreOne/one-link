@@ -97,6 +97,10 @@ class ServerConfig:
     # Idle timeout for an established session. Both sides quiet for
     # this long → relay closes. Senders re-establish for the next msg.
     relay_session_idle_s: float = 300.0  # 5 min
+    # Trust reverse-proxy client IP headers. Disabled by default
+    # because a directly exposed server would otherwise let clients
+    # spoof X-Forwarded-For and bypass per-IP rate limits.
+    trust_proxy_headers: bool = False
 
 
 # ─── in-memory store ────────────────────────────────────────────────
@@ -238,6 +242,8 @@ class RendezvousApp:
             rate_per_min=config.relay_connect_per_ip_per_min
         )
         self._relay_listeners: dict[bytes, _RelayListener] = {}
+        self._relay_listen_nonces: dict[bytes, deque[tuple[int, bytes]]] = {}
+        self._signed_replay_cache: dict[tuple[str, bytes], deque[tuple[int, bytes]]] = {}
         self.metrics = Metrics()
         self._eviction_task: asyncio.Task | None = None
 
@@ -280,6 +286,8 @@ class RendezvousApp:
                 evicted = self.registry.evict_expired(now_ms())
                 self.rate_per_ip.sweep()
                 self.rate_register_per_pubkey.sweep()
+                self._sweep_relay_listen_nonces()
+                self._sweep_signed_replay_cache()
                 if evicted:
                     log.debug("evicted %d expired registrations", evicted)
         except asyncio.CancelledError:
@@ -288,17 +296,79 @@ class RendezvousApp:
     # ─── request helpers ────────────────────────────────────────────
 
     def _client_ip(self, request: web.Request) -> str:
-        """Best-effort remote IP. If a reverse proxy set
-        X-Forwarded-For, trust the leftmost entry; otherwise fall back
-        to the socket peer. Operators deploying without a known proxy
-        can disable XFF trust by stripping the header upstream."""
+        """Best-effort remote IP.
+
+        X-Forwarded-For is trusted only when the operator explicitly
+        enables trust_proxy_headers. Directly exposed servers must use
+        the socket peer address so clients cannot spoof rate-limit
+        identities.
+        """
         xff = request.headers.get("X-Forwarded-For")
-        if xff:
+        if self.config.trust_proxy_headers and xff:
             return xff.split(",")[0].strip()
         peer = request.transport.get_extra_info("peername") if request.transport else None
         if peer:
             return peer[0]
         return "unknown"
+
+    def _admit_relay_listen_nonce(
+        self, pubkey: bytes, timestamp_ms: int, nonce: bytes
+    ) -> bool:
+        """Single-use relay listen nonce per pubkey within replay window."""
+        from one_link.relay_proto import REPLAY_WINDOW_MS
+
+        cutoff = now_ms() - REPLAY_WINDOW_MS
+        dq = self._relay_listen_nonces.setdefault(pubkey, deque())
+        while dq and dq[0][0] < cutoff:
+            dq.popleft()
+        if any(seen_nonce == nonce for _seen_ts, seen_nonce in dq):
+            return False
+        dq.append((int(timestamp_ms), bytes(nonce)))
+        return True
+
+    def _sweep_relay_listen_nonces(self) -> int:
+        from one_link.relay_proto import REPLAY_WINDOW_MS
+
+        cutoff = now_ms() - REPLAY_WINDOW_MS
+        dead: list[bytes] = []
+        for pubkey, dq in self._relay_listen_nonces.items():
+            while dq and dq[0][0] < cutoff:
+                dq.popleft()
+            if not dq:
+                dead.append(pubkey)
+        for pubkey in dead:
+            self._relay_listen_nonces.pop(pubkey, None)
+        return len(dead)
+
+    def _admit_signed_message_once(
+        self, kind: str, pubkey: bytes, timestamp_ms: int, signature: bytes
+    ) -> bool:
+        """Reject exact signed request replays inside the replay window."""
+        from one_link.rendezvous_proto import REPLAY_WINDOW_MS
+
+        cutoff = now_ms() - REPLAY_WINDOW_MS
+        key = (kind, pubkey)
+        dq = self._signed_replay_cache.setdefault(key, deque())
+        while dq and dq[0][0] < cutoff:
+            dq.popleft()
+        if any(seen_sig == signature for _seen_ts, seen_sig in dq):
+            return False
+        dq.append((int(timestamp_ms), bytes(signature)))
+        return True
+
+    def _sweep_signed_replay_cache(self) -> int:
+        from one_link.rendezvous_proto import REPLAY_WINDOW_MS
+
+        cutoff = now_ms() - REPLAY_WINDOW_MS
+        dead: list[tuple[str, bytes]] = []
+        for key, dq in self._signed_replay_cache.items():
+            while dq and dq[0][0] < cutoff:
+                dq.popleft()
+            if not dq:
+                dead.append(key)
+        for key in dead:
+            self._signed_replay_cache.pop(key, None)
+        return len(dead)
 
     def _client_port(self, request: web.Request) -> int:
         peer = request.transport.get_extra_info("peername") if request.transport else None
@@ -352,6 +422,11 @@ class RendezvousApp:
         except ValueError:
             self.metrics.register_rejects_total += 1
             return web.Response(status=401, text="signature does not verify")
+        if not self._admit_signed_message_once(
+            "register", req.pubkey, req.timestamp_ms, req.signature
+        ):
+            self.metrics.register_rejects_total += 1
+            return web.Response(status=409, text="replayed register")
 
         # Per-pubkey rate limit kicks in only AFTER signature verifies,
         # so an attacker without the key can't burn through a victim's
@@ -440,6 +515,10 @@ class RendezvousApp:
             req.verify()
         except ValueError:
             return web.Response(status=401, text="signature does not verify")
+        if not self._admit_signed_message_once(
+            "revoke", req.pubkey, req.timestamp_ms, req.signature
+        ):
+            return web.Response(status=409, text="replayed revoke")
 
         removed = self.registry.remove(req.pubkey)
         self.metrics.revokes_total += 1
@@ -554,6 +633,12 @@ class RendezvousApp:
         except ValueError:
             self.metrics.relay_listener_rejects_total += 1
             await ws.close(code=4001, message=b"signature did not verify")
+            return ws
+        if not self._admit_relay_listen_nonce(
+            auth.pubkey, auth.timestamp_ms, auth.nonce
+        ):
+            self.metrics.relay_listener_rejects_total += 1
+            await ws.close(code=4001, message=b"replayed listen auth nonce")
             return ws
 
         # Step 3: claim listener slot, kicking any prior one.
@@ -766,6 +851,11 @@ def _parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
         help="max concurrent sessions one listener can multiplex",
     )
     p.add_argument(
+        "--trust-proxy-headers",
+        action="store_true",
+        help="trust X-Forwarded-For from a controlled reverse proxy",
+    )
+    p.add_argument(
         "--log-level",
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -784,6 +874,7 @@ def _parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
         enable_relay=args.enable_relay,
         relay_connect_per_ip_per_min=args.relay_connect_per_ip_per_min,
         relay_max_sessions_per_listener=args.relay_max_sessions_per_listener,
+        trust_proxy_headers=args.trust_proxy_headers,
     )
 
 

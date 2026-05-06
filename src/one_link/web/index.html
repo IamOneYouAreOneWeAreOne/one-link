@@ -2549,11 +2549,14 @@
       toast("This device is blocked. Use Allow device first.", "bad");
       return;
     }
+    const sendingToast = toast(`Sending ${file.name}...`, "info", 30000);
     try {
       await api.upload(state.selectedPeer, file);
+      sendingToast?.remove();
       // Per-bubble status will reflect the matching transfer record;
       // no toast needed for happy path.
     } catch (e) {
+      sendingToast?.remove();
       const reason = (e && e.message) ? e.message : String(e);
       toast(`Send failed (${file.name}): ${reason}`, "bad", 8000);
     }
