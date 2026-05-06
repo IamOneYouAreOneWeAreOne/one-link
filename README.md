@@ -11,7 +11,7 @@ effect tracking) with Python as the host harness while LLVM/WASM backends mature
 
 ## Status
 
-**v0.2.11** — clearer people-facing labels, activity/folder guidance, live self-advertisement filtering, display-name advertising on restart, mesh operations console, folder controls, and persistent transfer tracking.
+**v0.2.12** — obvious file sending from the Files panel, stale-device cleanup, hidden same-computer test entries, clearer people-facing labels, activity/folder guidance, and persistent transfer tracking.
 
 - Native-feeling browser app: dark theme, peer sidebar with online dots,
   message bubbles, drag-drop file send, live updates over WebSocket

@@ -93,6 +93,11 @@
     font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .8px;
   }
   .side .section-h .count { background: var(--bg-3); padding: 1px 8px; border-radius: 10px; color: var(--text-dim); font-size: 11px; }
+  .side .section-h button {
+    color: var(--text-dim); background: var(--bg-2); border-radius: 8px;
+    padding: 2px 8px; font-size: 10px; text-transform: none; letter-spacing: 0;
+  }
+  .side .section-h button:hover { color: var(--text); background: var(--bg-3); }
   .peerlist { padding: 0 8px 12px; flex: 1; overflow-y: auto; }
   .peer {
     display: flex; align-items: center; gap: 10px;
@@ -598,7 +603,10 @@
     <aside class="side">
       <div class="section-h">
         <span>Nearby devices</span>
-        <span class="count" id="peers-count">0</span>
+        <span>
+          <button id="btn-prune-peers" title="Remove stale devices">Clean up</button>
+          <span class="count" id="peers-count">0</span>
+        </span>
       </div>
       <div class="peerlist" id="peerlist">
         <div class="empty">
@@ -667,11 +675,20 @@
     <!-- FILES PANEL (toggled) -->
     <aside class="files" id="files-panel" style="display:none;">
       <div class="section-h">
-        <span>Received files</span>
+        <span>Files</span>
         <span class="count" id="files-count">0</span>
       </div>
+      <div class="help-card">
+        Send files to the selected paired device, or open files you received here.
+      </div>
       <div id="filelist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
-        <div class="empty">no files yet</div>
+        <div class="empty">No received files yet.</div>
+      </div>
+      <div class="panel-form">
+        <div class="mini-actions">
+          <button id="btn-send-file-panel">Send file</button>
+          <button id="btn-refresh-files">Refresh</button>
+        </div>
       </div>
     </aside>
 
@@ -843,6 +860,7 @@
   const state = {
     me: null,
     peers: new Map(),     // short_id -> peer
+    hiddenLocalPeers: 0,
     selectedPeer: null,   // short_id
     messages: [],         // recent across all peers
     transfers: [],
@@ -894,12 +912,20 @@
   function renderPeers() {
     const list = $("#peerlist");
     list.innerHTML = "";
-    $("#peers-count").textContent = state.peers.size;
-    if (state.peers.size === 0) {
+    const visiblePeers = [...state.peers.values()].filter(p => {
+      const unpaired = p.trust !== "pinned" && p.trust !== "rejected";
+      return !(p.same_host && unpaired);
+    });
+    state.hiddenLocalPeers = state.peers.size - visiblePeers.length;
+    $("#peers-count").textContent = visiblePeers.length;
+    if (visiblePeers.length === 0) {
       list.appendChild(el("div", "empty", "No other devices yet. Open One Link on another computer on this Wi-Fi."));
+      if (state.hiddenLocalPeers > 0) {
+        list.appendChild(el("div", "empty", `${state.hiddenLocalPeers} local test entr${state.hiddenLocalPeers === 1 ? "y is" : "ies are"} hidden.`));
+      }
       return;
     }
-    for (const p of state.peers.values()) {
+    for (const p of visiblePeers) {
       const isUnpaired = p.trust !== "pinned" && p.trust !== "rejected" && p.online;
       const cls = ["peer",
         p.online ? "online" : "offline",
@@ -1015,7 +1041,7 @@
       list.innerHTML = "";
       $("#files-count").textContent = files.length;
       if (files.length === 0) {
-        list.appendChild(el("div", "empty", "no files yet"));
+        list.appendChild(el("div", "empty", "No received files yet. Use Send file after you pick and pair a device."));
         return;
       }
       for (const f of files) {
@@ -1348,6 +1374,17 @@
   };
   $("#btn-attach").addEventListener("click", triggerAttach);
   $("#btn-attach2").addEventListener("click", triggerAttach);
+  $("#btn-send-file-panel").addEventListener("click", triggerAttach);
+  $("#btn-refresh-files").addEventListener("click", refreshFiles);
+  $("#btn-prune-peers").addEventListener("click", async () => {
+    try {
+      const r = await api.post("/api/peers/prune", {});
+      toast(`Cleaned up ${r.removed || 0} stale device${r.removed === 1 ? "" : "s"}`, "good");
+      await refreshPeers();
+    } catch (e) {
+      toast(`Cleanup failed: ${e.message || e}`, "bad");
+    }
+  });
   fileInput.addEventListener("change", async (e) => {
     const files = Array.from(e.target.files || []);
     fileInput.value = "";
