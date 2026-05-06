@@ -3,7 +3,7 @@
 Outputs:
     src/one_link/web/assets/one-glyph.png   transparent glyph (black-on-alpha)
     src/one_link/web/assets/one-glyph.ico   multi-size Windows app icon
-                                            (rounded-rect gradient + white glyph)
+                                            (black rounded-rect + white glyph)
 
 Run:
     python scripts/build_icons.py
@@ -23,9 +23,7 @@ OUT_DIR = REPO / "src" / "one_link" / "web" / "assets"
 DEFAULT_SRC = OUT_DIR / "one-glyph.png"
 SRC = Path(os.environ.get("ONE_LINK_GLYPH_SRC", str(DEFAULT_SRC))).expanduser()
 
-# Brand colors (match index.html CSS tokens)
-ACCENT_TOP = (124, 92, 255)
-ACCENT_BOT = (78, 193, 255)
+APP_ICON_BG = (0, 0, 0)
 
 
 def luminance_to_alpha(im_rgba: Image.Image) -> Image.Image:
@@ -36,7 +34,11 @@ def luminance_to_alpha(im_rgba: Image.Image) -> Image.Image:
     """
     arr = np.array(im_rgba).astype(np.float32)
     lum = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
-    alpha = np.clip(255.0 - lum, 0, 255).astype(np.uint8)
+    source_alpha = arr[:, :, 3]
+    if np.min(source_alpha) < 255:
+        alpha = source_alpha.astype(np.uint8)
+    else:
+        alpha = np.clip(255.0 - lum, 0, 255).astype(np.uint8)
     out = np.zeros_like(arr, dtype=np.uint8)
     out[:, :, 3] = alpha
     return Image.fromarray(out, "RGBA")
@@ -97,11 +99,11 @@ def _radial_gradient(size: int) -> Image.Image:
 
 
 def make_app_icon(size: int, glyph_rgba: Image.Image) -> Image.Image:
-    """Modern app icon: vibrant rounded-rect, white glyph with soft glow."""
+    """Modern app icon: black rounded-rect, white glyph with soft glow."""
     # We render at 4x then downsample for crisp rounded corners + smooth gradient.
     s4 = size * 4 if size <= 128 else size * 2
     icon = Image.new("RGBA", (s4, s4), (0, 0, 0, 0))
-    bg = _radial_gradient(s4) if s4 >= 64 else _vertical_gradient(s4)
+    bg = Image.new("RGBA", (s4, s4), (*APP_ICON_BG, 255))
 
     # Rounded corners — radius ~22% of side
     radius = max(2, int(s4 * 0.22))
@@ -114,7 +116,7 @@ def make_app_icon(size: int, glyph_rgba: Image.Image) -> Image.Image:
     # Inner top-left sheen — diagonal highlight selling the 3D feel (vectorized)
     if s4 >= 64:
         yy, xx = np.mgrid[0:s4, 0:s4].astype(np.float32)
-        sheen_arr = np.clip(80 - 60 * (xx + yy) / (s4 * 0.6), 0, 80).astype(np.uint8)
+        sheen_arr = np.clip(32 - 24 * (xx + yy) / (s4 * 0.6), 0, 32).astype(np.uint8)
         sheen = Image.fromarray(sheen_arr, "L")
         sheen_mask = Image.new("L", (s4, s4), 0)
         ImageDraw.Draw(sheen_mask).rounded_rectangle(
