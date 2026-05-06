@@ -43,6 +43,21 @@ DEFAULT_REQUEST_TIMEOUT_S = 5.0
 DEFAULT_REGISTER_TTL_S = 300       # 5 min
 DEFAULT_REFRESH_FRACTION = 0.5     # refresh halfway through TTL
 
+# v0.5.4: Baked-in default rendezvous URLs. EMPTY by default — the
+# upstream OSS distribution doesn't operate a default rendezvous on
+# behalf of users.
+#
+# Three ways an operator can pre-populate this for their distribution:
+#   1. Patch this constant before building the binary / wheel.
+#   2. Ship a `seeds.toml` in the user's data dir with `[rendezvous]
+#      urls = ["https://..."]`.
+#   3. Set env var `ONE_LINK_RDZ_DEFAULTS=https://a,https://b` at start.
+#
+# All three feed into Daemon._harvest_default_rendezvous_seeds(); user
+# edits in Settings always override the defaults afterwards. See
+# docs/RENDEZVOUS_DEPLOY.md for the recommended posture.
+DEFAULT_RENDEZVOUS_URLS: list[str] = []
+
 
 @dataclass
 class RendezvousObservedSelf:

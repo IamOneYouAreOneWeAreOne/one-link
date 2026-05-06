@@ -10,6 +10,7 @@ Browsing returns a live registry of known peers keyed by short_id.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import socket
 from dataclasses import dataclass, field
 from typing import Callable
@@ -27,6 +28,12 @@ class Peer:
     address: str
     port: int
     ed_pub_hex: str
+    # v0.5.4: rendezvous URLs the peer is advertising via mDNS TXT.
+    # Other daemons on the same Wi-Fi pick this up so a household
+    # only needs ONE device to know about a rendezvous — the rest
+    # auto-discover. Stored as a list of strings; never None
+    # (empty list when the peer didn't advertise any).
+    rendezvous_urls: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -98,12 +105,25 @@ def _info_to_peer(info: AsyncServiceInfo, self_short_id: str) -> Peer | None:
     if short_id == self_short_id:
         return None
     server = info.server.rstrip(".") if info.server else "?"
+    # v0.5.4: parse "rdz" TXT field — comma-separated rendezvous URLs.
+    # Limit to a small count to keep TXT records bounded and resist
+    # malicious peers spamming junk URLs into the mDNS scope.
+    rdz_raw = props.get("rdz") or ""
+    rdz_urls: list[str] = []
+    if rdz_raw:
+        for u in rdz_raw.split(","):
+            u = u.strip().rstrip("/")
+            if u and (u.startswith("http://") or u.startswith("https://")):
+                rdz_urls.append(u)
+                if len(rdz_urls) >= 8:
+                    break
     return Peer(
         short_id=short_id,
         hostname=props.get("host", server),
         address=addr,
         port=info.port or 0,
         ed_pub_hex=props.get("pub", ""),
+        rendezvous_urls=rdz_urls,
     )
 
 
@@ -154,11 +174,15 @@ class Discovery:
         hostname: str,
         port: int,
         ed_pub_hex: str,
+        rendezvous_urls: list[str] | None = None,
     ):
         self.short_id = short_id
         self.hostname = hostname
         self.port = port
         self.ed_pub_hex = ed_pub_hex
+        # v0.5.4: rendezvous URLs we advertise in our mDNS TXT record
+        # so other daemons on this LAN auto-discover them.
+        self.rendezvous_urls: list[str] = list(rendezvous_urls or [])
         self.registry = Registry()
         self._zc: AsyncZeroconf | None = None
         self._info: AsyncServiceInfo | None = None
@@ -170,17 +194,24 @@ class Discovery:
         loop = asyncio.get_running_loop()
         self._zc = AsyncZeroconf(ip_version=IPVersion.V4Only)
         local_ip = _best_local_ipv4()
+        # mDNS TXT properties. Cap rdz length: an oversized record can
+        # be silently dropped by routers, defeating the whole point.
+        # 8 URLs × ~64 chars = 512 bytes, well under typical limits.
+        rdz_value = ",".join(self.rendezvous_urls[:8])
+        properties: dict[str, str] = {
+            "sid": self.short_id,
+            "host": self.hostname,
+            "pub": self.ed_pub_hex,
+            "v": "0.0.1",
+        }
+        if rdz_value:
+            properties["rdz"] = rdz_value
         self._info = AsyncServiceInfo(
             type_=SERVICE_TYPE,
             name=f"{self.short_id}.{SERVICE_TYPE}",
             addresses=[socket.inet_aton(local_ip)],
             port=self.port,
-            properties={
-                "sid": self.short_id,
-                "host": self.hostname,
-                "pub": self.ed_pub_hex,
-                "v": "0.0.1",
-            },
+            properties=properties,
             server=f"{self.short_id}.local.",
         )
         await self._zc.async_register_service(self._info, allow_name_change=True)
@@ -189,6 +220,40 @@ class Discovery:
             SERVICE_TYPE,
             listener=_AsyncListener(self.registry, self.short_id, self._zc, loop),
         )
+
+    async def update_rendezvous_urls(self, urls: list[str]) -> None:
+        """v0.5.4: live-update the advertised rendezvous URLs in the
+        mDNS TXT record without re-registering the service. Called
+        whenever the daemon's rendezvous_urls setting changes."""
+        self.rendezvous_urls = list(urls or [])
+        if self._zc is None or self._info is None:
+            return
+        rdz_value = ",".join(self.rendezvous_urls[:8])
+        # AsyncServiceInfo.properties is a dict; building a new one
+        # and re-registering is the supported path.
+        new_props: dict[str, str] = {
+            "sid": self.short_id,
+            "host": self.hostname,
+            "pub": self.ed_pub_hex,
+            "v": "0.0.1",
+        }
+        if rdz_value:
+            new_props["rdz"] = rdz_value
+        # `update_service` re-broadcasts the TXT record without
+        # cycling the service registration (which would briefly remove
+        # us from peers' registries and surface as a flap).
+        from zeroconf import AsyncServiceInfo  # type: ignore[no-redef]
+        local_ip = _best_local_ipv4()
+        self._info = AsyncServiceInfo(
+            type_=SERVICE_TYPE,
+            name=f"{self.short_id}.{SERVICE_TYPE}",
+            addresses=[socket.inet_aton(local_ip)],
+            port=self.port,
+            properties=new_props,
+            server=f"{self.short_id}.local.",
+        )
+        with contextlib.suppress(Exception):
+            await self._zc.async_update_service(self._info)
 
     async def prune_unreachable(self, *, timeout: float = 0.6) -> int:
         """TCP-probe every peer in the registry; remove any that don't accept

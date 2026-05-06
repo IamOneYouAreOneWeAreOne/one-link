@@ -118,21 +118,47 @@ HANDSHAKE_PER_IP_RATE_MAX = 240     # attempts per window per IP
 HANDSHAKE_LOOPBACK_IPS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 # Capabilities this build advertises in CAPS messages.
-PROTOCOL_VERSION = "OL1.1"
+# v0.5.4 bumps to OL1.2: CAPS optionally includes `share_rdz` so paired
+# devices auto-inherit each other's rendezvous URL list. Older OL1.1
+# peers ignore the field — strict-forward-compat.
+PROTOCOL_VERSION = "OL1.2"
 CAPS_FEATURES: list[str] = [
     *LOCAL_CAPABILITIES,
     "audit",
     "fts",
     "trust",
+    "rdz_inherit",  # advertises that we'll inherit rdz urls from peers
 ]
+# v0.5.4: cap on how many URLs we'll embed in CAPS or accept from a
+# peer. Defends against a malicious peer flooding us with junk URLs
+# during pairing. Each inherited URL is also bound by state.set_rendezvous_urls
+# validation which rejects non-http(s).
+MAX_SHARED_RENDEZVOUS_URLS = 16
 
 
-def _build_caps(short_id: str) -> dict:
+def _build_caps(
+    short_id: str,
+    *,
+    rendezvous_urls: list[str] | None = None,
+) -> dict:
+    """Build a CAPS frame.
+
+    `rendezvous_urls` (when provided + non-empty) becomes the
+    `share_rdz` field — read by paired peers running v0.5.4+ to
+    auto-inherit our rendezvous configuration. Pre-OL1.2 peers
+    silently ignore it; we never put it on the wire if the local
+    `share_rendezvous` setting is False.
+    """
+    extra: dict = {}
+    if rendezvous_urls:
+        # Cap to a sane size — see MAX_SHARED_RENDEZVOUS_URLS comment.
+        extra["share_rdz"] = list(rendezvous_urls)[:MAX_SHARED_RENDEZVOUS_URLS]
     return make_msg(
         "CAPS",
         short_id,
         protocol=PROTOCOL_VERSION,
         features=list(CAPS_FEATURES),
+        **extra,
     )
 
 
@@ -252,6 +278,31 @@ class Daemon:
         # v0.5.3: peer-server port stamped during start() so live re-config
         # of rendezvous URLs (no restart) can re-derive advertised endpoints.
         self._rendezvous_peer_port: int = 0
+        # v0.5.4: Track which paired peers have offered us their rendezvous
+        # URL list this session, so we don't repeatedly merge the same set
+        # on every reconnect.
+        self._inherited_rdz_from: set[str] = set()
+
+    def _build_my_caps(self) -> dict:
+        """Build a CAPS frame for THIS daemon. Includes our rendezvous
+        URL list when the local `share_rendezvous` setting is True
+        (default) — paired peers running v0.5.4+ auto-adopt.
+        """
+        share = True
+        urls: list[str] = []
+        if self.state is not None:
+            try:
+                v = self.state.get_setting("share_rendezvous")
+                # Default True unless explicitly opted out.
+                share = v is None or v.lower() in ("1", "true", "yes")
+                if share:
+                    urls = self.state.get_rendezvous_urls()
+            except Exception:
+                share = False
+        return _build_caps(
+            self.me.short_id,
+            rendezvous_urls=urls if share else None,
+        )
 
     def _acquire_instance_lock(self) -> None:
         """Prevent duplicate daemons for the same config/data home.
@@ -523,7 +574,7 @@ class Daemon:
 
         # Send our capabilities eagerly (no ACK expected).
         try:
-            await channel.send(encode_msg(_build_caps(self.me.short_id)))
+            await channel.send(encode_msg(self._build_my_caps()))
         except Exception as e:
             log.warning("CAPS send failed: %s", e)
 
@@ -566,6 +617,21 @@ class Daemon:
             if self.state is not None:
                 with contextlib.suppress(Exception):
                     self.state.set_peer_capabilities(peer_fp, features)
+            # v0.5.4: pair-time URL inheritance.
+            # Adopt rendezvous URLs from the peer — but only if:
+            #   1. Peer is pinned (we explicitly trusted them via SAS)
+            #   2. We haven't already inherited from this peer this session
+            #   3. We have an `inherit_rendezvous` setting on (default True)
+            #   4. The URLs validate (state.set_rendezvous_urls rejects junk)
+            shared = msg.get("share_rdz")
+            if (
+                isinstance(shared, list)
+                and shared
+                and self._is_pinned(peer_fp)
+                and peer_fp not in self._inherited_rdz_from
+            ):
+                with contextlib.suppress(Exception):
+                    self._inherit_rendezvous_urls_from(peer_fp, shared)
             log.info(
                 "peer caps from %s: %s features=%s",
                 peer_sid, channel.peer_caps["protocol"],
@@ -1336,6 +1402,16 @@ class Daemon:
         """Start a RendezvousClient if URLs are configured. No-op
         otherwise. Failures are logged, not raised — the daemon must
         keep working LAN-only when rendezvous is unreachable.
+
+        v0.5.4: First-run defaults — if no URLs are configured in
+        state yet, harvest them from (in priority order):
+          1. ONE_LINK_RDZ_DEFAULTS env var (comma-separated URLs)
+          2. ~/.config/one-link/seeds.toml (or platform equivalent)
+          3. The DEFAULT_RENDEZVOUS_URLS constant baked into the
+             binary (empty by default; populated by distributors who
+             want a zero-step out-of-box experience)
+        These defaults are written to state.set_rendezvous_urls
+        once on first run; user edits in Settings override.
         """
         if self.state is None:
             return
@@ -1345,7 +1421,225 @@ class Daemon:
         except Exception as e:
             log.warning("could not read rendezvous URLs: %s", e)
             return
+        if not urls:
+            harvested = self._harvest_default_rendezvous_seeds()
+            if harvested:
+                try:
+                    self.state.set_rendezvous_urls(harvested)
+                    urls = self.state.get_rendezvous_urls()
+                    log.info(
+                        "first-run: adopted %d rendezvous default(s) %s",
+                        len(urls), urls,
+                    )
+                except ValueError as e:
+                    log.warning("default rendezvous seeds failed validation: %s", e)
         await self.update_rendezvous_urls(urls)
+
+    def _maybe_inherit_rendezvous_from_mdns(self) -> None:
+        """v0.5.4: zero-step household bootstrap.
+
+        If we currently have NO rendezvous URLs configured, harvest
+        any URLs that LAN-discovered peers are advertising in their
+        mDNS TXT records. Apply them via state.set_rendezvous_urls
+        and trigger a live re-config.
+
+        Guarded:
+          - Only runs when our list is empty. The user's first
+            explicit `set_rendezvous_urls(...)` (UI save, API call,
+            or a successful inherit) "claims" the slot and we stop
+            doing this automatically.
+          - Inheriting from mDNS is intentionally lower-trust than
+            inheriting from a pinned peer's CAPS. We still validate
+            URLs (http/https only) and cap by MAX_SHARED_RENDEZVOUS_URLS
+            to defend against a malicious LAN actor flooding URLs.
+          - Skipped entirely if `inherit_rendezvous` is set False.
+        """
+        if self.state is None or self.discovery is None:
+            return
+        try:
+            v = self.state.get_setting("inherit_rendezvous")
+            if v is not None and v.lower() in ("0", "false", "no"):
+                return
+        except Exception:
+            return
+        try:
+            existing = self.state.get_rendezvous_urls()
+        except Exception:
+            return
+        if existing:
+            return  # user has chosen — don't override
+
+        candidates: set[str] = set()
+        for p in self.discovery.registry.list():
+            for u in (p.rendezvous_urls or []):
+                u = u.strip().rstrip("/")
+                if not (u.startswith("http://") or u.startswith("https://")):
+                    continue
+                candidates.add(u)
+                if len(candidates) >= MAX_SHARED_RENDEZVOUS_URLS:
+                    break
+            if len(candidates) >= MAX_SHARED_RENDEZVOUS_URLS:
+                break
+        if not candidates:
+            return
+        urls = sorted(candidates)
+        try:
+            self.state.set_rendezvous_urls(urls)
+        except ValueError:
+            return
+        log.info(
+            "mDNS-inherited %d rendezvous url(s) from LAN peers: %s",
+            len(urls), ", ".join(urls),
+        )
+        # Live re-config so we register with the inherited rendezvous
+        # immediately; no daemon restart.
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.update_rendezvous_urls(urls))
+        except RuntimeError:
+            pass
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "rendezvous_inherited",
+                    "from_peer_fp": "lan-mdns",
+                    "added": urls,
+                })
+
+    def _harvest_default_rendezvous_seeds(self) -> list[str]:
+        """v0.5.4: Sources for first-run rendezvous URLs, in priority order.
+
+        Tries env var first, then platform config seeds.toml, then a
+        baked-in module constant. Returns a deduped list (possibly
+        empty). Validation against http(s) prefix is left to
+        state.set_rendezvous_urls.
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def _add(u: str) -> None:
+            u = u.strip().rstrip("/")
+            if not u or u in seen:
+                return
+            seen.add(u)
+            out.append(u)
+
+        # 1. Env var.
+        env = os.environ.get("ONE_LINK_RDZ_DEFAULTS", "")
+        if env:
+            for u in env.split(","):
+                _add(u)
+
+        # 2. seeds.toml in the data dir.
+        seeds_path = data_dir() / "seeds.toml"
+        if seeds_path.is_file():
+            try:
+                # Python 3.11+ has tomllib. Fall back gracefully if not.
+                import tomllib  # type: ignore[import-not-found]
+                with open(seeds_path, "rb") as fh:
+                    doc = tomllib.load(fh)
+                seeds = doc.get("rendezvous", {}).get("urls", [])
+                if isinstance(seeds, list):
+                    for u in seeds:
+                        if isinstance(u, str):
+                            _add(u)
+            except Exception as e:
+                log.warning("seeds.toml unreadable: %s", e)
+
+        # 3. Baked-in defaults (empty by default; populated by builds
+        #    that want zero-step out-of-the-box. See deploy/RENDEZVOUS_DEPLOY.md).
+        from one_link import rendezvous_client as _rdz_client
+        baked = getattr(_rdz_client, "DEFAULT_RENDEZVOUS_URLS", None)
+        if isinstance(baked, list):
+            for u in baked:
+                if isinstance(u, str):
+                    _add(u)
+
+        return out
+
+    def _inherit_rendezvous_urls_from(
+        self, peer_fp: str, offered: list[str]
+    ) -> None:
+        """v0.5.4: Adopt rendezvous URLs that a pinned peer offered in
+        their CAPS frame.
+
+        Validation:
+          - peer must be pinned (caller checks; defensive re-check)
+          - URLs are sanitized via state.set_rendezvous_urls (rejects
+            non-http(s), strips whitespace, dedupes)
+          - the local `inherit_rendezvous` setting must not be False
+            (default True; users can disable in settings)
+          - capped at MAX_SHARED_RENDEZVOUS_URLS to defend against a
+            malicious offered list
+          - we mark the peer in `_inherited_rdz_from` so we don't
+            spam-merge on every reconnect
+
+        Side effect: if the merged URL set is different from what we
+        had, schedule a live re-config of the rendezvous client (no
+        restart needed) so the new URLs take effect immediately.
+        """
+        if self.state is None:
+            return
+        # Once-per-session guard: even if the caller forgot to check,
+        # don't re-merge the same peer's offer twice.
+        if peer_fp in self._inherited_rdz_from:
+            return
+        # User opt-out check.
+        try:
+            v = self.state.get_setting("inherit_rendezvous")
+            if v is not None and v.lower() in ("0", "false", "no"):
+                return
+        except Exception:
+            pass
+        if not self._is_pinned(peer_fp):
+            return
+
+        # Merge.
+        existing = set(self.state.get_rendezvous_urls())
+        candidate = list(offered)[:MAX_SHARED_RENDEZVOUS_URLS]
+        clean: set[str] = set(existing)
+        added: list[str] = []
+        for u in candidate:
+            if not isinstance(u, str):
+                continue
+            u = u.strip().rstrip("/")
+            if not (u.startswith("http://") or u.startswith("https://")):
+                continue
+            if u in clean:
+                continue
+            clean.add(u)
+            added.append(u)
+
+        self._inherited_rdz_from.add(peer_fp)
+        if not added:
+            return  # nothing new
+
+        log.info(
+            "inheriting %d rendezvous url(s) from peer %s: %s",
+            len(added), peer_fp[:8], ", ".join(added),
+        )
+        try:
+            self.state.set_rendezvous_urls(sorted(clean))
+        except ValueError as e:
+            log.warning("inherited urls failed validation: %s", e)
+            return
+        # Push the live re-config asynchronously so we don't block
+        # the inbound peer-message handler — and so we don't try to
+        # `await` from this sync helper.
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.update_rendezvous_urls(sorted(clean)))
+        except RuntimeError:
+            # Not in an event loop (shouldn't happen here, but be safe).
+            pass
+        # Tell the UI so the user sees "1 rendezvous URL adopted from <peer>".
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "rendezvous_inherited",
+                    "from_peer_fp": peer_fp,
+                    "added": added,
+                })
 
     async def update_rendezvous_urls(self, urls: list[str]) -> None:
         """Live re-config — no daemon restart required.
@@ -1355,6 +1649,10 @@ class Daemon:
         failure: per-URL register issues are logged and the daemon
         keeps running. Empty list disables rendezvous entirely
         (LAN-only).
+
+        v0.5.4: also re-broadcasts the new URL list via mDNS so other
+        LAN daemons can auto-inherit. Honours the share_rendezvous
+        opt-out.
         """
         # Tear down old client first.
         if self.rendezvous is not None:
@@ -1362,6 +1660,21 @@ class Daemon:
             self.rendezvous = None
             with contextlib.suppress(Exception):
                 await old.stop()
+
+        # Update mDNS TXT to advertise (or stop advertising) these URLs.
+        # The discovery instance might not be up yet during initial
+        # _start_rendezvous; in that case its constructor receives the
+        # URLs directly.
+        if self.discovery is not None:
+            share = True
+            if self.state is not None:
+                with contextlib.suppress(Exception):
+                    v = self.state.get_setting("share_rendezvous")
+                    share = v is None or v.lower() in ("1", "true", "yes")
+            with contextlib.suppress(Exception):
+                await self.discovery.update_rendezvous_urls(
+                    urls if share else []
+                )
 
         urls = [u for u in (urls or []) if u]
         if not urls:
@@ -1799,7 +2112,7 @@ class Daemon:
                         address=peer.address,
                         port=peer.port,
                     )
-            await channel.send(encode_msg(_build_caps(self.me.short_id)))
+            await channel.send(encode_msg(self._build_my_caps()))
             sess = OutboundSession(
                 peer_fp=peer_fp,
                 peer=peer,
@@ -1867,7 +2180,7 @@ class Daemon:
             channel = await ch.initiate(reader, writer, self.me)
             self._verify_channel_peer(peer, channel)
             try:
-                await channel.send(encode_msg(_build_caps(self.me.short_id)))
+                await channel.send(encode_msg(self._build_my_caps()))
             except Exception:
                 pass
             await channel.send(encode_msg(msg))
@@ -2080,7 +2393,7 @@ class Daemon:
                     f"fingerprint mismatch: expected {peer.short_id}"
                 )
             try:
-                await channel.send(encode_msg(_build_caps(self.me.short_id)))
+                await channel.send(encode_msg(self._build_my_caps()))
             except Exception:
                 pass
 
@@ -2269,7 +2582,7 @@ class Daemon:
 
             # Send our caps before any application traffic.
             try:
-                await channel.send(encode_msg(_build_caps(self.me.short_id)))
+                await channel.send(encode_msg(self._build_my_caps()))
             except Exception as e:
                 log.warning("CAPS send (file outbound) failed: %s", e)
 
@@ -2651,11 +2964,22 @@ class Daemon:
                 if dn:
                     advertised_name = dn
 
+        # v0.5.4: advertise our rendezvous URLs in mDNS TXT so other
+        # LAN daemons auto-discover them. Tied to the same
+        # share_rendezvous toggle that controls pair-time inheritance.
+        rdz_to_advertise: list[str] = []
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                share = self.state.get_setting("share_rendezvous")
+                if share is None or share.lower() in ("1", "true", "yes"):
+                    rdz_to_advertise = self.state.get_rendezvous_urls()
+
         self.discovery = Discovery(
             short_id=self.me.short_id,
             hostname=advertised_name,
             port=peer_port,
             ed_pub_hex=self.me.public_bytes.hex(),
+            rendezvous_urls=rdz_to_advertise,
         )
         await self.discovery.start()
 
@@ -2664,10 +2988,18 @@ class Daemon:
         # source of truth for filter mode (paired-only by default,
         # ?include_unpaired=1 for the discovery modal). Pushing only a
         # signal avoids duplicating that policy here.
+        # v0.5.4: also inherit any rendezvous URLs LAN peers are
+        # advertising — but ONLY if we currently have none configured
+        # (zero-step bootstrap for new household members). Once we have
+        # any rendezvous URL, we stop auto-inheriting from mDNS to
+        # respect user choice. Pair-time inheritance from pinned peers
+        # is the higher-trust path and runs separately.
         def _on_peer_change():
             if self.ui_server is not None:
                 with contextlib.suppress(Exception):
                     self.ui_server.broadcast({"type": "peers_changed"})
+            with contextlib.suppress(Exception):
+                self._maybe_inherit_rendezvous_from_mdns()
 
         self.discovery.registry.on_change = _on_peer_change
 
