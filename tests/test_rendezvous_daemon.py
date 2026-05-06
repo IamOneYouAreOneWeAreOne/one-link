@@ -88,10 +88,12 @@ async def test_resolve_peer_endpoint_falls_back_to_rendezvous(
     b_id = _new_identity()
 
     # B "registers" with the rendezvous on its own.
+    b_advertised_host = "192.168.7.10"
+    b_advertised_port = 51234
     b_client = RendezvousClient(
         private_key=b_id.private, pubkey=b_id.public_bytes,
         rendezvous_urls=[base],
-        advertise_endpoints=[Endpoint("192.168.7.10", 51234)],
+        advertise_endpoints=[Endpoint(b_advertised_host, b_advertised_port)],
         capabilities=["chat"],
     )
     await b_client.start()
@@ -117,10 +119,14 @@ async def test_resolve_peer_endpoint_falls_back_to_rendezvous(
         try:
             peer = await daemon.resolve_peer_endpoint(b_id.fingerprint)
             assert peer is not None
-            # Rendezvous-observed endpoint takes priority — that's
-            # 127.0.0.1 in this loopback test setup.
-            assert peer.address == "127.0.0.1"
-            assert peer.port > 0
+            # Advertised endpoint comes first (the rendezvous-observed
+            # *port* is the HTTP source port, not the peer-server port,
+            # so we never use it directly — only the observed host
+            # paired with an advertised port). _collect_dial_candidates
+            # produces both (advertised, advertised) and (observed_host,
+            # advertised_port); resolve_peer_endpoint returns the first.
+            assert peer.address == b_advertised_host
+            assert peer.port == b_advertised_port
             assert peer.ed_pub_hex == b_id.public_bytes.hex()
         finally:
             if daemon.rendezvous is not None:
@@ -356,14 +362,24 @@ async def test_api_rendezvous_get_when_unconfigured(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_api_rendezvous_set_persists_urls(tmp_path: Path):
+async def test_api_rendezvous_set_persists_urls_and_live_applies(tmp_path: Path):
+    """v0.5.3: POST /api/rendezvous applies the URL change immediately
+    — no restart required. The daemon's update_rendezvous_urls() is
+    invoked with the persisted list."""
     from one_link.server import UIServer
 
     state = State(db_path=tmp_path / "state.db")
+    applied_urls: list[list[str]] = []
+
+    async def _fake_update(urls):
+        applied_urls.append(list(urls))
+
     try:
         daemon = SimpleNamespace(
             state=state,
             rendezvous=None,
+            update_rendezvous_urls=_fake_update,
+            ui_server=None,
             me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa", hostname="me"),
         )
         server = UIServer(daemon)
@@ -381,9 +397,59 @@ async def test_api_rendezvous_set_persists_urls(tmp_path: Path):
         body = json.loads(resp.text)
         assert body["ok"] is True
         assert body["urls"] == ["https://r.example"]
+        assert body["active"] is False  # daemon.rendezvous still None in this fake
+        # Live re-config applied
+        assert applied_urls == [["https://r.example"]]
+        # And persisted
         assert state.get_rendezvous_urls() == ["https://r.example"]
     finally:
         state.close()
+
+
+@pytest.mark.asyncio
+async def test_update_rendezvous_urls_switches_live_between_rendezvous(
+    tmp_path: Path,
+):
+    """Daemon configured for rendezvous A; live re-config to B.
+    Old registration on A should be revoked; new registration on B
+    should appear. No daemon restart involved."""
+    base_a, rdz_a, run_a = await _start_rendezvous()
+    base_b, rdz_b, run_b = await _start_rendezvous()
+    try:
+        me = _new_identity()
+        state = State(db_path=tmp_path / "state.db")
+        try:
+            state.set_rendezvous_urls([base_a])
+
+            daemon = Daemon(me)
+            daemon.state = state
+            daemon.discovery = None
+            await daemon._start_rendezvous(peer_port=51234)  # type: ignore[attr-defined]
+            try:
+                # Confirm A has us; B doesn't.
+                assert rdz_a.registry.get(me.public_bytes) is not None
+                assert rdz_b.registry.get(me.public_bytes) is None
+
+                # Live switch.
+                state.set_rendezvous_urls([base_b])
+                await daemon.update_rendezvous_urls([base_b])
+
+                # Now B has us; A no longer does (revoked on stop).
+                assert rdz_b.registry.get(me.public_bytes) is not None
+                assert rdz_a.registry.get(me.public_bytes) is None
+
+                # Switch to empty — disables rendezvous entirely.
+                await daemon.update_rendezvous_urls([])
+                assert daemon.rendezvous is None
+                assert rdz_b.registry.get(me.public_bytes) is None
+            finally:
+                if daemon.rendezvous is not None:
+                    await daemon.rendezvous.stop()
+        finally:
+            state.close()
+    finally:
+        await run_a.cleanup()
+        await run_b.cleanup()
 
 
 @pytest.mark.asyncio

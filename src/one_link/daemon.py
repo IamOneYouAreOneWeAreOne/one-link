@@ -249,6 +249,9 @@ class Daemon:
         # are configured in state; stopped on shutdown. None when offline /
         # unconfigured — daemon falls back to mDNS-only behaviour.
         self.rendezvous = None  # type: rendezvous_client.RendezvousClient | None
+        # v0.5.3: peer-server port stamped during start() so live re-config
+        # of rendezvous URLs (no restart) can re-derive advertised endpoints.
+        self._rendezvous_peer_port: int = 0
 
     def _acquire_instance_lock(self) -> None:
         """Prevent duplicate daemons for the same config/data home.
@@ -1336,15 +1339,37 @@ class Daemon:
         """
         if self.state is None:
             return
+        self._rendezvous_peer_port = int(peer_port)
         try:
             urls = self.state.get_rendezvous_urls()
         except Exception as e:
             log.warning("could not read rendezvous URLs: %s", e)
             return
+        await self.update_rendezvous_urls(urls)
+
+    async def update_rendezvous_urls(self, urls: list[str]) -> None:
+        """Live re-config — no daemon restart required.
+
+        Stops any running rendezvous client (revoke + close), then
+        starts a fresh one if `urls` is non-empty. Tolerant of partial
+        failure: per-URL register issues are logged and the daemon
+        keeps running. Empty list disables rendezvous entirely
+        (LAN-only).
+        """
+        # Tear down old client first.
+        if self.rendezvous is not None:
+            old = self.rendezvous
+            self.rendezvous = None
+            with contextlib.suppress(Exception):
+                await old.stop()
+
+        urls = [u for u in (urls or []) if u]
         if not urls:
             log.info("rendezvous: no URLs configured; LAN-only mode")
             return
+
         from one_link import rendezvous_client
+        peer_port = getattr(self, "_rendezvous_peer_port", 0)
         try:
             advertise = rendezvous_client.discover_local_endpoints(peer_port=peer_port)
         except Exception as e:
@@ -1367,6 +1392,11 @@ class Daemon:
             "rendezvous: connected to %d endpoint(s); advertising %d local ip(s)",
             len(urls), len(advertise),
         )
+        # Push a peers_changed notification so the UI re-fetches /api/rendezvous
+        # status if it's open.
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({"type": "rendezvous_changed"})
 
     async def resolve_peer_endpoint(self, peer_fp: str) -> Peer | None:
         """Find a way to reach a paired peer. mDNS first (LAN), then
@@ -1403,20 +1433,34 @@ class Daemon:
         if ack is None:
             return None
 
-        # Pick the best endpoint to dial. Priority:
-        #   1. Rendezvous-observed (public IP — works across NATs without
-        #      hole-punch as long as the peer is fully open or already
-        #      mapped to its peer port).
-        #   2. Advertised endpoints in order (LAN IPs come first if the
-        #      peer was on the same network at register time).
-        # Hole-punch logic in v0.5.2 will additionally schedule a
-        # rendezvous-coordinated PUNCH attempt before falling back to
-        # relay in v0.5.3.
+        # Pick the best endpoint to dial.
+        #
+        # Important correctness point: the rendezvous-observed `port`
+        # is the source port of the peer's HTTP register request — NOT
+        # the port their peer-server listens on. So `observed_endpoint`
+        # gives us a reliable public *IP*, but its port is garbage for
+        # establishing a peer connection. The peer's *advertised*
+        # endpoints carry the real listening port.
+        #
+        # Strategy:
+        #   1. Try advertised (LAN_IP, advertised_port) first — works if
+        #      we share a network with the peer (rare for cross-internet,
+        #      but free).
+        #   2. Try (observed_public_IP, advertised_port) — this is the
+        #      actual cross-internet candidate, valid as long as the
+        #      peer's NAT preserves its outbound→inbound port mapping
+        #      for the listener (true for most cone NATs, fails on
+        #      symmetric NATs — the v0.5.3 relay path catches those).
         candidates: list[tuple[str, int]] = []
-        if ack.observed_endpoint is not None:
-            candidates.append((ack.observed_endpoint.host, ack.observed_endpoint.port))
+        observed_host: str | None = (
+            ack.observed_endpoint.host if ack.observed_endpoint else None
+        )
         for e in ack.advertised_endpoints:
+            if e.port <= 0:
+                continue
             candidates.append((e.host, e.port))
+            if observed_host and observed_host != e.host:
+                candidates.append((observed_host, e.port))
         if not candidates:
             return None
         host, port = candidates[0]
@@ -1468,10 +1512,18 @@ class Daemon:
             return out
         if ack is None:
             return out
-        if ack.observed_endpoint is not None:
-            _add(ack.observed_endpoint.host, ack.observed_endpoint.port)
+        # See the priority note in `resolve_peer_endpoint`: the
+        # observed_endpoint.port is garbage for dial — we only use
+        # observed.host paired with each advertised.port.
+        observed_host = (
+            ack.observed_endpoint.host if ack.observed_endpoint else None
+        )
         for e in ack.advertised_endpoints:
+            if e.port <= 0:
+                continue
             _add(e.host, e.port)
+            if observed_host and observed_host != e.host:
+                _add(observed_host, e.port)
         return out
 
     async def _dial_first_responsive(

@@ -270,6 +270,12 @@ def discover_local_endpoints(
     `advertised_endpoints` — peers on the same NAT might be able to use
     these directly without needing the rendezvous-observed public IP.
     """
+    # If we don't have a real peer-listener port (e.g., outbound-only
+    # daemon during tests, or pre-bind state), there's nothing to
+    # advertise — return an empty list rather than producing port-0
+    # entries that the rendezvous would reject.
+    if not peer_port or int(peer_port) <= 0:
+        return []
     out: list[Endpoint] = []
     seen: set[str] = set()
     try:

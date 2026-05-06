@@ -760,9 +760,11 @@ class UIServer:
         })
 
     async def api_set_rendezvous(self, request: web.Request) -> web.Response:
-        """Update the rendezvous URL list. Stored to state and applied
-        on next daemon restart. (Live re-config of the running client
-        is a v0.5.2 polish — for now restart to pick up changes.)"""
+        """Update the rendezvous URL list and apply *immediately* —
+        no daemon restart required. The daemon revokes its existing
+        registrations, drops the old client, and starts a fresh one
+        against the new URL set. Empty list disables rendezvous
+        entirely (LAN-only mode)."""
         if self.daemon.state is None:
             return web.json_response({"error": "state not available"}, status=503)
         try:
@@ -778,10 +780,22 @@ class UIServer:
             self.daemon.state.set_rendezvous_urls(urls)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
+        # Live re-config — no restart. Applies the new URL list on the
+        # running daemon.
+        applied = self.daemon.state.get_rendezvous_urls()
+        try:
+            await self.daemon.update_rendezvous_urls(applied)
+        except Exception as e:
+            log.exception("rendezvous live re-config failed")
+            return web.json_response({
+                "ok": False,
+                "urls": applied,
+                "error": f"saved but failed to apply: {e}",
+            }, status=500)
         return web.json_response({
             "ok": True,
-            "urls": self.daemon.state.get_rendezvous_urls(),
-            "note": "Restart One Link to apply.",
+            "urls": applied,
+            "active": self.daemon.rendezvous is not None,
         })
 
     # ─── pairing ──────────────────────────────────────────────────────

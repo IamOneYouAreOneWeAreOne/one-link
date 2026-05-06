@@ -1,0 +1,50 @@
+# Production-shape docker-compose.
+#
+# Run: cd deploy/rendezvous && docker compose up -d
+# Logs: docker compose logs -f rendezvous
+# Health: curl -sS http://localhost:7118/health
+
+services:
+  rendezvous:
+    build:
+      context: ../..
+      dockerfile: deploy/rendezvous/Dockerfile
+    image: onelink/rendezvous:0.5.3
+    container_name: one-link-rendezvous
+    restart: unless-stopped
+    ports:
+      - "7118:7118"
+    environment:
+      ONE_LINK_RDZ_HOST: "0.0.0.0"
+      ONE_LINK_RDZ_PORT: "7118"
+      ONE_LINK_RDZ_LOG_LEVEL: "INFO"
+      ONE_LINK_RDZ_MAX_REGISTRATIONS: "200000"
+      ONE_LINK_RDZ_RATE_PER_IP_PER_MIN: "120"
+      ONE_LINK_RDZ_RATE_REGISTER_PER_PUBKEY_PER_MIN: "30"
+    # Hardening: rendezvous needs nothing but its socket.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Sane resource caps.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: "512M"
+        reservations:
+          memory: "128M"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:7118/health',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

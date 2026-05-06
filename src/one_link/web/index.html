@@ -173,6 +173,14 @@
     color: var(--text); font-weight: 600; font-size: 15px; margin-bottom: 6px;
   }
   .side .empty-state p { font-size: 12px; line-height: 1.5; margin-bottom: 16px; }
+  .side .empty-state-link {
+    display: inline-block;
+    margin-top: 6px; padding: 6px 10px;
+    color: var(--accent); font-size: 11px; font-weight: 500;
+    text-decoration: none; border-radius: 6px;
+    transition: background .12s;
+  }
+  .side .empty-state-link:hover { background: var(--bg-2); }
 
   /* v0.4: prominent "+ Pair a device" CTA above the peer list. */
   .pair-cta {
@@ -664,6 +672,53 @@
   .settings-row .toggle input:checked + .slider { background: var(--accent); }
   .settings-row .toggle input:checked + .slider::before { transform: translateX(16px); }
 
+  /* v0.5.3: Connect-across-networks settings section */
+  .settings-section {
+    border-top: 1px solid var(--line);
+    margin-top: 18px; padding-top: 16px;
+  }
+  .settings-section-h {
+    display: flex; align-items: center; gap: 8px;
+    color: var(--text); font-weight: 600; font-size: 13px;
+    margin-bottom: 6px;
+  }
+  .rdz-status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--text-dimmer);
+    transition: background .15s;
+  }
+  .rdz-status-dot.active { background: var(--good); box-shadow: 0 0 6px rgba(70,211,154,.55); }
+  .rdz-status-dot.error  { background: var(--bad); }
+  .settings-help {
+    color: var(--text-dim); font-size: 12px; line-height: 1.5;
+    margin-bottom: 10px;
+  }
+  .settings-help .learn-more {
+    color: var(--accent); cursor: pointer; text-decoration: none;
+  }
+  .settings-help .learn-more:hover { text-decoration: underline; }
+  #set-rendezvous {
+    width: 100%; min-height: 64px;
+    background: var(--bg-2); border: 1px solid var(--bg-3);
+    border-radius: 8px; padding: 9px 11px; color: var(--text);
+    font-family: var(--mono); font-size: 12px;
+    outline: none; resize: vertical;
+    transition: border-color .12s;
+  }
+  #set-rendezvous:focus { border-color: var(--accent); }
+  .rdz-status-pane {
+    margin-top: 10px;
+    background: var(--bg-2); border-radius: 8px;
+    padding: 8px 11px;
+    font-size: 11px; color: var(--text-dim); font-family: var(--mono);
+    min-height: 14px;
+    line-height: 1.5;
+  }
+  .rdz-status-pane:empty { display: none; }
+  .rdz-status-pane .ok    { color: var(--good); }
+  .rdz-status-pane .warn  { color: var(--warn); }
+  .rdz-status-pane .err   { color: var(--bad); }
+
   /* Top-bar settings gear */
   .gear {
     background: transparent; color: var(--text-dim);
@@ -920,7 +975,7 @@
 
   <!-- SETTINGS MODAL -->
   <div class="modal-backdrop" id="settings-backdrop">
-    <div class="modal" style="max-width:480px;">
+    <div class="modal" style="max-width:560px;">
       <h2>Settings</h2>
       <p>Your display name is what nearby devices should see after One Link restarts.</p>
       <div class="settings-row">
@@ -938,9 +993,52 @@
         <label for="set-passphrase">Passphrase</label>
         <input type="password" id="set-passphrase" placeholder="(set ONE_LINK_PASSPHRASE env var; restart required)" disabled />
       </div>
+
+      <!-- v0.5.3: Connect across networks (rendezvous) -->
+      <div class="settings-section">
+        <div class="settings-section-h">
+          <span>Connect across networks</span>
+          <span class="rdz-status-dot" id="rdz-status-dot" title="Not connected"></span>
+        </div>
+        <p class="settings-help">
+          One Link finds devices on your Wi-Fi automatically. To talk to
+          devices on different networks, add one or more rendezvous URLs.
+          <a href="#" id="rdz-help-link" class="learn-more">What's a rendezvous?</a>
+        </p>
+        <textarea id="set-rendezvous" rows="3"
+                  placeholder="https://your-rendezvous.example.com&#10;https://backup-rendezvous.example.com"></textarea>
+        <div class="rdz-status-pane" id="rdz-status-pane"></div>
+      </div>
+
       <div class="actions">
         <button class="btn-ghost" id="settings-cancel">Close</button>
         <button class="btn-primary" id="settings-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v0.5.3: "What's a rendezvous?" inline help -->
+  <div class="modal-backdrop" id="rdz-help-backdrop">
+    <div class="modal" style="max-width:520px;">
+      <h2>What's a rendezvous?</h2>
+      <p>Without a rendezvous, One Link can only find devices on the same
+        Wi-Fi network as you. To chat with a laptop at home from a coffee
+        shop — or with friends and family across the country — your
+        devices need a way to find each other across the internet.</p>
+      <p>A <b>rendezvous</b> is a small server that lets paired devices
+        announce where they currently are. It never sees your messages
+        or files; it only carries signed presence beacons. Add one URL
+        and your devices will find each other anywhere on Earth.</p>
+      <p>Three options:</p>
+      <ul style="margin: 8px 0 12px 22px; line-height: 1.6;">
+        <li>Use a rendezvous a friend or community is running.</li>
+        <li>Run your own (free, ~5 minutes — see RENDEZVOUS_DEPLOY.md
+          in the repo).</li>
+        <li>Don't add any. Wi-Fi-only mode is fully secure and works
+          for household use.</li>
+      </ul>
+      <div class="actions">
+        <button class="btn-primary" id="rdz-help-close">Got it</button>
       </div>
     </div>
   </div>
@@ -1011,6 +1109,40 @@
     pairing: { peerFp: null, sas: null, weConfirmed: false },
   };
 
+  // ── v0.5.3: connection-regime classifier ───────────────────────────
+  // Tells users where a peer's connection is coming from. Pure
+  // client-side: based on the address octet pattern of peer.address,
+  // which the server already gives us. No extra API roundtrip needed.
+  function isPrivateAddress(addr) {
+    if (!addr || typeof addr !== "string") return false;
+    if (addr === "127.0.0.1" || addr.startsWith("127.")) return true;
+    if (addr === "::1") return true;
+    if (addr.startsWith("169.254.")) return true;          // link-local
+    if (addr.startsWith("10.")) return true;                // RFC 1918
+    if (addr.startsWith("192.168.")) return true;           // RFC 1918
+    if (addr.startsWith("fe80:") || addr.startsWith("FE80:")) return true; // IPv6 LL
+    if (addr.startsWith("fc") || addr.startsWith("fd")) return true;       // IPv6 ULA
+    // 172.16.0.0 – 172.31.255.255
+    const m = /^172\.(\d+)\./.exec(addr);
+    if (m) {
+      const oct = parseInt(m[1], 10);
+      if (oct >= 16 && oct <= 31) return true;
+    }
+    // 100.64.0.0/10 carrier-grade NAT
+    const m2 = /^100\.(\d+)\./.exec(addr);
+    if (m2) {
+      const oct = parseInt(m2[1], 10);
+      if (oct >= 64 && oct <= 127) return true;
+    }
+    return false;
+  }
+
+  function reachLabel(p) {
+    if (!p.online) return "offline";
+    if (isPrivateAddress(p.address)) return "on Wi-Fi";
+    return "via internet";
+  }
+
   // ── API client ─────────────────────────────────────────────────────
   const api = {
     async get(p)  { const r = await fetch(p, { credentials: "include" }); if (!r.ok) throw new Error(`${p} ${r.status}`); return r.json(); },
@@ -1068,6 +1200,17 @@
       wrap.appendChild(el("p", "",
         "Open One Link on another computer or phone, then tap " +
         "“Pair a new device” above to add it."));
+      // v0.5.3: nudge to set up cross-network reach if no rendezvous configured.
+      if (!state.rendezvousUrls || state.rendezvousUrls.length === 0) {
+        const link = el("a", "empty-state-link",
+          "Need to reach a device across the internet? Set up a rendezvous →");
+        link.href = "#";
+        link.onclick = (e) => {
+          e.preventDefault();
+          $("#btn-settings").click();
+        };
+        wrap.appendChild(link);
+      }
       list.appendChild(wrap);
       return;
     }
@@ -1081,7 +1224,7 @@
       const av = el("div", "avatar", initials(p.hostname || p.short_id));
       const txt = el("div", "text");
       txt.appendChild(el("div", "name", p.hostname || "(unknown)"));
-      txt.appendChild(el("div", "sub", p.online ? "online" : "offline"));
+      txt.appendChild(el("div", "sub", reachLabel(p)));
 
       const verify = el("div", "verify");
       verify.textContent = `${p.short_id} · ${p.address || "?"}:${p.port || "?"}`;
@@ -1338,6 +1481,17 @@
       $("#metric-cache").textContent = fmtBytes(state.status.performance?.cdc_cache?.bytes || 0);
       $("#metric-sessions").textContent = state.status.performance?.sessions?.open ?? 0;
     } catch (e) { console.warn(e); }
+    // v0.5.3: keep rendezvous URLs cached so the empty-state nudge is
+    // accurate without waiting for the user to open the settings modal.
+    try {
+      const r = await api.get("/api/rendezvous");
+      const before = (state.rendezvousUrls || []).length;
+      state.rendezvousUrls = r.urls || [];
+      if (before === 0 && state.peers && state.peers.size === 0) {
+        // The empty-state callout depends on this — re-render.
+        renderPeers();
+      }
+    } catch (e) { /* ignore — rendezvous is optional */ }
   }
 
   async function refreshTransfers() {
@@ -1403,7 +1557,7 @@
     $("#convo-name").textContent = peer.hostname || "(unknown)";
     $("#convo-sub").textContent = peer.trust === "rejected"
       ? `${peer.short_id} · blocked`
-      : `${peer.short_id} · ${peer.address}:${peer.port}`;
+      : `${peer.short_id} · ${reachLabel(peer)}`;
     $("#btn-unblock").style.display = peer.trust === "rejected" && peer.fingerprint ? "inline-block" : "none";
     $("#btn-attach").disabled = peer.trust === "rejected";
     $("#btn-attach2").disabled = peer.trust === "rejected";
@@ -1891,6 +2045,17 @@
       $("#set-name").value = "";
       $("#set-autoaccept").checked = false;
     }
+    // v0.5.3: load current rendezvous URLs + status
+    try {
+      const r = await api.get("/api/rendezvous");
+      state.rendezvousUrls = r.urls || [];
+      $("#set-rendezvous").value = (r.urls || []).join("\n");
+      renderRendezvousStatus(r);
+    } catch (e) {
+      state.rendezvousUrls = [];
+      $("#set-rendezvous").value = "";
+      renderRendezvousStatus({});
+    }
     settingsBackdrop.classList.add("show");
   };
   $("#settings-cancel").onclick = () => settingsBackdrop.classList.remove("show");
@@ -1899,23 +2064,97 @@
       display_name: $("#set-name").value.trim() || null,
       auto_accept_lan: $("#set-autoaccept").checked,
     };
+    let savedSettings = false;
     try {
       await api.post("/api/settings", payload);
-      toast("Settings saved", "good");
-      settingsBackdrop.classList.remove("show");
-      refreshPeers();
-      // refresh own identity in case display name changed
-      try {
-        const me = await api.get("/api/me");
-        $("#me-host").textContent = me.display_name || me.hostname;
-      } catch {}
+      savedSettings = true;
     } catch (e) {
       toast(`Save failed: ${e.message || e}`, "bad");
+      return;
     }
+
+    // v0.5.3: rendezvous URL list — only POST if value actually changed
+    // (avoids needlessly tearing down a working client).
+    const newUrls = $("#set-rendezvous").value
+      .split(/[\s,]+/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    const oldUrls = (state.rendezvousUrls || []).slice().sort();
+    const newSorted = newUrls.slice().sort();
+    const changed = oldUrls.length !== newSorted.length ||
+      oldUrls.some((u, i) => u !== newSorted[i]);
+    if (changed) {
+      try {
+        const res = await api.post("/api/rendezvous", { urls: newUrls });
+        state.rendezvousUrls = res.urls || [];
+        renderRendezvousStatus({ active: res.active, urls: res.urls });
+        toast(
+          res.urls.length === 0
+            ? "Saved — Wi-Fi-only mode"
+            : `Saved — connected to ${res.urls.length} rendezvous`,
+          "good",
+        );
+      } catch (e) {
+        toast(`Rendezvous save failed: ${e.message || e}`, "bad");
+        return;
+      }
+    } else if (savedSettings) {
+      toast("Settings saved", "good");
+    }
+
+    settingsBackdrop.classList.remove("show");
+    refreshPeers();
+    // refresh own identity in case display name changed
+    try {
+      const me = await api.get("/api/me");
+      $("#me-host").textContent = me.display_name || me.hostname;
+    } catch {}
   };
 
+  // v0.5.3: render rendezvous status (active/configured) inside the
+  // settings modal, plus the dot indicator.
+  function renderRendezvousStatus({ active, urls, observed_self } = {}) {
+    const dot = $("#rdz-status-dot");
+    const pane = $("#rdz-status-pane");
+    if (!dot || !pane) return;
+    if (urls && urls.length === 0) {
+      dot.classList.remove("active", "error");
+      dot.title = "Wi-Fi-only mode";
+      pane.innerHTML = "";
+      return;
+    }
+    if (active) {
+      dot.classList.remove("error");
+      dot.classList.add("active");
+      dot.title = "Connected";
+    } else {
+      dot.classList.remove("active");
+      dot.classList.add("error");
+      dot.title = "Configured but not connected";
+    }
+    pane.innerHTML = "";
+    if (observed_self && Object.keys(observed_self).length > 0) {
+      for (const [url, obs] of Object.entries(observed_self)) {
+        const line = el("div", "ok",
+          `✓ ${url} → ${obs.observed_host}:${obs.observed_port}`);
+        pane.appendChild(line);
+      }
+    } else if (urls && urls.length > 0) {
+      pane.appendChild(el("div", "warn",
+        "configured; waiting for first registration..."));
+    }
+  }
+
+  // v0.5.3: rendezvous-help inline modal
+  const rdzHelpBackdrop = $("#rdz-help-backdrop");
+  $("#rdz-help-link").onclick = (e) => {
+    e.preventDefault();
+    rdzHelpBackdrop.classList.add("show");
+  };
+  $("#rdz-help-close").onclick = () => rdzHelpBackdrop.classList.remove("show");
+
   // Click outside modal closes
-  [pairBackdrop, settingsBackdrop].forEach(b => {
+  [pairBackdrop, settingsBackdrop, rdzHelpBackdrop].forEach(b => {
     b.addEventListener("click", (e) => { if (e.target === b) b.classList.remove("show"); });
   });
 

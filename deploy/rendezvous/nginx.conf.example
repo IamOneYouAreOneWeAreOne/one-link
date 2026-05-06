@@ -1,0 +1,46 @@
+# Example nginx vhost for fronting a rendezvous with TLS.
+#
+# Save to /etc/nginx/sites-available/one-link-rendezvous.conf, then:
+#   ln -s ../sites-available/one-link-rendezvous.conf \
+#         /etc/nginx/sites-enabled/
+#   certbot --nginx -d rendezvous.example.com
+#   systemctl reload nginx
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name rendezvous.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name rendezvous.example.com;
+
+    # certbot fills these in
+    ssl_certificate     /etc/letsencrypt/live/rendezvous.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/rendezvous.example.com/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # Payloads are small; no buffering or huge bodies needed.
+    proxy_buffering off;
+    client_max_body_size 16k;
+
+    # Rendezvous expects X-Forwarded-For for accurate per-IP limits.
+    location / {
+        proxy_pass http://127.0.0.1:7118;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_read_timeout 30s;
+    }
+
+    # Defensive: 400 anything that smells like path traversal.
+    location ~ \.\./ {
+        return 400;
+    }
+}
