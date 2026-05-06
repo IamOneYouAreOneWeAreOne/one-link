@@ -335,6 +335,10 @@ class UIServer:
                         fp = fingerprint_of(bytes.fromhex(p.ed_pub_hex))
                     except ValueError:
                         fp = ""
+                if fp and fp == self.daemon.me.fingerprint:
+                    continue
+                if p.short_id == self.daemon.me.short_id:
+                    continue
                 live[fp or p.short_id] = {
                     "short_id": p.short_id,
                     "hostname": p.hostname,
@@ -346,6 +350,7 @@ class UIServer:
                     "trust": "pending",  # default if no DB row yet
                     "capabilities": [],
                     "allowed_capabilities": None,
+                    "same_host": p.hostname == self.daemon.me.hostname,
                 }
         # Merge persistent state
         if self.daemon.state is not None:

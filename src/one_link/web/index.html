@@ -342,6 +342,13 @@
     display: block; height: 100%;
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
   }
+  .help-card {
+    margin: 8px 12px 10px; padding: 11px 12px;
+    border: 1px solid rgba(255,255,255,.05);
+    border-radius: 8px; background: rgba(255,255,255,.025);
+    color: var(--text-dim); font-size: 12px; line-height: 1.45;
+  }
+  .help-card strong { color: var(--text); font-weight: 600; }
   .panel-form {
     border-top: 1px solid var(--line);
     padding: 12px 14px; display: grid; gap: 8px;
@@ -370,6 +377,7 @@
   }
   .peer-tools.show { display: flex; }
   .peer-tools .label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .8px; }
+  .peer-tools .scope { color: var(--text-dim); font-size: 12px; margin-left: auto; }
   .mesh-summary {
     display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
     padding: 10px 12px; border-bottom: 1px solid var(--line);
@@ -589,7 +597,7 @@
     <!-- SIDEBAR -->
     <aside class="side">
       <div class="section-h">
-        <span>Peers on your LAN</span>
+        <span>Nearby devices</span>
         <span class="count" id="peers-count">0</span>
       </div>
       <div class="peerlist" id="peerlist">
@@ -602,7 +610,7 @@
         <button class="btn active" data-pane="convo">Chat</button>
         <button class="btn" data-pane="files" id="btn-files">Files</button>
         <button class="btn" data-pane="folders" id="btn-folders">Folders</button>
-        <button class="btn" data-pane="mesh" id="btn-mesh">Mesh</button>
+        <button class="btn" data-pane="mesh" id="btn-mesh">Activity</button>
       </div>
     </aside>
 
@@ -610,8 +618,8 @@
     <section class="convo">
       <div id="convo-empty" class="empty-pane">
         <div class="glyph"><img src="/static/one-glyph.png" alt="" /></div>
-        <h3>Pick a peer to start</h3>
-        <div>Once another One Link device shows up on your LAN, you can chat with them and drop files anywhere on this window to send.</div>
+        <h3>Pick a device to start</h3>
+        <div>Open One Link on another computer on this network. Pair once, then chat or drag files here.</div>
       </div>
 
       <div id="convo-active" style="display:none; flex:1; flex-direction:column; min-height:0;">
@@ -643,6 +651,7 @@
           <button class="cap-toggle" data-cap="chat">Chat</button>
           <button class="cap-toggle" data-cap="files">Files</button>
           <button class="cap-toggle" data-cap="folder_sync">Folders</button>
+          <span class="scope">This paired device only</span>
         </div>
 
         <div class="messages" id="messages"></div>
@@ -668,15 +677,19 @@
 
     <aside class="files" id="folders-panel" style="display:none;">
       <div class="section-h">
-        <span>Sync folders</span>
+        <span>Shared folders</span>
         <span class="count" id="folders-count">0</span>
       </div>
+      <div class="help-card">
+        <strong>Folder location</strong> means a folder on this computer, like
+        <code>$HOME\Documents\One Link</code>. Pair a device first, then share the folder with it.
+      </div>
       <div id="folderlist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
-        <div class="empty">no folders yet</div>
+        <div class="empty">No shared folders yet.</div>
       </div>
       <div class="panel-form">
-        <input id="folder-name" type="text" placeholder="Folder name" />
-        <input id="folder-path" type="text" placeholder="Local path" />
+        <input id="folder-name" type="text" placeholder="Name, like Family Photos" />
+        <input id="folder-path" type="text" placeholder="Folder location on this computer" />
         <div class="mini-actions">
           <button id="btn-add-folder">Add</button>
           <button id="btn-refresh-folders">Refresh</button>
@@ -686,17 +699,20 @@
 
     <aside class="files" id="mesh-panel" style="display:none;">
       <div class="section-h">
-        <span>Transfers</span>
+        <span>Activity</span>
         <span class="count" id="transfers-count">0</span>
       </div>
+      <div class="help-card">
+        This is the receipt drawer: sent files, received files, and folder sync progress. You do not need it unless you want to check what happened.
+      </div>
       <div class="mesh-summary" id="mesh-summary">
-        <div class="metric"><div class="num" id="metric-online">0</div><div class="lbl">online</div></div>
-        <div class="metric"><div class="num" id="metric-active">0</div><div class="lbl">active</div></div>
-        <div class="metric"><div class="num" id="metric-cache">0 B</div><div class="lbl">CDC cache</div></div>
-        <div class="metric"><div class="num" id="metric-sessions">0</div><div class="lbl">sessions</div></div>
+        <div class="metric"><div class="num" id="metric-online">0</div><div class="lbl">nearby</div></div>
+        <div class="metric"><div class="num" id="metric-active">0</div><div class="lbl">moving now</div></div>
+        <div class="metric"><div class="num" id="metric-cache">0 B</div><div class="lbl">saved chunks</div></div>
+        <div class="metric"><div class="num" id="metric-sessions">0</div><div class="lbl">secure links</div></div>
       </div>
       <div id="transferlist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
-        <div class="empty">no transfers yet</div>
+        <div class="empty">No activity yet.</div>
       </div>
       <div class="panel-form">
         <div class="mini-actions">
@@ -750,7 +766,7 @@
   <div class="modal-backdrop" id="settings-backdrop">
     <div class="modal" style="max-width:480px;">
       <h2>Settings</h2>
-      <p>Defaults are fine for almost everyone. Only change these if you know what you're doing.</p>
+      <p>Your display name is what nearby devices should see after One Link restarts.</p>
       <div class="settings-row">
         <label for="set-name">Display name</label>
         <input type="text" id="set-name" placeholder="leave blank to use hostname" />
@@ -880,7 +896,7 @@
     list.innerHTML = "";
     $("#peers-count").textContent = state.peers.size;
     if (state.peers.size === 0) {
-      list.appendChild(el("div", "empty", "no peers yet — make sure One Link is running on your other devices on the same network"));
+      list.appendChild(el("div", "empty", "No other devices yet. Open One Link on another computer on this Wi-Fi."));
       return;
     }
     for (const p of state.peers.values()) {
@@ -900,7 +916,7 @@
       txt.appendChild(el("div", "name", p.hostname || "(unknown)"));
       // Subtle, debug-only details — only visible on hover via .verify
       txt.appendChild(el("div", "sub",
-        p.online ? "online" : "offline"
+        p.same_host ? "same computer" : p.online ? "online" : "offline"
       ));
 
       // Hover-only "verify identity" detail — IP + fingerprint short-id
@@ -1026,7 +1042,7 @@
       list.innerHTML = "";
       $("#folders-count").textContent = state.folders.length;
       if (state.folders.length === 0) {
-        list.appendChild(el("div", "empty", "no folders yet"));
+        list.appendChild(el("div", "empty", "No shared folders yet. Add a folder location from this computer."));
         return;
       }
       for (const f of state.folders) {
@@ -1106,7 +1122,7 @@
     list.innerHTML = "";
     $("#transfers-count").textContent = state.transfers.length;
     if (state.transfers.length === 0) {
-      list.appendChild(el("div", "empty", "no transfers yet"));
+      list.appendChild(el("div", "empty", "No activity yet. Sent files and folder sync will appear here."));
       return;
     }
     for (const t of state.transfers) {

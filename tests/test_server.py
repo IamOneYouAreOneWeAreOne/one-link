@@ -83,6 +83,47 @@ async def test_api_peers_hides_offline_pending_ghosts(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_api_peers_filters_live_self_advertisements(tmp_path: Path):
+    from one_link.server import UIServer
+    from one_link.state import State
+
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        me_fp = "aa" * 32
+        live_self = SimpleNamespace(
+            short_id="aaaaaaaa",
+            hostname="I am One",
+            address="192.168.1.10",
+            port=50000,
+            ed_pub_hex=("11" * 32),
+        )
+        live_other = SimpleNamespace(
+            short_id="bbbbbbbb",
+            hostname="Kitchen Laptop",
+            address="192.168.1.11",
+            port=50001,
+            ed_pub_hex=("22" * 32),
+        )
+        daemon = SimpleNamespace(
+            state=state,
+            discovery=SimpleNamespace(
+                registry=SimpleNamespace(list=lambda: [live_self, live_other])
+            ),
+            me=SimpleNamespace(fingerprint=me_fp, short_id="aaaaaaaa", hostname="I am One"),
+        )
+
+        server = UIServer(daemon)
+        resp = await server.api_peers(None)
+        body = json.loads(resp.text)
+        short_ids = {p["short_id"] for p in body["peers"]}
+
+        assert "aaaaaaaa" not in short_ids
+        assert "bbbbbbbb" in short_ids
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
 async def test_api_status_and_transfers_surface_ledger(tmp_path: Path):
     from one_link.server import UIServer
     from one_link.state import State

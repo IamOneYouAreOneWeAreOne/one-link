@@ -1990,9 +1990,14 @@ class Daemon:
         ctrl_port = self._control_server.sockets[0].getsockname()[1]
         _control_port_path().write_text(str(ctrl_port))
 
+        advertised_name = self.me.hostname
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                advertised_name = self.state.get_setting("display_name") or self.me.hostname
+
         self.discovery = Discovery(
             short_id=self.me.short_id,
-            hostname=self.me.hostname,
+            hostname=advertised_name,
             port=peer_port,
             ed_pub_hex=self.me.public_bytes.hex(),
         )
