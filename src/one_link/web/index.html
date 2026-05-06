@@ -392,7 +392,7 @@
     border-top: 1px solid var(--line);
     padding: 12px 16px;
     background: var(--bg-1);
-    display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: end;
+    display: grid; grid-template-columns: auto auto 1fr auto; gap: 10px; align-items: end;
   }
   .composer .icon-btn {
     width: 38px; height: 38px;
@@ -897,8 +897,80 @@
     padding: 6px 10px;
   }
 
-  /* ── Composer screenshot button (Tier 3 placeholder, hidden for now) ─ */
-  .composer .icon-btn.cam { display: none; }
+  /* ── Inline message styling (links, code, mentions) ────────────────── */
+  .msg a {
+    color: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    word-break: break-all;
+  }
+  .msg.in a  { color: var(--accent-2); }
+  .msg.out a { color: rgba(255,255,255,.92); }
+  .msg code {
+    font-family: var(--mono);
+    font-size: .92em;
+    background: rgba(255,255,255,.10);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .msg.out code { background: rgba(255,255,255,.18); }
+  .msg pre {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: rgba(0,0,0,.30);
+    padding: 8px 10px;
+    border-radius: 8px;
+    margin: 4px 0 2px;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .msg b, .msg strong { font-weight: 700; }
+  .msg i, .msg em     { font-style: italic; }
+
+  /* ── Peer latency dot (next to reach label) ────────────────────────── */
+  .peer .sub .lat-dot {
+    display: inline-block;
+    width: 6px; height: 6px; border-radius: 50%;
+    margin-right: 5px;
+    vertical-align: 1px;
+    background: var(--text-dimmer);
+  }
+  .peer .sub .lat-dot.fast    { background: var(--good); box-shadow: 0 0 4px rgba(70,211,154,.55); }
+  .peer .sub .lat-dot.medium  { background: var(--warn); }
+  .peer .sub .lat-dot.slow    { background: var(--bad); }
+  .convo-h .who .sub .lat-dot {
+    display: inline-block;
+    width: 7px; height: 7px; border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: 1px;
+    background: var(--text-dimmer);
+  }
+  .convo-h .who .sub .lat-dot.fast   { background: var(--good); box-shadow: 0 0 5px rgba(70,211,154,.55); }
+  .convo-h .who .sub .lat-dot.medium { background: var(--warn); }
+  .convo-h .who .sub .lat-dot.slow   { background: var(--bad); }
+
+  /* ── Click-to-copy affordance ──────────────────────────────────────── */
+  .copyable {
+    cursor: copy;
+    transition: color .12s;
+  }
+  .copyable:hover { color: var(--accent-2); }
+
+  /* ── Keyboard shortcuts modal ──────────────────────────────────────── */
+  .shortcuts-list {
+    display: grid; grid-template-columns: auto 1fr; gap: 10px 16px;
+    margin: 12px 0;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .shortcuts-list kbd {
+    background: var(--bg-2); border: 1px solid var(--bg-3);
+    color: var(--text);
+    padding: 2px 8px; border-radius: 4px;
+    font-family: var(--mono); font-size: 11px;
+    white-space: nowrap;
+  }
+  .shortcuts-list .desc { color: var(--text-dim); }
 </style>
 </head>
 <body>
@@ -999,6 +1071,7 @@
         <div class="composer">
           <div class="attach-tray" id="attach-tray"></div>
           <button class="icon-btn" id="btn-attach2" title="Attach file">📎</button>
+          <button class="icon-btn" id="btn-screenshot" title="Paste screenshot from clipboard">📷</button>
           <textarea id="input" placeholder="Message your peer… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
           <button class="send" id="btn-send" disabled>Send</button>
         </div>
@@ -1126,8 +1199,8 @@
         </div>
       </div>
       <div class="sas-display">
-        <div class="sas-code" id="pair-sas">000 000</div>
-        <div class="sas-label">verification code · check both devices</div>
+        <div class="sas-code copyable" id="pair-sas" title="Click to copy">000 000</div>
+        <div class="sas-label">verification code · click to copy · check both devices</div>
       </div>
       <div class="actions">
         <button class="btn-danger" id="pair-mismatch">Codes don't match</button>
@@ -1177,6 +1250,27 @@
       <div class="actions">
         <button class="btn-ghost" id="settings-cancel">Close</button>
         <button class="btn-primary" id="settings-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- KEYBOARD SHORTCUTS HELP -->
+  <div class="modal-backdrop" id="shortcuts-backdrop">
+    <div class="modal" style="max-width:480px;">
+      <h2>Keyboard shortcuts</h2>
+      <div class="shortcuts-list">
+        <kbd>Ctrl + K</kbd>      <div class="desc">Search this conversation</div>
+        <kbd>Ctrl + /</kbd>      <div class="desc">Focus message input</div>
+        <kbd>Ctrl + ,</kbd>      <div class="desc">Open settings</div>
+        <kbd>Ctrl + N</kbd>      <div class="desc">Pair a new device</div>
+        <kbd>Ctrl + 1 … 9</kbd>  <div class="desc">Switch to paired device by position</div>
+        <kbd>Enter</kbd>         <div class="desc">Send message + staged files</div>
+        <kbd>Shift + Enter</kbd> <div class="desc">New line in message</div>
+        <kbd>Esc</kbd>           <div class="desc">Close current modal or search</div>
+        <kbd>?</kbd>             <div class="desc">Show this help</div>
+      </div>
+      <div class="actions">
+        <button class="btn-primary" id="shortcuts-close">Got it</button>
       </div>
     </div>
   </div>
@@ -1321,6 +1415,21 @@
     return "via internet";
   }
 
+  // Pick a class name for the latency dot based on rolling RTT.
+  // Thresholds match what users intuitively call "snappy" vs "laggy".
+  function latencyClass(p) {
+    const ms = p.health?.latency_ewma_ms;
+    if (ms == null || !p.online) return null;
+    if (ms < 80)  return "fast";
+    if (ms < 250) return "medium";
+    return "slow";
+  }
+  function latencyTitle(p) {
+    const ms = p.health?.latency_ewma_ms;
+    if (ms == null) return "";
+    return `${Math.round(ms)} ms round-trip`;
+  }
+
   // ── API client ─────────────────────────────────────────────────────
   const api = {
     async get(p)  { const r = await fetch(p, { credentials: "include" }); if (!r.ok) throw new Error(`${p} ${r.status}`); return r.json(); },
@@ -1349,6 +1458,30 @@
     transfers() { return this.get("/api/transfers?limit=80"); },
     status() { return this.get("/api/status"); },
   };
+
+  // ── Click-to-copy helper ───────────────────────────────────────────
+  async function copyToClipboard(text, label) {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(`Copied ${label || "to clipboard"}`, "good", 1800);
+    } catch (e) {
+      // Fallback for older browsers / non-secure contexts.
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+        toast(`Copied ${label || "to clipboard"}`, "good", 1800);
+      } catch {
+        toast("Copy failed", "bad");
+      }
+      document.body.removeChild(ta);
+    }
+  }
 
   // ── Desktop notifications ──────────────────────────────────────────
   function notifySupported() {
@@ -1430,10 +1563,22 @@
       const av = el("div", "avatar", initials(p.hostname || p.short_id));
       const txt = el("div", "text");
       txt.appendChild(el("div", "name", p.hostname || "(unknown)"));
-      txt.appendChild(el("div", "sub", reachLabel(p)));
+      const sub = el("div", "sub");
+      const lc = latencyClass(p);
+      if (lc) {
+        const dot = el("span", `lat-dot ${lc}`);
+        dot.title = latencyTitle(p);
+        sub.appendChild(dot);
+      }
+      sub.appendChild(document.createTextNode(reachLabel(p)));
+      txt.appendChild(sub);
 
-      const verify = el("div", "verify");
-      verify.textContent = `${p.short_id} · ${p.address || "?"}:${p.port || "?"}`;
+      const verify = el("div", "verify copyable");
+      verify.textContent = `${p.short_id} · ${p.address || "?"}:${p.port || "?"} — click to copy ID`;
+      verify.onclick = (ev) => {
+        ev.stopPropagation();
+        copyToClipboard(p.short_id, "device ID");
+      };
       row.appendChild(verify);
       row.appendChild(av);
       row.appendChild(txt);
@@ -1537,6 +1682,85 @@
     }
   }
 
+  // ── Inline text rendering: links, code, bold, italic ──────────────
+  // Tokenize and build DOM nodes — never inject raw HTML.
+  // Tokens (in order of priority): triple-backtick blocks, inline `code`,
+  // URLs, **bold**, _italic_.
+  function renderInlineText(body) {
+    const frag = document.createDocumentFragment();
+    const blocks = (body || "").split(/```([\s\S]*?)```/g);
+    for (let i = 0; i < blocks.length; i++) {
+      if (i % 2 === 1) {
+        const pre = document.createElement("pre");
+        const code = document.createElement("code");
+        code.textContent = blocks[i];
+        pre.appendChild(code);
+        frag.appendChild(pre);
+      } else {
+        renderInlineNonCode(blocks[i], frag);
+      }
+    }
+    return frag;
+  }
+  function renderInlineNonCode(text, frag) {
+    const parts = text.split(/`([^`\n]+)`/g);
+    for (let i = 0; i < parts.length; i++) {
+      if (i % 2 === 1) {
+        const c = document.createElement("code");
+        c.textContent = parts[i];
+        frag.appendChild(c);
+      } else {
+        renderInlineMarks(parts[i], frag);
+      }
+    }
+  }
+  function renderInlineMarks(text, frag) {
+    // Collect non-overlapping ranges for url / bold / italic.
+    const URL_RE  = /\bhttps?:\/\/[^\s<>"']+|\bwww\.[^\s<>"']+/gi;
+    const BOLD_RE = /\*\*([^*\n]+)\*\*/g;
+    const ITAL_RE = /(?:^|[\s(\[{])_([^_\n]+)_(?=$|[\s).,!?:;\]}])/g;
+    const ranges = [];
+    let m;
+    while ((m = URL_RE.exec(text))  !== null) ranges.push({s: m.index, e: m.index + m[0].length, t: "url",  raw: m[0]});
+    while ((m = BOLD_RE.exec(text)) !== null) ranges.push({s: m.index, e: m.index + m[0].length, t: "bold", raw: m[1]});
+    while ((m = ITAL_RE.exec(text)) !== null) {
+      // Italic match includes a leading whitespace/open-bracket; offset start.
+      const lead = m[0].length - (m[1].length + 2);
+      ranges.push({s: m.index + lead, e: m.index + m[0].length, t: "ital", raw: m[1]});
+    }
+    ranges.sort((a, b) => a.s - b.s);
+    const kept = [];
+    let cursor = 0;
+    for (const r of ranges) {
+      if (r.s < cursor) continue;
+      kept.push(r);
+      cursor = r.e;
+    }
+    let pos = 0;
+    for (const r of kept) {
+      if (r.s > pos) frag.appendChild(document.createTextNode(text.slice(pos, r.s)));
+      if (r.t === "url") {
+        const a = document.createElement("a");
+        const href = r.raw.startsWith("www.") ? "https://" + r.raw : r.raw;
+        a.href = href;
+        a.textContent = r.raw;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        frag.appendChild(a);
+      } else if (r.t === "bold") {
+        const b = document.createElement("strong");
+        b.textContent = r.raw;
+        frag.appendChild(b);
+      } else if (r.t === "ital") {
+        const i = document.createElement("em");
+        i.textContent = r.raw;
+        frag.appendChild(i);
+      }
+      pos = r.e;
+    }
+    if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+  }
+
   // Look up the transfer record matching a FILE_OFFER message.
   // FILE_OFFER carries `blob` (hex); transfer carries `blob_hash`.
   // Direction must match too (out vs in are distinct ledger rows).
@@ -1606,7 +1830,7 @@
 
       if (msg.t === "TEXT") {
         const b = el("div", `msg ${msg.dir}`);
-        b.appendChild(document.createTextNode(msg.body || ""));
+        b.appendChild(renderInlineText(msg.body || ""));
         b.appendChild(el("span", "when", fmtTime(msg.ts)));
         m.appendChild(b);
       } else if (msg.t === "FILE_OFFER" || msg.t === "FILE_DONE") {
@@ -1928,9 +2152,26 @@
     $("#convo-active").style.display = "flex";
     $("#convo-avatar").textContent = initials(peer.hostname || peer.short_id);
     $("#convo-name").textContent = peer.hostname || "(unknown)";
-    $("#convo-sub").textContent = peer.trust === "rejected"
-      ? `${peer.short_id} · blocked`
-      : `${peer.short_id} · ${reachLabel(peer)}`;
+    const subEl = $("#convo-sub");
+    subEl.innerHTML = "";
+    subEl.classList.add("copyable");
+    subEl.title = "Click to copy device ID";
+    subEl.onclick = () => copyToClipboard(peer.short_id, "device ID");
+    if (peer.trust === "rejected") {
+      subEl.appendChild(document.createTextNode(`${peer.short_id} · blocked`));
+    } else {
+      const lc = latencyClass(peer);
+      if (lc) {
+        const dot = el("span", `lat-dot ${lc}`);
+        dot.title = latencyTitle(peer);
+        subEl.appendChild(dot);
+      }
+      subEl.appendChild(document.createTextNode(`${peer.short_id} · ${reachLabel(peer)}`));
+      const ms = peer.health?.latency_ewma_ms;
+      if (ms != null) {
+        subEl.appendChild(document.createTextNode(` · ${Math.round(ms)} ms`));
+      }
+    }
     $("#btn-unblock").style.display = peer.trust === "rejected" && peer.fingerprint ? "inline-block" : "none";
     $("#btn-attach").disabled = peer.trust === "rejected";
     $("#btn-attach2").disabled = peer.trust === "rejected";
@@ -2247,6 +2488,32 @@
   };
   $("#btn-attach").addEventListener("click", triggerAttach);
   $("#btn-attach2").addEventListener("click", triggerAttach);
+  // Screenshot button — reads clipboard image (e.g. from Win+Shift+S) and stages it.
+  $("#btn-screenshot").addEventListener("click", async () => {
+    if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
+    if (!navigator.clipboard?.read) {
+      toast("This browser doesn't support clipboard read. Take a screenshot, then paste with Ctrl+V.", "info", 5000);
+      return;
+    }
+    try {
+      const items = await navigator.clipboard.read();
+      let staged = 0;
+      for (const item of items) {
+        const imgType = item.types.find(t => t.startsWith("image/"));
+        if (!imgType) continue;
+        const blob = await item.getType(imgType);
+        const ext = imgType.split("/")[1] || "png";
+        const file = new File([blob], `screenshot-${Date.now()}.${ext}`, { type: imgType });
+        await stageFile(file);
+        staged++;
+      }
+      if (staged === 0) {
+        toast("No image in clipboard. Use Win+Shift+S, then click 📷 again.", "info", 5000);
+      }
+    } catch (e) {
+      toast(`Clipboard read failed: ${e.message || e}. You may need to grant permission.`, "bad", 6000);
+    }
+  });
   $("#btn-unblock").addEventListener("click", async () => {
     const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
     if (!peer?.fingerprint) return;
@@ -2337,13 +2604,79 @@
     dragCounter--;
     if (dragCounter <= 0) { dragCounter = 0; $("#drop-overlay").classList.remove("show"); }
   });
+  // Recursively walk a DirectoryEntry, returning {file, relPath}[].
+  // Browsers paginate readEntries() in batches of ~100, so we loop until
+  // empty. Path is included so we can show 'subdir/file.txt' in chips.
+  async function readAllEntries(reader) {
+    const out = [];
+    while (true) {
+      const batch = await new Promise((resolve, reject) =>
+        reader.readEntries(resolve, reject));
+      if (!batch.length) break;
+      out.push(...batch);
+    }
+    return out;
+  }
+  async function collectFromEntry(entry, prefix = "") {
+    const collected = [];
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) =>
+        entry.file(resolve, reject));
+      collected.push({ file, relPath: prefix + file.name });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const children = await readAllEntries(reader);
+      for (const child of children) {
+        const sub = await collectFromEntry(child, prefix + entry.name + "/");
+        collected.push(...sub);
+      }
+    }
+    return collected;
+  }
+
   document.addEventListener("drop", async (e) => {
     e.preventDefault();
     dragCounter = 0;
     $("#drop-overlay").classList.remove("show");
     if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
-    const files = Array.from(e.dataTransfer?.files || []);
-    for (const f of files) await stageFile(f);
+    const items = e.dataTransfer?.items;
+    let collected = [];
+    if (items && items.length && items[0].webkitGetAsEntry) {
+      // Use entries API to detect folders. This is what makes folder
+      // drops actually work.
+      const entries = [];
+      for (const item of items) {
+        const entry = item.webkitGetAsEntry?.();
+        if (entry) entries.push(entry);
+      }
+      try {
+        for (const entry of entries) {
+          const sub = await collectFromEntry(entry);
+          collected.push(...sub);
+        }
+      } catch (err) {
+        toast(`Folder read failed: ${err.message || err}`, "bad");
+      }
+    }
+    if (!collected.length) {
+      // Fallback: dataTransfer.files (works for plain file drops).
+      const files = Array.from(e.dataTransfer?.files || []);
+      collected = files.map(f => ({ file: f, relPath: f.name }));
+    }
+    if (collected.length === 0) return;
+    if (collected.length > 1) {
+      toast(`Staging ${collected.length} files`, "info", 2000);
+    }
+    for (const { file, relPath } of collected) {
+      // For nested files, attach the relative path to the staged name so
+      // the receiver can see where it came from. We can't preserve the
+      // tree on send (the wire protocol takes flat names), but the
+      // sender at least sees what they're sending.
+      const tagged = relPath !== file.name
+        ? new File([file], relPath.replace(/[\\\/]/g, "_"), { type: file.type })
+        : file;
+      await stageFile(tagged);
+    }
   });
 
   // ── Search wiring ──────────────────────────────────────────────────
@@ -2564,6 +2897,10 @@
     refreshPeers();
   };
   pairCancel.onclick = () => closePairModal(false);
+  pairSasEl.onclick = () => {
+    const txt = (pairSasEl.textContent || "").replace(/\s+/g, "");
+    if (txt && txt !== "—" && txt !== "…") copyToClipboard(txt, "verification code");
+  };
 
   // ── Settings modal ─────────────────────────────────────────────────
   const settingsBackdrop = $("#settings-backdrop");
@@ -2685,8 +3022,77 @@
   $("#rdz-help-close").onclick = () => rdzHelpBackdrop.classList.remove("show");
 
   // Click outside modal closes
-  [pairBackdrop, settingsBackdrop, rdzHelpBackdrop].forEach(b => {
+  [pairBackdrop, settingsBackdrop, rdzHelpBackdrop, $("#shortcuts-backdrop")].forEach(b => {
+    if (!b) return;
     b.addEventListener("click", (e) => { if (e.target === b) b.classList.remove("show"); });
+  });
+  $("#shortcuts-close")?.addEventListener("click", () => $("#shortcuts-backdrop").classList.remove("show"));
+
+  // ── Global keyboard shortcuts ─────────────────────────────────────
+  function isTypingTarget(t) {
+    if (!t) return false;
+    if (t.isContentEditable) return true;
+    const tag = t.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  }
+  function anyModalOpen() {
+    return document.querySelector(".modal-backdrop.show, .discover-overlay.show") != null;
+  }
+  function closeAnyModal() {
+    document.querySelectorAll(".modal-backdrop.show, .discover-overlay.show")
+      .forEach(b => b.classList.remove("show"));
+    if (state.discoverOpen) state.discoverOpen = false;
+  }
+  document.addEventListener("keydown", (e) => {
+    // Esc — universal close (search input, modals)
+    if (e.key === "Escape") {
+      if (searchWrap.classList.contains("open")) {
+        searchInput.value = ""; finishSearch();
+        searchWrap.classList.remove("open");
+        return;
+      }
+      if (anyModalOpen()) {
+        closeAnyModal();
+        return;
+      }
+    }
+    // Bypass keyboard shortcuts while typing, except for the special
+    // Ctrl-combos that users expect to work everywhere.
+    const typing = isTypingTarget(e.target);
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && (e.key === "k" || e.key === "K")) {
+      e.preventDefault();
+      searchWrap.classList.add("open");
+      searchInput.focus();
+      return;
+    }
+    if (ctrl && e.key === "/") {
+      e.preventDefault();
+      input.focus();
+      return;
+    }
+    if (ctrl && e.key === ",") {
+      e.preventDefault();
+      $("#btn-settings").click();
+      return;
+    }
+    if (ctrl && (e.key === "n" || e.key === "N")) {
+      e.preventDefault();
+      $("#open-discover-modal").click();
+      return;
+    }
+    if (ctrl && /^[1-9]$/.test(e.key)) {
+      e.preventDefault();
+      const peers = [...state.peers.values()];
+      const idx = parseInt(e.key, 10) - 1;
+      if (peers[idx]) selectPeer(peers[idx].short_id);
+      return;
+    }
+    if (!typing && e.key === "?") {
+      e.preventDefault();
+      $("#shortcuts-backdrop").classList.add("show");
+      return;
+    }
   });
 
   init();
