@@ -1,5 +1,32 @@
 name: tests
 
+# ----------------------------------------------------------------------------
+# macOS runners removed from this workflow on 2026-05-06.
+#
+# Why: macOS-latest is billed at ~$0.08/min vs $0.008/min for Linux (10x
+# premium). Running it on every push to a pure-Python project with no
+# Mac-specific code was burning ~$40/month in metered Actions usage with
+# zero added coverage.
+#
+# What changed:
+#   - Test matrix: was [windows-latest, macos-latest], now
+#     [ubuntu-latest, windows-latest]. Linux is free under the included
+#     Actions allowance and gives equivalent coverage for this codebase
+#     (pure Python, X25519 / ChaCha20-Poly1305 / Ed25519 / mDNS — no
+#     AppKit / CoreFoundation / Mac-only APIs).
+#   - The `build_macos_binary` job below is commented out (see the block
+#     near the bottom of this file). The README only ships a Windows
+#     binary today, so the macOS artifact had no consumer.
+#
+# If you ever need macOS coverage back (e.g. shipping a signed Mac
+# binary, debugging a Mac-only bug):
+#   - For one-off checks: re-enable via the GitHub UI by adding a
+#     `workflow_dispatch:` trigger and running the job manually.
+#   - For release-time builds: gate macOS jobs behind
+#     `if: startsWith(github.ref, 'refs/tags/')` so they only fire on
+#     tag pushes, not every commit.
+# ----------------------------------------------------------------------------
+
 on:
   push:
     branches: [master, main]
@@ -12,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
         python: ["3.11", "3.12"]
 
     steps:
@@ -66,30 +93,39 @@ jobs:
           path: dist/one-link.exe
           if-no-files-found: error
 
-  build_macos_binary:
-    name: build macOS binary
-    runs-on: macos-latest
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          pip install pyinstaller
-
-      - name: build
-        run: python scripts/build_binary.py
-
-      - name: upload binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: one-link-macos
-          path: dist/one-link
-          if-no-files-found: error
+  # --------------------------------------------------------------------------
+  # build_macos_binary — DISABLED on 2026-05-06 (cost: macos-latest @ ~$0.08/min
+  # billed every master push, no documented consumer for the artifact).
+  #
+  # To re-enable: uncomment the block below AND add a tag-only guard so it
+  # doesn't fire on every push, e.g.:
+  #     if: startsWith(github.ref, 'refs/tags/')
+  # That way you only pay for a Mac runner when you actually cut a release.
+  # --------------------------------------------------------------------------
+  # build_macos_binary:
+  #   name: build macOS binary
+  #   runs-on: macos-latest
+  #   needs: test
+  #   if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+  #
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-python@v5
+  #       with:
+  #         python-version: "3.12"
+  #
+  #     - name: install
+  #       run: |
+  #         python -m pip install --upgrade pip
+  #         pip install -e ".[dev]"
+  #         pip install pyinstaller
+  #
+  #     - name: build
+  #       run: python scripts/build_binary.py
+  #
+  #     - name: upload binary artifact
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: one-link-macos
+  #         path: dist/one-link
+  #         if-no-files-found: error
