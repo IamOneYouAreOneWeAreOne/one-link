@@ -116,6 +116,10 @@ FILE_SEND_TOTAL_DEADLINE_S = 600.0
 # short (1.5s) so a real failure forces a fast reopen.
 OUTBOUND_SESSION_PING_AFTER_S = 30.0
 OUTBOUND_SESSION_PING_DEADLINE_S = 1.5
+# v0.7.1: dedup window for the capability_request WS event. A peer
+# retrying a denied FILE_OFFER once a second shouldn't fire 60 toasts;
+# the UI gets one prompt per (peer, cap) per minute.
+CAPABILITY_REQUEST_DEDUP_S = 60.0
 # H3: handshake hardening
 HANDSHAKE_DEADLINE_S = 8.0          # peer has 8s to complete handshake
 HANDSHAKE_PER_IP_INFLIGHT_MAX = 32  # concurrent handshakes from one IP
@@ -374,6 +378,9 @@ class Daemon:
         # from mDNS visibility.
         # peer_fp -> {"last_alive_ms": int, "latency_ewma_ms": float}
         self._pair_health: dict[str, dict[str, float]] = {}
+        # v0.7.1: dedup table for capability_request WS events.
+        # (peer_fp, cap) -> monotonic ts of last UI prompt fired.
+        self._capability_request_seen: dict[tuple[str, str], float] = {}
         # Endpoint announcements are untrusted route candidates until a
         # fresh encrypted handshake at that address proves the expected
         # peer fingerprint. Tracks background verification tasks.
@@ -824,6 +831,7 @@ class Daemon:
             return  # no ACK needed
         if t == "TEXT":
             if not self._capability_allowed(peer_fp, CHAT):
+                self._emit_capability_request(peer_fp, peer_sid, CHAT)
                 await channel.send(encode_msg(make_msg(
                     "ACK", self.me.short_id, of=msg["id"], rejected="capability_disabled",
                 )))
@@ -833,6 +841,7 @@ class Daemon:
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_OFFER":
             if not self._capability_allowed(peer_fp, FILES):
+                self._emit_capability_request(peer_fp, peer_sid, FILES)
                 await channel.send(encode_msg(make_msg(
                     "ACK", self.me.short_id, of=msg["id"], rejected="capability_disabled",
                 )))
@@ -1022,6 +1031,10 @@ class Daemon:
                 except Exception:
                     pass
                 self.state.set_peer_trust(peer_fp, "pinned", actor="pairing")
+                # v0.7.1 deny-by-default: SAS pair grants CHAT only.
+                # The user can grant files/folders/groups via the UI
+                # prompt that fires on the first request.
+                self._apply_default_capability_policy(peer_fp)
                 if self.ui_server is not None:
                     self.ui_server.broadcast({
                         "type": "peer_trust",
@@ -1060,6 +1073,7 @@ class Daemon:
         elif t == "MANIFEST_PUSH":
             # Peer is offering us their view of a shared folder.
             if not self._capability_allowed(peer_fp, FOLDER_SYNC):
+                self._emit_capability_request(peer_fp, peer_sid, FOLDER_SYNC)
                 return
             await self._handle_manifest_push(channel, msg, peer_fp)
         elif t == "MANIFEST_WANTS":
@@ -2365,6 +2379,53 @@ class Daemon:
         policy = self.state.get_peer_capability_policy(peer_fp)
         return policy is None or cap in policy
 
+    def _apply_default_capability_policy(self, peer_fp: str) -> None:
+        """v0.7.1: at SAS-pair finalize, install the deny-by-default
+        policy ([CHAT]) only if the user hasn't already configured
+        one for this peer. The user's manual override (chosen via
+        the Capabilities UI before the pair completed) wins.
+
+        Files/folder/group requests will now hit `_capability_allowed`
+        and be denied — the deny path emits a `capability_request` WS
+        event so the UI can surface a one-click Allow prompt."""
+        if self.state is None:
+            return
+        existing = self.state.get_peer_capability_policy(peer_fp)
+        if existing is not None:
+            return
+        from one_link.capabilities import DEFAULT_ALLOW_AFTER_PAIRING
+        with contextlib.suppress(Exception):
+            self.state.set_peer_capability_policy(
+                peer_fp,
+                list(DEFAULT_ALLOW_AFTER_PAIRING),
+                actor="pairing",
+                note="deny-by-default on first pair",
+            )
+
+    def _emit_capability_request(
+        self, peer_fp: str, peer_sid: str, cap: str,
+    ) -> None:
+        """v0.7.1: notify UI that a peer is asking for a capability
+        the user hasn't granted. Rate-limited per (fp, cap) so a
+        peer hammering offer-retries can't spam the UI. The user
+        responds via POST /api/peers/{fp}/capabilities/grant."""
+        if self.ui_server is None:
+            return
+        now = time.monotonic()
+        key = (peer_fp, cap)
+        last = self._capability_request_seen.get(key, 0.0)
+        if now - last < CAPABILITY_REQUEST_DEDUP_S:
+            return
+        self._capability_request_seen[key] = now
+        with contextlib.suppress(Exception):
+            self.ui_server.broadcast({
+                "type": "capability_request",
+                "fingerprint": peer_fp,
+                "short_id": peer_sid,
+                "capability": cap,
+                "ts_ms": int(time.time() * 1000),
+            })
+
     def _session_stats(self) -> dict:
         now = time.time()
         return {
@@ -2679,6 +2740,7 @@ class Daemon:
         ctx = self.pairing.get(peer_fp) or ctx
         if ctx and ctx.both_confirmed and self.state is not None:
             self.state.set_peer_trust(peer_fp, "pinned", actor="pairing")
+            self._apply_default_capability_policy(peer_fp)
             if self.ui_server is not None:
                 self.ui_server.broadcast({
                     "type": "peer_trust", "fingerprint": peer_fp, "trust": "pinned",

@@ -277,13 +277,17 @@ def test_paste_image_handler_is_bound(tmp_path):
 
 def test_upload_failure_uses_server_reason_in_toast(tmp_path):
     """Pin the contract that uploadFile shows the server's error
-    string, not a generic 'send failed'."""
+    string, not a generic 'send failed'. Post-ac3d63f the failure
+    path routes through `errorToastBody(e)` — a server-error
+    translator that maps codes/messages to human language. We
+    assert the helper is invoked rather than asserting on a fixed
+    string, since the wording is allowed to evolve."""
     p = Path(__file__).parent.parent / "src" / "one_link" / "web" / "index.html"
     text = p.read_text(encoding="utf-8")
     # The success path removes the sticky "sending" toast.
     assert "sendingToast?.remove" in text
-    # The failure path uses the server-reported reason.
-    assert "Send failed" in text
+    # The failure path translates the server reason via errorToastBody.
+    assert "errorToastBody" in text
 
 
 # ─── deadline constants exposed for tests ──────────────────────────

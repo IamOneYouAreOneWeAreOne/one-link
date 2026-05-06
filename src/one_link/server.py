@@ -238,6 +238,8 @@ class UIServer:
         r.add_post(r"/api/peers/{fp}/trust", self._guarded(self.api_set_trust))
         r.add_get(r"/api/peers/{fp}/capabilities", self._guarded(self.api_get_peer_capabilities))
         r.add_post(r"/api/peers/{fp}/capabilities", self._guarded(self.api_set_peer_capabilities))
+        r.add_post(r"/api/peers/{fp}/capabilities/grant", self._guarded(self.api_grant_capability))
+        r.add_post(r"/api/peers/{fp}/capabilities/revoke", self._guarded(self.api_revoke_capability))
         r.add_get("/api/capability-audit", self._guarded(self.api_capability_audit))
         r.add_get("/api/rendezvous", self._guarded(self.api_get_rendezvous))
         r.add_post("/api/rendezvous", self._guarded(self.api_set_rendezvous))
@@ -691,7 +693,38 @@ class UIServer:
             return web.json_response({"error": str(e)}, status=409)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
+        # v0.7.1: every fp in shared_with gets folder caps auto-granted.
+        for fp in shared_with:
+            self._ensure_folder_caps_for(str(fp), note=f"folder={name}/add")
         return web.json_response({"ok": True, "folder": f})
+
+    def _ensure_folder_caps_for(self, peer_fp: str, *, note: str = "") -> None:
+        """v0.7.1: explicit user share = positive consent for folder
+        traffic. Add FOLDER_SYNC + MERKLE_SYNC to the peer's policy
+        allowlist so the deny-by-default gate doesn't block the
+        immediately-following MANIFEST_PUSH/WANTS frames."""
+        if self.daemon.state is None or not peer_fp:
+            return
+        try:
+            from one_link.capabilities import FOLDER_SYNC, MERKLE_SYNC
+            current = self.daemon.state.get_peer_capability_policy(peer_fp)
+            if current is None:
+                return  # policy=None means "default-allow legacy" — nothing to add
+            wanted = set(current) | {FOLDER_SYNC, MERKLE_SYNC}
+            if wanted == set(current):
+                return
+            new_policy = sorted(wanted)
+            self.daemon.state.set_peer_capability_policy(
+                peer_fp, new_policy,
+                actor="ui-share-folder", note=note,
+            )
+            self.broadcast({
+                "type": "peer_capabilities",
+                "fingerprint": peer_fp,
+                "allowed": new_policy,
+            })
+        except Exception:
+            pass
 
     async def api_remove_folder(self, request: web.Request) -> web.Response:
         if self.daemon.state is None or self.daemon.folder_engine is None:
@@ -729,6 +762,11 @@ class UIServer:
             return web.json_response({"error": str(e)}, status=404)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
+        # v0.7.1 deny-by-default: sharing a folder = user consent for
+        # folder/merkle traffic with this peer.
+        self._ensure_folder_caps_for(
+            peer_fp, note=f"folder={name}/share/{mode}",
+        )
         return web.json_response({"ok": True})
 
     async def api_unshare_folder(self, request: web.Request) -> web.Response:
@@ -873,6 +911,82 @@ class UIServer:
         clean = [c for c in normalize_caps(allowed) if c in LOCAL_CAPABILITIES]
         self.daemon.state.set_peer_capability_policy(fp, clean, actor="ui", note=note)
         return web.json_response({"ok": True, "fingerprint": fp, "allowed": clean})
+
+    async def api_grant_capability(self, request: web.Request) -> web.Response:
+        """v0.7.1: cap-by-cap grant. Adds a single capability to the
+        peer's policy allowlist (creates the policy if absent). Used
+        by the UI to respond to a `capability_request` WS event."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        cap = data.get("cap") or data.get("capability")
+        note = data.get("note") if isinstance(data.get("note"), str) else None
+        from one_link.capabilities import LOCAL_CAPABILITIES, normalize_caps
+        if not isinstance(cap, str) or cap not in LOCAL_CAPABILITIES:
+            return web.json_response(
+                {"error": f"unknown capability: {cap!r}"}, status=400
+            )
+        current = self.daemon.state.get_peer_capability_policy(fp) or []
+        if cap in current:
+            return web.json_response({
+                "ok": True, "fingerprint": fp,
+                "allowed": current, "added": False,
+            })
+        new_policy = sorted(set(current) | {cap})
+        self.daemon.state.set_peer_capability_policy(
+            fp, new_policy, actor="ui-grant", note=note,
+        )
+        self.broadcast({
+            "type": "peer_capabilities",
+            "fingerprint": fp,
+            "allowed": new_policy,
+        })
+        return web.json_response({
+            "ok": True, "fingerprint": fp,
+            "allowed": new_policy, "added": True,
+        })
+
+    async def api_revoke_capability(self, request: web.Request) -> web.Response:
+        """v0.7.1: cap-by-cap revoke. Removes a single capability from
+        the peer's policy allowlist. If the policy becomes empty, it
+        stays as an explicit empty list (different from None) so the
+        peer is denied everything until re-granted."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        cap = data.get("cap") or data.get("capability")
+        note = data.get("note") if isinstance(data.get("note"), str) else None
+        if not isinstance(cap, str):
+            return web.json_response(
+                {"error": "cap must be a string"}, status=400
+            )
+        current = self.daemon.state.get_peer_capability_policy(fp) or []
+        if cap not in current:
+            return web.json_response({
+                "ok": True, "fingerprint": fp,
+                "allowed": current, "removed": False,
+            })
+        new_policy = sorted(set(current) - {cap})
+        self.daemon.state.set_peer_capability_policy(
+            fp, new_policy, actor="ui-revoke", note=note,
+        )
+        self.broadcast({
+            "type": "peer_capabilities",
+            "fingerprint": fp,
+            "allowed": new_policy,
+        })
+        return web.json_response({
+            "ok": True, "fingerprint": fp,
+            "allowed": new_policy, "removed": True,
+        })
 
     async def api_capability_audit(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:

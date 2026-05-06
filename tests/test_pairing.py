@@ -262,7 +262,11 @@ async def test_pair_reject_blocks_outbound():
                 rj = await r.json()
             assert rj["ok"]
 
-            # Now sending should fail with 'rejected'
+            # Now sending should fail with a rejection-shaped error.
+            # Post-ac3d63f the daemon translates the raw "rejected"
+            # signal into the friendlier "This device is blocked"
+            # for the UI; either wording satisfies the contract that
+            # the user is told the send was refused on trust grounds.
             async with s.post(
                 f"{base_a}/api/send",
                 headers={"Authorization": f"Bearer {ta}"},
@@ -270,4 +274,5 @@ async def test_pair_reject_blocks_outbound():
             ) as r:
                 assert r.status >= 400
                 err = await r.json()
-                assert "rejected" in err["error"].lower()
+                lower = err["error"].lower()
+                assert "rejected" in lower or "blocked" in lower

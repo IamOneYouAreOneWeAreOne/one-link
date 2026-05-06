@@ -23,6 +23,15 @@ LOCAL_CAPABILITIES = (
     FUTURE_TRANSPORTS,
 )
 
+# v0.7.1 deny-by-default capability split. The audit doc
+# (docs/SECURITY_AUDIT_v0.7.0.md, finding A) prescribes:
+#   - chat: allowed-after-pairing — automatic on SAS confirm
+#   - files / folder / group / future_transports: prompt/allowlist —
+#     user must explicitly grant
+# These tuples are the policy-layer enforcement points.
+DEFAULT_ALLOW_AFTER_PAIRING = (CHAT,)
+PROMPT_REQUIRED = (FILES, FILE_CDC, FOLDER_SYNC, MERKLE_SYNC, FUTURE_TRANSPORTS)
+
 
 def normalize_caps(values) -> tuple[str, ...]:
     out = []
