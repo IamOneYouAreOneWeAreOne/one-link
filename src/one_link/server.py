@@ -486,6 +486,23 @@ class UIServer:
                 p["regime"] = _classify_address_regime(p.get("address") or "")
             else:
                 p["regime"] = "offline"
+            # v0.7.0: per-pairing health metrics. last_alive_ms is wall-
+            # clock time of the last bytes seen from this peer (in or
+            # out). latency_ewma_ms is the rolling round-trip time
+            # measured by the H4 PING/PONG probe. Both None for
+            # never-contacted peers.
+            health = getattr(self.daemon, "get_pair_health", lambda _fp: None)(fp)
+            if health is not None:
+                p["health"] = {
+                    "last_alive_ms": health.get("last_alive_ms"),
+                    "latency_ewma_ms": (
+                        health.get("latency_ewma_ms")
+                        if health.get("latency_ewma_ms") == health.get("latency_ewma_ms")
+                        else None  # NaN guard
+                    ),
+                }
+            else:
+                p["health"] = None
 
         # Sort: paired first, then online, then by hostname
         peers = sorted(
@@ -703,11 +720,16 @@ class UIServer:
                 )
 
         try:
-            self.daemon.state.set_peer_trust(fp, trust, actor="ui")
+            # v0.7.0: rejection is a unified tear-down (drop session,
+            # cancel transfers, clear group chains). Pinning + pending
+            # are simple state writes.
+            if trust == "rejected":
+                await self.daemon.revoke_peer(fp, actor="ui")
+            else:
+                self.daemon.state.set_peer_trust(fp, trust, actor="ui")
+                self.broadcast({"type": "peer_trust", "fingerprint": fp, "trust": trust})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
-        # Notify UI subscribers so the badge updates everywhere.
-        self.broadcast({"type": "peer_trust", "fingerprint": fp, "trust": trust})
         return web.json_response({"ok": True, "trust": trust})
 
     async def api_get_peer_capabilities(self, request: web.Request) -> web.Response:

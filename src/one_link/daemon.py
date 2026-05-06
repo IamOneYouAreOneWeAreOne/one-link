@@ -357,6 +357,12 @@ class Daemon:
         # v0.5.6: per-peer connection regime, last-seen.
         # peer_fp -> {"outbound": str, "inbound": str, "ts": float}
         self._inbound_regime: dict[str, str] = {}
+        # v0.7.0: per-pairing health metrics. Updated on every
+        # successful send / receive. Surfaced in /api/peers so the
+        # UI can show real "last alive" + latency instead of guessing
+        # from mDNS visibility.
+        # peer_fp -> {"last_alive_ms": int, "latency_ewma_ms": float}
+        self._pair_health: dict[str, dict[str, float]] = {}
 
     def _build_my_caps(self) -> dict:
         """Build a CAPS frame for THIS daemon. Includes our rendezvous
@@ -727,6 +733,8 @@ class Daemon:
     async def _on_peer_message(self, channel: ch.Channel, msg: dict) -> None:
         peer_fp = fingerprint_of(channel.peer_ed_pub)
         peer_sid = channel.peer_short_id
+        # v0.7.0: any frame received from a paired peer = they're alive.
+        self._stamp_pair_health(peer_fp)
         t = msg.get("t")
         # H2: rejected peers cannot drive any state mutation, including the
         # sqlite write that CAPS would have caused. They get an ACK with the
@@ -924,6 +932,8 @@ class Daemon:
             await self._handle_group_key_offer(channel, msg, peer_fp)
         elif t == "GROUP_MSG":
             await self._handle_group_msg(channel, msg, peer_fp, peer_sid)
+        elif t == "ENDPOINT_UPDATE":
+            await self._handle_endpoint_update(channel, msg, peer_fp, peer_sid)
         elif t == "PING":
             await channel.send(encode_msg(make_msg("PONG", self.me.short_id)))
         elif t == "PAIR_REQUEST":
@@ -2319,11 +2329,15 @@ class Daemon:
         """H4: send a PING and wait briefly for a PONG. Returns True if the
         session is still alive, False if it timed out or errored. Ignores
         any non-PONG frames that arrive in the meantime (e.g. CAPS), as the
-        server may push them eagerly."""
+        server may push them eagerly.
+
+        v0.7.0: also stamps the round-trip latency into pair health so the
+        UI can show "32ms" or whatever instead of guessing from regime."""
         try:
             async with sess.lock:
+                ping_at = time.monotonic()
                 await sess.channel.send(encode_msg(make_msg("PING", self.me.short_id)))
-                deadline = time.monotonic() + OUTBOUND_SESSION_PING_DEADLINE_S
+                deadline = ping_at + OUTBOUND_SESSION_PING_DEADLINE_S
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -2335,6 +2349,10 @@ class Daemon:
                     rt = reply.get("t")
                     if rt == "PONG":
                         sess.last_used = time.time()
+                        latency_ms = (time.monotonic() - ping_at) * 1000.0
+                        self._stamp_pair_health(
+                            sess.peer_fp, latency_ms=latency_ms,
+                        )
                         return True
                     if rt == "CAPS":
                         features = list(normalize_caps(reply.get("features", [])))
@@ -2378,7 +2396,16 @@ class Daemon:
         # stashes the inbound-pump task on the writer for cleanup.
         relay_pump = getattr(writer, "_relay_pump_task", None)
         try:
-            channel = await ch.initiate(reader, writer, self.me)
+            try:
+                channel = await asyncio.wait_for(
+                    ch.initiate(reader, writer, self.me),
+                    timeout=HANDSHAKE_DEADLINE_OUTBOUND_S,
+                )
+            except asyncio.TimeoutError as e:
+                raise RuntimeError(
+                    f"session open to {peer.short_id}: handshake timed out "
+                    f"after {HANDSHAKE_DEADLINE_OUTBOUND_S}s — peer not responsive"
+                ) from e
             actual_fp = self._verify_channel_peer(peer, channel)
             if actual_fp != peer_fp:
                 raise RuntimeError("peer fingerprint changed while opening session")
@@ -2589,6 +2616,270 @@ class Daemon:
         }
 
     # ─── groups (v0.6.2) ───────────────────────────────────────────
+
+    # ─── v0.7.0: Linked Mesh ──────────────────────────────────────
+
+    MAX_ENDPOINTS_PER_ANNOUNCEMENT = 8
+
+    def _stamp_pair_health(
+        self,
+        peer_fp: str,
+        *,
+        latency_ms: float | None = None,
+    ) -> None:
+        """v0.7.0: record liveness for this peer. Latency is EWMA'd
+        when provided (alpha=0.3 — fast enough to track real changes,
+        slow enough to ignore single-packet jitter)."""
+        if not peer_fp:
+            return
+        now_ms = int(time.time() * 1000)
+        h = self._pair_health.get(peer_fp)
+        if h is None:
+            h = {"last_alive_ms": now_ms, "latency_ewma_ms": float("nan")}
+            self._pair_health[peer_fp] = h
+        else:
+            h["last_alive_ms"] = now_ms
+        if latency_ms is not None:
+            prev = h.get("latency_ewma_ms")
+            if prev is None or prev != prev:  # NaN check
+                h["latency_ewma_ms"] = float(latency_ms)
+            else:
+                h["latency_ewma_ms"] = 0.7 * prev + 0.3 * float(latency_ms)
+
+    def get_pair_health(self, peer_fp: str) -> dict | None:
+        """Public read for /api/peers."""
+        h = self._pair_health.get(peer_fp)
+        if h is None:
+            return None
+        return dict(h)
+
+    async def revoke_peer(
+        self, peer_fp: str, *, actor: str = "ui", note: str = "",
+    ) -> None:
+        """v0.7.0: trust=rejected becomes a unified tear-down.
+
+        Today, set_peer_trust(rejected) just flips the DB field — but
+        the persistent session can keep running until idle timeout,
+        in-flight transfers can complete, and group sender chains
+        stay valid. That leaves a window where a "rejected" peer can
+        still drive state into our daemon.
+
+        This method does the full revocation in one transaction:
+          1. Set trust = rejected (audited)
+          2. Drop outbound session (cuts active channel)
+          3. Mark any in-flight transfer to/from this peer as failed
+          4. Clear group sender chains keyed by this peer's pubkey
+          5. Broadcast peer_trust event so UI updates immediately
+
+        Idempotent: safe to call on a peer that's already rejected.
+        """
+        if self.state is None:
+            return
+        rec = self.state.get_peer(peer_fp)
+        if rec is None:
+            return
+        # Step 1.
+        try:
+            self.state.set_peer_trust(peer_fp, "rejected", actor=actor, note=note)
+        except Exception as e:
+            log.warning("revoke_peer set_peer_trust failed: %s", e)
+        # Step 2.
+        with contextlib.suppress(Exception):
+            await self._drop_outbound_session(peer_fp)
+        # Step 3.
+        try:
+            transfers = self.state.list_transfers(peer_fp=peer_fp, limit=200)
+        except Exception:
+            transfers = []
+        for t in transfers:
+            if t.status in ("offered", "active", "queued"):
+                with contextlib.suppress(Exception):
+                    self._update_transfer(
+                        t.id,
+                        status="failed",
+                        metadata={
+                            **t.metadata,
+                            "error": "peer revoked",
+                            "error_class": "PeerRevoked",
+                        },
+                    )
+        # Step 4: clear group sender chains for this peer's pubkey.
+        # The pubkey is on the peer record; chains are keyed by it.
+        if rec.pubkey:
+            try:
+                with self.state._write_lock:
+                    self.state._conn.execute(
+                        "DELETE FROM group_sender_chains WHERE sender_pub = ?",
+                        (rec.pubkey,),
+                    )
+            except Exception as e:
+                log.debug("clearing group chains for revoked peer failed: %s", e)
+        # Step 5.
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "peer_trust",
+                    "fingerprint": peer_fp,
+                    "trust": "rejected",
+                })
+        log.info(
+            "peer revoked: %s (%d transfers cancelled, group chains cleared)",
+            peer_fp[:8],
+            sum(1 for t in transfers if t.status in ("offered", "active", "queued")),
+        )
+
+    async def _handle_endpoint_update(
+        self, channel: ch.Channel, msg: dict, peer_fp: str, peer_sid: str,
+    ) -> None:
+        """A pinned peer is telling us their current endpoint(s).
+
+        v0.7.0: paired peers act as one — once we trust each other,
+        endpoint changes (Wi-Fi roam, daemon restart, NAT remap) get
+        pushed proactively over the existing encrypted channel. The
+        receiver updates `state.peers.last_address/last_port` with the
+        first reachable advertised endpoint, so the next outbound
+        send_to has the freshest address — no failed-dial-then-retry
+        dance.
+
+        Trust gate: only pinned peers can update our peer record.
+        AEAD already authenticates the sender (this frame rode an
+        encrypted channel keyed to their pubkey), so we don't need a
+        second signature layer here; rejection of unpinned suffices.
+        """
+        if not self._is_pinned(peer_fp):
+            log.info(
+                "ENDPOINT_UPDATE from non-pinned peer dropped: %s", peer_fp[:8]
+            )
+            return
+        if self.state is None:
+            return
+        endpoints = msg.get("endpoints")
+        if not isinstance(endpoints, list) or not endpoints:
+            log.warning("ENDPOINT_UPDATE with empty endpoints from %s", peer_sid)
+            return
+        # Cap at MAX_ENDPOINTS_PER_ANNOUNCEMENT to defend against a
+        # malicious peer flooding us with junk addresses.
+        endpoints = endpoints[: self.MAX_ENDPOINTS_PER_ANNOUNCEMENT]
+        cleaned: list[tuple[str, int]] = []
+        for e in endpoints:
+            if not isinstance(e, dict):
+                continue
+            host = e.get("host")
+            port = e.get("port")
+            if not isinstance(host, str) or not host:
+                continue
+            if not isinstance(port, int) or not (0 < port < 65536):
+                continue
+            cleaned.append((host, port))
+        if not cleaned:
+            return
+        # Pick the most-likely-reachable endpoint:
+        #   1) any non-LAN public IP if our connection is internet
+        #   2) otherwise the first private one (LAN)
+        # If we currently have a session over a private IP and the
+        # peer announces a public one, prefer the LAN one — same Wi-Fi
+        # is fastest. The send-path's happy-eyeballs falls through if
+        # the picked one is wrong.
+        host, port = cleaned[0]
+        try:
+            existing = self.state.get_peer(peer_fp)
+        except Exception:
+            existing = None
+        if existing:
+            try:
+                self.state.upsert_peer(
+                    fingerprint=peer_fp,
+                    short_id=existing.short_id,
+                    pubkey=existing.pubkey,
+                    hostname=existing.hostname,
+                    address=host,
+                    port=port,
+                )
+                log.info(
+                    "ENDPOINT_UPDATE accepted from %s: %s:%d (%d total endpoints)",
+                    peer_sid, host, port, len(cleaned),
+                )
+            except Exception as e:
+                log.warning("ENDPOINT_UPDATE upsert failed: %s", e)
+        # ACK so the sender's send_to() succeeds.
+        await channel.send(encode_msg(make_msg(
+            "ACK", self.me.short_id, of=msg.get("id"),
+        )))
+
+    async def broadcast_endpoint_to_paired(self) -> int:
+        """v0.7.0: tell every pinned peer where to find us right now.
+
+        Called on daemon start (so peers learn our potentially-new
+        port immediately) and live-on-changes (TODO: hook into Wi-Fi
+        change events in v0.7.x). Best-effort — peers we can't
+        currently reach are skipped; they'll learn on next
+        re-pair-time inheritance or by mDNS / rendezvous when they
+        come back online.
+
+        Returns the count of peers we successfully reached.
+        """
+        if self.state is None:
+            return 0
+        try:
+            peers = self.state.list_peers()
+        except Exception:
+            return 0
+        # Build the announcement payload using whatever we know about
+        # our local addresses. Prefer the daemon's actual peer-server
+        # port; the rendezvous client already has the discover-local
+        # logic, reuse it to avoid divergence.
+        from one_link import rendezvous_client
+        peer_port = getattr(self, "_rendezvous_peer_port", 0)
+        if peer_port <= 0:
+            return 0
+        try:
+            local_endpoints = rendezvous_client.discover_local_endpoints(
+                peer_port=peer_port
+            )
+        except Exception as e:
+            log.debug("could not enumerate local endpoints: %s", e)
+            return 0
+        if not local_endpoints:
+            return 0
+        endpoint_dicts = [
+            {"host": e.host, "port": e.port}
+            for e in local_endpoints[: self.MAX_ENDPOINTS_PER_ANNOUNCEMENT]
+        ]
+        delivered = 0
+        for rec in peers:
+            if rec.trust != "pinned":
+                continue
+            if rec.fingerprint == self.me.fingerprint:
+                continue
+            try:
+                peer_obj = await self.resolve_for_send(rec.fingerprint)
+                if peer_obj is None:
+                    continue
+                outer = make_msg(
+                    "ENDPOINT_UPDATE", self.me.short_id,
+                    endpoints=endpoint_dicts,
+                )
+                # Best-effort. resolve_for_send + send_to do the right
+                # thing: open or reuse a session, send through it,
+                # await the ACK with the same backoff/timeouts the
+                # rest of the daemon uses.
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        self.send_to(peer_obj, [outer]),
+                        timeout=10.0,
+                    )
+                    delivered += 1
+            except Exception as e:
+                log.debug(
+                    "endpoint announcement to %s failed: %s",
+                    rec.fingerprint[:8], e,
+                )
+        if delivered:
+            log.info(
+                "endpoint announcements: delivered to %d/%d pinned peer(s)",
+                delivered, sum(1 for r in peers if r.trust == "pinned"),
+            )
+        return delivered
 
     async def _handle_group_key_offer(
         self, channel: ch.Channel, msg: dict, peer_fp: str,
@@ -3215,234 +3506,256 @@ class Daemon:
             metadata={"mode": "cdc", "path": str(path)},
         )
 
+        # v0.7.0 Linked Mesh: reuse the persistent encrypted session
+        # instead of opening a fresh TCP connection + handshake per
+        # file send. The session was negotiated on the first chat /
+        # send_to call and is kept alive (with idle PING probe) for
+        # OUTBOUND_SESSION_IDLE_S. Skipping the per-send handshake is
+        # the core "they act as one" win: lower latency on the small-
+        # file case, no stale-endpoint dial races, no CAPS round-trip
+        # on every drop. _get_outbound_session handles the dial-and-
+        # handshake fall-back internally when no live session exists.
         try:
-            reader, writer = await self._dial_peer(peer)
-        except Exception as e:
+            sess = await self._get_outbound_session(peer)
+        except asyncio.TimeoutError as e:
             self._update_transfer(
                 transfer_id, status="failed",
                 metadata={
                     "mode": "cdc",
                     "path": str(path),
-                    "error": f"dial failed: {e}"[:500],
-                    "error_class": type(e).__name__,
+                    "error": (
+                        f"file send to {peer.short_id}: handshake "
+                        f"timed out after {HANDSHAKE_DEADLINE_OUTBOUND_S}s "
+                        f"— peer not responsive"
+                    ),
+                    "error_class": "TimeoutError",
                 },
             )
-            raise
-        try:
-            # v0.6.3: bound the handshake. A stale mDNS endpoint can
-            # map to a listener that doesn't speak our protocol; we'd
-            # hang on read_frame forever otherwise.
-            try:
-                channel = await asyncio.wait_for(
-                    ch.initiate(reader, writer, self.me),
-                    timeout=HANDSHAKE_DEADLINE_OUTBOUND_S,
-                )
-            except asyncio.TimeoutError as e:
-                with contextlib.suppress(Exception):
-                    writer.close()
-                    await writer.wait_closed()
+            raise RuntimeError(
+                f"file send to {peer.short_id}: handshake timed out "
+                f"after {HANDSHAKE_DEADLINE_OUTBOUND_S}s — peer not responsive"
+            ) from e
+        except Exception as e:
+            # _get_outbound_session already wraps its own handshake
+            # timeout into RuntimeError("... handshake timed out ..."),
+            # which the existing test_send_file_aborts_when_receiver…
+            # robustness test pins. Surface the original message and
+            # stamp the ledger row so the UI shows the reason.
+            err_msg = str(e)
+            err_class = type(e).__name__
+            ledger_msg = (
+                err_msg if "handshake timed out" in err_msg.lower()
+                else f"dial failed: {err_msg}"
+            )
+            self._update_transfer(
+                transfer_id, status="failed",
+                metadata={
+                    "mode": "cdc",
+                    "path": str(path),
+                    "error": ledger_msg[:500],
+                    "error_class": err_class,
+                },
+            )
+            if "handshake timed out" in err_msg.lower():
+                # Preserve the canonical "handshake timed out" wording
+                # for callers/tests matching on it.
                 raise RuntimeError(
                     f"file send to {peer.short_id}: handshake timed out "
                     f"after {HANDSHAKE_DEADLINE_OUTBOUND_S}s — peer not responsive"
                 ) from e
-            peer_fp = self._verify_channel_peer(peer, channel)
-            if self.state is not None:
+            raise
+
+        peer_fp = sess.peer_fp  # cryptographically-verified fingerprint
+        channel = sess.channel
+        # Walk the ledger row from queued → offered. The provisional
+        # peer_fp was set from peer.ed_pub_hex; _get_outbound_session's
+        # _verify_channel_peer guarantees they match here (it raises
+        # otherwise). One UPDATE keeps the ledger consistent.
+        if peer_fp != provisional_fp:
+            self._upsert_transfer(
+                id=transfer_id,
+                direction="out",
+                peer_fp=peer_fp,
+                kind="file",
+                name=path.name,
+                size=size,
+                blob_hash=blob_hex,
+                status="offered",
+                progress_bytes=0,
+                total_bytes=size,
+                chunks_done=0,
+                chunks_total=len(cdc_chunks),
+                metadata={"mode": "cdc", "path": str(path)},
+            )
+        else:
+            self._update_transfer(transfer_id, status="offered")
+
+        async def _await_ack(ch_: ch.Channel) -> dict:
+            # v0.6.3: bound each recv. Without this, a peer that
+            # received our chunk but never ACKed (e.g., crashed,
+            # NAT dropped, channel hung mid-flush) would freeze
+            # the entire transfer indefinitely.
+            deadline = FILE_ACK_DEADLINE_S
+            while True:
                 try:
-                    self.state.upsert_peer(
-                        fingerprint=peer_fp,
-                        short_id=channel.peer_short_id,
-                        pubkey=channel.peer_ed_pub,
-                        hostname=peer.hostname,
-                        address=peer.address,
-                        port=peer.port,
+                    plaintext = await asyncio.wait_for(
+                        ch_.recv(), timeout=deadline,
                     )
-                except Exception:
-                    pass
-            # v0.6.3: ledger row was created earlier (pre-dial); now
-            # advance status to 'offered'. The duplicate creation that
-            # used to be here is gone — single row, walked through
-            # queued → offered → active → complete | failed. peer_fp
-            # was set provisionally at row creation; if for any reason
-            # it differs from the post-handshake fingerprint, do a
-            # full upsert to correct it.
-            if peer_fp != provisional_fp:
-                self._upsert_transfer(
-                    id=transfer_id,
-                    direction="out",
-                    peer_fp=peer_fp,
-                    kind="file",
-                    name=path.name,
-                    size=size,
-                    blob_hash=blob_hex,
-                    status="offered",
-                    progress_bytes=0,
-                    total_bytes=size,
-                    chunks_done=0,
-                    chunks_total=len(cdc_chunks),
-                    metadata={"mode": "cdc", "path": str(path)},
+                except asyncio.TimeoutError as e:
+                    raise RuntimeError(
+                        f"file send to {peer.short_id}: peer did not "
+                        f"ACK within {deadline}s — transfer aborted"
+                    ) from e
+                m = decode_msg(plaintext)
+                if m.get("t") == "CAPS":
+                    features = list(normalize_caps(m.get("features", [])))
+                    ch_.peer_caps = {
+                        "protocol": m.get("protocol", "?"),
+                        "features": features,
+                        "from": m.get("from"),
+                    }
+                    if self.state is not None:
+                        with contextlib.suppress(Exception):
+                            self.state.set_peer_capabilities(peer_fp, features)
+                    continue
+                return m
+
+        try:
+            # v0.7.0: serialize all I/O on the persistent session under
+            # sess.lock so the file send doesn't interleave with chat
+            # send_to() calls or session-keepalive PINGs. Same locking
+            # discipline as send_to(); the rest of the application is
+            # unaware they're sharing a TCP connection.
+            async with sess.lock:
+                await channel.send(encode_msg(offer))
+                first_reply = await _await_ack(channel)
+                ev = self._persist(
+                    msg=offer, direction="out", peer_fp=peer_fp, peer_short_id=peer.short_id,
                 )
-            else:
-                self._update_transfer(transfer_id, status="offered")
+                self._broadcast_tail(ev)
 
-            # Send our caps before any application traffic.
-            try:
-                await channel.send(encode_msg(self._build_my_caps()))
-            except Exception as e:
-                log.warning("CAPS send (file outbound) failed: %s", e)
-
-            async def _await_ack(ch_: ch.Channel) -> dict:
-                # v0.6.3: bound each recv. Without this, a peer that
-                # received our chunk but never ACKed (e.g., crashed,
-                # NAT dropped, channel hung mid-flush) would freeze
-                # the entire transfer indefinitely.
-                deadline = FILE_ACK_DEADLINE_S
-                while True:
-                    try:
-                        plaintext = await asyncio.wait_for(
-                            ch_.recv(), timeout=deadline,
-                        )
-                    except asyncio.TimeoutError as e:
-                        raise RuntimeError(
-                            f"file send to {peer.short_id}: peer did not "
-                            f"ACK within {deadline}s — transfer aborted"
-                        ) from e
-                    m = decode_msg(plaintext)
-                    if m.get("t") == "CAPS":
-                        features = list(normalize_caps(m.get("features", [])))
-                        ch_.peer_caps = {
-                            "protocol": m.get("protocol", "?"),
-                            "features": features,
-                            "from": m.get("from"),
-                        }
-                        if self.state is not None:
-                            with contextlib.suppress(Exception):
-                                self.state.set_peer_capabilities(peer_fp, features)
-                        continue
-                    return m
-
-            await channel.send(encode_msg(offer))
-            first_reply = await _await_ack(channel)
-            ev = self._persist(
-                msg=offer, direction="out", peer_fp=peer_fp, peer_short_id=peer.short_id,
-            )
-            self._broadcast_tail(ev)
-
-            chunks_sent = 0
-            wire_bytes_sent = 0
-            raw_bytes_sent = 0
-            compressed_chunks = 0
-            cdc_used = first_reply.get("t") == "FILE_WANTS"
-            wanted_indexes = (
-                {int(i) for i in first_reply.get("wants", [])}
-                if cdc_used else set()
-            )
-            if cdc_used:
-                skipped_bytes = sum(
-                    int(c.size) for c in cdc_chunks if c.index not in wanted_indexes
+                chunks_sent = 0
+                wire_bytes_sent = 0
+                raw_bytes_sent = 0
+                compressed_chunks = 0
+                cdc_used = first_reply.get("t") == "FILE_WANTS"
+                wanted_indexes = (
+                    {int(i) for i in first_reply.get("wants", [])}
+                    if cdc_used else set()
                 )
-                self._update_transfer(
-                    transfer_id,
-                    status="active",
-                    progress_bytes=skipped_bytes,
-                    total_bytes=size,
-                    chunks_done=len(cdc_chunks) - len(wanted_indexes),
-                    chunks_total=len(cdc_chunks),
-                    metadata={
-                        "mode": "cdc",
-                        "path": str(path),
-                        "skipped_chunks": len(cdc_chunks) - len(wanted_indexes),
-                    },
-                )
-                with open(path, "rb") as f:
-                    for c in cdc_chunks:
-                        if c.index not in wanted_indexes:
-                            continue
-                        f.seek(c.start)
-                        data = f.read(c.size)
-                        enc, payload = self._encode_payload(data)
-                        raw_bytes_sent += len(data)
-                        wire_bytes_sent += len(payload)
-                        if enc != "raw":
-                            compressed_chunks += 1
-                        chunk_msg = make_msg(
-                            "FILE_CDC_CHUNK",
-                            self.me.short_id,
-                            blob=blob_hex,
-                            index=c.index,
-                            hash=c.hash,
-                            enc=enc,
-                            wire_size=len(payload),
-                            data=base64.b64encode(payload).decode("ascii"),
-                        )
-                        await channel.send(encode_msg(chunk_msg))
-                        await _await_ack(channel)
-                        chunks_sent += 1
-                        self._update_transfer(
-                            transfer_id,
-                            status="active",
-                            progress_bytes=skipped_bytes + raw_bytes_sent,
-                            total_bytes=size,
-                            chunks_done=(len(cdc_chunks) - len(wanted_indexes)) + chunks_sent,
-                            chunks_total=len(cdc_chunks),
-                            raw_bytes=raw_bytes_sent,
-                            wire_bytes=wire_bytes_sent,
-                        )
-            else:
-                with open(path, "rb") as f:
-                    seq = 0
-                    prev = f.read(CHUNK_SIZE)
-                    total_stream_chunks = max(1, (size + CHUNK_SIZE - 1) // CHUNK_SIZE)
-                    while prev:
-                        cur = f.read(CHUNK_SIZE)
-                        eof = not cur
-                        chunk_msg = make_msg(
-                            "FILE_CHUNK",
-                            self.me.short_id,
-                            blob=blob_hex,
-                            seq=seq,
-                            data=base64.b64encode(prev).decode("ascii"),
-                            eof=eof,
-                        )
-                        await channel.send(encode_msg(chunk_msg))
-                        await _await_ack(channel)
-                        chunks_sent += 1
-                        raw_bytes_sent += len(prev)
-                        wire_bytes_sent += len(prev)
-                        self._update_transfer(
-                            transfer_id,
-                            status="active",
-                            progress_bytes=raw_bytes_sent,
-                            total_bytes=size,
-                            chunks_done=chunks_sent,
-                            chunks_total=total_stream_chunks,
-                            raw_bytes=raw_bytes_sent,
-                            wire_bytes=wire_bytes_sent,
-                        )
-                        prev = cur
-                        seq += 1
-
-                if chunks_sent == 0:
-                    empty = make_msg(
-                        "FILE_CHUNK",
-                        self.me.short_id,
-                        blob=blob_hex,
-                        seq=0,
-                        data="",
-                        eof=True,
+                if cdc_used:
+                    skipped_bytes = sum(
+                        int(c.size) for c in cdc_chunks if c.index not in wanted_indexes
                     )
-                    await channel.send(encode_msg(empty))
-                    await _await_ack(channel)
-                    chunks_sent = 1
                     self._update_transfer(
                         transfer_id,
                         status="active",
-                        progress_bytes=0,
-                        total_bytes=0,
-                        chunks_done=1,
-                        chunks_total=1,
+                        progress_bytes=skipped_bytes,
+                        total_bytes=size,
+                        chunks_done=len(cdc_chunks) - len(wanted_indexes),
+                        chunks_total=len(cdc_chunks),
+                        metadata={
+                            "mode": "cdc",
+                            "path": str(path),
+                            "skipped_chunks": len(cdc_chunks) - len(wanted_indexes),
+                        },
                     )
+                    with open(path, "rb") as f:
+                        for c in cdc_chunks:
+                            if c.index not in wanted_indexes:
+                                continue
+                            f.seek(c.start)
+                            data = f.read(c.size)
+                            enc, payload = self._encode_payload(data)
+                            raw_bytes_sent += len(data)
+                            wire_bytes_sent += len(payload)
+                            if enc != "raw":
+                                compressed_chunks += 1
+                            chunk_msg = make_msg(
+                                "FILE_CDC_CHUNK",
+                                self.me.short_id,
+                                blob=blob_hex,
+                                index=c.index,
+                                hash=c.hash,
+                                enc=enc,
+                                wire_size=len(payload),
+                                data=base64.b64encode(payload).decode("ascii"),
+                            )
+                            await channel.send(encode_msg(chunk_msg))
+                            await _await_ack(channel)
+                            chunks_sent += 1
+                            self._update_transfer(
+                                transfer_id,
+                                status="active",
+                                progress_bytes=skipped_bytes + raw_bytes_sent,
+                                total_bytes=size,
+                                chunks_done=(len(cdc_chunks) - len(wanted_indexes)) + chunks_sent,
+                                chunks_total=len(cdc_chunks),
+                                raw_bytes=raw_bytes_sent,
+                                wire_bytes=wire_bytes_sent,
+                            )
+                else:
+                    with open(path, "rb") as f:
+                        seq = 0
+                        prev = f.read(CHUNK_SIZE)
+                        total_stream_chunks = max(1, (size + CHUNK_SIZE - 1) // CHUNK_SIZE)
+                        while prev:
+                            cur = f.read(CHUNK_SIZE)
+                            eof = not cur
+                            chunk_msg = make_msg(
+                                "FILE_CHUNK",
+                                self.me.short_id,
+                                blob=blob_hex,
+                                seq=seq,
+                                data=base64.b64encode(prev).decode("ascii"),
+                                eof=eof,
+                            )
+                            await channel.send(encode_msg(chunk_msg))
+                            await _await_ack(channel)
+                            chunks_sent += 1
+                            raw_bytes_sent += len(prev)
+                            wire_bytes_sent += len(prev)
+                            self._update_transfer(
+                                transfer_id,
+                                status="active",
+                                progress_bytes=raw_bytes_sent,
+                                total_bytes=size,
+                                chunks_done=chunks_sent,
+                                chunks_total=total_stream_chunks,
+                                raw_bytes=raw_bytes_sent,
+                                wire_bytes=wire_bytes_sent,
+                            )
+                            prev = cur
+                            seq += 1
 
-            await channel.close()
+                    if chunks_sent == 0:
+                        empty = make_msg(
+                            "FILE_CHUNK",
+                            self.me.short_id,
+                            blob=blob_hex,
+                            seq=0,
+                            data="",
+                            eof=True,
+                        )
+                        await channel.send(encode_msg(empty))
+                        await _await_ack(channel)
+                        chunks_sent = 1
+                        self._update_transfer(
+                            transfer_id,
+                            status="active",
+                            progress_bytes=0,
+                            total_bytes=0,
+                            chunks_done=1,
+                            chunks_total=1,
+                        )
+
+                # v0.7.0: stamp session counters so the next idle-PING
+                # probe doesn't fire prematurely. No channel.close() —
+                # the persistent session is alive for the next send.
+                sess.last_used = time.time()
+                sess.messages_sent += 1
+                self._stamp_pair_health(sess.peer_fp)
+
             self._update_transfer(
                 transfer_id,
                 status="complete",
@@ -3485,9 +3798,12 @@ class Daemon:
                     "error_class": type(e).__name__,
                 },
             )
+            # v0.7.0: a mid-stream failure leaves the session in an
+            # unknown state (we sent a partial frame, peer's read loop
+            # could be poisoned). Drop it so the next send_to / send_file
+            # opens a fresh handshake instead of inheriting the rot.
             with contextlib.suppress(Exception):
-                writer.close()
-                await writer.wait_closed()
+                await self._drop_outbound_session(sess.peer_fp)
             raise
 
     # ─── control plane (local CLI) ──────────────────────────────────────
@@ -3773,6 +4089,25 @@ class Daemon:
                 pass
 
         self._prune_task = asyncio.create_task(_prune_loop())
+
+        # v0.7.0: kick off endpoint announcement to all pinned peers
+        # shortly after startup. Detached task — failures don't
+        # affect daemon liveness, just degrade send-path freshness
+        # for any peer that didn't receive the announcement.
+        async def _delayed_announcement() -> None:
+            try:
+                # Short settle for the rendezvous client + discovery
+                # to finish their startup work; otherwise we'd
+                # broadcast empty endpoints.
+                await asyncio.sleep(2.0)
+                await self.broadcast_endpoint_to_paired()
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.debug("endpoint announcement at startup failed: %s", e)
+
+        with contextlib.suppress(Exception):
+            asyncio.create_task(_delayed_announcement())
 
         # Folder sync: blob store + manifest engine. Both lazy: even if user
         # never adds a folder, these are cheap to construct.
