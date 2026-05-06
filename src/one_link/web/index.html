@@ -603,10 +603,7 @@
     <aside class="side">
       <div class="section-h">
         <span>Nearby devices</span>
-        <span>
-          <button id="btn-prune-peers" title="Remove stale devices">Clean up</button>
-          <span class="count" id="peers-count">0</span>
-        </span>
+        <span class="count" id="peers-count">0</span>
       </div>
       <div class="peerlist" id="peerlist">
         <div class="empty">
@@ -645,6 +642,7 @@
               <input id="search-input" type="text" placeholder="Search this conversation…" />
             </div>
             <button id="btn-search-toggle" title="Search">⌕</button>
+            <button id="btn-unblock" style="display:none;">Allow device</button>
             <button id="btn-attach">Attach file</button>
           </div>
         </div>
@@ -914,7 +912,7 @@
     list.innerHTML = "";
     const visiblePeers = [...state.peers.values()].filter(p => {
       const unpaired = p.trust !== "pinned" && p.trust !== "rejected";
-      return !(p.same_host && unpaired);
+      return !(p.local_duplicate && unpaired);
     });
     state.hiddenLocalPeers = state.peers.size - visiblePeers.length;
     $("#peers-count").textContent = visiblePeers.length;
@@ -942,7 +940,7 @@
       txt.appendChild(el("div", "name", p.hostname || "(unknown)"));
       // Subtle, debug-only details — only visible on hover via .verify
       txt.appendChild(el("div", "sub",
-        p.same_host ? "same computer" : p.online ? "online" : "offline"
+        p.trust === "rejected" ? "blocked" : p.same_host ? "same computer" : p.online ? "online" : "offline"
       ));
 
       // Hover-only "verify identity" detail — IP + fingerprint short-id
@@ -1194,7 +1192,12 @@
     $("#convo-active").style.display = "flex";
     $("#convo-avatar").textContent = initials(peer.hostname || peer.short_id);
     $("#convo-name").textContent = peer.hostname || "(unknown)";
-    $("#convo-sub").textContent = `${peer.short_id} · ${peer.address}:${peer.port}`;
+    $("#convo-sub").textContent = peer.trust === "rejected"
+      ? `${peer.short_id} · blocked`
+      : `${peer.short_id} · ${peer.address}:${peer.port}`;
+    $("#btn-unblock").style.display = peer.trust === "rejected" && peer.fingerprint ? "inline-block" : "none";
+    $("#btn-attach").disabled = peer.trust === "rejected";
+    $("#btn-attach2").disabled = peer.trust === "rejected";
     renderPeers();
     renderMessages();
     renderPeerControls();
@@ -1353,6 +1356,11 @@
   async function sendCurrent() {
     const body = input.value.trim();
     if (!body || !state.selectedPeer) return;
+    const peer = state.peers.get(state.selectedPeer);
+    if (peer?.trust === "rejected") {
+      toast("This device is blocked. Use Allow device first.", "bad");
+      return;
+    }
     sendBtn.disabled = true;
     try {
       await api.post("/api/send", { peer: state.selectedPeer, body });
@@ -1369,22 +1377,24 @@
   // ── Send file (button) ─────────────────────────────────────────────
   const fileInput = $("#file-input");
   const triggerAttach = () => {
-    if (!state.selectedPeer) { toast("Pick a peer first", "info"); return; }
+    if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
+    const peer = state.peers.get(state.selectedPeer);
+    if (peer?.trust === "rejected") {
+      toast("This device is blocked. Use Allow device first.", "bad");
+      return;
+    }
     fileInput.click();
   };
   $("#btn-attach").addEventListener("click", triggerAttach);
   $("#btn-attach2").addEventListener("click", triggerAttach);
+  $("#btn-unblock").addEventListener("click", async () => {
+    const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
+    if (!peer?.fingerprint) return;
+    await setTrust(peer.fingerprint, "pending");
+    toast("Device unblocked. Pair it to send securely.", "good");
+  });
   $("#btn-send-file-panel").addEventListener("click", triggerAttach);
   $("#btn-refresh-files").addEventListener("click", refreshFiles);
-  $("#btn-prune-peers").addEventListener("click", async () => {
-    try {
-      const r = await api.post("/api/peers/prune", {});
-      toast(`Cleaned up ${r.removed || 0} stale device${r.removed === 1 ? "" : "s"}`, "good");
-      await refreshPeers();
-    } catch (e) {
-      toast(`Cleanup failed: ${e.message || e}`, "bad");
-    }
-  });
   fileInput.addEventListener("change", async (e) => {
     const files = Array.from(e.target.files || []);
     fileInput.value = "";
@@ -1392,7 +1402,12 @@
   });
 
   async function uploadFile(file) {
-    if (!state.selectedPeer) { toast("Pick a peer first", "info"); return; }
+    if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
+    const peer = state.peers.get(state.selectedPeer);
+    if (peer?.trust === "rejected") {
+      toast("This device is blocked. Use Allow device first.", "bad");
+      return;
+    }
     toast(`Sending ${file.name}…`, "info");
     try {
       const r = await api.upload(state.selectedPeer, file);
@@ -1419,7 +1434,7 @@
     e.preventDefault();
     dragCounter = 0;
     $("#drop-overlay").classList.remove("show");
-    if (!state.selectedPeer) { toast("Pick a peer first", "info"); return; }
+    if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
     const files = Array.from(e.dataTransfer?.files || []);
     for (const f of files) await uploadFile(f);
   });

@@ -326,6 +326,14 @@ class UIServer:
             pending peers — known in DB with trust='pending', regardless of online status
         """
         live: dict[str, dict] = {}  # fingerprint -> peer record
+        local_names = {self.daemon.me.hostname}
+        if self.daemon.state is not None:
+            try:
+                display_name = self.daemon.state.get_setting("display_name")
+                if display_name:
+                    local_names.add(display_name)
+            except Exception:
+                pass
         if self.daemon.discovery:
             for p in self.daemon.discovery.registry.list():
                 fp = ""
@@ -339,6 +347,7 @@ class UIServer:
                     continue
                 if p.short_id == self.daemon.me.short_id:
                     continue
+                same_host = p.hostname in local_names
                 live[fp or p.short_id] = {
                     "short_id": p.short_id,
                     "hostname": p.hostname,
@@ -350,7 +359,7 @@ class UIServer:
                     "trust": "pending",  # default if no DB row yet
                     "capabilities": [],
                     "allowed_capabilities": None,
-                    "same_host": p.hostname == self.daemon.me.hostname,
+                    "same_host": same_host,
                 }
         # Merge persistent state
         if self.daemon.state is not None:
@@ -395,6 +404,17 @@ class UIServer:
                         }
             except Exception:
                 pass
+        same_host_pending_counts: dict[str, int] = {}
+        for p in live.values():
+            if p.get("same_host") and p.get("trust") == "pending":
+                name = p.get("hostname") or ""
+                same_host_pending_counts[name] = same_host_pending_counts.get(name, 0) + 1
+        for p in live.values():
+            p["local_duplicate"] = bool(
+                p.get("same_host")
+                and p.get("trust") == "pending"
+                and same_host_pending_counts.get(p.get("hostname") or "", 0) > 1
+            )
         # Sort: online first, then by hostname
         peers = sorted(
             live.values(),

@@ -124,6 +124,59 @@ async def test_api_peers_filters_live_self_advertisements(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_api_peers_flags_unpaired_same_host_duplicate_adverts(tmp_path: Path):
+    from one_link.server import UIServer
+    from one_link.state import State
+
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        state.set_setting("display_name", "I am One")
+        live_local_1 = SimpleNamespace(
+            short_id="11111111",
+            hostname="WeareOne",
+            address="192.168.1.10",
+            port=50000,
+            ed_pub_hex=("11" * 32),
+        )
+        live_local_2 = SimpleNamespace(
+            short_id="22222222",
+            hostname="WeareOne",
+            address="192.168.1.10",
+            port=50001,
+            ed_pub_hex=("22" * 32),
+        )
+        live_other = SimpleNamespace(
+            short_id="33333333",
+            hostname="Kitchen Laptop",
+            address="192.168.1.11",
+            port=50002,
+            ed_pub_hex=("33" * 32),
+        )
+        daemon = SimpleNamespace(
+            state=state,
+            discovery=SimpleNamespace(
+                registry=SimpleNamespace(list=lambda: [live_local_1, live_local_2, live_other])
+            ),
+            me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa", hostname="WeareOne"),
+        )
+
+        server = UIServer(daemon)
+        resp = await server.api_peers(None)
+        body = json.loads(resp.text)
+        peers = {p["short_id"]: p for p in body["peers"]}
+
+        assert set(peers) == {"11111111", "22222222", "33333333"}
+        assert peers["11111111"]["same_host"] is True
+        assert peers["22222222"]["same_host"] is True
+        assert peers["11111111"]["local_duplicate"] is True
+        assert peers["22222222"]["local_duplicate"] is True
+        assert peers["33333333"].get("same_host") is False
+        assert peers["33333333"]["local_duplicate"] is False
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
 async def test_api_status_and_transfers_surface_ledger(tmp_path: Path):
     from one_link.server import UIServer
     from one_link.state import State
