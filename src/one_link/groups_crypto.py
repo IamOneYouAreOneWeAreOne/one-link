@@ -1,0 +1,455 @@
+"""Sender-Keys group encryption — Signal-pattern, adapted for One Link.
+
+Each member of a group maintains a per-group **sender chain**: a 32-byte
+chain key that advances after every message they send. Messages are
+encrypted with a fresh per-message key derived from the chain head;
+the chain key itself never leaves the sender. Recipients who hold a
+copy of the sender's current chain can re-derive each message's key
+in lock-step.
+
+Two cryptographic primitives compose the chain:
+
+  msg_key   = HMAC-SHA256(chain_key, b"msg")
+  next_key  = HMAC-SHA256(chain_key, b"next")
+
+After a message is sent or received, the holder advances the chain:
+
+  chain_key ← next_key, counter += 1
+
+Forward secrecy (this primitive)
+================================
+
+Within a chain: an attacker who captures the chain key at counter=N
+can decrypt message N onward but NOT N-1 or earlier — the previous
+key was destroyed at advance.
+
+This is "weak forward secrecy". Full FS + post-compromise security
+arrives in v0.7 via the Double Ratchet, which folds in fresh
+Diffie-Hellman material every message.
+
+Sender authentication
+=====================
+
+AEAD with the chain-derived `msg_key` authenticates "whoever has the
+chain key wrote this". That's NOT enough for a group: every current
+group member holds every sender's chain key, so a malicious member
+could forge messages purporting to come from any other member.
+
+Defence: every encrypted group message is also Ed25519-signed by the
+sender's device key. The pubkey is in the wire envelope; the
+signature covers
+`(group_id || sender_pubkey || epoch || counter || ciphertext)`.
+
+Epoch & rotation
+================
+
+`epoch` is a monotone counter that bumps when membership changes.
+The full session key state is `(group_id, sender_pubkey, epoch,
+chain_key, counter)`. After a remove-member event, every remaining
+member rotates their own chain to a fresh epoch and re-distributes
+to the new member set. The removed member's old chain is now stale —
+they can't decrypt the new epoch's messages.
+
+For v0.6.1 the *primitive* is here. The *distribution* (sending the
+new chain to peers over their 1-on-1 encrypted channels) lives in the
+wire-protocol layer added in v0.6.2.
+
+Replay defence
+==============
+
+Receivers track the highest `(sender, epoch, counter)` triple they've
+seen. A duplicate or out-of-order replay is rejected. Note: out-of-
+order delivery in normal use is rare for group chat; if needed we
+can add a sliding window in v0.6.2.
+
+Wire format
+===========
+
+  {
+    "v": "OL-GROUP-MSG-1",
+    "group_id_b64": ...,
+    "sender_pubkey_b64": ...,
+    "epoch": int,
+    "counter": int,
+    "ciphertext_b64": ...,
+    "signature_b64": ...,
+  }
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import struct
+from dataclasses import dataclass, field
+from typing import Optional
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+PROTOCOL_VERSION = "OL-GROUP-MSG-1"
+
+# Cryptographic constants.
+CHAIN_KEY_BYTES = 32              # HMAC-SHA256 output / ChaCha20Poly1305 key
+COUNTER_BYTES = 4                 # u32 — wraps after ~4B msgs / chain
+NONCE_BYTES = 12                  # ChaCha20-Poly1305 nonce
+TAG_BYTES = 16                    # Poly1305 auth tag
+MAX_MESSAGE_PLAINTEXT_BYTES = 1024 * 1024  # 1 MB sanity cap
+
+
+# ─── chain primitives ───────────────────────────────────────────────
+
+def _hmac_sha256(key: bytes, info: bytes) -> bytes:
+    """HMAC-SHA256(key, info). 32-byte output."""
+    return hmac.new(key, info, hashlib.sha256).digest()
+
+
+def derive_message_key(chain_key: bytes) -> bytes:
+    """The encryption key for *this* message — the current chain head."""
+    if len(chain_key) != CHAIN_KEY_BYTES:
+        raise ValueError(
+            f"chain_key must be {CHAIN_KEY_BYTES} bytes, got {len(chain_key)}"
+        )
+    return _hmac_sha256(chain_key, b"msg")
+
+
+def advance_chain_key(chain_key: bytes) -> bytes:
+    """Step the chain forward. The previous key MUST be destroyed
+    after this returns — that's where forward secrecy comes from."""
+    if len(chain_key) != CHAIN_KEY_BYTES:
+        raise ValueError(
+            f"chain_key must be {CHAIN_KEY_BYTES} bytes, got {len(chain_key)}"
+        )
+    return _hmac_sha256(chain_key, b"next")
+
+
+def new_chain_key() -> bytes:
+    """Cryptographically secure fresh chain key. Used at chain
+    creation (new group, new epoch after member rotation)."""
+    return os.urandom(CHAIN_KEY_BYTES)
+
+
+# ─── per-message AEAD ───────────────────────────────────────────────
+
+def _build_nonce(epoch: int, counter: int) -> bytes:
+    """Deterministic nonce from (epoch, counter). 4 bytes epoch +
+    8 bytes counter (the lower 32 bits are the counter; upper 32
+    bits zero, leaving room to fold in extra entropy later)."""
+    if not (0 <= epoch < 2**32):
+        raise ValueError(f"epoch out of u32 range: {epoch}")
+    if not (0 <= counter < 2**32):
+        raise ValueError(f"counter out of u32 range: {counter}")
+    return struct.pack(">II", epoch, counter) + b"\x00\x00\x00\x00"
+
+
+def _aad(group_id: bytes, sender_pubkey: bytes, epoch: int, counter: int) -> bytes:
+    """Associated data fed into AEAD — binds a ciphertext to its
+    routing context. Tampering with any of these fields invalidates
+    the Poly1305 tag."""
+    if len(group_id) != 16:
+        raise ValueError("group_id must be 16 bytes")
+    if len(sender_pubkey) != 32:
+        raise ValueError("sender_pubkey must be 32 bytes")
+    return (
+        b"OL-GROUP-MSG-1"
+        + group_id
+        + sender_pubkey
+        + struct.pack(">II", epoch, counter)
+    )
+
+
+def _encrypt_with_msg_key(
+    msg_key: bytes,
+    plaintext: bytes,
+    group_id: bytes,
+    sender_pubkey: bytes,
+    epoch: int,
+    counter: int,
+) -> bytes:
+    """ChaCha20-Poly1305 with deterministic nonce + AAD."""
+    if len(msg_key) != CHAIN_KEY_BYTES:
+        raise ValueError("msg_key wrong length")
+    if len(plaintext) > MAX_MESSAGE_PLAINTEXT_BYTES:
+        raise ValueError(
+            f"plaintext too large: {len(plaintext)} > "
+            f"{MAX_MESSAGE_PLAINTEXT_BYTES}"
+        )
+    aead = ChaCha20Poly1305(msg_key)
+    nonce = _build_nonce(epoch, counter)
+    aad = _aad(group_id, sender_pubkey, epoch, counter)
+    return aead.encrypt(nonce, plaintext, aad)
+
+
+def _decrypt_with_msg_key(
+    msg_key: bytes,
+    ciphertext: bytes,
+    group_id: bytes,
+    sender_pubkey: bytes,
+    epoch: int,
+    counter: int,
+) -> bytes:
+    """Inverse. Raises ValueError on auth failure (Poly1305 tag
+    mismatch) — caller must NOT reveal which check failed."""
+    aead = ChaCha20Poly1305(msg_key)
+    nonce = _build_nonce(epoch, counter)
+    aad = _aad(group_id, sender_pubkey, epoch, counter)
+    try:
+        return aead.decrypt(nonce, ciphertext, aad)
+    except Exception as e:
+        raise ValueError(f"AEAD decrypt failed: {e}") from None
+
+
+# ─── SenderChain — per-(group, sender) sending state ───────────────
+
+@dataclass
+class SenderChain:
+    """One member's outbound state for one group at one epoch."""
+    group_id: bytes
+    sender_pubkey: bytes
+    epoch: int
+    chain_key: bytes        # advanced after every send
+    counter: int = 0        # number of messages already sent this epoch
+
+
+@dataclass
+class ReceivingChain:
+    """The corresponding inbound state on the receiver side. Tracks
+    the highest counter seen + a small sliding window for out-of-
+    order frames so the upstack handles minor reordering."""
+    group_id: bytes
+    sender_pubkey: bytes
+    epoch: int
+    chain_key: bytes
+    counter: int = 0  # next-expected; lockstep with the sender if delivery is in order
+    # We allow at most this many "skipped" message keys to be cached
+    # so brief reordering doesn't drop messages. v0.6.1 enforces strict
+    # in-order; v0.6.2 may relax with sliding-window cache.
+    seen_counters: set[int] = field(default_factory=set)
+
+
+def encrypt_message(
+    *,
+    plaintext: bytes,
+    chain: SenderChain,
+    private_key: Ed25519PrivateKey,
+) -> tuple[dict, SenderChain]:
+    """Encrypt a single group message. Returns the wire dict + the
+    *new* SenderChain (chain key advanced, counter += 1).
+
+    The caller should treat the returned chain as the canonical
+    sender state from this point. The previous chain_key is no
+    longer usable (forward secrecy).
+    """
+    if len(plaintext) == 0:
+        raise ValueError("empty plaintext not allowed")
+    if len(plaintext) > MAX_MESSAGE_PLAINTEXT_BYTES:
+        raise ValueError("plaintext too large")
+    msg_key = derive_message_key(chain.chain_key)
+    ciphertext = _encrypt_with_msg_key(
+        msg_key=msg_key,
+        plaintext=plaintext,
+        group_id=chain.group_id,
+        sender_pubkey=chain.sender_pubkey,
+        epoch=chain.epoch,
+        counter=chain.counter,
+    )
+    # Sign (group_id || sender_pubkey || epoch || counter || ciphertext)
+    # so a member who holds the chain key can't forge as somebody else.
+    sig_input = (
+        chain.group_id
+        + chain.sender_pubkey
+        + struct.pack(">II", chain.epoch, chain.counter)
+        + ciphertext
+    )
+    signature = private_key.sign(sig_input)
+
+    wire = {
+        "v": PROTOCOL_VERSION,
+        "group_id_b64": _b64(chain.group_id),
+        "sender_pubkey_b64": _b64(chain.sender_pubkey),
+        "epoch": chain.epoch,
+        "counter": chain.counter,
+        "ciphertext_b64": _b64(ciphertext),
+        "signature_b64": _b64(signature),
+    }
+    next_chain = SenderChain(
+        group_id=chain.group_id,
+        sender_pubkey=chain.sender_pubkey,
+        epoch=chain.epoch,
+        chain_key=advance_chain_key(chain.chain_key),
+        counter=chain.counter + 1,
+    )
+    return wire, next_chain
+
+
+def decrypt_message(
+    *,
+    wire: dict,
+    chain: ReceivingChain,
+) -> tuple[bytes, ReceivingChain]:
+    """Decrypt + verify a group message. Returns plaintext + advanced
+    receiving chain.
+
+    Raises ValueError on:
+      - protocol version mismatch
+      - signature verification failure (forged sender)
+      - AEAD decrypt failure (tampered ciphertext or wrong key)
+      - replay (counter already seen this epoch)
+      - epoch mismatch (expected fresh-epoch rotation)
+      - in v0.6.1: out-of-order delivery (counter < expected). A
+        sliding-window cache lands in v0.6.2 if real-world delivery
+        proves to be reorder-prone.
+    """
+    if not isinstance(wire, dict):
+        raise ValueError("wire must be a dict")
+    if wire.get("v") != PROTOCOL_VERSION:
+        raise ValueError(f"unsupported version: {wire.get('v')!r}")
+
+    # Parse + validate fields.
+    group_id = _b64d(_require_str(wire.get("group_id_b64"), "group_id_b64"))
+    if group_id != chain.group_id:
+        raise ValueError("group_id does not match chain")
+    sender_pubkey = _b64d(_require_str(
+        wire.get("sender_pubkey_b64"), "sender_pubkey_b64"
+    ))
+    if sender_pubkey != chain.sender_pubkey:
+        raise ValueError("sender_pubkey does not match chain")
+    epoch = _require_int(wire.get("epoch"), "epoch")
+    counter = _require_int(wire.get("counter"), "counter")
+    ciphertext = _b64d(_require_str(wire.get("ciphertext_b64"), "ciphertext_b64"))
+    signature = _b64d(_require_str(wire.get("signature_b64"), "signature_b64"))
+    if len(signature) != 64:
+        raise ValueError("signature must be 64 bytes")
+
+    # Epoch / counter sanity. Strict in-order in v0.6.1.
+    if epoch != chain.epoch:
+        raise ValueError(
+            f"epoch mismatch: chain at {chain.epoch}, message claims {epoch}"
+        )
+    if counter in chain.seen_counters:
+        raise ValueError(f"replay: counter {counter} already seen")
+    if counter != chain.counter:
+        # Strict: v0.6.1 rejects out-of-order. Receiver should
+        # buffer at the wire layer if needed.
+        raise ValueError(
+            f"out-of-order: chain expected counter {chain.counter}, got {counter}"
+        )
+
+    # Verify Ed25519 signature.
+    sig_input = (
+        group_id + sender_pubkey
+        + struct.pack(">II", epoch, counter)
+        + ciphertext
+    )
+    try:
+        Ed25519PublicKey.from_public_bytes(sender_pubkey).verify(
+            signature, sig_input
+        )
+    except InvalidSignature:
+        raise ValueError("signature does not verify")
+
+    # Derive msg_key + decrypt. AEAD failure = tampered ciphertext.
+    msg_key = derive_message_key(chain.chain_key)
+    plaintext = _decrypt_with_msg_key(
+        msg_key=msg_key,
+        ciphertext=ciphertext,
+        group_id=group_id,
+        sender_pubkey=sender_pubkey,
+        epoch=epoch,
+        counter=counter,
+    )
+
+    # Advance.
+    next_seen = set(chain.seen_counters)
+    next_seen.add(counter)
+    next_chain = ReceivingChain(
+        group_id=chain.group_id,
+        sender_pubkey=chain.sender_pubkey,
+        epoch=chain.epoch,
+        chain_key=advance_chain_key(chain.chain_key),
+        counter=counter + 1,
+        seen_counters=next_seen,
+    )
+    return plaintext, next_chain
+
+
+# ─── epoch rotation ────────────────────────────────────────────────
+
+def begin_new_epoch(
+    *,
+    group_id: bytes,
+    sender_pubkey: bytes,
+    new_epoch: int,
+) -> SenderChain:
+    """Start a fresh sending chain at a new epoch. Called when group
+    membership changes (someone added or removed). The chain key is
+    fresh from the OS RNG so neither the previous epoch nor any
+    departed member can derive it.
+
+    The caller must distribute the resulting `chain_key` to the
+    current group members over their 1-on-1 encrypted channels.
+    That distribution happens at the wire-protocol layer (v0.6.2).
+    """
+    if new_epoch <= 0:
+        raise ValueError("epoch must be positive")
+    return SenderChain(
+        group_id=group_id,
+        sender_pubkey=sender_pubkey,
+        epoch=new_epoch,
+        chain_key=new_chain_key(),
+        counter=0,
+    )
+
+
+def receive_new_epoch(
+    *,
+    group_id: bytes,
+    sender_pubkey: bytes,
+    epoch: int,
+    chain_key: bytes,
+) -> ReceivingChain:
+    """Materialize an incoming epoch's receiving chain. Called when
+    we receive someone's new chain key over a 1-on-1 encrypted
+    channel after a membership change."""
+    if len(chain_key) != CHAIN_KEY_BYTES:
+        raise ValueError("chain_key wrong length")
+    if len(group_id) != 16:
+        raise ValueError("group_id must be 16 bytes")
+    if len(sender_pubkey) != 32:
+        raise ValueError("sender_pubkey must be 32 bytes")
+    return ReceivingChain(
+        group_id=group_id,
+        sender_pubkey=sender_pubkey,
+        epoch=epoch,
+        chain_key=chain_key,
+        counter=0,
+    )
+
+
+# ─── helpers ────────────────────────────────────────────────────────
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64d(s: str) -> bytes:
+    pad = "=" * ((4 - len(s) % 4) % 4)
+    return base64.urlsafe_b64decode((s + pad).encode("ascii"))
+
+
+def _require_str(v, name: str) -> str:
+    if not isinstance(v, str):
+        raise ValueError(f"{name} must be a string")
+    return v
+
+
+def _require_int(v, name: str) -> int:
+    if not isinstance(v, int) or isinstance(v, bool):
+        raise ValueError(f"{name} must be an integer")
+    return v
