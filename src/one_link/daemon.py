@@ -282,6 +282,12 @@ class Daemon:
         # URL list this session, so we don't repeatedly merge the same set
         # on every reconnect.
         self._inherited_rdz_from: set[str] = set()
+        # v0.5.5: encrypted-relay listeners. One persistent WS per
+        # configured rendezvous URL — the destination side of the
+        # relay. Started/stopped alongside the rendezvous client by
+        # `update_rendezvous_urls`. None when relay isn't enabled or
+        # not running.
+        self._relay_listener_clients: list = []
 
     def _build_my_caps(self) -> dict:
         """Build a CAPS frame for THIS daemon. Includes our rendezvous
@@ -1660,6 +1666,11 @@ class Daemon:
             self.rendezvous = None
             with contextlib.suppress(Exception):
                 await old.stop()
+        # v0.5.5: also tear down old relay listeners.
+        for old_listener in list(self._relay_listener_clients):
+            with contextlib.suppress(Exception):
+                await old_listener.stop()
+        self._relay_listener_clients.clear()
 
         # Update mDNS TXT to advertise (or stop advertising) these URLs.
         # The discovery instance might not be up yet during initial
@@ -1705,11 +1716,46 @@ class Daemon:
             "rendezvous: connected to %d endpoint(s); advertising %d local ip(s)",
             len(urls), len(advertise),
         )
+
+        # v0.5.5: also fire up encrypted-relay listeners for each URL.
+        # If the relay endpoint isn't enabled on a given rendezvous,
+        # the listener client just retries-and-fails-quietly in its
+        # own loop; no global breakage. Listeners are torn down by
+        # the next call to update_rendezvous_urls or stop().
+        from one_link.relay_client import RelayListenerClient
+        for url in urls:
+            listener = RelayListenerClient(
+                rendezvous_url=url,
+                private_key=self.me.private,
+                pubkey=self.me.public_bytes,
+                on_session=self._handle_relay_inbound_session,
+            )
+            try:
+                await listener.start()
+                self._relay_listener_clients.append(listener)
+            except Exception as e:
+                log.warning("relay listener for %s failed to start: %s", url, e)
+
         # Push a peers_changed notification so the UI re-fetches /api/rendezvous
         # status if it's open.
         if self.ui_server is not None:
             with contextlib.suppress(Exception):
                 self.ui_server.broadcast({"type": "rendezvous_changed"})
+
+    async def _handle_relay_inbound_session(
+        self, reader, writer
+    ) -> None:
+        """v0.5.5: bridge a relay-tunneled inbound session into the
+        existing peer-handler. The encrypted handshake +
+        rate-limit + capability gates all run unchanged on top of
+        the relay-streamed bytes — `_handle_peer` doesn't care
+        whether the bytes came from a TCP socket or a WebSocket
+        relay tunnel."""
+        try:
+            await self._handle_peer(reader, writer)
+        finally:
+            with contextlib.suppress(Exception):
+                writer.close()
 
     async def resolve_peer_endpoint(self, peer_fp: str) -> Peer | None:
         """Find a way to reach a paired peer. mDNS first (LAN), then
@@ -1931,19 +1977,82 @@ class Daemon:
 
         Replaces direct `asyncio.open_connection(peer.address, peer.port)`
         calls. Falls back to single-endpoint dial if no rendezvous /
-        no extra candidates are available — same behavior as before
-        for the LAN-only path.
+        no extra candidates are available.
+
+        v0.5.5: If direct dial fails entirely AND we have at least
+        one rendezvous configured AND the peer has an ed_pub_hex,
+        fall through to the encrypted relay path. This catches
+        symmetric NATs and other "no direct route possible" cases —
+        the bytes go up to the rendezvous, sealed-sender-routed to
+        the destination, then down to the peer's daemon. Same
+        encrypted channel runs on top.
         """
         candidates = await self._collect_dial_candidates(peer)
-        if not candidates:
-            raise OSError(f"peer {peer.short_id} has no dialable endpoints")
-        if len(candidates) == 1:
-            host, port = candidates[0]
-            return await asyncio.open_connection(host, port)
-        reader, writer, _winning = await self._dial_first_responsive(
-            candidates, timeout=timeout
-        )
-        return reader, writer
+        direct_err: BaseException | None = None
+        if candidates:
+            try:
+                if len(candidates) == 1:
+                    host, port = candidates[0]
+                    return await asyncio.open_connection(host, port)
+                reader, writer, _winning = await self._dial_first_responsive(
+                    candidates, timeout=timeout
+                )
+                return reader, writer
+            except (OSError, asyncio.TimeoutError) as e:
+                direct_err = e
+
+        # Fall through to relay if available.
+        relay_pair = await self._dial_via_relay(peer)
+        if relay_pair is not None:
+            return relay_pair
+
+        if direct_err is not None:
+            raise direct_err
+        raise OSError(f"peer {peer.short_id} has no dialable endpoints")
+
+    async def _dial_via_relay(
+        self, peer: Peer
+    ) -> tuple[object, object] | None:
+        """v0.5.5: open an encrypted-relay session targeting the
+        peer's pubkey. Returns a (reader, writer) compatible pair, or
+        None if no relay is available / peer can't be addressed via
+        relay.
+
+        Tries each configured rendezvous URL in order; the first
+        whose listener slot for the peer's pubkey is occupied wins.
+        """
+        if not self._relay_listener_clients:
+            # We don't have any rendezvous configured. Even if we did,
+            # caller should have a peer pubkey for sealed-sender routing.
+            return None
+        if not peer.ed_pub_hex:
+            return None
+        try:
+            dst_pubkey = bytes.fromhex(peer.ed_pub_hex)
+        except ValueError:
+            return None
+        if len(dst_pubkey) != 32:
+            return None
+        from one_link.relay_client import open_relay_outbound
+
+        # Use the same URL set as our listener clients — those are
+        # the rendezvous our paired peer is also (likely) registered
+        # with. First success wins.
+        for listener in list(self._relay_listener_clients):
+            url = listener._rendezvous_url  # type: ignore[attr-defined]
+            try:
+                reader, writer, _pump = await open_relay_outbound(
+                    url, dst_pubkey
+                )
+                log.info(
+                    "relay dial succeeded for %s via %s",
+                    peer.short_id, url,
+                )
+                return reader, writer
+            except Exception as e:
+                log.debug("relay dial via %s failed: %s", url, e)
+                continue
+        return None
 
     def _valid_blob_hex(self, blob: str) -> bool:
         if len(blob) != 64:
@@ -3154,6 +3263,11 @@ class Daemon:
             except Exception:
                 pass
             self.rendezvous = None
+        # v0.5.5: stop relay listeners.
+        for listener in list(self._relay_listener_clients):
+            with contextlib.suppress(Exception):
+                await listener.stop()
+        self._relay_listener_clients.clear()
         for peer_fp in list(self._outbound_sessions):
             await self._drop_outbound_session(peer_fp)
         if self._folder_sync_task and not self._folder_sync_task.done():
