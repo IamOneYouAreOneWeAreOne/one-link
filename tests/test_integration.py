@@ -41,7 +41,14 @@ def test_text_with_unicode():
 
 def test_send_by_hostname():
     with daemon_pair() as p:
-        res = request(p.a.control_port, cmd="send", peer=p.b.hostname, body="hi")
+        peers = request(p.a.control_port, cmd="peers")
+        assert peers["ok"], peers
+        peer_label = next(
+            peer["hostname"]
+            for peer in peers["peers"]
+            if peer["short_id"] == p.b.short_id
+        )
+        res = request(p.a.control_port, cmd="send", peer=peer_label, body="hi")
         assert res["ok"], res
 
 
