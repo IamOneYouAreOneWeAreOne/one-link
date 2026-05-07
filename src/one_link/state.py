@@ -298,11 +298,26 @@ class PeerRecord:
     # v0.7.3 per-device profile.
     local_alias: Optional[str] = None
     muted: bool = False
+    # v0.7.7 verified-in-person trust state. `verified_at_ms` is set
+    # the moment the user confirms a side-channel SAS match (face-to-
+    # face, QR scan, audio readback). `verified_method` is one of
+    # 'sas-digits', 'sas-qr', 'sas-audio', 'manual'. `verified_note`
+    # is an optional free-text reminder ("met at office Tue").
+    verified_at_ms: Optional[int] = None
+    verified_method: Optional[str] = None
+    verified_note: Optional[str] = None
 
     @property
     def display_name(self) -> str:
         """Resolves to local_alias if set, else hostname, else short_id."""
         return self.local_alias or self.hostname or self.short_id
+
+    @property
+    def is_verified(self) -> bool:
+        """v0.7.7: True iff the peer has been verified in person via
+        a side-channel SAS confirm. Independent of `trust` — trust
+        gates wire access; verification gates UI affordance."""
+        return self.verified_at_ms is not None
 
 
 @dataclass
@@ -429,8 +444,24 @@ class State:
                 self._migrate_v7_group_edit_delete(c)
                 if current < 7:
                     c.execute("INSERT INTO schema_version(version) VALUES(7)")
+                # v0.7.7: peer verified-in-person trust state.
+                self._migrate_v8_peer_verification(c)
+                if current < 8:
+                    c.execute("INSERT INTO schema_version(version) VALUES(8)")
             finally:
                 c.close()
+
+    def _migrate_v8_peer_verification(self, c: sqlite3.Cursor) -> None:
+        """v0.7.7: peers gain side-channel verification state.
+        Idempotent — safe to re-run."""
+        rows = c.execute("PRAGMA table_info(peers)").fetchall()
+        existing = {row[1] for row in rows}
+        if "verified_at_ms" not in existing:
+            c.execute("ALTER TABLE peers ADD COLUMN verified_at_ms INTEGER")
+        if "verified_method" not in existing:
+            c.execute("ALTER TABLE peers ADD COLUMN verified_method TEXT")
+        if "verified_note" not in existing:
+            c.execute("ALTER TABLE peers ADD COLUMN verified_note TEXT")
 
     def _migrate_v6_group_reply(self, c: sqlite3.Cursor) -> None:
         """v0.8.2: group messages gain reply_to for threaded context."""
@@ -1075,6 +1106,18 @@ class State:
                 row["local_alias"] if "local_alias" in cols else None
             ),
             muted=bool(row["muted"]) if "muted" in cols else False,
+            verified_at_ms=(
+                row["verified_at_ms"]
+                if "verified_at_ms" in cols else None
+            ),
+            verified_method=(
+                row["verified_method"]
+                if "verified_method" in cols else None
+            ),
+            verified_note=(
+                row["verified_note"]
+                if "verified_note" in cols else None
+            ),
         )
 
     def set_peer_profile(
@@ -1105,6 +1148,117 @@ class State:
             self._conn.execute(
                 f"UPDATE peers SET {', '.join(sets)} WHERE fingerprint = ?",
                 params,
+            )
+        return self.get_peer(fingerprint)
+
+    # ─── verification (v0.7.7) ────────────────────────────────────────
+
+    _ALLOWED_VERIFY_METHODS = ("sas-digits", "sas-qr", "sas-audio", "manual")
+
+    def set_peer_verified(
+        self,
+        fingerprint: str,
+        *,
+        method: str,
+        note: Optional[str] = None,
+        actor: Optional[str] = None,
+    ) -> Optional[PeerRecord]:
+        """v0.7.7: mark a peer as verified-in-person via a side-channel
+        SAS confirm. `method` records HOW the user verified (digits
+        read aloud, QR scan, audio readback, manual override).
+        Records a capability_audit row so the trust transition is
+        forensically auditable. Returns the refreshed PeerRecord, or
+        None if the peer doesn't exist."""
+        if method not in self._ALLOWED_VERIFY_METHODS:
+            raise ValueError(
+                f"verify method must be one of "
+                f"{self._ALLOWED_VERIFY_METHODS!r}, got {method!r}"
+            )
+        clean_note: Optional[str] = None
+        if note is not None:
+            clean_note = str(note).strip() or None
+            if clean_note and len(clean_note) > 280:
+                # Same upper bound as a tweet — long enough for a
+                # location/context reminder, short enough to render
+                # in the device drawer without truncation games.
+                raise ValueError("verify note too long (max 280 chars)")
+        now = _now_ms()
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT verified_at_ms, verified_method FROM peers"
+                " WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+            if row is None:
+                return None
+            before = {
+                "verified_at_ms": row["verified_at_ms"],
+                "verified_method": row["verified_method"],
+            }
+            self._conn.execute(
+                "UPDATE peers SET verified_at_ms = ?, verified_method = ?,"
+                " verified_note = ? WHERE fingerprint = ?",
+                (now, method, clean_note, fingerprint),
+            )
+            after = {
+                "verified_at_ms": now,
+                "verified_method": method,
+                "verified_note": clean_note,
+            }
+            if before != {
+                "verified_at_ms": after["verified_at_ms"],
+                "verified_method": after["verified_method"],
+            } or row["verified_at_ms"] is None:
+                self._record_capability_audit(
+                    fingerprint=fingerprint,
+                    kind="verify_set",
+                    before=before,
+                    after=after,
+                    actor=actor,
+                    note=clean_note,
+                )
+        return self.get_peer(fingerprint)
+
+    def clear_peer_verified(
+        self,
+        fingerprint: str,
+        *,
+        actor: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> Optional[PeerRecord]:
+        """v0.7.7: revoke a verified-in-person mark (e.g. user no
+        longer trusts the side channel, key changed, device changed
+        hands). Audit log captures the before-state so the timeline
+        survives the clear."""
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT verified_at_ms, verified_method, verified_note"
+                " FROM peers WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+            if row is None:
+                return None
+            before = {
+                "verified_at_ms": row["verified_at_ms"],
+                "verified_method": row["verified_method"],
+                "verified_note": row["verified_note"],
+            }
+            if row["verified_at_ms"] is None:
+                # Idempotent no-op — nothing to clear, no audit row.
+                return self.get_peer(fingerprint)
+            self._conn.execute(
+                "UPDATE peers SET verified_at_ms = NULL,"
+                " verified_method = NULL, verified_note = NULL"
+                " WHERE fingerprint = ?",
+                (fingerprint,),
+            )
+            self._record_capability_audit(
+                fingerprint=fingerprint,
+                kind="verify_clear",
+                before=before,
+                after=None,
+                actor=actor,
+                note=note,
             )
         return self.get_peer(fingerprint)
 

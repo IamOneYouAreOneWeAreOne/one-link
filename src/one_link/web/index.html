@@ -133,6 +133,39 @@
   .peer.online .avatar::after { background: var(--good); }
   .peer.offline { opacity: .55; }
   .peer.offline .avatar::after { background: var(--text-dimmer); }
+  /* v0.7.7 verified-in-person overlay. Sits on top of the avatar's
+     online-dot in the bottom-right; the dot moves to the top-right
+     so we don't double-stack. */
+  .avatar-wrap { position: relative; flex-shrink: 0; }
+  .avatar-wrap .verified-overlay {
+    position: absolute; right: -3px; top: -3px;
+    min-width: 14px; height: 14px; padding: 0 2px;
+    border-radius: 999px;
+    background: var(--good); color: #0a1f0a;
+    font-size: 10px; font-weight: 800; line-height: 14px;
+    text-align: center;
+    box-shadow: 0 1px 4px rgba(0,0,0,.5);
+    border: 2px solid var(--bg-1);
+    pointer-events: none;
+  }
+  .verified-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 999px;
+    background: rgba(76, 209, 117, .18); color: var(--good);
+    font-size: 11px; font-weight: 600; letter-spacing: .3px;
+    margin-left: 6px;
+  }
+  .verified-pill::before { content: "✓"; font-weight: 800; }
+  .verify-cta { /* yellow nudge in conversation header for unverified */
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 999px;
+    background: rgba(245, 196, 81, .15); color: var(--warn);
+    font-size: 11px; font-weight: 600;
+    border: 1px solid rgba(245, 196, 81, .25);
+    cursor: pointer; margin-left: 6px;
+    transition: background .12s, color .12s;
+  }
+  .verify-cta:hover { background: rgba(245, 196, 81, .26); }
   .peer .trust-tag {
     font-size: 10px; font-weight: 600; letter-spacing: .4px;
     padding: 1px 6px; border-radius: 999px; text-transform: uppercase;
@@ -311,8 +344,10 @@
     background: var(--bg-1);
     border-bottom: 1px solid var(--line);
   }
-  .convo-h .who { display: flex; align-items: center; min-width: 0; }
+  .convo-h .who { display: flex; align-items: center; min-width: 0; gap: 6px; }
   .convo-h .who .text { min-width: 0; }
+  .convo-h .who .trust-marker { display: flex; align-items: center; flex-shrink: 0; }
+  .convo-h .who .trust-marker:empty { display: none; }
   .convo-h .who .text .name { font-weight: 600; line-height: 1.1; }
   .convo-h .who .text .sub  {
     font-size: 12px; color: var(--text-dim);
@@ -366,11 +401,12 @@
   .device-drawer .device-drawer-sub {
     color: var(--text-dim); font-size: 12px; font-weight: 400;
   }
-  .device-reach, .device-identity {
+  .device-reach, .device-identity, .device-verify {
     display: flex; flex-direction: column; gap: 6px;
     background: var(--bg-2); border-radius: 8px; padding: 10px 12px;
     font-size: 13px;
   }
+  .device-verify .settings-help { margin: 0 0 8px; }
   .reach-row { display: flex; gap: 12px; align-items: baseline; }
   .reach-row .lbl {
     color: var(--text-dim); font-size: 11px;
@@ -952,6 +988,31 @@
   }
   .msg-toolbar .tb-btn:hover { background: var(--bg-3); color: var(--text); }
 
+  .pin-strip {
+    padding: 8px 18px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(245,196,81,.06);
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  }
+  .pin-chip {
+    max-width: 360px;
+    display: inline-flex; align-items: center; gap: 8px;
+    border: 1px solid rgba(245,196,81,.22);
+    background: rgba(245,196,81,.08);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+  .pin-chip .pin-text {
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  }
+  .pin-chip button {
+    background: transparent; color: var(--text-dim);
+    padding: 0 4px;
+  }
+  .pin-chip button:hover { color: var(--text); }
+
   /* v0.7.5: reactions chip row */
   .reactions-row {
     display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px;
@@ -1252,6 +1313,10 @@
               <div class="name" id="convo-name">…</div>
               <div class="sub"  id="convo-sub">…</div>
             </div>
+            <!-- v0.7.7: verified-in-person pill OR yellow "Verify in
+                 person" CTA. Populated by renderConvHeaderTrust on
+                 every selectPeer / peer_verified WS event. -->
+            <div class="trust-marker" id="convo-trust"></div>
           </div>
           <div class="actions">
             <div class="search" id="search-wrap">
@@ -1269,6 +1334,8 @@
           <span id="search-banner-text">…</span>
           <button id="btn-clear-search">Clear</button>
         </div>
+
+        <div id="pin-strip" class="pin-strip" style="display:none;"></div>
 
         <!-- v0.7.x: per-device Allow toggles (Chat/Files/Folders)
              moved into the Settings modal so the chat surface stays
@@ -1524,6 +1591,14 @@
         <input type="text" id="cg-name" maxlength="64" placeholder="e.g. Family, Project Aurora" />
       </div>
       <div class="settings-section">
+        <div class="settings-section-h"><span>Group name</span></div>
+        <div class="settings-row">
+          <label for="group-rename-input">Name</label>
+          <input type="text" id="group-rename-input" maxlength="64" />
+        </div>
+        <button class="btn-ghost" id="group-rename-save">Rename group</button>
+      </div>
+      <div class="settings-section">
         <div class="settings-section-h"><span>Members</span></div>
         <div id="cg-members"></div>
       </div>
@@ -1635,6 +1710,39 @@
           <div class="reach-row"><span class="lbl">Short ID</span><span class="val copyable" id="dev-shortid">—</span></div>
           <div class="reach-row"><span class="lbl">Fingerprint</span><span class="val copyable mono small" id="dev-fp">—</span></div>
           <div class="reach-row"><span class="lbl">SAS</span><span class="val mono" id="dev-sas">—</span></div>
+        </div>
+      </div>
+
+      <!-- v0.7.7 verified-in-person SAS confirm. The cryptographic
+           channel is protected by Double Ratchet; this section
+           records that the user confirmed the SAS through a side
+           channel (face-to-face, phone, video) so a green check
+           shows in the sidebar + conversation header. -->
+      <div class="settings-section" id="dev-verify-section">
+        <div class="settings-section-h"><span>Verified in person</span></div>
+        <div class="device-verify" id="dev-verify-state">
+          <p class="settings-help" id="dev-verify-help">
+            Compare the SAS above with the same value on the other
+            device — face-to-face, on a call, or by reading it aloud.
+            If they match, mark this device verified to surface a
+            green checkmark across the chat.
+          </p>
+          <div class="reach-row" id="dev-verify-when-row" style="display:none;">
+            <span class="lbl">Verified</span>
+            <span class="val" id="dev-verify-when">—</span>
+          </div>
+          <div class="reach-row" id="dev-verify-method-row" style="display:none;">
+            <span class="lbl">Method</span>
+            <span class="val" id="dev-verify-method">—</span>
+          </div>
+          <div class="reach-row" id="dev-verify-note-row" style="display:none;">
+            <span class="lbl">Note</span>
+            <span class="val" id="dev-verify-note">—</span>
+          </div>
+        </div>
+        <div class="mini-actions wrap" id="dev-verify-actions">
+          <button class="btn-primary" id="dev-verify-confirm">Verify in person</button>
+          <button class="btn-ghost" id="dev-verify-revoke" style="display:none;">Revoke verification</button>
         </div>
       </div>
 
@@ -1820,6 +1928,8 @@
     selectedGroup: null,  // group_id_hex or null
     groupMessages: [],    // current group's messages, refreshed on switch
     groupDetail: null,    // {members, my_role, name, ...}
+    pins: {},
+    drafts: {},
   };
 
   // v0.7.5: fixed emoji palette for reactions. Custom picker
@@ -2120,6 +2230,8 @@
         p.short_id, p.hostname || "", p.address || "", p.port || 0,
         p.online ? 1 : 0, p.trust || "", latBucket,
         (p.allowed_capabilities || ["*"]).join(","),
+        // v0.7.7: avatar overlay flips when verification toggles.
+        p.is_verified ? 1 : 0,
       ].join("|"));
     }
     return parts.join("§");
@@ -2168,7 +2280,17 @@
       row.dataset.short = p.short_id;
       if (state.selectedPeer === p.short_id) row.classList.add("active");
 
+      // v0.7.7: a verified ✓ overlay sits on top of the avatar so a
+      // glance at the sidebar tells the user which devices have been
+      // SAS-confirmed in person.
+      const avWrap = el("div", "avatar-wrap");
       const av = el("div", "avatar", initials(p.display_name || p.hostname || p.short_id));
+      avWrap.appendChild(av);
+      if (p.is_verified) {
+        const badge = el("span", "verified-overlay", "✓");
+        badge.title = `Verified in person${p.verified_method ? " (" + verifyMethodLabel(p.verified_method) + ")" : ""}`;
+        avWrap.appendChild(badge);
+      }
       const txt = el("div", "text");
       const kind = deviceKindLabel(p);
       const nameEl = el("div", "name");
@@ -2190,7 +2312,7 @@
       txt.appendChild(sub);
 
       row.title = `${p.display_name || p.hostname || p.short_id} · ${reachLabel(p)}`;
-      row.appendChild(av);
+      row.appendChild(avWrap);
       row.appendChild(txt);
 
       // v0.7.3: gear opens the per-device drawer for THIS peer.
@@ -2490,6 +2612,7 @@
       state.selectedPeer, filtered, state.transfersById,
       state.searchResults != null,
     );
+    renderPins();
     if (m._renderSig === sig) return;
     m._renderSig = sig;
     m.innerHTML = "";
@@ -2578,6 +2701,13 @@
   // Edit + Delete only on your own messages.
   function renderMsgToolbar(msg) {
     const bar = el("div", "msg-toolbar");
+    const pinBtn = el("button", "tb-btn", isPinned(msg) ? "★" : "☆");
+    pinBtn.title = isPinned(msg) ? "Unpin" : "Pin";
+    pinBtn.onclick = (ev) => {
+      ev.stopPropagation();
+      togglePin(msg);
+    };
+    bar.appendChild(pinBtn);
     const replyBtn = el("button", "tb-btn", "↩");
     replyBtn.title = "Reply";
     replyBtn.onclick = (ev) => {
@@ -2614,6 +2744,112 @@
       bar.appendChild(delBtn);
     }
     return bar;
+  }
+
+  function activeChatKey() {
+    if (state.selectedGroup) return `group:${state.selectedGroup}`;
+    if (state.selectedPeer) return `peer:${state.selectedPeer}`;
+    return null;
+  }
+  function msgChatKey(msg) {
+    if (msg.is_group || msg.group_id) return `group:${msg.group_id || state.selectedGroup}`;
+    return `peer:${msg.peer || state.selectedPeer}`;
+  }
+  function loadLocalCollections() {
+    try { state.pins = JSON.parse(localStorage.getItem("ol_pins") || "{}") || {}; }
+    catch { state.pins = {}; }
+    try { state.drafts = JSON.parse(localStorage.getItem("ol_drafts") || "{}") || {}; }
+    catch { state.drafts = {}; }
+  }
+  function savePins() {
+    try { localStorage.setItem("ol_pins", JSON.stringify(state.pins || {})); } catch {}
+  }
+  function saveDrafts() {
+    try { localStorage.setItem("ol_drafts", JSON.stringify(state.drafts || {})); } catch {}
+  }
+  function saveActiveDraft() {
+    const key = activeChatKey();
+    if (!key || !input) return;
+    const text = input.value || "";
+    if (text.trim()) state.drafts[key] = text;
+    else delete state.drafts[key];
+    saveDrafts();
+  }
+  function restoreDraft() {
+    const key = activeChatKey();
+    if (!key || !input) return;
+    input.value = state.drafts[key] || "";
+    input.style.height = "auto";
+    input.style.height = Math.min(160, input.scrollHeight) + "px";
+    refreshSendEnabled();
+  }
+  function clearActiveDraft() {
+    const key = activeChatKey();
+    if (!key) return;
+    delete state.drafts[key];
+    saveDrafts();
+  }
+  function isPinned(msg) {
+    const key = msgChatKey(msg);
+    return Boolean(key && state.pins?.[key]?.some(p => p.id === msg.id));
+  }
+  function togglePin(msg) {
+    const key = msgChatKey(msg);
+    if (!key || !msg.id) return;
+    const pins = state.pins[key] || [];
+    const idx = pins.findIndex(p => p.id === msg.id);
+    if (idx >= 0) {
+      pins.splice(idx, 1);
+    } else {
+      pins.unshift({
+        id: msg.id,
+        body: msg.body || msg.name || "(message)",
+        ts: msg.ts || msg.ts_ms || Date.now(),
+        group_id: msg.group_id || null,
+        peer: msg.peer || null,
+      });
+    }
+    state.pins[key] = pins.slice(0, 8);
+    if (state.pins[key].length === 0) delete state.pins[key];
+    savePins();
+    renderPins();
+    if (state.selectedGroup) renderGroupConversation();
+    else renderMessages();
+  }
+  function renderPins() {
+    const strip = $("#pin-strip");
+    if (!strip) return;
+    const key = activeChatKey();
+    const pins = key ? (state.pins[key] || []) : [];
+    strip.innerHTML = "";
+    if (!pins.length) {
+      strip.style.display = "none";
+      return;
+    }
+    strip.style.display = "flex";
+    strip.appendChild(el("span", "settings-help", "Pinned"));
+    for (const p of pins) {
+      const chip = el("div", "pin-chip");
+      const text = el("span", "pin-text", p.body || "(message)");
+      chip.appendChild(text);
+      chip.onclick = () => {
+        const tgt = document.querySelector(`[data-msg-id="${CSS.escape(p.id)}"]`);
+        if (tgt) tgt.scrollIntoView({ behavior: "smooth", block: "center" });
+      };
+      const x = el("button", null, "×");
+      x.title = "Unpin";
+      x.onclick = (ev) => {
+        ev.stopPropagation();
+        state.pins[key] = (state.pins[key] || []).filter(pin => pin.id !== p.id);
+        if (state.pins[key].length === 0) delete state.pins[key];
+        savePins();
+        renderPins();
+        if (state.selectedGroup) renderGroupConversation();
+        else renderMessages();
+      };
+      chip.appendChild(x);
+      strip.appendChild(chip);
+    }
   }
 
   async function startEditMessage(msg) {
@@ -2990,6 +3226,7 @@
   }
 
   async function selectGroup(gidHex) {
+    saveActiveDraft();
     state.selectedGroup = gidHex;
     state.selectedPeer = null;  // mutually exclusive
     try {
@@ -3006,6 +3243,9 @@
     }
     renderGroups();
     renderGroupConversation();
+    renderPins();
+    restoreDraft();
+    $("#input").focus();
   }
 
   function closeGroupSettings() {
@@ -3023,10 +3263,13 @@
     $("#group-settings-name").textContent = g.name || "(unnamed group)";
     $("#group-settings-sub").textContent =
       `${g.member_count} member${g.member_count === 1 ? "" : "s"}`;
+    $("#group-rename-input").value = g.name || "";
+    const canManage = g.my_role === "owner" || g.my_role === "admin";
+    $("#group-rename-input").disabled = !canManage;
+    $("#group-rename-save").disabled = !canManage;
 
     const memberHost = $("#group-settings-members");
     memberHost.innerHTML = "";
-    const canManage = g.my_role === "owner" || g.my_role === "admin";
     for (const m of g.members || []) {
       const row = el("div", "file-row");
       row.appendChild(el("div", "icon", m.is_me ? "You" : "User"));
@@ -3063,6 +3306,23 @@
       addSelect.appendChild(opt);
     }
     $("#group-settings-backdrop").classList.add("show");
+  }
+
+  async function renameCurrentGroup() {
+    const gid = state.selectedGroup;
+    const name = $("#group-rename-input").value.trim();
+    if (!gid || !name) return;
+    try {
+      const r = await api.post(`/api/groups/${gid}/rename`, { name });
+      if (state.groupDetail) state.groupDetail.name = r.name || name;
+      const g = state.groups.get(gid);
+      if (g) g.name = r.name || name;
+      toast("Group renamed", "good");
+      await refreshGroups();
+      await refreshSelectedGroup();
+    } catch (e) {
+      toast(`Rename failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
   }
 
   async function refreshSelectedGroup() {
@@ -3159,6 +3419,7 @@
 
   function renderGroupConversation() {
     if (!state.selectedGroup || !state.groupDetail) return;
+    renderPins();
     $("#convo-empty").style.display = "none";
     $("#convo-active").style.display = "flex";
     const g = state.groupDetail;
@@ -3489,7 +3750,11 @@
 
   // ── Selection ──────────────────────────────────────────────────────
   function selectPeer(shortId) {
+    saveActiveDraft();
     state.selectedPeer = shortId;
+    state.selectedGroup = null;
+    state.groupDetail = null;
+    state.groupMessages = [];
     const peer = state.peers.get(shortId);
     if (!peer) {
       $("#convo-empty").style.display = "grid";
@@ -3529,14 +3794,48 @@
     $("#btn-unblock").style.display = peer.trust === "rejected" && peer.fingerprint ? "inline-block" : "none";
     $("#btn-attach").disabled = peer.trust === "rejected";
     $("#btn-attach2").disabled = peer.trust === "rejected";
+    renderConvHeaderTrust(peer);
     renderPeers();
     renderMessages();
+    renderPins();
+    restoreDraft();
     renderPeerControls();
     $("#input").focus();
     $("#drop-peer").textContent = peer.hostname || peer.short_id;
     // v0.7.6: opening the conversation marks all of this peer's
     // messages as read. Best-effort — don't block on the network.
     maybeSendReadMarker(peer);
+  }
+
+  // v0.7.7: render the trust marker in the conversation header.
+  // Three states:
+  //   1. peer.is_verified           → green ✓ "Verified" pill
+  //   2. peer paired but unverified → yellow "Verify in person" CTA
+  //   3. peer rejected/pending      → nothing (other UI surfaces handle it)
+  // The CTA's onclick opens the device drawer scrolled to the
+  // verification section, so the user lands one click from the
+  // confirm button.
+  function renderConvHeaderTrust(peer) {
+    const host = $("#convo-trust");
+    if (!host) return;
+    host.innerHTML = "";
+    if (!peer || peer.trust !== "pinned") return;
+    if (peer.is_verified) {
+      const pill = el("span", "verified-pill", "Verified");
+      const label = peer.verified_method
+        ? `Verified in person · ${verifyMethodLabel(peer.verified_method)}`
+        : "Verified in person";
+      pill.title = peer.verified_note ? `${label} — ${peer.verified_note}` : label;
+      host.appendChild(pill);
+    } else {
+      const cta = el("span", "verify-cta", "Verify in person");
+      cta.title = "Confirm this device's SAS through a side channel (face-to-face, phone) to surface a green checkmark.";
+      cta.onclick = (ev) => {
+        ev.stopPropagation();
+        openDeviceDrawer(peer.short_id);
+      };
+      host.appendChild(cta);
+    }
   }
 
   function maybeSendReadMarker(peer) {
@@ -3640,7 +3939,68 @@
       $("#dev-sas").textContent = "(unavailable)";
     }
 
+    // v0.7.7: render verification state. Reads off the freshest peer
+    // record so a websocket "peer_verified" broadcast updates the
+    // open drawer without re-opening it.
+    renderDrawerVerification(peer);
+
     $("#device-backdrop").classList.add("show");
+  }
+
+  // v0.7.7: pretty label for a verification method tag stored in
+  // peers.verified_method. Single source of truth — the device
+  // drawer status row, the avatar overlay tooltip, and any future
+  // audit-log surface use the same labels.
+  function verifyMethodLabel(method) {
+    switch (method) {
+      case "sas-digits": return "SAS digits";
+      case "sas-qr":     return "QR scan";
+      case "sas-audio":  return "Spoken SAS";
+      case "manual":     return "Manual";
+      default:           return method || "—";
+    }
+  }
+
+  function renderDrawerVerification(peer) {
+    const verified = !!peer?.is_verified;
+    const helpEl = $("#dev-verify-help");
+    const whenRow = $("#dev-verify-when-row");
+    const methodRow = $("#dev-verify-method-row");
+    const noteRow = $("#dev-verify-note-row");
+    const confirmBtn = $("#dev-verify-confirm");
+    const revokeBtn = $("#dev-verify-revoke");
+    if (verified) {
+      helpEl.textContent =
+        "This device has been confirmed in person. The green " +
+        "checkmark in the sidebar reflects that. Revoke if you " +
+        "have reason to doubt the side-channel match (key change, " +
+        "device passed to someone else, etc).";
+      whenRow.style.display = "";
+      $("#dev-verify-when").textContent = peer.verified_at_ms
+        ? `${_humanRelMs(peer.verified_at_ms)} (${new Date(peer.verified_at_ms).toLocaleString()})`
+        : "—";
+      methodRow.style.display = "";
+      $("#dev-verify-method").textContent = verifyMethodLabel(peer.verified_method);
+      if (peer.verified_note) {
+        noteRow.style.display = "";
+        $("#dev-verify-note").textContent = peer.verified_note;
+      } else {
+        noteRow.style.display = "none";
+      }
+      confirmBtn.style.display = "none";
+      revokeBtn.style.display = "";
+    } else {
+      helpEl.textContent =
+        "Compare the SAS above with the same value on the other " +
+        "device — face-to-face, on a call, or by reading it aloud. " +
+        "If they match, mark this device verified to surface a " +
+        "green checkmark across the chat.";
+      whenRow.style.display = "none";
+      methodRow.style.display = "none";
+      noteRow.style.display = "none";
+      confirmBtn.style.display = "";
+      revokeBtn.style.display = "none";
+    }
   }
 
   function closeDeviceDrawer() {
@@ -3825,6 +4185,84 @@
     }
   };
 
+  // v0.7.7 verified-in-person actions. Confirm flow opens a small
+  // prompt for a free-text note (location, witness, etc) so the
+  // audit log captures HOW the SAS was compared. Revoke is a
+  // single-click revert with a confirm() guard.
+  $("#dev-verify-confirm").onclick = async () => {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    const peer = drawerPeerByFp(fp);
+    if (!peer) return;
+    const sas = ($("#dev-sas").textContent || "").trim();
+    const sasLine = sas && sas !== "…" && sas !== "—" && sas !== "(unavailable)"
+      ? `\n\nSAS for ${peer.display_name || peer.short_id}: ${sas}\n\nConfirm only if it matches what the other device shows.`
+      : "\n\nConfirm only if you have already compared the SAS through a side channel.";
+    if (!confirm(
+      `Mark "${peer.display_name || peer.hostname || peer.short_id}" as verified in person?` + sasLine
+    )) return;
+    let note = window.prompt(
+      "Optional reminder (e.g. 'compared at home Tue', 'phone call w/ Alice'). Leave blank to skip:",
+      ""
+    );
+    if (note === null) return;  // user hit Cancel on the prompt
+    note = (note || "").trim();
+    if (note.length > 280) {
+      toast("Note too long (max 280 characters).", "warn");
+      return;
+    }
+    try {
+      const res = await api.post(`/api/peers/${fp}/verify`, {
+        method: "sas-digits",
+        note: note || null,
+      });
+      if (peer) {
+        peer.verified_at_ms = res.verified_at_ms;
+        peer.verified_method = res.verified_method;
+        peer.verified_note = res.verified_note;
+        peer.is_verified = !!res.is_verified;
+      }
+      renderDrawerVerification(peer || drawerPeerByFp(fp));
+      renderPeers();
+      // Reflect the new pill in the conversation header without a
+      // round-trip to refreshPeers.
+      if (state.selectedPeer && peer && peer.short_id === state.selectedPeer) {
+        renderConvHeaderTrust(peer);
+      }
+      toast("Verified in person", "good");
+    } catch (e) {
+      toast(`Verify failed: ${errorToastBody(e)}`, "bad");
+    }
+  };
+  $("#dev-verify-revoke").onclick = async () => {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    const peer = drawerPeerByFp(fp);
+    if (!peer) return;
+    if (!confirm(
+      `Revoke the in-person verification for "${peer.display_name || peer.hostname || peer.short_id}"?\n\n` +
+      "The cryptographic channel stays intact — only the side-channel " +
+      "trust mark is cleared. The original verification stays in the audit log."
+    )) return;
+    try {
+      await api.del(`/api/peers/${fp}/verify`);
+      if (peer) {
+        peer.verified_at_ms = null;
+        peer.verified_method = null;
+        peer.verified_note = null;
+        peer.is_verified = false;
+      }
+      renderDrawerVerification(peer || drawerPeerByFp(fp));
+      renderPeers();
+      if (state.selectedPeer && peer && peer.short_id === state.selectedPeer) {
+        renderConvHeaderTrust(peer);
+      }
+      toast("Verification revoked", "info");
+    } catch (e) {
+      toast(`Revoke failed: ${errorToastBody(e)}`, "bad");
+    }
+  };
+
   // Conversation header click → open drawer for the selected peer.
   $("#convo-who")?.addEventListener("click", () => {
     if (state.selectedPeer) openDeviceDrawer(state.selectedPeer);
@@ -3874,10 +4312,11 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.8.2";
+  const PAGE_BUILT_FOR = "0.8.3";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
+    loadLocalCollections();
     try {
       const me = await api.get("/api/me");
       state.me = me;
@@ -3910,6 +4349,7 @@
     $("#cg-create")?.addEventListener("click", submitCreateGroup);
     $("#btn-group-settings")?.addEventListener("click", openGroupSettings);
     $("#group-settings-close")?.addEventListener("click", closeGroupSettings);
+    $("#group-rename-save")?.addEventListener("click", renameCurrentGroup);
     $("#group-add-member")?.addEventListener("click", addGroupMember);
     $("#group-copy-invite")?.addEventListener("click", copyGroupInviteLink);
     $("#group-leave")?.addEventListener("click", leaveCurrentGroup);
@@ -4006,6 +4446,29 @@
       } else if (m.type === "peer_profile" || m.type === "peer_capabilities") {
         // v0.7.3: alias / mute / cap changes — refresh the sidebar so
         // the new display name and toggle states show up immediately.
+        refreshPeers();
+      } else if (m.type === "peer_verified") {
+        // v0.7.7: side-channel SAS confirm flipped on/off. Patch the
+        // peer record in-place so the avatar overlay + conversation
+        // header pill update without waiting for the next /api/peers
+        // poll.
+        const peer = [...state.peers.values()]
+          .find(p => p.fingerprint === m.fingerprint);
+        if (peer) {
+          peer.verified_at_ms = m.verified_at_ms;
+          peer.verified_method = m.verified_method;
+          peer.verified_note = m.verified_note;
+          peer.is_verified = !!m.is_verified;
+          renderPeers();
+          if (state.selectedPeer === peer.short_id) {
+            renderConvHeaderTrust(peer);
+          }
+          if (state.deviceDrawerFp === m.fingerprint) {
+            renderDrawerVerification(peer);
+          }
+        }
+        // Best-effort full refresh in case the peer wasn't yet in
+        // our cache.
         refreshPeers();
       } else if (m.type === "msg_edit") {
         // v0.7.6: live edit. Patch the in-memory message + rerender.
@@ -4217,10 +4680,11 @@
   function refreshSendEnabled() {
     const hasText = input.value.trim().length > 0;
     const hasFiles = state.staged.length > 0;
-    sendBtn.disabled = (!hasText && !hasFiles) || !state.selectedPeer;
+    sendBtn.disabled = (!hasText && !hasFiles) || (!state.selectedPeer && !state.selectedGroup);
   }
   input.addEventListener("input", () => {
     refreshSendEnabled();
+    saveActiveDraft();
     input.style.height = "auto";
     input.style.height = Math.min(160, input.scrollHeight) + "px";
   });
@@ -4298,6 +4762,7 @@
         await api.post(`/api/groups/${state.selectedGroup}/send`, sendBody);
         $("#input").value = "";
         $("#input").style.height = "auto";
+        clearActiveDraft();
         clearReplyTo();
         // Refresh from state so the new message lands in the pane.
         const r = await api.get(
@@ -4332,6 +4797,7 @@
           await api.post("/api/send", sendBody);
           input.value = "";
           input.style.height = "auto";
+          clearActiveDraft();
           clearReplyTo();
         } catch (e) {
           toast(errorToastBody(e), "bad", 8000);

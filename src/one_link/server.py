@@ -283,6 +283,9 @@ class UIServer:
         r.add_post(r"/api/peers/{fp}/capabilities/grant", self._guarded(self.api_grant_capability))
         r.add_post(r"/api/peers/{fp}/capabilities/revoke", self._guarded(self.api_revoke_capability))
         r.add_post(r"/api/peers/{fp}/profile", self._guarded(self.api_set_peer_profile))
+        # v0.7.7 verified-in-person SAS confirm.
+        r.add_post(r"/api/peers/{fp}/verify", self._guarded(self.api_set_peer_verified))
+        r.add_delete(r"/api/peers/{fp}/verify", self._guarded(self.api_clear_peer_verified))
         r.add_get("/api/capability-audit", self._guarded(self.api_capability_audit))
         r.add_get("/api/rendezvous", self._guarded(self.api_get_rendezvous))
         r.add_post("/api/rendezvous", self._guarded(self.api_set_rendezvous))
@@ -299,6 +302,7 @@ class UIServer:
         r.add_get("/api/groups", self._guarded(self.api_list_groups))
         r.add_post("/api/groups", self._guarded(self.api_create_group))
         r.add_get(r"/api/groups/{gid}", self._guarded(self.api_get_group))
+        r.add_post(r"/api/groups/{gid}/rename", self._guarded(self.api_rename_group))
         r.add_get(r"/api/groups/{gid}/messages", self._guarded(self.api_group_messages))
         r.add_post(r"/api/groups/{gid}/send", self._guarded(self.api_send_group))
         r.add_post(
@@ -613,6 +617,11 @@ class UIServer:
                         live[rec.fingerprint]["local_alias"] = rec.local_alias
                         live[rec.fingerprint]["muted"] = bool(rec.muted)
                         live[rec.fingerprint]["display_name"] = rec.display_name
+                        # v0.7.7: verified-in-person trust state.
+                        live[rec.fingerprint]["verified_at_ms"] = rec.verified_at_ms
+                        live[rec.fingerprint]["verified_method"] = rec.verified_method
+                        live[rec.fingerprint]["verified_note"] = rec.verified_note
+                        live[rec.fingerprint]["is_verified"] = rec.is_verified
                     else:
                         # Pending peers in the DB but not visible on mDNS are
                         # usually stale ghosts from a previous daemon/process.
@@ -640,6 +649,11 @@ class UIServer:
                             "local_alias": rec.local_alias,
                             "muted": bool(rec.muted),
                             "display_name": rec.display_name,
+                            # v0.7.7: verified-in-person trust state.
+                            "verified_at_ms": rec.verified_at_ms,
+                            "verified_method": rec.verified_method,
+                            "verified_note": rec.verified_note,
+                            "is_verified": rec.is_verified,
                         }
             except Exception:
                 pass
@@ -1260,6 +1274,95 @@ class UIServer:
             "display_name": updated.display_name if updated else None,
         })
 
+    async def api_set_peer_verified(self, request: web.Request) -> web.Response:
+        """v0.7.7: mark a peer as verified-in-person.
+        POST body: {method: 'sas-digits'|'sas-qr'|'sas-audio'|'manual',
+                    note?: string}
+        Verification is a side-channel claim — the daemon takes the
+        user's word for it (the protocol cannot prove the user
+        actually compared SAS values). The audit trail (capability_audit
+        with kind='verify_set') is the forensic record."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        method = data.get("method")
+        if not isinstance(method, str) or not method:
+            return web.json_response(
+                {"error": "method required (sas-digits|sas-qr|sas-audio|manual)"},
+                status=400,
+            )
+        note_raw = data.get("note")
+        if note_raw is not None and not isinstance(note_raw, str):
+            return web.json_response(
+                {"error": "note must be a string or null"}, status=400,
+            )
+        try:
+            updated = self.daemon.state.set_peer_verified(
+                fp, method=method, note=note_raw, actor="ui",
+            )
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        if updated is None:
+            return web.json_response({"error": "peer not found"}, status=404)
+        self.broadcast({
+            "type": "peer_verified",
+            "fingerprint": fp,
+            "verified_at_ms": updated.verified_at_ms,
+            "verified_method": updated.verified_method,
+            "verified_note": updated.verified_note,
+            "is_verified": updated.is_verified,
+        })
+        return web.json_response({
+            "ok": True, "fingerprint": fp,
+            "verified_at_ms": updated.verified_at_ms,
+            "verified_method": updated.verified_method,
+            "verified_note": updated.verified_note,
+            "is_verified": updated.is_verified,
+        })
+
+    async def api_clear_peer_verified(self, request: web.Request) -> web.Response:
+        """v0.7.7: revoke a verified-in-person mark. Idempotent
+        when not verified; 404 only when the peer doesn't exist."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        # Body is optional — supports {note: "rotated keys"} for a
+        # human-readable reason captured in the audit log.
+        note: Optional[str] = None
+        if request.can_read_body:
+            try:
+                data = await request.json()
+                if isinstance(data, dict):
+                    raw = data.get("note")
+                    if isinstance(raw, str):
+                        note = raw.strip() or None
+            except Exception:
+                pass
+        updated = self.daemon.state.clear_peer_verified(
+            fp, actor="ui", note=note,
+        )
+        if updated is None:
+            return web.json_response({"error": "peer not found"}, status=404)
+        self.broadcast({
+            "type": "peer_verified",
+            "fingerprint": fp,
+            "verified_at_ms": None,
+            "verified_method": None,
+            "verified_note": None,
+            "is_verified": False,
+        })
+        return web.json_response({
+            "ok": True, "fingerprint": fp,
+            "verified_at_ms": None,
+            "verified_method": None,
+            "verified_note": None,
+            "is_verified": False,
+        })
+
     async def api_capability_audit(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:
             return web.json_response({"error": "state not available"}, status=503)
@@ -1780,6 +1883,36 @@ class UIServer:
         if mat is None:
             return web.json_response({"error": "group not found"}, status=404)
         return web.json_response(mat)
+
+    async def api_rename_group(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            gid = bytes.fromhex(request.match_info["gid"])
+        except ValueError:
+            return web.json_response({"error": "bad group id"}, status=400)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        name = (data.get("name") or "").strip()
+        if not name:
+            return web.json_response({"error": "name required"}, status=400)
+        if len(name) > 64:
+            return web.json_response({"error": "name too long"}, status=400)
+        mat = self._materialize_group(gid)
+        if mat is None or not mat.get("is_member"):
+            return web.json_response({"error": "group not found"}, status=404)
+        if mat.get("my_role") not in ("owner", "admin"):
+            return web.json_response(
+                {"error": "only group admins can rename a group"},
+                status=403,
+            )
+        try:
+            result = await self.daemon.rename_group(group_id=gid, name=name)
+            return web.json_response({"ok": True, **result})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
 
     async def api_group_messages(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:

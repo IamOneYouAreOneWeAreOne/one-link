@@ -88,10 +88,15 @@ We have Double Ratchet, deny-by-default, sandbox, transcript
 binding. Users can't see any of it. These changes surface the
 crypto so trust decisions are obvious.
 
-  - **v0.7.7 — Verified-in-person checkmark.** Trust state goes
-    `pinned` → `pinned-verified` after a side-channel SAS confirm.
-    UI: a "Verify in person" prompt during the first 24h after
-    pairing; stable green check on conversation header once done.
+  - **v0.7.7 — Verified-in-person checkmark.** ✓ Shipped (released
+    as package v0.8.3). Trust state remains `pinned`, but a separate
+    `verified_at_ms` / `verified_method` / `verified_note` triple is
+    set after the user confirms a side-channel SAS match. UI: green
+    ✓ overlay on the sidebar avatar, green "Verified" pill in the
+    conversation header, yellow "Verify in person" CTA before that.
+    Drawer section captures the audit trail. New endpoints: `POST
+    /api/peers/{fp}/verify` + `DELETE /api/peers/{fp}/verify`. Schema
+    migration v8.
 
   - **v0.7.8 — Key-change warning.** If a paired peer's pubkey
     rotates (re-install, identity replacement), prominent
