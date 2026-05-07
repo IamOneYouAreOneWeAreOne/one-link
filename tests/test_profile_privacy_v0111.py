@@ -325,6 +325,7 @@ def test_blocked_list_refreshes_on_settings_open(index_html: str):
 # ───────── version pin ───────────────────────────────────────────────
 
 def test_page_version_bumped(index_html: str):
+    """Don't pin a specific version so future 0.11.x ships don't
+    have to update this file."""
     from one_link import __version__
-    assert __version__ == "0.11.1"
     assert f'PAGE_BUILT_FOR = "{__version__}"' in index_html
