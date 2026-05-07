@@ -19,16 +19,50 @@ After both sides verify the other's signature, they:
 Each side keeps a 64-bit send counter (starts at 0) used as the ChaCha20-Poly1305 nonce
 (little-endian, padded to 12 bytes). AAD = "OL1/data|" + transcript.
 
-This is a deliberately small, auditable handshake — not full Noise. Good enough for
-LAN trust-on-first-use; we'll harden it (replay cache, rotation, full Noise pattern)
-in a later pass.
+v0.8.2 Double Ratchet activation
+================================
+
+The legacy mode above uses a STATIC tx/rx key pair for the lifetime
+of the channel. v0.7.2 shipped an audited Signal-style Double Ratchet
+primitive (one_link.double_ratchet); v0.8.2 wires it in.
+
+Activation flow:
+  1. Handshake completes as before. Channel stashes the X25519 ephemeral
+     PRIVATE key and the peer's X25519 ephemeral PUBLIC key for ratchet
+     bootstrap (these were previously discarded after key derivation).
+  2. Both sides exchange CAPS frames (legacy-encrypted). Daemon notes
+     `note_caps_sent()` after sending CAPS and `note_caps_received(features)`
+     when CAPS arrives.
+  3. When BOTH flags are set AND both feature lists contain
+     DOUBLE_RATCHET_V1, `maybe_activate_ratchet(role)` initialises the
+     ratchet state from the handshake bootstrap — and from that point
+     forward every send/recv goes through the ratchet, providing forward
+     secrecy + post-compromise security.
+
+Atomicity: activation flips BOTH directions at the same logical
+boundary. Sending side: switch happens after the local CAPS frame
+is written. Receiving side: switch happens after the peer's CAPS
+frame is parsed. Each side's recv loop is single-threaded so there
+is no in-flight frame between the CAPS frame and the next frame.
+
+Wire-format on the ratchet path:
+    [length-prefix, unchanged] [42-byte Header.encode()] [ciphertext]
+
+AAD = header.encode() || transcript_hash. Splicing a ratchet frame
+across channels fails AEAD (different transcript_hash).
+
+Backward compatibility: peers that don't advertise DOUBLE_RATCHET_V1
+stay on legacy. The activation is symmetric — either both speak
+ratchet or both stay legacy.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -41,11 +75,21 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from one_link.identity import Identity, fingerprint_of, verify
 from one_link.wire import read_frame, write_frame
 
+log = logging.getLogger(__name__)
+
 PROTO = b"OL1"
 NONCE_LEN = 16
 HELLO_TAG = b"OL1|HELLO|"
 REPLY_TAG = b"OL1|REPLY|"
 AAD_PREFIX = b"OL1/data|"
+# v0.8.2: capability tag both peers must advertise to enable ratchet.
+DR_CAP = "double_ratchet_v1"
+# v0.8.2: HKDF info label for the ratchet-bootstrap root key. Distinct
+# from the legacy session-key derivation so the two are independent;
+# even if the legacy AEAD keys leak, they don't reveal the ratchet
+# root_key (and vice versa).
+DR_ROOT_INFO = b"OL1/dr/root_seed|"
+DR_HEADER_LEN = 42  # Header.encode() output length
 
 
 @dataclass
@@ -63,6 +107,24 @@ class Channel:
     # None = peer hasn't sent CAPS yet (legacy or pre-CAPS).
     peer_caps: dict | None = None
 
+    # v0.8.2: Double Ratchet bootstrap material — kept alive
+    # post-handshake so we can activate the ratchet later if both
+    # peers advertise DOUBLE_RATCHET_V1. Set by initiate / respond.
+    _dr_role: Optional[str] = None      # "alice" | "bob"
+    _dr_x_priv: Optional[X25519PrivateKey] = None
+    _dr_peer_x_pub: Optional[bytes] = None
+    _dr_shared: Optional[bytes] = None  # raw 32-byte ECDH output
+    # Activation tracking. Both must be True before we attempt to
+    # negotiate the ratchet. _peer_dr_capable is the latest known
+    # state of the peer's DOUBLE_RATCHET_V1 advertisement.
+    _caps_sent: bool = False
+    _caps_received: bool = False
+    _peer_dr_capable: bool = False
+    # When non-None, channel is in ratchet mode. send/recv branch
+    # to the ratchet path and the legacy AEADs go unused. Set
+    # exactly once per channel by maybe_activate_ratchet.
+    _dr_state: object = None  # one_link.double_ratchet.RatchetState
+
     def _nonce(self, seq: int) -> bytes:
         return seq.to_bytes(12, "little")
 
@@ -73,17 +135,147 @@ class Channel:
     def _aad(self) -> bytes:
         return AAD_PREFIX + self.transcript_hash
 
+    @property
+    def is_ratchet_active(self) -> bool:
+        """v0.8.2: True after both sides exchanged CAPS containing
+        DOUBLE_RATCHET_V1 and the ratchet state was successfully
+        bootstrapped. Read-only — flipped exactly once."""
+        return self._dr_state is not None
+
+    # ─── v0.8.2: caps-driven ratchet activation ────────────────────
+
+    def note_caps_sent(self) -> None:
+        """Daemon calls this immediately after writing the local
+        CAPS frame. Marks the send-side ready for ratchet flip."""
+        self._caps_sent = True
+
+    def note_caps_received(self, features: list[str] | tuple[str, ...] | set[str]) -> None:
+        """Daemon calls this immediately after parsing the peer's
+        CAPS frame. Records DR capability + marks recv-side ready."""
+        if features is None:
+            features = []
+        self._peer_dr_capable = DR_CAP in features
+        self._caps_received = True
+
+    def maybe_activate_ratchet(self) -> bool:
+        """If both sides have exchanged CAPS, both advertise
+        DOUBLE_RATCHET_V1, and we have the bootstrap material from
+        the handshake, initialise the ratchet state and flip the
+        channel to ratchet mode.
+
+        Returns True iff the channel just transitioned to ratchet
+        mode on this call. Idempotent on subsequent calls.
+        """
+        if self._dr_state is not None:
+            return False  # already active
+        if not (self._caps_sent and self._caps_received):
+            return False
+        if not self._peer_dr_capable:
+            return False  # peer doesn't speak DR
+        if (
+            self._dr_role is None
+            or self._dr_shared is None
+            or self._dr_peer_x_pub is None
+            or self._dr_x_priv is None
+        ):
+            log.warning(
+                "channel ratchet activation requested but bootstrap "
+                "material missing for peer %s — staying on legacy",
+                self.peer_short_id,
+            )
+            return False
+        try:
+            from one_link.double_ratchet import (
+                init_alice, init_bob,
+            )
+            # Derive a root_key distinct from the legacy AEAD keys.
+            # If legacy keys leak, the DR bootstrap stays safe; if
+            # the bootstrap leaks, legacy still has its own keys.
+            root_key = HKDF(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=self.transcript_hash,
+                info=DR_ROOT_INFO,
+            ).derive(self._dr_shared)
+            if self._dr_role == "alice":
+                self._dr_state = init_alice(
+                    shared_secret=root_key,
+                    peer_pub=self._dr_peer_x_pub,
+                )
+            elif self._dr_role == "bob":
+                self._dr_state = init_bob(
+                    shared_secret=root_key,
+                    dh_priv=self._dr_x_priv,
+                )
+            else:
+                log.warning(
+                    "channel ratchet: unknown role %r for %s",
+                    self._dr_role, self.peer_short_id,
+                )
+                return False
+            log.info(
+                "channel ratchet activated for peer %s as %s",
+                self.peer_short_id, self._dr_role,
+            )
+            # Drop the legacy bootstrap material — we no longer need
+            # the X25519 priv key once the ratchet is rolling.
+            self._dr_x_priv = None
+            self._dr_shared = None
+            self._dr_peer_x_pub = None
+            return True
+        except Exception as e:
+            log.warning(
+                "channel ratchet activation FAILED for %s: %s — "
+                "falling back to legacy AEAD",
+                self.peer_short_id, e,
+            )
+            self._dr_state = None
+            return False
+
+    # ─── send / recv ───────────────────────────────────────────────
+
     async def send(self, plaintext: bytes) -> None:
+        if self._dr_state is not None:
+            await self._send_ratchet(plaintext)
+            return
+        # Legacy path.
         nonce = self._nonce(self.tx_seq)
         self.tx_seq += 1
         ct = self.tx_aead.encrypt(nonce, plaintext, self._aad())
         await write_frame(self.writer, ct)
 
     async def recv(self) -> bytes:
+        if self._dr_state is not None:
+            return await self._recv_ratchet()
+        # Legacy path.
         ct = await read_frame(self.reader)
         nonce = self._nonce(self.rx_seq)
         self.rx_seq += 1
         return self.rx_aead.decrypt(nonce, ct, self._aad())
+
+    async def _send_ratchet(self, plaintext: bytes) -> None:
+        from one_link.double_ratchet import encrypt as dr_encrypt
+        header, ct = dr_encrypt(
+            self._dr_state, plaintext, ad=self.transcript_hash,
+        )
+        # Wire layout: [Header (DR_HEADER_LEN bytes)][ciphertext]
+        await write_frame(self.writer, header.encode() + ct)
+
+    async def _recv_ratchet(self) -> bytes:
+        from one_link.double_ratchet import (
+            Header as DRHeader, decrypt as dr_decrypt,
+        )
+        payload = await read_frame(self.reader)
+        if len(payload) < DR_HEADER_LEN:
+            raise RuntimeError(
+                f"ratchet frame too short: {len(payload)} bytes "
+                f"(need at least {DR_HEADER_LEN} for header)"
+            )
+        header = DRHeader.decode(payload[:DR_HEADER_LEN])
+        ct = payload[DR_HEADER_LEN:]
+        return dr_decrypt(
+            self._dr_state, header, ct, ad=self.transcript_hash,
+        )
 
     async def close(self) -> None:
         try:
@@ -152,6 +344,13 @@ async def initiate(
         tx_aead=ChaCha20Poly1305(k_i_to_r),
         rx_aead=ChaCha20Poly1305(k_r_to_i),
         transcript_hash=transcript_hash,
+        # v0.8.2: ratchet-bootstrap material. Held until
+        # maybe_activate_ratchet seeds the RatchetState; cleared
+        # afterwards.
+        _dr_role="alice",
+        _dr_x_priv=x_priv,
+        _dr_peer_x_pub=r_x,
+        _dr_shared=shared,
     )
 
 
@@ -187,4 +386,11 @@ async def respond(
         tx_aead=ChaCha20Poly1305(k_r_to_i),
         rx_aead=ChaCha20Poly1305(k_i_to_r),
         transcript_hash=transcript_hash,
+        # v0.8.2: bob-side ratchet bootstrap. Bob's x_priv is the
+        # initial dh_send for init_bob; first ratchet ratchet-step
+        # happens when alice's first ratchet message arrives.
+        _dr_role="bob",
+        _dr_x_priv=x_priv,
+        _dr_peer_x_pub=i_x,
+        _dr_shared=shared,
     )
