@@ -94,4 +94,6 @@ def test_peer_trust_ws_pivots_to_verify_when_we_confirmed(index_html: str):
 
 
 def test_page_version_bumped(index_html: str):
-    assert 'PAGE_BUILT_FOR = "0.8.7"' in index_html
+    from one_link import __version__
+
+    assert f'PAGE_BUILT_FOR = "{__version__}"' in index_html

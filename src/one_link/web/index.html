@@ -1055,6 +1055,37 @@
     transition: width .25s ease;
   }
   .msg.out.file .progress-mini { background: rgba(255,255,255,.18); }
+  /* v0.8.8: live rate + ETA line under the progress bar. Mono so
+     the digits don't jiggle as the rate updates. */
+  .msg.file .transfer-detail {
+    font-size: 11px; color: var(--text-dim);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    margin-top: 4px; letter-spacing: .2px;
+  }
+  .msg.out.file .transfer-detail { color: rgba(255,255,255,.78); }
+  /* v0.8.8 aggregate transfer pill in the conversation header. */
+  .transfer-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px;
+    background: linear-gradient(90deg, rgba(124,92,255,.22), rgba(78,193,255,.18));
+    border: 1px solid rgba(124,92,255,.35);
+    color: var(--text);
+    font-size: 11px; font-weight: 600;
+    letter-spacing: .3px;
+    cursor: pointer;
+    transition: filter .12s;
+  }
+  .transfer-pill:hover { filter: brightness(1.15); }
+  .transfer-pill .pill-spinner {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--accent-2);
+    box-shadow: 0 0 6px var(--accent-2);
+    animation: pill-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pill-pulse {
+    0%, 100% { opacity: .5; transform: scale(.85); }
+    50%      { opacity: 1;  transform: scale(1.1); }
+  }
   .msg.file .status-icon {
     display: inline-flex; align-items: center; gap: 4px;
     font-size: 11px;
@@ -1487,6 +1518,10 @@
             <div class="trust-marker" id="convo-trust"></div>
           </div>
           <div class="actions">
+            <!-- v0.8.8: aggregate transfer pill — visible only while
+                 1+ transfers are active. Click → opens Files pane.
+                 Empty by default; populated by renderTransferHeaderPill. -->
+            <div class="transfer-pill" id="transfer-pill" style="display:none;"></div>
             <div class="search" id="search-wrap">
               <span class="icon-trigger">⌕</span>
               <input id="search-input" type="text" placeholder="Search this conversation…" />
@@ -2125,6 +2160,22 @@
     while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
     return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
   };
+  // v0.8.8: bytes/sec → human string for chat-bubble rate display.
+  const fmtRate = (bps) => {
+    if (!bps || bps < 1) return "—";
+    return fmtBytes(bps) + "/s";
+  };
+  // v0.8.8: bytes-remaining ÷ bps → "12s" or "3m 04s".
+  const fmtEta = (remainingBytes, bps) => {
+    if (!bps || bps < 1 || remainingBytes <= 0) return "—";
+    const sec = Math.round(remainingBytes / bps);
+    if (sec < 60) return `${sec}s`;
+    const m = Math.floor(sec / 60);
+    const s = sec - m * 60;
+    if (m < 60) return `${m}m ${String(s).padStart(2, "0")}s`;
+    const h = Math.floor(m / 60);
+    return `${h}h ${m - h * 60}m`;
+  };
   const fmtTime = (ms) => {
     const d = new Date(ms);
     return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -2167,6 +2218,10 @@
     messages: [],         // recent across all peers
     transfers: [],
     transfersById: new Map(),  // id -> transfer record (fast lookup for msg status)
+    // v0.8.8: per-transfer rate tracker. Each entry is
+    // {lastBytes, lastTs, bps} where bps is a rolling EWMA (alpha=0.4).
+    // Cleared on transfer completion / failure.
+    transferRates: new Map(),
     folders: [],
     status: null,
     searchQuery: "",
@@ -2812,6 +2867,131 @@
     if (t.status === "failed")   return "Failed";
     return t.status || fallback;
   }
+
+  // v0.8.8: per-transfer EWMA rate tracker. Each `transfer` WS event
+  // is a snapshot — by diffing progress_bytes across events we get
+  // bytes/sec without any extra wire data. EWMA (alpha=0.4) smooths
+  // out the chunk-by-chunk burstiness without going stale on slow
+  // links. Reset on terminal status so the next transfer for the
+  // same id (e.g. retry after pause) starts clean.
+  const _RATE_ALPHA = 0.4;
+  function updateTransferRate(t) {
+    if (!t || !t.id) return;
+    const terminal = t.status === "complete" || t.status === "failed";
+    if (terminal) {
+      state.transferRates.delete(t.id);
+      return;
+    }
+    if (t.status !== "active" && t.status !== "offered") {
+      // queued / paused — keep last bps but stamp timestamp so a
+      // resume's first delta is reasonable.
+      const cur = state.transferRates.get(t.id) || {};
+      cur.lastBytes = t.progress_bytes || 0;
+      cur.lastTs = Date.now();
+      state.transferRates.set(t.id, cur);
+      return;
+    }
+    const now = Date.now();
+    const prev = state.transferRates.get(t.id);
+    if (!prev) {
+      state.transferRates.set(t.id, {
+        lastBytes: t.progress_bytes || 0,
+        lastTs: now,
+        bps: 0,
+      });
+      return;
+    }
+    const dt = (now - prev.lastTs) / 1000;
+    if (dt < 0.1) return;  // ignore <100ms gaps — too noisy.
+    const db = (t.progress_bytes || 0) - prev.lastBytes;
+    if (db < 0) {
+      // progress went backwards (resume / retry) — restart.
+      state.transferRates.set(t.id, {
+        lastBytes: t.progress_bytes || 0,
+        lastTs: now,
+        bps: 0,
+      });
+      return;
+    }
+    const inst = db / dt;
+    const ewma = (1 - _RATE_ALPHA) * (prev.bps || 0) + _RATE_ALPHA * inst;
+    state.transferRates.set(t.id, {
+      lastBytes: t.progress_bytes || 0,
+      lastTs: now,
+      bps: ewma,
+    });
+  }
+  function rateForTransfer(t) {
+    if (!t) return 0;
+    const r = state.transferRates.get(t.id);
+    if (!r) return 0;
+    // Decay if no event for >3s — peer probably stalled. Avoids
+    // showing a stale "14 MB/s" forever on a frozen transfer.
+    const age = (Date.now() - (r.lastTs || 0)) / 1000;
+    if (age > 3) return 0;
+    return r.bps || 0;
+  }
+  function aggregateActiveTransferStats() {
+    let count = 0, bps = 0, sent = 0, total = 0;
+    for (const t of state.transfers) {
+      if (t.status === "active" || t.status === "offered") {
+        count += 1;
+        bps += rateForTransfer(t);
+        sent += t.progress_bytes || 0;
+        total += t.total_bytes || 0;
+      }
+    }
+    return { count, bps, sent, total };
+  }
+
+  // v0.8.8: aggregate header pill renderer. Hidden when zero
+  // transfers are active. Click opens the Files pane (Sent tab)
+  // so the user can drill in.
+  function renderTransferHeaderPill() {
+    const pill = $("#transfer-pill");
+    if (!pill) return;
+    const { count, bps, sent, total } = aggregateActiveTransferStats();
+    if (count === 0) {
+      pill.style.display = "none";
+      pill.innerHTML = "";
+      return;
+    }
+    pill.style.display = "inline-flex";
+    pill.innerHTML = "";
+    pill.appendChild(el("span", "pill-spinner"));
+    const label = count === 1
+      ? `Sending 1 file`
+      : `Sending ${count} files`;
+    const rate = bps > 0 ? ` · ${fmtRate(bps)}` : "";
+    const pct = total > 0 ? ` · ${Math.round((sent / total) * 100)}%` : "";
+    pill.appendChild(document.createTextNode(label + rate + pct));
+    pill.title = `${fmtBytes(sent)} of ${fmtBytes(total)} sent${bps > 0 ? ` at ${fmtRate(bps)}` : ""}. Click to open Files.`;
+    pill.onclick = () => {
+      // Switch to the Files pane → Sent tab.
+      const filesBtn = document.querySelector('[data-pane="files"]');
+      if (filesBtn) filesBtn.click();
+      state.filesMode = "sent";
+      const sentBtn = document.querySelector('[data-files-mode="sent"]');
+      if (sentBtn) sentBtn.click();
+    };
+  }
+  let _transferHeaderPillScheduled = false;
+  function scheduleRenderTransferHeaderPill() {
+    if (_transferHeaderPillScheduled) return;
+    _transferHeaderPillScheduled = true;
+    requestAnimationFrame(() => {
+      _transferHeaderPillScheduled = false;
+      renderTransferHeaderPill();
+    });
+  }
+  // Refresh pill on a timer too — so the rate decays correctly
+  // even if no transfer event arrives for several seconds.
+  setInterval(() => {
+    const pill = $("#transfer-pill");
+    if (pill && pill.style.display !== "none") {
+      renderTransferHeaderPill();
+    }
+  }, 1000);
   function statusKind(t) {
     if (!t) return "queued";
     if (t.status === "complete") return "sent";
@@ -3329,13 +3509,30 @@
     sizeLine.appendChild(statusEl);
     meta.appendChild(sizeLine);
 
-    // Progress bar (only while in-flight)
+    // v0.8.8: enriched progress display while in-flight. Live rate
+    // (bytes/sec EWMA) + ETA + bytes-done / total. Static bar is
+    // kept too — it's the most-glanced status indicator.
     if (kind === "sending" && t) {
       const bar = el("div", "progress-mini");
       const fill = el("span");
       fill.style.width = `${Math.max(0, Math.min(100, t.progress_pct || 0))}%`;
       bar.appendChild(fill);
       meta.appendChild(bar);
+
+      const detail = el("div", "transfer-detail");
+      const bps = rateForTransfer(t);
+      const remaining = Math.max(0, (t.total_bytes || 0) - (t.progress_bytes || 0));
+      const parts = [
+        `${fmtBytes(t.progress_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)}`,
+      ];
+      if (bps > 0) parts.push(fmtRate(bps));
+      if (bps > 0 && remaining > 0) parts.push(`ETA ${fmtEta(remaining, bps)}`);
+      detail.textContent = parts.join(" · ");
+      meta.appendChild(detail);
+    } else if (kind === "paused" && t) {
+      const detail = el("div", "transfer-detail");
+      detail.textContent = `${fmtBytes(t.progress_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)} · resumes when peer reconnects`;
+      meta.appendChild(detail);
     }
 
     // Inline image preview for received images that are on disk
@@ -4842,7 +5039,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.8.7";
+  const PAGE_BUILT_FOR = "0.8.8";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -5232,11 +5429,16 @@
         state.transfers.sort((a, b) => (b.updated_ms || 0) - (a.updated_ms || 0));
         state.transfers = state.transfers.slice(0, 80);
         state.transfersById.set(m.transfer.id, m.transfer);
+        // v0.8.8: update the per-transfer EWMA bytes-per-second
+        // tracker so the chat bubble + header pill can show a live
+        // rate. Cleared on terminal status (complete / failed).
+        updateTransferRate(m.transfer);
         // Coalesce UI rebuilds: a stuck/retrying transfer can fire
         // many events per second, and rebuilding the chat DOM each
         // time causes visible flicker. Once-per-frame is plenty.
         scheduleRenderTransfers();
         scheduleRenderMessages();
+        scheduleRenderTransferHeaderPill();  // v0.8.8 aggregate pill
         if (state.activePane === "files" && state.filesMode === "sent") {
           scheduleRenderFilesPanel();
         }

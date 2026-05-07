@@ -116,4 +116,6 @@ def test_close_device_drawer_cancels_speech(index_html: str):
 
 
 def test_page_version_bumped(index_html: str):
-    assert 'PAGE_BUILT_FOR = "0.8.5"' in index_html
+    from one_link import __version__
+
+    assert f'PAGE_BUILT_FOR = "{__version__}"' in index_html

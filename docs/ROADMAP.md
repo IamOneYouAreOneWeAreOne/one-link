@@ -138,9 +138,17 @@ crypto so trust decisions are obvious.
 Pure capability advantages over centralized chat. Each one closes
 a specific competitive gap.
 
-  - **v0.8.1 — Live bandwidth + transfer progress in chat.**
-    Per-bubble progress bar with B/s rate; aggregate "sending 3
-    files at 14 MB/s" pill in the conversation header.
+  - **v0.8.1 — Live bandwidth + transfer progress in chat.** ✓
+    Shipped (released as package v0.8.8). Client-side EWMA
+    (alpha=0.4) rate tracker computes bytes/sec from delta
+    progress_bytes across `transfer` WS events — no extra wire
+    data. Each in-flight FILE_OFFER bubble shows live bytes / total
+    + B/s + ETA. Conversation header gains an aggregate
+    "Sending N files · 14 MB/s · 47%" pill that ticks once per
+    second so a stalled transfer's stale rate fades. Click pill
+    → opens Files → Sent. Rate cache resets on terminal status
+    so retries start clean; rate decays to 0 after >3s of no
+    events so frozen transfers don't show ghost rates.
 
   - **v0.8.2 — Folder sync conflict UI.** When two peers diverge
     on a file, show both versions side-by-side; user picks. Today

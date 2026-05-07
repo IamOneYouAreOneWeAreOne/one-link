@@ -1,0 +1,142 @@
+"""v0.8.8 — live transfer progress in chat (bytes/sec + ETA + aggregate pill).
+
+Pure UI ship — no schema, no new endpoint. The transfer WS event
+already carries progress_bytes / total_bytes / status; we add a
+client-side EWMA rate tracker so the chat bubble shows live B/s
++ ETA, and a per-conversation aggregate pill in the header so the
+user sees 'sending 3 files at 14 MB/s' at a glance.
+
+These tests pin the surface contract.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture(scope="module")
+def index_html() -> str:
+    return Path("src/one_link/web/index.html").read_text(encoding="utf-8")
+
+
+# ───────── helpers present ───────────────────────────────────────────
+
+def test_rate_helper_present(index_html: str):
+    assert "function updateTransferRate(" in index_html
+    assert "function rateForTransfer(" in index_html
+    assert "function aggregateActiveTransferStats(" in index_html
+
+
+def test_format_helpers_present(index_html: str):
+    assert "const fmtRate" in index_html
+    assert "const fmtEta" in index_html
+
+
+def test_state_has_transfer_rates_map(index_html: str):
+    assert "transferRates: new Map()" in index_html
+
+
+# ───────── EWMA semantics ────────────────────────────────────────────
+
+def test_rate_tracker_uses_ewma(index_html: str):
+    """The tracker must use an EWMA, not raw last-delta — bursty
+    chunked transfers would jiggle wildly otherwise."""
+    assert "_RATE_ALPHA" in index_html
+    # alpha must be in (0, 1) and named-constant exposed at module top.
+    m = re.search(r"const _RATE_ALPHA = ([\d.]+)", index_html)
+    assert m is not None
+    alpha = float(m.group(1))
+    assert 0 < alpha < 1
+
+
+def test_rate_tracker_resets_on_terminal_status(index_html: str):
+    """complete / failed must drop the rate cache so the next
+    transfer for the same id (retry after pause) starts fresh."""
+    start = index_html.find("function updateTransferRate(")
+    assert start > 0
+    snippet = index_html[start:start + 1800]
+    assert 'status === "complete"' in snippet
+    assert 'status === "failed"' in snippet
+    assert "state.transferRates.delete(" in snippet
+
+
+def test_rate_decays_after_inactivity(index_html: str):
+    """If no event has arrived for >3s the bps must read as 0 —
+    otherwise a frozen transfer would keep showing 14 MB/s forever."""
+    start = index_html.find("function rateForTransfer(")
+    assert start > 0
+    snippet = index_html[start:start + 600]
+    assert "age > 3" in snippet
+
+
+# ───────── chat bubble surface ───────────────────────────────────────
+
+def test_file_bubble_shows_rate_and_eta(index_html: str):
+    """The in-flight file bubble must include live B/s + ETA when
+    the rate is known."""
+    start = index_html.find("function renderFileBubble(msg)")
+    assert start > 0
+    snippet = index_html[start:start + 4000]
+    assert "rateForTransfer(" in snippet
+    assert "fmtRate(" in snippet
+    assert "fmtEta(" in snippet
+    assert "transfer-detail" in snippet
+
+
+def test_paused_bubble_shows_resume_hint(index_html: str):
+    """Paused transfer bubble should explicitly mention the resume
+    behaviour so the user doesn't think it's stuck."""
+    start = index_html.find("function renderFileBubble(msg)")
+    assert start > 0
+    snippet = index_html[start:start + 4000]
+    assert "resumes when peer reconnects" in snippet
+
+
+# ───────── aggregate pill surface ────────────────────────────────────
+
+def test_header_has_transfer_pill(index_html: str):
+    assert 'id="transfer-pill"' in index_html
+
+
+def test_pill_renderer_present(index_html: str):
+    assert "function renderTransferHeaderPill(" in index_html
+    assert "function scheduleRenderTransferHeaderPill(" in index_html
+
+
+def test_pill_decays_via_interval(index_html: str):
+    """Need a setInterval so a stalled transfer's stale rate fades
+    even when no new transfer events arrive."""
+    # find the setInterval near renderTransferHeaderPill
+    idx = index_html.find("renderTransferHeaderPill();")
+    assert idx > 0
+    # search in a wide window for setInterval that calls render again
+    window = index_html[max(0, idx - 200):idx + 400]
+    assert "setInterval(" in window
+
+
+def test_pill_click_opens_files_pane(index_html: str):
+    """Clicking the pill should switch to Files → Sent."""
+    start = index_html.find("function renderTransferHeaderPill(")
+    assert start > 0
+    snippet = index_html[start:start + 1800]
+    assert 'data-pane="files"' in snippet
+    assert 'data-files-mode="sent"' in snippet
+
+
+def test_ws_handler_calls_update_rate(index_html: str):
+    """The transfer WS event handler must call updateTransferRate
+    on every event, otherwise the EWMA never advances."""
+    idx = index_html.find('m.type === "transfer"')
+    assert idx > 0
+    snippet = index_html[idx:idx + 1200]
+    assert "updateTransferRate(" in snippet
+    assert "scheduleRenderTransferHeaderPill()" in snippet
+
+
+def test_page_version_bumped(index_html: str):
+    from one_link import __version__
+
+    assert f'PAGE_BUILT_FOR = "{__version__}"' in index_html
