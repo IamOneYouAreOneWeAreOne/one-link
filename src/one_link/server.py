@@ -354,6 +354,10 @@ class UIServer:
         r.add_delete(r"/api/transfers/{transfer_id:.+}", self._guarded(self.api_delete_transfer))
         r.add_post("/api/inbox/reveal", self._guarded(self.api_inbox_reveal))
         r.add_post(r"/api/files/{name:.+}/reveal", self._guarded(self.api_file_reveal))
+        # v0.9.0: text preview endpoint. Must be registered BEFORE the
+        # generic download route so /preview doesn't get swallowed by
+        # the {name:.+} regex.
+        r.add_get(r"/api/files/{name:.+}/preview", self._guarded(self.api_file_preview))
         r.add_get(r"/api/files/{name:.+}", self._guarded(self.api_file_download))
         r.add_get("/api/audit", self._guarded(self.api_audit))
         r.add_get("/api/events", self._guarded_ws(self.ws_events))
@@ -3108,6 +3112,85 @@ class UIServer:
             return web.json_response({"error": "not found"}, status=404)
         mime = mimetypes.guess_type(safe)[0] or "application/octet-stream"
         return web.FileResponse(path, headers={"Content-Type": mime})
+
+    # v0.9.0: inline preview support. Whitelisted text-y extensions
+    # only — defense-in-depth against the user clicking 'preview' on
+    # a 50 MB binary file. Capped at 256 KB on read; any tail beyond
+    # that is reported back as truncated=True.
+    PREVIEW_MAX_BYTES = 256 * 1024
+    PREVIEW_KINDS: dict = {
+        # markdown variants → markdown renderer (subset)
+        "md": "markdown", "markdown": "markdown", "mdown": "markdown",
+        # code-ish: monospace + line numbers
+        "py": "code", "js": "code", "mjs": "code", "cjs": "code",
+        "ts": "code", "tsx": "code", "jsx": "code",
+        "html": "code", "htm": "code",
+        "css": "code", "scss": "code", "sass": "code", "less": "code",
+        "json": "code", "yaml": "code", "yml": "code", "toml": "code",
+        "xml": "code", "ini": "code", "conf": "code", "cfg": "code",
+        "sh": "code", "bash": "code", "zsh": "code", "fish": "code",
+        "ps1": "code", "bat": "code",
+        "rb": "code", "go": "code", "rs": "code", "java": "code",
+        "kt": "code", "swift": "code", "scala": "code",
+        "c": "code", "h": "code", "cc": "code", "cpp": "code", "hpp": "code",
+        "lua": "code", "r": "code", "pl": "code", "php": "code",
+        "sql": "code", "graphql": "code", "proto": "code",
+        # plain text → plain renderer
+        "txt": "text", "log": "text", "csv": "text", "tsv": "text",
+        "env": "text", "gitignore": "text", "gitattributes": "text",
+        "license": "text", "readme": "text",
+    }
+
+    async def api_file_preview(self, request: web.Request) -> web.Response:
+        """v0.9.0: read a small text-y file from the inbox + return its
+        decoded content for inline rendering in the chat bubble.
+        Whitelisted extensions only; >256 KB tail is reported as
+        truncated. Path-traversal defended like the download endpoint."""
+        name = request.match_info["name"]
+        safe = Path(name).name
+        if safe != name or not safe:
+            return web.json_response({"error": "bad name"}, status=400)
+        path = inbox_dir() / safe
+        if not path.is_file():
+            return web.json_response({"error": "not found"}, status=404)
+        ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else safe.lower()
+        kind = self.PREVIEW_KINDS.get(ext)
+        if kind is None:
+            return web.json_response(
+                {"error": "preview not available for this file type",
+                 "extension": ext},
+                status=415,
+            )
+        try:
+            size = path.stat().st_size
+        except OSError as e:
+            return web.json_response({"error": f"stat: {e}"}, status=500)
+        cap = self.PREVIEW_MAX_BYTES
+        truncated = size > cap
+        try:
+            with path.open("rb") as f:
+                raw = f.read(cap)
+        except OSError as e:
+            return web.json_response({"error": f"read: {e}"}, status=500)
+        # Decode: prefer utf-8, fall back to latin-1 (which can't fail).
+        # Replace bad bytes with U+FFFD so the user sees that part is
+        # garbled rather than getting a 500.
+        try:
+            content = raw.decode("utf-8")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            content = raw.decode("utf-8", errors="replace")
+            encoding = "utf-8-replace"
+        return web.json_response({
+            "name": safe,
+            "extension": ext,
+            "kind": kind,
+            "encoding": encoding,
+            "size": size,
+            "preview_bytes": len(raw),
+            "truncated": truncated,
+            "content": content,
+        })
 
     # Server-side debounce: explorer.exe spawns a new window each call,
     # so repeated rapid clicks from the UI (or a runaway loop) would

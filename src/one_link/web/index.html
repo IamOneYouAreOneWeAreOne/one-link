@@ -1127,6 +1127,115 @@
   .conflict-row .resolve-actions .keep-both { background: rgba(76,209,117,.18); color: var(--good); }
   .conflict-row .resolve-actions .keep-both:hover { background: var(--good); color: #0a1f0a; }
   .conflict-row.resolving { opacity: .55; pointer-events: none; }
+  /* v0.9.0 inline previews — markdown / code / text. */
+  .preview-toggle-row {
+    margin-top: 6px;
+  }
+  .preview-toggle-link {
+    color: var(--accent-2); cursor: pointer;
+    font-size: 11px; text-decoration: underline;
+  }
+  .msg.out.file .preview-toggle-link { color: rgba(255,255,255,.95); }
+  .preview-host {
+    margin-top: 8px;
+    background: var(--bg-1);
+    border: 1px solid var(--bg-3);
+    border-radius: 8px;
+    padding: 12px 14px;
+    max-height: 420px;
+    overflow: auto;
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .msg.out.file .preview-host {
+    background: rgba(0,0,0,.20);
+    border-color: rgba(255,255,255,.18);
+    color: var(--text);
+  }
+  .preview-loading, .preview-truncated, .preview-error {
+    color: var(--text-dim); font-style: italic; font-size: 11px;
+    padding: 4px 0;
+  }
+  .preview-error { color: var(--bad); }
+  /* Markdown preview styling. */
+  .md-preview h1, .md-preview h2, .md-preview h3,
+  .md-preview h4, .md-preview h5, .md-preview h6 {
+    color: var(--text); font-weight: 600;
+    margin: 12px 0 6px;
+  }
+  .md-preview h1 { font-size: 18px; }
+  .md-preview h2 { font-size: 16px; }
+  .md-preview h3 { font-size: 14px; }
+  .md-preview h4, .md-preview h5, .md-preview h6 { font-size: 13px; }
+  .md-preview p { margin: 0 0 8px; }
+  .md-preview ul, .md-preview ol { margin: 0 0 8px 22px; }
+  .md-preview li { margin-bottom: 2px; }
+  .md-preview blockquote {
+    border-left: 3px solid var(--accent);
+    margin: 0 0 8px;
+    padding: 4px 12px;
+    color: var(--text-dim);
+  }
+  .md-preview hr {
+    border: 0; border-top: 1px solid var(--bg-3);
+    margin: 12px 0;
+  }
+  .md-preview pre {
+    background: var(--bg-2);
+    border-radius: 6px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    margin: 0 0 8px;
+  }
+  .md-preview code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+  }
+  .md-preview a { color: var(--accent-2); text-decoration: underline; }
+  /* Code preview with line-number gutter. */
+  .code-preview {
+    display: flex;
+    background: var(--bg-2);
+    border-radius: 6px;
+    overflow: hidden;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .code-preview .gutter {
+    flex-shrink: 0;
+    background: rgba(0,0,0,.15);
+    padding: 10px 8px;
+    color: var(--text-dimmer);
+    text-align: right;
+    user-select: none;
+  }
+  .code-preview .gutter .ln {
+    display: block;
+    font-size: 11px;
+  }
+  .code-preview .code-body {
+    flex: 1; min-width: 0;
+    padding: 10px 12px;
+    margin: 0;
+    overflow-x: auto;
+    background: transparent;
+    color: var(--text);
+    white-space: pre;
+  }
+  .code-preview .code-body code { background: transparent; padding: 0; }
+  /* Plain-text preview. */
+  .text-preview pre {
+    background: var(--bg-2);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 0;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
   /* v0.8.8 aggregate transfer pill in the conversation header. */
   .transfer-pill {
     display: inline-flex; align-items: center; gap: 6px;
@@ -2935,6 +3044,159 @@
     if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
   }
 
+  // ── Inline previews (v0.9.0) ───────────────────────────────────────
+  // Whitelist mirrors server-side PREVIEW_KINDS — keep in sync.
+  const PREVIEW_KINDS = new Map([
+    ["md","markdown"],["markdown","markdown"],["mdown","markdown"],
+    ["py","code"],["js","code"],["mjs","code"],["cjs","code"],
+    ["ts","code"],["tsx","code"],["jsx","code"],
+    ["html","code"],["htm","code"],
+    ["css","code"],["scss","code"],["sass","code"],["less","code"],
+    ["json","code"],["yaml","code"],["yml","code"],["toml","code"],
+    ["xml","code"],["ini","code"],["conf","code"],["cfg","code"],
+    ["sh","code"],["bash","code"],["zsh","code"],["fish","code"],
+    ["ps1","code"],["bat","code"],
+    ["rb","code"],["go","code"],["rs","code"],["java","code"],
+    ["kt","code"],["swift","code"],["scala","code"],
+    ["c","code"],["h","code"],["cc","code"],["cpp","code"],["hpp","code"],
+    ["lua","code"],["r","code"],["pl","code"],["php","code"],
+    ["sql","code"],["graphql","code"],["proto","code"],
+    ["txt","text"],["log","text"],["csv","text"],["tsv","text"],
+    ["env","text"],["gitignore","text"],["gitattributes","text"],
+    ["license","text"],["readme","text"],
+  ]);
+  function previewKindForName(name) {
+    if (!name) return null;
+    const ext = (name.split(".").pop() || "").toLowerCase();
+    return PREVIEW_KINDS.get(ext) || null;
+  }
+
+  // v0.9.0: minimal markdown renderer scoped to previews.
+  // Supports: ATX headings (# ##), paragraphs, fenced code blocks,
+  // blockquotes, ordered + unordered lists (single-level), horizontal
+  // rules. Inline syntax delegates to renderInlineNonCode (bold,
+  // italic, inline code, autolinks). Deliberately small + safe — no
+  // raw HTML escape hatch, so no XSS surface.
+  function renderMarkdownDoc(source) {
+    const root = el("div", "md-preview");
+    const lines = (source || "").split(/\r?\n/);
+    let i = 0;
+    const n = lines.length;
+    while (i < n) {
+      const ln = lines[i];
+      if (/^```/.test(ln.trimStart())) {
+        // Fenced code block
+        const lang = ln.trimStart().slice(3).trim();
+        const buf = [];
+        i += 1;
+        while (i < n && !/^```/.test(lines[i].trimStart())) {
+          buf.push(lines[i]);
+          i += 1;
+        }
+        const pre = document.createElement("pre");
+        const code = document.createElement("code");
+        if (lang) code.dataset.lang = lang;
+        code.textContent = buf.join("\n");
+        pre.appendChild(code);
+        root.appendChild(pre);
+        if (i < n) i += 1;  // skip closing fence
+        continue;
+      }
+      const headM = ln.match(/^(#{1,6})\s+(.*)$/);
+      if (headM) {
+        const lvl = headM[1].length;
+        const h = document.createElement("h" + lvl);
+        renderInlineNonCode(headM[2].trim(), h);
+        root.appendChild(h);
+        i += 1;
+        continue;
+      }
+      if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(ln)) {
+        root.appendChild(document.createElement("hr"));
+        i += 1;
+        continue;
+      }
+      if (/^>\s?/.test(ln)) {
+        // Blockquote — collect contiguous > lines.
+        const buf = [];
+        while (i < n && /^>\s?/.test(lines[i])) {
+          buf.push(lines[i].replace(/^>\s?/, ""));
+          i += 1;
+        }
+        const bq = document.createElement("blockquote");
+        renderInlineNonCode(buf.join("\n"), bq);
+        root.appendChild(bq);
+        continue;
+      }
+      const ulM = ln.match(/^([-*+])\s+(.*)$/);
+      const olM = ln.match(/^(\d+)\.\s+(.*)$/);
+      if (ulM || olM) {
+        const ordered = !!olM;
+        const list = document.createElement(ordered ? "ol" : "ul");
+        while (i < n) {
+          const L = lines[i];
+          const m = ordered ? L.match(/^(\d+)\.\s+(.*)$/) : L.match(/^([-*+])\s+(.*)$/);
+          if (!m) break;
+          const li = document.createElement("li");
+          renderInlineNonCode(m[2], li);
+          list.appendChild(li);
+          i += 1;
+        }
+        root.appendChild(list);
+        continue;
+      }
+      if (ln.trim() === "") { i += 1; continue; }
+      // Paragraph — collect lines until blank or block boundary.
+      const buf = [ln];
+      i += 1;
+      while (i < n) {
+        const L = lines[i];
+        if (L.trim() === "") break;
+        if (/^(#{1,6}\s|>\s|```|[-*+]\s|\d+\.\s|(-{3,}|\*{3,}|_{3,})\s*$)/.test(L.trimStart())) break;
+        buf.push(L);
+        i += 1;
+      }
+      const p = document.createElement("p");
+      renderInlineNonCode(buf.join(" "), p);
+      root.appendChild(p);
+    }
+    return root;
+  }
+
+  // v0.9.0: code preview with line numbers. No syntax highlighting
+  // (vendoring a highlighter would 10x the bundle); monospace +
+  // line-numbered gutter is plenty for "what's in this script?".
+  function renderCodePreview(source, ext) {
+    const wrap = el("div", "code-preview");
+    if (ext) wrap.dataset.lang = ext;
+    const lines = (source || "").split("\n");
+    const gutter = el("div", "gutter");
+    const code = el("pre", "code-body");
+    for (let i = 0; i < lines.length; i++) {
+      gutter.appendChild(el("span", "ln", String(i + 1)));
+    }
+    const codeEl = document.createElement("code");
+    codeEl.textContent = source || "";
+    code.appendChild(codeEl);
+    wrap.appendChild(gutter);
+    wrap.appendChild(code);
+    return wrap;
+  }
+
+  function renderTextPreview(source) {
+    const wrap = el("div", "text-preview");
+    const pre = document.createElement("pre");
+    pre.textContent = source || "";
+    wrap.appendChild(pre);
+    return wrap;
+  }
+
+  function renderPreviewByKind(kind, content, ext) {
+    if (kind === "markdown") return renderMarkdownDoc(content);
+    if (kind === "code") return renderCodePreview(content, ext);
+    return renderTextPreview(content);
+  }
+
   // Look up the transfer record matching a FILE_OFFER message.
   // FILE_OFFER carries `blob` (hex); transfer carries `blob_hash`.
   // Direction must match too (out vs in are distinct ledger rows).
@@ -3638,6 +3900,63 @@
         img.alt = msg.name || "image";
         img.onclick = () => window.open(img.src, "_blank");
         meta.appendChild(img);
+      }
+    }
+
+    // v0.9.0: text/markdown/code preview toggle for received files
+    // whose extension is whitelisted. Lazy: a "Show preview" link
+    // appears under the file row, click fetches + renders inline.
+    // Result is cached per-message so re-opening the chat doesn't
+    // re-fetch.
+    const previewKind = previewKindForName(msg.name);
+    if (msg.dir === "in" && kind === "sent" && previewKind) {
+      const fname = (incomingPath || msg.name || "").toString().split(/[\\\/]/).pop();
+      if (fname) {
+        const togglesRow = el("div", "preview-toggle-row");
+        const link = el("a", "preview-toggle-link", "Show preview");
+        link.href = "#";
+        const host = el("div", "preview-host");
+        host.style.display = "none";
+        link.onclick = async (ev) => {
+          ev.preventDefault();
+          const visible = host.style.display !== "none";
+          if (visible) {
+            host.style.display = "none";
+            link.textContent = "Show preview";
+            return;
+          }
+          if (host.dataset.loaded !== "1") {
+            host.innerHTML = "";
+            host.appendChild(el("div", "preview-loading", "Loading…"));
+            host.style.display = "";
+            link.textContent = "Hide preview";
+            try {
+              const data = await api.get(
+                `/api/files/${encodeURIComponent(fname)}/preview`
+              );
+              host.innerHTML = "";
+              host.appendChild(renderPreviewByKind(
+                data.kind, data.content || "", data.extension || "",
+              ));
+              if (data.truncated) {
+                const tnote = el("div", "preview-truncated",
+                  `Preview truncated at ${fmtBytes(data.preview_bytes)} of ${fmtBytes(data.size)}.`);
+                host.appendChild(tnote);
+              }
+              host.dataset.loaded = "1";
+            } catch (e) {
+              host.innerHTML = "";
+              host.appendChild(el("div", "preview-error",
+                `Preview failed: ${e.message || e}`));
+            }
+          } else {
+            host.style.display = "";
+            link.textContent = "Hide preview";
+          }
+        };
+        togglesRow.appendChild(link);
+        meta.appendChild(togglesRow);
+        meta.appendChild(host);
       }
     }
 
@@ -5293,7 +5612,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.8.9";
+  const PAGE_BUILT_FOR = "0.9.0";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {

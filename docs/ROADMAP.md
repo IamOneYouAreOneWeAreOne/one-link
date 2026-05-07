@@ -172,9 +172,19 @@ a specific competitive gap.
   - **v0.8.4 — Voice messages.** Browser MediaRecorder → opus
     blob → file send pipeline. UI: hold-to-record button.
 
-  - **v0.8.5 — Inline previews for PDFs / markdown / code.**
-    Already have image inline. Add PDF (PDF.js), markdown (with
-    the existing markdown-lite renderer), syntax-highlighted code.
+  - **v0.8.5 — Inline previews for PDFs / markdown / code.** ✓
+    Markdown + code + plain-text shipped (released as package
+    v0.9.0). PDFs deferred — vendoring PDF.js (~600 KB) for the
+    long tail seemed disproportionate; OS / browser-native PDF
+    handlers cover that case via Open. Markdown gets a real
+    subset renderer (ATX headings, paragraphs, fenced code,
+    blockquotes, ordered + unordered lists, horizontal rules,
+    plus inline bold/italic/code/autolinks). Code gets a
+    line-numbered monospace block. Plain text wraps in a pre.
+    Server endpoint GET /api/files/{name}/preview enforces a
+    50-extension whitelist + 256 KB cap with utf-8/latin-1
+    fallback decode. Per-bubble Show preview toggle in chat;
+    cached on the message so re-opening doesn't re-fetch.
 
   - **v0.8.6 — Large file streaming.** Don't materialize the
     full file before playback; stream chunks to a video/audio
