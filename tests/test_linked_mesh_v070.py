@@ -16,6 +16,7 @@ Pin behaviors that the v0.7 architectural rewrite introduced:
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import time
@@ -23,12 +24,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import blake3
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.daemon import (
     Daemon,
+    IncomingFile,
     OutboundSession,
+    _final_stream_ack_deadline,
     _stream_transfer_profile,
 )
 from one_link.capabilities import CHAT, FILES, FILE_CDC
@@ -561,6 +565,14 @@ def test_stream_transfer_profile_scales_window_safely():
     assert big["window_chunks"] <= 16
 
 
+def test_final_stream_ack_deadline_gives_legacy_receivers_cache_grace():
+    medium = _final_stream_ack_deadline(256 * 1024 * 1024)
+    huge = _final_stream_ack_deadline(10 * 1024 * 1024 * 1024)
+
+    assert medium >= 120.0
+    assert huge == 600.0
+
+
 @pytest.mark.asyncio
 async def test_send_file_stream_pipelines_bounded_ack_window(
     tmp_path: Path, monkeypatch
@@ -614,6 +626,78 @@ async def test_send_file_stream_pipelines_bounded_ack_window(
     assert max(chan.recv_sent_counts) >= 4  # offer + three chunks before stream ACK drain
     assert row.metadata["stream_engine"] == "pipelined_json_v1"
     assert row.metadata["stream_window_chunks"] == 3
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_receiver_acks_final_chunk_before_cache_warm(
+    tmp_path: Path, monkeypatch
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+
+    content = b"final ack must not wait for chunk cache"
+    blob = blake3.blake3(content).hexdigest()
+    out_path = tmp_path / "received.bin"
+    transfer_id = "in:test-final-ack"
+    state.upsert_transfer(
+        id=transfer_id,
+        direction="in",
+        peer_fp=them.fingerprint,
+        kind="file",
+        name=out_path.name,
+        size=len(content),
+        blob_hash=blob,
+        status="offered",
+        progress_bytes=0,
+        total_bytes=len(content),
+        chunks_done=0,
+        chunks_total=1,
+        metadata={"mode": "stream", "path": str(out_path)},
+    )
+    daemon._incoming_files[blob] = IncomingFile(
+        name=out_path.name,
+        size=len(content),
+        blob_hex=blob,
+        out_path=out_path,
+        handle=open(out_path, "wb"),
+        hasher=blake3.blake3(),
+        transfer_id=transfer_id,
+    )
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    cache_checked: list[bool] = []
+
+    def _cache_after_ack(path: Path) -> None:
+        assert any(
+            m.get("t") == "ACK" and m.get("of") == "final-chunk"
+            for m in chan.sent
+        )
+        cache_checked.append(True)
+
+    monkeypatch.setattr(daemon, "_cache_file_chunks", _cache_after_ack)
+    await daemon._on_peer_message(
+        chan,
+        make_msg(
+            "FILE_CHUNK",
+            them.short_id,
+            id="final-chunk",
+            blob=blob,
+            seq=0,
+            data=base64.b64encode(content).decode("ascii"),
+            eof=True,
+        ),
+    )
+
+    assert cache_checked == [True]
+    assert chan.sent[-1]["t"] == "ACK"
+    assert state.get_transfer(transfer_id).status == "complete"
     state.close()
 
 

@@ -136,6 +136,8 @@ OUTBOUND_SESSION_IDLE_S = 300.0
 HANDSHAKE_DEADLINE_OUTBOUND_S = 8.0
 FILE_ACK_DEADLINE_S = 30.0
 FILE_SEND_TOTAL_DEADLINE_S = 600.0
+FILE_FINAL_ACK_MIN_GRACE_S = 120.0
+FILE_FINAL_ACK_BYTES_PER_S = 2 * 1024 * 1024
 TRANSFER_RETRY_BASE_S = 5.0
 TRANSFER_RETRY_MAX_S = 5 * 60.0
 SWARM_ASSIST_DEADLINE_S = 2.0
@@ -277,6 +279,17 @@ def _stream_transfer_profile(size: int) -> dict[str, int]:
         "window_chunks": int(window_chunks),
         "window_bytes": int(window_chunks * chunk_size),
     }
+
+
+def _final_stream_ack_deadline(size: int) -> float:
+    """Grace period for old receivers that cache chunks before final ACK."""
+
+    size = max(0, int(size))
+    cache_grace = size / FILE_FINAL_ACK_BYTES_PER_S if size else 0.0
+    return float(min(
+        FILE_SEND_TOTAL_DEADLINE_S,
+        max(FILE_ACK_DEADLINE_S, FILE_FINAL_ACK_MIN_GRACE_S, cache_grace),
+    ))
 
 
 def _delivery_backoff_ms(attempts: int) -> int:
@@ -1569,7 +1582,6 @@ class Daemon:
                         f.out_path.unlink()
                     self._update_transfer(f.transfer_id, status="failed")
                 else:
-                    self._cache_file_chunks(f.out_path)
                     self._update_transfer(
                         f.transfer_id,
                         status="complete",
@@ -1577,6 +1589,10 @@ class Daemon:
                         total_bytes=f.size,
                     )
                 log.info("file done: %s ok=%s -> %s", f.name, ok, f.out_path)
+                await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+                if ok:
+                    self._cache_file_chunks(f.out_path)
+                return
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_CDC_CHUNK":
             await self._handle_file_cdc_chunk(channel, msg, peer_fp, peer_sid)
@@ -6433,12 +6449,12 @@ class Daemon:
                 },
             )
 
-        async def _await_ack(ch_: ch.Channel) -> dict:
+        async def _await_ack(ch_: ch.Channel, *, deadline: float | None = None) -> dict:
             # v0.6.3: bound each recv. Without this, a peer that
             # received our chunk but never ACKed (e.g., crashed,
             # NAT dropped, channel hung mid-flush) would freeze
             # the entire transfer indefinitely.
-            deadline = FILE_ACK_DEADLINE_S
+            deadline = FILE_ACK_DEADLINE_S if deadline is None else float(deadline)
             while True:
                 try:
                     plaintext = await asyncio.wait_for(
@@ -6596,9 +6612,11 @@ class Daemon:
                             1, (size + stream_chunk_size - 1) // stream_chunk_size,
                         )
 
-                        async def _settle_one_stream_ack() -> None:
+                        async def _settle_one_stream_ack(
+                            *, deadline: float | None = None,
+                        ) -> None:
                             nonlocal chunks_sent, raw_bytes_sent, wire_bytes_sent
-                            await _await_ack(channel)
+                            await _await_ack(channel, deadline=deadline)
                             acked_size = pending_sizes.popleft()
                             chunks_sent += 1
                             raw_bytes_sent += acked_size
@@ -6640,7 +6658,11 @@ class Daemon:
                             seq += 1
 
                         while pending_sizes:
-                            await _settle_one_stream_ack()
+                            final_deadline = (
+                                _final_stream_ack_deadline(size)
+                                if len(pending_sizes) == 1 else None
+                            )
+                            await _settle_one_stream_ack(deadline=final_deadline)
 
                     if chunks_sent == 0:
                         empty = make_msg(
