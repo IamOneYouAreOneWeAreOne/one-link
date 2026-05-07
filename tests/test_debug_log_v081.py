@@ -250,16 +250,25 @@ async def test_api_debug_health_runs_checks(tmp_path: Path):
 
 # ─── HTML structural pin ──────────────────────────────────────────
 
-def test_index_html_has_debug_pane():
+def test_index_html_has_hidden_debug_overlay():
+    """v0.8.1.1: debug surface is intentionally hidden from the
+    chat sidebar. Pinned to a modal opened via Ctrl+Shift+D or the
+    Settings modal's "Open diagnostics" button."""
     p = (
         Path(__file__).resolve().parent.parent
         / "src" / "one_link" / "web" / "index.html"
     )
     text = p.read_text(encoding="utf-8")
     for needle in [
-        'id="debug-panel"',
-        'id="btn-debug"',
-        'data-pane="debug"',
+        # Modal-style overlay (not an aside).
+        'id="debug-backdrop"',
+        'id="debug-close"',
+        # Entry points: keyboard shortcut + Settings link.
+        "function openDebugOverlay",
+        "function closeDebugOverlay",
+        'id="settings-open-diagnostics"',
+        'Ctrl+Shift+D',  # mentioned in the comment block
+        # Existing innards.
         'id="btn-debug-health"',
         'id="btn-debug-clear"',
         'id="debug-severity"',
@@ -274,3 +283,19 @@ def test_index_html_has_debug_pane():
         ".debug-health-row",
     ]:
         assert needle in text, f"index.html missing {needle!r}"
+
+
+def test_debug_button_not_in_sidebar():
+    """The chat sidebar must NOT carry a debug tab anymore.
+    Regression: anything with data-pane="debug" reintroduces
+    the chat-surface clutter the user explicitly asked us to
+    remove."""
+    p = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "one_link" / "web" / "index.html"
+    )
+    text = p.read_text(encoding="utf-8")
+    assert 'data-pane="debug"' not in text, (
+        "Debug tab is back in the chat sidebar — it should live "
+        "behind Ctrl+Shift+D / Settings only."
+    )

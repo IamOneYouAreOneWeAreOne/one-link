@@ -98,7 +98,12 @@
     padding: 2px 8px; font-size: 10px; text-transform: none; letter-spacing: 0;
   }
   .side .section-h button:hover { color: var(--text); background: var(--bg-3); }
-  .peerlist { padding: 0 8px 12px; flex: 1; overflow-y: auto; }
+  .peerlist {
+    padding: 0 8px 12px;
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
   .peer {
     display: flex; align-items: center; gap: 10px;
     padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer;
@@ -301,11 +306,31 @@
     background: var(--bg-1);
     border-bottom: 1px solid var(--line);
   }
-  .convo-h .who { display: flex; align-items: center; gap: 12px; }
-  .convo-h .avatar { width: 36px; height: 36px; }
-  .convo-h .avatar { font-size: 14px; }
+  .convo-h .who { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .conversation-badge {
+    flex: 0 0 auto;
+    min-width: 52px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: rgba(124,92,255,.14);
+    border: 1px solid rgba(124,92,255,.28);
+    color: var(--accent-2);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    text-align: center;
+  }
+  .conversation-badge.group {
+    background: rgba(78,193,255,.12);
+    border-color: rgba(78,193,255,.26);
+    color: var(--accent-2);
+  }
+  .convo-h .who .text { min-width: 0; }
   .convo-h .who .text .name { font-weight: 600; line-height: 1.1; }
-  .convo-h .who .text .sub  { font-size: 12px; color: var(--text-dim); }
+  .convo-h .who .text .sub  {
+    font-size: 12px; color: var(--text-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   .convo-h .actions { display: flex; gap: 6px; align-items: center; }
   .convo-h .actions button {
     padding: 7px 12px; border-radius: var(--radius-sm);
@@ -348,6 +373,8 @@
   }
   .convo-h .who { cursor: pointer; }
   .convo-h .who:hover .name { color: var(--accent); }
+  .convo-h .who.group-context { cursor: default; }
+  .convo-h .who.group-context:hover .name { color: var(--text); }
   .device-drawer h2 { display: flex; align-items: baseline; gap: 12px; }
   .device-drawer .device-drawer-sub {
     color: var(--text-dim); font-size: 12px; font-weight: 400;
@@ -768,18 +795,7 @@
   }
   .gear:hover { background: var(--bg-2); color: var(--text); }
 
-  /* Peer card detail-on-hover (verify info) */
-  .peer .verify {
-    display: none; position: absolute;
-    background: var(--bg-elev); border: 1px solid var(--bg-3);
-    border-radius: 8px; padding: 8px 10px;
-    font-size: 11px; color: var(--text-dim); font-family: var(--mono);
-    box-shadow: var(--shadow); z-index: 50;
-    white-space: nowrap;
-    left: 100%; top: 0; margin-left: 4px;
-  }
   .peer { position: relative; }
-  .peer:hover .verify { display: block; }
 
   /* v0.4: the sidebar now only renders paired devices, so the
      "tap to pair" affordance moved to the discovery modal. The
@@ -1229,8 +1245,9 @@
         <button class="btn" data-pane="files" id="btn-files">Files</button>
         <button class="btn" data-pane="folders" id="btn-folders">Folders</button>
         <button class="btn" data-pane="mesh" id="btn-mesh">Activity</button>
-        <!-- v0.8.1: developer backend (errors + health-check). -->
-        <button class="btn" data-pane="debug" id="btn-debug" title="Debug">⚙ Debug</button>
+        <!-- v0.8.1.1: Debug surface is intentionally hidden from
+             the chat sidebar. Open via Ctrl+Shift+D, or via the
+             "Open diagnostics" link inside Settings. -->
       </div>
     </aside>
 
@@ -1330,34 +1347,12 @@
       </div>
     </aside>
 
-    <!-- v0.8.1: Debug pane — health check + recent failures.
-         Surfaces the developer backend so a bad action gives the
-         user a clear "what / why / how to fix" instead of a
-         silent toast. -->
-    <aside class="files" id="debug-panel" style="display:none;">
-      <div class="section-h">
-        <span>Debug</span>
-        <span class="count" id="debug-error-count">0</span>
-      </div>
-      <div class="help-card">
-        Live error log + health check. Open this when something
-        feels broken — every server-side failure lands here with
-        a suggestion.
-      </div>
-      <div class="mini-actions wrap" style="padding: 10px 12px; gap: 8px;">
-        <button id="btn-debug-health">Run health check</button>
-        <button id="btn-debug-clear">Clear log</button>
-        <select id="debug-severity" style="padding: 6px;">
-          <option value="">all</option>
-          <option value="error">errors only</option>
-          <option value="warn">warnings+</option>
-        </select>
-      </div>
-      <div id="debug-health-result" style="padding: 0 12px;"></div>
-      <div id="debug-log-list" style="overflow-y:auto; flex:1; padding: 8px 12px;">
-        <div class="empty">No errors recorded yet.</div>
-      </div>
-    </aside>
+    <!-- v0.8.1.1: Debug overlay moved out of the sidebar and into
+         a hidden modal opened via Ctrl+Shift+D or Settings. The
+         chat surface no longer carries any debug-related real
+         estate. The actual modal HTML is below near the other
+         backdrops. -->
+
 
     <aside class="files" id="mesh-panel" style="display:none;">
       <div class="section-h">
@@ -1511,6 +1506,18 @@
         <div class="rdz-status-pane" id="rdz-status-pane"></div>
       </div>
 
+      <!-- v0.8.1.1: tucked-away diagnostics entry point. -->
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Troubleshooting</span></div>
+        <p class="settings-help">
+          Live error log + daemon health check. Open this only if
+          something seems broken; in normal use you'll never need it.
+        </p>
+        <button class="btn-ghost" id="settings-open-diagnostics">
+          Open diagnostics
+        </button>
+      </div>
+
       <div class="actions">
         <button class="btn-ghost" id="settings-cancel">Close</button>
         <button class="btn-primary" id="settings-save">Save</button>
@@ -1616,6 +1623,42 @@
       <div class="actions">
         <button class="btn-ghost" id="device-cancel">Close</button>
         <button class="btn-primary" id="device-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v0.8.1.1: hidden DEBUG OVERLAY. Open with Ctrl+Shift+D
+       or via the Settings modal's "Open diagnostics" button. -->
+  <div class="modal-backdrop" id="debug-backdrop">
+    <div class="modal" style="max-width:720px; max-height:80vh; display:flex; flex-direction:column;">
+      <h2>
+        Diagnostics
+        <span class="device-drawer-sub" id="debug-version-sub"></span>
+      </h2>
+      <p>
+        Live error log + health check for the local daemon. Every
+        server-side failure since the daemon started lands here with
+        a suggestion. Hidden from the chat surface — open this only
+        when something feels broken.
+      </p>
+      <div class="mini-actions wrap" style="gap: 8px; margin-bottom: 8px;">
+        <button class="btn-ghost" id="btn-debug-health">Run health check</button>
+        <button class="btn-ghost" id="btn-debug-clear">Clear log</button>
+        <select id="debug-severity" style="padding: 6px;">
+          <option value="">all severities</option>
+          <option value="error">errors only</option>
+          <option value="warn">warnings+</option>
+        </select>
+        <span class="device-drawer-sub" style="margin-left:auto;">
+          <span id="debug-error-count">0</span> error(s)
+        </span>
+      </div>
+      <div id="debug-health-result"></div>
+      <div id="debug-log-list" style="overflow-y:auto; flex:1; padding: 4px 0; min-height:200px;">
+        <div class="empty">No errors recorded yet.</div>
+      </div>
+      <div class="actions">
+        <button class="btn-ghost" id="debug-close">Close</button>
       </div>
     </div>
   </div>
@@ -2120,13 +2163,7 @@
       sub.appendChild(document.createTextNode(reachLabel(p)));
       txt.appendChild(sub);
 
-      const verify = el("div", "verify copyable");
-      verify.textContent = `${p.short_id} · ${p.address || "?"}:${p.port || "?"} — click to copy ID`;
-      verify.onclick = (ev) => {
-        ev.stopPropagation();
-        copyToClipboard(p.short_id, "device ID");
-      };
-      row.appendChild(verify);
+      row.title = `${p.display_name || p.hostname || p.short_id} · ${reachLabel(p)}`;
       row.appendChild(av);
       row.appendChild(txt);
 
@@ -3214,11 +3251,11 @@
     $("#convo-name").textContent = peer.display_name || peer.hostname || "(unknown)";
     const subEl = $("#convo-sub");
     subEl.innerHTML = "";
-    subEl.classList.add("copyable");
-    subEl.title = "Click to copy device ID";
-    subEl.onclick = () => copyToClipboard(peer.short_id, "device ID");
+    subEl.classList.remove("copyable");
+    subEl.title = "";
+    subEl.onclick = null;
     if (peer.trust === "rejected") {
-      subEl.appendChild(document.createTextNode(`${peer.short_id} · blocked`));
+      subEl.appendChild(document.createTextNode("blocked"));
     } else {
       const lc = latencyClass(peer);
       if (lc) {
@@ -3226,7 +3263,7 @@
         dot.title = latencyTitle(peer);
         subEl.appendChild(dot);
       }
-      subEl.appendChild(document.createTextNode(`${peer.short_id} · ${reachLabel(peer)}`));
+      subEl.appendChild(document.createTextNode(reachLabel(peer)));
       const ms = peer.health?.latency_ewma_ms;
       if (ms != null) {
         subEl.appendChild(document.createTextNode(` · ${Math.round(ms)} ms`));
@@ -3323,23 +3360,7 @@
     $("#dev-alias").value = peer.local_alias || "";
     $("#dev-mute").checked = !!peer.muted;
 
-    const allowed = peer.allowed_capabilities == null
-      ? new Set(["chat", "files", "folder_sync"])
-      : new Set(peer.allowed_capabilities || []);
-    document.querySelectorAll("#dev-cap-row .cap-toggle").forEach(btn => {
-      btn.classList.toggle("on", allowed.has(btn.dataset.cap));
-    });
-    // v0.7.3: Allow-all master toggle reflects the union state.
-    // policy=null is the canonical "allow everything" state — it
-    // wins regardless of which individual toggles are visible.
-    const allowAllNow = (
-      peer.allowed_capabilities == null
-      || (
-        allowed.has("chat") && allowed.has("files")
-        && allowed.has("folder_sync")
-      )
-    );
-    $("#dev-allow-all").checked = !!allowAllNow;
+    syncDrawerCapabilityControls(peer.allowed_capabilities);
 
     $("#dev-regime").textContent = reachLabel(peer);
     const lat = peer.health?.latency_ewma_ms;
@@ -3371,6 +3392,69 @@
     $("#device-backdrop").classList.remove("show");
   }
 
+  function bindSwitch(inputId) {
+    const input = $("#" + inputId);
+    const toggle = input?.closest(".toggle");
+    if (!input || !toggle) return;
+    toggle.setAttribute("role", "switch");
+    toggle.setAttribute("tabindex", "0");
+    const syncA11y = () => {
+      toggle.setAttribute("aria-checked", input.checked ? "true" : "false");
+    };
+    input.addEventListener("change", syncA11y);
+    toggle.addEventListener("click", (e) => {
+      if (e.target === input) return;
+      e.preventDefault();
+      input.checked = !input.checked;
+      syncA11y();
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    toggle.addEventListener("keydown", (e) => {
+      if (e.key !== " " && e.key !== "Enter") return;
+      e.preventDefault();
+      input.checked = !input.checked;
+      syncA11y();
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    syncA11y();
+  }
+
+  ["set-autoaccept", "set-rendezvous", "dev-mute", "dev-allow-all"]
+    .forEach(bindSwitch);
+
+  const DRAWER_CAPS = ["chat", "files", "folder_sync"];
+
+  function drawerPeerByFp(fp = state.deviceDrawerFp) {
+    return [...state.peers.values()].find(p => p.fingerprint === fp) || null;
+  }
+
+  function drawerAllowedSet(policy) {
+    if (policy == null) return new Set(DRAWER_CAPS);
+    return new Set(policy || []);
+  }
+
+  function syncDrawerCapabilityControls(policy) {
+    const allowed = drawerAllowedSet(policy);
+    const allOn = DRAWER_CAPS.every(cap => allowed.has(cap));
+    const allowAll = $("#dev-allow-all");
+    if (allowAll) {
+      allowAll.checked = allOn;
+      const toggle = allowAll.closest(".toggle");
+      if (toggle) toggle.setAttribute("aria-checked", allOn ? "true" : "false");
+    }
+    document.querySelectorAll("#dev-cap-row .cap-toggle").forEach(btn => {
+      btn.classList.toggle("on", allowed.has(btn.dataset.cap));
+    });
+  }
+
+  function drawerCapabilityPolicyFromButtons() {
+    const allowed = [];
+    document.querySelectorAll("#dev-cap-row .cap-toggle").forEach(btn => {
+      if (btn.classList.contains("on")) allowed.push(btn.dataset.cap);
+    });
+    return allowed;
+  }
+
   // Wire drawer interactions.
   $("#device-cancel").onclick = closeDeviceDrawer;
   $("#dev-alias").addEventListener("input", (e) => {
@@ -3389,12 +3473,16 @@
       if (!fp) return;
       const cap = btn.dataset.cap;
       const isOn = btn.classList.contains("on");
-      // Optimistic toggle; revert if API errors.
+      const peer = drawerPeerByFp(fp);
+      const previous = peer ? peer.allowed_capabilities : null;
       btn.classList.toggle("on", !isOn);
+      const nextAllowed = drawerCapabilityPolicyFromButtons();
+      syncDrawerCapabilityControls(nextAllowed);
       try {
-        await setCapability(cap, !isOn, { fingerprint: fp });
+        const res = await setCapability(cap, !isOn, { fingerprint: fp });
+        syncDrawerCapabilityControls(res.allowed);
       } catch {
-        btn.classList.toggle("on", isOn);
+        syncDrawerCapabilityControls(previous);
       }
     };
   });
@@ -3406,25 +3494,19 @@
     const fp = state.deviceDrawerFp;
     if (!fp) return;
     const wantsAll = !!e.target.checked;
+    const peer = drawerPeerByFp(fp);
+    const previous = peer ? peer.allowed_capabilities : null;
+    syncDrawerCapabilityControls(wantsAll ? null : []);
     try {
       const body = { allowed: wantsAll ? null : [] };
       const res = await api.post(`/api/peers/${fp}/capabilities`, body);
-      // Reflect the new state in the drawer's individual toggles
-      // immediately so the user sees consistent UI.
-      const allowed = res.allowed == null
-        ? new Set(["chat", "files", "folder_sync"])
-        : new Set(res.allowed || []);
-      document.querySelectorAll("#dev-cap-row .cap-toggle").forEach(btn => {
-        btn.classList.toggle("on", allowed.has(btn.dataset.cap));
-      });
       // Update local state.peers cache so refreshPeers doesn't flip
       // the toggle back on the next render-coalesce tick.
-      const peer = [...state.peers.values()]
-        .find(p => p.fingerprint === fp);
       if (peer) peer.allowed_capabilities = res.allowed;
+      syncDrawerCapabilityControls(res.allowed);
       toast(wantsAll ? "Allowing all capabilities" : "Permissions cleared", "good");
     } catch (err) {
-      e.target.checked = !wantsAll;
+      syncDrawerCapabilityControls(previous);
       toast(`Update failed: ${err.message || err}`, "bad");
     }
   });
@@ -3513,6 +3595,7 @@
       );
       if (peer) peer.allowed_capabilities = res.allowed;
       toast("Peer policy updated", "good");
+      return res;
     } catch (e) {
       toast(`Policy update failed: ${e.message || e}`, "bad");
       throw e;
@@ -3534,7 +3617,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.8.1";
+  const PAGE_BUILT_FOR = "0.8.1.1";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -4239,7 +4322,6 @@
       $("#files-panel").style.display = "none";
       $("#folders-panel").style.display = "none";
       $("#mesh-panel").style.display = "none";
-      const dbg = $("#debug-panel"); if (dbg) dbg.style.display = "none";
       if (pane === "files") {
         $("#files-panel").style.display = "flex";
         $("#main").classList.add("with-files");
@@ -4252,14 +4334,36 @@
         $("#mesh-panel").style.display = "flex";
         $("#main").classList.add("with-files");
         refreshTransfers();
-      } else if (pane === "debug") {
-        if (dbg) dbg.style.display = "flex";
-        $("#main").classList.add("with-files");
-        refreshDebugLog();
       } else {
         $("#main").classList.remove("with-files");
       }
     };
+  });
+
+  // v0.8.1.1: Diagnostics overlay open/close — accessible only via
+  // Ctrl+Shift+D OR the Settings modal's "Open diagnostics" button.
+  // Intentionally hidden from the chat surface (chat-first, debug
+  // when you need it).
+  function openDebugOverlay() {
+    const bd = $("#debug-backdrop");
+    if (!bd) return;
+    // Refresh the log + version sub on every open so the user sees
+    // current state (instead of a snapshot from when the page loaded).
+    if (state.me?.app_version) {
+      $("#debug-version-sub").textContent = `daemon v${state.me.app_version}`;
+    }
+    bd.classList.add("show");
+    refreshDebugLog();
+  }
+  function closeDebugOverlay() {
+    $("#debug-backdrop")?.classList.remove("show");
+  }
+  $("#debug-close")?.addEventListener("click", closeDebugOverlay);
+  $("#settings-open-diagnostics")?.addEventListener("click", () => {
+    // Close the settings modal underneath so the user isn't
+    // stacking two backdrops.
+    $("#settings-backdrop")?.classList.remove("show");
+    openDebugOverlay();
   });
 
   // ── v0.8.1: Debug pane wiring ─────────────────────────────────────
@@ -4654,6 +4758,12 @@
     if (ctrl && e.key === "/") {
       e.preventDefault();
       input.focus();
+      return;
+    }
+    // v0.8.1.1: hidden diagnostics — Ctrl+Shift+D.
+    if (ctrl && e.shiftKey && (e.key === "d" || e.key === "D")) {
+      e.preventDefault();
+      openDebugOverlay();
       return;
     }
     if (ctrl && e.key === ",") {
