@@ -155,10 +155,10 @@ def test_translate_invalidtag_to_wire_mismatch():
     out = _translate_send_error(InvalidTag())
     assert out["status"] == 502
     assert out["code"] == "wire_version_mismatch"
-    # The message must mention "version" and the hint must tell the
-    # user to update — that's the only useful action they can take.
-    assert "version" in out["error"].lower()
-    assert "update" in out["hint"].lower()
+    # Version drift is an internal diagnostic now. The user-facing
+    # recovery path should be automatic reconnect/compatible routing.
+    assert "secure send" in out["error"].lower()
+    assert "automatically" in out["hint"].lower()
 
 
 def test_translate_capability_disabled():

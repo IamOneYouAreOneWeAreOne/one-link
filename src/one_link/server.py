@@ -56,6 +56,24 @@ PREFERRED_UI_PORT = 7117
 UI_PORT_FALLBACK_RANGE = 16
 
 
+def _record_translated_error(translated: dict, exc: BaseException, source: str, context: dict | None = None) -> None:
+    """v0.8.1: tee the translated error into the debug log so the
+    Debug pane shows it with the same code + suggestion."""
+    try:
+        from one_link.debug_log import get_debug_log
+        get_debug_log().record(
+            severity="warn" if translated.get("status", 500) < 500 else "error",
+            source=source,
+            code=str(translated.get("code") or "unknown"),
+            message=str(translated.get("error") or str(exc)),
+            context=context or {},
+            suggestion=str(translated.get("hint") or ""),
+            traceback_str=None,
+        )
+    except Exception:
+        pass
+
+
 def _translate_send_error(exc: BaseException) -> dict:
     """Map a raised exception from daemon.send_text / send_file into a
     user-facing response body. The goal is that no one ever sees an
@@ -77,8 +95,8 @@ def _translate_send_error(exc: BaseException) -> dict:
         return {
             "status": 502,
             "code": "wire_version_mismatch",
-            "error": "The other device is running a different version of One Link.",
-            "hint": "Update One Link on whichever device hasn't been updated yet, then try again.",
+            "error": "Secure send could not complete with this device yet.",
+            "hint": "Keep One Link open on both devices. It will reconnect and use the best compatible path automatically.",
         }
     msg = str(exc).lower()
     if "capability" in msg and "disabled" in msg:
@@ -100,7 +118,7 @@ def _translate_send_error(exc: BaseException) -> dict:
             "status": 502,
             "code": "handshake_failed",
             "error": "Could not establish a secure connection with the other device.",
-            "hint": "Make sure One Link is running there and try again. If this persists, both devices may need updating.",
+            "hint": "Make sure One Link is open there. One Link will keep healing the connection in the background.",
         }
     if "timeout" in msg or "timed out" in msg:
         return {
@@ -122,7 +140,7 @@ def _translate_send_error(exc: BaseException) -> dict:
         "status": 500,
         "code": "send_failed",
         "error": "Send failed.",
-        "hint": "Try again. If this keeps happening, check that both devices are running the same version of One Link.",
+        "hint": "Keep both devices open. One Link will retry when the path is healthy again.",
         "error_detail": str(exc),
     }
 
@@ -206,6 +224,17 @@ class UIServer:
         self.port: int = 0
         self._ws_clients: set[web.WebSocketResponse] = set()
         self._setup_routes()
+        # v0.8.1: live-push debug-log entries to the Debug pane.
+        try:
+            from one_link.debug_log import get_debug_log
+            get_debug_log().attach_broadcast(self._on_debug_entry)
+        except Exception:
+            pass
+
+    def _on_debug_entry(self, entry: dict) -> None:
+        """Bridges debug_log entries to WS clients as `debug_event`."""
+        with contextlib.suppress(Exception):
+            self.broadcast({"type": "debug_event", "entry": entry})
 
     @staticmethod
     def _load_or_create_token() -> str:
@@ -277,6 +306,10 @@ class UIServer:
             self._guarded(self.api_remove_group_member),
         )
         r.add_get("/api/search", self._guarded(self.api_search))
+        # v0.8.1: developer backend.
+        r.add_get("/api/debug/log", self._guarded(self.api_debug_log))
+        r.add_post("/api/debug/log/clear", self._guarded(self.api_debug_clear))
+        r.add_get("/api/debug/health", self._guarded(self.api_debug_health))
         r.add_post("/api/send", self._guarded(self.api_send))
         r.add_post("/api/send-file", self._guarded(self.api_send_file))
         r.add_get("/api/files", self._guarded(self.api_files))
@@ -1478,6 +1511,7 @@ class UIServer:
         except Exception as e:
             log.warning("send_reaction failed: %s", e)
             translated = _translate_send_error(e)
+            _record_translated_error(translated, e, source="server.api")
             return web.json_response(translated, status=translated["status"])
 
     async def api_edit_message(self, request: web.Request) -> web.Response:
@@ -1517,6 +1551,7 @@ class UIServer:
         except Exception as e:
             log.warning("send_edit failed: %s", e)
             translated = _translate_send_error(e)
+            _record_translated_error(translated, e, source="server.api")
             return web.json_response(translated, status=translated["status"])
 
     async def api_delete_message(self, request: web.Request) -> web.Response:
@@ -1558,6 +1593,7 @@ class UIServer:
         except Exception as e:
             log.warning("send_delete failed: %s", e)
             translated = _translate_send_error(e)
+            _record_translated_error(translated, e, source="server.api")
             return web.json_response(translated, status=translated["status"])
 
     async def api_set_read_marker(self, request: web.Request) -> web.Response:
@@ -1806,6 +1842,147 @@ class UIServer:
             return web.json_response({"error": str(e)}, status=400)
 
     # ─── /api/search ──────────────────────────────────────────────────
+    # ─── /api/debug (v0.8.1 developer backend) ────────────────────────
+
+    async def api_debug_log(self, request: web.Request) -> web.Response:
+        """Recent failures with context + how-to-fix suggestion.
+        Query: ?since_id=N (incremental), ?limit=N, ?severity=warn,error
+        ?source=send_file,api ."""
+        from one_link.debug_log import get_debug_log
+        try:
+            limit = max(1, min(int(request.query.get("limit", "200")), 1000))
+        except ValueError:
+            limit = 200
+        since_id = request.query.get("since_id")
+        try:
+            since = int(since_id) if since_id else None
+        except ValueError:
+            since = None
+        sev_q = request.query.get("severity") or ""
+        severities = [s.strip() for s in sev_q.split(",") if s.strip()] or None
+        src_q = request.query.get("source") or ""
+        sources = [s.strip() for s in src_q.split(",") if s.strip()] or None
+        entries = get_debug_log().tail(
+            limit=limit, since_id=since,
+            severity=severities, sources=sources,
+        )
+        return web.json_response({
+            "entries": entries,
+            "total": len(get_debug_log()),
+        })
+
+    async def api_debug_clear(self, request: web.Request) -> web.Response:
+        from one_link.debug_log import get_debug_log
+        n = get_debug_log().clear()
+        return web.json_response({"ok": True, "removed": n})
+
+    async def api_debug_health(self, request: web.Request) -> web.Response:
+        """v0.8.1: structured self-check. Each check returns
+        {ok: bool, name, detail}. Caller renders pass/fail rows
+        + the daemon-page version compare."""
+        checks: list[dict] = []
+        # State db
+        if self.daemon.state is None:
+            checks.append({
+                "name": "state_db",
+                "ok": False,
+                "detail": "state.db not opened (daemon misconfigured?)",
+            })
+        else:
+            try:
+                sv = self.daemon.state.schema_version()
+                checks.append({
+                    "name": "state_db",
+                    "ok": True,
+                    "detail": f"schema_version={sv}",
+                })
+            except Exception as e:
+                checks.append({
+                    "name": "state_db",
+                    "ok": False,
+                    "detail": f"schema introspection failed: {e}",
+                })
+
+        # Discovery
+        if self.daemon.discovery is None:
+            checks.append({
+                "name": "discovery",
+                "ok": False,
+                "detail": "mDNS discovery not running",
+            })
+        else:
+            n_peers = len(self.daemon.discovery.registry.list())
+            checks.append({
+                "name": "discovery",
+                "ok": True,
+                "detail": f"mDNS registry: {n_peers} live peer(s)",
+            })
+
+        # Peer-server listening
+        ps = getattr(self.daemon, "_peer_server", None)
+        checks.append({
+            "name": "peer_server",
+            "ok": ps is not None,
+            "detail": (
+                f"listening on port "
+                f"{getattr(self.daemon, '_rendezvous_peer_port', '?')}"
+                if ps is not None else "not listening"
+            ),
+        })
+
+        # Active outbound sessions
+        sessions = getattr(self.daemon, "_outbound_sessions", {}) or {}
+        checks.append({
+            "name": "outbound_sessions",
+            "ok": True,
+            "detail": f"{len(sessions)} active",
+        })
+
+        # Outbox depth
+        try:
+            pending = self.daemon.state.list_outbox(
+                pending_only=True, limit=1000,
+            ) if self.daemon.state else []
+            checks.append({
+                "name": "outbox",
+                "ok": True,
+                "detail": f"{len(pending)} message(s) waiting for delivery",
+            })
+        except Exception as e:
+            checks.append({
+                "name": "outbox",
+                "ok": False,
+                "detail": str(e),
+            })
+
+        # Paused transfers
+        try:
+            transfers = self.daemon.state.list_transfers(
+                limit=500,
+            ) if self.daemon.state else []
+            paused = [t for t in transfers if t.status == "paused"]
+            checks.append({
+                "name": "paused_transfers",
+                "ok": True,
+                "detail": (
+                    f"{len(paused)} paused, will auto-resume"
+                    if paused else "no paused transfers"
+                ),
+            })
+        except Exception as e:
+            checks.append({
+                "name": "paused_transfers",
+                "ok": False,
+                "detail": str(e),
+            })
+
+        from one_link import __version__ as ol_ver
+        return web.json_response({
+            "ok": all(c["ok"] for c in checks),
+            "version": ol_ver,
+            "checks": checks,
+        })
+
     async def api_search(self, request: web.Request) -> web.Response:
         """FTS5 full-text search over message bodies.
 
@@ -2040,6 +2217,7 @@ class UIServer:
                 )
             log.exception("send_file failed: %s", e)
             translated = _translate_send_error(e)
+            _record_translated_error(translated, e, source="server.api")
             return web.json_response(translated, status=translated["status"])
         finally:
             try:
@@ -2135,6 +2313,7 @@ class UIServer:
         except Exception as e:
             log.exception("retry_transfer failed: %s", e)
             translated = _translate_send_error(e)
+            _record_translated_error(translated, e, source="server.api")
             return web.json_response(translated, status=translated["status"])
 
     async def api_cancel_transfer(self, request: web.Request) -> web.Response:

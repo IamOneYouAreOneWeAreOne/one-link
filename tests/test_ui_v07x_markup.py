@@ -41,11 +41,6 @@ EXPECTED_IDS = [
     # Settings modal now, not as a top banner. The button is the
     # only entry point.
     "set-notif",
-    # v0.7.x version-mismatch banner (warns before crypto fails)
-    "version-banner",
-    "version-banner-text",
-    "version-banner-dismiss",
-    "version-banner-howto",
     # Files panel: Received/Sent toggle + open-inbox button
     "btn-files-received",
     "btn-files-sent",
@@ -97,8 +92,8 @@ EXPECTED_JS_HELPERS = [
     "function renderFilesPanel",
     "function readAllEntries",
     "function collectFromEntry",
-    # v0.7.x: cross-peer version mismatch banner
-    "function maybeShowVersionBanner",
+    # Peer version drift stays diagnostic-only; it must not block chat.
+    "function recordPeerCompatibility",
     # Structured-error helper used to surface error.code + error.hint
     "function _apiError",
     "function errorToastBody",

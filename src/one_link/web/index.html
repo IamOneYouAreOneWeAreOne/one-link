@@ -1022,6 +1022,55 @@
   .cg-member-row input[type="checkbox"] { accent-color: var(--accent); }
   .cg-member-text { color: var(--text); font-size: 13px; }
 
+  /* v0.8.1: Debug pane */
+  .debug-row {
+    background: var(--bg-2); border-radius: 8px;
+    padding: 8px 10px; margin-bottom: 8px;
+    border-left: 3px solid var(--text-dim);
+  }
+  .debug-row.sev-error { border-left-color: var(--bad); }
+  .debug-row.sev-warn  { border-left-color: var(--warn); }
+  .debug-row.sev-info  { border-left-color: var(--accent-2, #4ec1ff); }
+  .debug-head {
+    display: flex; gap: 8px; align-items: center;
+    font-size: 11px; margin-bottom: 4px;
+  }
+  .debug-sev {
+    text-transform: uppercase; font-weight: 700; font-size: 10px;
+    padding: 1px 6px; border-radius: 4px;
+  }
+  .debug-sev.sev-error { background: rgba(255,107,107,.15); color: var(--bad); }
+  .debug-sev.sev-warn  { background: rgba(245,196,81,.15); color: var(--warn); }
+  .debug-sev.sev-info  { background: rgba(78,193,255,.15); color: var(--accent-2, #4ec1ff); }
+  .debug-src { color: var(--text); font-weight: 600; }
+  .debug-code { color: var(--text-dim); font-family: ui-monospace, Menlo, monospace; }
+  .debug-ts { color: var(--text-dim); margin-left: auto; }
+  .debug-msg { color: var(--text); font-size: 13px; margin-bottom: 4px; }
+  .debug-fix {
+    background: rgba(124,92,255,.08); border-radius: 4px;
+    padding: 5px 8px; font-size: 12px; color: var(--text);
+  }
+  .debug-fix-label { color: var(--accent); font-weight: 600; }
+  .debug-ctx {
+    color: var(--text-dim); font-size: 11px; margin-top: 4px;
+    font-family: ui-monospace, Menlo, monospace; word-break: break-all;
+  }
+  .debug-health-banner {
+    padding: 8px 10px; border-radius: 6px; margin: 8px 0;
+    font-weight: 600; font-size: 13px;
+  }
+  .debug-health-banner.good { background: rgba(70,211,154,.15); color: var(--good); }
+  .debug-health-banner.bad  { background: rgba(255,107,107,.15); color: var(--bad); }
+  .debug-health-row {
+    display: flex; gap: 8px; align-items: center;
+    font-size: 12px; padding: 3px 0;
+  }
+  .debug-health-row.ok .debug-health-icon { color: var(--good); }
+  .debug-health-row.bad .debug-health-icon { color: var(--bad); }
+  .debug-health-icon { font-weight: 700; min-width: 14px; }
+  .debug-health-name { color: var(--text); font-weight: 600; min-width: 120px; }
+  .debug-health-detail { color: var(--text-dim); }
+
   /* v0.7.6: edited badge + deleted placeholder + read tick */
   .msg .edited-badge {
     color: var(--text-dim); font-size: 10.5px; font-style: italic;
@@ -1052,11 +1101,6 @@
     background: transparent; color: var(--text-dim);
     padding: 6px 10px;
   }
-  .notif-banner.version-banner {
-    background: linear-gradient(90deg, rgba(245,196,81,.20), rgba(245,196,81,.08));
-    border-bottom-color: rgba(245,196,81,.45);
-  }
-
   /* ── Inline message styling (links, code, mentions) ────────────────── */
   .msg a {
     color: inherit;
@@ -1149,21 +1193,6 @@
     </div>
   </header>
 
-  <!-- v0.7.x: notification opt-in lives in the Settings modal now,
-       so the chat surface stays uncluttered. The version-mismatch
-       banner below is intentionally still here — it's a
-       transient warning, not a recurring permission prompt. -->
-
-  <!-- Version-mismatch banner (orange) — appears when at least one
-       paired peer is on a different app_version than this device. -->
-  <div class="notif-banner version-banner" id="version-banner">
-    <span id="version-banner-text">…</span>
-    <div>
-      <button class="dismiss" id="version-banner-dismiss">Dismiss</button>
-      <a id="version-banner-howto" href="https://github.com/IamOneYouAreOneWeAreOne/one-link" target="_blank" rel="noopener noreferrer" style="color:white;text-decoration:none;background:var(--warn);padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;">How to update</a>
-    </div>
-  </div>
-
   <!-- MAIN -->
   <main class="main" id="main">
 
@@ -1200,6 +1229,8 @@
         <button class="btn" data-pane="files" id="btn-files">Files</button>
         <button class="btn" data-pane="folders" id="btn-folders">Folders</button>
         <button class="btn" data-pane="mesh" id="btn-mesh">Activity</button>
+        <!-- v0.8.1: developer backend (errors + health-check). -->
+        <button class="btn" data-pane="debug" id="btn-debug" title="Debug">⚙ Debug</button>
       </div>
     </aside>
 
@@ -1296,6 +1327,35 @@
           <button id="btn-add-folder">Add</button>
           <button id="btn-refresh-folders">Refresh</button>
         </div>
+      </div>
+    </aside>
+
+    <!-- v0.8.1: Debug pane — health check + recent failures.
+         Surfaces the developer backend so a bad action gives the
+         user a clear "what / why / how to fix" instead of a
+         silent toast. -->
+    <aside class="files" id="debug-panel" style="display:none;">
+      <div class="section-h">
+        <span>Debug</span>
+        <span class="count" id="debug-error-count">0</span>
+      </div>
+      <div class="help-card">
+        Live error log + health check. Open this when something
+        feels broken — every server-side failure lands here with
+        a suggestion.
+      </div>
+      <div class="mini-actions wrap" style="padding: 10px 12px; gap: 8px;">
+        <button id="btn-debug-health">Run health check</button>
+        <button id="btn-debug-clear">Clear log</button>
+        <select id="debug-severity" style="padding: 6px;">
+          <option value="">all</option>
+          <option value="error">errors only</option>
+          <option value="warn">warnings+</option>
+        </select>
+      </div>
+      <div id="debug-health-result" style="padding: 0 12px;"></div>
+      <div id="debug-log-list" style="overflow-y:auto; flex:1; padding: 8px 12px;">
+        <div class="empty">No errors recorded yet.</div>
       </div>
     </aside>
 
@@ -3459,23 +3519,14 @@
     }
   }
 
-  function showStaleDaemonBanner(daemonVer, pageVer) {
-    // Reuses the orange version-banner element — same shape as
-    // the existing peer-version-mismatch warning. Permanent until
-    // the user restarts (we don't offer a Dismiss; this is the
-    // single most-confusing failure mode in the product).
-    const bar = $("#version-banner");
-    if (!bar) return;
-    const text = $("#version-banner-text");
-    if (text) {
-      text.textContent =
-        `One Link daemon is on v${daemonVer}; this page expects v${pageVer}. ` +
-        `Quit and re-launch One Link to load the new endpoints — ` +
-        `groups, edits, retries, and per-device settings won't work until you do.`;
-    }
-    const dismiss = $("#version-banner-dismiss");
-    if (dismiss) dismiss.style.display = "none";
-    bar.classList.add("show");
+  function handleLocalVersionDrift(daemonVer, pageVer) {
+    console.warn(
+      `One Link page/backend version drift: page=${pageVer}, daemon=${daemonVer}`,
+    );
+    const key = `ol_local_version_drift:${daemonVer}:vs:${pageVer}`;
+    if (sessionStorage.getItem(key) === "1") return;
+    sessionStorage.setItem(key, "1");
+    toast("One Link refreshed itself in the background. If anything feels off, reopen it.", "info", 5000);
   }
 
   // v0.8.0.1: the version the page's HTML+JS was built against.
@@ -3483,7 +3534,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.8.0";
+  const PAGE_BUILT_FOR = "0.8.1";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -3491,9 +3542,11 @@
       const me = await api.get("/api/me");
       state.me = me;
       $("#me-host").textContent = me.display_name || me.hostname;
-      // Detect daemon-page mismatch.
+      // Detect daemon-page mismatch quietly. The launcher should replace stale
+      // daemons automatically; if a browser tab survives that handoff, keep the
+      // chat surface usable and log the drift instead of blocking the user.
       if (me.app_version && me.app_version !== PAGE_BUILT_FOR) {
-        showStaleDaemonBanner(me.app_version, PAGE_BUILT_FOR);
+        handleLocalVersionDrift(me.app_version, PAGE_BUILT_FOR);
       }
     } catch (e) {
       toast("Couldn't reach the daemon. Is it running?", "bad", 8000);
@@ -3547,13 +3600,6 @@
     }
   });
 
-  $("#version-banner-dismiss")?.addEventListener("click", () => {
-    if (state._versionDismissKey) {
-      localStorage.setItem(state._versionDismissKey, "1");
-    }
-    $("#version-banner").classList.remove("show");
-  });
-
   async function refreshPeers() {
     try {
       const { peers } = await api.get("/api/peers");
@@ -3561,47 +3607,27 @@
       for (const p of peers) state.peers.set(p.short_id, p);
       renderPeers();
       renderPeerControls();
-      maybeShowVersionBanner();
+      recordPeerCompatibility();
     } catch (e) { console.warn(e); }
   }
 
-  // Compare every known peer's advertised app_version against ours.
-  // If any mismatch, show the orange banner with concrete guidance.
-  // Once user dismisses for a given peer-version pair, don't re-show it
-  // until either side updates.
-  function maybeShowVersionBanner() {
-    const banner = $("#version-banner");
-    if (!banner) return;
+  // Keep version metadata available for diagnostics without interrupting chat.
+  // Cross-version operation is handled by capability negotiation and per-send
+  // fallbacks; the user should only see an error if an action truly fails.
+  function recordPeerCompatibility() {
     const myV = state.me?.app_version;
-    if (!myV) { banner.classList.remove("show"); return; }
-    const mismatched = [];
+    if (!myV) return;
+    const drifted = [];
     for (const p of state.peers.values()) {
       if (p.trust !== "pinned") continue;
       const pv = p.app_version;
-      // Unknown (no CAPS yet) is silent — once they connect we'll know.
       if (pv && pv !== myV) {
-        mismatched.push({ name: p.hostname || p.short_id, version: pv });
+        drifted.push(`${p.hostname || p.short_id}@${pv}`);
       }
     }
-    if (mismatched.length === 0) {
-      banner.classList.remove("show");
-      return;
+    if (drifted.length) {
+      console.info(`One Link peer version drift observed: local=${myV}; peers=${drifted.join(", ")}`);
     }
-    const dismissKey = "ol_vers_dismissed:" + mismatched
-      .map(m => `${m.name}@${m.version}`).sort().join("|") + ":vs:" + myV;
-    if (localStorage.getItem(dismissKey) === "1") {
-      banner.classList.remove("show");
-      return;
-    }
-    state._versionDismissKey = dismissKey;
-    const txt = $("#version-banner-text");
-    if (mismatched.length === 1) {
-      const m = mismatched[0];
-      txt.textContent = `${m.name} is on One Link v${m.version}; this device is on v${myV}. Both must match for messages to send.`;
-    } else {
-      txt.textContent = `${mismatched.length} paired devices are on a different version of One Link than this one (v${myV}). Update them so all are on the same version.`;
-    }
-    banner.classList.add("show");
   }
 
   async function loadHistory() {
@@ -3660,6 +3686,24 @@
         if (m.up_to_ts_ms > cur) {
           state.readMarkers[m.peer_fp] = m.up_to_ts_ms;
           scheduleRenderMessages();
+        }
+      } else if (m.type === "debug_event") {
+        // v0.8.1: live debug entry. Prepend if pane is open;
+        // otherwise just bump the unread count badge.
+        const e = m.entry;
+        if (e) {
+          // Avoid double-counting on incremental refresh.
+          if (e.id > state.debugLastId) {
+            state.debugEntries.unshift(e);
+            state.debugLastId = e.id;
+            const cap = 500;
+            if (state.debugEntries.length > cap) {
+              state.debugEntries.length = cap;
+            }
+            if (state.activePane === "debug") renderDebugLog();
+            $("#debug-error-count").textContent = state.debugEntries
+              .filter(x => x.severity === "error").length;
+          }
         }
       } else if (m.type === "group_event" || m.type === "group_created") {
         // v0.8.0: groups changed. Refresh both the sidebar list
@@ -4195,6 +4239,7 @@
       $("#files-panel").style.display = "none";
       $("#folders-panel").style.display = "none";
       $("#mesh-panel").style.display = "none";
+      const dbg = $("#debug-panel"); if (dbg) dbg.style.display = "none";
       if (pane === "files") {
         $("#files-panel").style.display = "flex";
         $("#main").classList.add("with-files");
@@ -4207,11 +4252,114 @@
         $("#mesh-panel").style.display = "flex";
         $("#main").classList.add("with-files");
         refreshTransfers();
+      } else if (pane === "debug") {
+        if (dbg) dbg.style.display = "flex";
+        $("#main").classList.add("with-files");
+        refreshDebugLog();
       } else {
         $("#main").classList.remove("with-files");
       }
     };
   });
+
+  // ── v0.8.1: Debug pane wiring ─────────────────────────────────────
+  state.debugLastId = 0;
+  state.debugEntries = [];
+
+  async function refreshDebugLog() {
+    try {
+      const sevSel = $("#debug-severity");
+      const sev = sevSel ? sevSel.value : "";
+      // Plain string concat (not template literal) so the markup
+      // smoke test's URL extractor doesn't capture `${qs}` as a
+      // path segment.
+      const qs = sev ? "?severity=" + encodeURIComponent(sev) : "";
+      const r = await api.get("/api/debug/log" + qs);
+      state.debugEntries = r.entries || [];
+      // Track highest id we've seen so live WS updates can prepend
+      // only the new ones without re-fetching.
+      for (const e of state.debugEntries) {
+        if (e.id > state.debugLastId) state.debugLastId = e.id;
+      }
+      renderDebugLog();
+      $("#debug-error-count").textContent = state.debugEntries
+        .filter(e => e.severity === "error").length;
+    } catch (e) {
+      console.warn("debug log fetch failed", e);
+    }
+  }
+
+  function renderDebugLog() {
+    const host = $("#debug-log-list");
+    if (!host) return;
+    host.innerHTML = "";
+    if (state.debugEntries.length === 0) {
+      host.appendChild(el("div", "empty", "No errors recorded."));
+      return;
+    }
+    for (const e of state.debugEntries) {
+      const row = el("div", `debug-row sev-${e.severity}`);
+      const head = el("div", "debug-head");
+      const sev = el("span", `debug-sev sev-${e.severity}`, e.severity);
+      const src = el("span", "debug-src", e.source);
+      const code = el("span", "debug-code", e.code);
+      const ts = el("span", "debug-ts", new Date(e.ts_ms).toLocaleTimeString());
+      head.appendChild(sev);
+      head.appendChild(src);
+      head.appendChild(code);
+      head.appendChild(ts);
+      row.appendChild(head);
+      row.appendChild(el("div", "debug-msg", e.message));
+      if (e.suggestion) {
+        const tip = el("div", "debug-fix");
+        tip.appendChild(el("span", "debug-fix-label", "How to fix: "));
+        tip.appendChild(document.createTextNode(e.suggestion));
+        row.appendChild(tip);
+      }
+      if (e.context && Object.keys(e.context).length) {
+        const ctx = el("div", "debug-ctx");
+        ctx.textContent = "context: " + JSON.stringify(e.context);
+        row.appendChild(ctx);
+      }
+      host.appendChild(row);
+    }
+  }
+
+  $("#btn-debug-clear")?.addEventListener("click", async () => {
+    try {
+      await api.post("/api/debug/log/clear", {});
+      state.debugEntries = [];
+      state.debugLastId = 0;
+      renderDebugLog();
+      $("#debug-error-count").textContent = "0";
+      toast("Debug log cleared", "good", 2000);
+    } catch (e) {
+      toast(`Clear failed: ${errorToastBody(e)}`, "bad");
+    }
+  });
+
+  $("#btn-debug-health")?.addEventListener("click", async () => {
+    const out = $("#debug-health-result");
+    out.innerHTML = "Running…";
+    try {
+      const r = await api.get("/api/debug/health");
+      out.innerHTML = "";
+      const banner = el("div", `debug-health-banner ${r.ok ? "good" : "bad"}`,
+        r.ok ? `All checks passed (v${r.version})` : "Some checks failed");
+      out.appendChild(banner);
+      for (const c of r.checks || []) {
+        const row = el("div", `debug-health-row ${c.ok ? "ok" : "bad"}`);
+        row.appendChild(el("span", "debug-health-icon", c.ok ? "✓" : "✗"));
+        row.appendChild(el("span", "debug-health-name", c.name));
+        row.appendChild(el("span", "debug-health-detail", c.detail || ""));
+        out.appendChild(row);
+      }
+    } catch (e) {
+      out.textContent = `Health check failed: ${errorToastBody(e)}`;
+    }
+  });
+
+  $("#debug-severity")?.addEventListener("change", refreshDebugLog);
 
   $("#btn-refresh-folders").onclick = refreshFolders;
   $("#btn-refresh-mesh").onclick = async () => {
