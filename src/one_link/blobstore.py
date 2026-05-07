@@ -14,6 +14,7 @@ import contextlib
 import os
 import secrets
 import shutil
+import time
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -109,6 +110,53 @@ class BlobStore:
 
     def read_bytes(self, hash_hex: str) -> bytes:
         return self.path(hash_hex).read_bytes()
+
+    def verify(self, hash_hex: str) -> bool:
+        """Re-hash a stored blob and confirm its address still matches."""
+        if not self.has(hash_hex):
+            return False
+        h = blake3.blake3()
+        try:
+            with self.open_read(hash_hex) as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+        except OSError:
+            return False
+        return h.hexdigest() == hash_hex
+
+    def audit(self) -> dict:
+        """Return an integrity summary for the whole store."""
+        ok: list[dict] = []
+        corrupt: list[dict] = []
+        for hash_hex, size in self.iter_blobs():
+            entry = {"hash": hash_hex, "size": size}
+            if self.verify(hash_hex):
+                ok.append(entry)
+            else:
+                corrupt.append(entry)
+        return {
+            "ok": len(corrupt) == 0,
+            "blobs": len(ok) + len(corrupt),
+            "verified": len(ok),
+            "corrupt": corrupt,
+        }
+
+    def cleanup_tmp(self, *, older_than_ms: int = 0) -> int:
+        """Remove abandoned temp files left by interrupted writes."""
+        now = time.time()
+        removed = 0
+        for p in self._tmp.iterdir():
+            if not p.is_file():
+                continue
+            try:
+                age_ms = int((now - p.stat().st_mtime) * 1000)
+            except OSError:
+                continue
+            if age_ms >= older_than_ms:
+                with contextlib.suppress(OSError):
+                    p.unlink()
+                    removed += 1
+        return removed
 
     # ─── enumeration / GC ─────────────────────────────────────────────
     def iter_blobs(self) -> Iterable[tuple[str, int]]:

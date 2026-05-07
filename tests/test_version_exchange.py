@@ -144,6 +144,11 @@ async def test_api_peers_exposes_peer_app_version_after_caps():
         # on every peer record — the wire is open.
         for pp in j["peers"]:
             assert "app_version" in pp
+            assert "compatibility" in pp
+            if pp["compatibility"] is not None:
+                assert "compatible" in pp["compatibility"]
+                assert "mode" in pp["compatibility"]
+                assert "transfer_mode" in pp["compatibility"]
 
 
 # ─── 4. _translate_send_error: the meat of the user-facing fix ─────────

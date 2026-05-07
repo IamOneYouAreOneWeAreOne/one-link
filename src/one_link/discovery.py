@@ -44,8 +44,15 @@ class Peer:
 class Registry:
     peers: dict[str, Peer] = field(default_factory=dict)
     on_change: Callable[[], None] | None = None
+    self_ed_pub_hex: str = ""
 
     def upsert(self, peer: Peer) -> None:
+        # Some mDNS stacks can echo our own service under a changed name after
+        # restarts. The public key is the durable identity; never list our own
+        # key as a peer just because the service name differs.
+        if self.self_ed_pub_hex and peer.ed_pub_hex == self.self_ed_pub_hex:
+            self.peers.pop(peer.short_id, None)
+            return
         # mDNS can briefly surface multiple service names for the same device
         # after restarts. The public key is the durable identity; keep the
         # newest advertisement and remove older aliases so the UI does not
@@ -195,7 +202,7 @@ class Discovery:
         # v0.7.3: compact device kind (e.g. "macos-laptop"). Empty
         # string means "don't advertise".
         self.device_kind: str = (device_kind or "")[:32]
-        self.registry = Registry()
+        self.registry = Registry(self_ed_pub_hex=ed_pub_hex)
         self._zc: AsyncZeroconf | None = None
         self._info: AsyncServiceInfo | None = None
         self._browser: AsyncServiceBrowser | None = None

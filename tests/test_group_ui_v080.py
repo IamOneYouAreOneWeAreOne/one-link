@@ -328,6 +328,50 @@ async def test_api_get_group_404_unknown(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_api_rename_group_calls_daemon_for_admin(tmp_path: Path):
+    from one_link.server import UIServer
+
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    gid = bytes.fromhex("ab" * 16)
+
+    class _Daemon:
+        def __init__(self):
+            self.state = state
+            self.me = SimpleNamespace(
+                fingerprint=me.fingerprint,
+                short_id=me.short_id,
+                public_bytes=me.public_bytes,
+            )
+            self.renamed = None
+
+        async def rename_group(self, *, group_id, name):
+            self.renamed = (group_id, name)
+            return {"name": name, "delivered": 0, "failures": []}
+
+    daemon = _Daemon()
+    server = UIServer(daemon)
+    server._materialize_group = lambda _gid: {
+        "group_id": gid.hex(),
+        "name": "Old",
+        "is_member": True,
+        "my_role": "admin",
+    }
+
+    class _Req:
+        match_info = {"gid": gid.hex()}
+        async def json(self):
+            return {"name": "New Name"}
+
+    resp = await server.api_rename_group(_Req())
+    body = json.loads(resp.text)
+    assert resp.status == 200
+    assert body["ok"] is True
+    assert daemon.renamed == (gid, "New Name")
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_api_group_messages_serializes_bytes_to_hex(tmp_path: Path):
     from one_link.server import UIServer
 
@@ -566,6 +610,8 @@ def test_index_html_has_groups_surface():
         'id="btn-group-settings"',
         'id="group-settings-backdrop"',
         'id="group-settings-members"',
+        'id="group-rename-input"',
+        'id="group-rename-save"',
         'id="group-add-peer"',
         'id="group-add-member"',
         'id="group-copy-invite"',
@@ -575,6 +621,10 @@ def test_index_html_has_groups_surface():
         "function selectGroup",
         "function renderGroupConversation",
         "function renderGroupReplyQuote",
+        "function renameCurrentGroup",
+        "function togglePin",
+        "function restoreDraft",
+        'id="pin-strip"',
         '"group_reaction"',
         '"group_msg_edit"',
         '"group_msg_delete"',
