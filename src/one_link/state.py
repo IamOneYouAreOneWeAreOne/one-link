@@ -317,6 +317,18 @@ class MessageRecord:
     metadata: dict
     # v0.7.5: optional parent message id for reply/quote rendering.
     reply_to: Optional[str] = None
+    # v0.7.6: edit / delete state.
+    edited_at_ms: Optional[int] = None
+    original_body: Optional[str] = None
+    deleted_at_ms: Optional[int] = None
+
+    @property
+    def is_edited(self) -> bool:
+        return self.edited_at_ms is not None
+
+    @property
+    def is_deleted(self) -> bool:
+        return self.deleted_at_ms is not None
 
 
 @dataclass
@@ -406,8 +418,49 @@ class State:
                 self._migrate_v4_messages_reply_to(c)
                 if current < 4:
                     c.execute("INSERT INTO schema_version(version) VALUES(4)")
+                # v0.7.6: messages gain edit/delete columns +
+                # per-peer read marker table.
+                self._migrate_v5_edit_delete_read(c)
+                if current < 5:
+                    c.execute("INSERT INTO schema_version(version) VALUES(5)")
             finally:
                 c.close()
+
+    def _migrate_v5_edit_delete_read(self, c: sqlite3.Cursor) -> None:
+        """v0.7.6: add edit_at_ms / original_body / deleted_at_ms
+        columns to messages, plus a peer_read_markers table for
+        receipt tracking. Idempotent — safe to re-run."""
+        rows = c.execute("PRAGMA table_info(messages)").fetchall()
+        existing = {row[1] for row in rows}
+        if "edited_at_ms" not in existing:
+            c.execute("ALTER TABLE messages ADD COLUMN edited_at_ms INTEGER")
+        if "original_body" not in existing:
+            c.execute("ALTER TABLE messages ADD COLUMN original_body TEXT")
+        if "deleted_at_ms" not in existing:
+            c.execute("ALTER TABLE messages ADD COLUMN deleted_at_ms INTEGER")
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS peer_read_markers (
+                peer_fp        TEXT    PRIMARY KEY,
+                up_to_ts_ms    INTEGER NOT NULL,
+                updated_ms     INTEGER NOT NULL
+            )
+            """
+        )
+
+    def schema_version(self) -> int:
+        """Return the latest applied schema version.
+
+        Exposed through daemon status so launchers and UIs can detect a
+        stale backend before the user hits a broken feature path.
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT MAX(version) AS version FROM schema_version"
+            ).fetchone()
+            return int(row["version"] or 0) if row else 0
+        except Exception:
+            return 0
 
     def _migrate_v4_messages_reply_to(self, c: sqlite3.Cursor) -> None:
         """v0.7.5: messages.reply_to is the parent msg_id when a row
@@ -1118,7 +1171,89 @@ class State:
             room_id=row["room_id"],
             metadata=md,
             reply_to=row["reply_to"] if "reply_to" in cols else None,
+            edited_at_ms=row["edited_at_ms"] if "edited_at_ms" in cols else None,
+            original_body=row["original_body"] if "original_body" in cols else None,
+            deleted_at_ms=row["deleted_at_ms"] if "deleted_at_ms" in cols else None,
         )
+
+    # ─── edit / delete (v0.7.6) ───────────────────────────────────────
+
+    def edit_message(
+        self, *, id: str, new_body: str, edited_at_ms: int,
+    ) -> Optional[MessageRecord]:
+        """v0.7.6: replace a message's body and stamp edited_at_ms.
+        Preserves the original body in original_body the first time
+        an edit happens (subsequent edits don't overwrite it).
+        Returns the refreshed record, or None if not found / deleted."""
+        cur = self.get_message(id)
+        if cur is None or cur.is_deleted:
+            return None
+        original = cur.original_body or cur.body
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE messages SET body = ?, edited_at_ms = ?,"
+                " original_body = COALESCE(original_body, ?)"
+                " WHERE id = ? AND deleted_at_ms IS NULL",
+                (new_body, int(edited_at_ms), original, id),
+            )
+        return self.get_message(id)
+
+    def delete_message(
+        self, *, id: str, deleted_at_ms: int,
+    ) -> Optional[MessageRecord]:
+        """v0.7.6: soft-delete. Body cleared; deleted_at_ms stamped.
+        Idempotent on already-deleted rows."""
+        cur = self.get_message(id)
+        if cur is None:
+            return None
+        if cur.is_deleted:
+            return cur
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE messages SET body = NULL, deleted_at_ms = ?"
+                " WHERE id = ?",
+                (int(deleted_at_ms), id),
+            )
+        return self.get_message(id)
+
+    def get_message(self, id: str) -> Optional[MessageRecord]:
+        row = self._conn.execute(
+            "SELECT * FROM messages WHERE id = ?", (id,),
+        ).fetchone()
+        return self._row_to_msg(row) if row else None
+
+    # ─── read markers (v0.7.6) ────────────────────────────────────────
+
+    def record_read_marker(self, peer_fp: str, up_to_ts_ms: int) -> None:
+        """Mark all messages from `peer_fp` with ts ≤ `up_to_ts_ms`
+        as read by us. Monotonic — older markers can't overwrite a
+        newer one."""
+        if not peer_fp:
+            return
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO peer_read_markers(peer_fp, up_to_ts_ms, updated_ms)
+                VALUES(?, ?, ?)
+                ON CONFLICT(peer_fp) DO UPDATE SET
+                    up_to_ts_ms = MAX(peer_read_markers.up_to_ts_ms, excluded.up_to_ts_ms),
+                    updated_ms = excluded.updated_ms
+                """,
+                (peer_fp, int(up_to_ts_ms), _now_ms()),
+            )
+
+    def get_read_marker(self, peer_fp: str) -> Optional[int]:
+        row = self._conn.execute(
+            "SELECT up_to_ts_ms FROM peer_read_markers WHERE peer_fp = ?",
+            (peer_fp,),
+        ).fetchone()
+        return int(row["up_to_ts_ms"]) if row else None
+
+    def list_read_markers(self) -> dict[str, int]:
+        rows = self._conn.execute(
+            "SELECT peer_fp, up_to_ts_ms FROM peer_read_markers"
+        ).fetchall()
+        return {r["peer_fp"]: int(r["up_to_ts_ms"]) for r in rows}
 
     # --- transfers ---------------------------------------------------------
 

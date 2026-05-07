@@ -19,6 +19,23 @@ from pathlib import Path
 import pytest
 
 
+def _control_request(port: int, cmd: str, timeout: float = 5.0) -> dict:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(("127.0.0.1", port))
+        s.sendall((json.dumps({"cmd": cmd}) + "\n").encode("utf-8"))
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        return json.loads(buf.decode("utf-8").strip() or "{}")
+    finally:
+        s.close()
+
+
 def _read_port(home: Path, name: str, timeout: float = 12.0) -> int:
     p = home / "data" / name
     end = time.time() + timeout
@@ -122,6 +139,73 @@ def test_ui_port_is_in_well_known_range():
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.timeout(60)
+def test_control_status_and_shutdown_contract():
+    """The launcher depends on status/shutdown to self-heal stale daemons."""
+    from one_link import __version__
+
+    tmp = Path(tempfile.mkdtemp(prefix="ol_lifecycle_status_"))
+    try:
+        home = tmp / "H"
+        home.mkdir()
+        proc = _spawn_daemon(home, tmp / "out.log")
+        try:
+            ctrl = _read_port(home, "control.port")
+            status = _control_request(ctrl, "status")
+            assert status["ok"] is True
+            assert status["app_version"] == __version__
+            assert status["pid"] == proc.pid
+            assert status["schema_version"] >= 1
+            assert status["protocol_version"]
+
+            shutdown = _control_request(ctrl, "shutdown")
+            assert shutdown == {"ok": True, "stopping": True}
+            proc.wait(timeout=10)
+            assert proc.poll() is not None
+        finally:
+            _stop(proc)
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_launcher_rejects_unknown_or_mismatched_daemon():
+    from one_link import __version__
+    from one_link.app import RunningDaemon
+
+    good = RunningDaemon(
+        control_port=1,
+        server_port=2,
+        token="t",
+        status={
+            "ok": True,
+            "app_version": __version__,
+            "protocol_version": "OL1.2",
+            "schema_version": 5,
+        },
+    )
+    old = RunningDaemon(
+        control_port=1,
+        server_port=2,
+        token="t",
+        status={
+            "ok": True,
+            "app_version": "0.1.0",
+            "protocol_version": "OL1.2",
+            "schema_version": 5,
+        },
+    )
+    unknown = RunningDaemon(
+        control_port=1,
+        server_port=2,
+        token="t",
+        status={"ok": False, "error": "unknown cmd"},
+    )
+    assert good.compatible is True
+    assert old.compatible is False
+    assert unknown.compatible is False
 
 
 @pytest.mark.timeout(60)

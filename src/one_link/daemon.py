@@ -54,6 +54,7 @@ import logging
 import os
 import secrets
 import socket
+import sys
 import time
 import uuid
 import zlib
@@ -120,6 +121,10 @@ OUTBOUND_SESSION_PING_DEADLINE_S = 1.5
 # retrying a denied FILE_OFFER once a second shouldn't fire 60 toasts;
 # the UI gets one prompt per (peer, cap) per minute.
 CAPABILITY_REQUEST_DEDUP_S = 60.0
+# v0.7.6: edit cooldown. Messages older than 5 minutes are
+# locked — protects against confusing audit trails (peer claims
+# "I never said that" when they did, but edited it last week).
+EDIT_COOLDOWN_MS = 5 * 60 * 1000
 # H3: handshake hardening
 HANDSHAKE_DEADLINE_S = 8.0          # peer has 8s to complete handshake
 HANDSHAKE_PER_IP_INFLIGHT_MAX = 32  # concurrent handshakes from one IP
@@ -1094,6 +1099,122 @@ class Daemon:
             await channel.send(encode_msg(make_msg(
                 "ACK", self.me.short_id, of=msg.get("id"),
             )))
+        elif t == "EDIT_MSG":
+            # v0.7.6: peer is editing one of THEIR previously-sent messages.
+            # We only honour edits from pinned peers. Server-side EDIT_COOLDOWN_S
+            # bound is enforced; older edits are dropped.
+            if not self._is_pinned(peer_fp):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="not_pinned",
+                )))
+                return
+            target = str(msg.get("target") or "")
+            new_body = msg.get("body")
+            edited_at = int(msg.get("edited_at_ms") or 0) or int(time.time() * 1000)
+            if not target or not isinstance(new_body, str):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="bad_edit",
+                )))
+                return
+            # Cooldown: only allow edit within 5 minutes of original ts.
+            if self.state is not None:
+                tgt = self.state.get_message(target)
+                if tgt is None:
+                    await channel.send(encode_msg(make_msg(
+                        "ACK", self.me.short_id, of=msg.get("id"),
+                        rejected="unknown_target",
+                    )))
+                    return
+                if tgt.peer_fp != peer_fp:
+                    # Peers can only edit their own messages.
+                    await channel.send(encode_msg(make_msg(
+                        "ACK", self.me.short_id, of=msg.get("id"),
+                        rejected="not_author",
+                    )))
+                    return
+                if edited_at - tgt.ts_ms > EDIT_COOLDOWN_MS:
+                    await channel.send(encode_msg(make_msg(
+                        "ACK", self.me.short_id, of=msg.get("id"),
+                        rejected="cooldown",
+                    )))
+                    return
+                with contextlib.suppress(Exception):
+                    self.state.edit_message(
+                        id=target, new_body=new_body, edited_at_ms=edited_at,
+                    )
+            if self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "msg_edit",
+                        "target": target,
+                        "body": new_body,
+                        "edited_at_ms": edited_at,
+                    })
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+            )))
+        elif t == "DELETE_MSG":
+            if not self._is_pinned(peer_fp):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="not_pinned",
+                )))
+                return
+            target = str(msg.get("target") or "")
+            deleted_at = int(msg.get("deleted_at_ms") or 0) or int(time.time() * 1000)
+            if not target:
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="bad_delete",
+                )))
+                return
+            if self.state is not None:
+                tgt = self.state.get_message(target)
+                if tgt is None or tgt.peer_fp != peer_fp:
+                    await channel.send(encode_msg(make_msg(
+                        "ACK", self.me.short_id, of=msg.get("id"),
+                        rejected="not_author",
+                    )))
+                    return
+                with contextlib.suppress(Exception):
+                    self.state.delete_message(
+                        id=target, deleted_at_ms=deleted_at,
+                    )
+            if self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "msg_delete",
+                        "target": target,
+                        "deleted_at_ms": deleted_at,
+                    })
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+            )))
+        elif t == "READ_MARKER":
+            # v0.7.6: peer reports they've read up to ts X.
+            # Pinned-only — receipts from strangers leak nothing
+            # useful to us and could be a flood vector otherwise.
+            if not self._is_pinned(peer_fp):
+                return
+            up_to = int(msg.get("up_to_ts_ms") or 0)
+            if up_to <= 0:
+                return
+            # We track THEIR read marker so the UI can render
+            # ✓✓ next to OUR messages with ts ≤ up_to.
+            # Stored in the same peer_read_markers table keyed
+            # by peer_fp; flips role here intentionally.
+            if self.state is not None:
+                with contextlib.suppress(Exception):
+                    self.state.record_read_marker(peer_fp, up_to)
+            if self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "read_marker",
+                        "peer_fp": peer_fp,
+                        "up_to_ts_ms": up_to,
+                    })
         elif t == "PING":
             await channel.send(encode_msg(make_msg("PONG", self.me.short_id)))
         elif t == "PAIR_REQUEST":
@@ -3708,6 +3829,94 @@ class Daemon:
         acks = await self.send_to(peer, [m])
         return {"sent": m, "ack": acks[0] if acks else None}
 
+    async def send_edit(
+        self, peer: Peer, *, target_msg_id: str, new_body: str,
+    ) -> dict:
+        """v0.7.6: edit one of our previously-sent messages. The
+        sender enforces the cooldown locally (so the UI doesn't
+        even attempt to send) and the receiver enforces it again
+        on receive."""
+        if self.state is not None:
+            tgt = self.state.get_message(str(target_msg_id))
+            if tgt is None:
+                raise RuntimeError("message not found")
+            if tgt.is_deleted:
+                raise RuntimeError("message is deleted")
+            now = int(time.time() * 1000)
+            if now - tgt.ts_ms > EDIT_COOLDOWN_MS:
+                raise RuntimeError(
+                    f"edit cooldown exceeded ({EDIT_COOLDOWN_MS // 60000}min)"
+                )
+        edited_at = int(time.time() * 1000)
+        m = make_msg(
+            "EDIT_MSG", self.me.short_id,
+            target=str(target_msg_id),
+            body=str(new_body),
+            edited_at_ms=edited_at,
+        )
+        acks = await self.send_to(peer, [m])
+        # Apply to our own state too so the sender's UI shows
+        # the edit immediately.
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                self.state.edit_message(
+                    id=str(target_msg_id),
+                    new_body=str(new_body),
+                    edited_at_ms=edited_at,
+                )
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "msg_edit",
+                    "target": str(target_msg_id),
+                    "body": str(new_body),
+                    "edited_at_ms": edited_at,
+                })
+        return {"sent": m, "ack": acks[0] if acks else None}
+
+    async def send_delete(
+        self, peer: Peer, *, target_msg_id: str,
+    ) -> dict:
+        """v0.7.6: delete one of our previously-sent messages.
+        Soft-delete on both ends — body cleared, deleted_at_ms set."""
+        deleted_at = int(time.time() * 1000)
+        m = make_msg(
+            "DELETE_MSG", self.me.short_id,
+            target=str(target_msg_id),
+            deleted_at_ms=deleted_at,
+        )
+        acks = await self.send_to(peer, [m])
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                self.state.delete_message(
+                    id=str(target_msg_id), deleted_at_ms=deleted_at,
+                )
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "msg_delete",
+                    "target": str(target_msg_id),
+                    "deleted_at_ms": deleted_at,
+                })
+        return {"sent": m, "ack": acks[0] if acks else None}
+
+    async def send_read_marker(
+        self, peer: Peer, *, up_to_ts_ms: int,
+    ) -> dict:
+        """v0.7.6: tell `peer` we've read all their messages with
+        ts ≤ `up_to_ts_ms`. Best-effort — peer-side persistence
+        is the source of truth, but errors don't block the UI."""
+        m = make_msg(
+            "READ_MARKER", self.me.short_id,
+            up_to_ts_ms=int(up_to_ts_ms),
+        )
+        try:
+            acks = await self.send_to(peer, [m])
+            return {"sent": m, "ack": acks[0] if acks else None}
+        except Exception as e:
+            log.debug("send_read_marker best-effort failed: %s", e)
+            return {"sent": m, "error": str(e)}
+
     async def send_reaction(
         self, peer: Peer, *, target_msg_id: str, emoji: str, op: str = "add",
     ) -> dict:
@@ -4592,7 +4801,12 @@ class Daemon:
                 await self._reply(writer, {"ok": False, "error": f"bad request: {e}"})
                 return
             cmd = req.get("cmd")
-            if cmd == "peers":
+            if cmd == "status":
+                await self._reply(writer, self._control_status())
+            elif cmd == "shutdown":
+                await self._reply(writer, {"ok": True, "stopping": True})
+                asyncio.create_task(self._control_shutdown())
+            elif cmd == "peers":
                 peers = [
                     {
                         "short_id": p.short_id,
@@ -4677,6 +4891,37 @@ class Daemon:
             with contextlib.suppress(Exception):
                 writer.close()
                 await writer.wait_closed()
+
+    def _control_status(self) -> dict:
+        try:
+            from one_link import __version__ as app_version
+        except Exception:
+            app_version = "?"
+        schema_version = 0
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                schema_version = self.state.schema_version()
+        return {
+            "ok": True,
+            "pid": os.getpid(),
+            "app_version": app_version,
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": schema_version,
+            "python": sys.executable,
+            "home": str(data_dir()),
+            "me": {
+                "short_id": self.me.short_id,
+                "fingerprint": self.me.fingerprint,
+                "hostname": self.me.hostname,
+            },
+        }
+
+    async def _control_shutdown(self) -> None:
+        await asyncio.sleep(0.05)
+        if self._peer_server is not None:
+            self._peer_server.close()
+        if self._control_server is not None:
+            self._control_server.close()
 
     async def _reply(self, writer: asyncio.StreamWriter, obj: dict) -> None:
         writer.write((json.dumps(obj) + "\n").encode("utf-8"))

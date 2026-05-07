@@ -1003,6 +1003,17 @@
   }
   .reply-bar .reply-bar-close:hover { color: var(--text); }
 
+  /* v0.7.6: edited badge + deleted placeholder + read tick */
+  .msg .edited-badge {
+    color: var(--text-dim); font-size: 10.5px; font-style: italic;
+    margin-left: 4px;
+  }
+  .msg-deleted {
+    color: var(--text-dim); font-style: italic; opacity: 0.7;
+  }
+  .msg .when .read-tick { color: var(--text-dim); font-size: 10.5px; }
+  .msg .when .read-tick.read { color: var(--accent); }
+
   /* ── Notification banner (one-time prompt) ─────────────────────────── */
   .notif-banner {
     display: none;
@@ -1612,6 +1623,12 @@
     // v0.7.5: when set, the next sendCurrent threads its TEXT
     // under this parent message id (becomes msg.reply_to on the wire).
     replyTo: null,
+    // v0.7.6: peer_fp -> highest ts_ms we know they've read.
+    // Drives the ✓✓ checkmark on our outbound messages.
+    readMarkers: {},
+    // v0.7.6: monotonic-per-peer "highest ts of theirs we've already
+    // ACKed back as read" — prevents redundant network calls.
+    sentReadUpTo: {},
   };
 
   // v0.7.5: fixed emoji palette for reactions. Custom picker
@@ -2301,6 +2318,15 @@
 
       if (msg.t === "TEXT") {
         const b = el("div", `msg ${msg.dir}`);
+        // v0.7.6: deleted-message placeholder.
+        if (msg.deleted || msg.deleted_at_ms) {
+          const placeholder = el("div", "msg-deleted", "[message deleted]");
+          b.appendChild(placeholder);
+          b.appendChild(el("span", "when", fmtTime(msg.ts)));
+          b.dataset.msgId = msg.id;
+          m.appendChild(b);
+          continue;
+        }
         // v0.7.5: inline-quote of the parent message when this is
         // a reply. Truncate the quote to 80 chars; clicking it
         // scrolls to the original (handled below via data-id).
@@ -2328,9 +2354,28 @@
           b.appendChild(quote);
         }
         b.appendChild(renderInlineText(msg.body || ""));
-        b.appendChild(el("span", "when", fmtTime(msg.ts)));
+        // v0.7.6: (edited) badge.
+        if (msg.edited_at_ms) {
+          const ed = el("span", "edited-badge", " (edited)");
+          ed.title = `edited at ${new Date(msg.edited_at_ms).toLocaleString()}`;
+          b.appendChild(ed);
+        }
+        const whenEl = el("span", "when", fmtTime(msg.ts));
+        // v0.7.6: read-receipt checkmark on outbound messages.
+        // ✓  = sent; ✓✓ = peer's read marker has passed this ts.
+        if (msg.dir === "out") {
+          const peerFp = state.peers.get(msg.peer)?.fingerprint;
+          const readUpTo = peerFp ? state.readMarkers?.[peerFp] : null;
+          const isRead = readUpTo != null && msg.ts <= readUpTo;
+          const tick = el("span", `read-tick ${isRead ? "read" : ""}`,
+                         isRead ? "✓✓" : "✓");
+          tick.title = isRead ? "Read" : "Sent";
+          whenEl.appendChild(document.createTextNode(" "));
+          whenEl.appendChild(tick);
+        }
+        b.appendChild(whenEl);
         b.dataset.msgId = msg.id;
-        // v0.7.5: hover toolbar (Reply + React).
+        // v0.7.5: hover toolbar (Reply + React + Edit + Delete).
         b.appendChild(renderMsgToolbar(msg));
         // v0.7.5: reactions row (chips per emoji w/ count).
         if (msg.reactions && Object.keys(msg.reactions).length) {
@@ -2344,7 +2389,8 @@
     m.scrollTop = m.scrollHeight;
   }
 
-  // v0.7.5: hover toolbar (Reply + React buttons) + reactions row.
+  // v0.7.5+v0.7.6: hover toolbar. Reply + React for everyone;
+  // Edit + Delete only on your own messages.
   function renderMsgToolbar(msg) {
     const bar = el("div", "msg-toolbar");
     const replyBtn = el("button", "tb-btn", "↩");
@@ -2361,7 +2407,55 @@
     };
     bar.appendChild(replyBtn);
     bar.appendChild(reactBtn);
+    // v0.7.6: Edit + Delete on outbound, non-deleted messages.
+    if (msg.dir === "out" && !msg.deleted) {
+      // Edit only within the cooldown (5 min).
+      const ageMs = Date.now() - (msg.ts || 0);
+      if (ageMs < 5 * 60 * 1000) {
+        const editBtn = el("button", "tb-btn", "✎");
+        editBtn.title = "Edit (5-min window)";
+        editBtn.onclick = (ev) => {
+          ev.stopPropagation();
+          startEditMessage(msg);
+        };
+        bar.appendChild(editBtn);
+      }
+      const delBtn = el("button", "tb-btn", "🗑");
+      delBtn.title = "Delete";
+      delBtn.onclick = (ev) => {
+        ev.stopPropagation();
+        deleteMessage(msg);
+      };
+      bar.appendChild(delBtn);
+    }
     return bar;
+  }
+
+  async function startEditMessage(msg) {
+    const newBody = prompt("Edit message:", msg.body || "");
+    if (newBody === null) return;
+    if (!newBody.trim()) return;
+    if (newBody === msg.body) return;
+    try {
+      await api.post(
+        `/api/messages/${encodeURIComponent(msg.id)}/edit`,
+        { body: newBody, peer: msg.peer },
+      );
+    } catch (e) {
+      toast(`Edit failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
+  async function deleteMessage(msg) {
+    if (!confirm("Delete this message? It'll vanish on both sides.")) return;
+    try {
+      await api.post(
+        `/api/messages/${encodeURIComponent(msg.id)}/delete`,
+        { peer: msg.peer },
+      );
+    } catch (e) {
+      toast(`Delete failed: ${errorToastBody(e)}`, "bad");
+    }
   }
 
   function renderReactionsRow(msg) {
@@ -2866,6 +2960,28 @@
     renderPeerControls();
     $("#input").focus();
     $("#drop-peer").textContent = peer.hostname || peer.short_id;
+    // v0.7.6: opening the conversation marks all of this peer's
+    // messages as read. Best-effort — don't block on the network.
+    maybeSendReadMarker(peer);
+  }
+
+  function maybeSendReadMarker(peer) {
+    if (!peer || !peer.fingerprint || peer.trust !== "pinned") return;
+    // Highest ts among inbound messages from this peer.
+    let highestTs = 0;
+    for (const m of state.messages) {
+      if (m.peer === peer.short_id && m.dir === "in" && m.ts > highestTs) {
+        highestTs = m.ts;
+      }
+    }
+    if (highestTs <= 0) return;
+    const already = state.sentReadUpTo[peer.fingerprint] || 0;
+    if (highestTs <= already) return;
+    state.sentReadUpTo[peer.fingerprint] = highestTs;
+    api.post(
+      `/api/peers/${peer.fingerprint}/read`,
+      { up_to_ts_ms: highestTs },
+    ).catch(() => { /* best-effort; never bother user */ });
   }
 
   function renderPeerControls() {
@@ -3264,6 +3380,31 @@
         // v0.7.3: alias / mute / cap changes — refresh the sidebar so
         // the new display name and toggle states show up immediately.
         refreshPeers();
+      } else if (m.type === "msg_edit") {
+        // v0.7.6: live edit. Patch the in-memory message + rerender.
+        const target = state.messages.find(x => x.id === m.target);
+        if (target) {
+          target.body = m.body;
+          target.edited_at_ms = m.edited_at_ms;
+          scheduleRenderMessages();
+        }
+      } else if (m.type === "msg_delete") {
+        const target = state.messages.find(x => x.id === m.target);
+        if (target) {
+          target.body = null;
+          target.deleted = true;
+          target.deleted_at_ms = m.deleted_at_ms;
+          scheduleRenderMessages();
+        }
+      } else if (m.type === "read_marker") {
+        // v0.7.6: peer reported they've read up to ts X. Update
+        // our local map; render flips outbound ✓ → ✓✓ for all
+        // messages with ts ≤ X.
+        const cur = state.readMarkers[m.peer_fp] || 0;
+        if (m.up_to_ts_ms > cur) {
+          state.readMarkers[m.peer_fp] = m.up_to_ts_ms;
+          scheduleRenderMessages();
+        }
       } else if (m.type === "reaction") {
         // v0.7.5: live reaction event. Apply to whichever in-memory
         // message matches the target id, then re-render.

@@ -143,6 +143,12 @@ def _msg_record_to_event(rec) -> dict:
     # v0.7.5: reply_to is a first-class wire field for inline-quote.
     if getattr(rec, "reply_to", None):
         out["reply_to"] = rec.reply_to
+    # v0.7.6: edit / delete state.
+    if getattr(rec, "edited_at_ms", None):
+        out["edited_at_ms"] = rec.edited_at_ms
+    if getattr(rec, "deleted_at_ms", None):
+        out["deleted_at_ms"] = rec.deleted_at_ms
+        out["deleted"] = True
     # Fold metadata back into the dict (skipping the ones we already added)
     for k, v in (rec.metadata or {}).items():
         if k in ("short_id",) or k in out:
@@ -256,6 +262,9 @@ class UIServer:
         r.add_get(r"/api/peers/{fp}/sas", self._guarded(self.api_get_sas))
         r.add_get("/api/messages", self._guarded(self.api_messages))
         r.add_post(r"/api/messages/{msg_id}/react", self._guarded(self.api_react_message))
+        r.add_post(r"/api/messages/{msg_id}/edit", self._guarded(self.api_edit_message))
+        r.add_post(r"/api/messages/{msg_id}/delete", self._guarded(self.api_delete_message))
+        r.add_post(r"/api/peers/{fp}/read", self._guarded(self.api_set_read_marker))
         r.add_get("/api/search", self._guarded(self.api_search))
         r.add_post("/api/send", self._guarded(self.api_send))
         r.add_post("/api/send-file", self._guarded(self.api_send_file))
@@ -358,12 +367,22 @@ class UIServer:
             from one_link import __version__ as ol_ver
         except Exception:
             ol_ver = "?"
+        try:
+            from one_link.daemon import PROTOCOL_VERSION
+        except Exception:
+            PROTOCOL_VERSION = "?"
+        schema_version = 0
+        if self.daemon.state is not None:
+            with contextlib.suppress(Exception):
+                schema_version = self.daemon.state.schema_version()
         return web.json_response({
             "short_id": me.short_id,
             "fingerprint": me.fingerprint,
             "hostname": me.hostname,
             "display_name": display_name or me.hostname,
             "app_version": ol_ver,
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": schema_version,
         })
 
     async def api_status(self, request: web.Request) -> web.Response:
@@ -374,6 +393,11 @@ class UIServer:
         live = self.daemon.discovery.registry.list() if self.daemon.discovery else []
         return web.json_response({
             "version": __import__("one_link").__version__,
+            "app_version": __import__("one_link").__version__,
+            "protocol_version": __import__("one_link.daemon").daemon.PROTOCOL_VERSION,
+            "schema_version": (
+                state.schema_version() if state is not None else 0
+            ),
             "me": {
                 "short_id": self.daemon.me.short_id,
                 "fingerprint": self.daemon.me.fingerprint,
@@ -1444,6 +1468,116 @@ class UIServer:
             log.warning("send_reaction failed: %s", e)
             translated = _translate_send_error(e)
             return web.json_response(translated, status=translated["status"])
+
+    async def api_edit_message(self, request: web.Request) -> web.Response:
+        """v0.7.6: edit one of our previously-sent messages within
+        the cooldown window. Body: {body, peer}."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        msg_id = request.match_info["msg_id"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        new_body = data.get("body")
+        peer_needle = data.get("peer")
+        if not isinstance(new_body, str) or not new_body.strip():
+            return web.json_response(
+                {"error": "body must be a non-empty string"}, status=400,
+            )
+        rec = self.daemon.state.get_message(msg_id)
+        if rec is None:
+            return web.json_response({"error": "message not found"}, status=404)
+        if rec.direction != "out":
+            return web.json_response(
+                {"error": "can only edit your own outbound messages"}, status=403,
+            )
+        peer = await self.daemon.resolve_for_send(str(peer_needle)) \
+            if peer_needle else None
+        if peer is None:
+            return web.json_response({"error": "peer offline"}, status=404)
+        try:
+            result = await self.daemon.send_edit(
+                peer, target_msg_id=msg_id, new_body=new_body,
+            )
+            return web.json_response({"ok": True, "result": result})
+        except RuntimeError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            log.warning("send_edit failed: %s", e)
+            translated = _translate_send_error(e)
+            return web.json_response(translated, status=translated["status"])
+
+    async def api_delete_message(self, request: web.Request) -> web.Response:
+        """v0.7.6: soft-delete one of our previously-sent messages."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        msg_id = request.match_info["msg_id"]
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        peer_needle = data.get("peer")
+        rec = self.daemon.state.get_message(msg_id)
+        if rec is None:
+            return web.json_response({"error": "message not found"}, status=404)
+        if rec.direction != "out":
+            return web.json_response(
+                {"error": "can only delete your own outbound messages"},
+                status=403,
+            )
+        peer = await self.daemon.resolve_for_send(str(peer_needle)) \
+            if peer_needle else None
+        # Even if peer is offline, we delete locally — they'll see
+        # the deletion next time they sync (in practice via ledger
+        # replay; transient like reactions for now).
+        if peer is None:
+            now = int(time.time() * 1000)
+            with contextlib.suppress(Exception):
+                self.daemon.state.delete_message(id=msg_id, deleted_at_ms=now)
+            self.broadcast({
+                "type": "msg_delete",
+                "target": msg_id,
+                "deleted_at_ms": now,
+            })
+            return web.json_response({"ok": True, "delivered": False})
+        try:
+            result = await self.daemon.send_delete(peer, target_msg_id=msg_id)
+            return web.json_response({"ok": True, "delivered": True, "result": result})
+        except Exception as e:
+            log.warning("send_delete failed: %s", e)
+            translated = _translate_send_error(e)
+            return web.json_response(translated, status=translated["status"])
+
+    async def api_set_read_marker(self, request: web.Request) -> web.Response:
+        """v0.7.6: tell `peer` we've read up to ts X. Best-effort —
+        idempotent, never blocks the caller."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        try:
+            up_to = int(data.get("up_to_ts_ms") or 0)
+        except (TypeError, ValueError):
+            return web.json_response(
+                {"error": "up_to_ts_ms must be an integer"}, status=400,
+            )
+        if up_to <= 0:
+            return web.json_response(
+                {"error": "up_to_ts_ms required"}, status=400,
+            )
+        peer = await self.daemon.resolve_for_send(fp)
+        if peer is None:
+            return web.json_response({"ok": True, "delivered": False})
+        try:
+            await self.daemon.send_read_marker(peer, up_to_ts_ms=up_to)
+            return web.json_response({"ok": True, "delivered": True})
+        except Exception as e:
+            log.debug("send_read_marker failed: %s", e)
+            return web.json_response({"ok": True, "delivered": False})
 
     # ─── /api/search ──────────────────────────────────────────────────
     async def api_search(self, request: web.Request) -> web.Response:
