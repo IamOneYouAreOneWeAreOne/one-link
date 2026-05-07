@@ -1633,6 +1633,58 @@
     font-weight: 600; font-size: 12px;
     flex-shrink: 0;
   }
+  /* v0.10.4 presence pill + menu. */
+  .presence-pill {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--bg-2);
+    color: var(--text);
+    cursor: pointer; font-size: 13px;
+    transition: background .12s;
+  }
+  .presence-pill:hover { background: var(--bg-3); }
+  .presence-pill .presence-caret {
+    color: var(--text-dim); font-size: 10px;
+  }
+  .me .dot, .presence-menu .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--good);
+    flex-shrink: 0;
+  }
+  /* Status colors. */
+  .me .dot.away,    .presence-menu .dot.away    { background: var(--warn); }
+  .me .dot.dnd,     .presence-menu .dot.dnd     { background: var(--bad); }
+  .me .dot.invisible, .presence-menu .dot.invisible { background: var(--text-dimmer); }
+  .presence-menu {
+    position: absolute; top: 64px; right: 16px;
+    background: var(--bg-elev);
+    border: 1px solid var(--bg-3);
+    border-radius: 10px;
+    padding: 4px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.4);
+    z-index: 200;
+    min-width: 180px;
+  }
+  .presence-menu button {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: transparent; color: var(--text);
+    font-size: 13px; text-align: left;
+    cursor: pointer;
+    transition: background .12s;
+  }
+  .presence-menu button:hover { background: var(--bg-2); }
+  .presence-menu button.active { background: var(--bg-3); }
+  /* Peer-list avatar dots get colored by reported presence.
+     'presence-online'/'presence-offline'/'presence-away'/'presence-dnd'
+     classes are added on the .peer row in renderPeers. */
+  .peer.presence-online .avatar::after  { background: var(--good); }
+  .peer.presence-away .avatar::after    { background: var(--warn); }
+  .peer.presence-dnd .avatar::after     { background: var(--bad); }
+  .peer.presence-offline .avatar::after { background: var(--text-dimmer); }
   /* v0.10.2 disappearing-message expiry badge. */
   .msg .expiry-badge {
     display: inline-block;
@@ -2173,9 +2225,22 @@
       <button class="btn" data-pane="mesh" id="btn-mesh">Activity</button>
     </nav>
     <div class="me">
-      <span class="dot"></span>
-      <span id="me-host">…</span>
+      <!-- v0.10.4: presence pill replaces the static green dot.
+           Click → dropdown to change status. -->
+      <button class="presence-pill" id="presence-pill" title="Click to change status">
+        <span class="dot" id="presence-dot"></span>
+        <span id="me-host">…</span>
+        <span class="presence-caret">▾</span>
+      </button>
       <button class="gear" id="btn-settings" title="Settings">⚙</button>
+    </div>
+    <!-- v0.10.4 presence dropdown menu — anchored to the pill;
+         hidden by default. -->
+    <div class="presence-menu" id="presence-menu" style="display:none;">
+      <button data-presence="online"><span class="dot online"></span> Online</button>
+      <button data-presence="away"><span class="dot away"></span> Away</button>
+      <button data-presence="dnd"><span class="dot dnd"></span> Do not disturb</button>
+      <button data-presence="invisible"><span class="dot invisible"></span> Appear offline</button>
     </div>
   </header>
 
@@ -3689,6 +3754,59 @@
     } catch {}
   }
 
+  // ── v0.10.4 presence ──────────────────────────────────────────────
+  // User's own status: 'online' (default) | 'away' | 'dnd' |
+  // 'invisible'. Set via the pill dropdown; persisted via
+  // /api/presence; broadcast to peers as a PRESENCE wire frame.
+  state.myPresence = "online";
+
+  function applyPresenceUI(status) {
+    const dot = $("#presence-dot");
+    if (dot) {
+      dot.className = "dot " + (status || "online");
+    }
+    state.myPresence = status || "online";
+    document.querySelectorAll("#presence-menu [data-presence]").forEach((b) => {
+      b.classList.toggle("active", b.dataset.presence === state.myPresence);
+    });
+  }
+
+  async function setMyPresence(status) {
+    try {
+      const r = await api.post("/api/presence", { status });
+      applyPresenceUI(r.presence);
+      const labels = {
+        online: "Online", away: "Away",
+        dnd: "Do not disturb", invisible: "Appearing offline",
+      };
+      toast(labels[r.presence] || r.presence, "good", 2000);
+    } catch (e) {
+      toast(`Status update failed: ${errorToastBody(e)}`, "bad");
+    }
+  }
+
+  // Pill click → toggle menu.
+  $("#presence-pill")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const menu = $("#presence-menu");
+    if (!menu) return;
+    menu.style.display = menu.style.display === "block" ? "none" : "block";
+  });
+  document.addEventListener("click", (e) => {
+    const menu = $("#presence-menu");
+    if (!menu) return;
+    if (!menu.contains(e.target) && e.target.id !== "presence-pill"
+        && !$("#presence-pill")?.contains(e.target)) {
+      menu.style.display = "none";
+    }
+  });
+  document.querySelectorAll("#presence-menu [data-presence]").forEach((b) => {
+    b.addEventListener("click", () => {
+      $("#presence-menu").style.display = "none";
+      setMyPresence(b.dataset.presence);
+    });
+  });
+
   // ── v0.10.3 first-pair nudge ──────────────────────────────────────
   // Show a "say hi" callout above the chat ONCE after a peer first
   // becomes pinned. Tracks shown-fingerprints in localStorage so the
@@ -3813,6 +3931,8 @@
         // v0.7.8: red ⚠ overlay flips when unacked-event count
         // changes. Bucketed at 0 / 1 / many to coalesce repeats.
         (p.key_change_unacked || 0) === 0 ? 0 : ((p.key_change_unacked || 0) === 1 ? 1 : 2),
+        // v0.10.4: presence drives the avatar dot color.
+        p.presence || "",
       ].join("|"));
     }
     return parts.join("§");
@@ -3856,7 +3976,16 @@
     }
 
     for (const p of peers) {
-      const cls = ["peer", p.online ? "online" : "offline"].join(" ");
+      // v0.10.4: presence class drives the avatar dot color.
+      // Reported 'offline' (peer is invisible OR truly offline)
+      // wins over the connection's 'online' bit so the dot
+      // visually matches what the peer wants to show.
+      const reported = p.presence || (p.online ? "online" : "offline");
+      const cls = [
+        "peer",
+        p.online ? "online" : "offline",
+        `presence-${reported}`,
+      ].join(" ");
       const row = el("div", cls);
       row.dataset.short = p.short_id;
       if (state.selectedPeer === p.short_id) row.classList.add("active");
@@ -6980,7 +7109,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.10.3";
+  const PAGE_BUILT_FOR = "0.10.4";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -6989,6 +7118,9 @@
       const me = await api.get("/api/me");
       state.me = me;
       $("#me-host").textContent = me.display_name || me.hostname;
+      // v0.10.4: apply persisted presence on load so the dot
+      // matches the user's last choice.
+      applyPresenceUI(me.presence || "online");
       // Detect daemon-page mismatch quietly. The launcher should replace stale
       // daemons automatically; if a browser tab survives that handoff, keep the
       // chat surface usable and log the drift instead of blocking the user.
@@ -7138,10 +7270,7 @@
           maybeShowFirstPairNudge(m.fingerprint);
         }
         if (state.pairing.peerFp === m.fingerprint && m.trust === "pinned") {
-          // v0.8.7: if WE already confirmed (or the WS event is for
-          // a peer-side confirm that happened to land first), pivot
-          // to the verify-now stage instead of closing the modal.
-          // closePairModal would skip past the verify nudge.
+          // v0.8.7: local confirm pivots with enterPairVerifyStage().
           toast("Paired", "good");
           if (state.pairing.weConfirmed) {
             enterPairVerifyStage();
@@ -7193,6 +7322,19 @@
           "bad", 8000,
         );
         refreshPeers();
+      } else if (m.type === "self_presence") {
+        // v0.10.4: another tab changed our presence — sync.
+        applyPresenceUI(m.presence);
+      } else if (m.type === "peer_presence") {
+        // v0.10.4: a peer reported a status change. Patch the
+        // cached record + re-render the sidebar so the avatar
+        // dot tints update.
+        const peer = [...state.peers.values()]
+          .find(p => p.fingerprint === m.fingerprint);
+        if (peer) {
+          peer.presence = m.presence;
+          renderPeers();
+        }
       } else if (m.type === "peer_verified") {
         scheduleActivityRefresh();  // v0.9.1: surface in activity feed
         // v0.7.7: side-channel SAS confirm flipped on/off. Patch the

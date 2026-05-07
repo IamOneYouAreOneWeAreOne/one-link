@@ -223,6 +223,7 @@ CAPS_FEATURES: list[str] = [
 # during pairing. Each inherited URL is also bound by state.set_rendezvous_urls
 # validation which rejects non-http(s).
 MAX_SHARED_RENDEZVOUS_URLS = 16
+PRESENCE_STATES = frozenset({"online", "away", "dnd", "invisible", "offline"})
 
 
 def _build_caps(
@@ -230,6 +231,7 @@ def _build_caps(
     *,
     rendezvous_urls: list[str] | None = None,
     channel_bind: dict | None = None,
+    presence: str | None = None,
 ) -> dict:
     """Build a CAPS frame.
 
@@ -245,6 +247,8 @@ def _build_caps(
         extra["share_rdz"] = list(rendezvous_urls)[:MAX_SHARED_RENDEZVOUS_URLS]
     if channel_bind:
         extra["channel_bind"] = dict(channel_bind)
+    if presence:
+        extra["presence"] = presence
     # v0.7.x: advertise the build version so peers can show "your other
     # device is on an older version" before a wire-format mismatch
     # turns into a cryptic InvalidTag. Old peers ignore unknown fields.
@@ -448,6 +452,11 @@ class Daemon:
         # v0.5.6: per-peer connection regime, last-seen.
         # peer_fp -> {"outbound": str, "inbound": str, "ts": float}
         self._inbound_regime: dict[str, str] = {}
+        # v0.10.4 peer presence cache. peer_fp -> 'online' | 'away'
+        # | 'dnd' | 'offline'. 'invisible' is never observed on the
+        # wire — invisible peers report 'offline'. NOT persisted —
+        # presence is transient (resets when the peer disconnects).
+        self._peer_presence: dict[str, str] = {}
         # v0.7.0: per-pairing health metrics. Updated on every
         # successful send / receive. Surfaced in /api/peers so the
         # UI can show real "last alive" + latency instead of guessing
@@ -471,9 +480,12 @@ class Daemon:
         """Build a CAPS frame for THIS daemon. Includes our rendezvous
         URL list when the local `share_rendezvous` setting is True
         (default) — paired peers running v0.5.4+ auto-adopt.
+        v0.10.4: also carries our presence ('invisible' goes out as
+        'offline' so peers can't tell we're online).
         """
         share = True
         urls: list[str] = []
+        presence = "online"
         if self.state is not None:
             try:
                 v = self.state.get_setting("share_rendezvous")
@@ -483,10 +495,16 @@ class Daemon:
                     urls = self.state.get_rendezvous_urls()
             except Exception:
                 share = False
-        return _build_caps(
+            with contextlib.suppress(Exception):
+                p = (self.state.get_setting("presence") or "online").lower()
+                if p in ("online", "away", "dnd", "invisible"):
+                    presence = p
+        msg = _build_caps(
             self.me.short_id,
             rendezvous_urls=urls if share else None,
         )
+        msg["presence"] = "offline" if presence == "invisible" else presence
+        return msg
 
     def _channel_bind_for(self, channel: ch.Channel) -> dict:
         """Session binding advertised inside encrypted CAPS."""
@@ -697,6 +715,63 @@ class Daemon:
                 raise
             except Exception as e:
                 log.warning("dm reaper loop error: %s", e)
+
+    # v0.10.4 presence helpers ─────────────────────────────────────
+    PRESENCE_VALUES = ("online", "away", "dnd", "invisible")
+
+    def get_my_presence(self) -> str:
+        if self.state is None:
+            return "online"
+        try:
+            v = (self.state.get_setting("presence") or "online").lower()
+            if v in self.PRESENCE_VALUES:
+                return v
+        except Exception:
+            pass
+        return "online"
+
+    async def set_my_presence(self, status: str) -> str:
+        """Persist + propagate the user's status. Broadcasts a
+        PRESENCE wire frame to every open outbound session so
+        paired peers update in real time. Returns the canonical
+        (lowercased) status."""
+        s = (status or "online").lower()
+        if s not in self.PRESENCE_VALUES:
+            raise ValueError(
+                f"presence must be one of {self.PRESENCE_VALUES}"
+            )
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                self.state.set_setting("presence", s)
+        wire_value = "offline" if s == "invisible" else s
+        for peer_fp, sess in list(self._outbound_sessions.items()):
+            with contextlib.suppress(Exception):
+                async with sess.lock:
+                    await sess.channel.send(encode_msg(make_msg(
+                        "PRESENCE", self.me.short_id,
+                        presence=wire_value,
+                    )))
+        return s
+
+    def record_peer_presence(self, peer_fp: str, presence: str) -> None:
+        """Cache a peer's reported presence + broadcast peer_presence
+        WS event so the UI updates the avatar dot."""
+        if not peer_fp:
+            return
+        s = (presence or "online").lower()
+        if s not in ("online", "away", "dnd", "offline"):
+            return
+        old = self._peer_presence.get(peer_fp)
+        self._peer_presence[peer_fp] = s
+        if old == s:
+            return
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "peer_presence",
+                    "fingerprint": peer_fp,
+                    "presence": s,
+                })
 
     def _apply_settings_at_boot(self) -> None:
         """v0.10.0: read settings that affect global daemon state +
@@ -1146,6 +1221,7 @@ class Daemon:
                 "from": msg.get("from"),
                 "channel_bind": bind if isinstance(bind, dict) else None,
                 "app_version": msg.get("app_version"),
+                "presence": msg.get("presence"),
             }
             # v0.8.2: ratchet-activation half-step. Once we've also
             # SENT our CAPS we'll flip both directions to ratchet.
@@ -1156,6 +1232,9 @@ class Daemon:
                         "ratchet activated on inbound channel from %s",
                         peer_fp[:8],
                     )
+            # v0.10.4: peer's reported presence drives the UI dot.
+            if msg.get("presence"):
+                self.record_peer_presence(peer_fp, msg.get("presence"))
             if self.state is not None:
                 with contextlib.suppress(Exception):
                     self.state.set_peer_capabilities(peer_fp, features)
@@ -1180,6 +1259,10 @@ class Daemon:
                 channel.peer_caps["features"],
             )
             return  # no ACK needed
+        if t == "PRESENCE":
+            # v0.10.4: peer reported a status change. No ACK needed.
+            self.record_peer_presence(peer_fp, str(msg.get("presence") or ""))
+            return
         if t == "TEXT":
             if not self._capability_allowed(peer_fp, CHAT):
                 self._emit_capability_request(peer_fp, peer_sid, CHAT)

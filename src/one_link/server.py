@@ -299,6 +299,8 @@ class UIServer:
         r.add_delete(r"/api/peers/{fp}/verify", self._guarded(self.api_clear_peer_verified))
         # v0.10.2 disappearing messages — per-peer TTL.
         r.add_post(r"/api/peers/{fp}/ttl", self._guarded(self.api_set_peer_ttl))
+        # v0.10.4 presence — set self status; broadcasts to peers.
+        r.add_post("/api/presence", self._guarded(self.api_set_presence))
         # v0.7.8 key-change events.
         r.add_get("/api/key-change-events", self._guarded(self.api_list_key_change_events))
         r.add_post(r"/api/key-change-events/{event_id}/ack", self._guarded(self.api_ack_key_change_event))
@@ -490,6 +492,9 @@ class UIServer:
             "protocol_version": PROTOCOL_VERSION,
             "schema_version": schema_version,
             "onboarding_completed": onboarding_completed,
+            # v0.10.4: surface user's chosen presence so the UI's
+            # status pill renders correctly on every load.
+            "presence": self.daemon.get_my_presence(),
         })
 
     async def api_status(self, request: web.Request) -> web.Response:
@@ -912,6 +917,13 @@ class UIServer:
                 }
             except Exception:
                 p["compatibility"] = None
+            # v0.10.4: peer presence. Daemon caches the latest
+            # reported value in _peer_presence; missing key = peer
+            # never reported (treat as 'online' on the wire).
+            p["presence"] = (
+                self.daemon._peer_presence.get(fp, "online")
+                if fp else "online"
+            )
             # v0.7.0: per-pairing health metrics. last_alive_ms is wall-
             # clock time of the last bytes seen from this peer (in or
             # out). latency_ewma_ms is the rolling round-trip time
@@ -1567,6 +1579,22 @@ class UIServer:
             "verified_note": None,
             "is_verified": False,
         })
+
+    async def api_set_presence(self, request: web.Request) -> web.Response:
+        """v0.10.4: set the user's presence (online | away | dnd |
+        invisible). Persists, broadcasts to peers via PRESENCE wire
+        frame, and re-broadcasts via WS so other browser tabs sync."""
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        s = data.get("status")
+        try:
+            applied = await self.daemon.set_my_presence(s)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        self.broadcast({"type": "self_presence", "presence": applied})
+        return web.json_response({"ok": True, "presence": applied})
 
     async def api_set_peer_ttl(self, request: web.Request) -> web.Response:
         """v0.10.2: configure per-peer disappearing-message TTL.
