@@ -265,6 +265,31 @@
     border-radius: 4px;
   }
   .pair-modal .sas-art { margin-top: 12px; }
+  /* v0.8.7 pair-stage-verified panel. Big green check, calm copy,
+     one-tap verify CTA. */
+  .verified-stage {
+    text-align: center;
+    padding: 20px 0 14px;
+    margin: 8px 0 14px;
+    background: linear-gradient(180deg, rgba(76,209,117,.10), rgba(76,209,117,.02));
+    border: 1px solid rgba(76,209,117,.20);
+    border-radius: 12px;
+  }
+  .verified-stage-icon {
+    width: 56px; height: 56px; line-height: 56px;
+    margin: 0 auto 10px;
+    border-radius: 50%;
+    background: var(--good); color: #0a1f0a;
+    font-size: 32px; font-weight: 800;
+  }
+  .verified-stage h3 {
+    color: var(--good); font-size: 18px; font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .verified-stage p {
+    color: var(--text); margin: 0 16px 0;
+    line-height: 1.5; font-size: 13px;
+  }
   /* v0.8.6 trust history timeline. Vertical chronology with a
      left-edge color rail per event severity. */
   .trust-timeline {
@@ -1632,24 +1657,57 @@
           <div class="who-sub"  id="pair-peer-sub">…</div>
         </div>
       </div>
-      <div class="sas-display">
-        <div class="sas-code copyable" id="pair-sas" title="Click to copy">000 000</div>
-        <div class="sas-label">verification code · check both devices</div>
-        <!-- v0.7.9 multi-modal SAS verification: speak the digits
-             aloud (good for phone-call confirmation) and show a
-             6-cell visual SAS art grid (good for face-to-face glance
-             confirmation). Both deterministic from the SAS digits. -->
-        <div class="mini-actions" style="justify-content:center; margin-top:8px;">
-          <button class="btn-icon" id="pair-sas-speak" title="Read SAS aloud">🔊 Speak</button>
-          <button class="btn-icon" id="pair-sas-art-toggle" title="Show visual SAS art">🎨 Visual</button>
-          <button class="btn-icon" id="pair-sas-copy" title="Copy SAS digits">📋 Copy</button>
+      <!-- v0.8.7: pair flow has two stages.
+           1. STAGE-COMPARE — show SAS, user clicks "Codes match"
+           2. STAGE-VERIFIED — once both devices have confirmed,
+              prompt the user to ALSO mark this peer
+              verified-in-person while the SAS is still on screen.
+              This is the highest-trust moment we'll ever have with
+              this peer; capturing it as `verified` here saves the
+              user from having to revisit the drawer later. -->
+      <div id="pair-stage-compare">
+        <div class="sas-display">
+          <div class="sas-code copyable" id="pair-sas" title="Click to copy">000 000</div>
+          <div class="sas-label">verification code · check both devices</div>
+          <!-- v0.7.9 multi-modal SAS verification: speak the digits
+               aloud (good for phone-call confirmation) and show a
+               6-cell visual SAS art grid (good for face-to-face glance
+               confirmation). Both deterministic from the SAS digits. -->
+          <div class="mini-actions" style="justify-content:center; margin-top:8px;">
+            <button class="btn-icon" id="pair-sas-speak" title="Read SAS aloud">🔊 Speak</button>
+            <button class="btn-icon" id="pair-sas-art-toggle" title="Show visual SAS art">🎨 Visual</button>
+            <button class="btn-icon" id="pair-sas-copy" title="Copy SAS digits">📋 Copy</button>
+          </div>
+          <div class="sas-art" id="pair-sas-art" style="display:none;"></div>
         </div>
-        <div class="sas-art" id="pair-sas-art" style="display:none;"></div>
+        <div class="actions">
+          <button class="btn-danger" id="pair-mismatch">Codes don't match</button>
+          <button class="btn-ghost"  id="pair-cancel">Cancel</button>
+          <button class="btn-primary" id="pair-match">Codes match</button>
+        </div>
       </div>
-      <div class="actions">
-        <button class="btn-danger" id="pair-mismatch">Codes don't match</button>
-        <button class="btn-ghost"  id="pair-cancel">Cancel</button>
-        <button class="btn-primary" id="pair-match">Codes match</button>
+      <!-- Stage 2: post-pair verify nudge. Hidden until both
+           devices confirm. -->
+      <div id="pair-stage-verified" style="display:none;">
+        <div class="verified-stage">
+          <div class="verified-stage-icon">✓</div>
+          <h3>Paired</h3>
+          <p>
+            You and the other device confirmed the code matched.
+            The channel is now end-to-end encrypted with forward
+            secrecy.
+          </p>
+          <p class="settings-help" style="margin-top:8px;">
+            Want to ALSO mark this device as verified in person?
+            That gives it a green ✓ across One Link and tells you
+            at a glance that you trust this exact identity beyond
+            just having paired with it.
+          </p>
+        </div>
+        <div class="actions">
+          <button class="btn-ghost"   id="pair-skip-verify">Not now</button>
+          <button class="btn-primary" id="pair-verify-now">Verify in person now</button>
+        </div>
       </div>
     </div>
   </div>
@@ -4784,7 +4842,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.8.6";
+  const PAGE_BUILT_FOR = "0.8.7";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -4928,8 +4986,19 @@
         if (state.discoverOpen) loadDiscoverable();
       } else if (m.type === "peer_trust") {
         if (state.pairing.peerFp === m.fingerprint && m.trust === "pinned") {
-          closePairModal(true);
+          // v0.8.7: if WE already confirmed (or the WS event is for
+          // a peer-side confirm that happened to land first), pivot
+          // to the verify-now stage instead of closing the modal.
+          // closePairModal would skip past the verify nudge.
           toast("Paired", "good");
+          if (state.pairing.weConfirmed) {
+            enterPairVerifyStage();
+          } else {
+            // Other device confirmed first; stay on stage 1 so the
+            // local user still has a chance to mismatch-cancel.
+            // pairMatch will pivot when they click.
+            pairExplain.textContent = "The other device confirmed. Click 'Codes match' to finish.";
+          }
         }
         refreshPeers();
       } else if (m.type === "peer_profile" || m.type === "peer_capabilities") {
@@ -5917,6 +5986,7 @@
     pairSub.textContent = peer.short_id;
     pairSasEl.textContent = "…";
     renderSasArt($("#pair-sas-art"), null);
+    showPairStage("compare");  // v0.8.7
     pairBackdrop.classList.add("show");
     try {
       const res = await api.post(`/api/peers/${peer.fingerprint}/pair`, {});
@@ -5940,6 +6010,7 @@
     pairSub.textContent = peer.short_id;
     pairSasEl.textContent = _formatSas(sas);
     renderSasArt($("#pair-sas-art"), sas);
+    showPairStage("compare");  // v0.8.7
     pairBackdrop.classList.add("show");
   }
 
@@ -5953,6 +6024,25 @@
     if (art) art.style.display = "none";
   }
 
+  // v0.8.7: switch the pair modal between the two stages.
+  function showPairStage(stage) {
+    const compare = $("#pair-stage-compare");
+    const verified = $("#pair-stage-verified");
+    if (!compare || !verified) return;
+    compare.style.display = stage === "compare" ? "" : "none";
+    verified.style.display = stage === "verified" ? "" : "none";
+  }
+
+  // v0.8.7: when both devices confirm SAS match, slide to stage 2
+  // ('paired — also verify in person?') instead of closing outright.
+  // Closing the modal still happens — just from the new stage's
+  // explicit Skip / Verify button.
+  function enterPairVerifyStage() {
+    pairTitle.textContent = "Paired successfully";
+    pairExplain.textContent = "";
+    showPairStage("verified");
+  }
+
   pairMatch.onclick = async () => {
     if (!state.pairing.peerFp) return;
     pairMatch.disabled = true;
@@ -5960,8 +6050,10 @@
       const res = await api.post(`/api/peers/${state.pairing.peerFp}/pair-confirm`, {});
       state.pairing.weConfirmed = true;
       if (res.both_confirmed) {
-        closePairModal(true);
+        // v0.8.7: do NOT close the modal — pivot to the verify-now
+        // stage. Toast still fires so the user knows pairing succeeded.
         toast("Paired", "good");
+        enterPairVerifyStage();
       } else {
         pairExplain.textContent = "Waiting for the other device to confirm…";
       }
@@ -5971,6 +6063,30 @@
       pairMatch.disabled = false;
     }
   };
+
+  // v0.8.7: the verify-now stage exposes two CTAs.
+  $("#pair-verify-now")?.addEventListener("click", async () => {
+    const fp = state.pairing.peerFp;
+    if (!fp) { closePairModal(true); return; }
+    try {
+      await api.post(`/api/peers/${fp}/verify`, {
+        method: "sas-digits",
+        note: "Confirmed during pair flow",
+      });
+      toast("Verified in person", "good");
+    } catch (e) {
+      toast(`Verify failed: ${errorToastBody(e)}`, "bad");
+    } finally {
+      closePairModal(true);
+      // Refresh peers so the green ✓ shows up on the sidebar
+      // immediately. WS broadcast also fires server-side, but a
+      // direct refresh removes any visible lag.
+      refreshPeers();
+    }
+  });
+  $("#pair-skip-verify")?.addEventListener("click", () => {
+    closePairModal(true);
+  });
   pairMismatch.onclick = async () => {
     if (!state.pairing.peerFp) return;
     try {
