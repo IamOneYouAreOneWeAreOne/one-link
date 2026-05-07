@@ -1513,6 +1513,27 @@
   .pdf-fallback a {
     color: var(--accent-2); text-decoration: underline;
   }
+  /* v0.9.7 rendezvous help disclosure. */
+  .rdz-advanced {
+    margin: 8px 0 12px;
+    background: var(--bg-2);
+    border-radius: 8px;
+    padding: 8px 12px;
+  }
+  .rdz-advanced summary {
+    cursor: pointer; color: var(--accent-2);
+    font-size: 13px; font-weight: 600;
+    list-style: none;
+  }
+  .rdz-advanced summary::-webkit-details-marker { display: none; }
+  .rdz-advanced summary::before {
+    content: "▸"; display: inline-block; margin-right: 6px;
+    transition: transform .15s ease;
+  }
+  .rdz-advanced[open] summary::before { transform: rotate(90deg); }
+  .rdz-advanced ul {
+    color: var(--text-dim); font-size: 12px;
+  }
   /* Plain-text preview. */
   .text-preview pre {
     background: var(--bg-2);
@@ -2736,28 +2757,36 @@
     </div>
   </div>
 
-  <!-- v0.5.3: "What's a rendezvous?" inline help -->
+  <!-- v0.9.7: simplified rendezvous help. Default answer for
+       most users is "you don't need this — Wi-Fi only is fine."
+       Advanced setup details live behind a disclosure. -->
   <div class="modal-backdrop" id="rdz-help-backdrop">
     <div class="modal" style="max-width:520px;">
-      <h2>What's a rendezvous?</h2>
-      <p>Without a rendezvous, One Link can only find devices on the same
-        Wi-Fi network as you. To chat with a laptop at home from a coffee
-        shop — or with friends and family across the country — your
-        devices need a way to find each other across the internet.</p>
-      <p>A <b>rendezvous</b> is a small server that lets paired devices
-        announce where they currently are. It never sees your messages
-        or files; it only carries signed presence beacons. Add one URL
-        and your devices will find each other anywhere on Earth.</p>
-      <p>Three options:</p>
-      <ul style="margin: 8px 0 12px 22px; line-height: 1.6;">
-        <li>Use a rendezvous a friend or community is running.</li>
-        <li>Run your own (free, ~5 minutes — see RENDEZVOUS_DEPLOY.md
-          in the repo).</li>
-        <li>Don't add any. Wi-Fi-only mode is fully secure and works
-          for household use.</li>
-      </ul>
+      <h2>Reach devices across the internet?</h2>
+      <p>
+        Right now One Link only finds devices on the <strong>same
+        Wi-Fi network</strong>. That's perfect for household use —
+        nothing else to set up.
+      </p>
+      <p>
+        To reach devices in <strong>other locations</strong> (a
+        laptop at home from a coffee shop, family across town),
+        you need a tiny relay called a <strong>rendezvous</strong>.
+        It only carries signed presence beacons — never your
+        messages or files.
+      </p>
+      <details class="rdz-advanced">
+        <summary>How to set one up (advanced)</summary>
+        <ul style="margin: 8px 0 0 22px; line-height: 1.6;">
+          <li>Use a rendezvous a friend or community is running —
+            paste their URL into Settings → Rendezvous URLs.</li>
+          <li>Run your own — free, ~5 minutes, see
+            <code>RENDEZVOUS_DEPLOY.md</code> in the repo.</li>
+        </ul>
+      </details>
       <div class="actions">
-        <button class="btn-primary" id="rdz-help-close">Got it</button>
+        <button class="btn-ghost" id="rdz-help-settings">Open settings</button>
+        <button class="btn-primary" id="rdz-help-close">Wi-Fi only is fine</button>
       </div>
     </div>
   </div>
@@ -4460,10 +4489,24 @@
         open.href = `/api/files/${encodeURIComponent(fname)}`;
         open.target = "_blank";
         actions.appendChild(open);
-        const reveal = el("button", null, "Reveal");
+        // v0.9.7: "Reveal" → "Show in folder". The button used to
+        // pop an Explorer window silently; now we surface immediate
+        // feedback so the user knows the click registered even if
+        // the OS file manager takes a moment to focus.
+        const reveal = el("button", null, "Show in folder");
+        reveal.title = "Open the inbox in your file manager with this file selected";
         reveal.onclick = async () => {
-          try { await api.post(`/api/files/${encodeURIComponent(fname)}/reveal`, {}); }
-          catch (e) { toast(`Reveal failed: ${e.message || e}`, "bad"); }
+          const t = toast("Opening folder…", "info", 2500);
+          try {
+            const res = await api.post(`/api/files/${encodeURIComponent(fname)}/reveal`, {});
+            if (res?.throttled) {
+              t?.remove?.();
+              toast("Folder is opening — check your taskbar.", "info", 2500);
+            }
+          } catch (e) {
+            t?.remove?.();
+            toast(`Show in folder failed: ${e.message || e}`, "bad");
+          }
         };
         actions.appendChild(reveal);
       }
@@ -4516,10 +4559,20 @@
         open.href = `/api/files/${encodeURIComponent(f.name)}`;
         open.target = "_blank";
         row.appendChild(open);
-        const reveal = el("button", null, "Reveal");
+        const reveal = el("button", null, "Show in folder");
+        reveal.title = "Open the inbox in your file manager with this file selected";
         reveal.onclick = async () => {
-          try { await api.post(`/api/files/${encodeURIComponent(f.name)}/reveal`, {}); }
-          catch (e) { toast(`Reveal failed: ${e.message || e}`, "bad"); }
+          const t = toast("Opening folder…", "info", 2500);
+          try {
+            const res = await api.post(`/api/files/${encodeURIComponent(f.name)}/reveal`, {});
+            if (res?.throttled) {
+              t?.remove?.();
+              toast("Folder is opening — check your taskbar.", "info", 2500);
+            }
+          } catch (e) {
+            t?.remove?.();
+            toast(`Show in folder failed: ${e.message || e}`, "bad");
+          }
         };
         row.appendChild(reveal);
         list.appendChild(row);
@@ -6193,7 +6246,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.9.6";
+  const PAGE_BUILT_FOR = "0.9.7";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -6852,8 +6905,21 @@
   $("#btn-send-file-panel").addEventListener("click", triggerAttach);
   $("#btn-refresh-files").addEventListener("click", refreshFiles);
   $("#btn-open-inbox").addEventListener("click", async () => {
-    try { await api.post("/api/inbox/reveal", {}); }
-    catch (e) { toast(`Open failed: ${e.message || e}`, "bad"); }
+    // v0.9.7: Explorer windows can take a moment to render and
+    // sometimes pop behind the browser; the user hits the button
+    // and thinks nothing happened. Show an immediate toast so the
+    // click is acknowledged.
+    const t = toast("Opening inbox folder…", "info", 2500);
+    try {
+      const res = await api.post("/api/inbox/reveal", {});
+      if (res?.throttled) {
+        t?.remove?.();
+        toast("Inbox is opening — check your taskbar.", "info", 2500);
+      }
+    } catch (e) {
+      t?.remove?.();
+      toast(`Open failed: ${e.message || e}`, "bad");
+    }
   });
   document.querySelectorAll(".files-toggle button").forEach(btn => {
     btn.onclick = () => {
@@ -8206,6 +8272,13 @@
     rdzHelpBackdrop.classList.add("show");
   };
   $("#rdz-help-close").onclick = () => rdzHelpBackdrop.classList.remove("show");
+  // v0.9.7: shortcut from the help modal straight to the settings
+  // page where rendezvous URLs are actually pasted, so the user
+  // who DOES want to set one up doesn't have to hunt for it.
+  $("#rdz-help-settings")?.addEventListener("click", () => {
+    rdzHelpBackdrop.classList.remove("show");
+    $("#btn-settings")?.click();
+  });
 
   // Click outside modal closes
   [pairBackdrop, settingsBackdrop, rdzHelpBackdrop, $("#shortcuts-backdrop")].forEach(b => {

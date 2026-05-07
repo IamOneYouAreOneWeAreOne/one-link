@@ -121,6 +121,13 @@ def _translate_send_error(exc: BaseException) -> dict:
             "error": "Could not establish a secure connection with the other device.",
             "hint": "Make sure One Link is open there. One Link will keep healing the connection in the background.",
         }
+    if "ratchet header version" in msg or "ratchet frame too short" in msg:
+        return {
+            "status": 502,
+            "code": "secure_session_desync",
+            "error": "The secure connection needs to refresh before sending.",
+            "hint": "One Link preserved the transfer and will retry on a fresh secure session automatically.",
+        }
     if "timeout" in msg or "timed out" in msg:
         return {
             "status": 504,
@@ -3369,14 +3376,13 @@ class UIServer:
         import sys
         try:
             if sys.platform == "win32":
-                # explorer.exe /select,<path> is the canonical pattern,
-                # but it's notoriously brittle to subprocess quoting.
-                # Use the raw command line so Windows can parse it the
-                # way Explorer expects.
-                norm = str(path).replace("/", "\\")
+                # v0.9.7: use list-form Popen — string form was
+                # silently filing under "didn't work" for some users.
+                # explorer.exe parses /select,<path> as a single
+                # argv token (comma is part of the syntax, not a
+                # separator), so pass it as one element.
                 subprocess.Popen(
-                    f'explorer.exe /select,"{norm}"',
-                    shell=False,
+                    ["explorer.exe", f"/select,{path}"],
                 )
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", "-R", str(path)])
@@ -3384,7 +3390,7 @@ class UIServer:
                 subprocess.Popen(["xdg-open", str(path.parent)])
         except OSError as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
-        return web.json_response({"ok": True})
+        return web.json_response({"ok": True, "path": str(path)})
 
     async def api_inbox_reveal(self, request: web.Request) -> web.Response:
         # Open the inbox folder itself (no specific file selected).
@@ -3395,15 +3401,19 @@ class UIServer:
         # actual Explorer windows.
         if os.environ.get("ONE_LINK_DISABLE_REVEAL") == "1":
             return web.json_response({"ok": True, "path": str(path), "disabled": True})
-        import subprocess
         import sys
         try:
             if sys.platform == "win32":
-                norm = str(path).replace("/", "\\")
-                subprocess.Popen(f'explorer.exe "{norm}"', shell=False)
+                # v0.9.7: switch to os.startfile (ShellExecute under
+                # the hood). Reuses an existing Explorer window if
+                # one is open, displays significantly faster than
+                # spawning a fresh explorer.exe via subprocess.
+                os.startfile(str(path))
             elif sys.platform == "darwin":
+                import subprocess
                 subprocess.Popen(["open", str(path)])
             else:
+                import subprocess
                 subprocess.Popen(["xdg-open", str(path)])
         except OSError as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
