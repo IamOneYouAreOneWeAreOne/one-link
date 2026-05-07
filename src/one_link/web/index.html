@@ -1572,6 +1572,67 @@
   .pdf-fallback a {
     color: var(--accent-2); text-decoration: underline;
   }
+  /* v0.10.3 rich empty states. Every blank surface gets a glyph,
+     a heading, and a friendly one-line explanation. */
+  .empty.rich {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 50px 28px;
+    text-align: center;
+    color: var(--text-dim);
+    gap: 4px;
+  }
+  .empty.rich .rich-glyph {
+    font-size: 44px; line-height: 1;
+    margin-bottom: 12px;
+    filter: grayscale(.18);
+    opacity: .85;
+  }
+  .empty.rich h4 {
+    color: var(--text); font-size: 14px; font-weight: 600;
+    margin: 0 0 6px;
+  }
+  .empty.rich p {
+    margin: 0; font-size: 12.5px; line-height: 1.5;
+    max-width: 280px;
+  }
+  /* Conversation-empty CTAs row. */
+  .empty-pane .empty-cta-row {
+    display: flex; gap: 10px; margin-top: 18px;
+  }
+  .empty-pane .empty-cta-row button {
+    padding: 10px 18px;
+  }
+  .empty-pane .empty-tip {
+    margin-top: 14px;
+    color: var(--text-dimmer); font-size: 11px;
+  }
+  .empty-pane .empty-tip kbd {
+    background: var(--bg-2); padding: 1px 6px; border-radius: 4px;
+    border: 1px solid var(--bg-3);
+    font-family: ui-monospace, Menlo, monospace; font-size: 10px;
+    margin: 0 1px;
+  }
+  /* First-pair nudge — shown once after a successful pair. */
+  .first-pair-nudge {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; margin: 8px 18px 4px;
+    background: linear-gradient(90deg, rgba(76,209,117,.14), rgba(76,209,117,.04));
+    border: 1px solid rgba(76,209,117,.30);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 13px;
+    animation: pop-in .25s ease-out;
+  }
+  .first-pair-nudge .fpn-icon { font-size: 18px; flex-shrink: 0; }
+  .first-pair-nudge .fpn-text { flex: 1; }
+  .first-pair-nudge .fpn-text strong { color: var(--good); }
+  .first-pair-nudge button {
+    padding: 5px 12px; border-radius: 6px;
+    background: var(--good); color: #0a1f0a;
+    font-weight: 600; font-size: 12px;
+    flex-shrink: 0;
+  }
   /* v0.10.2 disappearing-message expiry badge. */
   .msg .expiry-badge {
     display: inline-block;
@@ -2159,6 +2220,14 @@
         <div class="glyph"><img src="/static/one-glyph.png" alt="" /></div>
         <h3>Pick a device to start</h3>
         <div>Open One Link on another computer on this network. Pair once, then chat or drag files here.</div>
+        <!-- v0.10.3: clear CTAs so a new user knows the next move. -->
+        <div class="empty-cta-row">
+          <button class="btn-primary" id="convo-empty-pair">+ Pair a new device</button>
+          <button class="btn-ghost" id="convo-empty-help">What's a rendezvous?</button>
+        </div>
+        <div class="empty-tip">
+          <kbd>Ctrl+K</kbd> opens search. <kbd>?</kbd> shows shortcuts.
+        </div>
       </div>
 
       <div id="convo-active" style="display:none; flex:1; flex-direction:column; min-height:0;">
@@ -2262,7 +2331,11 @@
         <button data-files-mode="sent" id="btn-files-sent">Sent</button>
       </div>
       <div id="filelist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
-        <div class="empty">No received files yet.</div>
+        <div class="empty rich">
+          <div class="rich-glyph">📥</div>
+          <h4>Inbox is quiet</h4>
+          <p>Files sent to you from a paired device land here automatically.</p>
+        </div>
       </div>
       <div class="panel-form">
         <div class="mini-actions">
@@ -2286,7 +2359,11 @@
         <code>$HOME\Documents\One Link</code>. Pair a device first, then share the folder with it.
       </div>
       <div id="folderlist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
-        <div class="empty">No shared folders yet.</div>
+        <div class="empty rich">
+          <div class="rich-glyph">📂</div>
+          <h4>No folders synced yet</h4>
+          <p>Sync a local folder with a paired device — changes mirror in real time, with CRDT conflict detection.</p>
+        </div>
       </div>
       <div class="panel-form">
         <input id="folder-name" type="text" placeholder="Name, like Family Photos" />
@@ -2331,7 +2408,11 @@
         <button class="chip" data-activity-filter="peer">Peers</button>
       </div>
       <div id="activity-list" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
-        <div class="empty">Loading…</div>
+        <div class="empty rich">
+          <div class="rich-glyph">⏱</div>
+          <h4>No events yet</h4>
+          <p>Pairings, file transfers, key changes, and trust events show up here as they happen.</p>
+        </div>
       </div>
       <!-- Legacy transfer list, kept hidden for now — Files pane Sent
            tab covers transfer-only views. -->
@@ -3606,6 +3687,96 @@
       n.onclick = () => { window.focus(); n.close(); };
       setTimeout(() => { try { n.close(); } catch {} }, 8000);
     } catch {}
+  }
+
+  // ── v0.10.3 first-pair nudge ──────────────────────────────────────
+  // Show a "say hi" callout above the chat ONCE after a peer first
+  // becomes pinned. Tracks shown-fingerprints in localStorage so the
+  // nudge doesn't re-pop on subsequent visits or new pairings.
+  const FIRST_PAIR_KEY = "one_link.first_pair_shown";
+
+  function _firstPairShownSet() {
+    try {
+      const raw = localStorage.getItem(FIRST_PAIR_KEY) || "";
+      return new Set(raw.split(",").filter(Boolean));
+    } catch { return new Set(); }
+  }
+  function _markFirstPairShown(fp) {
+    try {
+      const cur = _firstPairShownSet();
+      cur.add(fp);
+      localStorage.setItem(FIRST_PAIR_KEY, [...cur].join(","));
+    } catch {}
+  }
+
+  function maybeShowFirstPairNudge(fp) {
+    if (!fp) return;
+    if (_firstPairShownSet().has(fp)) return;
+    _markFirstPairShown(fp);
+    // Defer the render so the peer record has time to land in
+    // state.peers via the next refreshPeers tick.
+    setTimeout(() => renderFirstPairNudge(fp), 1200);
+  }
+
+  function renderFirstPairNudge(fp) {
+    if (!state.selectedPeer) {
+      // Auto-select the peer that just paired so the nudge feels
+      // contextual rather than a stranger message.
+      const peer = [...state.peers.values()]
+        .find(p => p.fingerprint === fp);
+      if (peer) selectPeer(peer.short_id);
+    }
+    const m = $("#messages");
+    if (!m) return;
+    const peer = [...state.peers.values()]
+      .find(p => p.fingerprint === fp);
+    const name = peer ? (peer.display_name || peer.hostname || peer.short_id) : "your new device";
+    const wrap = el("div", "first-pair-nudge");
+    wrap.appendChild(el("div", "fpn-icon", "👋"));
+    const text = el("div", "fpn-text");
+    text.appendChild(document.createTextNode("You're paired with "));
+    text.appendChild(el("strong", "", name));
+    text.appendChild(document.createTextNode(" — say hi to confirm the connection works."));
+    wrap.appendChild(text);
+    const btn = el("button", "", "Say hi");
+    btn.onclick = () => {
+      // Pre-fill the composer with a friendly first message.
+      const input = $("#input");
+      if (input) {
+        input.value = "👋";
+        input.focus();
+        // Slight delay before pressing Send so the user SEES the
+        // pre-fill rather than getting an instant flash.
+        setTimeout(() => $("#btn-send")?.click(), 250);
+      }
+      wrap.remove();
+    };
+    wrap.appendChild(btn);
+    // Insert before the messages list so it sits right under the
+    // conversation header.
+    m.insertBefore(wrap, m.firstChild);
+    setTimeout(() => {
+      // Auto-dismiss after 30s if untouched.
+      wrap.style.transition = "opacity .4s ease, max-height .4s ease";
+      wrap.style.opacity = "0";
+      wrap.style.maxHeight = "0";
+      setTimeout(() => wrap.remove(), 450);
+    }, 30_000);
+  }
+
+  // ── v0.10.3 rich empty states ─────────────────────────────────────
+  // Single helper so every list-empty case looks the same: a big
+  // glyph, a heading, a one-sentence explanation. Reusable across
+  // panes (Files, Folders, Activity, etc).
+  function richEmpty(glyph, heading, body, ...children) {
+    const wrap = el("div", "empty rich");
+    wrap.appendChild(el("div", "rich-glyph", glyph));
+    wrap.appendChild(el("h4", "", heading));
+    wrap.appendChild(el("p", "", body));
+    for (const c of children) {
+      if (c) wrap.appendChild(c);
+    }
+    return wrap;
   }
 
   // ── Toasts ─────────────────────────────────────────────────────────
@@ -5028,7 +5199,10 @@
       const files = _receivedFilesCache;
       $("#files-count").textContent = files.length;
       if (files.length === 0) {
-        list.appendChild(el("div", "empty", "No received files yet. Files sent to you from a paired device land here."));
+        list.appendChild(richEmpty(
+          "📥", "Inbox is quiet",
+          "Files sent to you from a paired device land here automatically.",
+        ));
         return;
       }
       for (const f of files) {
@@ -5506,7 +5680,10 @@
       list.innerHTML = "";
       $("#folders-count").textContent = state.folders.length;
       if (state.folders.length === 0) {
-        list.appendChild(el("div", "empty", "No shared folders yet. Add a folder location from this computer."));
+        list.appendChild(richEmpty(
+          "📂", "No folders synced yet",
+          "Add a folder above to start syncing it with a paired device. CRDT detects concurrent edits.",
+        ));
         return;
       }
       for (const f of state.folders) {
@@ -5783,7 +5960,10 @@
     list.innerHTML = "";
     const events = state.activityEvents || [];
     if (events.length === 0) {
-      list.appendChild(el("div", "empty", "No events yet."));
+      list.appendChild(richEmpty(
+        "⏱", "No events yet",
+        "Pairings, file transfers, key changes, and trust events show up here as they happen.",
+      ));
       return;
     }
     for (const ev of events) {
@@ -6800,7 +6980,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.10.2";
+  const PAGE_BUILT_FOR = "0.10.3";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -6951,6 +7131,12 @@
         if (state.discoverOpen) loadDiscoverable();
       } else if (m.type === "peer_trust") {
         scheduleActivityRefresh();  // v0.9.1: surface in activity feed
+        // v0.10.3: first-pair nudge. Track on a per-fingerprint
+        // basis so subsequent pairings (with the same OR different
+        // peers) don't re-pop the nudge.
+        if (m.trust === "pinned") {
+          maybeShowFirstPairNudge(m.fingerprint);
+        }
         if (state.pairing.peerFp === m.fingerprint && m.trust === "pinned") {
           // v0.8.7: if WE already confirmed (or the WS event is for
           // a peer-side confirm that happened to land first), pivot
@@ -9128,6 +9314,13 @@
     rdzHelpBackdrop.classList.add("show");
   };
   $("#rdz-help-close").onclick = () => rdzHelpBackdrop.classList.remove("show");
+  // v0.10.3 — convo-empty pane CTAs.
+  $("#convo-empty-pair")?.addEventListener("click", () => {
+    $("#open-discover-modal")?.click();
+  });
+  $("#convo-empty-help")?.addEventListener("click", () => {
+    rdzHelpBackdrop.classList.add("show");
+  });
   // v0.9.7: shortcut from the help modal straight to the settings
   // page where rendezvous URLs are actually pasted, so the user
   // who DOES want to set one up doesn't have to hunt for it.
