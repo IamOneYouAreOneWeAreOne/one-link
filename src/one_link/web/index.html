@@ -666,6 +666,52 @@
   .composer .send:hover { filter: brightness(1.1); }
   .composer .send:active { transform: scale(0.97); }
   .composer .send:disabled { opacity: .4; cursor: not-allowed; filter: none; }
+  /* v0.9.2 voice-message surfaces. */
+  .composer .icon-btn.recording {
+    background: var(--bad); color: white;
+    box-shadow: 0 0 0 0 rgba(255,107,107,.6);
+    animation: rec-pulse 1.4s ease-out infinite;
+  }
+  @keyframes rec-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(255,107,107,.55); }
+    70% { box-shadow: 0 0 0 8px rgba(255,107,107,0); }
+    100% { box-shadow: 0 0 0 0 rgba(255,107,107,0); }
+  }
+  .voice-overlay {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px;
+    background: linear-gradient(90deg, rgba(255,107,107,.18), rgba(255,107,107,.06));
+    border-top: 1px solid rgba(255,107,107,.40);
+  }
+  .voice-overlay .vo-pulse {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--bad); flex-shrink: 0;
+    animation: rec-pulse 1.4s ease-out infinite;
+  }
+  .voice-overlay .vo-text {
+    flex: 1; display: flex; gap: 12px; align-items: baseline;
+    color: var(--text); font-size: 13px;
+  }
+  .voice-overlay .vo-timer {
+    color: var(--text-dim);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .voice-overlay button { padding: 6px 14px; font-size: 12px; }
+  /* Audio bubble — receivers see this in place of a generic file row. */
+  .msg.file.audio { padding-bottom: 8px; }
+  .msg.file.audio .audio-player {
+    margin-top: 6px; width: 100%;
+    max-width: 320px;
+  }
+  .msg.file.audio .audio-player audio {
+    width: 100%;
+    height: 32px;
+    background: transparent;
+    border-radius: 8px;
+  }
+  .msg.out.file.audio .audio-player audio {
+    filter: invert(0) hue-rotate(0deg);
+  }
 
   /* ── Drag-drop overlay ─────────────────────────────────────────────── */
   .drop-overlay {
@@ -1791,8 +1837,24 @@
           <div class="attach-tray" id="attach-tray"></div>
           <button class="icon-btn" id="btn-attach2" title="Attach file">📎</button>
           <button class="icon-btn" id="btn-screenshot" title="Paste screenshot from clipboard">📷</button>
+          <!-- v0.9.2 voice messages — click to start recording, click
+               again to stop. While recording, the icon flips to a
+               red square + a timer/cancel overlay slides in. -->
+          <button class="icon-btn" id="btn-voice" title="Record voice message (Ctrl+Shift+M)">🎤</button>
           <textarea id="input" placeholder="Message your peer… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
           <button class="send" id="btn-send" disabled>Send</button>
+        </div>
+        <!-- v0.9.2 voice recording overlay — visible only while
+             recording. Slides in above the composer with a live
+             timer + cancel + stop-and-send. -->
+        <div class="voice-overlay" id="voice-overlay" style="display:none;">
+          <div class="vo-pulse"></div>
+          <div class="vo-text">
+            <strong>Recording…</strong>
+            <span class="vo-timer" id="voice-timer">0:00</span>
+          </div>
+          <button class="btn-ghost" id="voice-cancel" title="Discard recording">Cancel</button>
+          <button class="btn-primary" id="voice-stop" title="Stop and send">Send voice</button>
         </div>
       </div>
     </section>
@@ -2380,6 +2442,7 @@
         <kbd>Ctrl + ,</kbd>      <div class="desc">Open settings</div>
         <kbd>Ctrl + N</kbd>      <div class="desc">Pair a new device</div>
         <kbd>Ctrl + 1 … 9</kbd>  <div class="desc">Switch to paired device by position</div>
+        <kbd>Ctrl + Shift + M</kbd> <div class="desc">Record / stop voice message</div>
         <kbd>Enter</kbd>         <div class="desc">Send message + staged files</div>
         <kbd>Shift + Enter</kbd> <div class="desc">New line in message</div>
         <kbd>Esc</kbd>           <div class="desc">Close current modal or search</div>
@@ -2532,6 +2595,13 @@
 
   const IMAGE_EXT = new Set(["png","jpg","jpeg","gif","webp","bmp","svg"]);
   const isImageName = (name) => IMAGE_EXT.has((name?.split(".").pop() || "").toLowerCase());
+  // v0.9.2: audio extensions render as inline audio bubbles. webm
+  // and ogg cover the MediaRecorder output across browsers; the
+  // others handle inbound forwarded clips.
+  const AUDIO_EXT = new Set([
+    "webm", "ogg", "oga", "opus", "m4a", "mp3", "wav", "aac", "flac",
+  ]);
+  const isAudioName = (name) => AUDIO_EXT.has((name?.split(".").pop() || "").toLowerCase());
 
   // ── v0.5.3: connection-regime classifier ───────────────────────────
   // Tells users where a peer's connection is coming from. Pure
@@ -3974,6 +4044,37 @@
         img.onclick = () => window.open(img.src, "_blank");
         meta.appendChild(img);
       }
+    }
+    // v0.9.2: inline audio player for any received audio file
+    // (voice messages OR forwarded clips). Only after transfer is
+    // complete — mid-flight transfers don't have a file on disk
+    // to source from.
+    if (msg.dir === "in" && kind === "sent" && isAudioName(msg.name)) {
+      const fname = (incomingPath || msg.name || "").toString().split(/[\\\/]/).pop();
+      if (fname) {
+        b.classList.add("audio");
+        const wrap = el("div", "audio-player");
+        const audio = document.createElement("audio");
+        audio.controls = true;
+        audio.preload = "metadata";
+        audio.src = `/api/files/${encodeURIComponent(fname)}`;
+        wrap.appendChild(audio);
+        meta.appendChild(wrap);
+      }
+    }
+    // (Outbound audio: server stages uploads into a temp dir then
+    // removes them after send, so /api/files can't source the
+    // sender's own clip. Sender hears themselves while recording;
+    // re-playback would need a separate outbox-mirror endpoint
+    // — defer that to a follow-up.)
+    if (msg.dir === "out" && kind === "sent" && isAudioName(msg.name)) {
+      b.classList.add("audio");
+      const note = el("div", "audio-player");
+      note.style.fontSize = "11px";
+      note.style.color = "rgba(255,255,255,.75)";
+      note.style.fontStyle = "italic";
+      note.textContent = "🎤 Voice message sent";
+      meta.appendChild(note);
     }
 
     // v0.9.0: text/markdown/code preview toggle for received files
@@ -5775,7 +5876,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.9.1";
+  const PAGE_BUILT_FOR = "0.9.2";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -6367,6 +6468,35 @@
   };
   $("#btn-attach").addEventListener("click", triggerAttach);
   $("#btn-attach2").addEventListener("click", triggerAttach);
+  // v0.9.2 voice — click toggles record / stop. Cancel + Send buttons
+  // in the overlay handle explicit cancel vs send.
+  $("#btn-voice")?.addEventListener("click", () => {
+    if (state.voiceRec) {
+      stopVoiceRecording({ cancel: false });
+    } else {
+      startVoiceRecording();
+    }
+  });
+  $("#voice-cancel")?.addEventListener("click", () => {
+    stopVoiceRecording({ cancel: true });
+    toast("Recording discarded.", "info");
+  });
+  $("#voice-stop")?.addEventListener("click", () => {
+    stopVoiceRecording({ cancel: false });
+  });
+  // Ctrl+Shift+M toggles record. Skipped when typing in an input
+  // (so a chat-line literal "M" still types normally).
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey && e.shiftKey && (e.key === "M" || e.key === "m"))) return;
+    const tag = (document.activeElement?.tagName || "").toLowerCase();
+    if (tag === "textarea" || tag === "input") {
+      // still allow if the chat composer is empty? simpler: allow always
+      // since the chord is unlikely to be hit on accident.
+    }
+    e.preventDefault();
+    if (state.voiceRec) stopVoiceRecording({ cancel: false });
+    else startVoiceRecording();
+  });
   // Screenshot button — reads clipboard image (e.g. from Win+Shift+S) and stages it.
   $("#btn-screenshot").addEventListener("click", async () => {
     if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
@@ -6420,6 +6550,163 @@
     fileInput.value = "";
     for (const f of files) await stageFile(f);
   });
+
+  // ── Voice recording (v0.9.2) ───────────────────────────────────────
+  // Uses MediaRecorder (browser-native opus/webm) + reuses the
+  // existing /api/send-file pipeline. No new wire protocol — the
+  // peer just receives a regular file send; renderFileBubble
+  // recognizes audio extensions and renders a player inline.
+  state.voiceRec = null;        // MediaRecorder instance
+  state.voiceStream = null;     // active MediaStream (must be stopped)
+  state.voiceChunks = [];       // collected blob fragments
+  state.voiceStartedAt = 0;     // ms epoch
+  state.voiceTimerId = null;    // setInterval handle for the live timer
+  state.voiceCancelled = false; // sticky flag so onstop knows not to send
+
+  // Pick the most-supported opus container. Prefer webm/opus (Chrome
+  // + Edge native), fall back to ogg/opus (Firefox), then plain
+  // webm/ogg without explicit opus codec spec (Safari ≥ 14.1
+  // exposes some MediaRecorder support but with audio/mp4).
+  function _pickVoiceMime() {
+    if (!("MediaRecorder" in window)) return null;
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/ogg;codecs=opus",
+      "audio/webm",
+      "audio/ogg",
+      "audio/mp4",
+      "",
+    ];
+    for (const m of candidates) {
+      try {
+        if (m === "" || MediaRecorder.isTypeSupported(m)) return m;
+      } catch { /* keep iterating */ }
+    }
+    return null;
+  }
+
+  function _voiceFilenameFor(mime) {
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    let ext = "webm";
+    if (/ogg/.test(mime)) ext = "ogg";
+    else if (/mp4/.test(mime)) ext = "m4a";
+    return `voice-${ts}.${ext}`;
+  }
+
+  async function startVoiceRecording() {
+    if (state.voiceRec) return;
+    if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
+    const peer = state.peers.get(state.selectedPeer);
+    if (peer?.trust === "rejected") {
+      toast("This device is blocked.", "bad");
+      return;
+    }
+    const mime = _pickVoiceMime();
+    if (mime === null) {
+      toast("This browser doesn't support voice recording.", "warn", 6000);
+      return;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      const why =
+        e?.name === "NotAllowedError" ? "Microphone permission denied." :
+        e?.name === "NotFoundError" ? "No microphone detected." :
+        `Mic access failed: ${e?.message || e}`;
+      toast(why, "bad", 6000);
+      return;
+    }
+    let rec;
+    try {
+      rec = mime ? new MediaRecorder(stream, { mimeType: mime })
+                 : new MediaRecorder(stream);
+    } catch (e) {
+      toast(`Recording failed to start: ${e?.message || e}`, "bad");
+      stream.getTracks().forEach(t => t.stop());
+      return;
+    }
+    state.voiceStream = stream;
+    state.voiceRec = rec;
+    state.voiceChunks = [];
+    state.voiceStartedAt = Date.now();
+    state.voiceCancelled = false;
+    rec.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size > 0) state.voiceChunks.push(ev.data);
+    };
+    rec.onstop = async () => {
+      // Stop the underlying mic stream regardless of cancel/send.
+      try { stream.getTracks().forEach(t => t.stop()); } catch {}
+      stopVoiceTimer();
+      $("#voice-overlay").style.display = "none";
+      $("#btn-voice").classList.remove("recording");
+      $("#btn-voice").textContent = "🎤";
+      const wasCancelled = state.voiceCancelled;
+      const chunks = state.voiceChunks;
+      const recMime = rec.mimeType || mime || "audio/webm";
+      state.voiceRec = null;
+      state.voiceStream = null;
+      state.voiceChunks = [];
+      if (wasCancelled || chunks.length === 0) return;
+      const blob = new Blob(chunks, { type: recMime });
+      // Minimum threshold — anything under 200ms is almost
+      // certainly a misclick. Don't waste a peer-side bubble.
+      if (blob.size < 1024) {
+        toast("Voice clip too short — recording discarded.", "info");
+        return;
+      }
+      const fname = _voiceFilenameFor(recMime);
+      const file = new File([blob], fname, { type: recMime });
+      const sending = toast(`Sending voice message…`, "info", 30000);
+      try {
+        await api.upload(state.selectedPeer, file);
+        sending?.remove();
+      } catch (e) {
+        sending?.remove();
+        toast(`Voice send failed: ${errorToastBody(e)}`, "bad");
+      }
+    };
+    try {
+      rec.start();
+    } catch (e) {
+      toast(`Recording failed to start: ${e?.message || e}`, "bad");
+      stream.getTracks().forEach(t => t.stop());
+      state.voiceRec = null;
+      state.voiceStream = null;
+      return;
+    }
+    $("#btn-voice").classList.add("recording");
+    $("#btn-voice").textContent = "⏹";
+    $("#voice-overlay").style.display = "flex";
+    $("#voice-timer").textContent = "0:00";
+    state.voiceTimerId = setInterval(updateVoiceTimer, 250);
+  }
+
+  function stopVoiceRecording({ cancel = false } = {}) {
+    if (!state.voiceRec) return;
+    state.voiceCancelled = !!cancel;
+    try { state.voiceRec.stop(); } catch {}
+    // onstop handler does the rest.
+  }
+
+  function stopVoiceTimer() {
+    if (state.voiceTimerId !== null) {
+      clearInterval(state.voiceTimerId);
+      state.voiceTimerId = null;
+    }
+  }
+  function updateVoiceTimer() {
+    if (!state.voiceStartedAt) return;
+    const sec = Math.floor((Date.now() - state.voiceStartedAt) / 1000);
+    const m = Math.floor(sec / 60);
+    const s = sec - m * 60;
+    $("#voice-timer").textContent = `${m}:${String(s).padStart(2, "0")}`;
+    // Hard cap at 5 minutes to protect the channel.
+    if (sec >= 300) {
+      stopVoiceRecording({ cancel: false });
+      toast("Voice clip capped at 5 minutes — sending now.", "info", 4000);
+    }
+  }
 
   async function uploadFile(file) {
     if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }

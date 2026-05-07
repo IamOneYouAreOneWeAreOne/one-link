@@ -169,8 +169,15 @@ a specific competitive gap.
     reachable, send chunks in parallel over both, fastest path
     wins per chunk. CDC dedup makes this nearly free.
 
-  - **v0.8.4 — Voice messages.** Browser MediaRecorder → opus
-    blob → file send pipeline. UI: hold-to-record button.
+  - **v0.8.4 — Voice messages.** ✓ Shipped (released as package
+    v0.9.2). MediaRecorder captures opus (webm/ogg fallback chain
+    by browser support) → uploads via existing /api/send-file
+    pipeline → receiver's chat bubble auto-renders an inline
+    audio player. Mic button in composer + Ctrl+Shift+M shortcut.
+    Recording overlay slides in with live timer + Cancel + Send;
+    5-min hard cap, sub-1 KB blobs discarded as misclicks. mic
+    stream tracks explicitly stopped on rec.onstop so OS-level
+    indicator turns off. No schema, no new endpoint.
 
   - **v0.8.5 — Inline previews for PDFs / markdown / code.** ✓
     Markdown + code + plain-text shipped (released as package
