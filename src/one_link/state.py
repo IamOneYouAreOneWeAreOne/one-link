@@ -2481,6 +2481,46 @@ class State:
             )
         return self.get_message(id)
 
+    def clear_peer_history(self, peer_fp: str) -> int:
+        """v0.11.5: hard-delete all message rows for a peer locally.
+        Returns the number of rows deleted. The other side's copy
+        is untouched — this is purely local data hygiene."""
+        with self._write_lock:
+            cur = self._conn.execute(
+                "DELETE FROM messages WHERE peer_fp = ?",
+                (peer_fp,),
+            )
+            return cur.rowcount or 0
+
+    def clear_group_history(self, group_id_hex: str) -> int:
+        """v0.11.5: hard-delete all group message rows locally.
+        Group event log (membership) is preserved — only chat
+        content is wiped. Returns row count.
+
+        Tries `group_messages` table first; falls back to a no-op
+        if the build doesn't have the table yet (very old schemas)."""
+        with self._write_lock:
+            try:
+                cur = self._conn.execute(
+                    "DELETE FROM group_messages WHERE group_id = ?",
+                    (group_id_hex,),
+                )
+                return cur.rowcount or 0
+            except Exception:
+                return 0
+
+    def list_peer_files(self, peer_fp: str) -> list[MessageRecord]:
+        """v0.11.5: messages with file metadata for the media gallery.
+        Returns oldest → newest so the gallery scrolls naturally."""
+        rows = self._conn.execute(
+            "SELECT * FROM messages "
+            "WHERE peer_fp = ? AND msg_type = 'file' "
+            "  AND (deleted_at_ms IS NULL) "
+            "ORDER BY ts_ms ASC",
+            (peer_fp,),
+        ).fetchall()
+        return [self._row_to_msg(r) for r in rows]
+
     def delete_message(
         self, *, id: str, deleted_at_ms: int,
     ) -> Optional[MessageRecord]:

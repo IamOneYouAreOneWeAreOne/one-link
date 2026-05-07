@@ -476,6 +476,12 @@ class UIServer:
         # v0.11.2 per-chat mute with duration (peer + group).
         r.add_post(r"/api/peers/{fp}/mute", self._guarded(self.api_set_peer_mute))
         r.add_post(r"/api/groups/{gid}/mute", self._guarded(self.api_set_group_mute))
+        # v0.11.5 per-chat tools.
+        r.add_delete(r"/api/peers/{fp}/history", self._guarded(self.api_clear_peer_history))
+        r.add_delete(r"/api/groups/{gid}/history", self._guarded(self.api_clear_group_history))
+        r.add_get(r"/api/peers/{fp}/export", self._guarded(self.api_export_peer))
+        r.add_get(r"/api/groups/{gid}/export", self._guarded(self.api_export_group))
+        r.add_get(r"/api/peers/{fp}/media", self._guarded(self.api_peer_media))
         # v0.10.4 presence — set self status; broadcasts to peers.
         r.add_post("/api/presence", self._guarded(self.api_set_presence))
         # v0.10.6 native folder picker — pops a tk dialog on the
@@ -2034,6 +2040,191 @@ class UIServer:
             "ok": True, "group_id": gid_hex,
             "muted_until_ms": until_ms,
         })
+
+    # ─── v0.11.5 per-chat tools ───────────────────────────────────────
+
+    async def api_clear_peer_history(self, request: web.Request) -> web.Response:
+        """v0.11.5: hard-delete every message row exchanged with this
+        peer locally. The peer's copy is untouched; this is purely
+        local data hygiene. Used by 'Clear chat history' in the
+        device drawer."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        rec = self.daemon.state.get_peer(fp)
+        if rec is None:
+            return web.json_response({"error": "peer not found"}, status=404)
+        deleted = self.daemon.state.clear_peer_history(fp)
+        # Broadcast so any open tab refreshes its message list.
+        self.broadcast({
+            "type": "history_cleared", "scope": "peer",
+            "fingerprint": fp, "deleted": deleted,
+        })
+        return web.json_response({"ok": True, "deleted": deleted})
+
+    async def api_clear_group_history(self, request: web.Request) -> web.Response:
+        """v0.11.5: hard-delete every message row in this group locally.
+        Membership / event log is preserved — only chat content is
+        wiped."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        gid_hex = request.match_info["gid"]
+        try:
+            bytes.fromhex(gid_hex)
+        except ValueError:
+            return web.json_response({"error": "bad group id"}, status=400)
+        deleted = self.daemon.state.clear_group_history(gid_hex)
+        self.broadcast({
+            "type": "history_cleared", "scope": "group",
+            "group_id": gid_hex, "deleted": deleted,
+        })
+        return web.json_response({"ok": True, "deleted": deleted})
+
+    async def api_export_peer(self, request: web.Request) -> web.Response:
+        """v0.11.5: export the conversation with this peer as JSON
+        (default) or Markdown. ?format=md|json. Downloads as a file
+        via Content-Disposition: attachment."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        rec = self.daemon.state.get_peer(fp)
+        if rec is None:
+            return web.json_response({"error": "peer not found"}, status=404)
+        fmt = (request.query.get("format") or "json").lower()
+        if fmt not in ("json", "md", "markdown"):
+            return web.json_response(
+                {"error": "format must be json, md, or markdown"},
+                status=400,
+            )
+        # Pull all (not just recent). 100k cap as a sanity bound; very
+        # active chats can ship the rest via successive exports if
+        # ever needed.
+        msgs = self.daemon.state.recent_messages(peer_fp=fp, limit=100_000)
+        peer_label = rec.display_name or rec.hostname or rec.short_id
+        return self._render_conversation_export(
+            messages=msgs, fmt=fmt,
+            title=f"Conversation with {peer_label}",
+            filename_stem=f"one-link-{rec.short_id}",
+            self_label=self.daemon.me.hostname or "Me",
+            other_label=peer_label,
+        )
+
+    async def api_export_group(self, request: web.Request) -> web.Response:
+        """v0.11.5: same as api_export_peer but for a group's
+        message log."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        gid_hex = request.match_info["gid"]
+        try:
+            bytes.fromhex(gid_hex)
+        except ValueError:
+            return web.json_response({"error": "bad group id"}, status=400)
+        fmt = (request.query.get("format") or "json").lower()
+        if fmt not in ("json", "md", "markdown"):
+            return web.json_response(
+                {"error": "format must be json, md, or markdown"},
+                status=400,
+            )
+        mat = self._materialize_group(bytes.fromhex(gid_hex))
+        title = (mat.get("name") if mat else None) or f"Group {gid_hex[:8]}"
+        # recent_group_messages already exists; pull a generous batch.
+        with contextlib.suppress(Exception):
+            self.daemon.state.recent_group_messages
+        msgs = self.daemon.state.recent_group_messages(
+            group_id=bytes.fromhex(gid_hex), limit=100_000,
+        )
+        return self._render_conversation_export(
+            messages=msgs, fmt=fmt,
+            title=f"Group: {title}",
+            filename_stem=f"one-link-group-{gid_hex[:8]}",
+            self_label=self.daemon.me.hostname or "Me",
+            other_label=title,
+            is_group=True,
+        )
+
+    def _render_conversation_export(
+        self, *, messages, fmt: str,
+        title: str, filename_stem: str,
+        self_label: str, other_label: str,
+        is_group: bool = False,
+    ) -> web.Response:
+        """Serialize a list of MessageRecord (or group equivalents)
+        into JSON or Markdown + the right Content-Disposition header
+        for browser download."""
+        from datetime import datetime, timezone
+        # Normalize each row into a small dict shape we can render
+        # in either format. Groups have slightly different keys.
+        rows: list[dict] = []
+        for m in messages:
+            ts = getattr(m, "ts_ms", None) or getattr(m, "timestamp_ms", None) or 0
+            iso = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
+            who = "?"
+            if hasattr(m, "direction"):
+                who = self_label if m.direction == "out" else other_label
+            elif hasattr(m, "author_pubkey"):
+                if m.author_pubkey == self.daemon.me.public_bytes:
+                    who = self_label
+                else:
+                    who = "peer"  # group sender label is informational
+            rows.append({
+                "id": getattr(m, "id", ""),
+                "ts_ms": ts,
+                "ts": iso,
+                "who": who,
+                "type": getattr(m, "msg_type", "text"),
+                "body": getattr(m, "body", "") or "",
+            })
+        ts_now = int(time.time())
+        if fmt == "json":
+            payload = {
+                "title": title,
+                "exported_at_ms": ts_now * 1000,
+                "is_group": is_group,
+                "messages": rows,
+            }
+            body = json.dumps(payload, indent=2, ensure_ascii=False)
+            ct = "application/json"
+            ext = "json"
+        else:
+            lines = [f"# {title}", "", f"_Exported {ts_now}_", ""]
+            for r in rows:
+                lines.append(f"**{r['who']}** · {r['ts']}")
+                if r["type"] == "file":
+                    lines.append(f"📎 _file: {r['body']}_")
+                else:
+                    lines.append(r["body"] or "_(empty)_")
+                lines.append("")
+            body = "\n".join(lines)
+            ct = "text/markdown"
+            ext = "md"
+        resp = web.Response(text=body, content_type=ct, charset="utf-8")
+        resp.headers["Content-Disposition"] = (
+            f'attachment; filename="{filename_stem}-{ts_now}.{ext}"'
+        )
+        return resp
+
+    async def api_peer_media(self, request: web.Request) -> web.Response:
+        """v0.11.5: list files exchanged with this peer for the
+        media gallery view in the device drawer."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        rec = self.daemon.state.get_peer(fp)
+        if rec is None:
+            return web.json_response({"error": "peer not found"}, status=404)
+        msgs = self.daemon.state.list_peer_files(fp)
+        out = []
+        for m in msgs:
+            md = m.metadata or {}
+            out.append({
+                "id": m.id,
+                "ts_ms": m.ts_ms,
+                "direction": m.direction,
+                "name": md.get("filename") or m.body or "(file)",
+                "size": md.get("size"),
+                "mime": md.get("mime"),
+            })
+        return web.json_response({"items": out})
 
     # ─── key-change events (v0.7.8) ───────────────────────────────────
 

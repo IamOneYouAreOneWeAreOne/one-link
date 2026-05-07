@@ -3377,6 +3377,21 @@
         <button class="btn-ghost" id="group-copy-invite">Copy invite link</button>
       </div>
 
+      <!-- v0.11.5 per-group chat tools. Local-only operations —
+           Other members keep their copies untouched. -->
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Chat tools</span></div>
+        <div class="mini-actions wrap">
+          <button class="btn-ghost" id="group-export-md">Export · Markdown</button>
+          <button class="btn-ghost" id="group-export-json">Export · JSON</button>
+          <button class="btn-danger" id="group-clear-history">Clear local history</button>
+        </div>
+        <p class="settings-help">
+          Clearing only deletes your local copy. Group members
+          keep their own histories on their devices.
+        </p>
+      </div>
+
       <!-- v0.11.3: archive — local-only "hide from sidebar" without
            leaving. Other members aren't affected. -->
       <div class="settings-section">
@@ -3589,6 +3604,33 @@
         </p>
       </div>
 
+      <!-- v0.11.5 per-chat tools. Wallpaper accent + media + export
+           + clear-history. Each is local-only — peer's data stays
+           untouched. -->
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Chat wallpaper</span></div>
+        <p class="settings-help">
+          Local-only color tint applied to this conversation's
+          background. The peer doesn't see it.
+        </p>
+        <div class="profile-color-swatches" id="dev-wallpaper-swatches"></div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Chat tools</span></div>
+        <div class="mini-actions wrap">
+          <button class="btn-ghost" id="dev-media-gallery">Media gallery</button>
+          <button class="btn-ghost" id="dev-export-md">Export · Markdown</button>
+          <button class="btn-ghost" id="dev-export-json">Export · JSON</button>
+          <button class="btn-danger" id="dev-clear-history">Clear local history</button>
+        </div>
+        <p class="settings-help">
+          "Clear local history" deletes only your copy of this
+          conversation; the peer's messages on their device are
+          untouched.
+        </p>
+      </div>
+
       <div class="settings-section">
         <div class="settings-section-h"><span>Trust actions</span></div>
         <div class="mini-actions wrap">
@@ -3600,6 +3642,22 @@
       <div class="actions">
         <button class="btn-ghost" id="device-cancel">Close</button>
         <button class="btn-primary" id="device-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v0.11.5 media gallery modal. Lists files exchanged in the
+       active chat with Open/Download links. -->
+  <div class="modal-backdrop" id="media-gallery-backdrop">
+    <div class="modal" style="max-width:640px;">
+      <div class="settings-header">
+        <h2 id="media-gallery-title">Shared files</h2>
+        <button class="settings-close" id="media-gallery-close" title="Close" aria-label="Close media gallery">×</button>
+      </div>
+      <div class="settings-body">
+        <div class="settings-pane-host" style="grid-column: 1 / -1;">
+          <div id="media-gallery-list"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -6164,6 +6222,8 @@
     renderGroupConversation();
     renderPins();
     restoreDraft();
+    // v0.11.5 — apply this group's wallpaper accent.
+    applyActiveChatWallpaper();
     $("#input").focus();
   }
 
@@ -7164,6 +7224,8 @@
     $("#convo-who").title = "Open device settings";
     $("#btn-group-settings").style.display = "none";
     $("#btn-attach").style.display = "";
+    // v0.11.5 — apply this peer's wallpaper accent.
+    applyActiveChatWallpaper();
     if (state.replyTo?.group_id) clearReplyTo();
     $("#convo-name").textContent = peer.display_name || peer.hostname || "(unknown)";
     // v0.10.2: surface disappearing-message badge in the conversation
@@ -7458,6 +7520,11 @@
       $("#dev-mute-status"),
       peer.muted_until_ms,
       !!peer.muted,
+    );
+    // v0.11.5 wallpaper picker.
+    _renderChatWallpaperSwatches(
+      $("#dev-wallpaper-swatches"),
+      "peer", peer.fingerprint,
     );
     const dur = $("#dev-mute-duration");
     if (dur) dur.value = "";  // Reset picker each open.
@@ -7855,6 +7922,171 @@
       toast(`Block failed: ${e.message || e}`, "bad");
     }
   };
+
+  // v0.11.5 per-chat tools — peer scope.
+  $("#dev-clear-history")?.addEventListener("click", async () => {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    if (!confirm(
+      "Clear local chat history with this device?\n\n" +
+      "Only YOUR copy is deleted. The peer keeps their messages."
+    )) return;
+    try {
+      const r = await api.del(`/api/peers/${fp}/history`);
+      toast(`Cleared ${r.deleted || 0} message${r.deleted === 1 ? "" : "s"}`, "good");
+      // Reload current view if we're looking at this peer.
+      if (state.selectedPeer) {
+        const peer = state.peers.get(state.selectedPeer);
+        if (peer && peer.fingerprint === fp) {
+          await loadHistory();
+        }
+      }
+    } catch (e) {
+      toast(`Clear failed: ${errorToastBody(e)}`, "bad");
+    }
+  });
+  $("#dev-export-md")?.addEventListener("click", () => {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    _downloadConvoExport(`/api/peers/${fp}/export?format=md`);
+  });
+  $("#dev-export-json")?.addEventListener("click", () => {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    _downloadConvoExport(`/api/peers/${fp}/export?format=json`);
+  });
+  $("#dev-media-gallery")?.addEventListener("click", () => {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    openMediaGallery(fp);
+  });
+
+  // v0.11.5 — kick off a download via a temporary anchor. Avoids the
+  // CORS / fetch-blob dance and lets the browser handle saving.
+  function _downloadConvoExport(url) {
+    const a = document.createElement("a");
+    a.href = url;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  // v0.11.5 — wallpaper accent for an individual peer chat.
+  // Settings keyed in localStorage by fingerprint so each chat
+  // can have its own tint without sending anything to the server.
+  const _CHAT_WALLPAPER_PRESETS = [
+    "",  // None / default
+    "#1a1f3a", "#1f1a3a", "#1a3a2f", "#3a2f1a",
+    "#3a1a2a", "#1a2e3a", "#2a3a1a", "#3a1a1a",
+  ];
+  function getChatWallpaper(scope, key) {
+    return localStorage.getItem(`one_link.chat_wallpaper.${scope}.${key}`) || "";
+  }
+  function setChatWallpaper(scope, key, hex) {
+    if (!hex) {
+      localStorage.removeItem(`one_link.chat_wallpaper.${scope}.${key}`);
+    } else {
+      localStorage.setItem(`one_link.chat_wallpaper.${scope}.${key}`, hex);
+    }
+    applyActiveChatWallpaper();
+  }
+  function applyActiveChatWallpaper() {
+    const host = document.querySelector("#convo-active");
+    if (!host) return;
+    let hex = "";
+    if (state.selectedPeer) {
+      const peer = state.peers.get(state.selectedPeer);
+      if (peer?.fingerprint) {
+        hex = getChatWallpaper("peer", peer.fingerprint);
+      }
+    } else if (state.selectedGroup) {
+      hex = getChatWallpaper("group", state.selectedGroup);
+    }
+    host.style.background = hex || "";
+  }
+  function _renderChatWallpaperSwatches(host, scope, key) {
+    if (!host) return;
+    host.innerHTML = "";
+    const current = getChatWallpaper(scope, key);
+    for (const c of _CHAT_WALLPAPER_PRESETS) {
+      const sw = document.createElement("button");
+      sw.className = "profile-color-swatch" + (c === current ? " active" : "");
+      sw.style.background = c || "var(--bg)";
+      sw.dataset.color = c;
+      sw.title = c || "None";
+      if (c === "") {
+        sw.textContent = "✕";
+        sw.style.color = "var(--text-dim)";
+        sw.style.fontSize = "11px";
+      }
+      sw.onclick = (ev) => {
+        ev.preventDefault();
+        host.querySelectorAll(".profile-color-swatch").forEach(
+          (b) => b.classList.toggle("active", b === sw),
+        );
+        setChatWallpaper(scope, key, c);
+      };
+      host.appendChild(sw);
+    }
+  }
+
+  // v0.11.5 — media gallery modal (peer scope only for now; group
+  // gallery slots in here once the backend list_group_files lands).
+  async function openMediaGallery(fp) {
+    const host = $("#media-gallery-list");
+    const title = $("#media-gallery-title");
+    if (!host) return;
+    host.innerHTML = "<p class=\"settings-help\">Loading…</p>";
+    const peer = [...state.peers.values()].find(p => p.fingerprint === fp);
+    if (title) {
+      title.textContent = `Shared files · ${peer?.display_name || peer?.hostname || "device"}`;
+    }
+    $("#media-gallery-backdrop").classList.add("show");
+    try {
+      const r = await api.get(`/api/peers/${fp}/media`);
+      _renderMediaGallery(host, r.items || []);
+    } catch (e) {
+      host.innerHTML = `<p class="settings-help">Failed to load: ${errorToastBody(e)}</p>`;
+    }
+  }
+  function _renderMediaGallery(host, items) {
+    host.innerHTML = "";
+    if (items.length === 0) {
+      const p = el("p", "settings-help blocked-empty",
+        "No files exchanged in this chat yet.");
+      host.appendChild(p);
+      return;
+    }
+    for (const it of items) {
+      const row = el("div", "blocked-row");
+      const wrap = el("div");
+      wrap.style.flex = "1";
+      wrap.appendChild(el("div", "name", it.name || "(file)"));
+      const subBits = [];
+      if (it.size != null) subBits.push(fmtBytes(it.size));
+      if (it.direction) subBits.push(it.direction === "out" ? "Sent" : "Received");
+      if (it.ts_ms) subBits.push(new Date(it.ts_ms).toLocaleString());
+      wrap.appendChild(el("div", "sub", subBits.join(" · ")));
+      row.appendChild(wrap);
+      // For inbox files we have a direct download URL via /api/files.
+      if (it.direction === "in" && it.name) {
+        const dl = el("a", "btn-ghost", "Download");
+        dl.href = `/api/files/${encodeURIComponent(it.name)}`;
+        dl.setAttribute("download", it.name);
+        row.appendChild(dl);
+      }
+      host.appendChild(row);
+    }
+  }
+  $("#media-gallery-close")?.addEventListener("click", () => {
+    $("#media-gallery-backdrop").classList.remove("show");
+  });
+  $("#media-gallery-backdrop")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) {
+      $("#media-gallery-backdrop").classList.remove("show");
+    }
+  });
   $("#device-save").onclick = async () => {
     const fp = state.deviceDrawerFp;
     const pending = state.deviceDrawerPending;
@@ -8042,7 +8274,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.11.4";
+  const PAGE_BUILT_FOR = "0.11.5";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -8106,6 +8338,37 @@
     // v0.11.3 — new group-settings actions.
     $("#group-mute-apply")?.addEventListener("click", applyGroupMute);
     $("#group-archive-toggle")?.addEventListener("click", toggleArchiveCurrentGroup);
+    // v0.11.5 — group chat tools.
+    $("#group-clear-history")?.addEventListener("click", async () => {
+      const gid = state.selectedGroup;
+      if (!gid) return;
+      if (!confirm(
+        "Clear local chat history for this group?\n\n" +
+        "Only YOUR copy is deleted. Other members keep their messages."
+      )) return;
+      try {
+        const r = await api.del(`/api/groups/${gid}/history`);
+        toast(`Cleared ${r.deleted || 0} message${r.deleted === 1 ? "" : "s"}`, "good");
+        if (state.selectedGroup === gid) {
+          state.groupMessages = [];
+          if (typeof renderGroupConversation === "function") {
+            renderGroupConversation();
+          }
+        }
+      } catch (e) {
+        toast(`Clear failed: ${errorToastBody(e)}`, "bad");
+      }
+    });
+    $("#group-export-md")?.addEventListener("click", () => {
+      const gid = state.selectedGroup;
+      if (!gid) return;
+      _downloadConvoExport(`/api/groups/${gid}/export?format=md`);
+    });
+    $("#group-export-json")?.addEventListener("click", () => {
+      const gid = state.selectedGroup;
+      if (!gid) return;
+      _downloadConvoExport(`/api/groups/${gid}/export?format=json`);
+    });
   }
 
   // v0.7.x: notification toggle in Settings modal.
