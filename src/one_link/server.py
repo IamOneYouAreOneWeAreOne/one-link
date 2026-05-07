@@ -265,6 +265,17 @@ class UIServer:
         r.add_post(r"/api/messages/{msg_id}/edit", self._guarded(self.api_edit_message))
         r.add_post(r"/api/messages/{msg_id}/delete", self._guarded(self.api_delete_message))
         r.add_post(r"/api/peers/{fp}/read", self._guarded(self.api_set_read_marker))
+        # v0.8.0: group endpoints.
+        r.add_get("/api/groups", self._guarded(self.api_list_groups))
+        r.add_post("/api/groups", self._guarded(self.api_create_group))
+        r.add_get(r"/api/groups/{gid}", self._guarded(self.api_get_group))
+        r.add_get(r"/api/groups/{gid}/messages", self._guarded(self.api_group_messages))
+        r.add_post(r"/api/groups/{gid}/send", self._guarded(self.api_send_group))
+        r.add_post(r"/api/groups/{gid}/members", self._guarded(self.api_add_group_member))
+        r.add_delete(
+            r"/api/groups/{gid}/members/{member_fp}",
+            self._guarded(self.api_remove_group_member),
+        )
         r.add_get("/api/search", self._guarded(self.api_search))
         r.add_post("/api/send", self._guarded(self.api_send))
         r.add_post("/api/send-file", self._guarded(self.api_send_file))
@@ -1578,6 +1589,221 @@ class UIServer:
         except Exception as e:
             log.debug("send_read_marker failed: %s", e)
             return web.json_response({"ok": True, "delivered": False})
+
+    # ─── /api/groups (v0.8.0) ─────────────────────────────────────────
+
+    def _materialize_group(self, gid: bytes) -> dict | None:
+        """Internal helper: reduce events → membership + name +
+        our role. Returns None if no events."""
+        if self.daemon.state is None:
+            return None
+        try:
+            wire_events = self.daemon.state.list_group_events(gid)
+        except Exception:
+            return None
+        if not wire_events:
+            return None
+        from one_link import groups as gmod
+        from one_link.identity import fingerprint_of
+        events = [gmod.GroupEvent.from_wire(w) for w in wire_events]
+        gstate = gmod.reduce_events(events)
+        if gstate is None:
+            return None
+        my_pub = self.daemon.me.public_bytes
+        my_role = gstate.role_of(my_pub)
+        members = []
+        for pub in gstate.members:
+            fp = fingerprint_of(pub)
+            rec = self.daemon.state.get_peer(fp)
+            members.append({
+                "fingerprint": fp,
+                "pubkey_hex": pub.hex(),
+                "role": gstate.role_of(pub),
+                "display_name": (
+                    rec.display_name if rec
+                    else ("you" if pub == my_pub else fp[:8])
+                ),
+                "is_me": (pub == my_pub),
+            })
+        return {
+            "group_id": gid.hex(),
+            "name": gstate.name or "",
+            "members": members,
+            "member_count": len(gstate.members),
+            "my_role": my_role,
+            "is_member": my_pub in gstate.members,
+        }
+
+    async def api_list_groups(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"groups": []})
+        gids = self.daemon.state.list_group_ids()
+        out = []
+        for gid in gids:
+            mat = self._materialize_group(gid)
+            if mat and mat.get("is_member"):
+                out.append({
+                    "group_id": mat["group_id"],
+                    "name": mat["name"],
+                    "member_count": mat["member_count"],
+                    "my_role": mat["my_role"],
+                })
+        return web.json_response({"groups": out})
+
+    async def api_create_group(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        name = (data.get("name") or "").strip()
+        if not name:
+            return web.json_response({"error": "name required"}, status=400)
+        if len(name) > 64:
+            return web.json_response({"error": "name too long"}, status=400)
+        member_fps = data.get("members") or []
+        if not isinstance(member_fps, list):
+            return web.json_response(
+                {"error": "members must be a list of fingerprints"},
+                status=400,
+            )
+        # Resolve each fp → pubkey via the peer record.
+        member_pubkeys: list[bytes] = []
+        for fp in member_fps:
+            rec = self.daemon.state.get_peer(str(fp))
+            if rec is None or rec.trust != "pinned":
+                return web.json_response(
+                    {"error": f"member must be a paired (pinned) peer: {fp}"},
+                    status=400,
+                )
+            if rec.pubkey:
+                member_pubkeys.append(rec.pubkey)
+        try:
+            result = await self.daemon.create_group(
+                name=name, member_pubkeys=member_pubkeys,
+            )
+            return web.json_response({"ok": True, **result})
+        except Exception as e:
+            log.exception("create_group failed: %s", e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def api_get_group(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        gid_hex = request.match_info["gid"]
+        try:
+            gid = bytes.fromhex(gid_hex)
+        except ValueError:
+            return web.json_response({"error": "bad group id"}, status=400)
+        mat = self._materialize_group(gid)
+        if mat is None:
+            return web.json_response({"error": "group not found"}, status=404)
+        return web.json_response(mat)
+
+    async def api_group_messages(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"messages": []})
+        gid_hex = request.match_info["gid"]
+        try:
+            gid = bytes.fromhex(gid_hex)
+        except ValueError:
+            return web.json_response({"error": "bad group id"}, status=400)
+        try:
+            limit = max(1, min(int(request.query.get("limit", "200")), 5000))
+        except ValueError:
+            limit = 200
+        rows = self.daemon.state.recent_group_messages(group_id=gid, limit=limit)
+        # rows carry raw bytes for sender_pub + group_id; rewrite for JSON.
+        out = []
+        for r in rows:
+            sender_pub = r.get("sender_pub")
+            out.append({
+                "id": r.get("id"),
+                "group_id": gid_hex,
+                "sender_pub_hex": (
+                    sender_pub.hex() if isinstance(sender_pub, bytes)
+                    else (str(sender_pub) if sender_pub else "")
+                ),
+                "epoch": r.get("epoch"),
+                "counter": r.get("counter"),
+                "direction": r.get("direction"),
+                "body": r.get("body"),
+                "ts_ms": r.get("ts_ms"),
+            })
+        return web.json_response({"messages": out})
+
+    async def api_send_group(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        gid_hex = request.match_info["gid"]
+        try:
+            gid = bytes.fromhex(gid_hex)
+        except ValueError:
+            return web.json_response({"error": "bad group id"}, status=400)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        body = data.get("body")
+        if not isinstance(body, str) or not body.strip():
+            return web.json_response(
+                {"error": "body must be a non-empty string"}, status=400,
+            )
+        try:
+            result = await self.daemon.send_group_message(group_id=gid, body=body)
+            return web.json_response({"ok": True, **result})
+        except Exception as e:
+            log.exception("send_group_message failed: %s", e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def api_add_group_member(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        gid_hex = request.match_info["gid"]
+        try:
+            gid = bytes.fromhex(gid_hex)
+        except ValueError:
+            return web.json_response({"error": "bad group id"}, status=400)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        fp = (data.get("fp") or "").strip()
+        role = (data.get("role") or "member").strip()
+        rec = self.daemon.state.get_peer(fp)
+        if rec is None or rec.trust != "pinned" or not rec.pubkey:
+            return web.json_response(
+                {"error": "member must be a paired (pinned) peer"},
+                status=400,
+            )
+        try:
+            result = await self.daemon.add_group_member(
+                group_id=gid, member_pubkey=rec.pubkey, role=role,
+            )
+            return web.json_response({"ok": True, **result})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def api_remove_group_member(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        gid_hex = request.match_info["gid"]
+        try:
+            gid = bytes.fromhex(gid_hex)
+        except ValueError:
+            return web.json_response({"error": "bad group id"}, status=400)
+        member_fp = request.match_info["member_fp"]
+        rec = self.daemon.state.get_peer(member_fp)
+        if rec is None or not rec.pubkey:
+            return web.json_response({"error": "unknown member"}, status=404)
+        try:
+            result = await self.daemon.remove_group_member(
+                group_id=gid, member_pubkey=rec.pubkey,
+            )
+            return web.json_response({"ok": True, **result})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
 
     # ─── /api/search ──────────────────────────────────────────────────
     async def api_search(self, request: web.Request) -> web.Response:

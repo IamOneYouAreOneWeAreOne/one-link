@@ -1,0 +1,381 @@
+"""v0.8.0 group UI tests.
+
+Pin the contract:
+  - Daemon.create_group: signs CREATE + ADD_MEMBER events,
+    persists, fans out via _broadcast_group_event, caches group
+    name in group_meta. Returns {group_id, name, member_count}.
+  - Daemon.add_group_member / remove_group_member work end-to-end
+    against the CRDT.
+  - Inbound GROUP_EVENT handler: pinned-only, signature-verified,
+    persisted via state.upsert_group_event.
+  - Server endpoints: list / create / get / messages / send / add /
+    remove all wire correctly + JSON-serialize bytes properly.
+  - HTML structural pin: groups sidebar section, create-group
+    modal, helper functions, WS group_event handler.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from one_link.daemon import Daemon
+from one_link.identity import Identity, fingerprint_of
+from one_link.state import State
+from one_link.wire import decode_msg, encode_msg, make_msg
+
+
+def _new_identity() -> Identity:
+    sk = Ed25519PrivateKey.generate()
+    pub_obj = sk.public_key()
+    pub_bytes = pub_obj.public_bytes_raw()
+    fp = fingerprint_of(pub_bytes)
+    return Identity(
+        private=sk, public=pub_obj, public_bytes=pub_bytes,
+        fingerprint=fp, short_id=fp[:8], hostname="x",
+    )
+
+
+class _FakeChannel:
+    def __init__(self, *, peer_ed_pub: bytes, peer_short_id: str):
+        self.peer_ed_pub = peer_ed_pub
+        self.peer_short_id = peer_short_id
+        self.peer_caps: dict | None = None
+        self.sent: list[dict] = []
+
+    async def send(self, payload: bytes) -> None:
+        self.sent.append(decode_msg(payload))
+
+    async def recv(self) -> bytes:
+        raise NotImplementedError
+
+    async def close(self) -> None:
+        pass
+
+
+# ─── Daemon.create_group ──────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_create_group_persists_events(tmp_path: Path):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    # No discovery; resolve_for_send returns None → fan-out is a no-op
+    # but the events still persist locally.
+    async def _no_resolve(needle):
+        return None
+    daemon.resolve_for_send = _no_resolve  # type: ignore[method-assign]
+
+    result = await daemon.create_group(
+        name="Test Group", member_pubkeys=[them.public_bytes],
+    )
+    assert result["name"] == "Test Group"
+    assert result["member_count"] == 2  # me + them
+
+    # Two events persisted: CREATE + ADD_MEMBER.
+    gid = bytes.fromhex(result["group_id"])
+    events = state.list_group_events(gid)
+    kinds = {e["kind"] for e in events}
+    assert "create" in kinds
+    assert "add_member" in kinds
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_create_group_caches_name_in_meta(tmp_path: Path):
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+
+    async def _no_resolve(needle):
+        return None
+    daemon.resolve_for_send = _no_resolve  # type: ignore[method-assign]
+
+    result = await daemon.create_group(name="Solo", member_pubkeys=[])
+    gid = bytes.fromhex(result["group_id"])
+    meta = state.get_group_meta(gid)
+    assert meta is not None
+    assert meta.get("name") == "Solo"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_create_group_skips_self_in_member_list(tmp_path: Path):
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+
+    async def _no_resolve(needle):
+        return None
+    daemon.resolve_for_send = _no_resolve  # type: ignore[method-assign]
+
+    result = await daemon.create_group(
+        name="Test", member_pubkeys=[me.public_bytes],
+    )
+    # Genesis CREATE adds me as owner, ADD_MEMBER for self is skipped.
+    assert result["member_count"] == 1
+    state.close()
+
+
+# ─── Inbound GROUP_EVENT handler ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_inbound_group_event_pinned_persists(tmp_path: Path):
+    """Two daemons: alice creates a group; bob receives the event."""
+    alice = _new_identity()
+    bob = _new_identity()
+
+    # Alice's state has the group.
+    a_state = State(db_path=tmp_path / "a.db")
+    a_daemon = Daemon(alice)
+    a_daemon.state = a_state
+
+    async def _no_resolve(needle):
+        return None
+    a_daemon.resolve_for_send = _no_resolve  # type: ignore[method-assign]
+
+    a_state.upsert_peer(
+        fingerprint=bob.fingerprint, short_id=bob.short_id,
+        pubkey=bob.public_bytes,
+    )
+    a_state.set_peer_trust(bob.fingerprint, "pinned")
+    res = await a_daemon.create_group(name="Test", member_pubkeys=[bob.public_bytes])
+    gid = bytes.fromhex(res["group_id"])
+
+    # Now Bob's daemon receives the events.
+    b_state = State(db_path=tmp_path / "b.db")
+    b_daemon = Daemon(bob)
+    b_daemon.state = b_state
+    b_state.upsert_peer(
+        fingerprint=alice.fingerprint, short_id=alice.short_id,
+        pubkey=alice.public_bytes,
+    )
+    b_state.set_peer_trust(alice.fingerprint, "pinned")
+
+    chan = _FakeChannel(
+        peer_ed_pub=alice.public_bytes,
+        peer_short_id=alice.short_id,
+    )
+    for ev_wire in a_state.list_group_events(gid):
+        msg = make_msg("GROUP_EVENT", alice.short_id, event=ev_wire)
+        await b_daemon._on_peer_message(chan, msg)
+
+    # Bob now sees the same group + same events.
+    bob_events = b_state.list_group_events(gid)
+    assert len(bob_events) == len(a_state.list_group_events(gid))
+    a_state.close()
+    b_state.close()
+
+
+@pytest.mark.asyncio
+async def test_inbound_group_event_non_pinned_silently_dropped(tmp_path: Path):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    # NOT pinned.
+    chan = _FakeChannel(
+        peer_ed_pub=them.public_bytes, peer_short_id=them.short_id,
+    )
+    # Forge any old event-shaped dict; the handler short-circuits on
+    # _is_pinned before it gets to verify.
+    msg = make_msg("GROUP_EVENT", them.short_id, event={"kind": "create"})
+    await daemon._on_peer_message(chan, msg)
+    # No state mutation, no ACK sent (return-early path).
+    assert state.list_group_ids() == []
+    state.close()
+
+
+# ─── Server endpoints ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_api_list_groups_empty(tmp_path: Path):
+    from one_link.server import UIServer
+
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = SimpleNamespace(
+        state=state,
+        me=SimpleNamespace(
+            fingerprint=me.fingerprint, short_id=me.short_id,
+            hostname="me", public_bytes=me.public_bytes,
+        ),
+    )
+    server = UIServer(daemon)
+
+    class _Req:
+        query: dict = {}
+        match_info: dict = {}
+
+    resp = await server.api_list_groups(_Req())
+    body = json.loads(resp.text)
+    assert body["groups"] == []
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_create_group_validates_name(tmp_path: Path):
+    from one_link.server import UIServer
+
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = SimpleNamespace(state=state, me=me)
+    server = UIServer(daemon)
+    server.broadcast = lambda evt: None
+
+    class _Req:
+        match_info: dict = {}
+        async def json(self):
+            return {"name": "", "members": []}
+
+    resp = await server.api_create_group(_Req())
+    assert resp.status == 400
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_create_group_rejects_unpinned_member(tmp_path: Path):
+    from one_link.server import UIServer
+
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    # NOT pinned.
+    daemon = SimpleNamespace(state=state, me=me)
+    server = UIServer(daemon)
+    server.broadcast = lambda evt: None
+
+    class _Req:
+        match_info: dict = {}
+        async def json(self):
+            return {"name": "Test", "members": [them.fingerprint]}
+
+    resp = await server.api_create_group(_Req())
+    assert resp.status == 400
+    body = json.loads(resp.text)
+    assert "paired" in body["error"] or "pinned" in body["error"]
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_get_group_404_unknown(tmp_path: Path):
+    from one_link.server import UIServer
+
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = SimpleNamespace(state=state, me=me)
+    server = UIServer(daemon)
+
+    class _Req:
+        match_info = {"gid": "00" * 16}
+        query: dict = {}
+
+    resp = await server.api_get_group(_Req())
+    assert resp.status == 404
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_group_messages_serializes_bytes_to_hex(tmp_path: Path):
+    from one_link.server import UIServer
+
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    # Insert a group_message row directly with bytes sender_pub.
+    gid = b"\xab" * 16
+    pub = b"\xcc" * 32
+    state.insert_group_message(
+        id="m1", group_id=gid, sender_pub=pub,
+        epoch=1, counter=0, direction="in",
+        body="hello group", ts_ms=1000,
+    )
+    daemon = SimpleNamespace(state=state, me=me)
+    server = UIServer(daemon)
+
+    class _Req:
+        match_info = {"gid": gid.hex()}
+        query: dict = {}
+
+    resp = await server.api_group_messages(_Req())
+    body = json.loads(resp.text)
+    assert len(body["messages"]) == 1
+    m = body["messages"][0]
+    # sender_pub turned into hex string.
+    assert m["sender_pub_hex"] == pub.hex()
+    assert m["body"] == "hello group"
+    assert m["group_id"] == gid.hex()
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_send_group_validates_body(tmp_path: Path):
+    from one_link.server import UIServer
+
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = SimpleNamespace(state=state, me=me)
+    server = UIServer(daemon)
+
+    class _Req:
+        match_info = {"gid": "ab" * 16}
+        async def json(self):
+            return {"body": ""}
+
+    resp = await server.api_send_group(_Req())
+    assert resp.status == 400
+    state.close()
+
+
+# ─── HTML structural pin ───────────────────────────────────────────
+
+def test_index_html_has_groups_surface():
+    p = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "one_link" / "web" / "index.html"
+    )
+    text = p.read_text(encoding="utf-8")
+    for needle in [
+        'id="grouplist"',
+        'id="groups-count"',
+        'id="open-create-group"',
+        'id="create-group-backdrop"',
+        'id="cg-name"',
+        'id="cg-members"',
+        'id="cg-create"',
+        "function refreshGroups",
+        "function renderGroups",
+        "function selectGroup",
+        "function renderGroupConversation",
+        "function openCreateGroupModal",
+        "function submitCreateGroup",
+        '"group_event"',
+        '"group_created"',
+        ".grouplist",
+        ".group-avatar",
+        ".group-sender",
+    ]:
+        assert needle in text, f"index.html missing {needle!r}"

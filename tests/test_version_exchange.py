@@ -98,6 +98,8 @@ async def test_api_me_exposes_app_version():
                 assert r.status == 200
                 j = await r.json()
                 assert j.get("app_version") == __version__
+                assert j.get("protocol_version")
+                assert j.get("schema_version", 0) >= 1
 
 
 # ─── 3. /api/peers carries each peer's app_version after CAPS ─────────

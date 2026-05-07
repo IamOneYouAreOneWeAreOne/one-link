@@ -1003,6 +1003,25 @@
   }
   .reply-bar .reply-bar-close:hover { color: var(--text); }
 
+  /* v0.8.0: groups sidebar + sender label */
+  .grouplist { padding: 0 8px 8px; }
+  .group-row .avatar.group-avatar {
+    background: rgba(78,193,255,.14); color: var(--accent-2, #4ec1ff);
+    font-size: 14px;
+  }
+  .msg .group-sender {
+    font-size: 10.5px; color: var(--accent-2, #4ec1ff);
+    font-weight: 600; margin-bottom: 2px;
+    text-transform: uppercase; letter-spacing: .4px;
+  }
+  .cg-member-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 4px; cursor: pointer; border-radius: 4px;
+  }
+  .cg-member-row:hover { background: var(--bg-2); }
+  .cg-member-row input[type="checkbox"] { accent-color: var(--accent); }
+  .cg-member-text { color: var(--text); font-size: 13px; }
+
   /* v0.7.6: edited badge + deleted placeholder + read tick */
   .msg .edited-badge {
     color: var(--text-dim); font-size: 10.5px; font-style: italic;
@@ -1164,6 +1183,18 @@
           loading…
         </div>
       </div>
+
+      <!-- v0.8.0: Groups section. Sits below My devices. -->
+      <div class="section-h">
+        <span>Groups</span>
+        <span class="count" id="groups-count">0</span>
+      </div>
+      <button class="pair-cta" id="open-create-group">
+        <span class="plus">+</span>
+        <span>Create a group</span>
+      </button>
+      <div class="grouplist" id="grouplist"></div>
+
       <div class="side-foot">
         <button class="btn active" data-pane="convo">Chat</button>
         <button class="btn" data-pane="files" id="btn-files">Files</button>
@@ -1427,6 +1458,30 @@
     </div>
   </div>
 
+  <!-- v0.8.0 CREATE-GROUP MODAL -->
+  <div class="modal-backdrop" id="create-group-backdrop">
+    <div class="modal" style="max-width:480px;">
+      <h2>Create a group</h2>
+      <p>
+        Pick paired devices to invite. Each member's daemon will
+        learn about the group through the same encrypted session
+        we use for 1:1 chat.
+      </p>
+      <div class="settings-row">
+        <label for="cg-name">Group name</label>
+        <input type="text" id="cg-name" maxlength="64" placeholder="e.g. Family, Project Aurora" />
+      </div>
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Members</span></div>
+        <div id="cg-members"></div>
+      </div>
+      <div class="actions">
+        <button class="btn-ghost" id="cg-cancel">Cancel</button>
+        <button class="btn-primary" id="cg-create">Create</button>
+      </div>
+    </div>
+  </div>
+
   <!-- v0.7.3 PER-DEVICE DRAWER -->
   <div class="modal-backdrop" id="device-backdrop">
     <div class="modal device-drawer" style="max-width:560px;">
@@ -1629,6 +1684,13 @@
     // v0.7.6: monotonic-per-peer "highest ts of theirs we've already
     // ACKed back as read" — prevents redundant network calls.
     sentReadUpTo: {},
+    // v0.8.0: groups. {group_id_hex: {name, member_count, my_role}}.
+    groups: new Map(),
+    // When user clicks a group in the sidebar, we set this. Mutually
+    // exclusive with selectedPeer (entering a group exits 1:1 view).
+    selectedGroup: null,  // group_id_hex or null
+    groupMessages: [],    // current group's messages, refreshed on switch
+    groupDetail: null,    // {members, my_role, name, ...}
   };
 
   // v0.7.5: fixed emoji palette for reactions. Custom picker
@@ -2740,6 +2802,164 @@
     }
   }
 
+  // ── v0.8.0: groups ────────────────────────────────────────────────
+  async function refreshGroups() {
+    try {
+      const r = await api.get("/api/groups");
+      state.groups.clear();
+      for (const g of r.groups || []) {
+        state.groups.set(g.group_id, g);
+      }
+      renderGroups();
+    } catch (e) { console.warn(e); }
+  }
+
+  function renderGroups() {
+    const list = $("#grouplist");
+    if (!list) return;
+    $("#groups-count").textContent = state.groups.size;
+    list.innerHTML = "";
+    if (state.groups.size === 0) {
+      // No empty-state needed; the + button sits above this.
+      return;
+    }
+    for (const g of state.groups.values()) {
+      const row = el("div", "peer group-row");
+      if (state.selectedGroup === g.group_id) row.classList.add("active");
+      const av = el("div", "avatar group-avatar", "👥");
+      const txt = el("div", "text");
+      txt.appendChild(el("div", "name", g.name || "(unnamed group)"));
+      txt.appendChild(el("div", "sub",
+        `${g.member_count} member${g.member_count === 1 ? "" : "s"}`
+      ));
+      row.appendChild(av);
+      row.appendChild(txt);
+      row.onclick = () => selectGroup(g.group_id);
+      list.appendChild(row);
+    }
+  }
+
+  async function selectGroup(gidHex) {
+    state.selectedGroup = gidHex;
+    state.selectedPeer = null;  // mutually exclusive
+    try {
+      state.groupDetail = await api.get(`/api/groups/${gidHex}`);
+    } catch (e) {
+      toast(`Failed to load group: ${errorToastBody(e)}`, "bad");
+      return;
+    }
+    try {
+      const r = await api.get(`/api/groups/${gidHex}/messages?limit=200`);
+      state.groupMessages = r.messages || [];
+    } catch (e) {
+      state.groupMessages = [];
+    }
+    renderGroups();
+    renderGroupConversation();
+  }
+
+  function renderGroupConversation() {
+    if (!state.selectedGroup || !state.groupDetail) return;
+    $("#convo-empty").style.display = "none";
+    $("#convo-active").style.display = "flex";
+    const g = state.groupDetail;
+    $("#convo-avatar").textContent = "👥";
+    $("#convo-name").textContent = g.name || "(unnamed group)";
+    const subEl = $("#convo-sub");
+    subEl.innerHTML = "";
+    subEl.appendChild(document.createTextNode(
+      `${g.member_count} member${g.member_count === 1 ? "" : "s"} · group`
+    ));
+    const m = $("#messages");
+    m.innerHTML = "";
+    if (state.groupMessages.length === 0) {
+      m.appendChild(el("div", "day-sep", "No messages yet"));
+    }
+    for (const msg of state.groupMessages.slice().reverse()) {
+      const isMine = msg.direction === "out";
+      const b = el("div", `msg ${isMine ? "out" : "in"}`);
+      // Attribute the sender (group msgs aren't 1:1).
+      if (!isMine) {
+        const senderHex = msg.sender_pub_hex || "";
+        const senderLabel = senderHex
+          ? findPeerLabelByPubHex(senderHex)
+          : "(unknown)";
+        const who = el("div", "group-sender", senderLabel);
+        b.appendChild(who);
+      }
+      b.appendChild(renderInlineText(msg.body || ""));
+      b.appendChild(el("span", "when", fmtTime(msg.ts_ms || msg.ts)));
+      m.appendChild(b);
+    }
+    m.scrollTop = m.scrollHeight;
+  }
+
+  function findPeerLabelByPubHex(pubHex) {
+    for (const p of state.peers.values()) {
+      if (p.ed_pub_hex === pubHex) {
+        return p.display_name || p.hostname || p.short_id;
+      }
+    }
+    return pubHex.slice(0, 8);
+  }
+
+  // Open create-group modal — populates the member checkboxes.
+  function openCreateGroupModal() {
+    $("#cg-name").value = "";
+    const list = $("#cg-members");
+    list.innerHTML = "";
+    const pinned = [...state.peers.values()]
+      .filter(p => p.fingerprint && p.trust === "pinned");
+    if (pinned.length === 0) {
+      list.appendChild(el("div", "empty",
+        "Pair at least one device first — groups need members."));
+    }
+    for (const p of pinned) {
+      const row = el("label", "cg-member-row");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = p.fingerprint;
+      cb.dataset.fp = p.fingerprint;
+      row.appendChild(cb);
+      const txt = el("span", "cg-member-text",
+        ` ${p.display_name || p.hostname || p.short_id}`);
+      row.appendChild(txt);
+      list.appendChild(row);
+    }
+    $("#create-group-backdrop").classList.add("show");
+  }
+
+  function closeCreateGroupModal() {
+    $("#create-group-backdrop").classList.remove("show");
+  }
+
+  async function submitCreateGroup() {
+    const name = $("#cg-name").value.trim();
+    if (!name) { toast("Group name required", "bad"); return; }
+    const fps = [...$("#cg-members").querySelectorAll("input[type=checkbox]:checked")]
+      .map(cb => cb.dataset.fp);
+    try {
+      const r = await api.post("/api/groups", { name, members: fps });
+      closeCreateGroupModal();
+      toast(`Group "${r.name}" created`, "good");
+      await refreshGroups();
+      selectGroup(r.group_id);
+    } catch (e) {
+      // v0.8.0: a 404 here usually means the daemon is on a
+      // pre-v0.8.0 build that doesn't have /api/groups. The
+      // page-served HTML can be newer than the running daemon
+      // when the user updates source but doesn't restart.
+      if (e?.status === 404) {
+        toast(
+          "Groups need One Link v0.8.0+ on the daemon. Restart the One Link daemon to pick up the new endpoints.",
+          "bad", 9000,
+        );
+      } else {
+        toast(`Create failed: ${errorToastBody(e)}`, "bad");
+      }
+    }
+  }
+
   async function refreshFolders() {
     try {
       const { folders } = await api.folders();
@@ -3254,11 +3474,17 @@
     await refreshFolders();
     await refreshTransfers();
     await refreshStatus();
+    await refreshGroups();
     connectWS();
     setInterval(refreshPeers, 5000);
     setInterval(refreshTransfers, 4000);
     setInterval(refreshStatus, 8000);
+    setInterval(refreshGroups, 12000);
     maybeShowNotifBanner();
+    // v0.8.0: group buttons.
+    $("#open-create-group")?.addEventListener("click", openCreateGroupModal);
+    $("#cg-cancel")?.addEventListener("click", closeCreateGroupModal);
+    $("#cg-create")?.addEventListener("click", submitCreateGroup);
   }
 
   // v0.7.x: notification toggle in Settings modal.
@@ -3404,6 +3630,16 @@
         if (m.up_to_ts_ms > cur) {
           state.readMarkers[m.peer_fp] = m.up_to_ts_ms;
           scheduleRenderMessages();
+        }
+      } else if (m.type === "group_event" || m.type === "group_created") {
+        // v0.8.0: groups changed. Refresh both the sidebar list
+        // AND, if we're viewing the affected group, its messages
+        // + member list.
+        refreshGroups();
+        if (state.selectedGroup &&
+            (m.group_id === state.selectedGroup ||
+             m.type === "group_created")) {
+          selectGroup(state.selectedGroup);
         }
       } else if (m.type === "reaction") {
         // v0.7.5: live reaction event. Apply to whichever in-memory
@@ -3573,6 +3809,27 @@
   }
 
   async function sendCurrent() {
+    // v0.8.0: branch on whether the user is in a group or 1:1.
+    if (state.selectedGroup) {
+      const body = $("#input").value.trim();
+      if (!body) return;
+      try {
+        await api.post(
+          `/api/groups/${state.selectedGroup}/send`, { body },
+        );
+        $("#input").value = "";
+        $("#input").style.height = "auto";
+        // Refresh from state so the new message lands in the pane.
+        const r = await api.get(
+          `/api/groups/${state.selectedGroup}/messages?limit=200`
+        );
+        state.groupMessages = r.messages || [];
+        renderGroupConversation();
+      } catch (e) {
+        toast(`Group send failed: ${errorToastBody(e)}`, "bad", 8000);
+      }
+      return;
+    }
     if (!state.selectedPeer) return;
     const peer = state.peers.get(state.selectedPeer);
     if (peer?.trust === "rejected") {

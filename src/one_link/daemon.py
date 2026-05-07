@@ -1051,6 +1051,63 @@ class Daemon:
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_CDC_CHUNK":
             await self._handle_file_cdc_chunk(channel, msg, peer_fp, peer_sid)
+        elif t == "GROUP_EVENT":
+            # v0.8.0: peer is sending us a CRDT GroupEvent (create,
+            # add_member, remove_member, change_role, rename, leave).
+            # We persist via state.upsert_group_event after signature
+            # verification; reduce_events runs lazily on next state
+            # materialization. UI broadcasts a `group_event` so it
+            # can refresh the groups list / conversation membership.
+            if not self._is_pinned(peer_fp):
+                return
+            event_wire = msg.get("event")
+            if not isinstance(event_wire, dict):
+                return
+            try:
+                from one_link import groups as gmod
+                ev = gmod.GroupEvent.from_wire(event_wire)
+            except Exception as e:
+                log.warning("malformed GROUP_EVENT from %s: %s", peer_fp[:8], e)
+                return
+            # Verify signature. ev.verify() raises ValueError on
+            # bad signature; treat any exception as untrusted.
+            try:
+                ev.verify()
+            except Exception as e:
+                log.warning(
+                    "GROUP_EVENT signature failed: from=%s peer=%s: %s",
+                    ev.author_pubkey.hex()[:8], peer_fp[:8], e,
+                )
+                return
+            if self.state is not None:
+                with contextlib.suppress(Exception):
+                    self.state.upsert_group_event(
+                        group_id=ev.group_id, event_id=ev.event_id,
+                        timestamp_ms=ev.timestamp_ms,
+                        wire_dict=ev.to_wire(),
+                    )
+                # Bump the cached group_meta name so the sidebar
+                # reflects the latest reduce result without forcing
+                # the UI to recompute.
+                with contextlib.suppress(Exception):
+                    gstate = self._group_state_for(ev.group_id)
+                    if gstate is not None:
+                        self.state.upsert_group_meta(
+                            group_id=ev.group_id,
+                            name=gstate.name or "",
+                            created_ms=int(time.time() * 1000),
+                            state_hash="",
+                        )
+            if self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "group_event",
+                        "group_id": ev.group_id.hex(),
+                        "event_kind": ev.kind,
+                    })
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+            )))
         elif t == "GROUP_KEY_OFFER":
             await self._handle_group_key_offer(channel, msg, peer_fp)
         elif t == "GROUP_MSG":
@@ -3605,6 +3662,175 @@ class Daemon:
         await channel.send(encode_msg(make_msg(
             "ACK", self.me.short_id, of=msg.get("id"),
         )))
+
+    async def _broadcast_group_event(
+        self, group_id: bytes, event_wire: dict, recipients: list[bytes],
+    ) -> dict:
+        """v0.8.0: fan out a single CRDT event to every recipient by
+        Ed25519 pubkey. Uses send_to which reuses the persistent
+        encrypted session with each peer. Best-effort — peers we
+        can't reach now will catch up on next reconnect via outbox-
+        style distribution (TODO v0.8.1 — for now, missed events
+        require a fresh send when peer is online)."""
+        if self.state is None:
+            return {"delivered": 0, "failures": []}
+        delivered = 0
+        failures: list[str] = []
+        for pub in recipients:
+            if pub == self.me.public_bytes:
+                continue
+            fp = fingerprint_of(pub)
+            peer_obj = await self.resolve_for_send(fp)
+            if peer_obj is None:
+                failures.append(f"{fp[:8]}: offline")
+                continue
+            try:
+                await self.send_to(peer_obj, [
+                    make_msg("GROUP_EVENT", self.me.short_id, event=event_wire),
+                ])
+                delivered += 1
+            except Exception as e:
+                log.info(
+                    "GROUP_EVENT fan-out to %s failed: %s", fp[:8], e,
+                )
+                failures.append(f"{fp[:8]}: {e}")
+        return {"delivered": delivered, "failures": failures}
+
+    async def create_group(
+        self, *, name: str, member_pubkeys: list[bytes],
+    ) -> dict:
+        """v0.8.0: issue a fresh group + add every member, persist
+        the events locally, fan out to all recipients. Returns the
+        new group id (hex) and reduce result."""
+        if self.state is None:
+            raise RuntimeError("state not available")
+        from one_link import groups as gmod
+        # 1. Sign genesis CREATE.
+        create_ev = gmod.sign_create_group(
+            private_key=self.me.private,
+            pubkey=self.me.public_bytes,
+            name=name,
+        )
+        gid = create_ev.group_id
+        # 2. Persist locally.
+        self.state.upsert_group_event(
+            group_id=gid, event_id=create_ev.event_id,
+            timestamp_ms=create_ev.timestamp_ms,
+            wire_dict=create_ev.to_wire(),
+        )
+        events_to_fan_out = [create_ev]
+        # 3. Sign ADD_MEMBER for each invited peer.
+        for pub in member_pubkeys:
+            if pub == self.me.public_bytes:
+                continue
+            if len(pub) != 32:
+                continue
+            add_ev = gmod.sign_add_member(
+                private_key=self.me.private,
+                pubkey=self.me.public_bytes,
+                group_id=gid,
+                member_pubkey=pub,
+            )
+            self.state.upsert_group_event(
+                group_id=gid, event_id=add_ev.event_id,
+                timestamp_ms=add_ev.timestamp_ms,
+                wire_dict=add_ev.to_wire(),
+            )
+            events_to_fan_out.append(add_ev)
+        # 4. Materialize state, cache name.
+        wire_events = self.state.list_group_events(gid)
+        events = [gmod.GroupEvent.from_wire(w) for w in wire_events]
+        gstate = gmod.reduce_events(events)
+        if gstate is None:
+            raise RuntimeError("reduce failed on freshly-created group")
+        self.state.upsert_group_meta(
+            group_id=gid, name=gstate.name or name,
+            created_ms=int(time.time() * 1000), state_hash="",
+        )
+        # 5. Fan out every event to every member (including the
+        # CREATE so they can verify provenance).
+        all_recipients = list(member_pubkeys)
+        fanout_results = []
+        for ev in events_to_fan_out:
+            r = await self._broadcast_group_event(
+                gid, ev.to_wire(), all_recipients,
+            )
+            fanout_results.append(r)
+        # 6. UI notify.
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "group_created",
+                    "group_id": gid.hex(),
+                    "name": gstate.name,
+                })
+        return {
+            "group_id": gid.hex(),
+            "name": gstate.name,
+            "member_count": len(gstate.members),
+            "fanout": fanout_results,
+        }
+
+    async def add_group_member(
+        self, *, group_id: bytes, member_pubkey: bytes,
+        role: str = "member",
+    ) -> dict:
+        """v0.8.0: sign + persist + distribute an ADD_MEMBER event."""
+        if self.state is None:
+            raise RuntimeError("state not available")
+        from one_link import groups as gmod
+        ev = gmod.sign_add_member(
+            private_key=self.me.private,
+            pubkey=self.me.public_bytes,
+            group_id=group_id,
+            member_pubkey=member_pubkey,
+            role=role,
+        )
+        self.state.upsert_group_event(
+            group_id=group_id, event_id=ev.event_id,
+            timestamp_ms=ev.timestamp_ms,
+            wire_dict=ev.to_wire(),
+        )
+        # Re-materialize membership so we know who to fan out to.
+        wire_events = self.state.list_group_events(group_id)
+        events = [gmod.GroupEvent.from_wire(w) for w in wire_events]
+        gstate = gmod.reduce_events(events)
+        if gstate is None:
+            raise RuntimeError("group state unreadable")
+        recipients = list(gstate.members)
+        result = await self._broadcast_group_event(
+            group_id, ev.to_wire(), recipients,
+        )
+        return {"event_id": ev.event_id, **result}
+
+    async def remove_group_member(
+        self, *, group_id: bytes, member_pubkey: bytes,
+    ) -> dict:
+        if self.state is None:
+            raise RuntimeError("state not available")
+        from one_link import groups as gmod
+        ev = gmod.sign_remove_member(
+            private_key=self.me.private,
+            pubkey=self.me.public_bytes,
+            group_id=group_id,
+            member_pubkey=member_pubkey,
+        )
+        self.state.upsert_group_event(
+            group_id=group_id, event_id=ev.event_id,
+            timestamp_ms=ev.timestamp_ms,
+            wire_dict=ev.to_wire(),
+        )
+        wire_events = self.state.list_group_events(group_id)
+        events = [gmod.GroupEvent.from_wire(w) for w in wire_events]
+        gstate = gmod.reduce_events(events)
+        # Fan out to the OLD member set (so the now-removed peer
+        # also sees the remove event and stops trying to participate).
+        recipients = list(gstate.members) if gstate else []
+        recipients.append(member_pubkey)
+        result = await self._broadcast_group_event(
+            group_id, ev.to_wire(), recipients,
+        )
+        return {"event_id": ev.event_id, **result}
 
     async def send_group_message(
         self, *, group_id: bytes, body: str,
