@@ -69,7 +69,6 @@ from one_link.cdc import (
     MAX_CHUNK_BYTES as CDC_MAX_CHUNK_BYTES,
     MIN_CHUNK_BYTES as CDC_MIN_CHUNK_BYTES,
     Chunk,
-    chunk_path,
     index_path,
 )
 from one_link.crdt import ManifestEntry, VectorClock
@@ -82,6 +81,8 @@ from one_link.paths import (
     message_log_path,
 )
 from one_link.state import State
+from one_link.swarm_plan import plan_swarm_sources, source_from_hashes
+from one_link.transfer_intent import FileManifest
 from one_link.wire import decode_msg, encode_msg, make_msg
 
 # Forward import to avoid hard dep when server.py loads daemon.py
@@ -1118,6 +1119,10 @@ class Daemon:
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_CDC_CHUNK":
             await self._handle_file_cdc_chunk(channel, msg, peer_fp, peer_sid)
+        elif t == "CHUNK_QUERY":
+            await self._handle_chunk_query(channel, msg, peer_fp)
+        elif t == "CHUNK_PULL":
+            await self._handle_chunk_pull(channel, msg, peer_fp)
         elif t == "GROUP_EVENT":
             # v0.8.0: peer is sending us a CRDT GroupEvent (create,
             # add_member, remove_member, change_role, rename, leave).
@@ -1500,16 +1505,31 @@ class Daemon:
             return None
         return out
 
-    def _store_chunk_cache(self, chunk_hash: str, data: bytes) -> None:
+    def _store_chunk_cache(
+        self,
+        chunk_hash: str,
+        data: bytes,
+        *,
+        blob_hash: str | None = None,
+        chunk_index: int | None = None,
+    ) -> None:
         if blake3.blake3(data).hexdigest() != chunk_hash:
             raise RuntimeError("CDC chunk hash mismatch")
         dst = self._chunk_cache_path(chunk_hash)
-        if dst.is_file():
-            return
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dst.parent / f".{os.getpid()}_{secrets.token_hex(8)}.tmp"
-        tmp.write_bytes(data)
-        os.replace(tmp, dst)
+        if not dst.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dst.parent / f".{os.getpid()}_{secrets.token_hex(8)}.tmp"
+            tmp.write_bytes(data)
+            os.replace(tmp, dst)
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                self.state.record_chunk_available(
+                    chunk_hash,
+                    len(data),
+                    blob_hash=blob_hash,
+                    chunk_index=chunk_index,
+                    source="local",
+                )
 
     def _read_chunk_cache(self, chunk_hash: str) -> bytes | None:
         p = self._chunk_cache_path(chunk_hash)
@@ -1521,11 +1541,17 @@ class Daemon:
 
     def _cache_file_chunks(self, path: Path) -> None:
         try:
-            chunks = chunk_path(path)
+            file_index = index_path(path)
+            chunks = file_index.chunks
             with open(path, "rb") as fh:
                 for c in chunks:
                     fh.seek(c.start)
-                    self._store_chunk_cache(c.hash, fh.read(c.size))
+                    self._store_chunk_cache(
+                        c.hash,
+                        fh.read(c.size),
+                        blob_hash=file_index.blob_hash,
+                        chunk_index=c.index,
+                    )
         except Exception as e:
             log.debug("CDC cache fill skipped for %s: %s", path, e)
 
@@ -1587,6 +1613,273 @@ class Daemon:
                 with contextlib.suppress(OSError):
                     p.parent.rmdir()
         return {"removed": removed, "freed_bytes": freed, "bytes": total}
+
+    def _available_chunk_hashes(self, hashes: list[str]) -> list[str]:
+        clean = []
+        seen = set()
+        for h in hashes[:2048]:
+            h = str(h)
+            if h in seen or not self._valid_blob_hex(h):
+                continue
+            seen.add(h)
+            if self._chunk_cache_path(h).is_file():
+                clean.append(h)
+        if self.state is not None and clean:
+            with contextlib.suppress(Exception):
+                indexed = set(self.state.chunks_available(clean))
+                clean = [h for h in clean if h in indexed or self._chunk_cache_path(h).is_file()]
+        return clean
+
+    async def _handle_chunk_query(self, channel, msg, peer_fp) -> None:
+        if not self._is_pinned(peer_fp) or not self._capability_allowed(peer_fp, FILES):
+            await channel.send(encode_msg(make_msg(
+                "CHUNK_HAVE", self.me.short_id, of=msg.get("id"), hashes=[],
+                rejected="not_authorized",
+            )))
+            return
+        raw = msg.get("hashes") or []
+        if not isinstance(raw, list):
+            raw = []
+        have = self._available_chunk_hashes(raw)
+        await channel.send(encode_msg(make_msg(
+            "CHUNK_HAVE", self.me.short_id, of=msg.get("id"), hashes=have,
+        )))
+
+    async def _handle_chunk_pull(self, channel, msg, peer_fp) -> None:
+        if not self._is_pinned(peer_fp) or not self._capability_allowed(peer_fp, FILES):
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"), rejected="not_authorized",
+            )))
+            return
+        h = str(msg.get("hash", ""))
+        if not self._valid_blob_hex(h):
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"), rejected="bad_hash",
+            )))
+            return
+        data = self._read_chunk_cache(h)
+        if data is None:
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"), rejected="missing_chunk",
+            )))
+            return
+        enc, payload = self._encode_payload(data)
+        await channel.send(encode_msg(make_msg(
+            "CHUNK_DATA",
+            self.me.short_id,
+            of=msg.get("id"),
+            hash=h,
+            enc=enc,
+            wire_size=len(payload),
+            size=len(data),
+            data=base64.b64encode(payload).decode("ascii"),
+        )))
+
+    async def query_peer_chunks(self, peer: Peer, hashes: list[str]) -> dict:
+        block = self._check_outbound_trust(peer)
+        if block:
+            raise RuntimeError(block)
+        peer_fp = self._peer_fp_from_peer(peer) or ""
+        if peer_fp and not self._capability_allowed(peer_fp, FILES):
+            raise RuntimeError(f"files capability disabled for peer {peer.short_id}")
+        clean = [h for h in hashes[:2048] if self._valid_blob_hex(str(h))]
+        sess = await self._get_outbound_session(peer)
+        async with sess.lock:
+            q = make_msg("CHUNK_QUERY", self.me.short_id, hashes=clean)
+            await sess.channel.send(encode_msg(q))
+            while True:
+                reply = decode_msg(await asyncio.wait_for(
+                    sess.channel.recv(), timeout=FILE_ACK_DEADLINE_S,
+                ))
+                if reply.get("t") == "CAPS":
+                    continue
+                if reply.get("t") != "CHUNK_HAVE":
+                    raise RuntimeError(f"unexpected chunk query reply: {reply.get('t')}")
+                have = [
+                    str(h) for h in (reply.get("hashes") or [])
+                    if self._valid_blob_hex(str(h))
+                ]
+                return {
+                    "ok": not reply.get("rejected"),
+                    "hashes": have,
+                    "rejected": reply.get("rejected"),
+                }
+
+    async def pull_peer_chunk(self, peer: Peer, chunk_hash: str) -> dict:
+        block = self._check_outbound_trust(peer)
+        if block:
+            raise RuntimeError(block)
+        peer_fp = self._peer_fp_from_peer(peer) or ""
+        if peer_fp and not self._capability_allowed(peer_fp, FILES):
+            raise RuntimeError(f"files capability disabled for peer {peer.short_id}")
+        if not self._valid_blob_hex(str(chunk_hash)):
+            raise RuntimeError("bad chunk hash")
+        sess = await self._get_outbound_session(peer)
+        async with sess.lock:
+            q = make_msg("CHUNK_PULL", self.me.short_id, hash=str(chunk_hash))
+            await sess.channel.send(encode_msg(q))
+            while True:
+                reply = decode_msg(await asyncio.wait_for(
+                    sess.channel.recv(), timeout=FILE_ACK_DEADLINE_S,
+                ))
+                if reply.get("t") == "CAPS":
+                    continue
+                if reply.get("t") == "ACK" and reply.get("rejected"):
+                    return {"ok": False, "rejected": reply.get("rejected")}
+                if reply.get("t") != "CHUNK_DATA":
+                    raise RuntimeError(f"unexpected chunk pull reply: {reply.get('t')}")
+                data = base64.b64decode(reply.get("data", ""), validate=True)
+                data = self._decode_payload(
+                    str(reply.get("enc", "raw")),
+                    data,
+                    max_bytes=CDC_MAX_CHUNK_BYTES + 64,
+                )
+                if blake3.blake3(data).hexdigest() != chunk_hash:
+                    raise RuntimeError("CHUNK_DATA integrity failure")
+                self._store_chunk_cache(chunk_hash, data)
+                return {
+                    "ok": True,
+                    "hash": chunk_hash,
+                    "size": len(data),
+                    "wire_size": int(reply.get("wire_size") or len(data)),
+                }
+
+    def _swarm_trust_score(self, peer_fp: str) -> float:
+        if self.state is None:
+            return 0.0
+        rec = self.state.get_peer(peer_fp)
+        if rec is None:
+            return 0.0
+        score = 1.0 if rec.trust == "pinned" else 0.0
+        if rec.is_verified:
+            score += 1.0
+        return score
+
+    async def query_swarm_chunk_sources(
+        self,
+        peers: list[Peer],
+        hashes: list[str],
+        *,
+        concurrency: int = 4,
+    ) -> dict[str, set[str]]:
+        clean = []
+        seen = set()
+        for h in hashes[:2048]:
+            h = str(h)
+            if h not in seen and self._valid_blob_hex(h):
+                seen.add(h)
+                clean.append(h)
+        sem = asyncio.Semaphore(max(1, int(concurrency)))
+        claims: dict[str, set[str]] = {}
+
+        async def _query(peer: Peer) -> None:
+            peer_fp = self._peer_fp_from_peer(peer)
+            if not peer_fp:
+                return
+            async with sem:
+                try:
+                    res = await self.query_peer_chunks(peer, clean)
+                except Exception as e:
+                    log.debug("swarm chunk query skipped %s: %s", peer.short_id, e)
+                    return
+            if res.get("ok"):
+                have = {
+                    str(h) for h in (res.get("hashes") or [])
+                    if self._valid_blob_hex(str(h))
+                }
+                if have:
+                    claims[peer_fp] = have
+
+        await asyncio.gather(*(_query(p) for p in peers))
+        return claims
+
+    async def pull_swarm_missing_chunks(
+        self,
+        *,
+        peers: list[Peer],
+        manifest: FileManifest,
+        needed_indexes: list[int] | None = None,
+        concurrency: int = 3,
+    ) -> dict:
+        needed = set(needed_indexes) if needed_indexes is not None else {
+            c.index for c in manifest.chunks
+        }
+        needed_hashes = [
+            c.hash for c in manifest.chunks
+            if c.index in needed and not self._chunk_cache_path(c.hash).is_file()
+        ]
+        if not needed_hashes:
+            return {
+                "ok": True,
+                "pulled": 0,
+                "missing_indexes": [],
+                "sources": {},
+            }
+        claims = await self.query_swarm_chunk_sources(
+            peers,
+            needed_hashes,
+            concurrency=concurrency,
+        )
+        health_latency = {}
+        peer_by_fp = {}
+        for p in peers:
+            fp = self._peer_fp_from_peer(p)
+            if not fp:
+                continue
+            peer_by_fp[fp] = p
+            health = self.get_pair_health(fp) or {}
+            latency = health.get("latency_ewma_ms")
+            if isinstance(latency, (int, float)) and not (latency != latency):
+                health_latency[fp] = float(latency)
+        plan = plan_swarm_sources(
+            manifest=manifest,
+            needed_indexes=needed,
+            sources=[
+                source_from_hashes(
+                    fp,
+                    hashes,
+                    trust_score=self._swarm_trust_score(fp),
+                    latency_ms=health_latency.get(fp),
+                )
+                for fp, hashes in claims.items()
+            ],
+        )
+        sem = asyncio.Semaphore(max(1, int(concurrency)))
+        pulled = 0
+        failed: set[int] = set()
+
+        async def _pull(index: int, fp: str, chunk_hash: str) -> None:
+            nonlocal pulled
+            peer = peer_by_fp.get(fp)
+            if peer is None:
+                failed.add(index)
+                return
+            async with sem:
+                try:
+                    res = await self.pull_peer_chunk(peer, chunk_hash)
+                except Exception as e:
+                    log.debug("swarm chunk pull failed %s from %s: %s", chunk_hash[:8], fp[:8], e)
+                    failed.add(index)
+                    return
+            if res.get("ok"):
+                pulled += 1
+            else:
+                failed.add(index)
+
+        pulls = [
+            _pull(a.index, str(a.source_peer_fp), a.chunk_hash)
+            for a in plan.assignments
+            if a.status == "assigned" and a.source_peer_fp
+        ]
+        if pulls:
+            await asyncio.gather(*pulls)
+        missing = sorted(set(plan.missing_indexes) | failed)
+        return {
+            "ok": not missing,
+            "pulled": pulled,
+            "missing_indexes": missing,
+            "sources": plan.per_source_counts(),
+        }
 
     def _encode_payload(self, data: bytes) -> tuple[str, bytes]:
         if len(data) < COMPRESSION_MIN_BYTES:
@@ -1650,7 +1943,12 @@ class Daemon:
         if len(data) != expected["size"] or blake3.blake3(data).hexdigest() != expected["hash"]:
             self._abort_incoming_file(blob, f)
             raise RuntimeError("FILE_CDC_CHUNK integrity failure")
-        self._store_chunk_cache(expected["hash"], data)
+        self._store_chunk_cache(
+            expected["hash"],
+            data,
+            blob_hash=f.blob_hex,
+            chunk_index=idx,
+        )
         f.cdc_parts[idx] = data
         f.cdc_missing.remove(idx)
         cached = len(f.cdc_chunks) - len(f.cdc_missing)
@@ -1689,7 +1987,12 @@ class Daemon:
                     return
                 f.handle.write(data)
                 h.update(data)
-                self._store_chunk_cache(c["hash"], data)
+                self._store_chunk_cache(
+                    c["hash"],
+                    data,
+                    blob_hash=blob,
+                    chunk_index=int(c["index"]),
+                )
                 written += len(data)
             f.handle.close()
             ok = h.hexdigest() == blob and written == f.size
@@ -5189,6 +5492,12 @@ class Daemon:
                                 continue
                             f.seek(c.start)
                             data = f.read(c.size)
+                            self._store_chunk_cache(
+                                c.hash,
+                                data,
+                                blob_hash=blob_hex,
+                                chunk_index=c.index,
+                            )
                             enc, payload = self._encode_payload(data)
                             raw_bytes_sent += len(data)
                             wire_bytes_sent += len(payload)

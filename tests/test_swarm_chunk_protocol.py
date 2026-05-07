@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+import asyncio
+import time
+from pathlib import Path
+
+import blake3
+import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from one_link.capabilities import CHAT, FILES
+from one_link.daemon import Daemon, OutboundSession
+from one_link.discovery import Peer
+from one_link.identity import Identity, fingerprint_of
+from one_link.state import State
+from one_link.transfer_intent import FileChunkManifest, FileManifest
+from one_link.wire import decode_msg, encode_msg, make_msg
+
+
+def _new_identity() -> Identity:
+    sk = Ed25519PrivateKey.generate()
+    pub_obj = sk.public_key()
+    pub_bytes = pub_obj.public_bytes_raw()
+    fp = fingerprint_of(pub_bytes)
+    return Identity(
+        private=sk, public=pub_obj, public_bytes=pub_bytes,
+        fingerprint=fp, short_id=fp[:8], hostname="x",
+    )
+
+
+class _FakeChannel:
+    def __init__(self, *, peer_ed_pub: bytes, peer_short_id: str):
+        self.peer_ed_pub = peer_ed_pub
+        self.peer_short_id = peer_short_id
+        self.peer_caps = {"features": [CHAT, FILES], "app_version": "0.9.0"}
+        self.sent: list[dict] = []
+        self._replies: asyncio.Queue[bytes] = asyncio.Queue()
+
+    async def send(self, payload: bytes) -> None:
+        self.sent.append(decode_msg(payload))
+
+    async def recv(self) -> bytes:
+        return await self._replies.get()
+
+    def queue_reply(self, msg: dict) -> None:
+        self._replies.put_nowait(encode_msg(msg))
+
+
+def test_state_records_and_queries_chunk_availability(tmp_path: Path):
+    state = State(db_path=tmp_path / "s.db")
+    h1 = "aa" * 32
+    h2 = "bb" * 32
+    state.record_chunk_available(h1, 10, blob_hash="cc" * 32, chunk_index=0)
+    assert state.has_chunk(h1)
+    assert state.chunks_available([h2, h1]) == [h1]
+    rows = state.list_chunks_for_blob("cc" * 32)
+    assert rows[0]["chunk_hash"] == h1
+    assert rows[0]["chunk_index"] == 0
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_chunk_query_reports_only_cached_authorized_chunks(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(fingerprint=them.fingerprint, short_id=them.short_id, pubkey=them.public_bytes)
+    state.set_peer_trust(them.fingerprint, "pinned")
+    state.set_peer_capability_policy(them.fingerprint, [CHAT, FILES])
+    payload = b"piece"
+    h = blake3.blake3(payload).hexdigest()
+    daemon._store_chunk_cache(h, payload, blob_hash="cc" * 32, chunk_index=0)
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+
+    await daemon._on_peer_message(
+        chan,
+        make_msg("CHUNK_QUERY", them.short_id, hashes=[h, "dd" * 32]),
+    )
+    reply = chan.sent[-1]
+    assert reply["t"] == "CHUNK_HAVE"
+    assert reply["hashes"] == [h]
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_chunk_pull_returns_verified_chunk_data(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(fingerprint=them.fingerprint, short_id=them.short_id, pubkey=them.public_bytes)
+    state.set_peer_trust(them.fingerprint, "pinned")
+    state.set_peer_capability_policy(them.fingerprint, [CHAT, FILES])
+    payload = b"piece" * 100
+    h = blake3.blake3(payload).hexdigest()
+    daemon._store_chunk_cache(h, payload)
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+
+    await daemon._on_peer_message(chan, make_msg("CHUNK_PULL", them.short_id, hash=h))
+    reply = chan.sent[-1]
+    assert reply["t"] == "CHUNK_DATA"
+    assert reply["hash"] == h
+    assert reply["size"] == len(payload)
+    data = daemon._decode_payload(
+        reply["enc"],
+        __import__("base64").b64decode(reply["data"]),
+        max_bytes=1024 * 1024,
+    )
+    assert data == payload
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_outbound_query_and_pull_store_remote_chunk(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(fingerprint=them.fingerprint, short_id=them.short_id, pubkey=them.public_bytes)
+    state.set_peer_trust(them.fingerprint, "pinned")
+    state.set_peer_capability_policy(them.fingerprint, [CHAT, FILES])
+    peer = Peer(them.short_id, "them", "127.0.0.1", 1234, them.public_bytes.hex())
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=peer,
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    payload = b"remote-piece"
+    h = blake3.blake3(payload).hexdigest()
+    chan.queue_reply(make_msg("CHUNK_HAVE", them.short_id, hashes=[h]))
+    assert await daemon.query_peer_chunks(peer, [h]) == {"ok": True, "hashes": [h], "rejected": None}
+    enc, wire = daemon._encode_payload(payload)
+    chan.queue_reply(make_msg(
+        "CHUNK_DATA",
+        them.short_id,
+        hash=h,
+        enc=enc,
+        wire_size=len(wire),
+        size=len(payload),
+        data=__import__("base64").b64encode(wire).decode("ascii"),
+    ))
+    pulled = await daemon.pull_peer_chunk(peer, h)
+    assert pulled["ok"] is True
+    assert daemon._read_chunk_cache(h) == payload
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_swarm_pull_fetches_missing_chunks_from_multiple_sources(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    p1_id = _new_identity()
+    p2_id = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    peers = []
+    payloads = [b"first-swarm-piece", b"second-swarm-piece"]
+    hashes = [blake3.blake3(p).hexdigest() for p in payloads]
+    chunks = tuple(
+        FileChunkManifest(index=i, start=i * 16, end=(i + 1) * 16, size=len(payloads[i]), hash=hashes[i])
+        for i in range(2)
+    )
+    manifest = FileManifest(
+        name="x.bin",
+        size=sum(len(p) for p in payloads),
+        blob_hash=blake3.blake3(b"".join(payloads)).hexdigest(),
+        chunks=chunks,
+    )
+
+    for ident, payload, h in ((p1_id, payloads[0], hashes[0]), (p2_id, payloads[1], hashes[1])):
+        state.upsert_peer(fingerprint=ident.fingerprint, short_id=ident.short_id, pubkey=ident.public_bytes)
+        state.set_peer_trust(ident.fingerprint, "pinned")
+        state.set_peer_capability_policy(ident.fingerprint, [CHAT, FILES])
+        peer = Peer(ident.short_id, "them", "127.0.0.1", 1234, ident.public_bytes.hex())
+        peers.append(peer)
+        chan = _FakeChannel(peer_ed_pub=ident.public_bytes, peer_short_id=ident.short_id)
+        sess = OutboundSession(
+            peer_fp=ident.fingerprint,
+            peer=peer,
+            channel=chan,  # type: ignore[arg-type]
+            lock=asyncio.Lock(),
+            last_used=time.time(),
+            regime="lan",
+        )
+        daemon._outbound_sessions[ident.fingerprint] = sess
+        chan.queue_reply(make_msg("CHUNK_HAVE", ident.short_id, hashes=[h]))
+        enc, wire = daemon._encode_payload(payload)
+        chan.queue_reply(make_msg(
+            "CHUNK_DATA",
+            ident.short_id,
+            hash=h,
+            enc=enc,
+            wire_size=len(wire),
+            size=len(payload),
+            data=__import__("base64").b64encode(wire).decode("ascii"),
+        ))
+
+    pulled = await daemon.pull_swarm_missing_chunks(
+        peers=peers,
+        manifest=manifest,
+        needed_indexes=[0, 1],
+    )
+    assert pulled["ok"] is True
+    assert pulled["pulled"] == 2
+    assert daemon._read_chunk_cache(hashes[0]) == payloads[0]
+    assert daemon._read_chunk_cache(hashes[1]) == payloads[1]
+    assert set(pulled["sources"].values()) == {1}
+    state.close()
