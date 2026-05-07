@@ -477,17 +477,28 @@
     animation: spin 1s linear infinite;
   }
 
-  .side-foot {
-    border-top: 1px solid var(--line); padding: 10px 12px;
-    display: flex; gap: 8px;
+  /* v0.9.8: pane tabs in the top header. Same visual language as
+     the old .side-foot but positioned where the panes actually
+     open. */
+  .pane-tabs {
+    display: flex; gap: 6px;
+    flex: 1; justify-content: center;
+    margin: 0 24px;
   }
-  .side-foot .btn {
-    flex: 1; padding: 8px 10px; border-radius: var(--radius-sm);
-    background: var(--bg-2); color: var(--text-dim); font-size: 13px;
+  .pane-tabs .btn {
+    padding: 7px 16px; border-radius: var(--radius-sm);
+    background: transparent; color: var(--text-dim); font-size: 13px;
+    font-weight: 500;
     transition: background .12s, color .12s;
   }
-  .side-foot .btn:hover { background: var(--bg-3); color: var(--text); }
-  .side-foot .btn.active { background: var(--bg-3); color: var(--text); }
+  .pane-tabs .btn:hover { background: var(--bg-3); color: var(--text); }
+  .pane-tabs .btn.active {
+    background: var(--bg-2); color: var(--text);
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+  /* Legacy class kept for any straggler refs; rule no-ops since
+     .side-foot no longer exists in the markup. */
+  .side-foot { display: none; }
 
   /* ── Conversation pane ────────────────────────────────────────────── */
   .convo { display: flex; flex-direction: column; min-height: 0; background: var(--bg-0); }
@@ -1931,6 +1942,17 @@
       <div class="logo"><img src="/static/one-glyph.png" alt="" /></div>
       <span class="wm">One Link</span>
     </div>
+    <!-- v0.9.8: pane-switcher tabs moved from the bottom-left
+         sidebar to the top header. They live next to where the
+         panes actually open (right side of the app), so clicking
+         "Files" no longer feels like clicking-on-the-left-and-
+         the-thing-pops-on-the-right. -->
+    <nav class="pane-tabs" id="pane-tabs">
+      <button class="btn active" data-pane="convo">Chat</button>
+      <button class="btn" data-pane="files" id="btn-files">Files</button>
+      <button class="btn" data-pane="folders" id="btn-folders">Folders</button>
+      <button class="btn" data-pane="mesh" id="btn-mesh">Activity</button>
+    </nav>
     <div class="me">
       <span class="dot"></span>
       <span id="me-host">…</span>
@@ -1968,15 +1990,9 @@
       </div>
       <div class="grouplist" id="grouplist"></div>
 
-      <div class="side-foot">
-        <button class="btn active" data-pane="convo">Chat</button>
-        <button class="btn" data-pane="files" id="btn-files">Files</button>
-        <button class="btn" data-pane="folders" id="btn-folders">Folders</button>
-        <button class="btn" data-pane="mesh" id="btn-mesh">Activity</button>
-        <!-- v0.8.1.1: Debug surface is intentionally hidden from
-             the chat sidebar. Open via Ctrl+Shift+D, or via the
-             "Open diagnostics" link inside Settings. -->
-      </div>
+      <!-- v0.9.8: pane tabs moved to the top header, next to
+           where the panes actually open. Sidebar bottom is now
+           empty. -->
     </aside>
 
     <!-- CONVERSATION -->
@@ -6246,7 +6262,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.9.7";
+  const PAGE_BUILT_FOR = "0.9.8";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -7696,9 +7712,9 @@
   });
 
   // ── Sidebar toggles ────────────────────────────────────────────────
-  document.querySelectorAll(".side-foot .btn").forEach(b => {
+  document.querySelectorAll(".pane-tabs .btn").forEach(b => {
     b.onclick = () => {
-      document.querySelectorAll(".side-foot .btn").forEach(x => x.classList.remove("active"));
+      document.querySelectorAll(".pane-tabs .btn").forEach(x => x.classList.remove("active"));
       b.classList.add("active");
       const pane = b.dataset.pane;
       state.activePane = pane;
