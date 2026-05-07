@@ -92,6 +92,11 @@
     color: var(--text-dimmer);
     font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .8px;
   }
+  .side .section-h .section-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
   .side .section-h .count { background: var(--bg-3); padding: 1px 8px; border-radius: 10px; color: var(--text-dim); font-size: 11px; }
   .side .section-h button {
     color: var(--text-dim); background: var(--bg-2); border-radius: 8px;
@@ -306,25 +311,7 @@
     background: var(--bg-1);
     border-bottom: 1px solid var(--line);
   }
-  .convo-h .who { display: flex; align-items: center; gap: 10px; min-width: 0; }
-  .conversation-badge {
-    flex: 0 0 auto;
-    min-width: 52px;
-    padding: 4px 8px;
-    border-radius: 999px;
-    background: rgba(124,92,255,.14);
-    border: 1px solid rgba(124,92,255,.28);
-    color: var(--accent-2);
-    font-size: 11px;
-    font-weight: 700;
-    line-height: 1;
-    text-align: center;
-  }
-  .conversation-badge.group {
-    background: rgba(78,193,255,.12);
-    border-color: rgba(78,193,255,.26);
-    color: var(--accent-2);
-  }
+  .convo-h .who { display: flex; align-items: center; min-width: 0; }
   .convo-h .who .text { min-width: 0; }
   .convo-h .who .text .name { font-weight: 600; line-height: 1.1; }
   .convo-h .who .text .sub  {
@@ -1232,12 +1219,11 @@
       <!-- v0.8.0: Groups section. Sits below My devices. -->
       <div class="section-h">
         <span>Groups</span>
-        <span class="count" id="groups-count">0</span>
+        <span class="section-actions">
+          <button id="open-create-group">New</button>
+          <span class="count" id="groups-count">0</span>
+        </span>
       </div>
-      <button class="pair-cta" id="open-create-group">
-        <span class="plus">+</span>
-        <span>Create a group</span>
-      </button>
       <div class="grouplist" id="grouplist"></div>
 
       <div class="side-foot">
@@ -1262,7 +1248,6 @@
       <div id="convo-active" style="display:none; flex:1; flex-direction:column; min-height:0;">
         <div class="convo-h">
           <div class="who" id="convo-who" title="Open device settings">
-            <div class="avatar" id="convo-avatar">?</div>
             <div class="text">
               <div class="name" id="convo-name">…</div>
               <div class="sub"  id="convo-sub">…</div>
@@ -1275,6 +1260,7 @@
             </div>
             <button id="btn-search-toggle" title="Search">⌕</button>
             <button id="btn-unblock" style="display:none;">Allow device</button>
+            <button id="btn-group-settings" style="display:none;">Group settings</button>
             <button id="btn-attach">Attach file</button>
           </div>
         </div>
@@ -1530,9 +1516,8 @@
     <div class="modal" style="max-width:480px;">
       <h2>Create a group</h2>
       <p>
-        Pick paired devices to invite. Each member's daemon will
-        learn about the group through the same encrypted session
-        we use for 1:1 chat.
+        Pick at least two paired devices. For one person, use the
+        normal device chat.
       </p>
       <div class="settings-row">
         <label for="cg-name">Group name</label>
@@ -1545,6 +1530,47 @@
       <div class="actions">
         <button class="btn-ghost" id="cg-cancel">Cancel</button>
         <button class="btn-primary" id="cg-create">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v0.8.1.2 GROUP SETTINGS MODAL -->
+  <div class="modal-backdrop" id="group-settings-backdrop">
+    <div class="modal" style="max-width:560px;">
+      <h2>
+        <span id="group-settings-name">Group</span>
+        <span class="device-drawer-sub" id="group-settings-sub"></span>
+      </h2>
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Members</span></div>
+        <div id="group-settings-members"></div>
+      </div>
+      <div class="settings-section" id="group-settings-add-section">
+        <div class="settings-section-h"><span>Add someone</span></div>
+        <div class="settings-row">
+          <label for="group-add-peer">Device</label>
+          <select id="group-add-peer"></select>
+        </div>
+        <button class="btn-ghost" id="group-add-member">Add to group</button>
+      </div>
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Invite link</span></div>
+        <p class="settings-help">
+          Copies a signed invite token. Membership is still approved by
+          this group, so links cannot silently add strangers.
+        </p>
+        <button class="btn-ghost" id="group-copy-invite">Copy invite link</button>
+      </div>
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Leave group</span></div>
+        <p class="settings-help">
+          Leaving removes this device from the group. Your old local
+          history stays here, but new group messages will stop.
+        </p>
+        <button class="btn-danger" id="group-leave">Leave group</button>
+      </div>
+      <div class="actions">
+        <button class="btn-ghost" id="group-settings-close">Close</button>
       </div>
     </div>
   </div>
@@ -2558,13 +2584,13 @@
       ev.stopPropagation();
       setReplyTo(msg);
     };
+    bar.appendChild(replyBtn);
     const reactBtn = el("button", "tb-btn", "+");
     reactBtn.title = "React";
     reactBtn.onclick = (ev) => {
       ev.stopPropagation();
       openEmojiPicker(reactBtn, msg);
     };
-    bar.appendChild(replyBtn);
     bar.appendChild(reactBtn);
     // v0.7.6: Edit + Delete on outbound, non-deleted messages.
     if (msg.dir === "out" && !msg.deleted) {
@@ -2596,10 +2622,17 @@
     if (!newBody.trim()) return;
     if (newBody === msg.body) return;
     try {
-      await api.post(
-        `/api/messages/${encodeURIComponent(msg.id)}/edit`,
-        { body: newBody, peer: msg.peer },
-      );
+      if (msg.is_group) {
+        await api.post(
+          `/api/groups/${encodeURIComponent(msg.group_id)}/messages/${encodeURIComponent(msg.id)}/edit`,
+          { body: newBody },
+        );
+      } else {
+        await api.post(
+          `/api/messages/${encodeURIComponent(msg.id)}/edit`,
+          { body: newBody, peer: msg.peer },
+        );
+      }
     } catch (e) {
       toast(`Edit failed: ${errorToastBody(e)}`, "bad", 6000);
     }
@@ -2608,10 +2641,17 @@
   async function deleteMessage(msg) {
     if (!confirm("Delete this message? It'll vanish on both sides.")) return;
     try {
-      await api.post(
-        `/api/messages/${encodeURIComponent(msg.id)}/delete`,
-        { peer: msg.peer },
-      );
+      if (msg.is_group) {
+        await api.post(
+          `/api/groups/${encodeURIComponent(msg.group_id)}/messages/${encodeURIComponent(msg.id)}/delete`,
+          {},
+        );
+      } else {
+        await api.post(
+          `/api/messages/${encodeURIComponent(msg.id)}/delete`,
+          { peer: msg.peer },
+        );
+      }
     } catch (e) {
       toast(`Delete failed: ${errorToastBody(e)}`, "bad");
     }
@@ -2651,7 +2691,12 @@
   }
 
   function setReplyTo(msg) {
-    state.replyTo = { id: msg.id, body: msg.body || "", peer: msg.peer };
+    state.replyTo = {
+      id: msg.id,
+      body: msg.body || "",
+      peer: msg.peer || null,
+      group_id: msg.group_id || null,
+    };
     renderReplyBar();
     $("#input")?.focus();
   }
@@ -2712,10 +2757,17 @@
   async function toggleReaction(msg, emoji, addNotRemove) {
     const op = addNotRemove ? "add" : "remove";
     try {
-      await api.post(
-        `/api/messages/${encodeURIComponent(msg.id)}/react`,
-        { emoji, op, peer: msg.peer },
-      );
+      if (msg.is_group) {
+        await api.post(
+          `/api/groups/${encodeURIComponent(msg.group_id)}/messages/${encodeURIComponent(msg.id)}/react`,
+          { emoji, op },
+        );
+      } else {
+        await api.post(
+          `/api/messages/${encodeURIComponent(msg.id)}/react`,
+          { emoji, op, peer: msg.peer },
+        );
+      }
       // Optimistic local mutation — server will broadcast a
       // reaction event to confirm.
       msg.reactions = msg.reactions || {};
@@ -2731,7 +2783,8 @@
           if (msg.reactions[emoji].length === 0) delete msg.reactions[emoji];
         }
       }
-      scheduleRenderMessages();
+      if (msg.is_group) renderGroupConversation();
+      else scheduleRenderMessages();
     } catch (e) {
       toast(`Reaction failed: ${errorToastBody(e)}`, "bad");
     }
@@ -2923,7 +2976,7 @@
     for (const g of state.groups.values()) {
       const row = el("div", "peer group-row");
       if (state.selectedGroup === g.group_id) row.classList.add("active");
-      const av = el("div", "avatar group-avatar", "👥");
+      const av = el("div", "avatar group-avatar", "G");
       const txt = el("div", "text");
       txt.appendChild(el("div", "name", g.name || "(unnamed group)"));
       txt.appendChild(el("div", "sub",
@@ -2955,17 +3008,170 @@
     renderGroupConversation();
   }
 
+  function closeGroupSettings() {
+    $("#group-settings-backdrop").classList.remove("show");
+  }
+
+  function memberLabel(member) {
+    if (member.is_me) return "You";
+    return member.display_name || member.fingerprint?.slice(0, 8) || "Unknown";
+  }
+
+  function openGroupSettings() {
+    const g = state.groupDetail;
+    if (!state.selectedGroup || !g) return;
+    $("#group-settings-name").textContent = g.name || "(unnamed group)";
+    $("#group-settings-sub").textContent =
+      `${g.member_count} member${g.member_count === 1 ? "" : "s"}`;
+
+    const memberHost = $("#group-settings-members");
+    memberHost.innerHTML = "";
+    const canManage = g.my_role === "owner" || g.my_role === "admin";
+    for (const m of g.members || []) {
+      const row = el("div", "file-row");
+      row.appendChild(el("div", "icon", m.is_me ? "You" : "User"));
+      const meta = el("div", "meta");
+      meta.appendChild(el("div", "name", memberLabel(m)));
+      meta.appendChild(el("div", "size", m.role || "member"));
+      row.appendChild(meta);
+      if (canManage && !m.is_me) {
+        const remove = el("button", null, "Remove");
+        remove.onclick = () => removeGroupMember(m.fingerprint);
+        row.appendChild(remove);
+      }
+      memberHost.appendChild(row);
+    }
+
+    const memberFps = new Set((g.members || []).map(m => m.fingerprint));
+    const candidates = [...state.peers.values()]
+      .filter(p => p.fingerprint && p.trust === "pinned" && !memberFps.has(p.fingerprint));
+    const addSelect = $("#group-add-peer");
+    addSelect.innerHTML = "";
+    for (const p of candidates) {
+      const opt = document.createElement("option");
+      opt.value = p.fingerprint;
+      opt.textContent = p.display_name || p.hostname || p.short_id;
+      addSelect.appendChild(opt);
+    }
+    $("#group-settings-add-section").style.display =
+      canManage ? "block" : "none";
+    $("#group-add-member").disabled = candidates.length === 0;
+    if (candidates.length === 0) {
+      const opt = document.createElement("option");
+      opt.textContent = "No paired devices to add";
+      opt.value = "";
+      addSelect.appendChild(opt);
+    }
+    $("#group-settings-backdrop").classList.add("show");
+  }
+
+  async function refreshSelectedGroup() {
+    if (!state.selectedGroup) return;
+    await selectGroup(state.selectedGroup);
+    if ($("#group-settings-backdrop").classList.contains("show")) {
+      openGroupSettings();
+    }
+  }
+
+  async function addGroupMember() {
+    const gid = state.selectedGroup;
+    const fp = $("#group-add-peer").value;
+    if (!gid || !fp) return;
+    try {
+      await api.post(`/api/groups/${gid}/members`, { fp });
+      toast("Member added", "good");
+      await refreshGroups();
+      await refreshSelectedGroup();
+    } catch (e) {
+      toast(`Add failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
+  async function removeGroupMember(fp) {
+    const gid = state.selectedGroup;
+    if (!gid || !fp) return;
+    if (!confirm("Remove this member from the group?")) return;
+    try {
+      await api.del(`/api/groups/${gid}/members/${encodeURIComponent(fp)}`);
+      toast("Member removed", "good");
+      await refreshGroups();
+      await refreshSelectedGroup();
+    } catch (e) {
+      toast(`Remove failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
+  async function copyGroupInviteLink() {
+    const gid = state.selectedGroup;
+    if (!gid) return;
+    try {
+      const r = await api.get(`/api/groups/${gid}/invite-link`);
+      await navigator.clipboard.writeText(r.url || r.token || "");
+      toast("Invite link copied", "good");
+    } catch (e) {
+      toast(`Invite failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
+  async function leaveCurrentGroup() {
+    const gid = state.selectedGroup;
+    if (!gid) return;
+    if (!confirm("Leave this group on this device?")) return;
+    try {
+      await api.post(`/api/groups/${gid}/leave`, {});
+      closeGroupSettings();
+      state.selectedGroup = null;
+      state.groupDetail = null;
+      state.groupMessages = [];
+      $("#convo-active").style.display = "none";
+      $("#convo-empty").style.display = "grid";
+      await refreshGroups();
+      toast("Left group", "good");
+    } catch (e) {
+      toast(`Leave failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
+  function groupMessageLabel(msg) {
+    if (!msg) return "(message)";
+    if (msg.direction === "out") return "you";
+    const senderHex = msg.sender_pub_hex || "";
+    return senderHex ? findPeerLabelByPubHex(senderHex) : "(unknown)";
+  }
+
+  function renderGroupReplyQuote(msg, bubble) {
+    if (!msg.reply_to) return;
+    const parent = state.groupMessages.find(x => x.id === msg.reply_to);
+    const quote = el("div", "reply-quote");
+    const quoteBody = parent?.body
+      ? (parent.body.length > 80 ? parent.body.slice(0, 80) + "..." : parent.body)
+      : "(message)";
+    quote.appendChild(el("div", "reply-who", `↩ ${groupMessageLabel(parent)}`));
+    quote.appendChild(el("div", "reply-text", quoteBody));
+    quote.dataset.replyTo = msg.reply_to;
+    quote.onclick = () => {
+      const tgt = $("#messages")
+        ?.querySelector(`[data-msg-id="${CSS.escape(msg.reply_to)}"]`);
+      if (tgt) tgt.scrollIntoView({ behavior: "smooth", block: "center" });
+    };
+    bubble.appendChild(quote);
+  }
+
   function renderGroupConversation() {
     if (!state.selectedGroup || !state.groupDetail) return;
     $("#convo-empty").style.display = "none";
     $("#convo-active").style.display = "flex";
     const g = state.groupDetail;
-    $("#convo-avatar").textContent = "👥";
+    $("#convo-who").classList.add("group-context");
+    $("#convo-who").title = "";
+    $("#btn-group-settings").style.display = "inline-block";
+    $("#btn-attach").style.display = "none";
+    if (state.replyTo?.peer) clearReplyTo();
     $("#convo-name").textContent = g.name || "(unnamed group)";
     const subEl = $("#convo-sub");
     subEl.innerHTML = "";
     subEl.appendChild(document.createTextNode(
-      `${g.member_count} member${g.member_count === 1 ? "" : "s"} · group`
+      `Group chat · ${g.member_count} member${g.member_count === 1 ? "" : "s"}`
     ));
     const m = $("#messages");
     m.innerHTML = "";
@@ -2984,8 +3190,37 @@
         const who = el("div", "group-sender", senderLabel);
         b.appendChild(who);
       }
-      b.appendChild(renderInlineText(msg.body || ""));
+      if (msg.deleted || msg.deleted_at_ms) {
+        b.appendChild(el("div", "msg-deleted", "[message deleted]"));
+      } else {
+        renderGroupReplyQuote(msg, b);
+        b.appendChild(renderInlineText(msg.body || ""));
+        if (msg.edited_at_ms) {
+          const ed = el("span", "edited-badge", " (edited)");
+          ed.title = `edited at ${new Date(msg.edited_at_ms).toLocaleString()}`;
+          b.appendChild(ed);
+        }
+      }
       b.appendChild(el("span", "when", fmtTime(msg.ts_ms || msg.ts)));
+      b.dataset.msgId = msg.id;
+      b.appendChild(renderMsgToolbar({
+        id: msg.id,
+        body: msg.body,
+        dir: isMine ? "out" : "in",
+        ts: msg.ts_ms || msg.ts,
+        group_id: state.selectedGroup,
+        is_group: true,
+        deleted: Boolean(msg.deleted || msg.deleted_at_ms),
+        reactions: msg.reactions || {},
+      }));
+      if (msg.reactions && Object.keys(msg.reactions).length) {
+        b.appendChild(renderReactionsRow({
+          ...msg,
+          dir: isMine ? "out" : "in",
+          group_id: state.selectedGroup,
+          is_group: true,
+        }));
+      }
       m.appendChild(b);
     }
     m.scrollTop = m.scrollHeight;
@@ -3007,9 +3242,9 @@
     list.innerHTML = "";
     const pinned = [...state.peers.values()]
       .filter(p => p.fingerprint && p.trust === "pinned");
-    if (pinned.length === 0) {
+    if (pinned.length < 2) {
       list.appendChild(el("div", "empty",
-        "Pair at least one device first — groups need members."));
+        "Groups need at least 3 people total. Pair two devices first."));
     }
     for (const p of pinned) {
       const row = el("label", "cg-member-row");
@@ -3023,6 +3258,18 @@
       row.appendChild(txt);
       list.appendChild(row);
     }
+    const createBtn = $("#cg-create");
+    const updateCreateEnabled = () => {
+      const checked = list.querySelectorAll("input[type=checkbox]:checked").length;
+      createBtn.disabled = checked < 2;
+      createBtn.title = checked < 2
+        ? "Pick at least two paired devices for a group"
+        : "";
+    };
+    list.querySelectorAll("input[type=checkbox]").forEach(cb => {
+      cb.addEventListener("change", updateCreateEnabled);
+    });
+    updateCreateEnabled();
     $("#create-group-backdrop").classList.add("show");
   }
 
@@ -3035,6 +3282,10 @@
     if (!name) { toast("Group name required", "bad"); return; }
     const fps = [...$("#cg-members").querySelectorAll("input[type=checkbox]:checked")]
       .map(cb => cb.dataset.fp);
+    if (fps.length < 2) {
+      toast("Groups need at least 3 people total. Use device chat for 1-on-1.", "bad", 6000);
+      return;
+    }
     try {
       const r = await api.post("/api/groups", { name, members: fps });
       closeCreateGroupModal();
@@ -3243,11 +3494,16 @@
     if (!peer) {
       $("#convo-empty").style.display = "grid";
       $("#convo-active").style.display = "none";
+      clearReplyTo();
       return;
     }
     $("#convo-empty").style.display = "none";
     $("#convo-active").style.display = "flex";
-    $("#convo-avatar").textContent = initials(peer.display_name || peer.hostname || peer.short_id);
+    $("#convo-who").classList.remove("group-context");
+    $("#convo-who").title = "Open device settings";
+    $("#btn-group-settings").style.display = "none";
+    $("#btn-attach").style.display = "";
+    if (state.replyTo?.group_id) clearReplyTo();
     $("#convo-name").textContent = peer.display_name || peer.hostname || "(unknown)";
     const subEl = $("#convo-sub");
     subEl.innerHTML = "";
@@ -3255,8 +3511,9 @@
     subEl.title = "";
     subEl.onclick = null;
     if (peer.trust === "rejected") {
-      subEl.appendChild(document.createTextNode("blocked"));
+      subEl.appendChild(document.createTextNode("Device chat · blocked"));
     } else {
+      subEl.appendChild(document.createTextNode("Device chat · "));
       const lc = latencyClass(peer);
       if (lc) {
         const dot = el("span", `lat-dot ${lc}`);
@@ -3651,6 +3908,11 @@
     $("#open-create-group")?.addEventListener("click", openCreateGroupModal);
     $("#cg-cancel")?.addEventListener("click", closeCreateGroupModal);
     $("#cg-create")?.addEventListener("click", submitCreateGroup);
+    $("#btn-group-settings")?.addEventListener("click", openGroupSettings);
+    $("#group-settings-close")?.addEventListener("click", closeGroupSettings);
+    $("#group-add-member")?.addEventListener("click", addGroupMember);
+    $("#group-copy-invite")?.addEventListener("click", copyGroupInviteLink);
+    $("#group-leave")?.addEventListener("click", leaveCurrentGroup);
   }
 
   // v0.7.x: notification toggle in Settings modal.
@@ -3786,6 +4048,64 @@
             if (state.activePane === "debug") renderDebugLog();
             $("#debug-error-count").textContent = state.debugEntries
               .filter(x => x.severity === "error").length;
+          }
+        }
+      } else if (m.type === "group_msg") {
+        const gid = m.group_id_hex || m.group_id;
+        if (gid && gid === state.selectedGroup) {
+          const row = {
+            id: m.id,
+            group_id: gid,
+            sender_pub_hex: m.sender_pub_hex,
+            epoch: m.epoch,
+            counter: m.counter,
+            direction: m.direction,
+            body: m.body,
+            reply_to: m.reply_to,
+            ts_ms: m.ts_ms || Date.now(),
+          };
+          const idx = state.groupMessages.findIndex(x => x.id === row.id);
+          if (idx >= 0) state.groupMessages[idx] = { ...state.groupMessages[idx], ...row };
+          else state.groupMessages.unshift(row);
+          renderGroupConversation();
+        }
+      } else if (m.type === "group_msg_edit") {
+        if ((m.group_id_hex || m.group_id) === state.selectedGroup) {
+          const target = state.groupMessages.find(x => x.id === m.target);
+          if (target) {
+            target.body = m.body;
+            target.edited_at_ms = m.edited_at_ms;
+            renderGroupConversation();
+          }
+        }
+      } else if (m.type === "group_msg_delete") {
+        if ((m.group_id_hex || m.group_id) === state.selectedGroup) {
+          const target = state.groupMessages.find(x => x.id === m.target);
+          if (target) {
+            target.body = null;
+            target.deleted = true;
+            target.deleted_at_ms = m.deleted_at_ms;
+            renderGroupConversation();
+          }
+        }
+      } else if (m.type === "group_reaction") {
+        if ((m.group_id_hex || m.group_id) === state.selectedGroup) {
+          const target = state.groupMessages.find(x => x.id === m.target);
+          if (target) {
+            target.reactions = target.reactions || {};
+            if (m.op === "add") {
+              target.reactions[m.emoji] = target.reactions[m.emoji] || [];
+              if (!target.reactions[m.emoji].includes(m.peer_fp)) {
+                target.reactions[m.emoji].push(m.peer_fp);
+              }
+            } else if (target.reactions[m.emoji]) {
+              target.reactions[m.emoji] = target.reactions[m.emoji]
+                .filter(f => f !== m.peer_fp);
+              if (target.reactions[m.emoji].length === 0) {
+                delete target.reactions[m.emoji];
+              }
+            }
+            renderGroupConversation();
           }
         }
       } else if (m.type === "group_event" || m.type === "group_created") {
@@ -3971,11 +4291,14 @@
       const body = $("#input").value.trim();
       if (!body) return;
       try {
-        await api.post(
-          `/api/groups/${state.selectedGroup}/send`, { body },
-        );
+        const sendBody = { body };
+        if (state.replyTo && state.replyTo.group_id === state.selectedGroup) {
+          sendBody.reply_to = state.replyTo.id;
+        }
+        await api.post(`/api/groups/${state.selectedGroup}/send`, sendBody);
         $("#input").value = "";
         $("#input").style.height = "auto";
+        clearReplyTo();
         // Refresh from state so the new message lands in the pane.
         const r = await api.get(
           `/api/groups/${state.selectedGroup}/messages?limit=200`

@@ -192,7 +192,12 @@ class TransferPausedError(RuntimeError):
 # peers ignore the field — strict-forward-compat.
 PROTOCOL_VERSION = "OL1.2"
 CAPS_FEATURES: list[str] = [
-    *LOCAL_CAPABILITIES,
+    # Keep experimental transport upgrades out of default CAPS until
+    # their channel-level activation passes the normal send/file/group
+    # regression suite. The code can stay in-tree, but advertising a
+    # half-ready wire mode breaks the product promise: send must always
+    # work with the safest compatible path.
+    *[cap for cap in LOCAL_CAPABILITIES if cap != "double_ratchet_v1"],
     "audit",
     "fts",
     "trust",
@@ -819,6 +824,10 @@ class Daemon:
         # Send our capabilities eagerly (no ACK expected).
         try:
             await channel.send(encode_msg(self._build_my_caps_for_channel(channel)))
+            # v0.8.2: ratchet-activation half-step. Once we've also
+            # received the peer's CAPS we'll flip both directions.
+            channel.note_caps_sent()
+            channel.maybe_activate_ratchet()
         except Exception as e:
             log.warning("CAPS send failed: %s", e)
 
@@ -875,6 +884,15 @@ class Daemon:
                 "channel_bind": bind if isinstance(bind, dict) else None,
                 "app_version": msg.get("app_version"),
             }
+            # v0.8.2: ratchet-activation half-step. Once we've also
+            # SENT our CAPS we'll flip both directions to ratchet.
+            with contextlib.suppress(Exception):
+                channel.note_caps_received(features)
+                if channel.maybe_activate_ratchet():
+                    log.info(
+                        "ratchet activated on inbound channel from %s",
+                        peer_fp[:8],
+                    )
             if self.state is not None:
                 with contextlib.suppress(Exception):
                     self.state.set_peer_capabilities(peer_fp, features)
@@ -2889,6 +2907,14 @@ class Daemon:
                             "from": reply.get("from"),
                             "app_version": reply.get("app_version"),
                         }
+                        # v0.8.2: ratchet activation on probe-time CAPS.
+                        # In practice the session was already CAPS-
+                        # exchanged at construction — this is a
+                        # defence in depth for any session that
+                        # somehow missed it.
+                        with contextlib.suppress(Exception):
+                            sess.channel.note_caps_received(features)
+                            sess.channel.maybe_activate_ratchet()
                         if self.state is not None:
                             with contextlib.suppress(Exception):
                                 self.state.set_peer_capabilities(sess.peer_fp, features)
@@ -2948,6 +2974,14 @@ class Daemon:
                         port=peer.port,
                     )
             await channel.send(encode_msg(self._build_my_caps_for_channel(channel)))
+            # v0.8.2: half-step toward ratchet activation. The
+            # peer's CAPS will arrive on the first recv inside the
+            # session-using path (send_to / send_file / probe). At
+            # that point note_caps_received fires and the channel
+            # flips to ratchet mode for both directions.
+            with contextlib.suppress(Exception):
+                channel.note_caps_sent()
+                channel.maybe_activate_ratchet()
             sess = OutboundSession(
                 peer_fp=peer_fp,
                 peer=peer,
@@ -2999,6 +3033,18 @@ class Daemon:
                                 "from": ack.get("from"),
                                 "app_version": ack.get("app_version"),
                             }
+                            # v0.8.2: half-step toward ratchet
+                            # activation. If we already sent CAPS
+                            # right after handshake, this completes
+                            # the negotiation and flips the channel.
+                            with contextlib.suppress(Exception):
+                                sess.channel.note_caps_received(features)
+                                if sess.channel.maybe_activate_ratchet():
+                                    log.info(
+                                        "ratchet activated on outbound "
+                                        "session for %s",
+                                        sess.peer_fp[:8],
+                                    )
                             if self.state is not None:
                                 with contextlib.suppress(Exception):
                                     self.state.set_peer_capabilities(sess.peer_fp, features)
@@ -3037,6 +3083,14 @@ class Daemon:
             self._verify_channel_peer(peer, channel)
             try:
                 await channel.send(encode_msg(self._build_my_caps_for_channel(channel)))
+                # v0.8.2: half-step. This is _send_control — a
+                # short-lived dial that sends one msg + waits for
+                # ACK. If the peer's CAPS arrives + we've already
+                # sent ours, the recv loop below picks up the
+                # peer's CAPS and the channel flips automatically.
+                with contextlib.suppress(Exception):
+                    channel.note_caps_sent()
+                    channel.maybe_activate_ratchet()
             except Exception:
                 pass
             await channel.send(encode_msg(msg))
@@ -3637,28 +3691,118 @@ class Daemon:
             counter=advanced.counter,
         )
         msg_id = msg.get("id") or uuid.uuid4().hex
-        self.state.insert_group_message(
-            id=msg_id,
-            group_id=group_id,
-            sender_pub=sender_pub,
-            epoch=epoch,
-            counter=int(wire.get("counter", 0)),
-            direction="in",
-            body=plaintext.decode("utf-8", errors="replace"),
-        )
-        # Surface to UI subscribers.
-        if self.ui_server is not None:
-            with contextlib.suppress(Exception):
-                self.ui_server.broadcast({
-                    "type": "group_msg",
-                    "group_id_hex": group_id.hex(),
-                    "sender_pub_hex": sender_pub.hex(),
-                    "epoch": epoch,
-                    "counter": int(wire.get("counter", 0)),
-                    "body": plaintext.decode("utf-8", errors="replace"),
-                    "ts_ms": int(time.time() * 1000),
-                    "direction": "in",
-                })
+        plain_text = plaintext.decode("utf-8", errors="replace")
+        group_body = plain_text
+        group_reply_to = None
+        group_kind = "text"
+        group_target = None
+        group_emoji = None
+        group_op = None
+        group_at_ms = int(time.time() * 1000)
+        with contextlib.suppress(Exception):
+            env = json.loads(plain_text)
+            if isinstance(env, dict) and env.get("ol_group_msg") == 1:
+                group_kind = str(env.get("kind") or "text")
+                if isinstance(env.get("body"), str):
+                    group_body = env["body"]
+                if isinstance(env.get("reply_to"), str) and env.get("reply_to"):
+                    group_reply_to = env["reply_to"]
+                if isinstance(env.get("target"), str):
+                    group_target = env["target"]
+                if isinstance(env.get("emoji"), str):
+                    group_emoji = env["emoji"]
+                if isinstance(env.get("op"), str):
+                    group_op = env["op"]
+                with contextlib.suppress(Exception):
+                    group_at_ms = int(env.get("at_ms") or group_at_ms)
+
+        if group_kind in ("text", "message"):
+            self.state.insert_group_message(
+                id=msg_id,
+                group_id=group_id,
+                sender_pub=sender_pub,
+                epoch=epoch,
+                counter=int(wire.get("counter", 0)),
+                direction="in",
+                body=group_body,
+                reply_to=group_reply_to,
+            )
+            if self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "group_msg",
+                        "group_id_hex": group_id.hex(),
+                        "sender_pub_hex": sender_pub.hex(),
+                        "id": msg_id,
+                        "epoch": epoch,
+                        "counter": int(wire.get("counter", 0)),
+                        "body": group_body,
+                        "reply_to": group_reply_to,
+                        "ts_ms": group_at_ms,
+                        "direction": "in",
+                    })
+        elif group_kind == "reaction" and group_target and group_emoji:
+            op = "remove" if group_op == "remove" else "add"
+            sender_fp = fingerprint_of(sender_pub)
+            if op == "add":
+                self.state.record_reaction(
+                    target_msg_id=group_target,
+                    peer_fp=sender_fp,
+                    emoji=group_emoji,
+                )
+            else:
+                self.state.remove_reaction(
+                    target_msg_id=group_target,
+                    peer_fp=sender_fp,
+                    emoji=group_emoji,
+                )
+            if self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "group_reaction",
+                        "group_id_hex": group_id.hex(),
+                        "target": group_target,
+                        "peer_fp": sender_fp,
+                        "emoji": group_emoji,
+                        "op": op,
+                    })
+        elif group_kind == "edit" and group_target and isinstance(group_body, str):
+            existing_msg = self.state.get_group_message(group_target)
+            if existing_msg and existing_msg.get("sender_pub") == sender_pub:
+                self.state.edit_group_message(
+                    id=group_target,
+                    new_body=group_body,
+                    edited_at_ms=group_at_ms,
+                )
+                if self.ui_server is not None:
+                    with contextlib.suppress(Exception):
+                        self.ui_server.broadcast({
+                            "type": "group_msg_edit",
+                            "group_id_hex": group_id.hex(),
+                            "target": group_target,
+                            "body": group_body,
+                            "edited_at_ms": group_at_ms,
+                        })
+        elif group_kind == "delete" and group_target:
+            existing_msg = self.state.get_group_message(group_target)
+            if existing_msg and existing_msg.get("sender_pub") == sender_pub:
+                self.state.delete_group_message(
+                    id=group_target,
+                    deleted_at_ms=group_at_ms,
+                )
+                if self.ui_server is not None:
+                    with contextlib.suppress(Exception):
+                        self.ui_server.broadcast({
+                            "type": "group_msg_delete",
+                            "group_id_hex": group_id.hex(),
+                            "target": group_target,
+                            "deleted_at_ms": group_at_ms,
+                        })
+        else:
+            log.warning(
+                "unknown GROUP_MSG action from %s: %s",
+                peer_fp[:8], group_kind,
+            )
         await channel.send(encode_msg(make_msg(
             "ACK", self.me.short_id, of=msg.get("id"),
         )))
@@ -3832,16 +3976,8 @@ class Daemon:
         )
         return {"event_id": ev.event_id, **result}
 
-    async def send_group_message(
-        self, *, group_id: bytes, body: str,
-    ) -> dict:
-        """v0.6.2: encrypt a message under our sender chain for the
-        group, then fan out to every member via their 1-on-1 outbound
-        session.
-
-        Returns:
-            {"recipients": int, "delivered": int, "failures": [...]}
-        """
+    async def _send_group_envelope(self, *, group_id: bytes, payload: dict) -> dict:
+        """Encrypt one typed group action and fan it to every member."""
         if self.state is None:
             raise RuntimeError("state not available")
         from one_link import groups as gmod
@@ -3904,7 +4040,14 @@ class Daemon:
             chain_key=chain_row["chain_key"],
             counter=int(chain_row["counter"]),
         )
-        body_bytes = body.encode("utf-8")
+        payload = {
+            "ol_group_msg": 1,
+            "at_ms": int(time.time() * 1000),
+            **payload,
+        }
+        body_bytes = json.dumps(
+            payload, separators=(",", ":"), sort_keys=True,
+        ).encode("utf-8")
         wire, advanced = gc.encrypt_message(
             plaintext=body_bytes,
             chain=sender_chain,
@@ -3920,29 +4063,6 @@ class Daemon:
             chain_key=advanced.chain_key,
             counter=advanced.counter,
         )
-        # Save outbound message in our own store.
-        msg_id = uuid.uuid4().hex
-        self.state.insert_group_message(
-            id=msg_id,
-            group_id=group_id,
-            sender_pub=self.me.public_bytes,
-            epoch=sender_chain.epoch,
-            counter=sender_chain.counter,
-            direction="out",
-            body=body,
-        )
-        if self.ui_server is not None:
-            with contextlib.suppress(Exception):
-                self.ui_server.broadcast({
-                    "type": "group_msg",
-                    "group_id_hex": group_id.hex(),
-                    "sender_pub_hex": self.me.public_bytes.hex(),
-                    "epoch": sender_chain.epoch,
-                    "counter": sender_chain.counter,
-                    "body": body,
-                    "ts_ms": int(time.time() * 1000),
-                    "direction": "out",
-                })
 
         # Fan out to every other member.
         recipients = [
@@ -3977,8 +4097,158 @@ class Daemon:
             "recipients": len(recipients),
             "delivered": delivered,
             "failures": failures,
-            "msg_id": msg_id,
+            "epoch": sender_chain.epoch,
+            "counter": sender_chain.counter,
+            "at_ms": payload["at_ms"],
         }
+
+    async def send_group_message(
+        self, *, group_id: bytes, body: str, reply_to: str | None = None,
+    ) -> dict:
+        """v0.6.2: encrypt a group text message under our sender chain."""
+        if self.state is None:
+            raise RuntimeError("state not available")
+        msg_id = uuid.uuid4().hex
+        payload = {"kind": "text", "body": body}
+        if reply_to:
+            payload["reply_to"] = reply_to
+        fanout = await self._send_group_envelope(group_id=group_id, payload=payload)
+        self.state.insert_group_message(
+            id=msg_id,
+            group_id=group_id,
+            sender_pub=self.me.public_bytes,
+            epoch=int(fanout["epoch"]),
+            counter=int(fanout["counter"]),
+            direction="out",
+            body=body,
+            reply_to=reply_to,
+            ts_ms=int(fanout["at_ms"]),
+        )
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "group_msg",
+                    "group_id_hex": group_id.hex(),
+                    "sender_pub_hex": self.me.public_bytes.hex(),
+                    "id": msg_id,
+                    "epoch": int(fanout["epoch"]),
+                    "counter": int(fanout["counter"]),
+                    "body": body,
+                    "reply_to": reply_to,
+                    "ts_ms": int(fanout["at_ms"]),
+                    "direction": "out",
+                })
+        return {**fanout, "msg_id": msg_id}
+
+    async def send_group_reaction(
+        self, *, group_id: bytes, target_msg_id: str, emoji: str, op: str,
+    ) -> dict:
+        if self.state is None:
+            raise RuntimeError("state not available")
+        op = "remove" if op == "remove" else "add"
+        if op == "add":
+            self.state.record_reaction(
+                target_msg_id=target_msg_id,
+                peer_fp=self.me.fingerprint,
+                emoji=emoji,
+            )
+        else:
+            self.state.remove_reaction(
+                target_msg_id=target_msg_id,
+                peer_fp=self.me.fingerprint,
+                emoji=emoji,
+            )
+        fanout = await self._send_group_envelope(
+            group_id=group_id,
+            payload={
+                "kind": "reaction",
+                "target": target_msg_id,
+                "emoji": emoji,
+                "op": op,
+            },
+        )
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "group_reaction",
+                    "group_id_hex": group_id.hex(),
+                    "target": target_msg_id,
+                    "peer_fp": self.me.fingerprint,
+                    "emoji": emoji,
+                    "op": op,
+                })
+        return fanout
+
+    async def send_group_edit(
+        self, *, group_id: bytes, target_msg_id: str, new_body: str,
+    ) -> dict:
+        if self.state is None:
+            raise RuntimeError("state not available")
+        rec = self.state.get_group_message(target_msg_id)
+        if rec is None:
+            raise RuntimeError("message not found")
+        if rec.get("direction") != "out":
+            raise RuntimeError("can only edit your own outbound messages")
+        if rec.get("deleted_at_ms"):
+            raise RuntimeError("cannot edit a deleted message")
+        edited_at_ms = int(time.time() * 1000)
+        self.state.edit_group_message(
+            id=target_msg_id,
+            new_body=new_body,
+            edited_at_ms=edited_at_ms,
+        )
+        fanout = await self._send_group_envelope(
+            group_id=group_id,
+            payload={
+                "kind": "edit",
+                "target": target_msg_id,
+                "body": new_body,
+                "at_ms": edited_at_ms,
+            },
+        )
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "group_msg_edit",
+                    "group_id_hex": group_id.hex(),
+                    "target": target_msg_id,
+                    "body": new_body,
+                    "edited_at_ms": edited_at_ms,
+                })
+        return fanout
+
+    async def send_group_delete(
+        self, *, group_id: bytes, target_msg_id: str,
+    ) -> dict:
+        if self.state is None:
+            raise RuntimeError("state not available")
+        rec = self.state.get_group_message(target_msg_id)
+        if rec is None:
+            raise RuntimeError("message not found")
+        if rec.get("direction") != "out":
+            raise RuntimeError("can only delete your own outbound messages")
+        deleted_at_ms = int(time.time() * 1000)
+        self.state.delete_group_message(
+            id=target_msg_id,
+            deleted_at_ms=deleted_at_ms,
+        )
+        fanout = await self._send_group_envelope(
+            group_id=group_id,
+            payload={
+                "kind": "delete",
+                "target": target_msg_id,
+                "at_ms": deleted_at_ms,
+            },
+        )
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "group_msg_delete",
+                    "group_id_hex": group_id.hex(),
+                    "target": target_msg_id,
+                    "deleted_at_ms": deleted_at_ms,
+                })
+        return fanout
 
     async def _broadcast_group_key_offer(
         self,
@@ -4516,6 +4786,10 @@ class Daemon:
                 )
             try:
                 await channel.send(encode_msg(self._build_my_caps_for_channel(channel)))
+                # v0.8.2: ratchet half-step.
+                with contextlib.suppress(Exception):
+                    channel.note_caps_sent()
+                    channel.maybe_activate_ratchet()
             except Exception:
                 pass
 
@@ -4532,17 +4806,22 @@ class Daemon:
                     reply = await asyncio.wait_for(channel.recv(), timeout=15.0)
                     m = decode_msg(reply)
                     if m.get("t") == "CAPS":
+                        feats = list(normalize_caps(m.get("features", [])))
                         channel.peer_caps = {
                             "protocol": m.get("protocol", "?"),
-                            "features": list(normalize_caps(m.get("features", []))),
+                            "features": feats,
                             "from": m.get("from"),
                             "app_version": m.get("app_version"),
                         }
+                        # v0.8.2: ratchet half-step.
+                        with contextlib.suppress(Exception):
+                            channel.note_caps_received(feats)
+                            channel.maybe_activate_ratchet()
                         if self.state is not None:
                             with contextlib.suppress(Exception):
                                 fp = self._peer_fp_from_peer(peer)
                                 if fp:
-                                    self.state.set_peer_capabilities(fp, channel.peer_caps["features"])
+                                    self.state.set_peer_capabilities(fp, feats)
                         continue
                     if m.get("t") == "MANIFEST_WANTS" and m.get("folder") == folder_name:
                         wants = list(m.get("wants", []) or [])
@@ -4804,6 +5083,10 @@ class Daemon:
                         "from": m.get("from"),
                         "app_version": m.get("app_version"),
                     }
+                    # v0.8.2: ratchet half-step on file-send recv loop.
+                    with contextlib.suppress(Exception):
+                        ch_.note_caps_received(features)
+                        ch_.maybe_activate_ratchet()
                     if self.state is not None:
                         with contextlib.suppress(Exception):
                             self.state.set_peer_capabilities(peer_fp, features)

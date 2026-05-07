@@ -423,8 +423,32 @@ class State:
                 self._migrate_v5_edit_delete_read(c)
                 if current < 5:
                     c.execute("INSERT INTO schema_version(version) VALUES(5)")
+                self._migrate_v6_group_reply(c)
+                if current < 6:
+                    c.execute("INSERT INTO schema_version(version) VALUES(6)")
+                self._migrate_v7_group_edit_delete(c)
+                if current < 7:
+                    c.execute("INSERT INTO schema_version(version) VALUES(7)")
             finally:
                 c.close()
+
+    def _migrate_v6_group_reply(self, c: sqlite3.Cursor) -> None:
+        """v0.8.2: group messages gain reply_to for threaded context."""
+        rows = c.execute("PRAGMA table_info(group_messages)").fetchall()
+        existing = {row[1] for row in rows}
+        if "reply_to" not in existing:
+            c.execute("ALTER TABLE group_messages ADD COLUMN reply_to TEXT")
+
+    def _migrate_v7_group_edit_delete(self, c: sqlite3.Cursor) -> None:
+        """v0.8.2: group messages gain edit/delete state."""
+        rows = c.execute("PRAGMA table_info(group_messages)").fetchall()
+        existing = {row[1] for row in rows}
+        if "edited_at_ms" not in existing:
+            c.execute("ALTER TABLE group_messages ADD COLUMN edited_at_ms INTEGER")
+        if "original_body" not in existing:
+            c.execute("ALTER TABLE group_messages ADD COLUMN original_body TEXT")
+        if "deleted_at_ms" not in existing:
+            c.execute("ALTER TABLE group_messages ADD COLUMN deleted_at_ms INTEGER")
 
     def _migrate_v5_edit_delete_read(self, c: sqlite3.Cursor) -> None:
         """v0.7.6: add edit_at_ms / original_body / deleted_at_ms
@@ -932,6 +956,7 @@ class State:
         counter: int,
         direction: str,
         body: str,
+        reply_to: Optional[str] = None,
         ts_ms: Optional[int] = None,
     ) -> None:
         with self._write_lock:
@@ -939,11 +964,12 @@ class State:
                 """
                 INSERT OR IGNORE INTO group_messages(
                     id, group_id, sender_pub, epoch, counter,
-                    direction, body, ts_ms
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    direction, body, reply_to, ts_ms
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (id, group_id, sender_pub, int(epoch), int(counter),
-                 direction, body, int(ts_ms if ts_ms is not None else _now_ms())),
+                 direction, body, reply_to,
+                 int(ts_ms if ts_ms is not None else _now_ms())),
             )
 
     def recent_group_messages(
@@ -954,7 +980,8 @@ class State:
     ) -> list[dict]:
         rows = self._conn.execute(
             "SELECT id, group_id, sender_pub, epoch, counter, direction, "
-            "body, ts_ms FROM group_messages WHERE group_id = ? "
+            "body, reply_to, edited_at_ms, original_body, deleted_at_ms, "
+            "ts_ms FROM group_messages WHERE group_id = ? "
             "ORDER BY ts_ms DESC LIMIT ?",
             (group_id, int(limit)),
         ).fetchall()
@@ -967,10 +994,70 @@ class State:
                 "counter": r["counter"],
                 "direction": r["direction"],
                 "body": r["body"],
+                "reply_to": r["reply_to"] if "reply_to" in r.keys() else None,
+                "edited_at_ms": r["edited_at_ms"] if "edited_at_ms" in r.keys() else None,
+                "original_body": r["original_body"] if "original_body" in r.keys() else None,
+                "deleted_at_ms": r["deleted_at_ms"] if "deleted_at_ms" in r.keys() else None,
                 "ts_ms": r["ts_ms"],
             }
             for r in rows
         ]
+
+    def get_group_message(self, id: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT id, group_id, sender_pub, epoch, counter, direction, "
+            "body, reply_to, edited_at_ms, original_body, deleted_at_ms, ts_ms "
+            "FROM group_messages WHERE id = ?",
+            (id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "group_id": row["group_id"],
+            "sender_pub": row["sender_pub"],
+            "epoch": row["epoch"],
+            "counter": row["counter"],
+            "direction": row["direction"],
+            "body": row["body"],
+            "reply_to": row["reply_to"],
+            "edited_at_ms": row["edited_at_ms"],
+            "original_body": row["original_body"],
+            "deleted_at_ms": row["deleted_at_ms"],
+            "ts_ms": row["ts_ms"],
+        }
+
+    def edit_group_message(
+        self, *, id: str, new_body: str, edited_at_ms: int,
+    ) -> Optional[dict]:
+        cur = self.get_group_message(id)
+        if cur is None or cur.get("deleted_at_ms"):
+            return None
+        original = cur.get("original_body") or cur.get("body")
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE group_messages SET body = ?, edited_at_ms = ?, "
+                "original_body = COALESCE(original_body, ?) "
+                "WHERE id = ? AND deleted_at_ms IS NULL",
+                (new_body, int(edited_at_ms), original, id),
+            )
+        return self.get_group_message(id)
+
+    def delete_group_message(
+        self, *, id: str, deleted_at_ms: int,
+    ) -> Optional[dict]:
+        cur = self.get_group_message(id)
+        if cur is None:
+            return None
+        if cur.get("deleted_at_ms"):
+            return cur
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE group_messages SET body = NULL, deleted_at_ms = ? "
+                "WHERE id = ? AND deleted_at_ms IS NULL",
+                (int(deleted_at_ms), id),
+            )
+        return self.get_group_message(id)
 
     def _row_to_peer(self, row: sqlite3.Row) -> PeerRecord:
         cols = row.keys()

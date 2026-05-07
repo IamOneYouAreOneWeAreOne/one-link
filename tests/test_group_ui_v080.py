@@ -282,6 +282,34 @@ async def test_api_create_group_rejects_unpinned_member(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_api_create_group_requires_two_other_devices(tmp_path: Path):
+    from one_link.server import UIServer
+
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    daemon = SimpleNamespace(state=state, me=me)
+    server = UIServer(daemon)
+    server.broadcast = lambda evt: None
+
+    class _Req:
+        match_info: dict = {}
+        async def json(self):
+            return {"name": "Too small", "members": [them.fingerprint]}
+
+    resp = await server.api_create_group(_Req())
+    body = json.loads(resp.text)
+    assert resp.status == 400
+    assert "at least 3 people" in body["error"]
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_api_get_group_404_unknown(tmp_path: Path):
     from one_link.server import UIServer
 
@@ -311,7 +339,7 @@ async def test_api_group_messages_serializes_bytes_to_hex(tmp_path: Path):
     state.insert_group_message(
         id="m1", group_id=gid, sender_pub=pub,
         epoch=1, counter=0, direction="in",
-        body="hello group", ts_ms=1000,
+        body="hello group", reply_to="parent", ts_ms=1000,
     )
     daemon = SimpleNamespace(state=state, me=me)
     server = UIServer(daemon)
@@ -327,6 +355,7 @@ async def test_api_group_messages_serializes_bytes_to_hex(tmp_path: Path):
     # sender_pub turned into hex string.
     assert m["sender_pub_hex"] == pub.hex()
     assert m["body"] == "hello group"
+    assert m["reply_to"] == "parent"
     assert m["group_id"] == gid.hex()
     state.close()
 
@@ -350,6 +379,172 @@ async def test_api_send_group_validates_body(tmp_path: Path):
     state.close()
 
 
+@pytest.mark.asyncio
+async def test_api_send_group_threads_reply_to(tmp_path: Path):
+    from one_link.server import UIServer
+
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+
+    class _Daemon:
+        def __init__(self):
+            self.state = state
+            self.me = SimpleNamespace(
+                fingerprint=me.fingerprint,
+                short_id=me.short_id,
+                hostname="me",
+                public_bytes=me.public_bytes,
+            )
+            self.sent = None
+
+        async def send_group_message(self, *, group_id, body, reply_to=None):
+            self.sent = (group_id, body, reply_to)
+            return {"msg_id": "m2"}
+
+    daemon = _Daemon()
+    server = UIServer(daemon)
+
+    class _Req:
+        match_info = {"gid": "ab" * 16}
+        async def json(self):
+            return {"body": "reply", "reply_to": "m1"}
+
+    resp = await server.api_send_group(_Req())
+    body = json.loads(resp.text)
+    assert resp.status == 200
+    assert body["ok"] is True
+    assert daemon.sent == (bytes.fromhex("ab" * 16), "reply", "m1")
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_leave_group_removes_self(tmp_path: Path):
+    from one_link.server import UIServer
+
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+
+    class _Daemon:
+        def __init__(self):
+            self.state = state
+            self.me = SimpleNamespace(
+                fingerprint=me.fingerprint,
+                short_id=me.short_id,
+                hostname="me",
+                public_bytes=me.public_bytes,
+            )
+            self.removed = None
+
+        async def remove_group_member(self, *, group_id, member_pubkey):
+            self.removed = (group_id, member_pubkey)
+            return {"group_id": group_id.hex(), "member_count": 0}
+
+    daemon = _Daemon()
+    server = UIServer(daemon)
+
+    class _Req:
+        match_info = {"gid": "ab" * 16}
+
+    resp = await server.api_leave_group(_Req())
+    body = json.loads(resp.text)
+    assert resp.status == 200
+    assert body["ok"] is True
+    assert daemon.removed == (bytes.fromhex("ab" * 16), me.public_bytes)
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_group_message_actions_call_daemon(tmp_path: Path):
+    from one_link.server import UIServer
+
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    gid = bytes.fromhex("ab" * 16)
+    state.insert_group_message(
+        id="m1", group_id=gid, sender_pub=me.public_bytes,
+        epoch=1, counter=0, direction="out", body="hello", ts_ms=1000,
+    )
+
+    class _Daemon:
+        def __init__(self):
+            self.state = state
+            self.me = SimpleNamespace(
+                fingerprint=me.fingerprint,
+                short_id=me.short_id,
+                public_bytes=me.public_bytes,
+            )
+            self.calls = []
+
+        async def send_group_reaction(self, *, group_id, target_msg_id, emoji, op):
+            self.calls.append(("react", group_id, target_msg_id, emoji, op))
+            return {"delivered": 1}
+
+        async def send_group_edit(self, *, group_id, target_msg_id, new_body):
+            self.calls.append(("edit", group_id, target_msg_id, new_body))
+            return {"delivered": 1}
+
+        async def send_group_delete(self, *, group_id, target_msg_id):
+            self.calls.append(("delete", group_id, target_msg_id))
+            return {"delivered": 1}
+
+    daemon = _Daemon()
+    server = UIServer(daemon)
+
+    class _ReactReq:
+        match_info = {"gid": gid.hex(), "msg_id": "m1"}
+        async def json(self):
+            return {"emoji": "+1", "op": "add"}
+
+    class _EditReq:
+        match_info = {"gid": gid.hex(), "msg_id": "m1"}
+        async def json(self):
+            return {"body": "updated"}
+
+    class _DeleteReq:
+        match_info = {"gid": gid.hex(), "msg_id": "m1"}
+
+    react = await server.api_react_group_message(_ReactReq())
+    edit = await server.api_edit_group_message(_EditReq())
+    delete = await server.api_delete_group_message(_DeleteReq())
+    assert react.status == 200
+    assert edit.status == 200
+    assert delete.status == 200
+    assert daemon.calls == [
+        ("react", gid, "m1", "+1", "add"),
+        ("edit", gid, "m1", "updated"),
+        ("delete", gid, "m1"),
+    ]
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_group_invite_link_is_signed(tmp_path: Path):
+    from one_link.server import UIServer
+
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = SimpleNamespace(state=state, me=me)
+    server = UIServer(daemon)
+    gid = bytes.fromhex("ab" * 16)
+    server._materialize_group = lambda _gid: {
+        "group_id": gid.hex(),
+        "name": "Team",
+        "is_member": True,
+    }
+
+    class _Req:
+        match_info = {"gid": gid.hex()}
+        query: dict = {}
+
+    resp = await server.api_group_invite_link(_Req())
+    body = json.loads(resp.text)
+    assert resp.status == 200
+    assert body["ok"] is True
+    assert body["url"].startswith("one-link://group-invite/")
+    assert body["issuer_fp"] == me.fingerprint
+    state.close()
+
+
 # ─── HTML structural pin ───────────────────────────────────────────
 
 def test_index_html_has_groups_surface():
@@ -366,10 +561,26 @@ def test_index_html_has_groups_surface():
         'id="cg-name"',
         'id="cg-members"',
         'id="cg-create"',
+        "Pick at least two paired devices",
+        "Groups need at least 3 people total",
+        'id="btn-group-settings"',
+        'id="group-settings-backdrop"',
+        'id="group-settings-members"',
+        'id="group-add-peer"',
+        'id="group-add-member"',
+        'id="group-copy-invite"',
+        'id="group-leave"',
         "function refreshGroups",
         "function renderGroups",
         "function selectGroup",
         "function renderGroupConversation",
+        "function renderGroupReplyQuote",
+        '"group_reaction"',
+        '"group_msg_edit"',
+        '"group_msg_delete"',
+        "function openGroupSettings",
+        "function copyGroupInviteLink",
+        "function leaveCurrentGroup",
         "function openCreateGroupModal",
         "function submitCreateGroup",
         '"group_event"',
