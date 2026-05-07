@@ -114,9 +114,17 @@ crypto so trust decisions are obvious.
     `/api/peers/{fp}/key-change-events/ack-all`, GET
     `/api/peers/{fp}/key-history`. Schema migration v9.
 
-  - **v0.7.9 — QR-code SAS + audio SAS.** In-person verification
-    via webcam scan of the SAS QR (existing 6-digit SAS encoded);
-    audio SAS reads digits aloud for over-the-phone verification.
+  - **v0.7.9 — Multi-modal SAS verification.** ✓ Shipped (released
+    as package v0.8.5). Audio readback (SpeechSynthesis API spells
+    each digit, "zero four three, one nine two") for phone-call
+    confirmation. Visual SAS art (deterministic 6-cell emoji + color
+    grid derived from the SAS digits) for face-to-face glance
+    confirmation, similar in spirit to SSH host-key randomart and
+    Threema's emoji codes. Both rendered alongside the canonical 6
+    digits in the pair modal AND device drawer; either side can
+    derive them locally — no extra wire data. Webcam QR scanning
+    is intentionally deferred (heavy vendored library, narrow win
+    over multi-modal already covered).
 
   - **v0.8.0 — Group UI** (depends on v0.7.5/.6 chat features).
     Wire all the existing v0.6.x group protocol into the UI:

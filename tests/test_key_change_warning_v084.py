@@ -255,5 +255,6 @@ def test_index_html_renders_key_change_surfaces():
     assert 'id="dev-keychange-ack"' in src
     # WS handlers
     assert "key_change_acked" in src
-    # Page version constant bumped
-    assert 'PAGE_BUILT_FOR = "0.8.4"' in src
+    # Page version constant present (post-v0.8.4); subsequent ships
+    # bump the digit, so we just check the surface exists.
+    assert "PAGE_BUILT_FOR" in src

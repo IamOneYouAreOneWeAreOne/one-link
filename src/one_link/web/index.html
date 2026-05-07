@@ -238,6 +238,33 @@
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
     font-size: 11px; word-break: break-all; color: var(--text-dim);
   }
+  /* v0.7.9 multi-modal SAS verification surfaces. */
+  .btn-icon {
+    background: var(--bg-3); color: var(--text-dim);
+    border: 1px solid transparent; border-radius: 6px;
+    width: 26px; height: 26px;
+    padding: 0;
+    font-size: 13px; line-height: 1;
+    cursor: pointer; margin-left: 4px;
+    transition: background .12s, color .12s;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .btn-icon:hover { background: var(--bg-2); color: var(--text); }
+  .btn-icon.on { background: var(--accent); color: white; }
+  .sas-art {
+    display: grid; grid-template-columns: repeat(6, 1fr);
+    gap: 4px; padding: 8px;
+    background: var(--bg-1); border-radius: 6px;
+    margin-top: 6px;
+    font-size: 22px; line-height: 1; text-align: center;
+  }
+  .sas-art.empty { display: none; }
+  .sas-art .cell {
+    aspect-ratio: 1 / 1;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 4px;
+  }
+  .pair-modal .sas-art { margin-top: 12px; }
   .peer .trust-tag {
     font-size: 10px; font-weight: 600; letter-spacing: .4px;
     padding: 1px 6px; border-radius: 999px; text-transform: uppercase;
@@ -1563,7 +1590,17 @@
       </div>
       <div class="sas-display">
         <div class="sas-code copyable" id="pair-sas" title="Click to copy">000 000</div>
-        <div class="sas-label">verification code · click to copy · check both devices</div>
+        <div class="sas-label">verification code · check both devices</div>
+        <!-- v0.7.9 multi-modal SAS verification: speak the digits
+             aloud (good for phone-call confirmation) and show a
+             6-cell visual SAS art grid (good for face-to-face glance
+             confirmation). Both deterministic from the SAS digits. -->
+        <div class="mini-actions" style="justify-content:center; margin-top:8px;">
+          <button class="btn-icon" id="pair-sas-speak" title="Read SAS aloud">🔊 Speak</button>
+          <button class="btn-icon" id="pair-sas-art-toggle" title="Show visual SAS art">🎨 Visual</button>
+          <button class="btn-icon" id="pair-sas-copy" title="Copy SAS digits">📋 Copy</button>
+        </div>
+        <div class="sas-art" id="pair-sas-art" style="display:none;"></div>
       </div>
       <div class="actions">
         <button class="btn-danger" id="pair-mismatch">Codes don't match</button>
@@ -1787,7 +1824,16 @@
         <div class="device-identity">
           <div class="reach-row"><span class="lbl">Short ID</span><span class="val copyable" id="dev-shortid">—</span></div>
           <div class="reach-row"><span class="lbl">Fingerprint</span><span class="val copyable mono small" id="dev-fp">—</span></div>
-          <div class="reach-row"><span class="lbl">SAS</span><span class="val mono" id="dev-sas">—</span></div>
+          <div class="reach-row">
+            <span class="lbl">SAS</span>
+            <span class="val mono" id="dev-sas">—</span>
+            <!-- v0.7.9: audio readback button + visual SAS-art panel
+                 toggle. Multi-modal verification beats reading 6
+                 digits twice. -->
+            <button class="btn-icon" id="dev-sas-speak" title="Read SAS aloud">🔊</button>
+            <button class="btn-icon" id="dev-sas-art-toggle" title="Show visual SAS art">🎨</button>
+          </div>
+          <div class="sas-art" id="dev-sas-art" style="display:none;"></div>
         </div>
       </div>
 
@@ -4114,6 +4160,7 @@
   // v0.7.3: per-device drawer.
   state.deviceDrawerFp = null;
   state.deviceDrawerPending = null;  // pending unsaved changes
+  state.deviceDrawerSas = null;      // v0.7.9: cached SAS for speak / art
 
   function _humanRelMs(ms) {
     if (!ms) return "—";
@@ -4178,9 +4225,18 @@
 
     // SAS — we recompute server-side via /api/peers/{fp}/sas.
     $("#dev-sas").textContent = "…";
+    state.deviceDrawerSas = null;
+    renderSasArt($("#dev-sas-art"), null);
+    $("#dev-sas-art").style.display = "none";
+    $("#dev-sas-art-toggle")?.classList.remove("on");
     try {
       const sas = await api.get(`/api/peers/${peer.fingerprint}/sas`);
       $("#dev-sas").textContent = sas.sas || "—";
+      // v0.7.9: cache + pre-render art so the toggle is instant.
+      if (sas.sas) {
+        state.deviceDrawerSas = sas.sas;
+        renderSasArt($("#dev-sas-art"), sas.sas);
+      }
     } catch {
       $("#dev-sas").textContent = "(unavailable)";
     }
@@ -4255,6 +4311,8 @@
   function closeDeviceDrawer() {
     state.deviceDrawerFp = null;
     state.deviceDrawerPending = null;
+    state.deviceDrawerSas = null;
+    try { window.speechSynthesis?.cancel(); } catch {}
     $("#device-backdrop").classList.remove("show");
   }
 
@@ -4375,6 +4433,17 @@
       syncDrawerCapabilityControls(previous);
       toast(`Update failed: ${err.message || err}`, "bad");
     }
+  });
+  // v0.7.9: drawer SAS multi-modal helpers (mirrors pair-modal).
+  $("#dev-sas-speak")?.addEventListener("click", () => {
+    speakSas(state.deviceDrawerSas);
+  });
+  $("#dev-sas-art-toggle")?.addEventListener("click", (e) => {
+    const art = $("#dev-sas-art");
+    if (!art) return;
+    const showing = art.style.display !== "none";
+    art.style.display = showing ? "none" : "grid";
+    e.currentTarget.classList.toggle("on", !showing);
   });
   $("#dev-shortid").onclick = () => {
     if (state.deviceDrawerFp) {
@@ -4577,7 +4646,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.8.4";
+  const PAGE_BUILT_FOR = "0.8.5";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -5604,6 +5673,103 @@
     return s.slice(0, 3) + " " + s.slice(3);
   }
 
+  // v0.7.9 multi-modal SAS verification helpers.
+  //
+  // The 6-digit SAS we present today (`043 192`) is hard to compare
+  // by phone call ("did you say one or seven?"), and 6 digits look a
+  // lot like every other 6 digits. v0.7.9 surfaces two derived
+  // representations alongside the canonical digits so the user can
+  // pick whichever modality fits the situation:
+  //
+  //   • Audio readback — SpeechSynthesis reads "zero four three,
+  //     one nine two" aloud so the OTHER end can echo it back.
+  //   • Visual SAS art — a deterministic 6-cell grid of distinct
+  //     emoji + colors derived from the SAS. Faster to compare
+  //     visually than reading 6 digits twice (similar in spirit to
+  //     SSH host-key randomart, Threema's emoji codes).
+  //
+  // Both are pure functions of the SAS digits — no extra wire data
+  // needed. Either side can render them locally.
+
+  // 24 distinct, easy-to-distinguish emoji. Avoid skin-tone
+  // variants and culturally-loaded symbols. Each maps to a digit
+  // pair so a 6-digit SAS yields 6 cells (one per digit, with the
+  // symbol selected from `digit*2` mod table.length plus an offset
+  // derived from neighbours so two equal digits produce different
+  // cells).
+  const SAS_ART_EMOJI = [
+    "🐶","🐱","🦊","🐼","🐯","🐸",
+    "🦋","🌸","🌳","🌈","🌊","🌙",
+    "🍎","🍊","🍋","🍇","🍒","🥑",
+    "🚀","🛸","⚓","🎵","🔔","⚡",
+  ];
+  const SAS_ART_BG = [
+    "#5b3aa8","#3a6fa8","#3aa87f","#a87f3a","#a83a5b","#5ba83a",
+    "#6a3aa8","#3a4aa8","#3aa897","#a8a23a","#a83a8b","#3aa83a",
+  ];
+
+  function sasArtCells(sas) {
+    const s = String(sas || "").padStart(6, "0").slice(0, 6);
+    const cells = [];
+    for (let i = 0; i < 6; i++) {
+      const d = parseInt(s[i], 10) || 0;
+      // Mix neighboring digits so two adjacent identical digits
+      // don't produce identical cells.
+      const left = parseInt(s[(i + 5) % 6], 10) || 0;
+      const right = parseInt(s[(i + 1) % 6], 10) || 0;
+      const emojiIdx = (d * 7 + left * 3 + i * 11) % SAS_ART_EMOJI.length;
+      const bgIdx = (d * 5 + right * 3 + i * 13) % SAS_ART_BG.length;
+      cells.push({
+        emoji: SAS_ART_EMOJI[emojiIdx],
+        bg: SAS_ART_BG[bgIdx],
+        digit: s[i],
+      });
+    }
+    return cells;
+  }
+
+  function renderSasArt(host, sas) {
+    if (!host) return;
+    host.innerHTML = "";
+    if (!sas) {
+      host.classList.add("empty");
+      return;
+    }
+    host.classList.remove("empty");
+    for (const c of sasArtCells(sas)) {
+      const cell = el("div", "cell", c.emoji);
+      cell.style.backgroundColor = c.bg;
+      cell.title = `digit ${c.digit}`;
+      host.appendChild(cell);
+    }
+  }
+
+  function speakSas(sas) {
+    if (!("speechSynthesis" in window)) {
+      toast("This browser doesn't support speech.", "warn");
+      return;
+    }
+    const s = String(sas || "").padStart(6, "0").slice(0, 6);
+    if (!s || s === "000000") {
+      toast("SAS isn't ready yet.", "info");
+      return;
+    }
+    // Cancel any in-flight readback so rapid clicks don't queue.
+    window.speechSynthesis.cancel();
+    // Spell digit-by-digit with a pause every 3 digits — matches
+    // the "043 192" formatting and makes phone-call confirmation
+    // bulletproof.
+    const words = ["zero","one","two","three","four","five","six","seven","eight","nine"];
+    const spoken = s.split("").map((d, i) => {
+      const word = words[parseInt(d, 10)] || d;
+      return i === 3 ? `, ${word}` : word;
+    }).join(" ");
+    const u = new SpeechSynthesisUtterance(spoken);
+    u.rate = 0.85;
+    u.pitch = 1.0;
+    window.speechSynthesis.speak(u);
+  }
+
   async function openPairModal(peer) {
     state.pairing = { peerFp: peer.fingerprint, sas: null, weConfirmed: false };
     pairTitle.textContent = "Pair this device";
@@ -5612,11 +5778,15 @@
     pairName.textContent = peer.hostname || "(unknown)";
     pairSub.textContent = peer.short_id;
     pairSasEl.textContent = "…";
+    renderSasArt($("#pair-sas-art"), null);
     pairBackdrop.classList.add("show");
     try {
       const res = await api.post(`/api/peers/${peer.fingerprint}/pair`, {});
       state.pairing.sas = res.sas;
       pairSasEl.textContent = _formatSas(res.sas);
+      // v0.7.9: SAS art is rendered up-front but kept hidden until
+      // the user toggles it. Pre-rendering avoids a flash on toggle.
+      renderSasArt($("#pair-sas-art"), res.sas);
     } catch (e) {
       pairSasEl.textContent = "—";
       toast(`Could not initiate pairing: ${e.message || e}`, "bad");
@@ -5631,12 +5801,18 @@
     pairName.textContent = peer.hostname || "(unknown)";
     pairSub.textContent = peer.short_id;
     pairSasEl.textContent = _formatSas(sas);
+    renderSasArt($("#pair-sas-art"), sas);
     pairBackdrop.classList.add("show");
   }
 
   function closePairModal(succeeded) {
     pairBackdrop.classList.remove("show");
     state.pairing = { peerFp: null, sas: null, weConfirmed: false };
+    // v0.7.9: stop any in-flight readback so a closed modal isn't
+    // chattering "five six" from the speaker.
+    try { window.speechSynthesis?.cancel(); } catch {}
+    const art = $("#pair-sas-art");
+    if (art) art.style.display = "none";
   }
 
   pairMatch.onclick = async () => {
@@ -5671,6 +5847,22 @@
     const txt = (pairSasEl.textContent || "").replace(/\s+/g, "");
     if (txt && txt !== "—" && txt !== "…") copyToClipboard(txt, "verification code");
   };
+  // v0.7.9 multi-modal SAS — wire pair-modal helpers.
+  $("#pair-sas-speak")?.addEventListener("click", () => {
+    speakSas(state.pairing?.sas);
+  });
+  $("#pair-sas-art-toggle")?.addEventListener("click", (e) => {
+    const art = $("#pair-sas-art");
+    if (!art) return;
+    const showing = art.style.display !== "none";
+    art.style.display = showing ? "none" : "grid";
+    e.currentTarget.classList.toggle("on", !showing);
+  });
+  $("#pair-sas-copy")?.addEventListener("click", () => {
+    const sas = state.pairing?.sas;
+    if (!sas) { toast("SAS isn't ready yet.", "info"); return; }
+    copyToClipboard(String(sas).padStart(6, "0"), "verification code");
+  });
 
   // ── Settings modal ─────────────────────────────────────────────────
   const settingsBackdrop = $("#settings-backdrop");
