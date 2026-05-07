@@ -1,0 +1,322 @@
+"""One Link performance lab.
+
+Benchmarks here are deterministic, local, and dependency-light. They are not a
+replacement for two-machine LAN throughput tests, but they give us repeatable
+numbers for the core pieces that make "send anything" fast:
+
+* CDC indexing throughput;
+* prior-knowledge byte savings;
+* swarm scheduler planning speed;
+* transfer-doctor/torture resilience;
+* SQLite transfer-ledger write pressure;
+* compression throughput.
+"""
+
+from __future__ import annotations
+
+import json
+import platform
+import random
+import statistics
+import tempfile
+import time
+import zlib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+from .cdc import build_dedup_plan, index_path
+from .state import State
+from .swarm_plan import plan_swarm_sources, source_from_hashes
+from .transfer_sim import simulate_never_lose_transfer, synthetic_manifest
+
+
+MiB = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class BenchResult:
+    name: str
+    metrics: dict[str, float | int | str | bool]
+    seconds: float
+    notes: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "seconds": round(self.seconds, 6),
+            "metrics": self.metrics,
+            "notes": self.notes,
+        }
+
+
+def _mb_per_s(nbytes: int, seconds: float) -> float:
+    return round((nbytes / MiB) / max(seconds, 1e-9), 3)
+
+
+def _time(fn: Callable[[], dict]) -> BenchResult:
+    t0 = time.perf_counter()
+    out = fn()
+    elapsed = time.perf_counter() - t0
+    return BenchResult(
+        name=str(out.pop("name")),
+        metrics=out,
+        seconds=elapsed,
+        notes=str(out.pop("notes", "")) if "notes" in out else "",
+    )
+
+
+def bench_cdc_indexing(*, size_mib: int, seed: int) -> BenchResult:
+    def run() -> dict:
+        rng = random.Random(seed)
+        with tempfile.TemporaryDirectory(prefix="ol_perf_cdc_") as td:
+            path = Path(td) / "payload.bin"
+            path.write_bytes(rng.randbytes(size_mib * MiB))
+            t0 = time.perf_counter()
+            idx = index_path(path)
+            elapsed = time.perf_counter() - t0
+        return {
+            "name": "cdc_indexing",
+            "size_bytes": size_mib * MiB,
+            "chunks": len(idx.chunks),
+            "mib_per_s": _mb_per_s(size_mib * MiB, elapsed),
+            "avg_chunk_bytes": round((size_mib * MiB) / max(1, len(idx.chunks)), 3),
+            "blob_hash_prefix": idx.blob_hash[:12],
+        }
+
+    return _time(run)
+
+
+def bench_prior_knowledge(*, size_mib: int, mutation_bytes: int, seed: int) -> BenchResult:
+    def run() -> dict:
+        rng = random.Random(seed)
+        with tempfile.TemporaryDirectory(prefix="ol_perf_prior_") as td:
+            root = Path(td)
+            base = root / "base.bin"
+            changed = root / "changed.bin"
+            payload = rng.randbytes(size_mib * MiB)
+            base.write_bytes(payload)
+            insert = rng.randbytes(mutation_bytes)
+            changed.write_bytes(payload[: MiB] + insert + payload[MiB:])
+            base_idx = index_path(base)
+            changed_idx = index_path(changed)
+            t0 = time.perf_counter()
+            plan = build_dedup_plan(changed_idx.chunks, {c.hash for c in base_idx.chunks})
+            plan_seconds = time.perf_counter() - t0
+        return {
+            "name": "prior_knowledge_dedup",
+            "changed_size_bytes": changed_idx.size,
+            "chunks": changed_idx.chunk_count if hasattr(changed_idx, "chunk_count") else len(changed_idx.chunks),
+            "hit_rate": round(plan.hit_rate, 6),
+            "bytes_to_send": plan.bytes_to_send,
+            "bytes_saved": plan.byte_savings,
+            "bandwidth_reduction": round(plan.byte_savings / max(1, changed_idx.size), 6),
+            "plan_micros": round(plan_seconds * 1_000_000, 3),
+        }
+
+    return _time(run)
+
+
+def bench_swarm_scheduler(*, chunks: int, sources: int, seed: int) -> BenchResult:
+    def run() -> dict:
+        manifest = synthetic_manifest(
+            name="scheduler.bin",
+            size=chunks * MiB,
+            chunk_size=MiB,
+        )
+        rng = random.Random(seed)
+        srcs = []
+        all_hashes = [c.hash for c in manifest.chunks]
+        for i in range(sources):
+            # Each source gets a deterministic overlapping subset.
+            claim = [
+                h for j, h in enumerate(all_hashes)
+                if (j + i) % max(2, min(7, sources)) == 0 or rng.random() < 0.08
+            ]
+            srcs.append(source_from_hashes(
+                f"{i:064x}",
+                claim,
+                trust_score=1.0 + (i % 3) * 0.25,
+                latency_ms=5.0 + i,
+                bandwidth_bps=50_000_000 + (i * 5_000_000),
+                reliability=0.90 + (i % 5) * 0.015,
+            ))
+        t0 = time.perf_counter()
+        plan = plan_swarm_sources(manifest=manifest, needed_indexes=None, sources=srcs)
+        elapsed = time.perf_counter() - t0
+        return {
+            "name": "swarm_scheduler",
+            "chunks": chunks,
+            "sources": sources,
+            "assigned": len([a for a in plan.assignments if a.status == "assigned"]),
+            "missing": len(plan.missing_indexes),
+            "chunks_per_s": round(chunks / max(elapsed, 1e-9), 3),
+            "assigned_bytes": plan.assigned_bytes,
+            "missing_bytes": plan.missing_bytes,
+            "source_count": len(plan.sources),
+        }
+
+    return _time(run)
+
+
+def bench_torture_sim(*, size_mib: int, seed: int) -> BenchResult:
+    def run() -> dict:
+        report = simulate_never_lose_transfer(
+            size=size_mib * MiB,
+            chunk_size=4 * MiB,
+            seed=seed,
+            drop_rate=0.25,
+            corruption_rate=0.04,
+        )
+        return {
+            "name": "never_lose_torture_sim",
+            "delivered": report.delivered,
+            "size_bytes": report.file_size,
+            "chunks_total": report.chunks_total,
+            "attempts": report.attempts,
+            "retries": report.retries,
+            "offline_waits": report.offline_waits,
+            "corruptions": report.corruptions,
+            "bytes_sent": report.bytes_sent,
+            "bytes_saved": report.bytes_saved,
+            "best_route": report.best_route,
+        }
+
+    return _time(run)
+
+
+def bench_sqlite_ledger(*, rows: int) -> BenchResult:
+    def run() -> dict:
+        with tempfile.TemporaryDirectory(prefix="ol_perf_state_") as td:
+            state = State(db_path=Path(td) / "state.db")
+            t0 = time.perf_counter()
+            for i in range(rows):
+                state.upsert_transfer(
+                    id=f"bench-{i}",
+                    direction="out",
+                    peer_fp="aa" * 32,
+                    kind="file",
+                    name=f"file-{i}.bin",
+                    size=1024,
+                    status="active" if i % 2 else "paused",
+                    progress_bytes=i % 1024,
+                    total_bytes=1024,
+                    chunks_done=i % 4,
+                    chunks_total=4,
+                    metadata={"bench": True, "i": i},
+                )
+            elapsed = time.perf_counter() - t0
+            listed = len(state.list_transfers(limit=min(rows, 500)))
+            state.close()
+        return {
+            "name": "sqlite_transfer_ledger",
+            "rows": rows,
+            "writes_per_s": round(rows / max(elapsed, 1e-9), 3),
+            "listed": listed,
+        }
+
+    return _time(run)
+
+
+def bench_compression(*, size_mib: int) -> BenchResult:
+    def run() -> dict:
+        data = (b"compressible-transfer-block\n" * ((size_mib * MiB) // 28 + 1))[: size_mib * MiB]
+        samples: list[float] = []
+        packed_size = 0
+        for _ in range(3):
+            t0 = time.perf_counter()
+            packed = zlib.compress(data, level=1)
+            samples.append(time.perf_counter() - t0)
+            packed_size = len(packed)
+        med = statistics.median(samples)
+        return {
+            "name": "zlib_level1_compression",
+            "size_bytes": len(data),
+            "packed_bytes": packed_size,
+            "ratio": round(packed_size / max(1, len(data)), 6),
+            "mib_per_s": _mb_per_s(len(data), med),
+        }
+
+    return _time(run)
+
+
+def run_perf_lab(
+    *,
+    scale: str = "quick",
+    seed: int = 20260507,
+) -> dict:
+    if scale not in {"quick", "standard", "heavy"}:
+        raise ValueError("scale must be quick, standard, or heavy")
+    cfg = {
+        "quick": {"cdc_mib": 4, "prior_mib": 4, "scheduler_chunks": 512, "ledger_rows": 500, "sim_mib": 256},
+        "standard": {"cdc_mib": 32, "prior_mib": 32, "scheduler_chunks": 4096, "ledger_rows": 5000, "sim_mib": 1024},
+        "heavy": {"cdc_mib": 256, "prior_mib": 256, "scheduler_chunks": 32768, "ledger_rows": 25000, "sim_mib": 10 * 1024},
+    }[scale]
+    started = time.time()
+    results = [
+        bench_cdc_indexing(size_mib=cfg["cdc_mib"], seed=seed),
+        bench_prior_knowledge(size_mib=cfg["prior_mib"], mutation_bytes=4096, seed=seed + 1),
+        bench_swarm_scheduler(chunks=cfg["scheduler_chunks"], sources=12, seed=seed + 2),
+        bench_torture_sim(size_mib=cfg["sim_mib"], seed=seed + 3),
+        bench_sqlite_ledger(rows=cfg["ledger_rows"]),
+        bench_compression(size_mib=max(1, cfg["cdc_mib"] // 2)),
+    ]
+    return {
+        "schema": "one-link-perf-lab-v1",
+        "scale": scale,
+        "seed": seed,
+        "started_unix": started,
+        "duration_s": round(time.time() - started, 6),
+        "environment": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+        },
+        "benchmarks": [r.to_dict() for r in results],
+    }
+
+
+def write_report(report: dict, output: Path) -> Path:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    return output
+
+
+def compare_reports(old: dict, new: dict) -> dict:
+    """Return metric deltas from two perf-lab reports.
+
+    Ratios greater than 1.0 mean the new report is higher. Whether higher is
+    better depends on the metric, so we keep this as raw math for now.
+    """
+
+    old_by_name = {b["name"]: b for b in old.get("benchmarks", [])}
+    new_by_name = {b["name"]: b for b in new.get("benchmarks", [])}
+    benches: dict[str, dict] = {}
+    for name in sorted(set(old_by_name) & set(new_by_name)):
+        old_metrics = old_by_name[name].get("metrics", {})
+        new_metrics = new_by_name[name].get("metrics", {})
+        metrics: dict[str, dict] = {}
+        for key in sorted(set(old_metrics) & set(new_metrics)):
+            old_v = old_metrics[key]
+            new_v = new_metrics[key]
+            if isinstance(old_v, bool) or isinstance(new_v, bool):
+                metrics[key] = {"old": old_v, "new": new_v, "changed": old_v != new_v}
+            elif isinstance(old_v, (int, float)) and isinstance(new_v, (int, float)):
+                delta = float(new_v) - float(old_v)
+                ratio = None if float(old_v) == 0 else float(new_v) / float(old_v)
+                metrics[key] = {
+                    "old": old_v,
+                    "new": new_v,
+                    "delta": round(delta, 6),
+                    "ratio": round(ratio, 6) if ratio is not None else None,
+                }
+            elif old_v != new_v:
+                metrics[key] = {"old": old_v, "new": new_v, "changed": True}
+        benches[name] = metrics
+    return {
+        "schema": "one-link-perf-compare-v1",
+        "old_scale": old.get("scale"),
+        "new_scale": new.get("scale"),
+        "benchmarks": benches,
+    }

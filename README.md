@@ -188,12 +188,28 @@ pip install -e .[dev]
 python -m pytest tests/ --ignore=tests/smoke_loopback.py -v
 python scripts/build_binary.py     # produces dist/one-link[.exe]
 python scripts/bench_transfer_primitives.py
+python scripts/perf_lab.py --scale quick
 ```
 
 The smoke test (`tests/smoke_loopback.py`) starts two daemons in temp
 directories and runs a complete end-to-end round-trip including a
 multi-chunk file. The pytest suite covers everything in much greater
 depth — see `TESTING.md`.
+
+### Performance Lab
+
+Use the repeatable local perf lab to see whether transfer work is getting
+faster or slower:
+
+```bash
+python scripts/perf_lab.py --scale quick
+python scripts/perf_lab.py --scale standard
+```
+
+Reports are written under `benchmarks/results/` as JSON and ignored by git.
+The lab measures CDC indexing, prior-knowledge bandwidth savings, swarm
+scheduler throughput, the never-lose torture simulator, SQLite transfer ledger
+pressure, and compression throughput.
 
 ### Running multiple daemons on one machine
 
