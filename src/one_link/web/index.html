@@ -776,7 +776,22 @@
     border-radius: 18px; padding: 30px 32px; min-width: 380px; max-width: 460px;
     box-shadow: 0 30px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(124,92,255,.08);
     animation: pop-in .2s ease-out;
+    /* Cap modal height at viewport - some breathing room - so long
+       drawers (Identity & trust + Verified in person + Trust actions
+       stacked) don't push the close button below the fold. Inner
+       scroll handles the overflow. */
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
+  /* Trim the scrollbar gutter so it doesn't visually fight the
+     modal's rounded corners. */
+  .modal::-webkit-scrollbar { width: 10px; }
+  .modal::-webkit-scrollbar-thumb {
+    background: var(--bg-3); border-radius: 8px;
+    border: 2px solid transparent; background-clip: content-box;
+  }
+  .modal::-webkit-scrollbar-thumb:hover { background-color: var(--text-dimmer); }
   @keyframes pop-in {
     from { transform: translateY(8px) scale(.98); opacity: 0; }
     to   { transform: none; opacity: 1; }
