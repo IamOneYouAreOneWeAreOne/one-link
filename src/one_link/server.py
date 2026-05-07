@@ -447,8 +447,15 @@ class UIServer:
     async def api_me(self, request: web.Request) -> web.Response:
         me = self.daemon.me
         display_name = None
+        onboarding_completed = False
         if self.daemon.state is not None:
             display_name = self.daemon.state.get_setting("display_name")
+            # v0.9.4: surface the persisted onboarding flag so a
+            # fresh browser tab can skip the wizard if the daemon
+            # has already seen it once.
+            onboarding_completed = (
+                self.daemon.state.get_setting("onboarding_completed") == "true"
+            )
         try:
             from one_link import __version__ as ol_ver
         except Exception:
@@ -469,6 +476,7 @@ class UIServer:
             "app_version": ol_ver,
             "protocol_version": PROTOCOL_VERSION,
             "schema_version": schema_version,
+            "onboarding_completed": onboarding_completed,
         })
 
     async def api_status(self, request: web.Request) -> web.Response:
@@ -552,6 +560,15 @@ class UIServer:
             self.daemon.state.set_setting(
                 "pair_default_allow_all",
                 "true" if data["pair_default_allow_all"] else "false",
+            )
+        # v0.9.4: persist onboarding completion server-side so a
+        # fresh browser tab on a paired daemon doesn't re-pop the
+        # wizard. Local storage is the primary gate; this is the
+        # backup.
+        if "onboarding_completed" in data:
+            self.daemon.state.set_setting(
+                "onboarding_completed",
+                "true" if data["onboarding_completed"] else "false",
             )
         return web.json_response({"ok": True})
 

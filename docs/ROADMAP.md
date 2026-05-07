@@ -248,6 +248,16 @@ Listed in dependency order.
 
 ## Cross-cutting follow-ups (post-Tier 3 starts)
 
+  - **Onboarding flow.** ✓ Shipped (released as package v0.9.4).
+    First-run 4-step wizard: welcome → display name → SAS
+    explainer → ready. Gated by localStorage flag (primary) +
+    daemon-side `onboarding_completed` setting (backup, so a
+    fresh browser tab on a paired daemon doesn't re-pop). Auto-
+    skipped if state.peers.size > 0 (returning user). Enter on
+    the name input advances. Progress dots + Skip button. Saves
+    display name through the existing /api/settings handler;
+    settings whitelist updated to accept the flag.
+
   - **Global search / command palette.** ✓ Shipped (released as
     package v0.9.3). Ctrl+K opens a unified palette searching
     messages (FTS5), peers (hostname/alias/short_id/fingerprint),
