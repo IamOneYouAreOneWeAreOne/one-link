@@ -16,6 +16,12 @@ import pytest
 # subprocess.Popen calls before any test runs already inherit it.
 os.environ.setdefault("ONE_LINK_DISABLE_REVEAL", "1")
 
+# v0.10.7: same idea for the native folder picker. Without this,
+# any test that hits POST /api/fs/pick-folder without patching
+# server._native_folder_picker would pop a real PowerShell /
+# osascript / zenity folder dialog on the developer's screen.
+os.environ.setdefault("ONE_LINK_DISABLE_NATIVE_PICKER", "1")
+
 
 @pytest.fixture
 def isolated_home(tmp_path: Path, monkeypatch) -> Path:

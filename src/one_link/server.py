@@ -188,7 +188,13 @@ def _pick_tkinter_fallback(title: str) -> Optional[str]:
 
 def _native_folder_picker(title: str) -> Optional[str]:
     """Dispatch to the most native folder picker available on this OS.
-    Tests patch this entry point directly."""
+    Tests patch this entry point directly.
+
+    Honors ONE_LINK_DISABLE_NATIVE_PICKER as a kill switch — set in
+    the test fixture so no run can ever pop a real OS dialog even if
+    a test forgets to patch."""
+    if os.environ.get("ONE_LINK_DISABLE_NATIVE_PICKER"):
+        return None
     if sys.platform == "win32":
         picked = _pick_win_powershell(title)
         if picked is not None:

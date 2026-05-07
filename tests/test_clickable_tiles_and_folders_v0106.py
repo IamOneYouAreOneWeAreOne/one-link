@@ -48,6 +48,11 @@ def _identity() -> Identity:
 @pytest_asyncio.fixture
 async def http(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    # Belt-and-suspenders: the native picker dispatcher honors this
+    # env var as a kill switch — guarantees no test run can EVER pop
+    # a real OS folder dialog, even if a future test forgets to
+    # patch _native_folder_picker.
+    monkeypatch.setenv("ONE_LINK_DISABLE_NATIVE_PICKER", "1")
     me = _identity()
     state = State(db_path=tmp_path / "state.db")
     daemon = Daemon(me)
@@ -254,6 +259,9 @@ def test_native_picker_uses_powershell_on_windows(monkeypatch):
     icon instead of native chrome. PowerShell + WinForms is the
     canonical Win10/11 picker."""
     from one_link import server
+    # These dispatch-routing tests need the kill switch off so we
+    # can actually exercise the platform branches.
+    monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "win32")
     called = {}
     def fake_ps(title):
@@ -275,6 +283,7 @@ def test_native_picker_falls_back_to_tk_when_powershell_missing(monkeypatch):
     through to the tk fallback rather than fail silently — that
     keeps the Browse button working on locked-down Windows boxes."""
     from one_link import server
+    monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "win32")
     monkeypatch.setattr(server, "_pick_win_powershell", lambda t: None)
     monkeypatch.setattr(server, "_pick_tkinter_fallback", lambda t: "C:/Tk")
@@ -283,6 +292,7 @@ def test_native_picker_falls_back_to_tk_when_powershell_missing(monkeypatch):
 
 def test_native_picker_uses_osascript_on_mac(monkeypatch):
     from one_link import server
+    monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "darwin")
     monkeypatch.setattr(server, "_pick_mac_osascript", lambda t: "/Users/me/Pick")
     assert server._native_folder_picker("hi") == "/Users/me/Pick"
@@ -290,9 +300,28 @@ def test_native_picker_uses_osascript_on_mac(monkeypatch):
 
 def test_native_picker_uses_linux_dispatch(monkeypatch):
     from one_link import server
+    monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "linux")
     monkeypatch.setattr(server, "_pick_linux", lambda t: "/home/me/Pick")
     assert server._native_folder_picker("hi") == "/home/me/Pick"
+
+
+def test_kill_switch_returns_none_when_env_var_set(monkeypatch):
+    """Verify the kill switch itself: when ONE_LINK_DISABLE_NATIVE_PICKER
+    is set, the dispatcher must return None without invoking ANY
+    platform branch. Belt-and-suspenders so a future test that forgets
+    to patch can never pop a real folder dialog."""
+    from one_link import server
+    monkeypatch.setenv("ONE_LINK_DISABLE_NATIVE_PICKER", "1")
+    # If any platform helper is reached, blow up loudly so the test
+    # tells us the switch failed.
+    def _boom(t):
+        raise AssertionError("kill switch failed: platform helper invoked")
+    monkeypatch.setattr(server, "_pick_win_powershell", _boom)
+    monkeypatch.setattr(server, "_pick_mac_osascript", _boom)
+    monkeypatch.setattr(server, "_pick_linux", _boom)
+    monkeypatch.setattr(server, "_pick_tkinter_fallback", _boom)
+    assert server._native_folder_picker("hi") is None
 
 
 def test_powershell_picker_passes_dialog_title(monkeypatch):
