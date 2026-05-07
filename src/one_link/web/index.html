@@ -1225,6 +1225,65 @@
     white-space: pre;
   }
   .code-preview .code-body code { background: transparent; padding: 0; }
+  /* v0.9.1 activity feed surfaces — filter chips + timeline rows. */
+  .activity-filters {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--bg-3);
+    background: var(--bg-2);
+  }
+  .activity-filters .chip {
+    background: transparent; color: var(--text-dim);
+    border: 1px solid var(--bg-3); border-radius: 999px;
+    padding: 3px 12px; font-size: 11px; font-weight: 600;
+    cursor: pointer; letter-spacing: .3px;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .activity-filters .chip:hover { color: var(--text); }
+  .activity-filters .chip.active {
+    background: var(--accent); color: white; border-color: var(--accent);
+  }
+  #activity-list {
+    padding: 4px 0;
+  }
+  .activity-row {
+    display: flex; gap: 12px;
+    padding: 10px 16px;
+    border-left: 3px solid var(--text-dimmer);
+    margin: 0 4px 4px;
+    background: var(--bg-1); border-radius: 0 6px 6px 0;
+  }
+  .activity-row.sev-good { border-left-color: var(--good); }
+  .activity-row.sev-warn { border-left-color: var(--warn); }
+  .activity-row.sev-bad  { border-left-color: var(--bad); }
+  .activity-row .av-icon {
+    flex-shrink: 0; width: 24px; height: 24px;
+    border-radius: 50%; background: var(--bg-3);
+    display: grid; place-items: center;
+    font-size: 13px;
+  }
+  .activity-row.sev-good .av-icon { background: rgba(76,209,117,.18); color: var(--good); }
+  .activity-row.sev-warn .av-icon { background: rgba(245,196,81,.18); color: var(--warn); }
+  .activity-row.sev-bad  .av-icon { background: rgba(255,107,107,.18); color: var(--bad); }
+  .activity-row .av-body { flex: 1; min-width: 0; }
+  .activity-row .av-line {
+    display: flex; gap: 8px; align-items: baseline;
+    font-size: 12px; color: var(--text);
+  }
+  .activity-row .av-time {
+    color: var(--text-dim);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 10px; flex-shrink: 0;
+  }
+  .activity-row .av-label { font-weight: 500; }
+  .activity-row .av-detail {
+    color: var(--text-dim); font-size: 11px;
+    margin-top: 2px; word-break: break-word;
+  }
+  .activity-row .av-peer {
+    color: var(--text-dim); font-size: 10px;
+    margin-top: 2px; font-style: italic;
+  }
   /* Plain-text preview. */
   .text-preview pre {
     background: var(--bg-2);
@@ -1798,7 +1857,9 @@
         <span class="count" id="transfers-count">0</span>
       </div>
       <div class="help-card">
-        This is the receipt drawer: sent files, received files, and folder sync progress. You do not need it unless you want to check what happened.
+        Cross-device timeline: pairings, verification, key changes,
+        file transfers, folder conflicts. Filter by kind below.
+        Live-updating — new events land as they happen.
       </div>
       <div class="mesh-summary" id="mesh-summary">
         <div class="metric"><div class="num" id="metric-online">0</div><div class="lbl">nearby</div></div>
@@ -1806,9 +1867,21 @@
         <div class="metric"><div class="num" id="metric-cache">0 B</div><div class="lbl">saved chunks</div></div>
         <div class="metric"><div class="num" id="metric-sessions">0</div><div class="lbl">secure links</div></div>
       </div>
-      <div id="transferlist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
-        <div class="empty">No activity yet.</div>
+      <!-- v0.9.1: filter chips for the merged activity feed. -->
+      <div class="activity-filters" id="activity-filters">
+        <button class="chip active" data-activity-filter="all">All</button>
+        <button class="chip" data-activity-filter="trust">Trust</button>
+        <button class="chip" data-activity-filter="key_change">Keys</button>
+        <button class="chip" data-activity-filter="transfer">Files</button>
+        <button class="chip" data-activity-filter="conflict">Conflicts</button>
+        <button class="chip" data-activity-filter="peer">Peers</button>
       </div>
+      <div id="activity-list" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
+        <div class="empty">Loading…</div>
+      </div>
+      <!-- Legacy transfer list, kept hidden for now — Files pane Sent
+           tab covers transfer-only views. -->
+      <div id="transferlist" style="display:none;"></div>
       <div class="panel-form">
         <div class="mini-actions">
           <button id="btn-refresh-mesh">Refresh</button>
@@ -4701,6 +4774,96 @@
     } catch (e) { /* ignore — rendezvous is optional */ }
   }
 
+  // v0.9.1: cross-peer activity feed.
+  state.activityFilter = "all";
+  state.activityEvents = [];
+
+  function activityIcon(kind, subkind) {
+    if (kind === "trust") {
+      if (subkind === "verify_set") return "✓";
+      if (subkind === "verify_clear") return "↺";
+      if (subkind === "trust_set") return "🔒";
+      return "⚙";
+    }
+    if (kind === "key_change") return "⚠";
+    if (kind === "transfer") return subkind === "complete" ? "📨" : "✗";
+    if (kind === "conflict") return "⚖";
+    if (kind === "peer") return "👋";
+    return "•";
+  }
+
+  async function refreshActivityFeed() {
+    const list = $("#activity-list");
+    if (!list) return;
+    let kindsParam = "";
+    if (state.activityFilter && state.activityFilter !== "all") {
+      kindsParam = `&kinds=${encodeURIComponent(state.activityFilter)}`;
+    }
+    try {
+      const r = await api.get(`/api/activity?limit=200${kindsParam}`);
+      state.activityEvents = r.events || [];
+    } catch (e) {
+      list.innerHTML = "";
+      list.appendChild(el("div", "empty", `Failed to load: ${e.message || e}`));
+      return;
+    }
+    renderActivityFeed();
+  }
+
+  function renderActivityFeed() {
+    const list = $("#activity-list");
+    if (!list) return;
+    list.innerHTML = "";
+    const events = state.activityEvents || [];
+    if (events.length === 0) {
+      list.appendChild(el("div", "empty", "No events yet."));
+      return;
+    }
+    for (const ev of events) {
+      const row = el("div", `activity-row sev-${ev.severity || "info"}`);
+      row.appendChild(el("div", "av-icon", activityIcon(ev.kind, ev.subkind)));
+      const body = el("div", "av-body");
+      const line = el("div", "av-line");
+      line.appendChild(el("span", "av-label", ev.label || ev.kind));
+      line.appendChild(el("span", "av-time", _humanRelMs(ev.ts_ms)));
+      body.appendChild(line);
+      if (ev.detail) {
+        body.appendChild(el("div", "av-detail", ev.detail));
+      }
+      if (ev.peer_display_name) {
+        body.appendChild(el("div", "av-peer", "↳ " + ev.peer_display_name));
+      }
+      row.title = new Date(ev.ts_ms).toLocaleString();
+      row.appendChild(body);
+      list.appendChild(row);
+    }
+  }
+
+  // Wire filter chips.
+  document.querySelectorAll('[data-activity-filter]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const filter = btn.dataset.activityFilter;
+      state.activityFilter = filter;
+      document.querySelectorAll('[data-activity-filter]').forEach(
+        (b) => b.classList.toggle("active", b === btn),
+      );
+      refreshActivityFeed();
+    });
+  });
+
+  // Schedule a refresh — coalesce many WS events per frame.
+  let _activityRefreshScheduled = false;
+  function scheduleActivityRefresh() {
+    if (_activityRefreshScheduled) return;
+    _activityRefreshScheduled = true;
+    requestAnimationFrame(() => {
+      _activityRefreshScheduled = false;
+      // Only refresh if pane is open OR we're idle. Saves a fetch
+      // per WS event when the user isn't looking.
+      if (state.activePane === "mesh") refreshActivityFeed();
+    });
+  }
+
   async function refreshTransfers() {
     try {
       const { transfers } = await api.transfers();
@@ -5612,7 +5775,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.9.0";
+  const PAGE_BUILT_FOR = "0.9.1";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -5755,6 +5918,7 @@
         refreshPeers();
         if (state.discoverOpen) loadDiscoverable();
       } else if (m.type === "peer_trust") {
+        scheduleActivityRefresh();  // v0.9.1: surface in activity feed
         if (state.pairing.peerFp === m.fingerprint && m.trust === "pinned") {
           // v0.8.7: if WE already confirmed (or the WS event is for
           // a peer-side confirm that happened to land first), pivot
@@ -5776,6 +5940,7 @@
         // the new display name and toggle states show up immediately.
         refreshPeers();
       } else if (m.type === "folder_conflict_detected") {
+        scheduleActivityRefresh();  // v0.9.1: surface in activity feed
         // v0.8.9: live conflict — refresh the banner + (if open)
         // the modal so the new entry appears immediately.
         toast(
@@ -5797,6 +5962,7 @@
         // banner / overlay clears for everyone live.
         refreshPeers();
       } else if (m.type === "key_change_detected") {
+        scheduleActivityRefresh();  // v0.9.1: surface in activity feed
         // v0.7.8: a hostname↔pubkey rotation just got logged. Pop
         // a loud toast so the user notices even with the chat
         // surface scrolled to a different conversation, then trigger
@@ -5810,6 +5976,7 @@
         );
         refreshPeers();
       } else if (m.type === "peer_verified") {
+        scheduleActivityRefresh();  // v0.9.1: surface in activity feed
         // v0.7.7: side-channel SAS confirm flipped on/off. Patch the
         // peer record in-place so the avatar overlay + conversation
         // header pill update without waiting for the next /api/peers
@@ -6029,6 +6196,10 @@
         scheduleRenderTransfers();
         scheduleRenderMessages();
         scheduleRenderTransferHeaderPill();  // v0.8.8 aggregate pill
+        // v0.9.1: terminal transfers feed the activity timeline.
+        if (m.transfer.status === "complete" || m.transfer.status === "failed") {
+          scheduleActivityRefresh();
+        }
         if (state.activePane === "files" && state.filesMode === "sent") {
           scheduleRenderFilesPanel();
         }
@@ -6489,6 +6660,10 @@
       } else if (pane === "mesh") {
         $("#mesh-panel").style.display = "flex";
         $("#main").classList.add("with-files");
+        // v0.9.1: load merged activity feed (transfers stay in
+        // state for legacy callers; the mesh-panel now shows the
+        // cross-peer event timeline).
+        refreshActivityFeed();
         refreshTransfers();
       } else {
         $("#main").classList.remove("with-files");

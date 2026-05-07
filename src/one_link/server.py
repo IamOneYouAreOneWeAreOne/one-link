@@ -293,6 +293,8 @@ class UIServer:
         r.add_get(r"/api/peers/{fp}/key-history", self._guarded(self.api_get_peer_key_history))
         # v0.8.6 trust history (merged audit timeline for one peer).
         r.add_get(r"/api/peers/{fp}/trust-history", self._guarded(self.api_get_peer_trust_history))
+        # v0.9.1 cross-peer activity feed (merged audit log).
+        r.add_get("/api/activity", self._guarded(self.api_get_activity_feed))
         # v0.8.9 folder-sync conflicts (concurrent divergent edits).
         r.add_get("/api/folder-conflicts", self._guarded(self.api_list_folder_conflicts))
         r.add_post(r"/api/folder-conflicts/{conflict_id}/resolve",
@@ -1508,6 +1510,34 @@ class UIServer:
             "fingerprint": fp,
             "hostname": peer.hostname,
             "events": events,
+        })
+
+    async def api_get_activity_feed(self, request: web.Request) -> web.Response:
+        """v0.9.1: cross-peer activity feed. Query params:
+          - since (ms timestamp; default last 7 days)
+          - kinds (comma-list of trust|key_change|transfer|conflict|peer)
+          - peer (fingerprint; only show events tied to this peer)
+          - limit (default 200, max 2000)"""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            since = request.query.get("since")
+            since_ms = int(since) if since else None
+        except ValueError:
+            since_ms = None
+        kinds_q = request.query.get("kinds")
+        kinds = [k.strip() for k in kinds_q.split(",")] if kinds_q else None
+        peer_fp = request.query.get("peer") or None
+        try:
+            limit = int(request.query.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        events = self.daemon.state.activity_feed(
+            since_ms=since_ms, kinds=kinds, peer_fp=peer_fp, limit=limit,
+        )
+        return web.json_response({
+            "events": events,
+            "count": len(events),
         })
 
     async def api_list_folder_conflicts(self, request: web.Request) -> web.Response:

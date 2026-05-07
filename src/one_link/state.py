@@ -944,6 +944,244 @@ class State:
             })
         return out
 
+    def activity_feed(
+        self,
+        *,
+        since_ms: Optional[int] = None,
+        kinds: Optional[Iterable[str]] = None,
+        peer_fp: Optional[str] = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """v0.9.1: cross-peer activity feed merging:
+          - capability_audit (verify_set, verify_clear, trust_set,
+            cap_policy_set, cap_policy_clear)
+          - key_change_events (in + out)
+          - transfers (file_send / file_recv complete + failed)
+          - manifest_conflicts (detected + resolved)
+          - peer first_seen synthetic events
+
+        Returns newest-first rows, each shaped:
+          {ts_ms, kind, severity, label, detail, peer_fp,
+           peer_display_name, source}.
+
+        Filters:
+          - since_ms: drop rows with ts_ms < since_ms
+          - kinds: keep only rows whose top-level kind matches
+            (one of: trust, key_change, transfer, conflict, peer)
+          - peer_fp: keep only rows attributable to this peer
+          - limit: cap final list (default 200, hard max 2000)"""
+        limit = max(1, min(int(limit), 2000))
+        kinds_set = set(kinds) if kinds else None
+
+        events: list[dict] = []
+        peer_cache: dict[str, str] = {}
+
+        def _peer_label(fp: Optional[str]) -> Optional[str]:
+            if not fp:
+                return None
+            if fp in peer_cache:
+                return peer_cache[fp]
+            rec = self.get_peer(fp)
+            label = rec.display_name if rec else fp[:8]
+            peer_cache[fp] = label
+            return label
+
+        # 1. capability_audit → trust kind
+        if kinds_set is None or "trust" in kinds_set:
+            sql = (
+                "SELECT id, ts_ms, fingerprint, kind, before_json,"
+                " after_json, actor, note FROM capability_audit"
+            )
+            params: list[Any] = []
+            wclauses: list[str] = []
+            if since_ms is not None:
+                wclauses.append("ts_ms >= ?"); params.append(int(since_ms))
+            if peer_fp is not None:
+                wclauses.append("fingerprint = ?"); params.append(peer_fp)
+            if wclauses:
+                sql += " WHERE " + " AND ".join(wclauses)
+            sql += " ORDER BY ts_ms DESC LIMIT ?"
+            params.append(limit)
+            for r in self._conn.execute(sql, tuple(params)).fetchall():
+                k = r["kind"]
+                if k == "verify_set":
+                    label, sev = "Verified in person", "good"
+                elif k == "verify_clear":
+                    label, sev = "Verification revoked", "warn"
+                elif k == "trust_set":
+                    after = json.loads(r["after_json"] or "null")
+                    label = f"Trust → {after}"
+                    sev = "info" if after == "pinned" else (
+                        "bad" if after == "rejected" else "warn"
+                    )
+                elif k == "cap_policy_set":
+                    label, sev = "Permissions changed", "info"
+                elif k == "cap_policy_clear":
+                    label, sev = "Permissions cleared (allow all)", "info"
+                else:
+                    label, sev = k.replace("_", " ").title(), "info"
+                events.append({
+                    "ts_ms": r["ts_ms"],
+                    "kind": "trust",
+                    "subkind": k,
+                    "severity": sev,
+                    "label": label,
+                    "detail": r["note"] or "",
+                    "peer_fp": r["fingerprint"],
+                    "peer_display_name": _peer_label(r["fingerprint"]),
+                    "source": "capability_audit",
+                })
+
+        # 2. key_change_events → key_change kind
+        if kinds_set is None or "key_change" in kinds_set:
+            sql = (
+                "SELECT id, ts_ms, hostname, old_fingerprint,"
+                " new_fingerprint, severity, acked_ms"
+                " FROM key_change_events"
+            )
+            wclauses = []
+            params = []
+            if since_ms is not None:
+                wclauses.append("ts_ms >= ?"); params.append(int(since_ms))
+            if peer_fp is not None:
+                wclauses.append("(new_fingerprint = ? OR old_fingerprint = ?)")
+                params.extend([peer_fp, peer_fp])
+            if wclauses:
+                sql += " WHERE " + " AND ".join(wclauses)
+            sql += " ORDER BY ts_ms DESC LIMIT ?"
+            params.append(limit)
+            for r in self._conn.execute(sql, tuple(params)).fetchall():
+                sev = r["severity"] or "low"
+                evsev = "bad" if sev == "high" else (
+                    "warn" if sev == "medium" else "info"
+                )
+                events.append({
+                    "ts_ms": r["ts_ms"],
+                    "kind": "key_change",
+                    "subkind": "detected",
+                    "severity": evsev,
+                    "label": f"Key change · {r['hostname']}",
+                    "detail": (
+                        f"old {r['old_fingerprint'][:8]}… → "
+                        f"new {r['new_fingerprint'][:8]}…"
+                        + (" (acknowledged)" if r["acked_ms"] else " (unacked)")
+                    ),
+                    "peer_fp": r["new_fingerprint"],
+                    "peer_display_name": _peer_label(r["new_fingerprint"]),
+                    "source": "key_change_events",
+                })
+
+        # 3. transfers → transfer kind. Only terminal states are
+        # interesting in the feed (mid-flight is the chat bubble's job).
+        if kinds_set is None or "transfer" in kinds_set:
+            sql = (
+                "SELECT id, direction, peer_fp, kind AS tkind, name,"
+                " size, status, updated_ms, metadata_json"
+                " FROM transfers"
+                " WHERE status IN ('complete', 'failed')"
+            )
+            params = []
+            if since_ms is not None:
+                sql += " AND updated_ms >= ?"; params.append(int(since_ms))
+            if peer_fp is not None:
+                sql += " AND peer_fp = ?"; params.append(peer_fp)
+            sql += " ORDER BY updated_ms DESC LIMIT ?"
+            params.append(limit)
+            for r in self._conn.execute(sql, tuple(params)).fetchall():
+                ok = (r["status"] == "complete")
+                direction = r["direction"]
+                verb = (
+                    "Received" if (ok and direction == "in") else
+                    "Sent" if (ok and direction == "out") else
+                    ("Receive failed" if direction == "in" else "Send failed")
+                )
+                label = f"{verb}: {r['name'] or '?'}"
+                detail_parts = [r["tkind"] or "file"]
+                if r["size"] is not None:
+                    bsz = r["size"]
+                    # Inline size formatting (KB/MB/GB) — same logic
+                    # as fmtBytes on the client.
+                    units = ["B", "KB", "MB", "GB", "TB"]
+                    j = 0
+                    while bsz >= 1024 and j < len(units) - 1:
+                        bsz /= 1024
+                        j += 1
+                    fmt = f"{bsz:.1f} {units[j]}" if j > 0 and bsz < 10 else f"{int(bsz)} {units[j]}"
+                    detail_parts.append(fmt)
+                events.append({
+                    "ts_ms": r["updated_ms"],
+                    "kind": "transfer",
+                    "subkind": "complete" if ok else "failed",
+                    "severity": "good" if ok else "bad",
+                    "label": label,
+                    "detail": " · ".join(detail_parts),
+                    "peer_fp": r["peer_fp"],
+                    "peer_display_name": _peer_label(r["peer_fp"]),
+                    "source": "transfers",
+                })
+
+        # 4. manifest_conflicts → conflict kind
+        if kinds_set is None or "conflict" in kinds_set:
+            sql = (
+                "SELECT id, folder_name, file_path, peer_fp,"
+                " detected_ms, resolved_ms, resolution"
+                " FROM manifest_conflicts"
+            )
+            wclauses = []
+            params = []
+            if since_ms is not None:
+                wclauses.append("detected_ms >= ?"); params.append(int(since_ms))
+            if peer_fp is not None:
+                wclauses.append("peer_fp = ?"); params.append(peer_fp)
+            if wclauses:
+                sql += " WHERE " + " AND ".join(wclauses)
+            sql += " ORDER BY detected_ms DESC LIMIT ?"
+            params.append(limit)
+            for r in self._conn.execute(sql, tuple(params)).fetchall():
+                events.append({
+                    "ts_ms": r["detected_ms"],
+                    "kind": "conflict",
+                    "subkind": "resolved" if r["resolved_ms"] else "detected",
+                    "severity": "warn" if not r["resolved_ms"] else "info",
+                    "label": (
+                        f"Folder conflict ({r['resolution']})" if r["resolved_ms"]
+                        else "Folder conflict detected"
+                    ),
+                    "detail": f"{r['folder_name']}/{r['file_path']}",
+                    "peer_fp": r["peer_fp"],
+                    "peer_display_name": _peer_label(r["peer_fp"]),
+                    "source": "manifest_conflicts",
+                })
+
+        # 5. peer first_seen synthetic events
+        if kinds_set is None or "peer" in kinds_set:
+            sql = "SELECT fingerprint, hostname, first_seen_ms FROM peers"
+            wclauses = []
+            params = []
+            if since_ms is not None:
+                wclauses.append("first_seen_ms >= ?"); params.append(int(since_ms))
+            if peer_fp is not None:
+                wclauses.append("fingerprint = ?"); params.append(peer_fp)
+            if wclauses:
+                sql += " WHERE " + " AND ".join(wclauses)
+            sql += " ORDER BY first_seen_ms DESC LIMIT ?"
+            params.append(limit)
+            for r in self._conn.execute(sql, tuple(params)).fetchall():
+                events.append({
+                    "ts_ms": r["first_seen_ms"],
+                    "kind": "peer",
+                    "subkind": "first_seen",
+                    "severity": "info",
+                    "label": f"Device first seen · {r['hostname'] or r['fingerprint'][:8]}",
+                    "detail": "",
+                    "peer_fp": r["fingerprint"],
+                    "peer_display_name": _peer_label(r["fingerprint"]),
+                    "source": "peers",
+                })
+
+        events.sort(key=lambda e: e["ts_ms"], reverse=True)
+        return events[:limit]
+
     def peer_trust_history(
         self,
         fingerprint: str,

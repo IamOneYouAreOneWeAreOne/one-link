@@ -239,6 +239,18 @@ Listed in dependency order.
 
 ---
 
+## Cross-cutting follow-ups (post-Tier 3 starts)
+
+  - **Activity feed.** ✓ Shipped (released as package v0.9.1).
+    Cross-peer chronological view merging capability_audit (verify,
+    trust, cap policy) + key_change_events + transfers (terminal
+    states only) + manifest_conflicts + peers first_seen into one
+    timeline. Filter chips (All / Trust / Keys / Files / Conflicts
+    / Peers). Live-updating: every relevant WS event nudges a
+    coalesced refresh on the open pane. Lives in the existing
+    Activity sidebar tab. Endpoint
+    `GET /api/activity?since=&kinds=&peer=&limit=`.
+
 ## Cross-cutting tech debt to attend to as we go
 
   - **Wire-format channel-level Double Ratchet activation.** v0.7.2
