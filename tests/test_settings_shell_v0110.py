@@ -172,6 +172,8 @@ def test_about_pane_links_to_source(index_html: str):
 # ───────── version pin ───────────────────────────────────────────────
 
 def test_page_version_bumped(index_html: str):
+    """The page-version string must match __version__. We don't pin
+    a specific version here so future ships in the 0.11.x line don't
+    have to update this file."""
     from one_link import __version__
-    assert __version__ == "0.11.0"
     assert f'PAGE_BUILT_FOR = "{__version__}"' in index_html

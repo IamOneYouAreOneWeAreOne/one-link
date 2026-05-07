@@ -60,6 +60,26 @@ PREFERRED_UI_PORT = 7117
 UI_PORT_FALLBACK_RANGE = 16
 
 
+# v0.11.1 Profile palette. Eight presets cover the standard messaging-
+# app palette space (purple/blue/teal/green/yellow/orange/red/pink).
+# We validate against this set so the database can't be poisoned with
+# garbage hex strings, and the UI picks from the same list. Adding a
+# new color is a coordinated edit on both sides.
+AVATAR_COLOR_PRESETS = (
+    "#7c4dff",  # default purple (current avatar gradient base)
+    "#3b82f6",  # blue
+    "#06b6d4",  # teal
+    "#10b981",  # green
+    "#facc15",  # yellow
+    "#f97316",  # orange
+    "#ef4444",  # red
+    "#ec4899",  # pink
+)
+# v0.11.1 bio cap. 140 chars matches the long-established "short
+# status" convention from Twitter/Signal/Telegram.
+BIO_MAX_LENGTH = 140
+
+
 # ─── v0.10.6 native folder picker ─────────────────────────────────────
 #
 # The first cut used tkinter.filedialog. On Windows that pops a Tk Tcl
@@ -735,6 +755,12 @@ class UIServer:
             "notification_sound": s.get("notification_sound", "true") == "true",
             # Log verbosity: error | warn | info | debug
             "log_level": s.get("log_level", "info"),
+            # v0.11.1 Profile fields. bio is a short status; null/empty
+            # means none. avatar_color is one of AVATAR_COLOR_PRESETS;
+            # falls back to the first preset if unset.
+            "bio": s.get("bio", "") or "",
+            "avatar_color": s.get("avatar_color", AVATAR_COLOR_PRESETS[0]),
+            "avatar_color_presets": list(AVATAR_COLOR_PRESETS),
         })
 
     async def api_set_settings(self, request: web.Request) -> web.Response:
@@ -859,6 +885,42 @@ class UIServer:
                 "info": logging.INFO,   "debug": logging.DEBUG,
             }
             logging.getLogger("one_link").setLevel(level_map[v])
+        # v0.11.1 Profile: bio (short status) + avatar color preset.
+        if "bio" in data:
+            v = data["bio"]
+            if v is None:
+                self.daemon.state.delete_setting("bio")
+            else:
+                if not isinstance(v, str):
+                    return web.json_response(
+                        {"error": "bio must be a string"}, status=400,
+                    )
+                if len(v) > BIO_MAX_LENGTH:
+                    return web.json_response(
+                        {"error": f"bio max {BIO_MAX_LENGTH} chars"},
+                        status=400,
+                    )
+                stripped = v.strip()
+                if stripped:
+                    self.daemon.state.set_setting("bio", stripped)
+                else:
+                    self.daemon.state.delete_setting("bio")
+        if "avatar_color" in data:
+            v = data["avatar_color"]
+            if v is None or v == "":
+                self.daemon.state.delete_setting("avatar_color")
+            else:
+                if v not in AVATAR_COLOR_PRESETS:
+                    return web.json_response(
+                        {
+                            "error": (
+                                "avatar_color must be one of "
+                                f"{list(AVATAR_COLOR_PRESETS)}"
+                            )
+                        },
+                        status=400,
+                    )
+                self.daemon.state.set_setting("avatar_color", v)
         return web.json_response({"ok": True})
 
     # ─── /api/peers ───────────────────────────────────────────────────

@@ -1352,6 +1352,68 @@
     border-top: 1px solid var(--line);
     background: var(--bg-2);
   }
+  /* v0.11.1 Profile pane — avatar preview + color picker. */
+  .profile-avatar-row {
+    display: flex; align-items: center; gap: 16px;
+    margin-bottom: 18px;
+    padding: 12px;
+    background: var(--bg-2);
+    border-radius: 10px;
+  }
+  .profile-avatar-preview {
+    width: 64px; height: 64px;
+    border-radius: 50%;
+    display: grid; place-items: center;
+    color: white;
+    font-weight: 700; font-size: 22px;
+    letter-spacing: .5px;
+    background: var(--accent);
+    flex: 0 0 auto;
+    box-shadow: 0 2px 8px rgba(0,0,0,.25);
+    transition: background .15s;
+  }
+  .profile-avatar-meta { flex: 1; min-width: 0; }
+  .profile-avatar-label {
+    font-size: 11px; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .7px;
+    margin-bottom: 6px;
+  }
+  .profile-color-swatches {
+    display: flex; gap: 8px; flex-wrap: wrap;
+  }
+  .profile-color-swatch {
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    padding: 0;
+    transition: transform .12s, border-color .12s;
+  }
+  .profile-color-swatch:hover { transform: scale(1.1); }
+  .profile-color-swatch.active {
+    border-color: var(--text);
+    box-shadow: 0 0 0 2px var(--bg-2);
+  }
+
+  /* v0.11.1 Blocked devices list. */
+  .blocked-list { display: flex; flex-direction: column; gap: 6px; }
+  .blocked-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px;
+    background: var(--bg-2);
+    border-radius: 8px;
+  }
+  .blocked-row .name {
+    flex: 1; min-width: 0;
+    font-size: 13px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .blocked-row .sub {
+    font-size: 10px; color: var(--text-dim);
+    font-family: var(--mono);
+  }
+  .blocked-empty { font-style: italic; opacity: .8; }
+
   /* Mobile / narrow: collapse the rail to a horizontal scroll bar. */
   @media (max-width: 720px) {
     .settings-body {
@@ -2825,13 +2887,30 @@
           <section class="settings-pane active" data-settings-pane="profile">
             <h3>Profile</h3>
             <p class="settings-pane-lede">
-              Your display name is what nearby devices see. Tap the
-              avatar to pick a color.
+              Your display name + avatar are how nearby devices see you.
+              The bio is shown in your device drawer.
             </p>
+            <!-- v0.11.1 avatar preview + color picker. The preview's
+                 background is the chosen color; initials are derived
+                 from the display-name input live. -->
+            <div class="profile-avatar-row">
+              <div class="profile-avatar-preview" id="profile-avatar-preview" aria-hidden="true">??</div>
+              <div class="profile-avatar-meta">
+                <div class="profile-avatar-label">Avatar color</div>
+                <div class="profile-color-swatches" id="profile-color-swatches">
+                  <!-- swatches injected by JS from /api/settings.avatar_color_presets -->
+                </div>
+              </div>
+            </div>
             <div class="settings-row">
               <label for="set-name">Display name</label>
               <input type="text" id="set-name" placeholder="leave blank to use hostname" />
             </div>
+            <div class="settings-row">
+              <label for="set-bio">Bio</label>
+              <input type="text" id="set-bio" maxlength="140" placeholder="Short status — what's up?" />
+            </div>
+            <p class="settings-help" id="set-bio-counter">0 / 140</p>
             <div class="settings-row">
               <label>Identity</label>
               <span class="settings-readonly" id="settings-identity-fp">…</span>
@@ -2867,6 +2946,19 @@
               <code>ONE_LINK_PASSPHRASE</code> environment variable
               before launching the daemon.
             </p>
+            <!-- v0.11.1 Blocked devices. Sources from /api/peers with
+                 trust='rejected' — already a backed feature, just
+                 wasn't surfaced anywhere a user could find. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Blocked devices</span></div>
+              <p class="settings-help">
+                Blocked devices can't pair with you or send messages.
+                Unblock here if you change your mind.
+              </p>
+              <div id="blocked-devices-list" class="blocked-list">
+                <p class="settings-help blocked-empty">No blocked devices.</p>
+              </div>
+            </div>
           </section>
 
           <!-- ── Notifications ──────────────────────────────────── -->
@@ -3971,12 +4063,21 @@
     try {
       const r = await api.get("/api/settings");
       applyTheme(r.theme || "dark");
+      // v0.11.1: apply saved avatar color so the user's chosen tint
+      // sticks across reloads, not just the session they picked it.
+      if (r.avatar_color) {
+        document.documentElement.style.setProperty(
+          "--my-avatar", r.avatar_color,
+        );
+      }
       state.runtimeSettings = {
         theme: r.theme || "dark",
         dnd_enabled: !!r.dnd_enabled,
         dnd_start: r.dnd_start || "22:00",
         dnd_end: r.dnd_end || "07:00",
         notification_sound: r.notification_sound !== false,
+        bio: r.bio || "",
+        avatar_color: r.avatar_color || "#7c4dff",
       };
     } catch {
       // Daemon unreachable / fresh install — default theme stays.
@@ -7505,7 +7606,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.11.0";
+  const PAGE_BUILT_FOR = "0.11.1";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -9796,6 +9897,114 @@
     });
   });
 
+  // v0.11.1 Profile helpers — avatar preview + bio counter + color
+  // swatches. Local DOM only; persistence is via /api/settings.
+  function _initialsFor(name) {
+    if (!name) return "?";
+    const parts = name.trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return "?";
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+  function _refreshProfileAvatarPreview() {
+    const preview = $("#profile-avatar-preview");
+    if (!preview) return;
+    const nameInput = $("#set-name");
+    const name = (nameInput?.value || "").trim() ||
+                 (state.me?.display_name || state.me?.hostname || "");
+    preview.textContent = _initialsFor(name);
+    const active = $(".profile-color-swatch.active");
+    if (active) preview.style.background = active.dataset.color;
+  }
+  function _renderColorSwatches(presets, current) {
+    const host = $("#profile-color-swatches");
+    if (!host) return;
+    host.innerHTML = "";
+    for (const c of presets) {
+      const sw = document.createElement("button");
+      sw.className = "profile-color-swatch" + (c === current ? " active" : "");
+      sw.style.background = c;
+      sw.dataset.color = c;
+      sw.title = c;
+      sw.setAttribute("aria-label", `Avatar color ${c}`);
+      sw.onclick = (ev) => {
+        ev.preventDefault();
+        host.querySelectorAll(".profile-color-swatch").forEach(
+          (b) => b.classList.toggle("active", b === sw),
+        );
+        _refreshProfileAvatarPreview();
+        // Live-apply to my own avatar everywhere it's rendered.
+        applyMyAvatarColor(c);
+      };
+      host.appendChild(sw);
+    }
+  }
+  function _renderBioCounter() {
+    const bio = $("#set-bio");
+    const counter = $("#set-bio-counter");
+    if (!bio || !counter) return;
+    counter.textContent = `${bio.value.length} / 140`;
+  }
+  // Live update preview on name/bio edits.
+  $("#set-name")?.addEventListener("input", _refreshProfileAvatarPreview);
+  $("#set-bio")?.addEventListener("input", _renderBioCounter);
+
+  // v0.11.1 — apply chosen avatar color to the user's own avatar
+  // tiles across the UI. Cheap CSS variable propagation; no DOM
+  // re-render needed.
+  function applyMyAvatarColor(hex) {
+    document.documentElement.style.setProperty("--my-avatar", hex);
+  }
+
+  // v0.11.1 — render blocked devices in Privacy pane. Uses the
+  // existing /api/peers endpoint with ?include=rejected so we don't
+  // need a new backend route.
+  async function refreshBlockedDevicesList() {
+    const host = $("#blocked-devices-list");
+    if (!host) return;
+    let rejected = [];
+    try {
+      const r = await api.get("/api/peers?include=rejected");
+      const all = r.peers || [];
+      rejected = all.filter((p) => p.trust === "rejected");
+    } catch (e) {
+      console.warn("refreshBlockedDevicesList:", e);
+    }
+    host.innerHTML = "";
+    if (rejected.length === 0) {
+      const empty = el("p", "settings-help blocked-empty",
+        "No blocked devices.");
+      host.appendChild(empty);
+      return;
+    }
+    for (const p of rejected) {
+      const row = el("div", "blocked-row");
+      const meta = el("div", "name", p.display_name || p.hostname || p.short_id || p.fingerprint?.slice(0, 12) || "(unknown)");
+      const sub = el("div", "sub", p.short_id || (p.fingerprint || "").slice(0, 8));
+      const wrap = el("div");
+      wrap.style.flex = "1";
+      wrap.appendChild(meta);
+      wrap.appendChild(sub);
+      const unblock = el("button", "btn-ghost", "Unblock");
+      unblock.onclick = async () => {
+        try {
+          await api.post(
+            `/api/peers/${encodeURIComponent(p.fingerprint)}/trust`,
+            { trust: "pinned" },
+          );
+          toast("Device unblocked", "good");
+          refreshBlockedDevicesList();
+          refreshPeers();
+        } catch (e) {
+          toast(`Unblock failed: ${errorToastBody(e)}`, "bad");
+        }
+      };
+      row.appendChild(wrap);
+      row.appendChild(unblock);
+      host.appendChild(row);
+    }
+  }
+
   // v0.11.0: fill Profile + About panes from /api/me. Done up-front
   // (state.me is already loaded by init()) so opening Settings is
   // instant — no flash of empty fields.
@@ -9827,6 +10036,15 @@
       $("#set-dnd-end").value = r.dnd_end || "07:00";
       $("#set-sound").checked = r.notification_sound !== false;
       $("#set-log-level").value = r.log_level || "info";
+      // v0.11.1 Profile fields.
+      const bioEl = $("#set-bio");
+      if (bioEl) bioEl.value = r.bio || "";
+      _renderBioCounter();
+      _renderColorSwatches(
+        r.avatar_color_presets || [],
+        r.avatar_color || (r.avatar_color_presets || [])[0] || "#7c4dff",
+      );
+      _refreshProfileAvatarPreview();
       // Cache for runtime checks (DND + sound + theme).
       state.runtimeSettings = {
         theme: r.theme || "dark",
@@ -9834,6 +10052,8 @@
         dnd_start: r.dnd_start || "22:00",
         dnd_end: r.dnd_end || "07:00",
         notification_sound: r.notification_sound !== false,
+        bio: r.bio || "",
+        avatar_color: r.avatar_color || "#7c4dff",
       };
     } catch (e) {
       $("#set-name").value = "";
@@ -9857,6 +10077,7 @@
     // Profile each open so the user always lands on a predictable
     // pane regardless of where they last navigated.
     refreshSettingsAbout();
+    refreshBlockedDevicesList();
     switchSettingsPane("profile");
     settingsBackdrop.classList.add("show");
   };
@@ -9873,6 +10094,10 @@
     applyTheme(e.target.value);
   });
   $("#settings-save").onclick = async () => {
+    // v0.11.1 — pull avatar_color from the active swatch, bio from
+    // the input. Both are optional; nullish skips the field on the
+    // backend.
+    const activeSwatch = $(".profile-color-swatch.active");
     const payload = {
       display_name: $("#set-name").value.trim() || null,
       auto_accept_lan: $("#set-autoaccept").checked,
@@ -9885,6 +10110,9 @@
       dnd_end: $("#set-dnd-end").value || "07:00",
       notification_sound: $("#set-sound").checked,
       log_level: $("#set-log-level").value || "info",
+      // v0.11.1 Profile fields.
+      bio: ($("#set-bio")?.value || "").trim(),
+      avatar_color: activeSwatch?.dataset?.color || undefined,
     };
     let savedSettings = false;
     try {
@@ -9894,12 +10122,15 @@
       // - theme: flip the data-theme attribute live
       // - runtime cache: keep DND / sound checks in sync
       applyTheme(payload.theme);
+      if (payload.avatar_color) applyMyAvatarColor(payload.avatar_color);
       state.runtimeSettings = {
         theme: payload.theme,
         dnd_enabled: payload.dnd_enabled,
         dnd_start: payload.dnd_start,
         dnd_end: payload.dnd_end,
         notification_sound: payload.notification_sound,
+        bio: payload.bio,
+        avatar_color: payload.avatar_color || state.runtimeSettings?.avatar_color,
       };
     } catch (e) {
       toast(`Save failed: ${errorToastBody(e)}`, "bad");
