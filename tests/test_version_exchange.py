@@ -195,6 +195,17 @@ def test_translate_handshake_failed():
     assert out["code"] == "handshake_failed"
 
 
+def test_translate_ratchet_desync():
+    from one_link.server import _translate_send_error
+
+    out = _translate_send_error(
+        ValueError("unsupported ratchet header version: 152")
+    )
+    assert out["status"] == 502
+    assert out["code"] == "secure_session_desync"
+    assert "retry" in out["hint"].lower()
+
+
 def test_translate_timeout():
     from one_link.server import _translate_send_error
 

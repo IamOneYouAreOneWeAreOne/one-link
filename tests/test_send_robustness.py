@@ -26,7 +26,9 @@ from one_link.daemon import (
     Daemon,
     FILE_ACK_DEADLINE_S,
     HANDSHAKE_DEADLINE_OUTBOUND_S,
+    OutboundSession,
     TransferPausedError,
+    _is_transient_send_error,
 )
 from one_link.discovery import Peer
 from one_link.identity import Identity, fingerprint_of
@@ -42,6 +44,17 @@ def _new_identity() -> Identity:
         private=sk, public=pub_obj, public_bytes=pub_bytes,
         fingerprint=fp, short_id=fp[:8], hostname="x",
     )
+
+
+class _DesyncedChannel:
+    async def send(self, payload: bytes) -> None:
+        return None
+
+    async def recv(self) -> bytes:
+        raise ValueError("unsupported ratchet header version: 152")
+
+    async def close(self) -> None:
+        return None
 
 
 # ─── handshake-timeout protection ─────────────────────────────────
@@ -165,6 +178,58 @@ async def test_send_file_marks_transfer_paused_with_reason(
         with contextlib.suppress(Exception):
             await asyncio.wait_for(server.wait_closed(), timeout=2.0)
         state_a.close()
+
+
+def test_ratchet_header_mismatch_is_transient():
+    assert _is_transient_send_error(
+        ValueError("unsupported ratchet header version: 152")
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_file_pauses_and_preserves_on_ratchet_desync(tmp_path: Path):
+    """If an existing secure session is desynced, files must pause for
+    automatic retry instead of being marked permanently failed."""
+    me_a = _new_identity()
+    me_b = _new_identity()
+    state_a = State(db_path=tmp_path / "state.db")
+    state_a.upsert_peer(
+        fingerprint=me_b.fingerprint,
+        short_id=me_b.short_id,
+        pubkey=me_b.public_bytes,
+    )
+    state_a.set_peer_trust(me_b.fingerprint, "pinned")
+    daemon_a = Daemon(me_a)
+    daemon_a.state = state_a
+    peer_b = Peer(
+        short_id=me_b.short_id,
+        hostname="b",
+        address="127.0.0.1",
+        port=9,
+        ed_pub_hex=me_b.public_bytes.hex(),
+    )
+    sess = OutboundSession(
+        peer_fp=me_b.fingerprint,
+        peer=peer_b,
+        channel=_DesyncedChannel(),  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon_a._outbound_sessions[me_b.fingerprint] = sess
+    src = tmp_path / "movie.mp4"
+    src.write_bytes(b"video-bytes" * 4096)
+
+    with pytest.raises(TransferPausedError) as ei:
+        await daemon_a.send_file(peer_b, src)
+    assert ei.value.path == src
+    assert src.is_file()
+    row = state_a.list_transfers(limit=1)[0]
+    assert row.status == "paused"
+    assert row.metadata["transient"] is True
+    assert "ratchet header version" in row.metadata["error"]
+    assert me_b.fingerprint not in daemon_a._outbound_sessions
+    state_a.close()
 
 
 # ─── transfer-ledger watchdog ──────────────────────────────────────

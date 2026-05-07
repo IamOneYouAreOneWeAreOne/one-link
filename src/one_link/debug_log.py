@@ -207,7 +207,11 @@ def _default_suggestion(exc: BaseException) -> str:
             "The peer is marked as blocked. Click 'Allow device' in the "
             "conversation header to unblock, then re-pair if needed."
         )
-    if "decrypt" in msg or "invalidtag" in msg or "wire_version_mismatch" in msg:
+    if (
+        "decrypt" in msg or "invalidtag" in msg
+        or "wire_version_mismatch" in msg
+        or "ratchet header version" in msg
+    ):
         return (
             "The secure session could not be opened on this path yet. "
             "One Link will reconnect and use the best compatible route automatically."

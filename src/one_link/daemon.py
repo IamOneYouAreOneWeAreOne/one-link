@@ -152,8 +152,11 @@ def _is_transient_send_error(exc: BaseException) -> bool:
 
     Permanent — fail loudly:
       - Capability denial (peer's policy refused us).
-      - Decrypt failure / wire-version mismatch (incompatible peer).
+      - Decrypt failure (wrong key / corrupt authenticated ciphertext).
       - Peer marked rejected.
+
+    Ratchet header mismatch is session-bound and recoverable: drop the
+    session, preserve the staged file, and retry after a fresh handshake.
     """
     if isinstance(exc, (OSError, ConnectionError, asyncio.TimeoutError)):
         return True
@@ -169,6 +172,8 @@ def _is_transient_send_error(exc: BaseException) -> bool:
         "connection aborted", "connection reset", "broken pipe",
         "timed out", "winerror 10053", "winerror 10054",
         "peer offline", "peer unreachable",
+        "unsupported ratchet header version", "ratchet header version",
+        "ratchet frame too short", "header too short",
     )
     return any(m in msg for m in transient_markers)
 

@@ -4,9 +4,9 @@ Covers:
     POST /api/files/{name}/reveal  -> opens explorer/finder/xdg with file selected
     POST /api/inbox/reveal         -> opens the inbox folder itself
 
-These endpoints shell out to the platform file manager via subprocess.Popen.
-We monkeypatch Popen so the tests work on any host without actually opening
-a window, and verify the right command is built per platform.
+These endpoints open the platform file manager. File selection uses
+subprocess.Popen; Windows folder reveal uses os.startfile. Tests monkeypatch
+those launch points so they work without opening a real window.
 """
 
 from __future__ import annotations
@@ -147,11 +147,7 @@ async def test_file_reveal_invokes_correct_platform_command(tmp_path: Path, monk
     popen.assert_called_once()
     args = popen.call_args.args[0]
     if sys.platform == "win32":
-        # We pass a single command-line string (not a list) so Windows
-        # parses /select,<path> the way Explorer expects.
-        assert isinstance(args, str)
-        assert args.lower().startswith("explorer.exe /select,")
-        assert "received.png" in args
+        assert args == ["explorer.exe", f"/select,{target.resolve()}"]
     elif sys.platform == "darwin":
         assert args == ["open", "-R", str(target.resolve())]
     else:
@@ -209,21 +205,24 @@ async def test_inbox_reveal_invokes_correct_platform_command(tmp_path: Path, mon
 
     popen = MagicMock()
     monkeypatch.setattr("subprocess.Popen", popen)
+    startfile = MagicMock()
+    if sys.platform == "win32":
+        monkeypatch.setattr("os.startfile", startfile, raising=False)
 
     resp = await server.api_inbox_reveal(SimpleNamespace())
     assert resp.status == 200, resp.text
 
-    popen.assert_called_once()
-    args = popen.call_args.args[0]
     resolved = str(inbox.resolve())
     if sys.platform == "win32":
-        assert isinstance(args, str)
-        assert args.lower().startswith("explorer.exe ")
-        # No /select, — opens the folder itself.
-        assert "/select," not in args
+        popen.assert_not_called()
+        startfile.assert_called_once_with(resolved)
     elif sys.platform == "darwin":
+        popen.assert_called_once()
+        args = popen.call_args.args[0]
         assert args == ["open", resolved]
     else:
+        popen.assert_called_once()
+        args = popen.call_args.args[0]
         assert args == ["xdg-open", resolved]
 
 
