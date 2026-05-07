@@ -712,6 +712,81 @@
   .msg.out.file.audio .audio-player audio {
     filter: invert(0) hue-rotate(0deg);
   }
+  /* v0.9.3 command palette. */
+  .palette-modal { padding: 0 !important; overflow: hidden; }
+  .palette-input-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--bg-3);
+  }
+  .palette-input-row .palette-icon {
+    color: var(--text-dim); font-size: 16px;
+  }
+  .palette-input-row input {
+    flex: 1; min-width: 0;
+    background: transparent; border: 0; outline: none;
+    color: var(--text); font-size: 15px;
+    padding: 4px 0;
+  }
+  .palette-input-row input::placeholder { color: var(--text-dimmer); }
+  .palette-input-row .palette-kbd {
+    color: var(--text-dimmer); font-size: 11px;
+    padding: 2px 6px; border-radius: 4px;
+    border: 1px solid var(--bg-3);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .palette-results {
+    max-height: 60vh; overflow-y: auto;
+    padding: 4px 0;
+  }
+  .palette-hint, .palette-empty {
+    padding: 30px 20px; text-align: center;
+    color: var(--text-dim); font-size: 13px;
+  }
+  .palette-section-h {
+    padding: 8px 18px 4px;
+    color: var(--text-dim); font-size: 10px;
+    text-transform: uppercase; letter-spacing: 1px;
+    font-weight: 700;
+  }
+  .palette-row {
+    display: flex; gap: 12px; align-items: center;
+    padding: 8px 18px;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+    transition: background .08s;
+  }
+  .palette-row:hover, .palette-row.focused {
+    background: var(--bg-2);
+    border-left-color: var(--accent);
+  }
+  .palette-row .pr-icon {
+    flex-shrink: 0; width: 28px; height: 28px;
+    border-radius: 6px;
+    background: var(--bg-3);
+    display: grid; place-items: center;
+    font-size: 14px;
+  }
+  .palette-row .pr-body { flex: 1; min-width: 0; }
+  .palette-row .pr-title {
+    color: var(--text); font-size: 13px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .palette-row .pr-sub {
+    color: var(--text-dim); font-size: 11px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-top: 2px;
+  }
+  .palette-row mark {
+    background: rgba(245,196,81,.40); color: var(--text);
+    padding: 0 1px; border-radius: 2px;
+  }
+  .palette-row .pr-kind {
+    color: var(--text-dimmer); font-size: 10px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    flex-shrink: 0; padding: 2px 6px;
+    border-radius: 999px; border: 1px solid var(--bg-3);
+  }
 
   /* ── Drag-drop overlay ─────────────────────────────────────────────── */
   .drop-overlay {
@@ -2371,6 +2446,25 @@
     </div>
   </div>
 
+  <!-- v0.9.3: global search / command palette. Opens with Ctrl+K
+       (or Cmd+K). Searches messages (FTS5), peers, groups, and
+       inbox files in one go. Arrow keys navigate; Enter activates
+       the highlighted result; Esc closes. -->
+  <div class="modal-backdrop" id="palette-backdrop">
+    <div class="modal palette-modal" style="max-width:640px; padding: 0;">
+      <div class="palette-input-row">
+        <span class="palette-icon">⌘</span>
+        <input type="text" id="palette-input"
+               placeholder="Search messages, peers, files…"
+               autocomplete="off" spellcheck="false" />
+        <span class="palette-kbd">Esc</span>
+      </div>
+      <div class="palette-results" id="palette-results">
+        <div class="palette-hint">Type to search across this device's messages, peers, groups, and received files.</div>
+      </div>
+    </div>
+  </div>
+
   <!-- v0.8.9: folder-sync conflict resolver. Lists every unresolved
        divergent-edit conflict; user picks Keep mine / Keep theirs /
        Keep both per file. -->
@@ -2437,7 +2531,8 @@
     <div class="modal" style="max-width:480px;">
       <h2>Keyboard shortcuts</h2>
       <div class="shortcuts-list">
-        <kbd>Ctrl + K</kbd>      <div class="desc">Search this conversation</div>
+        <kbd>Ctrl + K</kbd>      <div class="desc">Open command palette (search everything)</div>
+        <kbd>Ctrl + F</kbd>      <div class="desc">Search this conversation</div>
         <kbd>Ctrl + /</kbd>      <div class="desc">Focus message input</div>
         <kbd>Ctrl + ,</kbd>      <div class="desc">Open settings</div>
         <kbd>Ctrl + N</kbd>      <div class="desc">Pair a new device</div>
@@ -5876,7 +5971,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.9.2";
+  const PAGE_BUILT_FOR = "0.9.3";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -6549,6 +6644,282 @@
     const files = Array.from(e.target.files || []);
     fileInput.value = "";
     for (const f of files) await stageFile(f);
+  });
+
+  // ── Command palette / global search (v0.9.3) ───────────────────────
+  // Ctrl+K (or Cmd+K) opens a modal with one input + result list.
+  // Searches messages, peers, groups, and inbox files via the
+  // /api/search endpoint. Arrow keys navigate; Enter activates;
+  // Esc closes.
+  state.paletteOpen = false;
+  state.paletteFocusIdx = 0;
+  state.paletteResults = [];      // flat list mirroring the rendered rows
+  state.paletteQuery = "";
+  let _paletteDebounce = null;
+
+  function openPalette() {
+    if (state.paletteOpen) return;
+    state.paletteOpen = true;
+    $("#palette-backdrop").classList.add("show");
+    const input = $("#palette-input");
+    input.value = "";
+    state.paletteQuery = "";
+    state.paletteResults = [];
+    state.paletteFocusIdx = 0;
+    renderPaletteResults({ messages: [], peers: [], groups: [], files: [] });
+    setTimeout(() => input.focus(), 0);
+  }
+  function closePalette() {
+    state.paletteOpen = false;
+    $("#palette-backdrop").classList.remove("show");
+  }
+
+  function paletteHighlight(text, query) {
+    // Simple case-insensitive highlight — wraps the matched span
+    // in <mark>. Falls back to plain text if no match.
+    const t = String(text || "");
+    if (!query) return document.createTextNode(t);
+    const idx = t.toLowerCase().indexOf(query.toLowerCase());
+    if (idx < 0) return document.createTextNode(t);
+    const frag = document.createDocumentFragment();
+    if (idx > 0) frag.appendChild(document.createTextNode(t.slice(0, idx)));
+    const m = document.createElement("mark");
+    m.textContent = t.slice(idx, idx + query.length);
+    frag.appendChild(m);
+    if (idx + query.length < t.length) {
+      frag.appendChild(document.createTextNode(t.slice(idx + query.length)));
+    }
+    return frag;
+  }
+
+  function renderPaletteResults(r) {
+    const host = $("#palette-results");
+    host.innerHTML = "";
+    state.paletteResults = [];
+    const q = state.paletteQuery;
+    const total = (r.messages?.length || 0) + (r.peers?.length || 0) +
+                  (r.groups?.length || 0) + (r.files?.length || 0);
+    if (q && total === 0) {
+      host.appendChild(el("div", "palette-empty", `No matches for "${q}".`));
+      return;
+    }
+    if (!q) {
+      host.appendChild(el("div", "palette-hint",
+        "Type to search across this device's messages, peers, groups, and received files."));
+      return;
+    }
+
+    // Order: peers > groups > messages > files. Peers are most
+    // likely "I want to switch to that conversation"; messages are
+    // higher signal but visually noisier so come after the navigation
+    // candidates.
+    if (r.peers && r.peers.length > 0) {
+      host.appendChild(el("div", "palette-section-h", "Devices"));
+      for (const p of r.peers) {
+        const row = paletteRowPeer(p, q);
+        state.paletteResults.push({ row, action: () => paletteOpenPeer(p) });
+        host.appendChild(row);
+      }
+    }
+    if (r.groups && r.groups.length > 0) {
+      host.appendChild(el("div", "palette-section-h", "Groups"));
+      for (const g of r.groups) {
+        const row = paletteRowGroup(g, q);
+        state.paletteResults.push({ row, action: () => paletteOpenGroup(g) });
+        host.appendChild(row);
+      }
+    }
+    if (r.messages && r.messages.length > 0) {
+      host.appendChild(el("div", "palette-section-h", "Messages"));
+      for (const m of r.messages) {
+        const row = paletteRowMessage(m, q);
+        state.paletteResults.push({ row, action: () => paletteOpenMessage(m) });
+        host.appendChild(row);
+      }
+    }
+    if (r.files && r.files.length > 0) {
+      host.appendChild(el("div", "palette-section-h", "Files"));
+      for (const f of r.files) {
+        const row = paletteRowFile(f, q);
+        state.paletteResults.push({ row, action: () => paletteOpenFile(f) });
+        host.appendChild(row);
+      }
+    }
+    state.paletteFocusIdx = 0;
+    if (state.paletteResults[0]) {
+      state.paletteResults[0].row.classList.add("focused");
+    }
+  }
+
+  function paletteRowPeer(p, q) {
+    const row = el("div", "palette-row");
+    row.appendChild(el("div", "pr-icon", "👤"));
+    const body = el("div", "pr-body");
+    const title = el("div", "pr-title");
+    title.appendChild(paletteHighlight(
+      p.display_name || p.hostname || p.short_id, q,
+    ));
+    if (p.is_verified) {
+      const v = el("span"); v.style.color = "var(--good)"; v.textContent = " ✓";
+      title.appendChild(v);
+    }
+    body.appendChild(title);
+    body.appendChild(el("div", "pr-sub",
+      `${p.trust} · ${p.short_id}`));
+    row.appendChild(body);
+    row.appendChild(el("span", "pr-kind", "PEER"));
+    row.onclick = () => paletteOpenPeer(p);
+    return row;
+  }
+  function paletteRowGroup(g, q) {
+    const row = el("div", "palette-row");
+    row.appendChild(el("div", "pr-icon", "👥"));
+    const body = el("div", "pr-body");
+    const title = el("div", "pr-title");
+    title.appendChild(paletteHighlight(g.name || "(unnamed)", q));
+    body.appendChild(title);
+    body.appendChild(el("div", "pr-sub", `Group · ${g.group_id.slice(0, 12)}…`));
+    row.appendChild(body);
+    row.appendChild(el("span", "pr-kind", "GROUP"));
+    row.onclick = () => paletteOpenGroup(g);
+    return row;
+  }
+  function paletteRowMessage(m, q) {
+    const row = el("div", "palette-row");
+    row.appendChild(el("div", "pr-icon", m.direction === "out" ? "↗" : "↘"));
+    const body = el("div", "pr-body");
+    const title = el("div", "pr-title");
+    title.appendChild(paletteHighlight(m.body || "(empty)", q));
+    body.appendChild(title);
+    const who = m.peer_display_name || m.peer_fp?.slice(0, 8) || "?";
+    const when = m.ts_ms ? new Date(m.ts_ms).toLocaleString() : "?";
+    body.appendChild(el("div", "pr-sub", `${who} · ${when}`));
+    row.appendChild(body);
+    row.appendChild(el("span", "pr-kind", "MSG"));
+    row.onclick = () => paletteOpenMessage(m);
+    return row;
+  }
+  function paletteRowFile(f, q) {
+    const row = el("div", "palette-row");
+    row.appendChild(el("div", "pr-icon", fileIcon(f.name)));
+    const body = el("div", "pr-body");
+    const title = el("div", "pr-title");
+    title.appendChild(paletteHighlight(f.name, q));
+    body.appendChild(title);
+    body.appendChild(el("div", "pr-sub",
+      `${fmtBytes(f.size)} · ${new Date(f.mtime_ms || 0).toLocaleString()}`));
+    row.appendChild(body);
+    row.appendChild(el("span", "pr-kind", "FILE"));
+    row.onclick = () => paletteOpenFile(f);
+    return row;
+  }
+
+  function paletteOpenPeer(p) {
+    closePalette();
+    if (!p.short_id) return;
+    selectPeer(p.short_id);
+  }
+  function paletteOpenGroup(g) {
+    closePalette();
+    if (g.group_id) selectGroup(g.group_id);
+  }
+  function paletteOpenMessage(m) {
+    closePalette();
+    // Switch to the conversation, then scroll to the message id.
+    if (m.room_id) {
+      // Group message — if we know which group.
+      // No direct ID mapping here; just open the conversation.
+    }
+    if (m.peer_fp) {
+      const peer = [...state.peers.values()]
+        .find(p => p.fingerprint === m.peer_fp);
+      if (peer) selectPeer(peer.short_id);
+    }
+    // Best-effort: scroll to the message after a tick (chat
+    // re-render runs on rAF).
+    setTimeout(() => {
+      const node = document.querySelector(`[data-msg-id="${m.id}"]`);
+      if (node) node.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 80);
+  }
+  function paletteOpenFile(f) {
+    closePalette();
+    // Open the file in a new tab — same as the per-bubble Open link.
+    window.open(`/api/files/${encodeURIComponent(f.name)}`, "_blank");
+  }
+
+  function paletteFocus(delta) {
+    if (state.paletteResults.length === 0) return;
+    state.paletteResults[state.paletteFocusIdx]?.row.classList.remove("focused");
+    state.paletteFocusIdx =
+      (state.paletteFocusIdx + delta + state.paletteResults.length)
+        % state.paletteResults.length;
+    const r = state.paletteResults[state.paletteFocusIdx];
+    r?.row.classList.add("focused");
+    r?.row.scrollIntoView({ block: "nearest" });
+  }
+  function paletteActivateFocused() {
+    const r = state.paletteResults[state.paletteFocusIdx];
+    if (r) r.action();
+  }
+
+  async function runPaletteSearch(q) {
+    state.paletteQuery = q;
+    if (!q) {
+      renderPaletteResults({ messages: [], peers: [], groups: [], files: [] });
+      return;
+    }
+    try {
+      const r = await api.get(`/api/palette?q=${encodeURIComponent(q)}&limit=10`);
+      // Drop the response if the user kept typing; only render the
+      // freshest query's results.
+      if (state.paletteQuery !== q) return;
+      renderPaletteResults(r);
+    } catch (e) {
+      const host = $("#palette-results");
+      host.innerHTML = "";
+      host.appendChild(el("div", "palette-empty",
+        `Search failed: ${e.message || e}`));
+    }
+  }
+
+  // Wire keyboard.
+  document.addEventListener("keydown", (e) => {
+    // Ctrl/Cmd + K opens the palette from anywhere.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k" && !e.shiftKey) {
+      // Don't fight the existing per-conversation Ctrl+K — only
+      // override when palette is closed AND the active element
+      // isn't the conversation search input.
+      if (document.activeElement?.id === "search-input") return;
+      e.preventDefault();
+      openPalette();
+      return;
+    }
+    if (!state.paletteOpen) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closePalette();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      paletteFocus(+1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      paletteFocus(-1);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      paletteActivateFocused();
+    }
+  });
+
+  // Wire input.
+  $("#palette-input")?.addEventListener("input", (e) => {
+    const q = e.target.value;
+    if (_paletteDebounce !== null) clearTimeout(_paletteDebounce);
+    _paletteDebounce = setTimeout(() => runPaletteSearch(q.trim()), 120);
+  });
+  // Click outside the modal closes it.
+  $("#palette-backdrop")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closePalette();
   });
 
   // ── Voice recording (v0.9.2) ───────────────────────────────────────
@@ -7543,7 +7914,15 @@
     // Ctrl-combos that users expect to work everywhere.
     const typing = isTypingTarget(e.target);
     const ctrl = e.ctrlKey || e.metaKey;
-    if (ctrl && (e.key === "k" || e.key === "K")) {
+    // v0.9.3: Ctrl+K is now the GLOBAL command palette (handled in
+    // its own listener earlier in the file). Ctrl+F replaces it as
+    // the per-conversation search trigger — matches Slack / VS Code
+    // / Notion conventions. Without this remap the two handlers
+    // would race + the palette would steal focus mid-search.
+    if (ctrl && (e.key === "f" || e.key === "F") && !e.shiftKey) {
+      // Skip if browser-native find is desirable (no conversation
+      // open).
+      if (!state.selectedPeer && !state.selectedGroup) return;
       e.preventDefault();
       searchWrap.classList.add("open");
       searchInput.focus();

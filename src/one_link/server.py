@@ -295,6 +295,12 @@ class UIServer:
         r.add_get(r"/api/peers/{fp}/trust-history", self._guarded(self.api_get_peer_trust_history))
         # v0.9.1 cross-peer activity feed (merged audit log).
         r.add_get("/api/activity", self._guarded(self.api_get_activity_feed))
+        # v0.9.3 global search backing the Ctrl+K command palette.
+        # NOTE: /api/search is the legacy per-conversation FTS
+        # finder (see api_search). /api/palette is the merged-results
+        # endpoint that searches messages + peers + groups + files
+        # in one shot.
+        r.add_get("/api/palette", self._guarded(self.api_global_search))
         # v0.8.9 folder-sync conflicts (concurrent divergent edits).
         r.add_get("/api/folder-conflicts", self._guarded(self.api_list_folder_conflicts))
         r.add_post(r"/api/folder-conflicts/{conflict_id}/resolve",
@@ -1538,6 +1544,75 @@ class UIServer:
         return web.json_response({
             "events": events,
             "count": len(events),
+        })
+
+    async def api_global_search(self, request: web.Request) -> web.Response:
+        """v0.9.3: global search backing the Ctrl+K command palette.
+        Query params:
+          - q (required, the search string)
+          - limit (per-kind cap, default 10, max 50)
+        Returns merged results across messages (FTS5), peers,
+        groups, and inbox files."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        q = (request.query.get("q") or "").strip()
+        if not q:
+            return web.json_response({
+                "query": "",
+                "messages": [], "peers": [], "groups": [], "files": [],
+            })
+        try:
+            limit = int(request.query.get("limit", "10"))
+        except ValueError:
+            limit = 10
+        limit = max(1, min(limit, 50))
+
+        # 1. State-backed: messages + peers + groups.
+        state_hits = self.daemon.state.global_search(q, per_kind_limit=limit)
+
+        # 2. Inbox files by name substring. Uses the existing inbox
+        # listing helper to keep ordering / metadata consistent.
+        files: list[dict] = []
+        try:
+            ql = q.lower()
+            inbox = inbox_dir()
+            if inbox.is_dir():
+                rows = []
+                for f in inbox.iterdir():
+                    if not f.is_file():
+                        continue
+                    if ql not in f.name.lower():
+                        continue
+                    try:
+                        st = f.stat()
+                    except OSError:
+                        continue
+                    rows.append((f.name, int(st.st_size),
+                                 int(st.st_mtime * 1000)))
+                # Newest first.
+                rows.sort(key=lambda r: r[2], reverse=True)
+                for name, size, mtime in rows[:limit]:
+                    files.append({"name": name, "size": size, "mtime_ms": mtime})
+        except Exception as e:
+            log.warning("global search file scan failed: %s", e)
+
+        # Hostname enrichment for message rows so the UI can render
+        # "from <peer name>" without a second roundtrip.
+        peer_lookup: dict = {}
+        try:
+            for rec in self.daemon.state.list_peers():
+                peer_lookup[rec.fingerprint] = rec.display_name
+        except Exception:
+            pass
+        for m in state_hits.get("messages", []):
+            m["peer_display_name"] = peer_lookup.get(m.get("peer_fp"))
+
+        return web.json_response({
+            "query": q,
+            "messages": state_hits["messages"],
+            "peers": state_hits["peers"],
+            "groups": state_hits["groups"],
+            "files": files,
         })
 
     async def api_list_folder_conflicts(self, request: web.Request) -> web.Response:
@@ -3088,6 +3163,10 @@ class UIServer:
             "MANIFEST_WANTS",
             "BLOB_OFFER",
             "BLOB_CHUNK",
+            "CHUNK_QUERY",
+            "CHUNK_HAVE",
+            "CHUNK_PULL",
+            "CHUNK_DATA",
         ]
         # Outbound network endpoints we ever connect to: only LAN peers
         # discovered via mDNS, never any external service.

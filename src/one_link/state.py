@@ -456,8 +456,30 @@ class State:
                 self._migrate_v10_folder_conflicts(c)
                 if current < 10:
                     c.execute("INSERT INTO schema_version(version) VALUES(10)")
+                self._migrate_v11_chunk_availability(c)
+                if current < 11:
+                    c.execute("INSERT INTO schema_version(version) VALUES(11)")
             finally:
                 c.close()
+
+    def _migrate_v11_chunk_availability(self, c: sqlite3.Cursor) -> None:
+        """v0.9.x: local chunk availability index for swarm transfer."""
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chunk_availability (
+                chunk_hash  TEXT PRIMARY KEY,
+                size        INTEGER NOT NULL,
+                blob_hash   TEXT,
+                chunk_index INTEGER,
+                source      TEXT NOT NULL DEFAULT 'local',
+                updated_ms  INTEGER NOT NULL
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunk_availability_blob "
+            "ON chunk_availability(blob_hash)"
+        )
 
     def _migrate_v10_folder_conflicts(self, c: sqlite3.Cursor) -> None:
         """v0.8.9: track CRDT-detected concurrent edits to the same
@@ -2085,6 +2107,90 @@ class State:
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_msg(r) for r in rows]
 
+    def global_search(
+        self,
+        query: str,
+        *,
+        per_kind_limit: int = 10,
+    ) -> dict:
+        """v0.9.3: search across messages (FTS5), peers (LIKE), and
+        groups (LIKE). Returns a dict keyed by kind so the caller
+        can render each section.
+
+        Query is escaped for FTS5 (`"…"` quoted) so user input
+        with operators like AND / OR / NEAR doesn't accidentally
+        change the search semantics. Empty query returns empty
+        results without hitting the DB."""
+        q = (query or "").strip()
+        out: dict = {"messages": [], "peers": [], "groups": []}
+        if not q:
+            return out
+        # 1. Messages via FTS5. Phrase-quoted so special chars don't
+        # error out the parser ("auth: user" would otherwise be
+        # parsed as field-restricted query).
+        try:
+            phrased = '"' + q.replace('"', '""') + '"'
+            msgs = self.search_messages(phrased, limit=per_kind_limit)
+        except Exception:
+            msgs = []
+        for m in msgs:
+            out["messages"].append({
+                "id": m.id,
+                "ts_ms": m.ts_ms,
+                "direction": m.direction,
+                "peer_fp": m.peer_fp,
+                "msg_type": m.msg_type,
+                "body": (m.body or "")[:200],
+                "room_id": m.room_id,
+                "reply_to": m.reply_to,
+            })
+        # 2. Peers by hostname / display alias / short_id / fingerprint
+        # prefix. Case-insensitive.
+        like = f"%{q}%"
+        peer_rows = self._conn.execute(
+            "SELECT * FROM peers"
+            " WHERE LOWER(IFNULL(hostname, '')) LIKE LOWER(?)"
+            "    OR LOWER(IFNULL(local_alias, '')) LIKE LOWER(?)"
+            "    OR LOWER(short_id) LIKE LOWER(?)"
+            "    OR LOWER(fingerprint) LIKE LOWER(?)"
+            " ORDER BY (trust = 'pinned') DESC, last_seen_ms DESC"
+            " LIMIT ?",
+            (like, like, like, like, int(per_kind_limit)),
+        ).fetchall()
+        for r in peer_rows:
+            rec = self._row_to_peer(r)
+            out["peers"].append({
+                "fingerprint": rec.fingerprint,
+                "short_id": rec.short_id,
+                "hostname": rec.hostname,
+                "display_name": rec.display_name,
+                "trust": rec.trust,
+                "is_verified": rec.is_verified,
+                "last_seen_ms": rec.last_seen_ms,
+            })
+        # 3. Groups by name. groups.name was added in v0.6.2.
+        try:
+            grp_rows = self._conn.execute(
+                "SELECT group_id, name, updated_ms FROM groups"
+                " WHERE LOWER(IFNULL(name, '')) LIKE LOWER(?)"
+                " ORDER BY updated_ms DESC LIMIT ?",
+                (like, int(per_kind_limit)),
+            ).fetchall()
+        except Exception:
+            grp_rows = []
+        for r in grp_rows:
+            gid = r["group_id"]
+            try:
+                gid_hex = gid.hex() if isinstance(gid, (bytes, bytearray)) else str(gid)
+            except Exception:
+                gid_hex = ""
+            out["groups"].append({
+                "group_id": gid_hex,
+                "name": r["name"] or "",
+                "updated_ms": r["updated_ms"],
+            })
+        return out
+
     def recent_messages(
         self,
         *,
@@ -3157,6 +3263,84 @@ class State:
         return [{"hash": r["hash"], "size": r["size"], "received_ms": r["received_ms"]} for r in rows]
 
     # ─── settings (kv) ────────────────────────────────────────────────
+
+    def record_chunk_available(
+        self,
+        chunk_hash: str,
+        size: int,
+        *,
+        blob_hash: Optional[str] = None,
+        chunk_index: Optional[int] = None,
+        source: str = "local",
+    ) -> None:
+        now = _now_ms()
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO chunk_availability(
+                    chunk_hash, size, blob_hash, chunk_index, source, updated_ms
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chunk_hash) DO UPDATE SET
+                    size = excluded.size,
+                    blob_hash = COALESCE(excluded.blob_hash, chunk_availability.blob_hash),
+                    chunk_index = COALESCE(excluded.chunk_index, chunk_availability.chunk_index),
+                    source = excluded.source,
+                    updated_ms = excluded.updated_ms
+                """,
+                (
+                    chunk_hash,
+                    int(size),
+                    blob_hash,
+                    chunk_index,
+                    str(source or "local"),
+                    now,
+                ),
+            )
+
+    def has_chunk(self, chunk_hash: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM chunk_availability WHERE chunk_hash = ?",
+            (chunk_hash,),
+        ).fetchone()
+        return row is not None
+
+    def chunks_available(self, chunk_hashes: Iterable[str]) -> list[str]:
+        clean = [str(h) for h in chunk_hashes if str(h)]
+        if not clean:
+            return []
+        out: list[str] = []
+        for i in range(0, len(clean), 500):
+            batch = clean[i:i + 500]
+            rows = self._conn.execute(
+                "SELECT chunk_hash FROM chunk_availability "
+                f"WHERE chunk_hash IN ({','.join('?' for _ in batch)})",
+                tuple(batch),
+            ).fetchall()
+            out.extend(str(r["chunk_hash"]) for r in rows)
+        have = set(out)
+        return [h for h in clean if h in have]
+
+    def list_chunks_for_blob(self, blob_hash: str) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT chunk_hash, size, blob_hash, chunk_index, source, updated_ms
+            FROM chunk_availability
+            WHERE blob_hash = ?
+            ORDER BY chunk_index ASC, updated_ms DESC
+            """,
+            (blob_hash,),
+        ).fetchall()
+        return [
+            {
+                "chunk_hash": r["chunk_hash"],
+                "size": int(r["size"]),
+                "blob_hash": r["blob_hash"],
+                "chunk_index": r["chunk_index"],
+                "source": r["source"],
+                "updated_ms": int(r["updated_ms"]),
+            }
+            for r in rows
+        ]
 
     def set_setting(self, key: str, value: str) -> None:
         with self._write_lock:

@@ -248,6 +248,16 @@ Listed in dependency order.
 
 ## Cross-cutting follow-ups (post-Tier 3 starts)
 
+  - **Global search / command palette.** ✓ Shipped (released as
+    package v0.9.3). Ctrl+K opens a unified palette searching
+    messages (FTS5), peers (hostname/alias/short_id/fingerprint),
+    groups (name), and inbox files (substring). Phrase-quoted FTS
+    so chars like `:` don't error out the parser. Pinned peers
+    rank ahead of pending. Arrow keys navigate; Enter activates;
+    Esc closes. Stale-response guard so a fast-typed query
+    doesn't show old results. Per-convo Ctrl+K relocated to
+    Ctrl+F (Slack/VSCode convention).
+
   - **Activity feed.** ✓ Shipped (released as package v0.9.1).
     Cross-peer chronological view merging capability_audit (verify,
     trust, cap policy) + key_change_events + transfers (terminal
