@@ -2404,6 +2404,8 @@ class Daemon:
             concurrency=concurrency,
         )
         health_latency = {}
+        health_bandwidth = {}
+        health_reliability = {}
         peer_by_fp = {}
         for p in peers:
             fp = self._peer_fp_from_peer(p)
@@ -2414,6 +2416,12 @@ class Daemon:
             latency = health.get("latency_ewma_ms")
             if isinstance(latency, (int, float)) and not (latency != latency):
                 health_latency[fp] = float(latency)
+            bandwidth = health.get("bandwidth_bps") or health.get("throughput_bps")
+            if isinstance(bandwidth, (int, float)) and bandwidth > 0:
+                health_bandwidth[fp] = float(bandwidth)
+            reliability = health.get("reliability")
+            if isinstance(reliability, (int, float)):
+                health_reliability[fp] = max(0.0, min(1.0, float(reliability)))
         plan = plan_swarm_sources(
             manifest=manifest,
             needed_indexes=needed,
@@ -2423,6 +2431,8 @@ class Daemon:
                     hashes,
                     trust_score=self._swarm_trust_score(fp),
                     latency_ms=health_latency.get(fp),
+                    bandwidth_bps=health_bandwidth.get(fp),
+                    reliability=health_reliability.get(fp, 1.0),
                 )
                 for fp, hashes in claims.items()
             ],
@@ -2462,6 +2472,10 @@ class Daemon:
             "pulled": pulled,
             "missing_indexes": missing,
             "sources": plan.per_source_counts(),
+            "source_bytes": plan.per_source_bytes(),
+            "assigned_bytes": plan.assigned_bytes,
+            "missing_bytes": plan.missing_bytes,
+            "schedule": list(plan.rarest_first_indexes),
         }
 
     def _trusted_chunk_source_peers(self, *, exclude_fp: str) -> list[Peer]:

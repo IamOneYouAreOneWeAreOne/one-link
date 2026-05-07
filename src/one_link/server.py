@@ -301,6 +301,10 @@ class UIServer:
         r.add_post(r"/api/peers/{fp}/ttl", self._guarded(self.api_set_peer_ttl))
         # v0.10.4 presence — set self status; broadcasts to peers.
         r.add_post("/api/presence", self._guarded(self.api_set_presence))
+        # v0.10.6 native folder picker — pops a tk dialog on the
+        # daemon's desktop. For local-only One Link sessions that's
+        # the same machine the user is browsing from.
+        r.add_post("/api/fs/pick-folder", self._guarded(self.api_pick_folder))
         # v0.7.8 key-change events.
         r.add_get("/api/key-change-events", self._guarded(self.api_list_key_change_events))
         r.add_post(r"/api/key-change-events/{event_id}/ack", self._guarded(self.api_ack_key_change_event))
@@ -483,6 +487,13 @@ class UIServer:
         if self.daemon.state is not None:
             with contextlib.suppress(Exception):
                 schema_version = self.daemon.state.schema_version()
+        # v0.10.6: per-user suggested folder path. The folders pane
+        # used to show a hardcoded example with my dev box's username
+        # in it; this surfaces a real path under THIS user's home.
+        try:
+            suggested_folder = str(Path.home() / "Documents" / "One Link")
+        except Exception:
+            suggested_folder = ""
         return web.json_response({
             "short_id": me.short_id,
             "fingerprint": me.fingerprint,
@@ -495,6 +506,7 @@ class UIServer:
             # v0.10.4: surface user's chosen presence so the UI's
             # status pill renders correctly on every load.
             "presence": self.daemon.get_my_presence(),
+            "suggested_folder": suggested_folder,
         })
 
     async def api_status(self, request: web.Request) -> web.Response:
@@ -1596,6 +1608,55 @@ class UIServer:
             return web.json_response({"error": str(e)}, status=400)
         self.broadcast({"type": "self_presence", "presence": applied})
         return web.json_response({"ok": True, "presence": applied})
+
+    async def api_pick_folder(self, request: web.Request) -> web.Response:
+        """v0.10.6: open a native folder-picker dialog on the daemon's
+        desktop and return the selected absolute path. tkinter is in
+        the stdlib, so no extra dep is needed.
+
+        Runs in a worker thread because tkinter mainloop is blocking.
+        On a headless box (no DISPLAY / Xlib) we degrade gracefully —
+        the UI keeps the manual text input as a fallback."""
+        def _pick() -> Optional[str]:
+            try:
+                import tkinter
+                from tkinter import filedialog
+            except Exception:
+                return None
+            try:
+                root = tkinter.Tk()
+            except Exception:
+                # Headless box / no display — surface a typed error.
+                return None
+            try:
+                root.withdraw()
+                with contextlib.suppress(Exception):
+                    root.attributes("-topmost", True)
+                with contextlib.suppress(Exception):
+                    root.lift()
+                path = filedialog.askdirectory(
+                    parent=root,
+                    title="Choose a folder to share with One Link",
+                    mustexist=True,
+                )
+            finally:
+                with contextlib.suppress(Exception):
+                    root.destroy()
+            return path or None
+
+        try:
+            picked = await asyncio.to_thread(_pick)
+        except Exception as e:
+            return web.json_response(
+                {"error": f"folder picker failed: {e}", "available": False},
+                status=500,
+            )
+        if picked is None:
+            # Either the user cancelled OR the daemon has no display
+            # available. Both shapes are recoverable; the UI falls
+            # back to the manual text path input.
+            return web.json_response({"path": None, "cancelled": True})
+        return web.json_response({"path": picked, "cancelled": False})
 
     async def api_set_peer_ttl(self, request: web.Request) -> web.Response:
         """v0.10.2: configure per-peer disappearing-message TTL.

@@ -218,6 +218,9 @@ async def test_swarm_pull_fetches_missing_chunks_from_multiple_sources(tmp_path:
     assert daemon._read_chunk_cache(hashes[0]) == payloads[0]
     assert daemon._read_chunk_cache(hashes[1]) == payloads[1]
     assert set(pulled["sources"].values()) == {1}
+    assert pulled["assigned_bytes"] == manifest.size
+    assert pulled["missing_bytes"] == 0
+    assert set(pulled["schedule"]) == {0, 1}
     state.close()
 
 

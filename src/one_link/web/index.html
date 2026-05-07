@@ -1028,6 +1028,48 @@
   }
   .metric .num { color: var(--text); font-weight: 700; font-size: 16px; }
   .metric .lbl { color: var(--text-dim); font-size: 10px; text-transform: uppercase; letter-spacing: .7px; }
+  /* v0.10.6: clickable mesh tiles. Hover/focus affordance + cursor
+     so users discover that the four Activity counters drill in. */
+  .metric.clickable {
+    cursor: pointer;
+    transition: background .12s ease, border-color .12s ease, transform .06s ease;
+    user-select: none;
+  }
+  .metric.clickable:hover {
+    background: var(--bg-elev);
+    border-color: rgba(255,255,255,.10);
+  }
+  .metric.clickable:active { transform: translateY(1px); }
+  .metric.clickable:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* v0.10.6: folder pane controls. Inline Browse button next to
+     the path input + small icon-style refresh button. */
+  .folder-path-row {
+    display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: stretch;
+  }
+  .folder-browse-btn {
+    padding: 0 12px;
+    white-space: nowrap;
+    font-size: 12px;
+  }
+  .folder-refresh-btn {
+    width: 32px; height: 32px;
+    display: inline-grid; place-items: center;
+    padding: 0;
+    font-size: 16px;
+    line-height: 1;
+    border-radius: var(--radius-sm);
+  }
+  .folder-refresh-btn.spinning {
+    animation: folder-refresh-spin .6s linear;
+  }
+  @keyframes folder-refresh-spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
 
   /* ── Toast ─────────────────────────────────────────────────────────── */
   .toast-stack { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 200; }
@@ -2421,7 +2463,7 @@
       <div class="conflicts-banner" id="folder-conflicts-banner" style="display:none;"></div>
       <div class="help-card">
         <strong>Folder location</strong> means a folder on this computer, like
-        <code>$HOME\Documents\One Link</code>. Pair a device first, then share the folder with it.
+        <code id="folder-path-example">C:\Users\you\Documents\One Link</code>. Pair a device first, then share the folder with it.
       </div>
       <div id="folderlist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
         <div class="empty rich">
@@ -2432,10 +2474,18 @@
       </div>
       <div class="panel-form">
         <input id="folder-name" type="text" placeholder="Name, like Family Photos" />
-        <input id="folder-path" type="text" placeholder="Folder location on this computer" />
+        <!-- v0.10.6: path row gets an inline Browse… button so users
+             can pick a folder via the OS native picker instead of
+             typing a path. -->
+        <div class="folder-path-row">
+          <input id="folder-path" type="text" placeholder="Folder location on this computer" />
+          <button id="btn-browse-folder" class="folder-browse-btn" title="Browse for a folder">Browse…</button>
+        </div>
         <div class="mini-actions">
           <button id="btn-add-folder">Add</button>
-          <button id="btn-refresh-folders">Refresh</button>
+          <!-- v0.10.6: small icon refresh button (browser-style ↻)
+               instead of a wide text button. -->
+          <button id="btn-refresh-folders" class="folder-refresh-btn" title="Refresh folder list" aria-label="Refresh folder list">↻</button>
         </div>
       </div>
     </aside>
@@ -2458,10 +2508,10 @@
         Live-updating — new events land as they happen.
       </div>
       <div class="mesh-summary" id="mesh-summary">
-        <div class="metric"><div class="num" id="metric-online">0</div><div class="lbl">nearby</div></div>
-        <div class="metric"><div class="num" id="metric-active">0</div><div class="lbl">moving now</div></div>
-        <div class="metric"><div class="num" id="metric-cache">0 B</div><div class="lbl">saved chunks</div></div>
-        <div class="metric"><div class="num" id="metric-sessions">0</div><div class="lbl">secure links</div></div>
+        <div class="metric clickable" id="metric-tile-online" role="button" tabindex="0" data-mesh-tile="online" aria-label="View peers in Chat"><div class="num" id="metric-online">0</div><div class="lbl">nearby</div></div>
+        <div class="metric clickable" id="metric-tile-active" role="button" tabindex="0" data-mesh-tile="active" aria-label="Open Files Sent tab"><div class="num" id="metric-active">0</div><div class="lbl">moving now</div></div>
+        <div class="metric clickable" id="metric-tile-cache" role="button" tabindex="0" data-mesh-tile="cache" aria-label="Filter activity to file transfers"><div class="num" id="metric-cache">0 B</div><div class="lbl">saved chunks</div></div>
+        <div class="metric clickable" id="metric-tile-sessions" role="button" tabindex="0" data-mesh-tile="sessions" aria-label="Filter activity to trust events"><div class="num" id="metric-sessions">0</div><div class="lbl">secure links</div></div>
       </div>
       <!-- v0.9.1: filter chips for the merged activity feed. -->
       <div class="activity-filters" id="activity-filters">
@@ -6139,6 +6189,44 @@
     });
   });
 
+  // v0.10.6: clickable Activity tiles. Each of the four mesh
+  // counters drills into the most useful surface for that number:
+  //   nearby      → Chat pane (sidebar lists online peers)
+  //   moving now  → Files → Sent tab
+  //   saved chunks→ Activity filter "transfer"
+  //   secure links→ Activity filter "trust"
+  function _activateActivityFilter(name) {
+    const chip = document.querySelector(`[data-activity-filter="${name}"]`);
+    if (chip) chip.click();
+  }
+  function _handleMeshTile(kind) {
+    if (kind === "online") {
+      const convoBtn = document.querySelector('[data-pane="convo"]');
+      if (convoBtn) convoBtn.click();
+      const peerlist = document.querySelector("#peerlist");
+      if (peerlist) peerlist.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    } else if (kind === "active") {
+      const filesBtn = document.querySelector('[data-pane="files"]');
+      if (filesBtn) filesBtn.click();
+      state.filesMode = "sent";
+      const sentBtn = document.querySelector('[data-files-mode="sent"]');
+      if (sentBtn) sentBtn.click();
+    } else if (kind === "cache") {
+      _activateActivityFilter("transfer");
+    } else if (kind === "sessions") {
+      _activateActivityFilter("trust");
+    }
+  }
+  document.querySelectorAll('[data-mesh-tile]').forEach((tile) => {
+    tile.addEventListener("click", () => _handleMeshTile(tile.dataset.meshTile));
+    tile.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        _handleMeshTile(tile.dataset.meshTile);
+      }
+    });
+  });
+
   // Schedule a refresh — coalesce many WS events per frame.
   let _activityRefreshScheduled = false;
   function scheduleActivityRefresh() {
@@ -7121,7 +7209,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.10.5";
+  const PAGE_BUILT_FOR = "0.10.6";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -7133,6 +7221,16 @@
       // v0.10.4: apply persisted presence on load so the dot
       // matches the user's last choice.
       applyPresenceUI(me.presence || "online");
+      // v0.10.6: replace the hardcoded folder example with a real
+      // path under THIS user's home directory.
+      if (me.suggested_folder) {
+        const ex = $("#folder-path-example");
+        if (ex) ex.textContent = me.suggested_folder;
+        const pathInput = $("#folder-path");
+        if (pathInput) {
+          pathInput.placeholder = `e.g. ${me.suggested_folder}`;
+        }
+      }
       // Detect daemon-page mismatch quietly. The launcher should replace stale
       // daemons automatically; if a browser tab survives that handoff, keep the
       // chat surface usable and log the drift instead of blocking the user.
@@ -9052,7 +9150,39 @@
 
   $("#debug-severity")?.addEventListener("change", refreshDebugLog);
 
-  $("#btn-refresh-folders").onclick = refreshFolders;
+  // v0.10.6: spin the refresh icon while the fetch is in flight so
+  // the user gets feedback on a button that's now icon-only.
+  $("#btn-refresh-folders").onclick = async () => {
+    const btn = $("#btn-refresh-folders");
+    if (btn) btn.classList.add("spinning");
+    try {
+      await refreshFolders();
+    } finally {
+      if (btn) setTimeout(() => btn.classList.remove("spinning"), 600);
+    }
+  };
+  // v0.10.6: native folder picker. POSTs to /api/fs/pick-folder which
+  // pops a tk dialog on the daemon's desktop and returns the picked
+  // path. If unavailable (headless) we silently keep the manual path
+  // input as the fallback.
+  $("#btn-browse-folder")?.addEventListener("click", async () => {
+    try {
+      const r = await api.post("/api/fs/pick-folder", {});
+      if (r && r.path) {
+        $("#folder-path").value = r.path;
+        // If name is still blank, suggest the leaf folder name.
+        const nameEl = $("#folder-name");
+        if (nameEl && !nameEl.value.trim()) {
+          const leaf = r.path.split(/[\\/]/).filter(Boolean).pop();
+          if (leaf) nameEl.value = leaf;
+        }
+      } else if (r && r.cancelled) {
+        // User cancelled — no toast, no noise.
+      }
+    } catch (e) {
+      toast(`Browse unavailable on this device: ${errorToastBody(e)}`, "info", 4000);
+    }
+  });
   // v0.8.9: conflicts modal close button.
   $("#conflicts-close")?.addEventListener("click", closeConflictsModal);
   // Esc closes too — match other modals.

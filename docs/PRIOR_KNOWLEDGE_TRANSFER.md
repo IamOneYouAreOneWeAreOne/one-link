@@ -40,6 +40,18 @@ This pass adds local prior assist:
 This means a huge video, VM image, dataset, or edited archive can transfer at a
 fraction of the bandwidth when the receiver already has a related version.
 
+This pass also upgrades trusted swarm assist from "ask another device if it has
+a chunk" into a deterministic transfer scheduler:
+
+1. Rarest chunks are pulled first, so chunks that only one trusted device has
+   are secured before common chunks.
+2. Sources are scored by trust, reliability, bandwidth, latency, and energy
+   cost. Integrity is still enforced by BLAKE3 for every chunk.
+3. Equal sources are byte-balanced, so multiple trusted devices act as one
+   parallel fabric instead of one source being overloaded.
+4. The daemon now records the planned schedule, assigned bytes, missing bytes,
+   and per-source byte counts for future UI and retry decisions.
+
 ## Safety Boundaries
 
 - Scans are rooted only in the One Link inbox and configured sync folders.
@@ -53,7 +65,8 @@ fraction of the bandwidth when the receiver already has a related version.
 
 ## Next Upgrade
 
-The next major leap is a true predictive stream mode for video:
+The next major leap is a true predictive stream mode for video and very large
+related media:
 
 1. Negotiate `file_video_delta_v1` only when both peers advertise it.
 2. Send a codec/session descriptor and model hash.
