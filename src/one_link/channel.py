@@ -245,13 +245,76 @@ class Channel:
         await write_frame(self.writer, ct)
 
     async def recv(self) -> bytes:
+        # v0.9.6: ratchet activation race tolerance. The two sides
+        # flip _dr_state independently as caps_sent + caps_received
+        # complete on each end. There's a brief window where WE've
+        # activated DR but the peer's NEXT outbound frame was queued
+        # BEFORE peer activated → peer's frame is legacy AEAD. Decoding
+        # a legacy ciphertext as a DR header reads a uniformly-random
+        # first byte and raises "unsupported ratchet header version".
+        #
+        # The fix: when DR is active, try DR first; on header-parse
+        # failure, fall back to legacy. Both paths use different keys,
+        # so a successful decryption under either is unambiguous —
+        # an attacker forging a legacy frame to bypass DR can't
+        # succeed because the legacy AEAD key would also fail
+        # without authentic ciphertext.
         if self._dr_state is not None:
-            return await self._recv_ratchet()
+            payload = await read_frame(self.reader)
+            try:
+                return self._decode_ratchet_payload(payload)
+            except (ValueError, RuntimeError) as dr_err:
+                # Activation-race fingerprints: the header is too short
+                # to be a DR header (ValueError "header too short"
+                # raised by struct.unpack via Header.decode, OR
+                # RuntimeError "ratchet frame too short" from our
+                # length pre-check) OR the version byte isn't 1
+                # (ValueError "unsupported ratchet header version").
+                # Both fingerprints mean we received a frame queued by
+                # the peer's send-side BEFORE peer activated DR. Fall
+                # back to legacy AEAD on the same bytes — keys are
+                # disjoint so a wrong-path decrypt can't accidentally
+                # succeed. Other DR failures (CT corruption, MAC
+                # InvalidTag from dr_decrypt) propagate as-is to avoid
+                # half-advanced ratchet state from partial decrypts.
+                msg = str(dr_err)
+                if (
+                    "ratchet header version" not in msg
+                    and "ratchet frame too short" not in msg
+                    and "header too short" not in msg
+                ):
+                    raise
+                try:
+                    nonce = self._nonce(self.rx_seq)
+                    pt = self.rx_aead.decrypt(nonce, payload, self._aad())
+                    self.rx_seq += 1
+                    return pt
+                except Exception:
+                    raise dr_err
         # Legacy path.
         ct = await read_frame(self.reader)
         nonce = self._nonce(self.rx_seq)
         self.rx_seq += 1
         return self.rx_aead.decrypt(nonce, ct, self._aad())
+
+    def _decode_ratchet_payload(self, payload: bytes) -> bytes:
+        """Synchronous DR-decrypt of an already-read frame payload.
+        Split out from _recv_ratchet so recv() can try-DR-then-legacy
+        on the same buffered bytes (one read_frame, two decode
+        attempts)."""
+        from one_link.double_ratchet import (
+            Header as DRHeader, decrypt as dr_decrypt,
+        )
+        if len(payload) < DR_HEADER_LEN:
+            raise RuntimeError(
+                f"ratchet frame too short: {len(payload)} bytes "
+                f"(need at least {DR_HEADER_LEN} for header)"
+            )
+        header = DRHeader.decode(payload[:DR_HEADER_LEN])
+        ct = payload[DR_HEADER_LEN:]
+        return dr_decrypt(
+            self._dr_state, header, ct, ad=self.transcript_hash,
+        )
 
     async def _send_ratchet(self, plaintext: bytes) -> None:
         from one_link.double_ratchet import encrypt as dr_encrypt
