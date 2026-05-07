@@ -534,6 +534,11 @@ class UIServer:
         )
         r.add_get(r"/api/groups/{gid}/invite-link", self._guarded(self.api_group_invite_link))
         r.add_post(r"/api/groups/{gid}/members", self._guarded(self.api_add_group_member))
+        # v0.11.3 promote/demote a group member.
+        r.add_post(
+            r"/api/groups/{gid}/members/{member_fp}/role",
+            self._guarded(self.api_set_group_member_role),
+        )
         r.add_delete(
             r"/api/groups/{gid}/members/{member_fp}",
             self._guarded(self.api_remove_group_member),
@@ -3087,6 +3092,42 @@ class UIServer:
                 group_id=gid, member_pubkey=rec.pubkey, role=role,
             )
             return web.json_response({"ok": True, **result})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def api_set_group_member_role(self, request: web.Request) -> web.Response:
+        """v0.11.3: promote/demote a group member.
+
+        Body: {role: 'owner' | 'admin' | 'member'}
+        Authority: only owners can change roles (enforced server-side
+        by the CRDT reducer rejecting non-owner CHANGE_ROLE events).
+        """
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        gid_hex = request.match_info["gid"]
+        try:
+            gid = bytes.fromhex(gid_hex)
+        except ValueError:
+            return web.json_response({"error": "bad group id"}, status=400)
+        member_fp = request.match_info["member_fp"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        new_role = (data.get("role") or "").strip()
+        if new_role not in ("owner", "admin", "member"):
+            return web.json_response(
+                {"error": "role must be owner, admin, or member"},
+                status=400,
+            )
+        rec = self.daemon.state.get_peer(member_fp)
+        if rec is None or not rec.pubkey:
+            return web.json_response({"error": "unknown member"}, status=404)
+        try:
+            result = await self.daemon.change_group_member_role(
+                group_id=gid, member_pubkey=rec.pubkey, new_role=new_role,
+            )
+            return web.json_response({"ok": True, "role": new_role, **result})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 

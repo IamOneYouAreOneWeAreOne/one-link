@@ -58,6 +58,7 @@ import sys
 import time
 import uuid
 import zlib
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -116,6 +117,10 @@ CONTROL_PORT_FILE = "control.port"
 PEER_PORT_FILE = "peer.port"
 DAEMON_LOCK_FILE = "daemon.lock"
 CHUNK_SIZE = 256 * 1024  # 256 KiB plaintext per FILE_CHUNK
+STREAM_MIN_CHUNK_SIZE = 256 * 1024
+STREAM_MAX_CHUNK_SIZE = 4 * 1024 * 1024
+STREAM_PIPELINE_TARGET_BYTES = 24 * 1024 * 1024
+STREAM_PIPELINE_MAX_CHUNKS = 16
 MAX_INCOMING_FILE_BYTES = 1024 * 1024 * 1024  # match UI upload cap
 CDC_CACHE_MAX_BYTES = 512 * 1024 * 1024
 CDC_AUTO_INDEX_MAX_BYTES = 128 * 1024 * 1024
@@ -243,6 +248,35 @@ def _should_build_cdc_offer(
     if int(size) <= CDC_AUTO_INDEX_MAX_BYTES:
         return True, "small_enough_for_python_cdc"
     return False, "large_file_fast_lane_until_native_cdc"
+
+
+def _stream_transfer_profile(size: int) -> dict[str, int]:
+    """Choose a safe high-throughput baseline stream profile.
+
+    The goal is to fill modern Wi-Fi/Ethernet pipes without turning One Link
+    into a RAM vacuum. Larger files get larger chunks and a bounded in-flight
+    byte window; small files keep low latency and small allocations.
+    """
+
+    size = max(0, int(size))
+    if size >= 2 * 1024 * 1024 * 1024:
+        chunk_size = STREAM_MAX_CHUNK_SIZE
+    elif size >= 512 * 1024 * 1024:
+        chunk_size = 2 * 1024 * 1024
+    elif size >= 64 * 1024 * 1024:
+        chunk_size = 1024 * 1024
+    else:
+        chunk_size = STREAM_MIN_CHUNK_SIZE
+    target = min(
+        STREAM_PIPELINE_TARGET_BYTES,
+        max(chunk_size, size if size > 0 else chunk_size),
+    )
+    window_chunks = max(1, min(STREAM_PIPELINE_MAX_CHUNKS, target // chunk_size))
+    return {
+        "chunk_size": int(chunk_size),
+        "window_chunks": int(window_chunks),
+        "window_bytes": int(window_chunks * chunk_size),
+    }
 
 
 def _delivery_backoff_ms(attempts: int) -> int:
@@ -5105,6 +5139,40 @@ class Daemon:
         )
         return {"event_id": ev.event_id, **result}
 
+    async def change_group_member_role(
+        self, *, group_id: bytes, member_pubkey: bytes, new_role: str,
+    ) -> dict:
+        """v0.11.3: sign + persist + distribute a CHANGE_ROLE event.
+
+        Authority: only owners can change roles (enforced in the
+        reducer). The caller is expected to be an owner — the
+        endpoint surfaces the reducer-rejection as a 400 if not."""
+        if self.state is None:
+            raise RuntimeError("state not available")
+        from one_link import groups as gmod
+        ev = gmod.sign_change_role(
+            private_key=self.me.private,
+            pubkey=self.me.public_bytes,
+            group_id=group_id,
+            member_pubkey=member_pubkey,
+            new_role=new_role,
+        )
+        self.state.upsert_group_event(
+            group_id=group_id, event_id=ev.event_id,
+            timestamp_ms=ev.timestamp_ms,
+            wire_dict=ev.to_wire(),
+        )
+        wire_events = self.state.list_group_events(group_id)
+        events = [gmod.GroupEvent.from_wire(w) for w in wire_events]
+        gstate = gmod.reduce_events(events)
+        if gstate is None:
+            raise RuntimeError("group state unreadable")
+        recipients = list(gstate.members)
+        result = await self._broadcast_group_event(
+            group_id, ev.to_wire(), recipients,
+        )
+        return {"event_id": ev.event_id, **result}
+
     async def remove_group_member(
         self, *, group_id: bytes, member_pubkey: bytes,
     ) -> dict:
@@ -6510,26 +6578,31 @@ class Daemon:
                             "actual_method": actual_method,
                             "protocol_attempts": attempts,
                         }
+                    stream_profile = _stream_transfer_profile(size)
+                    stream_chunk_size = int(stream_profile["chunk_size"])
+                    stream_window_chunks = int(stream_profile["window_chunks"])
+                    stream_window_bytes = int(stream_profile["window_bytes"])
+                    base_metadata = {
+                        **base_metadata,
+                        "stream_engine": "pipelined_json_v1",
+                        "stream_chunk_size": stream_chunk_size,
+                        "stream_window_chunks": stream_window_chunks,
+                        "stream_window_bytes": stream_window_bytes,
+                    }
                     with open(path, "rb") as f:
                         seq = 0
-                        prev = f.read(CHUNK_SIZE)
-                        total_stream_chunks = max(1, (size + CHUNK_SIZE - 1) // CHUNK_SIZE)
-                        while prev:
-                            cur = f.read(CHUNK_SIZE)
-                            eof = not cur
-                            chunk_msg = make_msg(
-                                "FILE_CHUNK",
-                                self.me.short_id,
-                                blob=blob_hex,
-                                seq=seq,
-                                data=base64.b64encode(prev).decode("ascii"),
-                                eof=eof,
-                            )
-                            await channel.send(encode_msg(chunk_msg))
+                        pending_sizes: deque[int] = deque()
+                        total_stream_chunks = max(
+                            1, (size + stream_chunk_size - 1) // stream_chunk_size,
+                        )
+
+                        async def _settle_one_stream_ack() -> None:
+                            nonlocal chunks_sent, raw_bytes_sent, wire_bytes_sent
                             await _await_ack(channel)
+                            acked_size = pending_sizes.popleft()
                             chunks_sent += 1
-                            raw_bytes_sent += len(prev)
-                            wire_bytes_sent += len(prev)
+                            raw_bytes_sent += acked_size
+                            wire_bytes_sent += acked_size
                             self._update_transfer(
                                 transfer_id,
                                 status="active",
@@ -6543,10 +6616,31 @@ class Daemon:
                                     **base_metadata,
                                     "delivery_state": "sending",
                                     "actual_method": actual_method,
+                                    "in_flight_chunks": len(pending_sizes),
                                 },
                             )
-                            prev = cur
+
+                        while True:
+                            data = f.read(stream_chunk_size)
+                            if not data:
+                                break
+                            eof = f.tell() >= size
+                            chunk_msg = make_msg(
+                                "FILE_CHUNK",
+                                self.me.short_id,
+                                blob=blob_hex,
+                                seq=seq,
+                                data=base64.b64encode(data).decode("ascii"),
+                                eof=eof,
+                            )
+                            await channel.send(encode_msg(chunk_msg))
+                            pending_sizes.append(len(data))
+                            while len(pending_sizes) >= stream_window_chunks:
+                                await _settle_one_stream_ack()
                             seq += 1
+
+                        while pending_sizes:
+                            await _settle_one_stream_ack()
 
                     if chunks_sent == 0:
                         empty = make_msg(

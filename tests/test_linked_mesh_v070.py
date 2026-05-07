@@ -29,6 +29,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from one_link.daemon import (
     Daemon,
     OutboundSession,
+    _stream_transfer_profile,
 )
 from one_link.capabilities import CHAT, FILES, FILE_CDC
 from one_link.discovery import Peer
@@ -77,6 +78,16 @@ class _FakeChannel:
 
     def queue_reply(self, msg: dict) -> None:
         self._replies.put_nowait(encode_msg(msg))
+
+
+class _TracingFakeChannel(_FakeChannel):
+    def __init__(self, *, peer_ed_pub: bytes, peer_short_id: str):
+        super().__init__(peer_ed_pub=peer_ed_pub, peer_short_id=peer_short_id)
+        self.recv_sent_counts: list[int] = []
+
+    async def recv(self) -> bytes:
+        self.recv_sent_counts.append(len(self.sent))
+        return await super().recv()
 
 
 # ─── ENDPOINT_UPDATE: pinned-only ─────────────────────────────────
@@ -536,6 +547,73 @@ async def test_send_file_large_cdc_peer_uses_fast_stream_lane(
     assert offer["mode"] == "stream"
     assert "chunks" not in offer
     assert row.metadata["cdc_decision_reason"] == "large_file_fast_lane_until_native_cdc"
+    state.close()
+
+
+def test_stream_transfer_profile_scales_window_safely():
+    small = _stream_transfer_profile(2 * 1024 * 1024)
+    big = _stream_transfer_profile(4 * 1024 * 1024 * 1024)
+
+    assert small["chunk_size"] == 256 * 1024
+    assert small["window_chunks"] >= 1
+    assert big["chunk_size"] == 4 * 1024 * 1024
+    assert big["window_bytes"] <= 24 * 1024 * 1024
+    assert big["window_chunks"] <= 16
+
+
+@pytest.mark.asyncio
+async def test_send_file_stream_pipelines_bounded_ack_window(
+    tmp_path: Path, monkeypatch
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    chan = _TracingFakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES],
+        "from": them.short_id,
+        "app_version": "0.11.2",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint, peer=Peer(
+            short_id=them.short_id, hostname="them",
+            address="127.0.0.1", port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    monkeypatch.setattr("one_link.daemon.STREAM_MIN_CHUNK_SIZE", 2)
+    monkeypatch.setattr("one_link.daemon.STREAM_PIPELINE_TARGET_BYTES", 6)
+    monkeypatch.setattr("one_link.daemon.STREAM_PIPELINE_MAX_CHUNKS", 3)
+
+    f = tmp_path / "pipeline.bin"
+    f.write_bytes(b"0123456789")
+    chan.queue_reply(make_msg("ACK", them.short_id))  # offer ACK
+    for _ in range(5):
+        chan.queue_reply(make_msg("ACK", them.short_id))
+
+    result = await daemon.send_file(sess.peer, f)
+    chunks = [m for m in chan.sent if m.get("t") == "FILE_CHUNK"]
+    row = state.list_transfers(limit=1)[0]
+
+    assert result["chunks"] == 5
+    assert [c["seq"] for c in chunks] == [0, 1, 2, 3, 4]
+    assert max(chan.recv_sent_counts) >= 4  # offer + three chunks before stream ACK drain
+    assert row.metadata["stream_engine"] == "pipelined_json_v1"
+    assert row.metadata["stream_window_chunks"] == 3
     state.close()
 
 

@@ -78,6 +78,13 @@ def main() -> int:
                     f"high-prior-python={metrics['high_prior_python_mode']}, "
                     f"high-prior-accelerated={metrics['high_prior_accelerated_mode']}"
                 )
+            elif b["name"] == "stream_pipeline_profiles":
+                print(
+                    "  Stream pipeline: "
+                    f"huge chunk={metrics['huge_chunk']} bytes, "
+                    f"window={metrics['huge_window_bytes']} bytes/"
+                    f"{metrics['huge_window_chunks']} chunks"
+                )
         print(f"  Report: {out}")
         if comparison is not None:
             print("  Comparison:")

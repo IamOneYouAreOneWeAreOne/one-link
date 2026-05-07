@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from .cdc import build_dedup_plan, fixed_index_path, hash_path, index_path
+from .daemon import _stream_transfer_profile
 from .state import State
 from .swarm_plan import plan_swarm_sources, source_from_hashes
 from .transfer_brain import TransferRouteObservation, decision_from_observations
@@ -345,6 +346,29 @@ def bench_transfer_brain(*, size_mib: int) -> BenchResult:
     return _time(run)
 
 
+def bench_stream_pipeline_profiles() -> BenchResult:
+    def run() -> dict:
+        sizes = {
+            "small": 8 * MiB,
+            "medium": 256 * MiB,
+            "large": 2 * 1024 * MiB,
+            "huge": 20 * 1024 * MiB,
+        }
+        profiles = {name: _stream_transfer_profile(size) for name, size in sizes.items()}
+        return {
+            "name": "stream_pipeline_profiles",
+            "small_chunk": profiles["small"]["chunk_size"],
+            "medium_chunk": profiles["medium"]["chunk_size"],
+            "large_chunk": profiles["large"]["chunk_size"],
+            "huge_chunk": profiles["huge"]["chunk_size"],
+            "huge_window_bytes": profiles["huge"]["window_bytes"],
+            "huge_window_chunks": profiles["huge"]["window_chunks"],
+            "notes": "bounded in-flight baseline stream profile",
+        }
+
+    return _time(run)
+
+
 def run_perf_lab(
     *,
     scale: str = "quick",
@@ -368,6 +392,7 @@ def run_perf_lab(
         bench_sqlite_ledger(rows=cfg["ledger_rows"]),
         bench_compression(size_mib=max(1, cfg["cdc_mib"] // 2)),
         bench_transfer_brain(size_mib=cfg["sim_mib"]),
+        bench_stream_pipeline_profiles(),
     ]
     return {
         "schema": "one-link-perf-lab-v1",

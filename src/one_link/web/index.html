@@ -1395,6 +1395,39 @@
     box-shadow: 0 0 0 2px var(--bg-2);
   }
 
+  /* v0.11.3 archived-groups expand header. */
+  .archived-header {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 11px;
+    padding: 8px 12px;
+    text-transform: uppercase;
+    letter-spacing: .7px;
+    user-select: none;
+    border-top: 1px dashed rgba(255,255,255,.05);
+    margin-top: 6px;
+    transition: color .12s;
+  }
+  .archived-header:hover { color: var(--text); }
+
+  /* v0.11.3 group role picker. */
+  .group-role-picker {
+    background: var(--bg-2);
+    border: 1px solid var(--bg-3);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 11px;
+    padding: 4px 6px;
+    margin-right: 6px;
+  }
+
+  /* v0.11.3 mute indicator inline with sidebar names. */
+  .mute-indicator {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-left: 4px;
+  }
+
   /* v0.11.2 mute-duration picker. Inline select + Apply button. */
   .mute-duration-row {
     display: flex; gap: 6px; flex: 1; min-width: 0;
@@ -3232,14 +3265,9 @@
         <label for="cg-name">Group name</label>
         <input type="text" id="cg-name" maxlength="64" placeholder="e.g. Family, Project Aurora" />
       </div>
-      <div class="settings-section">
-        <div class="settings-section-h"><span>Group name</span></div>
-        <div class="settings-row">
-          <label for="group-rename-input">Name</label>
-          <input type="text" id="group-rename-input" maxlength="64" />
-        </div>
-        <button class="btn-ghost" id="group-rename-save">Rename group</button>
-      </div>
+      <!-- v0.11.3: removed orphan group-rename-input that was
+           accidentally placed in the create modal. The real one
+           lives in #group-settings-backdrop where it belongs. -->
       <div class="settings-section">
         <div class="settings-section-h"><span>Members</span></div>
         <div id="cg-members"></div>
@@ -3252,12 +3280,41 @@
   </div>
 
   <!-- v0.8.1.2 GROUP SETTINGS MODAL -->
+  <!-- v0.11.3: Group settings modal expanded with rename header,
+       mute duration picker, avatar color picker, role mgmt, and
+       archive button. All existing input IDs are preserved so the
+       JS that loads/saves them keeps working unchanged. -->
   <div class="modal-backdrop" id="group-settings-backdrop">
-    <div class="modal" style="max-width:560px;">
+    <div class="modal" style="max-width:600px;">
       <h2>
         <span id="group-settings-name">Group</span>
         <span class="device-drawer-sub" id="group-settings-sub"></span>
       </h2>
+
+      <!-- v0.11.3: rename now has its own section header so the
+           input doesn't sit visually orphaned at the top. -->
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Name</span></div>
+        <div class="settings-row">
+          <label for="group-rename-input">Group name</label>
+          <input type="text" id="group-rename-input" maxlength="64" />
+        </div>
+        <button class="btn-ghost" id="group-rename-save">Rename group</button>
+      </div>
+
+      <!-- v0.11.3: avatar color (local cosmetic, persisted in
+           settings keyed by group_id_hex). -->
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Avatar color</span></div>
+        <p class="settings-help">
+          Local-only color tint for the group's avatar tile in your
+          sidebar. Other members aren't affected.
+        </p>
+        <div class="profile-color-swatches" id="group-color-swatches">
+          <!-- swatches injected by JS at modal-open time -->
+        </div>
+      </div>
+
       <div class="settings-section">
         <div class="settings-section-h"><span>Members</span></div>
         <div id="group-settings-members"></div>
@@ -3270,6 +3327,30 @@
         </div>
         <button class="btn-ghost" id="group-add-member">Add to group</button>
       </div>
+
+      <!-- v0.11.3: per-group mute with duration. Backend already in
+           place from v0.11.2 (POST /api/groups/{gid}/mute). -->
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Mute group</span></div>
+        <p class="settings-help" id="group-mute-status">Not muted.</p>
+        <div class="settings-row">
+          <label>Mute for…</label>
+          <div class="mute-duration-row" data-mute-target="group">
+            <select id="group-mute-duration" class="mute-duration-select">
+              <option value="">Choose…</option>
+              <option value="900000">15 minutes</option>
+              <option value="3600000">1 hour</option>
+              <option value="28800000">8 hours</option>
+              <option value="86400000">24 hours</option>
+              <option value="604800000">1 week</option>
+              <option value="0">Until I unmute</option>
+              <option value="null">Unmute now</option>
+            </select>
+            <button class="btn-ghost" id="group-mute-apply">Apply</button>
+          </div>
+        </div>
+      </div>
+
       <div class="settings-section">
         <div class="settings-section-h"><span>Invite link</span></div>
         <p class="settings-help">
@@ -3278,6 +3359,19 @@
         </p>
         <button class="btn-ghost" id="group-copy-invite">Copy invite link</button>
       </div>
+
+      <!-- v0.11.3: archive — local-only "hide from sidebar" without
+           leaving. Other members aren't affected. -->
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Archive</span></div>
+        <p class="settings-help">
+          Hide this group from your main list. You stay a member;
+          messages still arrive. Archived groups appear under an
+          "Archived" expand toggle at the bottom of the sidebar.
+        </p>
+        <button class="btn-ghost" id="group-archive-toggle">Archive group</button>
+      </div>
+
       <div class="settings-section">
         <div class="settings-section-h"><span>Leave group</span></div>
         <p class="settings-help">
@@ -4506,6 +4600,21 @@
         nameEl.appendChild(ic);
       }
       nameEl.appendChild(document.createTextNode(p.display_name || p.hostname || "(unknown)"));
+      // v0.11.3: 🔕 indicator when peer is currently muted (auto-
+      // expires when muted_until_ms passes).
+      if (p.muted_until_ms != null) {
+        const now = Date.now();
+        if (p.muted_until_ms === 0 || p.muted_until_ms > now) {
+          const mi = el("span", "mute-indicator", " 🔕");
+          mi.title = "Notifications muted";
+          nameEl.appendChild(mi);
+        }
+      } else if (p.muted) {
+        // Legacy boolean fallback.
+        const mi = el("span", "mute-indicator", " 🔕");
+        mi.title = "Notifications muted";
+        nameEl.appendChild(mi);
+      }
       txt.appendChild(nameEl);
       const sub = el("div", "sub");
       const lc = latencyClass(p);
@@ -5919,28 +6028,42 @@
       // No empty-state needed; the + button sits above this.
       return;
     }
+    // v0.11.3: split into active vs archived. Archived rows render
+    // under an "Archived" expand toggle so they don't clutter the
+    // sidebar but stay one click away.
+    const activeGroups = [];
+    const archivedGroups = [];
     for (const g of state.groups.values()) {
+      if (isGroupArchived(g.group_id)) archivedGroups.push(g);
+      else activeGroups.push(g);
+    }
+    const renderRow = (g) => {
       const row = el("div", "peer group-row");
       if (state.selectedGroup === g.group_id) row.classList.add("active");
+      // v0.11.3: per-group avatar tint.
       const av = el("div", "avatar group-avatar", "G");
+      av.style.background = getGroupColor(g.group_id);
       const txt = el("div", "text");
-      txt.appendChild(el("div", "name", g.name || "(unnamed group)"));
+      const nameEl = el("div", "name", g.name || "(unnamed group)");
+      // v0.11.3: 🔕 indicator when group is currently muted.
+      if (g.muted_until_ms != null) {
+        const now = Date.now();
+        if (g.muted_until_ms === 0 || g.muted_until_ms > now) {
+          const muteIcon = el("span", "mute-indicator", " 🔕");
+          muteIcon.title = "Notifications muted";
+          nameEl.appendChild(muteIcon);
+        }
+      }
+      txt.appendChild(nameEl);
       txt.appendChild(el("div", "sub",
         `${g.member_count} member${g.member_count === 1 ? "" : "s"}`
       ));
       row.appendChild(av);
       row.appendChild(txt);
-      // v0.10.8: gear opens group settings (rename, members, leave).
-      // Matches the per-device gear convention in the My Devices list
-      // — without this, the user has no way to discover settings for
-      // a group except by selecting it AND noticing the small "Group
-      // settings" text button in the conversation header.
       const gear = el("button", "gear-btn", "⚙");
       gear.title = `${g.name || "Group"} settings`;
       gear.onclick = async (ev) => {
         ev.stopPropagation();
-        // Settings need state.groupDetail loaded — select first if
-        // this isn't the currently-active group.
         if (state.selectedGroup !== g.group_id) {
           await selectGroup(g.group_id);
         }
@@ -5949,6 +6072,21 @@
       row.appendChild(gear);
       row.onclick = () => selectGroup(g.group_id);
       list.appendChild(row);
+    };
+    for (const g of activeGroups) renderRow(g);
+    if (archivedGroups.length > 0) {
+      const header = el("div", "archived-header");
+      const expanded = state._archivedExpanded;
+      header.textContent =
+        `${expanded ? "▾" : "▸"} Archived (${archivedGroups.length})`;
+      header.onclick = () => {
+        state._archivedExpanded = !state._archivedExpanded;
+        renderGroups();
+      };
+      list.appendChild(header);
+      if (expanded) {
+        for (const g of archivedGroups) renderRow(g);
+      }
     }
   }
 
@@ -5994,6 +6132,7 @@
       `${g.member_count} member${g.member_count === 1 ? "" : "s"}`;
     $("#group-rename-input").value = g.name || "";
     const canManage = g.my_role === "owner" || g.my_role === "admin";
+    const isOwner = g.my_role === "owner";
     $("#group-rename-input").disabled = !canManage;
     $("#group-rename-save").disabled = !canManage;
 
@@ -6006,6 +6145,24 @@
       meta.appendChild(el("div", "name", memberLabel(m)));
       meta.appendChild(el("div", "size", m.role || "member"));
       row.appendChild(meta);
+      // v0.11.3: owner-only role picker. Drop-in dropdown (no
+      // confirm) since the action is reversible. Owners can
+      // promote/demote anyone but themselves; reducer enforces
+      // server-side.
+      if (isOwner && !m.is_me) {
+        const roleSel = document.createElement("select");
+        roleSel.className = "group-role-picker";
+        for (const r of ["owner", "admin", "member"]) {
+          const opt = document.createElement("option");
+          opt.value = r;
+          opt.textContent = r;
+          if ((m.role || "member") === r) opt.selected = true;
+          roleSel.appendChild(opt);
+        }
+        roleSel.onchange = () =>
+          changeGroupMemberRole(m.fingerprint, roleSel.value);
+        row.appendChild(roleSel);
+      }
       if (canManage && !m.is_me) {
         const remove = el("button", null, "Remove");
         remove.onclick = () => removeGroupMember(m.fingerprint);
@@ -6034,6 +6191,27 @@
       opt.value = "";
       addSelect.appendChild(opt);
     }
+
+    // v0.11.3: avatar color swatches keyed by group_id.
+    _renderGroupColorSwatches(state.selectedGroup);
+
+    // v0.11.3: mute status + reset duration picker.
+    const groupRow = state.groups.get(state.selectedGroup);
+    _renderMuteStatus(
+      $("#group-mute-status"),
+      groupRow ? groupRow.muted_until_ms : null,
+      false,
+    );
+    const muteSel = $("#group-mute-duration");
+    if (muteSel) muteSel.value = "";
+
+    // v0.11.3: archive button label reflects current state.
+    const archiveBtn = $("#group-archive-toggle");
+    if (archiveBtn) {
+      const isArchived = isGroupArchived(state.selectedGroup);
+      archiveBtn.textContent = isArchived ? "Unarchive group" : "Archive group";
+    }
+
     $("#group-settings-backdrop").classList.add("show");
   }
 
@@ -6087,6 +6265,118 @@
       await refreshSelectedGroup();
     } catch (e) {
       toast(`Remove failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
+  // v0.11.3: change a group member's role. Owner-only on the
+  // server side; the UI also gates the dropdown to owners.
+  async function changeGroupMemberRole(fp, newRole) {
+    const gid = state.selectedGroup;
+    if (!gid || !fp || !newRole) return;
+    try {
+      await api.post(
+        `/api/groups/${gid}/members/${encodeURIComponent(fp)}/role`,
+        { role: newRole },
+      );
+      toast(`Role changed to ${newRole}`, "good");
+      await refreshGroups();
+      await refreshSelectedGroup();
+    } catch (e) {
+      toast(`Role change failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
+  // v0.11.3: per-group avatar color. Settings-keyed by gid_hex so
+  // each group keeps its own tint independent of the user's
+  // global avatar color.
+  const _GROUP_COLOR_PRESETS = [
+    "#7c4dff", "#3b82f6", "#06b6d4", "#10b981",
+    "#facc15", "#f97316", "#ef4444", "#ec4899",
+  ];
+  function getGroupColor(gid) {
+    return localStorage.getItem(`one_link.group_color.${gid}`)
+        || _GROUP_COLOR_PRESETS[0];
+  }
+  function setGroupColor(gid, hex) {
+    localStorage.setItem(`one_link.group_color.${gid}`, hex);
+    // Live-reflect in the sidebar.
+    renderGroups();
+  }
+  function _renderGroupColorSwatches(gid) {
+    const host = $("#group-color-swatches");
+    if (!host) return;
+    host.innerHTML = "";
+    const current = getGroupColor(gid);
+    for (const c of _GROUP_COLOR_PRESETS) {
+      const sw = document.createElement("button");
+      sw.className = "profile-color-swatch" + (c === current ? " active" : "");
+      sw.style.background = c;
+      sw.dataset.color = c;
+      sw.title = c;
+      sw.onclick = (ev) => {
+        ev.preventDefault();
+        host.querySelectorAll(".profile-color-swatch").forEach(
+          (b) => b.classList.toggle("active", b === sw),
+        );
+        setGroupColor(gid, c);
+      };
+      host.appendChild(sw);
+    }
+  }
+
+  // v0.11.3: archive — local-only "hide from sidebar". Settings
+  // live in localStorage so the daemon doesn't need a new
+  // schema migration. Other members aren't affected.
+  function isGroupArchived(gid) {
+    return localStorage.getItem(`one_link.group_archived.${gid}`) === "1";
+  }
+  function setGroupArchived(gid, archived) {
+    if (archived) {
+      localStorage.setItem(`one_link.group_archived.${gid}`, "1");
+    } else {
+      localStorage.removeItem(`one_link.group_archived.${gid}`);
+    }
+    renderGroups();
+  }
+  async function toggleArchiveCurrentGroup() {
+    const gid = state.selectedGroup;
+    if (!gid) return;
+    const wasArchived = isGroupArchived(gid);
+    setGroupArchived(gid, !wasArchived);
+    const archiveBtn = $("#group-archive-toggle");
+    if (archiveBtn) {
+      archiveBtn.textContent = wasArchived ? "Archive group" : "Unarchive group";
+    }
+    toast(wasArchived ? "Group unarchived" : "Group archived", "good");
+  }
+
+  // v0.11.3: per-group mute apply. Backend already in place from
+  // v0.11.2 — this just hooks up the duration picker.
+  async function applyGroupMute() {
+    const gid = state.selectedGroup;
+    if (!gid) return;
+    const sel = $("#group-mute-duration");
+    if (!sel?.value) {
+      toast("Pick a duration first", "info");
+      return;
+    }
+    const raw = sel.value;
+    let body;
+    if (raw === "null") body = { duration_ms: null };
+    else body = { duration_ms: parseInt(raw, 10) };
+    try {
+      const r = await api.post(`/api/groups/${gid}/mute`, body);
+      _renderMuteStatus(
+        $("#group-mute-status"), r.muted_until_ms, false,
+      );
+      // Refresh state.groups so other UI surfaces (sidebar) pick
+      // up the change too.
+      await refreshGroups();
+      toast(
+        body.duration_ms === null ? "Group unmuted" : "Group muted", "good",
+      );
+    } catch (e) {
+      toast(`Mute failed: ${errorToastBody(e)}`, "bad");
     }
   }
 
@@ -7700,7 +7990,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.11.2";
+  const PAGE_BUILT_FOR = "0.11.3";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -7761,6 +8051,9 @@
     $("#group-add-member")?.addEventListener("click", addGroupMember);
     $("#group-copy-invite")?.addEventListener("click", copyGroupInviteLink);
     $("#group-leave")?.addEventListener("click", leaveCurrentGroup);
+    // v0.11.3 — new group-settings actions.
+    $("#group-mute-apply")?.addEventListener("click", applyGroupMute);
+    $("#group-archive-toggle")?.addEventListener("click", toggleArchiveCurrentGroup);
   }
 
   // v0.7.x: notification toggle in Settings modal.

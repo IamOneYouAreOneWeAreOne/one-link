@@ -58,6 +58,12 @@ the transfer is already resuming an existing CDC send. That directly fixes the
 "video never arrived because planning was too slow" class of failure while
 keeping CDC for the cases where it is currently worth it.
 
+v0.11.3 adds the next speed layer: the fast stream lane is pipelined. Instead
+of sending one chunk and waiting for one ACK, it keeps a bounded window of
+encrypted chunks in flight. Chunk size scales with file size up to `4 MiB`, and
+the in-flight window is capped at `24 MiB` / `16` chunks so One Link can push
+hard on Wi-Fi/Ethernet without unbounded RAM growth.
+
 ## Current Important Result
 
 The current Python CDC implementation is about `8 MiB/s` on the local Windows
@@ -83,6 +89,8 @@ That means One Link must be selective:
 4. Add fixed-manifest wire negotiation for aligned media blocks.
 5. Add swarm CDC fetch execution, not just planning.
 6. Add perf gates so a change cannot silently make transfer planning slower.
+7. Replace JSON/base64 file chunk payloads with an encrypted binary file-frame
+   lane to remove the remaining ~33% base64 overhead.
 
 ## Critical Finding
 

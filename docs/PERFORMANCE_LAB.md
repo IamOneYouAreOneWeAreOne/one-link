@@ -36,6 +36,8 @@ simple before/after view after each optimization pass.
 - **Compression throughput**: zlib level-1 speed and ratio for easy data.
 - **Adaptive transfer brain**: whether local cost planning chooses fast lanes
   when prior knowledge is low and CDC/swarm when prior knowledge is high.
+- **Stream pipeline profile**: the adaptive chunk/window plan for keeping
+  baseline sends saturated without unbounded memory.
 
 ## How To Read The Report
 
@@ -59,6 +61,8 @@ Useful first-pass signals:
   decision with today's Python CDC speed.
 - `adaptive_transfer_brain.metrics.high_prior_accelerated_mode`: shows the
   target decision once native/GPU CDC lands.
+- `stream_pipeline_profiles.metrics.huge_window_bytes`: maximum baseline stream
+  bytes in flight for huge sends.
 
 ## What Is Not Yet Measured
 
@@ -84,6 +88,8 @@ work produced:
 - Adaptive transfer brain: thousands of local decisions per second; with
   current Python CDC it still often chooses hash-stream for huge fast-LAN
   transfers, while accelerated CDC flips high-prior cases to CDC/swarm.
+- Stream pipeline: huge sends use up to `4 MiB` chunks with a bounded
+  `24 MiB` in-flight window.
 
 On the same machine before this work, `standard` scale produced:
 
