@@ -4111,7 +4111,12 @@
     }
 
     // Auto-select if there's exactly one paired peer and nothing currently selected.
-    if (peers.length === 1 && !state.selectedPeer) {
+    // v0.10.8 bug fix: must also check selectedGroup — otherwise the
+    // 5s refreshPeers tick would silently snap back to the lone peer
+    // a few seconds after the user clicks a group, since selectGroup
+    // sets selectedPeer = null. Symptom was: "chat changes for a few
+    // seconds then goes back to the chat I was on".
+    if (peers.length === 1 && !state.selectedPeer && !state.selectedGroup) {
       selectPeer(peers[0].short_id);
     }
   }
@@ -5497,6 +5502,23 @@
       ));
       row.appendChild(av);
       row.appendChild(txt);
+      // v0.10.8: gear opens group settings (rename, members, leave).
+      // Matches the per-device gear convention in the My Devices list
+      // — without this, the user has no way to discover settings for
+      // a group except by selecting it AND noticing the small "Group
+      // settings" text button in the conversation header.
+      const gear = el("button", "gear-btn", "⚙");
+      gear.title = `${g.name || "Group"} settings`;
+      gear.onclick = async (ev) => {
+        ev.stopPropagation();
+        // Settings need state.groupDetail loaded — select first if
+        // this isn't the currently-active group.
+        if (state.selectedGroup !== g.group_id) {
+          await selectGroup(g.group_id);
+        }
+        openGroupSettings();
+      };
+      row.appendChild(gear);
       row.onclick = () => selectGroup(g.group_id);
       list.appendChild(row);
     }
