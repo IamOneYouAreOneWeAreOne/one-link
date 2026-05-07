@@ -286,6 +286,11 @@ class UIServer:
         # v0.7.7 verified-in-person SAS confirm.
         r.add_post(r"/api/peers/{fp}/verify", self._guarded(self.api_set_peer_verified))
         r.add_delete(r"/api/peers/{fp}/verify", self._guarded(self.api_clear_peer_verified))
+        # v0.7.8 key-change events.
+        r.add_get("/api/key-change-events", self._guarded(self.api_list_key_change_events))
+        r.add_post(r"/api/key-change-events/{event_id}/ack", self._guarded(self.api_ack_key_change_event))
+        r.add_post(r"/api/peers/{fp}/key-change-events/ack-all", self._guarded(self.api_ack_peer_key_change_events))
+        r.add_get(r"/api/peers/{fp}/key-history", self._guarded(self.api_get_peer_key_history))
         r.add_get("/api/capability-audit", self._guarded(self.api_capability_audit))
         r.add_get("/api/rendezvous", self._guarded(self.api_get_rendezvous))
         r.add_post("/api/rendezvous", self._guarded(self.api_set_rendezvous))
@@ -747,6 +752,28 @@ class UIServer:
             else:
                 p["health"] = None
 
+        # v0.7.8: attach unacked key-change events per peer so the UI
+        # can render a red badge / banner without a second round-trip.
+        # `key_change_alert` carries the freshest unacked event (or
+        # None) for direct rendering.
+        if self.daemon.state is not None:
+            try:
+                # One bulk fetch — bucket by new_fingerprint client-side.
+                unacked = self.daemon.state.list_key_change_events(
+                    unacked_only=True, limit=1000,
+                )
+                by_fp: dict[str, list[dict]] = {}
+                for ev in unacked:
+                    by_fp.setdefault(ev["new_fingerprint"], []).append(ev)
+                for p in kept:
+                    fp = p.get("fingerprint") or ""
+                    bucket = by_fp.get(fp, [])
+                    p["key_change_unacked"] = len(bucket)
+                    p["key_change_alert"] = bucket[0] if bucket else None
+            except Exception:
+                for p in kept:
+                    p.setdefault("key_change_unacked", 0)
+                    p.setdefault("key_change_alert", None)
         # Sort: paired first, then online, then by hostname
         peers = sorted(
             kept,
@@ -1362,6 +1389,72 @@ class UIServer:
             "verified_note": None,
             "is_verified": False,
         })
+
+    # ─── key-change events (v0.7.8) ───────────────────────────────────
+
+    async def api_list_key_change_events(self, request: web.Request) -> web.Response:
+        """List recorded key-change (hostname-rotated-pubkey) events.
+        Query params:
+          - unacked=1 → only show events the user hasn't dismissed
+          - peer={fp} → only events targeting this fingerprint
+          - limit (default 200, capped at 1000)"""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        unacked_only = request.query.get("unacked") in ("1", "true", "yes")
+        new_fp = request.query.get("peer") or None
+        try:
+            limit = int(request.query.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        limit = max(1, min(limit, 1000))
+        events = self.daemon.state.list_key_change_events(
+            unacked_only=unacked_only,
+            new_fingerprint=new_fp,
+            limit=limit,
+        )
+        return web.json_response({"events": events})
+
+    async def api_ack_key_change_event(self, request: web.Request) -> web.Response:
+        """Dismiss one key-change event by id."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            event_id = int(request.match_info["event_id"])
+        except (KeyError, ValueError):
+            return web.json_response({"error": "invalid event id"}, status=400)
+        acked = self.daemon.state.ack_key_change_event(event_id)
+        if acked:
+            self.broadcast({"type": "key_change_acked", "event_id": event_id})
+        return web.json_response({"ok": True, "event_id": event_id, "newly_acked": acked})
+
+    async def api_ack_peer_key_change_events(self, request: web.Request) -> web.Response:
+        """Dismiss every unacked event targeting one peer (the device
+        drawer's 'Acknowledge' button). Returns the count just acked."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        n = self.daemon.state.ack_all_key_change_events_for(fp)
+        if n:
+            self.broadcast({
+                "type": "key_change_acked_all",
+                "fingerprint": fp, "acked": n,
+            })
+        return web.json_response({"ok": True, "fingerprint": fp, "acked": n})
+
+    async def api_get_peer_key_history(self, request: web.Request) -> web.Response:
+        """Return every (ed_pub_hex, fingerprint, first_seen, last_seen)
+        ever observed for the peer's hostname. Used by the device
+        drawer's Identity & trust → Key history disclosure."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        peer = self.daemon.state.get_peer(fp)
+        if peer is None:
+            return web.json_response({"error": "peer not found"}, status=404)
+        if not peer.hostname:
+            return web.json_response({"hostname": None, "history": []})
+        history = self.daemon.state.list_hostname_keys(peer.hostname)
+        return web.json_response({"hostname": peer.hostname, "history": history})
 
     async def api_capability_audit(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:

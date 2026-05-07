@@ -166,6 +166,78 @@
     transition: background .12s, color .12s;
   }
   .verify-cta:hover { background: rgba(245, 196, 81, .26); }
+  /* v0.7.8 KEY-CHANGE WARNING surfaces. The bottom of the trust
+     stack: a hostname has rotated keys (re-install or attempted
+     impersonation). Always RED, hard to miss, requires explicit
+     user ack. */
+  .avatar-wrap .keychange-overlay {
+    position: absolute; right: -3px; top: -3px;
+    min-width: 14px; height: 14px; padding: 0 2px;
+    border-radius: 999px;
+    background: var(--bad); color: white;
+    font-size: 10px; font-weight: 800; line-height: 14px;
+    text-align: center;
+    box-shadow: 0 1px 6px rgba(255, 90, 90, .65);
+    border: 2px solid var(--bg-1);
+    pointer-events: none;
+  }
+  /* If a peer has BOTH a key-change AND a verified mark, the
+     key-change red wins — verified is no longer meaningful while
+     a conflict is unacked. We hide the green via specificity here
+     by relying on render order (overlay appended last in JS). */
+  .keychange-banner {
+    background: rgba(255, 107, 107, .12);
+    color: var(--bad);
+    border-bottom: 1px solid rgba(255, 107, 107, .35);
+    padding: 10px 18px;
+    font-size: 13px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .keychange-banner .kcb-icon {
+    flex-shrink: 0; font-size: 18px; line-height: 1;
+  }
+  .keychange-banner .kcb-text { flex: 1; min-width: 0; }
+  .keychange-banner .kcb-text strong { color: var(--text); }
+  .keychange-banner .kcb-actions {
+    display: flex; gap: 6px; flex-shrink: 0;
+  }
+  .keychange-banner button {
+    font-size: 12px; padding: 4px 10px;
+    border-radius: var(--radius-sm); font-weight: 600;
+  }
+  .keychange-banner .btn-ack {
+    background: var(--bad); color: white;
+  }
+  .keychange-banner .btn-details {
+    background: var(--bg-2); color: var(--text);
+  }
+  .keychange-banner .severity-tag {
+    display: inline-block; padding: 0 6px;
+    border-radius: 999px; font-size: 10px; font-weight: 800;
+    letter-spacing: .5px; text-transform: uppercase;
+    background: var(--bad); color: white; margin-right: 4px;
+  }
+  .severity-tag.severity-medium { background: var(--warn); color: #281c00; }
+  .severity-tag.severity-low { background: var(--text-dimmer); color: var(--bg-0); }
+  .device-keychange {
+    background: rgba(255, 107, 107, .08);
+    border: 1px solid rgba(255, 107, 107, .25);
+    border-radius: 8px; padding: 12px;
+  }
+  .device-keychange .row-h {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+    font-weight: 600; color: var(--bad);
+  }
+  .device-keychange .key-event {
+    margin-bottom: 8px; padding: 8px;
+    background: var(--bg-1); border-radius: 6px;
+    font-size: 12px;
+  }
+  .device-keychange .key-event:last-child { margin-bottom: 0; }
+  .device-keychange .key-event .fp {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; word-break: break-all; color: var(--text-dim);
+  }
   .peer .trust-tag {
     font-size: 10px; font-weight: 600; letter-spacing: .4px;
     padding: 1px 6px; border-radius: 999px; text-transform: uppercase;
@@ -1330,6 +1402,12 @@
           </div>
         </div>
 
+        <!-- v0.7.8: key-change warning. Sits between the header
+             and the message list so it's the first thing the user
+             sees on a peer with a rotated pubkey. Hidden until
+             renderConvKeyChangeBanner populates it. -->
+        <div id="convo-keychange" class="keychange-banner" style="display:none;"></div>
+
         <div id="search-banner" class="search-results-banner" style="display:none;">
           <span id="search-banner-text">…</span>
           <button id="btn-clear-search">Clear</button>
@@ -1710,6 +1788,28 @@
           <div class="reach-row"><span class="lbl">Short ID</span><span class="val copyable" id="dev-shortid">—</span></div>
           <div class="reach-row"><span class="lbl">Fingerprint</span><span class="val copyable mono small" id="dev-fp">—</span></div>
           <div class="reach-row"><span class="lbl">SAS</span><span class="val mono" id="dev-sas">—</span></div>
+        </div>
+      </div>
+
+      <!-- v0.7.8 key-change warning section. Hidden by default;
+           rendered into when the peer has 1+ unacked key-change
+           events. Lists every (severity, hostname, old→new fp,
+           old→new pub_hex) and exposes an "Acknowledge all" button
+           that POSTs to /api/peers/{fp}/key-change-events/ack-all. -->
+      <div class="settings-section" id="dev-keychange-section" style="display:none;">
+        <div class="settings-section-h"><span>Key change detected</span></div>
+        <div class="device-keychange" id="dev-keychange-body">
+          <div class="row-h">⚠ <span id="dev-keychange-summary"></span></div>
+          <div id="dev-keychange-events"></div>
+          <div class="mini-actions wrap" style="margin-top:8px;">
+            <button class="btn-ghost" id="dev-keychange-ack">Acknowledge</button>
+          </div>
+          <p class="settings-help" style="margin-top:8px;">
+            A key change is benign when the device was reinstalled or
+            replaced — but if you didn't expect one, treat it as a
+            potential impersonation. Re-pair only after confirming the
+            new identity through a side channel.
+          </p>
         </div>
       </div>
 
@@ -2232,6 +2332,9 @@
         (p.allowed_capabilities || ["*"]).join(","),
         // v0.7.7: avatar overlay flips when verification toggles.
         p.is_verified ? 1 : 0,
+        // v0.7.8: red ⚠ overlay flips when unacked-event count
+        // changes. Bucketed at 0 / 1 / many to coalesce repeats.
+        (p.key_change_unacked || 0) === 0 ? 0 : ((p.key_change_unacked || 0) === 1 ? 1 : 2),
       ].join("|"));
     }
     return parts.join("§");
@@ -2283,10 +2386,16 @@
       // v0.7.7: a verified ✓ overlay sits on top of the avatar so a
       // glance at the sidebar tells the user which devices have been
       // SAS-confirmed in person.
+      // v0.7.8: a red ⚠ overlay supersedes ✓ when the peer has any
+      // unacked key-change event — a rotated key invalidates trust.
       const avWrap = el("div", "avatar-wrap");
       const av = el("div", "avatar", initials(p.display_name || p.hostname || p.short_id));
       avWrap.appendChild(av);
-      if (p.is_verified) {
+      if ((p.key_change_unacked || 0) > 0) {
+        const badge = el("span", "keychange-overlay", "!");
+        badge.title = `Key change detected — ${p.key_change_unacked} unacknowledged event${p.key_change_unacked === 1 ? "" : "s"}. Click for details.`;
+        avWrap.appendChild(badge);
+      } else if (p.is_verified) {
         const badge = el("span", "verified-overlay", "✓");
         badge.title = `Verified in person${p.verified_method ? " (" + verifyMethodLabel(p.verified_method) + ")" : ""}`;
         avWrap.appendChild(badge);
@@ -3422,6 +3531,11 @@
     renderPins();
     $("#convo-empty").style.display = "none";
     $("#convo-active").style.display = "flex";
+    // v0.7.7/v0.7.8: hide per-peer trust + key-change surfaces in
+    // group context (they're peer-scoped, group has its own trust UX).
+    const trust = $("#convo-trust"); if (trust) trust.innerHTML = "";
+    const kcb = $("#convo-keychange");
+    if (kcb) { kcb.style.display = "none"; kcb.innerHTML = ""; }
     const g = state.groupDetail;
     $("#convo-who").classList.add("group-context");
     $("#convo-who").title = "";
@@ -3795,6 +3909,7 @@
     $("#btn-attach").disabled = peer.trust === "rejected";
     $("#btn-attach2").disabled = peer.trust === "rejected";
     renderConvHeaderTrust(peer);
+    renderConvKeyChangeBanner(peer);
     renderPeers();
     renderMessages();
     renderPins();
@@ -3805,6 +3920,137 @@
     // v0.7.6: opening the conversation marks all of this peer's
     // messages as read. Best-effort — don't block on the network.
     maybeSendReadMarker(peer);
+  }
+
+  // v0.7.8: pretty severity label.
+  function severityLabel(sev) {
+    if (sev === "high") return "high — was a paired device";
+    if (sev === "medium") return "medium — known peer";
+    if (sev === "low") return "low — never paired";
+    return sev || "unknown";
+  }
+  function severityClass(sev) {
+    return `severity-tag severity-${sev || "low"}`;
+  }
+  function shortFp(fp) {
+    if (!fp) return "—";
+    return fp.length > 16 ? `${fp.slice(0, 8)}…${fp.slice(-8)}` : fp;
+  }
+
+  // v0.7.8: render the prominent red banner under the conversation
+  // header when the selected peer has 1+ unacked key-change events.
+  // Hidden if zero. The banner is conversation-scoped — moving to
+  // a different peer reruns this with that peer's events.
+  function renderConvKeyChangeBanner(peer) {
+    const banner = $("#convo-keychange");
+    if (!banner) return;
+    banner.style.display = "none";
+    banner.innerHTML = "";
+    const ev = peer?.key_change_alert;
+    if (!ev) return;
+    const count = peer.key_change_unacked || 1;
+    banner.style.display = "flex";
+    const icon = el("span", "kcb-icon", "⚠");
+    const text = el("div", "kcb-text");
+    const sev = el("span", severityClass(ev.severity), (ev.severity || "low").toUpperCase());
+    text.appendChild(sev);
+    const strong = el("strong", null, "Key change detected");
+    text.appendChild(strong);
+    const detail = document.createTextNode(
+      ` — "${ev.hostname}" is now advertising a different identity key. ` +
+      (count > 1 ? `${count} events unacknowledged. ` : "") +
+      "Re-pair only after confirming the new identity through a side channel."
+    );
+    text.appendChild(detail);
+    const actions = el("div", "kcb-actions");
+    const details = el("button", "btn-details", "Details");
+    details.onclick = (e) => {
+      e.stopPropagation();
+      openDeviceDrawer(peer.short_id);
+    };
+    const ack = el("button", "btn-ack", "Acknowledge");
+    ack.onclick = async (e) => {
+      e.stopPropagation();
+      await ackPeerKeyChange(peer.fingerprint);
+    };
+    actions.appendChild(details);
+    actions.appendChild(ack);
+    banner.appendChild(icon);
+    banner.appendChild(text);
+    banner.appendChild(actions);
+  }
+
+  async function ackPeerKeyChange(fp) {
+    if (!fp) return;
+    try {
+      await api.post(`/api/peers/${fp}/key-change-events/ack-all`, {});
+      // Optimistic clear so the UI doesn't lag the click.
+      const peer = [...state.peers.values()].find(p => p.fingerprint === fp);
+      if (peer) {
+        peer.key_change_unacked = 0;
+        peer.key_change_alert = null;
+        renderPeers();
+        if (state.selectedPeer === peer.short_id) {
+          renderConvKeyChangeBanner(peer);
+          renderConvHeaderTrust(peer);
+        }
+        if (state.deviceDrawerFp === fp) {
+          renderDrawerKeyChange(peer);
+        }
+      }
+      toast("Key-change events acknowledged", "good");
+    } catch (e) {
+      toast(`Acknowledge failed: ${errorToastBody(e)}`, "bad");
+    }
+  }
+
+  // v0.7.8: render drawer's key-change section. Calls the server
+  // `?peer=` endpoint to enumerate every event for this fingerprint
+  // (full audit trail, not just the freshest like the header banner).
+  async function renderDrawerKeyChange(peer) {
+    const section = $("#dev-keychange-section");
+    if (!section) return;
+    if (!peer || !peer.fingerprint) {
+      section.style.display = "none";
+      return;
+    }
+    if (!peer.key_change_unacked) {
+      section.style.display = "none";
+      return;
+    }
+    section.style.display = "";
+    let events = [];
+    try {
+      const res = await api.get(
+        `/api/key-change-events?peer=${encodeURIComponent(peer.fingerprint)}&unacked=1&limit=50`
+      );
+      events = res.events || [];
+    } catch (e) {
+      $("#dev-keychange-events").innerHTML = "";
+      $("#dev-keychange-summary").textContent =
+        `Failed to load events: ${e.message || e}`;
+      return;
+    }
+    if (state.deviceDrawerFp !== peer.fingerprint) return;
+    $("#dev-keychange-summary").textContent =
+      `${events.length} unacknowledged event${events.length === 1 ? "" : "s"} for "${peer.hostname || peer.short_id}".`;
+    const list = $("#dev-keychange-events");
+    list.innerHTML = "";
+    for (const ev of events) {
+      const card = el("div", "key-event");
+      const sev = el("span", severityClass(ev.severity), (ev.severity || "low").toUpperCase());
+      card.appendChild(sev);
+      card.appendChild(document.createTextNode(
+        ` ${new Date(ev.ts_ms).toLocaleString()} · severity ${severityLabel(ev.severity)}`
+      ));
+      card.appendChild(el("br"));
+      card.appendChild(document.createTextNode("Old fingerprint: "));
+      card.appendChild(el("span", "fp", shortFp(ev.old_fingerprint)));
+      card.appendChild(el("br"));
+      card.appendChild(document.createTextNode("New fingerprint: "));
+      card.appendChild(el("span", "fp", shortFp(ev.new_fingerprint)));
+      list.appendChild(card);
+    }
   }
 
   // v0.7.7: render the trust marker in the conversation header.
@@ -3943,6 +4189,9 @@
     // record so a websocket "peer_verified" broadcast updates the
     // open drawer without re-opening it.
     renderDrawerVerification(peer);
+    // v0.7.8: render the key-change section (hidden if no unacked
+    // events; populated lazily via a server fetch otherwise).
+    renderDrawerKeyChange(peer);
 
     $("#device-backdrop").classList.add("show");
   }
@@ -4234,6 +4483,22 @@
       toast(`Verify failed: ${errorToastBody(e)}`, "bad");
     }
   };
+  // v0.7.8: drawer's "Acknowledge" button — clears the red banner +
+  // overlay for THIS peer and writes acked_ms on every unacked event
+  // for the peer's fingerprint. Audit rows persist (the events stay
+  // in the DB; just marked seen).
+  $("#dev-keychange-ack").onclick = async () => {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    if (!confirm(
+      "Acknowledge every key-change event for this device?\n\n" +
+      "The events stay in the audit log. Acknowledging only clears " +
+      "the red warning banner — it does NOT re-trust the new key. " +
+      "If you want to chat with the new identity, re-pair from scratch."
+    )) return;
+    await ackPeerKeyChange(fp);
+  };
+
   $("#dev-verify-revoke").onclick = async () => {
     const fp = state.deviceDrawerFp;
     if (!fp) return;
@@ -4312,7 +4577,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.8.3";
+  const PAGE_BUILT_FOR = "0.8.4";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -4393,6 +4658,23 @@
       renderPeers();
       renderPeerControls();
       recordPeerCompatibility();
+      // v0.7.7/v0.7.8: re-render trust + key-change surfaces for the
+      // currently selected peer so a freshly-recorded event flips the
+      // banner without needing a click. Drawer also refreshes if open.
+      if (state.selectedPeer) {
+        const cur = state.peers.get(state.selectedPeer);
+        if (cur) {
+          renderConvHeaderTrust(cur);
+          renderConvKeyChangeBanner(cur);
+        }
+      }
+      if (state.deviceDrawerFp) {
+        const drawerPeer = drawerPeerByFp(state.deviceDrawerFp);
+        if (drawerPeer) {
+          renderDrawerVerification(drawerPeer);
+          renderDrawerKeyChange(drawerPeer);
+        }
+      }
     } catch (e) { console.warn(e); }
   }
 
@@ -4446,6 +4728,23 @@
       } else if (m.type === "peer_profile" || m.type === "peer_capabilities") {
         // v0.7.3: alias / mute / cap changes — refresh the sidebar so
         // the new display name and toggle states show up immediately.
+        refreshPeers();
+      } else if (m.type === "key_change_acked" || m.type === "key_change_acked_all") {
+        // v0.7.8: another tab acknowledged. Refresh peers so the
+        // banner / overlay clears for everyone live.
+        refreshPeers();
+      } else if (m.type === "key_change_detected") {
+        // v0.7.8: a hostname↔pubkey rotation just got logged. Pop
+        // a loud toast so the user notices even with the chat
+        // surface scrolled to a different conversation, then trigger
+        // peers_changed via refreshPeers so every UI surface
+        // (sidebar overlay, conv banner, drawer) updates atomically.
+        const ev = m.event || {};
+        const sevTag = (ev.severity || "low").toUpperCase();
+        toast(
+          `[${sevTag}] Key change detected for "${ev.hostname || "?"}".`,
+          "bad", 8000,
+        );
         refreshPeers();
       } else if (m.type === "peer_verified") {
         // v0.7.7: side-channel SAS confirm flipped on/off. Patch the

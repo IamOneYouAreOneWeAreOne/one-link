@@ -448,8 +448,56 @@ class State:
                 self._migrate_v8_peer_verification(c)
                 if current < 8:
                     c.execute("INSERT INTO schema_version(version) VALUES(8)")
+                # v0.7.8: hostname-pubkey history + key-change events.
+                self._migrate_v9_key_change_tracking(c)
+                if current < 9:
+                    c.execute("INSERT INTO schema_version(version) VALUES(9)")
             finally:
                 c.close()
+
+    def _migrate_v9_key_change_tracking(self, c: sqlite3.Cursor) -> None:
+        """v0.7.8: track every (hostname, ed_pub_hex) ever observed
+        + log conflict events when a hostname rotates pubkeys (the
+        re-install / MITM scenario). Idempotent."""
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hostname_keys (
+                hostname      TEXT    NOT NULL,
+                ed_pub_hex    TEXT    NOT NULL,
+                fingerprint   TEXT    NOT NULL,
+                first_seen_ms INTEGER NOT NULL,
+                last_seen_ms  INTEGER NOT NULL,
+                PRIMARY KEY (hostname, ed_pub_hex)
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_hostname_keys_host"
+            " ON hostname_keys(hostname)"
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS key_change_events (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_ms           INTEGER NOT NULL,
+                hostname        TEXT    NOT NULL,
+                old_fingerprint TEXT    NOT NULL,
+                new_fingerprint TEXT    NOT NULL,
+                old_pub_hex     TEXT    NOT NULL,
+                new_pub_hex     TEXT    NOT NULL,
+                severity        TEXT    NOT NULL,
+                acked_ms        INTEGER
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kce_acked"
+            " ON key_change_events(acked_ms)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kce_new_fp"
+            " ON key_change_events(new_fingerprint)"
+        )
 
     def _migrate_v8_peer_verification(self, c: sqlite3.Cursor) -> None:
         """v0.7.7: peers gain side-channel verification state.
@@ -611,7 +659,37 @@ class State:
                 row = c.execute(
                     "SELECT * FROM peers WHERE fingerprint = ?", (fingerprint,)
                 ).fetchone()
-                return self._row_to_peer(row)
+                # v0.7.8: track hostname↔key history + raise a key-change
+                # event whenever a hostname rotates fingerprints. The
+                # detection happens here (post-INSERT) so it covers every
+                # code path that upserts a peer (handshake, discovery,
+                # snapshot rehydration). pubkey is bytes — convert once.
+                # The new-event id (if any) is stashed on the returned
+                # PeerRecord via `_pending_key_change_event_id` so the
+                # daemon can broadcast it without a second query.
+                new_event_id: Optional[int] = None
+                if hostname:
+                    try:
+                        ed_pub_hex = pubkey.hex() if isinstance(pubkey, (bytes, bytearray)) else str(pubkey)
+                        new_event_id = self._record_hostname_key_seen_locked(
+                            c=c,
+                            hostname=hostname,
+                            ed_pub_hex=ed_pub_hex,
+                            fingerprint=fingerprint,
+                            now=now,
+                        )
+                    except Exception:
+                        # Detection failure must never block a peer
+                        # upsert — log via daemon if needed, but the
+                        # peer table is the source of truth.
+                        pass
+                rec = self._row_to_peer(row)
+                if new_event_id is not None:
+                    # Attach as a runtime-only attribute; the dataclass
+                    # itself is unchanged so callers that don't care
+                    # see no difference.
+                    object.__setattr__(rec, "_pending_key_change_event_id", new_event_id)
+                return rec
             finally:
                 c.close()
 
@@ -820,6 +898,200 @@ class State:
                 "note": r["note"],
             })
         return out
+
+    # ─── key-change tracking (v0.7.8) ─────────────────────────────────
+
+    def _record_hostname_key_seen_locked(
+        self,
+        *,
+        c: sqlite3.Cursor,
+        hostname: str,
+        ed_pub_hex: str,
+        fingerprint: str,
+        now: int,
+    ) -> Optional[int]:
+        """Internal: insert/update the hostname_keys row for this
+        observation, AND if the hostname has previously been seen with
+        a DIFFERENT pubkey, emit a key_change_events row.
+
+        Severity is graded by the strongest prior trust observed:
+          - 'high'   ← any prior fingerprint for this hostname is pinned
+          - 'medium' ← any prior fingerprint exists in peers (pending)
+          - 'low'    ← only seen via discovery, never persisted in peers
+        Caller must hold self._write_lock and pass an open cursor.
+        Detection runs AFTER the upsert_peer INSERT so the new (hostname,
+        pubkey) pair sees its own peers row — we filter it out via the
+        `fingerprint != ?` clause below.
+
+        Returns the integer id of the freshly-inserted key_change_events
+        row (so the caller can broadcast it in real time), or None if
+        no new conflict was logged."""
+        # 1. Find any conflicting prior observation.
+        prior_rows = c.execute(
+            "SELECT ed_pub_hex, fingerprint FROM hostname_keys"
+            " WHERE hostname = ? AND ed_pub_hex != ?"
+            " ORDER BY last_seen_ms DESC",
+            (hostname, ed_pub_hex),
+        ).fetchall()
+        # 2. Upsert the current (hostname, ed_pub_hex) row.
+        c.execute(
+            """
+            INSERT INTO hostname_keys(
+                hostname, ed_pub_hex, fingerprint,
+                first_seen_ms, last_seen_ms
+            ) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(hostname, ed_pub_hex) DO UPDATE SET
+                last_seen_ms = excluded.last_seen_ms,
+                fingerprint  = excluded.fingerprint
+            """,
+            (hostname, ed_pub_hex, fingerprint, now, now),
+        )
+        # 3. If we found a conflict AND haven't already logged this
+        # exact (old_fp, new_fp) pair, write a key_change_events row.
+        if not prior_rows:
+            return None
+        new_event_id: Optional[int] = None
+        for old in prior_rows:
+            old_fp = old["fingerprint"]
+            old_pub_hex = old["ed_pub_hex"]
+            if old_fp == fingerprint:
+                # Hostname was reattached to a row we already wrote
+                # under a different ed_pub_hex column — defensive guard,
+                # shouldn't normally happen.
+                continue
+            # Idempotency: have we already logged THIS specific
+            # (old_fp → new_fp) transition? If so, just bump nothing —
+            # the existing row stays, acked or not.
+            already = c.execute(
+                "SELECT 1 FROM key_change_events"
+                " WHERE hostname = ? AND old_fingerprint = ?"
+                " AND new_fingerprint = ? LIMIT 1",
+                (hostname, old_fp, fingerprint),
+            ).fetchone()
+            if already:
+                continue
+            # Severity grading via prior peers row's trust state.
+            old_peer = c.execute(
+                "SELECT trust FROM peers WHERE fingerprint = ?",
+                (old_fp,),
+            ).fetchone()
+            if old_peer is not None and old_peer["trust"] == "pinned":
+                severity = "high"
+            elif old_peer is not None:
+                severity = "medium"
+            else:
+                severity = "low"
+            cur = c.execute(
+                """
+                INSERT INTO key_change_events(
+                    ts_ms, hostname,
+                    old_fingerprint, new_fingerprint,
+                    old_pub_hex, new_pub_hex,
+                    severity, acked_ms
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    now, hostname,
+                    old_fp, fingerprint,
+                    old_pub_hex, ed_pub_hex,
+                    severity,
+                ),
+            )
+            # First conflict (most-recent prior, if multiple) wins as
+            # the broadcast id. Subsequent prior_rows iterations will
+            # only fire when the hostname has rotated keys 3+ times,
+            # which is rare; keeping the freshest is the practical UX.
+            if new_event_id is None:
+                new_event_id = int(cur.lastrowid)
+        return new_event_id
+
+    def list_hostname_keys(self, hostname: str) -> list[dict]:
+        """Return every (ed_pub_hex, fingerprint, first_seen, last_seen)
+        we've observed for a hostname, freshest first. Powers the
+        device drawer's 'Key history' section."""
+        rows = self._conn.execute(
+            "SELECT hostname, ed_pub_hex, fingerprint,"
+            " first_seen_ms, last_seen_ms FROM hostname_keys"
+            " WHERE hostname = ? ORDER BY last_seen_ms DESC",
+            (hostname,),
+        ).fetchall()
+        return [
+            {
+                "hostname": r["hostname"],
+                "ed_pub_hex": r["ed_pub_hex"],
+                "fingerprint": r["fingerprint"],
+                "first_seen_ms": r["first_seen_ms"],
+                "last_seen_ms": r["last_seen_ms"],
+            }
+            for r in rows
+        ]
+
+    def list_key_change_events(
+        self,
+        *,
+        unacked_only: bool = False,
+        new_fingerprint: Optional[str] = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Return key-change events, freshest first. UI surfaces use
+        `unacked_only=True` to drive the red banner; the device drawer
+        passes `new_fingerprint=fp` to list events targeting that
+        specific peer."""
+        sql = (
+            "SELECT id, ts_ms, hostname, old_fingerprint, new_fingerprint,"
+            " old_pub_hex, new_pub_hex, severity, acked_ms"
+            " FROM key_change_events"
+        )
+        clauses: list[str] = []
+        params: list[Any] = []
+        if unacked_only:
+            clauses.append("acked_ms IS NULL")
+        if new_fingerprint is not None:
+            clauses.append("new_fingerprint = ?")
+            params.append(new_fingerprint)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ts_ms DESC, id DESC LIMIT ?"
+        params.append(int(limit))
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "ts_ms": r["ts_ms"],
+                "hostname": r["hostname"],
+                "old_fingerprint": r["old_fingerprint"],
+                "new_fingerprint": r["new_fingerprint"],
+                "old_pub_hex": r["old_pub_hex"],
+                "new_pub_hex": r["new_pub_hex"],
+                "severity": r["severity"],
+                "acked_ms": r["acked_ms"],
+            }
+            for r in rows
+        ]
+
+    def ack_key_change_event(self, event_id: int) -> bool:
+        """Mark a key-change event acknowledged. Returns True if a
+        previously-unacked row was just acked, False if the row didn't
+        exist OR was already acked."""
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE key_change_events SET acked_ms = ?"
+                " WHERE id = ? AND acked_ms IS NULL",
+                (_now_ms(), int(event_id)),
+            )
+            return cur.rowcount > 0
+
+    def ack_all_key_change_events_for(self, new_fingerprint: str) -> int:
+        """Bulk-ack every unacked event targeting a peer (used when
+        the device drawer's 'Got it' button is clicked). Returns the
+        count of rows just acked."""
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE key_change_events SET acked_ms = ?"
+                " WHERE new_fingerprint = ? AND acked_ms IS NULL",
+                (_now_ms(), new_fingerprint),
+            )
+            return cur.rowcount or 0
 
     # ─── groups (v0.6.2) ──────────────────────────────────────────────
     # `event` is a one_link.groups.GroupEvent — we serialize via to_wire().

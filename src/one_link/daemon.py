@@ -640,6 +640,32 @@ class Daemon:
         with contextlib.suppress(Exception):
             self.ui_server.broadcast({"type": "transfer", "transfer": self._transfer_event(rec)})
 
+    def _broadcast_key_change_if_present(self, peer_rec) -> None:
+        """v0.7.8: if `state.upsert_peer` just detected a hostname-pubkey
+        rotation, the returned PeerRecord has `_pending_key_change_event_id`
+        attached. Broadcast a `key_change_detected` event so the UI raises
+        the red banner without waiting for a poll."""
+        if self.ui_server is None or peer_rec is None:
+            return
+        event_id = getattr(peer_rec, "_pending_key_change_event_id", None)
+        if event_id is None:
+            return
+        if self.state is None:
+            return
+        with contextlib.suppress(Exception):
+            events = self.state.list_key_change_events(limit=1)
+            event = next((e for e in events if e["id"] == event_id), None)
+            if event is None:
+                return
+            self.ui_server.broadcast({
+                "type": "key_change_detected",
+                "fingerprint": peer_rec.fingerprint,
+                "event": event,
+            })
+            # Also nudge a peers_changed so /api/peers re-fetches with
+            # the fresh `key_change_unacked` count.
+            self.ui_server.broadcast({"type": "peers_changed"})
+
     def _upsert_transfer(self, **kwargs):
         if self.state is None:
             return None
@@ -810,7 +836,7 @@ class Daemon:
                     pinfo = self.discovery.registry.find(channel.peer_short_id)
                     if pinfo:
                         hostname = pinfo.hostname
-                self.state.upsert_peer(
+                rec = self.state.upsert_peer(
                     fingerprint=peer_fp,
                     short_id=channel.peer_short_id,
                     pubkey=channel.peer_ed_pub,
@@ -818,6 +844,12 @@ class Daemon:
                     address=addr[0] if addr else None,
                     port=addr[1] if addr else None,
                 )
+                # v0.7.8: if upsert_peer just detected a hostname-pubkey
+                # rotation, the returned record carries the new event id
+                # as a runtime attribute. Broadcast it live so every
+                # open tab raises the red banner without waiting for
+                # the next /api/peers poll.
+                self._broadcast_key_change_if_present(rec)
             except Exception as e:
                 log.warning("upsert_peer failed: %s", e)
 

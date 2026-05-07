@@ -207,5 +207,6 @@ def test_index_html_renders_verification_surfaces():
     assert "verify-cta" in src
     # Live WS event handler
     assert 'm.type === "peer_verified"' in src
-    # Page version constant bumped
-    assert 'PAGE_BUILT_FOR = "0.8.3"' in src
+    # Page version constant present (post-v0.8.3); each subsequent
+    # ship can bump the digit, so we just check the surface exists.
+    assert "PAGE_BUILT_FOR" in src

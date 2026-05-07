@@ -98,10 +98,21 @@ crypto so trust decisions are obvious.
     /api/peers/{fp}/verify` + `DELETE /api/peers/{fp}/verify`. Schema
     migration v8.
 
-  - **v0.7.8 — Key-change warning.** If a paired peer's pubkey
-    rotates (re-install, identity replacement), prominent
-    full-conversation warning and a re-pair prompt. Today this
-    case silently drops the peer to pending.
+  - **v0.7.8 — Key-change warning.** ✓ Shipped (released as
+    package v0.8.4). state.py tracks every (hostname, ed_pub_hex)
+    pair ever observed in `hostname_keys`; whenever a hostname
+    rotates pubkeys, an entry is appended to `key_change_events`
+    with severity = high (old peer pinned) / medium (pending)
+    / low (never persisted). Detection runs inside upsert_peer so
+    every code path (handshake, discovery, snapshot) is covered.
+    UI: red ⚠ overlay on the sidebar avatar (overrides the green
+    ✓), red banner under the conversation header with severity
+    pill + Acknowledge action, full audit list in the device
+    drawer's "Key change detected" section. Endpoints: GET
+    `/api/key-change-events`, POST
+    `/api/key-change-events/{id}/ack`, POST
+    `/api/peers/{fp}/key-change-events/ack-all`, GET
+    `/api/peers/{fp}/key-history`. Schema migration v9.
 
   - **v0.7.9 — QR-code SAS + audio SAS.** In-person verification
     via webcam scan of the SAS QR (existing 6-digit SAS encoded);
