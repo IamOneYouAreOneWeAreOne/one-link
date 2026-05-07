@@ -539,10 +539,25 @@ class UIServer:
             pair_allow_all_raw is None
             or pair_allow_all_raw.lower() in ("1", "true", "yes")
         )
+        # v0.10.0 settings polish — surface theme + DND + sound +
+        # log verbosity + custom download folder. Sane defaults so a
+        # never-touched daemon Just Works.
         return web.json_response({
             "display_name": s.get("display_name"),
             "auto_accept_lan": s.get("auto_accept_lan", "false") == "true",
             "pair_default_allow_all": pair_allow_all,
+            # Theme: 'dark' (default) | 'light' | 'auto' (follow OS)
+            "theme": s.get("theme", "dark"),
+            # Download folder: empty string = default (inbox_dir())
+            "download_folder": s.get("download_folder", ""),
+            # Do-not-disturb: 24-hour HH:MM strings; off if not enabled
+            "dnd_enabled": s.get("dnd_enabled", "false") == "true",
+            "dnd_start": s.get("dnd_start", "22:00"),
+            "dnd_end": s.get("dnd_end", "07:00"),
+            # Notification sound: master toggle
+            "notification_sound": s.get("notification_sound", "true") == "true",
+            # Log verbosity: error | warn | info | debug
+            "log_level": s.get("log_level", "info"),
         })
 
     async def api_set_settings(self, request: web.Request) -> web.Response:
@@ -577,6 +592,96 @@ class UIServer:
                 "onboarding_completed",
                 "true" if data["onboarding_completed"] else "false",
             )
+        # v0.10.0 — settings polish. Each branch validates its input
+        # so a malformed value can't poison the database.
+        if "theme" in data:
+            v = (data["theme"] or "dark")
+            if v not in ("dark", "light", "auto"):
+                return web.json_response(
+                    {"error": "theme must be dark|light|auto"}, status=400,
+                )
+            self.daemon.state.set_setting("theme", v)
+        if "download_folder" in data:
+            v = data["download_folder"]
+            if v is not None and not isinstance(v, str):
+                return web.json_response(
+                    {"error": "download_folder must be a string or null"},
+                    status=400,
+                )
+            v = (v or "").strip()
+            from one_link.paths import set_inbox_override
+            if v:
+                # Validate: path must exist + be a writable directory.
+                # We don't auto-mkdir because the user may have a typo
+                # we'd rather surface.
+                p = Path(v)
+                if not p.is_dir():
+                    return web.json_response(
+                        {"error": f"download_folder is not a directory: {v}"},
+                        status=400,
+                    )
+                if not os.access(p, os.W_OK):
+                    return web.json_response(
+                        {"error": f"download_folder is not writable: {v}"},
+                        status=400,
+                    )
+                resolved = str(p.resolve())
+                self.daemon.state.set_setting("download_folder", resolved)
+                # Apply immediately — next received file lands in the
+                # new folder without a daemon restart.
+                set_inbox_override(p.resolve())
+            else:
+                self.daemon.state.delete_setting("download_folder")
+                set_inbox_override(None)
+        if "dnd_enabled" in data:
+            self.daemon.state.set_setting(
+                "dnd_enabled",
+                "true" if data["dnd_enabled"] else "false",
+            )
+        for key in ("dnd_start", "dnd_end"):
+            if key in data:
+                v = (data[key] or "").strip()
+                # HH:MM 24-hour validation. Empty string clears.
+                if v:
+                    parts = v.split(":")
+                    bad = (
+                        len(parts) != 2
+                        or not parts[0].isdigit()
+                        or not parts[1].isdigit()
+                        or not (0 <= int(parts[0]) < 24)
+                        or not (0 <= int(parts[1]) < 60)
+                    )
+                    if bad:
+                        return web.json_response(
+                            {"error": f"{key} must be HH:MM 24-hour"},
+                            status=400,
+                        )
+                    # Re-canonicalize so '7:5' stores as '07:05'.
+                    v = f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+                    self.daemon.state.set_setting(key, v)
+                else:
+                    self.daemon.state.delete_setting(key)
+        if "notification_sound" in data:
+            self.daemon.state.set_setting(
+                "notification_sound",
+                "true" if data["notification_sound"] else "false",
+            )
+        if "log_level" in data:
+            v = (data["log_level"] or "info").lower()
+            if v not in ("error", "warn", "info", "debug"):
+                return web.json_response(
+                    {"error": "log_level must be error|warn|info|debug"},
+                    status=400,
+                )
+            self.daemon.state.set_setting("log_level", v)
+            # Apply immediately so the daemon's running logger
+            # respects the change without a restart.
+            import logging
+            level_map = {
+                "error": logging.ERROR, "warn": logging.WARNING,
+                "info": logging.INFO,   "debug": logging.DEBUG,
+            }
+            logging.getLogger("one_link").setLevel(level_map[v])
         return web.json_response({"ok": True})
 
     # ─── /api/peers ───────────────────────────────────────────────────

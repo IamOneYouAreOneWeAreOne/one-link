@@ -34,6 +34,45 @@
             "Inter", "Helvetica Neue", Arial, sans-serif;
     --mono: "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace;
   }
+  /* v0.10.0 light theme. Color palette inverted around perceived
+     luminance — same accents (purple + cyan) for brand consistency.
+     Activated by setting <html data-theme="light"> or "auto" + a
+     prefers-color-scheme:light user. Toggling at runtime is purely
+     a CSS variable swap, no JS-driven repaints. */
+  html[data-theme="light"] {
+    --bg-0:       #f6f7fb;
+    --bg-1:       #ffffff;
+    --bg-2:       #eef0f6;
+    --bg-3:       #e1e5ee;
+    --bg-elev:    #ffffff;
+    --line:       #d8dde7;
+    --text:       #1a1f2b;
+    --text-dim:   #5a6477;
+    --text-dimmer:#8b94a8;
+    --accent:     #5b3eea;
+    --accent-2:   #1d92e6;
+    --good:       #16a36b;
+    --warn:       #b87f00;
+    --bad:        #d04545;
+    --bubble-in:  #eef0f6;
+    --bubble-out: linear-gradient(135deg, #5b3eea 0%, #1d92e6 100%);
+    --shadow:     0 6px 24px rgba(20,30,60,.10);
+  }
+  /* "auto" theme follows the OS prefers-color-scheme. We re-declare
+     the light palette inside the media query so it auto-applies
+     when the user has their system in light mode. */
+  @media (prefers-color-scheme: light) {
+    html[data-theme="auto"] {
+      --bg-0: #f6f7fb; --bg-1: #ffffff; --bg-2: #eef0f6;
+      --bg-3: #e1e5ee; --bg-elev: #ffffff; --line: #d8dde7;
+      --text: #1a1f2b; --text-dim: #5a6477; --text-dimmer: #8b94a8;
+      --accent: #5b3eea; --accent-2: #1d92e6;
+      --good: #16a36b; --warn: #b87f00; --bad: #d04545;
+      --bubble-in: #eef0f6;
+      --bubble-out: linear-gradient(135deg, #5b3eea 0%, #1d92e6 100%);
+      --shadow: 0 6px 24px rgba(20,30,60,.10);
+    }
+  }
   html, body { height: 100%; }
   body {
     background: var(--bg-0);
@@ -2326,6 +2365,99 @@
         </p>
       </div>
 
+      <!-- v0.10.0 settings polish — theme + downloads + DND + sound + verbosity -->
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Appearance</span></div>
+        <div class="settings-row">
+          <label for="set-theme">Theme</label>
+          <select id="set-theme">
+            <option value="dark">Dark (default)</option>
+            <option value="light">Light</option>
+            <option value="auto">Match system</option>
+          </select>
+        </div>
+        <p class="settings-help">
+          Light mode follows the same color palette flipped for daytime
+          legibility. "Match system" tracks your OS preference live.
+        </p>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Downloads</span></div>
+        <div class="settings-row">
+          <label for="set-download-folder">Folder</label>
+          <input type="text" id="set-download-folder"
+                 placeholder="(default — One Link's inbox folder)"
+                 spellcheck="false" />
+        </div>
+        <p class="settings-help">
+          Files received from peers land here. Leave blank to use the
+          built-in inbox under your user data directory. The folder
+          must already exist + be writable.
+        </p>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Do-not-disturb</span></div>
+        <div class="settings-row">
+          <label for="set-dnd-enabled">Quiet hours</label>
+          <span class="toggle">
+            <input type="checkbox" id="set-dnd-enabled" />
+            <span class="slider"></span>
+          </span>
+        </div>
+        <div class="settings-row">
+          <label for="set-dnd-start">From</label>
+          <input type="time" id="set-dnd-start" value="22:00" />
+        </div>
+        <div class="settings-row">
+          <label for="set-dnd-end">Until</label>
+          <input type="time" id="set-dnd-end" value="07:00" />
+        </div>
+        <p class="settings-help">
+          When quiet hours are active, desktop notifications and the
+          notification sound are suppressed. Messages still arrive — they
+          just don't ping you. Crosses midnight (e.g. 22:00 → 07:00).
+        </p>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Notification sound</span></div>
+        <div class="settings-row">
+          <label for="set-sound">Play a chime on incoming messages</label>
+          <span class="toggle">
+            <input type="checkbox" id="set-sound" />
+            <span class="slider"></span>
+          </span>
+        </div>
+        <p class="settings-help">
+          Quiet two-tone chime synthesized in the browser. Per-device
+          mute (set in the device drawer) wins over this — a muted
+          peer never makes noise even if this toggle is on.
+        </p>
+        <div class="mini-actions">
+          <button class="btn-ghost" id="set-sound-test">Test sound</button>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Log verbosity</span></div>
+        <div class="settings-row">
+          <label for="set-log-level">Level</label>
+          <select id="set-log-level">
+            <option value="error">Errors only</option>
+            <option value="warn">Warnings + errors</option>
+            <option value="info">Info (default)</option>
+            <option value="debug">Debug (very chatty)</option>
+          </select>
+        </div>
+        <p class="settings-help">
+          Affects the daemon's terminal log + the diagnostics overlay.
+          "Debug" surfaces every wire frame and CRDT merge — useful
+          when something is misbehaving, noisy otherwise.
+        </p>
+      </div>
+
       <!-- v0.5.3: Connect across networks (rendezvous) -->
       <div class="settings-section">
         <div class="settings-section-h">
@@ -3169,10 +3301,124 @@
       btn.classList.remove("on");
     }
   }
+  // v0.10.0 — runtime settings cache populated when settings load.
+  // Defaults are sane so notifyIncoming + soundOnIncoming work even
+  // before /api/settings has been fetched.
+  state.runtimeSettings = {
+    theme: "dark",
+    dnd_enabled: false,
+    dnd_start: "22:00",
+    dnd_end: "07:00",
+    notification_sound: true,
+  };
+
+  // v0.10.0: live theme apply. Sets <html data-theme="..."> which
+  // CSS variable overrides key off of. No element-by-element repaint.
+  // v0.10.0: pull settings + flip the theme + cache runtime values.
+  // Called on init() so a theme set in a prior session takes effect
+  // before the user sees anything.
+  async function loadAndApplySettings() {
+    try {
+      const r = await api.get("/api/settings");
+      applyTheme(r.theme || "dark");
+      state.runtimeSettings = {
+        theme: r.theme || "dark",
+        dnd_enabled: !!r.dnd_enabled,
+        dnd_start: r.dnd_start || "22:00",
+        dnd_end: r.dnd_end || "07:00",
+        notification_sound: r.notification_sound !== false,
+      };
+    } catch {
+      // Daemon unreachable / fresh install — default theme stays.
+    }
+  }
+
+  function applyTheme(theme) {
+    const t = (theme || "dark").toLowerCase();
+    const html = document.documentElement;
+    if (t === "light") html.setAttribute("data-theme", "light");
+    else if (t === "auto") html.setAttribute("data-theme", "auto");
+    else html.removeAttribute("data-theme");  // dark = default
+  }
+
+  // v0.10.0: do-not-disturb check. Compares current local time
+  // against the user's window. Wraps around midnight when start
+  // > end (e.g. 22:00 → 07:00 means "any time between 22:00 and
+  // 07:00 the next morning").
+  function isQuietHoursActive() {
+    const rs = state.runtimeSettings;
+    if (!rs?.dnd_enabled) return false;
+    const parse = (s) => {
+      const m = (s || "").match(/^(\d{1,2}):(\d{2})$/);
+      if (!m) return null;
+      return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+    };
+    const start = parse(rs.dnd_start);
+    const end = parse(rs.dnd_end);
+    if (start == null || end == null) return false;
+    const now = new Date();
+    const minutes = now.getHours() * 60 + now.getMinutes();
+    if (start === end) return false;  // zero-width window
+    if (start < end) return minutes >= start && minutes < end;
+    // Wrap-around (e.g. 22:00 → 07:00).
+    return minutes >= start || minutes < end;
+  }
+
+  // v0.10.0: notification chime via Web Audio API. Two-tone synth,
+  // ~250ms total, gentle decay. No vendored audio file. Respects
+  // the master setting + DND + per-peer mute.
+  let _audioCtx = null;
+  function _getAudioCtx() {
+    if (!_audioCtx) {
+      try {
+        _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      } catch { return null; }
+    }
+    if (_audioCtx.state === "suspended") _audioCtx.resume().catch(() => {});
+    return _audioCtx;
+  }
+  function playNotificationChime() {
+    if (!state.runtimeSettings?.notification_sound) return;
+    const ctx = _getAudioCtx();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    // Two notes: G5 (784 Hz) → C6 (1047 Hz). Quick, pleasant.
+    [
+      { freq: 784, start: 0,    dur: 0.12 },
+      { freq: 1047, start: 0.10, dur: 0.16 },
+    ].forEach(({ freq, start, dur }) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, now + start);
+      gain.gain.exponentialRampToValueAtTime(0.18, now + start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + start + dur);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + start);
+      osc.stop(now + start + dur + 0.05);
+    });
+  }
+  function soundOnIncoming(opts = {}) {
+    if (isQuietHoursActive()) return;
+    if (opts.peer_fp) {
+      const peer = [...state.peers.values()]
+        .find(p => p.fingerprint === opts.peer_fp);
+      if (peer?.muted) return;
+    }
+    playNotificationChime();
+  }
+
   function notifyIncoming(title, body, opts = {}) {
+    // v0.10.0: pair the desktop notification with the chime.
+    soundOnIncoming(opts);
     if (!notifySupported()) return;
     if (Notification.permission !== "granted") return;
     if (document.hasFocus()) return;
+    // v0.10.0: do-not-disturb suppresses BOTH the chime AND the
+    // desktop notification. Messages still arrive — they just
+    // don't ping.
+    if (isQuietHoursActive()) return;
     // v0.7.3: respect per-device mute. Caller passes peer_fp; if
     // that peer's record is `muted`, swallow the notification.
     if (opts.peer_fp) {
@@ -6275,7 +6521,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.9.9";
+  const PAGE_BUILT_FOR = "0.10.0";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -6306,6 +6552,10 @@
     setInterval(refreshStatus, 8000);
     setInterval(refreshGroups, 12000);
     maybeShowNotifBanner();
+    // v0.10.0: load + apply persisted settings (theme + DND + sound).
+    // Done BEFORE the onboarding pop so the wizard renders in the
+    // user's chosen theme.
+    await loadAndApplySettings();
     // v0.9.4: pop the onboarding wizard after everything else is
     // loaded, so we know whether peers exist before deciding.
     maybeShowOnboarding();
@@ -8187,6 +8437,22 @@
       // v0.7.3: default-allow-all on pair (true by default).
       $("#set-pair-allow-all").checked =
         r.pair_default_allow_all !== false;
+      // v0.10.0 settings polish.
+      $("#set-theme").value = r.theme || "dark";
+      $("#set-download-folder").value = r.download_folder || "";
+      $("#set-dnd-enabled").checked = !!r.dnd_enabled;
+      $("#set-dnd-start").value = r.dnd_start || "22:00";
+      $("#set-dnd-end").value = r.dnd_end || "07:00";
+      $("#set-sound").checked = r.notification_sound !== false;
+      $("#set-log-level").value = r.log_level || "info";
+      // Cache for runtime checks (DND + sound + theme).
+      state.runtimeSettings = {
+        theme: r.theme || "dark",
+        dnd_enabled: !!r.dnd_enabled,
+        dnd_start: r.dnd_start || "22:00",
+        dnd_end: r.dnd_end || "07:00",
+        notification_sound: r.notification_sound !== false,
+      };
     } catch (e) {
       $("#set-name").value = "";
       $("#set-autoaccept").checked = false;
@@ -8208,18 +8474,48 @@
     settingsBackdrop.classList.add("show");
   };
   $("#settings-cancel").onclick = () => settingsBackdrop.classList.remove("show");
+  // v0.10.0: live-preview the chime so the user knows what it
+  // sounds like before committing.
+  $("#set-sound-test")?.addEventListener("click", () => {
+    // Bypass the master toggle so test-sound works even when the
+    // user has it disabled — they're explicitly asking to hear it.
+    playNotificationChime();
+  });
+  // v0.10.0: live theme preview as the user changes the dropdown.
+  $("#set-theme")?.addEventListener("change", (e) => {
+    applyTheme(e.target.value);
+  });
   $("#settings-save").onclick = async () => {
     const payload = {
       display_name: $("#set-name").value.trim() || null,
       auto_accept_lan: $("#set-autoaccept").checked,
       pair_default_allow_all: $("#set-pair-allow-all").checked,
+      // v0.10.0 settings polish.
+      theme: $("#set-theme").value || "dark",
+      download_folder: $("#set-download-folder").value.trim(),
+      dnd_enabled: $("#set-dnd-enabled").checked,
+      dnd_start: $("#set-dnd-start").value || "22:00",
+      dnd_end: $("#set-dnd-end").value || "07:00",
+      notification_sound: $("#set-sound").checked,
+      log_level: $("#set-log-level").value || "info",
     };
     let savedSettings = false;
     try {
       await api.post("/api/settings", payload);
       savedSettings = true;
+      // Apply changes that don't need a server roundtrip:
+      // - theme: flip the data-theme attribute live
+      // - runtime cache: keep DND / sound checks in sync
+      applyTheme(payload.theme);
+      state.runtimeSettings = {
+        theme: payload.theme,
+        dnd_enabled: payload.dnd_enabled,
+        dnd_start: payload.dnd_start,
+        dnd_end: payload.dnd_end,
+        notification_sound: payload.notification_sound,
+      };
     } catch (e) {
-      toast(`Save failed: ${e.message || e}`, "bad");
+      toast(`Save failed: ${errorToastBody(e)}`, "bad");
       return;
     }
 

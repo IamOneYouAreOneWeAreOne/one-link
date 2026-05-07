@@ -654,6 +654,44 @@ class Daemon:
         with contextlib.suppress(Exception):
             self.ui_server.broadcast({"type": "transfer", "transfer": self._transfer_event(rec)})
 
+    def _apply_settings_at_boot(self) -> None:
+        """v0.10.0: read settings that affect global daemon state +
+        apply them once at startup. Lets the user keep their
+        download_folder + log_level preferences across restarts.
+
+        Each setting is wrapped in its own try so a malformed value
+        from an older build doesn't take down the boot."""
+        if self.state is None:
+            return
+        # Custom download folder. Re-validate at boot since the path
+        # on disk may have moved / been deleted since the user set it.
+        # On failure, fall back to default + log.
+        with contextlib.suppress(Exception):
+            from one_link.paths import set_inbox_override
+            saved = self.state.get_setting("download_folder")
+            if saved:
+                from pathlib import Path as _Path
+                p = _Path(saved)
+                if p.is_dir() and os.access(p, os.W_OK):
+                    set_inbox_override(p.resolve())
+                    log.info("download folder override active: %s", p)
+                else:
+                    log.warning(
+                        "download_folder setting %r is not a "
+                        "writable directory; using default inbox",
+                        saved,
+                    )
+        # Persisted log level.
+        with contextlib.suppress(Exception):
+            level = (self.state.get_setting("log_level") or "").lower()
+            if level in ("error", "warn", "info", "debug"):
+                import logging as _logging
+                level_map = {
+                    "error": _logging.ERROR, "warn": _logging.WARNING,
+                    "info":  _logging.INFO,  "debug": _logging.DEBUG,
+                }
+                _logging.getLogger("one_link").setLevel(level_map[level])
+
     def _on_folder_conflict(self, folder_name: str, conflict_id: int) -> None:
         """v0.8.9: invoked from foldersync.FolderEngine when a CRDT-
         detected divergent-edit conflict has just been logged. Reads
@@ -6119,6 +6157,9 @@ class Daemon:
                 trust_default="pinned",
             )
             self.state.set_peer_trust(self.me.fingerprint, "pinned", actor="self")
+            # v0.10.0: apply persisted settings that affect global
+            # daemon behavior (custom download folder, log level).
+            self._apply_settings_at_boot()
         except Exception as e:
             log.warning("state init failed (continuing without persistence): %s", e)
             self.state = None
