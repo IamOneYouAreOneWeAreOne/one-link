@@ -581,7 +581,12 @@ def test_replay_after_removal_does_not_resurrect():
 
 # ─── 7. Defensive ──────────────────────────────────────────────────
 
-def test_owner_cannot_remove_self_if_only_owner():
+def test_sole_owner_can_leave_when_no_other_members():
+    """v0.10.8: a sole owner of a group of 1 can leave — the group
+    just becomes empty, which is the only way for a sole-owner
+    self-created group to ever go away. Pre-fix, the orphan check
+    rejected this and the user got stuck with a ghost group row
+    in their sidebar that no API call could clear."""
     sk_o, pk_o = _new_key()
     gid = new_group_id()
     events = [
@@ -591,7 +596,55 @@ def test_owner_cannot_remove_self_if_only_owner():
                            member_pubkey=pk_o),
     ]
     state = reduce_events(events)
-    assert state.is_member(pk_o)  # orphan-prevention kicked in
+    assert not state.is_member(pk_o)
+    assert len(state.members) == 0
+
+
+def test_owner_still_cannot_remove_self_when_others_remain():
+    """Orphan-prevention still applies when there ARE other members.
+    Without another owner to admin them, the remaining members
+    would be stuck — block the self-remove."""
+    sk_o, pk_o = _new_key()
+    _, pk_b = _new_key()
+    gid = new_group_id()
+    base = 1_700_000_000_000
+    events = [
+        sign_create_group(private_key=sk_o, pubkey=pk_o, name="g",
+                          group_id=gid, timestamp_ms=base),
+        sign_add_member(private_key=sk_o, pubkey=pk_o, group_id=gid,
+                        member_pubkey=pk_b, timestamp_ms=base + 1),
+        sign_remove_member(private_key=sk_o, pubkey=pk_o, group_id=gid,
+                           member_pubkey=pk_o, timestamp_ms=base + 2),
+    ]
+    state = reduce_events(events)
+    # Owner stayed in: orphan-prevention engaged because pk_b would
+    # otherwise be left without an owner.
+    assert state.is_member(pk_o)
+    assert state.is_member(pk_b)
+
+
+def test_owner_can_leave_after_others_have_been_removed():
+    """Sequential cleanup: remove the other member first, then
+    remove yourself. After step 1 you're the only member; step 2
+    is now allowed under the new carve-out."""
+    sk_o, pk_o = _new_key()
+    _, pk_b = _new_key()
+    gid = new_group_id()
+    base = 1_700_000_000_000
+    events = [
+        sign_create_group(private_key=sk_o, pubkey=pk_o, name="g",
+                          group_id=gid, timestamp_ms=base),
+        sign_add_member(private_key=sk_o, pubkey=pk_o, group_id=gid,
+                        member_pubkey=pk_b, timestamp_ms=base + 1),
+        sign_remove_member(private_key=sk_o, pubkey=pk_o, group_id=gid,
+                           member_pubkey=pk_b, timestamp_ms=base + 2),
+        sign_remove_member(private_key=sk_o, pubkey=pk_o, group_id=gid,
+                           member_pubkey=pk_o, timestamp_ms=base + 3),
+    ]
+    state = reduce_events(events)
+    assert not state.is_member(pk_o)
+    assert not state.is_member(pk_b)
+    assert len(state.members) == 0
 
 
 def test_owner_can_remove_self_after_promoting_someone_else():

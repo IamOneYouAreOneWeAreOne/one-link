@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from one_link.daemon import Daemon
+from one_link.identity import Identity, fingerprint_of
+from one_link.server import UIServer
+from one_link.state import State
+
+
+def _identity() -> Identity:
+    sk = Ed25519PrivateKey.generate()
+    pub = sk.public_key()
+    pub_bytes = pub.public_bytes_raw()
+    fp = fingerprint_of(pub_bytes)
+    return Identity(
+        private=sk,
+        public=pub,
+        public_bytes=pub_bytes,
+        fingerprint=fp,
+        short_id=fp[:8],
+        hostname="route-test",
+    )
+
+
+def test_live_route_observations_surface_best_route_and_scores():
+    daemon = Daemon(_identity())
+    fp = "aa" * 32
+
+    daemon._record_route_observation(
+        fp,
+        route="relay",
+        ok=True,
+        latency_ms=120,
+        bandwidth_bps=20_000_000,
+    )
+    daemon._record_route_observation(
+        fp,
+        route="lan",
+        ok=True,
+        latency_ms=5,
+        bandwidth_bps=250_000_000,
+    )
+    daemon._record_route_observation(
+        fp,
+        route="relay",
+        ok=False,
+        error_code="timeout",
+    )
+
+    health = daemon.get_pair_health(fp)
+
+    assert health is not None
+    assert health["best_route"] == "lan"
+    assert health["bandwidth_bps"] > 0
+    assert 0.0 <= health["reliability"] <= 1.0
+    assert health["route_scores"][0]["route"] == "lan"
+
+
+def test_live_route_memory_feeds_swarm_health_fields():
+    daemon = Daemon(_identity())
+    fp = "bb" * 32
+
+    daemon._record_route_observation(
+        fp,
+        route="prior",
+        ok=True,
+        latency_ms=1,
+        bandwidth_bps=1_000_000_000,
+    )
+
+    health = daemon.get_pair_health(fp)
+
+    assert health["best_route"] == "prior"
+    assert health["latency_ewma_ms"] == 1
+    assert health["bandwidth_bps"] == 1_000_000_000
+    assert health["reliability"] == 1.0
+
+
+def test_failed_route_observation_degrades_reliability_without_crashing():
+    daemon = Daemon(_identity())
+    fp = "cc" * 32
+
+    daemon._record_route_observation(fp, route="lan", ok=False, error_code="chunk_retry")
+    daemon._record_route_observation(fp, route="lan", ok=True, latency_ms=10, bandwidth_bps=10_000_000)
+
+    health = daemon.get_pair_health(fp)
+
+    assert health["best_route"] == "lan"
+    assert health["reliability"] == 0.5
+    assert health["route_scores"][0]["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_api_peers_surfaces_live_route_memory(tmp_path):
+    state = State(db_path=tmp_path / "state.db")
+    pub_hex = "bb" * 32
+    peer_fp = fingerprint_of(bytes.fromhex(pub_hex))
+    state.upsert_peer(
+        fingerprint=peer_fp,
+        short_id="bbbbbbbb",
+        pubkey=bytes.fromhex(pub_hex),
+        trust_default="pinned",
+    )
+    health_store = {
+        peer_fp: {
+            "last_alive_ms": 123,
+            "latency_ewma_ms": 5.0,
+            "bandwidth_bps": 250_000_000.0,
+            "reliability": 0.99,
+            "best_route": "lan",
+            "route_scores": [{"route": "lan", "score": 120.0}],
+        }
+    }
+    daemon = SimpleNamespace(
+        state=state,
+        discovery=None,
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa", hostname="me"),
+        _outbound_sessions={},
+        _inbound_regime={},
+        _peer_presence={},
+        get_pair_health=lambda fp: health_store.get(fp),
+    )
+    server = UIServer(daemon)
+
+    class _Req:
+        query: dict = {}
+        match_info: dict = {}
+
+    resp = await server.api_peers(_Req())
+    body = json.loads(resp.text)
+    peer = next(p for p in body["peers"] if p["fingerprint"] == peer_fp)
+
+    assert peer["health"]["best_route"] == "lan"
+    assert peer["health"]["bandwidth_bps"] == 250_000_000.0
+    assert peer["health"]["reliability"] == 0.99
+    assert peer["health"]["route_scores"][0]["route"] == "lan"
+    state.close()

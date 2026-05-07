@@ -541,15 +541,28 @@ def _apply_event(state: GroupState, e: GroupEvent) -> bool:
         # Admin can't remove an owner.
         if target_role == ROLE_OWNER and author_role != ROLE_OWNER:
             return False
-        # Owner can't remove themselves if they're the *only* owner —
-        # would orphan the group.
+        # Owner can't remove themselves if they're the *only* owner
+        # AND there are remaining members — would orphan them. If the
+        # leaving owner is the *only member at all*, the group simply
+        # becomes empty, which is safe + the only way for a sole-owner
+        # group of 1 to ever go away. Without this carve-out, a user
+        # who created a group and is the only member is permanently
+        # stuck with a ghost row in their sidebar (they can never
+        # leave, and nobody else can remove them).
         if e.target_pubkey == e.author_pubkey and target_role == ROLE_OWNER:
             owners = [
                 pk for pk, r in state.members.items()
                 if r == ROLE_OWNER and pk != e.target_pubkey
             ]
             if not owners:
-                return False
+                others = [
+                    pk for pk in state.members.keys()
+                    if pk != e.target_pubkey
+                ]
+                if others:
+                    # Real orphan risk — block.
+                    return False
+                # Sole member of the group: emptying it is fine.
         state.members.pop(e.target_pubkey, None)
         return True
 

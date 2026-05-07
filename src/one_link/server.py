@@ -1098,13 +1098,18 @@ class UIServer:
             # never-contacted peers.
             health = getattr(self.daemon, "get_pair_health", lambda _fp: None)(fp)
             if health is not None:
+                latency = health.get("latency_ewma_ms")
                 p["health"] = {
                     "last_alive_ms": health.get("last_alive_ms"),
                     "latency_ewma_ms": (
-                        health.get("latency_ewma_ms")
-                        if health.get("latency_ewma_ms") == health.get("latency_ewma_ms")
+                        latency
+                        if latency == latency
                         else None  # NaN guard
                     ),
+                    "bandwidth_bps": health.get("bandwidth_bps"),
+                    "reliability": health.get("reliability"),
+                    "best_route": health.get("best_route"),
+                    "route_scores": health.get("route_scores") or [],
                 }
             else:
                 p["health"] = None

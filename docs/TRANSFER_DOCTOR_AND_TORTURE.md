@@ -1,6 +1,6 @@
 # Transfer Doctor And Torture Gate
 
-Status: in_progress for v0.10.7.
+Status: in_progress for v0.10.8.
 
 One Link's promise is not "try to send a file." The promise is "the file gets
 there, quietly, even when devices sleep, routes move, sessions desync, versions
@@ -39,7 +39,7 @@ Current action vocabulary:
 - `retry_missing_chunk` - corrupt or missing piece; retry only that piece.
 - `fallback_protocol` - versions differ; use best shared protocol.
 
-## Route Memory
+## Live Route Memory
 
 `RouteMemory` scores observed routes by:
 
@@ -48,8 +48,17 @@ Current action vocabulary:
 - bandwidth;
 - failure count.
 
-This is the foundation for making One Link stop hammering weak paths and prefer
-the route that actually works for that peer.
+The daemon now feeds live transfer outcomes into route memory. Successful sends
+stamp route bandwidth and reliability. Failed sends stamp a doctor error code.
+`/api/peers` can surface:
+
+- `best_route`;
+- `bandwidth_bps`;
+- `reliability`;
+- `route_scores`.
+
+This makes One Link stop hammering weak paths and prefer the route that actually
+works for that peer.
 
 ## Huge File Torture Simulator
 
@@ -72,8 +81,8 @@ The command exits non-zero if delivery does not complete.
 
 ## What This Unlocks Next
 
-The next production leap is to feed live route observations into `RouteMemory`
-from the daemon and expose the doctor state in the UI transfer cards:
+The next production leap is to expose the live route intelligence in the UI
+transfer cards:
 
 - speed;
 - ETA;

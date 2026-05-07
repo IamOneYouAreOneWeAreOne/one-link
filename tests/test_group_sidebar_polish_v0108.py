@@ -154,3 +154,32 @@ def test_settings_modal_has_section(index_html: str, section: str):
         end = backdrop_idx + 5000
     scope = index_html[backdrop_idx:end + 1000]
     assert section in scope, f"section {section!r} missing from group settings modal"
+
+
+# ───────── 5. sole-member leave reducer carve-out ───────────────────
+
+def test_sole_member_leave_unblocks_ghost_group():
+    """End-to-end via the reducer: a sole-owner sole-member group
+    must be leave-able. Pre-fix this was rejected and the user was
+    stuck with a row in their sidebar with no way to clear it."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey,
+    )
+    from one_link.groups import (
+        new_group_id, reduce_events,
+        sign_create_group, sign_remove_member,
+    )
+
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key().public_bytes_raw()
+    gid = new_group_id()
+    events = [
+        sign_create_group(private_key=sk, pubkey=pk, name="ghost",
+                          group_id=gid),
+        sign_remove_member(private_key=sk, pubkey=pk, group_id=gid,
+                           member_pubkey=pk),
+    ]
+    state = reduce_events(events)
+    assert state is not None
+    assert not state.is_member(pk)
+    assert len(state.members) == 0

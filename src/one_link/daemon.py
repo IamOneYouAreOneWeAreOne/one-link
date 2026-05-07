@@ -82,7 +82,12 @@ from one_link.paths import (
 )
 from one_link.state import State
 from one_link.swarm_plan import plan_swarm_sources, source_from_hashes
-from one_link.transfer_doctor import diagnose_transfer, enrich_transfer_event
+from one_link.transfer_doctor import (
+    RouteMemory,
+    RouteObservation,
+    diagnose_transfer,
+    enrich_transfer_event,
+)
 from one_link.transfer_intent import FileChunkManifest, FileManifest, plan_transfer_intent
 from one_link.wire import decode_msg, encode_msg, make_msg
 
@@ -470,6 +475,10 @@ class Daemon:
         # from mDNS visibility.
         # peer_fp -> {"last_alive_ms": int, "latency_ewma_ms": float}
         self._pair_health: dict[str, dict[str, float]] = {}
+        # v0.10.8: live route memory. Transfer outcomes feed this so
+        # swarm planning can prefer routes that actually work for this
+        # peer instead of static guesses.
+        self._route_memory: dict[str, RouteMemory] = {}
         # v0.7.1: dedup table for capability_request WS events.
         # (peer_fp, cap) -> monotonic ts of last UI prompt fired.
         self._capability_request_seen: dict[tuple[str, str], float] = {}
@@ -4274,6 +4283,9 @@ class Daemon:
         peer_fp: str,
         *,
         latency_ms: float | None = None,
+        bandwidth_bps: float | None = None,
+        reliability: float | None = None,
+        best_route: str | None = None,
     ) -> None:
         """v0.7.0: record liveness for this peer. Latency is EWMA'd
         when provided (alpha=0.3 — fast enough to track real changes,
@@ -4293,13 +4305,67 @@ class Daemon:
                 h["latency_ewma_ms"] = float(latency_ms)
             else:
                 h["latency_ewma_ms"] = 0.7 * prev + 0.3 * float(latency_ms)
+        if bandwidth_bps is not None and bandwidth_bps > 0:
+            prev_bw = h.get("bandwidth_bps")
+            if prev_bw is None or prev_bw <= 0:
+                h["bandwidth_bps"] = float(bandwidth_bps)
+            else:
+                h["bandwidth_bps"] = 0.7 * prev_bw + 0.3 * float(bandwidth_bps)
+        if reliability is not None:
+            h["reliability"] = max(0.0, min(1.0, float(reliability)))
+        if best_route:
+            h["best_route"] = str(best_route)
+
+    def _route_memory_for(self, peer_fp: str) -> RouteMemory:
+        mem = self._route_memory.get(peer_fp)
+        if mem is None:
+            mem = RouteMemory()
+            self._route_memory[peer_fp] = mem
+        return mem
+
+    def _record_route_observation(
+        self,
+        peer_fp: str,
+        *,
+        route: str = "lan",
+        ok: bool,
+        latency_ms: float | None = None,
+        bandwidth_bps: float | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        if not peer_fp:
+            return
+        mem = self._route_memory_for(peer_fp)
+        mem.observe(RouteObservation(
+            route=route or "unknown",
+            ok=bool(ok),
+            latency_ms=latency_ms,
+            bandwidth_bps=bandwidth_bps,
+            error_code=error_code,
+            at_ms=int(time.time() * 1000),
+        ))
+        ranked = mem.candidates()
+        best = ranked[0] if ranked else None
+        if best is not None:
+            self._stamp_pair_health(
+                peer_fp,
+                latency_ms=best.latency_ms,
+                bandwidth_bps=best.bandwidth_bps,
+                reliability=best.successes / max(1, best.attempts),
+                best_route=best.route,
+            )
 
     def get_pair_health(self, peer_fp: str) -> dict | None:
         """Public read for /api/peers."""
         h = self._pair_health.get(peer_fp)
         if h is None:
             return None
-        return dict(h)
+        out = dict(h)
+        mem = self._route_memory.get(peer_fp)
+        if mem is not None:
+            out["route_scores"] = [c.__dict__ for c in mem.candidates()]
+            out["best_route"] = mem.best_route(out.get("best_route") or "lan")
+        return out
 
     async def revoke_peer(
         self, peer_fp: str, *, actor: str = "ui", note: str = "",
@@ -6447,7 +6513,19 @@ class Daemon:
                 # the persistent session is alive for the next send.
                 sess.last_used = time.time()
                 sess.messages_sent += 1
-                self._stamp_pair_health(sess.peer_fp)
+                done_ms = int(time.time() * 1000)
+                started_ms = int(base_metadata.get("last_attempt_ms") or now_ms)
+                elapsed_s = max(0.001, (done_ms - started_ms) / 1000.0)
+                throughput_bps = (
+                    (raw_bytes_sent * 8.0) / elapsed_s
+                    if raw_bytes_sent > 0 else None
+                )
+                self._record_route_observation(
+                    sess.peer_fp,
+                    route=getattr(sess, "regime", None) or "lan",
+                    ok=True,
+                    bandwidth_bps=throughput_bps,
+                )
 
             self._update_transfer(
                 transfer_id,
@@ -6521,6 +6599,22 @@ class Daemon:
             # opens a fresh handshake instead of inheriting the rot.
             with contextlib.suppress(Exception):
                 await self._drop_outbound_session(sess.peer_fp)
+            diag = diagnose_transfer({
+                "status": "paused" if transient else "failed",
+                "direction": "out",
+                "metadata": {
+                    **base_metadata,
+                    "error": err_str,
+                    "error_class": err_class,
+                    "transient": transient,
+                },
+            }).to_dict()
+            self._record_route_observation(
+                sess.peer_fp,
+                route=getattr(sess, "regime", None) or "lan",
+                ok=False,
+                error_code=diag["code"],
+            )
             if transient:
                 raise TransferPausedError(
                     err_str, transfer_id=transfer_id, path=path,
