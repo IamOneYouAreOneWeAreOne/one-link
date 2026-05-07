@@ -140,6 +140,9 @@ def _msg_record_to_event(rec) -> dict:
     }
     if rec.body is not None:
         out["body"] = rec.body
+    # v0.7.5: reply_to is a first-class wire field for inline-quote.
+    if getattr(rec, "reply_to", None):
+        out["reply_to"] = rec.reply_to
     # Fold metadata back into the dict (skipping the ones we already added)
     for k, v in (rec.metadata or {}).items():
         if k in ("short_id",) or k in out:
@@ -252,6 +255,7 @@ class UIServer:
         r.add_post(r"/api/peers/{fp}/pair-reject", self._guarded(self.api_pair_reject))
         r.add_get(r"/api/peers/{fp}/sas", self._guarded(self.api_get_sas))
         r.add_get("/api/messages", self._guarded(self.api_messages))
+        r.add_post(r"/api/messages/{msg_id}/react", self._guarded(self.api_react_message))
         r.add_get("/api/search", self._guarded(self.api_search))
         r.add_post("/api/send", self._guarded(self.api_send))
         r.add_post("/api/send-file", self._guarded(self.api_send_file))
@@ -1359,7 +1363,87 @@ class UIServer:
             peer_fp=peer_fp, room_id=room_q, limit=limit
         )
         msgs = [_msg_record_to_event(r) for r in recs]
+        # v0.7.5: bulk-fetch reactions for the returned messages so
+        # the UI can render the chip row in one shot.
+        try:
+            ids = [m.get("id") for m in msgs if m.get("id")]
+            reactions = self.daemon.state.list_reactions_for_messages(ids)
+        except Exception:
+            reactions = {}
+        for m in msgs:
+            r = reactions.get(m.get("id"))
+            if r:
+                m["reactions"] = r
         return web.json_response({"messages": msgs})
+
+    async def api_react_message(self, request: web.Request) -> web.Response:
+        """v0.7.5: add or remove an emoji reaction on a message.
+        Body: {emoji: str, op: "add"|"remove", peer: short_id_or_fp}
+        Sends a REACTION frame to the peer that authored the
+        message (so they can render the reaction in their UI too)
+        and persists locally."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        msg_id = request.match_info["msg_id"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        emoji = data.get("emoji")
+        op = data.get("op", "add")
+        peer_needle = data.get("peer")
+        if not isinstance(emoji, str) or not emoji or len(emoji) > 64:
+            return web.json_response(
+                {"error": "emoji must be a non-empty short string"},
+                status=400,
+            )
+        if op not in ("add", "remove"):
+            return web.json_response(
+                {"error": "op must be 'add' or 'remove'"}, status=400,
+            )
+        # Resolve target peer. The frontend should pass the
+        # conversation peer — that's whose copy of the message we're
+        # reacting to.
+        peer = None
+        if peer_needle:
+            peer = await self.daemon.resolve_for_send(str(peer_needle))
+        if peer is None:
+            # Persist locally even if peer is offline; the reaction
+            # will reach them next time they're online via outbox-
+            # style retry isn't implemented for reactions yet, so
+            # this is best-effort.
+            try:
+                if op == "add":
+                    self.daemon.state.record_reaction(
+                        target_msg_id=msg_id,
+                        peer_fp=self.daemon.me.fingerprint,
+                        emoji=emoji,
+                    )
+                else:
+                    self.daemon.state.remove_reaction(
+                        target_msg_id=msg_id,
+                        peer_fp=self.daemon.me.fingerprint,
+                        emoji=emoji,
+                    )
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=400)
+            self.broadcast({
+                "type": "reaction",
+                "target": msg_id,
+                "peer_fp": self.daemon.me.fingerprint,
+                "emoji": emoji,
+                "op": op,
+            })
+            return web.json_response({"ok": True, "delivered": False})
+        try:
+            await self.daemon.send_reaction(
+                peer, target_msg_id=msg_id, emoji=emoji, op=op,
+            )
+            return web.json_response({"ok": True, "delivered": True})
+        except Exception as e:
+            log.warning("send_reaction failed: %s", e)
+            translated = _translate_send_error(e)
+            return web.json_response(translated, status=translated["status"])
 
     # ─── /api/search ──────────────────────────────────────────────────
     async def api_search(self, request: web.Request) -> web.Response:
@@ -1411,6 +1495,11 @@ class UIServer:
         # Set `queue_on_failure: false` to opt out (e.g. for the
         # control plane's strict send command).
         queue_on_failure = bool(data.get("queue_on_failure", True))
+        # v0.7.5: optional reply_to threads this TEXT under a parent
+        # message id. Validated as a 32-hex string-ish; daemon
+        # tolerates anything string-shaped.
+        reply_to_raw = data.get("reply_to")
+        reply_to = str(reply_to_raw) if isinstance(reply_to_raw, str) and reply_to_raw else None
         if not peer_needle or not body:
             return web.json_response({"error": "peer and body required"}, status=400)
         # v0.5.1: also tries the rendezvous if the peer isn't on mDNS.
@@ -1433,7 +1522,7 @@ class UIServer:
                     log.warning("offline-enqueue failed: %s", enqueue_err)
             return web.json_response({"error": f"no peer {peer_needle!r}"}, status=404)
         try:
-            result = await self.daemon.send_text(peer, body)
+            result = await self.daemon.send_text(peer, body, reply_to=reply_to)
             return web.json_response({"ok": True, "result": result})
         except Exception as e:
             log.exception("send failed: %s", e)
@@ -1546,17 +1635,29 @@ class UIServer:
         if peer is None:
             return web.json_response({"error": f"no peer {peer_needle!r}"}, status=404)
 
+        keep_upload_for_resume = False
         try:
-            # v0.6.3: auto-retry once on transient failure. The peer
-            # might have a stale connection or the rendezvous lookup
-            # could give us a freshly-rotated endpoint. One retry with
-            # a re-resolved peer fixes the common case at zero
-            # cost when everything's fine.
+            # v0.6.3: auto-retry once on ordinary transient failure.
+            # v0.7.4: if send_file already created a paused transfer row,
+            # return 202 and keep the staged upload so auto-resume has
+            # bytes to send later instead of turning the pause into a 500.
             try:
                 result = await self.daemon.send_file(peer, upload_path)
             except (RuntimeError, OSError) as first_err:
+                if getattr(first_err, "transfer_id", None):
+                    keep_upload_for_resume = True
+                    return web.json_response(
+                        {
+                            "ok": True,
+                            "paused": True,
+                            "transfer_id": first_err.transfer_id,
+                            "error": str(first_err),
+                            "hint": "Transfer paused; it will resume automatically when the device reconnects.",
+                        },
+                        status=202,
+                    )
                 log.warning(
-                    "send_file first attempt failed (%s) — retrying with "
+                    "send_file first attempt failed (%s) - retrying with "
                     "fresh resolve", first_err,
                 )
                 fresh_peer = await self.daemon.resolve_for_send(peer_needle)
@@ -1565,12 +1666,24 @@ class UIServer:
                 result = await self.daemon.send_file(fresh_peer, upload_path)
             return web.json_response({"ok": True, "result": result})
         except Exception as e:
+            if getattr(e, "transfer_id", None):
+                keep_upload_for_resume = True
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "paused": True,
+                        "transfer_id": e.transfer_id,
+                        "error": str(e),
+                        "hint": "Transfer paused; it will resume automatically when the device reconnects.",
+                    },
+                    status=202,
+                )
             log.exception("send_file failed: %s", e)
             translated = _translate_send_error(e)
             return web.json_response(translated, status=translated["status"])
         finally:
             try:
-                if upload_path:
+                if upload_path and not keep_upload_for_resume:
                     upload_path.unlink(missing_ok=True)
             except OSError:
                 pass

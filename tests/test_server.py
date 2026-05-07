@@ -67,6 +67,53 @@ class _FakeReq:
         self.match_info: dict[str, str] = {}
 
 
+class _FakePart:
+    def __init__(
+        self, name: str, *, text: str | None = None,
+        data: bytes | None = None, filename: str | None = None,
+    ):
+        self.name = name
+        self.filename = filename
+        self._text = text
+        self._data = data or b""
+        self._offset = 0
+
+    async def text(self) -> str:
+        return self._text or ""
+
+    async def read_chunk(self, size: int = 8192) -> bytes:
+        if self._offset >= len(self._data):
+            return b""
+        out = self._data[self._offset:self._offset + size]
+        self._offset += len(out)
+        return out
+
+
+class _FakeMultipart:
+    def __init__(self, parts):
+        self._parts = list(parts)
+
+    def __aiter__(self):
+        self._iter = iter(self._parts)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+class _FakeMultipartReq:
+    content_type = "multipart/form-data; boundary=test"
+
+    def __init__(self, parts):
+        self._parts = parts
+
+    async def multipart(self):
+        return _FakeMultipart(self._parts)
+
+
 @pytest.mark.asyncio
 async def test_api_peers_hides_offline_pending_ghosts(tmp_path: Path):
     from one_link.server import UIServer
@@ -632,6 +679,42 @@ async def test_api_send_file_sanitizes_uploaded_filename():
         assert match, files
         assert all(f.parent == inbox for f in files)
         assert not (p.b.home / "data" / "evil.bin").exists()
+
+
+@pytest.mark.asyncio
+async def test_api_send_file_paused_keeps_staged_upload(tmp_path: Path, monkeypatch):
+    """A transient send failure should become HTTP 202 + durable staged
+    bytes, not a 500 followed by deleting the only upload copy."""
+    from one_link.daemon import TransferPausedError
+    from one_link.server import UIServer
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    seen_paths: list[Path] = []
+
+    class _Daemon:
+        state = None
+        me = SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa")
+
+        async def resolve_for_send(self, needle):
+            return SimpleNamespace(short_id=str(needle))
+
+        async def send_file(self, peer, path):
+            seen_paths.append(Path(path))
+            raise TransferPausedError(
+                "network dropped", transfer_id="t-paused", path=Path(path),
+            )
+
+    server = UIServer(_Daemon())
+    resp = await server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text="bbbbbbbb"),
+        _FakePart("file", data=b"keep me", filename="resume.bin"),
+    ]))
+    body = json.loads(resp.text)
+    assert resp.status == 202
+    assert body["paused"] is True
+    assert body["transfer_id"] == "t-paused"
+    assert seen_paths and seen_paths[0].is_file()
+    assert seen_paths[0].read_bytes() == b"keep me"
 
 
 @pytest.mark.asyncio

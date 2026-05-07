@@ -265,6 +265,18 @@ CREATE TABLE IF NOT EXISTS folder_audit (
 CREATE INDEX IF NOT EXISTS idx_folder_audit_ts ON folder_audit(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_folder_audit_folder ON folder_audit(folder_name);
 CREATE INDEX IF NOT EXISTS idx_folder_audit_peer ON folder_audit(peer_fp);
+
+-- v0.7.5: per-message emoji reactions. (target_msg_id, peer_fp, emoji)
+-- is the natural primary key — each peer can hold at most one of each
+-- emoji on a given message (toggle on/off semantics).
+CREATE TABLE IF NOT EXISTS message_reactions (
+    target_msg_id  TEXT    NOT NULL,
+    peer_fp        TEXT    NOT NULL,
+    emoji          TEXT    NOT NULL,
+    ts_ms          INTEGER NOT NULL,
+    PRIMARY KEY (target_msg_id, peer_fp, emoji)
+);
+CREATE INDEX IF NOT EXISTS idx_reactions_target ON message_reactions(target_msg_id);
 """
 
 
@@ -303,6 +315,8 @@ class MessageRecord:
     body: Optional[str]
     room_id: Optional[str]
     metadata: dict
+    # v0.7.5: optional parent message id for reply/quote rendering.
+    reply_to: Optional[str] = None
 
 
 @dataclass
@@ -388,8 +402,20 @@ class State:
                 self._migrate_v3_peer_profile(c)
                 if current < 3:
                     c.execute("INSERT INTO schema_version(version) VALUES(3)")
+                # v0.7.5: messages gain reply_to column.
+                self._migrate_v4_messages_reply_to(c)
+                if current < 4:
+                    c.execute("INSERT INTO schema_version(version) VALUES(4)")
             finally:
                 c.close()
+
+    def _migrate_v4_messages_reply_to(self, c: sqlite3.Cursor) -> None:
+        """v0.7.5: messages.reply_to is the parent msg_id when a row
+        is a reply/quote. Idempotent."""
+        rows = c.execute("PRAGMA table_info(messages)").fetchall()
+        existing = {row[1] for row in rows}
+        if "reply_to" not in existing:
+            c.execute("ALTER TABLE messages ADD COLUMN reply_to TEXT")
 
     def _migrate_v3_peer_profile(self, c: sqlite3.Cursor) -> None:
         """v0.7.3: add per-peer profile columns. local_alias is a
@@ -955,19 +981,80 @@ class State:
         body: Optional[str],
         room_id: Optional[str] = None,
         metadata: Optional[dict] = None,
+        reply_to: Optional[str] = None,
     ) -> None:
         with self._write_lock:
             self._conn.execute(
                 """
                 INSERT OR IGNORE INTO messages(
-                    id, ts_ms, direction, peer_fp, msg_type, body, room_id, metadata_json
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    id, ts_ms, direction, peer_fp, msg_type, body, room_id,
+                    metadata_json, reply_to
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     id, ts_ms, direction, peer_fp, msg_type, body, room_id,
                     json.dumps(metadata or {}, separators=(",", ":")),
+                    reply_to,
                 ),
             )
+
+    # ─── reactions (v0.7.5) ───────────────────────────────────────────
+
+    def record_reaction(
+        self, *, target_msg_id: str, peer_fp: str, emoji: str,
+    ) -> bool:
+        """Add a reaction. Idempotent on (target, peer, emoji).
+        Returns True if a new row was inserted, False if it already
+        existed."""
+        if not target_msg_id or not peer_fp or not emoji:
+            raise ValueError("target_msg_id, peer_fp, emoji required")
+        # Bound emoji length — actual single grapheme can be up to
+        # ~50 bytes in Unicode, but a "reaction" with hundreds of
+        # combining marks is abuse.
+        if len(emoji) > 64:
+            raise ValueError("emoji too long")
+        with self._write_lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO message_reactions(
+                    target_msg_id, peer_fp, emoji, ts_ms
+                ) VALUES(?, ?, ?, ?)
+                ON CONFLICT(target_msg_id, peer_fp, emoji) DO NOTHING
+                """,
+                (target_msg_id, peer_fp, emoji, _now_ms()),
+            )
+            return cur.rowcount > 0
+
+    def remove_reaction(
+        self, *, target_msg_id: str, peer_fp: str, emoji: str,
+    ) -> bool:
+        with self._write_lock:
+            cur = self._conn.execute(
+                "DELETE FROM message_reactions"
+                " WHERE target_msg_id = ? AND peer_fp = ? AND emoji = ?",
+                (target_msg_id, peer_fp, emoji),
+            )
+            return cur.rowcount > 0
+
+    def list_reactions_for_messages(
+        self, msg_ids: Iterable[str],
+    ) -> dict[str, dict[str, list[str]]]:
+        """Return {target_msg_id: {emoji: [peer_fp, ...], ...}}.
+        Empty for messages with no reactions."""
+        ids = [str(m) for m in msg_ids if m]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"SELECT target_msg_id, peer_fp, emoji FROM message_reactions"
+            f" WHERE target_msg_id IN ({placeholders}) ORDER BY ts_ms ASC",
+            ids,
+        ).fetchall()
+        out: dict[str, dict[str, list[str]]] = {}
+        for r in rows:
+            mid = r["target_msg_id"]
+            out.setdefault(mid, {}).setdefault(r["emoji"], []).append(r["peer_fp"])
+        return out
 
     def search_messages(
         self,
@@ -1020,6 +1107,7 @@ class State:
             md = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
         except Exception:
             md = {}
+        cols = row.keys()
         return MessageRecord(
             id=row["id"],
             ts_ms=row["ts_ms"],
@@ -1029,6 +1117,7 @@ class State:
             body=row["body"],
             room_id=row["room_id"],
             metadata=md,
+            reply_to=row["reply_to"] if "reply_to" in cols else None,
         )
 
     # --- transfers ---------------------------------------------------------

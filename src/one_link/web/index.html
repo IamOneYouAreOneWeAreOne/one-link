@@ -916,6 +916,93 @@
   .file-row .badge.queued   { background: rgba(245,196,81,.15); color: var(--warn); }
   .file-row .badge.paused   { background: rgba(78,193,255,.13); color: var(--accent-2, #4ec1ff); }
 
+  /* v0.7.5: reply quote inside a message bubble */
+  .msg .reply-quote {
+    background: rgba(255,255,255,.05); border-left: 2px solid var(--accent);
+    border-radius: 4px; padding: 4px 8px; margin-bottom: 4px;
+    font-size: 11.5px; color: var(--text-dim); cursor: pointer;
+    max-width: 100%;
+  }
+  .msg .reply-quote:hover { background: rgba(255,255,255,.08); }
+  .msg .reply-quote .reply-who {
+    color: var(--accent); font-weight: 600; font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: .5px;
+  }
+  .msg .reply-quote .reply-text {
+    color: var(--text-dim); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* v0.7.5: hover toolbar above each message bubble */
+  .msg { position: relative; }
+  .msg-toolbar {
+    position: absolute; top: -10px; right: 6px;
+    display: none; gap: 4px;
+    background: var(--bg-2); border: 1px solid var(--bg-3);
+    border-radius: 14px; padding: 2px 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.25);
+  }
+  .msg:hover .msg-toolbar { display: flex; }
+  .msg-toolbar .tb-btn {
+    background: transparent; color: var(--text-dim);
+    padding: 2px 6px; font-size: 12px; border-radius: 10px;
+  }
+  .msg-toolbar .tb-btn:hover { background: var(--bg-3); color: var(--text); }
+
+  /* v0.7.5: reactions chip row */
+  .reactions-row {
+    display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px;
+  }
+  .react-chip {
+    background: var(--bg-2); border: 1px solid var(--bg-3);
+    border-radius: 12px; padding: 2px 8px; font-size: 12px;
+    color: var(--text-dim); display: flex; align-items: center; gap: 4px;
+  }
+  .react-chip:hover { background: var(--bg-3); color: var(--text); }
+  .react-chip.mine {
+    background: rgba(124,92,255,.18);
+    border-color: rgba(124,92,255,.4);
+    color: var(--text);
+  }
+  .react-chip .count { font-size: 11px; }
+
+  /* v0.7.5: emoji picker popover */
+  .emoji-picker {
+    position: fixed; z-index: 100;
+    background: var(--bg-2); border: 1px solid var(--bg-3);
+    border-radius: 8px; padding: 4px;
+    display: flex; gap: 2px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.35);
+  }
+  .emoji-btn {
+    background: transparent; padding: 4px 6px; font-size: 18px;
+    border-radius: 6px; cursor: pointer;
+  }
+  .emoji-btn:hover { background: var(--bg-3); }
+
+  /* v0.7.5: composer reply bar */
+  .reply-bar {
+    display: none; position: relative;
+    background: rgba(124,92,255,.1); border-left: 2px solid var(--accent);
+    padding: 6px 32px 6px 10px; margin-bottom: 4px; border-radius: 4px;
+    font-size: 12px;
+  }
+  .reply-bar.show { display: block; }
+  .reply-bar .reply-bar-label {
+    color: var(--accent); font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .5px;
+  }
+  .reply-bar .reply-bar-body {
+    color: var(--text-dim); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .reply-bar .reply-bar-close {
+    position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+    background: transparent; color: var(--text-dim); font-size: 16px;
+    line-height: 1; padding: 0 6px;
+  }
+  .reply-bar .reply-bar-close:hover { color: var(--text); }
+
   /* ── Notification banner (one-time prompt) ─────────────────────────── */
   .notif-banner {
     display: none;
@@ -1115,6 +1202,8 @@
         <div class="messages" id="messages"></div>
 
         <div class="composer">
+          <!-- v0.7.5: shows the message we're replying to. -->
+          <div class="reply-bar" id="reply-bar"></div>
           <div class="attach-tray" id="attach-tray"></div>
           <button class="icon-btn" id="btn-attach2" title="Attach file">📎</button>
           <button class="icon-btn" id="btn-screenshot" title="Paste screenshot from clipboard">📷</button>
@@ -1520,7 +1609,15 @@
     staged: [],           // [{id, file, dataUrl?}] pending send
     stagedSeq: 0,
     filesMode: "received",  // "received" | "sent"
+    // v0.7.5: when set, the next sendCurrent threads its TEXT
+    // under this parent message id (becomes msg.reply_to on the wire).
+    replyTo: null,
   };
+
+  // v0.7.5: fixed emoji palette for reactions. Custom picker
+  // arrives in v0.7.5.1 — for now five universally-meaningful
+  // reactions cover the 80% case.
+  const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "🎉"];
 
   const IMAGE_EXT = new Set(["png","jpg","jpeg","gif","webp","bmp","svg"]);
   const isImageName = (name) => IMAGE_EXT.has((name?.split(".").pop() || "").toLowerCase());
@@ -2204,14 +2301,187 @@
 
       if (msg.t === "TEXT") {
         const b = el("div", `msg ${msg.dir}`);
+        // v0.7.5: inline-quote of the parent message when this is
+        // a reply. Truncate the quote to 80 chars; clicking it
+        // scrolls to the original (handled below via data-id).
+        if (msg.reply_to) {
+          const parent = state.messages.find(x =>
+            x.id === msg.reply_to && x.peer === msg.peer
+          );
+          const quote = el("div", "reply-quote");
+          const quoteBody = parent?.body
+            ? (parent.body.length > 80 ? parent.body.slice(0, 80) + "…" : parent.body)
+            : "(message)";
+          const who = parent?.dir === "in"
+            ? (state.peers.get(msg.peer)?.display_name
+               || state.peers.get(msg.peer)?.hostname || msg.peer)
+            : "you";
+          quote.appendChild(el("div", "reply-who", `↩ ${who}`));
+          quote.appendChild(el("div", "reply-text", quoteBody));
+          if (msg.reply_to) {
+            quote.dataset.replyTo = msg.reply_to;
+            quote.onclick = () => {
+              const tgt = m.querySelector(`[data-msg-id="${CSS.escape(msg.reply_to)}"]`);
+              if (tgt) tgt.scrollIntoView({ behavior: "smooth", block: "center" });
+            };
+          }
+          b.appendChild(quote);
+        }
         b.appendChild(renderInlineText(msg.body || ""));
         b.appendChild(el("span", "when", fmtTime(msg.ts)));
+        b.dataset.msgId = msg.id;
+        // v0.7.5: hover toolbar (Reply + React).
+        b.appendChild(renderMsgToolbar(msg));
+        // v0.7.5: reactions row (chips per emoji w/ count).
+        if (msg.reactions && Object.keys(msg.reactions).length) {
+          b.appendChild(renderReactionsRow(msg));
+        }
         m.appendChild(b);
       } else if (msg.t === "FILE_OFFER" || msg.t === "FILE_DONE") {
         m.appendChild(renderFileBubble(msg));
       }
     }
     m.scrollTop = m.scrollHeight;
+  }
+
+  // v0.7.5: hover toolbar (Reply + React buttons) + reactions row.
+  function renderMsgToolbar(msg) {
+    const bar = el("div", "msg-toolbar");
+    const replyBtn = el("button", "tb-btn", "↩");
+    replyBtn.title = "Reply";
+    replyBtn.onclick = (ev) => {
+      ev.stopPropagation();
+      setReplyTo(msg);
+    };
+    const reactBtn = el("button", "tb-btn", "+");
+    reactBtn.title = "React";
+    reactBtn.onclick = (ev) => {
+      ev.stopPropagation();
+      openEmojiPicker(reactBtn, msg);
+    };
+    bar.appendChild(replyBtn);
+    bar.appendChild(reactBtn);
+    return bar;
+  }
+
+  function renderReactionsRow(msg) {
+    const row = el("div", "reactions-row");
+    const myFp = state.me?.fingerprint;
+    for (const [emoji, fps] of Object.entries(msg.reactions || {})) {
+      const chip = el("button", "react-chip");
+      const mine = myFp && fps.includes(myFp);
+      if (mine) chip.classList.add("mine");
+      chip.appendChild(document.createTextNode(emoji));
+      const count = el("span", "count", String(fps.length));
+      chip.appendChild(count);
+      chip.title = fps.length === 1
+        ? `${shortIdForFp(fps[0])} reacted`
+        : `${fps.length} reactions`;
+      chip.onclick = (ev) => {
+        ev.stopPropagation();
+        toggleReaction(msg, emoji, !mine);
+      };
+      row.appendChild(chip);
+    }
+    return row;
+  }
+
+  function shortIdForFp(fp) {
+    if (!fp) return "?";
+    if (state.me?.fingerprint === fp) return "you";
+    for (const p of state.peers.values()) {
+      if (p.fingerprint === fp) {
+        return p.display_name || p.hostname || p.short_id;
+      }
+    }
+    return fp.slice(0, 8);
+  }
+
+  function setReplyTo(msg) {
+    state.replyTo = { id: msg.id, body: msg.body || "", peer: msg.peer };
+    renderReplyBar();
+    $("#input")?.focus();
+  }
+  function clearReplyTo() {
+    state.replyTo = null;
+    renderReplyBar();
+  }
+  function renderReplyBar() {
+    const bar = $("#reply-bar");
+    if (!bar) return;
+    if (!state.replyTo) {
+      bar.classList.remove("show");
+      bar.innerHTML = "";
+      return;
+    }
+    bar.classList.add("show");
+    bar.innerHTML = "";
+    const label = el("div", "reply-bar-label", "Replying to");
+    const body = el("div", "reply-bar-body");
+    const text = state.replyTo.body || "(message)";
+    body.textContent = text.length > 80 ? text.slice(0, 80) + "…" : text;
+    const x = el("button", "reply-bar-close", "×");
+    x.onclick = clearReplyTo;
+    bar.appendChild(label);
+    bar.appendChild(body);
+    bar.appendChild(x);
+  }
+
+  function openEmojiPicker(anchor, msg) {
+    // Remove any existing picker first.
+    document.querySelectorAll(".emoji-picker").forEach(p => p.remove());
+    const picker = el("div", "emoji-picker");
+    for (const e of REACTION_EMOJIS) {
+      const b = el("button", "emoji-btn", e);
+      b.onclick = (ev) => {
+        ev.stopPropagation();
+        toggleReaction(msg, e, true);
+        picker.remove();
+      };
+      picker.appendChild(b);
+    }
+    document.body.appendChild(picker);
+    const r = anchor.getBoundingClientRect();
+    picker.style.left = `${r.left}px`;
+    picker.style.top = `${r.bottom + 4}px`;
+    // Click-outside to dismiss.
+    setTimeout(() => {
+      const off = (ev) => {
+        if (!picker.contains(ev.target)) {
+          picker.remove();
+          document.removeEventListener("click", off, true);
+        }
+      };
+      document.addEventListener("click", off, true);
+    }, 0);
+  }
+
+  async function toggleReaction(msg, emoji, addNotRemove) {
+    const op = addNotRemove ? "add" : "remove";
+    try {
+      await api.post(
+        `/api/messages/${encodeURIComponent(msg.id)}/react`,
+        { emoji, op, peer: msg.peer },
+      );
+      // Optimistic local mutation — server will broadcast a
+      // reaction event to confirm.
+      msg.reactions = msg.reactions || {};
+      const myFp = state.me?.fingerprint || "self";
+      if (op === "add") {
+        msg.reactions[emoji] = msg.reactions[emoji] || [];
+        if (!msg.reactions[emoji].includes(myFp)) {
+          msg.reactions[emoji].push(myFp);
+        }
+      } else {
+        if (msg.reactions[emoji]) {
+          msg.reactions[emoji] = msg.reactions[emoji].filter(f => f !== myFp);
+          if (msg.reactions[emoji].length === 0) delete msg.reactions[emoji];
+        }
+      }
+      scheduleRenderMessages();
+    } catch (e) {
+      toast(`Reaction failed: ${errorToastBody(e)}`, "bad");
+    }
   }
 
   function renderFileBubble(msg) {
@@ -2994,6 +3264,28 @@
         // v0.7.3: alias / mute / cap changes — refresh the sidebar so
         // the new display name and toggle states show up immediately.
         refreshPeers();
+      } else if (m.type === "reaction") {
+        // v0.7.5: live reaction event. Apply to whichever in-memory
+        // message matches the target id, then re-render.
+        const target = state.messages.find(x => x.id === m.target);
+        if (target) {
+          target.reactions = target.reactions || {};
+          if (m.op === "add") {
+            target.reactions[m.emoji] = target.reactions[m.emoji] || [];
+            if (!target.reactions[m.emoji].includes(m.peer_fp)) {
+              target.reactions[m.emoji].push(m.peer_fp);
+            }
+          } else {
+            if (target.reactions[m.emoji]) {
+              target.reactions[m.emoji] = target.reactions[m.emoji]
+                .filter(f => f !== m.peer_fp);
+              if (target.reactions[m.emoji].length === 0) {
+                delete target.reactions[m.emoji];
+              }
+            }
+          }
+          scheduleRenderMessages();
+        }
       } else if (m.type === "pair_request") {
         // Incoming pair request from another device. Open the same modal
         // so the user verifies the SAS. v0.4: requester is by definition
@@ -3154,9 +3446,15 @@
     try {
       if (body) {
         try {
-          await api.post("/api/send", { peer: state.selectedPeer, body });
+          // v0.7.5: thread under reply target if set.
+          const sendBody = { peer: state.selectedPeer, body };
+          if (state.replyTo && state.replyTo.peer === state.selectedPeer) {
+            sendBody.reply_to = state.replyTo.id;
+          }
+          await api.post("/api/send", sendBody);
           input.value = "";
           input.style.height = "auto";
+          clearReplyTo();
         } catch (e) {
           toast(errorToastBody(e), "bad", 8000);
         }

@@ -568,9 +568,14 @@ class Daemon:
         """Record a message in sqlite and return the canonical event dict
         (with peer_fp + peer short_id) for tail / UI broadcast."""
         body = msg.get("body") if msg.get("t") == "TEXT" else None
+        # v0.7.5: reply_to is a first-class column, not metadata.
+        reply_to = (
+            msg.get("reply_to")
+            if isinstance(msg.get("reply_to"), str) else None
+        )
         # Store everything-except-the-canonical fields as metadata so we
         # round-trip cleanly for tests and history reads.
-        canonical = {"t", "id", "ts", "body"}
+        canonical = {"t", "id", "ts", "body", "reply_to"}
         metadata = {
             **{k: v for k, v in msg.items() if k not in canonical},
             "short_id": peer_short_id,
@@ -586,10 +591,14 @@ class Daemon:
                     body=body,
                     room_id=msg.get("room_id"),
                     metadata=metadata,
+                    reply_to=reply_to,
                 )
             except Exception as e:
                 log.warning("state.record_message failed: %s", e)
-        return {**msg, "dir": direction, "peer": peer_short_id, "peer_fp": peer_fp}
+        out = {**msg, "dir": direction, "peer": peer_short_id, "peer_fp": peer_fp}
+        if reply_to:
+            out["reply_to"] = reply_to
+        return out
 
     def _transfer_event(self, rec) -> dict:
         pct = 0.0
@@ -1043,6 +1052,48 @@ class Daemon:
             await self._handle_group_msg(channel, msg, peer_fp, peer_sid)
         elif t == "ENDPOINT_UPDATE":
             await self._handle_endpoint_update(channel, msg, peer_fp, peer_sid)
+        elif t == "REACTION":
+            # v0.7.5: emoji reaction frame. {target, emoji, op}.
+            # Only pinned peers can react against our messages, since
+            # accepting reactions from strangers would surface their
+            # short_id in our UI without prior trust.
+            if not self._is_pinned(peer_fp):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="not_pinned",
+                )))
+                return
+            target = str(msg.get("target") or "")
+            emoji = str(msg.get("emoji") or "")
+            op = str(msg.get("op") or "add")
+            if not target or not emoji or op not in ("add", "remove"):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="bad_reaction",
+                )))
+                return
+            if self.state is not None:
+                try:
+                    if op == "add":
+                        self.state.record_reaction(
+                            target_msg_id=target, peer_fp=peer_fp, emoji=emoji,
+                        )
+                    else:
+                        self.state.remove_reaction(
+                            target_msg_id=target, peer_fp=peer_fp, emoji=emoji,
+                        )
+                except Exception as e:
+                    log.warning("record_reaction failed: %s", e)
+            if self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "reaction",
+                        "target": target, "peer_fp": peer_fp,
+                        "emoji": emoji, "op": op,
+                    })
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+            )))
         elif t == "PING":
             await channel.send(encode_msg(make_msg("PONG", self.me.short_id)))
         elif t == "PAIR_REQUEST":
@@ -3645,9 +3696,59 @@ class Daemon:
             # Peer may already be unreachable; that's fine.
             pass
 
-    async def send_text(self, peer: Peer, body: str) -> dict:
-        m = make_msg("TEXT", self.me.short_id, body=body)
+    async def send_text(
+        self, peer: Peer, body: str, *, reply_to: str | None = None,
+    ) -> dict:
+        # v0.7.5: optional reply_to threads this TEXT under a parent
+        # message. The receiver renders an inline quote chip.
+        kwargs: dict = {"body": body}
+        if reply_to:
+            kwargs["reply_to"] = str(reply_to)
+        m = make_msg("TEXT", self.me.short_id, **kwargs)
         acks = await self.send_to(peer, [m])
+        return {"sent": m, "ack": acks[0] if acks else None}
+
+    async def send_reaction(
+        self, peer: Peer, *, target_msg_id: str, emoji: str, op: str = "add",
+    ) -> dict:
+        """v0.7.5: emit a REACTION frame to the peer for one of
+        their messages. `op` is 'add' or 'remove' — the receiver
+        applies idempotently. Persisted on both sides."""
+        if op not in ("add", "remove"):
+            raise ValueError("op must be 'add' or 'remove'")
+        m = make_msg(
+            "REACTION", self.me.short_id,
+            target=str(target_msg_id),
+            emoji=str(emoji),
+            op=op,
+        )
+        acks = await self.send_to(peer, [m])
+        # Persist on the local side too (the sending peer's reaction
+        # against the target message). _on_peer_message handles the
+        # receiver-side persist.
+        if self.state is not None and self.me.fingerprint:
+            with contextlib.suppress(Exception):
+                if op == "add":
+                    self.state.record_reaction(
+                        target_msg_id=str(target_msg_id),
+                        peer_fp=self.me.fingerprint,
+                        emoji=str(emoji),
+                    )
+                else:
+                    self.state.remove_reaction(
+                        target_msg_id=str(target_msg_id),
+                        peer_fp=self.me.fingerprint,
+                        emoji=str(emoji),
+                    )
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "reaction",
+                    "target": str(target_msg_id),
+                    "peer_fp": self.me.fingerprint,
+                    "emoji": str(emoji),
+                    "op": op,
+                })
         return {"sent": m, "ack": acks[0] if acks else None}
 
     # ─── outbox / store-and-forward (v0.7.1) ──────────────────────────
@@ -4176,19 +4277,22 @@ class Daemon:
                     "error": (
                         f"file send to {peer.short_id}: handshake "
                         f"timed out after {HANDSHAKE_DEADLINE_OUTBOUND_S}s "
-                        f"— peer not responsive"
+                        f"- peer not responsive"
                     ),
                     "error_class": "TimeoutError",
+                    "transient": True,
+                    "paused_at_ms": int(time.time() * 1000),
                 },
             )
-            raise RuntimeError(
-                f"file send to {peer.short_id}: handshake timed out "
-                f"after {HANDSHAKE_DEADLINE_OUTBOUND_S}s — peer not responsive"
+            raise TransferPausedError(
+                "file send paused: handshake timed out",
+                transfer_id=transfer_id,
+                path=path,
             ) from e
         except Exception as e:
             # _get_outbound_session already wraps its own handshake
             # timeout into RuntimeError("... handshake timed out ..."),
-            # which the existing test_send_file_aborts_when_receiver…
+            # which the existing send-file timeout tests pin.
             # robustness test pins. Surface the original message and
             # stamp the ledger row so the UI shows the reason.
             err_msg = str(e)
@@ -4197,21 +4301,21 @@ class Daemon:
                 err_msg if "handshake timed out" in err_msg.lower()
                 else f"dial failed: {err_msg}"
             )
+            transient = _is_transient_send_error(e)
             self._update_transfer(
-                transfer_id, status="failed",
+                transfer_id, status="paused" if transient else "failed",
                 metadata={
                     "mode": "cdc",
                     "path": str(path),
                     "error": ledger_msg[:500],
                     "error_class": err_class,
+                    "transient": transient,
+                    "paused_at_ms": int(time.time() * 1000) if transient else None,
                 },
             )
-            if "handshake timed out" in err_msg.lower():
-                # Preserve the canonical "handshake timed out" wording
-                # for callers/tests matching on it.
-                raise RuntimeError(
-                    f"file send to {peer.short_id}: handshake timed out "
-                    f"after {HANDSHAKE_DEADLINE_OUTBOUND_S}s — peer not responsive"
+            if transient:
+                raise TransferPausedError(
+                    ledger_msg, transfer_id=transfer_id, path=path,
                 ) from e
             raise
 
@@ -4466,6 +4570,10 @@ class Daemon:
             # opens a fresh handshake instead of inheriting the rot.
             with contextlib.suppress(Exception):
                 await self._drop_outbound_session(sess.peer_fp)
+            if transient:
+                raise TransferPausedError(
+                    err_str, transfer_id=transfer_id, path=path,
+                ) from e
             raise
 
     # ─── control plane (local CLI) ──────────────────────────────────────

@@ -26,6 +26,7 @@ from one_link.daemon import (
     Daemon,
     FILE_ACK_DEADLINE_S,
     HANDSHAKE_DEADLINE_OUTBOUND_S,
+    TransferPausedError,
 )
 from one_link.discovery import Peer
 from one_link.identity import Identity, fingerprint_of
@@ -112,12 +113,12 @@ async def test_send_file_aborts_when_receiver_doesnt_speak_protocol(
 
 
 @pytest.mark.asyncio
-async def test_send_file_marks_transfer_failed_with_reason(
+async def test_send_file_marks_transfer_paused_with_reason(
     tmp_path: Path, monkeypatch,
 ):
-    """When send_file aborts on a timeout, the transfer-ledger row
-    must be 'failed' with a human-readable reason in metadata —
-    that's what the UI surfaces instead of a silent spinner."""
+    """When send_file aborts on a transient timeout, the transfer-ledger
+    row must be 'paused' with a human-readable reason in metadata.
+    The UI/API can then show "will resume" instead of a 500 or spinner."""
     me_a = _new_identity()
     me_b = _new_identity()
     state_a = State(db_path=tmp_path / "state.db")
@@ -148,16 +149,17 @@ async def test_send_file_marks_transfer_failed_with_reason(
         "one_link.daemon.HANDSHAKE_DEADLINE_OUTBOUND_S", 0.5,
     )
     try:
-        with pytest.raises(RuntimeError):
+        with pytest.raises(TransferPausedError):
             await daemon_a.send_file(peer_b, f)
-        # The ledger row should now be 'failed' with our reason.
+        # The ledger row should now be 'paused' with our reason.
         rows = state_a.list_transfers(limit=10)
         assert rows, "no transfer recorded"
         rec = rows[0]
-        assert rec.status == "failed"
+        assert rec.status == "paused"
         # Reason populated.
         assert "error" in rec.metadata
         assert "timed out" in rec.metadata["error"].lower()
+        assert rec.metadata.get("transient") is True
     finally:
         server.close()
         with contextlib.suppress(Exception):
