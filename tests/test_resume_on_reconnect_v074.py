@@ -211,7 +211,7 @@ async def test_resume_walks_only_paused_outbound(tmp_path: Path):
     )
     sends = []
 
-    async def _fake_send_file(peer, path):
+    async def _fake_send_file(peer, path, *, transfer_id=None):
         sends.append(path)
         return {}
 
@@ -226,6 +226,105 @@ async def test_resume_walks_only_paused_outbound(tmp_path: Path):
     # Inbound paused row was not touched.
     assert state.get_transfer("t-in").status == "paused"
     assert state.get_transfer("t-done").status == "complete"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_respects_retry_backoff(tmp_path: Path):
+    """Paused rows with a future retry time stay quiet until due."""
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    src = tmp_path / "later.bin"
+    src.write_bytes(b"not yet")
+    state.upsert_transfer(
+        id="t-later", direction="out", peer_fp=them.fingerprint,
+        kind="file", name="later.bin", size=7, status="paused",
+        progress_bytes=0, total_bytes=7,
+        chunks_done=0, chunks_total=1,
+        metadata={
+            "path": str(src),
+            "next_retry_ms": 9_999_999_999_999,
+            "delivery_state": "waiting_for_device",
+        },
+    )
+
+    fake_peer = Peer(
+        short_id=them.short_id, hostname="them",
+        address="127.0.0.1", port=12345,
+        ed_pub_hex=them.public_bytes.hex(),
+    )
+    sends = []
+
+    async def _fake_resolve(needle):
+        return fake_peer
+
+    async def _fake_send_file(peer, path, *, transfer_id=None):
+        sends.append((path, transfer_id))
+        return {}
+
+    daemon.resolve_for_send = _fake_resolve  # type: ignore[method-assign]
+    daemon.send_file = _fake_send_file  # type: ignore[method-assign]
+
+    result = await daemon.resume_paused_transfers_for(them.fingerprint)
+    assert result["resumed"] == 0
+    assert sends == []
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_reuses_existing_transfer_id(tmp_path: Path):
+    """A resumed transfer updates the durable intent row instead of
+    creating a second ghost row beside it.
+    """
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    src = tmp_path / "same.bin"
+    src.write_bytes(b"again")
+    state.upsert_transfer(
+        id="t-same", direction="out", peer_fp=them.fingerprint,
+        kind="file", name="same.bin", size=5, status="paused",
+        progress_bytes=0, total_bytes=5,
+        chunks_done=0, chunks_total=1,
+        metadata={"path": str(src), "next_retry_ms": 0},
+    )
+    fake_peer = Peer(
+        short_id=them.short_id, hostname="them",
+        address="127.0.0.1", port=12345,
+        ed_pub_hex=them.public_bytes.hex(),
+    )
+    seen: list[str | None] = []
+
+    async def _fake_resolve(needle):
+        return fake_peer
+
+    async def _fake_send_file(peer, path, *, transfer_id=None):
+        seen.append(transfer_id)
+        state.update_transfer("t-same", status="complete")
+        return {}
+
+    daemon.resolve_for_send = _fake_resolve  # type: ignore[method-assign]
+    daemon.send_file = _fake_send_file  # type: ignore[method-assign]
+
+    result = await daemon.resume_paused_transfers_for(them.fingerprint)
+    assert result["resumed"] == 1
+    assert seen == ["t-same"]
+    assert [r.id for r in state.list_transfers(limit=10)] == ["t-same"]
     state.close()
 
 
@@ -264,7 +363,7 @@ async def test_resume_concurrent_calls_are_serialized(tmp_path: Path):
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def _slow_send_file(peer, path):
+    async def _slow_send_file(peer, path, *, transfer_id=None):
         started.set()
         await release.wait()
         return {}
@@ -366,5 +465,5 @@ def test_index_html_has_paused_status_renderer():
     p = Path(__file__).resolve().parent.parent / "src" / "one_link" / "web" / "index.html"
     text = p.read_text(encoding="utf-8")
     assert '"paused"' in text or "'paused'" in text
-    assert "Paused" in text  # human-readable label
+    assert "Waiting for device" in text  # human-readable retry label
     assert ".badge.paused" in text  # CSS pill style

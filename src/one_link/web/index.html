@@ -3717,12 +3717,14 @@
 
   function statusLabel(t, fallback) {
     if (!t) return fallback;
-    if (t.status === "queued")   return "Queued";
+    const meta = t.metadata || {};
+    const stateName = meta.delivery_state || "";
+    if (t.status === "queued")   return stateName === "resuming" ? "Resuming" : "Waiting for device";
     if (t.status === "offered")  return "Sending…";
     if (t.status === "active")   return `Sending… ${Math.round(t.progress_pct || 0)}%`;
-    if (t.status === "complete") return t.direction === "in" ? "Received" : "Sent";
-    if (t.status === "paused")   return "Paused — will resume";
-    if (t.status === "failed")   return "Failed";
+    if (t.status === "complete") return t.direction === "in" ? "Received" : "Done";
+    if (t.status === "paused")   return stateName === "resuming" ? "Resuming" : "Waiting for device";
+    if (t.status === "failed")   return meta.transient ? "Waiting for device" : "Needs attention";
     return t.status || fallback;
   }
 
@@ -3853,7 +3855,7 @@
   function statusKind(t) {
     if (!t) return "queued";
     if (t.status === "complete") return "sent";
-    if (t.status === "failed")   return "failed";
+    if (t.status === "failed")   return (t.metadata || {}).transient ? "paused" : "failed";
     if (t.status === "paused")   return "paused";
     if (t.status === "active" || t.status === "offered") return "sending";
     return "queued";
@@ -4389,7 +4391,7 @@
       meta.appendChild(detail);
     } else if (kind === "paused" && t) {
       const detail = el("div", "transfer-detail");
-      detail.textContent = `${fmtBytes(t.progress_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)} · resumes when peer reconnects`;
+      detail.textContent = `${fmtBytes(t.progress_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)} · One Link will keep trying automatically`;
       meta.appendChild(detail);
     }
 
@@ -5379,7 +5381,18 @@
       row.appendChild(el("div", "icon", t.direction === "in" ? "In" : "Out"));
       const meta = el("div", "meta");
       meta.appendChild(el("div", "name", t.name || "file"));
-      meta.appendChild(el("div", "size", `${t.status} · ${fmtBytes(t.progress_bytes)} / ${fmtBytes(t.total_bytes)}`));
+      const label = statusLabel(t, t.status || "Queued");
+      const rate = (t.status === "active" || t.status === "offered") ? rateForTransfer(t) : 0;
+      const parts = [
+        label,
+        `${fmtBytes(t.progress_bytes)} / ${fmtBytes(t.total_bytes)}`,
+      ];
+      if (rate > 0) {
+        parts.push(fmtRate(rate));
+        const remaining = Math.max(0, (t.total_bytes || 0) - (t.progress_bytes || 0));
+        if (remaining > 0) parts.push(`ETA ${fmtEta(remaining, rate)}`);
+      }
+      meta.appendChild(el("div", "size", parts.join(" · ")));
       const bar = el("div", "bar");
       const fill = el("span");
       fill.style.width = `${Math.max(0, Math.min(100, t.progress_pct || 0))}%`;
@@ -5391,7 +5404,7 @@
       // metadata.path and re-runs send_file. Inbound failures
       // can't be retried from the receiver side (the sender owns
       // the source file), so it's out-only.
-      if (t.status === "failed" && t.direction === "out") {
+      if (t.status === "failed" && !((t.metadata || {}).transient) && t.direction === "out") {
         const retry = el("button", null, "Retry");
         retry.onclick = async () => {
           retry.disabled = true;
@@ -5412,7 +5425,7 @@
       }
       // v0.7.4: paused outbound transfers auto-resume on next
       // session-up. Show a Cancel button for the user to give up.
-      if (t.status === "paused" && t.direction === "out") {
+      if ((t.status === "paused" || t.status === "queued") && t.direction === "out") {
         const cancel = el("button", null, "Cancel");
         cancel.onclick = async () => {
           cancel.disabled = true;
@@ -7502,13 +7515,14 @@
     }
     const sendingToast = toast(`Sending ${file.name}...`, "info", 30000);
     try {
-      await api.upload(state.selectedPeer, file);
+      const result = await api.upload(state.selectedPeer, file);
       sendingToast?.remove();
-      // Per-bubble status will reflect the matching transfer record;
-      // no toast needed for happy path.
+      if (result?.queued || result?.paused) {
+        toast(`Waiting for device — ${file.name} will send automatically.`, "info", 5000);
+      }
     } catch (e) {
       sendingToast?.remove();
-      toast(`${file.name}: ${errorToastBody(e)}`, "bad", 9000);
+      toast(`${file.name}: ${errorToastBody(e)}. One Link will keep anything already staged and retry when it can.`, "bad", 9000);
     }
   }
 

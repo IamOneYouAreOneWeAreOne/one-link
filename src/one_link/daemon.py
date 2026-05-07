@@ -111,6 +111,8 @@ OUTBOUND_SESSION_IDLE_S = 300.0
 HANDSHAKE_DEADLINE_OUTBOUND_S = 8.0
 FILE_ACK_DEADLINE_S = 30.0
 FILE_SEND_TOTAL_DEADLINE_S = 600.0
+TRANSFER_RETRY_BASE_S = 5.0
+TRANSFER_RETRY_MAX_S = 5 * 60.0
 # H4: re-validate idle outbound sessions with a PING before reusing them.
 # A NAT box / Wi-Fi roam / asymmetric-disconnect can silently kill a TCP
 # session; without this probe the next send_to() would block on a dead
@@ -191,6 +193,12 @@ class TransferPausedError(RuntimeError):
         super().__init__(message)
         self.transfer_id = transfer_id
         self.path = path
+
+
+def _delivery_backoff_ms(attempts: int) -> int:
+    attempts = max(1, int(attempts))
+    delay_s = min(TRANSFER_RETRY_MAX_S, TRANSFER_RETRY_BASE_S * (2 ** (attempts - 1)))
+    return int(delay_s * 1000)
 
 # Capabilities this build advertises in CAPS messages.
 # v0.5.4 bumps to OL1.2: CAPS optionally includes `share_rdz` so paired
@@ -711,11 +719,91 @@ class Daemon:
             log.warning("state.update_transfer failed: %s", e)
             return None
 
+    def _mark_transfer_waiting(
+        self,
+        transfer_id: str,
+        *,
+        path: Path,
+        error: str,
+        error_class: str,
+        base_metadata: dict | None = None,
+    ):
+        now_ms = int(time.time() * 1000)
+        current = self.state.get_transfer(transfer_id) if self.state else None
+        metadata = {
+            **(base_metadata or {}),
+            **((current.metadata if current else {}) or {}),
+        }
+        attempts = int(metadata.get("attempts") or 0) + 1
+        metadata.update({
+            "path": str(path),
+            "error": str(error)[:500],
+            "error_class": str(error_class)[:120],
+            "transient": True,
+            "paused_at_ms": now_ms,
+            "last_attempt_ms": now_ms,
+            "attempts": attempts,
+            "next_retry_ms": now_ms + _delivery_backoff_ms(attempts),
+            "delivery_state": "waiting_for_device",
+        })
+        return self._update_transfer(
+            transfer_id,
+            status="paused",
+            metadata=metadata,
+        )
+
+    def queue_file_transfer(
+        self,
+        *,
+        peer_fp: str,
+        path: Path,
+        reason: str = "peer offline",
+    ):
+        """Create the durable transfer intent before any live route exists."""
+        if self.state is None:
+            raise RuntimeError("state not available")
+        rec = self.state.get_peer(peer_fp)
+        if rec is None or rec.trust != "pinned":
+            raise RuntimeError("file queue requires a pinned peer")
+        path = Path(path)
+        size = path.stat().st_size
+        file_index = index_path(path)
+        transfer_id = f"out:{file_index.blob_hash}:{uuid.uuid4().hex[:12]}"
+        now_ms = int(time.time() * 1000)
+        queued = self._upsert_transfer(
+            id=transfer_id,
+            direction="out",
+            peer_fp=peer_fp,
+            kind="file",
+            name=path.name,
+            size=size,
+            blob_hash=file_index.blob_hash,
+            status="paused",
+            progress_bytes=0,
+            total_bytes=size,
+            chunks_done=0,
+            chunks_total=len(file_index.chunks),
+            metadata={
+                "mode": "cdc",
+                "path": str(path),
+                "queued_at_ms": now_ms,
+                "paused_at_ms": now_ms,
+                "attempts": 0,
+                "next_retry_ms": now_ms,
+                "transient": True,
+                "delivery_state": "waiting_for_device",
+                "error": reason,
+                "error_class": "PeerOffline",
+            },
+        )
+        self._schedule_resume_paused(peer_fp)
+        return queued
+
     # v0.6.3: transfer-ledger watchdog.
     STUCK_TRANSFER_DEADLINE_MS = 5 * 60 * 1000  # 5 min without progress
 
     def _reap_stuck_transfers(self) -> int:
-        """Mark any 'offered' or 'active' transfer as 'failed' if it
+        """Mark any stale active transfer as paused/retryable if it
         hasn't been updated in STUCK_TRANSFER_DEADLINE_MS. Defends
         the UI against silent stalls (peer crashed, NAT dropped the
         connection, network change). Returns the count reaped."""
@@ -734,17 +822,18 @@ class Daemon:
             if t.updated_ms > cutoff:
                 continue
             try:
-                rec = self.state.update_transfer(
+                rec = self._mark_transfer_waiting(
                     t.id,
-                    status="failed",
-                    metadata={
-                        **t.metadata,
+                    path=Path((t.metadata or {}).get("path") or t.name),
+                    error="transfer stalled; waiting to resume automatically",
+                    error_class="StalledTransfer",
+                    base_metadata={
+                        **(t.metadata or {}),
                         "reaped": True,
                         "reaped_reason": "no_progress_within_deadline",
                         "reaped_at_ms": now_ms,
                     },
                 )
-                self._broadcast_transfer(rec)
                 reaped += 1
                 log.info(
                     "reaped stuck transfer %s (%s, last update %d ms ago)",
@@ -5001,9 +5090,12 @@ class Daemon:
                 rows = self.state.list_transfers(peer_fp=peer_fp, limit=200)
             except Exception:
                 rows = []
+            now_ms = int(time.time() * 1000)
             paused = [
                 r for r in rows
-                if r.status == "paused" and r.direction == "out"
+                if r.status in ("paused", "queued")
+                and r.direction == "out"
+                and int((r.metadata or {}).get("next_retry_ms") or 0) <= now_ms
             ]
             resumed = 0
             errors = 0
@@ -5032,15 +5124,16 @@ class Daemon:
                     )
                     errors += 1
                     continue
-                # send_file always creates a fresh ledger row, so
-                # delete the paused row to avoid two ghosts side by
-                # side in the Activity drawer. The CDC chunk cache
-                # on the receiver side carries the partial-progress
-                # state across the row swap.
-                with contextlib.suppress(Exception):
-                    self.state.delete_transfer(r.id)
                 try:
-                    await self.send_file(peer, src)
+                    self._update_transfer(
+                        r.id,
+                        status="paused",
+                        metadata={
+                            **(r.metadata or {}),
+                            "delivery_state": "resuming",
+                        },
+                    )
+                    await self.send_file(peer, src, transfer_id=r.id)
                     resumed += 1
                 except Exception as e:
                     errors += 1
@@ -5078,6 +5171,35 @@ class Daemon:
             await self.resume_paused_transfers_for(peer_fp)
         except Exception as e:
             log.warning("resume task errored for %s: %s", peer_fp[:8], e)
+
+    def _schedule_due_transfer_retries(self) -> int:
+        """Background transfer queue pump.
+
+        Scans durable outbound transfer intents whose backoff window has
+        elapsed and schedules one resume task per peer. It is intentionally
+        quiet when peers are offline; the row stays as Waiting and the next
+        pump/session-up will try again.
+        """
+        if self.state is None:
+            return 0
+        now_ms = int(time.time() * 1000)
+        try:
+            rows = self.state.list_transfers(limit=500)
+        except Exception:
+            return 0
+        peers: set[str] = set()
+        for r in rows:
+            if r.direction != "out" or r.status not in ("paused", "queued"):
+                continue
+            meta = r.metadata or {}
+            if not meta.get("path"):
+                continue
+            if int(meta.get("next_retry_ms") or 0) > now_ms:
+                continue
+            peers.add(r.peer_fp)
+        for fp in peers:
+            self._schedule_resume_paused(fp)
+        return len(peers)
 
     # ─── folder sync orchestration ─────────────────────────────────────
     async def push_folder_to_peer(self, peer: Peer, folder_name: str) -> dict:
@@ -5274,7 +5396,13 @@ class Daemon:
             )
             return {"ok": False, "error": str(e), "blobs_sent": blobs_sent}
 
-    async def send_file(self, peer: Peer, path: Path) -> dict:
+    async def send_file(
+        self,
+        peer: Peer,
+        path: Path,
+        *,
+        transfer_id: str | None = None,
+    ) -> dict:
         block = self._check_outbound_trust(peer)
         if block:
             raise RuntimeError(block)
@@ -5311,8 +5439,15 @@ class Daemon:
         # as 'failed' rather than disappearing silently. The peer_fp at
         # this stage is the policy-side estimate (from peer.ed_pub_hex);
         # the post-handshake _verify_channel_peer corrects it on success.
-        transfer_id = f"out:{blob_hex}:{uuid.uuid4().hex[:12]}"
+        transfer_id = transfer_id or f"out:{blob_hex}:{uuid.uuid4().hex[:12]}"
         provisional_fp = peer_fp_for_policy or ""
+        existing = self.state.get_transfer(transfer_id) if self.state else None
+        base_metadata = {
+            **((existing.metadata if existing else {}) or {}),
+            "mode": "cdc",
+            "path": str(path),
+            "delivery_state": "queued",
+        }
         self._upsert_transfer(
             id=transfer_id,
             direction="out",
@@ -5326,7 +5461,7 @@ class Daemon:
             total_bytes=size,
             chunks_done=0,
             chunks_total=len(cdc_chunks),
-            metadata={"mode": "cdc", "path": str(path)},
+            metadata=base_metadata,
         )
 
         # v0.7.0 Linked Mesh: reuse the persistent encrypted session
@@ -5341,20 +5476,16 @@ class Daemon:
         try:
             sess = await self._get_outbound_session(peer)
         except asyncio.TimeoutError as e:
-            self._update_transfer(
-                transfer_id, status="paused",
-                metadata={
-                    "mode": "cdc",
-                    "path": str(path),
-                    "error": (
-                        f"file send to {peer.short_id}: handshake "
-                        f"timed out after {HANDSHAKE_DEADLINE_OUTBOUND_S}s "
-                        f"- peer not responsive"
-                    ),
-                    "error_class": "TimeoutError",
-                    "transient": True,
-                    "paused_at_ms": int(time.time() * 1000),
-                },
+            self._mark_transfer_waiting(
+                transfer_id,
+                path=path,
+                error=(
+                    f"file send to {peer.short_id}: handshake "
+                    f"timed out after {HANDSHAKE_DEADLINE_OUTBOUND_S}s "
+                    f"- peer not responsive"
+                ),
+                error_class="TimeoutError",
+                base_metadata=base_metadata,
             )
             raise TransferPausedError(
                 "file send paused: handshake timed out",
@@ -5374,17 +5505,25 @@ class Daemon:
                 else f"dial failed: {err_msg}"
             )
             transient = _is_transient_send_error(e)
-            self._update_transfer(
-                transfer_id, status="paused" if transient else "failed",
-                metadata={
-                    "mode": "cdc",
-                    "path": str(path),
-                    "error": ledger_msg[:500],
-                    "error_class": err_class,
-                    "transient": transient,
-                    "paused_at_ms": int(time.time() * 1000) if transient else None,
-                },
-            )
+            if transient:
+                self._mark_transfer_waiting(
+                    transfer_id,
+                    path=path,
+                    error=ledger_msg,
+                    error_class=err_class,
+                    base_metadata=base_metadata,
+                )
+            else:
+                self._update_transfer(
+                    transfer_id, status="failed",
+                    metadata={
+                        **base_metadata,
+                        "error": ledger_msg[:500],
+                        "error_class": err_class,
+                        "transient": False,
+                        "delivery_state": "needs_attention",
+                    },
+                )
             if transient:
                 raise TransferPausedError(
                     ledger_msg, transfer_id=transfer_id, path=path,
@@ -5411,10 +5550,22 @@ class Daemon:
                 total_bytes=size,
                 chunks_done=0,
                 chunks_total=len(cdc_chunks),
-                metadata={"mode": "cdc", "path": str(path)},
+                metadata={
+                    **base_metadata,
+                    "delivery_state": "sending",
+                    "last_attempt_ms": int(time.time() * 1000),
+                },
             )
         else:
-            self._update_transfer(transfer_id, status="offered")
+            self._update_transfer(
+                transfer_id,
+                status="offered",
+                metadata={
+                    **base_metadata,
+                    "delivery_state": "sending",
+                    "last_attempt_ms": int(time.time() * 1000),
+                },
+            )
 
         async def _await_ack(ch_: ch.Channel) -> dict:
             # v0.6.3: bound each recv. Without this, a peer that
@@ -5486,8 +5637,8 @@ class Daemon:
                         chunks_done=len(cdc_chunks) - len(wanted_indexes),
                         chunks_total=len(cdc_chunks),
                         metadata={
-                            "mode": "cdc",
-                            "path": str(path),
+                            **base_metadata,
+                            "delivery_state": "sending",
                             "skipped_chunks": len(cdc_chunks) - len(wanted_indexes),
                         },
                     )
@@ -5603,10 +5754,14 @@ class Daemon:
                 raw_bytes=raw_bytes_sent,
                 wire_bytes=wire_bytes_sent,
                 metadata={
+                    **base_metadata,
                     "mode": "cdc" if cdc_used else "stream",
-                    "path": str(path),
+                    "delivery_state": "done",
                     "skipped_chunks": len(cdc_chunks) - chunks_sent if cdc_used else 0,
                     "compressed_chunks": compressed_chunks,
+                    "completed_at_ms": int(time.time() * 1000),
+                    "error": None,
+                    "transient": False,
                 },
             )
             return {
@@ -5634,18 +5789,26 @@ class Daemon:
             err_str = str(e)
             err_class = type(e).__name__
             transient = _is_transient_send_error(e)
-            new_status = "paused" if transient else "failed"
-            self._update_transfer(
-                transfer_id, status=new_status,
-                metadata={
-                    "mode": "cdc",
-                    "path": str(path),
-                    "error": err_str[:500],
-                    "error_class": err_class,
-                    "transient": transient,
-                    "paused_at_ms": int(time.time() * 1000) if transient else None,
-                },
-            )
+            if transient:
+                self._mark_transfer_waiting(
+                    transfer_id,
+                    path=path,
+                    error=err_str,
+                    error_class=err_class,
+                    base_metadata=base_metadata,
+                )
+            else:
+                self._update_transfer(
+                    transfer_id,
+                    status="failed",
+                    metadata={
+                        **base_metadata,
+                        "error": err_str[:500],
+                        "error_class": err_class,
+                        "transient": False,
+                        "delivery_state": "needs_attention",
+                    },
+                )
             # v0.7.0: a mid-stream failure leaves the session in an
             # unknown state (we sent a partial frame, peer's read loop
             # could be poisoned). Drop it so the next send_to / send_file
@@ -5984,6 +6147,8 @@ class Daemon:
                     # chunk, so this only catches actually-stuck rows.
                     with contextlib.suppress(Exception):
                         self._reap_stuck_transfers()
+                    with contextlib.suppress(Exception):
+                        self._schedule_due_transfer_retries()
             except asyncio.CancelledError:
                 pass
 
@@ -6007,6 +6172,9 @@ class Daemon:
 
         with contextlib.suppress(Exception):
             asyncio.create_task(_delayed_announcement())
+
+        with contextlib.suppress(Exception):
+            self._schedule_due_transfer_retries()
 
         # Folder sync: blob store + manifest engine. Both lazy: even if user
         # never adds a folder, these are cheap to construct.

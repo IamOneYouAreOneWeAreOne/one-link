@@ -698,7 +698,7 @@ async def test_api_send_file_paused_keeps_staged_upload(tmp_path: Path, monkeypa
         async def resolve_for_send(self, needle):
             return SimpleNamespace(short_id=str(needle))
 
-        async def send_file(self, peer, path):
+        async def send_file(self, peer, path, *, transfer_id=None):
             seen_paths.append(Path(path))
             raise TransferPausedError(
                 "network dropped", transfer_id="t-paused", path=Path(path),
@@ -715,6 +715,73 @@ async def test_api_send_file_paused_keeps_staged_upload(tmp_path: Path, monkeypa
     assert body["transfer_id"] == "t-paused"
     assert seen_paths and seen_paths[0].is_file()
     assert seen_paths[0].read_bytes() == b"keep me"
+
+
+@pytest.mark.asyncio
+async def test_api_send_file_offline_paired_peer_queues_staged_upload(
+    tmp_path: Path, monkeypatch,
+):
+    """Known paired peers should get a durable send intent even while
+    offline. The upload bytes stay staged so the background queue can
+    send them later without asking the user to try again.
+    """
+    from one_link.server import UIServer
+    from one_link.state import State
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    state = State(db_path=tmp_path / "state.db")
+    peer_fp = "bb" * 32
+    state.upsert_peer(
+        fingerprint=peer_fp,
+        short_id="bbbbbbbb",
+        pubkey=b"\xbb" * 32,
+        hostname="OfflineBox",
+        trust_default="pinned",
+    )
+    queued_paths: list[Path] = []
+
+    class _Daemon:
+        me = SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa")
+
+        def __init__(self):
+            self.state = state
+
+        async def resolve_for_send(self, needle):
+            return None
+
+        def queue_file_transfer(self, *, peer_fp, path, reason="peer offline"):
+            queued_paths.append(Path(path))
+            return self.state.upsert_transfer(
+                id="queued-1",
+                direction="out",
+                peer_fp=peer_fp,
+                kind="file",
+                name=Path(path).name,
+                size=Path(path).stat().st_size,
+                status="paused",
+                progress_bytes=0,
+                total_bytes=Path(path).stat().st_size,
+                chunks_done=0,
+                chunks_total=1,
+                metadata={
+                    "path": str(path),
+                    "delivery_state": "waiting_for_device",
+                    "transient": True,
+                },
+            )
+
+    server = UIServer(_Daemon())
+    resp = await server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text="bbbbbbbb"),
+        _FakePart("file", data=b"wait for me", filename="offline.bin"),
+    ]))
+    body = json.loads(resp.text)
+    assert resp.status == 202
+    assert body["queued"] is True
+    assert body["transfer_id"] == "queued-1"
+    assert queued_paths and queued_paths[0].is_file()
+    assert queued_paths[0].read_bytes() == b"wait for me"
+    state.close()
 
 
 @pytest.mark.asyncio

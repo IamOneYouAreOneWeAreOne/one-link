@@ -92,7 +92,7 @@ def test_paused_bubble_shows_resume_hint(index_html: str):
     start = index_html.find("function renderFileBubble(msg)")
     assert start > 0
     snippet = index_html[start:start + 4000]
-    assert "resumes when peer reconnects" in snippet
+    assert "One Link will keep trying automatically" in snippet
 
 
 # ───────── aggregate pill surface ────────────────────────────────────

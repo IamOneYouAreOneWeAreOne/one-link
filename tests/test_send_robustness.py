@@ -234,7 +234,7 @@ async def test_send_file_pauses_and_preserves_on_ratchet_desync(tmp_path: Path):
 
 # ─── transfer-ledger watchdog ──────────────────────────────────────
 
-def test_reap_stuck_transfers_marks_old_offered_as_failed(tmp_path: Path):
+def test_reap_stuck_transfers_marks_old_offered_as_waiting(tmp_path: Path):
     me = _new_identity()
     state = State(db_path=tmp_path / "state.db")
     daemon = Daemon(me)
@@ -280,9 +280,12 @@ def test_reap_stuck_transfers_marks_old_offered_as_failed(tmp_path: Path):
     reaped = daemon._reap_stuck_transfers()
     assert reaped == 1
 
-    # Stuck row is now 'failed'.
+    # Stuck row is now retryable, not dead.
     rows = {r.id: r for r in state.list_transfers(limit=10)}
-    assert rows["stuck1"].status == "failed"
+    assert rows["stuck1"].status == "paused"
+    assert rows["stuck1"].metadata.get("transient") is True
+    assert rows["stuck1"].metadata.get("delivery_state") == "waiting_for_device"
+    assert rows["stuck1"].metadata.get("next_retry_ms")
     assert rows["stuck1"].metadata.get("reaped") is True
     assert rows["stuck1"].metadata.get("reaped_reason") == "no_progress_within_deadline"
     # Fresh row still 'offered'.

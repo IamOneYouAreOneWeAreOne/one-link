@@ -2871,8 +2871,34 @@ class UIServer:
 
         # v0.5.1: also tries the rendezvous if the peer isn't on mDNS.
         peer = await self.daemon.resolve_for_send(peer_needle)
+        target_fp = self._resolve_pinned_fp(peer_needle, peer)
         if peer is None:
-            return web.json_response({"error": f"no peer {peer_needle!r}"}, status=404)
+            if target_fp:
+                keep_upload_for_resume = True
+                try:
+                    rec = self.daemon.queue_file_transfer(
+                        peer_fp=target_fp,
+                        path=upload_path,
+                        reason="waiting for device",
+                    )
+                    return web.json_response(
+                        {
+                            "ok": True,
+                            "queued": True,
+                            "paused": True,
+                            "transfer_id": rec.id if rec else None,
+                            "hint": "Waiting for the device. One Link will send it automatically when the path is healthy.",
+                        },
+                        status=202,
+                    )
+                except Exception as e:
+                    log.exception("queue_file_transfer failed: %s", e)
+            with contextlib.suppress(OSError):
+                upload_path.unlink(missing_ok=True)
+            return web.json_response({
+                "error": f"no peer {peer_needle!r}",
+                "hint": "Pick a paired device. Once a paired device is known, One Link can wait and send automatically.",
+            }, status=404)
 
         keep_upload_for_resume = False
         try:
@@ -2980,7 +3006,7 @@ class UIServer:
             return web.json_response(
                 {"error": "only outbound transfers can be retried"}, status=400,
             )
-        if rec.status not in ("failed", "complete"):
+        if rec.status not in ("failed", "complete", "paused", "queued"):
             return web.json_response(
                 {"error": f"transfer is {rec.status} — not retriable"}, status=409,
             )
@@ -3010,7 +3036,7 @@ class UIServer:
         if peer is None:
             return web.json_response({"error": "peer offline"}, status=404)
         try:
-            result = await self.daemon.send_file(peer, path)
+            result = await self.daemon.send_file(peer, path, transfer_id=rec.id)
             return web.json_response({"ok": True, "result": result})
         except Exception as e:
             log.exception("retry_transfer failed: %s", e)
