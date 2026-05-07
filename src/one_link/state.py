@@ -899,6 +899,161 @@ class State:
             })
         return out
 
+    def peer_trust_history(
+        self,
+        fingerprint: str,
+        *,
+        limit: int = 200,
+    ) -> list[dict]:
+        """v0.8.6: merged chronological trust history for one peer.
+
+        Combines four sources into a single timeline (newest first):
+          - peers row's first_seen_ms (synthetic 'first_seen' event)
+          - capability_audit rows (verify_set, verify_clear, trust_set,
+            cap_policy_set, cap_policy_clear)
+          - key_change_events where this fingerprint is the new_fp
+            OR the old_fp (rotation events affect both ends)
+          - hostname_keys first_seen for any pubkey ever attached to
+            the peer's hostname (synthetic 'pubkey_first_seen' event)
+
+        Each entry is a uniform dict with keys: ts_ms, kind, label,
+        detail, severity, source. The UI just renders the list — no
+        further classification needed."""
+        peer = self.get_peer(fingerprint)
+        if peer is None:
+            return []
+        events: list[dict] = []
+
+        # 1. First-seen synthetic event from the peers row.
+        events.append({
+            "ts_ms": peer.first_seen_ms,
+            "kind": "first_seen",
+            "label": "Device first seen",
+            "detail": f"hostname: {peer.hostname or '(unknown)'}",
+            "severity": "info",
+            "source": "peers",
+        })
+
+        # 2. capability_audit: rich. Translate each kind to a human label.
+        audit = self.recent_capability_audit(
+            fingerprint=fingerprint, limit=limit,
+        )
+        for row in audit:
+            kind = row["kind"]
+            if kind == "verify_set":
+                method = (row["after"] or {}).get("verified_method") if isinstance(row["after"], dict) else None
+                events.append({
+                    "ts_ms": row["ts_ms"],
+                    "kind": kind,
+                    "label": "Verified in person",
+                    "detail": (
+                        f"method: {method}" + (f" · note: {row['note']}" if row["note"] else "")
+                        if method else (row["note"] or "")
+                    ),
+                    "severity": "good",
+                    "source": "capability_audit",
+                })
+            elif kind == "verify_clear":
+                events.append({
+                    "ts_ms": row["ts_ms"],
+                    "kind": kind,
+                    "label": "Verification revoked",
+                    "detail": row["note"] or "",
+                    "severity": "warn",
+                    "source": "capability_audit",
+                })
+            elif kind == "trust_set":
+                before = row["before"]
+                after = row["after"]
+                events.append({
+                    "ts_ms": row["ts_ms"],
+                    "kind": kind,
+                    "label": f"Trust changed: {before or '?'} → {after or '?'}",
+                    "detail": row["note"] or "",
+                    "severity": "info" if after == "pinned" else (
+                        "bad" if after == "rejected" else "warn"
+                    ),
+                    "source": "capability_audit",
+                })
+            elif kind in ("cap_policy_set", "cap_policy_clear"):
+                before = row["before"]
+                after = row["after"]
+                if kind == "cap_policy_clear":
+                    label = "Permissions cleared (allow all)"
+                    detail = ""
+                else:
+                    after_list = after if isinstance(after, list) else []
+                    detail = (
+                        f"now allow: {', '.join(after_list) or '(none)'}"
+                    )
+                    label = "Permissions changed"
+                events.append({
+                    "ts_ms": row["ts_ms"],
+                    "kind": kind,
+                    "label": label,
+                    "detail": detail + ((" · " + row["note"]) if row["note"] else ""),
+                    "severity": "info",
+                    "source": "capability_audit",
+                })
+            else:
+                events.append({
+                    "ts_ms": row["ts_ms"],
+                    "kind": kind,
+                    "label": kind.replace("_", " ").title(),
+                    "detail": row["note"] or "",
+                    "severity": "info",
+                    "source": "capability_audit",
+                })
+
+        # 3. key_change_events: include any event where this peer is
+        # either the rotated-out fingerprint (old_fp) or rotated-in
+        # fingerprint (new_fp). Both contexts are useful: "this device
+        # used to be X, now it's Y" and "this device replaces Z".
+        kce_in = self.list_key_change_events(
+            new_fingerprint=fingerprint, limit=limit,
+        )
+        for ev in kce_in:
+            sev = ev["severity"]
+            events.append({
+                "ts_ms": ev["ts_ms"],
+                "kind": "key_change_in",
+                "label": "Key change detected (this device replaces a prior one)",
+                "detail": (
+                    f"prior fp: {ev['old_fingerprint'][:8]}… · severity: {sev}"
+                    + (" · acknowledged" if ev["acked_ms"] else " · UNACKNOWLEDGED")
+                ),
+                "severity": "bad" if sev == "high" else (
+                    "warn" if sev == "medium" else "info"
+                ),
+                "source": "key_change_events",
+            })
+        # rotated-out (this peer's fingerprint shows up as old_fp).
+        # No filter helper for old_fp; do a direct query.
+        old_rows = self._conn.execute(
+            "SELECT id, ts_ms, hostname, old_fingerprint, new_fingerprint,"
+            " severity, acked_ms FROM key_change_events"
+            " WHERE old_fingerprint = ? ORDER BY ts_ms DESC LIMIT ?",
+            (fingerprint, int(limit)),
+        ).fetchall()
+        for r in old_rows:
+            events.append({
+                "ts_ms": r["ts_ms"],
+                "kind": "key_change_out",
+                "label": "This device was rotated out",
+                "detail": (
+                    f"replaced by: {r['new_fingerprint'][:8]}…"
+                    + (" · acknowledged" if r["acked_ms"] else " · UNACKNOWLEDGED")
+                ),
+                "severity": "bad" if r["severity"] == "high" else (
+                    "warn" if r["severity"] == "medium" else "info"
+                ),
+                "source": "key_change_events",
+            })
+
+        # Sort newest-first, cap to `limit`.
+        events.sort(key=lambda e: e["ts_ms"], reverse=True)
+        return events[:limit]
+
     # ─── key-change tracking (v0.7.8) ─────────────────────────────────
 
     def _record_hostname_key_seen_locked(

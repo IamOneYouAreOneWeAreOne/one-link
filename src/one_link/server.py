@@ -291,6 +291,8 @@ class UIServer:
         r.add_post(r"/api/key-change-events/{event_id}/ack", self._guarded(self.api_ack_key_change_event))
         r.add_post(r"/api/peers/{fp}/key-change-events/ack-all", self._guarded(self.api_ack_peer_key_change_events))
         r.add_get(r"/api/peers/{fp}/key-history", self._guarded(self.api_get_peer_key_history))
+        # v0.8.6 trust history (merged audit timeline for one peer).
+        r.add_get(r"/api/peers/{fp}/trust-history", self._guarded(self.api_get_peer_trust_history))
         r.add_get("/api/capability-audit", self._guarded(self.api_capability_audit))
         r.add_get("/api/rendezvous", self._guarded(self.api_get_rendezvous))
         r.add_post("/api/rendezvous", self._guarded(self.api_set_rendezvous))
@@ -730,10 +732,31 @@ class UIServer:
             # CAPS) so the UI can warn before a wire-mismatch turns into
             # an opaque InvalidTag. None until first CAPS exchange.
             p["app_version"] = None
+            peer_features = []
             if sess is not None:
                 ch = getattr(sess, "channel", None)
                 if ch is not None and getattr(ch, "peer_caps", None):
                     p["app_version"] = ch.peer_caps.get("app_version")
+                    peer_features = ch.peer_caps.get("features") or []
+            try:
+                from one_link import __version__ as _local_app_version
+                from one_link.capabilities import LOCAL_CAPABILITIES
+                from one_link.protocol_compat import fallback_order, negotiate
+                compat = negotiate(
+                    local_version=_local_app_version,
+                    peer_version=p.get("app_version"),
+                    local_capabilities=LOCAL_CAPABILITIES,
+                    peer_capabilities=peer_features,
+                )
+                p["compatibility"] = {
+                    "compatible": compat.compatible,
+                    "mode": compat.mode,
+                    "transfer_mode": compat.transfer_mode,
+                    "fallback_order": list(fallback_order(compat)),
+                    "reasons": list(compat.reasons),
+                }
+            except Exception:
+                p["compatibility"] = None
             # v0.7.0: per-pairing health metrics. last_alive_ms is wall-
             # clock time of the last bytes seen from this peer (in or
             # out). latency_ewma_ms is the rolling round-trip time
@@ -1455,6 +1478,29 @@ class UIServer:
             return web.json_response({"hostname": None, "history": []})
         history = self.daemon.state.list_hostname_keys(peer.hostname)
         return web.json_response({"hostname": peer.hostname, "history": history})
+
+    async def api_get_peer_trust_history(self, request: web.Request) -> web.Response:
+        """v0.8.6: merged trust timeline for one peer (capability_audit
+        + key_change_events + first-seen + key history). Read-only;
+        the UI renders this as a chronological list in the device
+        drawer's 'Trust history' disclosure."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        try:
+            limit = int(request.query.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        limit = max(1, min(limit, 1000))
+        peer = self.daemon.state.get_peer(fp)
+        if peer is None:
+            return web.json_response({"error": "peer not found"}, status=404)
+        events = self.daemon.state.peer_trust_history(fp, limit=limit)
+        return web.json_response({
+            "fingerprint": fp,
+            "hostname": peer.hostname,
+            "events": events,
+        })
 
     async def api_capability_audit(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:

@@ -265,6 +265,35 @@
     border-radius: 4px;
   }
   .pair-modal .sas-art { margin-top: 12px; }
+  /* v0.8.6 trust history timeline. Vertical chronology with a
+     left-edge color rail per event severity. */
+  .trust-timeline {
+    background: var(--bg-2); border-radius: 8px; padding: 8px 4px;
+    max-height: 320px; overflow-y: auto;
+    font-size: 12px;
+  }
+  .trust-timeline .empty { color: var(--text-dim); padding: 16px; text-align: center; }
+  .trust-timeline .tev {
+    display: flex; gap: 10px; padding: 8px 12px;
+    border-left: 3px solid var(--text-dimmer);
+    margin: 0 4px 6px;
+    background: var(--bg-1); border-radius: 0 6px 6px 0;
+  }
+  .trust-timeline .tev:last-child { margin-bottom: 0; }
+  .trust-timeline .tev.sev-good { border-left-color: var(--good); }
+  .trust-timeline .tev.sev-warn { border-left-color: var(--warn); }
+  .trust-timeline .tev.sev-bad  { border-left-color: var(--bad); }
+  .trust-timeline .tev .tev-time {
+    color: var(--text-dim); flex-shrink: 0;
+    min-width: 96px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px;
+  }
+  .trust-timeline .tev .tev-body { flex: 1; min-width: 0; }
+  .trust-timeline .tev .tev-label { font-weight: 500; color: var(--text); }
+  .trust-timeline .tev .tev-detail {
+    color: var(--text-dim); margin-top: 2px;
+    word-break: break-word;
+  }
   .peer .trust-tag {
     font-size: 10px; font-weight: 600; letter-spacing: .4px;
     padding: 1px 6px; border-radius: 999px; text-transform: uppercase;
@@ -1904,6 +1933,22 @@
         <div class="mini-actions wrap" id="dev-verify-actions">
           <button class="btn-primary" id="dev-verify-confirm">Verify in person</button>
           <button class="btn-ghost" id="dev-verify-revoke" style="display:none;">Revoke verification</button>
+        </div>
+      </div>
+
+      <!-- v0.8.6 trust timeline. Surfaces every audited trust
+           transition (verify_set, verify_clear, trust_set,
+           cap_policy_set, cap_policy_clear, key_change events)
+           plus a synthetic 'first seen' event from peers.first_seen_ms.
+           Loaded lazily when the disclosure opens — most users
+           won't expand it. -->
+      <div class="settings-section" id="dev-trust-history-section">
+        <div class="settings-section-h">
+          <span>Trust history</span>
+          <button class="btn-icon" id="dev-trust-history-toggle" title="Show / hide trust timeline">▾</button>
+        </div>
+        <div class="trust-timeline" id="dev-trust-timeline" style="display:none;">
+          <div class="empty">Loading…</div>
         </div>
       </div>
 
@@ -4264,6 +4309,19 @@
     // events; populated lazily via a server fetch otherwise).
     renderDrawerKeyChange(peer);
 
+    // v0.8.6: collapse the trust-history disclosure on every reopen.
+    // It populates lazily on toggle.
+    const tl = $("#dev-trust-timeline");
+    if (tl) {
+      tl.style.display = "none";
+      tl.innerHTML = "";
+    }
+    const tlBtn = $("#dev-trust-history-toggle");
+    if (tlBtn) {
+      tlBtn.textContent = "▾";
+      tlBtn.classList.remove("on");
+    }
+
     $("#device-backdrop").classList.add("show");
   }
 
@@ -4449,6 +4507,71 @@
       toast(`Update failed: ${err.message || err}`, "bad");
     }
   });
+  // v0.8.6: render the trust-history timeline inside the device
+  // drawer. Lazy-loaded on toggle so a quick drawer open doesn't
+  // hit the DB. The rendered list is keyed off ts_ms; severity
+  // drives the left-rail color (good/warn/bad/info).
+  async function loadDrawerTrustHistory() {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    const tl = $("#dev-trust-timeline");
+    if (!tl) return;
+    tl.innerHTML = "";
+    tl.appendChild(el("div", "empty", "Loading…"));
+    let events = [];
+    try {
+      const res = await api.get(
+        `/api/peers/${fp}/trust-history?limit=200`
+      );
+      events = res.events || [];
+    } catch (e) {
+      tl.innerHTML = "";
+      tl.appendChild(el("div", "empty", `Failed to load: ${e.message || e}`));
+      return;
+    }
+    // Drawer might have been closed while we waited on the network.
+    if (state.deviceDrawerFp !== fp) return;
+    tl.innerHTML = "";
+    if (events.length === 0) {
+      tl.appendChild(el("div", "empty", "No recorded trust events for this device."));
+      return;
+    }
+    for (const ev of events) {
+      const sev = ev.severity || "info";
+      const row = el("div", `tev sev-${sev}`);
+      row.appendChild(el("div", "tev-time", _humanRelMs(ev.ts_ms)));
+      const body = el("div", "tev-body");
+      body.appendChild(el("div", "tev-label", ev.label || ev.kind || "(unknown)"));
+      if (ev.detail) {
+        body.appendChild(el("div", "tev-detail", ev.detail));
+      }
+      const dateLine = el("div", "tev-detail",
+        new Date(ev.ts_ms).toLocaleString());
+      dateLine.style.fontSize = "10px";
+      dateLine.style.opacity = "0.7";
+      body.appendChild(dateLine);
+      row.appendChild(body);
+      tl.appendChild(row);
+    }
+  }
+
+  $("#dev-trust-history-toggle")?.addEventListener("click", async (e) => {
+    const tl = $("#dev-trust-timeline");
+    const btn = e.currentTarget;
+    if (!tl) return;
+    const showing = tl.style.display !== "none";
+    if (showing) {
+      tl.style.display = "none";
+      btn.textContent = "▾";
+      btn.classList.remove("on");
+    } else {
+      tl.style.display = "block";
+      btn.textContent = "▴";
+      btn.classList.add("on");
+      await loadDrawerTrustHistory();
+    }
+  });
+
   // v0.7.9: drawer SAS multi-modal helpers (mirrors pair-modal).
   $("#dev-sas-speak")?.addEventListener("click", () => {
     speakSas(state.deviceDrawerSas);
@@ -4661,7 +4784,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.8.5";
+  const PAGE_BUILT_FOR = "0.8.6";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
