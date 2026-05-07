@@ -1063,6 +1063,70 @@
     margin-top: 4px; letter-spacing: .2px;
   }
   .msg.out.file .transfer-detail { color: rgba(255,255,255,.78); }
+  /* v0.8.9 folder-sync divergent-edit conflict banner + modal. */
+  .conflicts-banner {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; margin: 0 10px 8px;
+    background: rgba(245, 196, 81, .14);
+    border: 1px solid rgba(245, 196, 81, .30);
+    border-radius: 8px;
+    color: var(--warn);
+    font-size: 12px; cursor: pointer;
+    transition: background .12s;
+  }
+  .conflicts-banner:hover { background: rgba(245, 196, 81, .22); }
+  .conflicts-banner .cb-icon { font-size: 16px; flex-shrink: 0; }
+  .conflicts-banner .cb-text { flex: 1; }
+  .conflicts-banner .cb-text strong { color: var(--text); }
+  .conflicts-banner .cb-cta {
+    color: var(--warn); font-weight: 700; flex-shrink: 0;
+  }
+  .conflict-row {
+    background: var(--bg-2); border-radius: 8px;
+    padding: 12px; margin-bottom: 10px;
+  }
+  .conflict-row .conflict-h {
+    font-weight: 600; color: var(--text); margin-bottom: 6px;
+    word-break: break-all;
+  }
+  .conflict-row .conflict-h .folder { color: var(--text-dim); font-weight: 400; font-size: 11px; margin-right: 6px; }
+  .conflict-row .versions {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    margin: 8px 0;
+  }
+  .conflict-row .ver {
+    background: var(--bg-1); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px;
+    border: 1px solid transparent;
+  }
+  .conflict-row .ver.applied { border-color: var(--accent); }
+  .conflict-row .ver .ver-h {
+    font-weight: 600; color: var(--text); display: flex;
+    align-items: center; gap: 6px; margin-bottom: 4px;
+  }
+  .conflict-row .ver .ver-h .applied-tag {
+    font-size: 9px; padding: 1px 5px; border-radius: 999px;
+    background: var(--accent); color: white;
+    text-transform: uppercase; letter-spacing: .4px;
+  }
+  .conflict-row .ver .meta-line {
+    color: var(--text-dim); font-size: 11px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    margin: 2px 0; word-break: break-all;
+  }
+  .conflict-row .resolve-actions {
+    display: flex; gap: 6px; margin-top: 8px;
+  }
+  .conflict-row .resolve-actions button {
+    flex: 1; padding: 7px 10px; border-radius: 6px;
+    background: var(--bg-3); color: var(--text);
+    font-size: 12px; font-weight: 600;
+    transition: background .12s, color .12s;
+  }
+  .conflict-row .resolve-actions button:hover { background: var(--accent); color: white; }
+  .conflict-row .resolve-actions .keep-both { background: rgba(76,209,117,.18); color: var(--good); }
+  .conflict-row .resolve-actions .keep-both:hover { background: var(--good); color: #0a1f0a; }
+  .conflict-row.resolving { opacity: .55; pointer-events: none; }
   /* v0.8.8 aggregate transfer pill in the conversation header. */
   .transfer-pill {
     display: inline-flex; align-items: center; gap: 6px;
@@ -1592,6 +1656,9 @@
         <span>Shared folders</span>
         <span class="count" id="folders-count">0</span>
       </div>
+      <!-- v0.8.9: divergent-edit conflict banner. Hidden when zero
+           unresolved conflicts. Click → opens the Conflicts modal. -->
+      <div class="conflicts-banner" id="folder-conflicts-banner" style="display:none;"></div>
       <div class="help-card">
         <strong>Folder location</strong> means a folder on this computer, like
         <code>$HOME\Documents\One Link</code>. Pair a device first, then share the folder with it.
@@ -2056,6 +2123,31 @@
       <div class="actions">
         <button class="btn-ghost" id="device-cancel">Close</button>
         <button class="btn-primary" id="device-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v0.8.9: folder-sync conflict resolver. Lists every unresolved
+       divergent-edit conflict; user picks Keep mine / Keep theirs /
+       Keep both per file. -->
+  <div class="modal-backdrop" id="conflicts-backdrop">
+    <div class="modal" style="max-width:680px;">
+      <h2>
+        Folder sync conflicts
+        <span class="device-drawer-sub" id="conflicts-sub"></span>
+      </h2>
+      <p>
+        Two devices changed the same file at the same time. Pick which
+        version wins for each file. Choosing "Keep both" preserves
+        your version under its original name AND saves the other
+        device's version with a <code>.conflict-&lt;peer&gt;</code>
+        suffix so nothing is lost.
+      </p>
+      <div id="conflicts-list" style="overflow-y:auto; flex:1; max-height:60vh;">
+        <div class="empty">No conflicts. ✓</div>
+      </div>
+      <div class="actions">
+        <button class="btn-ghost" id="conflicts-close">Close</button>
       </div>
     </div>
   </div>
@@ -4048,6 +4140,9 @@
     try {
       const { folders } = await api.folders();
       state.folders = folders || [];
+      // v0.8.9: refresh the conflicts banner whenever the folders
+      // pane refreshes — they're tightly coupled.
+      refreshFolderConflictsBanner();
       const list = $("#folderlist");
       list.innerHTML = "";
       $("#folders-count").textContent = state.folders.length;
@@ -4105,6 +4200,165 @@
         list.appendChild(row);
       }
     } catch (e) { console.warn(e); }
+  }
+
+  // v0.8.9: folder-sync divergent-edit conflict UI.
+
+  // Cache of unresolved-conflict count + freshest list. Banner derives
+  // from this; modal pulls a fresh list on open.
+  state.folderConflicts = { unresolved_total: 0, conflicts: [] };
+
+  async function refreshFolderConflictsBanner() {
+    try {
+      const r = await api.get("/api/folder-conflicts?unresolved=1&limit=200");
+      state.folderConflicts.unresolved_total = r.unresolved_total || 0;
+      state.folderConflicts.conflicts = r.conflicts || [];
+    } catch (e) {
+      // 404 means a pre-v0.8.9 daemon — banner stays hidden.
+      state.folderConflicts.unresolved_total = 0;
+      state.folderConflicts.conflicts = [];
+    }
+    const banner = $("#folder-conflicts-banner");
+    if (!banner) return;
+    const n = state.folderConflicts.unresolved_total || 0;
+    if (n === 0) {
+      banner.style.display = "none";
+      banner.innerHTML = "";
+      return;
+    }
+    banner.style.display = "flex";
+    banner.innerHTML = "";
+    banner.appendChild(el("span", "cb-icon", "⚠"));
+    const text = el("div", "cb-text");
+    const strong = el("strong", null, `${n} divergent-edit conflict${n === 1 ? "" : "s"}`);
+    text.appendChild(strong);
+    text.appendChild(document.createTextNode(
+      ` — two devices changed the same file at the same time. Click to choose which version wins.`
+    ));
+    banner.appendChild(text);
+    banner.appendChild(el("span", "cb-cta", "Review →"));
+    banner.onclick = () => openConflictsModal();
+  }
+
+  async function openConflictsModal() {
+    $("#conflicts-backdrop").classList.add("show");
+    await renderConflictsModal();
+  }
+  function closeConflictsModal() {
+    $("#conflicts-backdrop").classList.remove("show");
+  }
+
+  async function renderConflictsModal() {
+    let conflicts = [];
+    let total = 0;
+    try {
+      const r = await api.get("/api/folder-conflicts?unresolved=1&limit=200");
+      conflicts = r.conflicts || [];
+      total = r.unresolved_total || 0;
+    } catch (e) {
+      $("#conflicts-list").innerHTML =
+        `<div class="empty">Failed to load conflicts: ${e.message || e}</div>`;
+      $("#conflicts-sub").textContent = "";
+      return;
+    }
+    $("#conflicts-sub").textContent =
+      total > 0 ? `${total} unresolved` : "All clear";
+    const list = $("#conflicts-list");
+    list.innerHTML = "";
+    if (conflicts.length === 0) {
+      list.appendChild(el("div", "empty", "No conflicts. ✓"));
+      return;
+    }
+    for (const c of conflicts) {
+      list.appendChild(renderConflictRow(c));
+    }
+  }
+
+  function renderConflictRow(c) {
+    const row = el("div", "conflict-row");
+    row.dataset.id = c.id;
+    const head = el("div", "conflict-h");
+    head.appendChild(el("span", "folder", c.folder_name + ":"));
+    head.appendChild(document.createTextNode(c.file_path));
+    row.appendChild(head);
+
+    const versions = el("div", "versions");
+    versions.appendChild(renderConflictVersion(
+      "Mine", c, "local", c.applied_choice === "local",
+    ));
+    versions.appendChild(renderConflictVersion(
+      "Theirs", c, "remote", c.applied_choice === "remote",
+    ));
+    row.appendChild(versions);
+
+    const actions = el("div", "resolve-actions");
+    const mine = el("button", null, "Keep mine");
+    mine.onclick = () => resolveConflict(c.id, "mine", row);
+    const theirs = el("button", null, "Keep theirs");
+    theirs.onclick = () => resolveConflict(c.id, "theirs", row);
+    const both = el("button", "keep-both", "Keep both");
+    both.onclick = () => resolveConflict(c.id, "both", row);
+    actions.appendChild(mine);
+    actions.appendChild(theirs);
+    actions.appendChild(both);
+    row.appendChild(actions);
+    return row;
+  }
+
+  function renderConflictVersion(label, c, side, isApplied) {
+    const v = el("div", "ver" + (isApplied ? " applied" : ""));
+    const h = el("div", "ver-h");
+    h.appendChild(document.createTextNode(label));
+    if (isApplied) {
+      h.appendChild(el("span", "applied-tag", "Auto-applied"));
+    }
+    v.appendChild(h);
+    const blob = c[side + "_blob_hash"] || "(deleted)";
+    const size = c[side + "_size"];
+    const mtime = c[side + "_mtime_ms"];
+    const peer = side === "remote" ? (c.peer_fp || "?") : "this device";
+    v.appendChild(makeMetaLine("blob", (blob || "?").slice(0, 16) + "…"));
+    v.appendChild(makeMetaLine("size", size != null ? fmtBytes(size) : "—"));
+    v.appendChild(makeMetaLine(
+      "modified", mtime ? new Date(mtime).toLocaleString() : "—"
+    ));
+    v.appendChild(makeMetaLine(
+      "from", peer === "this device" ? peer : peer.slice(0, 12) + "…"
+    ));
+    return v;
+  }
+  function makeMetaLine(label, val) {
+    const line = el("div", "meta-line");
+    const lbl = el("span");
+    lbl.style.color = "var(--text-dimmer)";
+    lbl.textContent = label + ": ";
+    line.appendChild(lbl);
+    line.appendChild(document.createTextNode(val));
+    return line;
+  }
+
+  async function resolveConflict(id, choice, row) {
+    if (!id) return;
+    if (row) row.classList.add("resolving");
+    try {
+      const res = await api.post(
+        `/api/folder-conflicts/${id}/resolve`, { choice },
+      );
+      if (res.already_resolved) {
+        toast("Conflict already resolved.", "info");
+      } else if (choice === "both") {
+        toast(`Kept both — saved peer's version as ${res.suffixed_path || "*.conflict-…"}`, "good", 6000);
+      } else if (choice === "mine") {
+        toast("Kept your version.", "good");
+      } else {
+        toast("Switched to peer's version.", "good");
+      }
+      await renderConflictsModal();
+      await refreshFolderConflictsBanner();
+    } catch (e) {
+      if (row) row.classList.remove("resolving");
+      toast(`Resolve failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
   }
 
   async function refreshStatus() {
@@ -5039,7 +5293,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.8.8";
+  const PAGE_BUILT_FOR = "0.8.9";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -5202,6 +5456,23 @@
         // v0.7.3: alias / mute / cap changes — refresh the sidebar so
         // the new display name and toggle states show up immediately.
         refreshPeers();
+      } else if (m.type === "folder_conflict_detected") {
+        // v0.8.9: live conflict — refresh the banner + (if open)
+        // the modal so the new entry appears immediately.
+        toast(
+          `Folder conflict in "${m.conflict?.folder_name || "?"}": ${m.conflict?.file_path || ""}`,
+          "warn", 7000,
+        );
+        refreshFolderConflictsBanner();
+        if ($("#conflicts-backdrop").classList.contains("show")) {
+          renderConflictsModal();
+        }
+      } else if (m.type === "folder_conflict_resolved") {
+        // Another tab resolved one — clear it from our view.
+        refreshFolderConflictsBanner();
+        if ($("#conflicts-backdrop").classList.contains("show")) {
+          renderConflictsModal();
+        }
       } else if (m.type === "key_change_acked" || m.type === "key_change_acked_all") {
         // v0.7.8: another tab acknowledged. Refresh peers so the
         // banner / overlay clears for everyone live.
@@ -6032,6 +6303,12 @@
   $("#debug-severity")?.addEventListener("change", refreshDebugLog);
 
   $("#btn-refresh-folders").onclick = refreshFolders;
+  // v0.8.9: conflicts modal close button.
+  $("#conflicts-close")?.addEventListener("click", closeConflictsModal);
+  // Esc closes too — match other modals.
+  $("#conflicts-backdrop")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeConflictsModal();
+  });
   $("#btn-refresh-mesh").onclick = async () => {
     await refreshTransfers();
     await refreshStatus();

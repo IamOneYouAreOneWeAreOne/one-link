@@ -220,11 +220,20 @@ class FolderEngine:
         return build_tree(manifest_leaf_hashes(rows)).root
 
     def receive_remote_manifest(
-        self, *, folder_name: str, entries: list[dict]
+        self, *, folder_name: str, entries: list[dict],
+        peer_fp: Optional[str] = None,
     ) -> list[dict]:
         """Merge remote entries into local manifest, return list of entries
         whose blobs we now want (winner has a non-None blob_hash we don't
-        already have in the local store)."""
+        already have in the local store).
+
+        v0.8.9: when local + remote are CONCURRENT in vclock terms AND
+        the live blob_hashes differ (real divergent edit, not just a
+        tie-broken delete vs. tombstone), log a manifest_conflicts row
+        so the user can see + override the auto-merge via the
+        Conflicts UI. The merge still applies — the wire protocol has
+        no 'hold' primitive — but the audit row preserves both sides
+        so the user can flip the choice."""
         wants: list[dict] = []
         for e in entries:
             remote = ManifestEntry.from_dict(e)
@@ -240,6 +249,19 @@ class FolderEngine:
                 if local_row is not None
                 else None
             )
+            # v0.8.9: detect concurrent divergent edits BEFORE merge.
+            # We only care about the specific "both sides have a real
+            # blob and the hashes differ" case — that's the dataloss
+            # scenario where one user's edits silently overwrite the
+            # other's. Tombstone-vs-edit is handled deterministically
+            # by merge_manifest_entries (edit wins) so no UI prompt.
+            self._maybe_record_conflict(
+                folder_name=folder_name,
+                local=local,
+                remote=remote,
+                peer_fp=peer_fp,
+            )
+
             winner = merge_manifest_entries(local, remote)
             if winner is None:
                 continue
@@ -261,6 +283,218 @@ class FolderEngine:
                 # Tombstone won; remove local file (and blob is GC'd elsewhere)
                 self._delete_on_disk(folder_name, winner.file_path)
         return wants
+
+    def _maybe_record_conflict(
+        self,
+        *,
+        folder_name: str,
+        local: Optional[ManifestEntry],
+        remote: ManifestEntry,
+        peer_fp: Optional[str],
+    ) -> None:
+        """v0.8.9: detect + log a divergent-edit conflict.
+        Idempotency lives in state.record_manifest_conflict — if the
+        same (local_vclock, remote_vclock) pair was already recorded
+        for this path, the helper returns the existing id instead of
+        duplicating."""
+        if local is None or local.blob_hash is None:
+            return
+        if remote.blob_hash is None:
+            return
+        if local.blob_hash == remote.blob_hash:
+            return
+        if not local.vclock.concurrent_with(remote.vclock):
+            return
+        # Predict which side merge_manifest_entries will pick so the
+        # conflict row records what the auto-resolution did.
+        l_mt = local.mtime_ms or 0
+        r_mt = remote.mtime_ms or 0
+        if l_mt != r_mt:
+            applied = "local" if l_mt > r_mt else "remote"
+        elif (local.blob_hash or "") >= (remote.blob_hash or ""):
+            applied = "local"
+        else:
+            applied = "remote"
+        try:
+            cid = self.state.record_manifest_conflict(
+                folder_name=folder_name,
+                file_path=remote.file_path,
+                peer_fp=peer_fp,
+                local_blob_hash=local.blob_hash,
+                local_size=local.size,
+                local_mtime_ms=local.mtime_ms,
+                local_vclock=local.vclock.to_dict(),
+                remote_blob_hash=remote.blob_hash,
+                remote_size=remote.size,
+                remote_mtime_ms=remote.mtime_ms,
+                remote_vclock=remote.vclock.to_dict(),
+                applied_choice=applied,
+            )
+            log.info(
+                "folder %s: divergent-edit conflict logged id=%s path=%s "
+                "applied=%s peer=%s",
+                folder_name, cid, remote.file_path, applied,
+                (peer_fp or "?")[:8],
+            )
+            # Notify the UI live (best-effort — daemon owns ui_server).
+            cb = getattr(self, "_on_conflict_recorded", None)
+            if callable(cb):
+                try:
+                    cb(folder_name, cid)
+                except Exception:
+                    pass
+        except Exception as exc:
+            log.warning("conflict record failed for %s/%s: %s",
+                        folder_name, remote.file_path, exc)
+
+    def resolve_conflict(
+        self, *, conflict_id: int, choice: str,
+    ) -> dict:
+        """v0.8.9: resolve a divergent-edit conflict via UI choice.
+
+        choice is one of:
+          'mine'   — keep our blob_hash, bump vclock past remote.
+          'theirs' — adopt remote's blob_hash + materialize.
+          'both'   — keep mine; ALSO write a conflict-suffixed file
+                     under "<name>.conflict-{peer-shortfp}.<ext>"
+                     containing remote's blob.
+
+        After resolution, the manifest CRDT carries the chosen state;
+        the next sync round will propagate it. Returns a dict with
+        the resolution outcome (manifest entries written, materialize
+        flags) so the API layer can echo it to the UI.
+
+        Raises ValueError on bad choice / missing conflict / a 'theirs'
+        or 'both' resolution where the remote blob isn't yet local."""
+        if choice not in ("mine", "theirs", "both"):
+            raise ValueError(
+                f"choice must be mine|theirs|both, got {choice!r}"
+            )
+        conflict = self.state.get_manifest_conflict(conflict_id)
+        if conflict is None:
+            raise ValueError(f"conflict {conflict_id} not found")
+        if conflict.get("resolved_ms") is not None:
+            return {
+                "ok": False, "already_resolved": True,
+                "conflict_id": conflict_id,
+                "resolution": conflict.get("resolution"),
+            }
+        folder_name = conflict["folder_name"]
+        file_path = conflict["file_path"]
+        local_vc = VectorClock.from_dict(conflict["local_vclock"])
+        remote_vc = VectorClock.from_dict(conflict["remote_vclock"])
+        # Use the LIVE manifest entry (might've drifted since detection
+        # if a third peer's edit landed in between).
+        live_row = self.state.get_manifest_entry(folder_name, file_path)
+        live = (
+            ManifestEntry(
+                file_path=live_row["file_path"],
+                blob_hash=live_row["blob_hash"],
+                size=live_row["size"],
+                mtime_ms=live_row["mtime_ms"],
+                vclock=VectorClock.from_dict(live_row["vclock"]),
+            ) if live_row else None
+        )
+        # The new vclock for whichever entry we're stamping. Merge of
+        # live + both detection-time clocks then bumped on our node so
+        # downstream peers strictly observe our resolution.
+        merged = (live.vclock if live else VectorClock.empty()).merge(local_vc).merge(remote_vc)
+        new_vc = merged.increment(self.me_fp)
+        result = {
+            "ok": True,
+            "conflict_id": conflict_id,
+            "resolution": choice,
+            "folder_name": folder_name,
+            "file_path": file_path,
+            "wrote": [],
+        }
+        if choice == "mine":
+            chosen_entry = ManifestEntry(
+                file_path=file_path,
+                blob_hash=conflict["local_blob_hash"],
+                size=conflict["local_size"],
+                mtime_ms=conflict["local_mtime_ms"],
+                vclock=new_vc,
+            )
+            self._apply_resolution_entry(folder_name, chosen_entry, materialize=True)
+            result["wrote"].append(file_path)
+        elif choice == "theirs":
+            chosen_entry = ManifestEntry(
+                file_path=file_path,
+                blob_hash=conflict["remote_blob_hash"],
+                size=conflict["remote_size"],
+                mtime_ms=conflict["remote_mtime_ms"],
+                vclock=new_vc,
+            )
+            self._apply_resolution_entry(folder_name, chosen_entry, materialize=True)
+            result["wrote"].append(file_path)
+        else:  # both
+            # 1. Keep mine in place under original path.
+            mine_entry = ManifestEntry(
+                file_path=file_path,
+                blob_hash=conflict["local_blob_hash"],
+                size=conflict["local_size"],
+                mtime_ms=conflict["local_mtime_ms"],
+                vclock=new_vc,
+            )
+            self._apply_resolution_entry(folder_name, mine_entry, materialize=True)
+            result["wrote"].append(file_path)
+            # 2. Write theirs at a conflict-suffixed path.
+            suffix_path = self._conflict_suffixed_path(
+                file_path, conflict.get("peer_fp"),
+            )
+            # Fresh vclock for the new path — it's a new entry.
+            suffix_vc = VectorClock.empty().increment(self.me_fp)
+            suffix_entry = ManifestEntry(
+                file_path=suffix_path,
+                blob_hash=conflict["remote_blob_hash"],
+                size=conflict["remote_size"],
+                mtime_ms=conflict["remote_mtime_ms"],
+                vclock=suffix_vc,
+            )
+            self._apply_resolution_entry(folder_name, suffix_entry, materialize=True)
+            result["wrote"].append(suffix_path)
+            result["suffixed_path"] = suffix_path
+        self.state.mark_manifest_conflict_resolved(
+            conflict_id, resolution=choice, resolved_by="ui",
+        )
+        return result
+
+    def _apply_resolution_entry(
+        self,
+        folder_name: str,
+        entry: ManifestEntry,
+        *,
+        materialize: bool,
+    ) -> None:
+        self.state.upsert_manifest_entry(
+            folder_name=folder_name,
+            file_path=entry.file_path,
+            blob_hash=entry.blob_hash,
+            size=entry.size,
+            mtime_ms=entry.mtime_ms,
+            vclock=entry.vclock.to_dict(),
+        )
+        if materialize and entry.blob_hash is not None:
+            if self.blobs.has(entry.blob_hash):
+                self._materialize(folder_name, entry)
+            # else: blob not yet local — _materialize will be replayed
+            # by materialize_after_blob_arrived when it lands.
+
+    @staticmethod
+    def _conflict_suffixed_path(
+        file_path: str, peer_fp: Optional[str],
+    ) -> str:
+        """foo.txt + peer aabbcc… → foo.conflict-aabbcc88.txt
+        foo (no extension) → foo.conflict-aabbcc88"""
+        tag = (peer_fp or "peer")[:8]
+        # Find last dot AFTER the last slash (so dotfiles + paths work).
+        slash_idx = max(file_path.rfind("/"), file_path.rfind("\\"))
+        dot_idx = file_path.rfind(".")
+        if dot_idx > slash_idx and dot_idx > 0:
+            stem, ext = file_path[:dot_idx], file_path[dot_idx:]
+            return f"{stem}.conflict-{tag}{ext}"
+        return f"{file_path}.conflict-{tag}"
 
     def materialize_after_blob_arrived(
         self, *, blob_hash: str

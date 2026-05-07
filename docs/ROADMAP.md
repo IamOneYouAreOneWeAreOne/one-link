@@ -150,9 +150,20 @@ a specific competitive gap.
     so retries start clean; rate decays to 0 after >3s of no
     events so frozen transfers don't show ghost rates.
 
-  - **v0.8.2 — Folder sync conflict UI.** When two peers diverge
-    on a file, show both versions side-by-side; user picks. Today
-    we silently latest-wins.
+  - **v0.8.2 — Folder sync conflict UI.** ✓ Shipped (released as
+    package v0.8.9). When the manifest CRDT detects a divergent
+    edit (concurrent vclocks + different blob_hashes), state.py
+    logs both versions to a new `manifest_conflicts` table BEFORE
+    the merge tie-breaks. Server endpoints surface the unresolved
+    list + a per-conflict resolve handler that supports
+    mine | theirs | both. The 'both' choice keeps mine in place
+    AND writes the peer's version under
+    `<name>.conflict-<peer-shortfp>.<ext>` so nothing is lost.
+    UI: yellow Conflicts banner above the Folders list shows the
+    count + opens a side-by-side dialog with Auto-applied tag,
+    blob/size/mtime/peer per side, and Keep mine / Keep theirs /
+    Keep both buttons. Live `folder_conflict_detected` WS event
+    broadcasts toast + banner refresh. Schema migration v10.
 
   - **v0.8.3 — Multi-path send.** When LAN + internet both
     reachable, send chunks in parallel over both, fastest path

@@ -452,8 +452,53 @@ class State:
                 self._migrate_v9_key_change_tracking(c)
                 if current < 9:
                     c.execute("INSERT INTO schema_version(version) VALUES(9)")
+                # v0.8.9: folder-sync concurrent-edit conflicts.
+                self._migrate_v10_folder_conflicts(c)
+                if current < 10:
+                    c.execute("INSERT INTO schema_version(version) VALUES(10)")
             finally:
                 c.close()
+
+    def _migrate_v10_folder_conflicts(self, c: sqlite3.Cursor) -> None:
+        """v0.8.9: track CRDT-detected concurrent edits to the same
+        file path. Today merge_manifest_entries silently latest-wins
+        on the concurrent case; v0.8.9 records both sides so the user
+        can override via the Folders → Conflicts UI. Idempotent."""
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS manifest_conflicts (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_name         TEXT    NOT NULL,
+                file_path           TEXT    NOT NULL,
+                detected_ms         INTEGER NOT NULL,
+                peer_fp             TEXT,
+                -- local snapshot at detection time
+                local_blob_hash     TEXT,
+                local_size          INTEGER,
+                local_mtime_ms      INTEGER,
+                local_vclock_json   TEXT    NOT NULL,
+                -- remote snapshot
+                remote_blob_hash    TEXT,
+                remote_size         INTEGER,
+                remote_mtime_ms     INTEGER,
+                remote_vclock_json  TEXT    NOT NULL,
+                -- which side was applied as the auto-merge winner
+                applied_choice      TEXT    NOT NULL,
+                -- user resolution
+                resolved_ms         INTEGER,
+                resolution          TEXT,
+                resolved_by         TEXT
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mc_folder"
+            " ON manifest_conflicts(folder_name)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mc_unresolved"
+            " ON manifest_conflicts(resolved_ms)"
+        )
 
     def _migrate_v9_key_change_tracking(self, c: sqlite3.Cursor) -> None:
         """v0.7.8: track every (hostname, ed_pub_hex) ever observed
@@ -2676,6 +2721,178 @@ class State:
             "vclock":      json.loads(row["vclock_json"]),
             "updated_ms":  row["updated_ms"],
         }
+
+    # ─── manifest conflicts (v0.8.9) ──────────────────────────────────
+
+    def record_manifest_conflict(
+        self,
+        *,
+        folder_name: str,
+        file_path: str,
+        peer_fp: Optional[str],
+        local_blob_hash: Optional[str],
+        local_size: Optional[int],
+        local_mtime_ms: Optional[int],
+        local_vclock: dict,
+        remote_blob_hash: Optional[str],
+        remote_size: Optional[int],
+        remote_mtime_ms: Optional[int],
+        remote_vclock: dict,
+        applied_choice: str,
+    ) -> int:
+        """v0.8.9: log a CRDT-detected concurrent edit. Returns the
+        new row id. The merge has ALREADY been applied by the caller —
+        this row exists so the user can override that auto-decision
+        via the Conflicts UI.
+
+        Idempotency: if an unresolved conflict for the same
+        (folder_name, file_path) with identical local + remote vclocks
+        already exists, return that id instead of creating a duplicate.
+        Avoids the manifest-resync flood scenario logging the same
+        conflict 50 times."""
+        if applied_choice not in ("local", "remote", "tombstone"):
+            raise ValueError(
+                f"applied_choice must be local|remote|tombstone, got {applied_choice!r}"
+            )
+        local_vc_json = json.dumps(local_vclock, separators=(",", ":"), sort_keys=True)
+        remote_vc_json = json.dumps(remote_vclock, separators=(",", ":"), sort_keys=True)
+        with self._write_lock:
+            existing = self._conn.execute(
+                "SELECT id FROM manifest_conflicts"
+                " WHERE folder_name = ? AND file_path = ?"
+                " AND local_vclock_json = ? AND remote_vclock_json = ?"
+                " AND resolved_ms IS NULL"
+                " LIMIT 1",
+                (folder_name, file_path, local_vc_json, remote_vc_json),
+            ).fetchone()
+            if existing is not None:
+                return int(existing["id"])
+            cur = self._conn.execute(
+                """
+                INSERT INTO manifest_conflicts(
+                    folder_name, file_path, detected_ms, peer_fp,
+                    local_blob_hash, local_size, local_mtime_ms, local_vclock_json,
+                    remote_blob_hash, remote_size, remote_mtime_ms, remote_vclock_json,
+                    applied_choice
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    folder_name, file_path, _now_ms(), peer_fp,
+                    local_blob_hash, local_size, local_mtime_ms, local_vc_json,
+                    remote_blob_hash, remote_size, remote_mtime_ms, remote_vc_json,
+                    applied_choice,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def list_manifest_conflicts(
+        self,
+        *,
+        folder_name: Optional[str] = None,
+        unresolved_only: bool = False,
+        limit: int = 200,
+    ) -> list[dict]:
+        sql = (
+            "SELECT * FROM manifest_conflicts"
+        )
+        clauses: list[str] = []
+        params: list[Any] = []
+        if folder_name is not None:
+            clauses.append("folder_name = ?")
+            params.append(folder_name)
+        if unresolved_only:
+            clauses.append("resolved_ms IS NULL")
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY detected_ms DESC, id DESC LIMIT ?"
+        params.append(int(limit))
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            out.append({
+                "id":                 r["id"],
+                "folder_name":        r["folder_name"],
+                "file_path":          r["file_path"],
+                "detected_ms":        r["detected_ms"],
+                "peer_fp":            r["peer_fp"],
+                "local_blob_hash":    r["local_blob_hash"],
+                "local_size":         r["local_size"],
+                "local_mtime_ms":     r["local_mtime_ms"],
+                "local_vclock":       json.loads(r["local_vclock_json"]),
+                "remote_blob_hash":   r["remote_blob_hash"],
+                "remote_size":        r["remote_size"],
+                "remote_mtime_ms":    r["remote_mtime_ms"],
+                "remote_vclock":      json.loads(r["remote_vclock_json"]),
+                "applied_choice":     r["applied_choice"],
+                "resolved_ms":        r["resolved_ms"],
+                "resolution":         r["resolution"],
+                "resolved_by":        r["resolved_by"],
+            })
+        return out
+
+    def get_manifest_conflict(self, conflict_id: int) -> Optional[dict]:
+        rows = self.list_manifest_conflicts(limit=1)
+        for r in self._conn.execute(
+            "SELECT * FROM manifest_conflicts WHERE id = ?", (int(conflict_id),),
+        ).fetchall():
+            return {
+                "id":                 r["id"],
+                "folder_name":        r["folder_name"],
+                "file_path":          r["file_path"],
+                "detected_ms":        r["detected_ms"],
+                "peer_fp":            r["peer_fp"],
+                "local_blob_hash":    r["local_blob_hash"],
+                "local_size":         r["local_size"],
+                "local_mtime_ms":     r["local_mtime_ms"],
+                "local_vclock":       json.loads(r["local_vclock_json"]),
+                "remote_blob_hash":   r["remote_blob_hash"],
+                "remote_size":        r["remote_size"],
+                "remote_mtime_ms":    r["remote_mtime_ms"],
+                "remote_vclock":      json.loads(r["remote_vclock_json"]),
+                "applied_choice":     r["applied_choice"],
+                "resolved_ms":        r["resolved_ms"],
+                "resolution":         r["resolution"],
+                "resolved_by":        r["resolved_by"],
+            }
+        return None
+
+    def mark_manifest_conflict_resolved(
+        self,
+        conflict_id: int,
+        *,
+        resolution: str,
+        resolved_by: str = "ui",
+    ) -> bool:
+        """Stamp a conflict resolved. Returns True iff the row was
+        previously unresolved (so the caller can avoid double-applying
+        a side-effect like 'write the conflict-suffix file')."""
+        if resolution not in ("mine", "theirs", "both", "auto"):
+            raise ValueError(
+                f"resolution must be mine|theirs|both|auto, got {resolution!r}"
+            )
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE manifest_conflicts"
+                " SET resolved_ms = ?, resolution = ?, resolved_by = ?"
+                " WHERE id = ? AND resolved_ms IS NULL",
+                (_now_ms(), resolution, resolved_by, int(conflict_id)),
+            )
+            return cur.rowcount > 0
+
+    def count_unresolved_manifest_conflicts(
+        self, folder_name: Optional[str] = None,
+    ) -> int:
+        if folder_name is None:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM manifest_conflicts WHERE resolved_ms IS NULL"
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM manifest_conflicts"
+                " WHERE folder_name = ? AND resolved_ms IS NULL",
+                (folder_name,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
 
     # ─── blobs index ──────────────────────────────────────────────────
 

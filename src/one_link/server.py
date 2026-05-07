@@ -293,6 +293,10 @@ class UIServer:
         r.add_get(r"/api/peers/{fp}/key-history", self._guarded(self.api_get_peer_key_history))
         # v0.8.6 trust history (merged audit timeline for one peer).
         r.add_get(r"/api/peers/{fp}/trust-history", self._guarded(self.api_get_peer_trust_history))
+        # v0.8.9 folder-sync conflicts (concurrent divergent edits).
+        r.add_get("/api/folder-conflicts", self._guarded(self.api_list_folder_conflicts))
+        r.add_post(r"/api/folder-conflicts/{conflict_id}/resolve",
+                   self._guarded(self.api_resolve_folder_conflict))
         r.add_get("/api/capability-audit", self._guarded(self.api_capability_audit))
         r.add_get("/api/rendezvous", self._guarded(self.api_get_rendezvous))
         r.add_post("/api/rendezvous", self._guarded(self.api_set_rendezvous))
@@ -1501,6 +1505,73 @@ class UIServer:
             "hostname": peer.hostname,
             "events": events,
         })
+
+    async def api_list_folder_conflicts(self, request: web.Request) -> web.Response:
+        """v0.8.9: list manifest conflicts. Query params:
+          - folder=name → only this folder
+          - unresolved=1 → only unresolved
+          - limit (default 200, capped at 1000)"""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        folder_name = request.query.get("folder") or None
+        unresolved_only = request.query.get("unresolved") in ("1", "true", "yes")
+        try:
+            limit = int(request.query.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        limit = max(1, min(limit, 1000))
+        conflicts = self.daemon.state.list_manifest_conflicts(
+            folder_name=folder_name,
+            unresolved_only=unresolved_only,
+            limit=limit,
+        )
+        # Counter so the UI can show a badge without re-querying.
+        unresolved_total = self.daemon.state.count_unresolved_manifest_conflicts()
+        return web.json_response({
+            "conflicts": conflicts,
+            "unresolved_total": unresolved_total,
+        })
+
+    async def api_resolve_folder_conflict(self, request: web.Request) -> web.Response:
+        """v0.8.9: resolve one manifest conflict.
+        Body: {choice: 'mine'|'theirs'|'both'}.
+        Idempotent — re-resolving an already-resolved conflict returns
+        ok=false / already_resolved=true."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        if self.daemon.folder_engine is None:
+            return web.json_response({"error": "folder sync not available"}, status=503)
+        try:
+            cid = int(request.match_info["conflict_id"])
+        except (KeyError, ValueError):
+            return web.json_response({"error": "invalid conflict id"}, status=400)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        choice = data.get("choice")
+        if choice not in ("mine", "theirs", "both"):
+            return web.json_response(
+                {"error": "choice must be mine|theirs|both"}, status=400,
+            )
+        try:
+            result = self.daemon.folder_engine.resolve_conflict(
+                conflict_id=cid, choice=choice,
+            )
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            return web.json_response(
+                {"error": f"resolve failed: {e}"}, status=500,
+            )
+        # Live-broadcast so every open tab clears the badge.
+        self.broadcast({
+            "type": "folder_conflict_resolved",
+            "conflict_id": cid,
+            "resolution": choice,
+            "folder_name": result.get("folder_name"),
+        })
+        return web.json_response(result)
 
     async def api_capability_audit(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:

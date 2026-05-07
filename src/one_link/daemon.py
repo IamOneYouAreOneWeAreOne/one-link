@@ -640,6 +640,23 @@ class Daemon:
         with contextlib.suppress(Exception):
             self.ui_server.broadcast({"type": "transfer", "transfer": self._transfer_event(rec)})
 
+    def _on_folder_conflict(self, folder_name: str, conflict_id: int) -> None:
+        """v0.8.9: invoked from foldersync.FolderEngine when a CRDT-
+        detected divergent-edit conflict has just been logged. Reads
+        the row out of state + broadcasts so the UI raises the
+        Conflicts banner without waiting for a poll."""
+        if self.ui_server is None or self.state is None:
+            return
+        with contextlib.suppress(Exception):
+            row = self.state.get_manifest_conflict(conflict_id)
+            if row is None:
+                return
+            self.ui_server.broadcast({
+                "type": "folder_conflict_detected",
+                "folder_name": folder_name,
+                "conflict": row,
+            })
+
     def _broadcast_key_change_if_present(self, peer_rec) -> None:
         """v0.7.8: if `state.upsert_peer` just detected a hostname-pubkey
         rotation, the returned PeerRecord has `_pending_key_change_event_id`
@@ -1850,6 +1867,7 @@ class Daemon:
         try:
             wants_data = self.folder_engine.receive_remote_manifest(
                 folder_name=folder_name, entries=entries,
+                peer_fp=peer_fp,  # v0.8.9: attribute conflicts to source
             )
         except Exception as e:
             log.warning("manifest merge failed: %s", e)
@@ -5688,6 +5706,9 @@ class Daemon:
                     loop=asyncio.get_running_loop(),
                     on_local_change=self._on_local_folder_change,
                 )
+                # v0.8.9: hook divergent-edit conflict detection so the UI
+                # raises a banner the moment a conflict is logged.
+                self.folder_engine._on_conflict_recorded = self._on_folder_conflict
                 await self.folder_engine.start()
                 self._folder_sync_task = asyncio.create_task(self._folder_sync_loop())
             except Exception as e:
