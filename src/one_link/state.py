@@ -306,6 +306,11 @@ class PeerRecord:
     verified_at_ms: Optional[int] = None
     verified_method: Optional[str] = None
     verified_note: Optional[str] = None
+    # v0.10.2 disappearing-message TTL. None = off; otherwise every
+    # TEXT message sent to / received from this peer carries an
+    # expires_at_ms = ts_ms + dm_ttl_ms. The daemon's reaper sweeps
+    # expired rows + broadcasts msg_delete WS events.
+    dm_ttl_ms: Optional[int] = None
 
     @property
     def display_name(self) -> str:
@@ -336,6 +341,8 @@ class MessageRecord:
     edited_at_ms: Optional[int] = None
     original_body: Optional[str] = None
     deleted_at_ms: Optional[int] = None
+    # v0.10.2: disappearing-message expiry (ms epoch). NULL = never.
+    expires_at_ms: Optional[int] = None
 
     @property
     def is_edited(self) -> bool:
@@ -344,6 +351,10 @@ class MessageRecord:
     @property
     def is_deleted(self) -> bool:
         return self.deleted_at_ms is not None
+
+    @property
+    def is_expiring(self) -> bool:
+        return self.expires_at_ms is not None
 
 
 @dataclass
@@ -459,8 +470,41 @@ class State:
                 self._migrate_v11_chunk_availability(c)
                 if current < 11:
                     c.execute("INSERT INTO schema_version(version) VALUES(11)")
+                # v0.10.2: disappearing messages (per-peer TTL).
+                self._migrate_v12_disappearing_messages(c)
+                if current < 12:
+                    c.execute("INSERT INTO schema_version(version) VALUES(12)")
             finally:
                 c.close()
+
+    def _migrate_v12_disappearing_messages(self, c: sqlite3.Cursor) -> None:
+        """v0.10.2: per-peer disappearing-message TTL.
+
+        peers.dm_ttl_ms — when set, every TEXT message exchanged with
+        this peer carries an expires_at_ms = ts_ms + dm_ttl_ms. None
+        = TTL off (default). Both ends must support v12 for end-to-end
+        expiry — receivers running older builds keep the message
+        forever; sender's local copy still expires.
+
+        messages.expires_at_ms — wall-clock ms when this row should
+        be tombstoned. NULL = never expires (legacy + non-TTL chats).
+        Indexed for fast reaper sweeps."""
+        rows = c.execute("PRAGMA table_info(peers)").fetchall()
+        existing = {row[1] for row in rows}
+        if "dm_ttl_ms" not in existing:
+            c.execute("ALTER TABLE peers ADD COLUMN dm_ttl_ms INTEGER")
+        rows = c.execute("PRAGMA table_info(messages)").fetchall()
+        existing = {row[1] for row in rows}
+        if "expires_at_ms" not in existing:
+            c.execute("ALTER TABLE messages ADD COLUMN expires_at_ms INTEGER")
+        # Partial index — only rows with non-NULL expires_at_ms are
+        # candidates for the reaper sweep, so a partial index keeps
+        # the index page footprint tiny on chats that never use TTL.
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_expiry "
+            "ON messages(expires_at_ms) "
+            "WHERE expires_at_ms IS NOT NULL"
+        )
 
     def _migrate_v11_chunk_availability(self, c: sqlite3.Cursor) -> None:
         """v0.9.x: local chunk availability index for swarm transfer."""
@@ -1850,6 +1894,10 @@ class State:
                 row["verified_note"]
                 if "verified_note" in cols else None
             ),
+            dm_ttl_ms=(
+                row["dm_ttl_ms"]
+                if "dm_ttl_ms" in cols else None
+            ),
         )
 
     def set_peer_profile(
@@ -2008,21 +2056,95 @@ class State:
         room_id: Optional[str] = None,
         metadata: Optional[dict] = None,
         reply_to: Optional[str] = None,
+        expires_at_ms: Optional[int] = None,
     ) -> None:
         with self._write_lock:
             self._conn.execute(
                 """
                 INSERT OR IGNORE INTO messages(
                     id, ts_ms, direction, peer_fp, msg_type, body, room_id,
-                    metadata_json, reply_to
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    metadata_json, reply_to, expires_at_ms
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     id, ts_ms, direction, peer_fp, msg_type, body, room_id,
                     json.dumps(metadata or {}, separators=(",", ":")),
-                    reply_to,
+                    reply_to, expires_at_ms,
                 ),
             )
+
+    # ─── disappearing messages (v0.10.2) ──────────────────────────────
+
+    # Friendly TTL labels — UI presents these; values are the ms.
+    PEER_DM_TTL_PRESETS = {
+        None: "Off",
+        5 * 60 * 1000: "5 minutes",
+        30 * 60 * 1000: "30 minutes",
+        60 * 60 * 1000: "1 hour",
+        24 * 60 * 60 * 1000: "1 day",
+        7 * 24 * 60 * 60 * 1000: "1 week",
+    }
+
+    def set_peer_dm_ttl(
+        self,
+        fingerprint: str,
+        ttl_ms: Optional[int],
+    ) -> Optional[PeerRecord]:
+        """v0.10.2: set the per-peer disappearing-message TTL. Pass
+        None to clear (messages will no longer expire). Returns the
+        refreshed PeerRecord, or None if the peer doesn't exist."""
+        if ttl_ms is not None:
+            if not isinstance(ttl_ms, int) or ttl_ms <= 0:
+                raise ValueError("ttl_ms must be a positive integer")
+            # Sanity cap: 30 days. Anything longer is "off" effectively;
+            # we don't persist it because the UI's preset list doesn't
+            # cover values that long.
+            if ttl_ms > 30 * 24 * 60 * 60 * 1000:
+                raise ValueError("ttl_ms too large (max 30 days)")
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM peers WHERE fingerprint = ?", (fingerprint,),
+            ).fetchone()
+            if row is None:
+                return None
+            self._conn.execute(
+                "UPDATE peers SET dm_ttl_ms = ? WHERE fingerprint = ?",
+                (ttl_ms, fingerprint),
+            )
+        return self.get_peer(fingerprint)
+
+    def get_peer_dm_ttl(self, fingerprint: str) -> Optional[int]:
+        rec = self.get_peer(fingerprint)
+        return rec.dm_ttl_ms if rec else None
+
+    def expire_due_messages(self, *, now_ms: Optional[int] = None) -> list[str]:
+        """v0.10.2: tombstone every message whose expires_at_ms has
+        passed. Returns the list of msg_ids that were just expired
+        so the daemon can broadcast msg_delete WS events.
+
+        Idempotent — re-expiring a row that's already deleted is a
+        no-op (the AND deleted_at_ms IS NULL clause filters them out)."""
+        cutoff = now_ms if now_ms is not None else _now_ms()
+        with self._write_lock:
+            rows = self._conn.execute(
+                "SELECT id FROM messages"
+                " WHERE expires_at_ms IS NOT NULL"
+                "   AND expires_at_ms <= ?"
+                "   AND deleted_at_ms IS NULL",
+                (cutoff,),
+            ).fetchall()
+            ids = [r["id"] for r in rows]
+            if not ids:
+                return []
+            # Mark all expired in one statement.
+            self._conn.execute(
+                "UPDATE messages SET body = NULL, deleted_at_ms = ?"
+                " WHERE expires_at_ms IS NOT NULL"
+                "   AND expires_at_ms <= ?"
+                "   AND deleted_at_ms IS NULL",
+                (cutoff, cutoff),
+            )
+        return ids
 
     # ─── reactions (v0.7.5) ───────────────────────────────────────────
 
@@ -2231,6 +2353,7 @@ class State:
             edited_at_ms=row["edited_at_ms"] if "edited_at_ms" in cols else None,
             original_body=row["original_body"] if "original_body" in cols else None,
             deleted_at_ms=row["deleted_at_ms"] if "deleted_at_ms" in cols else None,
+            expires_at_ms=row["expires_at_ms"] if "expires_at_ms" in cols else None,
         )
 
     # ─── edit / delete (v0.7.6) ───────────────────────────────────────

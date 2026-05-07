@@ -205,6 +205,15 @@
     transition: background .12s, color .12s;
   }
   .verify-cta:hover { background: rgba(245, 196, 81, .26); }
+  /* v0.10.2 disappearing-message pill in conversation header. */
+  .dm-ttl-pill {
+    display: inline-flex; align-items: center;
+    padding: 2px 8px; border-radius: 999px;
+    background: rgba(245, 196, 81, .18); color: var(--warn);
+    font-size: 11px; font-weight: 600; letter-spacing: .3px;
+    margin-left: 6px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
   /* v0.7.8 KEY-CHANGE WARNING surfaces. The bottom of the trust
      stack: a hostname has rotated keys (re-install or attempted
      impersonation). Always RED, hard to miss, requires explicit
@@ -1563,6 +1572,27 @@
   .pdf-fallback a {
     color: var(--accent-2); text-decoration: underline;
   }
+  /* v0.10.2 disappearing-message expiry badge. */
+  .msg .expiry-badge {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(245, 196, 81, .18);
+    color: var(--warn);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .3px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .msg.out .expiry-badge {
+    background: rgba(255,255,255,.18);
+    color: rgba(255,255,255,.95);
+  }
+  .msg.expired {
+    opacity: .35;
+    transition: opacity .6s ease;
+  }
   /* v0.10.1 multi-select message UI. */
   .select-bar {
     display: flex; align-items: center; gap: 14px;
@@ -2809,6 +2839,28 @@
         <div class="trust-timeline" id="dev-trust-timeline" style="display:none;">
           <div class="empty">Loading…</div>
         </div>
+      </div>
+
+      <!-- v0.10.2 disappearing messages — per-peer TTL. -->
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Disappearing messages</span></div>
+        <div class="settings-row">
+          <label for="dev-dm-ttl">Auto-delete after</label>
+          <select id="dev-dm-ttl">
+            <option value="">Off</option>
+            <option value="300000">5 minutes</option>
+            <option value="1800000">30 minutes</option>
+            <option value="3600000">1 hour</option>
+            <option value="86400000">1 day</option>
+            <option value="604800000">1 week</option>
+          </select>
+        </div>
+        <p class="settings-help">
+          When set, every new TEXT message you send to (or receive from)
+          this device gets a self-destruct timer. Both sides see the
+          same countdown; rows are tombstoned automatically when due.
+          Files + reactions don't expire — only chat text.
+        </p>
       </div>
 
       <div class="settings-section">
@@ -4361,6 +4413,11 @@
         }
         b.appendChild(whenEl);
         b.dataset.msgId = msg.id;
+        // v0.10.2: live "🔥 5m" countdown badge for messages with
+        // a TTL. Updated by the per-second tick.
+        if (msg.expires_at_ms && !msg.deleted) {
+          b.appendChild(renderExpiryBadge(msg));
+        }
         // v0.7.5: hover toolbar (Reply + React + Edit + Delete).
         b.appendChild(renderMsgToolbar(msg));
         // v0.7.5: reactions row (chips per emoji w/ count).
@@ -4378,6 +4435,46 @@
     }
     m.scrollTop = m.scrollHeight;
   }
+
+  // v0.10.2: live countdown badge for disappearing messages.
+  // Rendered once with data-expires; the per-second tick updates
+  // the textContent in place (no full chat re-render).
+  function renderExpiryBadge(msg) {
+    const span = el("span", "expiry-badge");
+    span.dataset.expires = String(msg.expires_at_ms);
+    span.dataset.msgId = msg.id;
+    span.textContent = formatExpiryRemaining(msg.expires_at_ms);
+    span.title = `Disappears at ${new Date(msg.expires_at_ms).toLocaleString()}`;
+    return span;
+  }
+  function formatExpiryRemaining(expiresAt) {
+    const ms = (expiresAt || 0) - Date.now();
+    if (ms <= 0) return "🔥 expired";
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `🔥 ${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `🔥 ${m}m`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `🔥 ${h}h`;
+    const d = Math.floor(h / 24);
+    return `🔥 ${d}d`;
+  }
+  // Per-second tick to keep every visible expiry-badge countdown
+  // fresh. Cheap — N <= 200 visible bubbles, single innerText set
+  // each. No DOM rebuilds.
+  setInterval(() => {
+    document.querySelectorAll(".expiry-badge").forEach((span) => {
+      const expiresAt = parseInt(span.dataset.expires || "0", 10);
+      if (!expiresAt) return;
+      span.textContent = formatExpiryRemaining(expiresAt);
+      // When fully expired, fade the bubble visually so the user
+      // sees the burn before the WS msg_delete arrives.
+      if (expiresAt <= Date.now()) {
+        const bubble = span.closest(".msg");
+        if (bubble) bubble.classList.add("expired");
+      }
+    });
+  }, 1000);
 
   // v0.7.5+v0.7.6: hover toolbar. Reply + React for everyone;
   // Edit + Delete only on your own messages.
@@ -5865,6 +5962,15 @@
     $("#btn-attach").style.display = "";
     if (state.replyTo?.group_id) clearReplyTo();
     $("#convo-name").textContent = peer.display_name || peer.hostname || "(unknown)";
+    // v0.10.2: surface disappearing-message badge in the conversation
+    // header so the user always knows messages here have a TTL.
+    const ttlHost = $("#convo-trust");
+    if (ttlHost && peer.dm_ttl_ms) {
+      const dmPill = el("span", "dm-ttl-pill", `🔥 ${_humanTtl(peer.dm_ttl_ms)}`);
+      dmPill.title = `Messages disappear after ${_humanTtl(peer.dm_ttl_ms)}`;
+      // ttlHost may already contain the verified-pill; append.
+      ttlHost.appendChild(dmPill);
+    }
     const subEl = $("#convo-sub");
     subEl.innerHTML = "";
     subEl.classList.remove("copyable");
@@ -6183,6 +6289,14 @@
     // v0.7.8: render the key-change section (hidden if no unacked
     // events; populated lazily via a server fetch otherwise).
     renderDrawerKeyChange(peer);
+
+    // v0.10.2: populate the disappearing-message TTL picker. The
+    // value comes from /api/peers (peer.dm_ttl_ms) and is rendered
+    // as the matching <option>'s value (empty string = Off).
+    const ttlSel = $("#dev-dm-ttl");
+    if (ttlSel) {
+      ttlSel.value = peer.dm_ttl_ms ? String(peer.dm_ttl_ms) : "";
+    }
 
     // v0.8.6: collapse the trust-history disclosure on every reopen.
     // It populates lazily on toggle.
@@ -6581,6 +6695,33 @@
     await ackPeerKeyChange(fp);
   };
 
+  // v0.10.2: TTL picker change → save to /api/peers/{fp}/ttl + cache.
+  $("#dev-dm-ttl")?.addEventListener("change", async (e) => {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    const raw = e.target.value;
+    const ttl = raw ? parseInt(raw, 10) : null;
+    try {
+      await api.post(`/api/peers/${fp}/ttl`, { ttl_ms: ttl });
+      // Patch the peer record so next render uses the new value.
+      const peer = drawerPeerByFp(fp);
+      if (peer) peer.dm_ttl_ms = ttl;
+      toast(
+        ttl ? `Messages with this device now expire after ${_humanTtl(ttl)}.`
+            : "Disappearing messages turned off for this device.",
+        "good", 4000,
+      );
+    } catch (err) {
+      toast(`TTL save failed: ${errorToastBody(err)}`, "bad");
+    }
+  });
+  function _humanTtl(ms) {
+    if (ms < 60000) return `${Math.round(ms / 1000)}s`;
+    if (ms < 3600000) return `${Math.round(ms / 60000)}m`;
+    if (ms < 86400000) return `${Math.round(ms / 3600000)}h`;
+    return `${Math.round(ms / 86400000)}d`;
+  }
+
   $("#dev-verify-revoke").onclick = async () => {
     const fp = state.deviceDrawerFp;
     if (!fp) return;
@@ -6659,7 +6800,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.10.1";
+  const PAGE_BUILT_FOR = "0.10.2";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {

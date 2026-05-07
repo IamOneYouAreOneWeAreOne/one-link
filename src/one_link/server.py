@@ -175,6 +175,10 @@ def _msg_record_to_event(rec) -> dict:
     if getattr(rec, "deleted_at_ms", None):
         out["deleted_at_ms"] = rec.deleted_at_ms
         out["deleted"] = True
+    # v0.10.2: disappearing-message expiry. UI renders the
+    # countdown badge from this field + the current time.
+    if getattr(rec, "expires_at_ms", None):
+        out["expires_at_ms"] = rec.expires_at_ms
     # Fold metadata back into the dict (skipping the ones we already added)
     for k, v in (rec.metadata or {}).items():
         if k in ("short_id",) or k in out:
@@ -293,6 +297,8 @@ class UIServer:
         # v0.7.7 verified-in-person SAS confirm.
         r.add_post(r"/api/peers/{fp}/verify", self._guarded(self.api_set_peer_verified))
         r.add_delete(r"/api/peers/{fp}/verify", self._guarded(self.api_clear_peer_verified))
+        # v0.10.2 disappearing messages — per-peer TTL.
+        r.add_post(r"/api/peers/{fp}/ttl", self._guarded(self.api_set_peer_ttl))
         # v0.7.8 key-change events.
         r.add_get("/api/key-change-events", self._guarded(self.api_list_key_change_events))
         r.add_post(r"/api/key-change-events/{event_id}/ack", self._guarded(self.api_ack_key_change_event))
@@ -774,6 +780,8 @@ class UIServer:
                         live[rec.fingerprint]["verified_method"] = rec.verified_method
                         live[rec.fingerprint]["verified_note"] = rec.verified_note
                         live[rec.fingerprint]["is_verified"] = rec.is_verified
+                        # v0.10.2: per-peer disappearing-message TTL.
+                        live[rec.fingerprint]["dm_ttl_ms"] = rec.dm_ttl_ms
                     else:
                         # Pending peers in the DB but not visible on mDNS are
                         # usually stale ghosts from a previous daemon/process.
@@ -806,6 +814,8 @@ class UIServer:
                             "verified_method": rec.verified_method,
                             "verified_note": rec.verified_note,
                             "is_verified": rec.is_verified,
+                            # v0.10.2: per-peer disappearing-message TTL.
+                            "dm_ttl_ms": rec.dm_ttl_ms,
                         }
             except Exception:
                 pass
@@ -1556,6 +1566,48 @@ class UIServer:
             "verified_method": None,
             "verified_note": None,
             "is_verified": False,
+        })
+
+    async def api_set_peer_ttl(self, request: web.Request) -> web.Response:
+        """v0.10.2: configure per-peer disappearing-message TTL.
+        Body: {ttl_ms: int | null}. null → off (default).
+
+        Sender's TTL applies to BOTH directions of the chat —
+        outbound TEXT messages get expires_at_ms = ts_ms + ttl_ms,
+        and the wire frame carries ttl_ms so the peer can persist
+        the same expiry on their copy."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        raw = data.get("ttl_ms")
+        if raw is None:
+            ttl = None
+        else:
+            try:
+                ttl = int(raw)
+            except (TypeError, ValueError):
+                return web.json_response(
+                    {"error": "ttl_ms must be a positive integer or null"},
+                    status=400,
+                )
+        try:
+            updated = self.daemon.state.set_peer_dm_ttl(fp, ttl)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        if updated is None:
+            return web.json_response({"error": "peer not found"}, status=404)
+        self.broadcast({
+            "type": "peer_ttl",
+            "fingerprint": fp,
+            "dm_ttl_ms": updated.dm_ttl_ms,
+        })
+        return web.json_response({
+            "ok": True, "fingerprint": fp,
+            "dm_ttl_ms": updated.dm_ttl_ms,
         })
 
     # ─── key-change events (v0.7.8) ───────────────────────────────────

@@ -598,9 +598,19 @@ class Daemon:
             msg.get("reply_to")
             if isinstance(msg.get("reply_to"), str) else None
         )
+        # v0.10.2 disappearing messages: if the wire frame carries
+        # ttl_ms, compute expires_at_ms once and persist it. Reaper
+        # tombstones the row when due. Outbound: send_text already
+        # set ttl_ms from the peer's dm_ttl_ms. Inbound: honor
+        # whatever the sender chose (matches their TTL window).
+        expires_at_ms: Optional[int] = None
+        ts_ms = int(msg["ts"])
+        ttl_ms_raw = msg.get("ttl_ms")
+        if isinstance(ttl_ms_raw, int) and ttl_ms_raw > 0:
+            expires_at_ms = ts_ms + ttl_ms_raw
         # Store everything-except-the-canonical fields as metadata so we
         # round-trip cleanly for tests and history reads.
-        canonical = {"t", "id", "ts", "body", "reply_to"}
+        canonical = {"t", "id", "ts", "body", "reply_to", "ttl_ms"}
         metadata = {
             **{k: v for k, v in msg.items() if k not in canonical},
             "short_id": peer_short_id,
@@ -609,7 +619,7 @@ class Daemon:
             try:
                 self.state.record_message(
                     id=msg["id"],
-                    ts_ms=int(msg["ts"]),
+                    ts_ms=ts_ms,
                     direction=direction,
                     peer_fp=peer_fp,
                     msg_type=msg["t"],
@@ -617,12 +627,15 @@ class Daemon:
                     room_id=msg.get("room_id"),
                     metadata=metadata,
                     reply_to=reply_to,
+                    expires_at_ms=expires_at_ms,
                 )
             except Exception as e:
                 log.warning("state.record_message failed: %s", e)
         out = {**msg, "dir": direction, "peer": peer_short_id, "peer_fp": peer_fp}
         if reply_to:
             out["reply_to"] = reply_to
+        if expires_at_ms is not None:
+            out["expires_at_ms"] = expires_at_ms
         return out
 
     def _transfer_event(self, rec) -> dict:
@@ -654,6 +667,36 @@ class Daemon:
             return
         with contextlib.suppress(Exception):
             self.ui_server.broadcast({"type": "transfer", "transfer": self._transfer_event(rec)})
+
+    DM_REAPER_INTERVAL_S = 30
+
+    async def _dm_reaper_loop(self) -> None:
+        """v0.10.2: tombstone expired disappearing messages every
+        30s + broadcast msg_delete WS events so open tabs flip the
+        bubbles in real time. Failures don't kill the loop."""
+        while True:
+            try:
+                await asyncio.sleep(self.DM_REAPER_INTERVAL_S)
+                if self.state is None:
+                    continue
+                expired_ids = self.state.expire_due_messages()
+                if not expired_ids:
+                    continue
+                log.info("dm reaper: expired %d message(s)", len(expired_ids))
+                if self.ui_server is not None:
+                    now_ms = int(time.time() * 1000)
+                    for mid in expired_ids:
+                        with contextlib.suppress(Exception):
+                            self.ui_server.broadcast({
+                                "type": "msg_delete",
+                                "target": mid,
+                                "deleted_at_ms": now_ms,
+                                "reason": "expired",
+                            })
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("dm reaper loop error: %s", e)
 
     def _apply_settings_at_boot(self) -> None:
         """v0.10.0: read settings that affect global daemon state +
@@ -4935,6 +4978,14 @@ class Daemon:
         kwargs: dict = {"body": body}
         if reply_to:
             kwargs["reply_to"] = str(reply_to)
+        # v0.10.2 disappearing messages — attach the peer's TTL so
+        # both sides compute the same expires_at_ms = ts_ms + ttl.
+        peer_fp = self._peer_fp_from_peer(peer)
+        if peer_fp and self.state is not None:
+            with contextlib.suppress(Exception):
+                ttl = self.state.get_peer_dm_ttl(peer_fp)
+                if ttl:
+                    kwargs["ttl_ms"] = int(ttl)
         m = make_msg("TEXT", self.me.short_id, **kwargs)
         acks = await self.send_to(peer, [m])
         return {"sent": m, "ack": acks[0] if acks else None}
@@ -6459,6 +6510,11 @@ class Daemon:
                 log.warning("folder sync init failed: %s", e)
                 self.folder_engine = None
                 self.blob_store = None
+
+        # v0.10.2: disappearing-message reaper. Polls every 30s for
+        # rows whose expires_at_ms has passed; tombstones them and
+        # broadcasts msg_delete WS events.
+        self._dm_reaper_task = asyncio.create_task(self._dm_reaper_loop())
 
         # Start UI server if available
         if UIServer is not None:
