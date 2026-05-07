@@ -31,6 +31,8 @@ import logging
 import mimetypes
 import os
 import secrets
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
@@ -38,6 +40,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from aiohttp import WSMsgType, web
 
 from one_link.paths import data_dir, inbox_dir
+from one_link.transfer_doctor import enrich_transfer_event
 
 if TYPE_CHECKING:
     from one_link.daemon import Daemon
@@ -55,6 +58,150 @@ COOKIE_NAME = "ol_ui"
 # random port only as a last resort.
 PREFERRED_UI_PORT = 7117
 UI_PORT_FALLBACK_RANGE = 16
+
+
+# ─── v0.10.6 native folder picker ─────────────────────────────────────
+#
+# The first cut used tkinter.filedialog. On Windows that pops a Tk Tcl
+# wrapper around the system dialog — the title bar shows the Tk feather
+# icon and the frame doesn't get DPI-scaled, so the whole thing looks
+# fuzzy on hi-DPI displays. We now dispatch to the platform-native
+# picker:
+#   Windows : PowerShell + WinForms FolderBrowserDialog (Vista-style;
+#             AutoUpgradeEnabled=$true makes it the same dialog
+#             File Explorer uses).
+#   macOS   : osascript "choose folder" — Cocoa native.
+#   Linux   : zenity → kdialog → tkinter (last resort).
+#
+# Tests patch _native_folder_picker directly so they don't depend on
+# any specific platform implementation.
+
+_PICK_TIMEOUT_S = 600  # 10-min hard cap, enough for slow browsing.
+
+
+def _pick_win_powershell(title: str) -> Optional[str]:
+    """Native Windows folder picker via PowerShell + WinForms.
+    Returns absolute path on success, None on cancel/unavailable."""
+    safe_title = title.replace("'", "''")
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms | Out-Null\n"
+        "$d = New-Object System.Windows.Forms.FolderBrowserDialog\n"
+        f"$d.Description = '{safe_title}'\n"
+        "$d.UseDescriptionForTitle = $true\n"
+        "$d.AutoUpgradeEnabled = $true\n"
+        "$d.ShowNewFolderButton = $true\n"
+        "$null = $d.ShowDialog()\n"
+        "Write-Output $d.SelectedPath\n"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=_PICK_TIMEOUT_S,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as e:
+        log.debug("powershell folder picker failed: %s", e)
+        return None
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    return out or None
+
+
+def _pick_mac_osascript(title: str) -> Optional[str]:
+    """Native macOS folder picker via osascript. Returns POSIX path."""
+    safe = title.replace('"', '\\"')
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e",
+             f'POSIX path of (choose folder with prompt "{safe}")'],
+            capture_output=True, text=True, timeout=_PICK_TIMEOUT_S,
+        )
+    except Exception as e:
+        log.debug("osascript folder picker failed: %s", e)
+        return None
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip().rstrip("/")
+    return out or None
+
+
+def _pick_linux(title: str) -> Optional[str]:
+    """Linux folder picker. Tries zenity (GNOME) then kdialog (KDE)."""
+    home = os.path.expanduser("~")
+    attempts = (
+        ["zenity", "--file-selection", "--directory", f"--title={title}"],
+        ["kdialog", "--getexistingdirectory", "--title", title, home],
+    )
+    for cmd in attempts:
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=_PICK_TIMEOUT_S,
+            )
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            log.debug("%s folder picker failed: %s", cmd[0], e)
+            continue
+        if proc.returncode == 0:
+            out = (proc.stdout or "").strip()
+            return out or None
+    # Both unavailable / cancelled — fall through to tkinter as a last
+    # resort so headless-test environments still get a sensible result.
+    return _pick_tkinter_fallback(title)
+
+
+def _pick_tkinter_fallback(title: str) -> Optional[str]:
+    """Last-resort fallback. We enable DPI awareness on Windows so at
+    least the dialog isn't blurry on hi-DPI screens."""
+    if sys.platform == "win32":
+        with contextlib.suppress(Exception):
+            import ctypes
+            try:
+                # Per-monitor v2 — sharpest on Win10+.
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            except Exception:
+                ctypes.windll.user32.SetProcessDPIAware()
+    try:
+        import tkinter
+        from tkinter import filedialog
+    except Exception:
+        return None
+    try:
+        root = tkinter.Tk()
+    except Exception:
+        return None
+    try:
+        root.withdraw()
+        with contextlib.suppress(Exception):
+            root.attributes("-topmost", True)
+        with contextlib.suppress(Exception):
+            root.lift()
+        path = filedialog.askdirectory(
+            parent=root, title=title, mustexist=True,
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            root.destroy()
+    return path or None
+
+
+def _native_folder_picker(title: str) -> Optional[str]:
+    """Dispatch to the most native folder picker available on this OS.
+    Tests patch this entry point directly."""
+    if sys.platform == "win32":
+        picked = _pick_win_powershell(title)
+        if picked is not None:
+            return picked
+        # If PowerShell is missing or restricted, fall back to the
+        # DPI-aware tk dialog so the user isn't completely stuck.
+        return _pick_tkinter_fallback(title)
+    if sys.platform == "darwin":
+        picked = _pick_mac_osascript(title)
+        if picked is not None:
+            return picked
+        return _pick_tkinter_fallback(title)
+    return _pick_linux(title)
 
 
 def _record_translated_error(translated: dict, exc: BaseException, source: str, context: dict | None = None) -> None:
@@ -191,7 +338,7 @@ def _transfer_record_to_event(rec) -> dict:
     pct = 0.0
     if rec.total_bytes > 0:
         pct = min(100.0, max(0.0, (rec.progress_bytes / rec.total_bytes) * 100.0))
-    return {
+    event = {
         "id": rec.id,
         "direction": rec.direction,
         "peer_fp": rec.peer_fp,
@@ -210,6 +357,7 @@ def _transfer_record_to_event(rec) -> dict:
         "updated_ms": rec.updated_ms,
         "metadata": rec.metadata,
     }
+    return enrich_transfer_event(event, now_ms=int(time.time() * 1000))
 
 
 def _token_path() -> Path:
@@ -1611,50 +1759,23 @@ class UIServer:
 
     async def api_pick_folder(self, request: web.Request) -> web.Response:
         """v0.10.6: open a native folder-picker dialog on the daemon's
-        desktop and return the selected absolute path. tkinter is in
-        the stdlib, so no extra dep is needed.
+        desktop and return the selected absolute path.
 
-        Runs in a worker thread because tkinter mainloop is blocking.
-        On a headless box (no DISPLAY / Xlib) we degrade gracefully —
-        the UI keeps the manual text input as a fallback."""
-        def _pick() -> Optional[str]:
-            try:
-                import tkinter
-                from tkinter import filedialog
-            except Exception:
-                return None
-            try:
-                root = tkinter.Tk()
-            except Exception:
-                # Headless box / no display — surface a typed error.
-                return None
-            try:
-                root.withdraw()
-                with contextlib.suppress(Exception):
-                    root.attributes("-topmost", True)
-                with contextlib.suppress(Exception):
-                    root.lift()
-                path = filedialog.askdirectory(
-                    parent=root,
-                    title="Choose a folder to share with One Link",
-                    mustexist=True,
-                )
-            finally:
-                with contextlib.suppress(Exception):
-                    root.destroy()
-            return path or None
-
+        Dispatches to the OS-native picker (Vista-style FolderBrowser
+        on Windows, Cocoa choose-folder on macOS, zenity/kdialog on
+        Linux). The picker runs in a worker thread because the dialog
+        loops are blocking."""
+        title = "Choose a folder to share with One Link"
         try:
-            picked = await asyncio.to_thread(_pick)
+            picked = await asyncio.to_thread(_native_folder_picker, title)
         except Exception as e:
             return web.json_response(
                 {"error": f"folder picker failed: {e}", "available": False},
                 status=500,
             )
         if picked is None:
-            # Either the user cancelled OR the daemon has no display
-            # available. Both shapes are recoverable; the UI falls
-            # back to the manual text path input.
+            # Either the user cancelled OR no picker was available.
+            # The UI falls back to the manual text path input.
             return web.json_response({"path": None, "cancelled": True})
         return web.json_response({"path": picked, "cancelled": False})
 

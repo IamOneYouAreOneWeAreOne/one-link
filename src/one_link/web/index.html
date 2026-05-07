@@ -4496,7 +4496,9 @@
 
   function statusLabel(t, fallback) {
     if (!t) return fallback;
+    if (t.display_state) return t.display_state;
     const meta = t.metadata || {};
+    if (meta.doctor?.label) return meta.doctor.label;
     const stateName = meta.delivery_state || "";
     if (t.status === "queued")   return stateName === "resuming" ? "Resuming" : "Waiting for device";
     if (t.status === "offered")  return "Sending…";
@@ -5219,7 +5221,8 @@
       meta.appendChild(detail);
     } else if (kind === "paused" && t) {
       const detail = el("div", "transfer-detail");
-      detail.textContent = `${fmtBytes(t.progress_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)} · One Link will keep trying automatically`;
+      const autoMsg = t.user_message || t.metadata?.user_message || t.metadata?.doctor?.user_message || "One Link will keep trying automatically";
+      detail.textContent = `${fmtBytes(t.progress_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)} · ${autoMsg}`;
       meta.appendChild(detail);
     }
 
@@ -7209,7 +7212,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.10.6";
+  const PAGE_BUILT_FOR = "0.10.7";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {

@@ -208,7 +208,8 @@ async def test_pick_folder_endpoint_exists(http):
     """Endpoint registered. Response shape must match the contract
     even on a headless test runner where tk has no display."""
     client, _, _, token = http
-    resp = await client.post("/api/fs/pick-folder", headers=_h(token), json={})
+    with patch("one_link.server._native_folder_picker", return_value=None):
+        resp = await client.post("/api/fs/pick-folder", headers=_h(token), json={})
     # 200 (cancelled or path) or 500 (catastrophic). 404 would mean
     # the route isn't wired.
     assert resp.status in (200, 500)
@@ -224,8 +225,7 @@ async def test_pick_folder_returns_user_selection(http, tmp_path):
     returns it verbatim with cancelled=False."""
     client, _, _, token = http
     chosen = str(tmp_path / "Picked")
-    with patch("tkinter.filedialog.askdirectory", return_value=chosen), \
-         patch("tkinter.Tk"):
+    with patch("one_link.server._native_folder_picker", return_value=chosen):
         resp = await client.post("/api/fs/pick-folder", headers=_h(token), json={})
     assert resp.status == 200
     j = await resp.json()
@@ -235,16 +235,101 @@ async def test_pick_folder_returns_user_selection(http, tmp_path):
 
 @pytest.mark.asyncio
 async def test_pick_folder_cancellation_returns_null_path(http):
-    """When the user closes the dialog without picking, askdirectory
-    returns '' — endpoint must surface that as cancelled=True."""
+    """When the user cancels OR no picker is available, the helper
+    returns None — endpoint must surface that as cancelled=True."""
     client, _, _, token = http
-    with patch("tkinter.filedialog.askdirectory", return_value=""), \
-         patch("tkinter.Tk"):
+    with patch("one_link.server._native_folder_picker", return_value=None):
         resp = await client.post("/api/fs/pick-folder", headers=_h(token), json={})
     assert resp.status == 200
     j = await resp.json()
     assert j["path"] is None
     assert j["cancelled"] is True
+
+
+# ───────── native picker dispatch ──────────────────────────────────
+
+def test_native_picker_uses_powershell_on_windows(monkeypatch):
+    """On Windows the dispatcher must NOT call tkinter first — the
+    Tk dialog looks blurry on hi-DPI displays and shows the feather
+    icon instead of native chrome. PowerShell + WinForms is the
+    canonical Win10/11 picker."""
+    from one_link import server
+    monkeypatch.setattr(server.sys, "platform", "win32")
+    called = {}
+    def fake_ps(title):
+        called["ps"] = title
+        return "C:/Picked"
+    def fake_tk(title):
+        called["tk"] = title
+        return "C:/SHOULD_NOT_BE_USED"
+    monkeypatch.setattr(server, "_pick_win_powershell", fake_ps)
+    monkeypatch.setattr(server, "_pick_tkinter_fallback", fake_tk)
+    result = server._native_folder_picker("hi")
+    assert result == "C:/Picked"
+    assert "ps" in called
+    assert "tk" not in called
+
+
+def test_native_picker_falls_back_to_tk_when_powershell_missing(monkeypatch):
+    """If PowerShell is missing/locked-down, the dispatcher must fall
+    through to the tk fallback rather than fail silently — that
+    keeps the Browse button working on locked-down Windows boxes."""
+    from one_link import server
+    monkeypatch.setattr(server.sys, "platform", "win32")
+    monkeypatch.setattr(server, "_pick_win_powershell", lambda t: None)
+    monkeypatch.setattr(server, "_pick_tkinter_fallback", lambda t: "C:/Tk")
+    assert server._native_folder_picker("hi") == "C:/Tk"
+
+
+def test_native_picker_uses_osascript_on_mac(monkeypatch):
+    from one_link import server
+    monkeypatch.setattr(server.sys, "platform", "darwin")
+    monkeypatch.setattr(server, "_pick_mac_osascript", lambda t: "/Users/me/Pick")
+    assert server._native_folder_picker("hi") == "/Users/me/Pick"
+
+
+def test_native_picker_uses_linux_dispatch(monkeypatch):
+    from one_link import server
+    monkeypatch.setattr(server.sys, "platform", "linux")
+    monkeypatch.setattr(server, "_pick_linux", lambda t: "/home/me/Pick")
+    assert server._native_folder_picker("hi") == "/home/me/Pick"
+
+
+def test_powershell_picker_passes_dialog_title(monkeypatch):
+    """The title we configure must reach the WinForms dialog so
+    the user sees 'Choose a folder to share with One Link' rather
+    than a default 'Browse for Folder' label."""
+    from one_link import server
+    captured = {}
+    def fake_run(args, **kw):
+        captured["args"] = args
+        class _R:
+            returncode = 0
+            stdout = "C:/Picked"
+            stderr = ""
+        return _R()
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    out = server._pick_win_powershell("Choose a folder to share with One Link")
+    assert out == "C:/Picked"
+    # The PS script string lives in args[-1] for `-Command <script>`.
+    script = captured["args"][-1]
+    assert "Choose a folder to share with One Link" in script
+    assert "FolderBrowserDialog" in script
+    assert "AutoUpgradeEnabled = $true" in script
+
+
+def test_powershell_picker_returns_none_on_empty_path(monkeypatch):
+    """Cancel via the PS dialog leaves SelectedPath empty — must
+    surface as None, not as ''."""
+    from one_link import server
+    def fake_run(args, **kw):
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    assert server._pick_win_powershell("hi") is None
 
 
 # ───────── folder pane UI surface ───────────────────────────────────
@@ -332,5 +417,4 @@ def test_refresh_button_spins_while_loading(index_html: str):
 
 def test_page_version_bumped(index_html: str):
     from one_link import __version__
-    assert __version__ == "0.10.6"
     assert f'PAGE_BUILT_FOR = "{__version__}"' in index_html

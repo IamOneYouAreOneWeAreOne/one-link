@@ -1,6 +1,6 @@
 [project]
 name = "one_link"
-version = "0.10.6"
+version = "0.10.7"
 description = "Peer-to-peer LAN chat + file sync built on the Coherence Language ecosystem."
 requires-python = ">=3.11"
 authors = [{ name = "One Link contributor", email = "weareone@oneunity.earth" }]

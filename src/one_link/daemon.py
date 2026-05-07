@@ -82,6 +82,7 @@ from one_link.paths import (
 )
 from one_link.state import State
 from one_link.swarm_plan import plan_swarm_sources, source_from_hashes
+from one_link.transfer_doctor import diagnose_transfer, enrich_transfer_event
 from one_link.transfer_intent import FileChunkManifest, FileManifest, plan_transfer_intent
 from one_link.wire import decode_msg, encode_msg, make_msg
 
@@ -705,7 +706,7 @@ class Daemon:
         pct = 0.0
         if rec.total_bytes > 0:
             pct = min(100.0, max(0.0, (rec.progress_bytes / rec.total_bytes) * 100.0))
-        return {
+        event = {
             "id": rec.id,
             "direction": rec.direction,
             "peer_fp": rec.peer_fp,
@@ -724,6 +725,7 @@ class Daemon:
             "updated_ms": rec.updated_ms,
             "metadata": rec.metadata,
         }
+        return enrich_transfer_event(event, now_ms=int(time.time() * 1000))
 
     def _broadcast_transfer(self, rec) -> None:
         if self.ui_server is None or rec is None:
@@ -948,6 +950,16 @@ class Daemon:
             "next_retry_ms": now_ms + _delivery_backoff_ms(attempts),
             "delivery_state": "waiting_for_device",
         })
+        diagnosis = diagnose_transfer({
+            "status": "paused",
+            "direction": "out",
+            "metadata": metadata,
+        }, now_ms=now_ms).to_dict()
+        metadata.update({
+            "doctor": diagnosis,
+            "auto_action": diagnosis["action"],
+            "user_message": diagnosis["user_message"],
+        })
         return self._update_transfer(
             transfer_id,
             status="paused",
@@ -998,6 +1010,17 @@ class Daemon:
                 "error_class": "PeerOffline",
             },
         )
+        if queued is not None:
+            diag = diagnose_transfer(queued, now_ms=now_ms).to_dict()
+            self._update_transfer(
+                queued.id,
+                metadata={
+                    **(queued.metadata or {}),
+                    "doctor": diag,
+                    "auto_action": diag["action"],
+                    "user_message": diag["user_message"],
+                },
+            )
         self._schedule_resume_paused(peer_fp)
         return queued
 
