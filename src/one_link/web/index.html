@@ -914,6 +914,7 @@
   .file-row .badge.active   { background: rgba(78,193,255,.15); color: var(--accent-2); }
   .file-row .badge.failed   { background: rgba(255,107,107,.15); color: var(--bad); }
   .file-row .badge.queued   { background: rgba(245,196,81,.15); color: var(--warn); }
+  .file-row .badge.paused   { background: rgba(78,193,255,.13); color: var(--accent-2, #4ec1ff); }
 
   /* ── Notification banner (one-time prompt) ─────────────────────────── */
   .notif-banner {
@@ -2113,6 +2114,7 @@
     if (t.status === "offered")  return "Sending…";
     if (t.status === "active")   return `Sending… ${Math.round(t.progress_pct || 0)}%`;
     if (t.status === "complete") return t.direction === "in" ? "Received" : "Sent";
+    if (t.status === "paused")   return "Paused — will resume";
     if (t.status === "failed")   return "Failed";
     return t.status || fallback;
   }
@@ -2120,12 +2122,14 @@
     if (!t) return "queued";
     if (t.status === "complete") return "sent";
     if (t.status === "failed")   return "failed";
+    if (t.status === "paused")   return "paused";
     if (t.status === "active" || t.status === "offered") return "sending";
     return "queued";
   }
   function statusGlyph(kind) {
     if (kind === "sent") return "✓";
     if (kind === "failed") return "✗";
+    if (kind === "paused") return "⏸";
     if (kind === "sending") return "⏳";
     return "•";
   }
@@ -2514,6 +2518,24 @@
           }
         };
         row.appendChild(retry);
+      }
+      // v0.7.4: paused outbound transfers auto-resume on next
+      // session-up. Show a Cancel button for the user to give up.
+      if (t.status === "paused" && t.direction === "out") {
+        const cancel = el("button", null, "Cancel");
+        cancel.onclick = async () => {
+          cancel.disabled = true;
+          try {
+            await api.post(
+              `/api/transfers/${encodeURIComponent(t.id)}/cancel`, {}
+            );
+            await refreshTransfers();
+          } catch (e) {
+            toast(`Cancel failed: ${errorToastBody(e)}`, "bad");
+            cancel.disabled = false;
+          }
+        };
+        row.appendChild(cancel);
       }
       if (["complete", "failed"].includes(t.status)) {
         const del = el("button", null, "Clear");

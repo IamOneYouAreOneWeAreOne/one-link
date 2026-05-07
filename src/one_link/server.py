@@ -259,6 +259,8 @@ class UIServer:
         r.add_get("/api/transfers", self._guarded(self.api_transfers))
         r.add_post("/api/transfers/prune", self._guarded(self.api_prune_transfers))
         r.add_post(r"/api/transfers/{transfer_id:.+}/retry", self._guarded(self.api_retry_transfer))
+        r.add_post(r"/api/transfers/{transfer_id:.+}/cancel", self._guarded(self.api_cancel_transfer))
+        r.add_post(r"/api/peers/{fp}/resume", self._guarded(self.api_resume_peer_transfers))
         r.add_get("/api/outbox", self._guarded(self.api_list_outbox))
         r.add_post(r"/api/outbox/{id:\d+}/cancel", self._guarded(self.api_cancel_outbox))
         r.add_post(r"/api/outbox/flush", self._guarded(self.api_flush_outbox))
@@ -1661,6 +1663,38 @@ class UIServer:
             log.exception("retry_transfer failed: %s", e)
             translated = _translate_send_error(e)
             return web.json_response(translated, status=translated["status"])
+
+    async def api_cancel_transfer(self, request: web.Request) -> web.Response:
+        """v0.7.4: cancel a paused transfer (mark as failed +
+        reason='cancelled by user'). Idempotent: cancelling a
+        non-existent or already-finished transfer returns ok."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        transfer_id = request.match_info["transfer_id"]
+        rec = self.daemon.state.get_transfer(transfer_id)
+        if rec is None:
+            return web.json_response({"ok": True, "removed": False})
+        if rec.status not in ("paused", "queued", "offered", "active"):
+            return web.json_response({"ok": True, "already_terminal": True})
+        self.daemon.state.update_transfer(
+            transfer_id, status="failed",
+            metadata={
+                **(rec.metadata or {}),
+                "error": "cancelled by user",
+                "error_class": "CancelledByUser",
+            },
+        )
+        return web.json_response({"ok": True})
+
+    async def api_resume_peer_transfers(self, request: web.Request) -> web.Response:
+        """v0.7.4: manually trigger the resume orchestrator for a
+        peer. Useful when the user wants to retry a peer's paused
+        transfers without waiting for the next idle session refresh."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        result = await self.daemon.resume_paused_transfers_for(fp)
+        return web.json_response(result)
 
     async def api_prune_transfers(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:

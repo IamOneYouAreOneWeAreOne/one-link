@@ -1054,7 +1054,9 @@ class State:
     ) -> TransferRecord:
         if direction not in ("in", "out"):
             raise ValueError(f"invalid transfer direction: {direction!r}")
-        if status not in ("queued", "offered", "active", "complete", "failed"):
+        if status not in (
+            "queued", "offered", "active", "complete", "failed", "paused",
+        ):
             raise ValueError(f"invalid transfer status: {status!r}")
         total = int(size if total_bytes is None else total_bytes)
         now = _now_ms()

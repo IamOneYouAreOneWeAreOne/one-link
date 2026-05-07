@@ -130,6 +130,57 @@ HANDSHAKE_PER_IP_RATE_MAX = 240     # attempts per window per IP
 # owns the box.
 HANDSHAKE_LOOPBACK_IPS = frozenset({"127.0.0.1", "::1", "localhost"})
 
+
+def _is_transient_send_error(exc: BaseException) -> bool:
+    """v0.7.4: classify send_file failures so the resume-on-reconnect
+    path knows when to mark a transfer 'paused' (auto-retry on next
+    fresh session) vs 'failed' (permanent, user must intervene).
+
+    Transient — pause + retry:
+      - OSError family (ConnectionAbortedError, ConnectionResetError,
+        TimeoutError, BrokenPipeError, etc) — typically WinError 10053
+        when the peer's TCP stack tore the link mid-stream.
+      - asyncio.TimeoutError — handshake or per-chunk ACK deadline.
+      - RuntimeError carrying our own "handshake timed out" / "did
+        not ACK" / "peer not responsive" sentinels.
+
+    Permanent — fail loudly:
+      - Capability denial (peer's policy refused us).
+      - Decrypt failure / wire-version mismatch (incompatible peer).
+      - Peer marked rejected.
+    """
+    if isinstance(exc, (OSError, ConnectionError, asyncio.TimeoutError)):
+        return True
+    msg = str(exc).lower()
+    if "capability" in msg and "disabled" in msg:
+        return False
+    if "rejected" in msg:
+        return False
+    if "decrypt" in msg or "invalidtag" in msg:
+        return False
+    transient_markers = (
+        "handshake timed out", "did not ack", "peer not responsive",
+        "connection aborted", "connection reset", "broken pipe",
+        "timed out", "winerror 10053", "winerror 10054",
+        "peer offline", "peer unreachable",
+    )
+    return any(m in msg for m in transient_markers)
+
+
+class TransferPausedError(RuntimeError):
+    """Raised when an outbound file send is safely resumable later.
+
+    The transfer ledger already contains the durable status row when this
+    exception is raised. HTTP callers use the transfer_id/path to return a
+    202 instead of an opaque 500 and, for browser uploads, to keep the
+    staged file available for automatic resume.
+    """
+
+    def __init__(self, message: str, *, transfer_id: str, path: Path):
+        super().__init__(message)
+        self.transfer_id = transfer_id
+        self.path = path
+
 # Capabilities this build advertises in CAPS messages.
 # v0.5.4 bumps to OL1.2: CAPS optionally includes `share_rdz` so paired
 # devices auto-inherit each other's rendezvous URL list. Older OL1.1
@@ -2684,6 +2735,10 @@ class Daemon:
             # for delivery in the background — the caller doesn't
             # block on the flush.
             self._schedule_outbox_flush(peer_fp)
+            # v0.7.4: same trigger for paused outbound transfers.
+            # The resume task acquires its own per-peer lock so two
+            # session-up events can't fire duplicate sends.
+            self._schedule_resume_paused(peer_fp)
             return sess
         except Exception:
             with contextlib.suppress(Exception):
@@ -3744,6 +3799,122 @@ class Daemon:
         except Exception as e:
             log.warning("outbox flush task errored for %s: %s", peer_fp[:8], e)
 
+    # ─── resume-on-reconnect (v0.7.4) ─────────────────────────────────
+
+    def _get_resume_lock(self, peer_fp: str) -> asyncio.Lock:
+        # Lazy per-peer lock dict, created on first use to avoid
+        # touching __init__ across versions.
+        if not hasattr(self, "_resume_lock_dict"):
+            self._resume_lock_dict: dict[str, asyncio.Lock] = {}
+        lk = self._resume_lock_dict.get(peer_fp)
+        if lk is None:
+            lk = asyncio.Lock()
+            self._resume_lock_dict[peer_fp] = lk
+        return lk
+
+    async def resume_paused_transfers_for(self, peer_fp: str) -> dict:
+        """v0.7.4: re-run send_file for every transfer this daemon
+        paused mid-stream against `peer_fp`. The CDC FILE_OFFER /
+        FILE_WANTS protocol is naturally idempotent — receiver replies
+        with ONLY the chunks it doesn't already have cached, so a
+        resume only ships the gap.
+
+        Per-peer asyncio lock prevents two simultaneous session-up
+        events from firing duplicate resumes. Returns counts."""
+        if self.state is None:
+            return {"ok": False, "error": "state not available", "resumed": 0}
+        rec = self.state.get_peer(peer_fp)
+        if rec is None or rec.trust != "pinned":
+            return {"ok": False, "error": "peer not pinned", "resumed": 0}
+        peer = await self.resolve_for_send(peer_fp)
+        if peer is None:
+            return {"ok": False, "error": "peer offline", "resumed": 0}
+        lock = self._get_resume_lock(peer_fp)
+        if lock.locked():
+            return {"ok": True, "resumed": 0, "skipped_concurrent": True}
+        async with lock:
+            try:
+                rows = self.state.list_transfers(peer_fp=peer_fp, limit=200)
+            except Exception:
+                rows = []
+            paused = [
+                r for r in rows
+                if r.status == "paused" and r.direction == "out"
+            ]
+            resumed = 0
+            errors = 0
+            for r in paused:
+                path_str = (r.metadata or {}).get("path")
+                if not path_str:
+                    log.info(
+                        "resume skipped %s: no source path on ledger row",
+                        r.id,
+                    )
+                    continue
+                from pathlib import Path as _P
+                src = _P(path_str)
+                if not src.is_file():
+                    log.info(
+                        "resume skipped %s: source file gone (%s)",
+                        r.id, path_str,
+                    )
+                    self._update_transfer(
+                        r.id, status="failed",
+                        metadata={
+                            **(r.metadata or {}),
+                            "error": f"source file no longer exists: {path_str}",
+                            "error_class": "FileNotFoundError",
+                        },
+                    )
+                    errors += 1
+                    continue
+                # send_file always creates a fresh ledger row, so
+                # delete the paused row to avoid two ghosts side by
+                # side in the Activity drawer. The CDC chunk cache
+                # on the receiver side carries the partial-progress
+                # state across the row swap.
+                with contextlib.suppress(Exception):
+                    self.state.delete_transfer(r.id)
+                try:
+                    await self.send_file(peer, src)
+                    resumed += 1
+                except Exception as e:
+                    errors += 1
+                    log.info(
+                        "resume of %s deferred for %s: %s",
+                        r.id, peer_fp[:8], e,
+                    )
+                    # send_file's own except path stamped a fresh
+                    # paused/failed row; we don't double-write.
+                    # First failure short-circuits — same logic as
+                    # outbox flush. Next session-up retries.
+                    break
+            return {
+                "ok": True, "resumed": resumed, "errors": errors,
+                "remaining": sum(
+                    1 for r in self.state.list_transfers(
+                        peer_fp=peer_fp, limit=200,
+                    ) if r.status == "paused" and r.direction == "out"
+                ),
+            }
+
+    def _schedule_resume_paused(self, peer_fp: str) -> None:
+        """Fire-and-forget background resume. Called from the same
+        session-up hook as the outbox flush."""
+        if self.state is None or not peer_fp:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._resume_paused_swallow(peer_fp))
+
+    async def _resume_paused_swallow(self, peer_fp: str) -> None:
+        try:
+            await self.resume_paused_transfers_for(peer_fp)
+        except Exception as e:
+            log.warning("resume task errored for %s: %s", peer_fp[:8], e)
+
     # ─── folder sync orchestration ─────────────────────────────────────
     async def push_folder_to_peer(self, peer: Peer, folder_name: str) -> dict:
         """One-way folder push to peer. Single connection cycle:
@@ -3998,7 +4169,7 @@ class Daemon:
             sess = await self._get_outbound_session(peer)
         except asyncio.TimeoutError as e:
             self._update_transfer(
-                transfer_id, status="failed",
+                transfer_id, status="paused",
                 metadata={
                     "mode": "cdc",
                     "path": str(path),
@@ -4266,16 +4437,27 @@ class Daemon:
                 "transfer_id": transfer_id,
             }
         except Exception as e:
-            # v0.6.3: stamp the human-readable reason on the ledger row
-            # so the UI can show "timed out" / "peer unreachable" /
-            # "decrypt_failed" instead of a silent spinner.
+            # v0.7.4: distinguish transient errors (network drop,
+            # WinError 10053, handshake timeout, peer offline) from
+            # permanent ones (capability_disabled, decrypt fail,
+            # peer_rejected). Transient → status='paused' so the
+            # next session-up auto-resumes via the CDC chunk-cache
+            # protocol (FILE_OFFER replies with FILE_WANTS=missing,
+            # which is empty for already-delivered chunks). Permanent
+            # → status='failed' as before.
+            err_str = str(e)
+            err_class = type(e).__name__
+            transient = _is_transient_send_error(e)
+            new_status = "paused" if transient else "failed"
             self._update_transfer(
-                transfer_id, status="failed",
+                transfer_id, status=new_status,
                 metadata={
                     "mode": "cdc",
                     "path": str(path),
-                    "error": str(e)[:500],
-                    "error_class": type(e).__name__,
+                    "error": err_str[:500],
+                    "error_class": err_class,
+                    "transient": transient,
+                    "paused_at_ms": int(time.time() * 1000) if transient else None,
                 },
             )
             # v0.7.0: a mid-stream failure leaves the session in an
