@@ -548,7 +548,14 @@ class UIServer:
         # v0.8.1: developer backend.
         r.add_get("/api/debug/log", self._guarded(self.api_debug_log))
         r.add_post("/api/debug/log/clear", self._guarded(self.api_debug_clear))
-        r.add_get("/api/debug/health", self._guarded(self.api_debug_health))
+        # v0.11.4: /api/debug/health is intentionally NOT token-guarded.
+        # The daemon binds to 127.0.0.1 so only same-machine processes
+        # can hit it, and the response leaks no PII or message data —
+        # just structural self-checks (schema version, mDNS status,
+        # disk paths). Leaving auth on this endpoint made it the FIRST
+        # thing to break when the session cookie expired, defeating its
+        # whole purpose ("open this when something feels broken").
+        r.add_get("/api/debug/health", self.api_debug_health)
         r.add_post("/api/send", self._guarded(self.api_send))
         r.add_post("/api/send-file", self._guarded(self.api_send_file))
         r.add_get("/api/files", self._guarded(self.api_files))
@@ -2378,14 +2385,44 @@ class UIServer:
         return None
 
     async def api_get_sas(self, request: web.Request) -> web.Response:
-        """Return the SAS for a peer (deterministic — both sides see same)."""
+        """Return the SAS for a peer (deterministic — both sides see same).
+
+        v0.11.4: SAS is a pure function of the two pubkeys, so we don't
+        need the peer to be online. If mDNS doesn't have them right
+        now, fall back to the stored peer record. This unblocks
+        in-person verification of an already-paired device that just
+        happens to be offline at the moment the user opens the drawer."""
         fp = request.match_info["fp"]
-        peer = self._resolve_peer_for_pairing(fp)
-        if peer is None:
-            return web.json_response({"error": "peer not visible on LAN"}, status=404)
         from one_link.pairing import compute_sas, format_sas
-        sas = compute_sas(self.daemon.me.public_bytes, bytes.fromhex(peer.ed_pub_hex))
-        return web.json_response({"sas": sas, "formatted": format_sas(sas)})
+
+        # 1. Try the live mDNS registry first — that's the freshest
+        #    pubkey and matches the previous behavior for online peers.
+        peer = self._resolve_peer_for_pairing(fp)
+        if peer is not None and peer.ed_pub_hex:
+            try:
+                pub = bytes.fromhex(peer.ed_pub_hex)
+            except ValueError:
+                pub = None
+            if pub:
+                sas = compute_sas(self.daemon.me.public_bytes, pub)
+                return web.json_response(
+                    {"sas": sas, "formatted": format_sas(sas)},
+                )
+
+        # 2. Fall back to the stored peer record. SAS doesn't require
+        #    the peer to be online — both sides will compute the same
+        #    value from their respective stored pubkeys.
+        if self.daemon.state is not None:
+            rec = self.daemon.state.get_peer(fp)
+            if rec is not None and rec.pubkey:
+                sas = compute_sas(self.daemon.me.public_bytes, rec.pubkey)
+                return web.json_response(
+                    {"sas": sas, "formatted": format_sas(sas)},
+                )
+
+        return web.json_response(
+            {"error": "no pubkey on file for this peer"}, status=404,
+        )
 
     async def api_pair_init(self, request: web.Request) -> web.Response:
         fp = request.match_info["fp"]
