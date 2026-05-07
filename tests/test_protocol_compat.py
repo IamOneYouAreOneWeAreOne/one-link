@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from one_link.capabilities import CHAT, FILES, FILE_CDC, FOLDER_SYNC
+from one_link.capabilities import (
+    CHAT,
+    FILES,
+    FILE_CDC,
+    FILE_COMPRESSION,
+    FILE_RESUMABLE,
+    FILE_SWARM,
+    FOLDER_SYNC,
+)
 from one_link.protocol_compat import Version, fallback_order, negotiate
 
 
@@ -22,6 +30,28 @@ def test_same_major_with_cdc_uses_advanced_mode():
     assert res.mode == "advanced"
     assert res.transfer_mode == "cdc"
     assert fallback_order(res)[:2] == ("file_cdc", "file_baseline")
+
+
+def test_swarm_resumable_cdc_is_strongest_but_keeps_fallbacks():
+    res = negotiate(
+        local_version="0.9.9",
+        peer_version="0.9.8",
+        local_capabilities=[
+            CHAT, FILES, FILE_CDC, FILE_RESUMABLE, FILE_SWARM, FILE_COMPRESSION,
+        ],
+        peer_capabilities=[
+            CHAT, FILES, FILE_CDC, FILE_RESUMABLE, FILE_SWARM, FILE_COMPRESSION,
+        ],
+    )
+    assert res.compatible
+    assert res.mode == "swarm_advanced"
+    assert res.transfer_mode == "swarm_cdc"
+    assert fallback_order(res)[:4] == (
+        "file_swarm_cdc",
+        "file_resumable_cdc",
+        "file_cdc",
+        "file_baseline",
+    )
 
 
 def test_same_major_falls_back_to_baseline_file_mode():

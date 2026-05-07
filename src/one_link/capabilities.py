@@ -10,6 +10,9 @@ from __future__ import annotations
 CHAT = "chat"
 FILES = "files"
 FILE_CDC = "file_cdc"
+FILE_RESUMABLE = "file_resumable"
+FILE_SWARM = "file_swarm"
+FILE_COMPRESSION = "file_compression"
 FOLDER_SYNC = "folder_sync"
 MERKLE_SYNC = "merkle_sync"
 FUTURE_TRANSPORTS = "future_transports"
@@ -26,6 +29,9 @@ LOCAL_CAPABILITIES = (
     CHAT,
     FILES,
     FILE_CDC,
+    FILE_RESUMABLE,
+    FILE_SWARM,
+    FILE_COMPRESSION,
     FOLDER_SYNC,
     MERKLE_SYNC,
     FUTURE_TRANSPORTS,
@@ -39,13 +45,19 @@ LOCAL_CAPABILITIES = (
 #     user must explicitly grant
 # These tuples are the policy-layer enforcement points.
 DEFAULT_ALLOW_AFTER_PAIRING = (CHAT,)
-PROMPT_REQUIRED = (FILES, FILE_CDC, FOLDER_SYNC, MERKLE_SYNC, FUTURE_TRANSPORTS)
+PROMPT_REQUIRED = (FILES, FOLDER_SYNC, MERKLE_SYNC, FUTURE_TRANSPORTS)
 # DOUBLE_RATCHET_V1 is a transport-layer capability negotiated
 # between channels; it isn't a user-facing prompt-required cap.
 # Therefore it appears in neither tuple — and the deny-by-default
 # tests check that union(DEFAULT_ALLOW_AFTER_PAIRING, PROMPT_REQUIRED)
 # excludes transport-layer caps. Update accordingly.
-TRANSPORT_LAYER_CAPS = (DOUBLE_RATCHET_V1,)
+TRANSPORT_LAYER_CAPS = (
+    FILE_CDC,
+    FILE_RESUMABLE,
+    FILE_SWARM,
+    FILE_COMPRESSION,
+    DOUBLE_RATCHET_V1,
+)
 
 
 def normalize_caps(values) -> tuple[str, ...]:

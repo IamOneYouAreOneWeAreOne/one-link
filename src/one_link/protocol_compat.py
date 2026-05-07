@@ -11,7 +11,15 @@ from dataclasses import dataclass
 import re
 from typing import Iterable
 
-from .capabilities import CHAT, FILES, FILE_CDC, normalize_caps
+from .capabilities import (
+    CHAT,
+    FILES,
+    FILE_CDC,
+    FILE_COMPRESSION,
+    FILE_RESUMABLE,
+    FILE_SWARM,
+    normalize_caps,
+)
 
 
 SEMVER_RE = re.compile(r"^\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?")
@@ -49,6 +57,10 @@ class CompatibilityResult:
 
     @property
     def transfer_mode(self) -> str:
+        if FILE_SWARM in self.common_capabilities and FILE_CDC in self.common_capabilities:
+            return "swarm_cdc"
+        if FILE_RESUMABLE in self.common_capabilities and FILE_CDC in self.common_capabilities:
+            return "resumable_cdc"
         if FILE_CDC in self.common_capabilities:
             return "cdc"
         if FILES in self.common_capabilities:
@@ -97,7 +109,11 @@ def negotiate(
             reasons=tuple(reasons),
         )
 
-    if FILE_CDC in common:
+    if FILE_SWARM in common and FILE_CDC in common:
+        mode = "swarm_advanced"
+    elif FILE_RESUMABLE in common and FILE_CDC in common:
+        mode = "resumable_advanced"
+    elif FILE_CDC in common:
         mode = "advanced"
     elif any(c in common for c in BASELINE_CAPABILITIES):
         mode = "baseline"
@@ -122,6 +138,10 @@ def negotiate(
 def fallback_order(result: CompatibilityResult) -> tuple[str, ...]:
     """Return strongest-to-weakest transfer methods for this peer."""
     order: list[str] = []
+    if FILE_SWARM in result.common_capabilities and FILE_CDC in result.common_capabilities:
+        order.append("file_swarm_cdc")
+    if FILE_RESUMABLE in result.common_capabilities and FILE_CDC in result.common_capabilities:
+        order.append("file_resumable_cdc")
     if FILE_CDC in result.common_capabilities:
         order.append("file_cdc")
     if FILES in result.common_capabilities:

@@ -82,7 +82,7 @@ from one_link.paths import (
 )
 from one_link.state import State
 from one_link.swarm_plan import plan_swarm_sources, source_from_hashes
-from one_link.transfer_intent import FileManifest
+from one_link.transfer_intent import FileManifest, plan_transfer_intent
 from one_link.wire import decode_msg, encode_msg, make_msg
 
 # Forward import to avoid hard dep when server.py loads daemon.py
@@ -5424,16 +5424,6 @@ class Daemon:
             for c in cdc_chunks
         ]
 
-        offer = make_msg(
-            "FILE_OFFER",
-            self.me.short_id,
-            name=path.name,
-            size=size,
-            blob=blob_hex,
-            chunks=cdc_index,
-            mode="cdc",
-        )
-
         # v0.6.3: create the transfer-ledger row BEFORE the dial so any
         # failure during dial / handshake / first ACK marks an actual row
         # as 'failed' rather than disappearing silently. The peer_fp at
@@ -5444,7 +5434,7 @@ class Daemon:
         existing = self.state.get_transfer(transfer_id) if self.state else None
         base_metadata = {
             **((existing.metadata if existing else {}) or {}),
-            "mode": "cdc",
+            "mode": "planning",
             "path": str(path),
             "delivery_state": "queued",
         }
@@ -5532,6 +5522,63 @@ class Daemon:
 
         peer_fp = sess.peer_fp  # cryptographically-verified fingerprint
         channel = sess.channel
+        peer_caps_frame = getattr(channel, "peer_caps", None) or {}
+        peer_features = list(peer_caps_frame.get("features") or [])
+        if not peer_features and self.state is not None:
+            with contextlib.suppress(Exception):
+                peer_features = self.state.get_peer_capabilities(peer_fp)
+        peer_version = peer_caps_frame.get("app_version")
+        try:
+            from one_link import __version__ as local_version
+        except Exception:
+            local_version = None
+        intent = plan_transfer_intent(
+            path=path,
+            peer_fp=peer_fp,
+            local_version=local_version,
+            peer_version=peer_version,
+            peer_capabilities=peer_features,
+            intent_id=transfer_id,
+            file_index=file_index,
+        )
+        can_offer_cdc = intent.can_offer_cdc
+        planned_wire_mode = "cdc" if can_offer_cdc else "stream"
+        planned_chunks_total = (
+            len(cdc_chunks)
+            if can_offer_cdc
+            else max(1, (size + CHUNK_SIZE - 1) // CHUNK_SIZE)
+        )
+        now_ms = int(time.time() * 1000)
+        base_metadata = {
+            **base_metadata,
+            **intent.metadata(),
+            "mode": planned_wire_mode,
+            "delivery_state": "queued",
+            "peer_app_version": peer_version,
+            "peer_features": list(peer_features),
+            "planned_wire_mode": planned_wire_mode,
+            "protocol_attempts": [
+                {
+                    "method": intent.preferred_method,
+                    "at_ms": now_ms,
+                    "state": "selected",
+                },
+            ],
+        }
+        offer_fields = {
+            "name": path.name,
+            "size": size,
+            "blob": blob_hex,
+            "mode": planned_wire_mode,
+            "compat": {
+                "preferred_method": intent.preferred_method,
+                "fallback_order": list(intent.methods),
+                "transfer_mode": intent.compatibility.transfer_mode,
+            },
+        }
+        if can_offer_cdc:
+            offer_fields["chunks"] = cdc_index
+        offer = make_msg("FILE_OFFER", self.me.short_id, **offer_fields)
         # Walk the ledger row from queued → offered. The provisional
         # peer_fp was set from peer.ed_pub_hex; _get_outbound_session's
         # _verify_channel_peer guarantees they match here (it raises
@@ -5549,11 +5596,11 @@ class Daemon:
                 progress_bytes=0,
                 total_bytes=size,
                 chunks_done=0,
-                chunks_total=len(cdc_chunks),
+                chunks_total=planned_chunks_total,
                 metadata={
                     **base_metadata,
                     "delivery_state": "sending",
-                    "last_attempt_ms": int(time.time() * 1000),
+                    "last_attempt_ms": now_ms,
                 },
             )
         else:
@@ -5563,7 +5610,7 @@ class Daemon:
                 metadata={
                     **base_metadata,
                     "delivery_state": "sending",
-                    "last_attempt_ms": int(time.time() * 1000),
+                    "last_attempt_ms": now_ms,
                 },
             )
 
@@ -5620,10 +5667,19 @@ class Daemon:
                 wire_bytes_sent = 0
                 raw_bytes_sent = 0
                 compressed_chunks = 0
-                cdc_used = first_reply.get("t") == "FILE_WANTS"
+                if first_reply.get("rejected"):
+                    raise RuntimeError(
+                        f"peer rejected file offer: {first_reply.get('rejected')}"
+                    )
+                cdc_used = can_offer_cdc and first_reply.get("t") == "FILE_WANTS"
                 wanted_indexes = (
                     {int(i) for i in first_reply.get("wants", [])}
                     if cdc_used else set()
+                )
+                actual_method = (
+                    "file_cdc"
+                    if cdc_used
+                    else "file_baseline"
                 )
                 if cdc_used:
                     skipped_bytes = sum(
@@ -5639,6 +5695,7 @@ class Daemon:
                         metadata={
                             **base_metadata,
                             "delivery_state": "sending",
+                            "actual_method": actual_method,
                             "skipped_chunks": len(cdc_chunks) - len(wanted_indexes),
                         },
                     )
@@ -5681,8 +5738,27 @@ class Daemon:
                                 chunks_total=len(cdc_chunks),
                                 raw_bytes=raw_bytes_sent,
                                 wire_bytes=wire_bytes_sent,
+                                metadata={
+                                    **base_metadata,
+                                    "delivery_state": "sending",
+                                    "actual_method": actual_method,
+                                },
                             )
                 else:
+                    if can_offer_cdc:
+                        attempts = list(base_metadata.get("protocol_attempts") or [])
+                        attempts.append({
+                            "method": "file_baseline",
+                            "at_ms": int(time.time() * 1000),
+                            "state": "fallback",
+                            "reason": "peer_acknowledged_stream",
+                        })
+                        base_metadata = {
+                            **base_metadata,
+                            "mode": "stream",
+                            "actual_method": actual_method,
+                            "protocol_attempts": attempts,
+                        }
                     with open(path, "rb") as f:
                         seq = 0
                         prev = f.read(CHUNK_SIZE)
@@ -5712,6 +5788,11 @@ class Daemon:
                                 chunks_total=total_stream_chunks,
                                 raw_bytes=raw_bytes_sent,
                                 wire_bytes=wire_bytes_sent,
+                                metadata={
+                                    **base_metadata,
+                                    "delivery_state": "sending",
+                                    "actual_method": actual_method,
+                                },
                             )
                             prev = cur
                             seq += 1
@@ -5735,6 +5816,11 @@ class Daemon:
                             total_bytes=0,
                             chunks_done=1,
                             chunks_total=1,
+                            metadata={
+                                **base_metadata,
+                                "delivery_state": "sending",
+                                "actual_method": actual_method,
+                            },
                         )
 
                 # v0.7.0: stamp session counters so the next idle-PING
@@ -5757,6 +5843,7 @@ class Daemon:
                     **base_metadata,
                     "mode": "cdc" if cdc_used else "stream",
                     "delivery_state": "done",
+                    "actual_method": "file_cdc" if cdc_used else "file_baseline",
                     "skipped_chunks": len(cdc_chunks) - chunks_sent if cdc_used else 0,
                     "compressed_chunks": compressed_chunks,
                     "completed_at_ms": int(time.time() * 1000),
@@ -5767,7 +5854,7 @@ class Daemon:
             return {
                 "offer": offer,
                 "chunks": chunks_sent,
-                "total_chunks": len(cdc_chunks),
+                "total_chunks": len(cdc_chunks) if cdc_used else chunks_sent,
                 "cdc": cdc_used,
                 "cdc_skipped": len(cdc_chunks) - chunks_sent if cdc_used else 0,
                 "raw_bytes_sent": raw_bytes_sent,
