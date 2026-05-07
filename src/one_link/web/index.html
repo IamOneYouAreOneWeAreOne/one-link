@@ -1395,6 +1395,14 @@
     box-shadow: 0 0 0 2px var(--bg-2);
   }
 
+  /* v0.11.2 mute-duration picker. Inline select + Apply button. */
+  .mute-duration-row {
+    display: flex; gap: 6px; flex: 1; min-width: 0;
+  }
+  .mute-duration-select {
+    flex: 1; min-width: 0;
+  }
+
   /* v0.11.1 Blocked devices list. */
   .blocked-list { display: flex; flex-direction: column; gap: 6px; }
   .blocked-row {
@@ -2975,6 +2983,33 @@
             </p>
 
             <div class="settings-section">
+              <div class="settings-section-h"><span>What to notify about</span></div>
+              <div class="settings-row">
+                <label for="set-notif-preview">Show message preview</label>
+                <span class="toggle">
+                  <input type="checkbox" id="set-notif-preview" />
+                  <span class="slider"></span>
+                </span>
+              </div>
+              <p class="settings-help">
+                Include message text in the desktop notification.
+                Turn off to keep peeking eyes from seeing message
+                content on your lock screen.
+              </p>
+              <div class="settings-row">
+                <label for="set-notif-reactions">Notify on reactions</label>
+                <span class="toggle">
+                  <input type="checkbox" id="set-notif-reactions" />
+                  <span class="slider"></span>
+                </span>
+              </div>
+              <p class="settings-help">
+                When a peer adds or removes an emoji reaction to one
+                of your messages. Off if you find these noisy.
+              </p>
+            </div>
+
+            <div class="settings-section">
               <div class="settings-section-h"><span>Sound</span></div>
               <div class="settings-row">
                 <label for="set-sound">Play a chime on incoming messages</label>
@@ -3278,6 +3313,27 @@
             <span class="slider"></span>
           </span>
         </div>
+        <!-- v0.11.2 mute-with-duration. The boolean toggle above is
+             kept for back-compat; this row exposes a duration picker
+             matching the messaging-app convention (15min / 1h / 8h /
+             24h / 1 week / forever / unmute). -->
+        <div class="settings-row">
+          <label>Mute for…</label>
+          <div class="mute-duration-row" data-mute-target="peer">
+            <select id="dev-mute-duration" class="mute-duration-select">
+              <option value="">Choose…</option>
+              <option value="900000">15 minutes</option>
+              <option value="3600000">1 hour</option>
+              <option value="28800000">8 hours</option>
+              <option value="86400000">24 hours</option>
+              <option value="604800000">1 week</option>
+              <option value="0">Until I unmute</option>
+              <option value="null">Unmute now</option>
+            </select>
+            <button class="btn-ghost" id="dev-mute-apply">Apply</button>
+          </div>
+        </div>
+        <p class="settings-help" id="dev-mute-status"></p>
       </div>
 
       <div class="settings-section">
@@ -7055,6 +7111,14 @@
 
     $("#dev-alias").value = peer.local_alias || "";
     $("#dev-mute").checked = !!peer.muted;
+    // v0.11.2 mute status — show current deadline if any.
+    _renderMuteStatus(
+      $("#dev-mute-status"),
+      peer.muted_until_ms,
+      !!peer.muted,
+    );
+    const dur = $("#dev-mute-duration");
+    if (dur) dur.value = "";  // Reset picker each open.
 
     syncDrawerCapabilityControls(peer.allowed_capabilities);
 
@@ -7257,6 +7321,36 @@
   $("#dev-mute").addEventListener("change", (e) => {
     if (state.deviceDrawerPending) {
       state.deviceDrawerPending.muted = !!e.target.checked;
+    }
+  });
+  // v0.11.2 mute-with-duration apply.
+  $("#dev-mute-apply")?.addEventListener("click", async () => {
+    const fp = state.deviceDrawerFp;
+    if (!fp) return;
+    const sel = $("#dev-mute-duration");
+    if (!sel?.value) {
+      toast("Pick a duration first", "info");
+      return;
+    }
+    const raw = sel.value;
+    let body;
+    if (raw === "null") body = { duration_ms: null };
+    else body = { duration_ms: parseInt(raw, 10) };
+    try {
+      const r = await api.post(
+        `/api/peers/${encodeURIComponent(fp)}/mute`, body,
+      );
+      _renderMuteStatus(
+        $("#dev-mute-status"), r.muted_until_ms, r.muted_until_ms != null,
+      );
+      $("#dev-mute").checked = r.muted_until_ms != null;
+      toast(
+        body.duration_ms === null ? "Unmuted" : "Mute applied", "good",
+      );
+      // Refresh sidebar so the row reflects the change.
+      await refreshPeers();
+    } catch (e) {
+      toast(`Mute failed: ${errorToastBody(e)}`, "bad");
     }
   });
   document.querySelectorAll("#dev-cap-row .cap-toggle").forEach(btn => {
@@ -7606,7 +7700,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.11.1";
+  const PAGE_BUILT_FOR = "0.11.2";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -9956,6 +10050,31 @@
     document.documentElement.style.setProperty("--my-avatar", hex);
   }
 
+  // v0.11.2 mute-status text. Renders into a target node:
+  //   "Muted forever"     when muted_until_ms === 0
+  //   "Muted until …"     when muted_until_ms > now
+  //   "" (cleared)        when not muted
+  // Falls back to the legacy boolean if muted_until_ms is null but
+  // legacyMuted is true (v0.7.3-era state).
+  function _renderMuteStatus(target, mutedUntilMs, legacyMuted) {
+    if (!target) return;
+    const now = Date.now();
+    if (mutedUntilMs == null) {
+      target.textContent = legacyMuted ? "Muted (legacy toggle)." : "";
+      return;
+    }
+    if (mutedUntilMs === 0) {
+      target.textContent = "Muted until you unmute.";
+      return;
+    }
+    if (mutedUntilMs <= now) {
+      target.textContent = "Mute expired.";
+      return;
+    }
+    const d = new Date(mutedUntilMs);
+    target.textContent = `Muted until ${d.toLocaleString()}`;
+  }
+
   // v0.11.1 — render blocked devices in Privacy pane. Uses the
   // existing /api/peers endpoint with ?include=rejected so we don't
   // need a new backend route.
@@ -10045,6 +10164,11 @@
         r.avatar_color || (r.avatar_color_presets || [])[0] || "#7c4dff",
       );
       _refreshProfileAvatarPreview();
+      // v0.11.2 notification fine-tuning toggles.
+      const np = $("#set-notif-preview");
+      const nr = $("#set-notif-reactions");
+      if (np) np.checked = r.notification_preview !== false;
+      if (nr) nr.checked = r.notify_on_reactions !== false;
       // Cache for runtime checks (DND + sound + theme).
       state.runtimeSettings = {
         theme: r.theme || "dark",
@@ -10113,6 +10237,9 @@
       // v0.11.1 Profile fields.
       bio: ($("#set-bio")?.value || "").trim(),
       avatar_color: activeSwatch?.dataset?.color || undefined,
+      // v0.11.2 notification fine-tuning.
+      notification_preview: !!$("#set-notif-preview")?.checked,
+      notify_on_reactions: !!$("#set-notif-reactions")?.checked,
     };
     let savedSettings = false;
     try {

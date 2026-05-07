@@ -1,6 +1,6 @@
 # Performance Lab
 
-Status: in_progress for v0.10.9.
+Status: in_progress for v0.11.0.
 
 Correctness tests prove One Link should work. The performance lab proves whether
 it is getting faster, tighter, and more efficient.
@@ -19,7 +19,12 @@ simple before/after view after each optimization pass.
 
 ## What It Measures
 
-- **CDC indexing throughput**: how fast One Link can split and hash a file.
+- **Hash-only manifest throughput**: how fast One Link can identify a file
+  without building a chunk manifest.
+- **Fixed-manifest throughput**: how fast One Link can build aligned block
+  manifests for large media.
+- **CDC indexing throughput**: how fast One Link can split and hash a file for
+  prior-knowledge dedup.
 - **Prior-knowledge savings**: how many bytes can be skipped when the receiver
   already has a related object.
 - **Swarm scheduler throughput**: how quickly One Link can assign chunks across
@@ -29,12 +34,17 @@ simple before/after view after each optimization pass.
 - **SQLite transfer ledger pressure**: how many transfer updates per second the
   durable ledger can absorb.
 - **Compression throughput**: zlib level-1 speed and ratio for easy data.
+- **Adaptive transfer brain**: whether local cost planning chooses fast lanes
+  when prior knowledge is low and CDC/swarm when prior knowledge is high.
 
 ## How To Read The Report
 
 Useful first-pass signals:
 
-- `cdc_indexing.metrics.mib_per_s`: higher is better.
+- `hash_only_manifest.metrics.mib_per_s`: higher is better.
+- `fixed_indexing.metrics.mib_per_s`: higher is better.
+- `cdc_indexing.metrics.mib_per_s`: higher is better, but CDC should only be
+  selected when its skipped bytes justify its CPU cost.
 - `prior_knowledge_dedup.metrics.bandwidth_reduction`: closer to `1.0` is
   better when files are related.
 - `swarm_scheduler.metrics.chunks_per_s`: higher means the planner can scale
@@ -44,6 +54,11 @@ Useful first-pass signals:
   updates under many transfers.
 - `zlib_level1_compression.metrics.mib_per_s`: higher means compression is less
   likely to become the bottleneck.
+- `adaptive_transfer_brain.metrics.low_prior_mode`: should prefer a fast lane.
+- `adaptive_transfer_brain.metrics.high_prior_python_mode`: shows the honest
+  decision with today's Python CDC speed.
+- `adaptive_transfer_brain.metrics.high_prior_accelerated_mode`: shows the
+  target decision once native/GPU CDC lands.
 
 ## What Is Not Yet Measured
 
@@ -60,15 +75,24 @@ Those are the next performance gates.
 
 ## Current Local Snapshot
 
-On the current Windows dev machine, `standard` scale produced:
+On the current Windows dev machine, `quick` scale after the v0.11.0 fast-lane
+work produced:
 
+- Hash-only manifest: about `1.6 GiB/s`.
+- Fixed manifest: about `1.2 GiB/s`.
 - CDC indexing: about `8 MiB/s`.
+- Adaptive transfer brain: thousands of local decisions per second; with
+  current Python CDC it still often chooses hash-stream for huge fast-LAN
+  transfers, while accelerated CDC flips high-prior cases to CDC/swarm.
+
+On the same machine before this work, `standard` scale produced:
+
 - Prior-knowledge related-file savings: about `99%` bytes skipped.
 - Swarm scheduling: about `388k chunks/s`.
 - SQLite transfer ledger: about `17k writes/s`.
 - Compression: several GiB/s on easy data.
 
 Interpretation: the scheduler and ledger are not the bottleneck right now. The
-largest obvious optimization target is CDC indexing throughput, followed by
-real two-device LAN transfer throughput and browser UI pressure under many live
-transfer events.
+largest obvious optimization target was blindly paying CDC indexing cost. v0.11
+adds the fast lanes and transfer brain needed to stop doing that for peers or
+files that cannot benefit from CDC.

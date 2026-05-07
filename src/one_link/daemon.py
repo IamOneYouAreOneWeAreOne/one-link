@@ -64,11 +64,19 @@ from pathlib import Path
 import blake3
 
 from one_link import blobstore, channel as ch, foldersync
-from one_link.capabilities import CHAT, FILES, FOLDER_SYNC, LOCAL_CAPABILITIES, normalize_caps
+from one_link.capabilities import (
+    CHAT,
+    FILES,
+    FILE_CDC,
+    FOLDER_SYNC,
+    LOCAL_CAPABILITIES,
+    normalize_caps,
+)
 from one_link.cdc import (
     MAX_CHUNK_BYTES as CDC_MAX_CHUNK_BYTES,
     MIN_CHUNK_BYTES as CDC_MIN_CHUNK_BYTES,
     Chunk,
+    hash_path,
     index_path,
 )
 from one_link.crdt import ManifestEntry, VectorClock
@@ -88,7 +96,12 @@ from one_link.transfer_doctor import (
     diagnose_transfer,
     enrich_transfer_event,
 )
-from one_link.transfer_intent import FileChunkManifest, FileManifest, plan_transfer_intent
+from one_link.transfer_intent import (
+    FileChunkManifest,
+    FileManifest,
+    plan_transfer_intent,
+    plan_transfer_intent_for_manifest,
+)
 from one_link.wire import decode_msg, encode_msg, make_msg
 
 # Forward import to avoid hard dep when server.py loads daemon.py
@@ -105,6 +118,7 @@ DAEMON_LOCK_FILE = "daemon.lock"
 CHUNK_SIZE = 256 * 1024  # 256 KiB plaintext per FILE_CHUNK
 MAX_INCOMING_FILE_BYTES = 1024 * 1024 * 1024  # match UI upload cap
 CDC_CACHE_MAX_BYTES = 512 * 1024 * 1024
+CDC_AUTO_INDEX_MAX_BYTES = 128 * 1024 * 1024
 COMPRESSION_MIN_BYTES = 2048
 COMPRESSION_MIN_SAVINGS = 0.08
 OUTBOUND_SESSION_IDLE_S = 300.0
@@ -204,6 +218,31 @@ class TransferPausedError(RuntimeError):
         super().__init__(message)
         self.transfer_id = transfer_id
         self.path = path
+
+
+def _should_build_cdc_offer(
+    *,
+    size: int,
+    intent,
+    existing_metadata: dict | None = None,
+) -> tuple[bool, str]:
+    """Decide whether a live send should pay CDC indexing cost.
+
+    CDC is excellent when it skips enough bytes, but Python CDC is currently
+    much slower than the fast stream path for first-time large media. This
+    keeps the app automatic: small files and CDC resumes use CDC; huge unknown
+    sends use the fast compatible lane until the native CDC engine lands.
+    """
+
+    if not getattr(intent, "can_offer_cdc", False):
+        return False, "peer_does_not_support_cdc"
+    md = existing_metadata or {}
+    previous_mode = str(md.get("actual_method") or md.get("planned_wire_mode") or "")
+    if previous_mode in {"file_cdc", "cdc", "swarm_cdc"}:
+        return True, "resume_existing_cdc_transfer"
+    if int(size) <= CDC_AUTO_INDEX_MAX_BYTES:
+        return True, "small_enough_for_python_cdc"
+    return False, "large_file_fast_lane_until_native_cdc"
 
 
 def _delivery_backoff_ms(attempts: int) -> int:
@@ -6095,19 +6134,10 @@ class Daemon:
         if peer_fp_for_policy and not self._capability_allowed(peer_fp_for_policy, FILES):
             raise RuntimeError(f"files capability disabled for peer {peer.short_id}")
         size = path.stat().st_size
-        file_index = index_path(path)
-        blob_hex = file_index.blob_hash
-        cdc_chunks = file_index.chunks
-        cdc_index = [
-            {
-                "index": c.index,
-                "start": c.start,
-                "end": c.end,
-                "size": c.size,
-                "hash": c.hash,
-            }
-            for c in cdc_chunks
-        ]
+        blob_hex = hash_path(path)
+        cdc_chunks: tuple[Chunk, ...] = ()
+        cdc_index: list[dict] = []
+        stream_chunks_total = max(1, (size + CHUNK_SIZE - 1) // CHUNK_SIZE)
 
         # v0.6.3: create the transfer-ledger row BEFORE the dial so any
         # failure during dial / handshake / first ACK marks an actual row
@@ -6135,7 +6165,7 @@ class Daemon:
             progress_bytes=0,
             total_bytes=size,
             chunks_done=0,
-            chunks_total=len(cdc_chunks),
+            chunks_total=stream_chunks_total,
             metadata=base_metadata,
         )
 
@@ -6217,21 +6247,55 @@ class Daemon:
             from one_link import __version__ as local_version
         except Exception:
             local_version = None
-        intent = plan_transfer_intent(
+
+        thin_manifest = FileManifest(
+            name=path.name,
+            size=size,
+            blob_hash=blob_hex,
+            chunks=(),
+        )
+        intent = plan_transfer_intent_for_manifest(
+            manifest=thin_manifest,
             path=path,
             peer_fp=peer_fp,
             local_version=local_version,
             peer_version=peer_version,
             peer_capabilities=peer_features,
             intent_id=transfer_id,
-            file_index=file_index,
         )
-        can_offer_cdc = intent.can_offer_cdc
+        can_offer_cdc, cdc_decision_reason = _should_build_cdc_offer(
+            size=size,
+            intent=intent,
+            existing_metadata=base_metadata,
+        )
+        if can_offer_cdc:
+            file_index = index_path(path)
+            blob_hex = file_index.blob_hash
+            cdc_chunks = file_index.chunks
+            cdc_index = [
+                {
+                    "index": c.index,
+                    "start": c.start,
+                    "end": c.end,
+                    "size": c.size,
+                    "hash": c.hash,
+                }
+                for c in cdc_chunks
+            ]
+            intent = plan_transfer_intent(
+                path=path,
+                peer_fp=peer_fp,
+                local_version=local_version,
+                peer_version=peer_version,
+                peer_capabilities=peer_features,
+                intent_id=transfer_id,
+                file_index=file_index,
+            )
         planned_wire_mode = "cdc" if can_offer_cdc else "stream"
         planned_chunks_total = (
             len(cdc_chunks)
             if can_offer_cdc
-            else max(1, (size + CHUNK_SIZE - 1) // CHUNK_SIZE)
+            else stream_chunks_total
         )
         now_ms = int(time.time() * 1000)
         base_metadata = {
@@ -6239,6 +6303,8 @@ class Daemon:
             **intent.metadata(),
             "mode": planned_wire_mode,
             "delivery_state": "queued",
+            "cdc_decision_reason": cdc_decision_reason,
+            "cdc_auto_index_max_bytes": CDC_AUTO_INDEX_MAX_BYTES,
             "peer_app_version": peer_version,
             "peer_features": list(peer_features),
             "planned_wire_mode": planned_wire_mode,

@@ -12,21 +12,27 @@ def test_perf_lab_quick_report_schema(tmp_path):
     assert report["scale"] == "quick"
     names = {b["name"] for b in report["benchmarks"]}
     assert {
+        "hash_only_manifest",
+        "fixed_indexing",
         "cdc_indexing",
         "prior_knowledge_dedup",
         "swarm_scheduler",
         "never_lose_torture_sim",
         "sqlite_transfer_ledger",
         "zlib_level1_compression",
+        "adaptive_transfer_brain",
     } <= names
 
     by_name = {b["name"]: b for b in report["benchmarks"]}
+    assert by_name["hash_only_manifest"]["metrics"]["mib_per_s"] > 0
+    assert by_name["fixed_indexing"]["metrics"]["mib_per_s"] > 0
     assert by_name["cdc_indexing"]["metrics"]["mib_per_s"] > 0
     assert by_name["prior_knowledge_dedup"]["metrics"]["bytes_saved"] > 0
     assert by_name["swarm_scheduler"]["metrics"]["chunks_per_s"] > 0
     assert by_name["never_lose_torture_sim"]["metrics"]["delivered"] is True
     assert by_name["sqlite_transfer_ledger"]["metrics"]["writes_per_s"] > 0
     assert by_name["zlib_level1_compression"]["metrics"]["mib_per_s"] > 0
+    assert by_name["adaptive_transfer_brain"]["metrics"]["decisions_per_s"] > 0
 
     out = write_report(report, tmp_path / "perf.json")
     loaded = json.loads(out.read_text(encoding="utf-8"))

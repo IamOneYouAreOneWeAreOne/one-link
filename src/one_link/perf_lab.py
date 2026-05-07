@@ -4,12 +4,15 @@ Benchmarks here are deterministic, local, and dependency-light. They are not a
 replacement for two-machine LAN throughput tests, but they give us repeatable
 numbers for the core pieces that make "send anything" fast:
 
+* whole-file hash throughput;
+* fixed-manifest throughput;
 * CDC indexing throughput;
 * prior-knowledge byte savings;
 * swarm scheduler planning speed;
 * transfer-doctor/torture resilience;
 * SQLite transfer-ledger write pressure;
 * compression throughput.
+* adaptive transfer-brain strategy selection.
 """
 
 from __future__ import annotations
@@ -25,9 +28,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .cdc import build_dedup_plan, index_path
+from .cdc import build_dedup_plan, fixed_index_path, hash_path, index_path
 from .state import State
 from .swarm_plan import plan_swarm_sources, source_from_hashes
+from .transfer_brain import TransferRouteObservation, decision_from_observations
 from .transfer_sim import simulate_never_lose_transfer, synthetic_manifest
 
 
@@ -64,6 +68,48 @@ def _time(fn: Callable[[], dict]) -> BenchResult:
         seconds=elapsed,
         notes=str(out.pop("notes", "")) if "notes" in out else "",
     )
+
+
+def bench_hash_only(*, size_mib: int, seed: int) -> BenchResult:
+    def run() -> dict:
+        rng = random.Random(seed)
+        with tempfile.TemporaryDirectory(prefix="ol_perf_hash_") as td:
+            path = Path(td) / "payload.bin"
+            path.write_bytes(rng.randbytes(size_mib * MiB))
+            t0 = time.perf_counter()
+            blob = hash_path(path)
+            elapsed = time.perf_counter() - t0
+        return {
+            "name": "hash_only_manifest",
+            "size_bytes": size_mib * MiB,
+            "mib_per_s": _mb_per_s(size_mib * MiB, elapsed),
+            "blob_hash_prefix": blob[:12],
+            "notes": "baseline/old-version peers now pay this cost instead of CDC indexing",
+        }
+
+    return _time(run)
+
+
+def bench_fixed_indexing(*, size_mib: int, seed: int) -> BenchResult:
+    def run() -> dict:
+        rng = random.Random(seed)
+        with tempfile.TemporaryDirectory(prefix="ol_perf_fixed_") as td:
+            path = Path(td) / "payload.bin"
+            path.write_bytes(rng.randbytes(size_mib * MiB))
+            t0 = time.perf_counter()
+            idx = fixed_index_path(path)
+            elapsed = time.perf_counter() - t0
+        return {
+            "name": "fixed_indexing",
+            "size_bytes": size_mib * MiB,
+            "chunks": len(idx.chunks),
+            "mib_per_s": _mb_per_s(size_mib * MiB, elapsed),
+            "avg_chunk_bytes": round((size_mib * MiB) / max(1, len(idx.chunks)), 3),
+            "blob_hash_prefix": idx.blob_hash[:12],
+            "notes": "high-throughput aligned-block manifest lane for large media",
+        }
+
+    return _time(run)
 
 
 def bench_cdc_indexing(*, size_mib: int, seed: int) -> BenchResult:
@@ -240,6 +286,65 @@ def bench_compression(*, size_mib: int) -> BenchResult:
     return _time(run)
 
 
+def bench_transfer_brain(*, size_mib: int) -> BenchResult:
+    def run() -> dict:
+        observations = [
+            TransferRouteObservation(
+                route="lan",
+                ok=True,
+                latency_ms=4.0 + (i % 3),
+                bandwidth_bps=700_000_000 + (i % 5) * 20_000_000,
+                energy_cost=0.6,
+            )
+            for i in range(40)
+        ]
+        observations.extend(
+            TransferRouteObservation(route="relay", ok=(i % 4 != 0), latency_ms=95.0, bandwidth_bps=60_000_000)
+            for i in range(20)
+        )
+        t0 = time.perf_counter()
+        low_prior = decision_from_observations(
+            size_bytes=size_mib * MiB,
+            supports_cdc=True,
+            supports_swarm=True,
+            prior_hit_rate=0.0,
+            observations=observations,
+            routes=("lan", "relay"),
+        )
+        high_prior_python = decision_from_observations(
+            size_bytes=size_mib * MiB,
+            supports_cdc=True,
+            supports_swarm=True,
+            prior_hit_rate=0.985,
+            observations=observations,
+            routes=("lan", "relay"),
+        )
+        high_prior_accelerated = decision_from_observations(
+            size_bytes=size_mib * MiB,
+            supports_cdc=True,
+            supports_swarm=True,
+            prior_hit_rate=0.985,
+            observations=observations,
+            routes=("lan", "relay"),
+            speeds={"cdc_mib_s": 1200.0},
+        )
+        elapsed = time.perf_counter() - t0
+        return {
+            "name": "adaptive_transfer_brain",
+            "decisions_per_s": round(3 / max(elapsed, 1e-9), 3),
+            "low_prior_mode": low_prior.selected.mode.value,
+            "high_prior_python_mode": high_prior_python.selected.mode.value,
+            "high_prior_accelerated_mode": high_prior_accelerated.selected.mode.value,
+            "low_prior_ms": round(low_prior.selected.estimated_ms, 3),
+            "high_prior_python_ms": round(high_prior_python.selected.estimated_ms, 3),
+            "high_prior_accelerated_ms": round(high_prior_accelerated.selected.estimated_ms, 3),
+            "high_prior_accelerated_wire_bytes": high_prior_accelerated.selected.estimated_wire_bytes,
+            "health": high_prior_accelerated.health.value,
+        }
+
+    return _time(run)
+
+
 def run_perf_lab(
     *,
     scale: str = "quick",
@@ -254,12 +359,15 @@ def run_perf_lab(
     }[scale]
     started = time.time()
     results = [
+        bench_hash_only(size_mib=cfg["cdc_mib"], seed=seed),
+        bench_fixed_indexing(size_mib=cfg["cdc_mib"], seed=seed),
         bench_cdc_indexing(size_mib=cfg["cdc_mib"], seed=seed),
         bench_prior_knowledge(size_mib=cfg["prior_mib"], mutation_bytes=4096, seed=seed + 1),
         bench_swarm_scheduler(chunks=cfg["scheduler_chunks"], sources=12, seed=seed + 2),
         bench_torture_sim(size_mib=cfg["sim_mib"], seed=seed + 3),
         bench_sqlite_ledger(rows=cfg["ledger_rows"]),
         bench_compression(size_mib=max(1, cfg["cdc_mib"] // 2)),
+        bench_transfer_brain(size_mib=cfg["sim_mib"]),
     ]
     return {
         "schema": "one-link-perf-lab-v1",

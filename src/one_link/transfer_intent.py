@@ -109,6 +109,34 @@ def plan_transfer_intent(
     file_index: FileIndex | None = None,
 ) -> TransferIntent:
     manifest = build_file_manifest(path, file_index=file_index)
+    return plan_transfer_intent_for_manifest(
+        manifest=manifest,
+        path=path,
+        peer_fp=peer_fp,
+        local_version=local_version,
+        peer_version=peer_version,
+        peer_capabilities=peer_capabilities,
+        intent_id=intent_id,
+    )
+
+
+def plan_transfer_intent_for_manifest(
+    *,
+    manifest: FileManifest,
+    path: Path,
+    peer_fp: str,
+    local_version: str | None,
+    peer_version: str | None,
+    peer_capabilities: Iterable[str],
+    intent_id: str | None = None,
+) -> TransferIntent:
+    """Plan a transfer from a precomputed or thin manifest.
+
+    The live daemon uses this to negotiate protocol compatibility before it
+    spends CPU on a full CDC index. If the receiver lacks CDC, a thin manifest
+    with only name/size/blob is enough for the durable baseline stream.
+    """
+
     peer_caps_tuple = tuple(peer_capabilities or ())
     compat = negotiate(
         local_version=local_version,

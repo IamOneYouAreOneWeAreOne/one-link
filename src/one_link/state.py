@@ -311,6 +311,11 @@ class PeerRecord:
     # expires_at_ms = ts_ms + dm_ttl_ms. The daemon's reaper sweeps
     # expired rows + broadcasts msg_delete WS events.
     dm_ttl_ms: Optional[int] = None
+    # v0.11.2 per-chat mute with duration. None = not muted; 0 = muted
+    # forever (no auto-expire); N > 0 = muted until wall-clock ms N.
+    # is_muted derives this with the current time so an expired mute
+    # automatically un-mutes itself.
+    muted_until_ms: Optional[int] = None
 
     @property
     def display_name(self) -> str:
@@ -323,6 +328,18 @@ class PeerRecord:
         a side-channel SAS confirm. Independent of `trust` — trust
         gates wire access; verification gates UI affordance."""
         return self.verified_at_ms is not None
+
+    def is_muted_at(self, now_ms: int) -> bool:
+        """v0.11.2: True iff the per-chat mute is active at `now_ms`.
+        muted_until_ms = 0 means muted forever; >0 means muted until
+        that timestamp. Falls back to the legacy `muted` boolean for
+        rows persisted under v0.7.3 schema before muted_until_ms
+        existed."""
+        if self.muted_until_ms is not None:
+            if self.muted_until_ms == 0:
+                return True
+            return self.muted_until_ms > now_ms
+        return self.muted
 
 
 @dataclass
@@ -477,8 +494,29 @@ class State:
                 self._migrate_v13_prior_chunk_sources(c)
                 if current < 13:
                     c.execute("INSERT INTO schema_version(version) VALUES(13)")
+                self._migrate_v14_mute_until(c)
+                if current < 14:
+                    c.execute("INSERT INTO schema_version(version) VALUES(14)")
             finally:
                 c.close()
+
+    def _migrate_v14_mute_until(self, c: sqlite3.Cursor) -> None:
+        """v0.11.2: per-chat mute with duration.
+
+        peers.muted_until_ms — wall-clock ms after which the mute
+        auto-expires. NULL = not muted. 0 = muted forever (no auto-
+        expire). N > 0 = muted until ts N. The legacy `muted` boolean
+        column from v0.7.3 stays in place for back-compat but is now
+        a derived value (muted_until_ms IS NOT NULL AND
+        (muted_until_ms = 0 OR muted_until_ms > now)).
+
+        Group mutes use the existing settings table keyed as
+        `group_mute:<group_id_hex>` = until_ms — no schema change
+        needed for the group case."""
+        rows = c.execute("PRAGMA table_info(peers)").fetchall()
+        existing = {row[1] for row in rows}
+        if "muted_until_ms" not in existing:
+            c.execute("ALTER TABLE peers ADD COLUMN muted_until_ms INTEGER")
 
     def _migrate_v13_prior_chunk_sources(self, c: sqlite3.Cursor) -> None:
         """v0.10.3: path-backed chunk sources for prior knowledge transfer.
@@ -1932,6 +1970,10 @@ class State:
                 row["dm_ttl_ms"]
                 if "dm_ttl_ms" in cols else None
             ),
+            muted_until_ms=(
+                row["muted_until_ms"]
+                if "muted_until_ms" in cols else None
+            ),
         )
 
     def set_peer_profile(
@@ -2150,6 +2192,33 @@ class State:
     def get_peer_dm_ttl(self, fingerprint: str) -> Optional[int]:
         rec = self.get_peer(fingerprint)
         return rec.dm_ttl_ms if rec else None
+
+    def set_peer_muted_until(
+        self, fingerprint: str, until_ms: Optional[int],
+    ) -> None:
+        """v0.11.2: per-chat mute with duration.
+
+        until_ms semantics:
+          None  → unmute (clear muted_until_ms + legacy muted=0)
+          0     → mute forever (muted_until_ms=0, legacy muted=1)
+          N > 0 → mute until wall-clock ms N
+
+        We also keep the legacy `muted` boolean column in sync so
+        old read paths that haven't been ported still see a sane
+        derived state."""
+        if until_ms is not None and until_ms < 0:
+            raise ValueError("until_ms must be None, 0, or positive")
+        legacy_muted = 0 if until_ms is None else 1
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE peers SET muted_until_ms = ?, muted = ? "
+                "WHERE fingerprint = ?",
+                (until_ms, legacy_muted, fingerprint),
+            )
+
+    def get_peer_muted_until(self, fingerprint: str) -> Optional[int]:
+        rec = self.get_peer(fingerprint)
+        return rec.muted_until_ms if rec else None
 
     def expire_due_messages(self, *, now_ms: Optional[int] = None) -> list[str]:
         """v0.10.2: tombstone every message whose expires_at_ms has

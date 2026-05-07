@@ -158,6 +158,84 @@ def index_path(path: Path, *, read_size: int = 1024 * 1024) -> FileIndex:
     )
 
 
+def hash_path(path: Path, *, read_size: int = 4 * 1024 * 1024) -> str:
+    """Return the whole-file BLAKE3 hash without building a chunk index.
+
+    This is the fast lane for peers that only support the baseline stream
+    protocol. We still need a content identity for the durable transfer
+    ledger, but we should not pay Python CDC's byte-by-byte rolling-hash cost
+    when the receiver cannot use CDC chunks.
+    """
+
+    file_hasher = blake3.blake3()
+    with open(path, "rb") as f:
+        for part in iter(lambda: f.read(read_size), b""):
+            file_hasher.update(part)
+    return file_hasher.hexdigest()
+
+
+def fixed_index_path(
+    path: Path,
+    *,
+    chunk_size: int = MAX_CHUNK_BYTES,
+    read_size: int = 4 * 1024 * 1024,
+) -> FileIndex:
+    """Hash a file into fixed-size chunks with bounded memory.
+
+    Fixed manifests are not a replacement for CDC when a file has inserted or
+    deleted bytes, but they are dramatically cheaper for brand-new large media
+    sends and for peers that already share exact aligned blocks. This gives the
+    transfer planner a high-throughput lane while CDC remains available for
+    true prior-knowledge drift.
+    """
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if read_size <= 0:
+        raise ValueError("read_size must be positive")
+
+    chunks: list[Chunk] = []
+    file_hasher = blake3.blake3()
+    chunk_buf = bytearray()
+    offset = 0
+
+    def flush() -> None:
+        nonlocal chunk_buf, offset
+        if not chunk_buf and chunks:
+            return
+        end = offset + len(chunk_buf)
+        chunks.append(
+            Chunk(
+                index=len(chunks),
+                start=offset,
+                end=end,
+                hash=blake3.blake3(chunk_buf).hexdigest(),
+            )
+        )
+        offset = end
+        chunk_buf = bytearray()
+
+    with open(path, "rb") as f:
+        for part in iter(lambda: f.read(read_size), b""):
+            file_hasher.update(part)
+            view = memoryview(part)
+            pos = 0
+            while pos < len(view):
+                take = min(chunk_size - len(chunk_buf), len(view) - pos)
+                chunk_buf.extend(view[pos: pos + take])
+                pos += take
+                if len(chunk_buf) == chunk_size:
+                    flush()
+
+    if chunk_buf or not chunks:
+        flush()
+    return FileIndex(
+        blob_hash=file_hasher.hexdigest(),
+        size=path.stat().st_size,
+        chunks=tuple(chunks),
+    )
+
+
 def chunk_path(path: Path, *, read_size: int = 1024 * 1024) -> tuple[Chunk, ...]:
     """Chunk a file from disk with bounded memory."""
 

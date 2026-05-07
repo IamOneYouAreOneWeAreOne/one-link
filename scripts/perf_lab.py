@@ -39,7 +39,14 @@ def main() -> int:
         print(f"One Link performance lab ({ns.scale})")
         for b in report["benchmarks"]:
             metrics = b["metrics"]
-            if b["name"] == "cdc_indexing":
+            if b["name"] == "hash_only_manifest":
+                print(f"  Hash-only manifest: {metrics['mib_per_s']} MiB/s")
+            elif b["name"] == "fixed_indexing":
+                print(
+                    "  Fixed indexing: "
+                    f"{metrics['mib_per_s']} MiB/s ({metrics['chunks']} chunks)"
+                )
+            elif b["name"] == "cdc_indexing":
                 print(f"  CDC indexing: {metrics['mib_per_s']} MiB/s ({metrics['chunks']} chunks)")
             elif b["name"] == "prior_knowledge_dedup":
                 print(
@@ -63,6 +70,14 @@ def main() -> int:
                 print(f"  SQLite ledger: {metrics['writes_per_s']} writes/s")
             elif b["name"] == "zlib_level1_compression":
                 print(f"  Compression: {metrics['mib_per_s']} MiB/s ratio={metrics['ratio']}")
+            elif b["name"] == "adaptive_transfer_brain":
+                print(
+                    "  Transfer brain: "
+                    f"{metrics['decisions_per_s']} decisions/s, "
+                    f"low-prior={metrics['low_prior_mode']}, "
+                    f"high-prior-python={metrics['high_prior_python_mode']}, "
+                    f"high-prior-accelerated={metrics['high_prior_accelerated_mode']}"
+                )
         print(f"  Report: {out}")
         if comparison is not None:
             print("  Comparison:")

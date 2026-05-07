@@ -473,6 +473,9 @@ class UIServer:
         r.add_delete(r"/api/peers/{fp}/verify", self._guarded(self.api_clear_peer_verified))
         # v0.10.2 disappearing messages — per-peer TTL.
         r.add_post(r"/api/peers/{fp}/ttl", self._guarded(self.api_set_peer_ttl))
+        # v0.11.2 per-chat mute with duration (peer + group).
+        r.add_post(r"/api/peers/{fp}/mute", self._guarded(self.api_set_peer_mute))
+        r.add_post(r"/api/groups/{gid}/mute", self._guarded(self.api_set_group_mute))
         # v0.10.4 presence — set self status; broadcasts to peers.
         r.add_post("/api/presence", self._guarded(self.api_set_presence))
         # v0.10.6 native folder picker — pops a tk dialog on the
@@ -761,6 +764,14 @@ class UIServer:
             "bio": s.get("bio", "") or "",
             "avatar_color": s.get("avatar_color", AVATAR_COLOR_PRESETS[0]),
             "avatar_color_presets": list(AVATAR_COLOR_PRESETS),
+            # v0.11.2 notification fine-tuning.
+            # - notification_preview: include message body in the
+            #   desktop notification (true) vs just "New message" (false).
+            # - notify_on_reactions: ping when a peer adds/removes a
+            #   reaction to one of my messages. Off matches what most
+            #   power users want to silence the long tail of pings.
+            "notification_preview": s.get("notification_preview", "true") == "true",
+            "notify_on_reactions": s.get("notify_on_reactions", "true") == "true",
         })
 
     async def api_set_settings(self, request: web.Request) -> web.Response:
@@ -921,6 +932,12 @@ class UIServer:
                         status=400,
                     )
                 self.daemon.state.set_setting("avatar_color", v)
+        # v0.11.2 — notification fine-tuning toggles. Bools only.
+        for key in ("notification_preview", "notify_on_reactions"):
+            if key in data:
+                self.daemon.state.set_setting(
+                    key, "true" if data[key] else "false",
+                )
         return web.json_response({"ok": True})
 
     # ─── /api/peers ───────────────────────────────────────────────────
@@ -1015,6 +1032,8 @@ class UIServer:
                         live[rec.fingerprint]["is_verified"] = rec.is_verified
                         # v0.10.2: per-peer disappearing-message TTL.
                         live[rec.fingerprint]["dm_ttl_ms"] = rec.dm_ttl_ms
+                        # v0.11.2: per-chat mute with duration.
+                        live[rec.fingerprint]["muted_until_ms"] = rec.muted_until_ms
                     else:
                         # Pending peers in the DB but not visible on mDNS are
                         # usually stale ghosts from a previous daemon/process.
@@ -1049,6 +1068,8 @@ class UIServer:
                             "is_verified": rec.is_verified,
                             # v0.10.2: per-peer disappearing-message TTL.
                             "dm_ttl_ms": rec.dm_ttl_ms,
+                            # v0.11.2: per-chat mute with duration.
+                            "muted_until_ms": rec.muted_until_ms,
                         }
             except Exception:
                 pass
@@ -1894,6 +1915,114 @@ class UIServer:
             "dm_ttl_ms": updated.dm_ttl_ms,
         })
 
+    async def api_set_peer_mute(self, request: web.Request) -> web.Response:
+        """v0.11.2: per-peer mute with duration.
+
+        Body: {duration_ms: int | null}
+          - null → unmute
+          - 0 → mute forever (no auto-expire)
+          - N > 0 → mute for N ms (mute until now+N)
+
+        We store the absolute deadline (muted_until_ms) so the mute
+        survives daemon restarts without rearming a timer."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        if "duration_ms" not in data:
+            return web.json_response(
+                {"error": "duration_ms required (int or null)"},
+                status=400,
+            )
+        raw = data["duration_ms"]
+        if raw is None:
+            until_ms = None
+        else:
+            try:
+                d = int(raw)
+            except (TypeError, ValueError):
+                return web.json_response(
+                    {"error": "duration_ms must be int or null"},
+                    status=400,
+                )
+            if d < 0:
+                return web.json_response(
+                    {"error": "duration_ms must be >= 0"}, status=400,
+                )
+            until_ms = 0 if d == 0 else int(time.time() * 1000) + d
+        rec = self.daemon.state.get_peer(fp)
+        if rec is None:
+            return web.json_response({"error": "peer not found"}, status=404)
+        try:
+            self.daemon.state.set_peer_muted_until(fp, until_ms)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        self.broadcast({
+            "type": "peer_mute",
+            "fingerprint": fp,
+            "muted_until_ms": until_ms,
+        })
+        return web.json_response({
+            "ok": True, "fingerprint": fp,
+            "muted_until_ms": until_ms,
+        })
+
+    async def api_set_group_mute(self, request: web.Request) -> web.Response:
+        """v0.11.2: per-group mute with duration. Stored as a settings
+        key (`group_mute:<gid_hex>`) since groups don't have a
+        persistent metadata table. Same duration semantics as
+        api_set_peer_mute."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        gid_hex = request.match_info["gid"]
+        # Validate it's actually hex (not strictly required since we
+        # treat the id as opaque, but a 400 here saves us from
+        # storing junk keys forever).
+        try:
+            bytes.fromhex(gid_hex)
+        except ValueError:
+            return web.json_response({"error": "bad group id"}, status=400)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        if "duration_ms" not in data:
+            return web.json_response(
+                {"error": "duration_ms required (int or null)"},
+                status=400,
+            )
+        raw = data["duration_ms"]
+        key = f"group_mute:{gid_hex}"
+        if raw is None:
+            self.daemon.state.delete_setting(key)
+            until_ms = None
+        else:
+            try:
+                d = int(raw)
+            except (TypeError, ValueError):
+                return web.json_response(
+                    {"error": "duration_ms must be int or null"},
+                    status=400,
+                )
+            if d < 0:
+                return web.json_response(
+                    {"error": "duration_ms must be >= 0"}, status=400,
+                )
+            until_ms = 0 if d == 0 else int(time.time() * 1000) + d
+            self.daemon.state.set_setting(key, str(until_ms))
+        self.broadcast({
+            "type": "group_mute",
+            "group_id": gid_hex,
+            "muted_until_ms": until_ms,
+        })
+        return web.json_response({
+            "ok": True, "group_id": gid_hex,
+            "muted_until_ms": until_ms,
+        })
+
     # ─── key-change events (v0.7.8) ───────────────────────────────────
 
     async def api_list_key_change_events(self, request: web.Request) -> web.Response:
@@ -2580,11 +2709,24 @@ class UIServer:
         for gid in gids:
             mat = self._materialize_group(gid)
             if mat and mat.get("is_member"):
+                # v0.11.2: surface per-group mute deadline so the UI
+                # can render a 🔕 indicator without an extra fetch.
+                gid_hex = mat["group_id"]
+                raw_mute = self.daemon.state.get_setting(f"group_mute:{gid_hex}")
+                muted_until_ms: Optional[int]
+                if raw_mute is None:
+                    muted_until_ms = None
+                else:
+                    try:
+                        muted_until_ms = int(raw_mute)
+                    except ValueError:
+                        muted_until_ms = None
                 out.append({
-                    "group_id": mat["group_id"],
+                    "group_id": gid_hex,
                     "name": mat["name"],
                     "member_count": mat["member_count"],
                     "my_role": mat["my_role"],
+                    "muted_until_ms": muted_until_ms,
                 })
         return web.json_response({"groups": out})
 

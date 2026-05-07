@@ -30,7 +30,7 @@ from one_link.daemon import (
     Daemon,
     OutboundSession,
 )
-from one_link.capabilities import CHAT, FILES
+from one_link.capabilities import CHAT, FILES, FILE_CDC
 from one_link.discovery import Peer
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
@@ -396,6 +396,12 @@ async def test_send_file_baseline_peer_gets_legacy_stream_offer(
         daemon, "_dial_peer_with_regime",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("no dial")),
     )
+    monkeypatch.setattr(
+        "one_link.daemon.index_path",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("baseline peer should not pay CDC indexing cost")
+        ),
+    )
 
     f = tmp_path / "legacy.txt"
     f.write_bytes(b"legacy stream")
@@ -469,6 +475,67 @@ async def test_send_file_unknown_peer_probes_cdc_then_stream_fallback(
     assert row.metadata["compatibility"]["mode"] == "legacy_unknown"
     assert row.metadata["protocol_attempts"][-1]["method"] == "file_baseline"
     assert row.metadata["protocol_attempts"][-1]["state"] == "fallback"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_send_file_large_cdc_peer_uses_fast_stream_lane(
+    tmp_path: Path, monkeypatch
+):
+    """Large first-time sends must not crawl through Python CDC just because
+    the peer supports it. The product promise is fast automatic delivery.
+    """
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, FILE_CDC],
+        "from": them.short_id,
+        "app_version": "0.11.0",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint, peer=Peer(
+            short_id=them.short_id, hostname="them",
+            address="127.0.0.1", port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    monkeypatch.setattr(
+        "one_link.daemon.index_path",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("large first-time send should not build Python CDC")
+        ),
+    )
+
+    f = tmp_path / "video.bin"
+    f.write_bytes(b"x" * 1024)
+    monkeypatch.setattr("one_link.daemon.CDC_AUTO_INDEX_MAX_BYTES", 512)
+    chan.queue_reply(make_msg("ACK", them.short_id))
+    chan.queue_reply(make_msg("ACK", them.short_id))
+
+    result = await daemon.send_file(sess.peer, f)
+    offer = chan.sent[0]
+    row = state.list_transfers(limit=1)[0]
+
+    assert result["cdc"] is False
+    assert offer["mode"] == "stream"
+    assert "chunks" not in offer
+    assert row.metadata["cdc_decision_reason"] == "large_file_fast_lane_until_native_cdc"
     state.close()
 
 

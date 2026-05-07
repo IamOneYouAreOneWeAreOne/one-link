@@ -207,9 +207,12 @@ python scripts/perf_lab.py --scale standard
 ```
 
 Reports are written under `benchmarks/results/` as JSON and ignored by git.
-The lab measures CDC indexing, prior-knowledge bandwidth savings, swarm
-scheduler throughput, the never-lose torture simulator, SQLite transfer ledger
-pressure, and compression throughput.
+The lab measures hash-only manifests, fixed manifests, CDC indexing,
+prior-knowledge bandwidth savings, swarm scheduler throughput, the never-lose
+torture simulator, SQLite transfer ledger pressure, compression throughput,
+and the adaptive transfer brain. The transfer brain is the local Coherence
+planner that decides when a file should use the simple fast lane, CDC, or
+swarm CDC based on measured route health and prior knowledge.
 
 ### Running multiple daemons on one machine
 
