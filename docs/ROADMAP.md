@@ -180,10 +180,13 @@ a specific competitive gap.
     indicator turns off. No schema, no new endpoint.
 
   - **v0.8.5 — Inline previews for PDFs / markdown / code.** ✓
-    Markdown + code + plain-text shipped (released as package
-    v0.9.0). PDFs deferred — vendoring PDF.js (~600 KB) for the
-    long tail seemed disproportionate; OS / browser-native PDF
-    handlers cover that case via Open. Markdown gets a real
+    Fully shipped. Markdown + code + plain-text in v0.9.0; PDFs
+    completed in v0.9.5 by leaning on the browser's native PDF
+    viewer through a sandboxed `<iframe src=/api/files/{name}>` —
+    zero vendored bytes. Server returns metadata-only for PDFs
+    so a 100 MB file doesn't OOM. iframe is lazy-loaded + a
+    fallback "Open PDF in new tab" anchor renders below for
+    browsers without native PDF support. Markdown gets a real
     subset renderer (ATX headings, paragraphs, fenced code,
     blockquotes, ordered + unordered lists, horizontal rules,
     plus inline bold/italic/code/autolinks). Code gets a

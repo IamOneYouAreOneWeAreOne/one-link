@@ -3245,6 +3245,10 @@ class UIServer:
     # that is reported back as truncated=True.
     PREVIEW_MAX_BYTES = 256 * 1024
     PREVIEW_KINDS: dict = {
+        # v0.9.5: PDFs handled by the browser's native viewer via
+        # <iframe src=/api/files/{name}>. Server returns metadata
+        # only (no content read) so a 100 MB PDF doesn't OOM.
+        "pdf": "pdf",
         # markdown variants → markdown renderer (subset)
         "md": "markdown", "markdown": "markdown", "mdown": "markdown",
         # code-ish: monospace + line numbers
@@ -3291,6 +3295,18 @@ class UIServer:
             size = path.stat().st_size
         except OSError as e:
             return web.json_response({"error": f"stat: {e}"}, status=500)
+        # v0.9.5: PDFs render via the browser's built-in viewer
+        # (<iframe src=/api/files/{name}>), not by reading the
+        # bytes server-side. Return metadata only so a 100 MB PDF
+        # doesn't OOM the daemon.
+        if kind == "pdf":
+            return web.json_response({
+                "name": safe,
+                "extension": ext,
+                "kind": kind,
+                "size": size,
+                "stream_url": f"/api/files/{safe}",
+            })
         cap = self.PREVIEW_MAX_BYTES
         truncated = size > cap
         try:

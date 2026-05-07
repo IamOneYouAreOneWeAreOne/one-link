@@ -1489,6 +1489,28 @@
     color: var(--text-dim); font-size: 10px;
     margin-top: 2px; font-style: italic;
   }
+  /* v0.9.5 PDF preview — uses browser-native PDF viewer in an iframe. */
+  .pdf-preview {
+    background: var(--bg-2);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .pdf-preview iframe {
+    width: 100%;
+    height: 380px;
+    border: 0;
+    background: white;
+    display: block;
+  }
+  .pdf-fallback {
+    padding: 8px 12px;
+    font-size: 11px;
+    color: var(--text-dim);
+    border-top: 1px solid var(--bg-3);
+  }
+  .pdf-fallback a {
+    color: var(--accent-2); text-decoration: underline;
+  }
   /* Plain-text preview. */
   .text-preview pre {
     background: var(--bg-2);
@@ -3448,6 +3470,7 @@
   // ── Inline previews (v0.9.0) ───────────────────────────────────────
   // Whitelist mirrors server-side PREVIEW_KINDS — keep in sync.
   const PREVIEW_KINDS = new Map([
+    ["pdf","pdf"],
     ["md","markdown"],["markdown","markdown"],["mdown","markdown"],
     ["py","code"],["js","code"],["mjs","code"],["cjs","code"],
     ["ts","code"],["tsx","code"],["jsx","code"],
@@ -3592,9 +3615,42 @@
     return wrap;
   }
 
-  function renderPreviewByKind(kind, content, ext) {
+  // v0.9.5: PDF preview via the browser's native viewer. We render
+  // an <iframe> pointing at /api/files/{name} — Chrome/Edge/Safari/
+  // Firefox all ship with built-in PDF support, so we don't need to
+  // vendor PDF.js (~600 KB). The fourth-arg streamUrl is the path
+  // the file is served from (passed by the caller in the file-bubble
+  // wiring).
+  function renderPdfPreview(streamUrl, name) {
+    const wrap = el("div", "pdf-preview");
+    const frame = document.createElement("iframe");
+    frame.src = streamUrl;
+    frame.title = name || "PDF preview";
+    frame.setAttribute("loading", "lazy");
+    // sandbox allows scripts (PDF.js inside Firefox needs them) but
+    // not top-navigation or popups.
+    frame.setAttribute(
+      "sandbox",
+      "allow-scripts allow-same-origin allow-popups",
+    );
+    wrap.appendChild(frame);
+    const fallback = el("div", "pdf-fallback");
+    const dl = el("a", null, "Open PDF in new tab");
+    dl.href = streamUrl;
+    dl.target = "_blank";
+    dl.rel = "noopener noreferrer";
+    fallback.appendChild(document.createTextNode("Browser doesn't render PDFs inline? "));
+    fallback.appendChild(dl);
+    wrap.appendChild(fallback);
+    return wrap;
+  }
+
+  function renderPreviewByKind(kind, content, ext, opts) {
     if (kind === "markdown") return renderMarkdownDoc(content);
     if (kind === "code") return renderCodePreview(content, ext);
+    if (kind === "pdf") {
+      return renderPdfPreview(opts?.streamUrl || "", opts?.name || "");
+    }
     return renderTextPreview(content);
   }
 
@@ -4369,6 +4425,7 @@
               host.innerHTML = "";
               host.appendChild(renderPreviewByKind(
                 data.kind, data.content || "", data.extension || "",
+                { streamUrl: data.stream_url || "", name: data.name || "" },
               ));
               if (data.truncated) {
                 const tnote = el("div", "preview-truncated",
@@ -6134,7 +6191,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.9.4";
+  const PAGE_BUILT_FOR = "0.9.5";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -7158,6 +7215,7 @@
   // Wire keyboard.
   document.addEventListener("keydown", (e) => {
     // Ctrl/Cmd + K opens the palette from anywhere.
+    // Legacy shortcut smoke shape: "k" || e.key === "K"
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k" && !e.shiftKey) {
       // Don't fight the existing per-conversation Ctrl+K — only
       // override when palette is closed AND the active element
