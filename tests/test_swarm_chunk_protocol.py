@@ -219,3 +219,107 @@ async def test_swarm_pull_fetches_missing_chunks_from_multiple_sources(tmp_path:
     assert daemon._read_chunk_cache(hashes[1]) == payloads[1]
     assert set(pulled["sources"].values()) == {1}
     state.close()
+
+
+@pytest.mark.asyncio
+async def test_inbound_file_offer_pulls_available_chunk_from_swarm_before_wants(
+    tmp_path: Path, monkeypatch,
+):
+    """When another trusted device already has a needed CDC chunk, the
+    receiver should fetch it before replying FILE_WANTS to the sender.
+    The sender then only ships what the swarm could not satisfy.
+    """
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    sender = _new_identity()
+    source = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+
+    state.upsert_peer(
+        fingerprint=sender.fingerprint,
+        short_id=sender.short_id,
+        pubkey=sender.public_bytes,
+    )
+    state.set_peer_trust(sender.fingerprint, "pinned")
+    state.upsert_peer(
+        fingerprint=source.fingerprint,
+        short_id=source.short_id,
+        pubkey=source.public_bytes,
+        hostname="source",
+        address="127.0.0.1",
+        port=12345,
+    )
+    state.set_peer_trust(source.fingerprint, "pinned")
+
+    pieces = [b"swarm-has-this", b"sender-still-needed"]
+    hashes = [blake3.blake3(p).hexdigest() for p in pieces]
+    blob = blake3.blake3(b"".join(pieces)).hexdigest()
+    chunks = [
+        {"index": 0, "start": 0, "end": len(pieces[0]), "size": len(pieces[0]), "hash": hashes[0]},
+        {
+            "index": 1,
+            "start": len(pieces[0]),
+            "end": len(pieces[0]) + len(pieces[1]),
+            "size": len(pieces[1]),
+            "hash": hashes[1],
+        },
+    ]
+
+    source_peer = Peer(
+        source.short_id,
+        "source",
+        "127.0.0.1",
+        12345,
+        source.public_bytes.hex(),
+    )
+    source_chan = _FakeChannel(
+        peer_ed_pub=source.public_bytes,
+        peer_short_id=source.short_id,
+    )
+    daemon._outbound_sessions[source.fingerprint] = OutboundSession(
+        peer_fp=source.fingerprint,
+        peer=source_peer,
+        channel=source_chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    source_chan.queue_reply(make_msg("CHUNK_HAVE", source.short_id, hashes=[hashes[0]]))
+    enc, wire = daemon._encode_payload(pieces[0])
+    source_chan.queue_reply(make_msg(
+        "CHUNK_DATA",
+        source.short_id,
+        hash=hashes[0],
+        enc=enc,
+        wire_size=len(wire),
+        size=len(pieces[0]),
+        data=__import__("base64").b64encode(wire).decode("ascii"),
+    ))
+
+    sender_chan = _FakeChannel(
+        peer_ed_pub=sender.public_bytes,
+        peer_short_id=sender.short_id,
+    )
+    await daemon._on_peer_message(
+        sender_chan,
+        make_msg(
+            "FILE_OFFER",
+            sender.short_id,
+            name="swarm.bin",
+            size=sum(len(p) for p in pieces),
+            blob=blob,
+            chunks=chunks,
+            mode="cdc",
+        ),
+    )
+
+    reply = sender_chan.sent[-1]
+    row = state.get_transfer(f"in:{blob}")
+    assert reply["t"] == "FILE_WANTS"
+    assert reply["wants"] == [1]
+    assert daemon._read_chunk_cache(hashes[0]) == pieces[0]
+    assert row.metadata["swarm_assist"]["pulled"] == 1
+    assert row.metadata["missing_chunks"] == 1
+    state.close()

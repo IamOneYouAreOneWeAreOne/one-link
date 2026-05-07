@@ -116,9 +116,15 @@ async def test_resume_offline_peer_returns_offline(tmp_path: Path):
         metadata={"path": str(tmp_path / "a.bin")},
     )
     (tmp_path / "a.bin").write_bytes(b"hi")
+    before = int(__import__("time").time() * 1000)
     result = await daemon.resume_paused_transfers_for(them.fingerprint)
     assert result["ok"] is False
     assert result["error"] == "peer offline"
+    row = state.get_transfer("t-1")
+    assert row.status == "paused"
+    assert row.metadata["delivery_state"] == "waiting_for_device"
+    assert row.metadata["error_class"] == "PeerOffline"
+    assert row.metadata["next_retry_ms"] > before
     state.close()
 
 

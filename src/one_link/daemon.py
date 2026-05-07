@@ -82,7 +82,7 @@ from one_link.paths import (
 )
 from one_link.state import State
 from one_link.swarm_plan import plan_swarm_sources, source_from_hashes
-from one_link.transfer_intent import FileManifest, plan_transfer_intent
+from one_link.transfer_intent import FileChunkManifest, FileManifest, plan_transfer_intent
 from one_link.wire import decode_msg, encode_msg, make_msg
 
 # Forward import to avoid hard dep when server.py loads daemon.py
@@ -113,6 +113,7 @@ FILE_ACK_DEADLINE_S = 30.0
 FILE_SEND_TOTAL_DEADLINE_S = 600.0
 TRANSFER_RETRY_BASE_S = 5.0
 TRANSFER_RETRY_MAX_S = 5 * 60.0
+SWARM_ASSIST_DEADLINE_S = 2.0
 # H4: re-validate idle outbound sessions with a PING before reusing them.
 # A NAT box / Wi-Fi roam / asymmetric-disconnect can silently kill a TCP
 # session; without this probe the next send_to() would block on a dead
@@ -837,6 +838,43 @@ class Daemon:
         self._schedule_resume_paused(peer_fp)
         return queued
 
+    def _mark_due_transfers_waiting_for_peer(
+        self,
+        peer_fp: str,
+        *,
+        reason: str,
+        error_class: str,
+    ) -> int:
+        """Back off due outbound intents for a peer that is not sendable.
+
+        This keeps the background queue quiet: an offline peer should not
+        trigger scary errors or tight retry loops; the durable rows remain
+        Waiting and the next backoff window/session-up will try again.
+        """
+        if self.state is None:
+            return 0
+        now_ms = int(time.time() * 1000)
+        try:
+            rows = self.state.list_transfers(peer_fp=peer_fp, limit=200)
+        except Exception:
+            return 0
+        marked = 0
+        for r in rows:
+            if r.direction != "out" or r.status not in ("paused", "queued"):
+                continue
+            meta = r.metadata or {}
+            if int(meta.get("next_retry_ms") or 0) > now_ms:
+                continue
+            self._mark_transfer_waiting(
+                r.id,
+                path=Path(meta.get("path") or r.name),
+                error=reason,
+                error_class=error_class,
+                base_metadata=meta,
+            )
+            marked += 1
+        return marked
+
     # v0.6.3: transfer-ledger watchdog.
     STUCK_TRANSFER_DEADLINE_MS = 5 * 60 * 1000  # 5 min without progress
 
@@ -1129,11 +1167,21 @@ class Daemon:
             out_path = inbox_dir() / f"{blob[:8]}_{name}"
             handle = open(out_path, "wb")
             missing = None
+            swarm_assist: dict = {"pulled": 0, "sources": {}}
             if cdc_chunks:
                 missing = {
                     int(c["index"]) for c in cdc_chunks
                     if not self._chunk_cache_path(str(c["hash"])).is_file()
                 }
+                if missing:
+                    missing, swarm_assist = await self._swarm_assist_file_offer(
+                        sender_fp=peer_fp,
+                        name=name,
+                        size=size,
+                        blob=blob,
+                        cdc_chunks=cdc_chunks,
+                        missing=missing,
+                    )
             transfer_id = f"in:{blob}"
             self._incoming_files[blob] = IncomingFile(
                 name=name,
@@ -1164,6 +1212,7 @@ class Daemon:
                     "mode": "cdc" if cdc_chunks else "stream",
                     "path": str(out_path),
                     "missing_chunks": len(missing or []),
+                    "swarm_assist": swarm_assist,
                 },
             )
             log.info(
@@ -2011,6 +2060,86 @@ class Daemon:
             "pulled": pulled,
             "missing_indexes": missing,
             "sources": plan.per_source_counts(),
+        }
+
+    def _trusted_chunk_source_peers(self, *, exclude_fp: str) -> list[Peer]:
+        """Build direct peer candidates for swarm chunk assistance."""
+        if self.state is None:
+            return []
+        try:
+            records = self.state.list_peers()
+        except Exception:
+            return []
+        out: list[Peer] = []
+        for rec in records:
+            if rec.fingerprint in (exclude_fp, self.me.fingerprint):
+                continue
+            if rec.trust != "pinned" or not rec.last_address or not rec.last_port:
+                continue
+            if not rec.pubkey:
+                continue
+            out.append(Peer(
+                short_id=rec.short_id,
+                hostname=rec.hostname or rec.short_id,
+                address=rec.last_address,
+                port=int(rec.last_port),
+                ed_pub_hex=rec.pubkey.hex(),
+            ))
+        return out[:8]
+
+    async def _swarm_assist_file_offer(
+        self,
+        *,
+        sender_fp: str,
+        name: str,
+        size: int,
+        blob: str,
+        cdc_chunks: list[dict],
+        missing: set[int],
+    ) -> tuple[set[int], dict]:
+        """Try to satisfy inbound missing chunks from other trusted devices."""
+        if not missing:
+            return missing, {"pulled": 0, "sources": {}}
+        peers = self._trusted_chunk_source_peers(exclude_fp=sender_fp)
+        if not peers:
+            return missing, {"pulled": 0, "sources": {}}
+        manifest = FileManifest(
+            name=name,
+            size=size,
+            blob_hash=blob,
+            chunks=tuple(
+                FileChunkManifest(
+                    index=int(c["index"]),
+                    start=int(c["start"]),
+                    end=int(c["end"]),
+                    size=int(c["size"]),
+                    hash=str(c["hash"]),
+                )
+                for c in cdc_chunks
+            ),
+        )
+        try:
+            result = await asyncio.wait_for(
+                self.pull_swarm_missing_chunks(
+                    peers=peers,
+                    manifest=manifest,
+                    needed_indexes=sorted(missing),
+                ),
+                timeout=SWARM_ASSIST_DEADLINE_S,
+            )
+        except Exception as e:
+            log.debug("swarm assist skipped for %s: %s", blob[:8], e)
+            return missing, {"pulled": 0, "sources": {}, "error": str(e)[:200]}
+        remaining = {
+            int(c["index"])
+            for c in cdc_chunks
+            if int(c["index"]) in missing
+            and not self._chunk_cache_path(str(c["hash"])).is_file()
+        }
+        return remaining, {
+            "pulled": int(result.get("pulled") or 0),
+            "sources": dict(result.get("sources") or {}),
+            "missing_after": sorted(remaining),
         }
 
     def _encode_payload(self, data: bytes) -> tuple[str, bytes]:
@@ -5119,6 +5248,11 @@ class Daemon:
             return {"ok": False, "error": "peer not pinned", "resumed": 0}
         peer = await self.resolve_for_send(peer_fp)
         if peer is None:
+            self._mark_due_transfers_waiting_for_peer(
+                peer_fp,
+                reason="waiting for device",
+                error_class="PeerOffline",
+            )
             return {"ok": False, "error": "peer offline", "resumed": 0}
         lock = self._get_resume_lock(peer_fp)
         if lock.locked():
