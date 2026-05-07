@@ -25,14 +25,17 @@ transfer intents, retry/resume, and swarm chunk assist.
 
 This pass adds local prior assist:
 
-1. When a trusted peer offers a CDC file, the receiver scans bounded local
-   One Link roots before answering `FILE_WANTS`.
-2. Matching chunks from existing local files are verified by BLAKE3 and copied
-   into the normal chunk cache.
-3. The receiver asks the sender only for chunks not found locally or through
+1. The daemon keeps a bounded background index of chunks already present in
+   the One Link inbox and configured sync folders.
+2. The index is lazy: it stores path + byte range + mtime metadata, not a
+   duplicate copy of every chunk.
+3. When a trusted peer offers a CDC file, the receiver hydrates only matching
+   chunks that are actually needed, verifies each by BLAKE3, and then answers
+   `FILE_WANTS`.
+4. The receiver asks the sender only for chunks not found locally or through
    trusted swarm assist.
-4. When a trusted peer asks `CHUNK_QUERY`, the daemon also hydrates from local
-   prior files before answering.
+5. When a trusted peer asks `CHUNK_QUERY`, the daemon can hydrate from the
+   lazy prior index before answering.
 
 This means a huge video, VM image, dataset, or edited archive can transfer at a
 fraction of the bandwidth when the receiver already has a related version.
@@ -41,6 +44,8 @@ fraction of the bandwidth when the receiver already has a related version.
 
 - Scans are rooted only in the One Link inbox and configured sync folders.
 - Scans are bounded by file count and bytes per offer/query.
+- Lazy source reads are accepted only if the source file's size and mtime
+  still match the indexed metadata.
 - A chunk is usable only if its BLAKE3 hash exactly matches the peer manifest.
 - No private local filenames or directory listings are sent as part of prior
   assist.

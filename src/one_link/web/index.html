@@ -3303,6 +3303,18 @@
     const yest = new Date(); yest.setDate(now.getDate() - 1);
     if (sameDay(ms, now.getTime())) return "Today";
     if (sameDay(ms, yest.getTime())) return "Yesterday";
+    // v0.10.5 bonus: smart relative labels for the recent past.
+    // 2-7 days ago → weekday name (helps read the chat without
+    // doing date math). >7 days but same year → "Apr 30". Older
+    // years → "Apr 30, 2024".
+    const ageMs = now.getTime() - ms;
+    if (ageMs > 0 && ageMs < 7 * 24 * 60 * 60 * 1000) {
+      const dayName = d.toLocaleDateString([], { weekday: "long" });
+      return dayName;
+    }
+    if (d.getFullYear() === now.getFullYear()) {
+      return d.toLocaleDateString([], { month: "short", day: "numeric" });
+    }
     return d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
   };
   const initials = (name) => {
@@ -7109,7 +7121,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.10.4";
+  const PAGE_BUILT_FOR = "0.10.5";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -7898,7 +7910,57 @@
     }
   });
 
+  // v0.10.5 bonus polish — slash commands. Preprocesses the
+  // composer body before send. Recognized: /shrug, /tableflip,
+  // /unflip, /me <text>, /clear (clears pinned), /help.
+  function _expandSlashCommand(body) {
+    const m = body.match(/^\/([a-z]+)(?:\s+(.*))?$/s);
+    if (!m) return { body, sideEffect: null };
+    const cmd = m[1].toLowerCase();
+    const arg = (m[2] || "").trim();
+    switch (cmd) {
+      case "shrug":      return { body: `${arg ? arg + " " : ""}¯\\_(ツ)_/¯` };
+      case "tableflip":  return { body: `${arg ? arg + " " : ""}(╯°□°)╯︵ ┻━┻` };
+      case "unflip":     return { body: `${arg ? arg + " " : ""}┬─┬ノ( º _ ºノ)` };
+      case "me":         return { body: arg ? `*${arg}*` : body };
+      case "clear":      return { body: null, sideEffect: "clear-pins" };
+      case "help":       return { body: null, sideEffect: "help" };
+      default:           return { body, sideEffect: null };
+    }
+  }
+
+  function _maybeRunSlashSideEffect(name) {
+    if (name === "help") {
+      $("#shortcuts-backdrop")?.classList.add("show");
+    } else if (name === "clear-pins") {
+      // Clear pinned messages for the current conversation.
+      const key = state.selectedGroup
+        ? `group:${state.selectedGroup}` : `peer:${state.selectedPeer || ""}`;
+      try {
+        const pins = JSON.parse(localStorage.getItem("one_link.pins") || "{}");
+        delete pins[key];
+        localStorage.setItem("one_link.pins", JSON.stringify(pins));
+        renderPins();
+        toast("Pinned messages cleared.", "good", 2500);
+      } catch (e) {
+        toast(`Clear pins failed: ${e.message || e}`, "bad");
+      }
+    }
+  }
+
   async function sendCurrent() {
+    // v0.10.5 bonus: expand slash commands BEFORE branching so
+    // /shrug works in both 1:1 and group threads.
+    const rawInput = $("#input").value.trim();
+    const expanded = _expandSlashCommand(rawInput);
+    if (expanded.sideEffect) {
+      _maybeRunSlashSideEffect(expanded.sideEffect);
+      $("#input").value = "";
+      return;
+    }
+    if (expanded.body !== null && expanded.body !== rawInput) {
+      $("#input").value = expanded.body;
+    }
     // v0.8.0: branch on whether the user is in a group or 1:1.
     if (state.selectedGroup) {
       const body = $("#input").value.trim();

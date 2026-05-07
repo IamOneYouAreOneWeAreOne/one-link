@@ -1,6 +1,6 @@
 [project]
 name = "one_link"
-version = "0.10.4"
+version = "0.10.5"
 description = "Peer-to-peer LAN chat + file sync built on the Coherence Language ecosystem."
 requires-python = ">=3.11"
 authors = [{ name = "One Link contributor", email = "weareone@oneunity.earth" }]
@@ -18,6 +18,11 @@ dependencies = [
 
 [project.optional-dependencies]
 window = ["pywebview>=5.0"]  # optional native-window wrapper (Tier 2)
+# v0.10.5 system tray icon. Lets the daemon live in the OS tray
+# instead of always-needing-a-browser-tab. Optional — fresh
+# installs without these packages fall back to headless daemon
+# mode automatically.
+tray = ["pystray>=0.19", "pillow>=10.0"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 # v0.7.2 supply-chain gates (audit finding C):
 #   - pip-audit: scans the lockfile against the OSV vulnerability DB

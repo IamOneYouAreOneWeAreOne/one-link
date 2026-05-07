@@ -920,8 +920,9 @@ class UIServer:
             # v0.10.4: peer presence. Daemon caches the latest
             # reported value in _peer_presence; missing key = peer
             # never reported (treat as 'online' on the wire).
+            peer_presence = getattr(self.daemon, "_peer_presence", {}) or {}
             p["presence"] = (
-                self.daemon._peer_presence.get(fp, "online")
+                peer_presence.get(fp, "online")
                 if fp else "online"
             )
             # v0.7.0: per-pairing health metrics. last_alive_ms is wall-

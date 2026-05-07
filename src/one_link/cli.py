@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import signal
 import socket
 import sys
 from pathlib import Path
@@ -58,18 +60,44 @@ def cli():
 
 @cli.command()
 @click.option("-v", "--verbose", is_flag=True)
-def daemon(verbose):
+@click.option("--tray/--no-tray", default=True,
+              help="Run a system tray icon alongside the daemon (default: on).")
+def daemon(verbose, tray):
     """Run the One Link daemon (leave this in a terminal/service)."""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # v0.10.5: optional tray icon. Imports lazily so a fresh
+    # install without pystray still runs the daemon headlessly.
+    tray_icon = None
+    if tray:
+        try:
+            from one_link.tray import TrayIcon
+            from one_link.paths import inbox_dir
+            tray_icon = TrayIcon(
+                on_quit=lambda: os.kill(os.getpid(), signal.SIGINT),
+                inbox_path=inbox_dir(),
+            )
+            if tray_icon.available:
+                tray_icon.start()
+                logging.getLogger("one_link.tray").info(
+                    "tray icon active. Right-click for menu; click to open UI."
+                )
+        except Exception as e:
+            logging.getLogger("one_link.tray").info(
+                "tray init skipped: %s", e,
+            )
     try:
         asyncio.run(daemon_mod.run())
     except RuntimeError as e:
         if "already running" in str(e):
             raise click.ClickException(str(e))
         raise
+    finally:
+        if tray_icon is not None:
+            try: tray_icon.stop()
+            except Exception: pass
 
 
 @cli.command()

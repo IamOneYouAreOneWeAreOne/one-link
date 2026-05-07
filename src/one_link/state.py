@@ -474,8 +474,42 @@ class State:
                 self._migrate_v12_disappearing_messages(c)
                 if current < 12:
                     c.execute("INSERT INTO schema_version(version) VALUES(12)")
+                self._migrate_v13_prior_chunk_sources(c)
+                if current < 13:
+                    c.execute("INSERT INTO schema_version(version) VALUES(13)")
             finally:
                 c.close()
+
+    def _migrate_v13_prior_chunk_sources(self, c: sqlite3.Cursor) -> None:
+        """v0.10.3: path-backed chunk sources for prior knowledge transfer.
+
+        The chunk cache stores bytes only after a chunk is actually needed.
+        This table lets the daemon remember that a verified chunk exists in a
+        local inbox/sync-folder file at a byte range, then hydrate it lazily.
+        """
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chunk_sources (
+                chunk_hash TEXT NOT NULL,
+                path       TEXT NOT NULL,
+                start      INTEGER NOT NULL,
+                size       INTEGER NOT NULL,
+                mtime_ms   INTEGER NOT NULL,
+                file_size  INTEGER NOT NULL,
+                source     TEXT NOT NULL DEFAULT 'prior',
+                updated_ms INTEGER NOT NULL,
+                PRIMARY KEY(chunk_hash, path, start)
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunk_sources_hash "
+            "ON chunk_sources(chunk_hash)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunk_sources_updated "
+            "ON chunk_sources(updated_ms)"
+        )
 
     def _migrate_v12_disappearing_messages(self, c: sqlite3.Cursor) -> None:
         """v0.10.2: per-peer disappearing-message TTL.
@@ -3436,6 +3470,91 @@ class State:
             batch = clean[i:i + 500]
             rows = self._conn.execute(
                 "SELECT chunk_hash FROM chunk_availability "
+                f"WHERE chunk_hash IN ({','.join('?' for _ in batch)})",
+                tuple(batch),
+            ).fetchall()
+            out.extend(str(r["chunk_hash"]) for r in rows)
+        have = set(out)
+        return [h for h in clean if h in have]
+
+    def record_chunk_source(
+        self,
+        chunk_hash: str,
+        *,
+        path: str,
+        start: int,
+        size: int,
+        mtime_ms: int,
+        file_size: int,
+        source: str = "prior",
+    ) -> None:
+        now = _now_ms()
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO chunk_sources(
+                    chunk_hash, path, start, size, mtime_ms, file_size,
+                    source, updated_ms
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chunk_hash, path, start) DO UPDATE SET
+                    size = excluded.size,
+                    mtime_ms = excluded.mtime_ms,
+                    file_size = excluded.file_size,
+                    source = excluded.source,
+                    updated_ms = excluded.updated_ms
+                """,
+                (
+                    str(chunk_hash),
+                    str(path),
+                    int(start),
+                    int(size),
+                    int(mtime_ms),
+                    int(file_size),
+                    str(source or "prior"),
+                    now,
+                ),
+            )
+        self.record_chunk_available(
+            str(chunk_hash),
+            int(size),
+            source=str(source or "prior"),
+        )
+
+    def get_chunk_sources(self, chunk_hash: str, *, limit: int = 8) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT chunk_hash, path, start, size, mtime_ms, file_size,
+                   source, updated_ms
+            FROM chunk_sources
+            WHERE chunk_hash = ?
+            ORDER BY updated_ms DESC
+            LIMIT ?
+            """,
+            (str(chunk_hash), int(limit)),
+        ).fetchall()
+        return [
+            {
+                "chunk_hash": r["chunk_hash"],
+                "path": r["path"],
+                "start": int(r["start"]),
+                "size": int(r["size"]),
+                "mtime_ms": int(r["mtime_ms"]),
+                "file_size": int(r["file_size"]),
+                "source": r["source"],
+                "updated_ms": int(r["updated_ms"]),
+            }
+            for r in rows
+        ]
+
+    def chunks_sourced(self, chunk_hashes: Iterable[str]) -> list[str]:
+        clean = [str(h) for h in chunk_hashes if str(h)]
+        if not clean:
+            return []
+        out: list[str] = []
+        for i in range(0, len(clean), 500):
+            batch = clean[i:i + 500]
+            rows = self._conn.execute(
+                "SELECT DISTINCT chunk_hash FROM chunk_sources "
                 f"WHERE chunk_hash IN ({','.join('?' for _ in batch)})",
                 tuple(batch),
             ).fetchall()

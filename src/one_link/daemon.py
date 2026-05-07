@@ -114,6 +114,10 @@ FILE_SEND_TOTAL_DEADLINE_S = 600.0
 TRANSFER_RETRY_BASE_S = 5.0
 TRANSFER_RETRY_MAX_S = 5 * 60.0
 SWARM_ASSIST_DEADLINE_S = 2.0
+PRIOR_ASSIST_MAX_FILES = 96
+PRIOR_ASSIST_MAX_SCAN_BYTES = 2 * 1024 * 1024 * 1024
+PRIOR_ASSIST_MAX_MATCHES_PER_SCAN = 4096
+PRIOR_INDEX_INTERVAL_S = 120.0
 # H4: re-validate idle outbound sessions with a PING before reusing them.
 # A NAT box / Wi-Fi roam / asymmetric-disconnect can silently kill a TCP
 # session; without this probe the next send_to() would block on a dead
@@ -413,6 +417,8 @@ class Daemon:
         self.state: State | None = None
         self.pairing = PairingTracker()
         self._prune_task: asyncio.Task | None = None
+        self._dm_reaper_task: asyncio.Task | None = None
+        self._prior_index_task: asyncio.Task | None = None
         self._lock_file = None
         # Folder sync — populated in start() when state + blob store are up.
         self.folder_engine = None  # type: foldersync.FolderEngine | None
@@ -485,7 +491,6 @@ class Daemon:
         """
         share = True
         urls: list[str] = []
-        presence = "online"
         if self.state is not None:
             try:
                 v = self.state.get_setting("share_rendezvous")
@@ -495,16 +500,56 @@ class Daemon:
                     urls = self.state.get_rendezvous_urls()
             except Exception:
                 share = False
-            with contextlib.suppress(Exception):
-                p = (self.state.get_setting("presence") or "online").lower()
-                if p in ("online", "away", "dnd", "invisible"):
-                    presence = p
-        msg = _build_caps(
+        return _build_caps(
             self.me.short_id,
             rendezvous_urls=urls if share else None,
+            presence=self._presence_for_wire(self.get_my_presence()),
         )
-        msg["presence"] = "offline" if presence == "invisible" else presence
-        return msg
+
+    def get_my_presence(self) -> str:
+        if self.state is None:
+            return "online"
+        with contextlib.suppress(Exception):
+            status = (self.state.get_setting("presence", "online") or "online").lower()
+            if status in {"online", "away", "dnd", "invisible"}:
+                return status
+        return "online"
+
+    def _presence_for_wire(self, status: str) -> str:
+        clean = (status or "online").lower()
+        if clean == "invisible":
+            return "offline"
+        return clean if clean in {"online", "away", "dnd", "offline"} else "online"
+
+    def record_peer_presence(self, peer_fp: str | None, status: str | None) -> None:
+        if not peer_fp:
+            return
+        clean = str(status or "online").lower()
+        if clean not in {"online", "away", "dnd", "offline"}:
+            return
+        self._peer_presence[str(peer_fp)] = clean
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "peer_presence",
+                    "fingerprint": str(peer_fp),
+                    "presence": clean,
+                })
+
+    async def set_my_presence(self, status: str) -> str:
+        clean = str(status or "online").lower()
+        if clean not in {"online", "away", "dnd", "invisible"}:
+            raise ValueError("presence must be online, away, dnd, or invisible")
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                self.state.set_setting("presence", clean)
+        wire_status = self._presence_for_wire(clean)
+        msg = make_msg("PRESENCE", self.me.short_id, presence=wire_status)
+        for sess in list(self._outbound_sessions.values()):
+            with contextlib.suppress(Exception):
+                async with sess.lock:
+                    await sess.channel.send(encode_msg(msg))
+        return clean
 
     def _channel_bind_for(self, channel: ch.Channel) -> dict:
         """Session binding advertised inside encrypted CAPS."""
@@ -1200,6 +1245,9 @@ class Daemon:
                     of=msg.get("id"), rejected="peer_rejected",
                 )))
             raise RuntimeError(f"rejected peer attempted message: {peer_fp[:8]}")
+        if t == "PRESENCE":
+            self.record_peer_presence(peer_fp, msg.get("presence"))
+            return
         if t == "CAPS":
             features = list(normalize_caps(msg.get("features", [])))
             bind = msg.get("channel_bind")
@@ -1223,6 +1271,7 @@ class Daemon:
                 "app_version": msg.get("app_version"),
                 "presence": msg.get("presence"),
             }
+            self.record_peer_presence(peer_fp, msg.get("presence"))
             # v0.8.2: ratchet-activation half-step. Once we've also
             # SENT our CAPS we'll flip both directions to ratchet.
             with contextlib.suppress(Exception):
@@ -1841,10 +1890,43 @@ class Daemon:
     def _read_chunk_cache(self, chunk_hash: str) -> bytes | None:
         p = self._chunk_cache_path(chunk_hash)
         if not p.is_file():
-            return None
+            return self._read_chunk_from_prior_source(chunk_hash)
         with contextlib.suppress(OSError):
             os.utime(p, None)
         return p.read_bytes()
+
+    def _read_chunk_from_prior_source(self, chunk_hash: str) -> bytes | None:
+        if self.state is None:
+            return None
+        try:
+            sources = self.state.get_chunk_sources(chunk_hash, limit=8)
+        except Exception:
+            return None
+        for src in sources:
+            try:
+                p = Path(str(src["path"])).expanduser()
+                st = p.stat()
+                if int(st.st_size) != int(src["file_size"]):
+                    continue
+                mtime_ms = int(st.st_mtime * 1000)
+                if abs(mtime_ms - int(src["mtime_ms"])) > 1000:
+                    continue
+                start = int(src["start"])
+                size = int(src["size"])
+                if start < 0 or size <= 0 or start + size > st.st_size:
+                    continue
+                with open(p, "rb") as fh:
+                    fh.seek(start)
+                    data = fh.read(size)
+                if len(data) != size:
+                    continue
+                if blake3.blake3(data).hexdigest() != chunk_hash:
+                    continue
+                self._store_chunk_cache(chunk_hash, data)
+                return data
+            except Exception as e:
+                log.debug("prior chunk source skipped for %s: %s", chunk_hash[:8], e)
+        return None
 
     def _cache_file_chunks(self, path: Path) -> None:
         try:
@@ -1861,6 +1943,189 @@ class Daemon:
                     )
         except Exception as e:
             log.debug("CDC cache fill skipped for %s: %s", path, e)
+
+    def _record_prior_file_sources(self, path: Path) -> dict:
+        if self.state is None:
+            return {"chunks": 0, "bytes": 0, "skipped": True}
+        try:
+            p = Path(path).expanduser().resolve()
+            st = p.stat()
+            idx = index_path(p)
+        except Exception as e:
+            log.debug("prior source index skipped for %s: %s", path, e)
+            return {"chunks": 0, "bytes": 0, "skipped": True}
+        mtime_ms = int(st.st_mtime * 1000)
+        for c in idx.chunks:
+            with contextlib.suppress(Exception):
+                self.state.record_chunk_source(
+                    c.hash,
+                    path=str(p),
+                    start=c.start,
+                    size=c.size,
+                    mtime_ms=mtime_ms,
+                    file_size=int(st.st_size),
+                    source="prior",
+                )
+        return {"chunks": len(idx.chunks), "bytes": idx.size, "skipped": False}
+
+    def _prior_assist_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        with contextlib.suppress(Exception):
+            roots.append(inbox_dir())
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                for f in self.state.list_folders():
+                    p = Path(str(f.get("local_path") or "")).expanduser()
+                    if p:
+                        roots.append(p)
+        out: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            with contextlib.suppress(OSError, RuntimeError):
+                r = root.resolve()
+                key = str(r).lower()
+                if r.is_dir() and key not in seen:
+                    seen.add(key)
+                    out.append(r)
+        return out
+
+    def _iter_prior_assist_files(self) -> tuple[list[Path], dict]:
+        candidates: list[tuple[float, Path]] = []
+        scanned_bytes = 0
+        skipped = 0
+        cache_root = self._chunk_cache_dir().resolve()
+        for root in self._prior_assist_roots():
+            if len(candidates) >= PRIOR_ASSIST_MAX_FILES:
+                break
+            try:
+                walker = os.walk(root)
+            except OSError:
+                continue
+            for dirpath, dirnames, filenames in walker:
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in {".chunk_cache", "file_chunks", "__pycache__"}
+                    and not d.startswith(".")
+                ]
+                for name in filenames:
+                    if len(candidates) >= PRIOR_ASSIST_MAX_FILES:
+                        break
+                    p = Path(dirpath) / name
+                    try:
+                        rp = p.resolve()
+                        if cache_root in rp.parents:
+                            continue
+                        st = rp.stat()
+                        if not st.st_size:
+                            continue
+                        if scanned_bytes + st.st_size > PRIOR_ASSIST_MAX_SCAN_BYTES:
+                            skipped += 1
+                            continue
+                    except OSError:
+                        skipped += 1
+                        continue
+                    candidates.append((float(st.st_mtime), rp))
+                    scanned_bytes += int(st.st_size)
+                if len(candidates) >= PRIOR_ASSIST_MAX_FILES:
+                    break
+        files = [p for _mtime, p in sorted(candidates, reverse=True)]
+        return files, {
+            "candidate_files": len(files),
+            "candidate_bytes": scanned_bytes,
+            "skipped": skipped,
+        }
+
+    def _hydrate_chunks_from_local_prior(
+        self,
+        wanted_hashes: set[str],
+        *,
+        blob_hash: str | None = None,
+        target_chunks: dict[str, dict] | None = None,
+    ) -> dict:
+        wanted = {
+            str(h) for h in wanted_hashes
+            if self._valid_blob_hex(str(h)) and not self._chunk_cache_path(str(h)).is_file()
+        }
+        stats = {
+            "enabled": True,
+            "matched": 0,
+            "matched_bytes": 0,
+            "scanned_files": 0,
+            "scanned_bytes": 0,
+            "candidate_files": 0,
+            "candidate_bytes": 0,
+            "skipped": 0,
+        }
+        if not wanted:
+            return stats
+        files, file_stats = self._iter_prior_assist_files()
+        stats.update(file_stats)
+        for path in files:
+            if not wanted or stats["matched"] >= PRIOR_ASSIST_MAX_MATCHES_PER_SCAN:
+                break
+            source_stats = self._record_prior_file_sources(path)
+            if source_stats.get("skipped"):
+                stats["skipped"] += 1
+                continue
+            try:
+                idx = index_path(path)
+            except Exception:
+                stats["skipped"] += 1
+                continue
+            stats["scanned_files"] += 1
+            stats["scanned_bytes"] += idx.size
+            for c in [c for c in idx.chunks if c.hash in wanted]:
+                data = self._read_chunk_cache(c.hash)
+                if data is None:
+                    continue
+                target = (target_chunks or {}).get(c.hash) or {}
+                if blob_hash or target.get("index") is not None:
+                    self._store_chunk_cache(
+                        c.hash,
+                        data,
+                        blob_hash=blob_hash,
+                        chunk_index=target.get("index"),
+                    )
+                wanted.discard(c.hash)
+                stats["matched"] += 1
+                stats["matched_bytes"] += len(data)
+        return stats
+
+    def _index_local_prior_sources_once(self) -> dict:
+        files, file_stats = self._iter_prior_assist_files()
+        stats = {
+            **file_stats,
+            "indexed_files": 0,
+            "indexed_chunks": 0,
+            "indexed_bytes": 0,
+        }
+        for path in files:
+            source_stats = self._record_prior_file_sources(path)
+            if source_stats.get("skipped"):
+                stats["skipped"] += 1
+                continue
+            stats["indexed_files"] += 1
+            stats["indexed_chunks"] += int(source_stats.get("chunks") or 0)
+            stats["indexed_bytes"] += int(source_stats.get("bytes") or 0)
+        return stats
+
+    async def _prior_index_loop(self) -> None:
+        try:
+            await asyncio.sleep(5.0)
+            while True:
+                stats = await asyncio.to_thread(self._index_local_prior_sources_once)
+                if stats.get("indexed_chunks"):
+                    log.info(
+                        "prior index: files=%d chunks=%d bytes=%d",
+                        stats["indexed_files"],
+                        stats["indexed_chunks"],
+                        stats["indexed_bytes"],
+                    )
+                await asyncio.sleep(PRIOR_INDEX_INTERVAL_S)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.warning("prior index loop stopped: %s", e)
 
     def _chunk_cache_stats(self) -> dict:
         root = self._chunk_cache_dir()
@@ -1922,13 +2187,24 @@ class Daemon:
         return {"removed": removed, "freed_bytes": freed, "bytes": total}
 
     def _available_chunk_hashes(self, hashes: list[str]) -> list[str]:
-        clean = []
+        requested = []
         seen = set()
         for h in hashes[:2048]:
             h = str(h)
             if h in seen or not self._valid_blob_hex(h):
                 continue
             seen.add(h)
+            requested.append(h)
+        missing = {h for h in requested if not self._chunk_cache_path(h).is_file()}
+        if missing:
+            self._hydrate_chunks_from_local_prior(missing)
+        if self.state is not None and missing:
+            with contextlib.suppress(Exception):
+                sourced = set(self.state.chunks_sourced(missing))
+                for h in sourced:
+                    self._read_chunk_cache(h)
+        clean = []
+        for h in requested:
             if self._chunk_cache_path(h).is_file():
                 clean.append(h)
         if self.state is not None and clean:
@@ -6598,6 +6874,7 @@ class Daemon:
         # rows whose expires_at_ms has passed; tombstones them and
         # broadcasts msg_delete WS events.
         self._dm_reaper_task = asyncio.create_task(self._dm_reaper_loop())
+        self._prior_index_task = asyncio.create_task(self._prior_index_loop())
 
         # Start UI server if available
         if UIServer is not None:
@@ -6719,6 +6996,18 @@ class Daemon:
             self._prune_task.cancel()
             try:
                 await self._prune_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._dm_reaper_task and not self._dm_reaper_task.done():
+            self._dm_reaper_task.cancel()
+            try:
+                await self._dm_reaper_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._prior_index_task and not self._prior_index_task.done():
+            self._prior_index_task.cancel()
+            try:
+                await self._prior_index_task
             except (asyncio.CancelledError, Exception):
                 pass
         if self.ui_server is not None:

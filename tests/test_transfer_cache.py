@@ -33,8 +33,10 @@ def test_prior_assist_hydrates_matching_chunks_from_existing_inbox_file(tmp_path
     from one_link.daemon import Daemon
     from one_link.identity import load_or_create
     from one_link.paths import inbox_dir
+    from one_link.state import State
 
     d = Daemon(load_or_create())
+    d.state = State(db_path=Path(tmp_path) / "s.db")
     prior = inbox_dir() / "already_here_video_fragment.bin"
     prior.write_bytes((b"scene-a" * 9000) + os.urandom(128_000) + (b"scene-b" * 9000))
     idx = index_path(prior)
@@ -46,6 +48,7 @@ def test_prior_assist_hydrates_matching_chunks_from_existing_inbox_file(tmp_path
     assert stats["matched"] == len(wanted)
     assert stats["matched_bytes"] == prior.stat().st_size
     assert all(d._read_chunk_cache(h) is not None for h in wanted)
+    d.state.close()
 
 
 def test_chunk_query_availability_uses_local_prior_before_answering(tmp_path, monkeypatch):
@@ -68,4 +71,32 @@ def test_chunk_query_availability_uses_local_prior_before_answering(tmp_path, mo
 
     assert have == wanted
     assert all(d._read_chunk_cache(h) is not None for h in wanted)
+    d.state.close()
+
+
+def test_prior_index_records_lazy_sources_without_copying_all_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+
+    from one_link.cdc import index_path
+    from one_link.daemon import Daemon
+    from one_link.identity import load_or_create
+    from one_link.paths import inbox_dir
+    from one_link.state import State
+
+    d = Daemon(load_or_create())
+    d.state = State(db_path=Path(tmp_path) / "s.db")
+    prior = inbox_dir() / "warm_video.mov"
+    prior.write_bytes((b"warm-prior" * 20_000) + os.urandom(64_000))
+    idx = index_path(prior)
+
+    stats = d._index_local_prior_sources_once()
+    assert stats["indexed_files"] >= 1
+    assert stats["indexed_chunks"] >= len(idx.chunks)
+    assert all(not d._chunk_cache_path(c.hash).is_file() for c in idx.chunks)
+
+    first = idx.chunks[0]
+    assert d.state.chunks_sourced([first.hash]) == [first.hash]
+    data = d._read_chunk_cache(first.hash)
+    assert data is not None
+    assert d._chunk_cache_path(first.hash).is_file()
     d.state.close()
