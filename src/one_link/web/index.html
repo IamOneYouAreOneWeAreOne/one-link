@@ -3459,12 +3459,42 @@
     }
   }
 
+  function showStaleDaemonBanner(daemonVer, pageVer) {
+    // Reuses the orange version-banner element — same shape as
+    // the existing peer-version-mismatch warning. Permanent until
+    // the user restarts (we don't offer a Dismiss; this is the
+    // single most-confusing failure mode in the product).
+    const bar = $("#version-banner");
+    if (!bar) return;
+    const text = $("#version-banner-text");
+    if (text) {
+      text.textContent =
+        `One Link daemon is on v${daemonVer}; this page expects v${pageVer}. ` +
+        `Quit and re-launch One Link to load the new endpoints — ` +
+        `groups, edits, retries, and per-device settings won't work until you do.`;
+    }
+    const dismiss = $("#version-banner-dismiss");
+    if (dismiss) dismiss.style.display = "none";
+    bar.classList.add("show");
+  }
+
+  // v0.8.0.1: the version the page's HTML+JS was built against.
+  // Compared at startup against the daemon's /api/me.app_version
+  // so we surface a clear "restart One Link" banner instead of
+  // letting the user smack into mysterious 404s on endpoints the
+  // running daemon doesn't have yet. Bump on every release.
+  const PAGE_BUILT_FOR = "0.8.0";
+
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
     try {
       const me = await api.get("/api/me");
       state.me = me;
       $("#me-host").textContent = me.display_name || me.hostname;
+      // Detect daemon-page mismatch.
+      if (me.app_version && me.app_version !== PAGE_BUILT_FOR) {
+        showStaleDaemonBanner(me.app_version, PAGE_BUILT_FOR);
+      }
     } catch (e) {
       toast("Couldn't reach the daemon. Is it running?", "bad", 8000);
       console.error(e);
