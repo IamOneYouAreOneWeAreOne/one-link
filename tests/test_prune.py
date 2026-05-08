@@ -38,6 +38,25 @@ async def test_prune_removes_unreachable_peer(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_prune_removes_malformed_peer_without_network_probe():
+    from one_link.discovery import Discovery
+
+    d = Discovery(short_id="aaaa", hostname="me", port=1, ed_pub_hex="00" * 32)
+    d.registry.peers["ghost123"] = Peer(
+        short_id="ghost123",
+        hostname="GhostPeer",
+        address="127.0.0.1",
+        port=9,
+        ed_pub_hex="",
+    )
+
+    removed = await d.prune_unreachable(timeout=0.01)
+
+    assert removed == 1
+    assert d.registry.peers == {}
+
+
+@pytest.mark.asyncio
 async def test_prune_keeps_reachable_peer():
     """A peer pointing at a real listening port stays in the registry."""
     from one_link.discovery import Discovery

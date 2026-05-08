@@ -21,6 +21,16 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 SERVICE_TYPE = "_onelink._tcp.local."
 
 
+def _valid_pub_hex(value: str) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        bytes.fromhex(value)
+    except ValueError:
+        return False
+    return True
+
+
 @dataclass
 class Peer:
     short_id: str
@@ -47,6 +57,9 @@ class Registry:
     self_ed_pub_hex: str = ""
 
     def upsert(self, peer: Peer) -> None:
+        if not _valid_pub_hex(peer.ed_pub_hex):
+            self.peers.pop(peer.short_id, None)
+            return
         # Some mDNS stacks can echo our own service under a changed name after
         # restarts. The public key is the durable identity; never list our own
         # key as a peer just because the service name differs.
@@ -115,6 +128,9 @@ def _info_to_peer(info: AsyncServiceInfo, self_short_id: str) -> Peer | None:
     short_id = props.get("sid") or info.name.split(".", 1)[0]
     if short_id == self_short_id:
         return None
+    pub = props.get("pub", "")
+    if not _valid_pub_hex(pub):
+        return None
     server = info.server.rstrip(".") if info.server else "?"
     # v0.5.4: parse "rdz" TXT field — comma-separated rendezvous URLs.
     # Limit to a small count to keep TXT records bounded and resist
@@ -133,7 +149,7 @@ def _info_to_peer(info: AsyncServiceInfo, self_short_id: str) -> Peer | None:
         hostname=props.get("host", server),
         address=addr,
         port=info.port or 0,
-        ed_pub_hex=props.get("pub", ""),
+        ed_pub_hex=pub,
         rendezvous_urls=rdz_urls,
         # v0.7.3: device kind ("macos-laptop", etc). Bounded length;
         # we don't trust arbitrary strings inside the UI but the
@@ -288,6 +304,14 @@ class Discovery:
         peers = list(self.registry.peers.values())
         if not peers:
             return 0
+        removed = 0
+        for p in list(peers):
+            if not _valid_pub_hex(p.ed_pub_hex):
+                self.registry.remove(p.short_id)
+                removed += 1
+        peers = [p for p in peers if _valid_pub_hex(p.ed_pub_hex)]
+        if not peers:
+            return removed
 
         async def _probe(p: Peer) -> tuple[Peer, bool]:
             try:
@@ -303,7 +327,6 @@ class Discovery:
                 return p, False
 
         results = await asyncio.gather(*(_probe(p) for p in peers), return_exceptions=False)
-        removed = 0
         for peer, ok in results:
             if not ok:
                 self.registry.remove(peer.short_id)

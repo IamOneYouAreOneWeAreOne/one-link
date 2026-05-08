@@ -24,6 +24,15 @@ def test_upsert_and_find_by_short_id():
     assert r.find("abcdef12") is p
 
 
+def test_upsert_rejects_malformed_public_key():
+    r = Registry()
+    r.upsert(Peer("ghost123", "ghost", "10.0.0.9", 1234, ""))
+    r.upsert(Peer("ghost456", "ghost", "10.0.0.9", 1235, "not-hex"))
+
+    assert r.list() == []
+    assert r.find("ghost123") is None
+
+
 def test_find_by_hostname_case_insensitive():
     r = Registry()
     p = _peer("abcdef12", "Alice-Mac")

@@ -27,7 +27,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.daemon import Daemon, _is_transient_send_error
-from one_link.discovery import Peer
+from one_link.discovery import Discovery, Peer
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
 
@@ -282,6 +282,59 @@ async def test_resume_respects_retry_backoff(tmp_path: Path):
     result = await daemon.resume_paused_transfers_for(them.fingerprint)
     assert result["resumed"] == 0
     assert sends == []
+    state.close()
+
+
+def test_retry_pump_waits_for_live_discovered_peer(tmp_path: Path):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    daemon.discovery = Discovery(
+        short_id=me.short_id,
+        hostname="me",
+        port=1,
+        ed_pub_hex=me.public_bytes.hex(),
+    )
+    scheduled: list[str] = []
+    daemon._schedule_resume_paused = scheduled.append  # type: ignore[method-assign]
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    src = tmp_path / "wait.bin"
+    src.write_bytes(b"wait")
+    state.upsert_transfer(
+        id="t-wait",
+        direction="out",
+        peer_fp=them.fingerprint,
+        kind="file",
+        name="wait.bin",
+        size=4,
+        status="paused",
+        progress_bytes=0,
+        total_bytes=4,
+        chunks_done=0,
+        chunks_total=1,
+        metadata={"path": str(src), "next_retry_ms": 0},
+    )
+
+    assert daemon._schedule_due_transfer_retries() == 0
+    assert scheduled == []
+
+    daemon.discovery.registry.upsert(Peer(
+        short_id=them.short_id,
+        hostname="them",
+        address="127.0.0.1",
+        port=12345,
+        ed_pub_hex=them.public_bytes.hex(),
+    ))
+
+    assert daemon._schedule_due_transfer_retries() == 1
+    assert scheduled == [them.fingerprint]
     state.close()
 
 

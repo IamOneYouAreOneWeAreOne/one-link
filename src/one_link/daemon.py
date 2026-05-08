@@ -6392,6 +6392,14 @@ class Daemon:
         session-up hook as the outbox flush."""
         if self.state is None or not peer_fp:
             return
+        if self.discovery is not None:
+            live = False
+            for p in self.discovery.registry.list():
+                if self._peer_fp_from_peer(p) == peer_fp:
+                    live = True
+                    break
+            if not live:
+                return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -6428,6 +6436,14 @@ class Daemon:
                 continue
             if int(meta.get("next_retry_ms") or 0) > now_ms:
                 continue
+            if self.discovery is not None:
+                live = False
+                for p in self.discovery.registry.list():
+                    if self._peer_fp_from_peer(p) == r.peer_fp:
+                        live = True
+                        break
+                if not live:
+                    continue
             peers.add(r.peer_fp)
         for fp in peers:
             self._schedule_resume_paused(fp)
