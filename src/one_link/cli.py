@@ -193,10 +193,19 @@ def send_file(peer, path):
 
 @cli.command()
 @click.option("--no-browser", is_flag=True, help="Don't auto-open a browser tab.")
-def app(no_browser):
+@click.option(
+    "--lan",
+    is_flag=True,
+    help=(
+        "Bind to 0.0.0.0 so devices on your local Wi-Fi (your phone, "
+        "another laptop) can reach the UI. Prints the LAN URL + a "
+        "security warning. Default is loopback-only."
+    ),
+)
+def app(no_browser, lan):
     """Open the One Link desktop app (auto-starts daemon, opens browser UI)."""
     from one_link.app import run_app
-    raise SystemExit(run_app(no_browser=no_browser))
+    raise SystemExit(run_app(no_browser=no_browser, lan=lan))
 
 
 @cli.command()

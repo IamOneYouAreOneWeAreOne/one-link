@@ -443,6 +443,10 @@ class UIServer:
         self.runner: Optional[web.AppRunner] = None
         self.site: Optional[web.TCPSite] = None
         self.port: int = 0
+        # v0.15.2: which interface the UI server is bound to. Set in
+        # start() — readers (e.g. /api/me, control "status" report)
+        # surface this so the launcher knows whether LAN mode is on.
+        self.bind_host: str = "127.0.0.1"
         self._ws_clients: set[web.WebSocketResponse] = set()
         self._setup_routes()
         # v0.8.1: live-push debug-log entries to the Debug pane.
@@ -456,6 +460,41 @@ class UIServer:
         """Bridges debug_log entries to WS clients as `debug_event`."""
         with contextlib.suppress(Exception):
             self.broadcast({"type": "debug_event", "entry": entry})
+
+    async def _probe_owned_http_port(self, bind_host: str, port: int) -> bool:
+        """Return True only if the HTTP listener reached on this port is us.
+
+        Windows can allow a same-port bind path to appear successful while
+        the browser-visible connection still reaches an older daemon with a
+        different token. Before publishing server.port, verify the endpoint
+        answers our own token-gated status request.
+        """
+        host = "127.0.0.1" if bind_host in ("0.0.0.0", "127.0.0.1") else bind_host
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=0.5,
+            )
+            request = (
+                "GET /api/status HTTP/1.1\r\n"
+                f"Host: {host}:{port}\r\n"
+                f"Authorization: Bearer {self.token}\r\n"
+                "Connection: close\r\n\r\n"
+            )
+            writer.write(request.encode("ascii"))
+            await asyncio.wait_for(writer.drain(), timeout=0.5)
+            head = await asyncio.wait_for(reader.read(256), timeout=0.8)
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            first_line = head.split(b"\r\n", 1)[0]
+            return b" 200 " in first_line
+        except Exception as e:
+            log.debug(
+                "UI port ownership probe failed for %s:%d: %s",
+                host, port, e,
+            )
+            return False
 
     @staticmethod
     def _load_or_create_token() -> str:
@@ -803,6 +842,7 @@ class UIServer:
             "schema_version": (
                 state.schema_version() if state is not None else 0
             ),
+            "bind_host": self.bind_host,
             "me": {
                 "short_id": self.daemon.me.short_id,
                 "fingerprint": self.daemon.me.fingerprint,
@@ -4766,6 +4806,13 @@ class UIServer:
     async def start(self) -> int:
         self.runner = web.AppRunner(self.app, access_log=None)
         await self.runner.setup()
+        # v0.15.2 — LAN-bind opt-in via env var. Default 127.0.0.1
+        # (loopback only, the historical safe default). Setting
+        # ONE_LINK_BIND_HOST=0.0.0.0 (or a specific LAN address)
+        # exposes the UI to the LAN so a phone on the same Wi-Fi
+        # can connect. The token still gates everything; the env
+        # var only changes which interface answers.
+        bind_host = os.environ.get("ONE_LINK_BIND_HOST") or "127.0.0.1"
         # Try the well-known port first so browser tabs survive restarts.
         # Fall through 7118..7132 if taken, then OS-assigned random as
         # last resort.
@@ -4774,8 +4821,15 @@ class UIServer:
             PREFERRED_UI_PORT, PREFERRED_UI_PORT + UI_PORT_FALLBACK_RANGE
         ):
             try:
-                site = web.TCPSite(self.runner, host="127.0.0.1", port=candidate)
+                site = web.TCPSite(self.runner, host=bind_host, port=candidate)
                 await site.start()
+                if not await self._probe_owned_http_port(bind_host, candidate):
+                    await site.stop()
+                    log.warning(
+                        "UI port %d started but failed ownership probe; trying next port",
+                        candidate,
+                    )
+                    continue
                 self.site = site
                 self.port = candidate
                 bound = True
@@ -4784,13 +4838,14 @@ class UIServer:
                 # Port in use — try the next.
                 continue
         if not bound:
-            self.site = web.TCPSite(self.runner, host="127.0.0.1", port=0)
+            self.site = web.TCPSite(self.runner, host=bind_host, port=0)
             await self.site.start()
             sock = self.site._server.sockets[0]  # type: ignore[union-attr]
             self.port = sock.getsockname()[1]
+        self.bind_host = bind_host
         _server_port_path().write_text(str(self.port))
         _token_path().write_text(self.token)
-        log.info("UI server up — http://127.0.0.1:%d/", self.port)
+        log.info("UI server up — http://%s:%d/", bind_host, self.port)
         return self.port
 
     async def stop(self) -> None:

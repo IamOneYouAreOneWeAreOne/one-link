@@ -1,0 +1,268 @@
+"""v0.15.2 — LAN bind via ONE_LINK_BIND_HOST + --lan flag.
+
+Ship-spec from `docs/PHONE_TIER.md` testing-on-real-device path:
+
+  Reach:  users running `one-link app --lan` get the UI served on
+          0.0.0.0:7117 instead of 127.0.0.1:7117 so a phone on
+          the same Wi-Fi can reach it. The launcher prints the
+          LAN URL with the existing token so the user can tap or
+          paste it on their phone.
+  Hide:   default behavior is unchanged. Without --lan or the env
+          var, the daemon binds loopback-only — historical safe
+          default. Existing users see no change.
+  Async:  none — sync wiring only.
+  Depth:  the launcher detects whether an already-running daemon
+          is loopback-bound and replaces it when --lan is passed.
+          A LAN-mode warning is printed loud and yellow because
+          the trust boundary changed: the URL+token now reaches
+          anyone on the same network.
+
+Tests cover the env-var bind change, default loopback, --lan
+flag wiring through CLI to env var, LAN-IP detection, and the
+loud-warning print.
+"""
+
+from __future__ import annotations
+
+import os
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+import pytest_asyncio
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from one_link.daemon import Daemon
+from one_link.identity import Identity, fingerprint_of
+from one_link.server import UIServer
+from one_link.state import State
+
+
+def _identity() -> Identity:
+    sk = Ed25519PrivateKey.generate()
+    pub_obj = sk.public_key()
+    pub_bytes = pub_obj.public_bytes_raw()
+    fp = fingerprint_of(pub_bytes)
+    return Identity(
+        private=sk, public=pub_obj, public_bytes=pub_bytes,
+        fingerprint=fp, short_id=fp[:8], hostname="lan-host",
+    )
+
+
+@pytest_asyncio.fixture
+async def server_default(tmp_path: Path, monkeypatch):
+    """A UIServer with no ONE_LINK_BIND_HOST set — should bind loopback."""
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    monkeypatch.delenv("ONE_LINK_BIND_HOST", raising=False)
+    me = _identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    daemon.discovery = None
+    daemon._outbound_sessions = {}
+    daemon._inbound_regime = {}
+    daemon.folder_engine = None
+    server = UIServer(daemon)
+    await server.start()
+    try:
+        yield server
+    finally:
+        await server.stop()
+        state.close()
+
+
+@pytest_asyncio.fixture
+async def server_lan(tmp_path: Path, monkeypatch):
+    """A UIServer with ONE_LINK_BIND_HOST=0.0.0.0 — should bind any-iface."""
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    monkeypatch.setenv("ONE_LINK_BIND_HOST", "0.0.0.0")
+    me = _identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    daemon.discovery = None
+    daemon._outbound_sessions = {}
+    daemon._inbound_regime = {}
+    daemon.folder_engine = None
+    server = UIServer(daemon)
+    await server.start()
+    try:
+        yield server
+    finally:
+        await server.stop()
+        state.close()
+
+
+# ───────── env var changes the bind ─────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_default_binds_loopback(server_default):
+    """No env var → 127.0.0.1 (the historical safe default).
+    `bind_host` reflects what was actually bound."""
+    assert server_default.bind_host == "127.0.0.1"
+
+
+@pytest.mark.asyncio
+async def test_env_var_binds_any_interface(server_lan):
+    """ONE_LINK_BIND_HOST=0.0.0.0 → bind to any interface."""
+    assert server_lan.bind_host == "0.0.0.0"
+
+
+@pytest.mark.asyncio
+async def test_status_reports_actual_bind_host(server_lan):
+    """Status reports the active bind host so launchers and diagnostics
+    can tell LAN mode from loopback mode without guessing."""
+    resp = await server_lan.api_status(None)  # type: ignore[arg-type]
+    assert resp.status == 200
+    body = json.loads(resp.text)
+    assert body["bind_host"] == "0.0.0.0"
+
+
+@pytest.mark.asyncio
+async def test_socket_actually_listens_on_lan_iface(server_lan):
+    """A 0.0.0.0 bind MUST be reachable from a non-loopback IP. Probe
+    via the test server's actual sockname — port should be valid +
+    bound to the wildcard address (0.0.0.0 or :: depending on stack)."""
+    sockets = server_lan.site._server.sockets  # type: ignore[union-attr]
+    assert sockets
+    bound_addrs = {s.getsockname()[0] for s in sockets}
+    # On dual-stack systems the OS may bind to 0.0.0.0 directly. Pin
+    # that we are NOT on loopback.
+    assert "127.0.0.1" not in bound_addrs
+
+
+# ───────── --lan flag wires through to env var ──────────────────────
+
+def test_cli_lan_flag_exists():
+    """The `--lan` option MUST be registered on the `app` command."""
+    from click.testing import CliRunner
+    from one_link.cli import cli
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["app", "--help"])
+    assert result.exit_code == 0
+    assert "--lan" in result.output
+    # The help text must mention the trust boundary explicitly.
+    assert "Wi-Fi" in result.output or "LAN" in result.output
+
+
+def test_run_app_sets_env_var_when_lan_passed(monkeypatch):
+    """When run_app is called with lan=True, ONE_LINK_BIND_HOST MUST
+    be set to 0.0.0.0 BEFORE any daemon spawn so the spawned
+    subprocess inherits the right value.
+
+    Cleans up the env var explicitly via try/finally because run_app
+    sets it directly on os.environ — monkeypatch.setenv only reverts
+    keys IT set, so a direct assignment leaks across tests and
+    flips the bind host for unrelated server fixtures down the
+    pytest collection order."""
+    from one_link import app as app_mod
+
+    monkeypatch.delenv("ONE_LINK_BIND_HOST", raising=False)
+    captured_env = {}
+
+    def fake_resolve():
+        # Capture env state at the point of resolution — that's where
+        # the launcher decides whether to spawn.
+        captured_env["BIND_HOST"] = os.environ.get("ONE_LINK_BIND_HOST")
+        # Return None so run_app proceeds to spawn (we'll short-circuit).
+        return None
+
+    def fake_spawn():
+        # Bail before actually launching a subprocess in the test.
+        raise RuntimeError("test-bail")
+
+    monkeypatch.setattr(app_mod, "_resolve_running_daemon", fake_resolve)
+    monkeypatch.setattr(app_mod, "_spawn_daemon", fake_spawn)
+    try:
+        with pytest.raises(RuntimeError, match="test-bail"):
+            app_mod.run_app(no_browser=True, lan=True)
+        assert captured_env["BIND_HOST"] == "0.0.0.0"
+    finally:
+        os.environ.pop("ONE_LINK_BIND_HOST", None)
+
+
+def test_run_app_does_not_set_env_var_without_lan(monkeypatch):
+    """Default run (no --lan) MUST NOT touch ONE_LINK_BIND_HOST.
+    Otherwise an unrelated env var leak between flag-on and flag-off
+    invocations of run_app would auto-LAN-bind."""
+    from one_link import app as app_mod
+
+    monkeypatch.delenv("ONE_LINK_BIND_HOST", raising=False)
+
+    def fake_resolve():
+        return None
+
+    def fake_spawn():
+        raise RuntimeError("test-bail")
+
+    monkeypatch.setattr(app_mod, "_resolve_running_daemon", fake_resolve)
+    monkeypatch.setattr(app_mod, "_spawn_daemon", fake_spawn)
+    with pytest.raises(RuntimeError, match="test-bail"):
+        app_mod.run_app(no_browser=True, lan=False)
+    assert "ONE_LINK_BIND_HOST" not in os.environ
+
+
+# ───────── LAN-IP detection ─────────────────────────────────────────
+
+def test_detect_lan_ip_returns_string():
+    """Helper MUST return a string — never None or raise. On a
+    machine with no usable interface, falls back to 127.0.0.1
+    so the caller can decide how to handle that gracefully."""
+    from one_link.app import _detect_lan_ip
+
+    ip = _detect_lan_ip()
+    assert isinstance(ip, str)
+    assert ip
+    # IPv4 dotted quad sanity.
+    parts = ip.split(".")
+    assert len(parts) == 4
+    assert all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+
+
+def test_detect_lan_ip_falls_back_when_socket_fails(monkeypatch):
+    """When the UDP-connect probe fails (airplane mode, no DNS,
+    socket library disabled), the helper MUST fall back to 127.0.0.1
+    instead of raising."""
+    from one_link import app as app_mod
+
+    class ExplodingSocket:
+        def __init__(self, *_args, **_kwargs):
+            pass
+        def connect(self, *_args, **_kwargs):
+            raise OSError("network down")
+        def getsockname(self):
+            raise OSError("never reached")
+        def close(self):
+            pass
+
+    monkeypatch.setattr(app_mod.socket, "socket", lambda *a, **kw: ExplodingSocket())
+    assert app_mod._detect_lan_ip() == "127.0.0.1"
+
+
+# ───────── LAN warning print ────────────────────────────────────────
+
+def test_print_lan_warning_via_capsys(capsys):
+    """capsys-based assertion of the warning print — verifies the
+    URL, token, and the actual security copy are all in stdout."""
+    from one_link.app import _print_lan_warning
+
+    _print_lan_warning("192.168.1.42", 7117, "test-token-abc")
+    captured = capsys.readouterr()
+    assert "192.168.1.42" in captured.out
+    assert "7117" in captured.out
+    assert "?t=test-token-abc" in captured.out
+    # Pin the security copy so a refactor can't quietly soften it.
+    assert "LAN MODE" in captured.out
+    assert "Anyone" in captured.out
+    assert "password" in captured.out
+
+
+# ───────── version pin ──────────────────────────────────────────────
+
+def test_page_version_matches_package():
+    from one_link import __version__
+
+    html = Path("src/one_link/web/index.html").read_text(encoding="utf-8")
+    assert f'PAGE_BUILT_FOR = "{__version__}"' in html

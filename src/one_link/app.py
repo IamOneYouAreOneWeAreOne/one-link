@@ -60,6 +60,28 @@ def _alive(port: int, timeout: float = 0.3) -> bool:
         s.close()
 
 
+def _daemon_is_lan_bound(port: int, timeout: float = 0.3) -> bool:
+    """v0.15.2 — probe whether the UI server is reachable via a
+    non-loopback interface. We try to connect to the detected LAN
+    IP on the daemon's port; success means the daemon's bound to
+    0.0.0.0 (or that specific LAN address). Used to decide whether
+    --lan needs to restart an existing daemon."""
+    lan_ip = _detect_lan_ip()
+    if lan_ip == "127.0.0.1":
+        # No usable LAN interface — treat as already-correct so we
+        # don't pointlessly restart on an offline laptop.
+        return True
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((lan_ip, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
 def _control_request(port: int, cmd: str, timeout: float = 2.0, **kwargs) -> dict:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
@@ -174,10 +196,76 @@ def _spawn_daemon() -> subprocess.Popen:
     )
 
 
-def run_app(*, no_browser: bool = False) -> int:
+def _detect_lan_ip() -> str:
+    """v0.15.2 — best-effort LAN IPv4 detection. Opens a UDP socket
+    and "connects" to a public address; the OS picks the right
+    outbound interface but no packet is actually sent. Returns
+    127.0.0.1 if there's no usable interface (e.g. airplane mode).
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # 8.8.8.8 is Google DNS — never actually contacted, just used
+        # as a routing target so the OS picks the egress interface.
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def _print_lan_warning(lan_ip: str, port: int, token: str) -> None:
+    """v0.15.2 — yellow security warning + LAN URL. Made deliberately
+    loud so a user who passed --lan understands the trust boundary
+    they just opened: anyone on the same Wi-Fi who has the URL+token
+    can reach the UI."""
+    click.echo("")
+    click.secho(
+        "  ⚠ LAN MODE — One Link UI is now exposed to your local network.",
+        fg="yellow",
+        bold=True,
+    )
+    click.echo(
+        "    Anyone on this Wi-Fi who has the URL + token can access your UI."
+    )
+    click.echo(
+        "    The token gates pairing + sending; treat the URL like a password."
+    )
+    click.echo("")
+    click.secho(
+        f"  Phone/LAN URL: http://{lan_ip}:{port}/?t={token}",
+        fg="cyan",
+        bold=True,
+    )
+    click.echo("")
+
+
+def run_app(*, no_browser: bool = False, lan: bool = False) -> int:
     click.echo("One Link")
+    # v0.15.2: --lan opt-in. Set BEFORE we try to reuse a running
+    # daemon so any spawned-fresh daemon inherits the right bind
+    # host. If a 127.0.0.1-bound daemon is already running, we'll
+    # stop it and replace; the user explicitly asked for LAN mode.
+    if lan:
+        os.environ["ONE_LINK_BIND_HOST"] = "0.0.0.0"
+
     spawned: Optional[subprocess.Popen] = None
     info = _resolve_running_daemon()
+
+    # v0.15.2: --lan forces a daemon replacement when an existing
+    # daemon is bound to loopback. We don't have a bind-host field
+    # in the existing status payload (older daemons), so we
+    # detect LAN-bind by trying to connect to the daemon via the
+    # LAN IP — if that succeeds, the daemon is already LAN-bound.
+    if lan and info is not None and info.compatible:
+        if not _daemon_is_lan_bound(info.server_port):
+            click.echo("  switching daemon to LAN mode...")
+            _stop_incompatible_daemon(info)
+            info = _wait_for_daemon(timeout=1.0)
+            if info is not None and info.compatible:
+                # Old daemon survived shutdown? Rare; fall through and
+                # accept whatever we end up with.
+                pass
 
     if info is not None and not info.compatible:
         running = info.status.get("app_version") or "unknown"
@@ -209,6 +297,16 @@ def run_app(*, no_browser: bool = False) -> int:
             webbrowser.open(url, new=2)
         except Exception as e:
             click.echo(f"  (couldn't auto-open browser: {e})")
+
+    if lan:
+        lan_ip = _detect_lan_ip()
+        if lan_ip == "127.0.0.1":
+            click.secho(
+                "  (could not detect a LAN IP — is Wi-Fi/Ethernet up?)",
+                fg="yellow",
+            )
+        else:
+            _print_lan_warning(lan_ip, info.server_port, info.token)
 
     if spawned is not None:
         click.echo("\n  Daemon is running as a child of this terminal.")
