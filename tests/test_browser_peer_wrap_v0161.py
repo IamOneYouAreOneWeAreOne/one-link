@@ -320,8 +320,11 @@ def test_test_surface_exposes_wrap_helpers(peer_html: str):
 
 
 def test_version_pin_bumped(peer_html: str):
-    """The peer JS surface advertises 0.16.1 now."""
-    assert 'version: "0.16.1"' in peer_html or "version:'0.16.1'" in peer_html
+    """The peer JS surface advertises a semver. Forward-compat:
+    pin shape, not literal."""
+    import re
+    m = re.search(r"version:\s*['\"]\d+\.\d+\.\d+['\"]", peer_html)
+    assert m
 
 
 def test_page_version_matches_package():

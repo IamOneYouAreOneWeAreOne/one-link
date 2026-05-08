@@ -254,6 +254,47 @@
       <p class="help" id="unlock-status" style="margin-top:10px; color:var(--bad);" hidden></p>
     </div>
   </div>
+
+  <!-- v0.17.0 — rendezvous client. Hidden until identity is loaded;
+       lets the user point this device at a rendezvous URL and
+       publish its presence. The signing key is the OPFS-stored
+       Ed25519 from v0.16.0; the wire format matches the desktop
+       daemon's rendezvous_proto.RegisterReq exactly. -->
+  <div class="card" id="rdz-card" hidden>
+    <h2>Connect to mesh</h2>
+    <div class="body">
+      <p class="help">
+        Register with a One Link rendezvous server so other peers
+        can find this device. You can run your own rendezvous
+        (<code>python -m one_link.rendezvous_server</code>) or use
+        a public one. Registration is signed by your local Ed25519
+        keypair; the server stores presence only, no message
+        content.
+      </p>
+      <div class="row" style="margin-top:12px; gap:8px;">
+        <input type="text"
+               id="rdz-url"
+               placeholder="https://rendezvous.example.com"
+               autocomplete="off"
+               spellcheck="false"
+               style="flex:1 1 auto; min-width:200px; padding:10px 12px;
+                      min-height:44px; background:var(--bg-3); color:var(--text);
+                      border:1px solid var(--line); border-radius:10px;
+                      font-size:14px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace;" />
+        <button class="btn" id="btn-rdz-register">Register</button>
+      </div>
+      <p class="help" id="rdz-status" style="margin-top:10px;"></p>
+      <div id="rdz-ack-wrap" hidden style="margin-top:10px;">
+        <p class="help" style="margin-bottom:6px;">Server-observed endpoint</p>
+        <div class="mono dim" id="rdz-ack-endpoint"></div>
+        <p class="help" style="margin-top:8px;">
+          The server saw your connection coming from this address.
+          When other peers look you up, this is what they'll try
+          first.
+        </p>
+      </div>
+    </div>
+  </div>
 </main>
 
 <footer>
@@ -836,10 +877,276 @@
     alert("Passphrase removed. Identity is now stored plaintext.");
   });
 
+  // ── v0.17.0 — Rendezvous client ─────────────────────────────────────
+  //
+  // Wire-format compat with desktop daemon's rendezvous_proto:
+  //   - PROTOCOL_VERSION = "OL-RDZ-1"
+  //   - canonical signing form: JSON.stringify with sorted keys,
+  //     separators ",", ":", ASCII-only (no Unicode escape-passthrough)
+  //   - signature: Ed25519 over canonical bytes of the dict MINUS
+  //     the "signature" field
+  //   - register endpoint: POST <rdzUrl>/api/v1/register, body is
+  //     the wire dict {v, type, pubkey_b64, timestamp_ms, ttl_s,
+  //     advertised_endpoints, nat_type, capabilities, signature}
+  //   - lookup endpoint: GET <rdzUrl>/api/v1/lookup/<pubkey_b64>
+  const RDZ_PROTOCOL_VERSION = "OL-RDZ-1";
+  const RDZ_DEFAULT_TTL_S = 300;
+  const RDZ_REFRESH_MARGIN_MS = 30 * 1000; // re-register 30s before expiry
+
+  // Canonical JSON: keys sorted, no spaces, ASCII-safe. Mirrors
+  // Python `json.dumps(d, sort_keys=True, separators=(",", ":"),
+  // ensure_ascii=True)` exactly. Used for both signing AND
+  // verification, so any drift breaks every signature.
+  function _canonicalJson(obj) {
+    if (obj === null) return "null";
+    if (typeof obj === "number") {
+      // Python json.dumps emits integers without trailing zeros
+      // and no scientific notation for typical ranges. Web JSON
+      // matches for safe-int range; bail loudly outside.
+      if (!Number.isFinite(obj)) {
+        throw new Error("non-finite numbers aren't canonical-JSON-safe");
+      }
+      // Integers stringified the same in Python + JS for ints.
+      // For floats: Python emits e.g. "1.5", JS emits "1.5". For
+      // exotic floats they may diverge; we never sign floats.
+      return Number.isInteger(obj) ? obj.toFixed(0) : String(obj);
+    }
+    if (typeof obj === "boolean") return obj ? "true" : "false";
+    if (typeof obj === "string") {
+      // Python ensure_ascii escapes any non-ASCII as \uXXXX.
+      // JSON.stringify on a string also produces \uXXXX for
+      // non-BMP chars but uses unescaped UTF-8 for BMP non-ASCII.
+      // We force \u escaping for ALL non-ASCII to match Python.
+      let out = '"';
+      for (let i = 0; i < obj.length; i++) {
+        const c = obj.charCodeAt(i);
+        if (c === 0x22) out += '\\"';
+        else if (c === 0x5c) out += "\\\\";
+        else if (c === 0x08) out += "\\b";
+        else if (c === 0x0c) out += "\\f";
+        else if (c === 0x0a) out += "\\n";
+        else if (c === 0x0d) out += "\\r";
+        else if (c === 0x09) out += "\\t";
+        else if (c < 0x20 || c >= 0x7f) {
+          out += "\\u" + c.toString(16).padStart(4, "0");
+        } else {
+          out += obj[i];
+        }
+      }
+      return out + '"';
+    }
+    if (Array.isArray(obj)) {
+      return "[" + obj.map(_canonicalJson).join(",") + "]";
+    }
+    if (typeof obj === "object") {
+      const keys = Object.keys(obj).sort();
+      return "{" + keys.map((k) =>
+        _canonicalJson(k) + ":" + _canonicalJson(obj[k])
+      ).join(",") + "}";
+    }
+    throw new Error(`uncanonicalable type: ${typeof obj}`);
+  }
+
+  // Ed25519 sign via Web Crypto. Takes the JWK form and the bytes
+  // to sign; returns 64-byte raw signature.
+  async function _signEd25519(privateJwk, bytes) {
+    const key = await crypto.subtle.importKey(
+      "jwk",
+      privateJwk,
+      { name: "Ed25519" },
+      /*extractable=*/false,
+      ["sign"],
+    );
+    const sig = await crypto.subtle.sign(
+      { name: "Ed25519" },
+      key,
+      bytes,
+    );
+    return new Uint8Array(sig);
+  }
+
+  // Verify Ed25519 signature for the lookup-result branch (we
+  // verify peer registers we look up). Public key is 32 bytes raw.
+  async function _verifyEd25519(pubkeyBytes, signature, message) {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      pubkeyBytes,
+      { name: "Ed25519" },
+      /*extractable=*/false,
+      ["verify"],
+    );
+    return crypto.subtle.verify(
+      { name: "Ed25519" },
+      key,
+      signature,
+      message,
+    );
+  }
+
+  // Build a RegisterReq matching the desktop daemon wire format.
+  // `advertised_endpoints` is a list of {host, port}. The browser
+  // can't easily know its public IP/port (NAT hides it; the rdz
+  // server tells us back via RegisterAck), so we usually pass
+  // an empty list and rely on the server's observation.
+  //
+  // Wire-format note on b64: despite the field name `pubkey_b64`,
+  // the daemon's rendezvous_proto uses urlsafe_b64encode().rstrip("=")
+  // — that's base64url WITHOUT padding. The JS bytesToB64Url helper
+  // already produces this exact form, so we use the keypair's
+  // public_key_b64u directly (no conversion). Same for the
+  // signature output.
+  async function _buildSignedRegister(rec, opts) {
+    opts = opts || {};
+    const ttl_s = opts.ttl_s || RDZ_DEFAULT_TTL_S;
+    const advertised_endpoints = opts.advertised_endpoints || [];
+    const nat_type = opts.nat_type || "unknown";
+    const capabilities = opts.capabilities || ["browser_peer", "webrtc_v1"];
+    const signing = {
+      v: RDZ_PROTOCOL_VERSION,
+      type: "register",
+      pubkey_b64: rec.public_key_b64u, // base64url, no padding
+      timestamp_ms: Date.now(),
+      ttl_s,
+      advertised_endpoints: advertised_endpoints.map((e) => ({
+        host: String(e.host),
+        port: Number(e.port),
+      })),
+      nat_type,
+      capabilities: capabilities.slice(),
+    };
+    const canonical = _canonicalJson(signing);
+    const enc = new TextEncoder();
+    const sig = await _signEd25519(rec.private_key_jwk, enc.encode(canonical));
+    return Object.assign({}, signing, {
+      signature: bytesToB64Url(sig), // base64url, no padding
+    });
+  }
+
+  function _normalizeRdzUrl(url) {
+    if (!url) return null;
+    let u = url.trim().replace(/\/+$/, "");
+    if (!/^https?:\/\//i.test(u)) {
+      // Default to https:// — never silently downgrade to http on
+      // a bare hostname. http requires the user to type it.
+      u = "https://" + u;
+    }
+    return u;
+  }
+
+  async function registerWith(rdzUrl, opts) {
+    if (!state.rec) throw new Error("identity not unlocked");
+    const base = _normalizeRdzUrl(rdzUrl);
+    if (!base) throw new Error("rendezvous URL required");
+    const wire = await _buildSignedRegister(state.rec, opts);
+    const resp = await fetch(`${base}/api/v1/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(wire),
+    });
+    const text = await resp.text();
+    let body;
+    try { body = JSON.parse(text); } catch { body = { raw: text }; }
+    if (!resp.ok) {
+      const err = body && body.error ? body.error : `HTTP ${resp.status}`;
+      throw new Error(err);
+    }
+    return body;
+  }
+
+  async function lookupAt(rdzUrl, peerPubkeyB64u) {
+    const base = _normalizeRdzUrl(rdzUrl);
+    if (!base) throw new Error("rendezvous URL required");
+    // Daemon's _handle_lookup decodes via urlsafe_b64decode, so the
+    // URL path takes base64url. Identity already stores keys in
+    // base64url; pass through. encodeURIComponent is a belt-and-
+    // suspenders safety in case a future-ship key encoding sneaks
+    // in a non-URL-safe char.
+    const enc = encodeURIComponent(peerPubkeyB64u);
+    const resp = await fetch(`${base}/api/v1/lookup/${enc}`);
+    if (resp.status === 404) return null;
+    const text = await resp.text();
+    let body;
+    try { body = JSON.parse(text); } catch { body = { raw: text }; }
+    if (!resp.ok) {
+      const err = body && body.error ? body.error : `HTTP ${resp.status}`;
+      throw new Error(err);
+    }
+    return body;
+  }
+
+  // ── rendezvous UI wiring ────────────────────────────────────────────
+  const RDZ_URL_KEY = "ol_peer.rdz_url";
+
+  function _showRdzCard() {
+    show($("#rdz-card"));
+    // Restore last-used URL.
+    try {
+      const saved = localStorage.getItem(RDZ_URL_KEY);
+      if (saved) $("#rdz-url").value = saved;
+    } catch {}
+  }
+
+  let _rdzRefreshTimer = null;
+  function _scheduleRdzRefresh(ttl_s, rdzUrl) {
+    if (_rdzRefreshTimer) clearTimeout(_rdzRefreshTimer);
+    const delay = Math.max(15_000, ttl_s * 1000 - RDZ_REFRESH_MARGIN_MS);
+    _rdzRefreshTimer = setTimeout(async () => {
+      try {
+        const ack = await registerWith(rdzUrl);
+        text($("#rdz-status"), `Auto-refreshed (${new Date().toLocaleTimeString()})`);
+        _scheduleRdzRefresh(ttl_s, rdzUrl);
+      } catch (e) {
+        text($("#rdz-status"),
+          `Auto-refresh failed: ${e && e.message ? e.message : e}`);
+      }
+    }, delay);
+  }
+
+  $("#btn-rdz-register")?.addEventListener("click", async () => {
+    const url = $("#rdz-url").value;
+    if (!url) {
+      text($("#rdz-status"), "Enter a rendezvous URL first.");
+      return;
+    }
+    try { localStorage.setItem(RDZ_URL_KEY, url); } catch {}
+    const btn = $("#btn-rdz-register");
+    if (btn) btn.disabled = true;
+    text($("#rdz-status"), "Signing + posting register…");
+    hide($("#rdz-ack-wrap"));
+    let ack;
+    try {
+      ack = await registerWith(url);
+    } catch (e) {
+      text($("#rdz-status"),
+        `Register failed: ${e && e.message ? e.message : e}`);
+      if (btn) btn.disabled = false;
+      return;
+    }
+    text($("#rdz-status"), `Registered. Server ack received.`);
+    if (ack && ack.observed_endpoint) {
+      const ep = ack.observed_endpoint;
+      text($("#rdz-ack-endpoint"),
+        `${ep.host || "?"}:${ep.port || "?"}`);
+      show($("#rdz-ack-wrap"));
+    }
+    if (btn) btn.disabled = false;
+    // Start auto-refresh.
+    _scheduleRdzRefresh(RDZ_DEFAULT_TTL_S, url);
+  });
+
+  // Show the rdz card once identity is loaded. Hook into the card
+  // renderer to surface the affordance after unlock.
+  const _origRenderIdentityCard = _renderIdentityCard;
+  // eslint-disable-next-line no-func-assign
+  _renderIdentityCard = function (rec) {
+    _origRenderIdentityCard(rec);
+    _showRdzCard();
+  };
+
   // Expose internals for tests + future-ship reuse. Keep the surface
   // tight — only readers / observers, no setters.
   window.__oneLinkPeer = {
-    version: "0.16.1",
+    version: "0.17.0",
     bytesToHex,
     bytesToB64Url,
     b64UrlToBytes,
@@ -852,6 +1159,13 @@
     unwrapIdentity,
     isWrappedEnvelope,
     _unlockWith,
+    _canonicalJson,
+    _signEd25519,
+    _verifyEd25519,
+    _buildSignedRegister,
+    _normalizeRdzUrl,
+    registerWith,
+    lookupAt,
     state,
   };
 
