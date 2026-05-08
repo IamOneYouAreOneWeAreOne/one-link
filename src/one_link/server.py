@@ -607,6 +607,10 @@ class UIServer:
         # the daemon trusts it as a paired device with no manual
         # SAS confirm.
         r.add_post("/api/v1/peer-rtc/mint-pairing", self._guarded(self.api_mint_pairing))
+        # v0.20.1: render the most-recently-minted pairing token's
+        # LAN URL as an SVG QR. Hits the desktop UI's "Pair a phone"
+        # surface; saves us shipping a JS QR library.
+        r.add_get("/api/v1/peer-rtc/qr.svg", self._guarded(self.api_pair_qr))
         # v0.15.4: connect-info + QR for the phone-pairing flow.
         # Both auth-gated — they expose the LAN URL with the token.
         r.add_get("/api/connect-info", self._guarded(self.api_connect_info))
@@ -1012,6 +1016,45 @@ class UIServer:
             "daemon_fingerprint": daemon_fp,
             "ws_signaling_url": f"{base.replace('http', 'ws')}/api/v1/peer-rtc",
         })
+
+    async def api_pair_qr(self, request: web.Request) -> web.StreamResponse:
+        """v0.20.1: render an arbitrary URL as a QR SVG. Auth-gated.
+        Used by the desktop UI to render the pairing URL the
+        mint-pairing endpoint returned. Saves us shipping a JS
+        QR library.
+
+        Limit: 2KB URL cap. A QR holding more than that won't
+        scan reliably on a phone camera anyway."""
+        url = request.query.get("u", "").strip()
+        if not url:
+            return web.json_response(
+                {"error": "missing_u", "hint": "pass `u=<url>` query param"},
+                status=400,
+            )
+        if len(url) > 2048:
+            return web.json_response(
+                {"error": "url_too_long", "hint": "max 2048 chars"},
+                status=413,
+            )
+        try:
+            import qrcode
+            import qrcode.image.svg
+        except ImportError:
+            return web.json_response(
+                {"error": "qrcode_lib_missing", "hint": "pip install qrcode>=7"},
+                status=500,
+            )
+        qr = qrcode.QRCode(border=2, box_size=8)
+        qr.add_data(url)
+        qr.make(fit=True)
+        img = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
+        import io
+        buf = io.BytesIO()
+        img.save(buf)
+        svg_body = buf.getvalue().decode("utf-8")
+        resp = web.Response(text=svg_body, content_type="image/svg+xml")
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     async def _peer_rtc_signaling(
         self, request: web.Request

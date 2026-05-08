@@ -171,6 +171,30 @@
 </header>
 
 <main>
+  <!-- v0.20.1 — auto-pair card. Shown only when /peer is opened
+       with ?pair=<token>&fp=<...>&ws=<...> query params (i.e. the
+       phone scanned the QR from the desktop UI). Drives the
+       silent pair flow: identity → WebSocket → signed offer →
+       answer → DataChannel up → peer saved → chat transition.
+       NO manual SAS, no copy/paste, no user buttons. Single
+       status line. -->
+  <div class="card" id="autopair-card" hidden>
+    <h2>Connecting your phone</h2>
+    <div class="body">
+      <p class="help" id="autopair-status">Setting up secure link…</p>
+      <div class="row" style="margin-top:10px;">
+        <span class="pill dim" id="autopair-pill">starting</span>
+      </div>
+      <div style="margin-top:14px;" id="autopair-host-wrap" hidden>
+        <p class="help" style="margin-bottom:6px;">Pairing with</p>
+        <div class="mono dim" id="autopair-host"></div>
+      </div>
+      <div class="row" style="margin-top:14px;" id="autopair-actions" hidden>
+        <button class="btn ghost" id="btn-autopair-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <div class="card" id="identity-card">
     <h2>This device</h2>
     <div class="body">
@@ -2510,6 +2534,321 @@
     }
   };
 
+  // ── v0.20.1 — auto-pair flow (browser ↔ daemon, no manual UX) ──
+  //
+  // The phone visits /peer?pair=<token>&fp=<algo>:<hex>&ws=<url>.
+  // The page detects the params, hides ALL the manual cards
+  // (identity provisioning, rendezvous, manual signaling, SAS),
+  // shows a single "Connecting…" status, and runs:
+  //
+  //   1. Provision identity silently (existing boot path; we just
+  //      don't render the identity card).
+  //   2. Open a RTCPeerConnection with multi-vendor STUN.
+  //   3. Create a control + bulk DataChannel (so the daemon side
+  //      can pin the channel labels).
+  //   4. createOffer() + setLocalDescription.
+  //   5. Build a signed offer envelope:
+  //        {v:"OL-PEER-RTC-1", t:"offer", sdp,
+  //         pubkey_b64u, fingerprint, pair_token, ts, signature}
+  //      Signature = Ed25519 over canonical(envelope minus signature).
+  //   6. Open WS to ws=, send envelope.
+  //   7. On answer, setRemoteDescription.
+  //   8. On control:open, mark this connection as paired with
+  //      the daemon's claimed fingerprint, save to OPFS.
+  //   9. Status: "Connected". Transition to chat (v0.20.2).
+  //
+  // Failure modes are surfaced as a single "Couldn't pair: <reason>"
+  // line + a Retry button. We do NOT fall back to manual SAS — if
+  // the QR pair flow fails, the user picks up their phone and
+  // taps Retry; if it still fails, they regenerate the QR on their
+  // laptop. Manual SAS is the advanced override path, not the
+  // recovery path.
+
+  const AUTOPAIR_DAEMON_CONTROL_LABEL = "one-link-daemon-control-v1";
+  const AUTOPAIR_DAEMON_BULK_LABEL = "one-link-daemon-bulk-v1";
+
+  function _detectPairQuery() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const pair = params.get("pair");
+      const fp = params.get("fp");
+      const ws = params.get("ws");
+      if (!pair || !fp || !ws) return null;
+      return { pair_token: pair, daemon_fingerprint: fp, ws_url: ws };
+    } catch {
+      return null;
+    }
+  }
+
+  function _autopairSetState(pillKind, pillLabel, statusLine) {
+    const pill = $("#autopair-pill");
+    if (pill) {
+      pill.classList.remove("good", "warn", "bad", "dim");
+      pill.classList.add(pillKind);
+      pill.textContent = pillLabel;
+    }
+    text($("#autopair-status"), statusLine);
+  }
+
+  function _autopairShowHost(daemonFingerprint) {
+    text($("#autopair-host"), daemonFingerprint);
+    show($("#autopair-host-wrap"));
+  }
+
+  // Hide every manual surface so the auto-pair UX feels like
+  // "scan → connected" with nothing else on screen.
+  function _autopairHideManualCards() {
+    for (const id of [
+      "#identity-card",
+      "#status-card",
+      "#actions-card",
+      "#unlock-card",
+      "#rdz-card",
+      "#webrtc-card",
+      "#pair-card",
+      "#peers-card",
+      "#chat-card",
+    ]) {
+      hide($(id));
+    }
+  }
+
+  async function _waitForIdentity(maxMs) {
+    const deadline = Date.now() + (maxMs || 8000);
+    while (Date.now() < deadline) {
+      if (state.rec) return state.rec;
+      await new Promise((r) => setTimeout(r, 80));
+    }
+    return state.rec || null;
+  }
+
+  async function _runAutoPairFlow(pair) {
+    _autopairHideManualCards();
+    show($("#autopair-card"));
+    show($("#autopair-actions"));
+    _autopairSetState("dim", "starting", "Setting up your phone's identity…");
+    _autopairShowHost(pair.daemon_fingerprint);
+
+    // Identity must be unlocked + loaded before we can sign.
+    const rec = await _waitForIdentity(12_000);
+    if (!rec) {
+      _autopairSetState(
+        "bad", "no identity",
+        "Couldn't provision an identity. Try reloading.",
+      );
+      return;
+    }
+
+    _autopairSetState("warn", "negotiating", "Connecting to your laptop…");
+
+    let ws;
+    let pc;
+    let cleanup = null;
+    let dataChannelOpened = false;
+
+    try {
+      pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:global.stun.twilio.com:3478" },
+          { urls: "stun:stun.cloudflare.com:3478" },
+        ],
+        bundlePolicy: "max-bundle",
+        rtcpMuxPolicy: "require",
+      });
+    } catch (e) {
+      _autopairSetState(
+        "bad", "no webrtc",
+        `WebRTC unavailable: ${e && e.message ? e.message : e}. Try Chrome / Edge / Safari 17+.`,
+      );
+      return;
+    }
+
+    // Open control + bulk channels with the daemon-pinned labels.
+    const controlDc = pc.createDataChannel(
+      AUTOPAIR_DAEMON_CONTROL_LABEL,
+      { ordered: true },
+    );
+    const bulkDc = pc.createDataChannel(
+      AUTOPAIR_DAEMON_BULK_LABEL,
+      { ordered: false, maxRetransmits: 0 },
+    );
+    controlDc.binaryType = "arraybuffer";
+    bulkDc.binaryType = "arraybuffer";
+
+    const finalize = async () => {
+      if (dataChannelOpened) return;
+      dataChannelOpened = true;
+      // Persist the daemon as a paired peer in OPFS so future
+      // /peer visits (without ?pair=) recognize this daemon and
+      // auto-reconnect. Public key isn't on the wire yet — we'll
+      // fill it from the answer envelope when v0.20.2 wires it.
+      try {
+        await savePeer({
+          v: 1,
+          fingerprint: pair.daemon_fingerprint,
+          public_key_b64u: state._pendingDaemonPubkey || "",
+          alias: "Laptop daemon",
+          paired_ms: Date.now(),
+          last_seen_ms: Date.now(),
+          paired_via: "qr",
+        });
+      } catch (e) {
+        console.warn("save daemon peer failed", e);
+      }
+      _autopairSetState(
+        "good", "connected",
+        "Connected. Your phone is now paired with this laptop.",
+      );
+      hide($("#autopair-actions"));
+      // v0.20.2 wires the chat surface. For now, just leave the
+      // success state visible.
+    };
+
+    controlDc.onopen = finalize;
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+        if (!dataChannelOpened) {
+          _autopairSetState(
+            "bad", "failed",
+            "Connection failed. Check that you're on the same Wi-Fi as the laptop.",
+          );
+        }
+      }
+    };
+
+    // Create offer + sign envelope.
+    let offer;
+    try {
+      offer = await pc.createOffer({
+        offerToReceiveAudio: false,
+        offerToReceiveVideo: false,
+      });
+      await pc.setLocalDescription(offer);
+    } catch (e) {
+      _autopairSetState(
+        "bad", "offer failed",
+        `Couldn't build offer: ${e && e.message ? e.message : e}`,
+      );
+      return;
+    }
+
+    // Wait briefly for ICE gathering to settle so we send a
+    // complete offer (better LAN handshake reliability than
+    // trickle-only).
+    await new Promise((resolve) => {
+      if (pc.iceGatheringState === "complete") {
+        resolve();
+        return;
+      }
+      const onStateChange = () => {
+        if (pc.iceGatheringState === "complete") {
+          pc.removeEventListener("icegatheringstatechange", onStateChange);
+          resolve();
+        }
+      };
+      pc.addEventListener("icegatheringstatechange", onStateChange);
+      // Cap wait at 2 seconds — enough for LAN, sub-3s SLA.
+      setTimeout(resolve, 2000);
+    });
+
+    const offerEnvelope = {
+      v: "OL-PEER-RTC-1",
+      t: "offer",
+      sdp: pc.localDescription.sdp,
+      pubkey_b64u: rec.public_key_b64u,
+      fingerprint: rec.fingerprint,
+      pair_token: pair.pair_token,
+      ts: Date.now(),
+    };
+    let sig;
+    try {
+      const enc = new TextEncoder();
+      sig = await _signEd25519(
+        rec.private_key_jwk,
+        enc.encode(_canonicalJson(offerEnvelope)),
+      );
+    } catch (e) {
+      _autopairSetState(
+        "bad", "sign failed",
+        `Couldn't sign offer: ${e && e.message ? e.message : e}`,
+      );
+      return;
+    }
+    offerEnvelope.signature = bytesToB64Url(sig);
+
+    // Open WS, send envelope, wait for answer.
+    try {
+      ws = new WebSocket(pair.ws_url);
+    } catch (e) {
+      _autopairSetState(
+        "bad", "ws failed",
+        `Couldn't open signaling: ${e && e.message ? e.message : e}`,
+      );
+      return;
+    }
+
+    ws.onopen = () => {
+      try {
+        ws.send(JSON.stringify(offerEnvelope));
+      } catch (e) {
+        _autopairSetState(
+          "bad", "send failed",
+          `Couldn't send offer: ${e && e.message ? e.message : e}`,
+        );
+      }
+    };
+    ws.onerror = () => {
+      if (!dataChannelOpened) {
+        _autopairSetState(
+          "bad", "ws error",
+          "Signaling WebSocket failed. Check the laptop is reachable.",
+        );
+      }
+    };
+    ws.onmessage = async (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+      if (!msg || msg.v !== "OL-PEER-RTC-1") return;
+      if (msg.t === "answer") {
+        try {
+          await pc.setRemoteDescription(
+            new RTCSessionDescription({ sdp: msg.sdp, type: "answer" }),
+          );
+          // Stash the daemon's pubkey for the OPFS save above.
+          state._pendingDaemonPubkey = msg.daemon_pubkey_b64u || "";
+          // Once setRemoteDescription resolves, ICE proceeds and
+          // the DataChannel will fire onopen automatically.
+        } catch (e) {
+          _autopairSetState(
+            "bad", "answer failed",
+            `Couldn't apply answer: ${e && e.message ? e.message : e}`,
+          );
+        }
+      } else if (msg.t === "error") {
+        _autopairSetState(
+          "bad", msg.code || "rejected",
+          msg.message || "Daemon rejected the pairing.",
+        );
+      }
+    };
+    ws.onclose = () => {
+      // WS closing is normal once the answer was received +
+      // DataChannel up. Only surface as failure if the channel
+      // never opened.
+      cleanup = null;
+    };
+
+    // Cancel button tears everything down.
+    $("#btn-autopair-cancel")?.addEventListener("click", () => {
+      try { ws && ws.close(); } catch {}
+      try { pc && pc.close(); } catch {}
+      _autopairSetState("dim", "cancelled", "Pairing cancelled.");
+      hide($("#autopair-actions"));
+    }, { once: true });
+  }
+
   // ── hook pair handshake into existing WebRTC session lifecycle ────
   // Wrap createOfferSignal + acceptOfferSignal so they install our
   // onState + onMessage handlers. This way pair handshake fires
@@ -2563,7 +2902,7 @@
   // Expose internals for tests + future-ship reuse. Keep the surface
   // tight — only readers / observers, no setters.
   window.__oneLinkPeer = {
-    version: "0.19.2",
+    version: "0.20.1",
     bytesToHex,
     bytesToB64Url,
     b64UrlToBytes,
@@ -2615,10 +2954,32 @@
     loadMessages,
     clearMessages,
     sendChatMessage,
+    _detectPairQuery,
+    _runAutoPairFlow,
     state,
   };
 
-  boot();
+  // v0.20.1 — boot dispatch. Detect pair query first so we can hide
+  // the manual surfaces before the manual identity card flashes
+  // visible. Run identity boot in either mode (we always need an
+  // identity); the pair flow consumes it as soon as it's ready.
+  const _pairQuery = _detectPairQuery();
+  if (_pairQuery) {
+    _autopairHideManualCards();
+    show($("#autopair-card"));
+    _autopairSetState("dim", "starting", "Setting up your phone's identity…");
+  }
+  boot().then(() => {
+    if (_pairQuery) {
+      _runAutoPairFlow(_pairQuery).catch((e) => {
+        console.error("autopair failed", e);
+        _autopairSetState(
+          "bad", "failed",
+          `Pair flow crashed: ${e && e.message ? e.message : e}`,
+        );
+      });
+    }
+  });
 })();
 </script>
 

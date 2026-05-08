@@ -3844,12 +3844,40 @@
           <!-- ── About ──────────────────────────────────────────── -->
           <section class="settings-pane" data-settings-pane="about">
             <h3>About</h3>
-            <!-- v0.15.4 — connect-another-device QR. Populated by JS
-                 from /api/connect-info. Hidden until LAN mode is on
-                 (loopback URLs are useless on a phone); falls back
-                 to a hint telling the user to relaunch with --lan. -->
-            <div class="settings-section" id="connect-info-section">
-              <div class="settings-section-h"><span>Connect another device</span></div>
+            <!-- v0.20.1 — Pair a phone. Mints a one-shot pairing
+                 token + renders a QR. Phone scans the QR with its
+                 camera; the URL embeds the token, the daemon's
+                 fingerprint, and the WebRTC signaling URL. Phone
+                 opens /peer with those params and auto-pairs
+                 silently — no manual SAS, no copy/paste, no URL
+                 typing. The end-state is: phone is its own peer,
+                 paired with this daemon, with chat surface visible.
+
+                 Defaults to LAN mode. If the daemon is loopback-
+                 only, falls back to the hint telling the user to
+                 restart with --lan. -->
+            <div class="settings-section" id="pair-phone-section">
+              <div class="settings-section-h"><span>Pair a phone</span></div>
+              <div id="pair-phone-body">
+                <p class="settings-help">
+                  Show this on your phone's camera to pair it as
+                  its own One Link peer. The pairing code expires
+                  in 5 minutes and is single-use.
+                </p>
+                <div class="row" style="margin-top:10px; gap:8px;">
+                  <button class="btn-primary" id="btn-mint-pair">Generate pairing QR</button>
+                  <button class="btn-ghost" id="btn-mint-pair-cancel" style="display:none;">Cancel</button>
+                </div>
+                <div id="pair-phone-qr-wrap" style="display:none; margin-top:14px;">
+                </div>
+              </div>
+            </div>
+            <!-- v0.15.4 — connect-another-device QR (legacy daemon-UI mode).
+                 This is the URL-only flow that loads the desktop UI on
+                 phone. It's kept as an advanced fallback; the v0.20.1
+                 "Pair a phone" surface above is the recommended path. -->
+            <div class="settings-section" id="connect-info-section" data-tier="advanced">
+              <div class="settings-section-h"><span>Open desktop UI on another device (advanced)</span></div>
               <div id="connect-info-body">
                 <p class="settings-help">Loading…</p>
               </div>
@@ -9658,7 +9686,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.20.0";
+  const PAGE_BUILT_FOR = "0.20.1";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -12413,7 +12441,137 @@
     // v0.15.4: refresh the connect-another-device QR each time
     // settings opens so a re-LAN-bound daemon shows the new URL.
     _refreshConnectInfo();
+    // v0.20.1: reset the pair-phone surface to the "click to mint"
+    // state on every settings open. Tokens expire in 5 minutes; we
+    // don't want a stale QR sitting around from a previous session.
+    _resetPairPhoneCard();
   }
+
+  // v0.20.1 — Pair a phone (browser-as-peer onboarding).
+  //
+  // The desktop user clicks "Generate pairing QR." We POST to
+  // /api/v1/peer-rtc/mint-pairing, which mints a single-use 32-byte
+  // token, persists it for 5 minutes, and returns the LAN URL the
+  // phone should hit (with the token + daemon fingerprint +
+  // signaling URL embedded as query params).
+  //
+  // We render that URL as a QR code by hitting our own
+  // /api/connect-info/qr.svg endpoint? — no, that endpoint encodes
+  // the daemon-UI URL with the auth token, which is the OPPOSITE
+  // of what we want here. We need a separate QR rendering for the
+  // PAIRING URL. Cleanest: render the SVG client-side via a tiny
+  // QR library.
+  //
+  // We don't ship a QR library. Workaround for now: render the QR
+  // as a *very* small QR by re-using the existing
+  // /api/connect-info/qr.svg endpoint structure, but pass our own
+  // payload. v0.20.1 ships a minimal new endpoint
+  // /api/v1/peer-rtc/qr.svg?u=<url-encoded LAN URL> that hits the
+  // qrcode lib already on the daemon.
+  //
+  // Defensive fallback: if QR rendering fails, show the URL as
+  // text + a "Copy URL" button.
+  let _activePairToken = null;
+  function _resetPairPhoneCard() {
+    _activePairToken = null;
+    const wrap = $("#pair-phone-qr-wrap");
+    if (wrap) {
+      wrap.style.display = "none";
+      wrap.innerHTML = "";
+    }
+    const btnPrimary = $("#btn-mint-pair");
+    const btnCancel = $("#btn-mint-pair-cancel");
+    if (btnPrimary) {
+      btnPrimary.disabled = false;
+      btnPrimary.textContent = "Generate pairing QR";
+    }
+    if (btnCancel) btnCancel.style.display = "none";
+  }
+  $("#btn-mint-pair")?.addEventListener("click", async () => {
+    const btn = $("#btn-mint-pair");
+    const cancel = $("#btn-mint-pair-cancel");
+    const wrap = $("#pair-phone-qr-wrap");
+    if (!btn || !wrap) return;
+    btn.disabled = true;
+    btn.textContent = "Minting pairing token…";
+    let info;
+    try {
+      info = await api.post("/api/v1/peer-rtc/mint-pairing", {});
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "Generate pairing QR";
+      toast(`Couldn't mint pairing: ${e && e.message ? e.message : e}`, "bad");
+      return;
+    }
+    _activePairToken = info.token;
+    btn.textContent = "Pairing QR ready";
+    if (cancel) cancel.style.display = "";
+    // Render the LAN URL as a QR via the daemon's qr.svg endpoint.
+    // The QR encodes whatever URL we pass via the `u` query param.
+    // Saves us shipping a JS QR lib.
+    wrap.innerHTML = "";
+    wrap.style.display = "block";
+    const qrUrl =
+      `/api/v1/peer-rtc/qr.svg?u=${encodeURIComponent(info.lan_url)}` +
+      `&_=${Date.now()}`;
+    const img = document.createElement("img");
+    img.src = qrUrl;
+    img.alt = "QR code linking your phone to this daemon";
+    img.width = 256;
+    img.height = 256;
+    img.style.background = "#fff";
+    img.style.padding = "12px";
+    img.style.borderRadius = "8px";
+    img.style.display = "block";
+    img.style.margin = "0 auto";
+    wrap.appendChild(img);
+
+    const ttlMin = Math.round((info.ttl_ms || 300_000) / 60_000);
+    const note = document.createElement("p");
+    note.className = "settings-help";
+    note.style.marginTop = "10px";
+    note.textContent =
+      `Scan with your phone's camera. The link expires in ${ttlMin} ` +
+      `minute${ttlMin === 1 ? "" : "s"} and only works once. After ` +
+      `pairing, your phone has its own One Link identity and shows ` +
+      `your chats here.`;
+    wrap.appendChild(note);
+
+    const urlBox = document.createElement("div");
+    urlBox.style.display = "flex";
+    urlBox.style.gap = "8px";
+    urlBox.style.alignItems = "center";
+    urlBox.style.marginTop = "10px";
+    const urlEl = document.createElement("code");
+    urlEl.textContent = info.lan_url;
+    urlEl.style.flex = "1 1 auto";
+    urlEl.style.minWidth = "0";
+    urlEl.style.overflow = "hidden";
+    urlEl.style.textOverflow = "ellipsis";
+    urlEl.style.whiteSpace = "nowrap";
+    urlEl.style.background = "var(--bg-3)";
+    urlEl.style.color = "var(--text)";
+    urlEl.style.padding = "6px 10px";
+    urlEl.style.borderRadius = "6px";
+    urlEl.style.fontSize = "11px";
+    urlEl.style.fontFamily = "ui-monospace, SFMono-Regular, Consolas, monospace";
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "btn-ghost";
+    copyBtn.textContent = "Copy URL";
+    copyBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(info.lan_url);
+        copyBtn.textContent = "Copied";
+        setTimeout(() => { copyBtn.textContent = "Copy URL"; }, 1500);
+      } catch (e) {
+        toast(`Couldn't copy: ${e && e.message ? e.message : e}`, "bad");
+      }
+    };
+    urlBox.appendChild(urlEl);
+    urlBox.appendChild(copyBtn);
+    wrap.appendChild(urlBox);
+  });
+  $("#btn-mint-pair-cancel")?.addEventListener("click", _resetPairPhoneCard);
 
   // v0.15.4 — connect-another-device flow. Calls /api/connect-info,
   // renders either the QR + URL + Copy button (LAN mode) or a hint

@@ -532,9 +532,12 @@ async def test_signaling_rejects_unknown_pubkey_without_token(http):
 # ───────── version pin ─────────────────────────────────────────────
 
 
-def test_package_version_bumped():
+def test_package_version_at_or_above_v0200():
+    """Forward-compat: v0.20.x ships build on v0.20.0; pin the
+    floor, not a literal."""
     from one_link import __version__
-    assert __version__ == "0.20.0"
+    parts = [int(p) for p in __version__.split(".")]
+    assert parts >= [0, 20, 0]
 
 
 def test_page_version_matches_package():
