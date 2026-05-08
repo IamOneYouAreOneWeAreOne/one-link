@@ -1,6 +1,6 @@
 [project]
 name = "one_link"
-version = "0.15.3"
+version = "0.15.4"
 description = "Peer-to-peer LAN chat + file sync built on the Coherence Language ecosystem."
 requires-python = ">=3.11"
 authors = [{ name = "One Link contributor", email = "weareone@oneunity.earth" }]
@@ -14,6 +14,9 @@ dependencies = [
   "platformdirs>=4",
   "aiohttp>=3.13.4",
   "watchdog>=4.0",
+  # v0.15.4: QR code rendering for the LAN-pairing flow. Pure-Python,
+  # BSD-licensed (Lincoln Loop), SVG output without Pillow.
+  "qrcode>=7",
 ]
 
 [project.optional-dependencies]

@@ -169,11 +169,16 @@ def test_about_pane_fills_dynamically(index_html: str):
 
 def test_about_pane_links_to_source(index_html: str):
     """The About pane must link out to the source repo — table-stakes
-    transparency for a privacy-positioned product."""
+    transparency for a privacy-positioned product. Search the whole
+    pane body (until `</section>`) so legitimate growth — install
+    affordance, connect-another-device QR — doesn't false-fail this
+    pin on a fixed character window."""
     idx = index_html.find('data-settings-pane="about"')
     # Find the second occurrence (the pane, not the nav).
     pane_idx = index_html.find('data-settings-pane="about"', idx + 1)
-    scope = index_html[pane_idx:pane_idx + 2500]
+    pane_end = index_html.find("</section>", pane_idx)
+    assert pane_end > pane_idx
+    scope = index_html[pane_idx:pane_end]
     assert "github.com/IamOneYouAreOneWeAreOne/one-link" in scope
 
 

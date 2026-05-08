@@ -60,26 +60,23 @@ def _alive(port: int, timeout: float = 0.3) -> bool:
         s.close()
 
 
-def _daemon_is_lan_bound(port: int, timeout: float = 0.3) -> bool:
-    """v0.15.2 — probe whether the UI server is reachable via a
-    non-loopback interface. We try to connect to the detected LAN
-    IP on the daemon's port; success means the daemon's bound to
-    0.0.0.0 (or that specific LAN address). Used to decide whether
-    --lan needs to restart an existing daemon."""
-    lan_ip = _detect_lan_ip()
-    if lan_ip == "127.0.0.1":
-        # No usable LAN interface — treat as already-correct so we
-        # don't pointlessly restart on an offline laptop.
-        return True
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect((lan_ip, port))
-        return True
-    except OSError:
+def _daemon_is_lan_bound(info: "RunningDaemon") -> bool:
+    """v0.15.4 — ask the daemon directly whether it's LAN-bound.
+    Earlier versions probed via socket.connect() to the LAN IP, but
+    Windows + Linux kernels route same-host connects to your own
+    LAN IP back through loopback even when the listener is bound
+    to 127.0.0.1 only — so the probe gave a false positive and
+    --lan never actually rebound the daemon.
+
+    The /api/status payload includes `bind_host` since v0.15.2;
+    treating any non-loopback value as LAN-bound is the only
+    reliable signal."""
+    bind_host = info.status.get("bind_host")
+    if not bind_host:
+        # Pre-v0.15.2 daemon (no bind_host field) — assume worst
+        # case (loopback) so --lan triggers a restart.
         return False
-    finally:
-        s.close()
+    return bind_host not in ("127.0.0.1", "localhost", "::1")
 
 
 def _control_request(port: int, cmd: str, timeout: float = 2.0, **kwargs) -> dict:
@@ -261,13 +258,18 @@ def run_app(*, no_browser: bool = False, lan: bool = False) -> int:
     # detect LAN-bind by trying to connect to the daemon via the
     # LAN IP — if that succeeds, the daemon is already LAN-bound.
     if lan and info is not None and info.compatible:
-        if not _daemon_is_lan_bound(info.server_port):
+        if not _daemon_is_lan_bound(info):
             click.echo("  switching daemon to LAN mode...")
             _stop_incompatible_daemon(info)
+            # Give the OS a moment to release the listening socket so
+            # the freshly-spawned daemon can rebind the same port. On
+            # Windows the TIME_WAIT can otherwise force the new daemon
+            # to fall through to a higher candidate port.
+            time.sleep(1.0)
             info = _wait_for_daemon(timeout=1.0)
-            if info is not None and info.compatible:
-                # Old daemon survived shutdown? Rare; fall through and
-                # accept whatever we end up with.
+            if info is not None:
+                # Daemon survived our shutdown request? Rare; fall
+                # through and accept whatever we end up with.
                 pass
 
     if info is not None and not info.compatible:

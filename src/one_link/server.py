@@ -31,6 +31,7 @@ import logging
 import mimetypes
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -456,6 +457,23 @@ def _server_port_path() -> Path:
     return data_dir() / SERVER_PORT_FILE
 
 
+def _detect_lan_ip() -> str:
+    """v0.15.4 — best-effort LAN IPv4. UDP-connect-to-public-DNS
+    trick: the OS picks the egress interface but no packet is
+    actually sent. Returns 127.0.0.1 if there's no usable interface
+    (airplane mode, no Wi-Fi). Same logic as one_link.app, duplicated
+    here to keep server.py free of an app.py import (server is a
+    leaf module; app launches the daemon and imports server)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
 class UIServer:
     """Wraps the aiohttp app + the websocket event broker."""
 
@@ -561,6 +579,10 @@ class UIServer:
         # behavior. Like sw.js, served unauthenticated because it
         # contains zero PII (just the app's display chrome).
         r.add_get("/manifest.json", self._manifest)
+        # v0.15.4: connect-info + QR for the phone-pairing flow.
+        # Both auth-gated — they expose the LAN URL with the token.
+        r.add_get("/api/connect-info", self._guarded(self.api_connect_info))
+        r.add_get("/api/connect-info/qr.svg", self._guarded(self.api_connect_info_qr))
         r.add_get("/api/me", self._guarded(self.api_me))
         r.add_get("/api/status", self._guarded(self.api_status))
         r.add_get("/api/settings", self._guarded(self.api_get_settings))
@@ -807,6 +829,79 @@ class UIServer:
                 max_age=86400,
                 path="/",
             )
+        return resp
+
+    # ─── /api/connect-info ────────────────────────────────────────────
+    def _connect_info(self) -> dict:
+        """Return the dict the connect-info endpoint serializes. Pulled
+        out so the QR endpoint can reuse the same URL string and not
+        diverge on a refactor."""
+        lan_ip = _detect_lan_ip()
+        # If the daemon's loopback-bound, the LAN URL we'd encode
+        # would be useless on a phone (127.0.0.1 from a phone hits
+        # the phone itself). Surface a hint instead.
+        lan_bound = (
+            self.bind_host not in ("127.0.0.1", "localhost", "::1")
+            and lan_ip != "127.0.0.1"
+        )
+        host_for_url = lan_ip if lan_bound else "127.0.0.1"
+        url = f"http://{host_for_url}:{self.port}/?t={self.token}"
+        return {
+            "lan_ip": lan_ip,
+            "port": self.port,
+            "token": self.token,
+            "bind_host": self.bind_host,
+            "lan_bound": lan_bound,
+            "lan_url": url,
+        }
+
+    async def api_connect_info(self, request: web.Request) -> web.Response:
+        """v0.15.4: returns the URL + token + LAN binding state so the
+        UI can render the "connect another device" affordance. Auth
+        gated — this exposes the token; only the already-authenticated
+        UI should see it."""
+        return web.json_response(self._connect_info())
+
+    async def api_connect_info_qr(self, request: web.Request) -> web.Response:
+        """v0.15.4: returns an SVG QR code encoding the LAN URL. Auth
+        gated for the same reason as the JSON variant. SVG is chosen
+        over PNG because it scales crisply on phone retina displays
+        and doesn't need Pillow."""
+        info = self._connect_info()
+        if not info["lan_bound"]:
+            # Don't render a QR for the loopback URL; it's useless on
+            # a phone. Return 409 + JSON hint so the UI can show the
+            # "pass --lan" tip instead.
+            return web.json_response(
+                {
+                    "error": "loopback_only",
+                    "hint": (
+                        "Daemon is bound to 127.0.0.1. Restart with "
+                        "`one-link app --lan` to expose the UI to "
+                        "your local Wi-Fi."
+                    ),
+                },
+                status=409,
+            )
+        try:
+            import qrcode
+            import qrcode.image.svg
+        except ImportError:
+            return web.json_response(
+                {"error": "qrcode_lib_missing", "hint": "pip install qrcode>=7"},
+                status=500,
+            )
+        qr = qrcode.QRCode(border=2, box_size=8)
+        qr.add_data(info["lan_url"])
+        qr.make(fit=True)
+        img = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
+        import io
+        buf = io.BytesIO()
+        img.save(buf)
+        svg_body = buf.getvalue().decode("utf-8")
+        resp = web.Response(text=svg_body, content_type="image/svg+xml")
+        # Don't cache: the URL contains the token, which can rotate.
+        resp.headers["Cache-Control"] = "no-store"
         return resp
 
     # ─── /api/me ──────────────────────────────────────────────────────
