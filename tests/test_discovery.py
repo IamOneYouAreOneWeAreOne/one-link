@@ -33,6 +33,18 @@ def test_upsert_rejects_malformed_public_key():
     assert r.find("ghost123") is None
 
 
+def test_upsert_quarantines_same_host_alien_identity():
+    r = Registry(
+        self_ed_pub_hex="11" * 32,
+        local_addresses={"192.168.1.142", "127.0.0.1"},
+    )
+    r.upsert(Peer("ghost123", "ghost", "192.168.1.142", 1234, "22" * 32))
+    r.upsert(Peer("loopback", "ghost", "127.0.0.1", 1235, "33" * 32))
+    r.upsert(Peer("remote12", "real", "192.168.1.26", 1236, "44" * 32))
+
+    assert [p.short_id for p in r.list()] == ["remote12"]
+
+
 def test_find_by_hostname_case_insensitive():
     r = Registry()
     p = _peer("abcdef12", "Alice-Mac")

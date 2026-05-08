@@ -97,6 +97,7 @@ def _spawn(home: Path, log: Path) -> tuple[subprocess.Popen, object]:
     env = dict(os.environ)
     env["ONE_LINK_HOME"] = str(env.get("ONE_LINK_HOME") or "") or str(home)
     env["ONE_LINK_HOME"] = str(home)  # always per-test
+    env["ONE_LINK_ALLOW_SAME_HOST_PEERS"] = "1"
     # v0.7.x: defence-in-depth. conftest.py already sets this at
     # module-import time, but if a future test path starts a daemon
     # before conftest runs (or via a different code path), keep

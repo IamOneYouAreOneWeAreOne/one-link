@@ -57,6 +57,26 @@ async def test_prune_removes_malformed_peer_without_network_probe():
 
 
 @pytest.mark.asyncio
+async def test_prune_removes_same_host_alien_peer_without_network_probe():
+    from one_link.discovery import Discovery
+
+    d = Discovery(short_id="aaaa", hostname="me", port=1, ed_pub_hex="00" * 32)
+    d.registry.local_addresses = {"192.168.1.142"}
+    d.registry.peers["ghost123"] = Peer(
+        short_id="ghost123",
+        hostname="GhostPeer",
+        address="192.168.1.142",
+        port=49999,
+        ed_pub_hex="ff" * 32,
+    )
+
+    removed = await d.prune_unreachable(timeout=0.01)
+
+    assert removed == 1
+    assert d.registry.peers == {}
+
+
+@pytest.mark.asyncio
 async def test_prune_keeps_reachable_peer():
     """A peer pointing at a real listening port stays in the registry."""
     from one_link.discovery import Discovery

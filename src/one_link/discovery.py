@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import socket
 from dataclasses import dataclass, field
 from typing import Callable
@@ -55,6 +56,7 @@ class Registry:
     peers: dict[str, Peer] = field(default_factory=dict)
     on_change: Callable[[], None] | None = None
     self_ed_pub_hex: str = ""
+    local_addresses: set[str] = field(default_factory=set)
 
     def upsert(self, peer: Peer) -> None:
         if not _valid_pub_hex(peer.ed_pub_hex):
@@ -64,6 +66,9 @@ class Registry:
         # restarts. The public key is the durable identity; never list our own
         # key as a peer just because the service name differs.
         if self.self_ed_pub_hex and peer.ed_pub_hex == self.self_ed_pub_hex:
+            self.peers.pop(peer.short_id, None)
+            return
+        if peer.address in self.local_addresses:
             self.peers.pop(peer.short_id, None)
             return
         # mDNS can briefly surface multiple service names for the same device
@@ -229,6 +234,16 @@ class Discovery:
         loop = asyncio.get_running_loop()
         self._zc = AsyncZeroconf(ip_version=IPVersion.V4Only)
         local_ip = _best_local_ipv4()
+        allow_same_host = str(os.environ.get("ONE_LINK_ALLOW_SAME_HOST_PEERS") or "").lower()
+        if allow_same_host in ("1", "true", "yes"):
+            self.registry.local_addresses = set()
+        else:
+            self.registry.local_addresses = {
+                local_ip,
+                "127.0.0.1",
+                "::1",
+                "localhost",
+            }
         # mDNS TXT properties. Cap rdz length: an oversized record can
         # be silently dropped by routers, defeating the whole point.
         # 8 URLs × ~64 chars = 512 bytes, well under typical limits.
@@ -306,10 +321,14 @@ class Discovery:
             return 0
         removed = 0
         for p in list(peers):
-            if not _valid_pub_hex(p.ed_pub_hex):
+            if not _valid_pub_hex(p.ed_pub_hex) or p.address in self.registry.local_addresses:
                 self.registry.remove(p.short_id)
                 removed += 1
-        peers = [p for p in peers if _valid_pub_hex(p.ed_pub_hex)]
+        peers = [
+            p for p in peers
+            if _valid_pub_hex(p.ed_pub_hex)
+            and p.address not in self.registry.local_addresses
+        ]
         if not peers:
             return removed
 
