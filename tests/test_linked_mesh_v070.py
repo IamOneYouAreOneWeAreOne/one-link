@@ -19,6 +19,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -786,6 +787,7 @@ async def test_send_file_ignores_fast_cache_for_legacy_peer(tmp_path: Path, monk
 
 @pytest.mark.asyncio
 async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path / "home"))
     me = _new_identity()
     them = _new_identity()
     state = State(db_path=tmp_path / "state.db")
@@ -852,10 +854,101 @@ async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
     row = state.list_transfers(limit=1)[0]
 
     assert result["chunks"] == 5
+    assert result["raw_bytes_sent"] == f.stat().st_size
+    assert result["wire_bytes_sent"] == f.stat().st_size
     assert [c["index"] for c in sent_chunks] == [0, 1, 2, 3, 4]
     assert max(chan.recv_sent_counts) >= 4
     assert row.metadata["cdc_engine"] == "pipelined_chunks_v2"
     assert row.metadata["cdc_window_chunks"] == 3
+    assert all(not daemon._chunk_cache_path(c["hash"]).is_file() for c in chunks)
+    assert state.chunks_sourced([c["hash"] for c in chunks]) == [c["hash"] for c in chunks]
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_send_file_cdc_disables_compression_after_incompressible_chunks(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path / "home"))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    chan = _TracingFakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, FILE_CDC],
+        "from": them.short_id,
+        "app_version": "0.12.5",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id,
+            hostname="them",
+            address="127.0.0.1",
+            port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+
+    f = tmp_path / "incompressible-video-ish.bin"
+    f.write_bytes(os.urandom(5 * 4096))
+    payload = f.read_bytes()
+    chunks = []
+    for i in range(5):
+        start = i * 4096
+        data = payload[start:start + 4096]
+        chunks.append({
+            "index": i,
+            "start": start,
+            "end": start + len(data),
+            "size": len(data),
+            "hash": blake3.blake3(data).hexdigest(),
+        })
+    state.record_file_index_cache(
+        path=str(f.resolve()),
+        size=f.stat().st_size,
+        mtime_ns=f.stat().st_mtime_ns,
+        ctime_ns=f.stat().st_ctime_ns,
+        blob_hash=blake3.blake3(payload).hexdigest(),
+        index_kind="fixed",
+        chunks=chunks,
+    )
+    chan.queue_reply(make_msg("FILE_WANTS", them.short_id, wants=[0, 1, 2, 3, 4]))
+    for _ in range(5):
+        chan.queue_reply(make_msg("ACK", them.short_id))
+
+    import one_link.daemon as daemon_mod
+
+    real_compress = daemon_mod.zlib.compress
+    calls = 0
+
+    def counted_compress(data, level=1):
+        nonlocal calls
+        calls += 1
+        return real_compress(data, level=level)
+
+    monkeypatch.setattr(daemon_mod.zlib, "compress", counted_compress)
+
+    result = await daemon.send_file(sess.peer, f)
+
+    assert result["chunks"] == 5
+    assert result["compressed_chunks"] == 0
+    assert calls == 3
     state.close()
 
 

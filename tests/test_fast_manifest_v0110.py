@@ -108,3 +108,45 @@ def test_file_index_cache_roundtrips_and_invalidates_on_stat_change(tmp_path: Pa
         ) is None
     finally:
         state.close()
+
+
+def test_bulk_chunk_sources_for_file_roundtrip(tmp_path: Path):
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        p = tmp_path / "source.mov"
+        p.write_bytes(b"abcdefghij")
+        st = p.stat()
+        chunks = [
+            {
+                "index": 0,
+                "start": 0,
+                "end": 5,
+                "size": 5,
+                "hash": "a" * 64,
+            },
+            {
+                "index": 1,
+                "start": 5,
+                "end": 10,
+                "size": 5,
+                "hash": "b" * 64,
+            },
+        ]
+
+        n = state.record_chunk_sources_for_file(
+            path=str(p.resolve()),
+            file_size=st.st_size,
+            mtime_ms=int(st.st_mtime * 1000),
+            chunks=chunks,
+            source="file_index:fixed",
+        )
+
+        assert n == 2
+        assert state.chunks_sourced(["a" * 64, "b" * 64]) == ["a" * 64, "b" * 64]
+        src = state.get_chunk_sources("a" * 64)[0]
+        assert src["path"] == str(p.resolve())
+        assert src["start"] == 0
+        assert src["size"] == 5
+        assert src["source"] == "file_index:fixed"
+    finally:
+        state.close()

@@ -2318,21 +2318,30 @@ class Daemon:
             return
         try:
             sig = self._file_cache_signature(path)
+            chunk_rows = [
+                {
+                    "index": c.index,
+                    "start": c.start,
+                    "end": c.end,
+                    "size": c.size,
+                    "hash": c.hash,
+                }
+                for c in file_index.chunks
+            ]
             self.state.record_file_index_cache(
                 **sig,
                 blob_hash=file_index.blob_hash,
                 index_kind=index_kind,
-                chunks=(
-                    {
-                        "index": c.index,
-                        "start": c.start,
-                        "end": c.end,
-                        "size": c.size,
-                        "hash": c.hash,
-                    }
-                    for c in file_index.chunks
-                ),
+                chunks=chunk_rows,
             )
+            if chunk_rows:
+                self.state.record_chunk_sources_for_file(
+                    path=sig["path"],
+                    file_size=int(sig["size"]),
+                    mtime_ms=int(Path(sig["path"]).stat().st_mtime * 1000),
+                    chunks=chunk_rows,
+                    source=f"file_index:{index_kind}",
+                )
         except Exception as e:
             log.debug("file index cache write skipped for %s: %s", path, e)
 
@@ -2950,8 +2959,8 @@ class Daemon:
             "missing_after": sorted(remaining),
         }
 
-    def _encode_payload(self, data: bytes) -> tuple[str, bytes]:
-        if len(data) < COMPRESSION_MIN_BYTES:
+    def _encode_payload(self, data: bytes, *, allow_compress: bool = True) -> tuple[str, bytes]:
+        if not allow_compress or len(data) < COMPRESSION_MIN_BYTES:
             return "raw", data
         compressed = zlib.compress(data, level=1)
         if len(compressed) <= len(data) * (1.0 - COMPRESSION_MIN_SAVINGS):
@@ -6792,6 +6801,11 @@ class Daemon:
             if cached_file_index is not None and cached_file_index.chunks:
                 file_index = cached_file_index
                 index_kind = cached_index_kind
+                self._record_file_index_cache(
+                    path,
+                    file_index,
+                    index_kind=index_kind,
+                )
             elif size >= FAST_FIXED_INDEX_MIN_BYTES:
                 file_index = fixed_index_path(path, chunk_size=fixed_chunk_size)
                 index_kind = "fixed"
@@ -7005,6 +7019,9 @@ class Daemon:
                     )
                     with open(path, "rb") as f:
                         pending_cdc_sizes: deque[int] = deque()
+                        compression_enabled = True
+                        compression_trials = 0
+                        compression_misses = 0
 
                         async def _settle_one_cdc_ack() -> None:
                             nonlocal chunks_sent, raw_bytes_sent, wire_bytes_sent
@@ -7035,17 +7052,21 @@ class Daemon:
                                 continue
                             f.seek(c.start)
                             data = f.read(c.size)
-                            self._store_chunk_cache(
-                                c.hash,
+                            if len(data) != c.size or blake3.blake3(data).hexdigest() != c.hash:
+                                raise RuntimeError("source file changed during transfer")
+                            enc, payload = self._encode_payload(
                                 data,
-                                blob_hash=blob_hex,
-                                chunk_index=c.index,
+                                allow_compress=compression_enabled,
                             )
-                            enc, payload = self._encode_payload(data)
-                            raw_bytes_sent += len(data)
-                            wire_bytes_sent += len(payload)
                             if enc != "raw":
                                 compressed_chunks += 1
+                                compression_misses = 0
+                            elif len(data) >= COMPRESSION_MIN_BYTES:
+                                compression_misses += 1
+                            if len(data) >= COMPRESSION_MIN_BYTES:
+                                compression_trials += 1
+                                if compression_trials >= 3 and compression_misses >= 3:
+                                    compression_enabled = False
                             chunk_msg = make_msg(
                                 "FILE_CDC_CHUNK",
                                 self.me.short_id,

@@ -3751,6 +3751,78 @@ class State:
             source=str(source or "prior"),
         )
 
+    def record_chunk_sources_for_file(
+        self,
+        *,
+        path: str,
+        file_size: int,
+        mtime_ms: int,
+        chunks: Iterable[dict],
+        source: str = "file_index",
+    ) -> int:
+        """Record many chunk sources for one stable file in one write pass.
+
+        Live file sends already have a deterministic manifest for the source
+        file. Recording path+offset sources lets future CHUNK_PULL requests
+        read directly from that file instead of eagerly copying every chunk
+        into One Link's cache during the send hot path.
+        """
+
+        now = _now_ms()
+        clean: list[tuple[str, str, int, int, int, int, str, int]] = []
+        avail: list[tuple[str, int, str, int]] = []
+        for c in chunks:
+            try:
+                chunk_hash = str(c["hash"])
+                start = int(c["start"])
+                size = int(c.get("size", int(c["end"]) - start))
+            except Exception:
+                continue
+            if not chunk_hash or start < 0 or size <= 0:
+                continue
+            clean.append((
+                chunk_hash,
+                str(path),
+                start,
+                size,
+                int(mtime_ms),
+                int(file_size),
+                str(source or "file_index"),
+                now,
+            ))
+            avail.append((chunk_hash, size, str(source or "file_index"), now))
+        if not clean:
+            return 0
+        with self._write_lock:
+            self._conn.executemany(
+                """
+                INSERT INTO chunk_sources(
+                    chunk_hash, path, start, size, mtime_ms, file_size,
+                    source, updated_ms
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chunk_hash, path, start) DO UPDATE SET
+                    size = excluded.size,
+                    mtime_ms = excluded.mtime_ms,
+                    file_size = excluded.file_size,
+                    source = excluded.source,
+                    updated_ms = excluded.updated_ms
+                """,
+                clean,
+            )
+            self._conn.executemany(
+                """
+                INSERT INTO chunk_availability(
+                    chunk_hash, size, blob_hash, chunk_index, source, updated_ms
+                ) VALUES(?, ?, NULL, NULL, ?, ?)
+                ON CONFLICT(chunk_hash) DO UPDATE SET
+                    size = excluded.size,
+                    source = excluded.source,
+                    updated_ms = excluded.updated_ms
+                """,
+                avail,
+            )
+        return len(clean)
+
     def get_chunk_sources(self, chunk_hash: str, *, limit: int = 8) -> list[dict]:
         rows = self._conn.execute(
             """
