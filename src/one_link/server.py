@@ -562,6 +562,9 @@ class UIServer:
         r.add_post(r"/api/messages/{msg_id}/edit", self._guarded(self.api_edit_message))
         r.add_post(r"/api/messages/{msg_id}/delete", self._guarded(self.api_delete_message))
         r.add_post(r"/api/peers/{fp}/read", self._guarded(self.api_set_read_marker))
+        # v0.12.3 typing indicator. POST-only; no GET because the
+        # UI receives via WS peer_typing event (push, not pull).
+        r.add_post(r"/api/peers/{fp}/typing", self._guarded(self.api_set_typing))
         # v0.8.0: group endpoints.
         r.add_get("/api/groups", self._guarded(self.api_list_groups))
         r.add_post("/api/groups", self._guarded(self.api_create_group))
@@ -844,6 +847,11 @@ class UIServer:
             # expressible.
             "send_read_receipts": s.get("send_read_receipts", "true") == "true",
             "display_read_receipts": s.get("display_read_receipts", "true") == "true",
+            # v0.12.3 — typing indicator privacy. Same shape as
+            # read receipts: send + display are independent so the
+            # 'don't tell, but tell me' pattern is expressible.
+            "send_typing_indicators": s.get("send_typing_indicators", "true") == "true",
+            "display_typing_indicators": s.get("display_typing_indicators", "true") == "true",
             # v0.11.6 storage + data settings.
             # - default_dm_ttl_ms: applies to NEW pairings only;
             #   existing peers keep their dm_ttl_ms unchanged. None /
@@ -1027,6 +1035,8 @@ class UIServer:
             "notification_preview", "notify_on_reactions",
             # v0.12.2 read receipts privacy.
             "send_read_receipts", "display_read_receipts",
+            # v0.12.3 typing indicator privacy.
+            "send_typing_indicators", "display_typing_indicators",
         ):
             if key in data:
                 self.daemon.state.set_setting(
@@ -3208,6 +3218,31 @@ class UIServer:
             translated = _translate_send_error(e)
             _record_translated_error(translated, e, source="server.api")
             return web.json_response(translated, status=translated["status"])
+
+    async def api_set_typing(self, request: web.Request) -> web.Response:
+        """v0.12.3: relay an ephemeral 'I'm typing' indicator to a
+        peer. Best-effort, debounced server-side at 2.5s/peer.
+
+        The UI calls this on every keystroke that lands a non-
+        whitespace character; the daemon discards floods so the
+        wire stays calm. Honors send_typing_indicators privacy
+        setting; when off, returns 200 with skipped='privacy'."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        fp = request.match_info["fp"]
+        peer = await self.daemon.resolve_for_send(fp)
+        if peer is None:
+            return web.json_response({"ok": True, "delivered": False})
+        try:
+            r = await self.daemon.send_typing(peer)
+            return web.json_response({
+                "ok": True,
+                "delivered": r.get("error") is None and r.get("skipped") is None,
+                "skipped": r.get("skipped"),
+            })
+        except Exception as e:
+            log.debug("send_typing failed: %s", e)
+            return web.json_response({"ok": True, "delivered": False})
 
     async def api_set_read_marker(self, request: web.Request) -> web.Response:
         """v0.7.6: tell `peer` we've read up to ts X. Best-effort —

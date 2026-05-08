@@ -1469,6 +1469,31 @@
     margin-left: auto;
   }
 
+  /* v0.12.3 typing-indicator banner. */
+  .typing-banner {
+    padding: 6px 14px;
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--line);
+    color: var(--text-dim);
+    font-size: 12px;
+    font-style: italic;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .typing-dots {
+    display: inline-flex; gap: 2px;
+  }
+  .typing-dots span {
+    animation: typing-bounce 1.2s ease-in-out infinite;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .typing-dots span:nth-child(2) { animation-delay: .15s; }
+  .typing-dots span:nth-child(3) { animation-delay: .3s; }
+  @keyframes typing-bounce {
+    0%, 60%, 100% { opacity: .25; transform: translateY(0); }
+    30% { opacity: 1; transform: translateY(-3px); }
+  }
+
   /* v0.11.4 session-expired banner. Sits at the top of the viewport
      above all other UI so the user can't miss it. */
   .session-expired-banner {
@@ -2662,6 +2687,14 @@
              renderConvKeyChangeBanner populates it. -->
         <div id="convo-keychange" class="keychange-banner" style="display:none;"></div>
 
+        <!-- v0.12.3: typing indicator banner. Slides in just below
+             the conversation header while the active peer is
+             typing; auto-hides at expires_at_ms. -->
+        <div id="convo-typing" class="typing-banner" style="display:none;">
+          <span class="typing-dots"><span>·</span><span>·</span><span>·</span></span>
+          <span id="convo-typing-name">someone</span> is typing…
+        </div>
+
         <!-- v0.10.1: multi-select action bar. Slides in when 1+
              messages are selected; offers Forward / Copy / Pin /
              Delete / Cancel. Hidden by default. -->
@@ -3081,6 +3114,33 @@
                 Off = your sent messages always show ✓ regardless
                 of whether the peer has read them. Useful if seeing
                 "Read" stresses you out.
+              </p>
+            </div>
+            <!-- v0.12.3 Typing-indicator privacy. Same two-toggle
+                 pattern as read receipts. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Typing indicators</span></div>
+              <div class="settings-row">
+                <label for="set-send-typing">Tell peers when I'm typing</label>
+                <span class="toggle">
+                  <input type="checkbox" id="set-send-typing" />
+                  <span class="slider"></span>
+                </span>
+              </div>
+              <p class="settings-help">
+                When on, peers see "you are typing…" while you're
+                composing a message. Off = peers never know.
+              </p>
+              <div class="settings-row">
+                <label for="set-display-typing">Show "is typing…" when peers are</label>
+                <span class="toggle">
+                  <input type="checkbox" id="set-display-typing" />
+                  <span class="slider"></span>
+                </span>
+              </div>
+              <p class="settings-help">
+                Off = the typing banner never appears in your
+                conversations regardless of what peers are doing.
               </p>
             </div>
             <!-- v0.11.1 Blocked devices. Sources from /api/peers with
@@ -4498,6 +4558,9 @@
         // v0.12.2 read-receipt privacy.
         send_read_receipts: r.send_read_receipts !== false,
         display_read_receipts: r.display_read_receipts !== false,
+        // v0.12.3 typing-indicator privacy.
+        send_typing_indicators: r.send_typing_indicators !== false,
+        display_typing_indicators: r.display_typing_indicators !== false,
       };
     } catch {
       // Daemon unreachable / fresh install — default theme stays.
@@ -7669,6 +7732,36 @@
     }
   }
 
+  // v0.12.3: render the "user is typing…" banner for the active
+  // peer. Auto-hides via setInterval that re-runs every 500ms and
+  // checks deadlines.
+  function renderTypingBanner() {
+    const banner = $("#convo-typing");
+    if (!banner) return;
+    if (!state.selectedPeer) {
+      banner.style.display = "none";
+      return;
+    }
+    const peer = state.peers.get(state.selectedPeer);
+    if (!peer?.fingerprint) {
+      banner.style.display = "none";
+      return;
+    }
+    const exp = state.peerTyping?.[peer.fingerprint] || 0;
+    if (!exp || Date.now() >= exp) {
+      banner.style.display = "none";
+      return;
+    }
+    const nameEl = $("#convo-typing-name");
+    if (nameEl) {
+      nameEl.textContent = peer.display_name || peer.hostname || "Peer";
+    }
+    banner.style.display = "flex";
+  }
+  // 500ms tick to auto-hide expired banners. Cheap; only does
+  // anything when state.peerTyping is non-empty.
+  setInterval(renderTypingBanner, 500);
+
   function maybeSendReadMarker(peer) {
     if (!peer || !peer.fingerprint || peer.trust !== "pinned") return;
     // Highest ts among inbound messages from this peer.
@@ -8502,7 +8595,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.12.2";
+  const PAGE_BUILT_FOR = "0.12.3";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -8832,6 +8925,18 @@
           target.deleted_at_ms = m.deleted_at_ms;
           scheduleRenderMessages();
         }
+      } else if (m.type === "peer_typing") {
+        // v0.12.3: a peer reports they're typing. Cache the
+        // expires_at_ms so we can render the banner + auto-hide
+        // when the deadline passes. Honors display privacy: if
+        // off, the daemon broadcasts to other tabs but we treat
+        // each tab independently — a tab where the user has the
+        // toggle off should still drop the banner. (The daemon
+        // does the gating; this is belt-and-suspenders.)
+        if (state.runtimeSettings?.display_typing_indicators === false) return;
+        state.peerTyping = state.peerTyping || {};
+        state.peerTyping[m.peer_fp] = m.expires_at_ms;
+        renderTypingBanner();
       } else if (m.type === "read_marker") {
         // v0.7.6: peer reported they've read up to ts X. Update
         // our local map; render flips outbound ✓ → ✓✓ for all
@@ -10169,6 +10274,32 @@
     return false;
   }
   $("#input").addEventListener("paste", handlePasteImage);
+  // v0.12.3: typing indicator. Fires on every non-empty input
+  // event; daemon-side debounces to once per 2.5s/peer so a fast
+  // typer doesn't flood the wire. Privacy gate is enforced
+  // server-side too — we don't bother shipping the API call when
+  // the user has opted out, because we know we'll get
+  // skipped='privacy' back.
+  let _lastTypingFiredAt = 0;
+  $("#input").addEventListener("input", () => {
+    const text = $("#input").value || "";
+    if (!text.trim()) return;
+    if (state.runtimeSettings?.send_typing_indicators === false) return;
+    const now = Date.now();
+    // Client-side debounce mirrors the server-side 2.5s debounce
+    // so we don't even make the round trip while typing fast.
+    if (now - _lastTypingFiredAt < 2500) return;
+    _lastTypingFiredAt = now;
+    if (state.selectedPeer) {
+      const peer = state.peers.get(state.selectedPeer);
+      if (peer?.fingerprint && peer.trust === "pinned") {
+        api.post(`/api/peers/${peer.fingerprint}/typing`, {})
+          .catch(() => { /* best-effort */ });
+      }
+    }
+    // Group typing not implemented in this ship — would need a
+    // group_typing wire kind that fans out to all members.
+  });
   document.addEventListener("paste", (e) => {
     const t = e.target;
     const isOurInput = t && t.id === "input";
@@ -11120,6 +11251,11 @@
       const dr = $("#set-display-receipts");
       if (sr) sr.checked = r.send_read_receipts !== false;
       if (dr) dr.checked = r.display_read_receipts !== false;
+      // v0.12.3 typing-indicator privacy toggles.
+      const st = $("#set-send-typing");
+      const dt = $("#set-display-typing");
+      if (st) st.checked = r.send_typing_indicators !== false;
+      if (dt) dt.checked = r.display_typing_indicators !== false;
       // v0.11.6 storage + data settings.
       const ddt = $("#set-default-dm-ttl");
       if (ddt) ddt.value = r.default_dm_ttl_ms ? String(r.default_dm_ttl_ms) : "";
@@ -11203,6 +11339,9 @@
       // v0.12.2 read-receipt privacy.
       send_read_receipts: !!$("#set-send-receipts")?.checked,
       display_read_receipts: !!$("#set-display-receipts")?.checked,
+      // v0.12.3 typing-indicator privacy.
+      send_typing_indicators: !!$("#set-send-typing")?.checked,
+      display_typing_indicators: !!$("#set-display-typing")?.checked,
       // v0.11.6 storage + data settings. The four selects/inputs
       // map directly to setting keys; null + 0 + "" all clear.
       default_dm_ttl_ms: (() => {

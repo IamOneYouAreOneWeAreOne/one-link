@@ -78,6 +78,8 @@ from one_link.cdc import (
     MAX_CHUNK_BYTES as CDC_MAX_CHUNK_BYTES,
     MIN_CHUNK_BYTES as CDC_MIN_CHUNK_BYTES,
     Chunk,
+    FileIndex,
+    fixed_index_path,
     hash_path,
     index_path,
 )
@@ -127,6 +129,7 @@ BINARY_FRAME_HEADER_MAX = 64 * 1024
 MAX_INCOMING_FILE_BYTES = 1024 * 1024 * 1024  # match UI upload cap
 CDC_CACHE_MAX_BYTES = 512 * 1024 * 1024
 CDC_AUTO_INDEX_MAX_BYTES = 128 * 1024 * 1024
+FAST_FIXED_INDEX_MIN_BYTES = 16 * 1024 * 1024
 COMPRESSION_MIN_BYTES = 2048
 COMPRESSION_MIN_SAVINGS = 0.08
 OUTBOUND_SESSION_IDLE_S = 300.0
@@ -552,6 +555,15 @@ class Daemon:
         self.bandwidth_pacer = BandwidthPacer(cap_kbps=0)
         self._auto_accept_max_size_bytes: int = 0  # 0 = no limit
         self._auto_accept_extensions: set[str] = set()  # empty = no filter
+        # v0.12.3: typing-indicator state + privacy.
+        # _peer_typing[fp] = wall-clock ms when the peer's "still
+        # typing" expires. The WS broadcasts peer_typing events;
+        # the UI shows "User is typing…" until the deadline.
+        self._peer_typing: dict[str, int] = {}
+        # _last_typing_sent_to[fp] = ts of last TYPING we sent to
+        # this peer, used to debounce so a fast typer doesn't
+        # flood the wire.
+        self._last_typing_sent_to: dict[str, float] = {}
         self._prune_task: asyncio.Task | None = None
         self._dm_reaper_task: asyncio.Task | None = None
         self._prior_index_task: asyncio.Task | None = None
@@ -1917,6 +1929,39 @@ class Daemon:
             await channel.send(encode_msg(make_msg(
                 "ACK", self.me.short_id, of=msg.get("id"),
             )))
+        elif t == "TYPING":
+            # v0.12.3: ephemeral "peer is typing" indicator.
+            # Pinned-only — strangers can't poke our UI.
+            # Capped expiry at 10s (the wire claims 5s; we cap to
+            # avoid a malicious peer setting expires_in_ms = MAX
+            # to lock the indicator on forever).
+            if not self._is_pinned(peer_fp):
+                return
+            # Honor the local display privacy toggle: if off, we
+            # silently drop the WS broadcast so the UI never shows
+            # the indicator. We still cache the deadline so other
+            # internal consumers (notification suppression, etc.)
+            # can read it later.
+            display_on = True
+            if self.state is not None:
+                with contextlib.suppress(Exception):
+                    v = self.state.get_setting("display_typing_indicators")
+                    if v is not None and v != "true":
+                        display_on = False
+            try:
+                expires_in_ms = int(msg.get("expires_in_ms") or 5000)
+            except (TypeError, ValueError):
+                expires_in_ms = 5000
+            expires_in_ms = max(0, min(10_000, expires_in_ms))
+            now_ms = int(time.time() * 1000)
+            self._peer_typing[peer_fp] = now_ms + expires_in_ms
+            if display_on and self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "peer_typing",
+                        "peer_fp": peer_fp,
+                        "expires_at_ms": now_ms + expires_in_ms,
+                    })
         elif t == "READ_MARKER":
             # v0.7.6: peer reports they've read up to ts X.
             # Pinned-only — receipts from strangers leak nothing
@@ -2171,6 +2216,11 @@ class Daemon:
     def _cache_file_chunks(self, path: Path) -> None:
         try:
             file_index = index_path(path)
+            self._record_file_index_cache(
+                path,
+                file_index,
+                index_kind="cdc",
+            )
             chunks = file_index.chunks
             with open(path, "rb") as fh:
                 for c in chunks:
@@ -2183,6 +2233,77 @@ class Daemon:
                     )
         except Exception as e:
             log.debug("CDC cache fill skipped for %s: %s", path, e)
+
+    def _file_cache_signature(self, path: Path) -> dict:
+        p = Path(path).expanduser().resolve()
+        st = p.stat()
+        return {
+            "path": str(p),
+            "size": int(st.st_size),
+            "mtime_ns": int(st.st_mtime_ns),
+            "ctime_ns": int(st.st_ctime_ns),
+        }
+
+    def _cached_file_index(self, sig: dict) -> tuple[FileIndex, str] | None:
+        if self.state is None:
+            return None
+        try:
+            row = self.state.get_file_index_cache(**sig)
+        except Exception as e:
+            log.debug("file index cache lookup skipped for %s: %s", sig.get("path"), e)
+            return None
+        if not row:
+            return None
+        try:
+            chunks = tuple(
+                Chunk(
+                    index=int(c["index"]),
+                    start=int(c["start"]),
+                    end=int(c["end"]),
+                    hash=str(c["hash"]),
+                )
+                for c in (row.get("chunks") or [])
+            )
+            return (
+                FileIndex(
+                    blob_hash=str(row["blob_hash"]),
+                    size=int(row["size"]),
+                    chunks=chunks,
+                ),
+                str(row.get("index_kind") or "unknown"),
+            )
+        except Exception as e:
+            log.debug("file index cache decode skipped for %s: %s", sig.get("path"), e)
+            return None
+
+    def _record_file_index_cache(
+        self,
+        path: Path,
+        file_index: FileIndex,
+        *,
+        index_kind: str,
+    ) -> None:
+        if self.state is None:
+            return
+        try:
+            sig = self._file_cache_signature(path)
+            self.state.record_file_index_cache(
+                **sig,
+                blob_hash=file_index.blob_hash,
+                index_kind=index_kind,
+                chunks=(
+                    {
+                        "index": c.index,
+                        "start": c.start,
+                        "end": c.end,
+                        "size": c.size,
+                        "hash": c.hash,
+                    }
+                    for c in file_index.chunks
+                ),
+            )
+        except Exception as e:
+            log.debug("file index cache write skipped for %s: %s", path, e)
 
     def _record_prior_file_sources(self, path: Path) -> dict:
         if self.state is None:
@@ -5872,6 +5993,41 @@ class Daemon:
             log.debug("send_read_marker best-effort failed: %s", e)
             return {"sent": m, "error": str(e)}
 
+    async def send_typing(self, peer: Peer) -> dict:
+        """v0.12.3: ephemeral 'I'm typing' indicator.
+
+        Debounced to once per 2.5s per peer to avoid wire flood
+        on a fast typer. The wire frame carries an `expires_in_ms`
+        (5000) so the receiver knows when to time out the
+        indicator without coordination clocks.
+
+        Gated by send_typing_indicators privacy setting; off →
+        return immediately, peer never learns we're typing.
+        Best-effort — failures are debug-logged, never bubble up
+        to the UI."""
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                v = self.state.get_setting("send_typing_indicators")
+                if v is not None and v != "true":
+                    return {"sent": None, "skipped": "privacy"}
+        peer_fp = self._peer_fp_from_peer(peer)
+        if peer_fp:
+            now = time.monotonic()
+            last = self._last_typing_sent_to.get(peer_fp, 0.0)
+            if now - last < 2.5:
+                return {"sent": None, "skipped": "debounced"}
+            self._last_typing_sent_to[peer_fp] = now
+        m = make_msg(
+            "TYPING", self.me.short_id,
+            expires_in_ms=5000,
+        )
+        try:
+            await self.send_to(peer, [m])
+            return {"sent": m}
+        except Exception as e:
+            log.debug("send_typing best-effort failed: %s", e)
+            return {"sent": m, "error": str(e)}
+
     async def send_reaction(
         self, peer: Peer, *, target_msg_id: str, emoji: str, op: str = "add",
     ) -> dict:
@@ -6426,8 +6582,21 @@ class Daemon:
         peer_fp_for_policy = self._peer_fp_from_peer(peer)
         if peer_fp_for_policy and not self._capability_allowed(peer_fp_for_policy, FILES):
             raise RuntimeError(f"files capability disabled for peer {peer.short_id}")
-        size = path.stat().st_size
-        blob_hex = hash_path(path)
+        file_sig = self._file_cache_signature(path)
+        size = int(file_sig["size"])
+        cached_file_index: FileIndex | None = None
+        cached_index_kind = "miss"
+        cached = self._cached_file_index(file_sig)
+        if cached is not None:
+            cached_file_index, cached_index_kind = cached
+            blob_hex = cached_file_index.blob_hash
+        else:
+            blob_hex = hash_path(path)
+            self._record_file_index_cache(
+                path,
+                FileIndex(blob_hash=blob_hex, size=size, chunks=()),
+                index_kind="hash_only",
+            )
         cdc_chunks: tuple[Chunk, ...] = ()
         cdc_index: list[dict] = []
         stream_chunks_total = max(1, (size + CHUNK_SIZE - 1) // CHUNK_SIZE)
@@ -6562,7 +6731,25 @@ class Daemon:
             existing_metadata=base_metadata,
         )
         if can_offer_cdc:
-            file_index = index_path(path)
+            if cached_file_index is not None and cached_file_index.chunks:
+                file_index = cached_file_index
+                index_kind = cached_index_kind
+            elif size >= FAST_FIXED_INDEX_MIN_BYTES:
+                file_index = fixed_index_path(path)
+                index_kind = "fixed"
+                self._record_file_index_cache(
+                    path,
+                    file_index,
+                    index_kind=index_kind,
+                )
+            else:
+                file_index = index_path(path)
+                index_kind = "cdc"
+                self._record_file_index_cache(
+                    path,
+                    file_index,
+                    index_kind=index_kind,
+                )
             blob_hex = file_index.blob_hash
             cdc_chunks = file_index.chunks
             cdc_index = [
@@ -6596,8 +6783,13 @@ class Daemon:
             **intent.metadata(),
             "mode": planned_wire_mode,
             "delivery_state": "queued",
+            "file_index_cache": "hit" if cached is not None else "miss",
+            "file_index_kind": (
+                index_kind if can_offer_cdc else cached_index_kind
+            ),
             "cdc_decision_reason": cdc_decision_reason,
             "cdc_auto_index_max_bytes": CDC_AUTO_INDEX_MAX_BYTES,
+            "fast_fixed_index_min_bytes": FAST_FIXED_INDEX_MIN_BYTES,
             "peer_app_version": peer_version,
             "peer_features": list(peer_features),
             "planned_wire_mode": planned_wire_mode,
