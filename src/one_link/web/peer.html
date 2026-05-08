@@ -160,6 +160,14 @@
     color: var(--text-dimmer);
     font-size: 11px;
   }
+
+  /* v0.20.3 — Advanced-tier reveal. Power-user surfaces (identity
+     card, manual pairing, rendezvous, etc.) are tagged
+     data-tier="advanced" and hidden by default. Flipping
+     html.show-advanced reveals them. The default user sees only
+     the welcome / auto-pair / chat surfaces. */
+  [data-tier="advanced"] { display: none; }
+  html.show-advanced [data-tier="advanced"] { display: revert; }
 </style>
 </head>
 <body>
@@ -195,6 +203,39 @@
     </div>
   </div>
 
+  <!-- v0.20.3 — first-time landing card. Shown by default on /peer
+       when there's no ?pair= query and no previously-paired daemon
+       in OPFS. Tells the user exactly what to do (scan a QR from
+       their laptop's Settings → About → Pair a phone) without
+       exposing identity / rendezvous / signaling cards. The
+       Advanced toggle flips html.show-advanced and reveals the
+       technical surfaces to power users. -->
+  <div class="card" id="welcome-card" hidden>
+    <h2>Pair this device</h2>
+    <div class="body">
+      <p class="help">
+        On your laptop, open One Link, click the gear (⚙) →
+        <strong>About</strong> → <strong>Pair a phone</strong> →
+        <strong>Generate pairing QR</strong>. Hold this phone's
+        camera up to the QR. You'll be back here, paired, in a
+        couple of seconds.
+      </p>
+      <p class="help" style="margin-top:10px;">
+        No account, no cloud, no apps to install — your phone is
+        about to become its own One Link node, end-to-end
+        encrypted with your laptop directly.
+      </p>
+      <div class="row" style="margin-top:14px; gap:8px;">
+        <button class="btn ghost" id="btn-show-advanced">Advanced surfaces</button>
+      </div>
+      <p class="help" style="margin-top:8px; font-size:11px;">
+        Advanced reveals identity / rendezvous / manual pairing
+        for power users. You don't need any of it for the
+        scan-the-QR flow.
+      </p>
+    </div>
+  </div>
+
   <!-- v0.20.2 — daemon roster + chat surface. Hidden until the
        phone has paired with a daemon (via auto-pair) AND the
        daemon's peer roster is fetched. From here the phone shows
@@ -226,7 +267,7 @@
     </div>
   </div>
 
-  <div class="card" id="identity-card">
+  <div class="card" id="identity-card" data-tier="advanced">
     <h2>This device</h2>
     <div class="body">
       <p class="help" id="ident-status">Loading identity…</p>
@@ -244,7 +285,7 @@
     </div>
   </div>
 
-  <div class="card" id="status-card">
+  <div class="card" id="status-card" data-tier="advanced">
     <h2>What this is</h2>
     <div class="body">
       <p class="help">
@@ -261,7 +302,7 @@
     </div>
   </div>
 
-  <div class="card" id="actions-card" hidden>
+  <div class="card" id="actions-card" data-tier="advanced" hidden>
     <h2>Identity actions</h2>
     <div class="body">
       <div class="row">
@@ -288,7 +329,7 @@
   <!-- v0.16.1 unlock card. Shown only when an encrypted blob is on
        disk and we haven't unlocked yet. Boot stops here until the
        user enters the right passphrase OR resets. -->
-  <div class="card" id="unlock-card" hidden>
+  <div class="card" id="unlock-card" data-tier="advanced" hidden>
     <h2>Unlock identity</h2>
     <div class="body">
       <p class="help">
@@ -315,7 +356,7 @@
        publish its presence. The signing key is the OPFS-stored
        Ed25519 from v0.16.0; the wire format matches the desktop
        daemon's rendezvous_proto.RegisterReq exactly. -->
-  <div class="card" id="rdz-card" hidden>
+  <div class="card" id="rdz-card" data-tier="advanced" hidden>
     <h2>Connect to mesh</h2>
     <div class="body">
       <p class="help">
@@ -356,7 +397,7 @@
        chat, or copy/paste; then the browser peers talk directly on
        DataChannel. Rendezvous can automate blob delivery later, but
        this path deliberately works with zero signaling server. -->
-  <div class="card" id="webrtc-card" hidden>
+  <div class="card" id="webrtc-card" data-tier="advanced" hidden>
     <h2>Direct browser link</h2>
     <div class="body">
       <p class="help">
@@ -401,7 +442,7 @@
        SAS is the security gate — without it, a malicious relay
        (or attacker who controls signaling) could MITM the
        channel. -->
-  <div class="card" id="pair-card" hidden>
+  <div class="card" id="pair-card" data-tier="advanced" hidden>
     <h2>Verify the connection</h2>
     <div class="body">
       <p class="help" id="pair-status">Setting up secure handshake…</p>
@@ -438,7 +479,7 @@
        paired timestamp, "Forget" action. Any further ship that
        sends/receives messages with these peers reads from this
        same OPFS layout. -->
-  <div class="card" id="peers-card" hidden>
+  <div class="card" id="peers-card" data-tier="advanced" hidden>
     <h2>Paired peers</h2>
     <div class="body">
       <p class="help" id="peers-empty">No paired peers yet. Pair a connection above to add the first one.</p>
@@ -450,7 +491,7 @@
        completes for the current WebRTC session. Messages persist
        in IndexedDB per peer; the list lazy-loads when the chat
        card opens. -->
-  <div class="card" id="chat-card" hidden>
+  <div class="card" id="chat-card" data-tier="advanced" hidden>
     <h2>Chat with active peer</h2>
     <div class="body">
       <p class="help" id="chat-peer-line"></p>
@@ -2630,6 +2671,7 @@
   // "scan → connected" with nothing else on screen.
   function _autopairHideManualCards() {
     for (const id of [
+      "#welcome-card",
       "#identity-card",
       "#status-card",
       "#actions-card",
@@ -3214,7 +3256,7 @@
   // Expose internals for tests + future-ship reuse. Keep the surface
   // tight — only readers / observers, no setters.
   window.__oneLinkPeer = {
-    version: "0.20.2",
+    version: "0.20.3",
     bytesToHex,
     bytesToB64Url,
     b64UrlToBytes,
@@ -3275,6 +3317,28 @@
     state,
   };
 
+  // v0.20.3 — Advanced-surfaces toggle. The default user sees the
+  // welcome card + (after pair) the daemon roster + chat. Power
+  // users tap "Advanced surfaces" to reveal identity / rendezvous /
+  // manual signaling / SAS art. Toggle persists per session via
+  // localStorage so a page refresh keeps the user's preference.
+  const ADV_KEY = "ol_peer.show_advanced";
+  function _setShowAdvanced(on) {
+    document.documentElement.classList.toggle("show-advanced", on);
+    try { localStorage.setItem(ADV_KEY, on ? "1" : "0"); } catch {}
+    const btn = $("#btn-show-advanced");
+    if (btn) btn.textContent = on ? "Hide advanced surfaces" : "Advanced surfaces";
+  }
+  try {
+    if (localStorage.getItem(ADV_KEY) === "1") {
+      document.documentElement.classList.add("show-advanced");
+    }
+  } catch {}
+  $("#btn-show-advanced")?.addEventListener("click", () => {
+    const on = document.documentElement.classList.contains("show-advanced");
+    _setShowAdvanced(!on);
+  });
+
   // v0.20.1 — boot dispatch. Detect pair query first so we can hide
   // the manual surfaces before the manual identity card flashes
   // visible. Run identity boot in either mode (we always need an
@@ -3284,6 +3348,12 @@
     _autopairHideManualCards();
     show($("#autopair-card"));
     _autopairSetState("dim", "starting", "Setting up your phone's identity…");
+  } else {
+    // v0.20.3 — default landing. No pair query → show the welcome
+    // card explaining how to scan a QR. Identity provisioning still
+    // runs (so a future ?pair= visit is instant) but its card stays
+    // hidden behind data-tier="advanced".
+    show($("#welcome-card"));
   }
   boot().then(() => {
     if (_pairQuery) {

@@ -467,8 +467,13 @@ def test_test_surface_exposes_daemon_helpers(peer_html: str):
 # ───────── version pin ────────────────────────────────────────────
 
 
-def test_peer_version_bumped(peer_html: str):
-    assert 'version: "0.20.2"' in peer_html
+def test_peer_version_at_or_above_v0202(peer_html: str):
+    """Forward-compat: pin shape, not literal."""
+    import re
+    m = re.search(r"version:\s*['\"](\d+)\.(\d+)\.(\d+)['\"]", peer_html)
+    assert m
+    parts = tuple(int(p) for p in m.groups())
+    assert parts >= (0, 20, 2)
 
 
 def test_page_version_matches_package():
