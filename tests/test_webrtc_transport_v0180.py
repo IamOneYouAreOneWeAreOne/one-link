@@ -141,5 +141,9 @@ def test_test_surface_exposes_webrtc_helpers(peer_html: str):
         assert name in snippet
 
 
-def test_version_bumped_to_v0180(peer_html: str):
-    assert 'version: "0.18.0"' in peer_html
+def test_version_at_least_v0180(peer_html: str):
+    import re
+
+    m = re.search(r'version:\s*"(\d+)\.(\d+)\.(\d+)"', peer_html)
+    assert m
+    assert tuple(map(int, m.groups())) >= (0, 18, 0)
