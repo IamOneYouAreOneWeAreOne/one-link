@@ -60,6 +60,35 @@ PREFERRED_UI_PORT = 7117
 UI_PORT_FALLBACK_RANGE = 16
 
 
+# v0.11.6 helpers for Storage + data settings.
+def _parse_int_or_none(raw):
+    """Settings table stores everything as TEXT. Convert to int when
+    possible, else None — used for nullable numeric settings."""
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_ext_list(raw):
+    """Accept a comma-separated extensions string and return a sorted
+    deduped list of lowercase extensions without leading dots.
+    Examples:
+      "PNG, .jpg,jpeg, png" -> ["jpeg", "jpg", "png"]
+      "" -> []
+    """
+    if not raw:
+        return []
+    seen = set()
+    for tok in str(raw).split(","):
+        t = tok.strip().lstrip(".").lower()
+        if t:
+            seen.add(t)
+    return sorted(seen)
+
+
 # v0.11.1 Profile palette. Eight presets cover the standard messaging-
 # app palette space (purple/blue/teal/green/yellow/orange/red/pink).
 # We validate against this set so the database can't be poisoned with
@@ -482,6 +511,8 @@ class UIServer:
         r.add_get(r"/api/peers/{fp}/export", self._guarded(self.api_export_peer))
         r.add_get(r"/api/groups/{gid}/export", self._guarded(self.api_export_group))
         r.add_get(r"/api/peers/{fp}/media", self._guarded(self.api_peer_media))
+        # v0.11.6 storage breakdown.
+        r.add_get("/api/storage/usage", self._guarded(self.api_storage_usage))
         # v0.10.4 presence — set self status; broadcasts to peers.
         r.add_post("/api/presence", self._guarded(self.api_set_presence))
         # v0.10.6 native folder picker — pops a tk dialog on the
@@ -790,6 +821,24 @@ class UIServer:
             #   power users want to silence the long tail of pings.
             "notification_preview": s.get("notification_preview", "true") == "true",
             "notify_on_reactions": s.get("notify_on_reactions", "true") == "true",
+            # v0.11.6 storage + data settings.
+            # - default_dm_ttl_ms: applies to NEW pairings only;
+            #   existing peers keep their dm_ttl_ms unchanged. None /
+            #   0 = off.
+            # - bandwidth_cap_kbps: 0 = unlimited. Pinned in settings
+            #   for the transfer engine to consume; enforcement at
+            #   the chunk-pacer is a follow-on.
+            # - auto_accept_max_size_mb: 0 = no limit. Inbound files
+            #   above this size require an explicit accept.
+            # - auto_accept_extensions: comma-separated allowlist of
+            #   file extensions (e.g. "png,jpg,pdf"). Empty = no
+            #   filter. Lowercased + leading dots stripped on read.
+            "default_dm_ttl_ms": _parse_int_or_none(s.get("default_dm_ttl_ms")),
+            "bandwidth_cap_kbps": _parse_int_or_none(s.get("bandwidth_cap_kbps")) or 0,
+            "auto_accept_max_size_mb": _parse_int_or_none(s.get("auto_accept_max_size_mb")) or 0,
+            "auto_accept_extensions": _normalize_ext_list(
+                s.get("auto_accept_extensions", "")
+            ),
         })
 
     async def api_set_settings(self, request: web.Request) -> web.Response:
@@ -956,6 +1005,75 @@ class UIServer:
                 self.daemon.state.set_setting(
                     key, "true" if data[key] else "false",
                 )
+        # v0.11.6 — storage + data settings.
+        if "default_dm_ttl_ms" in data:
+            v = data["default_dm_ttl_ms"]
+            if v is None or v == "" or v == 0:
+                self.daemon.state.delete_setting("default_dm_ttl_ms")
+            else:
+                try:
+                    iv = int(v)
+                except (TypeError, ValueError):
+                    return web.json_response(
+                        {"error": "default_dm_ttl_ms must be a positive int or null"},
+                        status=400,
+                    )
+                if iv <= 0:
+                    self.daemon.state.delete_setting("default_dm_ttl_ms")
+                else:
+                    self.daemon.state.set_setting("default_dm_ttl_ms", str(iv))
+        if "bandwidth_cap_kbps" in data:
+            v = data["bandwidth_cap_kbps"]
+            try:
+                iv = int(v) if v is not None else 0
+            except (TypeError, ValueError):
+                return web.json_response(
+                    {"error": "bandwidth_cap_kbps must be a non-negative int"},
+                    status=400,
+                )
+            if iv < 0:
+                return web.json_response(
+                    {"error": "bandwidth_cap_kbps must be >= 0"}, status=400,
+                )
+            if iv == 0:
+                self.daemon.state.delete_setting("bandwidth_cap_kbps")
+            else:
+                self.daemon.state.set_setting("bandwidth_cap_kbps", str(iv))
+        if "auto_accept_max_size_mb" in data:
+            v = data["auto_accept_max_size_mb"]
+            try:
+                iv = int(v) if v is not None else 0
+            except (TypeError, ValueError):
+                return web.json_response(
+                    {"error": "auto_accept_max_size_mb must be a non-negative int"},
+                    status=400,
+                )
+            if iv < 0:
+                return web.json_response(
+                    {"error": "auto_accept_max_size_mb must be >= 0"}, status=400,
+                )
+            if iv == 0:
+                self.daemon.state.delete_setting("auto_accept_max_size_mb")
+            else:
+                self.daemon.state.set_setting("auto_accept_max_size_mb", str(iv))
+        if "auto_accept_extensions" in data:
+            raw = data["auto_accept_extensions"]
+            if isinstance(raw, list):
+                raw = ",".join(str(x) for x in raw)
+            if raw is None:
+                raw = ""
+            if not isinstance(raw, str):
+                return web.json_response(
+                    {"error": "auto_accept_extensions must be a string or list"},
+                    status=400,
+                )
+            normalized = _normalize_ext_list(raw)
+            if normalized:
+                self.daemon.state.set_setting(
+                    "auto_accept_extensions", ",".join(normalized),
+                )
+            else:
+                self.daemon.state.delete_setting("auto_accept_extensions")
         return web.json_response({"ok": True})
 
     # ─── /api/peers ───────────────────────────────────────────────────
@@ -2202,6 +2320,53 @@ class UIServer:
             f'attachment; filename="{filename_stem}-{ts_now}.{ext}"'
         )
         return resp
+
+    async def api_storage_usage(self, request: web.Request) -> web.Response:
+        """v0.11.6: per-chat storage breakdown for the Storage
+        settings pane. Combines state rollups with peer/group
+        display names so the UI can render a sortable table."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        peer_rows = self.daemon.state.storage_usage_by_peer()
+        peer_out = []
+        total_msgs = 0
+        total_bytes = 0
+        for r in peer_rows:
+            rec = self.daemon.state.get_peer(r["peer_fp"])
+            peer_out.append({
+                "fingerprint": r["peer_fp"],
+                "display_name": (
+                    rec.display_name if rec else r["peer_fp"][:8]
+                ),
+                "msg_count": r["msg_count"],
+                "file_count": r["file_count"],
+                "file_bytes": r["file_bytes"],
+            })
+            total_msgs += r["msg_count"]
+            total_bytes += r["file_bytes"]
+
+        group_rows = self.daemon.state.storage_usage_by_group()
+        group_out = []
+        for g in group_rows:
+            mat = None
+            with contextlib.suppress(Exception):
+                mat = self._materialize_group(bytes.fromhex(g["group_id"]))
+            group_out.append({
+                "group_id": g["group_id"],
+                "name": (mat.get("name") if mat else None) or g["group_id"][:8],
+                "msg_count": g["msg_count"],
+            })
+            total_msgs += g["msg_count"]
+
+        return web.json_response({
+            "peers": peer_out,
+            "groups": group_out,
+            "totals": {
+                "msg_count": total_msgs,
+                "file_bytes": total_bytes,
+                "chat_count": len(peer_out) + len(group_out),
+            },
+        })
 
     async def api_peer_media(self, request: web.Request) -> web.Response:
         """v0.11.5: list files exchanged with this peer for the

@@ -1421,6 +1421,54 @@
     margin-right: 6px;
   }
 
+  /* v0.11.6 storage table. Per-chat usage rollup with inline
+     Clear button. */
+  .storage-totals {
+    display: flex; gap: 16px; flex-wrap: wrap;
+    background: var(--bg-2);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 6px 0 10px;
+  }
+  .storage-totals .stat {
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .storage-totals .stat-num {
+    font-weight: 700; color: var(--text); font-size: 16px;
+  }
+  .storage-totals .stat-lbl {
+    color: var(--text-dim); font-size: 10px;
+    text-transform: uppercase; letter-spacing: .7px;
+  }
+  .storage-table { display: flex; flex-direction: column; gap: 4px; }
+  .storage-row {
+    display: grid; grid-template-columns: 1fr auto auto auto;
+    gap: 8px; align-items: center;
+    padding: 8px 10px;
+    background: var(--bg-2); border-radius: 6px;
+    font-size: 12px;
+  }
+  .storage-row .name {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--text);
+  }
+  .storage-row .stat-num {
+    color: var(--text); font-family: var(--mono); font-size: 11px;
+  }
+  .storage-row .stat-lbl-inline {
+    color: var(--text-dim); font-size: 10px;
+  }
+  .storage-row.scope-group .name::before { content: "👥 "; }
+  .storage-row.scope-peer .name::before { content: "📱 "; }
+  .storage-refresh-btn {
+    width: 28px; height: 28px;
+    display: inline-grid; place-items: center;
+    padding: 0;
+    font-size: 14px;
+    line-height: 1;
+    margin-left: auto;
+  }
+
   /* v0.11.4 session-expired banner. Sits at the top of the viewport
      above all other UI so the user can't miss it. */
   .session-expired-banner {
@@ -3158,7 +3206,8 @@
 
           <!-- ── Storage ────────────────────────────────────────── -->
           <section class="settings-pane" data-settings-pane="storage">
-            <h3>Storage</h3>
+            <h3>Storage &amp; data</h3>
+
             <div class="settings-section">
               <div class="settings-section-h"><span>Downloads</span></div>
               <div class="settings-row">
@@ -3172,9 +3221,86 @@
                 built-in inbox. The folder must already exist + be writable.
               </p>
             </div>
-            <p class="settings-help">
-              Per-chat storage usage + cleanup tools coming in Phase 6.
-            </p>
+
+            <!-- v0.11.6: Default disappearing TTL applied to NEW
+                 pairings only. Existing peers keep their per-chat
+                 TTL (set in the device drawer) unchanged. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Default disappearing messages</span></div>
+              <div class="settings-row">
+                <label for="set-default-dm-ttl">Auto-delete after</label>
+                <select id="set-default-dm-ttl">
+                  <option value="">Off</option>
+                  <option value="300000">5 minutes</option>
+                  <option value="1800000">30 minutes</option>
+                  <option value="3600000">1 hour</option>
+                  <option value="86400000">1 day</option>
+                  <option value="604800000">1 week</option>
+                </select>
+              </div>
+              <p class="settings-help">
+                Applies to NEW devices you pair with from now on.
+                Existing chats keep whatever TTL is set in their
+                device drawer.
+              </p>
+            </div>
+
+            <!-- v0.11.6: bandwidth cap. Pinned in settings; the
+                 transfer engine consumes this value to throttle
+                 chunks. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Bandwidth limit</span></div>
+              <div class="settings-row">
+                <label for="set-bandwidth-cap">Max upload + download</label>
+                <select id="set-bandwidth-cap">
+                  <option value="0">Unlimited</option>
+                  <option value="1024">1 MB/s</option>
+                  <option value="5120">5 MB/s</option>
+                  <option value="25600">25 MB/s</option>
+                  <option value="102400">100 MB/s</option>
+                </select>
+              </div>
+              <p class="settings-help">
+                Caps One Link's combined send + receive throughput.
+                Useful on a metered connection or to leave headroom
+                for video calls.
+              </p>
+            </div>
+
+            <!-- v0.11.6: auto-accept rules. Toggle + size cap +
+                 extension allowlist. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Auto-accept files</span></div>
+              <div class="settings-row">
+                <label for="set-auto-accept-size">Max file size (MB)</label>
+                <input type="number" id="set-auto-accept-size" min="0" step="1" placeholder="0 = no limit" />
+              </div>
+              <div class="settings-row">
+                <label for="set-auto-accept-exts">Allowed extensions</label>
+                <input type="text" id="set-auto-accept-exts" placeholder="e.g. png, jpg, pdf — empty for any" />
+              </div>
+              <p class="settings-help">
+                Inbound files matching these rules land in your inbox
+                without a prompt. Anything outside these limits — too
+                big, or extension not in the allowlist — requires an
+                explicit accept.
+              </p>
+            </div>
+
+            <!-- v0.11.6: per-chat usage breakdown table. -->
+            <div class="settings-section">
+              <div class="settings-section-h">
+                <span>Storage by chat</span>
+                <button class="btn-ghost storage-refresh-btn" id="storage-refresh"
+                        title="Refresh storage usage" aria-label="Refresh storage usage">↻</button>
+              </div>
+              <div class="storage-totals" id="storage-totals">
+                <span class="settings-help">Loading…</span>
+              </div>
+              <div class="storage-table" id="storage-table">
+                <p class="settings-help">No conversations yet.</p>
+              </div>
+            </div>
           </section>
 
           <!-- ── Devices ────────────────────────────────────────── -->
@@ -8274,7 +8400,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.11.5";
+  const PAGE_BUILT_FOR = "0.11.6";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -10592,12 +10718,98 @@
         el.classList.toggle("active", m);
       }
     });
+    // v0.11.6: lazy-load storage usage when the user switches to it.
+    if (name === "storage") {
+      refreshStorageUsage();
+    }
   }
   document.querySelectorAll(".settings-nav-item").forEach((btn) => {
     btn.addEventListener("click", () => {
       switchSettingsPane(btn.dataset.settingsPane);
     });
   });
+
+  // v0.11.6 — fetch + render the per-chat storage breakdown.
+  async function refreshStorageUsage() {
+    const totalsHost = $("#storage-totals");
+    const tableHost = $("#storage-table");
+    if (!totalsHost || !tableHost) return;
+    totalsHost.innerHTML = `<span class="settings-help">Loading…</span>`;
+    let r;
+    try {
+      r = await api.get("/api/storage/usage");
+    } catch (e) {
+      totalsHost.innerHTML = `<span class="settings-help">Failed to load: ${errorToastBody(e)}</span>`;
+      tableHost.innerHTML = "";
+      return;
+    }
+    const totals = r.totals || {};
+    totalsHost.innerHTML = "";
+    const stat = (n, lbl) => {
+      const wrap = el("div", "stat");
+      wrap.appendChild(el("div", "stat-num", n));
+      wrap.appendChild(el("div", "stat-lbl", lbl));
+      return wrap;
+    };
+    totalsHost.appendChild(stat(String(totals.chat_count || 0), "chats"));
+    totalsHost.appendChild(stat(String(totals.msg_count || 0), "messages"));
+    totalsHost.appendChild(stat(fmtBytes(totals.file_bytes || 0), "files"));
+
+    tableHost.innerHTML = "";
+    const peers = r.peers || [];
+    const groups = r.groups || [];
+    if (peers.length === 0 && groups.length === 0) {
+      tableHost.innerHTML = `<p class="settings-help">No conversations yet.</p>`;
+      return;
+    }
+    const renderRow = (kind, name, msgs, bytes, clearFn) => {
+      const row = el("div", `storage-row scope-${kind}`);
+      row.appendChild(el("div", "name", name));
+      const num = el("div", "stat-num", String(msgs));
+      num.appendChild(el("span", "stat-lbl-inline", " msgs"));
+      row.appendChild(num);
+      const sz = el("div", "stat-num", bytes != null ? fmtBytes(bytes) : "—");
+      row.appendChild(sz);
+      const btn = el("button", "btn-ghost", "Clear");
+      btn.onclick = clearFn;
+      row.appendChild(btn);
+      tableHost.appendChild(row);
+    };
+    for (const p of peers) {
+      renderRow("peer", p.display_name || p.fingerprint.slice(0, 8),
+        p.msg_count, p.file_bytes,
+        async () => {
+          if (!confirm(
+            `Clear local chat history with "${p.display_name}"?\n\n` +
+            "Only YOUR copy is deleted."
+          )) return;
+          try {
+            await api.del(`/api/peers/${p.fingerprint}/history`);
+            toast("Cleared", "good");
+            refreshStorageUsage();
+          } catch (e) {
+            toast(`Clear failed: ${errorToastBody(e)}`, "bad");
+          }
+        });
+    }
+    for (const g of groups) {
+      renderRow("group", g.name, g.msg_count, null,
+        async () => {
+          if (!confirm(
+            `Clear local chat history for group "${g.name}"?\n\n` +
+            "Only YOUR copy is deleted; other members are unaffected."
+          )) return;
+          try {
+            await api.del(`/api/groups/${g.group_id}/history`);
+            toast("Cleared", "good");
+            refreshStorageUsage();
+          } catch (e) {
+            toast(`Clear failed: ${errorToastBody(e)}`, "bad");
+          }
+        });
+    }
+  }
+  $("#storage-refresh")?.addEventListener("click", refreshStorageUsage);
 
   // v0.11.1 Profile helpers — avatar preview + bio counter + color
   // swatches. Local DOM only; persistence is via /api/settings.
@@ -10777,6 +10989,15 @@
       const nr = $("#set-notif-reactions");
       if (np) np.checked = r.notification_preview !== false;
       if (nr) nr.checked = r.notify_on_reactions !== false;
+      // v0.11.6 storage + data settings.
+      const ddt = $("#set-default-dm-ttl");
+      if (ddt) ddt.value = r.default_dm_ttl_ms ? String(r.default_dm_ttl_ms) : "";
+      const bw = $("#set-bandwidth-cap");
+      if (bw) bw.value = String(r.bandwidth_cap_kbps || 0);
+      const aas = $("#set-auto-accept-size");
+      if (aas) aas.value = String(r.auto_accept_max_size_mb || 0);
+      const aax = $("#set-auto-accept-exts");
+      if (aax) aax.value = (r.auto_accept_extensions || []).join(", ");
       // Cache for runtime checks (DND + sound + theme).
       state.runtimeSettings = {
         theme: r.theme || "dark",
@@ -10848,6 +11069,22 @@
       // v0.11.2 notification fine-tuning.
       notification_preview: !!$("#set-notif-preview")?.checked,
       notify_on_reactions: !!$("#set-notif-reactions")?.checked,
+      // v0.11.6 storage + data settings. The four selects/inputs
+      // map directly to setting keys; null + 0 + "" all clear.
+      default_dm_ttl_ms: (() => {
+        const v = $("#set-default-dm-ttl")?.value || "";
+        return v ? parseInt(v, 10) : null;
+      })(),
+      bandwidth_cap_kbps: (() => {
+        const v = $("#set-bandwidth-cap")?.value || "0";
+        return parseInt(v, 10) || 0;
+      })(),
+      auto_accept_max_size_mb: (() => {
+        const v = $("#set-auto-accept-size")?.value || "0";
+        const n = parseInt(v, 10);
+        return Number.isFinite(n) && n >= 0 ? n : 0;
+      })(),
+      auto_accept_extensions: ($("#set-auto-accept-exts")?.value || "").trim(),
     };
     let savedSettings = false;
     try {

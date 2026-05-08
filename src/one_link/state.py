@@ -886,11 +886,14 @@ class State:
     ) -> None:
         if trust not in ("pinned", "pending", "rejected"):
             raise ValueError(f"invalid trust state: {trust!r}")
+        applied_default_ttl = False
         with self._write_lock:
             row = self._conn.execute(
-                "SELECT trust FROM peers WHERE fingerprint = ?", (fingerprint,)
+                "SELECT trust, dm_ttl_ms FROM peers WHERE fingerprint = ?",
+                (fingerprint,),
             ).fetchone()
             before = row["trust"] if row else None
+            had_ttl = row and row["dm_ttl_ms"] is not None
             self._conn.execute(
                 "UPDATE peers SET trust = ? WHERE fingerprint = ?",
                 (trust, fingerprint),
@@ -904,6 +907,34 @@ class State:
                     actor=actor,
                     note=note,
                 )
+            # v0.11.6: when transitioning to "pinned" for the first
+            # time AND the user has a default disappearing-msg TTL
+            # set globally AND this peer has no per-chat TTL, copy
+            # the default in. This is the "applies to new pairings"
+            # promise from the Storage settings pane.
+            if (
+                trust == "pinned"
+                and before != "pinned"
+                and not had_ttl
+            ):
+                raw = self._conn.execute(
+                    "SELECT value FROM settings WHERE key = 'default_dm_ttl_ms'"
+                ).fetchone()
+                if raw is not None:
+                    try:
+                        default_ttl = int(raw["value"])
+                    except (TypeError, ValueError):
+                        default_ttl = 0
+                    if default_ttl > 0:
+                        self._conn.execute(
+                            "UPDATE peers SET dm_ttl_ms = ? "
+                            "WHERE fingerprint = ?",
+                            (default_ttl, fingerprint),
+                        )
+                        applied_default_ttl = True
+        # Returning intentionally None to preserve existing call
+        # sites; applied_default_ttl is for tests + a future caller
+        # that wants the signal.
 
     def get_peer(self, fingerprint: str) -> Optional[PeerRecord]:
         row = self._conn.execute(
@@ -2508,6 +2539,67 @@ class State:
                 return cur.rowcount or 0
             except Exception:
                 return 0
+
+    def storage_usage_by_peer(self) -> list[dict]:
+        """v0.11.6: per-peer usage rollup for the Storage pane.
+        Returns one entry per peer that has any messages, with
+        msg_count and file_bytes (sum of metadata.size for file
+        rows). The frontend joins this with peer display names."""
+        rows = self._conn.execute(
+            "SELECT peer_fp, COUNT(*) AS n, "
+            "  SUM(CASE WHEN msg_type='file' THEN 1 ELSE 0 END) AS file_n "
+            "FROM messages WHERE deleted_at_ms IS NULL "
+            "GROUP BY peer_fp"
+        ).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            fp = r["peer_fp"]
+            # Sum metadata.size across the file rows for this peer.
+            file_bytes = 0
+            file_rows = self._conn.execute(
+                "SELECT metadata_json FROM messages "
+                "WHERE peer_fp = ? AND msg_type = 'file' "
+                "  AND deleted_at_ms IS NULL",
+                (fp,),
+            ).fetchall()
+            for fr in file_rows:
+                try:
+                    md = json.loads(fr["metadata_json"]) if fr["metadata_json"] else {}
+                except Exception:
+                    md = {}
+                size = md.get("size")
+                if isinstance(size, (int, float)):
+                    file_bytes += int(size)
+            out.append({
+                "peer_fp": fp,
+                "msg_count": int(r["n"] or 0),
+                "file_count": int(r["file_n"] or 0),
+                "file_bytes": file_bytes,
+            })
+        # Largest by file_bytes first, then by msg_count.
+        out.sort(key=lambda d: (-d["file_bytes"], -d["msg_count"]))
+        return out
+
+    def storage_usage_by_group(self) -> list[dict]:
+        """v0.11.6: per-group rollup. Falls back to empty list when
+        the group_messages table doesn't exist on this build."""
+        try:
+            rows = self._conn.execute(
+                "SELECT group_id, COUNT(*) AS n "
+                "FROM group_messages GROUP BY group_id"
+            ).fetchall()
+        except Exception:
+            return []
+        out: list[dict] = []
+        for r in rows:
+            out.append({
+                "group_id": r["group_id"]
+                            if isinstance(r["group_id"], str)
+                            else r["group_id"].hex(),
+                "msg_count": int(r["n"] or 0),
+            })
+        out.sort(key=lambda d: -d["msg_count"])
+        return out
 
     def list_peer_files(self, peer_fp: str) -> list[MessageRecord]:
         """v0.11.5: messages with file metadata for the media gallery.
