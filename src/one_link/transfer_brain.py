@@ -218,6 +218,67 @@ class TransferBrainDecision:
         }
 
 
+def adapt_pipeline_profile(
+    profile: Mapping[str, int],
+    decision: Mapping[str, object] | TransferBrainDecision,
+    *,
+    max_window_chunks: int = 32,
+    max_window_bytes: int = 64 * MiB,
+) -> dict[str, int | float | str]:
+    """Tune chunk pipeline depth from the current brain decision.
+
+    This is intentionally bounded. A strong LAN/mesh path gets enough
+    in-flight work to fill the pipe; an observing/constrained/repair path
+    backs off so a flaky session does less damage before the auto-healer
+    refreshes it.
+    """
+
+    if isinstance(decision, TransferBrainDecision):
+        d = decision.to_dict()
+    else:
+        d = dict(decision)
+    chunk_size = max(1, int(profile.get("chunk_size") or MiB))
+    base_chunks = max(1, int(profile.get("window_chunks") or 1))
+    base_bytes = max(chunk_size, int(profile.get("window_bytes") or base_chunks * chunk_size))
+    health = str(d.get("health") or "observing")
+    coherence = float(d.get("coherence_score") or 0.0)
+    reliability = float(d.get("reliability") or 0.0)
+    parallelism = max(1, int(d.get("parallelism") or 1))
+
+    multiplier = 1.0
+    reason = "steady"
+    if health == HealthState.REPAIR.value:
+        multiplier = 0.35
+        reason = "repair_backoff"
+    elif health == HealthState.CONSTRAINED.value:
+        multiplier = 0.55
+        reason = "constrained_backoff"
+    elif health == HealthState.OBSERVING.value:
+        multiplier = 0.80
+        reason = "observing_probe"
+    elif coherence >= 0.88 and reliability >= 0.90:
+        multiplier = 2.0
+        reason = "coherent_fast_lane"
+    elif coherence >= 0.72 and reliability >= 0.80:
+        multiplier = 1.5
+        reason = "coherent_lane"
+
+    if parallelism > 1 and health == HealthState.HEALTHY.value:
+        multiplier *= min(1.75, 1.0 + (parallelism - 1) * 0.18)
+        reason = "mesh_parallel_lane" if reason == "steady" else reason
+
+    tuned_chunks = max(1, min(max_window_chunks, int(round(base_chunks * multiplier))))
+    tuned_bytes = min(max_window_bytes, max(chunk_size, tuned_chunks * chunk_size, int(base_bytes * multiplier)))
+    tuned_chunks = max(1, min(max_window_chunks, tuned_bytes // chunk_size))
+    return {
+        "chunk_size": chunk_size,
+        "window_chunks": int(tuned_chunks),
+        "window_bytes": int(tuned_chunks * chunk_size),
+        "multiplier": round(multiplier, 4),
+        "reason": reason,
+    }
+
+
 def pareto_frontier(candidates: Iterable[TransferCandidate]) -> tuple[TransferCandidate, ...]:
     items = tuple(candidates)
     frontier = [

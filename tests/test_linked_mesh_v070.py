@@ -642,6 +642,9 @@ async def test_send_file_reuses_cached_file_index_without_rehashing(
     assert offer["chunks"][0]["hash"] == chunk_hash
     assert row.metadata["file_index_cache"] == "hit"
     assert row.metadata["file_index_kind"] == "fixed"
+    assert row.metadata["prior_hit_rate_actual"] == 1.0
+    assert row.metadata["pipeline_tuning"]["reason"] == "constrained_backoff"
+    assert row.metadata["pipeline_tuning"]["window_chunks"] >= 1
     state.close()
 
 
@@ -935,9 +938,10 @@ async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
     assert result["raw_bytes_sent"] == f.stat().st_size
     assert result["wire_bytes_sent"] == f.stat().st_size
     assert [c["index"] for c in sent_chunks] == [0, 1, 2, 3, 4]
-    assert max(chan.recv_sent_counts) >= 4
+    assert max(chan.recv_sent_counts) >= 3
     assert row.metadata["cdc_engine"] == "pipelined_chunks_v2"
-    assert row.metadata["cdc_window_chunks"] == 3
+    assert row.metadata["cdc_window_chunks"] == 2
+    assert row.metadata["pipeline_tuning"]["reason"] == "constrained_backoff"
     assert all(not daemon._chunk_cache_path(c["hash"]).is_file() for c in chunks)
     assert state.chunks_sourced([c["hash"] for c in chunks]) == [c["hash"] for c in chunks]
     state.close()
@@ -1132,9 +1136,10 @@ async def test_send_file_stream_pipelines_bounded_ack_window(
 
     assert result["chunks"] == 5
     assert [c["seq"] for c in chunks] == [0, 1, 2, 3, 4]
-    assert max(chan.recv_sent_counts) >= 4  # offer + three chunks before stream ACK drain
+    assert max(chan.recv_sent_counts) >= 3  # offer + conservative probe window before ACK drain
     assert row.metadata["stream_engine"] == "pipelined_json_v1"
-    assert row.metadata["stream_window_chunks"] == 3
+    assert row.metadata["stream_window_chunks"] == 2
+    assert row.metadata["pipeline_tuning"]["reason"] == "constrained_backoff"
     state.close()
 
 

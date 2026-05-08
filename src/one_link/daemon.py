@@ -98,6 +98,7 @@ from one_link.swarm_plan import plan_swarm_sources, source_from_hashes
 from one_link.transfer_brain import (
     MeshNodeSignal,
     TransferRouteObservation,
+    adapt_pipeline_profile,
     decision_from_observations,
     verification_priority_order,
 )
@@ -7153,10 +7154,22 @@ class Daemon:
                     else "file_baseline"
                 )
                 if cdc_used:
+                    actual_prior_hit_rate = (
+                        1.0 - (len(wanted_indexes) / max(1, len(cdc_chunks)))
+                    )
                     skipped_bytes = sum(
                         int(c.size) for c in cdc_chunks if c.index not in wanted_indexes
                     )
-                    cdc_profile = _stream_transfer_profile(size)
+                    cdc_profile = adapt_pipeline_profile(
+                        _stream_transfer_profile(size),
+                        {
+                            **transfer_brain_decision,
+                            "coherence_score": max(
+                                float(transfer_brain_decision.get("coherence_score") or 0.0),
+                                actual_prior_hit_rate,
+                            ),
+                        },
+                    )
                     cdc_window_chunks = int(cdc_profile["window_chunks"])
                     cdc_window_bytes = int(cdc_profile["window_bytes"])
                     base_metadata = {
@@ -7164,6 +7177,8 @@ class Daemon:
                         "cdc_engine": "pipelined_chunks_v2",
                         "cdc_window_chunks": cdc_window_chunks,
                         "cdc_window_bytes": cdc_window_bytes,
+                        "pipeline_tuning": cdc_profile,
+                        "prior_hit_rate_actual": actual_prior_hit_rate,
                     }
                     self._update_transfer(
                         transfer_id,
@@ -7264,7 +7279,10 @@ class Daemon:
                             "actual_method": "file_binary_frame" if binary_stream_used else actual_method,
                             "protocol_attempts": attempts,
                         }
-                    stream_profile = _stream_transfer_profile(size)
+                    stream_profile = adapt_pipeline_profile(
+                        _stream_transfer_profile(size),
+                        transfer_brain_decision,
+                    )
                     stream_chunk_size = int(stream_profile["chunk_size"])
                     stream_window_chunks = int(stream_profile["window_chunks"])
                     stream_window_bytes = int(stream_profile["window_bytes"])
@@ -7277,6 +7295,7 @@ class Daemon:
                         "stream_chunk_size": stream_chunk_size,
                         "stream_window_chunks": stream_window_chunks,
                         "stream_window_bytes": stream_window_bytes,
+                        "pipeline_tuning": stream_profile,
                         "binary_frame": binary_stream_used,
                     }
                     with open(path, "rb") as f:

@@ -5,6 +5,7 @@ from one_link.transfer_brain import (
     MeshNodeSignal,
     TransferMode,
     TransferRouteObservation,
+    adapt_pipeline_profile,
     decision_from_observations,
     verification_priority_order,
 )
@@ -134,3 +135,24 @@ def test_verification_priority_checks_rare_weak_chunks_first():
 
     assert order[0].index == 2
     assert order[0].reason == "rare_or_unclaimed"
+
+
+def test_pipeline_profile_expands_only_for_coherent_healthy_routes():
+    profile = {"chunk_size": 1024 * 1024, "window_chunks": 8, "window_bytes": 8 * 1024 * 1024}
+    fast = adapt_pipeline_profile(profile, {
+        "health": "healthy",
+        "coherence_score": 0.91,
+        "reliability": 0.94,
+        "parallelism": 3,
+    })
+    repair = adapt_pipeline_profile(profile, {
+        "health": "repair",
+        "coherence_score": 0.2,
+        "reliability": 0.2,
+        "parallelism": 1,
+    })
+
+    assert fast["window_chunks"] > profile["window_chunks"]
+    assert fast["window_chunks"] <= 32
+    assert repair["window_chunks"] < profile["window_chunks"]
+    assert repair["reason"] == "repair_backoff"
