@@ -483,6 +483,12 @@ class UIServer:
         if assets_dir.is_dir():
             r.add_static("/static/", path=str(assets_dir), show_index=False)
         r.add_get("/favicon.ico", self._favicon)
+        # v0.14.0: Service Worker for background-sync (offline outbox)
+        # + cache-first shell. Must be served from root scope to be
+        # allowed to control "/" requests; not auth-gated since the
+        # SW itself contains no PII (only the URL paths it caches +
+        # the outbox-drain logic that re-uses the page's cookie).
+        r.add_get("/sw.js", self._service_worker)
         r.add_get("/api/me", self._guarded(self.api_me))
         r.add_get("/api/status", self._guarded(self.api_status))
         r.add_get("/api/settings", self._guarded(self.api_get_settings))
@@ -659,6 +665,20 @@ class UIServer:
                 return ws
             return await handler(request)
         return wrap
+
+    async def _service_worker(self, request: web.Request) -> web.StreamResponse:
+        """v0.14.0: serve sw.js from root with the right
+        Service-Worker-Allowed scope header so it can control "/".
+        Cache-Control set to no-store: a stale SW pinning an old
+        shell is a debugging nightmare we'd rather avoid."""
+        sw = WEB_DIR / "sw.js"
+        if not sw.is_file():
+            return web.Response(status=404, text="sw not bundled")
+        body = sw.read_text(encoding="utf-8")
+        resp = web.Response(text=body, content_type="application/javascript")
+        resp.headers["Service-Worker-Allowed"] = "/"
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     async def _favicon(self, request: web.Request) -> web.StreamResponse:
         ico = WEB_DIR / "assets" / "one-glyph.ico"

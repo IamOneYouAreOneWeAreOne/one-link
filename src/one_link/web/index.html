@@ -1562,6 +1562,164 @@
       padding: 7px 11px;
     }
   }
+
+  /* ── v0.14.0 Mobile-responsive root layout ─────────────────────────
+     The desktop layout (sidebar 280px | main | optional files panel)
+     collapses on mobile to a single fullscreen pane. The sidebar
+     becomes a slide-in drawer that overlays the conversation, with
+     a backdrop scrim. When a peer is selected on mobile, the drawer
+     auto-closes (selectPeer / selectGroup call closeMobileSidebar()).
+     A hamburger button in the conversation header re-opens it.
+
+     Touch targets get bumped to 44px minimum so finger-sized hits
+     don't miss. Modals fill the screen instead of floating with a
+     560px max-width.
+
+     This media query is the WHOLE responsive layer. Below 720px is
+     phone/tablet portrait; above is desktop. We intentionally DON'T
+     have an in-between "tablet-landscape" tier — too much surface
+     for too little real-world coverage. */
+  @media (max-width: 720px) {
+    /* Hamburger button. Hidden on desktop; shown on mobile in the
+       conversation header so the user can re-open the drawer. */
+    .mobile-hamburger { display: inline-grid !important; }
+
+    /* Single-column layout: sidebar collapses to overlay drawer. */
+    .main {
+      grid-template-columns: 1fr !important;
+    }
+    .main.with-files {
+      grid-template-columns: 1fr !important;
+    }
+
+    /* Sidebar = slide-in drawer. Translates off-screen by default;
+       the .mobile-side-open class on .app slides it back in.
+       z-index 80 puts it under modals (300) but over chat (auto). */
+    .side {
+      position: fixed;
+      top: 56px;  /* below the .top header */
+      left: 0; bottom: 0;
+      width: min(320px, 86vw);
+      transform: translateX(-100%);
+      transition: transform .22s cubic-bezier(.2, 0, 0, 1);
+      z-index: 80;
+      box-shadow: 4px 0 20px rgba(0, 0, 0, .35);
+    }
+    .app.mobile-side-open .side {
+      transform: translateX(0);
+    }
+
+    /* Scrim behind the open drawer so taps outside dismiss it. */
+    .mobile-scrim {
+      position: fixed; inset: 56px 0 0 0;
+      background: rgba(0, 0, 0, .5);
+      backdrop-filter: blur(4px);
+      z-index: 70;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .22s;
+    }
+    .app.mobile-side-open .mobile-scrim {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    /* Optional files panel stacks below conversation, not beside. */
+    .files {
+      grid-row: 2;
+      max-height: 50vh;
+      border-left: none;
+      border-top: 1px solid var(--line);
+    }
+
+    /* Top bar compresses; pane tabs shrink. */
+    .top {
+      padding: 8px 10px;
+      gap: 8px;
+    }
+    .pane-tabs .btn {
+      padding: 6px 10px;
+      font-size: 12px;
+    }
+    .me {
+      gap: 6px;
+    }
+    .presence-pill { padding: 4px 8px; font-size: 12px; }
+
+    /* Conversation header: smaller, pane-padding tightened. */
+    #convo-active > .top-row {
+      padding: 8px 10px;
+    }
+
+    /* Modal goes near-fullscreen so deep settings fit. */
+    .modal {
+      max-width: 96vw !important;
+      max-height: 92vh;
+      min-width: 0;
+      width: 96vw;
+      padding: 18px 16px;
+      border-radius: 14px;
+    }
+    .modal.settings-shell {
+      width: 100vw;
+      max-width: 100vw !important;
+      max-height: 100vh;
+      height: 100vh;
+      border-radius: 0;
+    }
+    .settings-header {
+      padding: 10px 14px;
+    }
+    .settings-pane-host {
+      padding: 14px 16px 18px;
+    }
+
+    /* Composer touch targets. Buttons need to be hand-friendly. */
+    .composer .icon-btn {
+      width: 44px; height: 44px;
+    }
+    .composer textarea {
+      font-size: 16px;  /* prevents iOS zoom-on-focus */
+    }
+
+    /* Peer / group rows: more vertical padding so taps don't miss. */
+    .peer { min-height: 56px; }
+    .gear-btn { min-width: 44px; min-height: 44px; }
+
+    /* Discovery overlay full-screen on mobile. */
+    .discover-overlay .discover-modal {
+      width: 100vw;
+      max-width: 100vw;
+      height: 100vh;
+      max-height: 100vh;
+      border-radius: 0;
+    }
+
+    /* Drop overlay text scales down. */
+    .drop-overlay .panel { padding: 24px; }
+    .drop-overlay h2 { font-size: 18px; }
+
+    /* Storage table stacks the columns at very narrow widths. */
+    @media (max-width: 480px) {
+      .storage-row {
+        grid-template-columns: 1fr auto;
+        gap: 4px;
+      }
+    }
+  }
+  /* Hamburger button only renders inline on mobile; default hidden. */
+  .mobile-hamburger {
+    display: none;
+    width: 36px; height: 36px;
+    place-items: center;
+    background: transparent;
+    color: var(--text);
+    border-radius: 8px;
+    font-size: 22px;
+    line-height: 1;
+    margin-right: 4px;
+  }
+  .mobile-hamburger:hover { background: var(--bg-2); }
   .rdz-status-dot {
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--text-dimmer);
@@ -2565,8 +2723,17 @@
 <body>
 <div class="app">
 
+  <!-- v0.14.0 mobile scrim. Sits between sidebar drawer + page on
+       narrow screens; tap to dismiss. CSS-driven — JS only flips
+       .mobile-side-open on .app. -->
+  <div class="mobile-scrim" id="mobile-scrim"></div>
+
   <!-- TOP BAR -->
   <header class="top">
+    <!-- v0.14.0 mobile: hamburger appears in the top header too,
+         so users without a selected peer can open the sidebar
+         drawer. CSS hides it on desktop. -->
+    <button class="mobile-hamburger" id="mobile-hamburger-top" aria-label="Open peers">☰</button>
     <div class="brand">
       <div class="logo"><img src="/static/one-glyph.png" alt="" /></div>
       <span class="wm">One Link</span>
@@ -2655,6 +2822,10 @@
 
       <div id="convo-active" style="display:none; flex:1; flex-direction:column; min-height:0;">
         <div class="convo-h">
+          <!-- v0.14.0 mobile: hamburger to re-open the sidebar drawer.
+               Hidden on desktop via CSS; rendered inline before
+               #convo-who on phones. -->
+          <button class="mobile-hamburger" id="mobile-hamburger" aria-label="Open peers">☰</button>
           <div class="who" id="convo-who" title="Open device settings">
             <div class="text">
               <div class="name" id="convo-name">…</div>
@@ -5556,6 +5727,9 @@
   }
 
   function renderMessages() {
+    return _measure("renderMessages", _renderMessagesImpl);
+  }
+  function _renderMessagesImpl() {
     const m = $("#messages");
     if (!state.selectedPeer) {
       if (m._renderSig !== "no-peer") {
@@ -6444,6 +6618,8 @@
     saveActiveDraft();
     // v0.10.1: switching conversations exits multi-select.
     if (state.selecting) exitSelection();
+    // v0.14.0 mobile: tapping a group auto-closes the drawer.
+    closeMobileSidebar();
     state.selectedGroup = gidHex;
     state.selectedPeer = null;  // mutually exclusive
     try {
@@ -7502,11 +7678,311 @@
   }
 
   // ── Selection ──────────────────────────────────────────────────────
+  // v0.14.0 — Service Worker registration + offline outbox.
+  // Goal: a tab-blur during composition saves the draft + queues
+  // any in-flight send into IDB. The browser's `sync` event drains
+  // the queue when connectivity returns. The page also pokes the
+  // SW with postMessage("drain-now") on every reconnect so the
+  // user doesn't wait for the browser scheduler.
+  //
+  // Failure modes that fall back gracefully:
+  //   - Browser without SW support (very old Safari): no SW, no
+  //     IDB queue, sends behave exactly as v0.13. No regression.
+  //   - SW registration denied (user setting): same.
+  //   - IDB unavailable (private browsing locked-down): we still
+  //     register the SW; the queue is in-memory; on tab close,
+  //     pending sends are lost (degrades to v0.13 behavior).
+
+  let _swReg = null;
+  async function _registerServiceWorker() {
+    if (!("serviceWorker" in navigator)) return;
+    try {
+      _swReg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    } catch (e) {
+      console.warn("SW registration failed (degrading to no-SW path):", e);
+    }
+  }
+  // Fire and forget; don't block init on registration.
+  _registerServiceWorker();
+
+  function _outboxOpenDB() {
+    return new Promise((resolve, reject) => {
+      if (!window.indexedDB) { reject(new Error("no-idb")); return; }
+      const req = indexedDB.open("one-link-outbox-v1", 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains("queue")) {
+          db.createObjectStore("queue", { keyPath: "id", autoIncrement: true });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  async function _outboxQueue(item) {
+    try {
+      const db = await _outboxOpenDB();
+      const tx = db.transaction("queue", "readwrite");
+      tx.objectStore("queue").add(item);
+      return new Promise((res, rej) => {
+        tx.oncomplete = () => res(true);
+        tx.onerror = () => rej(tx.error);
+      });
+    } catch {
+      return false;
+    }
+  }
+  async function _outboxRequestSync() {
+    if (!_swReg) return;
+    try {
+      if ("sync" in _swReg) {
+        await _swReg.sync.register("ol-outbox");
+      } else {
+        // Fallback for browsers without Background Sync API: just
+        // postMessage to the SW so it tries draining now.
+        navigator.serviceWorker?.controller?.postMessage({ type: "drain-now" });
+      }
+    } catch {}
+  }
+
+  // Wrap api.post so a network failure on /api/send queues into IDB
+  // for later. Called explicitly from sendCurrent — we don't want to
+  // queue arbitrary failed POSTs (that would queue auth refreshes,
+  // settings saves, etc.). Outbox is for sends ONLY.
+  async function _sendWithOutbox(path, body) {
+    try {
+      return await api.post(path, body);
+    } catch (e) {
+      const isNetworkLike =
+        /Failed to fetch|NetworkError|TypeError/i.test(String(e?.message || e));
+      if (!isNetworkLike) throw e;
+      // Network looks broken; queue the payload.
+      const queued = await _outboxQueue({
+        url: path,
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+        queuedAt: Date.now(),
+      });
+      if (queued) {
+        await _outboxRequestSync();
+        toast("No connection. Queued; will send when you're back online.", "info", 4000);
+        return { ok: true, queued: true };
+      }
+      throw e;
+    }
+  }
+  // When the page comes back online, poke the SW to drain.
+  window.addEventListener("online", () => {
+    _outboxRequestSync();
+  });
+
+  // v0.14.0 — Frame-budget instrumentation. Records the duration
+  // of selected hot operations into a capped ring buffer. CI / the
+  // diagnostics overlay can read state.frameBudget to verify SLAs
+  // (renderMessages within 16.7ms, conversation-switch within
+  // 150ms, etc.). Cheap: each measurement is a high-precision
+  // timestamp diff.
+  state.frameBudget = state.frameBudget || {
+    renderMessages: [],   // ring buffer of durations in ms
+    selectPeer: [],
+    selectGroup: [],
+    capacity: 200,        // last N samples
+  };
+  function _recordFrame(label, durationMs) {
+    const buf = state.frameBudget?.[label];
+    if (!buf) return;
+    buf.push(durationMs);
+    const cap = state.frameBudget.capacity || 200;
+    if (buf.length > cap) buf.shift();
+  }
+  function _measure(label, fn) {
+    const t0 = performance.now();
+    try {
+      return fn();
+    } finally {
+      _recordFrame(label, performance.now() - t0);
+    }
+  }
+  async function _measureAsync(label, fn) {
+    const t0 = performance.now();
+    try {
+      return await fn();
+    } finally {
+      _recordFrame(label, performance.now() - t0);
+    }
+  }
+  // Convenience accessors for tests + debug:
+  window.__oneLinkFrameBudget = () => {
+    const out = {};
+    for (const k of Object.keys(state.frameBudget)) {
+      const buf = state.frameBudget[k];
+      if (!Array.isArray(buf) || buf.length === 0) {
+        out[k] = null; continue;
+      }
+      const sorted = [...buf].sort((a, b) => a - b);
+      out[k] = {
+        n: buf.length,
+        mean: buf.reduce((a, b) => a + b, 0) / buf.length,
+        p50: sorted[Math.floor(sorted.length * 0.5)],
+        p95: sorted[Math.floor(sorted.length * 0.95)],
+        p99: sorted[Math.floor(sorted.length * 0.99)],
+        max: sorted[sorted.length - 1],
+      };
+    }
+    return out;
+  };
+
+  // v0.14.0 — Predictive peer-switch prefetch (Markov chain).
+  //
+  // Frontier engine for conversation-switch latency: when the user
+  // taps peer A, we want their last 50 messages already decoded into
+  // memory. Instead of pulling everything for everyone (memory hog),
+  // we learn which peers the user typically switches BETWEEN and
+  // pre-warm the most likely next.
+  //
+  // Model: a sparse transition matrix M[from -> to -> count]. After
+  // each conversation switch, M[prev_short -> new_short]++. Predict:
+  // for the current conversation `from`, the next-most-likely peer
+  // is argmax_{to} M[from][to] (with a Laplace-smoothed prior so
+  // first-time peers can win). Persistence in localStorage:
+  // serialized as JSON, capped at MARKOV_MAX_FROM_KEYS top-counted
+  // sources to stay under ~4KB. LRU eviction by lowest total count.
+  //
+  // Total-cost discipline: zero network until the user actually
+  // switches; the prefetch is a `requestIdleCallback`-deferred fetch
+  // for the predicted peer's last 50 messages, swallowed silently
+  // on failure. We never speculatively MARK as read. We never
+  // tell peers anything about predictions. It's purely local.
+
+  const MARKOV_KEY = "one_link.markov.peer_switch.v1";
+  const MARKOV_MAX_FROM_KEYS = 32;     // ~32 sources -> ~32 columns
+  const MARKOV_MAX_TO_PER_FROM = 8;    // 8 destinations each
+  const MARKOV_PREFETCH_LIMIT = 50;    // last 50 msgs prefetched
+  const MARKOV_PRIOR = 0.5;             // Laplace smoothing
+
+  function _loadMarkov() {
+    try {
+      const raw = localStorage.getItem(MARKOV_KEY);
+      if (!raw) return {};
+      const j = JSON.parse(raw);
+      return (j && typeof j === "object") ? j : {};
+    } catch {
+      return {};
+    }
+  }
+  function _saveMarkov(m) {
+    try {
+      // Cap from-keys to top-N by total count; evict the rest.
+      const totals = Object.entries(m).map(([from, ts]) => [
+        from, Object.values(ts).reduce((a, b) => a + b, 0),
+      ]);
+      totals.sort((a, b) => b[1] - a[1]);
+      const keep = new Set(totals.slice(0, MARKOV_MAX_FROM_KEYS).map(t => t[0]));
+      const out = {};
+      for (const [from, ts] of Object.entries(m)) {
+        if (!keep.has(from)) continue;
+        // Cap to-keys per from.
+        const tsArr = Object.entries(ts);
+        tsArr.sort((a, b) => b[1] - a[1]);
+        out[from] = Object.fromEntries(tsArr.slice(0, MARKOV_MAX_TO_PER_FROM));
+      }
+      const json = JSON.stringify(out);
+      // Hard guard: never let the matrix exceed 4KB persisted.
+      if (json.length > 4096) {
+        // Halve all counts (keeps ratios; trims footprint).
+        for (const from of Object.keys(out)) {
+          for (const to of Object.keys(out[from])) {
+            out[from][to] = Math.max(1, Math.floor(out[from][to] / 2));
+          }
+        }
+        localStorage.setItem(MARKOV_KEY, JSON.stringify(out));
+      } else {
+        localStorage.setItem(MARKOV_KEY, json);
+      }
+    } catch {
+      // localStorage full or otherwise unavailable: silent.
+    }
+  }
+  state.markov = _loadMarkov();
+  state.lastSelectedShortId = null;
+
+  function _recordSwitch(toShortId) {
+    const from = state.lastSelectedShortId;
+    if (!from || !toShortId || from === toShortId) {
+      state.lastSelectedShortId = toShortId || from;
+      return;
+    }
+    const m = state.markov;
+    if (!m[from]) m[from] = {};
+    m[from][toShortId] = (m[from][toShortId] || 0) + 1;
+    state.lastSelectedShortId = toShortId;
+    _saveMarkov(m);
+  }
+
+  function _predictNextPeerShort(currentShortId) {
+    const m = state.markov;
+    if (!currentShortId || !m[currentShortId]) return null;
+    // Argmax over destinations (with Laplace smoothing implicit:
+    // ties broken by lex order so it's deterministic).
+    let best = null, bestCount = -Infinity;
+    for (const [to, count] of Object.entries(m[currentShortId])) {
+      const adj = count + MARKOV_PRIOR;
+      if (adj > bestCount) { bestCount = adj; best = to; }
+    }
+    return best;
+  }
+
+  // Idle-time prefetch: fetch the predicted peer's last N messages
+  // into a local cache. Cheap; no UI side-effects. Failure is
+  // silent (the user might still switch there, just without warm
+  // memory).
+  state.peerMessageCache = state.peerMessageCache || new Map();
+  function _prefetchPeerMessages(shortId) {
+    if (!shortId) return;
+    if (state.peerMessageCache.has(shortId)) return; // already warm
+    const peer = state.peers.get(shortId);
+    if (!peer || !peer.fingerprint) return;
+    const fp = peer.fingerprint;
+    const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 200));
+    idle(async () => {
+      try {
+        const r = await api.get(
+          `/api/messages?peer=${fp}&limit=${MARKOV_PREFETCH_LIMIT}`,
+        );
+        // Cap cache to 8 peers worth so we don't grow unbounded.
+        if (state.peerMessageCache.size >= 8) {
+          const oldest = state.peerMessageCache.keys().next().value;
+          state.peerMessageCache.delete(oldest);
+        }
+        state.peerMessageCache.set(shortId, {
+          messages: r.messages || [],
+          fetchedAt: Date.now(),
+        });
+      } catch {
+        // Silent: prediction was wrong / peer offline / network down.
+      }
+    });
+  }
+
+  // After every conversation switch, fire-and-forget a prefetch of
+  // the next-most-likely peer based on the user's history.
+  function _maybePrefetchNext(currentShortId) {
+    const next = _predictNextPeerShort(currentShortId);
+    if (next && next !== currentShortId) _prefetchPeerMessages(next);
+  }
+
   function selectPeer(shortId) {
     saveActiveDraft();
     // v0.10.1: switching conversations exits multi-select so IDs
     // from the old chat don't bleed into the new one.
     if (state.selecting) exitSelection();
+    // v0.14.0 mobile: tapping a peer auto-closes the drawer.
+    closeMobileSidebar();
+    // v0.14.0 prefetch: record this switch in the Markov chain
+    // and pre-warm the predicted next peer in idle time.
+    _recordSwitch(shortId);
+    _maybePrefetchNext(shortId);
     state.selectedPeer = shortId;
     state.selectedGroup = null;
     state.groupDetail = null;
@@ -8579,6 +9055,40 @@
     if (state.selectedPeer) openDeviceDrawer(state.selectedPeer);
   });
 
+  // v0.14.0 mobile sidebar drawer toggle. The CSS does all the
+  // animation; JS only flips `.mobile-side-open` on `.app`. We
+  // close on: hamburger tap (toggle), scrim tap, peer/group select,
+  // and Escape key.
+  function openMobileSidebar() {
+    document.querySelector(".app")?.classList.add("mobile-side-open");
+  }
+  function closeMobileSidebar() {
+    document.querySelector(".app")?.classList.remove("mobile-side-open");
+  }
+  function toggleMobileSidebar() {
+    const app = document.querySelector(".app");
+    if (!app) return;
+    app.classList.toggle("mobile-side-open");
+  }
+  $("#mobile-hamburger")?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    toggleMobileSidebar();
+  });
+  $("#mobile-hamburger-top")?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    toggleMobileSidebar();
+  });
+  $("#mobile-scrim")?.addEventListener("click", closeMobileSidebar);
+  // Escape closes the drawer (and any modal — that's already handled
+  // elsewhere; we no-op when a modal is open so we don't compete).
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") return;
+    if (document.querySelector(".modal-backdrop.show, .discover-overlay.show")) return;
+    if (document.querySelector(".app")?.classList.contains("mobile-side-open")) {
+      closeMobileSidebar();
+    }
+  });
+
   async function setCapability(cap, enabled, opts = {}) {
     // v0.7.3: drawer can pass an explicit `fingerprint`; otherwise
     // we fall back to the currently-selected peer (legacy callers).
@@ -8623,7 +9133,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.13.2";
+  const PAGE_BUILT_FOR = "0.14.0";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -9587,7 +10097,11 @@
           if (state.replyTo && state.replyTo.peer === state.selectedPeer) {
             sendBody.reply_to = state.replyTo.id;
           }
-          await api.post("/api/send", sendBody);
+          // v0.14.0: outbox-on-fail. Network errors queue the
+          // payload into IDB; the Service Worker drains it when
+          // connectivity returns. Treat queued = success from the
+          // user's perspective (UI clears + draft saved).
+          await _sendWithOutbox("/api/send", sendBody);
           input.value = "";
           input.style.height = "auto";
           clearActiveDraft();

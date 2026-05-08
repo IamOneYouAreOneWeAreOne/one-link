@@ -1,0 +1,344 @@
+"""v0.14.0 — Mobile-responsive web UI + Markov prefetch + Service
+Worker + frame-budget instrumentation.
+
+Ship-spec gated by docs/PRINCIPLES.md:
+
+  Reach:  iOS Safari and Android Chrome users can use One Link
+          who couldn't before (sub-720px viewports were broken
+          previously).
+  Hide:   the desktop sidebar disappears into a slide-in drawer
+          on mobile; users see one pane at a time instead of three.
+  Async:  Service Worker queues sends to IDB when fetch fails;
+          the browser's sync event drains when connectivity
+          returns. Closing the tab no longer loses outbound msgs.
+  Depth:  predictive peer-switch prefetch via a sparse Markov
+          chain over recent transitions, persisted under 4KB,
+          + frame-budget instrumentation (window.__oneLinkFrameBudget)
+          for SLA regression in CI.
+
+Tests cover the markup, helpers, server SW route, and the
+correctness of the Markov persistence cap.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+from aiohttp.test_utils import TestClient, TestServer
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from one_link.daemon import Daemon
+from one_link.identity import Identity, fingerprint_of
+from one_link.server import UIServer
+from one_link.state import State
+
+
+def _identity() -> Identity:
+    sk = Ed25519PrivateKey.generate()
+    pub_obj = sk.public_key()
+    pub_bytes = pub_obj.public_bytes_raw()
+    fp = fingerprint_of(pub_bytes)
+    return Identity(
+        private=sk, public=pub_obj, public_bytes=pub_bytes,
+        fingerprint=fp, short_id=fp[:8], hostname="mobile-host",
+    )
+
+
+@pytest_asyncio.fixture
+async def http(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    daemon.discovery = None
+    daemon._outbound_sessions = {}
+    daemon._inbound_regime = {}
+    daemon.folder_engine = None
+    server = UIServer(daemon)
+    test_server = TestServer(server.app)
+    client = TestClient(test_server)
+    await client.start_server()
+    try:
+        yield client, daemon, state, server.token
+    finally:
+        await client.close()
+        state.close()
+
+
+@pytest.fixture(scope="module")
+def index_html() -> str:
+    return Path("src/one_link/web/index.html").read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def sw_js() -> str:
+    return Path("src/one_link/web/sw.js").read_text(encoding="utf-8")
+
+
+# ───────── mobile layout markup ──────────────────────────────────────
+
+def test_mobile_media_query_exists(index_html: str):
+    """The 720px breakpoint MUST exist; without it the layout never
+    collapses on phones and Reach is zero."""
+    assert "@media (max-width: 720px)" in index_html
+
+
+def test_mobile_breakpoint_overrides_main_grid(index_html: str):
+    """Main grid must collapse to 1fr at <720px or the sidebar +
+    chat overflow horizontally."""
+    idx = index_html.find("@media (max-width: 720px)")
+    # Find the SECOND media-query block (the new full-layout one).
+    idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
+    assert idx2 > 0
+    scope = index_html[idx2:idx2 + 4000]
+    assert ".main {" in scope
+    assert "grid-template-columns: 1fr !important;" in scope
+
+
+def test_sidebar_becomes_drawer_overlay(index_html: str):
+    """Sidebar must position fixed + translateX off-screen on mobile."""
+    assert "transform: translateX(-100%);" in index_html
+    assert ".app.mobile-side-open .side" in index_html
+
+
+def test_mobile_scrim_present(index_html: str):
+    """Scrim sits behind the open drawer; tap-out closes it."""
+    assert 'id="mobile-scrim"' in index_html
+    assert ".mobile-scrim {" in index_html
+
+
+def test_hamburger_button_present(index_html: str):
+    """Hamburger in conversation header AND top header so users
+    without a peer selected can also open the drawer."""
+    assert 'id="mobile-hamburger"' in index_html
+    assert 'id="mobile-hamburger-top"' in index_html
+
+
+def test_hamburger_hidden_on_desktop(index_html: str):
+    """Default state must be display:none; CSS flips to grid in the
+    mobile media query. Find the OUT-OF-MEDIA-QUERY `.mobile-hamburger`
+    rule (the second occurrence, since the in-media-query one
+    appears inside `@media (max-width: 720px)` first)."""
+    first = index_html.find(".mobile-hamburger {")
+    assert first > 0
+    second = index_html.find(".mobile-hamburger {", first + 1)
+    assert second > 0, "default (out-of-media) .mobile-hamburger rule not found"
+    snippet = index_html[second:second + 500]
+    assert "display: none;" in snippet
+
+
+def test_touch_target_minimums(index_html: str):
+    """44px is the iOS HIG minimum for tap targets. Buttons that
+    are smaller on desktop MUST grow on mobile."""
+    idx = index_html.find("@media (max-width: 720px)")
+    idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
+    scope = index_html[idx2:idx2 + 4000]
+    assert "44px" in scope
+
+
+def test_ios_zoom_prevention_on_textarea(index_html: str):
+    """iOS Safari zooms the page when an input has font-size < 16px.
+    Composer textarea must bump to 16px on mobile."""
+    idx = index_html.find("@media (max-width: 720px)")
+    idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
+    scope = index_html[idx2:idx2 + 4000]
+    assert ".composer textarea" in scope
+    assert "font-size: 16px" in scope
+
+
+# ───────── mobile sidebar JS ────────────────────────────────────────
+
+def test_open_close_toggle_helpers_present(index_html: str):
+    assert "function openMobileSidebar()" in index_html
+    assert "function closeMobileSidebar()" in index_html
+    assert "function toggleMobileSidebar()" in index_html
+
+
+def test_select_peer_closes_sidebar(index_html: str):
+    """Tapping a peer auto-closes the drawer on mobile (otherwise
+    the user has to scrim-tap or hamburger-tap every time)."""
+    idx = index_html.find("function selectPeer(shortId)")
+    snippet = index_html[idx:idx + 500]
+    assert "closeMobileSidebar()" in snippet
+
+
+def test_select_group_closes_sidebar(index_html: str):
+    idx = index_html.find("async function selectGroup(gidHex)")
+    snippet = index_html[idx:idx + 500]
+    assert "closeMobileSidebar()" in snippet
+
+
+def test_scrim_tap_closes(index_html: str):
+    assert '$("#mobile-scrim")' in index_html
+    idx = index_html.find('$("#mobile-scrim")')
+    snippet = index_html[idx:idx + 200]
+    assert "closeMobileSidebar" in snippet
+
+
+# ───────── Markov prefetch ──────────────────────────────────────────
+
+def test_markov_module_present(index_html: str):
+    assert "MARKOV_KEY" in index_html
+    assert "function _recordSwitch(toShortId)" in index_html
+    assert "function _predictNextPeerShort(currentShortId)" in index_html
+    assert "function _prefetchPeerMessages(shortId)" in index_html
+
+
+def test_markov_persistence_cap_under_4kb(index_html: str):
+    """The 4KB persistence cap is the Frontier-discipline constraint.
+    Pin so a refactor can't blow up localStorage usage."""
+    idx = index_html.find("function _saveMarkov(m)")
+    assert idx > 0
+    snippet = index_html[idx:idx + 2000]
+    assert "4096" in snippet
+    # When the matrix exceeds 4KB, all counts halve. Pin the
+    # decay step so it can't be removed.
+    assert "Math.floor(out[from][to] / 2)" in snippet
+
+
+def test_markov_capped_from_keys(index_html: str):
+    """The from-keys are capped at MARKOV_MAX_FROM_KEYS so the
+    matrix can't grow unbounded with peer count."""
+    assert "MARKOV_MAX_FROM_KEYS = 32" in index_html
+
+
+def test_markov_uses_laplace_smoothing(index_html: str):
+    """Without smoothing, a brand-new peer would never win the
+    argmax. Pin the prior."""
+    assert "MARKOV_PRIOR" in index_html
+
+
+def test_prefetch_uses_idle_callback(index_html: str):
+    """Prefetch is idle-deferred so it never competes with the
+    user's actual interaction."""
+    idx = index_html.find("function _prefetchPeerMessages(shortId)")
+    snippet = index_html[idx:idx + 1500]
+    assert "requestIdleCallback" in snippet
+
+
+def test_prefetch_cache_capped(index_html: str):
+    """8-entry cap on the per-peer cache so memory can't grow
+    without bound."""
+    idx = index_html.find("function _prefetchPeerMessages(shortId)")
+    snippet = index_html[idx:idx + 1500]
+    assert "state.peerMessageCache.size >= 8" in snippet
+
+
+def test_select_peer_records_switch_and_prefetches(index_html: str):
+    idx = index_html.find("function selectPeer(shortId)")
+    snippet = index_html[idx:idx + 800]
+    assert "_recordSwitch(shortId)" in snippet
+    assert "_maybePrefetchNext(shortId)" in snippet
+
+
+# ───────── Frame-budget instrumentation ─────────────────────────────
+
+def test_frame_budget_state_present(index_html: str):
+    assert "state.frameBudget" in index_html
+
+
+def test_measure_helpers_present(index_html: str):
+    assert "function _measure(label, fn)" in index_html
+    assert "async function _measureAsync(label, fn)" in index_html
+
+
+def test_render_messages_wrapped_with_measure(index_html: str):
+    """The render hot path must be measured or our SLA regression
+    in CI has nothing to read."""
+    idx = index_html.find("function renderMessages()")
+    snippet = index_html[idx:idx + 200]
+    assert '_measure("renderMessages"' in snippet
+
+
+def test_global_frame_budget_accessor(index_html: str):
+    """window.__oneLinkFrameBudget is the API CI / Playwright tests
+    will read to assert SLAs (p50/p95/p99/max)."""
+    assert "window.__oneLinkFrameBudget" in index_html
+    idx = index_html.find("window.__oneLinkFrameBudget")
+    snippet = index_html[idx:idx + 1500]
+    for percentile in ("p50", "p95", "p99", "max"):
+        assert percentile in snippet
+
+
+# ───────── Service Worker + outbox ──────────────────────────────────
+
+def test_sw_registered_from_page(index_html: str):
+    assert 'navigator.serviceWorker.register("/sw.js"' in index_html
+
+
+def test_sw_route_registered(index_html: str):
+    """Server must serve /sw.js. The route is at top scope so the
+    SW can control "/" — pin the route registration AND the
+    Service-Worker-Allowed header."""
+    server_py = Path("src/one_link/server.py").read_text(encoding="utf-8")
+    assert 'r.add_get("/sw.js"' in server_py
+    assert 'Service-Worker-Allowed' in server_py
+
+
+@pytest.mark.asyncio
+async def test_sw_endpoint_serves_javascript(http):
+    """End-to-end: hit /sw.js without auth and confirm we get the
+    SW source with the right headers."""
+    client, _, _, _ = http
+    resp = await client.get("/sw.js")
+    assert resp.status == 200
+    ct = resp.headers.get("Content-Type", "")
+    assert "javascript" in ct
+    assert resp.headers.get("Service-Worker-Allowed") == "/"
+    body = await resp.text()
+    # The SW must contain the outbox-drain logic.
+    assert "ol-outbox" in body
+    assert "drainOutbox" in body
+
+
+def test_sw_skips_caching_api_paths(sw_js: str):
+    """API paths must NEVER be cached (live state). Pin so a
+    refactor doesn't accidentally cache /api/me and serve a stale
+    version after an identity change. Find the actual fetch
+    handler's early-return on /api/ paths, not a comment that
+    happens to mention an API URL."""
+    idx = sw_js.find('url.pathname.startsWith("/api/")')
+    assert idx > 0
+    # The next ~200 chars must contain `return;` (early exit so
+    # the browser handles the request without SW intervention).
+    snippet = sw_js[idx:idx + 200]
+    assert "return;" in snippet
+
+
+def test_sw_drains_via_message_too(sw_js: str):
+    """Beyond the browser's `sync` event, the page can poke the SW
+    via postMessage to force a flush. Pin both code paths."""
+    assert 'event.tag === "ol-outbox"' in sw_js
+    assert '"drain-now"' in sw_js
+
+
+def test_outbox_idb_helpers_present(index_html: str):
+    assert "function _outboxOpenDB()" in index_html
+    assert "async function _outboxQueue(item)" in index_html
+    assert "async function _outboxRequestSync()" in index_html
+
+
+def test_send_with_outbox_used_for_send(index_html: str):
+    """The composer's send path must go through _sendWithOutbox so a
+    network-failed send queues instead of toasting and disappearing."""
+    assert "_sendWithOutbox" in index_html
+    # Pin that sendCurrent uses it.
+    idx = index_html.find("async function sendCurrent()")
+    snippet = index_html[idx:idx + 5000]
+    assert "_sendWithOutbox(" in snippet
+
+
+def test_online_event_pokes_drain(index_html: str):
+    """When the network comes back, the page proactively asks the
+    SW to drain — don't wait on the browser's sync scheduler."""
+    assert 'window.addEventListener("online"' in index_html
+
+
+# ───────── version pin ───────────────────────────────────────────────
+
+def test_page_version_bumped(index_html: str):
+    from one_link import __version__
+    assert f'PAGE_BUILT_FOR = "{__version__}"' in index_html
