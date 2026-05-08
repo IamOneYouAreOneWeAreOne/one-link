@@ -172,6 +172,8 @@ class TransferCandidate:
     confidence: float
     coherence_score: float = 0.0
     parallelism: int = 1
+    route_latency_ms: float | None = None
+    route_bandwidth_bps: float | None = None
     verification_head: tuple[int, ...] = ()
     reasons: tuple[str, ...] = ()
 
@@ -210,6 +212,14 @@ class TransferBrainDecision:
             "confidence": round(self.selected.confidence, 4),
             "coherence_score": round(self.selected.coherence_score, 4),
             "parallelism": self.selected.parallelism,
+            "route_latency_ms": (
+                round(self.selected.route_latency_ms, 3)
+                if self.selected.route_latency_ms is not None else None
+            ),
+            "route_bandwidth_bps": (
+                round(self.selected.route_bandwidth_bps, 3)
+                if self.selected.route_bandwidth_bps is not None else None
+            ),
             "verification_head": list(self.selected.verification_head),
             "health": self.health.value,
             "action": self.action,
@@ -244,6 +254,8 @@ def adapt_pipeline_profile(
     coherence = float(d.get("coherence_score") or 0.0)
     reliability = float(d.get("reliability") or 0.0)
     parallelism = max(1, int(d.get("parallelism") or 1))
+    route_latency = d.get("route_latency_ms")
+    route_bandwidth = d.get("route_bandwidth_bps")
 
     multiplier = 1.0
     reason = "steady"
@@ -268,7 +280,24 @@ def adapt_pipeline_profile(
         reason = "mesh_parallel_lane" if reason == "steady" else reason
 
     tuned_chunks = max(1, min(max_window_chunks, int(round(base_chunks * multiplier))))
-    tuned_bytes = min(max_window_bytes, max(chunk_size, tuned_chunks * chunk_size, int(base_bytes * multiplier)))
+    desired_bytes = max(chunk_size, tuned_chunks * chunk_size, int(base_bytes * multiplier))
+    if health == HealthState.HEALTHY.value:
+        try:
+            latency_ms = float(route_latency) if route_latency is not None else 0.0
+            bandwidth_bps = float(route_bandwidth) if route_bandwidth is not None else 0.0
+        except (TypeError, ValueError):
+            latency_ms = 0.0
+            bandwidth_bps = 0.0
+        if latency_ms > 0.0 and bandwidth_bps > 0.0:
+            # BDP-aware fast lane: keep enough chunks in flight to fill the
+            # measured pipe, plus a small cushion for ACK jitter. This is the
+            # practical route to "use the real link, not a fixed guess".
+            bdp_bytes = int((bandwidth_bps * (latency_ms / 1000.0)) / 8.0)
+            cushion = 2.5 if coherence >= 0.85 else 1.75
+            desired_bytes = max(desired_bytes, int(bdp_bytes * cushion))
+            if reason == "steady":
+                reason = "bdp_fast_lane"
+    tuned_bytes = min(max_window_bytes, desired_bytes)
     tuned_chunks = max(1, min(max_window_chunks, tuned_bytes // chunk_size))
     return {
         "chunk_size": chunk_size,
@@ -276,6 +305,42 @@ def adapt_pipeline_profile(
         "window_bytes": int(tuned_chunks * chunk_size),
         "multiplier": round(multiplier, 4),
         "reason": reason,
+    }
+
+
+def transfer_result_report(
+    *,
+    raw_bytes: int,
+    wire_bytes: int,
+    elapsed_s: float,
+    skipped_bytes: int = 0,
+) -> dict[str, int | float]:
+    """Summarize real transfer efficiency for route learning and UI.
+
+    ``raw_bytes`` is what this sender actually read and pushed. ``wire_bytes``
+    is what crossed the channel after compression/protocol choice.
+    ``skipped_bytes`` is payload the peer already had, which matters because
+    the user experiences it as delivered even though the network did not carry
+    it again.
+    """
+
+    raw = max(0, int(raw_bytes))
+    wire = max(0, int(wire_bytes))
+    skipped = max(0, int(skipped_bytes))
+    elapsed = max(0.001, float(elapsed_s))
+    effective = raw + skipped
+    saved = max(0, effective - wire)
+    return {
+        "raw_bytes_sent": raw,
+        "wire_bytes_sent": wire,
+        "skipped_bytes": skipped,
+        "effective_payload_bytes": effective,
+        "saved_bytes": saved,
+        "raw_throughput_bps": round((raw * 8.0) / elapsed, 3),
+        "wire_throughput_bps": round((wire * 8.0) / elapsed, 3),
+        "effective_throughput_bps": round((effective * 8.0) / elapsed, 3),
+        "wire_efficiency_ratio": round(wire / max(1, effective), 6),
+        "bandwidth_savings_ratio": round(saved / max(1, effective), 6),
     }
 
 
@@ -415,6 +480,8 @@ class AdaptiveTransferBrain:
                 energy_score=stats.energy_ema,
                 confidence=confidence,
                 coherence_score=coherence,
+                route_latency_ms=latency,
+                route_bandwidth_bps=route_bps,
                 verification_head=verification_head,
                 reasons=("fastest compatible baseline",),
             ),
@@ -428,6 +495,8 @@ class AdaptiveTransferBrain:
                 energy_score=stats.energy_ema * 0.92,
                 confidence=confidence,
                 coherence_score=coherence,
+                route_latency_ms=latency,
+                route_bandwidth_bps=route_bps,
                 verification_head=verification_head,
                 reasons=("aligned-block high-throughput manifest",),
             ),
@@ -446,6 +515,8 @@ class AdaptiveTransferBrain:
                 confidence=confidence,
                 coherence_score=round(min(1.0, coherence + prior_hit_rate * 0.15), 6),
                 parallelism=1,
+                route_latency_ms=latency,
+                route_bandwidth_bps=route_bps,
                 verification_head=verification_head,
                 reasons=(f"prior hit estimate {prior_hit_rate:.1%}",),
             ))
@@ -461,6 +532,8 @@ class AdaptiveTransferBrain:
                     confidence=confidence * 0.95,
                     coherence_score=round(min(1.0, coherence + 0.10 + prior_hit_rate * 0.18), 6),
                     parallelism=mesh_parallelism,
+                    route_latency_ms=latency,
+                    route_bandwidth_bps=route_bps,
                     verification_head=verification_head,
                     reasons=("multiple trusted sources can split missing chunks",),
                 ))

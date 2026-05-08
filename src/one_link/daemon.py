@@ -100,6 +100,7 @@ from one_link.transfer_brain import (
     TransferRouteObservation,
     adapt_pipeline_profile,
     decision_from_observations,
+    transfer_result_report,
     verification_priority_order,
 )
 from one_link.transfer_doctor import (
@@ -7139,6 +7140,7 @@ class Daemon:
                 wire_bytes_sent = 0
                 raw_bytes_sent = 0
                 compressed_chunks = 0
+                skipped_bytes = 0
                 if first_reply.get("rejected"):
                     raise RuntimeError(
                         f"peer rejected file offer: {first_reply.get('rejected')}"
@@ -7407,6 +7409,12 @@ class Daemon:
                 done_ms = int(time.time() * 1000)
                 started_ms = int(base_metadata.get("last_attempt_ms") or now_ms)
                 elapsed_s = max(0.001, (done_ms - started_ms) / 1000.0)
+                transfer_report = transfer_result_report(
+                    raw_bytes=raw_bytes_sent,
+                    wire_bytes=wire_bytes_sent,
+                    elapsed_s=elapsed_s,
+                    skipped_bytes=skipped_bytes,
+                )
                 throughput_bps = (
                     (raw_bytes_sent * 8.0) / elapsed_s
                     if raw_bytes_sent > 0 else None
@@ -7440,6 +7448,8 @@ class Daemon:
                     "skipped_chunks": len(cdc_chunks) - chunks_sent if cdc_used else 0,
                     "compressed_chunks": compressed_chunks,
                     "completed_at_ms": int(time.time() * 1000),
+                    "elapsed_ms": int(round(elapsed_s * 1000.0)),
+                    "transfer_report": transfer_report,
                     "error": None,
                     "transient": False,
                 },

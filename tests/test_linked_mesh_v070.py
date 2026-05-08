@@ -645,6 +645,9 @@ async def test_send_file_reuses_cached_file_index_without_rehashing(
     assert row.metadata["prior_hit_rate_actual"] == 1.0
     assert row.metadata["pipeline_tuning"]["reason"] == "constrained_backoff"
     assert row.metadata["pipeline_tuning"]["window_chunks"] >= 1
+    assert row.metadata["transfer_report"]["effective_payload_bytes"] == len(payload)
+    assert row.metadata["transfer_report"]["wire_bytes_sent"] == 0
+    assert row.metadata["transfer_report"]["bandwidth_savings_ratio"] == 1.0
     state.close()
 
 
@@ -942,6 +945,7 @@ async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
     assert row.metadata["cdc_engine"] == "pipelined_chunks_v2"
     assert row.metadata["cdc_window_chunks"] == 2
     assert row.metadata["pipeline_tuning"]["reason"] == "constrained_backoff"
+    assert row.metadata["transfer_report"]["wire_efficiency_ratio"] == 1.0
     assert all(not daemon._chunk_cache_path(c["hash"]).is_file() for c in chunks)
     assert state.chunks_sourced([c["hash"] for c in chunks]) == [c["hash"] for c in chunks]
     state.close()

@@ -7,6 +7,7 @@ from one_link.transfer_brain import (
     TransferRouteObservation,
     adapt_pipeline_profile,
     decision_from_observations,
+    transfer_result_report,
     verification_priority_order,
 )
 from one_link.transfer_intent import FileChunkManifest
@@ -156,3 +157,50 @@ def test_pipeline_profile_expands_only_for_coherent_healthy_routes():
     assert fast["window_chunks"] <= 32
     assert repair["window_chunks"] < profile["window_chunks"]
     assert repair["reason"] == "repair_backoff"
+
+
+def test_pipeline_profile_uses_bandwidth_delay_product_for_fast_links():
+    profile = {"chunk_size": 1024 * 1024, "window_chunks": 2, "window_bytes": 2 * 1024 * 1024}
+    tuned = adapt_pipeline_profile(profile, {
+        "health": "healthy",
+        "coherence_score": 0.7,
+        "reliability": 0.95,
+        "parallelism": 1,
+        "route_latency_ms": 90.0,
+        "route_bandwidth_bps": 1_200_000_000.0,
+    })
+
+    assert tuned["window_chunks"] > profile["window_chunks"]
+    assert tuned["window_bytes"] <= 64 * 1024 * 1024
+    assert tuned["reason"] == "bdp_fast_lane"
+
+
+def test_decision_exports_route_quality_for_runtime_tuning():
+    decision = decision_from_observations(
+        size_bytes=128 * 1024 * 1024,
+        supports_cdc=True,
+        supports_swarm=False,
+        prior_hit_rate=0.0,
+        observations=[
+            TransferRouteObservation("lan", True, latency_ms=7, bandwidth_bps=900_000_000)
+            for _ in range(8)
+        ],
+    ).to_dict()
+
+    assert decision["route"] == "lan"
+    assert decision["route_latency_ms"] == 7
+    assert decision["route_bandwidth_bps"] == 900_000_000
+
+
+def test_transfer_result_report_counts_skipped_bytes_as_effective_delivery():
+    report = transfer_result_report(
+        raw_bytes=10 * 1024 * 1024,
+        wire_bytes=6 * 1024 * 1024,
+        skipped_bytes=90 * 1024 * 1024,
+        elapsed_s=2.0,
+    )
+
+    assert report["effective_payload_bytes"] == 100 * 1024 * 1024
+    assert report["saved_bytes"] == 94 * 1024 * 1024
+    assert report["bandwidth_savings_ratio"] == 0.94
+    assert report["effective_throughput_bps"] > report["wire_throughput_bps"]
