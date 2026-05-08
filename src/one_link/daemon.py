@@ -4366,6 +4366,7 @@ class Daemon:
             async with sess.lock:
                 results: list[dict] = []
                 for m in msgs:
+                    send_started = time.monotonic()
                     await sess.channel.send(encode_msg(m))
                     while True:
                         ack = decode_msg(await sess.channel.recv())
@@ -4399,6 +4400,11 @@ class Daemon:
                     results.append(ack)
                     sess.messages_sent += 1
                     sess.last_used = time.time()
+                    self._stamp_pair_health(
+                        sess.peer_fp,
+                        latency_ms=(time.monotonic() - send_started) * 1000.0,
+                        best_route=sess.regime,
+                    )
                     # v0.6.2: group-protocol frames (GROUP_*) are not chat
                     # messages — they're transport-layer envelopes carrying
                     # encrypted multi-recipient payloads. Skip the regular
@@ -5844,7 +5850,17 @@ class Daemon:
     ) -> dict:
         """v0.7.6: tell `peer` we've read all their messages with
         ts ≤ `up_to_ts_ms`. Best-effort — peer-side persistence
-        is the source of truth, but errors don't block the UI."""
+        is the source of truth, but errors don't block the UI.
+
+        v0.12.2: gated by send_read_receipts privacy setting. When
+        off, returns immediately without dialing the peer. The UI
+        still updates its own local state.peer_read_markers so
+        unread counts are accurate even if peers don't get told."""
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                v = self.state.get_setting("send_read_receipts")
+                if v is not None and v != "true":
+                    return {"sent": None, "skipped": "privacy"}
         m = make_msg(
             "READ_MARKER", self.me.short_id,
             up_to_ts_ms=int(up_to_ts_ms),

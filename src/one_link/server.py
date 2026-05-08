@@ -833,6 +833,17 @@ class UIServer:
             #   power users want to silence the long tail of pings.
             "notification_preview": s.get("notification_preview", "true") == "true",
             "notify_on_reactions": s.get("notify_on_reactions", "true") == "true",
+            # v0.12.2 — read receipts privacy.
+            # send_read_receipts: when off, my client never tells
+            # peers what I've read (no READ_MARKER wire frame).
+            # display_read_receipts: when off, peers' READ_MARKER
+            # events are ignored locally — ✓✓ never appears even
+            # if the peer is sending receipts. Decoupled so the
+            # standard messaging-app convention "I want privacy
+            # but still want to see when others read mine" is
+            # expressible.
+            "send_read_receipts": s.get("send_read_receipts", "true") == "true",
+            "display_read_receipts": s.get("display_read_receipts", "true") == "true",
             # v0.11.6 storage + data settings.
             # - default_dm_ttl_ms: applies to NEW pairings only;
             #   existing peers keep their dm_ttl_ms unchanged. None /
@@ -1012,7 +1023,11 @@ class UIServer:
                     )
                 self.daemon.state.set_setting("avatar_color", v)
         # v0.11.2 — notification fine-tuning toggles. Bools only.
-        for key in ("notification_preview", "notify_on_reactions"):
+        for key in (
+            "notification_preview", "notify_on_reactions",
+            # v0.12.2 read receipts privacy.
+            "send_read_receipts", "display_read_receipts",
+        ):
             if key in data:
                 self.daemon.state.set_setting(
                     key, "true" if data[key] else "false",

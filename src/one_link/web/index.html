@@ -3052,6 +3052,37 @@
               <code>ONE_LINK_PASSPHRASE</code> environment variable
               before launching the daemon.
             </p>
+            <!-- v0.12.2 Read-receipt privacy. Two independent
+                 toggles so users can express the standard
+                 "I want privacy but want to see when others
+                 read mine" pattern. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Read receipts</span></div>
+              <div class="settings-row">
+                <label for="set-send-receipts">Tell peers when I read their messages</label>
+                <span class="toggle">
+                  <input type="checkbox" id="set-send-receipts" />
+                  <span class="slider"></span>
+                </span>
+              </div>
+              <p class="settings-help">
+                When on, your client tells peers "I've read up to
+                this message" so they see ✓✓. Off = peers never
+                learn what you've read.
+              </p>
+              <div class="settings-row">
+                <label for="set-display-receipts">Show ✓✓ when peers read mine</label>
+                <span class="toggle">
+                  <input type="checkbox" id="set-display-receipts" />
+                  <span class="slider"></span>
+                </span>
+              </div>
+              <p class="settings-help">
+                Off = your sent messages always show ✓ regardless
+                of whether the peer has read them. Useful if seeing
+                "Read" stresses you out.
+              </p>
+            </div>
             <!-- v0.11.1 Blocked devices. Sources from /api/peers with
                  trust='rejected' — already a backed feature, just
                  wasn't surfaced anywhere a user could find. -->
@@ -4464,6 +4495,9 @@
         notification_sound: r.notification_sound !== false,
         bio: r.bio || "",
         avatar_color: r.avatar_color || "#7c4dff",
+        // v0.12.2 read-receipt privacy.
+        send_read_receipts: r.send_read_receipts !== false,
+        display_read_receipts: r.display_read_receipts !== false,
       };
     } catch {
       // Daemon unreachable / fresh install — default theme stays.
@@ -5543,13 +5577,25 @@
         const whenEl = el("span", "when", fmtTime(msg.ts));
         // v0.7.6: read-receipt checkmark on outbound messages.
         // ✓  = sent; ✓✓ = peer's read marker has passed this ts.
+        // v0.12.2: gated by display_read_receipts (off → always
+        // show ✓ regardless of peer state). Tooltip shows the
+        // local timestamp the receipt was received so users know
+        // when peers actually saw it.
         if (msg.dir === "out") {
           const peerFp = state.peers.get(msg.peer)?.fingerprint;
+          const displayReceipts = state.runtimeSettings?.display_read_receipts !== false;
           const readUpTo = peerFp ? state.readMarkers?.[peerFp] : null;
-          const isRead = readUpTo != null && msg.ts <= readUpTo;
+          const isRead = displayReceipts && readUpTo != null && msg.ts <= readUpTo;
           const tick = el("span", `read-tick ${isRead ? "read" : ""}`,
                          isRead ? "✓✓" : "✓");
-          tick.title = isRead ? "Read" : "Sent";
+          if (isRead) {
+            const readAt = state.readMarkerReceivedAt?.[peerFp];
+            tick.title = readAt
+              ? `Read at ${new Date(readAt).toLocaleTimeString()}`
+              : "Read";
+          } else {
+            tick.title = "Sent";
+          }
           whenEl.appendChild(document.createTextNode(" "));
           whenEl.appendChild(tick);
         }
@@ -8456,7 +8502,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.12.1";
+  const PAGE_BUILT_FOR = "0.12.2";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -8790,9 +8836,13 @@
         // v0.7.6: peer reported they've read up to ts X. Update
         // our local map; render flips outbound ✓ → ✓✓ for all
         // messages with ts ≤ X.
+        // v0.12.2: also record received_at so the ✓✓ tooltip can
+        // show "Read at HH:MM" instead of just "Read".
         const cur = state.readMarkers[m.peer_fp] || 0;
         if (m.up_to_ts_ms > cur) {
           state.readMarkers[m.peer_fp] = m.up_to_ts_ms;
+          state.readMarkerReceivedAt = state.readMarkerReceivedAt || {};
+          state.readMarkerReceivedAt[m.peer_fp] = Date.now();
           scheduleRenderMessages();
         }
       } else if (m.type === "debug_event") {
@@ -11065,6 +11115,11 @@
       const nr = $("#set-notif-reactions");
       if (np) np.checked = r.notification_preview !== false;
       if (nr) nr.checked = r.notify_on_reactions !== false;
+      // v0.12.2 read-receipt privacy toggles.
+      const sr = $("#set-send-receipts");
+      const dr = $("#set-display-receipts");
+      if (sr) sr.checked = r.send_read_receipts !== false;
+      if (dr) dr.checked = r.display_read_receipts !== false;
       // v0.11.6 storage + data settings.
       const ddt = $("#set-default-dm-ttl");
       if (ddt) ddt.value = r.default_dm_ttl_ms ? String(r.default_dm_ttl_ms) : "";
@@ -11145,6 +11200,9 @@
       // v0.11.2 notification fine-tuning.
       notification_preview: !!$("#set-notif-preview")?.checked,
       notify_on_reactions: !!$("#set-notif-reactions")?.checked,
+      // v0.12.2 read-receipt privacy.
+      send_read_receipts: !!$("#set-send-receipts")?.checked,
+      display_read_receipts: !!$("#set-display-receipts")?.checked,
       // v0.11.6 storage + data settings. The four selects/inputs
       // map directly to setting keys; null + 0 + "" all clear.
       default_dm_ttl_ms: (() => {
