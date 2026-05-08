@@ -259,6 +259,31 @@ def test_print_lan_warning_via_capsys(capsys):
     assert "password" in captured.out
 
 
+def test_print_lan_warning_is_ascii_only():
+    """v0.15.3 regression — the warning print MUST stay ASCII-only.
+    Windows consoles default to cp1252 and choke on non-ASCII glyphs
+    (the original ⚠ U+26A0 raised UnicodeEncodeError, which crashed
+    the launcher AFTER the daemon had already spawned — leaving the
+    user with a running daemon but no printed URL). Capture stdout
+    via a cp1252-encoded stream and confirm no encode error fires."""
+    import io
+    import contextlib
+
+    from one_link.app import _print_lan_warning
+
+    # cp1252 is the default Windows console encoding. If the print
+    # contains a glyph cp1252 can't represent, this raises.
+    buf = io.BytesIO()
+    text_buf = io.TextIOWrapper(buf, encoding="cp1252", newline="")
+    with contextlib.redirect_stdout(text_buf):
+        _print_lan_warning("192.168.1.42", 7117, "test-token-abc")
+        text_buf.flush()
+    encoded = buf.getvalue()
+    # Sanity: the URL still made it through.
+    assert b"192.168.1.42" in encoded
+    assert b"LAN MODE" in encoded
+
+
 # ───────── version pin ──────────────────────────────────────────────
 
 def test_page_version_matches_package():

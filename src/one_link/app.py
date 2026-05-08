@@ -218,18 +218,21 @@ def _print_lan_warning(lan_ip: str, port: int, token: str) -> None:
     """v0.15.2 — yellow security warning + LAN URL. Made deliberately
     loud so a user who passed --lan understands the trust boundary
     they just opened: anyone on the same Wi-Fi who has the URL+token
-    can reach the UI."""
+    can reach the UI. Uses ASCII-only glyphs because Windows cp1252
+    consoles raise UnicodeEncodeError on ⚠ (warning sign) — the
+    crash happens AFTER the daemon spawns, leaving the user with a
+    running daemon but no printed URL."""
     click.echo("")
     click.secho(
-        "  ⚠ LAN MODE — One Link UI is now exposed to your local network.",
+        "  ** LAN MODE - One Link UI is now exposed to your local network.",
         fg="yellow",
         bold=True,
     )
     click.echo(
-        "    Anyone on this Wi-Fi who has the URL + token can access your UI."
+        "     Anyone on this Wi-Fi who has the URL + token can access your UI."
     )
     click.echo(
-        "    The token gates pairing + sending; treat the URL like a password."
+        "     The token gates pairing + sending; treat the URL like a password."
     )
     click.echo("")
     click.secho(
