@@ -6620,6 +6620,8 @@
     if (state.selecting) exitSelection();
     // v0.14.0 mobile: tapping a group auto-closes the drawer.
     closeMobileSidebar();
+    // v0.14.1 persist for boot-time restore.
+    _saveLastSelection("group", gidHex);
     state.selectedGroup = gidHex;
     state.selectedPeer = null;  // mutually exclusive
     try {
@@ -7972,6 +7974,62 @@
     if (next && next !== currentShortId) _prefetchPeerMessages(next);
   }
 
+  // v0.14.1 — Last-conversation persistence. We persist the
+  // currently-selected peer / group so opening the app boots
+  // straight back into the user's last chat (no manual re-tap on
+  // every reload). Stored under one_link.last_selection.v1; tiny
+  // JSON, capped to a single record.
+  const LAST_SELECTION_KEY = "one_link.last_selection.v1";
+  function _saveLastSelection(scope, id) {
+    try {
+      if (!scope || !id) {
+        localStorage.removeItem(LAST_SELECTION_KEY);
+        return;
+      }
+      localStorage.setItem(
+        LAST_SELECTION_KEY,
+        JSON.stringify({ scope, id, ts: Date.now() }),
+      );
+    } catch {}
+  }
+  function _readLastSelection() {
+    try {
+      const raw = localStorage.getItem(LAST_SELECTION_KEY);
+      if (!raw) return null;
+      const j = JSON.parse(raw);
+      if (!j || typeof j !== "object") return null;
+      if (j.scope !== "peer" && j.scope !== "group") return null;
+      if (typeof j.id !== "string" || !j.id) return null;
+      return { scope: j.scope, id: j.id, ts: j.ts || 0 };
+    } catch {
+      return null;
+    }
+  }
+  // v0.14.1: restore the last-selected conversation on boot. Called
+  // from init() after refreshPeers + refreshGroups have populated
+  // state. If the previous selection target is gone (peer
+  // unpaired, group disbanded), we silently no-op.
+  function _restoreLastSelection() {
+    const last = _readLastSelection();
+    if (!last) return;
+    if (last.scope === "peer") {
+      // Look up by short_id (the persisted shape) AND tolerate the
+      // case where peers refreshed under a different id (rare but
+      // possible after a peer's hostname changes).
+      if (state.peers.has(last.id)) {
+        try { selectPeer(last.id); } catch (e) {
+          console.warn("restore peer failed:", e);
+        }
+      }
+    } else if (last.scope === "group") {
+      if (state.groups.has(last.id)) {
+        try { selectGroup(last.id); } catch (e) {
+          console.warn("restore group failed:", e);
+        }
+      }
+    }
+  }
+
   function selectPeer(shortId) {
     saveActiveDraft();
     // v0.10.1: switching conversations exits multi-select so IDs
@@ -7983,6 +8041,8 @@
     // and pre-warm the predicted next peer in idle time.
     _recordSwitch(shortId);
     _maybePrefetchNext(shortId);
+    // v0.14.1 persist for boot-time restore.
+    _saveLastSelection("peer", shortId);
     state.selectedPeer = shortId;
     state.selectedGroup = null;
     state.groupDetail = null;
@@ -9133,7 +9193,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.14.0";
+  const PAGE_BUILT_FOR = "0.14.1";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -9174,6 +9234,13 @@
     // v0.12.1: pull persisted per-chat prefs (color / wallpaper /
     // archive) from the daemon so they sync across devices.
     await loadChatPrefs();
+    // v0.14.1: restore last-selected conversation. After all the
+    // peer + group state is loaded but BEFORE WS connects, jump
+    // back to wherever the user was last. The selectPeer /
+    // selectGroup calls render the conversation; if the bulk
+    // message load already completed, the chat is fully populated
+    // instantly.
+    _restoreLastSelection();
     connectWS();
     setInterval(refreshPeers, 5000);
     setInterval(refreshTransfers, 4000);

@@ -342,3 +342,51 @@ def test_online_event_pokes_drain(index_html: str):
 def test_page_version_bumped(index_html: str):
     from one_link import __version__
     assert f'PAGE_BUILT_FOR = "{__version__}"' in index_html
+
+
+# ───────── v0.14.1 last-selection persistence + restore ─────────────
+
+def test_last_selection_helpers_present(index_html: str):
+    """The persistence helpers + their localStorage key must exist."""
+    assert "LAST_SELECTION_KEY" in index_html
+    assert "function _saveLastSelection(scope, id)" in index_html
+    assert "function _readLastSelection()" in index_html
+    assert "function _restoreLastSelection()" in index_html
+
+
+def test_select_peer_persists(index_html: str):
+    idx = index_html.find("function selectPeer(shortId)")
+    snippet = index_html[idx:idx + 1200]
+    assert '_saveLastSelection("peer", shortId)' in snippet
+
+
+def test_select_group_persists(index_html: str):
+    idx = index_html.find("async function selectGroup(gidHex)")
+    snippet = index_html[idx:idx + 800]
+    assert '_saveLastSelection("group", gidHex)' in snippet
+
+
+def test_init_restores_last_selection(index_html: str):
+    """The restore step must run after refreshPeers + refreshGroups
+    + loadChatPrefs (state needs to be populated first) but BEFORE
+    connectWS (so the WS arrives into a fully restored UI)."""
+    idx = index_html.find("async function init()")
+    snippet = index_html[idx:idx + 6000]
+    assert "_restoreLastSelection()" in snippet
+    # Order check: restore must come after refreshGroups + loadChatPrefs.
+    refresh_groups_idx = snippet.find("await refreshGroups()")
+    load_prefs_idx = snippet.find("await loadChatPrefs()")
+    restore_idx = snippet.find("_restoreLastSelection()")
+    connect_ws_idx = snippet.find("connectWS()")
+    assert refresh_groups_idx < restore_idx
+    assert load_prefs_idx < restore_idx
+    assert restore_idx < connect_ws_idx
+
+
+def test_restore_silently_skips_missing_peer(index_html: str):
+    """If the last-selected peer is no longer paired (unpair from
+    another tab), the restore must not throw or toast."""
+    idx = index_html.find("function _restoreLastSelection()")
+    snippet = index_html[idx:idx + 1500]
+    assert "state.peers.has(last.id)" in snippet
+    assert "state.groups.has(last.id)" in snippet
