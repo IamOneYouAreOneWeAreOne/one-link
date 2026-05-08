@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>One Link — Peer</title>
+<link rel="icon" type="image/png" href="/static/one-glyph.png" />
+<link rel="apple-touch-icon" href="/static/one-glyph.png" />
+<link rel="manifest" href="/manifest.json" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="One Link" />
+<meta name="theme-color" content="#0b0d12" />
+<style>
+  /* ── Reset + tokens ─────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg-0:        #0b0d12;
+    --bg-1:        #11141b;
+    --bg-2:        #181c25;
+    --bg-3:        #232836;
+    --bg-elev:    #1c212d;
+    --line:       #232836;
+    --text:       #e8ecf2;
+    --text-dim:   #8a93a6;
+    --text-dimmer:#5e6577;
+    --accent:     #7c5cff;
+    --accent-2:   #4ec1ff;
+    --good:       #46d39a;
+    --warn:       #f5c451;
+    --bad:        #ff6b6b;
+  }
+  html, body {
+    height: 100%;
+    background: var(--bg-0);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+                 Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    min-height: 100dvh;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+
+  header {
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  header .glyph {
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 2px 8px rgba(124,92,255,.35);
+  }
+  header h1 { font-size: 16px; font-weight: 600; letter-spacing: .2px; }
+  header .tag {
+    margin-left: auto;
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 3px 10px;
+  }
+
+  main {
+    flex: 1 1 auto;
+    padding: 20px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    max-width: 600px;
+    width: 100%;
+    margin: 0 auto;
+  }
+  .card {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px 18px;
+  }
+  .card h2 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    margin-bottom: 10px;
+  }
+  .card .body {
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--bg-3);
+    padding: 8px 10px;
+    border-radius: 6px;
+    word-break: break-all;
+    user-select: all;
+  }
+  .mono.dim { color: var(--text-dim); }
+
+  .row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .pill {
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+  }
+  .pill.good { background: rgba(70,211,154,.16); color: var(--good); }
+  .pill.warn { background: rgba(245,196,81,.16); color: var(--warn); }
+  .pill.bad  { background: rgba(255,107,107,.16); color: var(--bad); }
+  .pill.dim  { background: var(--bg-3); color: var(--text-dim); }
+
+  .btn {
+    background: var(--accent);
+    color: white;
+    border: 0;
+    border-radius: 10px;
+    padding: 10px 16px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    min-height: 44px;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .btn:active { transform: scale(0.98); }
+  .btn.danger { background: transparent; color: var(--bad); border: 1px solid var(--bad); }
+  .btn.ghost  { background: transparent; color: var(--text); border: 1px solid var(--line); }
+
+  .help {
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  footer {
+    padding: 14px 18px;
+    text-align: center;
+    color: var(--text-dimmer);
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="glyph"></div>
+  <h1>One Link</h1>
+  <span class="tag" id="mode-tag">peer mode</span>
+</header>
+
+<main>
+  <div class="card" id="identity-card">
+    <h2>This device</h2>
+    <div class="body">
+      <p class="help" id="ident-status">Loading identity…</p>
+      <div class="row" style="margin-top:10px;">
+        <span class="pill dim" id="ident-state">starting</span>
+      </div>
+      <div style="margin-top:14px;" id="ident-fp-wrap" hidden>
+        <p class="help" style="margin-bottom:6px;">Fingerprint</p>
+        <div class="mono" id="ident-fp"></div>
+      </div>
+      <div style="margin-top:12px;" id="ident-pub-wrap" hidden>
+        <p class="help" style="margin-bottom:6px;">Public key</p>
+        <div class="mono dim" id="ident-pub"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="status-card">
+    <h2>What this is</h2>
+    <div class="body">
+      <p class="help">
+        This is a browser-as-peer One Link node. Your identity lives
+        in OPFS (origin-private storage); no daemon, no account, no
+        cloud. It's separate from the desktop daemon you may also be
+        running — both are independent peers that can connect to
+        each other once you pair them.
+      </p>
+      <p class="help" style="margin-top:8px;">
+        Networking, pairing, chat, and file transfer arrive in
+        subsequent ships. v0.16.0 only provisions identity.
+      </p>
+    </div>
+  </div>
+
+  <div class="card" id="actions-card" hidden>
+    <h2>Identity actions</h2>
+    <div class="body">
+      <div class="row">
+        <button class="btn ghost" id="btn-export">Export identity</button>
+        <button class="btn danger" id="btn-reset" type="button">Reset identity</button>
+      </div>
+      <p class="help" style="margin-top:10px;">
+        Reset wipes this device's identity from OPFS. After reset,
+        next reload generates a fresh keypair. You can't recover an
+        old identity from a new one — back it up first via Export
+        if you care about message continuity.
+      </p>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <span id="diag" class="mono dim" style="background:transparent;padding:0;"></span>
+</footer>
+
+<script>
+(() => {
+  "use strict";
+
+  // ── tiny DOM helpers ─────────────────────────────────────────────────
+  const $ = (sel) => document.querySelector(sel);
+  const text = (el, s) => { if (el) el.textContent = s; };
+  const show = (el) => { if (el) el.hidden = false; };
+  const hide = (el) => { if (el) el.hidden = true; };
+  const cls = (el, name, on) => { if (el) el.classList.toggle(name, !!on); };
+
+  function setPill(state, label) {
+    const p = $("#ident-state");
+    if (!p) return;
+    p.classList.remove("good", "warn", "bad", "dim");
+    p.classList.add(state);
+    p.textContent = label;
+  }
+
+  function setDiag(line) {
+    const d = $("#diag");
+    if (d) d.textContent = line;
+  }
+
+  // ── encoding helpers ────────────────────────────────────────────────
+  const HEX = "0123456789abcdef";
+  function bytesToHex(buf) {
+    const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    let out = "";
+    for (let i = 0; i < u8.length; i++) {
+      const b = u8[i];
+      out += HEX[b >> 4] + HEX[b & 0xf];
+    }
+    return out;
+  }
+  function bytesToB64Url(buf) {
+    const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    let bin = "";
+    for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+    return btoa(bin)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+  }
+  function b64UrlToBytes(s) {
+    const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = b64.length % 4 ? "=".repeat(4 - (b64.length % 4)) : "";
+    const bin = atob(b64 + pad);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8;
+  }
+
+  // ── fingerprint ─────────────────────────────────────────────────────
+  // BLAKE3 isn't in browsers natively. The desktop daemon uses BLAKE3
+  // for fingerprints; for browser-peer we tag the hash algorithm so a
+  // future ship can vendor a BLAKE3-WASM and produce daemon-compatible
+  // fingerprints. v0.16.0: SHA-256, prefixed `sha256:`.
+  async function fingerprintOf(pubBytes) {
+    const digest = await crypto.subtle.digest("SHA-256", pubBytes);
+    return "sha256:" + bytesToHex(digest);
+  }
+
+  // ── OPFS persistence ────────────────────────────────────────────────
+  // Identity layout (v0.16.0):
+  //   /identity/v1/keypair.json
+  //     {
+  //       "v": 1,
+  //       "alg": "Ed25519",
+  //       "created_ms": <int>,
+  //       "private_key_jwk": { ... },
+  //       "public_key_b64u": "<43 chars base64url>",
+  //       "fingerprint": "sha256:<hex>"
+  //     }
+  // Wrap-key encryption arrives in v0.16.1 (storage layer ship).
+  // For now the JWK is plain — same threat model as a desktop
+  // identity.key file in `~/.local/share/...`. OPFS is per-origin
+  // per-profile, not exfiltratable by a same-machine attacker
+  // without code execution as the same user.
+  const ID_DIR_NAME = "identity";
+  const ID_VERSION_DIR = "v1";
+  const ID_FILE = "keypair.json";
+
+  async function _opfsRoot() {
+    if (!navigator.storage || !navigator.storage.getDirectory) {
+      throw new Error("OPFS unavailable in this browser");
+    }
+    return navigator.storage.getDirectory();
+  }
+
+  async function _identityDir(create = false) {
+    const root = await _opfsRoot();
+    const id = await root.getDirectoryHandle(ID_DIR_NAME, { create });
+    return id.getDirectoryHandle(ID_VERSION_DIR, { create });
+  }
+
+  async function readIdentity() {
+    let dir;
+    try {
+      dir = await _identityDir(false);
+    } catch (e) {
+      return null;
+    }
+    let fileHandle;
+    try {
+      fileHandle = await dir.getFileHandle(ID_FILE, { create: false });
+    } catch (e) {
+      return null;
+    }
+    const file = await fileHandle.getFile();
+    const text = await file.text();
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function writeIdentity(rec) {
+    const dir = await _identityDir(true);
+    const fileHandle = await dir.getFileHandle(ID_FILE, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(JSON.stringify(rec));
+    await writable.close();
+  }
+
+  async function deleteIdentity() {
+    const root = await _opfsRoot();
+    let dir;
+    try {
+      dir = await root.getDirectoryHandle(ID_DIR_NAME, { create: false });
+    } catch (e) {
+      return; // already gone
+    }
+    // Recursively remove the whole identity tree.
+    await root.removeEntry(ID_DIR_NAME, { recursive: true });
+  }
+
+  // ── identity generation ─────────────────────────────────────────────
+  async function generateIdentity() {
+    // Web Crypto Ed25519 has been baseline in Chrome 113+/Safari 17+/
+    // Firefox 130+. Production deployment targets must match.
+    const kp = await crypto.subtle.generateKey(
+      { name: "Ed25519" },
+      /*extractable=*/true,
+      ["sign", "verify"],
+    );
+    const publicSpki = await crypto.subtle.exportKey("raw", kp.publicKey).catch(() => null)
+      || await crypto.subtle.exportKey("spki", kp.publicKey);
+    // Ed25519 public is 32 bytes raw; SPKI wraps it in ASN.1. Try
+    // raw first (newer browsers); fall back to extracting the
+    // 32-byte tail from the 44-byte SPKI prefix.
+    const pubBytes = (publicSpki.byteLength === 32)
+      ? new Uint8Array(publicSpki)
+      : new Uint8Array(publicSpki).slice(-32);
+    const privateJwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
+    const fp = await fingerprintOf(pubBytes);
+    const rec = {
+      v: 1,
+      alg: "Ed25519",
+      created_ms: Date.now(),
+      private_key_jwk: privateJwk,
+      public_key_b64u: bytesToB64Url(pubBytes),
+      fingerprint: fp,
+    };
+    return rec;
+  }
+
+  // ── boot ────────────────────────────────────────────────────────────
+  async function boot() {
+    // Quick-fail UX: detect missing platform features early so the
+    // user gets a clear message instead of a JS console error.
+    if (!window.crypto || !crypto.subtle) {
+      setPill("bad", "no web crypto");
+      text($("#ident-status"), "This browser doesn't expose Web Crypto. Try Chrome, Edge, Safari 17+, or Firefox 130+.");
+      return;
+    }
+    if (!navigator.storage || !navigator.storage.getDirectory) {
+      setPill("bad", "no opfs");
+      text($("#ident-status"),
+        "This browser doesn't expose OPFS. Identity needs persistent storage. Try Chrome 86+, Edge 86+, Safari 15.2+, or Firefox 111+.");
+      return;
+    }
+
+    setDiag("checking opfs identity…");
+    let rec = null;
+    try {
+      rec = await readIdentity();
+    } catch (e) {
+      setDiag(`opfs read failed: ${e && e.message ? e.message : e}`);
+    }
+
+    if (rec && rec.fingerprint && rec.public_key_b64u) {
+      setPill("good", "ready");
+      text($("#ident-status"), "Identity loaded from OPFS.");
+      text($("#ident-fp"), rec.fingerprint);
+      text($("#ident-pub"), rec.public_key_b64u);
+      show($("#ident-fp-wrap"));
+      show($("#ident-pub-wrap"));
+      show($("#actions-card"));
+      setDiag(`opfs:identity/v1/keypair.json · created ${new Date(rec.created_ms).toLocaleString()}`);
+      return;
+    }
+
+    setPill("warn", "generating");
+    text($("#ident-status"), "Generating a fresh keypair…");
+    setDiag("calling crypto.subtle.generateKey…");
+    try {
+      rec = await generateIdentity();
+    } catch (e) {
+      setPill("bad", "keygen failed");
+      text($("#ident-status"),
+        `Couldn't generate a keypair: ${e && e.message ? e.message : e}. ` +
+        "Ed25519 needs Chrome 113+/Safari 17+/Firefox 130+.");
+      return;
+    }
+    setDiag("writing identity to OPFS…");
+    try {
+      await writeIdentity(rec);
+    } catch (e) {
+      setPill("bad", "opfs write failed");
+      text($("#ident-status"),
+        `Generated keypair but couldn't persist: ${e && e.message ? e.message : e}. ` +
+        "Identity won't survive a refresh.");
+      // Still show the generated values so the user can copy them.
+    }
+    setPill("good", "ready");
+    text($("#ident-status"), "Generated a fresh identity. Stored in OPFS.");
+    text($("#ident-fp"), rec.fingerprint);
+    text($("#ident-pub"), rec.public_key_b64u);
+    show($("#ident-fp-wrap"));
+    show($("#ident-pub-wrap"));
+    show($("#actions-card"));
+    setDiag(`opfs:identity/v1/keypair.json · just created`);
+  }
+
+  // ── reset / export wiring ───────────────────────────────────────────
+  $("#btn-reset")?.addEventListener("click", async () => {
+    if (!confirm(
+      "Reset this device's identity? You'll lose access to anything paired " +
+      "with the current keypair. There's no undo."
+    )) return;
+    try {
+      await deleteIdentity();
+    } catch (e) {
+      alert(`Couldn't delete identity: ${e && e.message ? e.message : e}`);
+      return;
+    }
+    location.reload();
+  });
+  $("#btn-export")?.addEventListener("click", async () => {
+    let rec;
+    try {
+      rec = await readIdentity();
+    } catch (e) {
+      alert(`Couldn't read identity: ${e && e.message ? e.message : e}`);
+      return;
+    }
+    if (!rec) {
+      alert("No identity to export.");
+      return;
+    }
+    const blob = new Blob(
+      [JSON.stringify(rec, null, 2)],
+      { type: "application/json" },
+    );
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `one-link-identity-${rec.fingerprint.slice(7, 19)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  });
+
+  // Expose internals for tests + future-ship reuse. Keep the surface
+  // tight — only readers / observers, no setters.
+  window.__oneLinkPeer = {
+    version: "0.16.0",
+    bytesToHex,
+    bytesToB64Url,
+    b64UrlToBytes,
+    fingerprintOf,
+    readIdentity,
+    writeIdentity,
+    deleteIdentity,
+    generateIdentity,
+  };
+
+  boot();
+})();
+</script>
+
+</body>
+</html>

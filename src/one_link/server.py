@@ -579,6 +579,12 @@ class UIServer:
         # behavior. Like sw.js, served unauthenticated because it
         # contains zero PII (just the app's display chrome).
         r.add_get("/manifest.json", self._manifest)
+        # v0.16.0: browser-as-peer shell. Unauthenticated route —
+        # the page authenticates itself via its own keypair (held
+        # in OPFS), not the daemon's UI token. From this page the
+        # browser is its own peer; the daemon is unrelated.
+        r.add_get("/peer", self._peer_shell)
+        r.add_get("/peer/", self._peer_shell)
         # v0.15.4: connect-info + QR for the phone-pairing flow.
         # Both auth-gated — they expose the LAN URL with the token.
         r.add_get("/api/connect-info", self._guarded(self.api_connect_info))
@@ -785,6 +791,41 @@ class UIServer:
             return web.Response(status=404, text="manifest not bundled")
         body = mf.read_text(encoding="utf-8")
         resp = web.Response(text=body, content_type="application/manifest+json")
+        resp.headers["Cache-Control"] = "max-age=3600"
+        return resp
+
+    async def _peer_shell(self, request: web.Request) -> web.StreamResponse:
+        """v0.16.0: browser-as-peer shell. Serves peer.html which is a
+        self-contained page: the browser is its own One Link node with
+        its own identity stored in OPFS, not the daemon's UI proxy.
+
+        Unauthenticated by design. The page authenticates itself via
+        its own keypair to other peers via WebRTC + rendezvous; the
+        daemon's UI token is irrelevant here. The page can be served
+        from any host (a phone PWA cache, a static mirror, the user's
+        laptop) and the browser-peer logic is identical."""
+        peer = WEB_DIR / "peer.html"
+        if not peer.is_file():
+            return web.Response(status=404, text="peer shell not bundled")
+        body = peer.read_text(encoding="utf-8")
+        resp = web.Response(text=body, content_type="text/html")
+        # Tight CSP for the peer shell. We allow only same-origin
+        # scripts (the browser-peer logic is bundled inline below; no
+        # third-party JS), inline styles (CSS lives in the same
+        # document), and connections to wss/https (rendezvous +
+        # WebRTC signaling). data: images are needed for QR rendering.
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "connect-src 'self' wss: https:; "
+            "frame-ancestors 'none'"
+        )
+        # The peer page contains no PII per se — it's a shell that
+        # builds identity client-side — so caching the HTML for an
+        # hour is fine. The IDENTITY itself lives in OPFS, not the
+        # HTML, so a stale shell is just stale code, not stale auth.
         resp.headers["Cache-Control"] = "max-age=3600"
         return resp
 
