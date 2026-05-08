@@ -544,6 +544,14 @@ class Daemon:
         self.ui_server = None  # one_link.server.UIServer | None
         self.state: State | None = None
         self.pairing = PairingTracker()
+        # v0.12.0: bandwidth pacer + auto-accept rules cache. Both
+        # consume settings; refresh_settings_cache() pulls the
+        # latest values and is invoked from /api/settings POST so
+        # changes apply live without a daemon restart.
+        from one_link.pacing import BandwidthPacer
+        self.bandwidth_pacer = BandwidthPacer(cap_kbps=0)
+        self._auto_accept_max_size_bytes: int = 0  # 0 = no limit
+        self._auto_accept_extensions: set[str] = set()  # empty = no filter
         self._prune_task: asyncio.Task | None = None
         self._dm_reaper_task: asyncio.Task | None = None
         self._prior_index_task: asyncio.Task | None = None
@@ -988,6 +996,60 @@ class Daemon:
                     "info":  _logging.INFO,  "debug": _logging.DEBUG,
                 }
                 _logging.getLogger("one_link").setLevel(level_map[level])
+        # v0.12.0: bandwidth + auto-accept cache.
+        self.refresh_runtime_settings()
+
+    def refresh_runtime_settings(self) -> None:
+        """v0.12.0: re-read settings that the daemon caches in
+        memory for hot-path use. Called at boot AND from
+        UIServer.api_set_settings after the user saves, so changes
+        apply live without a restart.
+
+        Currently caches:
+          - bandwidth_cap_kbps  (drives self.bandwidth_pacer)
+          - auto_accept_max_size_mb
+          - auto_accept_extensions
+        """
+        if self.state is None:
+            return
+        with contextlib.suppress(Exception):
+            raw = self.state.get_setting("bandwidth_cap_kbps")
+            cap = 0
+            if raw:
+                try:
+                    cap = int(raw)
+                except (TypeError, ValueError):
+                    cap = 0
+            self.bandwidth_pacer.set_cap(max(0, cap))
+        with contextlib.suppress(Exception):
+            raw = self.state.get_setting("auto_accept_max_size_mb")
+            mb = 0
+            if raw:
+                try:
+                    mb = int(raw)
+                except (TypeError, ValueError):
+                    mb = 0
+            self._auto_accept_max_size_bytes = max(0, mb) * 1024 * 1024
+        with contextlib.suppress(Exception):
+            raw = self.state.get_setting("auto_accept_extensions") or ""
+            self._auto_accept_extensions = {
+                e.strip().lstrip(".").lower()
+                for e in raw.split(",") if e.strip()
+            }
+
+    def _file_passes_auto_accept(self, *, name: str, size: int) -> tuple[bool, str]:
+        """v0.12.0: check the inbound file against the user's
+        auto-accept rules. Returns (ok, reason). ok=False blocks
+        the offer with the reason surfaced to the sender."""
+        if self._auto_accept_max_size_bytes > 0 and size > self._auto_accept_max_size_bytes:
+            return False, "exceeds_max_size"
+        if self._auto_accept_extensions:
+            ext = ""
+            if "." in name:
+                ext = name.rsplit(".", 1)[1].lower()
+            if ext not in self._auto_accept_extensions:
+                return False, "extension_blocked"
+        return True, ""
 
     def _on_folder_conflict(self, folder_name: str, conflict_id: int) -> None:
         """v0.8.9: invoked from foldersync.FolderEngine when a CRDT-
@@ -1495,6 +1557,22 @@ class Daemon:
             name = Path(str(msg["name"])).name
             if not name or name in (".", ".."):
                 name = "unnamed.bin"
+            # v0.12.0: auto-accept rules. If the user has configured
+            # a max size or extension allowlist and this file fails
+            # them, ACK with the rejection reason and don't open a
+            # write handle. The sender sees the rejection and the
+            # user can loosen their filter to retry.
+            passed, reason = self._file_passes_auto_accept(name=name, size=size)
+            if not passed:
+                log.info(
+                    "auto-accept reject: %s (%d bytes) reason=%s",
+                    name, size, reason,
+                )
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg["id"],
+                    rejected=f"auto_accept_{reason}",
+                )))
+                return
             cdc_chunks = self._normalize_cdc_chunks(msg.get("chunks"), declared_size=size)
             out_path = inbox_dir() / f"{blob[:8]}_{name}"
             handle = open(out_path, "wb")
@@ -6769,6 +6847,9 @@ class Daemon:
                             if not data:
                                 break
                             eof = f.tell() >= size
+                            # v0.12.0: pace before send. No-op when
+                            # the user hasn't set a bandwidth cap.
+                            await self.bandwidth_pacer.pace(len(data))
                             if binary_stream_used:
                                 chunk_msg = make_msg(
                                     "FILE_BIN_CHUNK",

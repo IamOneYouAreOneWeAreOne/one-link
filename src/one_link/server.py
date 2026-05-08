@@ -1074,6 +1074,12 @@ class UIServer:
                 )
             else:
                 self.daemon.state.delete_setting("auto_accept_extensions")
+        # v0.12.0: refresh the daemon's in-memory cache of settings
+        # that affect hot paths (bandwidth pacer + auto-accept
+        # rules). Cheap; runs once per save.
+        with contextlib.suppress(Exception):
+            if hasattr(self.daemon, "refresh_runtime_settings"):
+                self.daemon.refresh_runtime_settings()
         return web.json_response({"ok": True})
 
     # ─── /api/peers ───────────────────────────────────────────────────
