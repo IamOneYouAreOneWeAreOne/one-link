@@ -187,6 +187,7 @@ losing or having someone else read if your device were compromised.
 pip install -e .[dev]
 python -m pytest tests/ --ignore=tests/smoke_loopback.py -v
 python scripts/build_binary.py     # produces dist/one-link[.exe]
+python scripts/build_native_cdc.py # optional: prebuild the native CDC scanner
 python scripts/bench_transfer_primitives.py
 python scripts/perf_lab.py --scale quick
 ```
@@ -213,6 +214,10 @@ torture simulator, SQLite transfer ledger pressure, compression throughput,
 and the adaptive transfer brain. The transfer brain is the local Coherence
 planner that decides when a file should use the simple fast lane, CDC, or
 swarm CDC based on measured route health and prior knowledge.
+
+One Link can use a bundled native CDC scanner for prior-knowledge transfers.
+When present, the perf lab reports `engine=ctypes-c`; otherwise it falls back
+to the pure-Python scanner with the same chunk hashes and wire format.
 
 ### Running multiple daemons on one machine
 

@@ -122,6 +122,20 @@ def whoami():
     click.echo(f"fingerprint: {me.fingerprint}")
 
 
+@cli.command("native-status")
+def native_status():
+    """Show whether the native transfer accelerator is active."""
+    from one_link.native_cdc import native_cdc_status
+
+    st = native_cdc_status()
+    click.echo(f"native_cdc: {'yes' if st.available else 'no'}")
+    click.echo(f"engine:     {st.engine}")
+    if st.library:
+        click.echo(f"library:    {st.library}")
+    if st.reason:
+        click.echo(f"reason:     {st.reason}")
+
+
 @cli.command()
 def peers():
     """List discovered peers on the LAN."""

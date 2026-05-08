@@ -55,10 +55,22 @@ def main() -> int:
     if spec.exists():
         spec.unlink()
 
+    native_build = subprocess.run(
+        [sys.executable, str(repo / "scripts" / "build_native_cdc.py")],
+        cwd=repo,
+    )
+    if native_build.returncode != 0:
+        print(f"[build] native CDC build failed: exit {native_build.returncode}")
+        return native_build.returncode
+
     # PyInstaller's --add-data uses ';' on Windows, ':' elsewhere.
     sep = ";" if platform.system() == "Windows" else ":"
     web_dir = repo / "src" / "one_link" / "web"
     add_data_web = f"{web_dir}{sep}one_link/web"
+    native_dir = repo / "src" / "one_link" / "native"
+    add_native: list[str] = []
+    if native_dir.is_dir() and any(p.is_file() for p in native_dir.rglob("*")):
+        add_native = ["--add-binary", f"{native_dir}{sep}one_link/native"]
 
     icon_arg: list[str] = []
     if platform.system() == "Windows":
@@ -91,6 +103,7 @@ def main() -> int:
         # Bundle the web UI (HTML/CSS/JS/assets) into the exe:
         "--add-data",
         add_data_web,
+        *add_native,
         *icon_arg,
         # Entry point:
         str(entry),

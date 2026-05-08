@@ -28,6 +28,7 @@ build/
 dist/
 *.spec
 !one_link.spec  # checked-in PyInstaller spec, if any
+src/one_link/native/*/ol_native_cdc.c
 
 # Local runtime data (NEVER commit identity keys or message logs)
 *.key

@@ -15,7 +15,9 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import Iterable
 
@@ -186,6 +188,10 @@ def get_native_cdc_scanner() -> NativeCdcScanner | None:
 
 
 def _ensure_library() -> Path:
+    bundled = _bundled_library()
+    if bundled is not None:
+        return bundled
+
     # Keep the native build cache space-free. MSYS GCC can hand paths with
     # spaces to internal tools poorly on Windows, which makes compilation fail
     # without useful stderr.
@@ -204,6 +210,38 @@ def _ensure_library() -> Path:
         raise RuntimeError("no C compiler found for native CDC")
     _compile(compiler, src, lib)
     return lib
+
+
+def native_library_name() -> str:
+    suffix = ".dll" if os.name == "nt" else ".dylib" if platform.system() == "Darwin" else ".so"
+    return f"ol_native_cdc{suffix}"
+
+
+def native_platform_tag() -> str:
+    system = platform.system().lower() or "unknown"
+    machine = platform.machine().lower().replace("amd64", "x86_64")
+    return f"{system}-{machine}"
+
+
+def _bundled_library() -> Path | None:
+    rel = Path("native") / native_platform_tag() / native_library_name()
+
+    # PyInstaller onefile extracts package data under sys._MEIPASS.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        p = Path(meipass) / "one_link" / rel
+        if p.is_file():
+            return p
+
+    try:
+        candidate = resources.files("one_link").joinpath(str(rel).replace("\\", "/"))
+        with resources.as_file(candidate) as p:
+            if p.is_file():
+                return p
+    except Exception:
+        pass
+
+    return None
 
 
 def _find_c_compiler() -> str | None:

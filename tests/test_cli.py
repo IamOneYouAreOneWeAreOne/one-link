@@ -41,6 +41,14 @@ def test_help_works():
     assert "send" in r.stdout
     assert "send-file" in r.stdout
     assert "peers" in r.stdout
+    assert "native-status" in r.stdout
+
+
+def test_native_status_works():
+    r = _cli("native-status")
+    assert r.returncode == 0
+    assert "native_cdc:" in r.stdout
+    assert "engine:" in r.stdout
 
 
 def test_whoami_creates_identity(tmp_path: Path):
