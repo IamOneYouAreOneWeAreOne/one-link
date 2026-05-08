@@ -1959,6 +1959,33 @@
     margin-top: 4px; letter-spacing: .2px;
   }
   .msg.out.file .transfer-detail { color: rgba(255,255,255,.78); }
+  .msg.file .transfer-facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 7px;
+    max-width: min(460px, 100%);
+  }
+  .msg.file .transfer-fact {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 3px 7px;
+    border-radius: 999px;
+    background: rgba(78,193,255,.10);
+    border: 1px solid rgba(78,193,255,.24);
+    color: var(--text-muted);
+    font-size: 10px;
+    line-height: 1.2;
+    font-weight: 700;
+    letter-spacing: 0;
+    white-space: nowrap;
+  }
+  .msg.out.file .transfer-fact {
+    background: rgba(255,255,255,.16);
+    border-color: rgba(255,255,255,.22);
+    color: rgba(255,255,255,.88);
+  }
   /* v0.8.9 folder-sync divergent-edit conflict banner + modal. */
   .conflicts-banner {
     display: flex; align-items: center; gap: 10px;
@@ -4567,6 +4594,11 @@
     if (!bps || bps < 1) return "—";
     return fmtBytes(bps) + "/s";
   };
+  const fmtMbps = (bytesPerSecond) => {
+    if (!bytesPerSecond || bytesPerSecond < 1) return "0 Mbps";
+    const mbps = (bytesPerSecond * 8) / 1_000_000;
+    return `${mbps >= 100 ? mbps.toFixed(0) : mbps >= 10 ? mbps.toFixed(1) : mbps.toFixed(2)} Mbps`;
+  };
   // v0.8.8: bytes-remaining ÷ bps → "12s" or "3m 04s".
   const fmtEta = (remainingBytes, bps) => {
     if (!bps || bps < 1 || remainingBytes <= 0) return "—";
@@ -5881,6 +5913,72 @@
     if (age > 3) return 0;
     return r.bps || 0;
   }
+  function transferRouteLabel(route) {
+    const r = String(route || "").toLowerCase();
+    if (r === "lan" || r === "wifi" || r === "wifi_direct") return "Wi-Fi direct";
+    if (r === "ethernet") return "Ethernet direct";
+    if (r === "relay" || r === "rendezvous") return "Relay";
+    if (r === "local_cache" || r === "known") return "Known chunks";
+    if (r) return r.replace(/_/g, " ");
+    return "Best available";
+  }
+  function transferAutopilotFacts(t, kind) {
+    if (!t) return [];
+    const meta = t.metadata || {};
+    const plan = meta.autopilot_plan || {};
+    const perf = meta.performance_summary || {};
+    const assist = meta.swarm_assist || {};
+    const facts = [];
+    const liveBps = rateForTransfer(t);
+    const doneBps = Number(perf.effective_mbps || 0) > 0
+      ? (Number(perf.effective_mbps) * 1_000_000) / 8
+      : 0;
+    const displayBps = liveBps > 0 ? liveBps : doneBps;
+    if (displayBps > 0) {
+      facts.push(`${kind === "sent" ? "Finished at" : "Sending at"} ${fmtMbps(displayBps)}`);
+    }
+
+    const progressBytes = Number(t.progress_bytes || 0);
+    const totalBytes = Number(t.total_bytes || 0);
+    const skippedBytes = Number(perf.skipped_bytes || meta.skipped_bytes || 0);
+    const savedBytes = Number(perf.saved_bytes || meta.saved_bytes || assist.assisted_bytes || 0);
+    let savings = Number(perf.bandwidth_savings_ratio || plan.estimated_savings_ratio || meta.bandwidth_savings_ratio || 0);
+    if (!savings && totalBytes > 0 && (skippedBytes > 0 || savedBytes > 0)) {
+      savings = Math.min(1, Math.max(0, (skippedBytes + savedBytes) / totalBytes));
+    }
+    if (savings > 0.01) {
+      facts.push(`${Math.round(savings * 100)}% already known`);
+      facts.push("Only sent missing pieces");
+    }
+
+    const frame = String(perf.frame_kind || plan.frame_kind || meta.frame_kind || "").toLowerCase();
+    if (frame.includes("binary") || meta.binary_frame === true) {
+      facts.push("Using fast binary path");
+    }
+    if (kind === "paused" || t.status === "queued" || meta.delivery_state === "resuming" || meta.transient) {
+      facts.push("Resuming automatically");
+    }
+    if (assist && Number(assist.pulled || 0) > 0) {
+      const pulled = Number(assist.pulled || 0);
+      const sourceCount = Number(assist.source_count || Object.keys(assist.sources || {}).length || 1);
+      facts.push(`Pulled ${pulled} chunk${pulled === 1 ? "" : "s"} from ${sourceCount} trusted device${sourceCount === 1 ? "" : "s"}`);
+    }
+    const route = perf.route || plan.route || meta.route || (assist.strategy === "multi_source_chunk_pull" ? "local_cache" : "");
+    if (route) facts.push(`Route: ${transferRouteLabel(route)}`);
+    if (progressBytes > 0 && totalBytes > 0 && progressBytes < totalBytes && kind !== "sent") {
+      facts.push("Resuming automatically");
+    }
+    return [...new Set(facts)].slice(0, 6);
+  }
+  function renderTransferFacts(t, kind) {
+    const facts = transferAutopilotFacts(t, kind);
+    if (!facts.length) return null;
+    const wrap = el("div", "transfer-facts");
+    for (const fact of facts) {
+      wrap.appendChild(el("span", "transfer-fact", fact));
+    }
+    return wrap;
+  }
   function aggregateActiveTransferStats() {
     let count = 0, bps = 0, sent = 0, total = 0;
     for (const t of state.transfers) {
@@ -5912,10 +6010,10 @@
     const label = count === 1
       ? `Sending 1 file`
       : `Sending ${count} files`;
-    const rate = bps > 0 ? ` · ${fmtRate(bps)}` : "";
+    const rate = bps > 0 ? ` · ${fmtMbps(bps)}` : "";
     const pct = total > 0 ? ` · ${Math.round((sent / total) * 100)}%` : "";
     pill.appendChild(document.createTextNode(label + rate + pct));
-    pill.title = `${fmtBytes(sent)} of ${fmtBytes(total)} sent${bps > 0 ? ` at ${fmtRate(bps)}` : ""}. Click to open Files.`;
+    pill.title = `${fmtBytes(sent)} of ${fmtBytes(total)} sent${bps > 0 ? ` at ${fmtMbps(bps)}` : ""}. Click to open Files.`;
     pill.onclick = () => {
       // Switch to the Files pane → Sent tab.
       const filesBtn = document.querySelector('[data-pane="files"]');
@@ -6541,7 +6639,7 @@
       const parts = [
         `${fmtBytes(t.progress_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)}`,
       ];
-      if (bps > 0) parts.push(fmtRate(bps));
+      if (bps > 0) parts.push(`${fmtMbps(bps)} (${fmtRate(bps)})`);
       if (bps > 0 && remaining > 0) parts.push(`ETA ${fmtEta(remaining, bps)}`);
       detail.textContent = parts.join(" · ");
       meta.appendChild(detail);
@@ -6551,6 +6649,8 @@
       detail.textContent = `${fmtBytes(t.progress_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)} · ${autoMsg}`;
       meta.appendChild(detail);
     }
+    const facts = renderTransferFacts(t, kind);
+    if (facts) meta.appendChild(facts);
 
     // Inline image preview for received images that are on disk
     const incomingPath = msg.path || (t?.metadata?.path);

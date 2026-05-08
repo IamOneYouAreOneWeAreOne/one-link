@@ -3020,11 +3020,26 @@ class Daemon:
         missing: set[int],
     ) -> tuple[set[int], dict]:
         """Try to satisfy inbound missing chunks from other trusted devices."""
+        missing_before = sorted(int(i) for i in missing)
         if not missing:
-            return missing, {"pulled": 0, "sources": {}}
+            return missing, {
+                "pulled": 0,
+                "sources": {},
+                "source_count": 0,
+                "missing_before": [],
+                "missing_after": [],
+                "strategy": "already_local",
+            }
         peers = self._trusted_chunk_source_peers(exclude_fp=sender_fp)
         if not peers:
-            return missing, {"pulled": 0, "sources": {}}
+            return missing, {
+                "pulled": 0,
+                "sources": {},
+                "source_count": 0,
+                "missing_before": missing_before,
+                "missing_after": missing_before,
+                "strategy": "sender_only",
+            }
         manifest = FileManifest(
             name=name,
             size=size,
@@ -3051,21 +3066,52 @@ class Daemon:
             )
         except Exception as e:
             log.debug("swarm assist skipped for %s: %s", blob[:8], e)
-            return missing, {"pulled": 0, "sources": {}, "error": str(e)[:200]}
+            return missing, {
+                "pulled": 0,
+                "sources": {},
+                "source_count": 0,
+                "missing_before": missing_before,
+                "missing_after": missing_before,
+                "strategy": "swarm_probe_failed",
+                "error": str(e)[:200],
+            }
         remaining = {
             int(c["index"])
             for c in cdc_chunks
             if int(c["index"]) in missing
             and not self._chunk_cache_path(str(c["hash"])).is_file()
         }
+        sources = dict(result.get("sources") or {})
+        source_bytes = dict(result.get("source_bytes") or {})
+        pulled = int(result.get("pulled") or 0)
+        missing_after = sorted(remaining)
+        source_count = len([fp for fp, count in sources.items() if int(count or 0) > 0])
+        saved_bytes = sum(
+            int(c["size"])
+            for c in cdc_chunks
+            if int(c["index"]) in set(missing_before) - set(missing_after)
+        )
         return remaining, {
-            "pulled": int(result.get("pulled") or 0),
+            "pulled": pulled,
             "retried": int(result.get("retried") or 0),
             "healed": int(result.get("healed") or 0),
-            "sources": dict(result.get("sources") or {}),
-            "source_bytes": dict(result.get("source_bytes") or {}),
+            "sources": sources,
+            "source_count": source_count,
+            "source_bytes": source_bytes,
+            "assisted_bytes": saved_bytes,
+            "assigned_bytes": int(result.get("assigned_bytes") or 0),
+            "missing_bytes": int(result.get("missing_bytes") or 0),
             "candidate_sources": dict(result.get("candidate_sources") or {}),
-            "missing_after": sorted(remaining),
+            "missing_before": missing_before,
+            "missing_after": missing_after,
+            "strategy": "multi_source_chunk_pull" if pulled else "sender_only",
+            "user_message": (
+                f"Pulled {pulled} missing chunk{'s' if pulled != 1 else ''} "
+                f"from {source_count} trusted device"
+                f"{'s' if source_count != 1 else ''}."
+                if pulled
+                else "No trusted device had the missing chunks yet."
+            ),
         }
 
     def _encode_payload(self, data: bytes, *, allow_compress: bool = True) -> tuple[str, bytes]:

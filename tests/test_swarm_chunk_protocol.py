@@ -417,5 +417,11 @@ async def test_inbound_file_offer_pulls_available_chunk_from_swarm_before_wants(
     assert reply["wants"] == [1]
     assert daemon._read_chunk_cache(hashes[0]) == pieces[0]
     assert row.metadata["swarm_assist"]["pulled"] == 1
+    assert row.metadata["swarm_assist"]["source_count"] == 1
+    assert row.metadata["swarm_assist"]["assisted_bytes"] == len(pieces[0])
+    assert row.metadata["swarm_assist"]["missing_before"] == [0, 1]
+    assert row.metadata["swarm_assist"]["missing_after"] == [1]
+    assert row.metadata["swarm_assist"]["strategy"] == "multi_source_chunk_pull"
+    assert "trusted device" in row.metadata["swarm_assist"]["user_message"]
     assert row.metadata["missing_chunks"] == 1
     state.close()

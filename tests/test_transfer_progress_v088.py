@@ -32,6 +32,7 @@ def test_rate_helper_present(index_html: str):
 
 def test_format_helpers_present(index_html: str):
     assert "const fmtRate" in index_html
+    assert "const fmtMbps" in index_html
     assert "const fmtEta" in index_html
 
 
@@ -82,6 +83,7 @@ def test_file_bubble_shows_rate_and_eta(index_html: str):
     snippet = index_html[start:start + 4000]
     assert "rateForTransfer(" in snippet
     assert "fmtRate(" in snippet
+    assert "fmtMbps(" in snippet
     assert "fmtEta(" in snippet
     assert "transfer-detail" in snippet
 
@@ -93,6 +95,21 @@ def test_paused_bubble_shows_resume_hint(index_html: str):
     assert start > 0
     snippet = index_html[start:start + 4000]
     assert "One Link will keep trying automatically" in snippet
+
+
+def test_file_bubble_surfaces_autopilot_truth(index_html: str):
+    start = index_html.find("function transferAutopilotFacts(")
+    assert start > 0
+    snippet = index_html[start:start + 4200]
+    assert "Sending at" in snippet
+    assert "already known" in snippet
+    assert "Only sent missing pieces" in snippet
+    assert "Using fast binary path" in snippet
+    assert "Resuming automatically" in snippet
+    assert "trusted device" in snippet
+    assert "Route:" in snippet
+    assert "transfer-facts" in index_html
+    assert "renderTransferFacts(t, kind)" in index_html
 
 
 # ───────── aggregate pill surface ────────────────────────────────────
