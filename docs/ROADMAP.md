@@ -1,297 +1,246 @@
 # One Link Roadmap
 
-Status: living document. Updated as releases ship. Last updated: 2026-05-06.
+Status: living document. Updated as releases ship.
+Last updated: 2026-05-08.
 
-This is the post-v0.7.2 plan to take One Link from "entry level" to
-best-in-class P2P chat + file sync. Driven by the user audit that
-followed v0.7.2 (deny-by-default, outbox, sandbox, supply-chain,
-Double Ratchet primitive landed). The big picture: protocol is
-strong; UX is not yet matching the protocol's strength.
+This roadmap is gated by [`PRINCIPLES.md`](./PRINCIPLES.md). Every
+unfinished ship below has been (or will be) restated against the
+ship-gate checklist before code lands. Items that don't pass all
+four principles aren't on this list.
 
-Each version is a single ship-sized chunk: implementation + tests +
-docs + tag. Sequence is the proposed order; reorder freely.
-
----
-
-## Settings architecture (cross-cutting)
-
-The split that drives every UI change in this roadmap:
-
-**App-wide settings** (gear top-right of the chat surface):
-things about YOU, the daemon owner.
-
-  - Display name
-  - Identity export/import
-  - Default permission policy for new pairings
-    (deny-by-default vs permissive vs prompt)
-  - Rendezvous URLs, auto-accept LAN
-  - Desktop notifications (browser-level permission)
-  - Theme, language, default download folder
-  - Log verbosity, auto-update channel
-
-**Per-device settings** (gear/⋮ next to each device row, OR
-a click on the conversation header device card): things about
-THAT one paired device.
-
-  - Identity & trust: fingerprint (copyable), SAS code, key change
-    history, "verified in person" toggle
-  - Permissions: chat / files / folders / groups (moves out of
-    app settings entirely)
-  - Reachability: live regime (LAN/internet/relay/offline),
-    latency (EWMA), last-alive, advertised endpoints list
-  - Display: custom name override, color/avatar, custom alert sound
-  - Notifications: per-device mute, do-not-disturb hours
-  - Activity: messages/files exchanged, audit log, link to history
-  - Trust actions: unpair, block, force-rekey
-
-**Per-conversation settings** (becomes meaningful when groups
-land): retention policy, member list, custom theme, mute.
+The reorganization from earlier roadmaps groups remaining work
+under three tracks instead of tiers. Tiers were "what the protocol
+needs"; tracks are "what the user gets." North stars steer the
+tracks; the four principles gate every ship.
 
 ---
 
-## Tier 1 — chat fundamentals every modern chat app has
+## What's already shipped (post-Tier audit, 2026-05-08)
 
-These are non-negotiable for a chat product to feel competent.
-Most are backwards-compatible wire additions (new message kinds
-or fields older peers ignore).
+The original Tier 1–3 plan from the v0.7.2 audit is essentially
+complete. Tier 4 is barely started.
 
-  - **v0.7.3 — Per-device drawer + settings split.** Move per-
-    device controls (Allow toggles, mute, custom name, view SAS,
-    unpair) into a dedicated drawer keyed by peer fingerprint.
-    Global settings keeps only app-wide concerns. Closes the
-    "Allow row clutters the chat header" frustration permanently.
+**Tier 1 — chat fundamentals: ✅ COMPLETE**
+- v0.7.3 per-device drawer + settings split
+- v0.7.4 transfer resume-on-reconnect
+- v0.7.5 reply / quote + reactions
+- v0.7.6 edit / delete + read receipts
+- v0.12.3 typing indicators (with privacy controls)
 
-  - **v0.7.4 — Resume-on-reconnect for transfers.** A WinError
-    10053 mid-transfer (or any network drop) shouldn't lose work.
-    Ledger already tracks chunks_done; add wire-protocol resume
-    + UI "paused — will resume" status pill. Auto-resume when
-    peer reconnects.
+**Tier 2 — security UX: ✅ COMPLETE**
+- v0.7.7 verified-in-person checkmark
+- v0.7.8 key-change warnings
+- v0.7.9 multi-modal SAS (digits + audio + visual art)
+- v0.8.0 group UI
 
-  - **v0.7.5 — Reply / quote + reactions.** Wire: message has
-    optional `reply_to: msg_id` field; reactions are a new
-    `REACTION` frame `{target_msg_id, emoji, op: add|remove}`.
-    UI: right-click → reply, hover → react. Threaded view shows
-    inline quote.
+**Tier 3 — P2P/file features: 4 of 6**
+- ✅ v0.8.1 live transfer progress
+- ✅ v0.8.2 folder sync conflict UI
+- ❌ v0.8.3 multi-path send (still open)
+- ✅ v0.8.4 voice messages
+- ✅ v0.8.5 inline previews
+- ❌ v0.8.6 large file streaming (still open)
 
-  - **v0.7.6 — Edit / delete + read receipts + typing.** Wire:
-    new `EDIT_MSG`, `DELETE_MSG`, `READ_MARKER`, `TYPING_START`
-    /`TYPING_STOP` frames. UI: edit / delete from message context
-    menu (with a 5-min cooldown after which edits are blocked);
-    optional read-receipts (per-device toggle); subtle "typing…"
-    indicator under conversation name.
+**Cross-cutting: all done**
+- ✅ Onboarding wizard (v0.9.4)
+- ✅ Global search / command palette (v0.9.3)
+- ✅ Activity feed (v0.9.1)
 
----
+**Tier 4 — platform reach: barely started**
+- ❌ v0.9.0 mobile-responsive web UI — was the planned target;
+  v0.9.x ship slots got spent on settings polish + activity feed
+  + voice + onboarding instead. Documenting honestly: this slot
+  did not get spent on mobile.
+- 🟡 System tray (✅ shipped in v0.10.5) but global hotkey ❌.
+- ❌ Multi-device-per-identity (originally v1.0.0)
+- ❌ Native iOS/Android apps
+- ❌ Voice/video calls
 
-## Tier 2 — security UX that matches the protocol's strength
+**Beyond the original roadmap (v0.10.x – v0.13.x):**
+A parallel UX track shipped Settings overhaul (v0.11.0 – v0.11.6),
+disappearing messages, presence, multi-select+forward, native
+folder picker, group sidebar polish, per-chat tools, storage
+controls, bandwidth cap enforcement, auto-accept filter, server-
+synced chat preferences, read-receipt + typing privacy controls,
+and the v0.13.x voice pass. Plus a parallel transfer-engine track
+from collaborator commits: transfer doctor, transfer brain, fast
+lanes, pipelined stream, binary lane.
 
-We have Double Ratchet, deny-by-default, sandbox, transcript
-binding. Users can't see any of it. These changes surface the
-crypto so trust decisions are obvious.
-
-  - **v0.7.7 — Verified-in-person checkmark.** ✓ Shipped (released
-    as package v0.8.3). Trust state remains `pinned`, but a separate
-    `verified_at_ms` / `verified_method` / `verified_note` triple is
-    set after the user confirms a side-channel SAS match. UI: green
-    ✓ overlay on the sidebar avatar, green "Verified" pill in the
-    conversation header, yellow "Verify in person" CTA before that.
-    Drawer section captures the audit trail. New endpoints: `POST
-    /api/peers/{fp}/verify` + `DELETE /api/peers/{fp}/verify`. Schema
-    migration v8.
-
-  - **v0.7.8 — Key-change warning.** ✓ Shipped (released as
-    package v0.8.4). state.py tracks every (hostname, ed_pub_hex)
-    pair ever observed in `hostname_keys`; whenever a hostname
-    rotates pubkeys, an entry is appended to `key_change_events`
-    with severity = high (old peer pinned) / medium (pending)
-    / low (never persisted). Detection runs inside upsert_peer so
-    every code path (handshake, discovery, snapshot) is covered.
-    UI: red ⚠ overlay on the sidebar avatar (overrides the green
-    ✓), red banner under the conversation header with severity
-    pill + Acknowledge action, full audit list in the device
-    drawer's "Key change detected" section. Endpoints: GET
-    `/api/key-change-events`, POST
-    `/api/key-change-events/{id}/ack`, POST
-    `/api/peers/{fp}/key-change-events/ack-all`, GET
-    `/api/peers/{fp}/key-history`. Schema migration v9.
-
-  - **v0.7.9 — Multi-modal SAS verification.** ✓ Shipped (released
-    as package v0.8.5). Audio readback (SpeechSynthesis API spells
-    each digit, "zero four three, one nine two") for phone-call
-    confirmation. Visual SAS art (deterministic 6-cell emoji + color
-    grid derived from the SAS digits) for face-to-face glance
-    confirmation, similar in spirit to SSH host-key randomart and
-    Threema's emoji codes. Both rendered alongside the canonical 6
-    digits in the pair modal AND device drawer; either side can
-    derive them locally — no extra wire data. Webcam QR scanning
-    is intentionally deferred (heavy vendored library, narrow win
-    over multi-modal already covered).
-
-  - **v0.8.0 — Group UI** (depends on v0.7.5/.6 chat features).
-    Wire all the existing v0.6.x group protocol into the UI:
-    create group, member list, invite-by-link, leave group.
-    Group chat reuses the chat fundamentals from .5/.6.
+The honest take from the project audit: **architecturally One
+Link lives the mission, but its reach (who can actually use it
+right now) doesn't match the name.** That's what the three tracks
+below are for.
 
 ---
 
-## Tier 3 — P2P/file features that beat AirDrop and Syncthing
+## The three tracks ahead
 
-Pure capability advantages over centralized chat. Each one closes
-a specific competitive gap.
+Every remaining roadmap item maps onto one of these. Each track
+gets steered by a different principle.
 
-  - **v0.8.1 — Live bandwidth + transfer progress in chat.** ✓
-    Shipped (released as package v0.8.8). Client-side EWMA
-    (alpha=0.4) rate tracker computes bytes/sec from delta
-    progress_bytes across `transfer` WS events — no extra wire
-    data. Each in-flight FILE_OFFER bubble shows live bytes / total
-    + B/s + ETA. Conversation header gains an aggregate
-    "Sending N files · 14 MB/s · 47%" pill that ticks once per
-    second so a stalled transfer's stale rate fades. Click pill
-    → opens Files → Sent. Rate cache resets on terminal status
-    so retries start clean; rate decays to 0 after >3s of no
-    events so frozen transfers don't show ghost rates.
+### Track A — Reach
 
-  - **v0.8.2 — Folder sync conflict UI.** ✓ Shipped (released as
-    package v0.8.9). When the manifest CRDT detects a divergent
-    edit (concurrent vclocks + different blob_hashes), state.py
-    logs both versions to a new `manifest_conflicts` table BEFORE
-    the merge tie-breaks. Server endpoints surface the unresolved
-    list + a per-conflict resolve handler that supports
-    mine | theirs | both. The 'both' choice keeps mine in place
-    AND writes the peer's version under
-    `<name>.conflict-<peer-shortfp>.<ext>` so nothing is lost.
-    UI: yellow Conflicts banner above the Folders list shows the
-    count + opens a side-by-side dialog with Auto-applied tag,
-    blob/size/mtime/peer per side, and Keep mine / Keep theirs /
-    Keep both buttons. Live `folder_conflict_detected` WS event
-    broadcasts toast + banner refresh. Schema migration v10.
+> Principle 1 (Reach over polish): who can use One Link this week
+> who couldn't last week?
 
-  - **v0.8.3 — Multi-path send.** When LAN + internet both
-    reachable, send chunks in parallel over both, fastest path
-    wins per chunk. CDC dedup makes this nearly free.
+The track that turns "We Are One" from aspiration to fact. Every
+ship in this track expands the user base meaningfully.
 
-  - **v0.8.4 — Voice messages.** ✓ Shipped (released as package
-    v0.9.2). MediaRecorder captures opus (webm/ogg fallback chain
-    by browser support) → uploads via existing /api/send-file
-    pipeline → receiver's chat bubble auto-renders an inline
-    audio player. Mic button in composer + Ctrl+Shift+M shortcut.
-    Recording overlay slides in with live timer + Cancel + Send;
-    5-min hard cap, sub-1 KB blobs discarded as misclicks. mic
-    stream tracks explicitly stopped on rec.onstop so OS-level
-    indicator turns off. No schema, no new endpoint.
+Ordered by leverage:
 
-  - **v0.8.5 — Inline previews for PDFs / markdown / code.** ✓
-    Fully shipped. Markdown + code + plain-text in v0.9.0; PDFs
-    completed in v0.9.5 by leaning on the browser's native PDF
-    viewer through a sandboxed `<iframe src=/api/files/{name}>` —
-    zero vendored bytes. Server returns metadata-only for PDFs
-    so a 100 MB file doesn't OOM. iframe is lazy-loaded + a
-    fallback "Open PDF in new tab" anchor renders below for
-    browsers without native PDF support. Markdown gets a real
-    subset renderer (ATX headings, paragraphs, fenced code,
-    blockquotes, ordered + unordered lists, horizontal rules,
-    plus inline bold/italic/code/autolinks). Code gets a
-    line-numbered monospace block. Plain text wraps in a pre.
-    Server endpoint GET /api/files/{name}/preview enforces a
-    50-extension whitelist + 256 KB cap with utf-8/latin-1
-    fallback decode. Per-bubble Show preview toggle in chat;
-    cached on the message so re-opening doesn't re-fetch.
+1. **Mobile-responsive web UI** (the v0.9.0 that never landed).
+   Frontier engine: sub-100ms input latency on a 5-year-old
+   phone, frame-budget regression tests, predictive prefetch of
+   the next likely conversation, layout that adapts to thumb
+   reach. Surface: phone tab Just Works.
 
-  - **v0.8.6 — Large file streaming.** Don't materialize the
-    full file before playback; stream chunks to a video/audio
-    element as they arrive. Especially for voice messages and
-    forwarded video.
+2. **Plain-language pass on every remaining surface.**
+   Continuation of v0.13.x. Audit every modal, error, tooltip,
+   help string. Frontier: zero jargon left for any non-technical
+   first-time user; confirmed via a literal "show this to a
+   non-technical person" test before merge.
+
+3. **First-run experience that presumes zero technical knowledge.**
+   Replace the existing onboarding wizard with one that pairs
+   the user's first device for them via a QR-style hand-off and
+   doesn't say the words "fingerprint," "rendezvous," or "SAS"
+   before the user is paired and chatting.
+
+4. **Native iOS and Android apps.** After mobile-web. Use mobile-
+   web as a forcing function; the mobile UI is the iOS UI's
+   layout spec. Background-service constraints on mobile are the
+   real frontier here.
+
+### Track B — Connection
+
+> Principle 3 (Async by default): does this work when one side is
+> offline, asleep, on a plane, or on the move?
+
+The track that turns "Everything is connected" from "if both
+sides are online" into "always." Every ship in this track
+removes a presence-required precondition.
+
+Ordered by leverage:
+
+1. **Multi-device-per-identity (the v1.0.0 target).** Your phone,
+   laptop, and desktop are ONE identity to your friends, not
+   three contacts. Frontier: predictive cache so your phone has
+   tomorrow's reply pre-decoded before you wake up; learned
+   model of which device you'll open next; CRDT merge with
+   proofs of commutativity under partition + clock skew + edit
+   storms. Surface: peers see one of you. Your devices feel
+   instantly synchronized.
+
+2. **Async-first delivery enhancements.** Outbox stops being a
+   fallback and becomes the default path; the synchronous path
+   is the optimization. Frontier: a learned reachability model
+   per peer (when do they typically come online?) so messages
+   prefer paths that are about to be available. Surface: send a
+   message, it's delivered when it's possible to deliver. The
+   user never sees "still trying."
+
+3. **Multi-path send** (the orphaned Tier-3 v0.8.3). Send chunks
+   over LAN + internet + relay in parallel; fastest path wins
+   per chunk. Frontier: the path-allocator is a learned
+   bandit, not a heuristic; CDC dedup makes mistakes nearly free
+   so the bandit can be aggressive. Surface: large files
+   transfer faster than physics says they should.
+
+4. **Large file streaming** (the orphaned Tier-3 v0.8.6). Don't
+   materialize the full file before playback; stream chunks to a
+   media element as they arrive. Frontier: predictive chunk
+   prefetch driven by playback position + recent throughput;
+   adaptive bitrate when bandwidth degrades. Surface: voice
+   messages and forwarded video play instantly even on a slow
+   peer.
+
+5. **Rendezvous default-on, not advanced setting.** Currently
+   rendezvous is a "for power users" knob in Network settings.
+   Move it to default-configured-on-install (with a curated
+   public rendezvous list shipped in `paths.py`). Frontier: a
+   pluggable rendezvous discovery that uses DNS, LAN multicast,
+   and a fallback DHT in priority order; the user sees nothing.
+
+### Track C — Engine-hiding
+
+> Principle 2 (Hide the engine): what word, button, or knob
+> disappears with this ship?
+
+The track that turns "It just works" from "if you understand
+P2P" into "for everyone." Every ship in this track removes a
+technical concept from the user's surface.
+
+Ordered by leverage:
+
+1. **Channel-level Double Ratchet activation.** The primitive
+   shipped in v0.7.2 and has been sitting unused since. Detect
+   mutual `double_ratchet_v1` capability and switch the channel.
+   Frontier: forward secrecy + post-compromise security, in
+   bytes per message <2× the existing X25519+ChaCha20-Poly1305
+   path; auditable transcript binding. Surface: zero. Invisible
+   safety upgrade.
+
+2. **Pair flow simplification.** Hide the SAS by default for
+   casual pairings (auto-accept on LAN with a deny-by-default
+   capability set + a "verify in person?" pill that the user
+   can engage when they want). Frontier: a calibrated risk model
+   that decides whether to surface the SAS based on context
+   (LAN vs. internet, hostname-pubkey history, prior pairings
+   from the same network). Surface: most pairings just work; the
+   SAS appears only when it actually changes the trust decision.
+
+3. **Progressive disclosure for advanced settings.** Mark settings
+   as "everyone / power user / engineer" tiers in the settings
+   table; default to "everyone." A long-press / shortcut reveals
+   the rest. Frontier: settings that auto-tier based on the
+   user's interaction history (we know which ones they touch).
+   Surface: 80% of users never see 80% of the settings.
+
+4. **Group sender-key rotation cadence.** Currently never rotates;
+   add periodic rotation tied to group event log advancement.
+   Frontier: rotation is automatic + driven by entropy/usage
+   thresholds; the user never knows. Surface: zero new buttons.
+
+5. **Tighter supply-chain gates.** pip-audit / bandit currently
+   report-only; promote to fail-the-build after triage. Frontier:
+   reproducible builds verified in CI; SBOM auto-published.
+   Surface: zero. The kind of safety the user shouldn't think
+   about.
 
 ---
 
-## Tier 4 — platform reach
+## Suggested next ship
 
-These are major efforts (each its own multi-month project).
-Listed in dependency order.
+**Mobile-responsive web UI** is Track A, item 1, and the single
+biggest unlock toward "We Are One." It's also a forcing function
+for everything that follows: every later ship will have to render
+at 360px before it merges, which itself drives Engine-hiding
+debt down (you can't hide forty advanced settings on a phone
+screen, so progressive disclosure becomes mandatory).
 
-  - **v0.9.0 — Mobile-friendly responsive web UI.** Same daemon,
-    new layout that works on iPad/iPhone Safari, Android Chrome.
-    Touch-first interactions. Drawer becomes a fullscreen sheet.
-
-  - **v0.9.1 — System tray + global hotkey.** Minimize-to-tray;
-    Win+L (or configurable) sends clipboard/selected file to
-    last-used device.
-
-  - **v1.0.0 — Multi-device-per-identity.** One identity (one
-    keypair shown to peers) but many local devices that all sync
-    messages between themselves over the same protocol. Requires
-    a new "device cluster" abstraction in state.
-
-  - **v1.1+ — Native iOS/Android apps.** Same daemon ported.
-    Background-service constraints on mobile mean significant
-    lifecycle work.
-
-  - **v1.2+ — Voice / video calls.** WebRTC over the same
-    encrypted channel. Major undertaking; depends on stable
-    multi-device-per-identity.
+Ship-spec for the next merge will be evaluated against the
+checklist in [`PRINCIPLES.md`](./PRINCIPLES.md).
 
 ---
 
-## Sequencing rules
+## Sequencing rules (unchanged from prior roadmaps)
 
-  - Each version ships independently. Don't bundle.
-  - Wire-format additions stay backward-compatible: older peers
-    ignore unknown fields / message kinds.
-  - Every cap that affects what a peer can request gets:
-    1. capability advertised in CAPS
-    2. deny-by-default policy entry
-    3. UI grant prompt on first request from a peer
-  - Tier 2 security UX must keep up with new wire features —
-    don't ship a feature that creates a new key-trust pathway
-    without first surfacing it in the trust UI.
-  - Resume-on-reconnect (v0.7.4) is a prerequisite for the
-    larger file features in Tier 3 — don't build voice-message /
-    streaming on a flaky transport layer.
+- Each version ships independently. Don't bundle.
+- Wire-format additions stay backward-compatible: older peers
+  ignore unknown fields / message kinds.
+- Every cap that affects what a peer can request gets:
+  1. capability advertised in CAPS
+  2. deny-by-default policy entry
+  3. UI grant prompt on first request from a peer
+- Any new key-trust pathway gets surfaced in the trust UI before
+  the wire feature ships.
 
 ---
 
-## Cross-cutting follow-ups (post-Tier 3 starts)
+## Audit cadence
 
-  - **Onboarding flow.** ✓ Shipped (released as package v0.9.4).
-    First-run 4-step wizard: welcome → display name → SAS
-    explainer → ready. Gated by localStorage flag (primary) +
-    daemon-side `onboarding_completed` setting (backup, so a
-    fresh browser tab on a paired daemon doesn't re-pop). Auto-
-    skipped if state.peers.size > 0 (returning user). Enter on
-    the name input advances. Progress dots + Skip button. Saves
-    display name through the existing /api/settings handler;
-    settings whitelist updated to accept the flag.
-
-  - **Global search / command palette.** ✓ Shipped (released as
-    package v0.9.3). Ctrl+K opens a unified palette searching
-    messages (FTS5), peers (hostname/alias/short_id/fingerprint),
-    groups (name), and inbox files (substring). Phrase-quoted FTS
-    so chars like `:` don't error out the parser. Pinned peers
-    rank ahead of pending. Arrow keys navigate; Enter activates;
-    Esc closes. Stale-response guard so a fast-typed query
-    doesn't show old results. Per-convo Ctrl+K relocated to
-    Ctrl+F (Slack/VSCode convention).
-
-  - **Activity feed.** ✓ Shipped (released as package v0.9.1).
-    Cross-peer chronological view merging capability_audit (verify,
-    trust, cap policy) + key_change_events + transfers (terminal
-    states only) + manifest_conflicts + peers first_seen into one
-    timeline. Filter chips (All / Trust / Keys / Files / Conflicts
-    / Peers). Live-updating: every relevant WS event nudges a
-    coalesced refresh on the open pane. Lives in the existing
-    Activity sidebar tab. Endpoint
-    `GET /api/activity?since=&kinds=&peer=&limit=`.
-
-## Cross-cutting tech debt to attend to as we go
-
-  - **Wire-format channel-level Double Ratchet activation.** v0.7.2
-    shipped the audited primitive; v0.7.3+ should detect mutual
-    `double_ratchet_v1` capability and switch the channel. Aim
-    to land this inside v0.7.4 (transfer resume) since both touch
-    the channel layer.
-  - **pip-audit / bandit findings.** Currently report-only. After
-    triage, tighten to fail-the-build in v0.8.x.
-  - **Group sender-key rotation cadence.** Currently never rotates;
-    add periodic rotation tied to group event log advancement
-    when v0.8.0 group UI lands.
-  - **Mobile responsive readiness.** Every UI commit from v0.7.3
-    forward should be mobile-aware so v0.9.0 isn't a full rewrite.
+Per `PRINCIPLES.md`, the principles need quarterly audit. Add a
+companion exercise: every quarter, also audit this roadmap. Move
+items between tracks if their dominant gating principle has
+shifted; retire items that have shipped; promote items that
+should now be next based on what users actually hit.

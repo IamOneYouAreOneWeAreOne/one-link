@@ -7828,87 +7828,91 @@
       muted: !!peer.muted,
     };
 
+    // v0.13.2: every helper call below is wrapped in a try/catch so
+    // a regression in any cosmetic side-effect (mute-status renderer,
+    // wallpaper swatches, capability sync, etc.) doesn't prevent the
+    // drawer from opening. The drawer's PRIMARY action is "show me
+    // device settings"; if a sub-helper breaks, log + continue. We
+    // still flip .show at the end so the user always gets the modal.
+    const tryStep = (label, fn) => {
+      try { fn(); } catch (e) { console.warn(`drawer: ${label} failed`, e); }
+    };
+
     const kind = deviceKindLabel(peer);
     const drawerNameEl = $("#device-drawer-name");
-    drawerNameEl.textContent = "";
-    if (kind) {
-      const ic = el("span", "kind-icon", kind.icon + " ");
-      ic.title = kind.label;
-      drawerNameEl.appendChild(ic);
+    if (drawerNameEl) {
+      drawerNameEl.textContent = "";
+      if (kind) {
+        const ic = el("span", "kind-icon", kind.icon + " ");
+        ic.title = kind.label;
+        drawerNameEl.appendChild(ic);
+      }
+      drawerNameEl.appendChild(document.createTextNode(
+        peer.display_name || peer.hostname || peer.short_id
+      ));
     }
-    drawerNameEl.appendChild(document.createTextNode(
-      peer.display_name || peer.hostname || peer.short_id
-    ));
     const subParts = [peer.short_id, reachLabel(peer)];
     if (kind) subParts.push(kind.label);
-    $("#device-drawer-sub").textContent = subParts.join(" · ");
+    const subEl = $("#device-drawer-sub");
+    if (subEl) subEl.textContent = subParts.join(" · ");
 
-    $("#dev-alias").value = peer.local_alias || "";
-    $("#dev-mute").checked = !!peer.muted;
-    // v0.11.2 mute status — show current deadline if any.
-    _renderMuteStatus(
+    const aliasEl = $("#dev-alias");
+    if (aliasEl) aliasEl.value = peer.local_alias || "";
+    const muteEl = $("#dev-mute");
+    if (muteEl) muteEl.checked = !!peer.muted;
+    tryStep("mute-status", () => _renderMuteStatus(
       $("#dev-mute-status"),
       peer.muted_until_ms,
       !!peer.muted,
-    );
-    // v0.11.5 wallpaper picker.
-    _renderChatWallpaperSwatches(
+    ));
+    tryStep("wallpaper-swatches", () => _renderChatWallpaperSwatches(
       $("#dev-wallpaper-swatches"),
       "peer", peer.fingerprint,
-    );
+    ));
     const dur = $("#dev-mute-duration");
-    if (dur) dur.value = "";  // Reset picker each open.
+    if (dur) dur.value = "";
 
-    syncDrawerCapabilityControls(peer.allowed_capabilities);
+    tryStep("capability-sync", () => syncDrawerCapabilityControls(
+      peer.allowed_capabilities,
+    ));
 
-    $("#dev-regime").textContent = reachLabel(peer);
+    const regEl = $("#dev-regime");
+    if (regEl) regEl.textContent = reachLabel(peer);
     const lat = peer.health?.latency_ewma_ms;
-    $("#dev-latency").textContent =
-      lat == null ? "—" : `${Math.round(lat)} ms`;
-    $("#dev-lastalive").textContent =
+    const latEl = $("#dev-latency");
+    if (latEl) latEl.textContent = lat == null ? "—" : `${Math.round(lat)} ms`;
+    const lastAliveEl = $("#dev-lastalive");
+    if (lastAliveEl) lastAliveEl.textContent =
       _humanRelMs(peer.health?.last_alive_ms || peer.last_seen_ms);
-    $("#dev-address").textContent =
-      `${peer.address || "?"}:${peer.port || "?"}`;
+    const addrEl = $("#dev-address");
+    if (addrEl) addrEl.textContent = `${peer.address || "?"}:${peer.port || "?"}`;
 
-    $("#dev-shortid").textContent = peer.short_id;
-    $("#dev-fp").textContent = peer.fingerprint;
+    const sidEl = $("#dev-shortid");
+    if (sidEl) sidEl.textContent = peer.short_id;
+    const fpEl = $("#dev-fp");
+    if (fpEl) fpEl.textContent = peer.fingerprint;
 
-    // SAS — we recompute server-side via /api/peers/{fp}/sas.
-    $("#dev-sas").textContent = "…";
-    state.deviceDrawerSas = null;
-    renderSasArt($("#dev-sas-art"), null);
-    $("#dev-sas-art").style.display = "none";
-    $("#dev-sas-art-toggle")?.classList.remove("on");
-    try {
-      const sas = await api.get(`/api/peers/${peer.fingerprint}/sas`);
-      $("#dev-sas").textContent = sas.sas || "—";
-      // v0.7.9: cache + pre-render art so the toggle is instant.
-      if (sas.sas) {
-        state.deviceDrawerSas = sas.sas;
-        renderSasArt($("#dev-sas-art"), sas.sas);
-      }
-    } catch {
-      $("#dev-sas").textContent = "(unavailable)";
-    }
+    // v0.13.2: every block wrapped so a single helper crash doesn't
+    // stop the modal from opening.
+    tryStep("sas-init", () => {
+      const sasEl = $("#dev-sas");
+      if (sasEl) sasEl.textContent = "…";
+      state.deviceDrawerSas = null;
+      renderSasArt($("#dev-sas-art"), null);
+      const art = $("#dev-sas-art");
+      if (art) art.style.display = "none";
+      $("#dev-sas-art-toggle")?.classList.remove("on");
+    });
+    // SAS fetch is async; we still want to surface the modal even if
+    // /api/peers/{fp}/sas hangs or 404s. We don't await it before
+    // showing the modal — fire-and-forget below.
 
-    // v0.7.7: render verification state. Reads off the freshest peer
-    // record so a websocket "peer_verified" broadcast updates the
-    // open drawer without re-opening it.
-    renderDrawerVerification(peer);
-    // v0.7.8: render the key-change section (hidden if no unacked
-    // events; populated lazily via a server fetch otherwise).
-    renderDrawerKeyChange(peer);
+    tryStep("verification", () => renderDrawerVerification(peer));
+    tryStep("key-change", () => renderDrawerKeyChange(peer));
 
-    // v0.10.2: populate the disappearing-message TTL picker. The
-    // value comes from /api/peers (peer.dm_ttl_ms) and is rendered
-    // as the matching <option>'s value (empty string = Off).
     const ttlSel = $("#dev-dm-ttl");
-    if (ttlSel) {
-      ttlSel.value = peer.dm_ttl_ms ? String(peer.dm_ttl_ms) : "";
-    }
+    if (ttlSel) ttlSel.value = peer.dm_ttl_ms ? String(peer.dm_ttl_ms) : "";
 
-    // v0.8.6: collapse the trust-history disclosure on every reopen.
-    // It populates lazily on toggle.
     const tl = $("#dev-trust-timeline");
     if (tl) {
       tl.style.display = "none";
@@ -7920,7 +7924,26 @@
       tlBtn.classList.remove("on");
     }
 
-    $("#device-backdrop").classList.add("show");
+    // v0.13.2: show the modal NOW — every cosmetic helper has run
+    // (or failed soft) and the user gets settings up regardless.
+    $("#device-backdrop")?.classList.add("show");
+
+    // SAS fetch happens AFTER the modal is up. Late-arriving SAS
+    // populates the field; failure surfaces "(unavailable)".
+    (async () => {
+      try {
+        const sas = await api.get(`/api/peers/${peer.fingerprint}/sas`);
+        const sasEl = $("#dev-sas");
+        if (sasEl) sasEl.textContent = sas.sas || "—";
+        if (sas.sas) {
+          state.deviceDrawerSas = sas.sas;
+          tryStep("sas-art", () => renderSasArt($("#dev-sas-art"), sas.sas));
+        }
+      } catch {
+        const sasEl = $("#dev-sas");
+        if (sasEl) sasEl.textContent = "(unavailable)";
+      }
+    })();
   }
 
   // v0.7.7: pretty label for a verification method tag stored in
@@ -8600,7 +8623,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.13.1";
+  const PAGE_BUILT_FOR = "0.13.2";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
