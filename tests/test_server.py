@@ -430,6 +430,18 @@ async def test_api_status_and_transfers_surface_ledger(tmp_path: Path):
             total_bytes=100,
             chunks_done=1,
             chunks_total=2,
+            metadata={
+                "manifest": {
+                    "name": "photo.png",
+                    "size": 100,
+                    "blob": "bb" * 32,
+                    "chunks": [
+                        {"index": 0, "start": 0, "end": 50, "hash": "a"},
+                        {"index": 1, "start": 50, "end": 100, "hash": "b"},
+                    ],
+                },
+                "autopilot_plan": {"frame_kind": "cdc_binary"},
+            },
         )
         daemon = SimpleNamespace(
             state=state,
@@ -445,6 +457,9 @@ async def test_api_status_and_transfers_surface_ledger(tmp_path: Path):
         transfers = json.loads(transfers_resp.text)["transfers"]
         assert transfers[0]["id"] == "t1"
         assert transfers[0]["progress_pct"] == 50.0
+        assert transfers[0]["metadata"]["manifest"]["chunk_count"] == 2
+        assert "chunks" not in transfers[0]["metadata"]["manifest"]
+        assert transfers[0]["metadata"]["autopilot_plan"]["frame_kind"] == "cdc_binary"
 
         status_resp = await server.api_status(None)
         status = json.loads(status_resp.text)

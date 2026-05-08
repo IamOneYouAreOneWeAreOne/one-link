@@ -416,9 +416,36 @@ def _transfer_record_to_event(rec) -> dict:
         "raw_bytes": rec.raw_bytes,
         "wire_bytes": rec.wire_bytes,
         "updated_ms": rec.updated_ms,
-        "metadata": rec.metadata,
+        "metadata": _compact_transfer_metadata(rec.metadata),
     }
     return enrich_transfer_event(event, now_ms=int(time.time() * 1000))
+
+
+def _compact_transfer_metadata(metadata: dict | None) -> dict:
+    """Return UI/API-safe transfer metadata.
+
+    The durable ledger may keep a full chunk manifest so resume/dedup logic has
+    complete truth. The browser and status endpoints should never receive that
+    whole list: a multi-GB video can mean thousands of chunks and megabytes of
+    JSON. Surface a compact manifest summary instead.
+    """
+    if not metadata:
+        return {}
+    out = dict(metadata)
+    manifest = out.get("manifest")
+    if isinstance(manifest, dict):
+        chunks = manifest.get("chunks")
+        chunk_count = (
+            len(chunks) if isinstance(chunks, list)
+            else int(manifest.get("chunk_count") or 0)
+        )
+        out["manifest"] = {
+            "name": manifest.get("name"),
+            "size": manifest.get("size"),
+            "blob": manifest.get("blob"),
+            "chunk_count": chunk_count,
+        }
+    return out
 
 
 def _token_path() -> Path:
