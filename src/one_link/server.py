@@ -497,6 +497,12 @@ class UIServer:
         # surface this so the launcher knows whether LAN mode is on.
         self.bind_host: str = "127.0.0.1"
         self._ws_clients: set[web.WebSocketResponse] = set()
+        # v0.20.0: WebRTC peer manager for browser-as-peer connections.
+        # Lazy-imported so daemons that don't ship aiortc still load
+        # this module (the manager itself works fine; only the actual
+        # peer-connection setup needs aiortc).
+        from one_link.peer_rtc import BrowserPeerManager
+        self.peer_rtc = BrowserPeerManager(daemon)
         self._setup_routes()
         # v0.8.1: live-push debug-log entries to the Debug pane.
         try:
@@ -589,6 +595,18 @@ class UIServer:
         # browser is its own peer; the daemon is unrelated.
         r.add_get("/peer", self._peer_shell)
         r.add_get("/peer/", self._peer_shell)
+        # v0.20.0: WebRTC signaling endpoint for browser-as-peer ↔
+        # daemon DataChannel transport. Unauthenticated WebSocket;
+        # the browser authenticates via Ed25519 signature on the SDP
+        # offer envelope (signed_offer.signature verified against
+        # signed_offer.pubkey before we accept the peer connection).
+        r.add_get("/api/v1/peer-rtc", self._peer_rtc_signaling)
+        # v0.20.1: pair-by-QR token mint. Auth-gated (token holder
+        # is the desktop user). Returns a fresh one-shot pairing
+        # token that the browser-peer presents during signaling so
+        # the daemon trusts it as a paired device with no manual
+        # SAS confirm.
+        r.add_post("/api/v1/peer-rtc/mint-pairing", self._guarded(self.api_mint_pairing))
         # v0.15.4: connect-info + QR for the phone-pairing flow.
         # Both auth-gated — they expose the LAN URL with the token.
         r.add_get("/api/connect-info", self._guarded(self.api_connect_info))
@@ -948,6 +966,240 @@ class UIServer:
         # Don't cache: the URL contains the token, which can rotate.
         resp.headers["Cache-Control"] = "no-store"
         return resp
+
+    # ─── /api/v1/peer-rtc — browser-as-peer WebRTC signaling + pair ──
+    async def api_mint_pairing(self, request: web.Request) -> web.Response:
+        """v0.20.1: mint a fresh single-use pairing token + return
+        the laptop's connection info. The desktop UI will encode
+        this into a QR for the user to scan with their phone.
+
+        Returns: {token, ttl_ms, lan_url, daemon_pubkey_b64u,
+                  daemon_fingerprint, ws_signaling_url}
+
+        ws_signaling_url is the URL the browser-peer opens to
+        exchange SDP. lan_url is the /peer page URL with the
+        pairing token + daemon fingerprint embedded as query
+        params (so the QR is one-scan magic)."""
+        from one_link.peer_rtc import _b64u as _peer_b64u
+        pp = self.peer_rtc.mint_pairing_token()
+        # Daemon's own identity surface for the browser to pin.
+        daemon_pub = self.daemon.me.public_bytes
+        daemon_pub_b64u = _peer_b64u(daemon_pub)
+        daemon_fp = self.daemon.me.fingerprint
+        # Build the LAN URL the QR encodes. The browser's /peer page
+        # detects ?pair=<token> and runs the auto-pair flow.
+        try:
+            from one_link.peer_rtc import _now_ms as _peer_now
+            host = self.bind_host
+            if host in ("0.0.0.0", "::", ""):
+                # The mint endpoint is auth-gated, so the caller is
+                # the desktop user; LAN-detect for them.
+                from one_link.app import _detect_lan_ip
+                host = _detect_lan_ip()
+            base = f"http://{host}:{self.port}"
+        except Exception:
+            base = f"http://{self.bind_host}:{self.port}"
+        lan_url = (
+            f"{base}/peer?pair={pp.token}&fp={daemon_fp}"
+            f"&ws={base.replace('http', 'ws')}/api/v1/peer-rtc"
+        )
+        return web.json_response({
+            "token": pp.token,
+            "ttl_ms": pp.ttl_ms,
+            "created_ms": pp.created_ms,
+            "lan_url": lan_url,
+            "daemon_pubkey_b64u": daemon_pub_b64u,
+            "daemon_fingerprint": daemon_fp,
+            "ws_signaling_url": f"{base.replace('http', 'ws')}/api/v1/peer-rtc",
+        })
+
+    async def _peer_rtc_signaling(
+        self, request: web.Request
+    ) -> web.WebSocketResponse:
+        """v0.20.0: WebSocket signaling endpoint for browser-as-peer
+        WebRTC connections. Handles the offer → answer + ICE trickle
+        + DataChannel-up handshake, then closes the WS (the
+        DataChannel is the live transport from then on).
+
+        Authentication: the browser's first text frame is a signed
+        offer envelope (Ed25519 over canonical JSON). We verify the
+        signature against the claimed pubkey before any aiortc work
+        starts — a malicious client can't make us spend CPU on SDP
+        negotiation without proving control of a real keypair.
+
+        Trust: if the offer envelope carries a valid pair_token, we
+        consume the token and trust this pubkey as a freshly-paired
+        device. Otherwise we check our roster of previously-paired
+        pubkeys; if the pubkey is recognized, we accept. Unknown
+        pubkey + no token → 4030 close.
+        """
+        # aiortc imports are lazy so this module loads even on
+        # daemons without aiortc. If we get here, we need it.
+        try:
+            from aiortc import (
+                RTCConfiguration,
+                RTCIceServer,
+                RTCPeerConnection,
+                RTCSessionDescription,
+            )
+        except ImportError:
+            return web.Response(status=501, text="aiortc not installed")
+
+        from one_link.peer_rtc import (
+            BrowserPeer,
+            DAEMON_BULK_LABEL,
+            DAEMON_CONTROL_LABEL,
+            PEER_RTC_PROTOCOL_VERSION,
+        )
+
+        ws = web.WebSocketResponse(heartbeat=20.0)
+        await ws.prepare(request)
+
+        peer: Optional[BrowserPeer] = None
+        pc = None
+
+        async def _send(msg: dict) -> None:
+            with contextlib.suppress(Exception):
+                await ws.send_json(msg)
+
+        async def _send_error(code: str, message: str) -> None:
+            await _send({
+                "v": PEER_RTC_PROTOCOL_VERSION,
+                "t": "error",
+                "code": code,
+                "message": message,
+            })
+
+        # Multi-vendor STUN. Same set the browser uses; both sides
+        # converging on the same servers keeps NAT-traversal symmetric.
+        stun_servers = [
+            RTCIceServer(urls="stun:stun.l.google.com:19302"),
+            RTCIceServer(urls="stun:global.stun.twilio.com:3478"),
+            RTCIceServer(urls="stun:stun.cloudflare.com:3478"),
+        ]
+        config = RTCConfiguration(iceServers=stun_servers)
+
+        try:
+            async for msg in ws:
+                if msg.type != WSMsgType.TEXT:
+                    continue
+                try:
+                    envelope = json.loads(msg.data)
+                except json.JSONDecodeError:
+                    await _send_error("bad_json", "invalid JSON")
+                    continue
+                if not isinstance(envelope, dict):
+                    await _send_error("bad_envelope", "envelope must be object")
+                    continue
+                if envelope.get("v") != PEER_RTC_PROTOCOL_VERSION:
+                    await _send_error("bad_version", "unsupported version")
+                    continue
+                t = envelope.get("t")
+                if t == "offer":
+                    # First-and-only offer per WS — verify signature.
+                    try:
+                        pubkey, fingerprint = (
+                            self.peer_rtc.verify_offer_envelope(envelope)
+                        )
+                    except ValueError as e:
+                        await _send_error("bad_offer", str(e))
+                        await ws.close(code=4001, message=b"bad offer")
+                        return ws
+                    # Trust check: pair_token OR known pubkey.
+                    pair_token = envelope.get("pair_token") or ""
+                    redeemed = self.peer_rtc.redeem_pairing_token(pair_token) if pair_token else None
+                    is_known = self.peer_rtc.is_paired(fingerprint)
+                    if not redeemed and not is_known:
+                        await _send_error(
+                            "no_trust",
+                            "no valid pairing token + pubkey not in roster",
+                        )
+                        await ws.close(code=4030, message=b"unpaired peer")
+                        return ws
+                    if redeemed:
+                        self.peer_rtc.mark_paired(fingerprint)
+                    # Set up the RTCPeerConnection.
+                    pc = RTCPeerConnection(configuration=config)
+                    peer = BrowserPeer(
+                        fingerprint=fingerprint,
+                        pubkey_bytes=pubkey,
+                        pc=pc,
+                        paired_ms=time.time() * 1000 if redeemed or is_known else None,
+                    )
+
+                    # Hook DataChannels created by the browser side.
+                    @pc.on("datachannel")
+                    def _on_datachannel(channel):
+                        nonlocal peer
+                        if peer is None:
+                            return
+                        label = channel.label
+                        if label == DAEMON_CONTROL_LABEL:
+                            peer.control_dc = channel
+                        elif label == DAEMON_BULK_LABEL:
+                            peer.bulk_dc = channel
+
+                        @channel.on("message")
+                        def _on_message(message):
+                            kind = "control" if label == DAEMON_CONTROL_LABEL else "bulk"
+                            asyncio.create_task(
+                                self.peer_rtc._dispatch_dc(peer, kind, message)
+                            )
+
+                        @channel.on("close")
+                        def _on_close():
+                            log.info(
+                                "peer-rtc: %s channel closed for %s",
+                                label, peer.fingerprint if peer else "?",
+                            )
+
+                    @pc.on("connectionstatechange")
+                    async def _on_connection_state():
+                        if pc.connectionState in ("closed", "failed"):
+                            if peer is not None:
+                                self.peer_rtc._close_peer(peer)
+
+                    # Apply offer + craft answer.
+                    await pc.setRemoteDescription(
+                        RTCSessionDescription(sdp=envelope["sdp"], type="offer")
+                    )
+                    answer = await pc.createAnswer()
+                    await pc.setLocalDescription(answer)
+
+                    self.peer_rtc.register_peer(peer)
+                    log.info(
+                        "peer-rtc: registered browser peer %s (paired_via=%s)",
+                        fingerprint,
+                        "token" if redeemed else "roster",
+                    )
+                    await _send({
+                        "v": PEER_RTC_PROTOCOL_VERSION,
+                        "t": "answer",
+                        "sdp": pc.localDescription.sdp,
+                        "daemon_pubkey_b64u": __import__("one_link.peer_rtc", fromlist=["_b64u"])._b64u(self.daemon.me.public_bytes),
+                        "daemon_fingerprint": self.daemon.me.fingerprint,
+                        "ts": int(time.time() * 1000),
+                    })
+                elif t == "ice":
+                    # aiortc's RTCPeerConnection handles ICE candidate
+                    # offer/answer internally during setLocal/Remote
+                    # description; trickle is handled within those
+                    # calls. We accept ICE messages from the browser
+                    # for forward compat (if a future aiortc requires
+                    # explicit addIceCandidate) but no-op them today.
+                    pass
+                elif t == "close":
+                    break
+                else:
+                    await _send_error("unknown_t", f"unknown envelope type: {t!r}")
+        except Exception as e:
+            log.warning("peer-rtc: signaling error: %s", e)
+        finally:
+            # Once the WS closes, the WebRTC peer-connection lives on
+            # independently — DataChannel is the live transport.
+            with contextlib.suppress(Exception):
+                await ws.close()
+        return ws
 
     # ─── /api/me ──────────────────────────────────────────────────────
     async def api_me(self, request: web.Request) -> web.Response:

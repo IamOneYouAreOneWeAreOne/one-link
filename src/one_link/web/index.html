@@ -1959,14 +1959,16 @@
     margin-top: 4px; letter-spacing: .2px;
   }
   .msg.out.file .transfer-detail { color: rgba(255,255,255,.78); }
-  .msg.file .transfer-facts {
+  .msg.file .transfer-facts,
+  .file-row .transfer-facts {
     display: flex;
     flex-wrap: wrap;
     gap: 5px;
     margin-top: 7px;
     max-width: min(460px, 100%);
   }
-  .msg.file .transfer-fact {
+  .msg.file .transfer-fact,
+  .file-row .transfer-fact {
     display: inline-flex;
     align-items: center;
     min-height: 20px;
@@ -1981,6 +1983,7 @@
     letter-spacing: 0;
     white-space: nowrap;
   }
+  .file-row .transfer-facts { max-width: 100%; }
   .msg.out.file .transfer-fact {
     background: rgba(255,255,255,.16);
     border-color: rgba(255,255,255,.22);
@@ -5924,6 +5927,10 @@
   }
   function transferAutopilotFacts(t, kind) {
     if (!t) return [];
+    const truth = t.autopilot_truth || {};
+    if (Array.isArray(truth.facts) && truth.facts.length) {
+      return [...new Set(truth.facts.filter(Boolean))].slice(0, 7);
+    }
     const meta = t.metadata || {};
     const plan = meta.autopilot_plan || {};
     const perf = meta.performance_summary || {};
@@ -7980,6 +7987,8 @@
       fill.style.width = `${Math.max(0, Math.min(100, t.progress_pct || 0))}%`;
       bar.appendChild(fill);
       meta.appendChild(bar);
+      const facts = renderTransferFacts(t, statusKind(t));
+      if (facts) meta.appendChild(facts);
       row.appendChild(meta);
       // v0.7.x: Retry button for failed outbound transfers. The
       // server reads the original local path off the ledger row's
@@ -9649,7 +9658,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.19.2";
+  const PAGE_BUILT_FOR = "0.20.0";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {

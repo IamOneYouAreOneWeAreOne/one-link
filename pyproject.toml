@@ -1,6 +1,6 @@
 [project]
 name = "one_link"
-version = "0.19.2"
+version = "0.20.0"
 description = "Peer-to-peer LAN chat + file sync built on the Coherence Language ecosystem."
 requires-python = ">=3.11"
 authors = [{ name = "One Link contributor", email = "weareone@oneunity.earth" }]
@@ -17,6 +17,13 @@ dependencies = [
   # v0.15.4: QR code rendering for the LAN-pairing flow. Pure-Python,
   # BSD-licensed (Lincoln Loop), SVG output without Pillow.
   "qrcode>=7",
+  # v0.20.0: WebRTC DataChannel transport on the daemon side. Lets
+  # browser-as-peer (the /peer page) connect to the desktop daemon
+  # directly with sub-second LAN handshakes via DTLS-SRTP. Vendors
+  # libsrtp + libav + libopenssl wheels — heavyweight but standard
+  # for any cross-vendor WebRTC + the only realistic path for the
+  # phone-as-peer endgame without writing our own ICE stack.
+  "aiortc>=1.14",
 ]
 
 [project.optional-dependencies]
