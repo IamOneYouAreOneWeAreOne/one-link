@@ -29,13 +29,15 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.daemon import (
+    BINARY_FRAME_MAGIC,
     Daemon,
     IncomingFile,
     OutboundSession,
+    _decode_binary_frame,
     _final_stream_ack_deadline,
     _stream_transfer_profile,
 )
-from one_link.capabilities import CHAT, FILES, FILE_CDC
+from one_link.capabilities import CHAT, FILES, FILE_BINARY_FRAME, FILE_CDC
 from one_link.discovery import Peer
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
@@ -70,7 +72,10 @@ class _FakeChannel:
     async def send(self, payload: bytes) -> None:
         if self.closed:
             raise RuntimeError("channel closed")
-        self.sent.append(decode_msg(payload))
+        if payload.startswith(BINARY_FRAME_MAGIC):
+            self.sent.append(_decode_binary_frame(payload))
+        else:
+            self.sent.append(decode_msg(payload))
 
     async def recv(self) -> bytes:
         if self.closed:
@@ -630,6 +635,64 @@ async def test_send_file_stream_pipelines_bounded_ack_window(
 
 
 @pytest.mark.asyncio
+async def test_send_file_uses_binary_stream_for_capable_peer(
+    tmp_path: Path, monkeypatch
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    chan = _TracingFakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, FILE_BINARY_FRAME],
+        "from": them.short_id,
+        "app_version": "0.11.6",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id, hostname="them",
+            address="127.0.0.1", port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    monkeypatch.setattr("one_link.daemon.STREAM_MIN_CHUNK_SIZE", 4)
+    monkeypatch.setattr("one_link.daemon.STREAM_PIPELINE_TARGET_BYTES", 8)
+    monkeypatch.setattr("one_link.daemon.STREAM_PIPELINE_MAX_CHUNKS", 2)
+
+    f = tmp_path / "binary-stream.bin"
+    f.write_bytes(b"abcdefghij")
+    chan.queue_reply(make_msg("ACK", them.short_id))
+    for _ in range(3):
+        chan.queue_reply(make_msg("ACK", them.short_id))
+
+    result = await daemon.send_file(sess.peer, f)
+    chunks = [m for m in chan.sent if m.get("t") == "FILE_BIN_CHUNK"]
+    row = state.list_transfers(limit=1)[0]
+
+    assert result["chunks"] == 3
+    assert [c["seq"] for c in chunks] == [0, 1, 2]
+    assert b"".join(c["_binary_data"] for c in chunks) == b"abcdefghij"
+    assert all("data" not in c for c in chunks)
+    assert row.metadata["stream_engine"] == "pipelined_binary_v1"
+    assert row.metadata["actual_method"] == "file_binary_frame"
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_stream_receiver_acks_final_chunk_before_cache_warm(
     tmp_path: Path, monkeypatch
 ):
@@ -697,6 +760,73 @@ async def test_stream_receiver_acks_final_chunk_before_cache_warm(
 
     assert cache_checked == [True]
     assert chan.sent[-1]["t"] == "ACK"
+    assert state.get_transfer(transfer_id).status == "complete"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_binary_stream_receiver_writes_raw_payload_and_acks(
+    tmp_path: Path, monkeypatch
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+
+    content = b"raw payload no base64"
+    blob = blake3.blake3(content).hexdigest()
+    out_path = tmp_path / "binary-received.bin"
+    transfer_id = "in:test-binary-final"
+    state.upsert_transfer(
+        id=transfer_id,
+        direction="in",
+        peer_fp=them.fingerprint,
+        kind="file",
+        name=out_path.name,
+        size=len(content),
+        blob_hash=blob,
+        status="offered",
+        progress_bytes=0,
+        total_bytes=len(content),
+        chunks_done=0,
+        chunks_total=1,
+        metadata={"mode": "stream", "path": str(out_path)},
+    )
+    daemon._incoming_files[blob] = IncomingFile(
+        name=out_path.name,
+        size=len(content),
+        blob_hex=blob,
+        out_path=out_path,
+        handle=open(out_path, "wb"),
+        hasher=blake3.blake3(),
+        transfer_id=transfer_id,
+    )
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    monkeypatch.setattr(daemon, "_cache_file_chunks", lambda path: None)
+
+    await daemon._on_peer_message(
+        chan,
+        {
+            **make_msg(
+                "FILE_BIN_CHUNK",
+                them.short_id,
+                id="binary-final",
+                blob=blob,
+                seq=0,
+                eof=True,
+            ),
+            "_binary_data": content,
+        },
+    )
+
+    assert out_path.read_bytes() == content
+    assert chan.sent[-1]["t"] == "ACK"
+    assert chan.sent[-1]["of"] == "binary-final"
     assert state.get_transfer(transfer_id).status == "complete"
     state.close()
 

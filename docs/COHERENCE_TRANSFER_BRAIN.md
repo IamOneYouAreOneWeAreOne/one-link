@@ -64,6 +64,13 @@ encrypted chunks in flight. Chunk size scales with file size up to `4 MiB`, and
 the in-flight window is capped at `24 MiB` / `16` chunks so One Link can push
 hard on Wi-Fi/Ethernet without unbounded RAM growth.
 
+v0.11.6 adds the first binary stream lane. Peers that advertise
+`file_binary_frame` still use the same authenticated encrypted channel, but
+file chunks are carried as `OLB1 + compact-json-header + raw-bytes` instead of
+JSON with base64 content. Older peers automatically keep using the JSON stream
+fallback. This removes the base64 expansion tax for upgraded peers without
+splitting security into a second transport.
+
 ## Current Important Result
 
 The current Python CDC implementation is about `8 MiB/s` on the local Windows
@@ -89,8 +96,8 @@ That means One Link must be selective:
 4. Add fixed-manifest wire negotiation for aligned media blocks.
 5. Add swarm CDC fetch execution, not just planning.
 6. Add perf gates so a change cannot silently make transfer planning slower.
-7. Replace JSON/base64 file chunk payloads with an encrypted binary file-frame
-   lane to remove the remaining ~33% base64 overhead.
+7. Measure binary-frame LAN throughput on two upgraded devices and use the
+   result to tune the adaptive stream window.
 
 ## Critical Finding
 

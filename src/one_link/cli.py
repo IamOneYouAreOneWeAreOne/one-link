@@ -18,7 +18,7 @@ from one_link import daemon as daemon_mod
 from one_link.identity import load_or_create
 
 
-def _connect_control() -> tuple[socket.socket, int]:
+def _connect_control(timeout: float = 5.0) -> tuple[socket.socket, int]:
     try:
         port = daemon_mod.read_control_port()
     except RuntimeError as e:
@@ -34,11 +34,12 @@ def _connect_control() -> tuple[socket.socket, int]:
             f"could not reach daemon on 127.0.0.1:{port}: {e}\n"
             f"is the daemon running? try:  one-link daemon"
         )
+    s.settimeout(timeout)
     return s, port
 
 
-def _request(cmd: str, **kwargs) -> dict:
-    s, _ = _connect_control()
+def _request(cmd: str, *, timeout: float = 5.0, **kwargs) -> dict:
+    s, _ = _connect_control(timeout=timeout)
     try:
         s.sendall((json.dumps({"cmd": cmd, **kwargs}) + "\n").encode("utf-8"))
         buf = b""
@@ -148,7 +149,14 @@ def send(peer, body):
 def send_file(peer, path):
     """Send a file to PEER. Any size."""
     click.echo(f"hashing {path.name} ({path.stat().st_size} bytes)…")
-    res = _request("send_file", peer=peer, path=str(path.resolve()))
+    size = path.stat().st_size
+    timeout = max(300.0, min(3600.0, size / (512 * 1024)))
+    res = _request(
+        "send_file",
+        timeout=timeout,
+        peer=peer,
+        path=str(path.resolve()),
+    )
     if not res.get("ok"):
         raise click.ClickException(res.get("error", "send-file failed"))
     r = res["result"]

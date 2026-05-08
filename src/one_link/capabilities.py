@@ -13,6 +13,7 @@ FILE_CDC = "file_cdc"
 FILE_RESUMABLE = "file_resumable"
 FILE_SWARM = "file_swarm"
 FILE_COMPRESSION = "file_compression"
+FILE_BINARY_FRAME = "file_binary_frame"
 FOLDER_SYNC = "folder_sync"
 MERKLE_SYNC = "merkle_sync"
 FUTURE_TRANSPORTS = "future_transports"
@@ -32,6 +33,7 @@ LOCAL_CAPABILITIES = (
     FILE_RESUMABLE,
     FILE_SWARM,
     FILE_COMPRESSION,
+    FILE_BINARY_FRAME,
     FOLDER_SYNC,
     MERKLE_SYNC,
     FUTURE_TRANSPORTS,
@@ -56,6 +58,7 @@ TRANSPORT_LAYER_CAPS = (
     FILE_RESUMABLE,
     FILE_SWARM,
     FILE_COMPRESSION,
+    FILE_BINARY_FRAME,
     DOUBLE_RATCHET_V1,
 )
 

@@ -67,6 +67,7 @@ import blake3
 from one_link import blobstore, channel as ch, foldersync
 from one_link.capabilities import (
     CHAT,
+    FILE_BINARY_FRAME,
     FILES,
     FILE_CDC,
     FOLDER_SYNC,
@@ -121,6 +122,8 @@ STREAM_MIN_CHUNK_SIZE = 256 * 1024
 STREAM_MAX_CHUNK_SIZE = 4 * 1024 * 1024
 STREAM_PIPELINE_TARGET_BYTES = 24 * 1024 * 1024
 STREAM_PIPELINE_MAX_CHUNKS = 16
+BINARY_FRAME_MAGIC = b"OLB1"
+BINARY_FRAME_HEADER_MAX = 64 * 1024
 MAX_INCOMING_FILE_BYTES = 1024 * 1024 * 1024  # match UI upload cap
 CDC_CACHE_MAX_BYTES = 512 * 1024 * 1024
 CDC_AUTO_INDEX_MAX_BYTES = 128 * 1024 * 1024
@@ -290,6 +293,39 @@ def _final_stream_ack_deadline(size: int) -> float:
         FILE_SEND_TOTAL_DEADLINE_S,
         max(FILE_ACK_DEADLINE_S, FILE_FINAL_ACK_MIN_GRACE_S, cache_grace),
     ))
+
+
+def _encode_binary_frame(header: dict, data: bytes) -> bytes:
+    """Encrypted-channel plaintext for binary payload frames.
+
+    The channel still encrypts/authenticates the whole bytestring. This
+    format only removes JSON/base64 from the plaintext payload:
+
+        b"OLB1" + header_len:u32be + compact_json_header + raw_bytes
+    """
+
+    head = encode_msg(header)
+    if len(head) > BINARY_FRAME_HEADER_MAX:
+        raise ValueError(f"binary frame header too large: {len(head)}")
+    return BINARY_FRAME_MAGIC + len(head).to_bytes(4, "big") + head + data
+
+
+def _decode_binary_frame(payload: bytes) -> dict:
+    if not payload.startswith(BINARY_FRAME_MAGIC):
+        raise ValueError("not a One Link binary frame")
+    if len(payload) < len(BINARY_FRAME_MAGIC) + 4:
+        raise ValueError("binary frame header truncated")
+    pos = len(BINARY_FRAME_MAGIC)
+    n = int.from_bytes(payload[pos:pos + 4], "big")
+    if n <= 0 or n > BINARY_FRAME_HEADER_MAX:
+        raise ValueError(f"invalid binary frame header length: {n}")
+    start = pos + 4
+    end = start + n
+    if end > len(payload):
+        raise ValueError("binary frame header exceeds payload")
+    msg = decode_msg(payload[start:end])
+    msg["_binary_data"] = payload[end:]
+    return msg
 
 
 def _delivery_backoff_ms(attempts: int) -> int:
@@ -1338,7 +1374,10 @@ class Daemon:
                     plaintext = await channel.recv()
                 except asyncio.IncompleteReadError:
                     break
-                msg = decode_msg(plaintext)
+                if plaintext.startswith(BINARY_FRAME_MAGIC):
+                    msg = _decode_binary_frame(plaintext)
+                else:
+                    msg = decode_msg(plaintext)
                 await self._on_peer_message(channel, msg)
         except Exception as e:
             log.warning("peer loop error (%s): %s", channel.peer_short_id, e)
@@ -1594,6 +1633,8 @@ class Daemon:
                     self._cache_file_chunks(f.out_path)
                 return
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+        elif t == "FILE_BIN_CHUNK":
+            await self._handle_file_binary_chunk(channel, msg, peer_fp, peer_sid)
         elif t == "FILE_CDC_CHUNK":
             await self._handle_file_cdc_chunk(channel, msg, peer_fp, peer_sid)
         elif t == "CHUNK_QUERY":
@@ -2715,6 +2756,80 @@ class Daemon:
                 raise RuntimeError("compressed payload exceeds maximum size")
             return out
         raise RuntimeError(f"unknown payload encoding: {encoding}")
+
+    async def _handle_file_binary_chunk(self, channel, msg, peer_fp, peer_sid) -> None:
+        """Receive one raw binary file chunk carried inside the encrypted channel."""
+
+        blob = str(msg.get("blob", ""))
+        f = self._incoming_files.get(blob)
+        if not f:
+            log.warning("FILE_BIN_CHUNK with no offer: %s", blob[:8])
+            return
+        seq = int(msg.get("seq", -1))
+        if seq != f.next_seq:
+            self._abort_incoming_file(blob, f)
+            raise RuntimeError(
+                f"FILE_BIN_CHUNK sequence mismatch for {blob[:8]}: "
+                f"expected {f.next_seq}, got {seq}"
+            )
+        data = msg.get("_binary_data")
+        if not isinstance(data, (bytes, bytearray)):
+            self._abort_incoming_file(blob, f)
+            raise RuntimeError("FILE_BIN_CHUNK missing binary payload")
+        data = bytes(data)
+        if f.received + len(data) > f.size:
+            self._abort_incoming_file(blob, f)
+            raise RuntimeError(
+                f"FILE_BIN_CHUNK exceeds declared size for {blob[:8]}: "
+                f"{f.received + len(data)} > {f.size}"
+            )
+        f.handle.write(data)
+        f.hasher.update(data)
+        f.received += len(data)
+        f.next_seq += 1
+        self._update_transfer(
+            f.transfer_id,
+            status="active",
+            progress_bytes=f.received,
+            total_bytes=f.size,
+            chunks_done=f.next_seq,
+            chunks_total=max(f.next_seq, (f.size + CHUNK_SIZE - 1) // CHUNK_SIZE),
+        )
+        if msg.get("eof"):
+            f.handle.close()
+            got = f.hasher.hexdigest()
+            ok = got == f.blob_hex and f.received == f.size
+            done = {
+                "t": "FILE_DONE",
+                "id": msg["id"],
+                "ts": msg["ts"],
+                "from": msg["from"],
+                "name": f.name,
+                "size": f.size,
+                "path": str(f.out_path),
+                "blob": f.blob_hex,
+                "ok": ok,
+            }
+            ev = self._persist(msg=done, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
+            self._broadcast_tail(ev)
+            self._incoming_files.pop(blob, None)
+            if not ok:
+                with contextlib.suppress(OSError):
+                    f.out_path.unlink()
+                self._update_transfer(f.transfer_id, status="failed")
+            else:
+                self._update_transfer(
+                    f.transfer_id,
+                    status="complete",
+                    progress_bytes=f.size,
+                    total_bytes=f.size,
+                )
+            log.info("binary file done: %s ok=%s -> %s", f.name, ok, f.out_path)
+            await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+            if ok:
+                self._cache_file_chunks(f.out_path)
+            return
+        await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
 
     async def _handle_file_cdc_chunk(self, channel, msg, peer_fp, peer_sid) -> None:
         blob = str(msg.get("blob", ""))
@@ -6580,10 +6695,14 @@ class Daemon:
                                 },
                             )
                 else:
+                    peer_features = set(normalize_caps(
+                        (getattr(channel, "peer_caps", None) or {}).get("features", [])
+                    ))
+                    binary_stream_used = FILE_BINARY_FRAME in peer_features
                     if can_offer_cdc:
                         attempts = list(base_metadata.get("protocol_attempts") or [])
                         attempts.append({
-                            "method": "file_baseline",
+                            "method": "file_binary_frame" if binary_stream_used else "file_baseline",
                             "at_ms": int(time.time() * 1000),
                             "state": "fallback",
                             "reason": "peer_acknowledged_stream",
@@ -6591,7 +6710,7 @@ class Daemon:
                         base_metadata = {
                             **base_metadata,
                             "mode": "stream",
-                            "actual_method": actual_method,
+                            "actual_method": "file_binary_frame" if binary_stream_used else actual_method,
                             "protocol_attempts": attempts,
                         }
                     stream_profile = _stream_transfer_profile(size)
@@ -6600,10 +6719,14 @@ class Daemon:
                     stream_window_bytes = int(stream_profile["window_bytes"])
                     base_metadata = {
                         **base_metadata,
-                        "stream_engine": "pipelined_json_v1",
+                        "stream_engine": (
+                            "pipelined_binary_v1" if binary_stream_used
+                            else "pipelined_json_v1"
+                        ),
                         "stream_chunk_size": stream_chunk_size,
                         "stream_window_chunks": stream_window_chunks,
                         "stream_window_bytes": stream_window_bytes,
+                        "binary_frame": binary_stream_used,
                     }
                     with open(path, "rb") as f:
                         seq = 0
@@ -6633,7 +6756,10 @@ class Daemon:
                                 metadata={
                                     **base_metadata,
                                     "delivery_state": "sending",
-                                    "actual_method": actual_method,
+                                    "actual_method": (
+                                        "file_binary_frame" if binary_stream_used
+                                        else actual_method
+                                    ),
                                     "in_flight_chunks": len(pending_sizes),
                                 },
                             )
@@ -6643,15 +6769,25 @@ class Daemon:
                             if not data:
                                 break
                             eof = f.tell() >= size
-                            chunk_msg = make_msg(
-                                "FILE_CHUNK",
-                                self.me.short_id,
-                                blob=blob_hex,
-                                seq=seq,
-                                data=base64.b64encode(data).decode("ascii"),
-                                eof=eof,
-                            )
-                            await channel.send(encode_msg(chunk_msg))
+                            if binary_stream_used:
+                                chunk_msg = make_msg(
+                                    "FILE_BIN_CHUNK",
+                                    self.me.short_id,
+                                    blob=blob_hex,
+                                    seq=seq,
+                                    eof=eof,
+                                )
+                                await channel.send(_encode_binary_frame(chunk_msg, data))
+                            else:
+                                chunk_msg = make_msg(
+                                    "FILE_CHUNK",
+                                    self.me.short_id,
+                                    blob=blob_hex,
+                                    seq=seq,
+                                    data=base64.b64encode(data).decode("ascii"),
+                                    eof=eof,
+                                )
+                                await channel.send(encode_msg(chunk_msg))
                             pending_sizes.append(len(data))
                             while len(pending_sizes) >= stream_window_chunks:
                                 await _settle_one_stream_ack()
@@ -6722,7 +6858,12 @@ class Daemon:
                     **base_metadata,
                     "mode": "cdc" if cdc_used else "stream",
                     "delivery_state": "done",
-                    "actual_method": "file_cdc" if cdc_used else "file_baseline",
+                    "actual_method": (
+                        "file_cdc" if cdc_used
+                        else "file_binary_frame"
+                        if base_metadata.get("binary_frame")
+                        else "file_baseline"
+                    ),
                     "skipped_chunks": len(cdc_chunks) - chunks_sent if cdc_used else 0,
                     "compressed_chunks": compressed_chunks,
                     "completed_at_ms": int(time.time() * 1000),

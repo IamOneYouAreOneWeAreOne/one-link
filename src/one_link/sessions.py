@@ -46,6 +46,16 @@ PROTOCOLS = (
         ),
     ),
     Protocol(
+        "file_binary_stream",
+        (
+            Step("send", "CAPS", "advertise file_binary_frame support"),
+            Step("send", "FILE_OFFER", "announces stream-compatible file"),
+            Step("recv", "ACK", "receiver accepts stream offer"),
+            Step("send", "FILE_BIN_CHUNK", "encrypted raw bytes, no base64 expansion"),
+            Step("recv", "ACK", "bounded pipelined chunk acknowledgment"),
+        ),
+    ),
+    Protocol(
         "folder_merkle_sync",
         (
             Step("send", "CAPS"),
