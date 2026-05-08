@@ -95,6 +95,72 @@ def test_failed_route_observation_degrades_reliability_without_crashing():
     assert health["route_scores"][0]["attempts"] == 2
 
 
+def test_route_memory_persists_runtime_observations(tmp_path):
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(_identity())
+    daemon.state = state
+    fp = "dd" * 32
+
+    daemon._record_route_observation(
+        fp,
+        route="lan",
+        ok=True,
+        latency_ms=4,
+        bandwidth_bps=800_000_000,
+    )
+    daemon._record_route_observation(
+        fp,
+        route="relay",
+        ok=False,
+        error_code="timeout",
+    )
+
+    rows = state.list_route_memory(fp)
+    by_route = {r["route"]: r for r in rows}
+
+    assert by_route["lan"]["successes"] == 1
+    assert by_route["lan"]["bandwidth_bps"] == 800_000_000
+    assert by_route["relay"]["failures"] == 1
+    state.close()
+
+
+def test_route_memory_loads_after_restart_and_feeds_health(tmp_path):
+    state = State(db_path=tmp_path / "state.db")
+    fp = "ee" * 32
+    state.upsert_route_memory(
+        peer_fp=fp,
+        route="lan",
+        attempts=4,
+        successes=4,
+        failures=0,
+        score=145.0,
+        latency_ms=3.0,
+        bandwidth_bps=900_000_000.0,
+    )
+    state.upsert_route_memory(
+        peer_fp=fp,
+        route="relay",
+        attempts=4,
+        successes=2,
+        failures=2,
+        score=40.0,
+        latency_ms=120.0,
+        bandwidth_bps=20_000_000.0,
+    )
+    daemon = Daemon(_identity())
+    daemon.state = state
+
+    daemon._load_persisted_route_memory()
+    health = daemon.get_pair_health(fp)
+    observations = daemon._transfer_route_observations(fp)
+
+    assert health["best_route"] == "lan"
+    assert health["bandwidth_bps"] == 900_000_000.0
+    assert len(observations) == 8
+    assert sum(1 for obs in observations if obs.ok) == 6
+    state.close()
+
+
 @pytest.mark.asyncio
 async def test_api_peers_surfaces_live_route_memory(tmp_path):
     state = State(db_path=tmp_path / "state.db")

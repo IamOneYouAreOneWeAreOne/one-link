@@ -243,6 +243,30 @@ def test_all_settings(state: State):
     assert out == {"a": "1", "b": "2"}
 
 
+def test_route_memory_roundtrips(state: State):
+    state.upsert_route_memory(
+        peer_fp="aa" * 32,
+        route="lan",
+        attempts=5,
+        successes=4,
+        failures=1,
+        score=123.5,
+        latency_ms=6.0,
+        bandwidth_bps=750_000_000.0,
+        metadata={"source": "test"},
+    )
+
+    rows = state.list_route_memory("aa" * 32)
+
+    assert rows[0]["route"] == "lan"
+    assert rows[0]["attempts"] == 5
+    assert rows[0]["successes"] == 4
+    assert rows[0]["failures"] == 1
+    assert rows[0]["latency_ms"] == 6.0
+    assert rows[0]["bandwidth_bps"] == 750_000_000.0
+    assert rows[0]["metadata"]["source"] == "test"
+
+
 def test_delete_setting(state: State):
     state.set_setting("k", "v")
     state.delete_setting("k")

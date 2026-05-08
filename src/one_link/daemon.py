@@ -4825,6 +4825,71 @@ class Daemon:
             self._route_memory[peer_fp] = mem
         return mem
 
+    def _persist_route_memory(self, peer_fp: str, mem: RouteMemory) -> None:
+        if self.state is None or not peer_fp:
+            return
+        for c in mem.candidates():
+            with contextlib.suppress(Exception):
+                self.state.upsert_route_memory(
+                    peer_fp=peer_fp,
+                    route=c.route,
+                    attempts=c.attempts,
+                    successes=c.successes,
+                    failures=c.failures,
+                    score=c.score,
+                    latency_ms=c.latency_ms,
+                    bandwidth_bps=c.bandwidth_bps,
+                    metadata={"source": "transfer_runtime"},
+                )
+
+    def _load_persisted_route_memory(self) -> None:
+        if self.state is None:
+            return
+        try:
+            rows = self.state.list_route_memory()
+        except Exception as e:
+            log.debug("route memory load skipped: %s", e)
+            return
+        rebuilt: dict[str, RouteMemory] = {}
+        now_ms = int(time.time() * 1000)
+        for row in rows:
+            peer_fp = str(row.get("peer_fp") or "")
+            route = str(row.get("route") or "")
+            if not peer_fp or not route:
+                continue
+            mem = rebuilt.setdefault(peer_fp, RouteMemory())
+            successes = max(0, int(row.get("successes") or 0))
+            failures = max(0, int(row.get("failures") or 0))
+            latency_ms = row.get("latency_ms")
+            bandwidth_bps = row.get("bandwidth_bps")
+            for _ in range(successes):
+                mem.observe(RouteObservation(
+                    route=route,
+                    ok=True,
+                    latency_ms=latency_ms,
+                    bandwidth_bps=bandwidth_bps,
+                    at_ms=now_ms,
+                ))
+            for _ in range(failures):
+                mem.observe(RouteObservation(
+                    route=route,
+                    ok=False,
+                    error_code="persisted_failure",
+                    at_ms=now_ms,
+                ))
+        self._route_memory.update(rebuilt)
+        for peer_fp, mem in rebuilt.items():
+            ranked = mem.candidates()
+            best = ranked[0] if ranked else None
+            if best is not None:
+                self._stamp_pair_health(
+                    peer_fp,
+                    latency_ms=best.latency_ms,
+                    bandwidth_bps=best.bandwidth_bps,
+                    reliability=best.successes / max(1, best.attempts),
+                    best_route=best.route,
+                )
+
     def _record_route_observation(
         self,
         peer_fp: str,
@@ -4856,6 +4921,7 @@ class Daemon:
                 reliability=best.successes / max(1, best.attempts),
                 best_route=best.route,
             )
+        self._persist_route_memory(peer_fp, mem)
 
     def get_pair_health(self, peer_fp: str) -> dict | None:
         """Public read for /api/peers."""
@@ -7760,6 +7826,7 @@ class Daemon:
             # v0.10.0: apply persisted settings that affect global
             # daemon behavior (custom download folder, log level).
             self._apply_settings_at_boot()
+            self._load_persisted_route_memory()
         except Exception as e:
             log.warning("state init failed (continuing without persistence): %s", e)
             self.state = None

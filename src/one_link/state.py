@@ -500,8 +500,35 @@ class State:
                 self._migrate_v15_file_index_cache(c)
                 if current < 15:
                     c.execute("INSERT INTO schema_version(version) VALUES(15)")
+                self._migrate_v16_route_memory(c)
+                if current < 16:
+                    c.execute("INSERT INTO schema_version(version) VALUES(16)")
             finally:
                 c.close()
+
+    def _migrate_v16_route_memory(self, c: sqlite3.Cursor) -> None:
+        """v0.14.2: durable route memory for adaptive transfers."""
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS route_memory (
+                peer_fp       TEXT NOT NULL,
+                route         TEXT NOT NULL,
+                attempts      INTEGER NOT NULL,
+                successes     INTEGER NOT NULL,
+                failures      INTEGER NOT NULL,
+                score         REAL NOT NULL,
+                latency_ms    REAL,
+                bandwidth_bps REAL,
+                updated_ms    INTEGER NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY(peer_fp, route)
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_route_memory_peer "
+            "ON route_memory(peer_fp, updated_ms)"
+        )
 
     def _migrate_v15_file_index_cache(self, c: sqlite3.Cursor) -> None:
         """v0.12.4: durable file fingerprint/manifest cache.
@@ -2860,6 +2887,96 @@ class State:
             return int(cur.rowcount)
 
     # ─── outbox (v0.7.1: store-and-forward) ──────────────────────────
+
+    def upsert_route_memory(
+        self,
+        *,
+        peer_fp: str,
+        route: str,
+        attempts: int,
+        successes: int,
+        failures: int,
+        score: float,
+        latency_ms: float | None = None,
+        bandwidth_bps: float | None = None,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        if not peer_fp:
+            raise ValueError("peer_fp is required")
+        if not route:
+            raise ValueError("route is required")
+        attempts_i = max(0, int(attempts))
+        successes_i = max(0, min(attempts_i, int(successes)))
+        failures_i = max(0, min(attempts_i - successes_i, int(failures)))
+        now = _now_ms()
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO route_memory(
+                    peer_fp, route, attempts, successes, failures, score,
+                    latency_ms, bandwidth_bps, updated_ms, metadata_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(peer_fp, route) DO UPDATE SET
+                    attempts = excluded.attempts,
+                    successes = excluded.successes,
+                    failures = excluded.failures,
+                    score = excluded.score,
+                    latency_ms = excluded.latency_ms,
+                    bandwidth_bps = excluded.bandwidth_bps,
+                    updated_ms = excluded.updated_ms,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    peer_fp,
+                    route,
+                    attempts_i,
+                    successes_i,
+                    failures_i,
+                    float(score),
+                    float(latency_ms) if latency_ms is not None else None,
+                    float(bandwidth_bps) if bandwidth_bps is not None else None,
+                    now,
+                    json.dumps(metadata or {}, separators=(",", ":"), sort_keys=True),
+                ),
+            )
+
+    def list_route_memory(self, peer_fp: Optional[str] = None) -> list[dict]:
+        if peer_fp:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM route_memory
+                WHERE peer_fp = ?
+                ORDER BY score DESC, updated_ms DESC
+                """,
+                (peer_fp,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM route_memory ORDER BY peer_fp, score DESC"
+            ).fetchall()
+        out: list[dict] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+            except json.JSONDecodeError:
+                metadata = {}
+            out.append({
+                "peer_fp": row["peer_fp"],
+                "route": row["route"],
+                "attempts": int(row["attempts"]),
+                "successes": int(row["successes"]),
+                "failures": int(row["failures"]),
+                "score": float(row["score"]),
+                "latency_ms": (
+                    float(row["latency_ms"]) if row["latency_ms"] is not None else None
+                ),
+                "bandwidth_bps": (
+                    float(row["bandwidth_bps"]) if row["bandwidth_bps"] is not None else None
+                ),
+                "updated_ms": int(row["updated_ms"]),
+                "metadata": metadata if isinstance(metadata, dict) else {},
+            })
+        return out
 
     def enqueue_outbox(
         self,
