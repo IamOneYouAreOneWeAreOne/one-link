@@ -634,6 +634,8 @@ async def test_send_file_large_cdc_peer_uses_native_prior_knowledge_lane(
     assert row.metadata["cdc_decision_reason"] == "native_cdc_fast_lane:ctypes-c"
     assert row.metadata["cdc_engine"].startswith("native_ctypes-c")
     assert row.metadata["transfer_report"]["bandwidth_savings_ratio"] == 1.0
+    assert result["transfer_report"]["wire_bytes_sent"] == 0
+    assert result["transfer_engine_oracle"]["cdc"]["samples"] == 1
     state.close()
 
 

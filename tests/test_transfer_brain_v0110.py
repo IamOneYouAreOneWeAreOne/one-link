@@ -4,6 +4,7 @@ from one_link.transfer_brain import (
     CalibrationTier,
     HealthState,
     MeshNodeSignal,
+    TransferPerformanceOracle,
     TransferMode,
     TransferRouteObservation,
     adapt_pipeline_profile,
@@ -205,6 +206,42 @@ def test_transfer_result_report_counts_skipped_bytes_as_effective_delivery():
     assert report["saved_bytes"] == 94 * 1024 * 1024
     assert report["bandwidth_savings_ratio"] == 0.94
     assert report["effective_throughput_bps"] > report["wire_throughput_bps"]
+
+
+def test_transfer_performance_oracle_learns_cdc_engine_speed():
+    oracle = TransferPerformanceOracle()
+    defaults = oracle.speeds(native_cdc=True)
+    report = transfer_result_report(
+        raw_bytes=5 * 1024 * 1024,
+        wire_bytes=1 * 1024 * 1024,
+        skipped_bytes=95 * 1024 * 1024,
+        elapsed_s=0.05,
+    )
+
+    oracle.observe(method="file_cdc", report=report)
+    oracle.observe(method="file_cdc", report=report)
+    speeds = oracle.speeds(native_cdc=True)
+    snap = oracle.snapshot()
+
+    assert speeds["cdc_mib_s"] > defaults["cdc_mib_s"]
+    assert snap["cdc"]["samples"] == 2
+    assert snap["cdc"]["savings_ratio"] > 0.90
+
+
+def test_transfer_performance_oracle_penalizes_failed_engine():
+    oracle = TransferPerformanceOracle()
+    report = transfer_result_report(
+        raw_bytes=32 * 1024 * 1024,
+        wire_bytes=32 * 1024 * 1024,
+        elapsed_s=1.0,
+    )
+    oracle.observe(method="file_binary_frame", report=report)
+    oracle.observe(method="file_binary_frame", report=report)
+    oracle.observe_failure(method="file_binary_frame")
+
+    snap = oracle.snapshot()
+    assert snap["stream"]["samples"] == 3
+    assert snap["stream"]["reliability"] < 1.0
 
 
 def test_adaptive_scheduler_opens_window_on_fast_acks():

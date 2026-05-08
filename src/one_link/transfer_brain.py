@@ -47,6 +47,138 @@ class HealthState(str, Enum):
 
 
 @dataclass(frozen=True)
+class EngineStats:
+    """EWMA performance memory for one local transfer engine."""
+
+    samples: int = 0
+    mib_s: float = 0.0
+    savings_ratio: float = 0.0
+    reliability: float = 1.0
+
+    def observe(
+        self,
+        *,
+        mib_s: float,
+        savings_ratio: float,
+        ok: bool = True,
+        alpha: float = 0.25,
+    ) -> "EngineStats":
+        samples = self.samples + 1
+        speed = max(0.001, float(mib_s))
+        savings = _clamp01(savings_ratio)
+        reliability_sample = 1.0 if ok else 0.0
+        if self.samples <= 0:
+            return EngineStats(
+                samples=samples,
+                mib_s=speed,
+                savings_ratio=savings,
+                reliability=reliability_sample,
+            )
+        return EngineStats(
+            samples=samples,
+            mib_s=self.mib_s * (1.0 - alpha) + speed * alpha,
+            savings_ratio=self.savings_ratio * (1.0 - alpha) + savings * alpha,
+            reliability=self.reliability * (1.0 - alpha) + reliability_sample * alpha,
+        )
+
+
+class TransferPerformanceOracle:
+    """Small deterministic feedback loop for local transfer engines.
+
+    Route memory learns peer/path quality. This class learns what *this
+    machine* is actually achieving for stream, fixed-manifest, and CDC sends.
+    The daemon feeds it completed transfer reports, then the transfer brain
+    gets calibrated speeds instead of stale constants.
+    """
+
+    def __init__(self) -> None:
+        self._stats: dict[str, EngineStats] = {}
+
+    def observe(
+        self,
+        *,
+        method: str,
+        report: Mapping[str, object],
+        ok: bool = True,
+    ) -> None:
+        engine = self._engine_for_method(method)
+        raw = _as_float(report.get("raw_bytes_sent"))
+        effective = _as_float(report.get("effective_payload_bytes"))
+        raw_bps = _as_float(report.get("raw_throughput_bps"))
+        effective_bps = _as_float(report.get("effective_throughput_bps"))
+        savings = _as_float(report.get("bandwidth_savings_ratio"))
+        if engine == "cdc":
+            bps = max(effective_bps, raw_bps)
+            payload = max(effective, raw)
+        else:
+            bps = raw_bps
+            payload = raw
+        if bps <= 0.0 and payload > 0.0:
+            return
+        mib_s = (bps / 8.0) / MiB
+        self._stats[engine] = self._stats.get(engine, EngineStats()).observe(
+            mib_s=mib_s,
+            savings_ratio=savings,
+            ok=ok,
+        )
+
+    def observe_failure(self, *, method: str) -> None:
+        engine = self._engine_for_method(method)
+        self._stats[engine] = self._stats.get(engine, EngineStats()).observe(
+            mib_s=max(0.001, self._stats.get(engine, EngineStats()).mib_s or 1.0),
+            savings_ratio=self._stats.get(engine, EngineStats()).savings_ratio,
+            ok=False,
+        )
+
+    def speeds(
+        self,
+        *,
+        native_cdc: bool,
+        defaults: Mapping[str, float] | None = None,
+    ) -> dict[str, float]:
+        base = {
+            "hash_mib_s": 1500.0,
+            "fixed_mib_s": 1400.0 if native_cdc else 1100.0,
+            "cdc_mib_s": 950.0 if native_cdc else 8.0,
+        }
+        if defaults:
+            base.update({k: float(v) for k, v in defaults.items()})
+        stream = self._stats.get("stream")
+        fixed = self._stats.get("fixed")
+        cdc = self._stats.get("cdc")
+        if stream and stream.samples >= 2 and stream.reliability >= 0.70:
+            # Stream throughput is not hash CPU speed, but it is the best
+            # lower bound for the local end-to-end baseline.
+            base["hash_mib_s"] = max(base["hash_mib_s"] * 0.50, stream.mib_s)
+        if fixed and fixed.samples >= 2 and fixed.reliability >= 0.70:
+            base["fixed_mib_s"] = max(base["fixed_mib_s"] * 0.50, fixed.mib_s)
+        if cdc and cdc.samples >= 2 and cdc.reliability >= 0.70:
+            floor = 80.0 if native_cdc else 4.0
+            base["cdc_mib_s"] = max(floor, cdc.mib_s)
+        return {k: round(float(v), 3) for k, v in base.items()}
+
+    def snapshot(self) -> dict[str, dict[str, float | int]]:
+        return {
+            k: {
+                "samples": v.samples,
+                "mib_s": round(v.mib_s, 3),
+                "savings_ratio": round(v.savings_ratio, 6),
+                "reliability": round(v.reliability, 4),
+            }
+            for k, v in sorted(self._stats.items())
+        }
+
+    @staticmethod
+    def _engine_for_method(method: str) -> str:
+        m = str(method or "").lower()
+        if "cdc" in m:
+            return "cdc"
+        if "fixed" in m or "manifest" in m:
+            return "fixed"
+        return "stream"
+
+
+@dataclass(frozen=True)
 class TransferRouteObservation:
     route: str
     ok: bool
@@ -715,6 +847,16 @@ def decision_from_observations(
 
 def _clamp01(value: float) -> float:
     return min(1.0, max(0.0, float(value)))
+
+
+def _as_float(value: object, default: float = 0.0) -> float:
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return float(default)
+    if out != out:
+        return float(default)
+    return out
 
 
 def route_coherence_score(stats: RouteStats) -> float:

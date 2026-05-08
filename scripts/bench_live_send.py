@@ -64,6 +64,7 @@ def main() -> int:
     parser.add_argument("--size-mib", type=int, default=128, help="Generated file size")
     parser.add_argument("--repeat", type=int, default=2, help="Send count")
     parser.add_argument("--seed", type=int, default=20260508)
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     args = parser.parse_args()
 
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -74,12 +75,15 @@ def main() -> int:
     else:
         temp_dir = tempfile.TemporaryDirectory(prefix="ol_live_bench_")
         path = Path(temp_dir.name) / f"bench-{args.size_mib}MiB.bin"
-        print(f"Generating {args.size_mib} MiB at {path} ...")
+        if not args.json:
+            print(f"Generating {args.size_mib} MiB at {path} ...")
         _make_file(path, args.size_mib * 1024 * 1024, seed=args.seed)
 
     try:
         size = path.stat().st_size
-        print(f"One Link live send benchmark: peer={args.peer} file={path.name} size={size}")
+        rows: list[dict[str, object]] = []
+        if not args.json:
+            print(f"One Link live send benchmark: peer={args.peer} file={path.name} size={size}")
         for i in range(max(1, int(args.repeat))):
             t0 = time.perf_counter()
             res = _request(
@@ -90,7 +94,17 @@ def main() -> int:
             )
             elapsed = time.perf_counter() - t0
             if not res.get("ok"):
-                print(f"run {i + 1}: failed after {elapsed:.2f}s: {res.get('error')}")
+                failure = {
+                    "run": i + 1,
+                    "ok": False,
+                    "elapsed_s": round(elapsed, 6),
+                    "error": res.get("error"),
+                }
+                rows.append(failure)
+                if args.json:
+                    print(json.dumps({"ok": False, "runs": rows}, indent=2))
+                else:
+                    print(f"run {i + 1}: failed after {elapsed:.2f}s: {res.get('error')}")
                 return 2
             result = res.get("result") or {}
             raw_value = result.get("raw_bytes_sent")
@@ -99,19 +113,59 @@ def main() -> int:
             wire = int(wire_value if wire_value is not None else raw)
             skipped = int(result.get("cdc_skipped") or 0)
             effective = size
+            report = result.get("transfer_report") or {}
+            row = {
+                "run": i + 1,
+                "ok": True,
+                "elapsed_s": round(elapsed, 6),
+                "effective_mbps": round(_mbps(effective, elapsed), 3),
+                "raw_mbps": round(_mbps(raw, elapsed), 3),
+                "wire_mbps": round(_mbps(wire, elapsed), 3),
+                "cdc": bool(result.get("cdc")),
+                "chunks": int(result.get("chunks") or 0),
+                "total_chunks": int(result.get("total_chunks") or 0),
+                "skipped_chunks": skipped,
+                "saved_bytes": int(report.get("saved_bytes") or max(0, effective - wire)),
+                "bandwidth_savings_ratio": float(report.get("bandwidth_savings_ratio") or 0.0),
+                "engine_oracle": result.get("transfer_engine_oracle") or {},
+            }
+            rows.append(row)
+            if not args.json:
+                print(
+                    "run {run}: {seconds:.2f}s effective={effective:.1f} Mbps "
+                    "raw={raw:.1f} Mbps wire={wire:.1f} Mbps cdc={cdc} "
+                    "chunks={chunks}/{total_chunks} skipped_chunks={skipped} "
+                    "saved={saved:.1f} MiB".format(
+                        run=i + 1,
+                        seconds=elapsed,
+                        effective=row["effective_mbps"],
+                        raw=row["raw_mbps"],
+                        wire=row["wire_mbps"],
+                        cdc=row["cdc"],
+                        chunks=row["chunks"],
+                        total_chunks=row["total_chunks"],
+                        skipped=row["skipped_chunks"],
+                        saved=row["saved_bytes"] / (1024 * 1024),
+                    )
+                )
+        ok_rows = [r for r in rows if r.get("ok")]
+        summary = {
+            "ok": True,
+            "peer": args.peer,
+            "file": str(path),
+            "size_bytes": size,
+            "runs": rows,
+            "best_effective_mbps": max((float(r["effective_mbps"]) for r in ok_rows), default=0.0),
+            "best_wire_mbps": max((float(r["wire_mbps"]) for r in ok_rows), default=0.0),
+            "total_saved_bytes": sum(int(r.get("saved_bytes") or 0) for r in ok_rows),
+        }
+        if args.json:
+            print(json.dumps(summary, indent=2, sort_keys=True))
+        elif len(ok_rows) > 1:
             print(
-                "run {run}: {seconds:.2f}s effective={effective:.1f} Mbps "
-                "raw={raw:.1f} Mbps wire={wire:.1f} Mbps cdc={cdc} "
-                "chunks={chunks}/{total_chunks} skipped_chunks={skipped}".format(
-                    run=i + 1,
-                    seconds=elapsed,
-                    effective=_mbps(effective, elapsed),
-                    raw=_mbps(raw, elapsed),
-                    wire=_mbps(wire, elapsed),
-                    cdc=bool(result.get("cdc")),
-                    chunks=int(result.get("chunks") or 0),
-                    total_chunks=int(result.get("total_chunks") or 0),
-                    skipped=skipped,
+                "summary: best effective={:.1f} Mbps, total saved={:.1f} MiB".format(
+                    summary["best_effective_mbps"],
+                    summary["total_saved_bytes"] / (1024 * 1024),
                 )
             )
         return 0

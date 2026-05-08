@@ -99,6 +99,7 @@ from one_link.swarm_plan import plan_swarm_sources, source_from_hashes
 from one_link.transfer_brain import (
     AdaptiveTransferScheduler,
     MeshNodeSignal,
+    TransferPerformanceOracle,
     TransferRouteObservation,
     adapt_pipeline_profile,
     decision_from_observations,
@@ -665,6 +666,10 @@ class Daemon:
         # swarm planning can prefer routes that actually work for this
         # peer instead of static guesses.
         self._route_memory: dict[str, RouteMemory] = {}
+        # v0.14.x: local transfer engine calibration. The route memory
+        # learns which peer path is good; this learns which local engine
+        # is actually fast on this computer right now.
+        self._transfer_perf = TransferPerformanceOracle()
         # v0.7.1: dedup table for capability_request WS events.
         # (peer_fp, cap) -> monotonic ts of last UI prompt fired.
         self._capability_request_seen: dict[tuple[str, str], float] = {}
@@ -7129,11 +7134,9 @@ class Daemon:
             c.route for c in self._route_memory_for(peer_fp).candidates()
         ) or (getattr(sess, "regime", None) or "lan",)
         native_status = native_cdc_status()
-        engine_speeds = {
-            "hash_mib_s": 1500.0,
-            "fixed_mib_s": 1400.0 if native_status.available else 1100.0,
-            "cdc_mib_s": 950.0 if native_status.available else 8.0,
-        }
+        engine_speeds = self._transfer_perf.speeds(
+            native_cdc=bool(native_status.available),
+        )
         transfer_brain_decision = decision_from_observations(
             size_bytes=size,
             supports_cdc=can_offer_cdc,
@@ -7169,6 +7172,7 @@ class Daemon:
                 "library": str(native_status.library),
             },
             "transfer_engine_speeds": engine_speeds,
+            "transfer_engine_oracle": self._transfer_perf.snapshot(),
             "prior_hit_rate_estimate": prior_hit_rate,
             "transfer_brain": transfer_brain_decision,
             "verification_head": list(verification_head),
@@ -7608,6 +7612,16 @@ class Daemon:
                     ok=True,
                     bandwidth_bps=throughput_bps,
                 )
+                self._transfer_perf.observe(
+                    method=(
+                        "file_cdc" if cdc_used
+                        else "file_binary_frame"
+                        if base_metadata.get("binary_frame")
+                        else "file_baseline"
+                    ),
+                    report=transfer_report,
+                    ok=True,
+                )
 
             self._update_transfer(
                 transfer_id,
@@ -7647,6 +7661,8 @@ class Daemon:
                 "raw_bytes_sent": raw_bytes_sent,
                 "wire_bytes_sent": wire_bytes_sent,
                 "compressed_chunks": compressed_chunks,
+                "transfer_report": transfer_report,
+                "transfer_engine_oracle": self._transfer_perf.snapshot(),
                 "blob": blob_hex,
                 "size": size,
                 "transfer_id": transfer_id,
@@ -7673,6 +7689,10 @@ class Daemon:
                         **base_metadata,
                         "adaptive_scheduler": adaptive_scheduler.snapshot(),
                     }
+            with contextlib.suppress(Exception):
+                self._transfer_perf.observe_failure(
+                    method=str(base_metadata.get("actual_method") or actual_method),
+                )
             if transient:
                 self._mark_transfer_waiting(
                     transfer_id,
