@@ -158,6 +158,35 @@ async def test_outbound_query_and_pull_store_remote_chunk(tmp_path: Path, monkey
 
 
 @pytest.mark.asyncio
+async def test_swarm_source_query_batches_large_manifests(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    them = _new_identity()
+    daemon = Daemon(me)
+    peer = Peer(them.short_id, "source", "127.0.0.1", 12345, them.public_bytes.hex())
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    daemon._outbound_sessions[them.fingerprint] = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=peer,
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    hashes = [f"{i:064x}" for i in range(2053)]
+    chan.queue_reply(make_msg("CHUNK_HAVE", them.short_id, hashes=[hashes[0]]))
+    chan.queue_reply(make_msg("CHUNK_HAVE", them.short_id, hashes=[hashes[2048], hashes[-1]]))
+
+    claims = await daemon.query_swarm_chunk_sources([peer], hashes)
+
+    assert claims[them.fingerprint] == {hashes[0], hashes[2048], hashes[-1]}
+    sent_queries = [m for m in chan.sent if m["t"] == "CHUNK_QUERY"]
+    assert len(sent_queries) == 2
+    assert len(sent_queries[0]["hashes"]) == 2048
+    assert len(sent_queries[1]["hashes"]) == 5
+
+
+@pytest.mark.asyncio
 async def test_swarm_pull_fetches_missing_chunks_from_multiple_sources(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
     me = _new_identity()

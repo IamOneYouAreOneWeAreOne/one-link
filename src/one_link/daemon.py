@@ -163,6 +163,8 @@ FILE_FINAL_ACK_BYTES_PER_S = 2 * 1024 * 1024
 TRANSFER_RETRY_BASE_S = 5.0
 TRANSFER_RETRY_MAX_S = 5 * 60.0
 SWARM_ASSIST_DEADLINE_S = 2.0
+SWARM_QUERY_BATCH_HASHES = 2048
+SWARM_QUERY_MAX_HASHES = 262_144
 PRIOR_ASSIST_MAX_FILES = 96
 PRIOR_ASSIST_MAX_SCAN_BYTES = 2 * 1024 * 1024 * 1024
 PRIOR_ASSIST_MAX_MATCHES_PER_SCAN = 4096
@@ -2797,31 +2799,38 @@ class Daemon:
     ) -> dict[str, set[str]]:
         clean = []
         seen = set()
-        for h in hashes[:2048]:
+        for h in hashes[:SWARM_QUERY_MAX_HASHES]:
             h = str(h)
             if h not in seen and self._valid_blob_hex(h):
                 seen.add(h)
                 clean.append(h)
         sem = asyncio.Semaphore(max(1, int(concurrency)))
         claims: dict[str, set[str]] = {}
+        batches = [
+            clean[i:i + SWARM_QUERY_BATCH_HASHES]
+            for i in range(0, len(clean), SWARM_QUERY_BATCH_HASHES)
+        ]
 
         async def _query(peer: Peer) -> None:
             peer_fp = self._peer_fp_from_peer(peer)
             if not peer_fp:
                 return
             async with sem:
-                try:
-                    res = await self.query_peer_chunks(peer, clean)
-                except Exception as e:
-                    log.debug("swarm chunk query skipped %s: %s", peer.short_id, e)
-                    return
-            if res.get("ok"):
-                have = {
-                    str(h) for h in (res.get("hashes") or [])
-                    if self._valid_blob_hex(str(h))
-                }
-                if have:
-                    claims[peer_fp] = have
+                have: set[str] = set()
+                for batch in batches:
+                    try:
+                        res = await self.query_peer_chunks(peer, batch)
+                    except Exception as e:
+                        log.debug("swarm chunk query skipped %s: %s", peer.short_id, e)
+                        return
+                    if not res.get("ok"):
+                        return
+                    have.update(
+                        str(h) for h in (res.get("hashes") or [])
+                        if self._valid_blob_hex(str(h))
+                    )
+            if have:
+                claims[peer_fp] = have
 
         await asyncio.gather(*(_query(p) for p in peers))
         return claims

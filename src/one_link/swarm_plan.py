@@ -75,6 +75,18 @@ class ChunkSource:
         score = self.route_score()
         return score[:5]
 
+    def estimated_finish_seconds(self, *, queued_bytes: int, next_bytes: int) -> float:
+        """Predict when this source would finish if assigned one more chunk."""
+
+        bandwidth = self.bandwidth_bps if self.bandwidth_bps is not None else 0.0
+        if bandwidth <= 0:
+            # Unknown route: keep it usable, but only after known-fast peers.
+            bandwidth = 8_000_000.0
+        latency = self.latency_ms if self.latency_ms is not None else 100.0
+        reliability = min(1.0, max(0.05, float(self.reliability)))
+        bytes_total = max(0, int(queued_bytes)) + max(0, int(next_bytes))
+        return (max(0.0, latency) / 1000.0) + ((bytes_total * 8.0) / (bandwidth * reliability))
+
 
 @dataclass(frozen=True)
 class ChunkAssignment:
@@ -171,13 +183,25 @@ def plan_swarm_sources(
                 priority=priority,
             ))
             continue
-        # Highest route score wins; equal routes are spread by current byte
-        # load so multiple local devices work as a parallel fabric.
+        # Highest trust/coherence/reliability still wins the safety decision.
+        # Inside that safe tier, choose the source with the lowest predicted
+        # finish time after assigning this chunk. That turns the trusted
+        # devices into one parallel fabric instead of pinning every chunk to
+        # the first slightly-faster source.
         best = max(
             candidates,
             key=lambda s: (
-                *s.route_score_without_tiebreaker(),
-                -source_load_bytes.get(s.peer_fp, 0),
+                s.route_score()[0],
+                1 if (s.coherence_score is not None and s.coherence_score >= 0.90) else 0,
+                s.route_score()[2],
+                -s.estimated_finish_seconds(
+                    queued_bytes=source_load_bytes.get(s.peer_fp, 0),
+                    next_bytes=c.size,
+                ),
+                s.route_score()[1],
+                s.route_score()[3],
+                s.route_score()[4],
+                s.route_score()[5],
                 s.peer_fp,
             ),
         )

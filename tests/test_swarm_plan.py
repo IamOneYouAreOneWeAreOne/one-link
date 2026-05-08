@@ -98,6 +98,39 @@ def test_swarm_plan_balances_equal_sources_by_bytes(tmp_path: Path):
     assert sum(plan.per_source_bytes().values()) == plan.assigned_bytes
 
 
+def test_swarm_plan_splits_by_predicted_finish_time_not_just_fastest_label(tmp_path: Path):
+    manifest = _manifest(tmp_path)
+    chunks = manifest.chunks[:12]
+    hashes = [c.hash for c in chunks]
+    fast = source_from_hashes(
+        "aa" * 32,
+        hashes,
+        trust_score=1.0,
+        latency_ms=3,
+        bandwidth_bps=800_000_000,
+        reliability=0.99,
+    )
+    helper = source_from_hashes(
+        "bb" * 32,
+        hashes,
+        trust_score=1.0,
+        latency_ms=4,
+        bandwidth_bps=250_000_000,
+        reliability=0.99,
+    )
+
+    plan = plan_swarm_sources(
+        manifest=manifest,
+        needed_indexes=[c.index for c in chunks],
+        sources=[fast, helper],
+    )
+
+    counts = plan.per_source_counts()
+    assert counts["aa" * 32] > counts["bb" * 32]
+    assert counts["bb" * 32] > 0
+    assert sum(counts.values()) == len(chunks)
+
+
 def test_swarm_plan_prefers_reliable_high_bandwidth_route_after_trust(tmp_path: Path):
     manifest = _manifest(tmp_path)
     h = manifest.chunks[0].hash
