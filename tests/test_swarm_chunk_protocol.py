@@ -225,6 +225,99 @@ async def test_swarm_pull_fetches_missing_chunks_from_multiple_sources(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_swarm_pull_retries_alternate_source_when_best_source_fails(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    fast_id = _new_identity()
+    backup_id = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+
+    payload = b"same-chunk-from-the-mesh"
+    h = blake3.blake3(payload).hexdigest()
+    manifest = FileManifest(
+        name="x.bin",
+        size=len(payload),
+        blob_hash=blake3.blake3(payload).hexdigest(),
+        chunks=(FileChunkManifest(
+            index=0,
+            start=0,
+            end=len(payload),
+            size=len(payload),
+            hash=h,
+        ),),
+    )
+    peers = []
+    channels = {}
+    for ident, bw in ((fast_id, 2_000_000_000), (backup_id, 100_000_000)):
+        state.upsert_peer(
+            fingerprint=ident.fingerprint,
+            short_id=ident.short_id,
+            pubkey=ident.public_bytes,
+        )
+        state.set_peer_trust(ident.fingerprint, "pinned")
+        state.set_peer_capability_policy(ident.fingerprint, [CHAT, FILES])
+        daemon._stamp_pair_health(
+            ident.fingerprint,
+            latency_ms=2.0,
+            bandwidth_bps=bw,
+            reliability=1.0,
+        )
+        peer = Peer(ident.short_id, "them", "127.0.0.1", 1234, ident.public_bytes.hex())
+        peers.append(peer)
+        chan = _FakeChannel(peer_ed_pub=ident.public_bytes, peer_short_id=ident.short_id)
+        channels[ident.fingerprint] = chan
+        daemon._outbound_sessions[ident.fingerprint] = OutboundSession(
+            peer_fp=ident.fingerprint,
+            peer=peer,
+            channel=chan,  # type: ignore[arg-type]
+            lock=asyncio.Lock(),
+            last_used=time.time(),
+            regime="lan",
+        )
+        chan.queue_reply(make_msg("CHUNK_HAVE", ident.short_id, hashes=[h]))
+
+    bad_payload = b"corrupt"
+    bad_enc, bad_wire = daemon._encode_payload(bad_payload)
+    channels[fast_id.fingerprint].queue_reply(make_msg(
+        "CHUNK_DATA",
+        fast_id.short_id,
+        hash=h,
+        enc=bad_enc,
+        wire_size=len(bad_wire),
+        size=len(bad_payload),
+        data=__import__("base64").b64encode(bad_wire).decode("ascii"),
+    ))
+    enc, wire = daemon._encode_payload(payload)
+    channels[backup_id.fingerprint].queue_reply(make_msg(
+        "CHUNK_DATA",
+        backup_id.short_id,
+        hash=h,
+        enc=enc,
+        wire_size=len(wire),
+        size=len(payload),
+        data=__import__("base64").b64encode(wire).decode("ascii"),
+    ))
+
+    pulled = await daemon.pull_swarm_missing_chunks(
+        peers=peers,
+        manifest=manifest,
+        needed_indexes=[0],
+    )
+
+    assert pulled["ok"] is True
+    assert pulled["pulled"] == 1
+    assert pulled["retried"] == 1
+    assert pulled["healed"] == 1
+    assert daemon._read_chunk_cache(h) == payload
+    assert h in pulled["candidate_sources"]
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_inbound_file_offer_pulls_available_chunk_from_swarm_before_wants(
     tmp_path: Path, monkeypatch,
 ):

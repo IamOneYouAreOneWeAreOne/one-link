@@ -543,6 +543,15 @@ async def test_send_file_large_cdc_peer_uses_fast_stream_lane(
             AssertionError("large first-time send should not build Python CDC")
         ),
     )
+    monkeypatch.setattr(
+        "one_link.daemon.native_cdc_status",
+        lambda: SimpleNamespace(
+            available=False,
+            engine="python",
+            reason="disabled for test",
+            library="",
+        ),
+    )
 
     f = tmp_path / "video.bin"
     f.write_bytes(b"x" * 1024)
@@ -558,6 +567,73 @@ async def test_send_file_large_cdc_peer_uses_fast_stream_lane(
     assert offer["mode"] == "stream"
     assert "chunks" not in offer
     assert row.metadata["cdc_decision_reason"] == "large_file_fast_lane_until_native_cdc"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_send_file_large_cdc_peer_uses_native_prior_knowledge_lane(
+    tmp_path: Path, monkeypatch
+):
+    """With the native CDC scanner active, large sends should advertise a
+    manifest so peers can skip already-known bytes instead of wasting wire.
+    """
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, FILE_CDC],
+        "from": them.short_id,
+        "app_version": "0.14.3",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint, peer=Peer(
+            short_id=them.short_id, hostname="them",
+            address="127.0.0.1", port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    monkeypatch.setattr(
+        "one_link.daemon.native_cdc_status",
+        lambda: SimpleNamespace(
+            available=True,
+            engine="ctypes-c",
+            reason="",
+            library="test-native",
+        ),
+    )
+
+    f = tmp_path / "huge-known-video.bin"
+    f.write_bytes(b"known-video" * 256)
+    monkeypatch.setattr("one_link.daemon.CDC_AUTO_INDEX_MAX_BYTES", 512)
+    monkeypatch.setattr("one_link.daemon.FAST_FIXED_INDEX_MIN_BYTES", 512)
+    chan.queue_reply(make_msg("FILE_WANTS", them.short_id, wants=[]))
+
+    result = await daemon.send_file(sess.peer, f)
+    offer = chan.sent[0]
+    row = state.list_transfers(limit=1)[0]
+
+    assert result["cdc"] is True
+    assert result["wire_bytes_sent"] == 0
+    assert offer["mode"] == "cdc"
+    assert isinstance(offer.get("chunks"), list)
+    assert row.metadata["cdc_decision_reason"] == "native_cdc_fast_lane:ctypes-c"
+    assert row.metadata["cdc_engine"].startswith("native_ctypes-c")
+    assert row.metadata["transfer_report"]["bandwidth_savings_ratio"] == 1.0
     state.close()
 
 
@@ -942,7 +1018,9 @@ async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
     assert result["wire_bytes_sent"] == f.stat().st_size
     assert [c["index"] for c in sent_chunks] == [0, 1, 2, 3, 4]
     assert max(chan.recv_sent_counts) >= 3
-    assert row.metadata["cdc_engine"] == "pipelined_chunks_v2"
+    assert row.metadata["cdc_engine"].endswith("pipelined_chunks_v3") or (
+        row.metadata["cdc_engine"] == "pipelined_chunks_v2"
+    )
     assert row.metadata["cdc_window_chunks"] == 2
     assert row.metadata["pipeline_tuning"]["reason"] == "constrained_backoff"
     assert row.metadata["transfer_report"]["wire_efficiency_ratio"] == 1.0

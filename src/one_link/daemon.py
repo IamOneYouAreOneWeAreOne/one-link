@@ -87,6 +87,7 @@ from one_link.cdc import (
 from one_link.crdt import ManifestEntry, VectorClock
 from one_link.discovery import Discovery, Peer
 from one_link.identity import Identity, fingerprint_of, load_or_create
+from one_link.native_cdc import native_cdc_status
 from one_link.pairing import PairingTracker, PairState, compute_sas
 from one_link.paths import (
     data_dir,
@@ -252,10 +253,10 @@ def _should_build_cdc_offer(
 ) -> tuple[bool, str]:
     """Decide whether a live send should pay CDC indexing cost.
 
-    CDC is excellent when it skips enough bytes, but Python CDC is currently
-    much slower than the fast stream path for first-time large media. This
-    keeps the app automatic: small files and CDC resumes use CDC; huge unknown
-    sends use the fast compatible lane until the native CDC engine lands.
+    CDC is excellent when it skips enough bytes, but Python CDC is much slower
+    than the fast stream path for first-time large media. Native CDC changes
+    that tradeoff: large files can advertise chunk knowledge quickly, so the
+    peer can skip anything it already has or source it from the trusted mesh.
     """
 
     if not getattr(intent, "can_offer_cdc", False):
@@ -266,6 +267,9 @@ def _should_build_cdc_offer(
         return True, "resume_existing_cdc_transfer"
     if int(size) <= CDC_AUTO_INDEX_MAX_BYTES:
         return True, "small_enough_for_python_cdc"
+    native = native_cdc_status()
+    if native.available:
+        return True, f"native_cdc_fast_lane:{native.engine}"
     return False, "large_file_fast_lane_until_native_cdc"
 
 
@@ -2833,41 +2837,63 @@ class Daemon:
             reliability = health.get("reliability")
             if isinstance(reliability, (int, float)):
                 health_reliability[fp] = max(0.0, min(1.0, float(reliability)))
+        source_objects = [
+            source_from_hashes(
+                fp,
+                hashes,
+                trust_score=self._swarm_trust_score(fp),
+                latency_ms=health_latency.get(fp),
+                bandwidth_bps=health_bandwidth.get(fp),
+                reliability=health_reliability.get(fp, 1.0),
+            )
+            for fp, hashes in claims.items()
+        ]
+        candidate_fps_by_hash: dict[str, list[str]] = {}
+        for chunk_hash in needed_hashes:
+            candidates = [
+                s for s in source_objects
+                if chunk_hash in s.chunk_hashes and s.peer_fp in peer_by_fp
+            ]
+            candidates.sort(
+                key=lambda s: (*s.route_score_without_tiebreaker(), s.peer_fp),
+                reverse=True,
+            )
+            candidate_fps_by_hash[chunk_hash] = [s.peer_fp for s in candidates]
+        chunk_by_index = {c.index: c for c in manifest.chunks}
         plan = plan_swarm_sources(
             manifest=manifest,
             needed_indexes=needed,
-            sources=[
-                source_from_hashes(
-                    fp,
-                    hashes,
-                    trust_score=self._swarm_trust_score(fp),
-                    latency_ms=health_latency.get(fp),
-                    bandwidth_bps=health_bandwidth.get(fp),
-                    reliability=health_reliability.get(fp, 1.0),
-                )
-                for fp, hashes in claims.items()
-            ],
+            sources=source_objects,
         )
         sem = asyncio.Semaphore(max(1, int(concurrency)))
         pulled = 0
+        retried = 0
+        healed = 0
         failed: set[int] = set()
+        succeeded: set[int] = set()
 
-        async def _pull(index: int, fp: str, chunk_hash: str) -> None:
+        async def _pull_from(index: int, fp: str, chunk_hash: str) -> bool:
             nonlocal pulled
+            if self._chunk_cache_path(chunk_hash).is_file():
+                succeeded.add(index)
+                return True
             peer = peer_by_fp.get(fp)
             if peer is None:
-                failed.add(index)
-                return
+                return False
             async with sem:
                 try:
                     res = await self.pull_peer_chunk(peer, chunk_hash)
                 except Exception as e:
                     log.debug("swarm chunk pull failed %s from %s: %s", chunk_hash[:8], fp[:8], e)
-                    failed.add(index)
-                    return
+                    return False
             if res.get("ok"):
                 pulled += 1
-            else:
+                succeeded.add(index)
+                return True
+            return False
+
+        async def _pull(index: int, fp: str, chunk_hash: str) -> None:
+            if not await _pull_from(index, fp, chunk_hash):
                 failed.add(index)
 
         pulls = [
@@ -2877,16 +2903,50 @@ class Daemon:
         ]
         if pulls:
             await asyncio.gather(*pulls)
+
+        if failed:
+            retry_indexes = sorted(failed)
+            failed.clear()
+
+            async def _retry(index: int) -> None:
+                nonlocal retried, healed
+                chunk = chunk_by_index.get(index)
+                if chunk is None:
+                    failed.add(index)
+                    return
+                primary = next(
+                    (
+                        a.source_peer_fp for a in plan.assignments
+                        if a.index == index
+                    ),
+                    None,
+                )
+                for fp in candidate_fps_by_hash.get(chunk.hash, []):
+                    if fp == primary:
+                        continue
+                    retried += 1
+                    if await _pull_from(index, fp, chunk.hash):
+                        healed += 1
+                        return
+                if index not in succeeded:
+                    failed.add(index)
+
+            await asyncio.gather(*(_retry(i) for i in retry_indexes))
         missing = sorted(set(plan.missing_indexes) | failed)
         return {
             "ok": not missing,
             "pulled": pulled,
+            "retried": retried,
+            "healed": healed,
             "missing_indexes": missing,
             "sources": plan.per_source_counts(),
             "source_bytes": plan.per_source_bytes(),
             "assigned_bytes": plan.assigned_bytes,
             "missing_bytes": plan.missing_bytes,
             "schedule": list(plan.rarest_first_indexes),
+            "candidate_sources": {
+                h: fps for h, fps in candidate_fps_by_hash.items() if len(fps) > 1
+            },
         }
 
     def _trusted_chunk_source_peers(self, *, exclude_fp: str) -> list[Peer]:
@@ -2965,7 +3025,11 @@ class Daemon:
         }
         return remaining, {
             "pulled": int(result.get("pulled") or 0),
+            "retried": int(result.get("retried") or 0),
+            "healed": int(result.get("healed") or 0),
             "sources": dict(result.get("sources") or {}),
+            "source_bytes": dict(result.get("source_bytes") or {}),
+            "candidate_sources": dict(result.get("candidate_sources") or {}),
             "missing_after": sorted(remaining),
         }
 
@@ -7064,6 +7128,12 @@ class Daemon:
         route_names = tuple(
             c.route for c in self._route_memory_for(peer_fp).candidates()
         ) or (getattr(sess, "regime", None) or "lan",)
+        native_status = native_cdc_status()
+        engine_speeds = {
+            "hash_mib_s": 1500.0,
+            "fixed_mib_s": 1400.0 if native_status.available else 1100.0,
+            "cdc_mib_s": 950.0 if native_status.available else 8.0,
+        }
         transfer_brain_decision = decision_from_observations(
             size_bytes=size,
             supports_cdc=can_offer_cdc,
@@ -7076,6 +7146,7 @@ class Daemon:
                 chunk_hit_rate=prior_hit_rate,
             ),
             verification_head=verification_head,
+            speeds=engine_speeds,
         ).to_dict()
         now_ms = int(time.time() * 1000)
         base_metadata = {
@@ -7091,6 +7162,13 @@ class Daemon:
             "cdc_auto_index_max_bytes": CDC_AUTO_INDEX_MAX_BYTES,
             "fast_fixed_index_min_bytes": FAST_FIXED_INDEX_MIN_BYTES,
             "fixed_chunk_size": fixed_chunk_size,
+            "cdc_engine_status": {
+                "available": bool(native_status.available),
+                "engine": str(native_status.engine),
+                "reason": str(native_status.reason),
+                "library": str(native_status.library),
+            },
+            "transfer_engine_speeds": engine_speeds,
             "prior_hit_rate_estimate": prior_hit_rate,
             "transfer_brain": transfer_brain_decision,
             "verification_head": list(verification_head),
@@ -7250,11 +7328,19 @@ class Daemon:
                     cdc_window_bytes = int(cdc_scheduler.window_bytes)
                     base_metadata = {
                         **base_metadata,
-                        "cdc_engine": "pipelined_chunks_v2",
+                        "cdc_engine": (
+                            f"native_{native_status.engine}_pipelined_chunks_v3"
+                            if native_status.available
+                            else "pipelined_chunks_v2"
+                        ),
                         "cdc_window_chunks": cdc_window_chunks,
                         "cdc_window_bytes": cdc_window_bytes,
                         "pipeline_tuning": cdc_profile,
                         "prior_hit_rate_actual": actual_prior_hit_rate,
+                        "skipped_bytes": skipped_bytes,
+                        "skipped_ratio": round(
+                            skipped_bytes / max(1, size), 6,
+                        ),
                     }
                     self._update_transfer(
                         transfer_id,
