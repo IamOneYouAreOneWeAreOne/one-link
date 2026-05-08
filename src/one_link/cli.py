@@ -9,6 +9,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 from pathlib import Path
 
 import click
@@ -69,10 +70,12 @@ def daemon(verbose, tray):
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    # v0.10.5: optional tray icon. Imports lazily so a fresh
-    # install without pystray still runs the daemon headlessly.
-    tray_icon = None
-    if tray:
+    # v0.10.5/v0.12.2: optional tray icon. Start it off the critical daemon
+    # boot path so slow Windows/Pillow/pystray initialization cannot delay
+    # discovery, the control socket, or the local web UI coming online.
+    tray_icon_holder: dict[str, object | None] = {"icon": None}
+
+    def _start_tray_icon() -> None:
         try:
             from one_link.tray import TrayIcon
             from one_link.paths import inbox_dir
@@ -80,6 +83,7 @@ def daemon(verbose, tray):
                 on_quit=lambda: os.kill(os.getpid(), signal.SIGINT),
                 inbox_path=inbox_dir(),
             )
+            tray_icon_holder["icon"] = tray_icon
             if tray_icon.available:
                 tray_icon.start()
                 logging.getLogger("one_link.tray").info(
@@ -89,6 +93,13 @@ def daemon(verbose, tray):
             logging.getLogger("one_link.tray").info(
                 "tray init skipped: %s", e,
             )
+
+    if tray:
+        threading.Thread(
+            target=_start_tray_icon,
+            daemon=True,
+            name="one-link-tray-loader",
+        ).start()
     try:
         asyncio.run(daemon_mod.run())
     except RuntimeError as e:
@@ -96,6 +107,7 @@ def daemon(verbose, tray):
             raise click.ClickException(str(e))
         raise
     finally:
+        tray_icon = tray_icon_holder.get("icon")
         if tray_icon is not None:
             try: tray_icon.stop()
             except Exception: pass

@@ -15,6 +15,7 @@ from typing import AsyncIterator
 
 import asyncio
 import json
+import time
 import pytest
 import pytest_asyncio
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -157,6 +158,7 @@ async def test_api_peers_stamps_regime_from_outbound_session(tmp_path: Path):
         peers = {p["fingerprint"]: p for p in body["peers"]}
         assert peer_fp in peers
         assert peers[peer_fp]["regime"] == "relay"
+        assert peers[peer_fp]["online"] is True
     finally:
         state.close()
 
@@ -318,6 +320,93 @@ async def test_api_peers_offline_peer_gets_offline_regime(tmp_path: Path):
         resp = await server.api_peers(_Req())
         body = json.loads(resp.text)
         peers = {p["fingerprint"]: p for p in body["peers"]}
+        assert peers[peer_fp]["regime"] == "offline"
+        assert peers[peer_fp]["online"] is False
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_peers_recent_secure_contact_keeps_peer_online(tmp_path: Path):
+    """A paired device that just ACKed or sent encrypted traffic is online even
+    if mDNS has not refreshed yet."""
+    from one_link.server import UIServer
+
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        peer_fp = "bb" * 32
+        state.upsert_peer(
+            fingerprint=peer_fp,
+            short_id="bbbbbbbb",
+            pubkey=b"\xbb" * 32,
+            address="192.168.1.26",
+            trust_default="pinned",
+        )
+        daemon = SimpleNamespace(
+            state=state,
+            discovery=None,
+            me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa", hostname="me"),
+            _outbound_sessions={},
+            _inbound_regime={},
+            get_pair_health=lambda fp: {
+                "last_alive_ms": int(time.time() * 1000),
+                "latency_ewma_ms": 5.0,
+                "best_route": "lan",
+            } if fp == peer_fp else None,
+        )
+        server = UIServer(daemon)
+
+        class _Req:
+            query: dict = {}
+            match_info: dict = {}
+
+        resp = await server.api_peers(_Req())
+        body = json.loads(resp.text)
+        peers = {p["fingerprint"]: p for p in body["peers"]}
+        assert peers[peer_fp]["online"] is True
+        assert peers[peer_fp]["presence"] == "online"
+        assert peers[peer_fp]["regime"] == "lan"
+        assert peers[peer_fp]["health"]["latency_ewma_ms"] == 5.0
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_peers_stale_secure_contact_does_not_keep_peer_online(tmp_path: Path):
+    """Old health is history, not current liveness."""
+    from one_link.server import UIServer
+
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        peer_fp = "bb" * 32
+        state.upsert_peer(
+            fingerprint=peer_fp,
+            short_id="bbbbbbbb",
+            pubkey=b"\xbb" * 32,
+            address="192.168.1.26",
+            trust_default="pinned",
+        )
+        daemon = SimpleNamespace(
+            state=state,
+            discovery=None,
+            me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa", hostname="me"),
+            _outbound_sessions={},
+            _inbound_regime={},
+            get_pair_health=lambda fp: {
+                "last_alive_ms": 1,
+                "latency_ewma_ms": 5.0,
+            } if fp == peer_fp else None,
+        )
+        server = UIServer(daemon)
+
+        class _Req:
+            query: dict = {}
+            match_info: dict = {}
+
+        resp = await server.api_peers(_Req())
+        body = json.loads(resp.text)
+        peers = {p["fingerprint"]: p for p in body["peers"]}
+        assert peers[peer_fp]["online"] is False
         assert peers[peer_fp]["regime"] == "offline"
     finally:
         state.close()
