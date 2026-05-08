@@ -195,6 +195,37 @@
     </div>
   </div>
 
+  <!-- v0.20.2 — daemon roster + chat surface. Hidden until the
+       phone has paired with a daemon (via auto-pair) AND the
+       daemon's peer roster is fetched. From here the phone shows
+       the laptop's chats; tapping a row drills into the message
+       view for that peer. -->
+  <div class="card" id="daemon-roster-card" hidden>
+    <h2>Your chats</h2>
+    <div class="body">
+      <p class="help" id="daemon-roster-status"></p>
+      <div id="daemon-peers-list"
+           style="display:flex; flex-direction:column; gap:8px;
+                  margin-top:12px;"></div>
+    </div>
+  </div>
+
+  <div class="card" id="daemon-chat-card" hidden>
+    <h2 id="daemon-chat-title">Chat</h2>
+    <div class="body">
+      <p class="help" id="daemon-chat-meta"></p>
+      <div class="row" style="margin-top:6px; margin-bottom:10px;">
+        <button class="btn ghost" id="btn-daemon-chat-back" style="padding:6px 10px; min-height:auto; font-size:12px;">← Back</button>
+      </div>
+      <div id="daemon-chat-log"
+           style="padding:12px; background:var(--bg-3); border-radius:10px;
+                  min-height:200px; max-height:60vh; overflow-y:auto;
+                  display:flex; flex-direction:column; gap:8px;
+                  font-size:14px; line-height:1.45;">
+      </div>
+    </div>
+  </div>
+
   <div class="card" id="identity-card">
     <h2>This device</h2>
     <div class="body">
@@ -2701,11 +2732,20 @@
         "Connected. Your phone is now paired with this laptop.",
       );
       hide($("#autopair-actions"));
-      // v0.20.2 wires the chat surface. For now, just leave the
-      // success state visible.
+      // v0.20.2 — register the daemon DataChannel for request/
+      // response routing and pull down the chat roster.
+      _registerDaemonDc(controlDc, pair.daemon_fingerprint);
+      try {
+        await _refreshDaemonRoster();
+      } catch (e) {
+        console.warn("daemon roster fetch failed", e);
+      }
     };
 
     controlDc.onopen = finalize;
+    // Wire incoming messages to the daemon-DC router so request/
+    // response correlation works for fetch_peers + fetch_messages.
+    controlDc.onmessage = (event) => _routeDaemonDcMessage(event.data);
 
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "failed" || pc.connectionState === "closed") {
@@ -2849,6 +2889,278 @@
     }, { once: true });
   }
 
+  // ── v0.20.2 — daemon DataChannel router + roster + chat ───────────
+  //
+  // Once the auto-pair flow's controlDc opens, we register it as the
+  // live transport to the daemon. From there:
+  //
+  //   - Outgoing requests use _daemonRequest("fetch_peers", {})
+  //     which assigns a fresh rid (uuid), sends the envelope, and
+  //     returns a Promise that resolves on the matching response or
+  //     rejects on timeout (10s) / channel close.
+  //
+  //   - Incoming frames hit _routeDaemonDcMessage, which looks up
+  //     the pending Promise by rid and resolves/rejects it.
+  //
+  //   - The roster + chat UI build on top: _refreshDaemonRoster
+  //     fetches fetch_peers, renders rows. Tap a row → fetch_messages
+  //     for that peer → render the chat view.
+  //
+  // Browser-to-browser chat (v0.19.2) and browser-to-daemon chat are
+  // independent surfaces — different cards, different wires. v0.19.2's
+  // pairing/chat lives on the v0.18.0 control DataChannel between two
+  // browsers; v0.20.2's daemon-roster lives on the v0.20.0 daemon
+  // control DataChannel. They never collide.
+
+  state.daemon_dc = null;
+  state.daemon_dc_fingerprint = null;
+  state.daemon_pending = new Map();   // rid → {resolve, reject, timer}
+  state.daemon_active_peer = null;     // currently-selected peer in the chat view
+
+  const DAEMON_REQUEST_TIMEOUT_MS = 10_000;
+
+  function _genRid() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return bytesToB64Url(_randomBytes(16));
+  }
+
+  function _registerDaemonDc(dc, daemonFingerprint) {
+    state.daemon_dc = dc;
+    state.daemon_dc_fingerprint = daemonFingerprint;
+    dc.addEventListener("close", () => {
+      state.daemon_dc = null;
+      // Fail any in-flight requests.
+      for (const [, pending] of state.daemon_pending) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error("daemon channel closed"));
+      }
+      state.daemon_pending.clear();
+    });
+  }
+
+  function _routeDaemonDcMessage(raw) {
+    let msg;
+    try {
+      msg = typeof raw === "string" ? JSON.parse(raw) : null;
+    } catch { return; }
+    if (!msg || msg.v !== "OL-PEER-1") return;
+    // First, route to the existing browser-to-browser handlers
+    // (pair/chat) — they're idempotent on non-matching version
+    // tags but we still want to keep them wired for the case where
+    // a browser-peer ALSO connects to this same page. In practice
+    // a phone in pair-by-QR mode talks only to the daemon, but we
+    // don't want to lose any v0.19.x dispatch coverage.
+    const rid = msg.rid || "";
+    if (rid && state.daemon_pending.has(rid)) {
+      const pending = state.daemon_pending.get(rid);
+      state.daemon_pending.delete(rid);
+      clearTimeout(pending.timer);
+      if (msg.t === "error") {
+        pending.reject(new Error(msg.message || msg.code || "daemon error"));
+      } else {
+        pending.resolve(msg);
+      }
+    }
+  }
+
+  function _daemonRequest(t, params, opts) {
+    const dc = state.daemon_dc;
+    if (!dc || dc.readyState !== "open") {
+      return Promise.reject(new Error("no live daemon channel"));
+    }
+    const rid = _genRid();
+    const envelope = Object.assign(
+      { v: "OL-PEER-1", t, rid },
+      params || {},
+    );
+    const timeoutMs = (opts && opts.timeoutMs) || DAEMON_REQUEST_TIMEOUT_MS;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (state.daemon_pending.has(rid)) {
+          state.daemon_pending.delete(rid);
+          reject(new Error(`${t} timed out after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+      state.daemon_pending.set(rid, { resolve, reject, timer });
+      try {
+        dc.send(JSON.stringify(envelope));
+      } catch (e) {
+        state.daemon_pending.delete(rid);
+        clearTimeout(timer);
+        reject(e);
+      }
+    });
+  }
+
+  async function fetchDaemonPeers() {
+    const reply = await _daemonRequest("fetch_peers", {});
+    return Array.isArray(reply.peers) ? reply.peers : [];
+  }
+
+  async function fetchDaemonMessages(peerFp, limit) {
+    const reply = await _daemonRequest("fetch_messages", {
+      peer_fp: peerFp,
+      limit: limit || 50,
+    });
+    return Array.isArray(reply.messages) ? reply.messages : [];
+  }
+
+  async function _refreshDaemonRoster() {
+    const card = $("#daemon-roster-card");
+    const list = $("#daemon-peers-list");
+    const status = $("#daemon-roster-status");
+    if (!card || !list) return;
+    show(card);
+    text(status, "Fetching your chats from the laptop…");
+    list.innerHTML = "";
+    let peers;
+    try {
+      peers = await fetchDaemonPeers();
+    } catch (e) {
+      text(status,
+        `Couldn't fetch chats: ${e && e.message ? e.message : e}`);
+      return;
+    }
+    if (!peers.length) {
+      text(status, "No chats yet on this device. Pair a peer on your laptop first.");
+      return;
+    }
+    text(status, `${peers.length} chat${peers.length === 1 ? "" : "s"}`);
+    // Sort by last_seen_ms desc so most-recent activity floats up.
+    peers.sort((a, b) =>
+      Number(b.last_seen_ms || 0) - Number(a.last_seen_ms || 0)
+    );
+    for (const peer of peers) {
+      const row = document.createElement("button");
+      row.style.display = "flex";
+      row.style.alignItems = "center";
+      row.style.gap = "12px";
+      row.style.padding = "12px 14px";
+      row.style.background = "var(--bg-3)";
+      row.style.border = "1px solid var(--line)";
+      row.style.borderRadius = "10px";
+      row.style.color = "var(--text)";
+      row.style.cursor = "pointer";
+      row.style.textAlign = "left";
+      row.style.minHeight = "60px";
+      row.style.width = "100%";
+      row.style.fontFamily = "inherit";
+      const left = document.createElement("div");
+      left.style.flex = "1 1 auto";
+      left.style.minWidth = "0";
+      const name = document.createElement("div");
+      name.textContent =
+        peer.alias || peer.hostname ||
+        (peer.fingerprint || "").split(":").pop().slice(0, 12);
+      name.style.fontWeight = "600";
+      name.style.fontSize = "15px";
+      const sub = document.createElement("div");
+      sub.style.fontSize = "11px";
+      sub.style.color = "var(--text-dim)";
+      sub.style.fontFamily = "ui-monospace, SFMono-Regular, Consolas, monospace";
+      sub.style.overflow = "hidden";
+      sub.style.textOverflow = "ellipsis";
+      sub.style.whiteSpace = "nowrap";
+      sub.textContent = peer.fingerprint || "(no fingerprint)";
+      left.appendChild(name);
+      left.appendChild(sub);
+      const chev = document.createElement("div");
+      chev.textContent = "›";
+      chev.style.fontSize = "20px";
+      chev.style.color = "var(--text-dim)";
+      row.appendChild(left);
+      row.appendChild(chev);
+      row.onclick = () => _openDaemonChat(peer);
+      list.appendChild(row);
+    }
+  }
+
+  async function _openDaemonChat(peer) {
+    state.daemon_active_peer = peer;
+    hide($("#daemon-roster-card"));
+    show($("#daemon-chat-card"));
+    text(
+      $("#daemon-chat-title"),
+      peer.alias || peer.hostname || peer.fingerprint || "Chat",
+    );
+    text($("#daemon-chat-meta"),
+      `${peer.fingerprint || ""}`);
+    const log = $("#daemon-chat-log");
+    if (!log) return;
+    log.innerHTML = "";
+    const loading = document.createElement("p");
+    loading.className = "help";
+    loading.textContent = "Fetching messages…";
+    log.appendChild(loading);
+    let msgs;
+    try {
+      msgs = await fetchDaemonMessages(peer.fingerprint, 50);
+    } catch (e) {
+      loading.textContent =
+        `Couldn't fetch messages: ${e && e.message ? e.message : e}`;
+      return;
+    }
+    log.innerHTML = "";
+    if (!msgs.length) {
+      const empty = document.createElement("p");
+      empty.className = "help";
+      empty.textContent = "No messages yet.";
+      log.appendChild(empty);
+      return;
+    }
+    for (const m of msgs) _renderDaemonMessageBubble(log, m);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function _renderDaemonMessageBubble(host, m) {
+    if (!host) return;
+    const bubble = document.createElement("div");
+    bubble.style.maxWidth = "85%";
+    bubble.style.padding = "8px 12px";
+    bubble.style.borderRadius = "12px";
+    bubble.style.whiteSpace = "pre-wrap";
+    bubble.style.wordBreak = "break-word";
+    if (m.direction === "out") {
+      bubble.style.alignSelf = "flex-end";
+      bubble.style.background = "var(--accent)";
+      bubble.style.color = "white";
+    } else {
+      bubble.style.alignSelf = "flex-start";
+      bubble.style.background = "var(--bg-1)";
+      bubble.style.color = "var(--text)";
+      bubble.style.border = "1px solid var(--line)";
+    }
+    const body = document.createElement("div");
+    if (m.deleted_at_ms) {
+      body.textContent = "(deleted)";
+      body.style.fontStyle = "italic";
+      body.style.opacity = "0.7";
+    } else {
+      body.textContent = m.body || "";
+    }
+    bubble.appendChild(body);
+    const meta = document.createElement("div");
+    meta.style.fontSize = "10px";
+    meta.style.opacity = "0.6";
+    meta.style.marginTop = "4px";
+    meta.style.textAlign = m.direction === "out" ? "right" : "left";
+    let timeStr = "";
+    if (m.ts_ms) {
+      try { timeStr = new Date(m.ts_ms).toLocaleString(); } catch {}
+    }
+    let metaText = timeStr;
+    if (m.edited_at_ms) metaText += " · edited";
+    meta.textContent = metaText;
+    bubble.appendChild(meta);
+    host.appendChild(bubble);
+  }
+
+  $("#btn-daemon-chat-back")?.addEventListener("click", () => {
+    hide($("#daemon-chat-card"));
+    show($("#daemon-roster-card"));
+    state.daemon_active_peer = null;
+  });
+
   // ── hook pair handshake into existing WebRTC session lifecycle ────
   // Wrap createOfferSignal + acceptOfferSignal so they install our
   // onState + onMessage handlers. This way pair handshake fires
@@ -2902,7 +3214,7 @@
   // Expose internals for tests + future-ship reuse. Keep the surface
   // tight — only readers / observers, no setters.
   window.__oneLinkPeer = {
-    version: "0.20.1",
+    version: "0.20.2",
     bytesToHex,
     bytesToB64Url,
     b64UrlToBytes,
@@ -2956,6 +3268,10 @@
     sendChatMessage,
     _detectPairQuery,
     _runAutoPairFlow,
+    fetchDaemonPeers,
+    fetchDaemonMessages,
+    _daemonRequest,
+    _refreshDaemonRoster,
     state,
   };
 

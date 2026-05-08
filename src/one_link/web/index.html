@@ -9686,7 +9686,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.20.1";
+  const PAGE_BUILT_FOR = "0.20.2";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -12424,6 +12424,75 @@
     }
   }
 
+  // v0.15.4 - connect-another-device flow. Calls /api/connect-info,
+  // renders either the QR + URL + Copy button (LAN mode) or a hint
+  // telling the user to pass --lan (loopback mode). The QR SVG is
+  // fetched separately so we don't double-encode the URL string.
+  async function _refreshConnectInfo() {
+    const host = $("#connect-info-body");
+    if (!host) return;
+    let info;
+    try {
+      info = await api.get("/api/connect-info");
+    } catch (e) {
+      host.innerHTML = "";
+      const p = el("p", "settings-help");
+      p.textContent = `Couldn't load connect info: ${e && e.message ? e.message : e}`;
+      host.appendChild(p);
+      return;
+    }
+    host.innerHTML = "";
+    if (!info.lan_bound) {
+      const hint = el("p", "settings-help");
+      hint.innerHTML =
+        "This daemon is bound to <code>127.0.0.1</code> only. " +
+        "Restart with <code>one-link app --lan</code> to get a " +
+        "scannable URL for your phone.";
+      host.appendChild(hint);
+      return;
+    }
+    const wrap = el("div", "connect-info-wrap");
+    const imgWrap = el("div", "connect-info-qr");
+    const img = document.createElement("img");
+    img.src = `/api/connect-info/qr.svg?_=${Date.now()}`;
+    img.alt = "QR code with the LAN URL";
+    img.width = 240;
+    img.height = 240;
+    img.style.background = "#fff";
+    img.style.padding = "12px";
+    img.style.borderRadius = "8px";
+    imgWrap.appendChild(img);
+    wrap.appendChild(imgWrap);
+
+    const right = el("div", "connect-info-text");
+    const lab = el("p", "settings-help");
+    lab.textContent =
+      "Scan this from another device on the same Wi-Fi, or copy + paste the URL.";
+    right.appendChild(lab);
+    const urlBox = el("div", "connect-info-url-box");
+    const urlEl = el("code", "connect-info-url");
+    urlEl.textContent = info.lan_url;
+    urlBox.appendChild(urlEl);
+    const copyBtn = el("button", "btn-ghost connect-info-copy", "Copy URL");
+    copyBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(info.lan_url);
+        copyBtn.textContent = "Copied";
+        setTimeout(() => { copyBtn.textContent = "Copy URL"; }, 1500);
+      } catch (e) {
+        toast(`Couldn't copy: ${e && e.message ? e.message : e}`, "bad");
+      }
+    };
+    urlBox.appendChild(copyBtn);
+    right.appendChild(urlBox);
+    const warn = el("p", "settings-help");
+    warn.textContent =
+      "The URL contains your access token. Anyone on this Wi-Fi who has it can reach the UI; share with intent.";
+    right.appendChild(warn);
+    wrap.appendChild(right);
+    host.appendChild(wrap);
+  }
+
   // v0.11.0: fill Profile + About panes from /api/me. Done up-front
   // (state.me is already loaded by init()) so opening Settings is
   // instant — no flash of empty fields.
@@ -12573,79 +12642,6 @@
   });
   $("#btn-mint-pair-cancel")?.addEventListener("click", _resetPairPhoneCard);
 
-  // v0.15.4 — connect-another-device flow. Calls /api/connect-info,
-  // renders either the QR + URL + Copy button (LAN mode) or a hint
-  // telling the user to pass --lan (loopback mode). The QR SVG is
-  // fetched separately so we don't double-encode the URL string.
-  async function _refreshConnectInfo() {
-    const host = $("#connect-info-body");
-    if (!host) return;
-    let info;
-    try {
-      info = await api.get("/api/connect-info");
-    } catch (e) {
-      host.innerHTML = "";
-      const p = el("p", "settings-help");
-      p.textContent = `Couldn't load connect info: ${e && e.message ? e.message : e}`;
-      host.appendChild(p);
-      return;
-    }
-    host.innerHTML = "";
-    if (!info.lan_bound) {
-      const hint = el("p", "settings-help");
-      hint.innerHTML =
-        "This daemon is bound to <code>127.0.0.1</code> only. " +
-        "Restart with <code>one-link app --lan</code> to get a " +
-        "scannable URL for your phone.";
-      host.appendChild(hint);
-      return;
-    }
-    // Two-column-ish layout: QR image on the left, URL + Copy on
-    // the right. On phone form-factor, the QR isn't very useful
-    // (you'd be scanning yourself); show URL + Copy more prominently.
-    const wrap = el("div", "connect-info-wrap");
-    const imgWrap = el("div", "connect-info-qr");
-    const img = document.createElement("img");
-    // Bust browser cache so token rotations propagate; the SVG
-    // endpoint also sends Cache-Control: no-store.
-    img.src = `/api/connect-info/qr.svg?_=${Date.now()}`;
-    img.alt = "QR code with the LAN URL";
-    img.width = 240;
-    img.height = 240;
-    img.style.background = "#fff";
-    img.style.padding = "12px";
-    img.style.borderRadius = "8px";
-    imgWrap.appendChild(img);
-    wrap.appendChild(imgWrap);
-
-    const right = el("div", "connect-info-text");
-    const lab = el("p", "settings-help");
-    lab.textContent =
-      "Scan this from another device on the same Wi-Fi, or copy + paste the URL.";
-    right.appendChild(lab);
-    const urlBox = el("div", "connect-info-url-box");
-    const urlEl = el("code", "connect-info-url");
-    urlEl.textContent = info.lan_url;
-    urlBox.appendChild(urlEl);
-    const copyBtn = el("button", "btn-ghost connect-info-copy", "Copy URL");
-    copyBtn.onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(info.lan_url);
-        copyBtn.textContent = "Copied";
-        setTimeout(() => { copyBtn.textContent = "Copy URL"; }, 1500);
-      } catch (e) {
-        toast(`Couldn't copy: ${e && e.message ? e.message : e}`, "bad");
-      }
-    };
-    urlBox.appendChild(copyBtn);
-    right.appendChild(urlBox);
-    const warn = el("p", "settings-help");
-    warn.textContent =
-      "The URL contains your access token. Anyone on this Wi-Fi who has it can reach the UI; share with intent.";
-    right.appendChild(warn);
-    wrap.appendChild(right);
-    host.appendChild(wrap);
-  }
   $("#btn-settings").onclick = async () => {
     try {
       const r = await api.get("/api/settings");

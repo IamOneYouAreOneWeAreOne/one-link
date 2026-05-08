@@ -503,6 +503,11 @@ class UIServer:
         # peer-connection setup needs aiortc).
         from one_link.peer_rtc import BrowserPeerManager
         self.peer_rtc = BrowserPeerManager(daemon)
+        # v0.20.2: hook the data-bridge listener so browser-peers
+        # can fetch peer rosters + recent messages from the daemon
+        # over the DataChannel. Without this hook, /peer phones
+        # connect but see nothing of the daemon's chat history.
+        self.peer_rtc.add_dc_listener(self._handle_browser_peer_request)
         self._setup_routes()
         # v0.8.1: live-push debug-log entries to the Debug pane.
         try:
@@ -1243,6 +1248,122 @@ class UIServer:
             with contextlib.suppress(Exception):
                 await ws.close()
         return ws
+
+    # ─── v0.20.2: browser-peer ↔ daemon data bridge ───────────────────
+    async def _handle_browser_peer_request(
+        self, peer: Any, channel_kind: str, msg_t: str, envelope: dict,
+    ) -> None:
+        """DataChannel listener registered on BrowserPeerManager.
+        Bridges OL-PEER-1 fetch_* requests from browser peers to the
+        daemon's existing state.list_peers / state.recent_messages.
+
+        Wire (over the daemon control DataChannel):
+
+          phone → daemon:
+            {"v":"OL-PEER-1", "t":"fetch_peers", "rid":"<uuid>"}
+            {"v":"OL-PEER-1", "t":"fetch_messages", "rid":"<uuid>",
+             "peer_fp":"<fp>", "limit":<int>}
+
+          daemon → phone:
+            {"v":"OL-PEER-1", "t":"peers", "rid":"<echo>",
+             "peers":[{fingerprint, hostname, alias, trust,
+                       last_seen_ms, sas_short}]}
+            {"v":"OL-PEER-1", "t":"messages", "rid":"<echo>",
+             "peer_fp":"<fp>",
+             "messages":[{id, ts_ms, direction, body, msg_type,
+                          edited_at_ms, deleted_at_ms}]}
+            {"v":"OL-PEER-1", "t":"error", "rid":"<echo>",
+             "code":"...", "message":"..."}
+
+        The browser peer dispatches responses on rid match; missing
+        rid → drop. Failures (state unavailable, peer_fp not in
+        roster) come back as `error` envelopes.
+        """
+        from one_link.peer_rtc import PEER_DC_PROTOCOL_VERSION
+
+        rid = envelope.get("rid", "")
+
+        def _send(reply: dict) -> None:
+            reply.setdefault("v", PEER_DC_PROTOCOL_VERSION)
+            if rid:
+                reply["rid"] = rid
+            self.peer_rtc.send_dc(peer, "control", reply)
+
+        def _err(code: str, message: str) -> None:
+            _send({"t": "error", "code": code, "message": message})
+
+        state = self.daemon.state
+        if state is None:
+            _err("no_state", "daemon state unavailable")
+            return
+
+        if msg_t == "fetch_peers":
+            try:
+                peers = state.list_peers()
+            except Exception as e:
+                _err("query_failed", f"list_peers: {e}")
+                return
+            payload = []
+            for p in peers:
+                # Conservative serialization — only fields the phone
+                # needs for a roster view. Sensitive material (raw
+                # pubkeys, capability state) stays on the daemon.
+                payload.append({
+                    "fingerprint": getattr(p, "fingerprint", None),
+                    "short_id": getattr(p, "short_id", None),
+                    "hostname": getattr(p, "hostname", None),
+                    "alias": getattr(p, "alias", None),
+                    "trust": getattr(p, "trust", "unknown"),
+                    "last_seen_ms": getattr(p, "last_seen_ms", None),
+                    "verified_at_ms": getattr(p, "verified_at_ms", None),
+                    "muted": bool(getattr(p, "muted", False)),
+                })
+            _send({"t": "peers", "peers": payload})
+            return
+
+        if msg_t == "fetch_messages":
+            peer_fp = envelope.get("peer_fp")
+            if not isinstance(peer_fp, str) or not peer_fp:
+                _err("bad_peer_fp", "peer_fp required")
+                return
+            limit = envelope.get("limit", 50)
+            if not isinstance(limit, int) or limit <= 0 or limit > 500:
+                limit = 50
+            try:
+                msgs = state.recent_messages(peer_fp=peer_fp, limit=limit)
+            except Exception as e:
+                _err("query_failed", f"recent_messages: {e}")
+                return
+            payload = []
+            for m in msgs:
+                payload.append({
+                    "id": getattr(m, "id", None),
+                    "ts_ms": getattr(m, "ts_ms", None),
+                    "direction": getattr(m, "direction", None),
+                    "msg_type": getattr(m, "msg_type", None),
+                    "body": getattr(m, "body", None),
+                    "room_id": getattr(m, "room_id", None),
+                    "edited_at_ms": getattr(m, "edited_at_ms", None),
+                    "deleted_at_ms": getattr(m, "deleted_at_ms", None),
+                })
+            _send({"t": "messages", "peer_fp": peer_fp, "messages": payload})
+            return
+
+        if msg_t == "fetch_self":
+            # Lightweight identity ping — phone uses this to populate
+            # "Connected to <hostname>" without a separate API call.
+            me = self.daemon.me
+            _send({
+                "t": "self",
+                "fingerprint": me.fingerprint,
+                "short_id": me.short_id,
+                "hostname": me.hostname,
+            })
+            return
+
+        # Unknown wire kind — silently ignore. v0.19.2's chat protocol
+        # also rides this channel and we don't want to error-spam those
+        # frames.
 
     # ─── /api/me ──────────────────────────────────────────────────────
     async def api_me(self, request: web.Request) -> web.Response:
