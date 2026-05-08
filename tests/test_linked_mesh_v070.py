@@ -35,6 +35,7 @@ from one_link.daemon import (
     OutboundSession,
     _decode_binary_frame,
     _final_stream_ack_deadline,
+    _fast_fixed_chunk_size_for_peer,
     _stream_transfer_profile,
 )
 from one_link.capabilities import CHAT, FILES, FILE_BINARY_FRAME, FILE_CDC
@@ -690,6 +691,172 @@ def test_final_stream_ack_deadline_gives_legacy_receivers_cache_grace():
 
     assert medium >= 120.0
     assert huge == 600.0
+
+
+def test_fast_fixed_chunk_size_is_version_gated():
+    assert _fast_fixed_chunk_size_for_peer(None) == 256 * 1024
+    assert _fast_fixed_chunk_size_for_peer("0.12.4") == 256 * 1024
+    assert _fast_fixed_chunk_size_for_peer("0.12.5") == 1024 * 1024
+    assert _fast_fixed_chunk_size_for_peer("v0.13.0") == 1024 * 1024
+
+
+def test_normalize_cdc_chunks_accepts_fast_fixed_chunk_size(tmp_path: Path):
+    daemon = Daemon(_new_identity())
+    chunks = daemon._normalize_cdc_chunks(
+        [{
+            "index": 0,
+            "start": 0,
+            "end": 1024 * 1024,
+            "size": 1024 * 1024,
+            "hash": "aa" * 32,
+        }],
+        declared_size=1024 * 1024,
+    )
+    assert chunks is not None
+    assert chunks[0]["size"] == 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_send_file_ignores_fast_cache_for_legacy_peer(tmp_path: Path, monkeypatch):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    payload = b"a" * (1024 * 1024)
+    f = tmp_path / "legacy-repeat.bin"
+    f.write_bytes(payload)
+    st = f.stat()
+    state.record_file_index_cache(
+        path=str(f.resolve()),
+        size=st.st_size,
+        mtime_ns=st.st_mtime_ns,
+        ctime_ns=st.st_ctime_ns,
+        blob_hash=blake3.blake3(payload).hexdigest(),
+        index_kind="fixed",
+        chunks=[{
+            "index": 0,
+            "start": 0,
+            "end": len(payload),
+            "size": len(payload),
+            "hash": blake3.blake3(payload).hexdigest(),
+        }],
+    )
+
+    chan = _TracingFakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, FILE_CDC],
+        "from": them.short_id,
+        "app_version": "0.12.4",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id, hostname="them",
+            address="127.0.0.1", port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    monkeypatch.setattr("one_link.daemon.FAST_FIXED_INDEX_MIN_BYTES", 1)
+    chan.queue_reply(make_msg("FILE_WANTS", them.short_id, wants=[]))
+
+    result = await daemon.send_file(sess.peer, f)
+    offer = chan.sent[0]
+    row = state.list_transfers(limit=1)[0]
+
+    assert result["chunks"] == 0
+    assert len(offer["chunks"]) == 4
+    assert max(c["size"] for c in offer["chunks"]) == 256 * 1024
+    assert row.metadata["file_index_kind"] == "fixed"
+    assert row.metadata["fixed_chunk_size"] == 256 * 1024
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    chan = _TracingFakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, FILE_CDC],
+        "from": them.short_id,
+        "app_version": "0.12.5",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id, hostname="them",
+            address="127.0.0.1", port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    monkeypatch.setattr("one_link.daemon.STREAM_MIN_CHUNK_SIZE", 2)
+    monkeypatch.setattr("one_link.daemon.STREAM_PIPELINE_TARGET_BYTES", 6)
+    monkeypatch.setattr("one_link.daemon.STREAM_PIPELINE_MAX_CHUNKS", 3)
+
+    f = tmp_path / "cdc-pipeline.bin"
+    f.write_bytes(b"0123456789")
+    chunks = []
+    for i in range(5):
+        start = i * 2
+        data = f.read_bytes()[start:start + 2]
+        chunks.append({
+            "index": i,
+            "start": start,
+            "end": start + len(data),
+            "size": len(data),
+            "hash": blake3.blake3(data).hexdigest(),
+        })
+    state.record_file_index_cache(
+        path=str(f.resolve()),
+        size=f.stat().st_size,
+        mtime_ns=f.stat().st_mtime_ns,
+        ctime_ns=f.stat().st_ctime_ns,
+        blob_hash=blake3.blake3(f.read_bytes()).hexdigest(),
+        index_kind="fixed",
+        chunks=chunks,
+    )
+    chan.queue_reply(make_msg("FILE_WANTS", them.short_id, wants=[0, 1, 2, 3, 4]))
+    for _ in range(5):
+        chan.queue_reply(make_msg("ACK", them.short_id))
+
+    result = await daemon.send_file(sess.peer, f)
+    sent_chunks = [m for m in chan.sent if m.get("t") == "FILE_CDC_CHUNK"]
+    row = state.list_transfers(limit=1)[0]
+
+    assert result["chunks"] == 5
+    assert [c["index"] for c in sent_chunks] == [0, 1, 2, 3, 4]
+    assert max(chan.recv_sent_counts) >= 4
+    assert row.metadata["cdc_engine"] == "pipelined_chunks_v2"
+    assert row.metadata["cdc_window_chunks"] == 3
+    state.close()
 
 
 @pytest.mark.asyncio

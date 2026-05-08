@@ -130,6 +130,7 @@ MAX_INCOMING_FILE_BYTES = 1024 * 1024 * 1024  # match UI upload cap
 CDC_CACHE_MAX_BYTES = 512 * 1024 * 1024
 CDC_AUTO_INDEX_MAX_BYTES = 128 * 1024 * 1024
 FAST_FIXED_INDEX_MIN_BYTES = 16 * 1024 * 1024
+FAST_FIXED_CHUNK_SIZE = 1024 * 1024
 COMPRESSION_MIN_BYTES = 2048
 COMPRESSION_MIN_SAVINGS = 0.08
 OUTBOUND_SESSION_IDLE_S = 300.0
@@ -296,6 +297,35 @@ def _final_stream_ack_deadline(size: int) -> float:
         FILE_SEND_TOTAL_DEADLINE_S,
         max(FILE_ACK_DEADLINE_S, FILE_FINAL_ACK_MIN_GRACE_S, cache_grace),
     ))
+
+
+def _version_at_least(version: str | None, major: int, minor: int, patch: int) -> bool:
+    if not version:
+        return False
+    try:
+        nums = []
+        for part in str(version).strip().lstrip("v").split(".")[:3]:
+            digits = "".join(ch for ch in part if ch.isdigit())
+            nums.append(int(digits or 0))
+        while len(nums) < 3:
+            nums.append(0)
+        return tuple(nums[:3]) >= (major, minor, patch)
+    except Exception:
+        return False
+
+
+def _fast_fixed_chunk_size_for_peer(peer_version: str | None) -> int:
+    """Largest fixed-manifest chunk this peer can safely parse.
+
+    v0.12.5 receivers accept up to STREAM_MAX_CHUNK_SIZE in FILE_OFFER
+    manifests. Older receivers clamp CDC-ish offers around 512 KiB, so we use
+    the classic 256 KiB chunk when version is unknown/older to preserve
+    zero-chunk repeat sends instead of silently falling back to streaming.
+    """
+
+    if _version_at_least(peer_version, 0, 12, 5):
+        return FAST_FIXED_CHUNK_SIZE
+    return CDC_MAX_CHUNK_BYTES
 
 
 def _encode_binary_frame(header: dict, data: bytes) -> bytes:
@@ -2133,10 +2163,11 @@ class Daemon:
             size = int(item.get("size", end - start))
             if start < 0 or end < start or size != end - start:
                 return None
-            if size < 0 or size > CDC_MAX_CHUNK_BYTES * 2:
-                # CDC's hard upper bound is MAX_CHUNK_BYTES; allow a small
-                # multiplier to account for any future loosening, but reject
-                # absurd sizes that would force a multi-MB single allocation.
+            if size < 0 or size > STREAM_MAX_CHUNK_SIZE:
+                # CDC's natural hard upper bound is MAX_CHUNK_BYTES. v0.12.5
+                # fixed-block manifests can use larger chunks to reduce ACK
+                # pressure, but still clamp to the stream max so a malicious
+                # offer cannot force arbitrary multi-MB allocations.
                 return None
             if declared_size is not None and end > declared_size:
                 return None
@@ -6709,6 +6740,14 @@ class Daemon:
             from one_link import __version__ as local_version
         except Exception:
             local_version = None
+        fixed_chunk_size = _fast_fixed_chunk_size_for_peer(peer_version)
+        if (
+            cached_file_index is not None
+            and cached_file_index.chunks
+            and max((c.size for c in cached_file_index.chunks), default=0) > fixed_chunk_size
+        ):
+            cached_file_index = None
+            cached_index_kind = "incompatible"
 
         thin_manifest = FileManifest(
             name=path.name,
@@ -6735,7 +6774,7 @@ class Daemon:
                 file_index = cached_file_index
                 index_kind = cached_index_kind
             elif size >= FAST_FIXED_INDEX_MIN_BYTES:
-                file_index = fixed_index_path(path)
+                file_index = fixed_index_path(path, chunk_size=fixed_chunk_size)
                 index_kind = "fixed"
                 self._record_file_index_cache(
                     path,
@@ -6790,6 +6829,7 @@ class Daemon:
             "cdc_decision_reason": cdc_decision_reason,
             "cdc_auto_index_max_bytes": CDC_AUTO_INDEX_MAX_BYTES,
             "fast_fixed_index_min_bytes": FAST_FIXED_INDEX_MIN_BYTES,
+            "fixed_chunk_size": fixed_chunk_size,
             "peer_app_version": peer_version,
             "peer_features": list(peer_features),
             "planned_wire_mode": planned_wire_mode,
@@ -6921,6 +6961,15 @@ class Daemon:
                     skipped_bytes = sum(
                         int(c.size) for c in cdc_chunks if c.index not in wanted_indexes
                     )
+                    cdc_profile = _stream_transfer_profile(size)
+                    cdc_window_chunks = int(cdc_profile["window_chunks"])
+                    cdc_window_bytes = int(cdc_profile["window_bytes"])
+                    base_metadata = {
+                        **base_metadata,
+                        "cdc_engine": "pipelined_chunks_v2",
+                        "cdc_window_chunks": cdc_window_chunks,
+                        "cdc_window_bytes": cdc_window_bytes,
+                    }
                     self._update_transfer(
                         transfer_id,
                         status="active",
@@ -6936,6 +6985,32 @@ class Daemon:
                         },
                     )
                     with open(path, "rb") as f:
+                        pending_cdc_sizes: deque[int] = deque()
+
+                        async def _settle_one_cdc_ack() -> None:
+                            nonlocal chunks_sent, raw_bytes_sent, wire_bytes_sent
+                            await _await_ack(channel)
+                            raw_size, wire_size = pending_cdc_sizes.popleft()
+                            chunks_sent += 1
+                            raw_bytes_sent += raw_size
+                            wire_bytes_sent += wire_size
+                            self._update_transfer(
+                                transfer_id,
+                                status="active",
+                                progress_bytes=skipped_bytes + raw_bytes_sent,
+                                total_bytes=size,
+                                chunks_done=(len(cdc_chunks) - len(wanted_indexes)) + chunks_sent,
+                                chunks_total=len(cdc_chunks),
+                                raw_bytes=raw_bytes_sent,
+                                wire_bytes=wire_bytes_sent,
+                                metadata={
+                                    **base_metadata,
+                                    "delivery_state": "sending",
+                                    "actual_method": actual_method,
+                                    "in_flight_chunks": len(pending_cdc_sizes),
+                                },
+                            )
+
                         for c in cdc_chunks:
                             if c.index not in wanted_indexes:
                                 continue
@@ -6963,23 +7038,11 @@ class Daemon:
                                 data=base64.b64encode(payload).decode("ascii"),
                             )
                             await channel.send(encode_msg(chunk_msg))
-                            await _await_ack(channel)
-                            chunks_sent += 1
-                            self._update_transfer(
-                                transfer_id,
-                                status="active",
-                                progress_bytes=skipped_bytes + raw_bytes_sent,
-                                total_bytes=size,
-                                chunks_done=(len(cdc_chunks) - len(wanted_indexes)) + chunks_sent,
-                                chunks_total=len(cdc_chunks),
-                                raw_bytes=raw_bytes_sent,
-                                wire_bytes=wire_bytes_sent,
-                                metadata={
-                                    **base_metadata,
-                                    "delivery_state": "sending",
-                                    "actual_method": actual_method,
-                                },
-                            )
+                            pending_cdc_sizes.append((len(data), len(payload)))
+                            while len(pending_cdc_sizes) >= cdc_window_chunks:
+                                await _settle_one_cdc_ack()
+                        while pending_cdc_sizes:
+                            await _settle_one_cdc_ack()
                 else:
                     peer_features = set(normalize_caps(
                         (getattr(channel, "peer_caps", None) or {}).get("features", [])
