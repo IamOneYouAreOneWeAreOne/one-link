@@ -8,6 +8,13 @@ unfinished ship below has been (or will be) restated against the
 ship-gate checklist before code lands. Items that don't pass all
 four principles aren't on this list.
 
+Companion docs that go deeper on specific tracks:
+- [`PHONE_TIER.md`](./PHONE_TIER.md) — exhaustive phone-tier
+  implementation guide (every UI surface dispositioned, full ship
+  sequence v0.14.2 → v0.14.8).
+- [`PRINCIPLES.md`](./PRINCIPLES.md) — the four operating
+  principles + ship-gate checklist.
+
 The reorganization from earlier roadmaps groups remaining work
 under three tracks instead of tiers. Tiers were "what the protocol
 needs"; tracks are "what the user gets." North stars steer the
@@ -88,28 +95,113 @@ ship in this track expands the user base meaningfully.
 
 Ordered by leverage:
 
-1. **Mobile-responsive web UI** (the v0.9.0 that never landed).
-   Frontier engine: sub-100ms input latency on a 5-year-old
-   phone, frame-budget regression tests, predictive prefetch of
-   the next likely conversation, layout that adapts to thumb
-   reach. Surface: phone tab Just Works.
+1. **Mobile-responsive web UI.** ✅ Shipped v0.14.0 (layout +
+   Markov prefetch + SW outbox) and v0.14.1 (last-conversation
+   restore on boot). The desktop UI now collapses cleanly at
+   720px and below.
 
-2. **Plain-language pass on every remaining surface.**
-   Continuation of v0.13.x. Audit every modal, error, tooltip,
-   help string. Frontier: zero jargon left for any non-technical
-   first-time user; confirmed via a literal "show this to a
-   non-technical person" test before merge.
+2. **Phone tier surface trim — full sequence v0.14.2 → v0.14.8.**
+   Detailed in [`PHONE_TIER.md`](./PHONE_TIER.md). Removes /
+   hides power-user surfaces on phone form-factor so the default
+   surface is roughly 50% of the desktop one. Each ship in the
+   sequence:
 
-3. **First-run experience that presumes zero technical knowledge.**
+   - **v0.14.2 — Phone tier foundation.** `data-form-factor`
+     attribute on `<html>` set at boot, `state.tier` setting,
+     CSS rules for `.desktop-only` + `[data-tier="advanced"]` +
+     `html.show-advanced` reveal. "Show advanced controls"
+     toggle in Profile pane. Per-pane "N advanced controls
+     hidden. [Show]" hint helper. Mechanism only — no element
+     yet tagged; desktop unchanged.
+
+   - **v0.14.3 — Cut Files / Folders / Activity tabs on phone.**
+     Files + Folders panes go `desktop-only` (no addressable
+     filesystem on phone). Activity tab goes `data-tier="advanced"`.
+     Phone pane-tab bar shows just "Chat."
+
+   - **v0.14.4 — Cut power-user settings rows on phone.** Network,
+     Shortcuts, and Advanced panes go desktop-only. Storage
+     pane: download-folder input desktop-only, granular bandwidth
+     dropdown becomes a "Save data on cellular" toggle, auto-
+     accept extensions input desktop-only. Privacy pane:
+     passphrase row → advanced. Notifications: notification-
+     preview + notify-on-reactions → advanced. Phone settings =
+     7 visible panes instead of 11.
+
+   - **v0.14.5 — Trim per-device drawer on phone.** Reachability
+     rows wrapped in "Connection details" disclosure (collapsed
+     by default). Capability toggle grid wrapped in "Customize"
+     disclosure with a single "Allow everything" default.
+     Trust history rows marked advanced.
+
+   - **v0.14.6 — Composer + drag-drop trim.** Drag-drop overlay
+     desktop-only. Screenshot button desktop-only. Composer
+     respects `safe-area-inset-bottom` on phones. Scroll-restore
+     on pane-switch.
+
+   - **v0.14.7 — Phone-friendly pair flow.** Promote SAS art
+     above SAS digits on phone. "Match? [Yes] [No]" framing.
+     "Verify in person" hint copy adjusted per form-factor.
+
+   - **v0.14.8 — Phone diagnostics escape hatch.** Long-press the
+     version number in About → diagnostics opens. Diagnostics
+     button in Advanced settings (when revealed). Ctrl+Shift+D
+     stays desktop-only.
+
+3. **Plain-language pass on every remaining surface.** ✅ Shipped
+   v0.13.0 + v0.13.1. Continued vigilance via the principle 2
+   audit cadence.
+
+4. **First-run experience that presumes zero technical knowledge.**
    Replace the existing onboarding wizard with one that pairs
    the user's first device for them via a QR-style hand-off and
    doesn't say the words "fingerprint," "rendezvous," or "SAS"
-   before the user is paired and chatting.
+   before the user is paired and chatting. Targeted: post-
+   v0.14.8 (the phone tier work informs what the new wizard
+   doesn't say).
 
-4. **Native iOS and Android apps.** After mobile-web. Use mobile-
-   web as a forcing function; the mobile UI is the iOS UI's
-   layout spec. Background-service constraints on mobile are the
-   real frontier here.
+5. **PWA pivot — the "no computer required" track.** Multi-ship
+   sequence v0.15.0 → v1.0.0 to make One Link a pure-browser P2P
+   chat that runs entirely on a phone with no daemon required.
+   Architecture: WebRTC DataChannel transport, Web Crypto
+   identity, OPFS storage, Passkey-aware unlock, Service Worker
+   background, PWA install. Detailed sequence:
+
+   - v0.15.0 — PWA shell + manifest + Web Crypto identity foundation
+   - v0.16.0 — OPFS storage layer + at-rest encryption
+   - v0.17.0 — Passkey / WebAuthn integration for identity unlock
+   - v0.18.0 — WebRTC DataChannel transport
+   - v0.19.0 — WebTransport bulk path + adaptive transport selector
+   - v0.20.0 — BLE proximity pairing on Android, ultrasonic on iOS fallback
+   - v0.21.0 — MLS group ratchet
+   - v0.22.0 — Sealed sender + cover traffic
+   - v0.23.0 — Yjs/Automerge CRDT layer
+   - v0.24.0 — WebGPU + on-device model for semantic search
+   - v0.25.0 — Federated learning across the user's devices
+   - **v1.0.0 — One Link Web** (the phone-only milestone)
+
+6. **Defang ladder.** Per-ship corporate-substrate mitigations
+   shipped alongside the PWA pivot:
+
+   - Multi-org STUN endpoints + LAN-only mode (defangs single-
+     STUN observation)
+   - IPFS distribution + `.onion` mirror (defangs DNS / CDN)
+   - OPFS-stored identity, never OS keychain (defangs iCloud /
+     Google Password Manager)
+   - Optional encrypted Web Push, off by default (defangs
+     APNS/FCM message-graph leakage)
+   - Hybrid logical clocks (defangs OS clock dependency)
+   - Multi-source entropy mixing (defangs RNG dependency)
+   - Capacitor sideload build for Android (defangs Play Store
+     gatekeeping)
+   - Signed updates verified by Service Worker (defangs CDN
+     compromise)
+
+7. **Native iOS and Android apps (v1.1+).** Capacitor wrappers
+   around the PWA. Same code; gain push notifications, home-
+   screen install via app stores for users who want App-Store
+   discovery, and EU alternative-app-store distribution
+   (sideload friendly).
 
 ### Track B — Connection
 
@@ -211,15 +303,21 @@ Ordered by leverage:
 
 ## Suggested next ship
 
-**Mobile-responsive web UI** is Track A, item 1, and the single
-biggest unlock toward "We Are One." It's also a forcing function
-for everything that follows: every later ship will have to render
-at 360px before it merges, which itself drives Engine-hiding
-debt down (you can't hide forty advanced settings on a phone
-screen, so progressive disclosure becomes mandatory).
+**v0.14.2 — Phone tier foundation.** Smallest first step in the
+phone-tier sequence detailed in [`PHONE_TIER.md`](./PHONE_TIER.md).
+Adds the form-factor detection + the `state.tier` setting + the
+"Show advanced controls" toggle, without touching any specific
+element's visibility yet. After it lands, every subsequent ship
+in the v0.14.x sequence is a simple "tag elements with this
+attribute" diff.
 
-Ship-spec for the next merge will be evaluated against the
-checklist in [`PRINCIPLES.md`](./PRINCIPLES.md).
+Pairs with continued v0.15.0+ planning for the PWA pivot. The
+phone-tier work and the PWA work are independent — phone-tier
+improves the existing daemon-served experience for phone users;
+PWA pivot makes One Link runnable without a daemon at all.
+
+Ship-spec for every merge is evaluated against the checklist in
+[`PRINCIPLES.md`](./PRINCIPLES.md).
 
 ---
 
