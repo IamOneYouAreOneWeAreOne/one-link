@@ -2642,7 +2642,7 @@
       <div id="convo-empty" class="empty-pane">
         <div class="glyph"><img src="/static/one-glyph.png" alt="" /></div>
         <h3>Pick a device to start</h3>
-        <div>Open One Link on another computer on this network. Pair once, then chat or drag files here.</div>
+        <div>Open One Link on another computer on this network. Pair once. Then talk to it like a normal person, or drag files at it.</div>
         <!-- v0.10.3: clear CTAs so a new user knows the next move. -->
         <div class="empty-cta-row">
           <button class="btn-primary" id="convo-empty-pair">+ Pair a new device</button>
@@ -2765,7 +2765,7 @@
         <div class="empty rich">
           <div class="rich-glyph">📥</div>
           <h4>Inbox is quiet</h4>
-          <p>Files sent to you from a paired device land here automatically.</p>
+          <p>Files from paired devices land here. We don't peek.</p>
         </div>
       </div>
       <div class="panel-form">
@@ -2787,13 +2787,13 @@
       <div class="conflicts-banner" id="folder-conflicts-banner" style="display:none;"></div>
       <div class="help-card">
         <strong>Folder location</strong> means a folder on this computer, like
-        <code id="folder-path-example">C:\Users\you\Documents\One Link</code>. Pair a device first, then share the folder with it.
+        <code id="folder-path-example">C:\Users\you\Documents\One Link</code>. Pair a device first; sharing without one is just a folder watching itself.
       </div>
       <div id="folderlist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
         <div class="empty rich">
           <div class="rich-glyph">📂</div>
           <h4>No folders synced yet</h4>
-          <p>Sync a local folder with a paired device — changes mirror in real time, with CRDT conflict detection.</p>
+          <p>Pick a folder on this device. We'll mirror it to a paired one and sort out conflicts on the way.</p>
         </div>
       </div>
       <div class="panel-form">
@@ -2829,7 +2829,7 @@
       <div class="help-card">
         Cross-device timeline: pairings, verification, key changes,
         file transfers, folder conflicts. Filter by kind below.
-        Live-updating — new events land as they happen.
+        Live; events land the moment they happen.
       </div>
       <div class="mesh-summary" id="mesh-summary">
         <div class="metric clickable" id="metric-tile-online" role="button" tabindex="0" data-mesh-tile="online" aria-label="View peers in Chat"><div class="num" id="metric-online">0</div><div class="lbl">nearby</div></div>
@@ -2849,8 +2849,8 @@
       <div id="activity-list" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
         <div class="empty rich">
           <div class="rich-glyph">⏱</div>
-          <h4>No events yet</h4>
-          <p>Pairings, file transfers, key changes, and trust events show up here as they happen.</p>
+          <h4>Nothing happened yet</h4>
+          <p>Pairings, transfers, key changes, trust events. They'll show up here when they show up.</p>
         </div>
       </div>
       <!-- Legacy transfer list, kept hidden for now — Files pane Sent
@@ -3055,9 +3055,9 @@
               <span class="settings-readonly" id="settings-identity-fp">…</span>
             </div>
             <p class="settings-help">
-              Your fingerprint identifies this device end-to-end. Share
-              it (or pair in person) so peers can verify they're really
-              talking to you.
+              Your fingerprint is who you are, cryptographically. Share it
+              (or pair in person) so peers can confirm it's actually you
+              and not a very motivated stranger.
             </p>
           </section>
 
@@ -3072,18 +3072,18 @@
               </span>
             </div>
             <p class="settings-help">
-              When on, paired devices skip the per-capability prompt and
-              immediately get full access. When off, you approve each
-              new pairing's access scope.
+              On: paired devices skip the per-capability prompt and get
+              full access. Off: you approve each new pairing's reach.
+              Trust costs nothing until it does.
             </p>
             <div class="settings-row">
               <label for="set-passphrase">Passphrase</label>
-              <input type="password" id="set-passphrase" placeholder="(set ONE_LINK_PASSPHRASE env var; restart required)" disabled />
+              <input type="password" id="set-passphrase" placeholder="(env var, restart required; yes, we know.)" disabled />
             </div>
             <p class="settings-help">
               Encrypts your local database at rest. Set the
               <code>ONE_LINK_PASSPHRASE</code> environment variable
-              before launching the daemon.
+              before launching the daemon. It's a 2014 vibe, but it works.
             </p>
             <!-- v0.12.2 Read-receipt privacy. Two independent
                  toggles so users can express the standard
@@ -3099,9 +3099,8 @@
                 </span>
               </div>
               <p class="settings-help">
-                When on, your client tells peers "I've read up to
-                this message" so they see ✓✓. Off = peers never
-                learn what you've read.
+                On: peers see ✓✓ once you've actually read their message.
+                Off: peers never learn what you've read. They'll cope.
               </p>
               <div class="settings-row">
                 <label for="set-display-receipts">Show ✓✓ when peers read mine</label>
@@ -3111,9 +3110,8 @@
                 </span>
               </div>
               <p class="settings-help">
-                Off = your sent messages always show ✓ regardless
-                of whether the peer has read them. Useful if seeing
-                "Read" stresses you out.
+                Off: your sent messages stay at ✓ no matter what. Useful
+                if "Read" lives rent-free in your head.
               </p>
             </div>
             <!-- v0.12.3 Typing-indicator privacy. Same two-toggle
@@ -3128,8 +3126,8 @@
                 </span>
               </div>
               <p class="settings-help">
-                When on, peers see "you are typing…" while you're
-                composing a message. Off = peers never know.
+                On: peers see the little dots while you compose. Off:
+                peers wonder. We think wondering is a feature.
               </p>
               <div class="settings-row">
                 <label for="set-display-typing">Show "is typing…" when peers are</label>
@@ -3139,8 +3137,8 @@
                 </span>
               </div>
               <p class="settings-help">
-                Off = the typing banner never appears in your
-                conversations regardless of what peers are doing.
+                Off: the typing banner never appears, no matter how
+                furiously someone is typing at you.
               </p>
             </div>
             <!-- v0.11.1 Blocked devices. Sources from /api/peers with
@@ -3149,11 +3147,11 @@
             <div class="settings-section">
               <div class="settings-section-h"><span>Blocked devices</span></div>
               <p class="settings-help">
-                Blocked devices can't pair with you or send messages.
-                Unblock here if you change your mind.
+                Blocked devices can't pair, send, or vibe in your
+                direction. Unblock here if you've forgiven them.
               </p>
               <div id="blocked-devices-list" class="blocked-list">
-                <p class="settings-help blocked-empty">No blocked devices.</p>
+                <p class="settings-help blocked-empty">Nobody on the list. Yet.</p>
               </div>
             </div>
           </section>
@@ -3166,9 +3164,9 @@
               <button id="set-notif" class="btn-ghost">Enable</button>
             </div>
             <p class="settings-help">
-              Browser-level system notifications. Per-device mute (set
-              in the device drawer) overrides this — a muted peer
-              never pings.
+              Browser-level system notifications. Per-device mute (in the
+              device drawer) wins over this. A muted peer never pings, no
+              matter how loudly they yell.
             </p>
 
             <div class="settings-section">
@@ -3181,9 +3179,8 @@
                 </span>
               </div>
               <p class="settings-help">
-                Include message text in the desktop notification.
-                Turn off to keep peeking eyes from seeing message
-                content on your lock screen.
+                Include message text in the desktop notification. Off if
+                your lock screen is read by people you didn't invite.
               </p>
               <div class="settings-row">
                 <label for="set-notif-reactions">Notify on reactions</label>
@@ -3193,8 +3190,8 @@
                 </span>
               </div>
               <p class="settings-help">
-                When a peer adds or removes an emoji reaction to one
-                of your messages. Off if you find these noisy.
+                Pings when a peer adds or removes an emoji on something you
+                said. Off if you don't need to know who 👍'd what.
               </p>
             </div>
 
@@ -3230,9 +3227,9 @@
                 <input type="time" id="set-dnd-end" value="07:00" />
               </div>
               <p class="settings-help">
-                During quiet hours desktop notifications and chimes are
-                suppressed. Messages still arrive — they just don't
-                ping. Crosses midnight (e.g. 22:00 → 07:00).
+                During quiet hours, notifications and chimes shut up.
+                Messages still arrive; they just don't make a scene.
+                Crosses midnight (e.g. 22:00 → 07:00).
               </p>
             </div>
           </section>
@@ -3249,7 +3246,7 @@
               </select>
             </div>
             <p class="settings-help">
-              Light mode flips the palette for daytime legibility.
+              Light mode flips the palette for the unhinged among us.
               "Match system" tracks your OS preference live.
             </p>
           </section>
@@ -3265,13 +3262,14 @@
               </span>
             </div>
             <p class="settings-help">
-              Devices broadcasting on your local network are paired
-              automatically. Off → you approve each one manually.
+              Devices yelling on your local network are paired without
+              asking. Off: you approve each one manually, like a person
+              who reads EULAs.
             </p>
             <p class="settings-help">
-              Per-conversation settings — disappearing messages,
-              muting, custom alias — live on the gear next to each
-              device or group in the sidebar.
+              Per-conversation settings (disappearing messages, mute,
+              custom alias) live on the gear next to each device or
+              group in the sidebar.
             </p>
           </section>
 
@@ -3284,9 +3282,9 @@
                 <span class="rdz-status-dot" id="rdz-status-dot" title="Not connected"></span>
               </div>
               <p class="settings-help">
-                One Link finds devices on your Wi-Fi automatically. To
-                talk to devices on different networks, add one or more
-                rendezvous URLs.
+                One Link finds devices on your Wi-Fi by itself. To reach
+                devices on different networks, add one or more rendezvous
+                URLs. (Yes, the word means what you hope it means.)
                 <a href="#" id="rdz-help-link" class="learn-more">What's a rendezvous?</a>
               </p>
               <textarea id="set-rendezvous" rows="3"
@@ -3304,12 +3302,13 @@
               <div class="settings-row">
                 <label for="set-download-folder">Folder</label>
                 <input type="text" id="set-download-folder"
-                       placeholder="(default — One Link's inbox folder)"
+                       placeholder="(default: One Link's inbox folder)"
                        spellcheck="false" />
               </div>
               <p class="settings-help">
-                Files received from peers land here. Leave blank for the
-                built-in inbox. The folder must already exist + be writable.
+                Files land here. Yes, all of them, even the weird ones.
+                Leave blank for the built-in inbox. The folder must
+                already exist and be writable. We won't conjure it.
               </p>
             </div>
 
@@ -3330,9 +3329,9 @@
                 </select>
               </div>
               <p class="settings-help">
-                Applies to NEW devices you pair with from now on.
-                Existing chats keep whatever TTL is set in their
-                device drawer.
+                Applies to NEW devices you pair from here on. Existing
+                chats keep whatever TTL is on their device drawer; we
+                don't time-travel into old conversations.
               </p>
             </div>
 
@@ -3353,8 +3352,8 @@
               </div>
               <p class="settings-help">
                 Caps One Link's combined send + receive throughput.
-                Useful on a metered connection or to leave headroom
-                for video calls.
+                Useful on a metered connection, or if you'd like the
+                rest of the internet to keep working.
               </p>
             </div>
 
@@ -3368,13 +3367,13 @@
               </div>
               <div class="settings-row">
                 <label for="set-auto-accept-exts">Allowed extensions</label>
-                <input type="text" id="set-auto-accept-exts" placeholder="e.g. png, jpg, pdf — empty for any" />
+                <input type="text" id="set-auto-accept-exts" placeholder="e.g. png, jpg, pdf. Blank = anything goes." />
               </div>
               <p class="settings-help">
-                Inbound files matching these rules land in your inbox
-                without a prompt. Anything outside these limits — too
-                big, or extension not in the allowlist — requires an
-                explicit accept.
+                Inbound files that pass these rules land in your inbox
+                quietly. Anything outside (too big, or extension not in
+                the allowlist) gets bounced. Sorry, we have standards
+                (you set them).
               </p>
             </div>
 
@@ -3389,7 +3388,7 @@
                 <span class="settings-help">Loading…</span>
               </div>
               <div class="storage-table" id="storage-table">
-                <p class="settings-help">No conversations yet.</p>
+                <p class="settings-help">No conversations. Suspicious.</p>
               </div>
             </div>
           </section>
@@ -3401,7 +3400,8 @@
               Permissions, custom name, mute, and trust details for each
               paired device live in that device's drawer. Click the gear
               (⚙) next to a device in the sidebar, or the device card at
-              the top of the conversation, to open it.
+              the top of a conversation, to open it. We could've put
+              this here. We didn't.
             </p>
           </section>
 
@@ -3413,11 +3413,11 @@
               shortcut list. Common ones:
             </p>
             <ul class="settings-shortcuts">
-              <li><kbd>Ctrl</kbd>+<kbd>K</kbd> — open search</li>
-              <li><kbd>Ctrl</kbd>+<kbd>Enter</kbd> — send message</li>
-              <li><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> — open diagnostics</li>
-              <li><kbd>Esc</kbd> — close the active modal</li>
-              <li><kbd>?</kbd> — show all shortcuts</li>
+              <li><kbd>Ctrl</kbd>+<kbd>K</kbd> open search</li>
+              <li><kbd>Ctrl</kbd>+<kbd>Enter</kbd> send message</li>
+              <li><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> open diagnostics</li>
+              <li><kbd>Esc</kbd> close the active modal</li>
+              <li><kbd>?</kbd> show all shortcuts</li>
             </ul>
           </section>
 
@@ -3436,16 +3436,17 @@
                 </select>
               </div>
               <p class="settings-help">
-                Affects the daemon's terminal log + the diagnostics overlay.
-                "Debug" surfaces every wire frame and CRDT merge — useful
-                when something is misbehaving, noisy otherwise.
+                Affects the daemon's terminal log + diagnostics overlay.
+                "Debug" surfaces every wire frame and CRDT merge.
+                Useful when something is misbehaving; noisy otherwise.
               </p>
             </div>
             <div class="settings-section">
               <div class="settings-section-h"><span>Troubleshooting</span></div>
               <p class="settings-help">
                 Live error log + daemon health check. Open this only if
-                something seems broken; in normal use you'll never need it.
+                something feels off. In normal use you'll never need it,
+                which is the dream.
               </p>
               <button class="btn-ghost" id="settings-open-diagnostics">
                 Open diagnostics
@@ -3470,11 +3471,12 @@
             </div>
             <p class="settings-help">
               One Link is peer-to-peer LAN chat + file sync. End-to-end
-              encrypted by default. No account, no server, no telemetry —
-              your data stays on your devices.
+              encrypted by default. No account, no server, no telemetry.
+              Your data stays on your devices. We barely even know what
+              files are.
             </p>
             <p class="settings-help">
-              Made with the Coherence Language ecosystem.
+              Built on Coherence; yes, we drank our own kool-aid.
               <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link" target="_blank" rel="noopener" class="learn-more">Source on GitHub</a>
             </p>
           </section>
@@ -3911,8 +3913,8 @@
         <h1>Welcome to One Link</h1>
         <p>
           Direct, end-to-end encrypted chat and file sync between
-          your own devices. Everything runs locally — no cloud,
-          no servers, no logins. Just identities you pair.
+          your own devices. Everything runs locally. No cloud, no
+          servers, no logins, no telemetry. Just identities you pair.
         </p>
         <div class="onboarding-actions">
           <button class="btn-primary" data-onboarding-go="2">Get started →</button>
@@ -3923,8 +3925,8 @@
         <h1>Pick a display name</h1>
         <p>
           This is how other devices see this one in their device
-          list. Anything works — your hostname, "Alex's Mac",
-          "Living Room PC".
+          list. Anything works. "Alex's Mac", "Living Room PC",
+          "Hot Toaster". We don't judge.
         </p>
         <input type="text" id="onboarding-name" maxlength="64"
                placeholder="e.g. Alex's Mac" autocomplete="off" />
@@ -4377,10 +4379,10 @@
     banner.id = "session-expired-banner";
     banner.className = "session-expired-banner";
     banner.innerHTML = `
-      <strong>Session expired.</strong>
-      Relaunch One Link from the system tray (or terminal) so the
-      daemon can mint a fresh access token. Your data is safe — this
-      is just the browser ↔ daemon authorization.
+      <strong>We forgot who you are.</strong>
+      Relaunch One Link from the tray (or terminal) so the daemon can
+      mint a fresh token. Your data is safe; this is just the browser
+      and the daemon doing introductions again.
       <button class="btn-ghost" id="session-expired-reload">Reload</button>
     `;
     document.body.appendChild(banner);
@@ -4484,7 +4486,7 @@
         document.execCommand("copy");
         toast(`Copied ${label || "to clipboard"}`, "good", 1800);
       } catch {
-        toast("Copy failed", "bad");
+        toast("Copy refused. Clipboard's busy.", "bad");
       }
       document.body.removeChild(ta);
     }
@@ -8448,7 +8450,7 @@
     if (note === null) return;  // user hit Cancel on the prompt
     note = (note || "").trim();
     if (note.length > 280) {
-      toast("Note too long (max 280 characters).", "warn");
+      toast("Note's running long. 280 char cap.", "warn");
       return;
     }
     try {
@@ -8595,7 +8597,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.12.5";
+  const PAGE_BUILT_FOR = "0.13.0";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -9584,7 +9586,7 @@
   // ── Attach button + file picker ────────────────────────────────────
   const fileInput = $("#file-input");
   const triggerAttach = () => {
-    if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
+    if (!state.selectedPeer) { toast("Pick a device first. Aim is required.", "info"); return; }
     const peer = state.peers.get(state.selectedPeer);
     if (peer?.trust === "rejected") {
       toast("This device is blocked. Use Allow device first.", "bad");
@@ -9625,7 +9627,7 @@
   });
   // Screenshot button — reads clipboard image (e.g. from Win+Shift+S) and stages it.
   $("#btn-screenshot").addEventListener("click", async () => {
-    if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
+    if (!state.selectedPeer) { toast("Pick a device first. Aim is required.", "info"); return; }
     if (!navigator.clipboard?.read) {
       toast("This browser doesn't support clipboard read. Take a screenshot, then paste with Ctrl+V.", "info", 5000);
       return;
@@ -10117,7 +10119,7 @@
 
   async function startVoiceRecording() {
     if (state.voiceRec) return;
-    if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
+    if (!state.selectedPeer) { toast("Pick a device first. Aim is required.", "info"); return; }
     const peer = state.peers.get(state.selectedPeer);
     if (peer?.trust === "rejected") {
       toast("This device is blocked.", "bad");
@@ -10174,7 +10176,7 @@
       // Minimum threshold — anything under 200ms is almost
       // certainly a misclick. Don't waste a peer-side bubble.
       if (blob.size < 1024) {
-        toast("Voice clip too short — recording discarded.", "info");
+        toast("Voice clip was barely a syllable. Tossed.", "info");
         return;
       }
       const fname = _voiceFilenameFor(recMime);
@@ -10231,7 +10233,7 @@
   }
 
   async function uploadFile(file) {
-    if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
+    if (!state.selectedPeer) { toast("Pick a device first. Aim is required.", "info"); return; }
     const peer = state.peers.get(state.selectedPeer);
     if (peer?.trust === "rejected") {
       toast("This device is blocked. Use Allow device first.", "bad");
@@ -10355,7 +10357,7 @@
     e.preventDefault();
     dragCounter = 0;
     $("#drop-overlay").classList.remove("show");
-    if (!state.selectedPeer) { toast("Pick a device first", "info"); return; }
+    if (!state.selectedPeer) { toast("Pick a device first. Aim is required.", "info"); return; }
     const items = e.dataTransfer?.items;
     let collected = [];
     if (items && items.length && items[0].webkitGetAsEntry) {
