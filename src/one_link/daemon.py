@@ -3120,7 +3120,7 @@ class Daemon:
         )
         await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         if not f.cdc_missing:
-            await self._finish_cdc_file(blob, peer_fp, peer_sid, msg)
+            self._schedule_finish_cdc_file(blob, peer_fp, peer_sid, msg)
 
     async def _finish_cdc_file(self, blob: str, peer_fp: str, peer_sid: str, src_msg: dict) -> None:
         f = self._incoming_files.get(blob)
@@ -3139,12 +3139,6 @@ class Daemon:
                     return
                 f.handle.write(data)
                 h.update(data)
-                self._store_chunk_cache(
-                    c["hash"],
-                    data,
-                    blob_hash=blob,
-                    chunk_index=int(c["index"]),
-                )
                 written += len(data)
             f.handle.close()
             ok = h.hexdigest() == blob and written == f.size
@@ -3162,7 +3156,7 @@ class Daemon:
                     f.out_path.unlink()
                 self._update_transfer(f.transfer_id, status="failed")
             else:
-                self._cache_file_chunks(f.out_path)
+                self._record_finished_cdc_sources(f.out_path, f)
                 self._update_transfer(
                     f.transfer_id,
                     status="complete",
@@ -3175,6 +3169,37 @@ class Daemon:
             self._update_transfer(f.transfer_id, status="failed")
             self._abort_incoming_file(blob, f)
             raise
+
+    def _record_finished_cdc_sources(self, path: Path, f: IncomingFile) -> None:
+        """Record chunk source rows for a just-assembled CDC receive.
+
+        The finish path already has the verified manifest. Re-indexing the
+        whole output file here makes repeated large-file sends feel stuck even
+        though no network bytes are needed. Keep the fast content-addressed
+        evidence without paying a second full-file scan.
+        """
+        if self.state is None or not f.cdc_chunks:
+            return
+        try:
+            st = path.stat()
+            self.state.record_chunk_sources_for_file(
+                path=str(path),
+                file_size=int(st.st_size),
+                mtime_ms=int(st.st_mtime * 1000),
+                chunks=[
+                    {
+                        "index": int(c["index"]),
+                        "start": int(c["start"]),
+                        "end": int(c["end"]),
+                        "size": int(c["size"]),
+                        "hash": str(c["hash"]),
+                    }
+                    for c in f.cdc_chunks
+                ],
+                source="received_cdc",
+            )
+        except Exception as e:
+            log.debug("finished CDC source recording skipped for %s: %s", path, e)
 
     def _schedule_finish_cdc_file(
         self, blob: str, peer_fp: str, peer_sid: str, src_msg: dict,
@@ -7416,7 +7441,9 @@ class Daemon:
                         result = await self.send_text(peer, req["body"])
                         await self._reply(writer, {"ok": True, "result": result})
                         return
-                    except OSError as e:
+                    except Exception as e:
+                        if not _is_transient_send_error(e):
+                            raise
                         last_error = e
                         if self.discovery:
                             self.discovery.registry.remove(peer.short_id)
@@ -7443,7 +7470,9 @@ class Daemon:
                         result = await self.send_file(peer, p)
                         await self._reply(writer, {"ok": True, "result": result})
                         return
-                    except OSError as e:
+                    except Exception as e:
+                        if not _is_transient_send_error(e):
+                            raise
                         last_error = e
                         if self.discovery:
                             self.discovery.registry.remove(peer.short_id)

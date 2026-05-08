@@ -1336,6 +1336,93 @@ async def test_binary_stream_receiver_writes_raw_payload_and_acks(
 
 
 @pytest.mark.asyncio
+async def test_cdc_final_chunk_ack_schedules_finish_without_blocking(
+    tmp_path: Path, monkeypatch
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+
+    content = b"cdc final ack must not wait for file rebuild"
+    blob = blake3.blake3(content).hexdigest()
+    chunk_hash = blake3.blake3(content).hexdigest()
+    out_path = tmp_path / "cdc-received.bin"
+    transfer_id = "in:test-cdc-final-ack"
+    state.upsert_transfer(
+        id=transfer_id,
+        direction="in",
+        peer_fp=them.fingerprint,
+        kind="file",
+        name=out_path.name,
+        size=len(content),
+        blob_hash=blob,
+        status="offered",
+        progress_bytes=0,
+        total_bytes=len(content),
+        chunks_done=0,
+        chunks_total=1,
+        metadata={"mode": "cdc", "path": str(out_path)},
+    )
+    handle = open(out_path, "wb")
+    daemon._incoming_files[blob] = IncomingFile(
+        name=out_path.name,
+        size=len(content),
+        blob_hex=blob,
+        out_path=out_path,
+        handle=handle,
+        hasher=blake3.blake3(),
+        cdc_chunks=[{
+            "index": 0,
+            "start": 0,
+            "end": len(content),
+            "size": len(content),
+            "hash": chunk_hash,
+        }],
+        cdc_missing={0},
+        cdc_parts={},
+        transfer_id=transfer_id,
+    )
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    scheduled: list[str] = []
+
+    def _schedule(blob_arg: str, peer_fp: str, peer_sid: str, src_msg: dict) -> None:
+        assert any(
+            m.get("t") == "ACK" and m.get("of") == "cdc-final"
+            for m in chan.sent
+        )
+        assert state.get_transfer(transfer_id).status == "active"
+        scheduled.append(blob_arg)
+
+    monkeypatch.setattr(daemon, "_schedule_finish_cdc_file", _schedule)
+    await daemon._on_peer_message(
+        chan,
+        make_msg(
+            "FILE_CDC_CHUNK",
+            them.short_id,
+            id="cdc-final",
+            blob=blob,
+            index=0,
+            hash=chunk_hash,
+            enc="raw",
+            wire_size=len(content),
+            data=base64.b64encode(content).decode("ascii"),
+        ),
+    )
+
+    assert chan.sent[-1]["t"] == "ACK"
+    assert scheduled == [blob]
+    with contextlib.suppress(Exception):
+        handle.close()
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_send_file_failure_drops_session(tmp_path: Path, monkeypatch):
     """A mid-stream failure must drop the session — leaving it cached
     risks the next send inheriting a poisoned read state."""

@@ -148,7 +148,7 @@ def peers():
 @click.argument("body")
 def send(peer, body):
     """Send a chat message to PEER (short_id or hostname)."""
-    res = _request("send", peer=peer, body=body)
+    res = _request("send", timeout=30.0, peer=peer, body=body)
     if not res.get("ok"):
         raise click.ClickException(res.get("error", "send failed"))
     r = res["result"]
