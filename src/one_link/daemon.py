@@ -6772,10 +6772,20 @@ class Daemon:
         if (
             cached_file_index is not None
             and cached_file_index.chunks
-            and max((c.size for c in cached_file_index.chunks), default=0) > fixed_chunk_size
         ):
-            cached_file_index = None
-            cached_index_kind = "incompatible"
+            cached_max_chunk = max((c.size for c in cached_file_index.chunks), default=0)
+            cached_fixed_too_large = cached_max_chunk > fixed_chunk_size
+            cached_fixed_too_small = (
+                cached_index_kind == "fixed"
+                and size >= FAST_FIXED_INDEX_MIN_BYTES
+                and cached_max_chunk < fixed_chunk_size
+            )
+            if cached_fixed_too_large or cached_fixed_too_small:
+                cached_file_index = None
+                cached_index_kind = (
+                    "fixed_chunk_upgrade"
+                    if cached_fixed_too_small else "incompatible"
+                )
 
         thin_manifest = FileManifest(
             name=path.name,

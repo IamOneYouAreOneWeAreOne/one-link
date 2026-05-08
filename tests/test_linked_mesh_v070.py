@@ -786,6 +786,84 @@ async def test_send_file_ignores_fast_cache_for_legacy_peer(tmp_path: Path, monk
 
 
 @pytest.mark.asyncio
+async def test_send_file_upgrades_small_fixed_cache_for_modern_peer(
+    tmp_path: Path, monkeypatch
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    payload = b"abcd" * (1024 * 1024)
+    f = tmp_path / "modern-repeat.bin"
+    f.write_bytes(payload)
+    old_chunks = []
+    for i in range(16):
+        start = i * 256 * 1024
+        data = payload[start:start + 256 * 1024]
+        old_chunks.append({
+            "index": i,
+            "start": start,
+            "end": start + len(data),
+            "size": len(data),
+            "hash": blake3.blake3(data).hexdigest(),
+        })
+    st = f.stat()
+    state.record_file_index_cache(
+        path=str(f.resolve()),
+        size=st.st_size,
+        mtime_ns=st.st_mtime_ns,
+        ctime_ns=st.st_ctime_ns,
+        blob_hash=blake3.blake3(payload).hexdigest(),
+        index_kind="fixed",
+        chunks=old_chunks,
+    )
+
+    chan = _TracingFakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, FILE_CDC],
+        "from": them.short_id,
+        "app_version": "0.12.5",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id,
+            hostname="them",
+            address="127.0.0.1",
+            port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    monkeypatch.setattr("one_link.daemon.FAST_FIXED_INDEX_MIN_BYTES", 1)
+    chan.queue_reply(make_msg("FILE_WANTS", them.short_id, wants=[]))
+
+    result = await daemon.send_file(sess.peer, f)
+    offer = chan.sent[0]
+    row = state.list_transfers(limit=1)[0]
+
+    assert result["chunks"] == 0
+    assert len(offer["chunks"]) == 4
+    assert max(c["size"] for c in offer["chunks"]) == 1024 * 1024
+    assert row.metadata["file_index_kind"] == "fixed"
+    assert row.metadata["fixed_chunk_size"] == 1024 * 1024
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path / "home"))
     me = _new_identity()
