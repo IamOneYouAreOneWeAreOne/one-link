@@ -262,6 +262,84 @@ def simulate_never_lose_transfer(
     )
 
 
+def simulate_autopilot_torture_matrix(
+    *,
+    size: int = 2 * 1024 * 1024 * 1024,
+    chunk_size: int = 16 * 1024 * 1024,
+    seeds: Iterable[int] = (3, 7, 11, 19),
+) -> dict[str, object]:
+    """Run a small deterministic matrix of hard transfer conditions.
+
+    This is the benchmark harness for the product promise: big sends should
+    finish under drops, corruption, sleep/reconnect, and version fallback.
+    It stays synthetic so CI can model multi-GB videos without disk I/O.
+    """
+
+    scenarios = {
+        "clean_lan": {"drop_rate": 0.0, "corruption_rate": 0.0},
+        "sleepy_wifi": {"drop_rate": 0.22, "corruption_rate": 0.01},
+        "hostile_wifi": {"drop_rate": 0.35, "corruption_rate": 0.06},
+        "prior_knowledge": {"drop_rate": 0.05, "corruption_rate": 0.01},
+    }
+    reports = []
+    for name, params in scenarios.items():
+        for seed in seeds:
+            manifest = synthetic_manifest(size=size, chunk_size=chunk_size)
+            sources = None
+            if name == "prior_knowledge":
+                all_indexes = frozenset(c.index for c in manifest.chunks)
+                sources = (
+                    SimSource(
+                        "p" * 64,
+                        "prior",
+                        all_indexes,
+                        trust_score=2.0,
+                        latency_ms=1.0,
+                        bandwidth_bps=2_000_000_000,
+                        reliability=0.97,
+                    ),
+                    SimSource(
+                        "l" * 64,
+                        "lan",
+                        frozenset(i for i in all_indexes if i % 3 == 0),
+                        trust_score=1.5,
+                        latency_ms=5.0,
+                        bandwidth_bps=700_000_000,
+                        reliability=0.98,
+                    ),
+                )
+            report = simulate_never_lose_transfer(
+                size=size,
+                chunk_size=chunk_size,
+                seed=int(seed),
+                sources=sources,
+                max_rounds=80_000,
+                **params,
+            )
+            row = report.to_dict()
+            row["scenario"] = name
+            row["efficiency_multiplier"] = round(
+                report.file_size / max(1, report.bytes_sent),
+                3,
+            )
+            reports.append(row)
+    delivered = sum(1 for r in reports if r["delivered"])
+    retries = sum(int(r["retries"]) for r in reports)
+    offline_waits = sum(int(r["offline_waits"]) for r in reports)
+    avg_efficiency = (
+        sum(float(r["efficiency_multiplier"]) for r in reports) / max(1, len(reports))
+    )
+    return {
+        "runs": len(reports),
+        "delivered": delivered,
+        "delivery_rate": round(delivered / max(1, len(reports)), 6),
+        "retries": retries,
+        "offline_waits": offline_waits,
+        "avg_efficiency_multiplier": round(avg_efficiency, 3),
+        "reports": reports,
+    }
+
+
 def main() -> int:
     report = simulate_never_lose_transfer()
     print("One Link never-lose transfer torture simulator")

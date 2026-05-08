@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from one_link.transfer_sim import (
     SimSource,
+    simulate_autopilot_torture_matrix,
     simulate_never_lose_transfer,
     synthetic_manifest,
 )
@@ -70,3 +71,17 @@ def test_torture_sim_exercises_legacy_protocol_fallback():
     assert report.delivered is True
     assert report.fallback_events > 0
     assert "protocol_fallback" in report.doctor_states
+
+
+def test_autopilot_torture_matrix_delivers_all_scenarios():
+    matrix = simulate_autopilot_torture_matrix(
+        size=256 * 1024 * 1024,
+        chunk_size=8 * 1024 * 1024,
+        seeds=(1, 2),
+    )
+
+    assert matrix["runs"] == 8
+    assert matrix["delivery_rate"] == 1.0
+    assert matrix["retries"] > 0
+    assert matrix["offline_waits"] > 0
+    assert matrix["avg_efficiency_multiplier"] > 1.0

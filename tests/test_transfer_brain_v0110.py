@@ -8,7 +8,9 @@ from one_link.transfer_brain import (
     TransferMode,
     TransferRouteObservation,
     adapt_pipeline_profile,
+    build_transfer_autopilot_plan,
     decision_from_observations,
+    transfer_performance_summary,
     transfer_result_report,
     verification_priority_order,
 )
@@ -298,3 +300,83 @@ def test_adaptive_scheduler_records_retry_or_reopen():
     assert snap["window_chunks"] == 3
     assert snap["timeline"][-1]["event"] == "retry_or_reopen"
     assert snap["timeline"][-1]["reason"] == "TimeoutError"
+
+
+def test_autopilot_plan_chooses_binary_cdc_and_ack_batch():
+    decision = decision_from_observations(
+        size_bytes=8 * 1024 * 1024 * 1024,
+        supports_cdc=True,
+        supports_swarm=True,
+        prior_hit_rate=0.96,
+        observations=[
+            TransferRouteObservation("lan", True, latency_ms=4, bandwidth_bps=900_000_000)
+            for _ in range(40)
+        ],
+        routes=["lan"],
+        speeds={"cdc_mib_s": 1200.0},
+    )
+    profile = adapt_pipeline_profile(
+        {"chunk_size": 1024 * 1024, "window_chunks": 8, "window_bytes": 8 * 1024 * 1024},
+        decision,
+    )
+
+    plan = build_transfer_autopilot_plan(
+        decision=decision,
+        profile=profile,
+        size_bytes=8 * 1024 * 1024 * 1024,
+        peer_features=["file_cdc_binary_frame", "file_binary_frame"],
+        prior_hit_rate=0.96,
+    ).to_dict()
+
+    assert plan["frame_kind"] == "cdc_binary"
+    assert plan["ack_batch"] > 1
+    assert plan["retry_posture"] == "auto_resume"
+    assert plan["estimated_savings_ratio"] >= 0.95
+    assert "binary" in " ".join(plan["reasons"])
+
+
+def test_autopilot_plan_falls_back_for_legacy_json_peer():
+    decision = decision_from_observations(
+        size_bytes=64 * 1024 * 1024,
+        supports_cdc=True,
+        supports_swarm=False,
+        prior_hit_rate=0.5,
+        observations=[TransferRouteObservation("relay", False) for _ in range(8)],
+        routes=["relay"],
+    )
+    profile = adapt_pipeline_profile(
+        {"chunk_size": 1024 * 1024, "window_chunks": 8, "window_bytes": 8 * 1024 * 1024},
+        decision,
+    )
+
+    plan = build_transfer_autopilot_plan(
+        decision=decision,
+        profile=profile,
+        size_bytes=64 * 1024 * 1024,
+        peer_features=[],
+        prior_hit_rate=0.5,
+    )
+
+    assert plan.frame_kind.endswith("json_compat")
+    assert plan.ack_batch == 1
+    assert plan.retry_posture == "repair_reopen_session"
+
+
+def test_transfer_performance_summary_explains_prior_knowledge_win():
+    report = transfer_result_report(
+        raw_bytes=2 * 1024 * 1024,
+        wire_bytes=2 * 1024 * 1024,
+        skipped_bytes=198 * 1024 * 1024,
+        elapsed_s=0.5,
+    )
+    plan = {
+        "mode": "cdc_manifest",
+        "route": "lan",
+        "frame_kind": "cdc_binary",
+    }
+
+    summary = transfer_performance_summary(report=report, plan=plan)
+
+    assert summary["optimization_multiplier"] == 100.0
+    assert summary["effective_mbps"] > summary["wire_mbps"]
+    assert "missing pieces" in summary["plain_english"]

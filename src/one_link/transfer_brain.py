@@ -360,6 +360,200 @@ class TransferBrainDecision:
         }
 
 
+@dataclass(frozen=True)
+class TransferAutopilotPlan:
+    """Human- and machine-readable strategy for one file send.
+
+    The planner is intentionally deterministic: given the same route memory,
+    engine memory, peer caps, and file shape it returns the same answer. The
+    daemon stores this in transfer metadata so the UI can explain what One Link
+    is doing without exposing protocol noise.
+    """
+
+    mode: str
+    route: str
+    state: str
+    frame_kind: str
+    compression_policy: str
+    chunk_size: int
+    window_chunks: int
+    window_bytes: int
+    ack_batch: int
+    retry_posture: str
+    route_score: float
+    confidence: float
+    estimated_wire_bytes: int
+    estimated_saved_bytes: int
+    estimated_savings_ratio: float
+    estimated_seconds: float
+    estimated_mbps: float
+    reasons: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "route": self.route,
+            "state": self.state,
+            "frame_kind": self.frame_kind,
+            "compression_policy": self.compression_policy,
+            "chunk_size": self.chunk_size,
+            "window_chunks": self.window_chunks,
+            "window_bytes": self.window_bytes,
+            "ack_batch": self.ack_batch,
+            "retry_posture": self.retry_posture,
+            "route_score": self.route_score,
+            "confidence": self.confidence,
+            "estimated_wire_bytes": self.estimated_wire_bytes,
+            "estimated_saved_bytes": self.estimated_saved_bytes,
+            "estimated_savings_ratio": self.estimated_savings_ratio,
+            "estimated_seconds": self.estimated_seconds,
+            "estimated_mbps": self.estimated_mbps,
+            "reasons": list(self.reasons),
+        }
+
+
+def build_transfer_autopilot_plan(
+    *,
+    decision: Mapping[str, object] | TransferBrainDecision,
+    profile: Mapping[str, int | float | str],
+    size_bytes: int,
+    peer_features: Iterable[str] = (),
+    prior_hit_rate: float = 0.0,
+    cdc_binary_feature: str = "file_cdc_binary_frame",
+    stream_binary_feature: str = "file_binary_frame",
+) -> TransferAutopilotPlan:
+    """Create the concrete runtime plan used by daemon + UI.
+
+    This sits one layer above `decide`: it converts "CDC on LAN is best" into
+    exact runtime posture: binary-vs-JSON frames, bounded ACK batching,
+    compression posture, retry mode, and the speed/savings users care about.
+    """
+
+    d = decision.to_dict() if isinstance(decision, TransferBrainDecision) else dict(decision)
+    features = {str(f) for f in peer_features}
+    mode = str(d.get("selected") or "hash_stream")
+    route = str(d.get("route") or "lan")
+    health = str(d.get("health") or "observing")
+    size = max(0, int(size_bytes))
+    wire = max(0, int(d.get("estimated_wire_bytes") or size))
+    saved = max(0, size - wire)
+    savings = _clamp01(max(float(prior_hit_rate or 0.0), saved / max(1, size)))
+    chunk_size = max(1, int(profile.get("chunk_size") or MiB))
+    window_chunks = max(1, int(profile.get("window_chunks") or 1))
+    window_bytes = max(chunk_size, int(profile.get("window_bytes") or window_chunks * chunk_size))
+    confidence = _clamp01(float(d.get("confidence") or 0.0))
+    coherence = _clamp01(float(d.get("coherence_score") or 0.0))
+    reliability = _clamp01(float(d.get("reliability") or 0.0))
+    route_score = round(_clamp01((coherence * 0.45) + (reliability * 0.40) + (confidence * 0.15)), 6)
+
+    if mode in (TransferMode.CDC_MANIFEST.value, TransferMode.SWARM_CDC.value):
+        frame_kind = "cdc_binary" if cdc_binary_feature in features else "cdc_json_compat"
+    else:
+        frame_kind = "stream_binary" if stream_binary_feature in features else "stream_json_compat"
+
+    compression_policy = "adaptive"
+    if savings >= 0.90:
+        compression_policy = "skip_heavy_compression"
+    elif frame_kind.endswith("json_compat"):
+        compression_policy = "adaptive_json_safe"
+
+    if health == HealthState.REPAIR.value:
+        ack_batch = 1
+        retry_posture = "repair_reopen_session"
+    elif health == HealthState.CONSTRAINED.value:
+        ack_batch = max(1, min(2, window_chunks // 2))
+        retry_posture = "cautious_retry"
+    else:
+        ack_batch = max(1, min(window_chunks, 8 if frame_kind.endswith("binary") else 4))
+        retry_posture = "auto_resume"
+
+    estimated_ms = max(1.0, float(d.get("estimated_ms") or 1.0))
+    estimated_seconds = estimated_ms / 1000.0
+    effective_mbps = (size * 8.0) / max(0.001, estimated_seconds) / 1_000_000.0
+    reasons = tuple(str(r) for r in d.get("reasons") or ())
+    reasons += (
+        f"{frame_kind} frames",
+        f"{window_chunks} chunk window",
+        f"{savings:.1%} estimated bandwidth avoided",
+    )
+
+    return TransferAutopilotPlan(
+        mode=mode,
+        route=route,
+        state=health,
+        frame_kind=frame_kind,
+        compression_policy=compression_policy,
+        chunk_size=chunk_size,
+        window_chunks=window_chunks,
+        window_bytes=window_bytes,
+        ack_batch=ack_batch,
+        retry_posture=retry_posture,
+        route_score=route_score,
+        confidence=round(confidence, 6),
+        estimated_wire_bytes=wire,
+        estimated_saved_bytes=saved,
+        estimated_savings_ratio=round(savings, 6),
+        estimated_seconds=round(estimated_seconds, 3),
+        estimated_mbps=round(effective_mbps, 3),
+        reasons=reasons,
+    )
+
+
+def transfer_performance_summary(
+    *,
+    report: Mapping[str, object],
+    plan: Mapping[str, object] | TransferAutopilotPlan | None = None,
+    elapsed_s: float | None = None,
+) -> dict[str, object]:
+    """UI-ready transfer truth: speed, savings, ETA, and what happened."""
+
+    p = plan.to_dict() if isinstance(plan, TransferAutopilotPlan) else dict(plan or {})
+    effective = int(_as_float(report.get("effective_payload_bytes")))
+    raw = int(_as_float(report.get("raw_bytes_sent")))
+    wire = int(_as_float(report.get("wire_bytes_sent")))
+    skipped = int(_as_float(report.get("skipped_bytes")))
+    saved = int(_as_float(report.get("saved_bytes")))
+    effective_bps = _as_float(report.get("effective_throughput_bps"))
+    wire_bps = _as_float(report.get("wire_throughput_bps"))
+    elapsed = max(0.001, float(elapsed_s if elapsed_s is not None else 0.0))
+    if elapsed_s is None and effective_bps > 0 and effective > 0:
+        elapsed = max(0.001, (effective * 8.0) / effective_bps)
+    savings = _clamp01(_as_float(report.get("bandwidth_savings_ratio")))
+    return {
+        "state": "done" if effective >= 0 else "sending",
+        "mode": p.get("mode"),
+        "route": p.get("route"),
+        "frame_kind": p.get("frame_kind"),
+        "effective_mbps": round(effective_bps / 1_000_000.0, 3),
+        "wire_mbps": round(wire_bps / 1_000_000.0, 3),
+        "elapsed_ms": int(round(elapsed * 1000.0)),
+        "raw_bytes_sent": raw,
+        "wire_bytes_sent": wire,
+        "skipped_bytes": skipped,
+        "saved_bytes": saved,
+        "bandwidth_savings_ratio": round(savings, 6),
+        "optimization_multiplier": round(effective / max(1, wire), 3),
+        "plain_english": _performance_plain_english(
+            frame_kind=str(p.get("frame_kind") or ""),
+            skipped_bytes=skipped,
+            savings_ratio=savings,
+        ),
+    }
+
+
+def _performance_plain_english(
+    *,
+    frame_kind: str,
+    skipped_bytes: int,
+    savings_ratio: float,
+) -> str:
+    if skipped_bytes > 0 and savings_ratio >= 0.90:
+        return "Most of this file was already known, so One Link sent only the missing pieces."
+    if "binary" in frame_kind:
+        return "One Link used the fast binary transfer path for this device."
+    return "One Link used the safest compatible transfer path for this device."
+
+
 def adapt_pipeline_profile(
     profile: Mapping[str, int],
     decision: Mapping[str, object] | TransferBrainDecision,

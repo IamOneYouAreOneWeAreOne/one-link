@@ -865,6 +865,7 @@ class UIServer:
             "performance": {
                 "sessions": self.daemon._session_stats(),
                 "cdc_cache": self.daemon._chunk_cache_stats(),
+                "transfer_autopilot": self.daemon._transfer_autopilot_stats(),
             },
         })
 
@@ -4565,7 +4566,9 @@ class UIServer:
                 "file_transfer": {
                     "strategy": "content-defined chunk offer, receiver wants only missing chunks",
                     "compression": "adaptive zlib level 1 per CDC chunk when it saves at least 8%",
+                    "autopilot": "route-scored binary/CDC strategy, BDP-aware windows, ACK-clocked self-tuning",
                 },
+                "transfer_autopilot": self.daemon._transfer_autopilot_stats(),
                 "folder_sync": {
                     "strategy": "Merkle root fast path plus CRDT manifest merge",
                 },

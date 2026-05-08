@@ -103,7 +103,9 @@ from one_link.transfer_brain import (
     TransferPerformanceOracle,
     TransferRouteObservation,
     adapt_pipeline_profile,
+    build_transfer_autopilot_plan,
     decision_from_observations,
+    transfer_performance_summary,
     transfer_result_report,
     verification_priority_order,
 )
@@ -2575,6 +2577,33 @@ class Daemon:
             "max_bytes": CDC_CACHE_MAX_BYTES,
             "oldest_mtime_ms": oldest_ms,
             "newest_mtime_ms": newest_ms,
+        }
+
+    def _transfer_autopilot_stats(self) -> dict:
+        """Live transfer brain status for /api/status.
+
+        This is intentionally compact and user-safe: no file paths, no peer
+        names, just whether the local engines and learned routes are getting
+        faster or need repair.
+        """
+        routes = []
+        for peer_fp, mem in sorted(self._route_memory.items()):
+            best = mem.best_route()
+            candidates = mem.candidates()
+            top = candidates[0] if candidates else None
+            routes.append({
+                "peer": peer_fp[:8],
+                "best_route": best,
+                "score": round(float(top.score), 6) if top is not None else 0.0,
+                "latency_ms": top.latency_ms if top is not None else None,
+                "bandwidth_bps": top.bandwidth_bps if top is not None else None,
+                "attempts": top.attempts if top is not None else 0,
+                "successes": top.successes if top is not None else 0,
+            })
+        return {
+            "engines": self._transfer_perf.snapshot(),
+            "routes": routes[:12],
+            "route_count": len(routes),
         }
 
     def _prune_chunk_cache(self, max_bytes: int = CDC_CACHE_MAX_BYTES) -> dict:
@@ -7156,6 +7185,19 @@ class Daemon:
             verification_head=verification_head,
             speeds=engine_speeds,
         ).to_dict()
+        autopilot_profile = adapt_pipeline_profile(
+            _stream_transfer_profile(size),
+            transfer_brain_decision,
+        )
+        autopilot_plan = build_transfer_autopilot_plan(
+            decision=transfer_brain_decision,
+            profile=autopilot_profile,
+            size_bytes=size,
+            peer_features=peer_features,
+            prior_hit_rate=prior_hit_rate,
+            cdc_binary_feature=FILE_CDC_BINARY_FRAME,
+            stream_binary_feature=FILE_BINARY_FRAME,
+        ).to_dict()
         now_ms = int(time.time() * 1000)
         base_metadata = {
             **base_metadata,
@@ -7180,6 +7222,7 @@ class Daemon:
             "transfer_engine_oracle": self._transfer_perf.snapshot(),
             "prior_hit_rate_estimate": prior_hit_rate,
             "transfer_brain": transfer_brain_decision,
+            "autopilot_plan": autopilot_plan,
             "verification_head": list(verification_head),
             "peer_app_version": peer_version,
             "peer_features": list(peer_features),
@@ -7644,6 +7687,11 @@ class Daemon:
                     elapsed_s=elapsed_s,
                     skipped_bytes=skipped_bytes,
                 )
+                performance_summary = transfer_performance_summary(
+                    report=transfer_report,
+                    plan=base_metadata.get("autopilot_plan") or autopilot_plan,
+                    elapsed_s=elapsed_s,
+                )
                 throughput_bps = (
                     (raw_bytes_sent * 8.0) / elapsed_s
                     if raw_bytes_sent > 0 else None
@@ -7689,6 +7737,7 @@ class Daemon:
                     "completed_at_ms": int(time.time() * 1000),
                     "elapsed_ms": int(round(elapsed_s * 1000.0)),
                     "transfer_report": transfer_report,
+                    "performance_summary": performance_summary,
                     "adaptive_scheduler": adaptive_scheduler_snapshot,
                     "error": None,
                     "transient": False,
@@ -7704,6 +7753,7 @@ class Daemon:
                 "wire_bytes_sent": wire_bytes_sent,
                 "compressed_chunks": compressed_chunks,
                 "transfer_report": transfer_report,
+                "performance_summary": performance_summary,
                 "transfer_engine_oracle": self._transfer_perf.snapshot(),
                 "blob": blob_hex,
                 "size": size,

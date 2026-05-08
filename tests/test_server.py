@@ -437,6 +437,7 @@ async def test_api_status_and_transfers_surface_ledger(tmp_path: Path):
             me=SimpleNamespace(fingerprint="ff" * 32, short_id="ffffffff", hostname="me"),
             _session_stats=lambda: {"open": 0, "sessions": []},
             _chunk_cache_stats=lambda: {"chunks": 0, "bytes": 0},
+            _transfer_autopilot_stats=lambda: {"engines": {}, "routes": [], "route_count": 0},
         )
         server = UIServer(daemon)
 
@@ -449,6 +450,7 @@ async def test_api_status_and_transfers_surface_ledger(tmp_path: Path):
         status = json.loads(status_resp.text)
         assert status["transfers"]["active"] == 1
         assert status["performance"]["sessions"]["open"] == 0
+        assert status["performance"]["transfer_autopilot"]["route_count"] == 0
 
         delete_resp = await server.api_delete_transfer(
             SimpleNamespace(match_info={"transfer_id": "t1"})
@@ -954,6 +956,8 @@ async def test_api_audit_describes_surface():
             assert "file_cdc" in j["local_capabilities"]
             assert j["performance"]["cdc_cache"]["max_bytes"] > 0
             assert "adaptive zlib" in j["performance"]["file_transfer"]["compression"]
+            assert "BDP-aware" in j["performance"]["file_transfer"]["autopilot"]
+            assert "transfer_autopilot" in j["performance"]
             assert any("mdns" in d["kind"] for d in j["outbound_destinations"])
             doctrine = j["sovereign_network"]
             assert doctrine["privacy_guarantees"]["mandatory_relay"] is False
