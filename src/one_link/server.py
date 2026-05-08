@@ -489,6 +489,12 @@ class UIServer:
         # SW itself contains no PII (only the URL paths it caches +
         # the outbox-drain logic that re-uses the page's cookie).
         r.add_get("/sw.js", self._service_worker)
+        # v0.15.0: Web App Manifest. Browsers fetch /manifest.json
+        # from the page's `<link rel="manifest">`; presence + correct
+        # MIME is what enables the install prompt + standalone-mode
+        # behavior. Like sw.js, served unauthenticated because it
+        # contains zero PII (just the app's display chrome).
+        r.add_get("/manifest.json", self._manifest)
         r.add_get("/api/me", self._guarded(self.api_me))
         r.add_get("/api/status", self._guarded(self.api_status))
         r.add_get("/api/settings", self._guarded(self.api_get_settings))
@@ -678,6 +684,20 @@ class UIServer:
         resp = web.Response(text=body, content_type="application/javascript")
         resp.headers["Service-Worker-Allowed"] = "/"
         resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    async def _manifest(self, request: web.Request) -> web.StreamResponse:
+        """v0.15.0: serve manifest.json with the right content-type
+        (`application/manifest+json`) — without it, some browsers
+        (esp. Firefox) decline to install the PWA. Cache-Control is
+        a moderate `max-age=3600` so an updated manifest reaches
+        users within an hour without requiring a hard refresh."""
+        mf = WEB_DIR / "manifest.json"
+        if not mf.is_file():
+            return web.Response(status=404, text="manifest not bundled")
+        body = mf.read_text(encoding="utf-8")
+        resp = web.Response(text=body, content_type="application/manifest+json")
+        resp.headers["Cache-Control"] = "max-age=3600"
         return resp
 
     async def _favicon(self, request: web.Request) -> web.StreamResponse:

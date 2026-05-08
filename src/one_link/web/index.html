@@ -6,6 +6,16 @@
 <title>One Link</title>
 <link rel="icon" type="image/png" href="/static/one-glyph.png" />
 <link rel="apple-touch-icon" href="/static/one-glyph.png" />
+<!-- v0.15.0: Web App Manifest. Combined with the Service Worker
+     (registered below in script), this satisfies the installability
+     criteria so Chrome / Edge / Samsung Internet show an install
+     prompt and Safari adds an "Add to Home Screen" entry. The
+     manifest declares standalone display so the installed app
+     opens chromeless. -->
+<link rel="manifest" href="/manifest.json" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="One Link" />
 <meta name="theme-color" content="#0b0d12" />
 <style>
   /* ── Reset + tokens ─────────────────────────────────────────────────── */
@@ -1573,6 +1583,31 @@
   html[data-form-factor="phone"] .desktop-only { display: none !important; }
   html[data-form-factor="phone"] [data-tier="advanced"] { display: none; }
   html.show-advanced [data-tier="advanced"] { display: revert !important; }
+
+  /* v0.15.1 offline banner. Hidden by default; .show animates it
+     down from the header. Calm color (warn-tier) so it reads as
+     informational, not error. Spans the full width above main. */
+  .offline-banner {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    background: rgba(245,196,81,.14);
+    color: var(--warn);
+    border-bottom: 1px solid rgba(245,196,81,.32);
+    font-size: 13px;
+  }
+  .offline-banner.show { display: flex; }
+  .offline-banner .offline-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--warn);
+    box-shadow: 0 0 8px rgba(245,196,81,.55);
+    animation: offline-pulse 2s ease-in-out infinite;
+  }
+  @keyframes offline-pulse {
+    0%, 100% { opacity: .6; }
+    50%      { opacity: 1.0; }
+  }
   /* v0.14.8: surface the phone-only diagnostics hint when the
      About pane carries it. Desktop has Ctrl+Shift+D + the Advanced
      pane button so the hint stays hidden there. */
@@ -2809,6 +2844,17 @@
     </div>
   </header>
 
+  <!-- v0.15.1: offline banner. Invisible by default; the JS handler
+       below toggles `.show` based on navigator.onLine + the
+       `online` / `offline` window events. The text is deliberately
+       calm — "messages queue and send when you're back" — so users
+       don't think anything is broken when they're on a flaky
+       cafe Wi-Fi. -->
+  <div class="offline-banner" id="offline-banner" role="status" aria-live="polite">
+    <span class="offline-dot"></span>
+    <span>You're offline. Messages queue and send when you're back.</span>
+  </div>
+
   <!-- MAIN -->
   <main class="main" id="main">
 
@@ -3729,6 +3775,21 @@
           <!-- ── About ──────────────────────────────────────────── -->
           <section class="settings-pane" data-settings-pane="about">
             <h3>About</h3>
+            <!-- v0.15.0: PWA install affordance. Hidden by default;
+                 the page's beforeinstallprompt handler unhides this
+                 row when the browser deems the app installable. On
+                 platforms that don't fire the event (Firefox, iOS
+                 Safari) the row stays hidden and users follow the
+                 OS-specific add-to-home-screen path. -->
+            <div class="settings-row" id="install-pwa-row" style="display:none;">
+              <label>Install</label>
+              <button class="btn-primary" id="btn-install-pwa">Install One Link</button>
+            </div>
+            <p class="settings-help" id="install-pwa-help" style="display:none;">
+              Adds One Link to your home screen / app launcher and
+              opens it chromeless. No account required. Works
+              identically to the browser version.
+            </p>
             <div class="settings-row">
               <label>Version</label>
               <span class="settings-readonly" id="settings-about-version" data-long-press-diagnostics="1">…</span>
@@ -7926,9 +7987,31 @@
       throw e;
     }
   }
+  // v0.15.1 — Offline indicator. Reads navigator.onLine at boot
+  // + listens for online/offline events. The banner is calm copy
+  // ("messages queue and send when you're back") so a flaky cafe
+  // Wi-Fi doesn't read as something being broken. We deliberately
+  // keep it on a separate channel from the toast stack so a long
+  // offline interval doesn't clutter the toast surface; the banner
+  // sits above main and stays as long as offline persists.
+  function _applyOnlineState(online) {
+    const b = document.querySelector("#offline-banner");
+    if (!b) return;
+    b.classList.toggle("show", !online);
+  }
+  // Apply at boot — navigator.onLine is set by the time scripts run.
+  _applyOnlineState(navigator.onLine !== false);
+  window.addEventListener("offline", () => {
+    _applyOnlineState(false);
+  });
   // When the page comes back online, poke the SW to drain.
   window.addEventListener("online", () => {
+    _applyOnlineState(true);
     _outboxRequestSync();
+    // Brief acknowledgement toast so the user knows queued sends
+    // are draining, then the banner disappears. Short duration so
+    // it doesn't linger if connectivity flaps repeatedly.
+    toast("Back online. Sending queued messages.", "good", 3000);
   });
 
   // v0.14.0 — Frame-budget instrumentation. Records the duration
@@ -9417,7 +9500,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.14.8";
+  const PAGE_BUILT_FOR = "0.15.1";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -11365,6 +11448,73 @@
     $("#settings-backdrop")?.classList.remove("show");
     openDebugOverlay();
   });
+
+  // v0.15.0 — PWA install prompt handler. Browsers (Chrome, Edge,
+  // Samsung Internet, Brave) fire `beforeinstallprompt` once
+  // installability criteria are met (manifest valid + SW registered
+  // + served over HTTPS or localhost). We capture the event, prevent
+  // the browser's own banner, and show our own button in About.
+  // On click, we call .prompt() on the deferred event so the user
+  // gets the OS-native install dialog. Firefox + iOS Safari don't
+  // fire this event; on those platforms users follow the OS
+  // add-to-home-screen path instead.
+  state.installPromptEvent = null;
+  function _showInstallAffordance() {
+    const row = document.querySelector("#install-pwa-row");
+    const help = document.querySelector("#install-pwa-help");
+    if (row) row.style.display = "";
+    if (help) help.style.display = "";
+  }
+  function _hideInstallAffordance() {
+    const row = document.querySelector("#install-pwa-row");
+    const help = document.querySelector("#install-pwa-help");
+    if (row) row.style.display = "none";
+    if (help) help.style.display = "none";
+  }
+  window.addEventListener("beforeinstallprompt", (e) => {
+    // Stop the browser's own banner so we control when + where the
+    // prompt appears (in our About pane, not as a top-of-page bar
+    // that competes with the chat surface).
+    e.preventDefault();
+    state.installPromptEvent = e;
+    _showInstallAffordance();
+  });
+  window.addEventListener("appinstalled", () => {
+    state.installPromptEvent = null;
+    _hideInstallAffordance();
+    toast("One Link installed. Open it from your home screen any time.", "good", 5000);
+  });
+  document.querySelector("#btn-install-pwa")?.addEventListener("click", async () => {
+    const ev = state.installPromptEvent;
+    if (!ev) {
+      toast("Install isn't available in this browser. Try Chrome or Edge, or use your browser's 'Add to home screen' option.", "info", 6000);
+      return;
+    }
+    try {
+      ev.prompt();
+      const choice = await ev.userChoice;
+      // Either way, the deferred prompt is single-use; clear it.
+      state.installPromptEvent = null;
+      if (choice && choice.outcome === "accepted") {
+        // appinstalled will fire and hide the affordance. No-op here.
+      } else {
+        // User dismissed; keep the affordance hidden until a future
+        // beforeinstallprompt fires (browser may re-fire after a
+        // few page loads).
+        _hideInstallAffordance();
+      }
+    } catch (err) {
+      toast(`Install prompt failed: ${err && err.message ? err.message : err}`, "bad");
+    }
+  });
+
+  // Detect "already running as installed PWA" — Chrome sets the
+  // display-mode media query to "standalone" inside the installed
+  // shell. Suppress the install affordance so the user isn't told
+  // to "install" the thing they're already inside.
+  if (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) {
+    _hideInstallAffordance();
+  }
 
   // v0.14.8 — Phone diagnostics escape hatch. The Advanced settings
   // pane carries the desktop-only "Open diagnostics" button + the

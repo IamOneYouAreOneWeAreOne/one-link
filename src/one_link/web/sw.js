@@ -12,10 +12,15 @@
 // We deliberately do NOT do push notifications here (no remote
 // server to subscribe to) and we do NOT cache encrypted payloads.
 
-const CACHE_NAME = "one-link-shell-v1";
+// v0.15.0: bump shell cache name so the SW upgrade picks up the
+// manifest + new icon variants. The activate handler below evicts
+// any older `one-link-shell-*` keys.
+const CACHE_NAME = "one-link-shell-v2";
 const SHELL_FILES = [
   "/",
+  "/manifest.json",
   "/static/one-glyph.png",
+  "/static/one-glyph-app.png",
 ];
 
 self.addEventListener("install", (event) => {
@@ -45,9 +50,13 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/")) {
     return; // let the browser handle normally
   }
-  // Cache-first for static shell; falls back to network.
+  // Cache-first for static shell; falls back to network. v0.15.0
+  // adds /manifest.json so the install prompt works offline (the
+  // browser refetches the manifest before showing the prompt; if
+  // we're offline we still serve from cache).
   if (
     url.pathname === "/" ||
+    url.pathname === "/manifest.json" ||
     url.pathname.startsWith("/static/")
   ) {
     event.respondWith(
