@@ -59,6 +59,12 @@ COOKIE_NAME = "ol_ui"
 PREFERRED_UI_PORT = 7117
 UI_PORT_FALLBACK_RANGE = 16
 
+# Discovery is intentionally soft state: mDNS can miss packets, Windows can
+# leave stale network state around, and a peer may still be reachable through an
+# already-open encrypted session. If we have touched the peer recently at the
+# secure protocol layer, keep the UI online instead of flickering offline.
+PEER_CONTACT_ONLINE_GRACE_MS = 2 * 60 * 1000
+
 
 # v0.11.6 helpers for Storage + data settings.
 def _parse_int_or_none(raw):
@@ -513,6 +519,12 @@ class UIServer:
         r.add_get(r"/api/peers/{fp}/media", self._guarded(self.api_peer_media))
         # v0.11.6 storage breakdown.
         r.add_get("/api/storage/usage", self._guarded(self.api_storage_usage))
+        # v0.12.1 server-persisted per-chat cosmetic state.
+        # Single GET returns a snapshot of everything; PATCH-like
+        # POST sets one field at a time. Keys are scope-prefixed to
+        # avoid collision with other settings.
+        r.add_get("/api/chat-prefs", self._guarded(self.api_get_chat_prefs))
+        r.add_post("/api/chat-prefs", self._guarded(self.api_set_chat_pref))
         # v0.10.4 presence — set self status; broadcasts to peers.
         r.add_post("/api/presence", self._guarded(self.api_set_presence))
         # v0.10.6 native folder picker — pops a tk dialog on the
@@ -1268,9 +1280,24 @@ class UIServer:
         outbound = getattr(self.daemon, "_outbound_sessions", {}) or {}
         inbound = getattr(self.daemon, "_inbound_regime", {}) or {}
         from one_link.daemon import _classify_address_regime
+        now_ms = int(time.time() * 1000)
         for p in kept:
             fp = p.get("fingerprint") or ""
             sess = outbound.get(fp)
+            health = getattr(self.daemon, "get_pair_health", lambda _fp: None)(fp)
+            last_alive_ms = None
+            if health is not None:
+                try:
+                    last_alive_ms = int(health.get("last_alive_ms") or 0)
+                except (TypeError, ValueError):
+                    last_alive_ms = None
+            recently_contacted = bool(
+                last_alive_ms
+                and last_alive_ms > 0
+                and now_ms - last_alive_ms <= PEER_CONTACT_ONLINE_GRACE_MS
+            )
+            if sess is not None or fp in inbound or recently_contacted:
+                p["online"] = True
             if sess is not None and getattr(sess, "regime", None):
                 p["regime"] = sess.regime
             elif fp in inbound:
@@ -1321,7 +1348,6 @@ class UIServer:
             # out). latency_ewma_ms is the rolling round-trip time
             # measured by the H4 PING/PONG probe. Both None for
             # never-contacted peers.
-            health = getattr(self.daemon, "get_pair_health", lambda _fp: None)(fp)
             if health is not None:
                 latency = health.get("latency_ewma_ms")
                 p["health"] = {
@@ -2372,6 +2398,143 @@ class UIServer:
                 "file_bytes": total_bytes,
                 "chat_count": len(peer_out) + len(group_out),
             },
+        })
+
+    # ─── v0.12.1 chat preferences (sync across user's devices) ─────────
+
+    _CHAT_PREF_KINDS = ("color", "wallpaper", "archived")
+    _CHAT_PREF_SCOPES = ("peer", "group")
+
+    @staticmethod
+    def _chat_pref_key(scope: str, identifier: str, kind: str) -> str:
+        return f"chatpref:{scope}:{identifier}:{kind}"
+
+    async def api_get_chat_prefs(self, request: web.Request) -> web.Response:
+        """v0.12.1: snapshot of every persisted per-chat preference.
+
+        Shape:
+          {
+            "peer":  { "<fp_hex>":  { "color": "#7c4dff", ... } },
+            "group": { "<gid_hex>": { "archived": true, ... } }
+          }
+
+        Stored in the existing settings table under keys of the form
+        `chatpref:<scope>:<id>:<kind>` so the daemon doesn't need a
+        new schema migration."""
+        if self.daemon.state is None:
+            return web.json_response({"peer": {}, "group": {}})
+        all_settings = self.daemon.state.all_settings()
+        out: dict[str, dict[str, dict[str, Any]]] = {"peer": {}, "group": {}}
+        for key, value in all_settings.items():
+            if not key.startswith("chatpref:"):
+                continue
+            parts = key.split(":", 3)
+            if len(parts) != 4:
+                continue
+            _, scope, identifier, kind = parts
+            if scope not in self._CHAT_PREF_SCOPES:
+                continue
+            if kind not in self._CHAT_PREF_KINDS:
+                continue
+            scope_map = out[scope].setdefault(identifier, {})
+            if kind == "archived":
+                scope_map["archived"] = value == "true"
+            else:
+                scope_map[kind] = value
+        return web.json_response(out)
+
+    async def api_set_chat_pref(self, request: web.Request) -> web.Response:
+        """v0.12.1: set or clear one preference.
+
+        Body: {scope, id, kind, value}
+          - scope: 'peer' | 'group'
+          - id: peer fingerprint OR group_id_hex
+          - kind: 'color' | 'wallpaper' | 'archived'
+          - value: the new value, or null to clear
+
+        Color and wallpaper are stored as hex strings; archived is
+        stored as 'true' (set) / unset (cleared)."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        scope = data.get("scope")
+        identifier = data.get("id")
+        kind = data.get("kind")
+        value = data.get("value")
+        if scope not in self._CHAT_PREF_SCOPES:
+            return web.json_response(
+                {"error": f"scope must be one of {self._CHAT_PREF_SCOPES}"},
+                status=400,
+            )
+        if kind not in self._CHAT_PREF_KINDS:
+            return web.json_response(
+                {"error": f"kind must be one of {self._CHAT_PREF_KINDS}"},
+                status=400,
+            )
+        if not isinstance(identifier, str) or not identifier.strip():
+            return web.json_response(
+                {"error": "id must be a non-empty string"}, status=400,
+            )
+        # Identifier sanity check — peer fp is 64 hex chars; group
+        # id is 32 hex chars. Reject anything not hex or out of
+        # those bounds, so a malformed call can't poison settings.
+        ident = identifier.strip().lower()
+        if scope == "peer" and (
+            len(ident) != 64 or any(c not in "0123456789abcdef" for c in ident)
+        ):
+            return web.json_response({"error": "bad peer fingerprint"}, status=400)
+        if scope == "group" and (
+            len(ident) < 8 or any(c not in "0123456789abcdef" for c in ident)
+        ):
+            return web.json_response({"error": "bad group id"}, status=400)
+        key = self._chat_pref_key(scope, ident, kind)
+        if value is None or value == "":
+            self.daemon.state.delete_setting(key)
+            stored = None
+        elif kind == "archived":
+            if not isinstance(value, bool):
+                return web.json_response(
+                    {"error": "archived value must be true|false|null"},
+                    status=400,
+                )
+            if value:
+                self.daemon.state.set_setting(key, "true")
+                stored = True
+            else:
+                self.daemon.state.delete_setting(key)
+                stored = False
+        else:
+            if not isinstance(value, str):
+                return web.json_response(
+                    {"error": f"{kind} value must be a hex color string or null"},
+                    status=400,
+                )
+            v = value.strip().lower()
+            if not v.startswith("#") or len(v) not in (4, 7):
+                return web.json_response(
+                    {"error": f"{kind} value must be a #rgb / #rrggbb hex"},
+                    status=400,
+                )
+            if any(c not in "0123456789abcdef" for c in v[1:]):
+                return web.json_response(
+                    {"error": f"{kind} value must be a #rgb / #rrggbb hex"},
+                    status=400,
+                )
+            self.daemon.state.set_setting(key, v)
+            stored = v
+        # Broadcast so other open tabs (and the same user's other
+        # devices once they sync) refresh their UI immediately.
+        self.broadcast({
+            "type": "chat_pref",
+            "scope": scope, "id": ident,
+            "kind": kind, "value": stored,
+        })
+        return web.json_response({
+            "ok": True, "scope": scope, "id": ident,
+            "kind": kind, "value": stored,
         })
 
     async def api_peer_media(self, request: web.Request) -> web.Response:

@@ -6531,12 +6531,76 @@
     "#7c4dff", "#3b82f6", "#06b6d4", "#10b981",
     "#facc15", "#f97316", "#ef4444", "#ec4899",
   ];
+  // v0.12.1 — chat-prefs cache. Source-of-truth for per-chat
+  // cosmetic state (color, wallpaper, archived). Populated from
+  // /api/chat-prefs at boot + kept in sync by chat_pref WS events.
+  // localStorage is still written so the FIRST paint after a
+  // reload is instant (we don't have to wait for the GET).
+  state.chatPrefs = state.chatPrefs || { peer: {}, group: {} };
+  function _readChatPref(scope, id, kind) {
+    const cached = state.chatPrefs?.[scope]?.[id]?.[kind];
+    if (cached !== undefined) return cached;
+    // Fall back to legacy localStorage keys so users upgrading
+    // from v0.11.x don't lose their picks on the first session.
+    if (kind === "color") {
+      return localStorage.getItem(`one_link.${scope}_color.${id}`) || undefined;
+    }
+    if (kind === "wallpaper") {
+      return localStorage.getItem(`one_link.chat_wallpaper.${scope}.${id}`) || undefined;
+    }
+    if (kind === "archived") {
+      return localStorage.getItem(`one_link.${scope}_archived.${id}`) === "1"
+        ? true : undefined;
+    }
+    return undefined;
+  }
+  function _writeChatPref(scope, id, kind, value) {
+    if (!state.chatPrefs[scope]) state.chatPrefs[scope] = {};
+    if (!state.chatPrefs[scope][id]) state.chatPrefs[scope][id] = {};
+    if (value === null || value === undefined || value === "") {
+      delete state.chatPrefs[scope][id][kind];
+    } else {
+      state.chatPrefs[scope][id][kind] = value;
+    }
+    // Mirror to localStorage for instant first-paint on reload.
+    if (kind === "color") {
+      const k = `one_link.${scope}_color.${id}`;
+      if (value) localStorage.setItem(k, value);
+      else localStorage.removeItem(k);
+    } else if (kind === "wallpaper") {
+      const k = `one_link.chat_wallpaper.${scope}.${id}`;
+      if (value) localStorage.setItem(k, value);
+      else localStorage.removeItem(k);
+    } else if (kind === "archived") {
+      const k = `one_link.${scope}_archived.${id}`;
+      if (value) localStorage.setItem(k, "1");
+      else localStorage.removeItem(k);
+    }
+    // Persist server-side so the user's other devices see it.
+    api.post("/api/chat-prefs", {
+      scope, id, kind, value: value === undefined ? null : value,
+    }).catch((e) => console.warn("chat-prefs save failed:", e));
+  }
+  async function loadChatPrefs() {
+    try {
+      const r = await api.get("/api/chat-prefs");
+      // Server is the authority; replace any cached state.
+      state.chatPrefs = { peer: r.peer || {}, group: r.group || {} };
+      // Re-render anything that consumed the prefs.
+      renderGroups();
+      renderPeers();
+      applyActiveChatWallpaper();
+    } catch (e) {
+      console.warn("loadChatPrefs failed:", e);
+    }
+  }
+
   function getGroupColor(gid) {
-    return localStorage.getItem(`one_link.group_color.${gid}`)
+    return _readChatPref("group", gid, "color")
         || _GROUP_COLOR_PRESETS[0];
   }
   function setGroupColor(gid, hex) {
-    localStorage.setItem(`one_link.group_color.${gid}`, hex);
+    _writeChatPref("group", gid, "color", hex);
     // Live-reflect in the sidebar.
     renderGroups();
   }
@@ -6562,18 +6626,14 @@
     }
   }
 
-  // v0.11.3: archive — local-only "hide from sidebar". Settings
-  // live in localStorage so the daemon doesn't need a new
-  // schema migration. Other members aren't affected.
+  // v0.12.1 archive — server-synced "hide from sidebar". Other
+  // members aren't affected; this is local to the user's account
+  // but does sync across the user's own devices.
   function isGroupArchived(gid) {
-    return localStorage.getItem(`one_link.group_archived.${gid}`) === "1";
+    return _readChatPref("group", gid, "archived") === true;
   }
   function setGroupArchived(gid, archived) {
-    if (archived) {
-      localStorage.setItem(`one_link.group_archived.${gid}`, "1");
-    } else {
-      localStorage.removeItem(`one_link.group_archived.${gid}`);
-    }
+    _writeChatPref("group", gid, "archived", archived ? true : null);
     renderGroups();
   }
   async function toggleArchiveCurrentGroup() {
@@ -8098,23 +8158,19 @@
     document.body.removeChild(a);
   }
 
-  // v0.11.5 — wallpaper accent for an individual peer chat.
-  // Settings keyed in localStorage by fingerprint so each chat
-  // can have its own tint without sending anything to the server.
+  // v0.12.1 — wallpaper accent for an individual chat. Now
+  // server-synced via _writeChatPref so the user's other devices
+  // see the same tint.
   const _CHAT_WALLPAPER_PRESETS = [
     "",  // None / default
     "#1a1f3a", "#1f1a3a", "#1a3a2f", "#3a2f1a",
     "#3a1a2a", "#1a2e3a", "#2a3a1a", "#3a1a1a",
   ];
   function getChatWallpaper(scope, key) {
-    return localStorage.getItem(`one_link.chat_wallpaper.${scope}.${key}`) || "";
+    return _readChatPref(scope, key, "wallpaper") || "";
   }
   function setChatWallpaper(scope, key, hex) {
-    if (!hex) {
-      localStorage.removeItem(`one_link.chat_wallpaper.${scope}.${key}`);
-    } else {
-      localStorage.setItem(`one_link.chat_wallpaper.${scope}.${key}`, hex);
-    }
+    _writeChatPref(scope, key, "wallpaper", hex || null);
     applyActiveChatWallpaper();
   }
   function applyActiveChatWallpaper() {
@@ -8400,7 +8456,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.12.0";
+  const PAGE_BUILT_FOR = "0.12.1";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -8438,6 +8494,9 @@
     await refreshTransfers();
     await refreshStatus();
     await refreshGroups();
+    // v0.12.1: pull persisted per-chat prefs (color / wallpaper /
+    // archive) from the daemon so they sync across devices.
+    await loadChatPrefs();
     connectWS();
     setInterval(refreshPeers, 5000);
     setInterval(refreshTransfers, 4000);
@@ -8660,6 +8719,23 @@
       } else if (m.type === "self_presence") {
         // v0.10.4: another tab changed our presence — sync.
         applyPresenceUI(m.presence);
+      } else if (m.type === "chat_pref") {
+        // v0.12.1: another tab (or another device) changed a per-
+        // chat preference. Mirror into local cache + re-render
+        // anything that consumes that pref.
+        const { scope, id, kind, value } = m;
+        if (state.chatPrefs && scope && id && kind) {
+          if (!state.chatPrefs[scope]) state.chatPrefs[scope] = {};
+          if (!state.chatPrefs[scope][id]) state.chatPrefs[scope][id] = {};
+          if (value === null || value === undefined) {
+            delete state.chatPrefs[scope][id][kind];
+          } else {
+            state.chatPrefs[scope][id][kind] = value;
+          }
+          if (scope === "group") renderGroups();
+          if (scope === "peer") renderPeers();
+          applyActiveChatWallpaper();
+        }
       } else if (m.type === "peer_presence") {
         // v0.10.4: a peer reported a status change. Patch the
         // cached record + re-render the sidebar so the avatar
