@@ -2893,11 +2893,11 @@
       <div class="discover-body" id="discover-body">
         <div class="empty">
           <div class="spinner"></div>
-          looking for devices…
+          peering into the LAN…
         </div>
       </div>
       <div class="discover-foot">
-        <span id="discover-status">Tap a device to pair. Both screens will show a 6-digit verification code.</span>
+        <span id="discover-status">Tap a device to pair. Both screens will show a 6-digit code. They had better match.</span>
         <button class="refresh" id="discover-refresh">Refresh</button>
       </div>
     </div>
@@ -3083,7 +3083,7 @@
             <p class="settings-help">
               Encrypts your local database at rest. Set the
               <code>ONE_LINK_PASSPHRASE</code> environment variable
-              before launching the daemon. It's a 2014 vibe, but it works.
+              before launching One Link. It's a 2014 vibe, but it works.
             </p>
             <!-- v0.12.2 Read-receipt privacy. Two independent
                  toggles so users can express the standard
@@ -3436,7 +3436,7 @@
                 </select>
               </div>
               <p class="settings-help">
-                Affects the daemon's terminal log + diagnostics overlay.
+                Affects One Link's terminal log + the diagnostics overlay.
                 "Debug" surfaces every wire frame and CRDT merge.
                 Useful when something is misbehaving; noisy otherwise.
               </p>
@@ -3444,7 +3444,7 @@
             <div class="settings-section">
               <div class="settings-section-h"><span>Troubleshooting</span></div>
               <p class="settings-help">
-                Live error log + daemon health check. Open this only if
+                Live error log + a health check. Open this only if
                 something feels off. In normal use you'll never need it,
                 which is the dream.
               </p>
@@ -3543,8 +3543,8 @@
       <div class="settings-section">
         <div class="settings-section-h"><span>Avatar color</span></div>
         <p class="settings-help">
-          Local-only color tint for the group's avatar tile in your
-          sidebar. Other members aren't affected.
+          Tints this group's avatar tile in your sidebar. Other members
+          will keep on imagining whatever color they imagined.
         </p>
         <div class="profile-color-swatches" id="group-color-swatches">
           <!-- swatches injected by JS at modal-open time -->
@@ -3591,7 +3591,7 @@
         <div class="settings-section-h"><span>Invite link</span></div>
         <p class="settings-help">
           Copies a signed invite token. Membership is still approved by
-          this group, so links cannot silently add strangers.
+          the group, so the link cannot silently smuggle strangers in.
         </p>
         <button class="btn-ghost" id="group-copy-invite">Copy invite link</button>
       </div>
@@ -3606,8 +3606,8 @@
           <button class="btn-danger" id="group-clear-history">Clear local history</button>
         </div>
         <p class="settings-help">
-          Clearing only deletes your local copy. Group members
-          keep their own histories on their devices.
+          Clears your local copy. Group members keep their own
+          histories on their own devices. We can't help you there.
         </p>
       </div>
 
@@ -3616,9 +3616,10 @@
       <div class="settings-section">
         <div class="settings-section-h"><span>Archive</span></div>
         <p class="settings-help">
-          Hide this group from your main list. You stay a member;
-          messages still arrive. Archived groups appear under an
-          "Archived" expand toggle at the bottom of the sidebar.
+          Hide this group from your sidebar without leaving. You
+          stay a member; messages still arrive, just out of sight.
+          Archived groups live under an "Archived" expand toggle at
+          the bottom.
         </p>
         <button class="btn-ghost" id="group-archive-toggle">Archive group</button>
       </div>
@@ -3626,8 +3627,9 @@
       <div class="settings-section">
         <div class="settings-section-h"><span>Leave group</span></div>
         <p class="settings-help">
-          Leaving removes this device from the group. Your old local
-          history stays here, but new group messages will stop.
+          Leaving removes this device from the group. Your old
+          history stays where it is. New messages don't show up.
+          The group will go on without you.
         </p>
         <button class="btn-danger" id="group-leave">Leave group</button>
       </div>
@@ -3762,9 +3764,10 @@
         <div class="device-verify" id="dev-verify-state">
           <p class="settings-help" id="dev-verify-help">
             Compare the SAS above with the same value on the other
-            device — face-to-face, on a call, or by reading it aloud.
-            If they match, mark this device verified to surface a
-            green checkmark across the chat.
+            device. Face-to-face, on a call, or by reading it aloud.
+            If they match, mark verified and a green check shows up
+            across the chat. If they don't match, somebody's doing
+            something they shouldn't.
           </p>
           <div class="reach-row" id="dev-verify-when-row" style="display:none;">
             <span class="lbl">Verified</span>
@@ -3816,10 +3819,10 @@
           </select>
         </div>
         <p class="settings-help">
-          When set, every new TEXT message you send to (or receive from)
-          this device gets a self-destruct timer. Both sides see the
-          same countdown; rows are tombstoned automatically when due.
-          Files + reactions don't expire — only chat text.
+          When set, every new TEXT message to (or from) this device
+          gets a self-destruct timer. Both sides see the same
+          countdown; rows tombstone automatically when due. Files
+          and reactions don't expire. Only chat text.
         </p>
       </div>
 
@@ -3829,8 +3832,8 @@
       <div class="settings-section">
         <div class="settings-section-h"><span>Chat wallpaper</span></div>
         <p class="settings-help">
-          Local-only color tint applied to this conversation's
-          background. The peer doesn't see it.
+          Tints this conversation's background just for you. The peer
+          sees whatever they like (or nothing).
         </p>
         <div class="profile-color-swatches" id="dev-wallpaper-swatches"></div>
       </div>
@@ -3844,9 +3847,8 @@
           <button class="btn-danger" id="dev-clear-history">Clear local history</button>
         </div>
         <p class="settings-help">
-          "Clear local history" deletes only your copy of this
-          conversation; the peer's messages on their device are
-          untouched.
+          "Clear local history" deletes only your copy. The peer's
+          messages on their device are untouched. We're not the FBI.
         </p>
       </div>
 
@@ -3939,16 +3941,15 @@
         <div class="onboarding-glyph">🔢</div>
         <h1>How pairing works</h1>
         <p>
-          When you pair a device, both screens show the SAME
-          6-digit code (a SAS). If they match, the connection is
-          authenticated and end-to-end encrypted from that
-          moment on. If they don't match, an attacker is
-          intercepting — say no.
+          When you pair a device, both screens show the SAME 6-digit
+          code (a SAS). If they match, the connection is authenticated
+          and end-to-end encrypted from that moment on. If they
+          don't match, somebody's intercepting. Say no.
         </p>
         <p class="onboarding-tip">
-          <strong>Pro tip:</strong> tap the speaker icon on a SAS
-          to read the digits aloud — useful when you're confirming
-          on a phone call.
+          <strong>Tip:</strong> tap the speaker icon to read the SAS
+          digits aloud. Handy when you're confirming over a phone call
+          and don't trust your typing.
         </p>
         <div class="onboarding-actions">
           <button class="btn-ghost" data-onboarding-go="2">Back</button>
@@ -3961,7 +3962,8 @@
         <p>
           Open One Link on another computer or phone. Click
           <strong>Pair a new device</strong> in the sidebar
-          (or hit <kbd>Ctrl+N</kbd>) to add it.
+          (or hit <kbd>Ctrl+N</kbd>) to add it. Then drag a file
+          at it. It feels good.
         </p>
         <p class="onboarding-tip">
           <strong>Press <kbd>?</kbd></strong> any time to see all
@@ -4012,7 +4014,7 @@
         suffix so nothing is lost.
       </p>
       <div id="conflicts-list" style="overflow-y:auto; flex:1; max-height:60vh;">
-        <div class="empty">No conflicts. ✓</div>
+        <div class="empty">No conflicts. Everyone agrees, for once. ✓</div>
       </div>
       <div class="actions">
         <button class="btn-ghost" id="conflicts-close">Close</button>
@@ -4029,10 +4031,11 @@
         <span class="device-drawer-sub" id="debug-version-sub"></span>
       </h2>
       <p>
-        Live error log + health check for the local daemon. Every
-        server-side failure since the daemon started lands here with
-        a suggestion. Hidden from the chat surface — open this only
-        when something feels broken.
+        Live error log + health check for One Link's background service.
+        Every server-side failure since startup lands here with a
+        suggestion. Hidden from the chat surface; open it only when
+        something feels off. The fact you're reading this is already
+        concerning.
       </p>
       <div class="mini-actions wrap" style="gap: 8px; margin-bottom: 8px;">
         <button class="btn-ghost" id="btn-debug-health">Run health check</button>
@@ -4048,7 +4051,7 @@
       </div>
       <div id="debug-health-result"></div>
       <div id="debug-log-list" style="overflow-y:auto; flex:1; padding: 4px 0; min-height:200px;">
-        <div class="empty">No errors recorded yet.</div>
+        <div class="empty">No errors recorded. Yet. (Tempting fate.)</div>
       </div>
       <div class="actions">
         <button class="btn-ghost" id="debug-close">Close</button>
@@ -4380,9 +4383,9 @@
     banner.className = "session-expired-banner";
     banner.innerHTML = `
       <strong>We forgot who you are.</strong>
-      Relaunch One Link from the tray (or terminal) so the daemon can
-      mint a fresh token. Your data is safe; this is just the browser
-      and the daemon doing introductions again.
+      Relaunch One Link from the tray (or terminal) so it can mint a
+      fresh token. Your data is safe; this is just the browser and
+      One Link's background service doing introductions again.
       <button class="btn-ghost" id="session-expired-reload">Reload</button>
     `;
     document.body.appendChild(banner);
@@ -4773,7 +4776,7 @@
     const text = el("div", "fpn-text");
     text.appendChild(document.createTextNode("You're paired with "));
     text.appendChild(el("strong", "", name));
-    text.appendChild(document.createTextNode(" — say hi to confirm the connection works."));
+    text.appendChild(document.createTextNode(". Say hi to confirm the wires actually wire up."));
     wrap.appendChild(text);
     const btn = el("button", "", "Say hi");
     btn.onclick = () => {
@@ -4875,10 +4878,10 @@
       img.alt = "";
       glyph.appendChild(img);
       wrap.appendChild(glyph);
-      wrap.appendChild(el("h4", "", "No paired devices yet"));
+      wrap.appendChild(el("h4", "", "It's just you"));
       wrap.appendChild(el("p", "",
         "Open One Link on another computer or phone, then tap " +
-        "“Pair a new device” above to add it."));
+        "“Pair a new device” above. We'll wave at you when it shows up."));
       // v0.5.3: nudge to set up cross-network reach if no rendezvous configured.
       if (!state.rendezvousUrls || state.rendezvousUrls.length === 0) {
         const link = el("a", "empty-state-link",
@@ -6595,7 +6598,7 @@
     if (!gid || !fp) return;
     try {
       await api.post(`/api/groups/${gid}/members`, { fp });
-      toast("Member added", "good");
+      toast("Member added. Be nice.", "good");
       await refreshGroups();
       await refreshSelectedGroup();
     } catch (e) {
@@ -6756,7 +6759,7 @@
     if (archiveBtn) {
       archiveBtn.textContent = wasArchived ? "Archive group" : "Unarchive group";
     }
-    toast(wasArchived ? "Group unarchived" : "Group archived", "good");
+    toast(wasArchived ? "Group back on the shelf." : "Group filed away.", "good");
   }
 
   // v0.11.3: per-group mute apply. Backend already in place from
@@ -6795,7 +6798,7 @@
     try {
       const r = await api.get(`/api/groups/${gid}/invite-link`);
       await navigator.clipboard.writeText(r.url || r.token || "");
-      toast("Invite link copied", "good");
+      toast("Invite link copied. Spend it wisely.", "good");
     } catch (e) {
       toast(`Invite failed: ${errorToastBody(e)}`, "bad", 6000);
     }
@@ -6814,7 +6817,7 @@
       $("#convo-active").style.display = "none";
       $("#convo-empty").style.display = "grid";
       await refreshGroups();
-      toast("Left group", "good");
+      toast("You left the group. Walk it off.", "good");
     } catch (e) {
       toast(`Leave failed: ${errorToastBody(e)}`, "bad", 6000);
     }
@@ -7003,7 +7006,7 @@
       // when the user updates source but doesn't restart.
       if (e?.status === 404) {
         toast(
-          "Groups need One Link v0.8.0+ on the daemon. Restart the One Link daemon to pick up the new endpoints.",
+          "Groups need One Link v0.8.0+. Restart One Link to pick up the new endpoints.",
           "bad", 9000,
         );
       } else {
@@ -8471,7 +8474,7 @@
       if (state.selectedPeer && peer && peer.short_id === state.selectedPeer) {
         renderConvHeaderTrust(peer);
       }
-      toast("Verified in person", "good");
+      toast("Verified in person. Hard to fake that.", "good");
     } catch (e) {
       toast(`Verify failed: ${errorToastBody(e)}`, "bad");
     }
@@ -8597,7 +8600,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.13.0";
+  const PAGE_BUILT_FOR = "0.13.1";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -8626,7 +8629,7 @@
         handleLocalVersionDrift(me.app_version, PAGE_BUILT_FOR);
       }
     } catch (e) {
-      toast("Couldn't reach the daemon. Is it running?", "bad", 8000);
+      toast("Can't reach One Link. Is it running?", "bad", 8000);
       console.error(e);
     }
     await refreshPeers();
@@ -9385,7 +9388,7 @@
     const groups = [...(state.groups?.values?.() || [])]
       .filter((g) => !f || (g.name || "").toLowerCase().includes(f));
     if (peers.length === 0 && groups.length === 0) {
-      list.appendChild(el("div", "empty", "No matches."));
+      list.appendChild(el("div", "empty", "Nothing matches. Try fewer words."));
       return;
     }
     for (const p of peers) {
@@ -9497,7 +9500,7 @@
         delete pins[key];
         localStorage.setItem("one_link.pins", JSON.stringify(pins));
         renderPins();
-        toast("Pinned messages cleared.", "good", 2500);
+        toast("Pins gone. Fresh start.", "good", 2500);
       } catch (e) {
         toast(`Clear pins failed: ${e.message || e}`, "bad");
       }
@@ -9655,7 +9658,7 @@
     const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
     if (!peer?.fingerprint) return;
     await setTrust(peer.fingerprint, "pending");
-    toast("Device unblocked. Pair it to send securely.", "good");
+    toast("Forgiveness granted. Pair it to send securely.", "good");
   });
   $("#btn-send-file-panel").addEventListener("click", triggerAttach);
   $("#btn-refresh-files").addEventListener("click", refreshFiles);
@@ -9852,7 +9855,7 @@
     const total = (r.messages?.length || 0) + (r.peers?.length || 0) +
                   (r.groups?.length || 0) + (r.files?.length || 0);
     if (q && total === 0) {
-      host.appendChild(el("div", "palette-empty", `No matches for "${q}".`));
+      host.appendChild(el("div", "palette-empty", `Nothing matches "${q}". Spell it different?`));
       return;
     }
     if (!q) {
@@ -10605,7 +10608,7 @@
       state.debugLastId = 0;
       renderDebugLog();
       $("#debug-error-count").textContent = "0";
-      toast("Debug log cleared", "good", 2000);
+      toast("Debug log wiped. Pretend it never happened.", "good", 2000);
     } catch (e) {
       toast(`Clear failed: ${errorToastBody(e)}`, "bad");
     }
@@ -10618,7 +10621,7 @@
       const r = await api.get("/api/debug/health");
       out.innerHTML = "";
       const banner = el("div", `debug-health-banner ${r.ok ? "good" : "bad"}`,
-        r.ok ? `All checks passed (v${r.version})` : "Some checks failed");
+        r.ok ? `All checks passed (v${r.version}). Don't get cocky.` : "Some checks failed. Read on.");
       out.appendChild(banner);
       for (const c of r.checks || []) {
         const row = el("div", `debug-health-row ${c.ok ? "ok" : "bad"}`);
@@ -10699,7 +10702,7 @@
       await api.post("/api/folders", { name, local_path, shared_with });
       $("#folder-name").value = "";
       $("#folder-path").value = "";
-      toast("Folder added", "good");
+      toast("Folder added. Hope it's the right one.", "good");
       await refreshFolders();
     } catch (e) {
       toast(`Folder add failed: ${e.message || e}`, "bad", 6000);
@@ -10916,7 +10919,7 @@
         method: "sas-digits",
         note: "Confirmed during pair flow",
       });
-      toast("Verified in person", "good");
+      toast("Verified in person. Hard to fake that.", "good");
     } catch (e) {
       toast(`Verify failed: ${errorToastBody(e)}`, "bad");
     } finally {
@@ -11190,7 +11193,7 @@
             `/api/peers/${encodeURIComponent(p.fingerprint)}/trust`,
             { trust: "pinned" },
           );
-          toast("Device unblocked", "good");
+          toast("Forgiveness granted.", "good");
           refreshBlockedDevicesList();
           refreshPeers();
         } catch (e) {
@@ -11410,7 +11413,7 @@
         return;
       }
     } else if (savedSettings) {
-      toast("Settings saved", "good");
+      toast("Settings saved. Smart move.", "good");
     }
 
     settingsBackdrop.classList.remove("show");
