@@ -1,4 +1,5 @@
 from one_link.transfer_brain import (
+    AdaptiveTransferScheduler,
     AdaptiveTransferBrain,
     CalibrationTier,
     HealthState,
@@ -204,3 +205,59 @@ def test_transfer_result_report_counts_skipped_bytes_as_effective_delivery():
     assert report["saved_bytes"] == 94 * 1024 * 1024
     assert report["bandwidth_savings_ratio"] == 0.94
     assert report["effective_throughput_bps"] > report["wire_throughput_bps"]
+
+
+def test_adaptive_scheduler_opens_window_on_fast_acks():
+    scheduler = AdaptiveTransferScheduler({
+        "chunk_size": 1024,
+        "window_chunks": 2,
+        "reason": "test",
+        "target_ack_ms": 20,
+    }, max_window_chunks=5)
+
+    for _ in range(4):
+        scheduler.observe_ack(
+            ack_ms=8,
+            raw_bytes=1024,
+            wire_bytes=1024,
+            in_flight_chunks=1,
+        )
+
+    snap = scheduler.snapshot()
+    assert snap["window_chunks"] > 2
+    assert any(e["event"] == "window_up" for e in snap["timeline"])
+
+
+def test_adaptive_scheduler_closes_window_on_slow_ack():
+    scheduler = AdaptiveTransferScheduler({
+        "chunk_size": 1024,
+        "window_chunks": 8,
+        "reason": "test",
+        "target_ack_ms": 20,
+    }, max_window_chunks=8)
+
+    scheduler.observe_ack(
+        ack_ms=250,
+        raw_bytes=1024,
+        wire_bytes=1024,
+        in_flight_chunks=7,
+    )
+
+    snap = scheduler.snapshot()
+    assert snap["window_chunks"] == 4
+    assert any(e["event"] == "window_down" for e in snap["timeline"])
+
+
+def test_adaptive_scheduler_records_retry_or_reopen():
+    scheduler = AdaptiveTransferScheduler({
+        "chunk_size": 1024,
+        "window_chunks": 6,
+        "reason": "test",
+    }, max_window_chunks=8)
+
+    scheduler.observe_retry(reason="TimeoutError", in_flight_chunks=5)
+    snap = scheduler.snapshot()
+
+    assert snap["window_chunks"] == 3
+    assert snap["timeline"][-1]["event"] == "retry_or_reopen"
+    assert snap["timeline"][-1]["reason"] == "TimeoutError"

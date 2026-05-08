@@ -344,6 +344,138 @@ def transfer_result_report(
     }
 
 
+class AdaptiveTransferScheduler:
+    """ACK-clocked runtime controller for one active file transfer.
+
+    The transfer brain chooses an initial plan. This scheduler keeps tuning
+    that plan while bytes are moving: fast ACKs open the window gradually,
+    slow ACKs shrink it, and a compact black-box timeline explains what
+    happened later without dumping protocol internals on the user.
+    """
+
+    def __init__(
+        self,
+        profile: Mapping[str, object],
+        *,
+        min_window_chunks: int = 1,
+        max_window_chunks: int = 32,
+        timeline_limit: int = 80,
+    ) -> None:
+        self.chunk_size = max(1, int(profile.get("chunk_size") or MiB))
+        self.min_window_chunks = max(1, int(min_window_chunks))
+        self.max_window_chunks = max(self.min_window_chunks, int(max_window_chunks))
+        self.window_chunks = max(
+            self.min_window_chunks,
+            min(self.max_window_chunks, int(profile.get("window_chunks") or 1)),
+        )
+        self.window_bytes = self.window_chunks * self.chunk_size
+        self.reason = str(profile.get("reason") or "runtime")
+        self.timeline_limit = max(8, int(timeline_limit))
+        self._good_acks = 0
+        self._ack_count = 0
+        self._ack_ema_ms: float | None = None
+        self._last_event_ms = 0
+        self._timeline: list[dict[str, int | float | str]] = []
+        target = profile.get("target_ack_ms")
+        if target is None:
+            target = profile.get("route_latency_ms")
+        try:
+            target_f = float(target) if target is not None else 80.0
+        except (TypeError, ValueError):
+            target_f = 80.0
+        self.target_ack_ms = max(8.0, min(2000.0, target_f * 2.5))
+        self._record(
+            "start",
+            window=self.window_chunks,
+            target_ack_ms=round(self.target_ack_ms, 3),
+            reason=self.reason,
+        )
+
+    def can_send(self, in_flight_chunks: int) -> bool:
+        return int(in_flight_chunks) < self.window_chunks
+
+    def observe_ack(
+        self,
+        *,
+        ack_ms: float,
+        raw_bytes: int,
+        wire_bytes: int,
+        in_flight_chunks: int,
+    ) -> None:
+        ack = max(0.001, float(ack_ms))
+        self._ack_count += 1
+        if self._ack_ema_ms is None:
+            self._ack_ema_ms = ack
+        else:
+            self._ack_ema_ms = self._ack_ema_ms * 0.75 + ack * 0.25
+        if ack <= self.target_ack_ms * 1.35:
+            self._good_acks += 1
+            if self._good_acks >= max(2, self.window_chunks) and self.window_chunks < self.max_window_chunks:
+                self.window_chunks += 1
+                self.window_bytes = self.window_chunks * self.chunk_size
+                self._good_acks = 0
+                self._record(
+                    "window_up",
+                    window=self.window_chunks,
+                    ack_ms=round(ack, 3),
+                    ack_ema_ms=round(self._ack_ema_ms, 3),
+                )
+        elif ack >= self.target_ack_ms * 4.0 and self.window_chunks > self.min_window_chunks:
+            old = self.window_chunks
+            self.window_chunks = max(self.min_window_chunks, self.window_chunks // 2)
+            self.window_bytes = self.window_chunks * self.chunk_size
+            self._good_acks = 0
+            self._record(
+                "window_down",
+                window=self.window_chunks,
+                previous_window=old,
+                ack_ms=round(ack, 3),
+                ack_ema_ms=round(self._ack_ema_ms, 3),
+            )
+        elif self._ack_count <= 4:
+            self._record(
+                "ack_sample",
+                window=self.window_chunks,
+                ack_ms=round(ack, 3),
+                in_flight=max(0, int(in_flight_chunks)),
+                wire_bytes=max(0, int(wire_bytes)),
+                raw_bytes=max(0, int(raw_bytes)),
+            )
+
+    def observe_retry(self, *, reason: str, in_flight_chunks: int = 0) -> None:
+        old = self.window_chunks
+        self.window_chunks = max(self.min_window_chunks, self.window_chunks // 2)
+        self.window_bytes = self.window_chunks * self.chunk_size
+        self._good_acks = 0
+        self._record(
+            "retry_or_reopen",
+            window=self.window_chunks,
+            previous_window=old,
+            in_flight=max(0, int(in_flight_chunks)),
+            reason=str(reason)[:80],
+        )
+
+    def snapshot(self) -> dict[str, int | float | str | list[dict]]:
+        return {
+            "window_chunks": self.window_chunks,
+            "window_bytes": self.window_bytes,
+            "target_ack_ms": round(self.target_ack_ms, 3),
+            "ack_count": self._ack_count,
+            "ack_ema_ms": (
+                round(self._ack_ema_ms, 3) if self._ack_ema_ms is not None else None
+            ),
+            "timeline": list(self._timeline),
+        }
+
+    def _record(self, event: str, **fields: int | float | str) -> None:
+        self._last_event_ms += 1
+        row: dict[str, int | float | str] = {"seq": self._last_event_ms, "event": event}
+        row.update(fields)
+        self._timeline.append(row)
+        if len(self._timeline) > self.timeline_limit:
+            del self._timeline[:len(self._timeline) - self.timeline_limit]
+
+
 def pareto_frontier(candidates: Iterable[TransferCandidate]) -> tuple[TransferCandidate, ...]:
     items = tuple(candidates)
     frontier = [

@@ -22,6 +22,7 @@ def test_perf_lab_quick_report_schema(tmp_path):
         "zlib_level1_compression",
         "adaptive_transfer_brain",
         "stream_pipeline_profiles",
+        "adaptive_runtime_scheduler",
     } <= names
 
     by_name = {b["name"]: b for b in report["benchmarks"]}
@@ -35,6 +36,8 @@ def test_perf_lab_quick_report_schema(tmp_path):
     assert by_name["zlib_level1_compression"]["metrics"]["mib_per_s"] > 0
     assert by_name["adaptive_transfer_brain"]["metrics"]["decisions_per_s"] > 0
     assert by_name["stream_pipeline_profiles"]["metrics"]["huge_window_bytes"] > 0
+    assert by_name["adaptive_runtime_scheduler"]["metrics"]["chunks_per_s"] > 0
+    assert by_name["adaptive_runtime_scheduler"]["metrics"]["ack_count"] > 0
 
     out = write_report(report, tmp_path / "perf.json")
     loaded = json.loads(out.read_text(encoding="utf-8"))

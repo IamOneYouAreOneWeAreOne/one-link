@@ -96,6 +96,7 @@ from one_link.paths import (
 from one_link.state import State
 from one_link.swarm_plan import plan_swarm_sources, source_from_hashes
 from one_link.transfer_brain import (
+    AdaptiveTransferScheduler,
     MeshNodeSignal,
     TransferRouteObservation,
     adapt_pipeline_profile,
@@ -7188,6 +7189,7 @@ class Daemon:
                     continue
                 return m
 
+        adaptive_scheduler: AdaptiveTransferScheduler | None = None
         try:
             # v0.7.0: serialize all I/O on the persistent session under
             # sess.lock so the file send doesn't interleave with chat
@@ -7207,6 +7209,7 @@ class Daemon:
                 raw_bytes_sent = 0
                 compressed_chunks = 0
                 skipped_bytes = 0
+                adaptive_scheduler_snapshot = None
                 if first_reply.get("rejected"):
                     raise RuntimeError(
                         f"peer rejected file offer: {first_reply.get('rejected')}"
@@ -7238,8 +7241,13 @@ class Daemon:
                             ),
                         },
                     )
-                    cdc_window_chunks = int(cdc_profile["window_chunks"])
-                    cdc_window_bytes = int(cdc_profile["window_bytes"])
+                    cdc_scheduler = AdaptiveTransferScheduler(
+                        cdc_profile,
+                        max_window_chunks=max(1, int(cdc_profile["window_chunks"]) * 2),
+                    )
+                    adaptive_scheduler = cdc_scheduler
+                    cdc_window_chunks = int(cdc_scheduler.window_chunks)
+                    cdc_window_bytes = int(cdc_scheduler.window_bytes)
                     base_metadata = {
                         **base_metadata,
                         "cdc_engine": "pipelined_chunks_v2",
@@ -7263,7 +7271,7 @@ class Daemon:
                         },
                     )
                     with open(path, "rb") as f:
-                        pending_cdc_sizes: deque[int] = deque()
+                        pending_cdc_sizes: deque[tuple[int, int, float]] = deque()
                         compression_enabled = True
                         compression_trials = 0
                         compression_misses = 0
@@ -7271,7 +7279,14 @@ class Daemon:
                         async def _settle_one_cdc_ack() -> None:
                             nonlocal chunks_sent, raw_bytes_sent, wire_bytes_sent
                             await _await_ack(channel)
-                            raw_size, wire_size = pending_cdc_sizes.popleft()
+                            ack_done = time.perf_counter()
+                            raw_size, wire_size, sent_at = pending_cdc_sizes.popleft()
+                            cdc_scheduler.observe_ack(
+                                ack_ms=(ack_done - sent_at) * 1000.0,
+                                raw_bytes=raw_size,
+                                wire_bytes=wire_size,
+                                in_flight_chunks=len(pending_cdc_sizes),
+                            )
                             chunks_sent += 1
                             raw_bytes_sent += raw_size
                             wire_bytes_sent += wire_size
@@ -7289,6 +7304,7 @@ class Daemon:
                                     "delivery_state": "sending",
                                     "actual_method": actual_method,
                                     "in_flight_chunks": len(pending_cdc_sizes),
+                                    "adaptive_scheduler": cdc_scheduler.snapshot(),
                                 },
                             )
 
@@ -7323,11 +7339,12 @@ class Daemon:
                                 data=base64.b64encode(payload).decode("ascii"),
                             )
                             await channel.send(encode_msg(chunk_msg))
-                            pending_cdc_sizes.append((len(data), len(payload)))
-                            while len(pending_cdc_sizes) >= cdc_window_chunks:
+                            pending_cdc_sizes.append((len(data), len(payload), time.perf_counter()))
+                            while not cdc_scheduler.can_send(len(pending_cdc_sizes)):
                                 await _settle_one_cdc_ack()
                         while pending_cdc_sizes:
                             await _settle_one_cdc_ack()
+                    adaptive_scheduler_snapshot = cdc_scheduler.snapshot()
                 else:
                     peer_features = set(normalize_caps(
                         (getattr(channel, "peer_caps", None) or {}).get("features", [])
@@ -7352,8 +7369,13 @@ class Daemon:
                         transfer_brain_decision,
                     )
                     stream_chunk_size = int(stream_profile["chunk_size"])
-                    stream_window_chunks = int(stream_profile["window_chunks"])
-                    stream_window_bytes = int(stream_profile["window_bytes"])
+                    stream_scheduler = AdaptiveTransferScheduler(
+                        stream_profile,
+                        max_window_chunks=max(1, int(stream_profile["window_chunks"]) * 2),
+                    )
+                    adaptive_scheduler = stream_scheduler
+                    stream_window_chunks = int(stream_scheduler.window_chunks)
+                    stream_window_bytes = int(stream_scheduler.window_bytes)
                     base_metadata = {
                         **base_metadata,
                         "stream_engine": (
@@ -7368,7 +7390,7 @@ class Daemon:
                     }
                     with open(path, "rb") as f:
                         seq = 0
-                        pending_sizes: deque[int] = deque()
+                        pending_sizes: deque[tuple[int, float]] = deque()
                         total_stream_chunks = max(
                             1, (size + stream_chunk_size - 1) // stream_chunk_size,
                         )
@@ -7378,7 +7400,14 @@ class Daemon:
                         ) -> None:
                             nonlocal chunks_sent, raw_bytes_sent, wire_bytes_sent
                             await _await_ack(channel, deadline=deadline)
-                            acked_size = pending_sizes.popleft()
+                            ack_done = time.perf_counter()
+                            acked_size, sent_at = pending_sizes.popleft()
+                            stream_scheduler.observe_ack(
+                                ack_ms=(ack_done - sent_at) * 1000.0,
+                                raw_bytes=acked_size,
+                                wire_bytes=acked_size,
+                                in_flight_chunks=len(pending_sizes),
+                            )
                             chunks_sent += 1
                             raw_bytes_sent += acked_size
                             wire_bytes_sent += acked_size
@@ -7399,6 +7428,7 @@ class Daemon:
                                         else actual_method
                                     ),
                                     "in_flight_chunks": len(pending_sizes),
+                                    "adaptive_scheduler": stream_scheduler.snapshot(),
                                 },
                             )
 
@@ -7429,8 +7459,8 @@ class Daemon:
                                     eof=eof,
                                 )
                                 await channel.send(encode_msg(chunk_msg))
-                            pending_sizes.append(len(data))
-                            while len(pending_sizes) >= stream_window_chunks:
+                            pending_sizes.append((len(data), time.perf_counter()))
+                            while not stream_scheduler.can_send(len(pending_sizes)):
                                 await _settle_one_stream_ack()
                             seq += 1
 
@@ -7440,6 +7470,7 @@ class Daemon:
                                 if len(pending_sizes) == 1 else None
                             )
                             await _settle_one_stream_ack(deadline=final_deadline)
+                    adaptive_scheduler_snapshot = stream_scheduler.snapshot()
 
                     if chunks_sent == 0:
                         empty = make_msg(
@@ -7516,6 +7547,7 @@ class Daemon:
                     "completed_at_ms": int(time.time() * 1000),
                     "elapsed_ms": int(round(elapsed_s * 1000.0)),
                     "transfer_report": transfer_report,
+                    "adaptive_scheduler": adaptive_scheduler_snapshot,
                     "error": None,
                     "transient": False,
                 },
@@ -7545,6 +7577,16 @@ class Daemon:
             err_str = str(e)
             err_class = type(e).__name__
             transient = _is_transient_send_error(e)
+            if adaptive_scheduler is not None:
+                with contextlib.suppress(Exception):
+                    adaptive_scheduler.observe_retry(
+                        reason=err_class,
+                        in_flight_chunks=0,
+                    )
+                    base_metadata = {
+                        **base_metadata,
+                        "adaptive_scheduler": adaptive_scheduler.snapshot(),
+                    }
             if transient:
                 self._mark_transfer_waiting(
                     transfer_id,

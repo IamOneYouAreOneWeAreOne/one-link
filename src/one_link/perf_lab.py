@@ -13,6 +13,7 @@ numbers for the core pieces that make "send anything" fast:
 * SQLite transfer-ledger write pressure;
 * compression throughput.
 * adaptive transfer-brain strategy selection.
+* runtime ACK-clocked scheduler window control.
 """
 
 from __future__ import annotations
@@ -32,7 +33,11 @@ from .cdc import build_dedup_plan, fixed_index_path, hash_path, index_path
 from .daemon import _stream_transfer_profile
 from .state import State
 from .swarm_plan import plan_swarm_sources, source_from_hashes
-from .transfer_brain import TransferRouteObservation, decision_from_observations
+from .transfer_brain import (
+    AdaptiveTransferScheduler,
+    TransferRouteObservation,
+    decision_from_observations,
+)
 from .transfer_sim import simulate_never_lose_transfer, synthetic_manifest
 
 
@@ -369,6 +374,49 @@ def bench_stream_pipeline_profiles() -> BenchResult:
     return _time(run)
 
 
+def bench_adaptive_runtime_scheduler(*, chunks: int) -> BenchResult:
+    def run() -> dict:
+        scheduler = AdaptiveTransferScheduler({
+            "chunk_size": MiB,
+            "window_chunks": 4,
+            "target_ack_ms": 18,
+            "reason": "perf_lab",
+        }, max_window_chunks=32)
+        slow_events = 0
+        for i in range(max(1, int(chunks))):
+            ack_ms = 8.0 + (i % 5)
+            if i and i % 257 == 0:
+                ack_ms = 120.0
+                slow_events += 1
+            scheduler.observe_ack(
+                ack_ms=ack_ms,
+                raw_bytes=MiB,
+                wire_bytes=MiB,
+                in_flight_chunks=max(0, scheduler.window_chunks - 1),
+            )
+        snap = scheduler.snapshot()
+        return {
+            "name": "adaptive_runtime_scheduler",
+            "chunks": int(chunks),
+            "chunks_per_s": 0,  # filled by _time wrapper below is not possible; use seconds outside metrics
+            "final_window_chunks": snap["window_chunks"],
+            "ack_count": snap["ack_count"],
+            "slow_events": slow_events,
+            "timeline_events": len(snap["timeline"]),
+            "ack_ema_ms": snap["ack_ema_ms"] or 0,
+        }
+
+    result = _time(run)
+    metrics = dict(result.metrics)
+    metrics["chunks_per_s"] = round(float(metrics["chunks"]) / max(result.seconds, 1e-9), 3)
+    return BenchResult(
+        name=result.name,
+        metrics=metrics,
+        seconds=result.seconds,
+        notes="ACK-clocked live transfer window controller",
+    )
+
+
 def run_perf_lab(
     *,
     scale: str = "quick",
@@ -393,6 +441,7 @@ def run_perf_lab(
         bench_compression(size_mib=max(1, cfg["cdc_mib"] // 2)),
         bench_transfer_brain(size_mib=cfg["sim_mib"]),
         bench_stream_pipeline_profiles(),
+        bench_adaptive_runtime_scheduler(chunks=cfg["scheduler_chunks"]),
     ]
     return {
         "schema": "one-link-perf-lab-v1",
