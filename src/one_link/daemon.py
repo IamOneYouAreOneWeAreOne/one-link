@@ -1679,7 +1679,7 @@ class Daemon:
                     of=msg["id"], blob=blob, wants=sorted(missing or []),
                 )))
                 if not missing:
-                    await self._finish_cdc_file(blob, peer_fp, peer_sid, msg)
+                    self._schedule_finish_cdc_file(blob, peer_fp, peer_sid, msg)
             else:
                 await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_CHUNK":
@@ -3166,6 +3166,25 @@ class Daemon:
             self._update_transfer(f.transfer_id, status="failed")
             self._abort_incoming_file(blob, f)
             raise
+
+    def _schedule_finish_cdc_file(
+        self, blob: str, peer_fp: str, peer_sid: str, src_msg: dict,
+    ) -> None:
+        """Finish a fully deduped receive after the FILE_WANTS response flushes.
+
+        If the sender needs zero chunks, the important wire response is
+        FILE_WANTS(wants=[]). Rebuilding the duplicate inbox file can touch tens
+        or hundreds of MiB of local disk, so it must not sit in front of the
+        sender's no-byte completion path.
+        """
+
+        async def _runner() -> None:
+            try:
+                await self._finish_cdc_file(blob, peer_fp, peer_sid, src_msg)
+            except Exception as e:
+                log.warning("background CDC finish failed for %s: %s", blob[:8], e)
+
+        asyncio.create_task(_runner())
 
     # ─── folder sync handlers ──────────────────────────────────────────
     def _is_pinned(self, peer_fp: str) -> bool:

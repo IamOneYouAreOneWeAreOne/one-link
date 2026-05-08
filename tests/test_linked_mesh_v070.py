@@ -860,6 +860,58 @@ async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_receive_empty_cdc_wants_schedules_finish_after_reply(
+    tmp_path: Path, monkeypatch
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    payload = b"already cached"
+    chunk_hash = blake3.blake3(payload).hexdigest()
+    blob = blake3.blake3(payload).hexdigest()
+    daemon._store_chunk_cache(chunk_hash, payload, blob_hash=blob, chunk_index=0)
+    scheduled: list[str] = []
+
+    def _schedule(blob_hex, peer_fp, peer_sid, src_msg):
+        scheduled.append(blob_hex)
+
+    monkeypatch.setattr(daemon, "_schedule_finish_cdc_file", _schedule)
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+
+    await daemon._on_peer_message(
+        chan,
+        make_msg(
+            "FILE_OFFER",
+            them.short_id,
+            name="cached.bin",
+            size=len(payload),
+            blob=blob,
+            chunks=[{
+                "index": 0,
+                "start": 0,
+                "end": len(payload),
+                "size": len(payload),
+                "hash": chunk_hash,
+            }],
+        ),
+    )
+
+    assert chan.sent[-1]["t"] == "FILE_WANTS"
+    assert chan.sent[-1]["wants"] == []
+    assert scheduled == [blob]
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_send_file_stream_pipelines_bounded_ack_window(
     tmp_path: Path, monkeypatch
 ):
