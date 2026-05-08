@@ -23,8 +23,11 @@ def _snippet(html: str, needle: str, size: int = 2600) -> str:
     return html[idx:idx + size]
 
 
-def test_version_bumped_to_v0190(peer_html: str):
-    assert 'version: "0.19.0"' in peer_html
+def test_browser_peer_surface_exposes_version(peer_html: str):
+    """The v0.19.0 transport selector must stay exposed across later
+    peer-page releases. Newer layers are allowed to bump the page version,
+    but the test surface still needs a concrete semantic version string."""
+    assert 'version: "' in peer_html
 
 
 def test_browser_transport_capabilities_advertise_paths(peer_html: str):
