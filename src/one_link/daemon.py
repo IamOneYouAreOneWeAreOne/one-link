@@ -70,6 +70,7 @@ from one_link.capabilities import (
     FILE_BINARY_FRAME,
     FILES,
     FILE_CDC,
+    FILE_SWARM,
     FOLDER_SYNC,
     LOCAL_CAPABILITIES,
     normalize_caps,
@@ -94,6 +95,12 @@ from one_link.paths import (
 )
 from one_link.state import State
 from one_link.swarm_plan import plan_swarm_sources, source_from_hashes
+from one_link.transfer_brain import (
+    MeshNodeSignal,
+    TransferRouteObservation,
+    decision_from_observations,
+    verification_priority_order,
+)
 from one_link.transfer_doctor import (
     RouteMemory,
     RouteObservation,
@@ -4860,6 +4867,79 @@ class Daemon:
             out["best_route"] = mem.best_route(out.get("best_route") or "lan")
         return out
 
+    def _transfer_route_observations(
+        self, peer_fp: str,
+    ) -> tuple[TransferRouteObservation, ...]:
+        mem = self._route_memory.get(peer_fp)
+        if mem is None:
+            return ()
+        out: list[TransferRouteObservation] = []
+        for c in mem.candidates():
+            attempts = max(1, int(c.attempts))
+            for _ in range(max(0, int(c.successes))):
+                out.append(TransferRouteObservation(
+                    route=c.route,
+                    ok=True,
+                    latency_ms=c.latency_ms,
+                    bandwidth_bps=c.bandwidth_bps,
+                ))
+            for _ in range(max(0, attempts - int(c.successes))):
+                out.append(TransferRouteObservation(route=c.route, ok=False))
+        return tuple(out)
+
+    def _mesh_node_signals(
+        self,
+        peer_fp: str,
+        *,
+        chunk_hit_rate: float = 0.0,
+    ) -> tuple[MeshNodeSignal, ...]:
+        nodes: list[MeshNodeSignal] = []
+        health = self.get_pair_health(peer_fp) or {}
+        if health:
+            nodes.append(MeshNodeSignal(
+                peer_fp=peer_fp,
+                trust_score=self._swarm_trust_score(peer_fp),
+                reliability=float(health.get("reliability") or 0.5),
+                latency_ms=health.get("latency_ewma_ms"),
+                bandwidth_bps=health.get("bandwidth_bps"),
+                chunk_hit_rate=chunk_hit_rate,
+                route_kind=str(health.get("best_route") or "lan"),
+            ))
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                for rec in self.state.list_peers():
+                    fp = str(getattr(rec, "fingerprint", "") or "")
+                    if not fp or fp == peer_fp or getattr(rec, "trust", "") != "pinned":
+                        continue
+                    h = self.get_pair_health(fp) or {}
+                    nodes.append(MeshNodeSignal(
+                        peer_fp=fp,
+                        trust_score=self._swarm_trust_score(fp),
+                        reliability=float(h.get("reliability") or 0.5),
+                        latency_ms=h.get("latency_ewma_ms"),
+                        bandwidth_bps=h.get("bandwidth_bps"),
+                        chunk_hit_rate=0.0,
+                        route_kind=str(h.get("best_route") or "mesh"),
+                    ))
+        return tuple(nodes)
+
+    def _estimate_prior_hit_rate(
+        self,
+        *,
+        metadata: dict,
+        cdc_chunks: tuple[Chunk, ...],
+        cached_hit: bool,
+    ) -> float:
+        chunks_total = int(metadata.get("chunks_total") or 0)
+        skipped = int(metadata.get("skipped_chunks") or 0)
+        if chunks_total > 0 and skipped > 0:
+            return min(1.0, max(0.0, skipped / chunks_total))
+        if cached_hit and cdc_chunks:
+            return 0.18
+        if cdc_chunks:
+            return 0.04
+        return 0.0
+
     async def revoke_peer(
         self, peer_fp: str, *, actor: str = "ui", note: str = "",
     ) -> None:
@@ -6900,6 +6980,34 @@ class Daemon:
             if can_offer_cdc
             else stream_chunks_total
         )
+        prior_hit_rate = self._estimate_prior_hit_rate(
+            metadata=base_metadata,
+            cdc_chunks=tuple(cdc_chunks),
+            cached_hit=cached is not None,
+        )
+        verification_head = tuple(
+            t.index for t in verification_priority_order(
+                tuple(FileChunkManifest.from_chunk(c) for c in cdc_chunks),
+                max_items=8,
+            )
+        ) if cdc_chunks else ()
+        route_observations = self._transfer_route_observations(peer_fp)
+        route_names = tuple(
+            c.route for c in self._route_memory_for(peer_fp).candidates()
+        ) or (getattr(sess, "regime", None) or "lan",)
+        transfer_brain_decision = decision_from_observations(
+            size_bytes=size,
+            supports_cdc=can_offer_cdc,
+            supports_swarm=FILE_SWARM in set(normalize_caps(peer_features)),
+            prior_hit_rate=prior_hit_rate,
+            observations=route_observations,
+            routes=route_names,
+            mesh_nodes=self._mesh_node_signals(
+                peer_fp,
+                chunk_hit_rate=prior_hit_rate,
+            ),
+            verification_head=verification_head,
+        ).to_dict()
         now_ms = int(time.time() * 1000)
         base_metadata = {
             **base_metadata,
@@ -6914,6 +7022,9 @@ class Daemon:
             "cdc_auto_index_max_bytes": CDC_AUTO_INDEX_MAX_BYTES,
             "fast_fixed_index_min_bytes": FAST_FIXED_INDEX_MIN_BYTES,
             "fixed_chunk_size": fixed_chunk_size,
+            "prior_hit_rate_estimate": prior_hit_rate,
+            "transfer_brain": transfer_brain_decision,
+            "verification_head": list(verification_head),
             "peer_app_version": peer_version,
             "peer_features": list(peer_features),
             "planned_wire_mode": planned_wire_mode,

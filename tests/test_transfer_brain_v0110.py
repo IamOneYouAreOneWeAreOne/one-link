@@ -2,10 +2,13 @@ from one_link.transfer_brain import (
     AdaptiveTransferBrain,
     CalibrationTier,
     HealthState,
+    MeshNodeSignal,
     TransferMode,
     TransferRouteObservation,
     decision_from_observations,
+    verification_priority_order,
 )
+from one_link.transfer_intent import FileChunkManifest
 
 
 def test_route_stats_calibrate_from_observations():
@@ -75,3 +78,59 @@ def test_brain_enters_repair_for_bad_routes():
 
     assert decision.health == HealthState.REPAIR
     assert decision.action == "refresh_route_and_reopen_session"
+
+
+def test_mesh_coherence_pushes_high_prior_sends_to_swarm():
+    decision = decision_from_observations(
+        size_bytes=40 * 1024 * 1024 * 1024,
+        supports_cdc=True,
+        supports_swarm=True,
+        prior_hit_rate=0.97,
+        observations=[
+            TransferRouteObservation("lan", True, latency_ms=4, bandwidth_bps=700_000_000)
+            for _ in range(32)
+        ],
+        routes=["lan"],
+        mesh_nodes=[
+            MeshNodeSignal(
+                peer_fp="a" * 64,
+                trust_score=1.0,
+                reliability=0.99,
+                latency_ms=3,
+                bandwidth_bps=900_000_000,
+                chunk_hit_rate=0.99,
+            ),
+            MeshNodeSignal(
+                peer_fp="b" * 64,
+                trust_score=0.95,
+                reliability=0.97,
+                latency_ms=8,
+                bandwidth_bps=500_000_000,
+                chunk_hit_rate=0.90,
+            ),
+        ],
+        verification_head=[12, 4, 99],
+        speeds={"cdc_mib_s": 1200.0},
+    )
+
+    assert decision.selected.mode == TransferMode.SWARM_CDC
+    assert decision.selected.parallelism == 2
+    assert decision.selected.coherence_score > 0.75
+    assert decision.to_dict()["verification_head"] == [12, 4, 99]
+
+
+def test_verification_priority_checks_rare_weak_chunks_first():
+    chunks = (
+        FileChunkManifest(0, 0, 10, 10, "edge"),
+        FileChunkManifest(1, 10, 20, 10, "common"),
+        FileChunkManifest(2, 20, 30, 10, "rare"),
+    )
+
+    order = verification_priority_order(
+        chunks,
+        claim_counts={"edge": 3, "common": 6, "rare": 0},
+        source_coherence={"edge": 0.9, "common": 0.9, "rare": 0.2},
+    )
+
+    assert order[0].index == 2
+    assert order[0].reason == "rare_or_unclaimed"

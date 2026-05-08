@@ -32,6 +32,7 @@ class ChunkSource:
     energy_cost: float = 1.0
     route_kind: str = "unknown"
     available: bool = True
+    coherence_score: float | None = None
 
     def score_for(self, chunk_hash: str) -> tuple[int, float, float]:
         has_chunk = 1 if chunk_hash in self.chunk_hashes else 0
@@ -50,8 +51,19 @@ class ChunkSource:
         bandwidth = self.bandwidth_bps if self.bandwidth_bps is not None else 0.0
         reliability = min(1.0, max(0.0, float(self.reliability)))
         energy = max(0.0, float(self.energy_cost))
+        coherence = (
+            min(1.0, max(0.0, float(self.coherence_score)))
+            if self.coherence_score is not None
+            else (
+                0.40 * min(1.0, max(0.0, float(self.trust_score)))
+                + 0.32 * reliability
+                + 0.18 * min(1.0, max(0.0, float(bandwidth)) / 1_000_000_000.0)
+                + 0.10 * (1.0 / (1.0 + max(0.0, latency) / 50.0))
+            )
+        )
         return (
             float(self.trust_score),
+            coherence,
             reliability,
             float(bandwidth),
             -float(latency),
@@ -59,7 +71,7 @@ class ChunkSource:
             self.peer_fp,
         )
 
-    def route_score_without_tiebreaker(self) -> tuple[float, float, float, float, float]:
+    def route_score_without_tiebreaker(self) -> tuple[float, float, float, float, float, float]:
         score = self.route_score()
         return score[:5]
 
@@ -193,6 +205,7 @@ def source_from_hashes(
     energy_cost: float = 1.0,
     route_kind: str = "unknown",
     available: bool = True,
+    coherence_score: float | None = None,
 ) -> ChunkSource:
     return ChunkSource(
         peer_fp=peer_fp,
@@ -204,6 +217,7 @@ def source_from_hashes(
         energy_cost=energy_cost,
         route_kind=route_kind,
         available=available,
+        coherence_score=coherence_score,
     )
 
 

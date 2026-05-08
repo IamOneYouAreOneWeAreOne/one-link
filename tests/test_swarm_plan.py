@@ -125,3 +125,34 @@ def test_swarm_plan_prefers_reliable_high_bandwidth_route_after_trust(tmp_path: 
     )
 
     assert plan.assignments[0].source_peer_fp == "bb" * 32
+
+
+def test_swarm_plan_uses_coherence_after_trust(tmp_path: Path):
+    manifest = _manifest(tmp_path)
+    h = manifest.chunks[0].hash
+    ordinary = source_from_hashes(
+        "aa" * 32,
+        [h],
+        trust_score=1.0,
+        latency_ms=3,
+        bandwidth_bps=800_000_000,
+        reliability=0.90,
+        coherence_score=0.45,
+    )
+    coherent = source_from_hashes(
+        "bb" * 32,
+        [h],
+        trust_score=1.0,
+        latency_ms=10,
+        bandwidth_bps=500_000_000,
+        reliability=0.90,
+        coherence_score=0.95,
+    )
+
+    plan = plan_swarm_sources(
+        manifest=manifest,
+        needed_indexes=[manifest.chunks[0].index],
+        sources=[ordinary, coherent],
+    )
+
+    assert plan.assignments[0].source_peer_fp == "bb" * 32
