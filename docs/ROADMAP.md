@@ -8,12 +8,42 @@ unfinished ship below has been (or will be) restated against the
 ship-gate checklist before code lands. Items that don't pass all
 four principles aren't on this list.
 
-Companion docs that go deeper on specific tracks:
+Companion docs (the project's plan-of-record at every layer):
+
+- [`PRINCIPLES.md`](./PRINCIPLES.md) — the **five** operating
+  principles + ship-gate checklist (Reach / Hide / Async / Depth
+  / Defang). The gate every ship passes.
 - [`PHONE_TIER.md`](./PHONE_TIER.md) — exhaustive phone-tier
-  implementation guide (every UI surface dispositioned, full ship
-  sequence v0.14.2 → v0.14.8).
-- [`PRINCIPLES.md`](./PRINCIPLES.md) — the four operating
-  principles + ship-gate checklist.
+  implementation guide. Every UI surface dispositioned, full ship
+  sequence v0.14.2 → v0.14.8.
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — implementation-grade
+  architectural specification for the v0.15.0 → v1.0.0 PWA pivot.
+  Each ship gets frontier, primitive, wire-format additions, state
+  migration, test contract, defang cross-reference, and
+  Coherence-stdlib reuse callouts.
+- [`SOVEREIGNTY.md`](./SOVEREIGNTY.md) — corporate-substrate
+  defang specification. Full mapping of every layer (browser,
+  DNS, CDN, push, keychain, RNG, etc.) → mitigation. Three
+  paranoia tiers (Default / Hardened / Air-gap) with exact
+  behavioral matrix.
+- [`SECURITY.md`](./SECURITY.md) — threat model + hardening
+  contract. Nine adversary classes with countermeasures.
+  Cryptographic correctness (constant-time, nonce uniqueness,
+  forward secrecy, post-compromise, post-quantum hybrid).
+  Runtime hardening (CSP, Trusted Types, worker isolation,
+  sensitive material lifecycle).
+- [`GOVERNANCE.md`](./GOVERNANCE.md) — license (AGPLv3),
+  trademark (non-profit only), release signing (multi-maintainer
+  threshold), refuse-acquisition charter, warrant canary,
+  funding posture. Project structure as security primitive.
+
+Read order for someone joining cold:
+1. `PRINCIPLES.md` — what gates ships.
+2. `ROADMAP.md` (this file) — what ships in what order.
+3. `ARCHITECTURE.md` — how the PWA pivot is built.
+4. `SOVEREIGNTY.md` + `SECURITY.md` — the defenses, paired.
+5. `GOVERNANCE.md` — the structural commitments.
+6. `PHONE_TIER.md` — the phone-specific surface contract.
 
 The reorganization from earlier roadmaps groups remaining work
 under three tracks instead of tiers. Tiers were "what the protocol

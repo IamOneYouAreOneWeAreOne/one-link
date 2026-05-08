@@ -87,6 +87,32 @@ Every ship spec answers: **"What is the measurable frontier this
 ship pushes, and how do we regression-test it?"** If the answer
 is "the surface is nicer," the engine isn't done.
 
+### 5. Defang every corporate floor
+
+> "For the people" means free of corporations, by default.
+
+Every layer of corporate substrate (browser engine, DNS, CDN,
+OS keychain, push services, certificate authorities, hardware
+RNG, NTP, app stores) is a place a corporation could insert
+itself between us and the user. We can't always eliminate the
+substrate — Apple still made the phone — but we can eliminate
+the influence.
+
+For each layer, we ship at least one engineering mitigation that
+makes using that substrate against our users prohibitively
+expensive: multi-vendor diversity, signed updates, encrypted
+payloads, IPFS distribution, optional-not-default opt-ins for
+anything that calls home. The default tier is convenient. The
+hardened tier is real and tested. The air-gap tier exists.
+
+Every ship spec answers: **"What corporate substrate does this
+feature touch, and what mitigation are we shipping to neutralize
+it?"** If a feature's only path goes through a corporate layer
+without an alternative, the spec is incomplete.
+
+The full mapping lives in [`SOVEREIGNTY.md`](./SOVEREIGNTY.md);
+this principle is the gating rule.
+
 ---
 
 ## The discipline that pairs with the principles
@@ -124,17 +150,20 @@ instantly.
 
 ## Ship-gate checklist
 
-Every ship-spec answers all four before the first line of code:
+Every ship-spec answers all five before the first line of code:
 
 ```
-[ ] Reach: __________________________________________
+[ ] Reach:    ________________________________________
     (one sentence: who can use One Link who couldn't before)
-[ ] Hide:  __________________________________________
+[ ] Hide:     ________________________________________
     (what word/button/knob disappears)
-[ ] Async: __________________________________________
+[ ] Async:    ________________________________________
     (where this buffers when the recipient is gone)
-[ ] Depth: __________________________________________
+[ ] Depth:    ________________________________________
     (the measurable frontier + the regression test that pins it)
+[ ] Defang:   ________________________________________
+    (what corporate substrate this touches + the mitigation
+     shipped alongside; cross-reference SOVEREIGNTY.md)
 ```
 
 If any answer is "n/a" or hand-wavy, the ship-spec needs more
