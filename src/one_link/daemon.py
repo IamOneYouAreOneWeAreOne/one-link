@@ -123,12 +123,6 @@ from one_link.transfer_intent import (
 )
 from one_link.wire import decode_msg, encode_msg, make_msg
 
-# Forward import to avoid hard dep when server.py loads daemon.py
-try:
-    from one_link.server import UIServer  # noqa: F401
-except Exception:
-    UIServer = None  # type: ignore[assignment]
-
 log = logging.getLogger("one_link.daemon")
 
 CONTROL_PORT_FILE = "control.port"
@@ -503,6 +497,10 @@ def _peer_port_path() -> Path:
     return data_dir() / PEER_PORT_FILE
 
 
+def _daemon_lock_path() -> Path:
+    return data_dir() / DAEMON_LOCK_FILE
+
+
 def _pid_is_alive(pid: int) -> bool:
     """Return True if the given OS PID is currently a live process.
 
@@ -544,6 +542,36 @@ def _pid_is_alive(pid: int) -> bool:
         except OSError:
             return False
         return True
+
+
+def _read_lock_pid() -> int | None:
+    try:
+        raw = _daemon_lock_path().read_text(encoding="ascii", errors="ignore").strip()
+        return int(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _runtime_port_paths() -> tuple[Path, ...]:
+    """Files that describe a live daemon instance, not durable user data."""
+    return (
+        data_dir() / CONTROL_PORT_FILE,
+        data_dir() / PEER_PORT_FILE,
+        data_dir() / "server.port",
+    )
+
+
+def _clear_stale_runtime_files() -> None:
+    """Remove dead daemon runtime hints without touching identity/state.
+
+    These files are just pointers to a currently running process. If the
+    process is gone, leaving them behind makes launchers and tests try a
+    port that will never answer. That is exactly the class of "spins forever"
+    failure a self-healing desktop app must not expose to users.
+    """
+    for p in (*_runtime_port_paths(), _daemon_lock_path()):
+        with contextlib.suppress(OSError):
+            p.unlink()
 
 
 @dataclass
@@ -8294,16 +8322,17 @@ class Daemon:
         self._dm_reaper_task = asyncio.create_task(self._dm_reaper_loop())
         self._prior_index_task = asyncio.create_task(self._prior_index_loop())
 
-        # Start UI server if available
-        if UIServer is not None:
-            try:
-                self.ui_server = UIServer(self)
-                ui_port = await self.ui_server.start()
-            except Exception as e:
-                log.warning("UI server failed to start: %s", e)
-                self.ui_server = None
-                ui_port = 0
-        else:
+        # Start UI server if available. Import lazily so CLI/status paths do
+        # not pay aiohttp's Windows platform/WMI import cost before the daemon
+        # has even published its control socket.
+        try:
+            from one_link.server import UIServer
+
+            self.ui_server = UIServer(self)
+            ui_port = await self.ui_server.start()
+        except Exception as e:
+            log.warning("UI server failed to start: %s", e)
+            self.ui_server = None
             ui_port = 0
 
         # v0.5.1: rendezvous client. Optional — only starts if URLs are
@@ -8378,10 +8407,14 @@ class Daemon:
 
     async def serve_forever(self) -> None:
         assert self._peer_server and self._control_server
-        await asyncio.gather(
-            self._peer_server.serve_forever(),
-            self._control_server.serve_forever(),
-        )
+        try:
+            await asyncio.gather(
+                self._peer_server.serve_forever(),
+                self._control_server.serve_forever(),
+            )
+        except RuntimeError as e:
+            if "is closed" not in str(e):
+                raise
 
     async def stop(self) -> None:
         # v0.5.1: revoke rendezvous registration first so peers learn
@@ -8465,16 +8498,42 @@ def read_control_port() -> int:
     p = _control_port_path()
     if not p.exists():
         raise RuntimeError("daemon not running (no control.port file)")
-    return int(p.read_text().strip())
+    try:
+        port = int(p.read_text().strip())
+    except Exception as e:
+        _clear_stale_runtime_files()
+        raise RuntimeError("daemon not running (bad control.port file)") from e
+    if is_daemon_alive(port):
+        return port
+    lock_pid = _read_lock_pid()
+    if lock_pid is None or not _pid_is_alive(lock_pid):
+        _clear_stale_runtime_files()
+    raise RuntimeError(f"daemon not running (stale control.port {port})")
 
 
-def is_daemon_alive(port: int) -> bool:
+def is_daemon_alive(port: int, *, timeout: float = 0.5) -> bool:
+    """Return True only when the local One Link control protocol answers.
+
+    A bare TCP connect is not enough: a stale port can be reused by an
+    unrelated process, and a wedged daemon can accept sockets without ever
+    replying. The launcher and CLI need the stronger signal.
+    """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.3)
+    s.settimeout(timeout)
     try:
         s.connect(("127.0.0.1", port))
-        return True
-    except OSError:
+        s.sendall(b'{"cmd":"status"}\n')
+        buf = b""
+        while not buf.endswith(b"\n") and len(buf) < 65536:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        if not buf:
+            return False
+        msg = json.loads(buf.decode("utf-8").strip() or "{}")
+        return msg.get("ok") is True and bool(msg.get("pid"))
+    except Exception:
         return False
     finally:
         s.close()

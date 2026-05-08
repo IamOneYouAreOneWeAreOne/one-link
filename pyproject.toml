@@ -56,6 +56,13 @@ one_link = [
   "native/*/ol_native_cdc.dylib",
 ]
 
+[tool.pytest.ini_options]
+# Some globally installed pytest plugins perform Windows WMI platform probes at
+# pytest_configure time. One Link's own perf lab is in-process and deterministic;
+# we do not depend on pytest-benchmark, and disabling it keeps the test gate from
+# hanging before collection on WMI-unhealthy machines.
+addopts = "-p no:benchmark -p no:hypothesispytest"
+
 # v0.7.2 bandit config (audit finding C). We exclude tests because
 # fake-data + pytest harness use patterns bandit flags but are safe
 # in a test context (e.g. assert in tests, hardcoded keys for

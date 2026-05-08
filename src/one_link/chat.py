@@ -79,13 +79,14 @@ def _spawn_daemon() -> tuple[subprocess.Popen, int]:
         # Detach from any console; keep stdio piped so we can join.
         flags = subprocess.CREATE_NO_WINDOW
     proc = subprocess.Popen(
-        [sys.executable, "-m", "one_link.cli", "daemon"],
+        [sys.executable, "-m", "one_link.cli", "daemon", "--no-tray"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=flags,
     )
-    # Wait up to 8s for the control socket to appear and respond.
-    deadline = time.time() + 8.0
+    # Wait long enough for slower Windows machines, but only return once the
+    # control protocol itself answers. A port file alone is not readiness.
+    deadline = time.time() + 20.0
     while time.time() < deadline:
         port = _daemon_alive()
         if port is not None:

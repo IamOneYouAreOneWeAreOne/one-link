@@ -7,6 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from one_link.platform_guard import install_windows_platform_fastpath
+
+
+install_windows_platform_fastpath()
+
 
 # v0.7.x: process-wide gate so any subprocess daemon the test
 # harness spawns inherits ONE_LINK_DISABLE_REVEAL=1. Without this,

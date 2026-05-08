@@ -67,6 +67,8 @@ def _request(control_port: int, **req) -> dict:
 def _spawn_daemon(home: Path, log_path: Path) -> subprocess.Popen:
     env = dict(os.environ)
     env["ONE_LINK_HOME"] = str(home)
+    env["ONE_LINK_ALLOW_SAME_HOST_PEERS"] = "1"
+    env.setdefault("ONE_LINK_DISABLE_REVEAL", "1")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = open(log_path, "wb")
     proc = subprocess.Popen(
@@ -212,9 +214,9 @@ def main() -> int:
         if failed:
             print(f"[smoke] preserving logs at {tmp}")
             print("\n--- A daemon log (tail) ---")
-            print(log_a.read_text(encoding="utf-8", errors="replace")[-2000:])
+            print(log_a.read_text(encoding="utf-8", errors="replace")[-2000:].encode("ascii", "replace").decode("ascii"))
             print("\n--- B daemon log (tail) ---")
-            print(log_b.read_text(encoding="utf-8", errors="replace")[-2000:])
+            print(log_b.read_text(encoding="utf-8", errors="replace")[-2000:].encode("ascii", "replace").decode("ascii"))
         else:
             shutil.rmtree(tmp, ignore_errors=True)
 

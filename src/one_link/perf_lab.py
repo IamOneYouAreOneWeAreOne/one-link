@@ -29,6 +29,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .platform_guard import install_windows_platform_fastpath
+
+install_windows_platform_fastpath()
+
 from .cdc import build_dedup_plan, fixed_index_path, hash_path, index_path
 from .daemon import _stream_transfer_profile
 from .native_cdc import native_cdc_status

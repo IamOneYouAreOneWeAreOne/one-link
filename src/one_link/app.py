@@ -49,15 +49,7 @@ class RunningDaemon:
 
 
 def _alive(port: int, timeout: float = 0.3) -> bool:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect(("127.0.0.1", port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+    return daemon_mod.is_daemon_alive(port, timeout=timeout)
 
 
 def _daemon_is_lan_bound(info: "RunningDaemon") -> bool:

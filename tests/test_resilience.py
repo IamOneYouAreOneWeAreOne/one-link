@@ -23,6 +23,25 @@ from tests.harness import daemon_pair, request
 pytestmark = pytest.mark.timeout(120)
 
 
+def test_cli_import_has_no_windows_wmi_startup_hang():
+    """CLI import must be boring-fast. It used to import aiohttp/zeroconf
+    transitively and could hang inside Windows WMI before One Link even wrote
+    control.port."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import one_link.cli; print('ok')",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "ok" in proc.stdout
+
+
 def test_stale_port_files_dont_break_daemon():
     """Drop a port file from a 'previous' daemon run, then start a new daemon
     in the same home. The new daemon must overwrite cleanly."""
@@ -72,6 +91,62 @@ def test_stale_port_files_dont_break_daemon():
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_read_control_port_auto_cleans_dead_runtime_files(monkeypatch):
+    """If a daemon died hard, users should not inherit dead control/UI
+    pointers. The next launcher/CLI probe must clean them and force a fresh
+    daemon start path automatically."""
+    from one_link import daemon as daemon_mod
+
+    tmp = Path(tempfile.mkdtemp(prefix="one_link_dead_runtime_"))
+    try:
+        home = tmp / "H"
+        data = home / "data"
+        data.mkdir(parents=True)
+        monkeypatch.setenv("ONE_LINK_HOME", str(home))
+
+        (data / "control.port").write_text("65530")
+        (data / "peer.port").write_text("65529")
+        (data / "server.port").write_text("65528")
+        (data / "daemon.lock").write_text("999999")
+
+        with pytest.raises(RuntimeError, match="stale control.port"):
+            daemon_mod.read_control_port()
+
+        assert not (data / "control.port").exists()
+        assert not (data / "peer.port").exists()
+        assert not (data / "server.port").exists()
+        assert not (data / "daemon.lock").exists()
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_control_liveness_requires_status_protocol():
+    """A random process accepting TCP on localhost is not a One Link daemon."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    async def _close_after_accept():
+        loop = asyncio.get_running_loop()
+        conn, _ = await loop.run_in_executor(None, listener.accept)
+        conn.close()
+        listener.close()
+
+    from one_link import daemon as daemon_mod
+
+    async def _run():
+        closer = asyncio.create_task(_close_after_accept())
+        try:
+            assert daemon_mod.is_daemon_alive(port, timeout=0.2) is False
+        finally:
+            await closer
+
+    asyncio.run(_run())
 
 
 def test_daemon_survives_garbage_on_peer_port():

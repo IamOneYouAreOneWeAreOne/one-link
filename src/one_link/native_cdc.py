@@ -23,6 +23,10 @@ from typing import Iterable
 
 from platformdirs import user_cache_dir
 
+from one_link.platform_guard import install_windows_platform_fastpath
+
+install_windows_platform_fastpath()
+
 
 _SOURCE = r"""
 #include <stdint.h>

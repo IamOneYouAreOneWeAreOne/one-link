@@ -11,15 +11,38 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import socket
 from dataclasses import dataclass, field
 from typing import Callable
 
-from zeroconf import IPVersion, ServiceListener
-from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
+from one_link.platform_guard import install_windows_platform_fastpath
 
 SERVICE_TYPE = "_onelink._tcp.local."
+ZEROCONF_IMPORT_TIMEOUT_S = 3.0
+
+log = logging.getLogger("one_link.discovery")
+
+
+def _load_zeroconf_modules():
+    """Import zeroconf off the event loop.
+
+    On Windows, zeroconf -> ifaddr/aiohttp dependencies can query WMI via
+    platform.* during import. If WMI is unhealthy, that import can hang before
+    One Link even publishes its control socket. Running it in a worker with a
+    timeout lets the daemon stay useful even when mDNS is unavailable.
+    """
+    install_windows_platform_fastpath()
+
+    from zeroconf import IPVersion
+    from zeroconf.asyncio import (
+        AsyncServiceBrowser,
+        AsyncServiceInfo,
+        AsyncZeroconf,
+    )
+
+    return IPVersion, AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
 
 def _valid_pub_hex(value: str) -> bool:
@@ -163,7 +186,7 @@ def _info_to_peer(info: AsyncServiceInfo, self_short_id: str) -> Peer | None:
     )
 
 
-class _AsyncListener(ServiceListener):
+class _AsyncListener:
     """Sync ServiceListener that schedules async work on the daemon loop."""
 
     def __init__(
@@ -183,6 +206,8 @@ class _AsyncListener(ServiceListener):
         asyncio.run_coroutine_threadsafe(self._resolve(type_, name), self.loop)
 
     async def _resolve(self, type_: str, name: str) -> None:
+        from zeroconf.asyncio import AsyncServiceInfo
+
         info = AsyncServiceInfo(type_, name)
         ok = await info.async_request(self.zc.zeroconf, timeout=2000)
         if not ok:
@@ -231,6 +256,20 @@ class Discovery:
     async def start(self) -> None:
         if self._zc is not None:
             return
+        try:
+            (
+                IPVersion,
+                AsyncServiceBrowser,
+                AsyncServiceInfo,
+                AsyncZeroconf,
+            ) = await asyncio.wait_for(
+                asyncio.to_thread(_load_zeroconf_modules),
+                timeout=ZEROCONF_IMPORT_TIMEOUT_S,
+            )
+        except Exception as e:
+            log.warning("mDNS discovery disabled: zeroconf import timed out or failed: %s", e)
+            return
+
         loop = asyncio.get_running_loop()
         self._zc = AsyncZeroconf(ip_version=IPVersion.V4Only)
         local_ip = _best_local_ipv4()
@@ -296,7 +335,8 @@ class Discovery:
         # `update_service` re-broadcasts the TXT record without
         # cycling the service registration (which would briefly remove
         # us from peers' registries and surface as a flap).
-        from zeroconf import AsyncServiceInfo  # type: ignore[no-redef]
+        from zeroconf.asyncio import AsyncServiceInfo
+
         local_ip = _best_local_ipv4()
         self._info = AsyncServiceInfo(
             type_=SERVICE_TYPE,

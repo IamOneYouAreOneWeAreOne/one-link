@@ -38,6 +38,10 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+from one_link.platform_guard import install_windows_platform_fastpath
+
+install_windows_platform_fastpath()
+
 from aiohttp import WSMsgType, web
 
 from one_link.paths import data_dir, inbox_dir

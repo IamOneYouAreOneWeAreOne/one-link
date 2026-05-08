@@ -31,6 +31,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from one_link.platform_guard import install_windows_platform_fastpath
+
+install_windows_platform_fastpath()
+
 
 @dataclass
 class DeviceInfo:
