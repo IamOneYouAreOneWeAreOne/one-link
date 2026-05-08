@@ -4838,10 +4838,16 @@ class UIServer:
                 # Port in use — try the next.
                 continue
         if not bound:
-            self.site = web.TCPSite(self.runner, host=bind_host, port=0)
-            await self.site.start()
-            sock = self.site._server.sockets[0]  # type: ignore[union-attr]
+            site = web.TCPSite(self.runner, host=bind_host, port=0)
+            await site.start()
+            sock = site._server.sockets[0]  # type: ignore[union-attr]
+            self.site = site
             self.port = sock.getsockname()[1]
+            if not await self._probe_owned_http_port(bind_host, self.port):
+                await site.stop()
+                raise RuntimeError(
+                    f"UI server bound port {self.port} but ownership probe failed"
+                )
         self.bind_host = bind_host
         _server_port_path().write_text(str(self.port))
         _token_path().write_text(self.token)

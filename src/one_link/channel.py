@@ -73,7 +73,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from one_link.identity import Identity, fingerprint_of, verify
-from one_link.wire import read_frame, write_frame
+from one_link.wire import read_frame, write_frame, write_frame_nowait
 
 log = logging.getLogger(__name__)
 
@@ -244,6 +244,25 @@ class Channel:
         ct = self.tx_aead.encrypt(nonce, plaintext, self._aad())
         await write_frame(self.writer, ct)
 
+    async def queue_send(self, plaintext: bytes) -> None:
+        """Encrypt and write a frame without awaiting socket drain.
+
+        File transfer callers use this for bounded windows: write several
+        chunks, then call ``flush`` before awaiting ACKs. Normal chat/control
+        paths keep using ``send`` so small messages retain immediate
+        backpressure and error visibility.
+        """
+        if self._dr_state is not None:
+            self._queue_send_ratchet(plaintext)
+            return
+        nonce = self._nonce(self.tx_seq)
+        self.tx_seq += 1
+        ct = self.tx_aead.encrypt(nonce, plaintext, self._aad())
+        write_frame_nowait(self.writer, ct)
+
+    async def flush(self) -> None:
+        await self.writer.drain()
+
     async def recv(self) -> bytes:
         # v0.9.6: ratchet activation race tolerance. The two sides
         # flip _dr_state independently as caps_sent + caps_received
@@ -323,6 +342,13 @@ class Channel:
         )
         # Wire layout: [Header (DR_HEADER_LEN bytes)][ciphertext]
         await write_frame(self.writer, header.encode() + ct)
+
+    def _queue_send_ratchet(self, plaintext: bytes) -> None:
+        from one_link.double_ratchet import encrypt as dr_encrypt
+        header, ct = dr_encrypt(
+            self._dr_state, plaintext, ad=self.transcript_hash,
+        )
+        write_frame_nowait(self.writer, header.encode() + ct)
 
     async def _recv_ratchet(self) -> bytes:
         from one_link.double_ratchet import (

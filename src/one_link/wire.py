@@ -38,10 +38,14 @@ async def read_frame(reader: asyncio.StreamReader) -> bytes:
     return await reader.readexactly(n)
 
 
-async def write_frame(writer: asyncio.StreamWriter, payload: bytes) -> None:
+def write_frame_nowait(writer: asyncio.StreamWriter, payload: bytes) -> None:
     if len(payload) > MAX_FRAME:
         raise ValueError(f"payload too large: {len(payload)} > {MAX_FRAME}")
     writer.write(len(payload).to_bytes(4, "big") + payload)
+
+
+async def write_frame(writer: asyncio.StreamWriter, payload: bytes) -> None:
+    write_frame_nowait(writer, payload)
     await writer.drain()
 
 

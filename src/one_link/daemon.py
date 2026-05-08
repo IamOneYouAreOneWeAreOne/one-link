@@ -68,6 +68,7 @@ from one_link import blobstore, channel as ch, foldersync
 from one_link.capabilities import (
     CHAT,
     FILE_BINARY_FRAME,
+    FILE_CDC_BINARY_FRAME,
     FILES,
     FILE_CDC,
     FILE_SWARM,
@@ -3164,7 +3165,11 @@ class Daemon:
         # chunk size (small slack for compressor framing variance).
         max_chunk_out = max(expected["size"] + 64, CDC_MAX_CHUNK_BYTES + 64)
         try:
-            data = base64.b64decode(msg.get("data", ""), validate=True)
+            payload = msg.get("_binary_data")
+            if isinstance(payload, (bytes, bytearray)):
+                data = bytes(payload)
+            else:
+                data = base64.b64decode(msg.get("data", ""), validate=True)
             data = self._decode_payload(
                 str(msg.get("enc", "raw")), data, max_bytes=max_chunk_out,
             )
@@ -7292,10 +7297,29 @@ class Daemon:
                 compressed_chunks = 0
                 skipped_bytes = 0
                 adaptive_scheduler_snapshot = None
+                peer_feature_set = set(normalize_caps(
+                    (getattr(channel, "peer_caps", None) or {}).get("features", peer_features)
+                ))
                 if first_reply.get("rejected"):
                     raise RuntimeError(
                         f"peer rejected file offer: {first_reply.get('rejected')}"
                     )
+
+                async def _queue_or_send(ch_: ch.Channel, payload: bytes) -> bool:
+                    queued = getattr(ch_, "queue_send", None)
+                    if queued is None:
+                        await ch_.send(payload)
+                        return False
+                    await queued(payload)
+                    return True
+
+                async def _flush_if_queued(ch_: ch.Channel, queued: bool) -> None:
+                    if not queued:
+                        return
+                    flush = getattr(ch_, "flush", None)
+                    if flush is not None:
+                        await flush()
+
                 cdc_used = can_offer_cdc and first_reply.get("t") == "FILE_WANTS"
                 wanted_indexes = (
                     {int(i) for i in first_reply.get("wants", [])}
@@ -7307,6 +7331,7 @@ class Daemon:
                     else "file_baseline"
                 )
                 if cdc_used:
+                    cdc_binary_used = FILE_CDC_BINARY_FRAME in peer_feature_set
                     actual_prior_hit_rate = (
                         1.0 - (len(wanted_indexes) / max(1, len(cdc_chunks)))
                     )
@@ -7345,6 +7370,7 @@ class Daemon:
                         "skipped_ratio": round(
                             skipped_bytes / max(1, size), 6,
                         ),
+                        "binary_frame": cdc_binary_used,
                     }
                     self._update_transfer(
                         transfer_id,
@@ -7426,20 +7452,27 @@ class Daemon:
                                 hash=c.hash,
                                 enc=enc,
                                 wire_size=len(payload),
-                                data=base64.b64encode(payload).decode("ascii"),
                             )
-                            await channel.send(encode_msg(chunk_msg))
+                            if cdc_binary_used:
+                                wire_payload = _encode_binary_frame(chunk_msg, payload)
+                            else:
+                                chunk_msg["data"] = base64.b64encode(payload).decode("ascii")
+                                wire_payload = encode_msg(chunk_msg)
+                            queued_write = await _queue_or_send(
+                                channel,
+                                wire_payload,
+                            )
                             pending_cdc_sizes.append((len(data), len(payload), time.perf_counter()))
                             while not cdc_scheduler.can_send(len(pending_cdc_sizes)):
+                                await _flush_if_queued(channel, queued_write)
+                                queued_write = False
                                 await _settle_one_cdc_ack()
                         while pending_cdc_sizes:
+                            await _flush_if_queued(channel, True)
                             await _settle_one_cdc_ack()
                     adaptive_scheduler_snapshot = cdc_scheduler.snapshot()
                 else:
-                    peer_features = set(normalize_caps(
-                        (getattr(channel, "peer_caps", None) or {}).get("features", [])
-                    ))
-                    binary_stream_used = FILE_BINARY_FRAME in peer_features
+                    binary_stream_used = FILE_BINARY_FRAME in peer_feature_set
                     if can_offer_cdc:
                         attempts = list(base_metadata.get("protocol_attempts") or [])
                         attempts.append({
@@ -7538,7 +7571,10 @@ class Daemon:
                                     seq=seq,
                                     eof=eof,
                                 )
-                                await channel.send(_encode_binary_frame(chunk_msg, data))
+                                queued_write = await _queue_or_send(
+                                    channel,
+                                    _encode_binary_frame(chunk_msg, data),
+                                )
                             else:
                                 chunk_msg = make_msg(
                                     "FILE_CHUNK",
@@ -7548,13 +7584,19 @@ class Daemon:
                                     data=base64.b64encode(data).decode("ascii"),
                                     eof=eof,
                                 )
-                                await channel.send(encode_msg(chunk_msg))
+                                queued_write = await _queue_or_send(
+                                    channel,
+                                    encode_msg(chunk_msg),
+                                )
                             pending_sizes.append((len(data), time.perf_counter()))
                             while not stream_scheduler.can_send(len(pending_sizes)):
+                                await _flush_if_queued(channel, queued_write)
+                                queued_write = False
                                 await _settle_one_stream_ack()
                             seq += 1
 
                         while pending_sizes:
+                            await _flush_if_queued(channel, True)
                             final_deadline = (
                                 _final_stream_ack_deadline(size)
                                 if len(pending_sizes) == 1 else None

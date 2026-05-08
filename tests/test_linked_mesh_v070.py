@@ -39,7 +39,7 @@ from one_link.daemon import (
     _fast_fixed_chunk_size_for_peer,
     _stream_transfer_profile,
 )
-from one_link.capabilities import CHAT, FILES, FILE_BINARY_FRAME, FILE_CDC
+from one_link.capabilities import CHAT, FILES, FILE_BINARY_FRAME, FILE_CDC, FILE_CDC_BINARY_FRAME
 from one_link.discovery import Peer
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
@@ -1034,6 +1034,150 @@ async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_file_cdc_uses_binary_frames_when_peer_supports_them(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path / "home"))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    chan = _TracingFakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, FILE_CDC, FILE_BINARY_FRAME, FILE_CDC_BINARY_FRAME],
+        "from": them.short_id,
+        "app_version": "0.15.1",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id,
+            hostname="them",
+            address="127.0.0.1",
+            port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+
+    f = tmp_path / "cdc-binary.bin"
+    f.write_bytes(b"0123456789abcdef")
+    payload = f.read_bytes()
+    chunks = [{
+        "index": 0,
+        "start": 0,
+        "end": len(payload),
+        "size": len(payload),
+        "hash": blake3.blake3(payload).hexdigest(),
+    }]
+    state.record_file_index_cache(
+        path=str(f.resolve()),
+        size=f.stat().st_size,
+        mtime_ns=f.stat().st_mtime_ns,
+        ctime_ns=f.stat().st_ctime_ns,
+        blob_hash=blake3.blake3(payload).hexdigest(),
+        index_kind="fixed",
+        chunks=chunks,
+    )
+    chan.queue_reply(make_msg("FILE_WANTS", them.short_id, wants=[0]))
+    chan.queue_reply(make_msg("ACK", them.short_id))
+
+    result = await daemon.send_file(sess.peer, f)
+    sent_chunks = [m for m in chan.sent if m.get("t") == "FILE_CDC_CHUNK"]
+    row = state.list_transfers(limit=1)[0]
+
+    assert result["cdc"] is True
+    assert len(sent_chunks) == 1
+    assert sent_chunks[0]["_binary_data"] == payload
+    assert "data" not in sent_chunks[0]
+    assert row.metadata["binary_frame"] is True
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_send_file_cdc_keeps_json_for_stream_binary_only_peers(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path / "home"))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    chan = _TracingFakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, FILE_CDC, FILE_BINARY_FRAME],
+        "from": them.short_id,
+        "app_version": "0.15.1",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id,
+            hostname="them",
+            address="127.0.0.1",
+            port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    f = tmp_path / "cdc-json-compat.bin"
+    payload = b"compat-cdc-json"
+    f.write_bytes(payload)
+    state.record_file_index_cache(
+        path=str(f.resolve()),
+        size=f.stat().st_size,
+        mtime_ns=f.stat().st_mtime_ns,
+        ctime_ns=f.stat().st_ctime_ns,
+        blob_hash=blake3.blake3(payload).hexdigest(),
+        index_kind="fixed",
+        chunks=[{
+            "index": 0,
+            "start": 0,
+            "end": len(payload),
+            "size": len(payload),
+            "hash": blake3.blake3(payload).hexdigest(),
+        }],
+    )
+    chan.queue_reply(make_msg("FILE_WANTS", them.short_id, wants=[0]))
+    chan.queue_reply(make_msg("ACK", them.short_id))
+
+    await daemon.send_file(sess.peer, f)
+    sent_chunks = [m for m in chan.sent if m.get("t") == "FILE_CDC_CHUNK"]
+    row = state.list_transfers(limit=1)[0]
+
+    assert "_binary_data" not in sent_chunks[0]
+    assert sent_chunks[0]["data"]
+    assert row.metadata["binary_frame"] is False
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_send_file_cdc_disables_compression_after_incompressible_chunks(
     tmp_path: Path, monkeypatch
 ):
@@ -1508,6 +1652,89 @@ async def test_cdc_final_chunk_ack_schedules_finish_without_blocking(
         ),
     )
 
+    assert chan.sent[-1]["t"] == "ACK"
+    assert scheduled == [blob]
+    with contextlib.suppress(Exception):
+        handle.close()
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_cdc_receive_accepts_binary_payload_frame(tmp_path: Path, monkeypatch):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+
+    content = b"binary cdc payload without base64"
+    blob = blake3.blake3(content).hexdigest()
+    chunk_hash = blake3.blake3(content).hexdigest()
+    out_path = tmp_path / "cdc-binary-received.bin"
+    transfer_id = "in:test-cdc-binary"
+    state.upsert_transfer(
+        id=transfer_id,
+        direction="in",
+        peer_fp=them.fingerprint,
+        kind="file",
+        name=out_path.name,
+        size=len(content),
+        blob_hash=blob,
+        status="offered",
+        progress_bytes=0,
+        total_bytes=len(content),
+        chunks_done=0,
+        chunks_total=1,
+        metadata={"mode": "cdc", "path": str(out_path)},
+    )
+    handle = open(out_path, "wb")
+    daemon._incoming_files[blob] = IncomingFile(
+        name=out_path.name,
+        size=len(content),
+        blob_hex=blob,
+        out_path=out_path,
+        handle=handle,
+        hasher=blake3.blake3(),
+        cdc_chunks=[{
+            "index": 0,
+            "start": 0,
+            "end": len(content),
+            "size": len(content),
+            "hash": chunk_hash,
+        }],
+        cdc_missing={0},
+        cdc_parts={},
+        transfer_id=transfer_id,
+    )
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        daemon,
+        "_schedule_finish_cdc_file",
+        lambda blob_arg, *_args: scheduled.append(blob_arg),
+    )
+
+    await daemon._on_peer_message(
+        chan,
+        make_msg(
+            "FILE_CDC_CHUNK",
+            them.short_id,
+            id="cdc-binary",
+            blob=blob,
+            index=0,
+            hash=chunk_hash,
+            enc="raw",
+            wire_size=len(content),
+            _binary_data=content,
+        ),
+    )
+
+    assert daemon._read_chunk_cache(chunk_hash) == content
     assert chan.sent[-1]["t"] == "ACK"
     assert scheduled == [blob]
     with contextlib.suppress(Exception):
