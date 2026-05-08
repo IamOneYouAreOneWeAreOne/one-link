@@ -211,14 +211,47 @@
     <div class="body">
       <div class="row">
         <button class="btn ghost" id="btn-export">Export identity</button>
+        <button class="btn ghost" id="btn-set-passphrase">Set passphrase</button>
+        <button class="btn ghost" id="btn-remove-passphrase" hidden>Remove passphrase</button>
         <button class="btn danger" id="btn-reset" type="button">Reset identity</button>
       </div>
+      <p class="help" style="margin-top:10px;" id="passphrase-help">
+        Set a passphrase to wrap this device's keypair with AES-GCM
+        on disk. You'll be prompted to unlock on every visit. Without
+        a passphrase the keypair is plaintext (still origin-private,
+        but readable by anyone with same-user filesystem access).
+      </p>
       <p class="help" style="margin-top:10px;">
         Reset wipes this device's identity from OPFS. After reset,
         next reload generates a fresh keypair. You can't recover an
         old identity from a new one — back it up first via Export
         if you care about message continuity.
       </p>
+    </div>
+  </div>
+
+  <!-- v0.16.1 unlock card. Shown only when an encrypted blob is on
+       disk and we haven't unlocked yet. Boot stops here until the
+       user enters the right passphrase OR resets. -->
+  <div class="card" id="unlock-card" hidden>
+    <h2>Unlock identity</h2>
+    <div class="body">
+      <p class="help">
+        This device's identity is encrypted. Enter your passphrase
+        to unlock it. We can't recover a forgotten passphrase — if
+        you've lost it, reset and start over.
+      </p>
+      <div class="row" style="margin-top:12px;">
+        <input type="password"
+               id="unlock-passphrase"
+               placeholder="passphrase"
+               autocomplete="current-password"
+               style="flex:1 1 auto; min-width:160px; padding:10px 12px; min-height:44px;
+                      background:var(--bg-3); color:var(--text); border:1px solid var(--line);
+                      border-radius:10px; font-size:14px;" />
+        <button class="btn" id="btn-unlock">Unlock</button>
+      </div>
+      <p class="help" id="unlock-status" style="margin-top:10px; color:var(--bad);" hidden></p>
     </div>
   </div>
 </main>
@@ -353,6 +386,134 @@
     await writable.close();
   }
 
+  // v0.16.1 — encryption-at-rest. Opt-in. The on-disk record is
+  // either:
+  //
+  // 1. UNWRAPPED — the same shape readIdentity returns today, with
+  //    private_key_jwk in plaintext. Used when the user hasn't
+  //    set a passphrase. Same security floor as a plaintext
+  //    identity.key on a desktop daemon.
+  //
+  // 2. WRAPPED — a thin envelope:
+  //      {
+  //        "v":              1,
+  //        "wrapped":        true,
+  //        "kdf":            "pbkdf2-sha256",
+  //        "kdf_iterations": 600000,
+  //        "kdf_salt_b64u":  "<16 bytes salt>",
+  //        "iv_b64u":        "<12 bytes AES-GCM IV>",
+  //        "ct_b64u":        "<unwrapped record encrypted>",
+  //        "fingerprint":    "sha256:<hex>",      // public, OK to leak
+  //        "public_key_b64u":"<32 bytes>",        // public, OK to leak
+  //        "created_ms":     <int>,
+  //        "wrapped_ms":     <int>
+  //      }
+  //
+  // Public material (fingerprint + public key) is left outside the
+  // wrap so we can show the device's own identity to the user
+  // without unlocking — useful for diagnostics + the unlock UI.
+  // The PRIVATE key + the JWK go inside the AES-GCM ciphertext.
+  //
+  // KDF: PBKDF2-HMAC-SHA256 with 600,000 iterations (OWASP 2023
+  // floor). Native Web Crypto. Argon2id is the eventual upgrade
+  // (queued for v0.18.x with proper WASM vendoring); upgrading
+  // is mechanical because the envelope carries `kdf` + `kdf_*`
+  // params explicitly.
+  const KDF_ITERATIONS_DEFAULT = 600000;
+  const SALT_BYTES = 16;
+  const IV_BYTES = 12; // AES-GCM standard
+
+  function _randomBytes(n) {
+    const u8 = new Uint8Array(n);
+    crypto.getRandomValues(u8);
+    return u8;
+  }
+
+  async function _deriveAesKey(passphrase, salt, iterations) {
+    const enc = new TextEncoder();
+    const baseKey = await crypto.subtle.importKey(
+      "raw",
+      enc.encode(passphrase),
+      { name: "PBKDF2" },
+      /*extractable=*/false,
+      ["deriveKey"],
+    );
+    return crypto.subtle.deriveKey(
+      {
+        name: "PBKDF2",
+        hash: "SHA-256",
+        salt,
+        iterations,
+      },
+      baseKey,
+      { name: "AES-GCM", length: 256 },
+      /*extractable=*/false,
+      ["encrypt", "decrypt"],
+    );
+  }
+
+  async function wrapIdentity(rec, passphrase) {
+    if (!passphrase || passphrase.length < 6) {
+      throw new Error("passphrase must be at least 6 characters");
+    }
+    const salt = _randomBytes(SALT_BYTES);
+    const iv = _randomBytes(IV_BYTES);
+    const iterations = KDF_ITERATIONS_DEFAULT;
+    const key = await _deriveAesKey(passphrase, salt, iterations);
+    const enc = new TextEncoder();
+    const ct = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      key,
+      enc.encode(JSON.stringify(rec)),
+    );
+    return {
+      v: 1,
+      wrapped: true,
+      kdf: "pbkdf2-sha256",
+      kdf_iterations: iterations,
+      kdf_salt_b64u: bytesToB64Url(salt),
+      iv_b64u: bytesToB64Url(iv),
+      ct_b64u: bytesToB64Url(new Uint8Array(ct)),
+      fingerprint: rec.fingerprint,
+      public_key_b64u: rec.public_key_b64u,
+      created_ms: rec.created_ms,
+      wrapped_ms: Date.now(),
+    };
+  }
+
+  async function unwrapIdentity(envelope, passphrase) {
+    if (!envelope || !envelope.wrapped) {
+      throw new Error("not a wrapped envelope");
+    }
+    if (envelope.kdf !== "pbkdf2-sha256") {
+      throw new Error(`unsupported kdf: ${envelope.kdf}`);
+    }
+    const salt = b64UrlToBytes(envelope.kdf_salt_b64u);
+    const iv = b64UrlToBytes(envelope.iv_b64u);
+    const ct = b64UrlToBytes(envelope.ct_b64u);
+    const iterations = envelope.kdf_iterations || KDF_ITERATIONS_DEFAULT;
+    const key = await _deriveAesKey(passphrase, salt, iterations);
+    let pt;
+    try {
+      pt = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv },
+        key,
+        ct,
+      );
+    } catch (e) {
+      // AES-GCM tag-mismatch on bad passphrase — surface as a
+      // semantic error, not the raw "bad decrypt" exception.
+      throw new Error("wrong passphrase");
+    }
+    const dec = new TextDecoder();
+    const json = dec.decode(pt);
+    return JSON.parse(json);
+  }
+
+  function isWrappedEnvelope(rec) {
+    return !!(rec && rec.wrapped === true && rec.ct_b64u);
+  }
+
   async function deleteIdentity() {
     const root = await _opfsRoot();
     let dir;
@@ -395,6 +556,81 @@
     return rec;
   }
 
+  // ── session state ──────────────────────────────────────────────────
+  // The unwrapped identity record lives only in memory after unlock.
+  // We intentionally don't keep the passphrase in memory — it's
+  // discarded after deriving the AES key. To re-encrypt with a new
+  // passphrase we need the user to re-enter the old one (proves
+  // possession), or to re-wrap from the in-memory `state.rec`.
+  const state = {
+    rec: null,         // unwrapped identity record (null = locked)
+    envelope: null,    // wrapped envelope from disk (null = unwrapped)
+  };
+
+  function _renderIdentityCard(rec) {
+    setPill("good", "ready");
+    text($("#ident-status"), "Identity loaded.");
+    text($("#ident-fp"), rec.fingerprint);
+    text($("#ident-pub"), rec.public_key_b64u);
+    show($("#ident-fp-wrap"));
+    show($("#ident-pub-wrap"));
+    show($("#actions-card"));
+    // If we boot from a wrapped envelope, swap the passphrase
+    // button labels so the user can REMOVE the passphrase. Setting
+    // a new passphrase on already-wrapped is "rotate."
+    if (state.envelope) {
+      const setBtn = $("#btn-set-passphrase");
+      if (setBtn) setBtn.textContent = "Change passphrase";
+      show($("#btn-remove-passphrase"));
+      text($("#passphrase-help"),
+        "Identity is encrypted on disk. Change the passphrase to rotate the wrap " +
+        "key, or remove it to switch back to plaintext storage.");
+    } else {
+      const setBtn = $("#btn-set-passphrase");
+      if (setBtn) setBtn.textContent = "Set passphrase";
+      hide($("#btn-remove-passphrase"));
+    }
+  }
+
+  async function _showUnlockGate(envelope) {
+    // Hide the actions card while locked — user can't export or
+    // reset until unlocked. Reset is reachable via the unlock-failure
+    // path (via prompt), which we'll route below.
+    hide($("#actions-card"));
+    show($("#unlock-card"));
+    text($("#ident-status"),
+      "Identity exists on disk but is encrypted. Enter your passphrase to unlock.");
+    setPill("warn", "locked");
+    text($("#ident-fp"), envelope.fingerprint);
+    text($("#ident-pub"), envelope.public_key_b64u);
+    show($("#ident-fp-wrap"));
+    show($("#ident-pub-wrap"));
+    setDiag(
+      `opfs:identity/v1/keypair.json · wrapped ` +
+      `${envelope.wrapped_ms ? new Date(envelope.wrapped_ms).toLocaleString() : ""}`
+    );
+    // Auto-focus the passphrase input on phones too — the
+    // virtual keyboard pops if focus + click; otherwise focus
+    // alone is enough on desktop.
+    const input = $("#unlock-passphrase");
+    if (input) {
+      try { input.focus(); } catch {}
+    }
+  }
+
+  async function _unlockWith(passphrase) {
+    if (!state.envelope) return;
+    let rec;
+    try {
+      rec = await unwrapIdentity(state.envelope, passphrase);
+    } catch (e) {
+      throw e;
+    }
+    state.rec = rec;
+    hide($("#unlock-card"));
+    _renderIdentityCard(rec);
+  }
+
   // ── boot ────────────────────────────────────────────────────────────
   async function boot() {
     // Quick-fail UX: detect missing platform features early so the
@@ -412,28 +648,33 @@
     }
 
     setDiag("checking opfs identity…");
-    let rec = null;
+    let onDisk = null;
     try {
-      rec = await readIdentity();
+      onDisk = await readIdentity();
     } catch (e) {
       setDiag(`opfs read failed: ${e && e.message ? e.message : e}`);
     }
 
-    if (rec && rec.fingerprint && rec.public_key_b64u) {
-      setPill("good", "ready");
-      text($("#ident-status"), "Identity loaded from OPFS.");
-      text($("#ident-fp"), rec.fingerprint);
-      text($("#ident-pub"), rec.public_key_b64u);
-      show($("#ident-fp-wrap"));
-      show($("#ident-pub-wrap"));
-      show($("#actions-card"));
-      setDiag(`opfs:identity/v1/keypair.json · created ${new Date(rec.created_ms).toLocaleString()}`);
+    // Wrapped envelope on disk → show unlock gate. Boot stops here
+    // until the user enters the passphrase.
+    if (isWrappedEnvelope(onDisk)) {
+      state.envelope = onDisk;
+      await _showUnlockGate(onDisk);
+      return;
+    }
+
+    // Unwrapped record on disk (legacy or never-wrapped) → use it.
+    if (onDisk && onDisk.fingerprint && onDisk.public_key_b64u && onDisk.private_key_jwk) {
+      state.rec = onDisk;
+      _renderIdentityCard(onDisk);
+      setDiag(`opfs:identity/v1/keypair.json · created ${new Date(onDisk.created_ms).toLocaleString()}`);
       return;
     }
 
     setPill("warn", "generating");
     text($("#ident-status"), "Generating a fresh keypair…");
     setDiag("calling crypto.subtle.generateKey…");
+    let rec;
     try {
       rec = await generateIdentity();
     } catch (e) {
@@ -451,15 +692,9 @@
       text($("#ident-status"),
         `Generated keypair but couldn't persist: ${e && e.message ? e.message : e}. ` +
         "Identity won't survive a refresh.");
-      // Still show the generated values so the user can copy them.
     }
-    setPill("good", "ready");
-    text($("#ident-status"), "Generated a fresh identity. Stored in OPFS.");
-    text($("#ident-fp"), rec.fingerprint);
-    text($("#ident-pub"), rec.public_key_b64u);
-    show($("#ident-fp-wrap"));
-    show($("#ident-pub-wrap"));
-    show($("#actions-card"));
+    state.rec = rec;
+    _renderIdentityCard(rec);
     setDiag(`opfs:identity/v1/keypair.json · just created`);
   }
 
@@ -503,10 +738,108 @@
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   });
 
+  // ── unlock wiring ───────────────────────────────────────────────────
+  async function _runUnlockFromInput() {
+    const input = $("#unlock-passphrase");
+    const status = $("#unlock-status");
+    if (!input) return;
+    const pass = input.value;
+    if (!pass) {
+      text(status, "Enter your passphrase.");
+      show(status);
+      return;
+    }
+    hide(status);
+    text(status, "");
+    const btn = $("#btn-unlock");
+    if (btn) btn.disabled = true;
+    setDiag("deriving key (PBKDF2 600k iterations)…");
+    try {
+      await _unlockWith(pass);
+      input.value = "";
+      setDiag("unlocked.");
+    } catch (e) {
+      text(status, "Wrong passphrase. Try again.");
+      show(status);
+      input.select();
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+  $("#btn-unlock")?.addEventListener("click", _runUnlockFromInput);
+  $("#unlock-passphrase")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") _runUnlockFromInput();
+  });
+
+  // ── set / change / remove passphrase wiring ─────────────────────────
+  $("#btn-set-passphrase")?.addEventListener("click", async () => {
+    if (!state.rec) {
+      alert("Identity not loaded yet.");
+      return;
+    }
+    const isRotation = !!state.envelope;
+    const promptCopy = isRotation
+      ? "Enter NEW passphrase (replacing the existing one). Min 6 characters."
+      : "Set a passphrase to encrypt this identity at rest. Min 6 characters. " +
+        "Forgot passphrases can't be recovered.";
+    const pass1 = prompt(promptCopy);
+    if (pass1 == null) return;
+    if (pass1.length < 6) {
+      alert("Passphrase too short. Use at least 6 characters.");
+      return;
+    }
+    const pass2 = prompt("Re-enter passphrase to confirm.");
+    if (pass2 == null) return;
+    if (pass2 !== pass1) {
+      alert("Passphrases don't match. Try again.");
+      return;
+    }
+    let envelope;
+    try {
+      envelope = await wrapIdentity(state.rec, pass1);
+    } catch (e) {
+      alert(`Couldn't wrap identity: ${e && e.message ? e.message : e}`);
+      return;
+    }
+    try {
+      await writeIdentity(envelope);
+    } catch (e) {
+      alert(`Couldn't persist wrapped identity: ${e && e.message ? e.message : e}`);
+      return;
+    }
+    state.envelope = envelope;
+    _renderIdentityCard(state.rec);
+    alert(
+      isRotation
+        ? "Passphrase changed. Future visits use the new passphrase."
+        : "Passphrase set. Identity is now encrypted at rest. Future visits prompt for unlock."
+    );
+  });
+
+  $("#btn-remove-passphrase")?.addEventListener("click", async () => {
+    if (!state.rec) {
+      alert("Identity not loaded yet.");
+      return;
+    }
+    if (!confirm(
+      "Remove passphrase? Identity will be stored plaintext in OPFS. " +
+      "Anyone with same-user filesystem access will be able to read it."
+    )) return;
+    try {
+      await writeIdentity(state.rec);
+    } catch (e) {
+      alert(`Couldn't write plaintext identity: ${e && e.message ? e.message : e}`);
+      return;
+    }
+    state.envelope = null;
+    _renderIdentityCard(state.rec);
+    alert("Passphrase removed. Identity is now stored plaintext.");
+  });
+
   // Expose internals for tests + future-ship reuse. Keep the surface
   // tight — only readers / observers, no setters.
   window.__oneLinkPeer = {
-    version: "0.16.0",
+    version: "0.16.1",
     bytesToHex,
     bytesToB64Url,
     b64UrlToBytes,
@@ -515,6 +848,11 @@
     writeIdentity,
     deleteIdentity,
     generateIdentity,
+    wrapIdentity,
+    unwrapIdentity,
+    isWrappedEnvelope,
+    _unlockWith,
+    state,
   };
 
   boot();

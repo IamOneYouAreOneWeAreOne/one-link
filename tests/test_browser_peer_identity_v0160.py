@@ -282,9 +282,13 @@ def test_js_export_writes_json_blob(peer_html: str):
 # ───────── version pin ──────────────────────────────────────────────
 
 def test_peer_html_version_pin(peer_html: str):
-    """The peer JS surface MUST advertise its version so a future
-    ship can detect upgrades + run migrations."""
-    assert 'version: "0.16.0"' in peer_html or "version:'0.16.0'" in peer_html
+    """The peer JS surface MUST advertise a version string so a
+    future ship can detect upgrades + run migrations. Forward-compat:
+    pin the SHAPE (string with semver-ish content) not a literal."""
+    import re
+
+    m = re.search(r"version:\s*['\"]\d+\.\d+\.\d+['\"]", peer_html)
+    assert m, "peer.html __oneLinkPeer.version must be a quoted semver"
 
 
 def test_page_version_matches_package():
