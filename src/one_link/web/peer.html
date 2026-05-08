@@ -295,6 +295,47 @@
       </div>
     </div>
   </div>
+
+  <!-- v0.18.0 — WebRTC manual signaling. This is the no-server
+       transport path: exchange one signed offer/answer blob by QR,
+       chat, or copy/paste; then the browser peers talk directly on
+       DataChannel. Rendezvous can automate blob delivery later, but
+       this path deliberately works with zero signaling server. -->
+  <div class="card" id="webrtc-card" hidden>
+    <h2>Direct browser link</h2>
+    <div class="body">
+      <p class="help">
+        Build a direct encrypted browser-to-browser DataChannel. For
+        now, exchange the signal text manually. Every signal is signed
+        by this device identity before the other side trusts it.
+      </p>
+      <div class="row" style="margin-top:12px; gap:8px;">
+        <button class="btn" id="btn-webrtc-offer">Create offer</button>
+        <button class="btn ghost" id="btn-webrtc-accept">Accept pasted signal</button>
+        <button class="btn ghost" id="btn-webrtc-copy">Copy local signal</button>
+      </div>
+      <p class="help" id="webrtc-status" style="margin-top:10px;"></p>
+      <label class="help" for="webrtc-remote" style="display:block;margin-top:12px;margin-bottom:6px;">
+        Remote signal
+      </label>
+      <textarea id="webrtc-remote"
+                spellcheck="false"
+                placeholder="Paste a signed One Link WebRTC signal here"
+                style="width:100%; min-height:120px; resize:vertical; padding:10px 12px;
+                       background:var(--bg-3); color:var(--text); border:1px solid var(--line);
+                       border-radius:10px; font-size:12px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace;"></textarea>
+      <label class="help" for="webrtc-local" style="display:block;margin-top:12px;margin-bottom:6px;">
+        Local signal
+      </label>
+      <textarea id="webrtc-local"
+                readonly
+                spellcheck="false"
+                placeholder="Your signed signal appears here"
+                style="width:100%; min-height:120px; resize:vertical; padding:10px 12px;
+                       background:var(--bg-3); color:var(--text); border:1px solid var(--line);
+                       border-radius:10px; font-size:12px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace;"></textarea>
+    </div>
+  </div>
 </main>
 
 <footer>
@@ -1074,6 +1115,212 @@
     return body;
   }
 
+  // ── v0.18.0 — WebRTC DataChannel transport foundation ───────────────
+  const WRTC_PROTOCOL_VERSION = "OL-WRTC-1";
+  const WRTC_SIGNAL_TTL_MS = 5 * 60 * 1000;
+  const WEBRTC_STUN_SERVERS = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:global.stun.twilio.com:3478" },
+    { urls: "stun:stun.cloudflare.com:3478" },
+    { urls: "stun:stun.nextcloud.com:443" },
+    { urls: "stun:stun.sipgate.net:3478" },
+    { urls: "stun:stun.antisip.com:3478" },
+  ];
+  const WEBRTC_CONTROL_LABEL = "one-link-control-v1";
+  const WEBRTC_BULK_LABEL = "one-link-bulk-v1";
+  const WEBRTC_BULK_BUFFER_LOW_BYTES = 1 * 1024 * 1024;
+  const WEBRTC_BULK_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
+
+  function assertWebRtcAvailable() {
+    if (!window.RTCPeerConnection) {
+      throw new Error("WebRTC unavailable in this browser");
+    }
+    if (!window.RTCSessionDescription) {
+      throw new Error("RTCSessionDescription unavailable in this browser");
+    }
+    return true;
+  }
+
+  async function _signSignal(type, body) {
+    if (!state.rec) throw new Error("identity not unlocked");
+    const signing = {
+      v: WRTC_PROTOCOL_VERSION,
+      type: String(type),
+      sender_pubkey_b64: state.rec.public_key_b64u,
+      timestamp_ms: Date.now(),
+      body,
+    };
+    const enc = new TextEncoder();
+    const sig = await _signEd25519(
+      state.rec.private_key_jwk,
+      enc.encode(_canonicalJson(signing)),
+    );
+    return Object.assign({}, signing, { signature: bytesToB64Url(sig) });
+  }
+
+  async function verifySignal(envelope, expectedType) {
+    if (!envelope || envelope.v !== WRTC_PROTOCOL_VERSION) {
+      throw new Error("not a One Link WebRTC signal");
+    }
+    if (expectedType && envelope.type !== expectedType) {
+      throw new Error(`expected ${expectedType}, got ${envelope.type}`);
+    }
+    if (Math.abs(Date.now() - Number(envelope.timestamp_ms || 0)) > WRTC_SIGNAL_TTL_MS) {
+      throw new Error("signal expired");
+    }
+    const pub = b64UrlToBytes(String(envelope.sender_pubkey_b64 || ""));
+    if (pub.byteLength !== 32) throw new Error("bad signal pubkey");
+    const sig = b64UrlToBytes(String(envelope.signature || ""));
+    if (sig.byteLength !== 64) throw new Error("bad signal signature");
+    const signing = {
+      v: envelope.v,
+      type: envelope.type,
+      sender_pubkey_b64: envelope.sender_pubkey_b64,
+      timestamp_ms: Number(envelope.timestamp_ms),
+      body: envelope.body,
+    };
+    const enc = new TextEncoder();
+    const ok = await _verifyEd25519(pub, sig, enc.encode(_canonicalJson(signing)));
+    if (!ok) throw new Error("signal signature does not verify");
+    return envelope;
+  }
+
+  function encodeSignal(envelope) {
+    return bytesToB64Url(new TextEncoder().encode(JSON.stringify(envelope)));
+  }
+
+  function decodeSignal(textValue) {
+    const s = String(textValue || "").trim();
+    if (!s) throw new Error("empty signal");
+    try {
+      return JSON.parse(s);
+    } catch {
+      const raw = b64UrlToBytes(s);
+      return JSON.parse(new TextDecoder().decode(raw));
+    }
+  }
+
+  function createPeerConnection(opts) {
+    assertWebRtcAvailable();
+    opts = opts || {};
+    const pc = new RTCPeerConnection({
+      iceServers: WEBRTC_STUN_SERVERS,
+      bundlePolicy: "max-bundle",
+      rtcpMuxPolicy: "require",
+    });
+    const session = {
+      pc,
+      control: null,
+      bulk: null,
+      signals: [],
+      opened_ms: Date.now(),
+      state: "starting",
+    };
+    const emitState = (label) => {
+      session.state = label;
+      if (opts.onState) opts.onState(label, session);
+    };
+    const wireChannel = (channel, kind) => {
+      channel.binaryType = "arraybuffer";
+      if (kind === "bulk") {
+        channel.bufferedAmountLowThreshold = WEBRTC_BULK_BUFFER_LOW_BYTES;
+      }
+      channel.onopen = () => emitState(`${kind}:open`);
+      channel.onclose = () => emitState(`${kind}:closed`);
+      channel.onerror = () => emitState(`${kind}:error`);
+      channel.onmessage = (event) => {
+        if (opts.onMessage) opts.onMessage(kind, event.data, session);
+      };
+      return channel;
+    };
+    if (opts.initiator) {
+      session.control = wireChannel(
+        pc.createDataChannel(WEBRTC_CONTROL_LABEL, { ordered: true }),
+        "control",
+      );
+      session.bulk = wireChannel(
+        pc.createDataChannel(WEBRTC_BULK_LABEL, {
+          ordered: false,
+          maxRetransmits: 0,
+        }),
+        "bulk",
+      );
+    } else {
+      pc.ondatachannel = (event) => {
+        if (event.channel.label === WEBRTC_CONTROL_LABEL) {
+          session.control = wireChannel(event.channel, "control");
+        } else if (event.channel.label === WEBRTC_BULK_LABEL) {
+          session.bulk = wireChannel(event.channel, "bulk");
+        }
+      };
+    }
+    pc.onicecandidate = async (event) => {
+      if (!event.candidate) return;
+      const signal = await _signSignal("ice", event.candidate.toJSON());
+      session.signals.push(signal);
+      if (opts.onSignal) opts.onSignal(signal, session);
+    };
+    pc.onconnectionstatechange = () => emitState(pc.connectionState || "unknown");
+    pc.oniceconnectionstatechange = () => emitState(`ice:${pc.iceConnectionState}`);
+    return session;
+  }
+
+  async function createOfferSignal(opts) {
+    const session = createPeerConnection(Object.assign({}, opts, { initiator: true }));
+    const offer = await session.pc.createOffer({
+      offerToReceiveAudio: false,
+      offerToReceiveVideo: false,
+    });
+    await session.pc.setLocalDescription(offer);
+    const signal = await _signSignal("offer", session.pc.localDescription.toJSON());
+    session.signals.push(signal);
+    return { session, signal };
+  }
+
+  async function acceptOfferSignal(envelope, opts) {
+    await verifySignal(envelope, "offer");
+    const session = createPeerConnection(Object.assign({}, opts, { initiator: false }));
+    await session.pc.setRemoteDescription(new RTCSessionDescription(envelope.body));
+    const answer = await session.pc.createAnswer();
+    await session.pc.setLocalDescription(answer);
+    const signal = await _signSignal("answer", session.pc.localDescription.toJSON());
+    session.signals.push(signal);
+    return { session, signal };
+  }
+
+  async function acceptAnswerSignal(session, envelope) {
+    if (!session || !session.pc) throw new Error("missing session");
+    await verifySignal(envelope, "answer");
+    await session.pc.setRemoteDescription(new RTCSessionDescription(envelope.body));
+    return session;
+  }
+
+  async function addIceSignal(session, envelope) {
+    if (!session || !session.pc) throw new Error("missing session");
+    await verifySignal(envelope, "ice");
+    await session.pc.addIceCandidate(envelope.body);
+    return session;
+  }
+
+  function sendControl(session, obj) {
+    if (!session || !session.control || session.control.readyState !== "open") {
+      throw new Error("control channel not open");
+    }
+    session.control.send(JSON.stringify(obj));
+  }
+
+  async function sendBulk(session, data) {
+    if (!session || !session.bulk || session.bulk.readyState !== "open") {
+      throw new Error("bulk channel not open");
+    }
+    while (session.bulk.bufferedAmount > WEBRTC_BULK_BUFFER_MAX_BYTES) {
+      await new Promise((resolve) => {
+        session.bulk.onbufferedamountlow = resolve;
+      });
+    }
+    session.bulk.send(data);
+  }
+
   // ── rendezvous UI wiring ────────────────────────────────────────────
   const RDZ_URL_KEY = "ol_peer.rdz_url";
 
@@ -1134,6 +1381,88 @@
     _scheduleRdzRefresh(RDZ_DEFAULT_TTL_S, url);
   });
 
+  // ── WebRTC UI wiring ────────────────────────────────────────────────
+  let _webrtcSession = null;
+  function _showWebRtcCard() {
+    show($("#webrtc-card"));
+    try {
+      assertWebRtcAvailable();
+      text($("#webrtc-status"), "Ready for direct browser link.");
+    } catch (e) {
+      text($("#webrtc-status"), e && e.message ? e.message : String(e));
+    }
+  }
+  function _writeLocalSignal(signal) {
+    const out = $("#webrtc-local");
+    if (out) out.value = encodeSignal(signal);
+  }
+  function _readRemoteSignal() {
+    const input = $("#webrtc-remote");
+    return decodeSignal(input ? input.value : "");
+  }
+  $("#btn-webrtc-offer")?.addEventListener("click", async () => {
+    const btn = $("#btn-webrtc-offer");
+    if (btn) btn.disabled = true;
+    text($("#webrtc-status"), "Creating signed WebRTC offer…");
+    try {
+      const res = await createOfferSignal({
+        onSignal: _writeLocalSignal,
+        onState: (label) => text($("#webrtc-status"), `WebRTC: ${label}`),
+      });
+      _webrtcSession = res.session;
+      _writeLocalSignal(res.signal);
+      text($("#webrtc-status"), "Offer ready. Send the local signal to the other peer.");
+    } catch (e) {
+      text($("#webrtc-status"), `Offer failed: ${e && e.message ? e.message : e}`);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+  $("#btn-webrtc-accept")?.addEventListener("click", async () => {
+    const btn = $("#btn-webrtc-accept");
+    if (btn) btn.disabled = true;
+    text($("#webrtc-status"), "Verifying remote signal…");
+    try {
+      const signal = _readRemoteSignal();
+      if (signal.type === "offer") {
+        const res = await acceptOfferSignal(signal, {
+          onSignal: _writeLocalSignal,
+          onState: (label) => text($("#webrtc-status"), `WebRTC: ${label}`),
+        });
+        _webrtcSession = res.session;
+        _writeLocalSignal(res.signal);
+        text($("#webrtc-status"), "Answer ready. Send the local signal back.");
+      } else if (signal.type === "answer") {
+        await acceptAnswerSignal(_webrtcSession, signal);
+        text($("#webrtc-status"), "Answer accepted. Waiting for channel open.");
+      } else if (signal.type === "ice") {
+        await addIceSignal(_webrtcSession, signal);
+        text($("#webrtc-status"), "ICE candidate accepted.");
+      } else {
+        throw new Error(`unsupported signal type: ${signal.type}`);
+      }
+    } catch (e) {
+      text($("#webrtc-status"), `Signal failed: ${e && e.message ? e.message : e}`);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+  $("#btn-webrtc-copy")?.addEventListener("click", async () => {
+    const out = $("#webrtc-local");
+    if (!out || !out.value) {
+      text($("#webrtc-status"), "No local signal yet.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(out.value);
+      text($("#webrtc-status"), "Local signal copied.");
+    } catch {
+      out.focus();
+      out.select();
+      text($("#webrtc-status"), "Select the local signal and copy it.");
+    }
+  });
+
   // Show the rdz card once identity is loaded. Hook into the card
   // renderer to surface the affordance after unlock.
   const _origRenderIdentityCard = _renderIdentityCard;
@@ -1141,12 +1470,13 @@
   _renderIdentityCard = function (rec) {
     _origRenderIdentityCard(rec);
     _showRdzCard();
+    _showWebRtcCard();
   };
 
   // Expose internals for tests + future-ship reuse. Keep the surface
   // tight — only readers / observers, no setters.
   window.__oneLinkPeer = {
-    version: "0.17.0",
+    version: "0.18.0",
     bytesToHex,
     bytesToB64Url,
     b64UrlToBytes,
@@ -1166,6 +1496,17 @@
     _normalizeRdzUrl,
     registerWith,
     lookupAt,
+    assertWebRtcAvailable,
+    createPeerConnection,
+    createOfferSignal,
+    acceptOfferSignal,
+    acceptAnswerSignal,
+    addIceSignal,
+    sendControl,
+    sendBulk,
+    verifySignal,
+    encodeSignal,
+    decodeSignal,
     state,
   };
 
