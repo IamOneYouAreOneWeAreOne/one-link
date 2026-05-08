@@ -47,7 +47,11 @@ def main() -> int:
                     f"{metrics['mib_per_s']} MiB/s ({metrics['chunks']} chunks)"
                 )
             elif b["name"] == "cdc_indexing":
-                print(f"  CDC indexing: {metrics['mib_per_s']} MiB/s ({metrics['chunks']} chunks)")
+                print(
+                    "  CDC indexing: "
+                    f"{metrics['mib_per_s']} MiB/s ({metrics['chunks']} chunks, "
+                    f"engine={metrics.get('engine', 'python')})"
+                )
             elif b["name"] == "prior_knowledge_dedup":
                 print(
                     "  Prior knowledge: "

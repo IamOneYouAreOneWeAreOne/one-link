@@ -16,6 +16,23 @@ from one_link.cdc import (
 from one_link.merkle import build_tree, divergent_leaf_indexes, hash_leaf, manifest_leaf_hashes
 
 
+def test_native_cdc_matches_python_fallback(monkeypatch, tmp_path):
+    data = random.Random(20260508).randbytes(MAX_CHUNK_BYTES * 5 + 777)
+    p = tmp_path / "native-check.bin"
+    p.write_bytes(data)
+
+    monkeypatch.setenv("ONE_LINK_DISABLE_NATIVE_CDC", "1")
+    python_chunks = chunk_bytes(data)
+    python_idx = index_path(p, read_size=8192)
+
+    monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_CDC", raising=False)
+    native_chunks = chunk_bytes(data)
+    native_idx = index_path(p, read_size=8192)
+
+    assert native_chunks == python_chunks
+    assert native_idx == python_idx
+
+
 def test_cdc_chunk_sizes_are_bounded_for_large_payload():
     chunks = chunk_bytes(os.urandom(MAX_CHUNK_BYTES * 2 + 123))
 

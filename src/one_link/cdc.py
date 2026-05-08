@@ -85,6 +85,10 @@ def chunk_bytes(data: bytes) -> tuple[Chunk, ...]:
     entire tail.
     """
 
+    native = _chunk_bytes_native(data)
+    if native is not None:
+        return native
+
     chunks: list[Chunk] = []
     start = 0
     rolling = 0
@@ -112,6 +116,10 @@ def index_path(path: Path, *, read_size: int = 1024 * 1024) -> FileIndex:
     the path used by live transfer, so very large files do not need a full
     in-memory copy just to build the dedup offer.
     """
+
+    native = _index_path_native(path, read_size=read_size)
+    if native is not None:
+        return native
 
     chunks: list[Chunk] = []
     file_hasher = blake3.blake3()
@@ -260,3 +268,108 @@ def _make_chunk(index: int, start: int, end: int, data: bytes) -> Chunk:
         end=end,
         hash=blake3.blake3(data[start:end]).hexdigest(),
     )
+
+
+def _chunk_bytes_native(data: bytes) -> tuple[Chunk, ...] | None:
+    try:
+        from .native_cdc import get_native_cdc_scanner
+
+        scanner = get_native_cdc_scanner()
+        if scanner is None:
+            return None
+        buf = bytearray(data)
+        cuts, rolling, chunk_len = scanner.scan(
+            buf,
+            length=len(buf),
+            initial_rolling=0,
+            initial_chunk_len=0,
+            min_chunk=MIN_CHUNK_BYTES,
+            max_chunk=MAX_CHUNK_BYTES,
+            boundary_mask=_BOUNDARY_MASK,
+        )
+        _ = rolling, chunk_len
+        chunks: list[Chunk] = []
+        start = 0
+        for cut in cuts:
+            chunks.append(_make_chunk(len(chunks), start, cut, data))
+            start = cut
+        if start < len(data) or not chunks:
+            chunks.append(_make_chunk(len(chunks), start, len(data), data))
+        return tuple(chunks)
+    except Exception:
+        return None
+
+
+def _index_path_native(path: Path, *, read_size: int) -> FileIndex | None:
+    try:
+        from .native_cdc import get_native_cdc_scanner
+
+        scanner = get_native_cdc_scanner()
+        if scanner is None:
+            return None
+        if read_size <= 0:
+            return None
+
+        chunks: list[Chunk] = []
+        file_hasher = blake3.blake3()
+        chunk_hasher = blake3.blake3()
+        buf = bytearray(read_size)
+        absolute = 0
+        chunk_start = 0
+        rolling = 0
+        chunk_len = 0
+
+        with open(path, "rb") as f:
+            while True:
+                n = f.readinto(buf)
+                if not n:
+                    break
+                view = memoryview(buf)[:n]
+                file_hasher.update(view)
+                cuts, rolling, chunk_len = scanner.scan(
+                    buf,
+                    length=n,
+                    initial_rolling=rolling,
+                    initial_chunk_len=chunk_len,
+                    min_chunk=MIN_CHUNK_BYTES,
+                    max_chunk=MAX_CHUNK_BYTES,
+                    boundary_mask=_BOUNDARY_MASK,
+                )
+
+                segment_start = 0
+                for cut in cuts:
+                    if cut < segment_start or cut > n:
+                        raise RuntimeError(f"native CDC returned invalid cut {cut}")
+                    chunk_hasher.update(view[segment_start:cut])
+                    end = absolute + cut
+                    chunks.append(
+                        Chunk(
+                            index=len(chunks),
+                            start=chunk_start,
+                            end=end,
+                            hash=chunk_hasher.hexdigest(),
+                        )
+                    )
+                    chunk_start = end
+                    chunk_hasher = blake3.blake3()
+                    segment_start = cut
+                if segment_start < n:
+                    chunk_hasher.update(view[segment_start:n])
+                absolute += n
+
+        if chunk_len or not chunks:
+            chunks.append(
+                Chunk(
+                    index=len(chunks),
+                    start=chunk_start,
+                    end=absolute,
+                    hash=chunk_hasher.hexdigest(),
+                )
+            )
+        return FileIndex(
+            blob_hash=file_hasher.hexdigest(),
+            size=path.stat().st_size,
+            chunks=tuple(chunks),
+        )
+    except Exception:
+        return None

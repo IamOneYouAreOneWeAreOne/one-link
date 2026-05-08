@@ -31,6 +31,7 @@ from typing import Callable
 
 from .cdc import build_dedup_plan, fixed_index_path, hash_path, index_path
 from .daemon import _stream_transfer_profile
+from .native_cdc import native_cdc_status
 from .state import State
 from .swarm_plan import plan_swarm_sources, source_from_hashes
 from .transfer_brain import (
@@ -124,6 +125,7 @@ def bench_cdc_indexing(*, size_mib: int, seed: int) -> BenchResult:
         with tempfile.TemporaryDirectory(prefix="ol_perf_cdc_") as td:
             path = Path(td) / "payload.bin"
             path.write_bytes(rng.randbytes(size_mib * MiB))
+            status = native_cdc_status()
             t0 = time.perf_counter()
             idx = index_path(path)
             elapsed = time.perf_counter() - t0
@@ -134,6 +136,8 @@ def bench_cdc_indexing(*, size_mib: int, seed: int) -> BenchResult:
             "mib_per_s": _mb_per_s(size_mib * MiB, elapsed),
             "avg_chunk_bytes": round((size_mib * MiB) / max(1, len(idx.chunks)), 3),
             "blob_hash_prefix": idx.blob_hash[:12],
+            "engine": status.engine if status.available else "python",
+            "native_available": status.available,
         }
 
     return _time(run)
