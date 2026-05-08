@@ -78,21 +78,29 @@ def test_each_section_has_nav_button(index_html: str, name: str, glyph: str):
 
 
 def test_each_section_has_pane(index_html: str):
-    """Counts must match: 11 nav items, 11 panes."""
+    """Counts must match: 11 nav items, 11 panes. v0.14.4 added
+    `.desktop-only` to network/shortcuts/advanced nav buttons; the
+    structural pin must survive arbitrary additional classes —
+    match on `data-settings-pane="<name>"` plus the role class
+    individually instead of pinning a fixed class string."""
+    import re
+
     expected = [
         "profile", "privacy", "notifications", "appearance",
         "chats", "network", "storage", "devices",
         "shortcuts", "advanced", "about",
     ]
     for name in expected:
-        # The nav button has class settings-nav-item; the pane has
-        # class settings-pane. Both share data-settings-pane.
-        nav = f'class="settings-nav-item active" data-settings-pane="{name}"' in index_html or \
-              f'class="settings-nav-item" data-settings-pane="{name}"' in index_html
-        pane = f'class="settings-pane active" data-settings-pane="{name}"' in index_html or \
-               f'class="settings-pane" data-settings-pane="{name}"' in index_html
-        assert nav, f"nav button missing for {name!r}"
-        assert pane, f"pane section missing for {name!r}"
+        nav_pattern = re.compile(
+            r'<button\s+class="[^"]*settings-nav-item[^"]*"[^>]*'
+            rf'data-settings-pane="{name}"'
+        )
+        pane_pattern = re.compile(
+            r'<section\s+class="[^"]*settings-pane[^"]*"[^>]*'
+            rf'data-settings-pane="{name}"'
+        )
+        assert nav_pattern.search(index_html), f"nav button missing for {name!r}"
+        assert pane_pattern.search(index_html), f"pane section missing for {name!r}"
 
 
 # ───────── existing input IDs preserved ──────────────────────────────

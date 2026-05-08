@@ -1573,6 +1573,10 @@
   html[data-form-factor="phone"] .desktop-only { display: none !important; }
   html[data-form-factor="phone"] [data-tier="advanced"] { display: none; }
   html.show-advanced [data-tier="advanced"] { display: revert !important; }
+  /* v0.14.8: surface the phone-only diagnostics hint when the
+     About pane carries it. Desktop has Ctrl+Shift+D + the Advanced
+     pane button so the hint stays hidden there. */
+  html[data-form-factor="phone"] #phone-diag-hint { display: block !important; }
 
   /* "N advanced controls hidden. [Show]" hint that lives at the
      bottom of any pane that has hidden items. CSS-only; the JS
@@ -1710,6 +1714,12 @@
     }
     .composer textarea {
       font-size: 16px;  /* prevents iOS zoom-on-focus */
+    }
+    /* v0.14.6: respect the iOS home-indicator safe area so the send
+       button isn't covered by the bottom-bar swipe target. The
+       max() clamps to a sane minimum on devices without a notch. */
+    .composer {
+      padding-bottom: max(8px, env(safe-area-inset-bottom));
     }
 
     /* Peer / group rows: more vertical padding so taps don't miss. */
@@ -2775,9 +2785,9 @@
          the-thing-pops-on-the-right. -->
     <nav class="pane-tabs" id="pane-tabs">
       <button class="btn active" data-pane="convo">Chat</button>
-      <button class="btn" data-pane="files" id="btn-files">Files</button>
-      <button class="btn" data-pane="folders" id="btn-folders">Folders</button>
-      <button class="btn" data-pane="mesh" id="btn-mesh">Activity</button>
+      <button class="btn desktop-only" data-pane="files" id="btn-files">Files</button>
+      <button class="btn desktop-only" data-pane="folders" id="btn-folders">Folders</button>
+      <button class="btn" data-pane="mesh" id="btn-mesh" data-tier="advanced">Activity</button>
     </nav>
     <div class="me">
       <!-- v0.10.4: presence pill replaces the static green dot.
@@ -2929,7 +2939,10 @@
           <div class="reply-bar" id="reply-bar"></div>
           <div class="attach-tray" id="attach-tray"></div>
           <button class="icon-btn" id="btn-attach2" title="Attach file">📎</button>
-          <button class="icon-btn" id="btn-screenshot" title="Paste screenshot from clipboard">📷</button>
+          <!-- v0.14.6: screenshot-from-clipboard is desktop-only.
+               Phones don't have a "paste from clipboard" UX for
+               screenshots; the OS share sheet handles it. -->
+          <button class="icon-btn desktop-only" id="btn-screenshot" title="Paste screenshot from clipboard">📷</button>
           <!-- v0.9.2 voice messages — click to start recording, click
                again to stop. While recording, the icon flips to a
                red square + a timer/cancel overlay slides in. -->
@@ -2952,8 +2965,10 @@
       </div>
     </section>
 
-    <!-- FILES PANEL (toggled) -->
-    <aside class="files" id="files-panel" style="display:none;">
+    <!-- FILES PANEL (toggled). v0.14.3: desktop-only — file inbox on
+         phone is the chat composer's attach button + share-sheet flow,
+         not a separate panel. -->
+    <aside class="files desktop-only" id="files-panel" style="display:none;">
       <div class="section-h">
         <span>Files</span>
         <span class="count" id="files-count">0</span>
@@ -2978,7 +2993,10 @@
       </div>
     </aside>
 
-    <aside class="files" id="folders-panel" style="display:none;">
+    <!-- FOLDERS PANEL. v0.14.3: desktop-only — folder-sync semantics
+         (watch a directory, observe conflicts, manage exclusions)
+         don't translate to phone OS sandboxes. -->
+    <aside class="files desktop-only" id="folders-panel" style="display:none;">
       <div class="section-h">
         <span>Shared folders</span>
         <span class="count" id="folders-count">0</span>
@@ -3022,6 +3040,12 @@
          backdrops. -->
 
 
+    <!-- ACTIVITY PANEL. v0.14.3: gated by btn-mesh which is
+         data-tier="advanced". On phone-default the button is hidden
+         so the panel can never be activated. We deliberately don't
+         tag the aside itself: the show-advanced reveal rule uses
+         `display: revert !important` which would clobber the inline
+         `display: flex` the click handler sets here. -->
     <aside class="files" id="mesh-panel" style="display:none;">
       <div class="section-h">
         <span>Activity</span>
@@ -3067,8 +3091,10 @@
 
   </main>
 
-  <!-- DROP OVERLAY -->
-  <div class="drop-overlay" id="drop-overlay">
+  <!-- DROP OVERLAY. v0.14.6: desktop-only. Phones have no
+       drag-and-drop affordance from the home screen; the attach
+       button + share-sheet is the path. -->
+  <div class="drop-overlay desktop-only" id="drop-overlay">
     <div class="panel">
       <h2>Drop to send</h2>
       <p id="drop-target">to <span id="drop-peer">…</span></p>
@@ -3202,7 +3228,7 @@
           <button class="settings-nav-item" data-settings-pane="chats">
             <span class="settings-nav-glyph">💬</span> Chats
           </button>
-          <button class="settings-nav-item" data-settings-pane="network">
+          <button class="settings-nav-item desktop-only" data-settings-pane="network">
             <span class="settings-nav-glyph">🌐</span> Network
           </button>
           <button class="settings-nav-item" data-settings-pane="storage">
@@ -3211,10 +3237,10 @@
           <button class="settings-nav-item" data-settings-pane="devices">
             <span class="settings-nav-glyph">🖥</span> Devices
           </button>
-          <button class="settings-nav-item" data-settings-pane="shortcuts">
+          <button class="settings-nav-item desktop-only" data-settings-pane="shortcuts">
             <span class="settings-nav-glyph">⌨</span> Shortcuts
           </button>
-          <button class="settings-nav-item" data-settings-pane="advanced">
+          <button class="settings-nav-item desktop-only" data-settings-pane="advanced">
             <span class="settings-nav-glyph">⚙</span> Advanced
           </button>
           <button class="settings-nav-item" data-settings-pane="about">
@@ -3298,11 +3324,15 @@
               full access. Off: you approve each new pairing's reach.
               Trust costs nothing until it does.
             </p>
-            <div class="settings-row">
+            <!-- v0.14.4: data-tier="advanced". Setting an env var
+                 before launch isn't a phone-installable workflow.
+                 Phones rely on the OS Secure Enclave for at-rest;
+                 this row is a desktop / power-user surface. -->
+            <div class="settings-row" data-tier="advanced">
               <label for="set-passphrase">Passphrase</label>
               <input type="password" id="set-passphrase" placeholder="(env var, restart required; yes, we know.)" disabled />
             </div>
-            <p class="settings-help">
+            <p class="settings-help" data-tier="advanced">
               Encrypts your local database at rest. Set the
               <code>ONE_LINK_PASSPHRASE</code> environment variable
               before launching One Link. It's a 2014 vibe, but it works.
@@ -3391,7 +3421,11 @@
               matter how loudly they yell.
             </p>
 
-            <div class="settings-section">
+            <!-- v0.14.4: data-tier="advanced". Lock-screen preview +
+                 reaction-ping are tuning, not core. Phone users
+                 control these via the OS notification settings;
+                 duplicating in-app adds confusion without value. -->
+            <div class="settings-section" data-tier="advanced">
               <div class="settings-section-h"><span>What to notify about</span></div>
               <div class="settings-row">
                 <label for="set-notif-preview">Show message preview</label>
@@ -3496,7 +3530,9 @@
           </section>
 
           <!-- ── Network ────────────────────────────────────────── -->
-          <section class="settings-pane" data-settings-pane="network">
+          <!-- v0.14.4: desktop-only. Rendezvous URLs are operator-grade
+               configuration; phone users get sane defaults at install. -->
+          <section class="settings-pane desktop-only" data-settings-pane="network">
             <h3>Network</h3>
             <div class="settings-section">
               <div class="settings-section-h">
@@ -3519,7 +3555,11 @@
           <section class="settings-pane" data-settings-pane="storage">
             <h3>Storage &amp; data</h3>
 
-            <div class="settings-section">
+            <!-- v0.14.4: download-folder is desktop/advanced. iOS +
+                 Android sandboxes don't expose a writable absolute
+                 path the user picks; the built-in inbox is the only
+                 sensible default on phone. -->
+            <div class="settings-section" data-tier="advanced">
               <div class="settings-section-h"><span>Downloads</span></div>
               <div class="settings-row">
                 <label for="set-download-folder">Folder</label>
@@ -3559,8 +3599,10 @@
 
             <!-- v0.11.6: bandwidth cap. Pinned in settings; the
                  transfer engine consumes this value to throttle
-                 chunks. -->
-            <div class="settings-section">
+                 chunks. v0.14.4: data-tier="advanced" — granular
+                 throttling is operator-grade; phone users on metered
+                 connections rely on the OS' own data-saver. -->
+            <div class="settings-section" data-tier="advanced">
               <div class="settings-section-h"><span>Bandwidth limit</span></div>
               <div class="settings-row">
                 <label for="set-bandwidth-cap">Max upload + download</label>
@@ -3587,7 +3629,10 @@
                 <label for="set-auto-accept-size">Max file size (MB)</label>
                 <input type="number" id="set-auto-accept-size" min="0" step="1" placeholder="0 = no limit" />
               </div>
-              <div class="settings-row">
+              <!-- v0.14.4: data-tier="advanced". Phone users rarely
+                   curate per-extension allowlists; size cap above
+                   covers the common case (defang-by-budget). -->
+              <div class="settings-row" data-tier="advanced">
                 <label for="set-auto-accept-exts">Allowed extensions</label>
                 <input type="text" id="set-auto-accept-exts" placeholder="e.g. png, jpg, pdf. Blank = anything goes." />
               </div>
@@ -3628,7 +3673,9 @@
           </section>
 
           <!-- ── Shortcuts ──────────────────────────────────────── -->
-          <section class="settings-pane" data-settings-pane="shortcuts">
+          <!-- v0.14.4: desktop-only. Keyboard shortcuts are useless on
+               touch; phone users have nothing to look up. -->
+          <section class="settings-pane desktop-only" data-settings-pane="shortcuts">
             <h3>Keyboard shortcuts</h3>
             <p class="settings-help">
               Press <kbd>?</kbd> anywhere in the app to view the full
@@ -3644,7 +3691,10 @@
           </section>
 
           <!-- ── Advanced ───────────────────────────────────────── -->
-          <section class="settings-pane" data-settings-pane="advanced">
+          <!-- v0.14.4: desktop-only. Diagnostics, debug overlay,
+               database vacuum — operator-tier surfaces. v0.14.8 adds
+               a phone escape hatch (long-press version). -->
+          <section class="settings-pane desktop-only" data-settings-pane="advanced">
             <h3>Advanced</h3>
             <div class="settings-section">
               <div class="settings-section-h"><span>Log verbosity</span></div>
@@ -3681,8 +3731,14 @@
             <h3>About</h3>
             <div class="settings-row">
               <label>Version</label>
-              <span class="settings-readonly" id="settings-about-version">…</span>
+              <span class="settings-readonly" id="settings-about-version" data-long-press-diagnostics="1">…</span>
             </div>
+            <!-- v0.14.8: phone-only escape hatch hint. The long-press
+                 handler above opens the diagnostics overlay so a
+                 phone user can grab logs when a maintainer asks. -->
+            <p class="settings-help" id="phone-diag-hint" style="display:none;">
+              Long-press the version string above to open diagnostics.
+            </p>
             <div class="settings-row">
               <label>Protocol</label>
               <span class="settings-readonly" id="settings-about-protocol">…</span>
@@ -3919,14 +3975,20 @@
           folders). Toggle off if you want to grant capabilities
           individually below.
         </p>
-        <div class="mini-actions wrap" id="dev-cap-row">
+        <!-- v0.14.5: per-capability toggles are advanced. The
+             "Allow all" master toggle above is the daily-use
+             surface; granular per-capability tuning is power-user. -->
+        <div class="mini-actions wrap" id="dev-cap-row" data-tier="advanced">
           <button class="cap-toggle" data-cap="chat">Chat</button>
           <button class="cap-toggle" data-cap="files">Files</button>
           <button class="cap-toggle" data-cap="folder_sync">Folders</button>
         </div>
       </div>
 
-      <div class="settings-section">
+      <!-- v0.14.5: connection details (regime, latency, address) are
+           operator-grade. Phone users care about "is this device
+           reachable" not "what NAT class are we on". -->
+      <div class="settings-section" data-tier="advanced">
         <div class="settings-section-h"><span>Reachability</span></div>
         <div class="device-reach" id="dev-reach">
           <div class="reach-row"><span class="lbl">Connection</span><span class="val" id="dev-regime">—</span></div>
@@ -4016,7 +4078,10 @@
            plus a synthetic 'first seen' event from peers.first_seen_ms.
            Loaded lazily when the disclosure opens — most users
            won't expand it. -->
-      <div class="settings-section" id="dev-trust-history-section">
+      <!-- v0.14.5: trust timeline is forensic / audit surface, not
+           daily use. Hide on phone; phone users still see Identity
+           & trust (SAS, fingerprint) above for verification. -->
+      <div class="settings-section" id="dev-trust-history-section" data-tier="advanced">
         <div class="settings-section-h">
           <span>Trust history</span>
           <button class="btn-icon" id="dev-trust-history-toggle" title="Show / hide trust timeline">▾</button>
@@ -5744,7 +5809,9 @@
     pill.onclick = () => {
       // Switch to the Files pane → Sent tab.
       const filesBtn = document.querySelector('[data-pane="files"]');
-      if (filesBtn) filesBtn.click();
+      // v0.14.3: bail on phone — Files pane is desktop-only.
+      if (_phoneCannotShow(filesBtn)) return;
+      filesBtn.click();
       state.filesMode = "sent";
       const sentBtn = document.querySelector('[data-files-mode="sent"]');
       if (sentBtn) sentBtn.click();
@@ -7623,9 +7690,11 @@
       if (peerlist) peerlist.scrollIntoView({ block: "nearest", behavior: "smooth" });
     } else if (kind === "active") {
       const filesBtn = document.querySelector('[data-pane="files"]');
-      if (filesBtn) filesBtn.click();
-      state.filesMode = "sent";
       const sentBtn = document.querySelector('[data-files-mode="sent"]');
+      // Phone has no Files pane; skip if the target is hidden.
+      if (_phoneCannotShow(filesBtn)) return;
+      filesBtn.click();
+      state.filesMode = "sent";
       if (sentBtn) sentBtn.click();
     } else if (kind === "cache") {
       _activateActivityFilter("transfer");
@@ -8049,6 +8118,19 @@
     };
     hint.appendChild(showLink);
     host.appendChild(hint);
+  }
+
+  // v0.14.3 — guard programmatic pane navigation. The transfer pill
+  // and the mesh-panel "active" tile both call .click() on a
+  // [data-pane="files"] button. On phone that button carries
+  // .desktop-only and is hidden via display:none !important; firing
+  // the click handler anyway would set state.activePane="files" and
+  // refresh the Files list against an inert panel. Callers must
+  // bail when this returns true.
+  function _phoneCannotShow(paneBtn) {
+    if (!paneBtn) return true;
+    if (document.documentElement.getAttribute("data-form-factor") !== "phone") return false;
+    return paneBtn.classList.contains("desktop-only");
   }
 
   function _recordSwitch(toShortId) {
@@ -9335,7 +9417,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.14.2";
+  const PAGE_BUILT_FOR = "0.14.8";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -11284,6 +11366,41 @@
     openDebugOverlay();
   });
 
+  // v0.14.8 — Phone diagnostics escape hatch. The Advanced settings
+  // pane carries the desktop-only "Open diagnostics" button + the
+  // page-wide Ctrl+Shift+D shortcut. Phones have neither (no
+  // keyboard, Advanced pane is hidden). Long-pressing the version
+  // string in About is the in-app fallback so a phone user can
+  // still reach diagnostics if a maintainer asks "open the debug
+  // overlay and tell me what you see." 800ms threshold matches
+  // platform conventions.
+  (function _wirePhoneDiagnosticsLongPress() {
+    const target = $("#settings-about-version");
+    if (!target) return;
+    let timer = null;
+    const start = (e) => {
+      // Skip non-phone form-factors — desktop has Ctrl+Shift+D and
+      // the Advanced pane button. Avoid surprising desktop users
+      // who linger on the version string.
+      const ff = document.documentElement.getAttribute("data-form-factor");
+      if (ff !== "phone") return;
+      timer = setTimeout(() => {
+        timer = null;
+        $("#settings-backdrop")?.classList.remove("show");
+        openDebugOverlay();
+      }, 800);
+    };
+    const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+    target.addEventListener("touchstart", start, { passive: true });
+    target.addEventListener("touchend", cancel);
+    target.addEventListener("touchmove", cancel);
+    target.addEventListener("touchcancel", cancel);
+    // Mouse fallback so a tablet on a hybrid form-factor still works.
+    target.addEventListener("mousedown", start);
+    target.addEventListener("mouseup", cancel);
+    target.addEventListener("mouseleave", cancel);
+  })();
+
   // ── v0.8.1: Debug pane wiring ─────────────────────────────────────
   state.debugLastId = 0;
   state.debugEntries = [];
@@ -11569,6 +11686,23 @@
     window.speechSynthesis.speak(u);
   }
 
+  // v0.14.7 — phone pair flow: SAS-art primary + shorter button
+  // copy. Reading 6 digits twice on a phone screen is fiddly; the
+  // 6-cell visual grid is faster to glance-compare. Buttons get a
+  // direct "Match" / "Don't match" framing matching what the user
+  // is actually being asked.
+  function _applyPhonePairFlow() {
+    if (document.documentElement.getAttribute("data-form-factor") !== "phone") return;
+    const art = document.querySelector("#pair-sas-art");
+    if (art) art.style.display = "grid";
+    const toggle = document.querySelector("#pair-sas-art-toggle");
+    if (toggle) toggle.classList.add("on");
+    const m = document.querySelector("#pair-match");
+    if (m) m.textContent = "Match";
+    const x = document.querySelector("#pair-mismatch");
+    if (x) x.textContent = "Don't match";
+  }
+
   async function openPairModal(peer) {
     state.pairing = { peerFp: peer.fingerprint, sas: null, weConfirmed: false };
     pairTitle.textContent = "Pair this device";
@@ -11579,6 +11713,7 @@
     pairSasEl.textContent = "…";
     renderSasArt($("#pair-sas-art"), null);
     showPairStage("compare");  // v0.8.7
+    _applyPhonePairFlow();
     pairBackdrop.classList.add("show");
     try {
       const res = await api.post(`/api/peers/${peer.fingerprint}/pair`, {});
@@ -11603,6 +11738,7 @@
     pairSasEl.textContent = _formatSas(sas);
     renderSasArt($("#pair-sas-art"), sas);
     showPairStage("compare");  // v0.8.7
+    _applyPhonePairFlow();
     pairBackdrop.classList.add("show");
   }
 

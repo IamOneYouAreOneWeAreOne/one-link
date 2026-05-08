@@ -274,11 +274,11 @@ def test_advanced_hint_show_link_flips_global(index_html: str):
 
 # ───────── version pin ──────────────────────────────────────────────
 
-def test_page_version_bumped(index_html: str):
+def test_page_version_matches_package(index_html: str):
     """The PAGE_BUILT_FOR constant must match the package version
     so the daemon-page version-mismatch banner doesn't fire on a
-    fresh install of v0.14.2."""
+    fresh install. Forward-compatible: this test stays green across
+    later version bumps."""
     from one_link import __version__
 
-    assert __version__ == "0.14.2"
     assert f'PAGE_BUILT_FOR = "{__version__}"' in index_html
