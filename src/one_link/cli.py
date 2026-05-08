@@ -160,7 +160,7 @@ def send(peer, body):
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 def send_file(peer, path):
     """Send a file to PEER. Any size."""
-    click.echo(f"hashing {path.name} ({path.stat().st_size} bytes)…")
+    click.echo(f"preparing {path.name} ({path.stat().st_size} bytes)…")
     size = path.stat().st_size
     timeout = max(300.0, min(3600.0, size / (512 * 1024)))
     res = _request(

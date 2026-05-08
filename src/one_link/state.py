@@ -497,8 +497,38 @@ class State:
                 self._migrate_v14_mute_until(c)
                 if current < 14:
                     c.execute("INSERT INTO schema_version(version) VALUES(14)")
+                self._migrate_v15_file_index_cache(c)
+                if current < 15:
+                    c.execute("INSERT INTO schema_version(version) VALUES(15)")
             finally:
                 c.close()
+
+    def _migrate_v15_file_index_cache(self, c: sqlite3.Cursor) -> None:
+        """v0.12.4: durable file fingerprint/manifest cache.
+
+        Large-file sends should not re-hash and re-index an unchanged file
+        every time the user sends it. The cache is keyed by canonical path and
+        guarded by file size + nanosecond mtimes/ctimes, so a stale row is
+        ignored automatically when the file changes.
+        """
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS file_index_cache (
+                path        TEXT PRIMARY KEY,
+                size        INTEGER NOT NULL,
+                mtime_ns    INTEGER NOT NULL,
+                ctime_ns    INTEGER NOT NULL,
+                blob_hash   TEXT    NOT NULL,
+                index_kind  TEXT    NOT NULL,
+                chunks_json TEXT    NOT NULL,
+                updated_ms  INTEGER NOT NULL
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_index_cache_updated "
+            "ON file_index_cache(updated_ms)"
+        )
 
     def _migrate_v14_mute_until(self, c: sqlite3.Cursor) -> None:
         """v0.11.2: per-chat mute with duration.
@@ -3784,6 +3814,90 @@ class State:
             }
             for r in rows
         ]
+
+    def record_file_index_cache(
+        self,
+        *,
+        path: str,
+        size: int,
+        mtime_ns: int,
+        ctime_ns: int,
+        blob_hash: str,
+        index_kind: str,
+        chunks: Iterable[dict],
+    ) -> None:
+        clean_chunks: list[dict] = []
+        for c in chunks:
+            clean_chunks.append({
+                "index": int(c["index"]),
+                "start": int(c["start"]),
+                "end": int(c["end"]),
+                "size": int(c.get("size", int(c["end"]) - int(c["start"]))),
+                "hash": str(c["hash"]),
+            })
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO file_index_cache(
+                    path, size, mtime_ns, ctime_ns, blob_hash, index_kind,
+                    chunks_json, updated_ms
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    size = excluded.size,
+                    mtime_ns = excluded.mtime_ns,
+                    ctime_ns = excluded.ctime_ns,
+                    blob_hash = excluded.blob_hash,
+                    index_kind = excluded.index_kind,
+                    chunks_json = excluded.chunks_json,
+                    updated_ms = excluded.updated_ms
+                """,
+                (
+                    str(path),
+                    int(size),
+                    int(mtime_ns),
+                    int(ctime_ns),
+                    str(blob_hash),
+                    str(index_kind or "unknown"),
+                    json.dumps(clean_chunks, separators=(",", ":")),
+                    _now_ms(),
+                ),
+            )
+
+    def get_file_index_cache(
+        self,
+        *,
+        path: str,
+        size: int,
+        mtime_ns: int,
+        ctime_ns: int,
+    ) -> Optional[dict]:
+        row = self._conn.execute(
+            """
+            SELECT path, size, mtime_ns, ctime_ns, blob_hash, index_kind,
+                   chunks_json, updated_ms
+            FROM file_index_cache
+            WHERE path = ? AND size = ? AND mtime_ns = ? AND ctime_ns = ?
+            """,
+            (str(path), int(size), int(mtime_ns), int(ctime_ns)),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            chunks = json.loads(row["chunks_json"] or "[]")
+        except Exception:
+            chunks = []
+        if not isinstance(chunks, list):
+            chunks = []
+        return {
+            "path": row["path"],
+            "size": int(row["size"]),
+            "mtime_ns": int(row["mtime_ns"]),
+            "ctime_ns": int(row["ctime_ns"]),
+            "blob_hash": row["blob_hash"],
+            "index_kind": row["index_kind"],
+            "chunks": chunks,
+            "updated_ms": int(row["updated_ms"]),
+        }
 
     def set_setting(self, key: str, value: str) -> None:
         with self._write_lock:

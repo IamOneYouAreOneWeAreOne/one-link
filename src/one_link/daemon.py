@@ -7407,6 +7407,21 @@ class Daemon:
         if rec is None or rec.trust != "pinned":
             return None
 
+        # Discovery is opportunistic. A trusted device we have talked to before
+        # should remain dialable through its last observed LAN endpoint while
+        # mDNS catches up, so "send" does not fail right after daemon restart.
+        if rec.last_address and rec.last_port:
+            with contextlib.suppress(Exception):
+                port = int(rec.last_port)
+                if port > 0:
+                    return Peer(
+                        short_id=rec.short_id,
+                        hostname=rec.hostname or rec.short_id,
+                        address=rec.last_address,
+                        port=port,
+                        ed_pub_hex=rec.pubkey.hex(),
+                    )
+
         # Rendezvous fallback — only if the daemon has a client running.
         return await self.resolve_peer_endpoint(rec.fingerprint)
 

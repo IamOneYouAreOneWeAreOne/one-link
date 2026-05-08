@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from one_link.cdc import fixed_index_path, hash_path, index_path
+from one_link.state import State
 from one_link.transfer_intent import (
     FileManifest,
     plan_transfer_intent_for_manifest,
@@ -63,3 +64,47 @@ def test_thin_manifest_plans_baseline_without_chunk_manifest(tmp_path: Path):
     assert intent.can_offer_cdc is False
     assert intent.compatibility.transfer_mode == "baseline_file"
     assert intent.preferred_method == "file_baseline"
+
+
+def test_file_index_cache_roundtrips_and_invalidates_on_stat_change(tmp_path: Path):
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        p = tmp_path / "movie.bin"
+        p.write_bytes(b"abcdef")
+        st = p.stat()
+        chunks = [
+            {
+                "index": 0,
+                "start": 0,
+                "end": 6,
+                "size": 6,
+                "hash": hash_path(p),
+            }
+        ]
+        state.record_file_index_cache(
+            path=str(p.resolve()),
+            size=st.st_size,
+            mtime_ns=st.st_mtime_ns,
+            ctime_ns=st.st_ctime_ns,
+            blob_hash=hash_path(p),
+            index_kind="fixed",
+            chunks=chunks,
+        )
+
+        cached = state.get_file_index_cache(
+            path=str(p.resolve()),
+            size=st.st_size,
+            mtime_ns=st.st_mtime_ns,
+            ctime_ns=st.st_ctime_ns,
+        )
+        assert cached is not None
+        assert cached["index_kind"] == "fixed"
+        assert cached["chunks"] == chunks
+        assert state.get_file_index_cache(
+            path=str(p.resolve()),
+            size=st.st_size + 1,
+            mtime_ns=st.st_mtime_ns,
+            ctime_ns=st.st_ctime_ns,
+        ) is None
+    finally:
+        state.close()

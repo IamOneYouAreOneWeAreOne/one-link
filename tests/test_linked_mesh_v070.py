@@ -559,6 +559,120 @@ async def test_send_file_large_cdc_peer_uses_fast_stream_lane(
     state.close()
 
 
+@pytest.mark.asyncio
+async def test_send_file_reuses_cached_file_index_without_rehashing(
+    tmp_path: Path, monkeypatch
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    f = tmp_path / "repeat-video.bin"
+    payload = b"unchanged media payload" * 1024
+    f.write_bytes(payload)
+    st = f.stat()
+    blob = blake3.blake3(payload).hexdigest()
+    chunk_hash = blake3.blake3(payload).hexdigest()
+    state.record_file_index_cache(
+        path=str(f.resolve()),
+        size=st.st_size,
+        mtime_ns=st.st_mtime_ns,
+        ctime_ns=st.st_ctime_ns,
+        blob_hash=blob,
+        index_kind="fixed",
+        chunks=[{
+            "index": 0,
+            "start": 0,
+            "end": len(payload),
+            "size": len(payload),
+            "hash": chunk_hash,
+        }],
+    )
+
+    chan = _TracingFakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, FILE_CDC],
+        "from": them.short_id,
+        "app_version": "0.12.4",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id, hostname="them",
+            address="127.0.0.1", port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    monkeypatch.setattr(
+        "one_link.daemon.hash_path",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("rehash")),
+    )
+    monkeypatch.setattr(
+        "one_link.daemon.index_path",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("reindex")),
+    )
+    monkeypatch.setattr(
+        "one_link.daemon.fixed_index_path",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("fixed reindex")),
+    )
+    chan.queue_reply(make_msg("FILE_WANTS", them.short_id, wants=[]))
+
+    result = await daemon.send_file(sess.peer, f)
+    offer = chan.sent[0]
+    row = state.list_transfers(limit=1)[0]
+
+    assert result["chunks"] == 0
+    assert result["cdc"] is True
+    assert offer["blob"] == blob
+    assert offer["chunks"][0]["hash"] == chunk_hash
+    assert row.metadata["file_index_cache"] == "hit"
+    assert row.metadata["file_index_kind"] == "fixed"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_resolve_for_send_uses_trusted_last_known_lan_route(tmp_path: Path):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    daemon.discovery = None
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+        hostname="Computer 2",
+        address="192.168.1.26",
+        port=61221,
+        trust_default="pinned",
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    peer = await daemon.resolve_for_send(them.short_id)
+
+    assert peer is not None
+    assert peer.short_id == them.short_id
+    assert peer.hostname == "Computer 2"
+    assert peer.address == "192.168.1.26"
+    assert peer.port == 61221
+    assert peer.ed_pub_hex == them.public_bytes.hex()
+    state.close()
+
+
 def test_stream_transfer_profile_scales_window_safely():
     small = _stream_transfer_profile(2 * 1024 * 1024)
     big = _stream_transfer_profile(4 * 1024 * 1024 * 1024)
