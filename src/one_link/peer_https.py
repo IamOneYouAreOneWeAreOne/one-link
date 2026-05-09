@@ -290,3 +290,84 @@ def cert_fingerprint_sha256(cert_path_to_read: Path) -> Optional[str]:
     except Exception:
         return None
     return cert.fingerprint(hashes.SHA256()).hex()
+
+
+# ── iOS Configuration Profile (.mobileconfig) ────────────────────────
+
+
+def _format_pem_for_plist(pem_bytes: bytes) -> bytes:
+    """The plist `<data>` field for a CertificatePEM payload wants
+    the raw PEM (with -----BEGIN CERTIFICATE----- markers + base64
+    body). plistlib base64-encodes the bytes for us; we just need
+    to pass clean PEM."""
+    return pem_bytes.strip()
+
+
+def build_mobileconfig(
+    base: Path,
+    *,
+    organization: str = "One Link",
+    profile_display_name: str = "One Link Trust",
+) -> bytes:
+    """v0.20.6 — build an iOS Configuration Profile that installs the
+    daemon's self-signed cert as a trusted root. After install, iOS
+    trusts every TLS connection signed by this cert system-wide,
+    which means /peer over HTTPS works with zero warnings.
+
+    The profile is unsigned. iOS shows a "Not Verified" badge during
+    install, but the user can still install it after entering their
+    passcode. (Signing requires an Apple Developer cert + extra
+    tooling we don't ship; the user's own face-to-face validation
+    is the trust ceremony either way.)
+
+    Profile structure:
+      PayloadType: Configuration (the outer)
+      └── PayloadContent[0]:
+          PayloadType: com.apple.security.root
+          PayloadContent: <PEM bytes of the self-signed cert>
+          PayloadCertificateFileName: <human readable>
+    """
+    import plistlib
+    import uuid
+
+    cp = cert_path(base)
+    if not cp.is_file():
+        # Mint on demand — same flow as ensure_cert.
+        ensure_cert(base)
+    cert_pem = cp.read_bytes()
+    fp = cert_fingerprint_sha256(cp) or "unknown"
+
+    cert_payload = {
+        "PayloadType": "com.apple.security.root",
+        "PayloadVersion": 1,
+        "PayloadIdentifier": f"com.onelink.peer.cert.{fp[:16]}",
+        "PayloadUUID": str(uuid.uuid4()).upper(),
+        "PayloadDisplayName": "One Link Self-Signed CA",
+        "PayloadDescription": (
+            "Trust the One Link daemon's self-signed certificate so "
+            "your phone can talk to it over HTTPS without warnings."
+        ),
+        "PayloadCertificateFileName": "one-link.cer",
+        "PayloadContent": _format_pem_for_plist(cert_pem),
+    }
+
+    outer = {
+        "PayloadType": "Configuration",
+        "PayloadVersion": 1,
+        "PayloadIdentifier": f"com.onelink.peer.profile.{fp[:16]}",
+        "PayloadUUID": str(uuid.uuid4()).upper(),
+        "PayloadDisplayName": profile_display_name,
+        "PayloadDescription": (
+            "Adds your laptop's One Link daemon as a trusted source "
+            "so your phone can pair with it over HTTPS without seeing "
+            "a 'Not Private' warning. Remove anytime via "
+            "Settings → General → VPN & Device Management."
+        ),
+        "PayloadOrganization": organization,
+        # PayloadRemovalDisallowed = False so the user can delete
+        # the profile any time they want, no admin intervention.
+        "PayloadRemovalDisallowed": False,
+        "PayloadContent": [cert_payload],
+    }
+
+    return plistlib.dumps(outer, fmt=plistlib.FMT_XML)

@@ -670,6 +670,16 @@ class UIServer:
         # LAN URL as an SVG QR. Hits the desktop UI's "Pair a phone"
         # surface; saves us shipping a JS QR library.
         r.add_get("/api/v1/peer-rtc/qr.svg", self._guarded(self.api_pair_qr))
+        # v0.20.6: iOS Configuration Profile that installs the
+        # daemon's self-signed cert as a trusted root. Phones load
+        # this URL via Safari, which auto-prompts to install the
+        # profile. After install, the regular pair URL (HTTPS)
+        # works with zero "Not Private" warnings. Unauthenticated
+        # because iOS Safari doesn't carry the bearer token across
+        # the profile-install handoff; cert-as-data leaks no PII
+        # since it's the same self-signed cert anyone on the LAN
+        # would see during a TLS handshake anyway.
+        r.add_get("/api/v1/peer-rtc/profile.mobileconfig", self._pair_profile)
         # v0.15.4: connect-info + QR for the phone-pairing flow.
         # Both auth-gated — they expose the LAN URL with the token.
         r.add_get("/api/connect-info", self._guarded(self.api_connect_info))
@@ -1138,7 +1148,53 @@ class UIServer:
             "daemon_pubkey_b64u": daemon_pub_b64u,
             "daemon_fingerprint": daemon_fp,
             "ws_signaling_url": ws_url,
+            # v0.20.6 — iOS users need to install a Configuration
+            # Profile FIRST so iOS trusts the self-signed cert.
+            # We give the desktop UI two URLs to render as separate
+            # QRs: one for the profile install (HTTP, always works),
+            # one for the actual pair flow (HTTPS, only works after
+            # profile is installed + trust toggled).
+            "ios_profile_url": (
+                f"http://{host}:{self.port}/api/v1/peer-rtc/profile.mobileconfig"
+            ),
         })
+
+    async def _pair_profile(self, request: web.Request) -> web.StreamResponse:
+        """v0.20.6 — serve the iOS Configuration Profile that trusts
+        the daemon's self-signed cert. iOS Safari recognises the
+        `application/x-apple-aspen-config` MIME type and prompts the
+        user to install. After install the cert is system-trusted
+        and /peer over HTTPS loads without warnings.
+
+        Two-step flow on the user's iPhone:
+          1. Safari → this URL → iOS prompts "Install Profile"
+          2. After install: Settings → General → About → Certificate
+             Trust Settings → toggle on for "One Link Self-Signed CA"
+
+        Both steps are required; Apple intentionally splits "install
+        cert" from "trust cert for TLS." We surface this in the
+        UI step-by-step.
+        """
+        try:
+            from one_link.peer_https import build_mobileconfig
+            from one_link.paths import data_dir
+        except ImportError:
+            return web.Response(status=501, text="peer_https module unavailable")
+        try:
+            payload = build_mobileconfig(data_dir())
+        except Exception as e:
+            log.warning("peer-https: mobileconfig build failed: %s", e)
+            return web.Response(status=500, text=f"mobileconfig: {e}")
+        resp = web.Response(
+            body=payload,
+            content_type="application/x-apple-aspen-config",
+        )
+        resp.headers["Cache-Control"] = "no-store"
+        # Suggested file name when downloaded outside Safari.
+        resp.headers["Content-Disposition"] = (
+            'attachment; filename="one-link-trust.mobileconfig"'
+        )
+        return resp
 
     async def api_pair_qr(self, request: web.Request) -> web.StreamResponse:
         """v0.20.1: render an arbitrary URL as a QR SVG. Auth-gated.

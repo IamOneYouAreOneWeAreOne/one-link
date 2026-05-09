@@ -3900,6 +3900,38 @@
                 </div>
                 <div id="pair-phone-qr-wrap" style="display:none; margin-top:14px;">
                 </div>
+
+                <!-- v0.20.6: iOS-first-time trust flow. iOS Safari
+                     refuses to bypass self-signed certs on LAN IPs
+                     (no "visit anyway" link). The fix is an iOS
+                     Configuration Profile that adds the daemon's
+                     cert to system-trusted roots. One-time setup
+                     per phone; takes ~30 seconds. After install +
+                     trust toggle, the regular pair QR works clean. -->
+                <details id="ios-trust-details" style="margin-top:18px; border-top:1px solid var(--line); padding-top:14px;">
+                  <summary style="cursor:pointer; user-select:none; color:var(--text-dim);">
+                    iPhone first time? (one-time trust setup)
+                  </summary>
+                  <div style="margin-top:10px;">
+                    <p class="settings-help">
+                      iOS won't let Safari bypass a self-signed cert
+                      warning on a LAN address. To fix this once
+                      per phone, install the trust profile below.
+                      After install you can scan the regular pair QR
+                      with no warnings ever again on this phone.
+                    </p>
+                    <ol class="settings-help" style="padding-left:22px; margin-top:10px; line-height:1.7;">
+                      <li>Scan the trust-profile QR below (or copy the URL).</li>
+                      <li>iOS prompts <strong>"This website is trying to download a configuration profile."</strong> Tap <strong>Allow</strong>.</li>
+                      <li>iOS shows <strong>"Profile Downloaded."</strong> Tap <strong>Close</strong>.</li>
+                      <li>Open <strong>Settings → General → VPN &amp; Device Management</strong>. Tap <strong>One Link Trust</strong> → <strong>Install</strong>. Enter your passcode.</li>
+                      <li>Open <strong>Settings → General → About → Certificate Trust Settings</strong>. Toggle on for <strong>One Link Self-Signed CA</strong>. Tap <strong>Continue</strong> on the warning.</li>
+                      <li>Done. Now scan the pair QR above.</li>
+                    </ol>
+                    <div id="ios-trust-qr-wrap" style="margin-top:12px;">
+                    </div>
+                  </div>
+                </details>
               </div>
             </div>
             <!-- v0.20.4 — legacy "Connect another device" (URL-only
@@ -9773,7 +9805,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.20.5";
+  const PAGE_BUILT_FOR = "0.20.6";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -12594,12 +12626,9 @@
     if (protoEl) protoEl.textContent = me.protocol_version || "?";
     const schemaEl = $("#settings-about-schema");
     if (schemaEl) schemaEl.textContent = String(me.schema_version ?? "?");
-    // v0.20.4: stop calling _refreshConnectInfo. The legacy
-    // "Connect another device" section is gone from the markup;
-    // populating an empty hidden div would just be wasted bytes
-    // on the wire. The function is left in place for any external
-    // tooling that still pokes the endpoint, but the UI no
-    // longer drives it.
+    // v0.20.5: do not call _refreshConnectInfo here. The legacy
+    // connect-info section intentionally has no render target, so
+    // the old UI QR cannot reappear beside Pair a phone.
     // v0.20.1: reset the pair-phone surface to the "click to mint"
     // state on every settings open. Tokens expire in 5 minutes; we
     // don't want a stale QR sitting around from a previous session.
@@ -12638,6 +12667,11 @@
       wrap.style.display = "none";
       wrap.innerHTML = "";
     }
+    // v0.20.6 — also clear the iOS trust QR so a stale one
+    // doesn't sit there pointing at a different cert if the
+    // user re-mints after the daemon rotated certs.
+    const trustWrap = $("#ios-trust-qr-wrap");
+    if (trustWrap) trustWrap.innerHTML = "";
     const btnPrimary = $("#btn-mint-pair");
     const btnCancel = $("#btn-mint-pair-cancel");
     if (btnPrimary) {
@@ -12729,6 +12763,86 @@
     urlBox.appendChild(urlEl);
     urlBox.appendChild(copyBtn);
     wrap.appendChild(urlBox);
+
+    // v0.20.6 — render the iOS trust-profile QR alongside the
+    // pair QR. iOS Safari refuses to bypass self-signed certs on
+    // LAN IPs (no "visit anyway" link), so phones need the
+    // .mobileconfig installed once. The trust profile URL is
+    // HTTP (port 7117) so the download works BEFORE the cert is
+    // trusted; after install + trust toggle, the pair QR (HTTPS)
+    // works clean. We only render this when the daemon has an
+    // HTTPS listener (otherwise no cert needs trusting).
+    const trustWrap = $("#ios-trust-qr-wrap");
+    if (trustWrap) {
+      trustWrap.innerHTML = "";
+      if (info.https_available && info.ios_profile_url) {
+        const tImg = document.createElement("img");
+        tImg.src =
+          `/api/v1/peer-rtc/qr.svg?u=${encodeURIComponent(info.ios_profile_url)}` +
+          `&_=${Date.now()}`;
+        tImg.alt = "QR code for the iOS trust-profile install";
+        tImg.width = 220;
+        tImg.height = 220;
+        tImg.style.background = "#fff";
+        tImg.style.padding = "10px";
+        tImg.style.borderRadius = "8px";
+        tImg.style.display = "block";
+        tImg.style.margin = "0 auto";
+        trustWrap.appendChild(tImg);
+
+        const tNote = document.createElement("p");
+        tNote.className = "settings-help";
+        tNote.style.marginTop = "10px";
+        tNote.style.fontSize = "12px";
+        tNote.textContent =
+          "One-time per phone. After install + trust toggle, " +
+          "the pair QR above works with no warnings.";
+        trustWrap.appendChild(tNote);
+
+        const tUrlBox = document.createElement("div");
+        tUrlBox.style.display = "flex";
+        tUrlBox.style.gap = "8px";
+        tUrlBox.style.alignItems = "center";
+        tUrlBox.style.marginTop = "8px";
+        const tUrlEl = document.createElement("code");
+        tUrlEl.textContent = info.ios_profile_url;
+        tUrlEl.style.flex = "1 1 auto";
+        tUrlEl.style.minWidth = "0";
+        tUrlEl.style.overflow = "hidden";
+        tUrlEl.style.textOverflow = "ellipsis";
+        tUrlEl.style.whiteSpace = "nowrap";
+        tUrlEl.style.background = "var(--bg-3)";
+        tUrlEl.style.color = "var(--text)";
+        tUrlEl.style.padding = "6px 10px";
+        tUrlEl.style.borderRadius = "6px";
+        tUrlEl.style.fontSize = "11px";
+        tUrlEl.style.fontFamily = "ui-monospace, SFMono-Regular, Consolas, monospace";
+        const tCopyBtn = document.createElement("button");
+        tCopyBtn.className = "btn-ghost";
+        tCopyBtn.textContent = "Copy URL";
+        tCopyBtn.onclick = async () => {
+          try {
+            await navigator.clipboard.writeText(info.ios_profile_url);
+            tCopyBtn.textContent = "Copied";
+            setTimeout(() => { tCopyBtn.textContent = "Copy URL"; }, 1500);
+          } catch (e) {
+            toast(`Couldn't copy: ${e && e.message ? e.message : e}`, "bad");
+          }
+        };
+        tUrlBox.appendChild(tUrlEl);
+        tUrlBox.appendChild(tCopyBtn);
+        trustWrap.appendChild(tUrlBox);
+      } else {
+        const tNote = document.createElement("p");
+        tNote.className = "settings-help";
+        tNote.style.fontSize = "12px";
+        tNote.textContent =
+          "This daemon isn't running an HTTPS listener, so no " +
+          "trust profile is needed. (If iPhones can't open the " +
+          "pair URL, restart the daemon with HTTPS enabled.)";
+        trustWrap.appendChild(tNote);
+      }
+    }
   });
   $("#btn-mint-pair-cancel")?.addEventListener("click", _resetPairPhoneCard);
 
