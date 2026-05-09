@@ -32,6 +32,12 @@ def _home_override() -> Path | None:
         what a multi-daemon-on-one-machine override is for.
       - Require absolute paths after expanduser/resolve to fail
         loudly on relative-path env injection.
+      - Refuse to write under a parent directory that the current
+        process does NOT own (POSIX only — the typical attack is
+        ``sudo one-link daemon`` with ONE_LINK_HOME=/etc/something,
+        where the operator's intent was a user-scoped install but
+        the elevated daemon now writes config under root-owned
+        directories where they'll be unrecoverable without sudo).
     On rejection we log a clear warning and fall through to the
     default platform dirs.
     """
@@ -81,6 +87,40 @@ def _home_override() -> Path | None:
                 v,
             )
             return None
+        # Parent-ownership check (POSIX). Walk upward to the deepest
+        # existing ancestor and confirm it belongs to our euid. On
+        # Windows, the analogous primitive is much messier (SID
+        # comparison via win32security) and the typical sudo-attack
+        # vector doesn't exist there; we skip the check and rely on
+        # ACLs at the per-file write paths instead.
+        if os.name != "nt":
+            ancestor = p
+            while not ancestor.exists() and ancestor != ancestor.parent:
+                ancestor = ancestor.parent
+            try:
+                st = ancestor.stat()
+                euid = os.geteuid()  # type: ignore[attr-defined]
+                if st.st_uid != euid:
+                    import logging
+                    logging.getLogger("one_link.paths").warning(
+                        "ONE_LINK_HOME parent %s is owned by uid=%d "
+                        "(daemon euid=%d) — rejected to avoid clobbering "
+                        "another user's data; fix the path or rerun "
+                        "without sudo",
+                        ancestor, st.st_uid, euid,
+                    )
+                    return None
+            except OSError:
+                # Stat failed — likely a permission issue under elevated
+                # contexts. Be conservative: refuse rather than write
+                # into something we can't even introspect.
+                import logging
+                logging.getLogger("one_link.paths").warning(
+                    "ONE_LINK_HOME ancestor %s could not be stat'd — "
+                    "falling back to platform default",
+                    ancestor,
+                )
+                return None
         return p
     except (ValueError, OSError) as e:
         import logging
