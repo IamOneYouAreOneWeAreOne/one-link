@@ -2758,6 +2758,35 @@
   const AUTOPAIR_DAEMON_CONTROL_LABEL = "one-link-daemon-control-v1";
   const AUTOPAIR_DAEMON_BULK_LABEL = "one-link-daemon-bulk-v1";
 
+  // v0.20.7 (security audit M9): validate the WS URL the QR
+  // wants us to connect to. Without this check, an attacker who
+  // crafts (or substitutes) a QR can route a phone's signed
+  // pairing offer to an attacker-controlled WS endpoint. The
+  // attacker then either replays the captured offer against the
+  // real daemon (consuming the single-use token) or drops the
+  // offer + serves the phone an unsigned answer trying to steer
+  // it onto an attacker-controlled DataChannel.
+  //
+  // The defense: the QR is supposed to live alongside this page
+  // — both are served from the same daemon. So the WS URL's host
+  // MUST equal window.location.host. We additionally restrict
+  // the scheme to ws/wss so a "javascript:" or "file:" or
+  // "http:" URL can't be smuggled through.
+  function _isSafePairWsUrl(rawUrl) {
+    try {
+      const u = new URL(rawUrl);
+      if (u.protocol !== "ws:" && u.protocol !== "wss:") return false;
+      // host = hostname + (port if non-default). Compare ignoring
+      // case + folding default ports.
+      if (u.host.toLowerCase() !== window.location.host.toLowerCase()) {
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function _detectPairQuery() {
     try {
       const params = new URLSearchParams(window.location.search);
@@ -2765,6 +2794,7 @@
       const fp = params.get("fp");
       const ws = params.get("ws");
       if (!pair || !fp || !ws) return null;
+      if (!_isSafePairWsUrl(ws)) return null;
       return { pair_token: pair, daemon_fingerprint: fp, ws_url: ws };
     } catch {
       return null;
