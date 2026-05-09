@@ -220,17 +220,33 @@ class SenderChain:
 @dataclass
 class ReceivingChain:
     """The corresponding inbound state on the receiver side. Tracks
-    the highest counter seen + a small sliding window for out-of-
-    order frames so the upstack handles minor reordering."""
+    the highest counter seen + a sliding-window cache for out-of-
+    order frames so a single dropped or reordered message doesn't
+    brick the chain."""
     group_id: bytes
     sender_pubkey: bytes
     epoch: int
     chain_key: bytes
-    counter: int = 0  # next-expected; lockstep with the sender if delivery is in order
-    # We allow at most this many "skipped" message keys to be cached
-    # so brief reordering doesn't drop messages. v0.6.1 enforces strict
-    # in-order; v0.6.2 may relax with sliding-window cache.
+    counter: int = 0  # next-expected; advances past every consumed counter
     seen_counters: set[int] = field(default_factory=set)
+    # v0.20.7 (security audit M4): sliding-window cache of message
+    # keys for counters that we advanced past (because a higher
+    # counter arrived first) but haven't yet decrypted. When the
+    # missing counter eventually arrives, we pop its msg_key here
+    # and decrypt the OOO frame instead of bricking the chain.
+    # Bounded at MAX_SKIP_KEYS_GROUP entries; oldest evicted on
+    # overflow.
+    skipped: dict[int, bytes] = field(default_factory=dict)
+
+
+# v0.20.7 (security audit M4): receive-side sliding-window cap. A
+# legitimate sender shouldn't get more than this many messages
+# ahead of the receiver under any normal delivery pattern. Beyond
+# this, we treat the gap as "the sender is racing us into a forged-
+# state condition" and abort. 64 is comfortable for typical chat
+# / wire reordering; under heavy file-transfer-style bursts groups
+# don't ride this code path (group-msg flow is text + small).
+MAX_SKIP_KEYS_GROUP = 64
 
 
 def encrypt_message(
@@ -296,15 +312,25 @@ def decrypt_message(
     """Decrypt + verify a group message. Returns plaintext + advanced
     receiving chain.
 
+    v0.20.7 (security audit M4): supports out-of-order delivery via a
+    sliding-window cache (MAX_SKIP_KEYS_GROUP entries). When a higher
+    counter arrives first we derive + stash msg_keys for the gap so
+    the missing counters can decrypt later. When an OOO frame arrives
+    after we've advanced past it we look up its key in the cache.
+    Pre-v0.20.7 this code rejected ANY out-of-order frame, which
+    meant a single dropped message bricked the entire chain — a real
+    DoS primitive over the relay path.
+
     Raises ValueError on:
       - protocol version mismatch
       - signature verification failure (forged sender)
       - AEAD decrypt failure (tampered ciphertext or wrong key)
       - replay (counter already seen this epoch)
       - epoch mismatch (expected fresh-epoch rotation)
-      - in v0.6.1: out-of-order delivery (counter < expected). A
-        sliding-window cache lands in v0.6.2 if real-world delivery
-        proves to be reorder-prone.
+      - out-of-window OOO (counter below chain.counter and not in
+        the sliding-window cache)
+      - too-large jump forward (counter > chain.counter +
+        MAX_SKIP_KEYS_GROUP).
     """
     if not isinstance(wire, dict):
         raise ValueError("wire must be a dict")
@@ -327,21 +353,18 @@ def decrypt_message(
     if len(signature) != 64:
         raise ValueError("signature must be 64 bytes")
 
-    # Epoch / counter sanity. Strict in-order in v0.6.1.
     if epoch != chain.epoch:
         raise ValueError(
             f"epoch mismatch: chain at {chain.epoch}, message claims {epoch}"
         )
     if counter in chain.seen_counters:
         raise ValueError(f"replay: counter {counter} already seen")
-    if counter != chain.counter:
-        # Strict: v0.6.1 rejects out-of-order. Receiver should
-        # buffer at the wire layer if needed.
-        raise ValueError(
-            f"out-of-order: chain expected counter {chain.counter}, got {counter}"
-        )
+    if counter < 0:
+        raise ValueError(f"counter must be non-negative: {counter}")
 
-    # Verify Ed25519 signature.
+    # Verify Ed25519 signature BEFORE deriving keys / mutating chain
+    # state so a malformed-but-counter-ahead frame can't push us
+    # past legitimate intermediates.
     sig_input = (
         group_id + sender_pubkey
         + struct.pack(">II", epoch, counter)
@@ -354,27 +377,79 @@ def decrypt_message(
     except InvalidSignature:
         raise ValueError("signature does not verify")
 
-    # Derive msg_key + decrypt. AEAD failure = tampered ciphertext.
-    msg_key = derive_message_key(chain.chain_key)
-    plaintext = _decrypt_with_msg_key(
-        msg_key=msg_key,
-        ciphertext=ciphertext,
-        group_id=group_id,
-        sender_pubkey=sender_pubkey,
-        epoch=epoch,
-        counter=counter,
-    )
+    # Three relations to chain.counter:
+    #   counter < chain.counter — late OOO arrival (must be in
+    #     skipped cache, else out-of-window)
+    #   counter == chain.counter — in-order delivery (the common
+    #     path)
+    #   counter > chain.counter — forward jump (gap must fit in
+    #     the sliding window)
+    skipped = dict(chain.skipped)
+    if counter < chain.counter:
+        msg_key = skipped.pop(counter, None)
+        if msg_key is None:
+            raise ValueError(
+                f"out-of-window: counter {counter} is below chain "
+                f"counter {chain.counter} and not in the sliding "
+                f"window cache"
+            )
+        plaintext = _decrypt_with_msg_key(
+            msg_key=msg_key,
+            ciphertext=ciphertext,
+            group_id=group_id,
+            sender_pubkey=sender_pubkey,
+            epoch=epoch,
+            counter=counter,
+        )
+        # No chain advancement on OOO arrival; we just consumed a
+        # cached key.
+        next_chain_key = chain.chain_key
+        next_counter = chain.counter
+    else:
+        # counter >= chain.counter
+        gap = counter - chain.counter
+        if gap > MAX_SKIP_KEYS_GROUP:
+            raise ValueError(
+                f"too many skipped messages: gap {gap} > "
+                f"{MAX_SKIP_KEYS_GROUP}"
+            )
+        # Derive intermediate msg_keys for the [chain.counter, counter)
+        # range and stash them in skipped, then derive the key for
+        # this counter and decrypt.
+        cur_chain_key = chain.chain_key
+        for c in range(chain.counter, counter):
+            stashed = derive_message_key(cur_chain_key)
+            skipped[c] = stashed
+            cur_chain_key = advance_chain_key(cur_chain_key)
+        # cur_chain_key is now at step `counter`.
+        msg_key = derive_message_key(cur_chain_key)
+        plaintext = _decrypt_with_msg_key(
+            msg_key=msg_key,
+            ciphertext=ciphertext,
+            group_id=group_id,
+            sender_pubkey=sender_pubkey,
+            epoch=epoch,
+            counter=counter,
+        )
+        next_chain_key = advance_chain_key(cur_chain_key)
+        next_counter = counter + 1
 
-    # Advance.
+    # Bound the skipped cache. FIFO eviction (lowest counter first)
+    # keeps the window centered on recent sender state.
+    while len(skipped) > MAX_SKIP_KEYS_GROUP:
+        oldest = min(skipped)
+        skipped.pop(oldest, None)
+
     next_seen = set(chain.seen_counters)
     next_seen.add(counter)
     next_chain = ReceivingChain(
         group_id=chain.group_id,
         sender_pubkey=chain.sender_pubkey,
         epoch=chain.epoch,
-        chain_key=advance_chain_key(chain.chain_key),
-        counter=counter + 1,
+        chain_key=next_chain_key,
+        counter=next_counter,
         seen_counters=next_seen,
+        skipped=skipped,
     )
     return plaintext, next_chain
 

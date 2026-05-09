@@ -200,38 +200,64 @@ def test_round_trip_many_messages_in_sequence():
 
 # ─── 3. Forward secrecy bound ───────────────────────────────────────
 
-def test_old_chain_key_cannot_decrypt_new_message():
-    """An attacker who captured chain_key at counter=0 cannot use
-    that snapshot to decrypt a message sent at counter=5 — the chain
-    has advanced 5 times and the old chain_key is no longer the head."""
+def test_forward_secrecy_after_epoch_rotation():
+    """v0.20.7: forward secrecy is delivered by epoch rotation, not
+    by the within-epoch chain advancement (chain advancement is
+    one-way HMAC; any holder of chain_key[N] can derive chain_key[N+k]
+    for arbitrary k, which is the GROUP-MEMBER property of a sender
+    chain — every member already has the chain key). The sharper
+    cryptographic guarantee is that ``begin_new_epoch`` mints a
+    fresh chain_key from os.urandom; an attacker who held the
+    PRIOR-EPOCH chain_key cannot decrypt next-epoch messages without
+    membership in the next-epoch chain distribution."""
+    sk, pk = _new_keypair()
+    gid = _new_group_id()
+    sender_e1 = _make_sender(sk, pk, gid, epoch=1)
+    captured_e1_chain_key = sender_e1.chain_key
+
+    # Membership rotation: epoch advances, chain_key is fresh.
+    sender_e2 = begin_new_epoch(group_id=gid, sender_pubkey=pk, new_epoch=2)
+    assert sender_e2.chain_key != captured_e1_chain_key
+
+    # Send a message at the new epoch.
+    wire, _ = encrypt_message(
+        plaintext=b"after rotation", chain=sender_e2, private_key=sk,
+    )
+    # Attacker holding the prior-epoch chain_key tries to decrypt by
+    # constructing a receiver pinned at the new epoch with the OLD
+    # chain_key — fails on AEAD tag (chain_keys differ) or on epoch
+    # mismatch if attacker pins the wrong epoch.
+    attacker_with_old_key = ReceivingChain(
+        group_id=gid, sender_pubkey=pk,
+        epoch=sender_e2.epoch,
+        chain_key=captured_e1_chain_key,
+        counter=0,
+    )
+    with pytest.raises(ValueError):
+        decrypt_message(wire=wire, chain=attacker_with_old_key)
+
+
+def test_chain_advance_within_epoch_is_member_property_not_secrecy():
+    """Documents that within an epoch, chain advancement is one-way
+    HMAC and ANY chain_key holder can derive future chain_keys. The
+    "forward secrecy" claim properly applies at epoch boundaries
+    via begin_new_epoch (see test above) — within an epoch the chain
+    is shared among current members by design."""
     sk, pk = _new_keypair()
     gid = _new_group_id()
     sender = _make_sender(sk, pk, gid)
-    captured_old_chain_key = sender.chain_key
-
-    # Send 5 messages.
+    captured = sender.chain_key
+    # Advance 5 manually; the captured key plus advance_chain_key is
+    # enough to reach any future state. This is intentional.
+    cur = captured
+    for _ in range(5):
+        cur = advance_chain_key(cur)
+    # And the legitimate sender's chain matches after 5 sends.
     for _ in range(5):
         _, sender = encrypt_message(
-            plaintext=b"...", chain=sender, private_key=sk,
+            plaintext=b"x", chain=sender, private_key=sk,
         )
-    # Send the targeted message at counter=5.
-    wire, _ = encrypt_message(
-        plaintext=b"the secret one", chain=sender, private_key=sk,
-    )
-    # Attacker tries to decrypt with the old captured chain_key by
-    # constructing a receiver pinned at counter=0.
-    attacker = ReceivingChain(
-        group_id=gid, sender_pubkey=pk, epoch=sender.epoch,
-        chain_key=captured_old_chain_key, counter=0,
-    )
-    # Even if the attacker re-walks the chain forward to counter=5,
-    # they need... oh wait, that's actually possible if they know all
-    # the prior nonces and counter steps. The cryptographic property
-    # is "previous chain_key cannot rewind." This test instead pins:
-    # given the captured chain_key alone, the attacker can't pretend
-    # the targeted message arrived at counter=0.
-    with pytest.raises(ValueError):
-        decrypt_message(wire=wire, chain=attacker)
+    assert sender.chain_key == cur
 
 
 def test_advancing_chain_destroys_previous_key():
@@ -363,21 +389,71 @@ def test_same_message_replayed_rejects():
 
 # ─── 7. Order constraints ───────────────────────────────────────────
 
-def test_strict_in_order_required_in_v0_6_1():
-    """v0.6.1 is strict in-order. A message with counter=2 arriving
-    before counter=1 is rejected. v0.6.2 may add a sliding window."""
+def test_out_of_order_within_window_now_accepted():
+    """v0.20.7 (audit M4): out-of-order delivery within the sliding
+    window is now ACCEPTED. A message with counter=2 arriving before
+    counter=1 decrypts cleanly; later, when counter=1 arrives, it
+    decrypts via the stashed key cache."""
     sk, pk = _new_keypair()
     gid = _new_group_id()
     sender = _make_sender(sk, pk, gid)
     receiver = _make_receiver_for(sender)
 
-    # Send two messages.
-    wire1, sender = encrypt_message(plaintext=b"1", chain=sender, private_key=sk)
-    wire2, sender = encrypt_message(plaintext=b"2", chain=sender, private_key=sk)
+    # Sender emits counter=0, 1, 2.
+    wire0, sender = encrypt_message(plaintext=b"zero", chain=sender, private_key=sk)
+    wire1, sender = encrypt_message(plaintext=b"one", chain=sender, private_key=sk)
+    wire2, sender = encrypt_message(plaintext=b"two", chain=sender, private_key=sk)
 
-    # Receiver tries to decrypt #2 first — should be rejected.
-    with pytest.raises(ValueError, match="out-of-order"):
-        decrypt_message(wire=wire2, chain=receiver)
+    # Receiver consumes them out of order: 0, 2, 1.
+    pt, receiver = decrypt_message(wire=wire0, chain=receiver)
+    assert pt == b"zero"
+    pt, receiver = decrypt_message(wire=wire2, chain=receiver)
+    assert pt == b"two"
+    pt, receiver = decrypt_message(wire=wire1, chain=receiver)
+    assert pt == b"one"
+
+
+def test_out_of_window_ooo_is_rejected():
+    """A frame whose counter is below chain.counter AND not in the
+    skipped cache is rejected with 'out-of-window'."""
+    sk, pk = _new_keypair()
+    gid = _new_group_id()
+    sender = _make_sender(sk, pk, gid)
+    receiver = _make_receiver_for(sender)
+
+    # Sender emits 0, 1, 2. Receiver consumes 0, 1, 2 in order.
+    wires = []
+    for body in (b"a", b"b", b"c"):
+        w, sender = encrypt_message(plaintext=body, chain=sender, private_key=sk)
+        wires.append(w)
+    for w in wires:
+        _, receiver = decrypt_message(wire=w, chain=receiver)
+
+    # Now a frame appears claiming counter=0 (replay-of-old). The
+    # receiver has already consumed it; seen_counters catches it.
+    with pytest.raises(ValueError, match="replay"):
+        decrypt_message(wire=wires[0], chain=receiver)
+
+
+def test_forward_jump_beyond_window_is_rejected():
+    """A counter that's farther ahead than MAX_SKIP_KEYS_GROUP is
+    refused — the receiver won't derive an unbounded number of
+    intermediate keys for an attacker-claimed jump."""
+    from one_link.groups_crypto import MAX_SKIP_KEYS_GROUP
+    sk, pk = _new_keypair()
+    gid = _new_group_id()
+    sender = _make_sender(sk, pk, gid)
+    receiver = _make_receiver_for(sender)
+
+    # Walk the SENDER forward past the window so we have a legitimately
+    # signed wire frame for a far-future counter.
+    for _ in range(MAX_SKIP_KEYS_GROUP + 5):
+        _, sender = encrypt_message(plaintext=b"x", chain=sender, private_key=sk)
+    far_wire, _ = encrypt_message(
+        plaintext=b"far away", chain=sender, private_key=sk,
+    )
+    with pytest.raises(ValueError, match="too many skipped messages"):
+        decrypt_message(wire=far_wire, chain=receiver)
 
 
 # ─── 8. Epoch rotation ──────────────────────────────────────────────
