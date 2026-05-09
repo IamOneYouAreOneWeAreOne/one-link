@@ -1,0 +1,124 @@
+One Link — for the people
+=========================
+
+One Link is a peer-to-peer LAN chat and file-sync tool that runs
+without accounts, without servers, and without telemetry. It is
+released under the GNU Affero General Public License version 3 or
+later (AGPLv3) starting with v0.20.7. See LICENSE for details.
+
+Why AGPLv3 and not MIT
+----------------------
+
+The choice of AGPLv3 is deliberate. One Link's threat model is
+documented in docs/SECURITY.md: real users on real laptops and
+phones, defending against adversaries that include corporate data
+collection, network-on-path attackers, lost devices, compromised
+peers, compromised mirrors, and (in the hardened tier) state-actor
+adversaries. The cryptography and the architecture do that work.
+The license does the OTHER half of the work, which is keeping
+those defenses in the hands of the people who use One Link.
+
+Permissive licenses (MIT, Apache 2.0, BSD) allow anyone to take
+the code, modify it, ship the modified version as a closed-source
+product, and never share their changes back. For a privacy tool
+that's a structural problem: a corporate fork could quietly remove
+a defense, ship the modified binary as "One Link Pro," and
+collect data from users who think they're running the upstream
+project. The MIT license offers no remedy for this.
+
+AGPLv3 prevents it. Anyone who modifies One Link and offers the
+modified version to others — whether by distribution OR by network
+service — must offer the corresponding source under AGPLv3 too. A
+corporation can still build a product on One Link; they just can't
+hide the modifications they make. Users always have the source of
+the version they're running, which means they can audit it,
+rebuild it, and verify it for themselves.
+
+The "or later" clause means One Link automatically inherits any
+future AGPL revision the Free Software Foundation publishes, so
+the protection adapts as software-licensing law evolves.
+
+The "for the people" charter
+----------------------------
+
+One Link commits to:
+
+  - No accounts. Identity is a local Ed25519 keypair, period.
+  - No phone number. No email. No SMS verification.
+  - No telemetry, no analytics, no third-party SDK, no
+    phone-home of any kind. (See docs/SECURITY.md "We promise"
+    section; the codebase is auditable and the test suite pins
+    this.)
+  - No advertising. Ever.
+  - No selling user data. There is no user data on any server
+    we control to sell — the architecture forbids it.
+  - No corporate substrate dependency that the user can't opt
+    out of. Hardware secure-element APIs (Secure Enclave,
+    StrongBox, TPM) are local primitives and are used; cloud
+    sync services that come with them (iCloud Keychain,
+    Google Password Manager) are NOT used by default and never
+    transmit identity material to the corporate operator.
+  - Reproducible builds, so anyone can verify a release matches
+    the source. (Implementation in flight; see
+    .github/workflows/reproducible-build.yml.)
+  - Multi-maintainer threshold release signing once the project
+    grows beyond a single maintainer.
+  - Public threat model maintained continuously, with audit
+    cadence (annual external pentest target). See
+    docs/SECURITY.md.
+  - Public bug bounty once funding allows.
+  - Warrant canary once relevant.
+
+What you can do with this code (under AGPLv3)
+---------------------------------------------
+
+  - Run it for any purpose, commercial or non-commercial.
+  - Study, modify, and learn from it.
+  - Distribute copies, modified or unmodified.
+  - Run it as a network service for other people.
+
+In all of those cases, AGPLv3 requires that recipients of your
+distribution OR users of your network service have access to the
+corresponding source code under the same license. That's the only
+restriction.
+
+What you can NOT do
+-------------------
+
+  - Ship a modified version as a closed-source product.
+  - Run a modified version as a SaaS / hosted service without
+    making the modified source available to your users.
+  - Strip or replace this NOTICE or the LICENSE file in
+    distributed copies.
+
+History
+-------
+
+Versions of One Link prior to commit `87d1b98` (released as
+v0.20.7+ in 2026-05) were under the MIT License and remain under
+MIT in perpetuity for anyone who has them. The license change at
+v0.20.7 reflects the project's growth from "personal experiment"
+to "tool for the people."  All NEW contributions and NEW
+derivative works from that commit forward are AGPLv3.
+
+If you forked the MIT version, your fork stays under MIT until
+you choose to sync with a post-v0.20.7 commit. You may continue
+to develop your MIT fork independently in perpetuity.
+
+Trademark + project identity
+----------------------------
+
+"One Link" is the project's identity and the working name of the
+code in this repository. Trademark policy will be formalized once
+the project incorporates as a non-profit foundation. Until then:
+forks may use the name "One Link" if they accurately describe
+their relationship to upstream (e.g. "One Link fork by Acme,
+based on commit abc123") and do not present themselves as the
+canonical project.
+
+Contact
+-------
+
+  - Maintainer: One Link contributor <weareone@oneunity.earth>
+  - Code: https://github.com/IamOneYouAreOneWeAreOne/one-link
+  - Security disclosure: see SECURITY.md at the repository root

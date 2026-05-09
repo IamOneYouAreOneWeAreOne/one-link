@@ -1,0 +1,41 @@
+name: pages
+
+# Deploy docs/site/ to GitHub Pages whenever it changes on master.
+# This is the public landing page at https://Jphilbrick10.github.io/one-link/
+# (or whatever Pages URL is enabled in repo settings).
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - "docs/site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deploy in flight at a time.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure pages
+        uses: actions/configure-pages@v5
+      - name: upload static site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./docs/site
+      - name: deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

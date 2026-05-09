@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>One Link — peer-to-peer chat + file sync, for the people</title>
+<meta name="description" content="Peer-to-peer chat and file sync. No accounts, no servers, no cloud. Your devices find each other on your network and talk directly, end-to-end encrypted, mutually authenticated.">
+<meta name="theme-color" content="#0e0e10">
+<style>
+  :root {
+    --bg: #0e0e10;
+    --fg: #e8e8e8;
+    --dim: #98989a;
+    --accent: #6ee7ff;
+    --warn: #ffb86b;
+    --good: #75e29c;
+    --code-bg: #18181c;
+    --hr: #25252b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+  body {
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 56px 24px 96px; }
+  h1 { font-size: 44px; line-height: 1.05; margin: 0 0 18px; letter-spacing: -0.02em; }
+  h2 { font-size: 22px; margin: 48px 0 14px; letter-spacing: -0.01em; color: var(--accent); }
+  h3 { font-size: 16px; margin: 22px 0 8px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.04em; }
+  p { margin: 0 0 14px; color: var(--fg); }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; transition: border-color 0.15s ease; }
+  a:hover { border-bottom-color: var(--accent); }
+  code, pre {
+    font: 13px/1.5 "SF Mono", Menlo, Consolas, "Roboto Mono", monospace;
+    background: var(--code-bg);
+    color: #d4d4d4;
+    border-radius: 6px;
+  }
+  code { padding: 1px 6px; }
+  pre {
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 12px 0 18px;
+    border: 1px solid var(--hr);
+  }
+  hr { border: 0; border-top: 1px solid var(--hr); margin: 32px 0; }
+  ul { padding-left: 22px; margin: 4px 0 16px; }
+  li { margin-bottom: 6px; }
+  .lede {
+    font-size: 19px;
+    line-height: 1.5;
+    color: var(--dim);
+    margin: 0 0 36px;
+  }
+  .pill {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    background: rgba(110, 231, 255, 0.12);
+    color: var(--accent);
+    border: 1px solid rgba(110, 231, 255, 0.4);
+    letter-spacing: 0.04em;
+  }
+  .download-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    margin: 18px 0 24px;
+  }
+  .download {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    background: var(--code-bg);
+    border: 1px solid var(--hr);
+    border-radius: 10px;
+    text-decoration: none;
+  }
+  .download:hover { border-color: var(--accent); }
+  .download .what { font-weight: 600; color: var(--fg); }
+  .download .for { color: var(--dim); font-size: 13px; }
+  .footer {
+    color: var(--dim);
+    font-size: 13px;
+    margin-top: 56px;
+    padding-top: 24px;
+    border-top: 1px solid var(--hr);
+  }
+  .badges { margin: 0 0 22px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .badge { padding: 3px 10px; border-radius: 6px; font-size: 12px; background: var(--code-bg); border: 1px solid var(--hr); color: var(--dim); }
+  .badge.good { color: var(--good); border-color: rgba(117, 226, 156, 0.4); }
+</style>
+</head>
+<body>
+<main>
+  <span class="pill">v0.20.7 — for the people</span>
+  <h1>One Link</h1>
+  <p class="lede">
+    Peer-to-peer chat and file sync. No accounts. No servers.
+    No cloud. No telemetry. Your devices find each other on your
+    network and talk directly, end-to-end encrypted, mutually
+    authenticated.
+  </p>
+
+  <div class="badges">
+    <span class="badge good">AGPLv3</span>
+    <span class="badge good">no telemetry</span>
+    <span class="badge good">no accounts</span>
+    <span class="badge good">at-rest encryption by default</span>
+    <span class="badge good">forward secrecy</span>
+    <span class="badge good">reproducible builds</span>
+  </div>
+
+  <h2>Download</h2>
+  <p>
+    Each release is built from a tagged commit on GitHub Actions
+    with reproducible-build settings, and every artifact carries a
+    Sigstore attestation in the public Rekor transparency log.
+    You can verify any download independently with the script
+    below — no need to trust this page or even the maintainer.
+  </p>
+
+  <div class="download-grid">
+    <a class="download" href="https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest">
+      <div>
+        <div class="what">Latest release ↗</div>
+        <div class="for">All platforms · sources, wheel, signature bundles</div>
+      </div>
+      <div>→</div>
+    </a>
+    <a class="download" href="https://github.com/IamOneYouAreOneWeAreOne/one-link">
+      <div>
+        <div class="what">Source on GitHub ↗</div>
+        <div class="for">git clone https://github.com/IamOneYouAreOneWeAreOne/one-link</div>
+      </div>
+      <div>→</div>
+    </a>
+  </div>
+
+  <h2>Install</h2>
+  <p>From PyPI (once published):</p>
+  <pre><code>pip install one_link
+one-link app</code></pre>
+
+  <p>From source (anyone, today):</p>
+  <pre><code>git clone https://github.com/IamOneYouAreOneWeAreOne/one-link
+cd one-link
+pip install -e .
+one-link app</code></pre>
+
+  <h2>Verify before you trust</h2>
+  <p>
+    Download the artifact, the matching <code>.sigstore</code>
+    bundle, and <code>SHA256SUMS</code> from the GitHub release.
+    Then run:
+  </p>
+  <pre><code>bash scripts/verify-release.sh ./one_link-0.20.7.tar.gz</code></pre>
+  <p>
+    The script checks the SHA-256 against the signed manifest and
+    verifies the Sigstore signature was produced by One Link's
+    GitHub Actions release workflow from the matching tag. Any
+    mismatch refuses the install and tells you why.
+  </p>
+  <p>
+    If you don't trust the script either, the underlying check is
+    just <code>python -m sigstore verify identity</code> with the
+    workflow identity pinned. Run it yourself.
+  </p>
+
+  <h2>What's inside</h2>
+  <ul>
+    <li>X25519 + Ed25519 mutual handshake. ChaCha20-Poly1305 framed
+        wire protocol.</li>
+    <li>Signal-style Double Ratchet for forward secrecy +
+        post-compromise security on every channel.</li>
+    <li>8-digit transcript-bound SAS pair flow. 5-minute pair TTL.
+        Deny-by-default capability gate after pair.</li>
+    <li>Group-chat sender chains with sliding-window OOO support
+        + Ed25519-signed messages.</li>
+    <li>At-rest encryption ON BY DEFAULT (no passphrase prompt).
+        DPAPI on Windows binds the data root key to the user's
+        login credentials.</li>
+    <li>WebRTC browser-as-peer transport with cryptographically
+        bound DTLS-SRTP fingerprint (signed answer envelope).</li>
+    <li>BLAKE3-verified content-defined chunking for fast
+        large-file sync. Native-code accelerator with SHA-256
+        sidecar integrity check.</li>
+    <li>mDNS LAN discovery + optional rendezvous + relay for
+        cross-network. Hardened tier (Tor / DHT) on roadmap.</li>
+  </ul>
+
+  <h2>Threat model</h2>
+  <p>
+    The full threat model lives at
+    <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/blob/master/docs/SECURITY.md">docs/SECURITY.md</a>.
+    Nine adversary classes (T1 casual snoop through T9 state
+    actor) with explicit defenses + honest "where the gaps are."
+  </p>
+  <p>
+    For responsible-disclosure of a vulnerability:
+    <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/blob/master/SECURITY.md">SECURITY.md</a>
+    at the repo root.
+  </p>
+
+  <h2>For the people</h2>
+  <p>
+    One Link is licensed under
+    <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPLv3</a>
+    so it can never be quietly enclosed inside a closed-source
+    corporate product. The full charter is in
+    <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/blob/master/NOTICE">NOTICE</a>.
+    No accounts, no email, no phone number, no telemetry, no
+    advertising, no selling user data, no corporate substrate
+    dependency the user can't opt out of. Ever.
+  </p>
+
+  <div class="footer">
+    Maintained by One Link contributor.
+    Source <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link">on GitHub</a>.
+    Security disclosure
+    <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/blob/master/SECURITY.md">here</a>.
+    AGPLv3 — copy, modify, share. Build something good.
+  </div>
+</main>
+</body>
+</html>

@@ -1,0 +1,178 @@
+name: release
+
+# Reproducible-build + signed-attestation pipeline for tagged releases.
+# Goals:
+#   1. Anyone can rebuild from source and get the same binary.
+#   2. Each release artifact carries a Sigstore attestation in the
+#      public Rekor transparency log so consumers can verify
+#      "this artifact was built from this commit by GitHub Actions
+#      on this date" without trusting a single private signing key.
+#   3. SHA-256 manifest published alongside the artifacts so a
+#      stripped-down verify path (curl + sha256sum) works for
+#      users who can't or won't install sigstore.
+#
+# Sovereignty note: Sigstore's Fulcio + Rekor are operated by the
+# Linux Foundation OpenSSF and ARE corporate-substrate dependencies.
+# The trust model is "transparent append-only log," not "trust the
+# operator," so a compromised Fulcio can't quietly forge a sig
+# without the forgery showing up in Rekor (which we and our users
+# audit). Once the project incorporates as a non-profit foundation
+# and stands up its own HSM-backed multi-maintainer threshold key
+# (see NOTICE), this workflow will switch to the in-house signing
+# pipeline. Until then Sigstore is the pragmatic baseline.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write    # create release + upload assets
+  id-token: write    # OIDC token for Sigstore keyless signing
+  attestations: write
+
+jobs:
+  build:
+    name: build reproducible artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      source_date_epoch: ${{ steps.meta.outputs.source_date_epoch }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so SOURCE_DATE_EPOCH = commit date is
+          # deterministic across re-runs.
+          fetch-depth: 0
+
+      - name: setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: read version + source-date-epoch
+        id: meta
+        # Use the tag's commit timestamp as SOURCE_DATE_EPOCH so
+        # rebuild-from-source by anyone on any machine produces
+        # byte-identical sdist + wheel. The Python build backend
+        # (setuptools) honors SOURCE_DATE_EPOCH when zipping.
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          if [ "$version" = "$GITHUB_REF" ]; then
+            version=$(grep -E '^version' pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
+          source_date_epoch=$(git log -1 --format=%ct)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source_date_epoch=$source_date_epoch" >> "$GITHUB_OUTPUT"
+          echo "Building One Link $version (SOURCE_DATE_EPOCH=$source_date_epoch)"
+
+      - name: install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: build sdist + wheel reproducibly
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.meta.outputs.source_date_epoch }}
+          PYTHONHASHSEED: 0
+        run: |
+          # Clean any prior artifacts that would taint the hash
+          rm -rf dist/ build/ *.egg-info
+          python -m build --sdist --wheel --outdir dist/
+
+      - name: compute SHA-256 manifest
+        run: |
+          cd dist
+          # Generate a deterministic manifest of (hash, filename)
+          # pairs sorted by filename so two builds produce
+          # byte-identical SHA256SUMS files.
+          sha256sum * | sort -k 2 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/SHA256SUMS
+
+  sign:
+    name: sigstore-attest dist
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install sigstore
+        run: |
+          python -m pip install --upgrade pip
+          pip install sigstore
+
+      - name: sigstore-sign each artifact
+        run: |
+          cd dist
+          for f in *.whl *.tar.gz SHA256SUMS; do
+            [ -f "$f" ] || continue
+            python -m sigstore sign --bundle "$f.sigstore" "$f"
+          done
+          ls -la
+
+      - name: attest the build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/SHA256SUMS
+
+      - name: create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/*.sigstore
+            dist/SHA256SUMS
+          generate_release_notes: true
+          body: |
+            ## One Link ${{ needs.build.outputs.version }}
+
+            Reproducible-build artifacts published with Sigstore
+            keyless attestations. Anyone can verify a download
+            with:
+
+            ```bash
+            bash scripts/verify-release.sh dist/<artifact>
+            ```
+
+            Or with the sigstore tool directly:
+
+            ```bash
+            python -m sigstore verify identity \
+              --bundle <artifact>.sigstore \
+              --cert-identity 'https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/v${{ needs.build.outputs.version }}' \
+              --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              <artifact>
+            ```
+
+            **SOURCE_DATE_EPOCH:** `${{ needs.build.outputs.source_date_epoch }}`
+            (rebuild from source with that env var set to verify
+            byte-equal artifacts).

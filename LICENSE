@@ -1,21 +1,47 @@
-MIT License
+                    One Link License Notice
 
 Copyright (c) 2026 One Link contributor (weareone@oneunity.earth)
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+You should have received a copy of the GNU Affero General Public
+License along with this program.  If not, see
+<https://www.gnu.org/licenses/agpl-3.0.html>.
+
+The full text of the AGPLv3 ships in this repository at
+LICENSE.AGPL-3.0 — that file is the legally operative license
+text.  This file (LICENSE) is the SPDX-friendly entry point that
+identifies the license + copyright holder.
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+
+────────────────────────────────────────────────────────────────────
+History note (license change at v0.20.7+):
+
+Versions of One Link prior to commit `87d1b98` (released as
+v0.20.7+ in 2026-05) were distributed under the MIT License.
+Those releases remain under MIT, in perpetuity, by the original
+copyright holder — anyone in possession of an MIT-licensed
+release retains every right MIT granted them.
+
+Starting with the AGPLv3 license commit, all NEW contributions
+and NEW derivative works are governed by AGPLv3.  The change is
+deliberate and described in NOTICE: One Link is for the people,
+and AGPLv3 is the license that ensures forks built on top of
+One Link's privacy work can't be quietly enclosed inside a
+corporate product without sharing those modifications back to
+the people who use them.
+
+If you forked or built on the MIT version: nothing about your
+fork changes; you may continue under MIT until you choose to
+sync with a post-AGPLv3 commit (at which point AGPLv3 covers
+your sync).
+────────────────────────────────────────────────────────────────────
