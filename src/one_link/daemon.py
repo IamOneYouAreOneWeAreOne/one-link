@@ -1948,8 +1948,11 @@ class Daemon:
                     ),
                 )
                 return
-            out_path = inbox_dir() / f"{blob[:8]}_{name}"
-            handle = open(out_path, "wb")
+            # v0.20.7 (security audit H16): open with exclusive-create
+            # against a uniquified path so a name + blob-prefix
+            # collision can't truncate an existing inbox file.
+            out_path = self._unique_inbox_path(blob, name)
+            handle = open(out_path, "xb")
             if cdc_chunks:
                 if missing:
                     missing, swarm_assist = await self._swarm_assist_file_offer(
@@ -2468,15 +2471,89 @@ class Daemon:
             return None
         return size if size >= 0 else None
 
+    # v0.20.7 (security audit H16): Windows treats these as device
+    # paths, opening "CON", "NUL", or "COM1" yields the console /
+    # null / serial port instead of a real file. Reject by
+    # case-folded stem.
+    _WINDOWS_RESERVED_BASENAMES: frozenset[str] = frozenset({
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5",
+        "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+        "LPT6", "LPT7", "LPT8", "LPT9",
+    })
+
     def _safe_transfer_name(self, value) -> str:
         name = Path(str(value or "")).name
         if not name or name in (".", ".."):
-            name = "unnamed.bin"
-        encoded = name.encode("utf-8", errors="ignore")
+            return "unnamed.bin"
+        # v0.20.7 (security audit H16):
+        #   - Reject NUL + control chars (0x00-0x1f, 0x7f).
+        #   - Reject trailing dots and spaces (Windows silently strips
+        #     them, so "report.pdf." collides with "report.pdf").
+        #   - Reject Windows reserved device names (CON, NUL, COM1-9,
+        #     LPT1-9, AUX, PRN). Match by stem so "CON.txt" is also
+        #     rejected — Windows treats the device-name stem as the
+        #     reserved meaning even with an extension.
+        clean = name.replace("\x00", "").rstrip(". ")
+        if not clean:
+            return "unnamed.bin"
+        if any(0 <= ord(c) <= 0x1f or ord(c) == 0x7f for c in clean):
+            clean = "".join(
+                c for c in clean
+                if not (0 <= ord(c) <= 0x1f or ord(c) == 0x7f)
+            )
+            if not clean:
+                return "unnamed.bin"
+        stem = Path(clean).stem
+        if stem.upper() in self._WINDOWS_RESERVED_BASENAMES:
+            clean = "_" + clean
+        encoded = clean.encode("utf-8", errors="ignore")
         if len(encoded) <= MAX_TRANSFER_FILE_NAME_BYTES:
-            return name
-        clipped = encoded[:MAX_TRANSFER_FILE_NAME_BYTES].decode("utf-8", errors="ignore").strip()
+            return clean
+        # Preserve the extension when clipping by total byte length so
+        # a long-prefix attacker can't collide on the trimmed name.
+        suffix = Path(clean).suffix.encode("utf-8", errors="ignore")
+        if 0 < len(suffix) < MAX_TRANSFER_FILE_NAME_BYTES // 2:
+            stem_budget = MAX_TRANSFER_FILE_NAME_BYTES - len(suffix)
+            stem_bytes = encoded[:stem_budget]
+            clipped = (
+                stem_bytes.decode("utf-8", errors="ignore").rstrip()
+                + suffix.decode("utf-8", errors="ignore")
+            )
+        else:
+            clipped = encoded[:MAX_TRANSFER_FILE_NAME_BYTES].decode(
+                "utf-8", errors="ignore"
+            ).strip()
         return clipped or "unnamed.bin"
+
+    def _unique_inbox_path(self, blob: str, name: str) -> Path:
+        """v0.20.7 (security audit H16): allocate a write-only inbox
+        path that does not overwrite an existing file.
+
+        The previous implementation opened ``inbox / f"{blob[:8]}_{name}"``
+        with ``"wb"`` (truncate). Two distinct file offers whose 8-char
+        blob prefix collided AND whose names matched silently overwrote.
+        With 32 bits of prefix entropy, a targeted attacker who can
+        choose the file name (a malicious paired peer) can grind blob
+        contents until the prefix matches an existing inbox file and
+        truncate it. We now open with ``"xb"`` (exclusive create) and
+        on collision append a numeric suffix until we find a free name.
+        """
+        base = inbox_dir()
+        candidate = base / f"{blob[:8]}_{name}"
+        if not candidate.exists():
+            return candidate
+        # On collision, insert "(N)" before the extension.
+        stem = Path(candidate.name).stem
+        suffix = Path(candidate.name).suffix
+        for n in range(1, 1000):
+            alt = base / f"{stem} ({n}){suffix}"
+            if not alt.exists():
+                return alt
+        # Fallback: random suffix to guarantee uniqueness even at
+        # extreme collision counts.
+        return base / f"{stem}.{secrets.token_hex(4)}{suffix}"
 
     def _normalize_cdc_chunks(self, raw, *, declared_size: int | None = None) -> list[dict] | None:
         """Validate a peer-supplied CDC chunk index.
@@ -2575,7 +2652,30 @@ class Daemon:
             return self._read_chunk_from_prior_source(chunk_hash)
         with contextlib.suppress(OSError):
             os.utime(p, None)
-        return p.read_bytes()
+        data = p.read_bytes()
+        # v0.20.7 (security audit H18): re-verify the stored bytes
+        # actually hash to the address they're stored under. Without
+        # this check, any process or cross-app actor that modifies a
+        # file under <data>/file_chunks (no FS sandbox enforcement;
+        # only user-account isolation) causes the daemon to ship
+        # wrong bytes to remote peers AND incorporate them into
+        # locally-assembled output. The CDC-finish path catches
+        # whole-file mismatch via the trailing blake3 check, but
+        # peers receiving a poisoned chunk via _handle_chunk_pull
+        # had no defense. Re-hashing on read is O(chunk_size) and
+        # the chunks are bounded; cost is acceptable for the
+        # integrity guarantee. On mismatch we unlink the corrupted
+        # cache entry and fall through to the prior-source path so
+        # a transient disk fault doesn't permanently kill the chunk.
+        if blake3.blake3(data).hexdigest() != chunk_hash:
+            log.warning(
+                "chunk-cache integrity mismatch for %s; unlinking",
+                chunk_hash[:8],
+            )
+            with contextlib.suppress(OSError):
+                p.unlink()
+            return self._read_chunk_from_prior_source(chunk_hash)
+        return data
 
     def _read_chunk_from_prior_source(self, chunk_hash: str) -> bytes | None:
         if self.state is None:
@@ -3576,14 +3676,37 @@ class Daemon:
                 "blob": f.blob_hex,
                 "ok": ok,
             }
-            ev = self._persist(msg=done, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
-            self._broadcast_tail(ev)
             self._incoming_files.pop(blob, None)
             if not ok:
-                with contextlib.suppress(OSError):
-                    f.out_path.unlink()
+                # v0.20.7 (security audit M23): same quarantine
+                # discipline as _finish_cdc_file. See note there.
+                quarantine_target: Optional[Path] = None
+                try:
+                    quarantine_target = f.out_path.with_name(
+                        f.out_path.name + ".failed." + secrets.token_hex(4)
+                    )
+                    f.out_path.rename(quarantine_target)
+                except OSError:
+                    quarantine_target = None
+                if quarantine_target is not None:
+                    with contextlib.suppress(OSError):
+                        quarantine_target.unlink()
+                else:
+                    with contextlib.suppress(OSError):
+                        f.out_path.unlink()
+                done["path"] = ""
+                ev = self._persist(
+                    msg=done, direction="in",
+                    peer_fp=peer_fp, peer_short_id=peer_sid,
+                )
+                self._broadcast_tail(ev)
                 self._update_transfer(f.transfer_id, status="failed")
             else:
+                ev = self._persist(
+                    msg=done, direction="in",
+                    peer_fp=peer_fp, peer_short_id=peer_sid,
+                )
+                self._broadcast_tail(ev)
                 self._update_transfer(
                     f.transfer_id,
                     status="complete",
@@ -3698,23 +3821,54 @@ class Daemon:
                 "cdc": True,
                 "file_risk": classify_file_risk(f.name),
             }
-            ev = self._persist(msg=done, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
-            self._broadcast_tail(ev)
             self._incoming_files.pop(blob, None)
             if not ok:
-                with contextlib.suppress(OSError):
-                    f.out_path.unlink()
-                self._update_transfer(f.transfer_id, status="failed")
-            else:
-                self._record_finished_cdc_sources(f.out_path, f)
-                self._update_transfer(
-                    f.transfer_id,
-                    status="complete",
-                    progress_bytes=f.size,
-                    total_bytes=f.size,
-                    chunks_done=len(f.cdc_chunks),
-                    chunks_total=len(f.cdc_chunks),
+                # v0.20.7 (security audit M23): the prior implementation
+                # ran ``contextlib.suppress(OSError): unlink`` and
+                # broadcast the ``path`` field regardless. On Windows
+                # an antivirus / search-indexer transient handle on
+                # the just-closed file frequently makes the unlink
+                # fail; the corrupt file then sits in the user's
+                # inbox indistinguishable (by name) from a legitimate
+                # one, and the FILE_DONE WS event surfaces a path
+                # pointing at it. Move-aside-then-retry-unlink ensures
+                # the visible inbox state never has a path the user
+                # would mistake for a clean download.
+                quarantine_target: Optional[Path] = None
+                try:
+                    quarantine_target = f.out_path.with_name(
+                        f.out_path.name + ".failed." + secrets.token_hex(4)
+                    )
+                    f.out_path.rename(quarantine_target)
+                except OSError:
+                    quarantine_target = None
+                if quarantine_target is not None:
+                    with contextlib.suppress(OSError):
+                        quarantine_target.unlink()
+                else:
+                    with contextlib.suppress(OSError):
+                        f.out_path.unlink()
+                # Strip the path field from the broadcast so any UI
+                # subscriber doesn't surface the corrupt path.
+                done["path"] = ""
+                ev = self._persist(
+                    msg=done, direction="in",
+                    peer_fp=peer_fp, peer_short_id=peer_sid,
                 )
+                self._broadcast_tail(ev)
+                self._update_transfer(f.transfer_id, status="failed")
+                return
+            ev = self._persist(msg=done, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
+            self._broadcast_tail(ev)
+            self._record_finished_cdc_sources(f.out_path, f)
+            self._update_transfer(
+                f.transfer_id,
+                status="complete",
+                progress_bytes=f.size,
+                total_bytes=f.size,
+                chunks_done=len(f.cdc_chunks),
+                chunks_total=len(f.cdc_chunks),
+            )
         except Exception:
             self._update_transfer(f.transfer_id, status="failed")
             self._abort_incoming_file(blob, f)
