@@ -1221,6 +1221,106 @@
     );
   }
 
+  // v0.20.7 (security audit C1): pull the DTLS-SRTP fingerprint
+  // out of an SDP blob. RFC 8122 a=fingerprint line. Mirrors
+  // peer_rtc.py's _extract_dtls_fingerprint exactly so both
+  // sides compute the same value from the same bytes.
+  function _extractDtlsFingerprint(sdp) {
+    if (typeof sdp !== "string") return "";
+    const m = /^a=fingerprint:(\S+)\s+([0-9A-Fa-f:]+)/m.exec(sdp);
+    if (!m) return "";
+    return m[1].toLowerCase() + ":" + m[2].toUpperCase();
+  }
+
+  // v0.20.7 (security audit C1 + H6): verify a daemon-signed
+  // peer-rtc answer envelope. Throws on any failure so the
+  // caller's catch block surfaces the rejection to the UI
+  // instead of silently applying a tampered SDP.
+  // ``expectedFingerprint`` is the daemon_fingerprint the phone
+  // pinned at QR-scan time. When provided, the verifier also
+  // confirms the answer envelope claims the SAME fingerprint,
+  // closing the audit-H6 gap where peer.html ignored the
+  // ``&fp=`` field from the QR.
+  async function _verifySignedDaemonAnswer(envelope, expectedFingerprint) {
+    if (!envelope || envelope.t !== "answer") {
+      throw new Error("answer envelope expected");
+    }
+    if (typeof envelope.signature !== "string" || !envelope.signature) {
+      throw new Error(
+        "daemon answer is not signed (peer outdated). Please " +
+        "update the daemon to v0.20.7+ for MITM-resistant pairing."
+      );
+    }
+    const sigB64u = envelope.signature;
+    const pubB64u = envelope.daemon_pubkey_b64u;
+    if (typeof pubB64u !== "string" || !pubB64u) {
+      throw new Error("daemon answer is missing daemon_pubkey_b64u");
+    }
+    const claimedFingerprint = envelope.daemon_fingerprint || "";
+    const claimedDtls = envelope.dtls_fingerprint || "";
+
+    const pubBytes = b64UrlToBytes(pubB64u);
+    if (!pubBytes || pubBytes.length !== 32) {
+      throw new Error("daemon_pubkey_b64u is not 32 bytes");
+    }
+    // Fingerprint cross-check #1: daemon_fingerprint in the
+    // envelope claims sha256:hex of pubBytes. Re-derive and
+    // require equality.
+    const derivedFp = await fingerprintOf(pubBytes);
+    if (claimedFingerprint && claimedFingerprint !== derivedFp) {
+      throw new Error(
+        "daemon_fingerprint does not match sha256(daemon_pubkey)"
+      );
+    }
+    // Fingerprint cross-check #2 (audit H6): the phone pinned
+    // a daemon fingerprint at QR-scan time. The signed answer
+    // envelope MUST claim that same fingerprint. A MITM serving
+    // a different daemon's signed answer (with a valid sig
+    // under THAT daemon's pubkey) would land here with a
+    // different fingerprint and we refuse.
+    if (expectedFingerprint &&
+        claimedFingerprint &&
+        expectedFingerprint !== claimedFingerprint) {
+      throw new Error(
+        "daemon answered with a different identity than the QR " +
+        "pinned at pair time (possible MITM or wrong daemon)"
+      );
+    }
+    // Build the canonical-bytes input for the signature: the
+    // envelope minus the signature field, JSON-serialized with
+    // sorted keys / no whitespace (matches peer_rtc._canonical).
+    const signing = Object.assign({}, envelope);
+    delete signing.signature;
+    const canonical = _canonicalJson(signing);
+    const enc = new TextEncoder();
+    const sig = b64UrlToBytes(sigB64u);
+    if (!sig || sig.length !== 64) {
+      throw new Error("daemon answer signature is not 64 bytes");
+    }
+    const ok = await _verifyEd25519(pubBytes, sig, enc.encode(canonical));
+    if (!ok) {
+      throw new Error("daemon answer signature does not verify");
+    }
+    // Cross-check: the SDP's a=fingerprint must match the claim
+    // the daemon cryptographically committed to. A MITM that
+    // rewrites the SDP fingerprint to point at their own DTLS
+    // cert invalidates this check.
+    const sdpDtls = _extractDtlsFingerprint(envelope.sdp || "");
+    if (claimedDtls) {
+      if (!sdpDtls) {
+        throw new Error(
+          "answer SDP is missing a=fingerprint (DTLS binding broken)"
+        );
+      }
+      if (sdpDtls !== claimedDtls) {
+        throw new Error(
+          "DTLS fingerprint in SDP does not match the daemon's " +
+          "signed claim (possible MITM)"
+        );
+      }
+    }
+  }
+
   // Build a RegisterReq matching the desktop daemon wire format.
   // `advertised_endpoints` is a list of {host, port}. The browser
   // can't easily know its public IP/port (NAT hides it; the rdz
@@ -2970,6 +3070,10 @@
       if (!msg || msg.v !== "OL-PEER-RTC-1") return;
       if (msg.t === "answer") {
         try {
+          // v0.20.7 audit C1 + H6: verify signed answer + DTLS
+          // fp + QR-pinned daemon fingerprint before applying.
+          // See _verifySignedDaemonAnswer for the full rationale.
+          await _verifySignedDaemonAnswer(msg, pair.daemon_fingerprint);
           await pc.setRemoteDescription(
             new RTCSessionDescription({ sdp: msg.sdp, type: "answer" }),
           );

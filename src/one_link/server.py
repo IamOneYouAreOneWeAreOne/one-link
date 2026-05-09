@@ -1580,14 +1580,40 @@ class UIServer:
                         fingerprint,
                         "token" if redeemed else "roster",
                     )
-                    await _send({
+                    # v0.20.7 (security audit C1): sign the answer
+                    # envelope with the daemon's Ed25519 private key
+                    # AND surface the DTLS fingerprint extracted from
+                    # the SDP as an explicit field. The browser then
+                    # cross-checks the SDP's a=fingerprint against
+                    # the signed claim, defeating a network MITM
+                    # that could otherwise rewrite the SDP fingerprint
+                    # to point at the attacker's own DTLS certificate.
+                    # Without this binding, the existing offer-envelope
+                    # signing on the browser side was a half-protocol;
+                    # the daemon's answer was unsigned and the SDP
+                    # fingerprint travelled inside it without any
+                    # cryptographic anchor to the daemon's identity.
+                    _peer_rtc_mod = __import__(
+                        "one_link.peer_rtc",
+                        fromlist=["_b64u", "_canonical", "_extract_dtls_fingerprint"],
+                    )
+                    sdp_text = pc.localDescription.sdp
+                    answer_envelope = {
                         "v": PEER_RTC_PROTOCOL_VERSION,
                         "t": "answer",
-                        "sdp": pc.localDescription.sdp,
-                        "daemon_pubkey_b64u": __import__("one_link.peer_rtc", fromlist=["_b64u"])._b64u(self.daemon.me.public_bytes),
+                        "sdp": sdp_text,
+                        "daemon_pubkey_b64u": _peer_rtc_mod._b64u(
+                            self.daemon.me.public_bytes
+                        ),
                         "daemon_fingerprint": self.daemon.me.fingerprint,
+                        "dtls_fingerprint": _peer_rtc_mod._extract_dtls_fingerprint(sdp_text),
                         "ts": int(time.time() * 1000),
-                    })
+                    }
+                    sig_bytes = self.daemon.me.sign(
+                        _peer_rtc_mod._canonical(answer_envelope)
+                    )
+                    answer_envelope["signature"] = _peer_rtc_mod._b64u(sig_bytes)
+                    await _send(answer_envelope)
                 elif t == "ice":
                     # aiortc's RTCPeerConnection handles ICE candidate
                     # offer/answer internally during setLocal/Remote

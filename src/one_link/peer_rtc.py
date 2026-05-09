@@ -165,6 +165,37 @@ def _b64ud(s: str) -> bytes:
         raise ValueError("invalid base64url") from e
 
 
+def _extract_dtls_fingerprint(sdp: str) -> str:
+    """v0.20.7 (security audit C1): extract the DTLS-SRTP fingerprint
+    from an SDP blob. The fingerprint line is per-RFC 8122:
+        a=fingerprint:<algo> <colon-separated hex bytes>
+    Returns "<algo>:<UPPERCASE-HEX>" (e.g. "sha-256:AB:CD:..."), or
+    "" if no a=fingerprint line is present. Both endpoints can call
+    this on their local + remote SDPs to verify the cryptographic
+    identity bound into the DataChannel transport.
+
+    Used in the signed answer envelope so the browser can cross-
+    check the SDP it received against the value the daemon
+    cryptographically committed to. A MITM rewriting the SDP
+    a=fingerprint to point at the attacker's DTLS cert would
+    invalidate the cross-check and the browser would refuse the
+    DataChannel.
+    """
+    if not isinstance(sdp, str):
+        return ""
+    import re
+    m = re.search(
+        r"^a=fingerprint:(\S+)\s+([0-9A-Fa-f:]+)",
+        sdp,
+        re.MULTILINE,
+    )
+    if not m:
+        return ""
+    algo = m.group(1).strip().lower()
+    fp = m.group(2).strip().upper()
+    return f"{algo}:{fp}"
+
+
 def _canonical(payload: dict) -> bytes:
     """JSON canonicalization matching the browser's _canonicalJson:
     sorted keys, no whitespace, ASCII-only (\\uXXXX escapes for
