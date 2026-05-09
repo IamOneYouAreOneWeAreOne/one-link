@@ -5914,7 +5914,10 @@ class UIServer:
             log.info("peer-https unavailable: %s", e)
             return
         try:
-            ctx = build_ssl_context(data_dir())
+            ctx = build_ssl_context(
+                data_dir(),
+                short_id=self.daemon.me.short_id,
+            )
         except Exception as e:
             log.warning("peer-https: build_ssl_context failed: %s", e)
             return

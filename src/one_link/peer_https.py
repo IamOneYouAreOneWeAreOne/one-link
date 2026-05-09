@@ -57,6 +57,7 @@ import ipaddress
 import logging
 import os
 import socket
+import contextlib
 import ssl
 from pathlib import Path
 from typing import Optional
@@ -119,12 +120,25 @@ def _detect_lan_addresses() -> list[str]:
     return sorted(out)
 
 
-def _build_subject_alt_names(extra_dns: list[str] | None = None) -> x509.SubjectAlternativeName:
+def _build_subject_alt_names(
+    extra_dns: list[str] | None = None,
+    *,
+    short_id: str = "",
+) -> x509.SubjectAlternativeName:
     """Build the SAN extension. We include every IP we can detect +
     a fixed set of useful DNS names so the cert is valid against
-    common access paths."""
+    common access paths.
+
+    v0.20.7 (security audit M12): also include a per-daemon
+    DNSName ``<short_id>.onelink.local`` so a phone with two
+    different One Link daemons in its trust store (e.g. laptop
+    + work-machine) can disambiguate which one it's connecting
+    to without relying purely on TOFU."""
     names: list[x509.GeneralName] = []
-    for dn in ["localhost", "onelink.local"] + (extra_dns or []):
+    base_dns = ["localhost", "onelink.local"]
+    if short_id:
+        base_dns.append(f"{short_id}.onelink.local")
+    for dn in base_dns + (extra_dns or []):
         names.append(x509.DNSName(dn))
     for ip_str in _detect_lan_addresses():
         try:
@@ -136,13 +150,23 @@ def _build_subject_alt_names(extra_dns: list[str] | None = None) -> x509.Subject
 
 
 def generate_self_signed(
-    base: Path, *, valid_days: int = CERT_VALID_DAYS
+    base: Path,
+    *,
+    valid_days: int = CERT_VALID_DAYS,
+    short_id: str = "",
 ) -> tuple[Path, Path]:
     """Mint a fresh ECDSA-P256 self-signed cert + key. Persists both
     to <base>/peer_https/{cert.pem,key.pem} with 0o600 perms.
 
     Returns (cert_path, key_path). Idempotent — call as many times
-    as you want; each call writes a fresh cert."""
+    as you want; each call writes a fresh cert.
+
+    v0.20.7 (security audit M12): the cert subject now includes
+    a per-daemon Common Name (``One Link Self-Signed (<short_id>)``)
+    so a phone trust store containing certs from multiple daemons
+    can identify which is which without inspecting fingerprints.
+    The Ed25519 short_id is the identity hint (8 hex chars).
+    """
     d = https_dir(base)
     d.mkdir(parents=True, exist_ok=True)
     cp = cert_path(base)
@@ -150,8 +174,13 @@ def generate_self_signed(
 
     # ECDSA P-256 keypair.
     key = ec.generate_private_key(ec.SECP256R1())
+    cn_text = (
+        f"One Link Self-Signed ({short_id})"
+        if short_id else
+        "One Link Self-Signed"
+    )
     subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, "One Link Self-Signed"),
+        x509.NameAttribute(NameOID.COMMON_NAME, cn_text),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "One Link"),
     ])
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -163,7 +192,10 @@ def generate_self_signed(
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(minutes=5))
         .not_valid_after(now + datetime.timedelta(days=valid_days))
-        .add_extension(_build_subject_alt_names(), critical=False)
+        .add_extension(
+            _build_subject_alt_names(short_id=short_id),
+            critical=False,
+        )
         .add_extension(
             x509.BasicConstraints(ca=False, path_length=None),
             critical=True,
@@ -174,7 +206,13 @@ def generate_self_signed(
                 content_commitment=False,
                 key_encipherment=False,
                 data_encipherment=False,
-                key_agreement=True,
+                # v0.20.7 (security audit M11): drop key_agreement.
+                # ECDHE cipher suites use the ephemeral key for
+                # agreement; the cert's static key only signs the
+                # handshake, so the key_agreement bit is unused.
+                # Removing it shrinks the attestation surface and
+                # matches the modern TLS 1.3-only profile.
+                key_agreement=False,
                 key_cert_sign=False,
                 crl_sign=False,
                 encipher_only=False,
@@ -238,30 +276,50 @@ def needs_rotation(
     return expiry - now < datetime.timedelta(days=rotate_within_days)
 
 
-def ensure_cert(base: Path) -> tuple[Path, Path]:
+def ensure_cert(base: Path, *, short_id: str = "") -> tuple[Path, Path]:
     """Return (cert_path, key_path), generating fresh material if
     the existing cert is missing, unparseable, or near expiry."""
     cp = cert_path(base)
     kp = key_path(base)
     if needs_rotation(cp) or not kp.is_file():
-        return generate_self_signed(base)
+        return generate_self_signed(base, short_id=short_id)
     return cp, kp
 
 
-def build_ssl_context(base: Path) -> Optional[ssl.SSLContext]:
+def build_ssl_context(
+    base: Path, *, short_id: str = "",
+) -> Optional[ssl.SSLContext]:
     """Build an ssl.SSLContext loaded with the daemon's self-signed
     cert. Returns None if the cert can't be created (e.g. the data
     dir is read-only) — callers fall back to HTTP-only.
 
-    The context is server-side TLS, modern profile (TLS 1.2+,
-    no SSLv2/SSLv3, ALPN with h2 + http/1.1)."""
+    v0.20.7 (security audit M11): TLS 1.3 only by default. The
+    previous profile permitted TLS 1.2 + 1.3 with no cipher
+    restriction, which kept whole classes of historical attacks
+    in scope (BEAST, CRIME, ROBOT, Lucky13, etc.). The browsers
+    we target (Chrome 113+, Safari 17+, Firefox 121+) all speak
+    TLS 1.3 unconditionally; pinning to 1.3-only loses no
+    practical clients and removes those attack classes. We also
+    disable compression + session tickets for forward-secrecy
+    hygiene (TLS 1.3 already negotiates fresh keys per session,
+    but OP_NO_TICKET keeps the in-memory session-state surface
+    smaller).
+    """
     try:
-        cp, kp = ensure_cert(base)
+        cp, kp = ensure_cert(base, short_id=short_id)
     except Exception as e:
         log.warning("peer-https: couldn't ensure cert: %s", e)
         return None
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    # v0.20.7 (M11): TLS 1.3 only.
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_3
+    # Defense-in-depth flags. NO_COMPRESSION defeats CRIME-class
+    # leaks; NO_TICKET shrinks the long-lived state surface.
+    with contextlib.suppress(AttributeError):
+        ctx.options |= ssl.OP_NO_COMPRESSION
+    with contextlib.suppress(AttributeError):
+        ctx.options |= ssl.OP_NO_TICKET
     try:
         ctx.set_alpn_protocols(["h2", "http/1.1"])
     except (NotImplementedError, ssl.SSLError):
