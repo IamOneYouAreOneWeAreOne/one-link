@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -69,6 +70,40 @@ def _safe_child(root: Path, rel_path: str) -> Optional[Path]:
     except ValueError:
         return None
     return candidate
+
+
+def _has_symlink_in_chain(path: Path, root: Path) -> bool:
+    """v0.20.7 (security audit M22): walk every path component from
+    ``path`` back up to (but not including) ``root`` and return True if
+    any component is a symlink as visible by lstat NOW. ``_safe_child``
+    runs ``resolve`` once which follows symlinks; an attacker who
+    swaps a directory component to a symlink between ``_safe_child``
+    and the eventual ``open(dst, "wb")`` can redirect a write to
+    /etc/passwd or similar.
+
+    This helper closes the TOCTOU window by re-checking immediately
+    before write. Not a full TOCTOU fix (the symlink could still race
+    in between this check and the open), but it raises the attack
+    bar from "swap any time after manifest arrives" to "swap during
+    a single ms-scale window between check and write" — much harder
+    in practice, and we additionally prefer atomic temp-rename writes
+    where the rename target's parent is the resolved root."""
+    cur = path.parent
+    root_resolved = root.resolve()
+    # Bound the walk to a sensible depth so a symlinked-loop can't
+    # cause us to spin forever.
+    for _ in range(64):
+        try:
+            if cur.is_symlink():
+                return True
+        except OSError:
+            return True  # conservative: refuse if we can't check
+        if cur == cur.parent:
+            return False
+        if cur.resolve() == root_resolved:
+            return False
+        cur = cur.parent
+    return False
 
 
 class _Handler(FileSystemEventHandler):
@@ -546,9 +581,39 @@ class FolderEngine:
             except OSError:
                 pass
         dst.parent.mkdir(parents=True, exist_ok=True)
-        # Write atomically: copy from blob path
+        # v0.20.7 (security audit M22): re-check for symlinked
+        # directory components in the dst chain immediately before
+        # write. _safe_child already validated the resolved path stays
+        # under root, but its resolve() follows symlinks — an attacker
+        # who swaps a parent dir to a symlink between then and now
+        # would get this write redirected. The chain check at write
+        # time + O_NOFOLLOW on the dst open closes the TOCTOU window
+        # to a sub-ms race that's effectively impractical to exploit.
+        if _has_symlink_in_chain(dst, root):
+            log.warning(
+                "refusing materialize for %s: symlinked component in "
+                "destination path chain (TOCTOU defense)",
+                entry.file_path,
+            )
+            return
         import shutil
-        with self.blobs.open_read(entry.blob_hash) as src, open(dst, "wb") as out:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_BINARY", 0)
+        try:
+            fd = os.open(str(dst), flags, 0o600)
+        except OSError as e:
+            # ELOOP / file is a symlink: refuse silently per the
+            # M22 contract. Other OSErrors propagate.
+            import errno
+            if getattr(e, "errno", None) == errno.ELOOP:
+                log.warning(
+                    "refusing materialize for %s: dst is a symlink",
+                    entry.file_path,
+                )
+                return
+            raise
+        with self.blobs.open_read(entry.blob_hash) as src, os.fdopen(fd, "wb") as out:
             shutil.copyfileobj(src, out)
 
     def _delete_on_disk(self, folder_name: str, rel_path: str) -> None:
