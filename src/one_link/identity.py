@@ -202,11 +202,14 @@ def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> 
     )
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(p.name + ".tmp." + secrets.token_hex(8))
-    fd = os.open(
-        str(tmp),
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-        0o600,
-    )
+    # Windows: O_BINARY suppresses CRLF translation on write so PEM
+    # files round-trip byte-equal across save/load (PEM tolerates
+    # mixed line endings, but `git diff` and reproducible-build
+    # hashing don't). On POSIX O_BINARY isn't defined; the OR is
+    # a no-op via getattr.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    flags |= getattr(os, "O_BINARY", 0)
+    fd = os.open(str(tmp), flags, 0o600)
     try:
         os.write(fd, pem)
         os.fsync(fd)
@@ -267,7 +270,28 @@ def load_or_create(
         if not isinstance(priv, Ed25519PrivateKey):
             raise RuntimeError(f"unexpected key type at {p}: {type(priv).__name__}")
     else:
-        priv = Ed25519PrivateKey.generate()
+        # v0.20.7 (master-seed integration): if a master seed has
+        # been provisioned (either via "one-link backup init" or
+        # via "one-link backup restore"), derive the identity key
+        # from that seed instead of minting fresh randomness. This
+        # means a user who lost their laptop can type their 24-word
+        # phrase on a new device and the identity is byte-identical
+        # to the original — peers continue to recognize them.
+        # Backward compat: daemons that pre-existed master_seed
+        # have no seed file and fall through to the legacy
+        # Ed25519PrivateKey.generate() path; those identities are
+        # not BIP-39-recoverable, but they continue to work.
+        priv = None
+        try:
+            from one_link import master_seed
+            from one_link.paths import data_dir as _data_dir_fn
+            seed = master_seed.load_seed(_data_dir_fn())
+            if seed is not None:
+                priv = master_seed.derive_identity_priv(seed)
+        except Exception:
+            priv = None
+        if priv is None:
+            priv = Ed25519PrivateKey.generate()
         _save_key(p, priv, pw)
     pub = priv.public_key()
     pub_bytes = pub.public_bytes(

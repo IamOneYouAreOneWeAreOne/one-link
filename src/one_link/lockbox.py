@@ -394,7 +394,21 @@ def acquire_or_create_silent_drk(data_dir: Path) -> bytes:
                 if len(blob) == 32:
                     return blob
 
-    fresh = secrets.token_bytes(32)
+    # v0.20.7 (master-seed integration): if a master seed has been
+    # provisioned, derive the DRK from it deterministically instead
+    # of minting fresh randomness. Then a user who restores their
+    # 24-word phrase on a new device gets the same DRK as the
+    # original install — at-rest data unlocks transparently.
+    fresh: Optional[bytes] = None
+    try:
+        from one_link import master_seed as _ms
+        seed = _ms.load_seed(data_dir)
+        if seed is not None:
+            fresh = _ms.derive_drk(seed)
+    except Exception:
+        fresh = None
+    if fresh is None:
+        fresh = secrets.token_bytes(32)
     try:
         if os.name == "nt":
             wrapped = _dpapi_protect(fresh)

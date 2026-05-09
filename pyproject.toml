@@ -66,6 +66,10 @@ one_link = [
   "native/*/ol_native_cdc.dll",
   "native/*/ol_native_cdc.so",
   "native/*/ol_native_cdc.dylib",
+  "native/*/ol_native_cdc.dll.sha256",
+  # v0.20.7 master-seed: BIP-39 English wordlist for the
+  # 24-word recovery phrase encoding.
+  "data/bip39-english.txt",
 ]
 
 [tool.pytest.ini_options]

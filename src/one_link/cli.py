@@ -122,6 +122,180 @@ def whoami():
     click.echo(f"fingerprint: {me.fingerprint}")
 
 
+@cli.group()
+def backup():
+    """Manage your 24-word recovery phrase.
+
+    The phrase is your sovereign backup: write it down on paper,
+    keep the paper somewhere safe. If you lose the device, type
+    the phrase on a new install and your identity + at-rest
+    data unlock — peers continue to recognize you.
+
+    The phrase is NEVER transmitted off-device, NEVER synced to
+    any cloud, NEVER stored in any third-party service. It exists
+    only on your paper backup + the daemon's encrypted local state.
+    """
+
+
+@backup.command("show")
+def backup_show():
+    """Print the 24-word recovery phrase. Write it down on paper."""
+    from one_link import master_seed, mnemonic
+    from one_link.paths import data_dir
+    seed = master_seed.load_seed(data_dir())
+    if seed is None:
+        click.echo(
+            "No master seed has been provisioned for this install.\n"
+            "Run `one-link backup init` to create one (seed + identity\n"
+            "will rotate; existing peers will see this as a key change).",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    phrase = mnemonic.encode(seed)
+    click.echo("=" * 64)
+    click.echo("WRITE THESE 24 WORDS DOWN ON PAPER. KEEP THE PAPER SAFE.")
+    click.echo("This is the ONLY way to recover your One Link identity")
+    click.echo("if you lose this device.")
+    click.echo("=" * 64)
+    words = phrase.split()
+    for row in range(0, len(words), 4):
+        line_words = words[row:row + 4]
+        numbered = [f"{i+row+1:>2}. {w:<10}" for i, w in enumerate(line_words)]
+        click.echo("  ".join(numbered))
+    click.echo("=" * 64)
+    click.echo("Anyone with these 24 words can take over your identity.")
+    click.echo("Treat them like a physical bank PIN: paper-only, never typed")
+    click.echo("into a website, never photographed, never sent to anyone.")
+    click.echo("=" * 64)
+
+
+@backup.command("init")
+@click.option(
+    "--force", is_flag=True,
+    help="Rotate identity even if existing keys are in use.",
+)
+def backup_init(force):
+    """Create a recoverable master seed for this install.
+
+    Use this on an existing One Link install (which already has
+    randomly-generated, non-recoverable keys) to switch to a
+    seed-backed setup. After running this, your old identity is
+    replaced — peers will see you as a "new" device with a
+    different fingerprint and you'll need to re-pair with them.
+
+    On a fresh install (no existing identity.key), the daemon
+    auto-creates a seed on first launch. This command is for
+    EXISTING installs that want to opt into recovery.
+    """
+    from one_link import master_seed
+    from one_link.paths import data_dir, key_path
+    if master_seed.has_seed(data_dir()):
+        click.echo(
+            "A master seed already exists. Run `one-link backup show`\n"
+            "to view its 24-word phrase. To rotate the seed (and thus\n"
+            "the identity), delete the seed file at\n"
+            f"  {data_dir() / master_seed.SEED_FILENAME}\n"
+            "and re-run this command.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    if key_path().is_file() and not force:
+        click.echo(
+            "An existing identity key is in use. Initializing a master\n"
+            "seed at this point will REPLACE that identity (peers will\n"
+            "see you as a different device after the swap).\n"
+            "Re-run with --force to confirm rotation.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    # If --force was passed and an identity exists: delete the old
+    # identity so the daemon will derive a fresh one from the seed.
+    if key_path().is_file() and force:
+        try:
+            key_path().unlink()
+        except OSError as e:
+            click.echo(f"Could not remove old identity: {e}", err=True)
+            raise click.exceptions.Exit(1)
+        # Also drop the DRK so it gets re-derived from the seed.
+        from one_link.lockbox import DRK_FILENAME
+        drk_path = data_dir() / DRK_FILENAME
+        with __import__("contextlib").suppress(OSError):
+            drk_path.unlink()
+    seed, _ = master_seed.load_or_create_seed(data_dir())
+    click.echo(
+        "Master seed created. Run `one-link backup show` and write\n"
+        "down the 24 words on paper. Then start the daemon — it will\n"
+        "derive a fresh identity + at-rest key from the seed."
+    )
+
+
+@backup.command("restore")
+@click.argument("phrase_words", nargs=-1)
+@click.option(
+    "--force", is_flag=True,
+    help="Overwrite existing identity even if one is present.",
+)
+def backup_restore(phrase_words, force):
+    """Restore identity from a 24-word recovery phrase.
+
+    Use on a NEW device that you want to be the same identity as
+    your old (lost) device. Type the 24 words separated by spaces:
+
+        one-link backup restore word1 word2 ... word24
+
+    Or paste them when prompted (no arguments).
+
+    Refuses to run if an identity already exists, unless --force.
+    The seed file is created from the phrase; on next daemon
+    launch the identity + DRK derive from it.
+    """
+    from one_link import master_seed, mnemonic
+    from one_link.paths import data_dir, key_path
+    if master_seed.has_seed(data_dir()) and not force:
+        click.echo(
+            "A master seed already exists on this install. To replace\n"
+            "it with a restored seed, re-run with --force.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    if key_path().is_file() and not force:
+        click.echo(
+            "An existing identity key is in use. Restoring will\n"
+            "REPLACE that identity. Re-run with --force to confirm.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    if not phrase_words:
+        click.echo(
+            "Type the 24 words separated by spaces, then press Enter.\n"
+            "(Hidden input; the phrase will not be echoed.)"
+        )
+        raw = click.prompt(
+            "phrase", hide_input=True, prompt_suffix="> ",
+        )
+    else:
+        raw = " ".join(phrase_words)
+    try:
+        seed = mnemonic.decode(raw)
+    except ValueError as e:
+        click.echo(f"Invalid phrase: {e}", err=True)
+        raise click.exceptions.Exit(1)
+    # Force-mode: clear out the old identity + DRK so they
+    # re-derive from the restored seed on next launch.
+    if force:
+        with __import__("contextlib").suppress(OSError):
+            key_path().unlink()
+        from one_link.lockbox import DRK_FILENAME
+        with __import__("contextlib").suppress(OSError):
+            (data_dir() / DRK_FILENAME).unlink()
+    master_seed.store_seed(data_dir(), seed)
+    click.echo(
+        "Master seed restored. Start the daemon — it will derive\n"
+        "your identity + at-rest key from the restored seed.\n"
+        "Peers paired with the original device will recognize you."
+    )
+
+
 @cli.command("native-status")
 def native_status():
     """Show whether the native transfer accelerator is active."""
