@@ -311,10 +311,18 @@ class Channel:
                 except Exception:
                     raise dr_err
         # Legacy path.
+        # v0.20.7 (security audit M2): increment rx_seq AFTER successful
+        # decrypt so a single bit-flip / injected garbage frame does not
+        # permanently desync the channel. The DR fallback path above
+        # already follows this pattern; this brings the legacy path in
+        # line. On decrypt failure the exception propagates and the
+        # channel is closed by the caller, so leaving rx_seq unmodified
+        # is safe (the channel will not be reused).
         ct = await read_frame(self.reader)
         nonce = self._nonce(self.rx_seq)
+        pt = self.rx_aead.decrypt(nonce, ct, self._aad())
         self.rx_seq += 1
-        return self.rx_aead.decrypt(nonce, ct, self._aad())
+        return pt
 
     def _decode_ratchet_payload(self, payload: bytes) -> bytes:
         """Synchronous DR-decrypt of an already-read frame payload.

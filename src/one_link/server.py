@@ -27,6 +27,7 @@ import asyncio
 import base64
 from collections import deque
 import contextlib
+import hmac
 import json
 import logging
 import mimetypes
@@ -556,6 +557,25 @@ class UIServer:
         target = request.raw_path or request.path_qs or request.path
         if len(target.encode("utf-8", errors="ignore")) > MAX_REQUEST_TARGET_BYTES:
             return web.json_response({"error": "request target too large"}, status=414)
+        # v0.20.7 (security audit H10): defeat DNS-rebinding + cross-
+        # origin WebSocket hijacking on the loopback-bound UI. A user
+        # who visits attacker.com can be served a page whose DNS A
+        # record was rebound to 127.0.0.1, which would let attacker JS
+        # reach this listener. The cookie's SameSite=Strict + the auth
+        # token already block most exploitation paths, but the
+        # browser-canonical mitigation is to refuse Host headers that
+        # don't belong to this listener and refuse Origin headers from
+        # foreign origins. We only enforce when bound to loopback (the
+        # default); --lan / 0.0.0.0 mode is an explicit user opt-in to
+        # LAN exposure where we can't enumerate the legit Host values.
+        if not self._accept_request_host(request):
+            return web.json_response(
+                {"error": "host header rejected"}, status=421
+            )
+        if not self._accept_request_origin(request):
+            return web.json_response(
+                {"error": "cross-origin request rejected"}, status=403
+            )
         content_type = (request.content_type or "").lower()
         if (
             request.method in ("POST", "PUT", "PATCH", "DELETE")
@@ -573,7 +593,60 @@ class UIServer:
         resp.headers.setdefault("X-Frame-Options", "DENY")
         resp.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
         resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        # v0.20.7 (security audit M15): aiohttp emits "Server: Python/x.y
+        # aiohttp/z.z.z" by default, which hands an attacker the exact
+        # version of the request handler to scan for known CVEs. Replace
+        # with a generic identifier; the daemon's actual version still
+        # ships via /api/connect-info to authenticated clients.
+        resp.headers["Server"] = "one-link"
         return resp
+
+    # v0.20.7 (security audit H10): DNS-rebinding + CSWSH defenses.
+    # Both helpers return True when the request is acceptable. They
+    # return False (caller answers 421/403) only when the daemon is
+    # on a loopback bind AND the request's Host or Origin would point
+    # at a foreign origin. A --lan / 0.0.0.0 bind is an explicit user
+    # opt-in to LAN exposure where we can't enumerate the legit Host
+    # values browsers might present.
+    _LOOPBACK_BIND_HOSTS = ("127.0.0.1", "localhost", "::1", "::")
+    _LOOPBACK_VALID_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+    def _is_loopback_bound(self) -> bool:
+        bind = (self.bind_host or "127.0.0.1").lower()
+        return bind in self._LOOPBACK_BIND_HOSTS
+
+    def _accept_request_host(self, request: web.Request) -> bool:
+        if not self._is_loopback_bound():
+            return True
+        host_header = (request.host or "").strip().lower()
+        if not host_header:
+            return False
+        # Handle bracketed IPv6 ([::1]:port).
+        if host_header.startswith("["):
+            if "]" not in host_header:
+                return False
+            host_only = host_header[1:host_header.index("]")]
+        elif ":" in host_header:
+            host_only = host_header.split(":", 1)[0]
+        else:
+            host_only = host_header
+        return host_only in self._LOOPBACK_VALID_HOSTS
+
+    def _accept_request_origin(self, request: web.Request) -> bool:
+        # No Origin = direct fetch / same-origin nav. Browsers add
+        # Origin on cross-origin requests + every WebSocket upgrade.
+        origin = (request.headers.get("Origin") or "").strip()
+        if not origin:
+            return True
+        if not self._is_loopback_bound():
+            return True
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(origin)
+            host = (parsed.hostname or "").lower()
+        except Exception:
+            return False
+        return host in self._LOOPBACK_VALID_HOSTS
 
     async def _probe_owned_http_port(self, bind_host: str, port: int) -> bool:
         """Return True only if the HTTP listener reached on this port is us.
@@ -801,14 +874,31 @@ class UIServer:
         # v0.8.1: developer backend.
         r.add_get("/api/debug/log", self._guarded(self.api_debug_log))
         r.add_post("/api/debug/log/clear", self._guarded(self.api_debug_clear))
-        # v0.11.4: /api/debug/health is intentionally NOT token-guarded.
-        # The daemon binds to 127.0.0.1 so only same-machine processes
-        # can hit it, and the response leaks no PII or message data —
-        # just structural self-checks (schema version, mDNS status,
-        # disk paths). Leaving auth on this endpoint made it the FIRST
-        # thing to break when the session cookie expired, defeating its
-        # whole purpose ("open this when something feels broken").
-        r.add_get("/api/debug/health", self.api_debug_health)
+        # v0.11.4: /api/debug/health stays unauthenticated when the
+        # daemon is loopback-bound (the original UX rationale: works
+        # even when the session cookie has expired, "open this when
+        # something feels broken"). v0.20.7 (security audit M14) closes
+        # the LAN-exposure escape hatch: under --lan / 0.0.0.0 bind the
+        # endpoint requires the token like every other /api route, so a
+        # LAN-adjacent attacker can't fingerprint One Link via
+        # schema_version + peer_count + disk paths.
+        async def _health_guarded(request: web.Request) -> web.StreamResponse:
+            if not self._is_loopback_bound():
+                if not self._check_token(request):
+                    if self._rate_limited(
+                        "auth_fail",
+                        self._client_rate_key(request),
+                        limit=MAX_FAILED_AUTH_ATTEMPTS,
+                    ):
+                        return web.json_response(
+                            {"error": "too many authentication attempts"},
+                            status=429,
+                        )
+                    return web.json_response(
+                        {"error": "unauthorized"}, status=401
+                    )
+            return await self.api_debug_health(request)
+        r.add_get("/api/debug/health", _health_guarded)
         r.add_post("/api/send", self._guarded(self.api_send))
         r.add_post("/api/send-file", self._guarded(self.api_send_file))
         r.add_get("/api/files", self._guarded(self.api_files))
@@ -836,11 +926,19 @@ class UIServer:
         # Accept token from cookie or Authorization header. Query tokens
         # are intentionally limited to GET / bootstrap in _index so they
         # cannot leak into API/WebSocket URLs, logs, or browser history.
-        if request.cookies.get(COOKIE_NAME) == self.token:
+        # v0.20.7 (security audit L12): use hmac.compare_digest for
+        # constant-time equality so a timing oracle cannot be used to
+        # extract token bytes one byte at a time. Token is 256 bits +
+        # rate-limited at the _guarded layer, so brute-force is already
+        # infeasible; this closes the primitive even so.
+        cookie_token = request.cookies.get(COOKIE_NAME, "")
+        if cookie_token and hmac.compare_digest(cookie_token, self.token):
             return True
         auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer ") and auth[7:] == self.token:
-            return True
+        if auth.startswith("Bearer "):
+            presented = auth[7:]
+            if presented and hmac.compare_digest(presented, self.token):
+                return True
         return False
 
     def _client_rate_key(self, request: web.Request) -> str:
@@ -1000,11 +1098,20 @@ class UIServer:
         resp.headers["Cache-Control"] = "no-store"
         resp.headers["Referrer-Policy"] = "no-referrer"
         if bootstrap_ok or request.cookies.get(COOKIE_NAME) == self.token:
+            # v0.20.7 (security audit M13): mark Secure when this very
+            # request was served over HTTPS so the cookie can never be
+            # echoed back over plain HTTP. We can't unconditionally set
+            # Secure because the daemon also serves the same UI over
+            # plain http://127.0.0.1 by default; setting Secure on a
+            # plain-http response makes the browser drop the cookie.
+            # Tying it to request.scheme keeps the loopback story
+            # working while making the LAN-HTTPS path leak-proof.
             resp.set_cookie(
                 COOKIE_NAME,
                 self.token,
                 httponly=True,
                 samesite="Strict",
+                secure=(request.scheme == "https"),
                 max_age=86400,
                 path="/",
             )

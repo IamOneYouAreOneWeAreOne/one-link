@@ -97,12 +97,37 @@ def test_default_allow_plus_prompt_covers_user_facing_local_caps():
 
 # ─── _apply_default_capability_policy ──────────────────────────────
 
-def test_apply_default_policy_allow_all_by_default(tmp_path: Path):
-    """v0.7.3: with pair_default_allow_all=true (the new default),
-    SAS-pair finalize leaves policy=None — legacy allow-everything."""
+def test_apply_default_policy_deny_by_default(tmp_path: Path):
+    """v0.20.7 (security audit C3): with the setting unset (the new
+    default), SAS-pair finalize installs policy=[CHAT]. Files/folders/
+    groups require explicit user grant. Reverses the v0.7.3 silent
+    allow-all flip of the v0.7.2 audit-finding-A deny-by-default
+    ground that the audit doc and capabilities.py still documented."""
     me = _new_identity()
     them = _new_identity()
     state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    daemon._apply_default_capability_policy(them.fingerprint)
+    policy = state.get_peer_capability_policy(them.fingerprint)
+    assert policy == list(DEFAULT_ALLOW_AFTER_PAIRING)
+    state.close()
+
+
+def test_apply_default_policy_allow_all_when_setting_true(tmp_path: Path):
+    """v0.20.7: when the user explicitly sets pair_default_allow_all
+    to true, SAS-pair finalize leaves policy=None (legacy allow-all
+    behavior). This is the opt-in escape hatch — never the default."""
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    state.set_setting("pair_default_allow_all", "true")
     daemon = Daemon(me)
     daemon.state = state
     state.upsert_peer(
@@ -118,8 +143,10 @@ def test_apply_default_policy_allow_all_by_default(tmp_path: Path):
 
 
 def test_apply_default_policy_strict_when_setting_off(tmp_path: Path):
-    """When pair_default_allow_all is set to false, the v0.7.2 audit
-    behavior kicks back in: policy=[CHAT] only."""
+    """When pair_default_allow_all is explicitly set to false, the
+    v0.7.2 audit-finding-A behavior applies: policy=[CHAT] only.
+    Same outcome as the new default; this test pins the explicit
+    opt-in path independently."""
     me = _new_identity()
     them = _new_identity()
     state = State(db_path=tmp_path / "s.db")

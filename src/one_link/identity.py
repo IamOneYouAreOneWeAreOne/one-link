@@ -17,6 +17,7 @@ Optional passphrase encryption-at-rest:
 from __future__ import annotations
 
 import os
+import secrets
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,6 +64,25 @@ def _resolve_passphrase(passphrase: Optional[bytes | str]) -> Optional[bytes]:
 
 
 def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> None:
+    """Atomically persist the Ed25519 identity key.
+
+    v0.20.7 (security audit H19): the previous implementation was a
+    direct ``p.write_bytes(pem)`` with no temp-file + fsync + rename
+    discipline. A crash or power loss during the write left the user
+    with a 0-byte / truncated identity.key, which on next boot caused
+    the daemon to silently mint a fresh keypair, rotating the device
+    fingerprint, breaking every pinned-trust relationship with paired
+    peers, and orphaning all on-disk chunk-availability state.
+
+    The fix:
+      1. Write PEM bytes to a unique sibling temp file.
+      2. fsync the temp fd so bytes are durable.
+      3. os.replace temp → final (atomic on POSIX + Windows NTFS).
+      4. fsync the parent directory on POSIX so the rename is durable.
+      5. chmod 0o600 (no-op for ACL bits on Windows; %APPDATA% ACL
+         inheritance remains the actual defense there until the
+         Windows-ACL hardening lands separately).
+    """
     enc = (
         serialization.BestAvailableEncryption(passphrase)
         if passphrase
@@ -74,7 +94,27 @@ def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> 
         encryption_algorithm=enc,
     )
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(pem)
+    tmp = p.with_name(p.name + ".tmp." + secrets.token_hex(8))
+    fd = os.open(
+        str(tmp),
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    try:
+        os.write(fd, pem)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, p)
+    if os.name != "nt":
+        try:
+            dfd = os.open(str(p.parent), os.O_DIRECTORY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except (OSError, AttributeError):
+            pass
     try:
         os.chmod(p, 0o600)
     except (OSError, NotImplementedError):

@@ -193,6 +193,12 @@ HANDSHAKE_DEADLINE_S = 8.0          # peer has 8s to complete handshake
 HANDSHAKE_PER_IP_INFLIGHT_MAX = 32  # concurrent handshakes from one IP
 HANDSHAKE_PER_IP_RATE_WINDOW_S = 60.0
 HANDSHAKE_PER_IP_RATE_MAX = 240     # attempts per window per IP
+# v0.20.7 (security audit H4): per-frame deadline on the post-handshake
+# peer recv loop. Without this, a peer that completes the (cheap)
+# handshake can hold the connection open indefinitely with no further
+# bytes, pinning fds + memory. The keepalive uses 30s PING/PONG so 120s
+# tolerates two missed PINGs before declaring the channel dead.
+PEER_IDLE_S = 120.0
 # Loopback gets a free pass — the test suite & the local UI talk to the
 # daemon on 127.0.0.1 in tight bursts, and an attacker on loopback already
 # owns the box.
@@ -1691,8 +1697,20 @@ class Daemon:
         try:
             while True:
                 try:
-                    plaintext = await channel.recv()
+                    # v0.20.7 (security audit H4): bounded read deadline.
+                    # A peer that holds the channel open with no further
+                    # bytes after handshake exits the loop here instead
+                    # of pinning fds forever.
+                    plaintext = await asyncio.wait_for(
+                        channel.recv(), timeout=PEER_IDLE_S
+                    )
                 except asyncio.IncompleteReadError:
+                    break
+                except asyncio.TimeoutError:
+                    log.info(
+                        "peer %s idle for %.0fs, closing channel",
+                        channel.peer_short_id, PEER_IDLE_S,
+                    )
                     break
                 if plaintext.startswith(BINARY_FRAME_MAGIC):
                     msg = _decode_binary_frame(plaintext)
@@ -1728,23 +1746,37 @@ class Daemon:
         if t == "CAPS":
             features = list(normalize_caps(msg.get("features", [])))
             bind = msg.get("channel_bind")
-            if isinstance(bind, dict):
-                expected_peer_fp = self.me.fingerprint
-                expected_self_fp = peer_fp
-                transcript = getattr(channel, "transcript_hex", "")
-                if (
-                    bind.get("peer_fp") != expected_peer_fp
-                    or bind.get("self_fp") != expected_self_fp
-                    or bind.get("transcript") != transcript
-                ):
-                    raise RuntimeError(
-                        f"CAPS channel binding mismatch from {peer_fp[:8]}"
-                    )
+            # v0.20.7 (security audit H1): channel_bind is REQUIRED.
+            # The v0.7.0 audit fix #10 added a transcript-bound CAPS
+            # claim to defeat channel-splicing / cross-session glue
+            # attacks. The receiver previously verified the claim only
+            # if present (`if isinstance(bind, dict)`), so a malicious
+            # peer could omit it and silently land on the pre-fix-#10
+            # acceptance path. Pre-v0.7.0 peers (which last shipped
+            # ~6+ months ago) must upgrade to communicate with a v0.20.7
+            # daemon. This is a deliberate compat break for security.
+            if not isinstance(bind, dict):
+                raise RuntimeError(
+                    f"CAPS missing channel_bind from {peer_fp[:8]} "
+                    f"(peer must upgrade to v0.7.0+)"
+                )
+            expected_peer_fp = self.me.fingerprint
+            expected_self_fp = peer_fp
+            transcript = getattr(channel, "transcript_hex", "")
+            if (
+                bind.get("peer_fp") != expected_peer_fp
+                or bind.get("self_fp") != expected_self_fp
+                or bind.get("transcript") != transcript
+            ):
+                raise RuntimeError(
+                    f"CAPS channel binding mismatch from {peer_fp[:8]}"
+                )
             channel.peer_caps = {
                 "protocol": msg.get("protocol", "?"),
                 "features": features,
                 "from": msg.get("from"),
-                "channel_bind": bind if isinstance(bind, dict) else None,
+                # v0.20.7: bind is now guaranteed-dict (checked above).
+                "channel_bind": bind,
                 "app_version": msg.get("app_version"),
                 "presence": msg.get("presence"),
             }
@@ -4837,10 +4869,16 @@ class Daemon:
         return policy is None or cap in policy
 
     def _apply_default_capability_policy(self, peer_fp: str) -> None:
-        """v0.7.3: at SAS-pair finalize, the per-peer policy default
-        is driven by the `pair_default_allow_all` setting.
+        """v0.20.7 (security audit C3): at SAS-pair finalize, the per-peer
+        policy default is driven by the `pair_default_allow_all` setting.
 
-          - True (default in v0.7.3+): leave policy = None.
+        v0.7.3 silently reversed the v0.7.2 audit-finding-A deny-by-default
+        ground (a None setting was treated as allow-all). The audit doc
+        and capabilities.py STILL document deny-by-default; runtime
+        contradicted both. v0.20.7 restores the deny-by-default ground:
+        a None or unset setting is treated as DENY, not allow.
+
+          - True: leave policy = None.
             policy=None means legacy allow-all — every advertised
             capability flows. Aligns with the user mental model
             "I just SAS-verified this device, of course I trust it."
@@ -4856,9 +4894,16 @@ class Daemon:
             return
         try:
             v = self.state.get_setting("pair_default_allow_all")
-            allow_all = v is None or v.lower() in ("1", "true", "yes")
+            # v0.20.7: deny-by-default. Only an explicit truthy setting
+            # opts in to legacy allow-all; None / unset / empty / falsy
+            # all resolve to deny (policy=[]).
+            allow_all = (
+                v is not None
+                and isinstance(v, str)
+                and v.lower() in ("1", "true", "yes")
+            )
         except Exception:
-            allow_all = True
+            allow_all = False
         if allow_all:
             return  # leave policy = None (legacy allow-all semantics)
         from one_link.capabilities import DEFAULT_ALLOW_AFTER_PAIRING

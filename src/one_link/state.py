@@ -433,6 +433,14 @@ class State:
         c.execute("PRAGMA foreign_keys = ON")
         c.execute("PRAGMA temp_store = MEMORY")
         c.execute("PRAGMA cache_size = -8000")  # 8 MB
+        # v0.20.7 (security audit H22): zero freed pages on delete so
+        # the disappearing-messages reaper actually erases plaintext
+        # bodies from the file. Adds ~10% write cost; worth it.
+        c.execute("PRAGMA secure_delete = ON")
+        # v0.20.7: checkpoint WAL frequently so deleted-row plaintext
+        # does not linger in state.db-wal between application
+        # checkpoints. 50 pages ~= ~200KB worst case.
+        c.execute("PRAGMA wal_autocheckpoint = 50")
         c.close()
 
     def _migrate(self) -> None:
