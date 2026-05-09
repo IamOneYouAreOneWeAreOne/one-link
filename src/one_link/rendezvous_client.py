@@ -14,18 +14,71 @@ Multiple rendezvous URLs can be configured; register propagates to
 all of them in parallel, lookup races them and returns the first
 non-404. This gives operators a free-fault-tolerance and a path to
 federation without changing the protocol.
+
+v0.20.7 (sovereignty pack): when ``ONE_LINK_TOR_PROXY`` is set in
+the environment (e.g. ``socks5://127.0.0.1:9050`` for a local Tor
+SOCKS port), all outbound rendezvous traffic routes through the
+SOCKS proxy. The rendezvous server then sees Tor exit / hidden
+service traffic only — never the user's real IP. Requires the
+optional ``[tor]`` install extra (``pip install one_link[tor]``)
+which pulls in ``aiohttp-socks``.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
+import os
 import socket
 from dataclasses import dataclass
 from typing import Optional
 
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+
+# v0.20.7 (sovereignty pack): SOCKS proxy support for outbound
+# rendezvous traffic. The aiohttp_socks dep is optional — the import
+# is lazy + guarded so the daemon runs identically without it.
+TOR_PROXY_ENV = "ONE_LINK_TOR_PROXY"
+
+
+def _build_proxy_connector() -> aiohttp.BaseConnector | None:
+    """Return a configured ProxyConnector if ONE_LINK_TOR_PROXY is
+    set and aiohttp_socks is importable; None otherwise.
+
+    Sovereignty note: Tor's SOCKS port is the canonical entry point
+    for routing traffic over the Tor network. A user who runs the
+    daemon with ``ONE_LINK_TOR_PROXY=socks5://127.0.0.1:9050``
+    achieves rendezvous-without-corporate-IP-visibility — the
+    rendezvous operator sees Tor exit traffic only. Pair this with
+    a rendezvous URL whose host is a ``.onion`` to get full
+    end-to-end-onion sovereignty (no exit node ever sees the
+    plaintext rendezvous request, because the request never leaves
+    the Tor network).
+    """
+    proxy_url = os.environ.get(TOR_PROXY_ENV, "").strip()
+    if not proxy_url:
+        return None
+    try:
+        from aiohttp_socks import ProxyConnector  # type: ignore[import-not-found]
+    except ImportError:
+        log.warning(
+            "%s is set but aiohttp-socks is not installed; "
+            "outbound rendezvous traffic will use the direct "
+            "network. Install with: pip install one_link[tor]",
+            TOR_PROXY_ENV,
+        )
+        return None
+    try:
+        return ProxyConnector.from_url(proxy_url)
+    except Exception as e:
+        log.warning(
+            "%s=%r could not be parsed as a SOCKS proxy URL (%s); "
+            "outbound rendezvous traffic will use the direct network",
+            TOR_PROXY_ENV, proxy_url, e,
+        )
+        return None
 
 from one_link.rendezvous_proto import (
     Endpoint,
@@ -121,7 +174,20 @@ class RendezvousClient:
     async def start(self) -> None:
         if self._session is not None:
             return
-        self._session = aiohttp.ClientSession(timeout=self._timeout)
+        # v0.20.7 (sovereignty pack): route through Tor SOCKS proxy
+        # when ONE_LINK_TOR_PROXY is set + aiohttp-socks is available.
+        proxy_connector = _build_proxy_connector()
+        if proxy_connector is not None:
+            log.info(
+                "rendezvous: outbound traffic routed via %s",
+                os.environ.get(TOR_PROXY_ENV, "<env unset>"),
+            )
+            self._session = aiohttp.ClientSession(
+                timeout=self._timeout,
+                connector=proxy_connector,
+            )
+        else:
+            self._session = aiohttp.ClientSession(timeout=self._timeout)
         # Initial register to all URLs — race them but don't fail if some
         # are down.
         await self._register_all()

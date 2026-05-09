@@ -33,6 +33,11 @@ window = ["pywebview>=5.0"]  # optional native-window wrapper (Tier 2)
 # installs without these packages fall back to headless daemon
 # mode automatically.
 tray = ["pystray>=0.19", "pillow>=10.0"]
+# v0.20.7 (sovereignty pack): route outbound rendezvous traffic
+# through a SOCKS proxy when ONE_LINK_TOR_PROXY is set. Optional
+# because pulling aiohttp-socks adds the python-socks transitive
+# dep (~150KB) that users not running Tor never need.
+tor = ["aiohttp-socks>=0.10"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 # v0.7.2 supply-chain gates (audit finding C):
 #   - pip-audit: scans the lockfile against the OSV vulnerability DB
