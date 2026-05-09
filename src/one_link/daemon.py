@@ -6052,6 +6052,28 @@ class Daemon:
             self.state.clear_outbox_for_peer(peer_fp)
         except Exception as e:
             log.debug("clearing outbox for revoked peer failed: %s", e)
+        # v0.20.7 (security audit L11): delete on-disk partial files
+        # for in-flight inbound transfers. Pre-fix the partial bytes
+        # remained in the inbox after revoke — combined with the
+        # FILE_DONE quarantine path's broadcast skipping, the user
+        # could be left with a partly-written file under a
+        # legitimate-looking name. Iterate _incoming_files for this
+        # peer and unlink + abort + drop the IncomingFile entry.
+        partials_to_drop: list[str] = []
+        for blob, f in list(self._incoming_files.items()):
+            try:
+                if getattr(f, "peer_fp", "") == peer_fp:
+                    partials_to_drop.append(blob)
+            except Exception:
+                continue
+        for blob in partials_to_drop:
+            f = self._incoming_files.get(blob)
+            if f is None:
+                continue
+            with contextlib.suppress(Exception):
+                self._abort_incoming_file(blob, f)
+            with contextlib.suppress(OSError):
+                f.out_path.unlink()
         # Step 5.
         if self.ui_server is not None:
             with contextlib.suppress(Exception):
