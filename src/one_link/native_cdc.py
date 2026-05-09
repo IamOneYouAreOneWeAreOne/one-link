@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import logging
 import os
 import platform
 import shutil
@@ -18,6 +19,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from importlib import resources
+
+log = logging.getLogger("one_link.native_cdc")
 from pathlib import Path
 from typing import Iterable
 
@@ -191,9 +194,58 @@ def get_native_cdc_scanner() -> NativeCdcScanner | None:
         return None
 
 
+def _verify_bundled_library(p: Path) -> bool:
+    """v0.20.7 (security audit M25): verify the bundled native CDC
+    binary's SHA-256 against a sidecar ``<name>.sha256`` file
+    shipped alongside it. Returns True iff the hash matches OR no
+    sidecar is present (backward compat for older builds).
+
+    The sidecar file format follows ``shasum -a 256`` output:
+        ``<lowercase 64-hex>  <basename>``
+    Whitespace before the basename is one or more spaces. We only
+    consume the first whitespace-delimited token (the hex), so
+    files written via ``hashlib.sha256().hexdigest()`` (no
+    basename) also work.
+
+    On mismatch we log + refuse the bundled binary; the caller
+    falls through to the compile-from-source path. This raises
+    the bar from "swap one DLL post-install" to "swap two files
+    consistently" — and provides the foundation for full signed-
+    distribution once the release-signing pipeline ships."""
+    sidecar = p.with_suffix(p.suffix + ".sha256")
+    if not sidecar.is_file():
+        # Backward compat: builds that don't ship the sidecar are
+        # treated as trust-on-first-use. Future bundled releases
+        # MUST ship the sidecar (build_native_cdc.py writes it).
+        return True
+    try:
+        line = sidecar.read_text(encoding="ascii", errors="replace").strip()
+        if not line:
+            return False
+        expected = line.split()[0].lower()
+        if len(expected) != 64 or not all(c in "0123456789abcdef" for c in expected):
+            return False
+        actual = hashlib.sha256(p.read_bytes()).hexdigest().lower()
+    except Exception as e:
+        log.warning(
+            "native CDC: integrity-check error for %s (%s); "
+            "refusing bundled binary",
+            p, e,
+        )
+        return False
+    if expected != actual:
+        log.warning(
+            "native CDC: integrity-check FAIL for %s "
+            "(expected %s, got %s); falling back to compile-from-source",
+            p, expected, actual,
+        )
+        return False
+    return True
+
+
 def _ensure_library() -> Path:
     bundled = _bundled_library()
-    if bundled is not None:
+    if bundled is not None and _verify_bundled_library(bundled):
         return bundled
 
     # Keep the native build cache space-free. MSYS GCC can hand paths with
