@@ -56,6 +56,7 @@ SEED_LEN_BYTES = 32  # 256 bits — matches BIP-39 24-word entropy
 _INFO_DRK = b"OL/master/drk|v1"
 _INFO_IDENTITY = b"OL/master/identity-ed25519|v1"
 _INFO_CLUSTER_SEED = b"OL/master/cluster-seed|v1"
+_INFO_BACKUP_BUNDLE = b"OL/master/backup-bundle|v1"
 
 
 def _seed_path(data_dir: Path) -> Path:
@@ -175,6 +176,20 @@ def derive_identity_priv(seed: bytes) -> Ed25519PrivateKey:
         info=_INFO_IDENTITY,
     ).derive(bytes(seed))
     return Ed25519PrivateKey.from_private_bytes(raw)
+
+
+def derive_backup_key(seed: bytes) -> bytes:
+    """AES-GCM key for encrypted-backup bundles. Distinct from the
+    DRK + identity + cluster keys so a leak of the backup wrap key
+    doesn't compromise the running daemon's at-rest data."""
+    if len(seed) != SEED_LEN_BYTES:
+        raise ValueError("seed must be 32 bytes")
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=_INFO_BACKUP_BUNDLE,
+    ).derive(bytes(seed))
 
 
 def derive_cluster_seed(seed: bytes) -> bytes:

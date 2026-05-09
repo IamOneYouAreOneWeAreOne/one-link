@@ -296,6 +296,133 @@ def backup_restore(phrase_words, force):
     )
 
 
+@backup.command("export")
+@click.argument("out_path", type=click.Path(dir_okay=False, path_type=Path))
+@click.option(
+    "--include-files", is_flag=True,
+    help=(
+        "Also include everything under inbox/. Inboxes can be GB-sized; "
+        "default is to bundle only the load-bearing state (sqlite + keys + "
+        "settings). Identity, chat history, groups, and folder configs are "
+        "ALWAYS included regardless of this flag."
+    ),
+)
+def backup_export(out_path, include_files):
+    """Write an encrypted backup bundle to OUT_PATH (a .olbak file).
+
+    The bundle is sealed with a key derived from your master seed
+    (the same seed your 24-word phrase encodes). It can ONLY be
+    decrypted by an install that knows the seed: either this same
+    daemon, or a fresh install where you've typed the 24 words via
+    `one-link backup restore`.
+
+    Without the seed the bundle is ciphertext indistinguishable
+    from random. Drop it on a USB stick, upload to any cloud, mail
+    it to yourself — without the 24 words it's unintelligible.
+
+    Refuses to run if no master seed has been provisioned (run
+    `one-link backup init` first to create one).
+    """
+    from one_link import backup_bundle, master_seed
+    from one_link.paths import data_dir
+    seed = master_seed.load_seed(data_dir())
+    if seed is None:
+        click.echo(
+            "No master seed has been provisioned for this install.\n"
+            "Run `one-link backup init` first.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    out_path = out_path.expanduser().resolve()
+    if out_path.exists():
+        click.echo(
+            f"Refusing to overwrite existing file: {out_path}\n"
+            "Pick a different path, or remove it first.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    try:
+        n = backup_bundle.create_bundle_to_file(
+            seed=seed,
+            data_dir=data_dir(),
+            out_path=out_path,
+            include_files=include_files,
+        )
+    except (OSError, ValueError) as e:
+        raise click.ClickException(f"export failed: {e}")
+    click.echo(f"wrote {n} bytes -> {out_path}")
+    click.echo(
+        "This file is encrypted under your master seed. To restore it on a\n"
+        "new device, copy it there + run `one-link backup import <path>`\n"
+        "AFTER you've restored the 24-word phrase on that device."
+    )
+
+
+@backup.command("import")
+@click.argument("bundle_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--overwrite", is_flag=True,
+    help="Replace files at the target if they already exist.",
+)
+@click.option(
+    "--target-dir", type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Override the install's data dir (advanced; default is correct).",
+)
+def backup_import(bundle_path, overwrite, target_dir):
+    """Decrypt and unpack a .olbak bundle into this install's data dir.
+
+    Requires a master seed already provisioned on this install (via
+    `one-link backup restore <24 words>`). The seed must match the
+    one that sealed the bundle, or decryption fails.
+
+    Default behavior refuses to clobber existing files in the
+    target dir. Pass --overwrite to allow replacement (this is
+    destructive: existing chat history etc. will be overwritten).
+    """
+    from one_link import backup_bundle, master_seed
+    from one_link.paths import data_dir
+    seed = master_seed.load_seed(data_dir())
+    if seed is None:
+        click.echo(
+            "No master seed on this install. Run\n"
+            "  one-link backup restore <word1> <word2> ... <word24>\n"
+            "first, using the 24-word phrase from the device this bundle came from.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    target = Path(target_dir).expanduser().resolve() if target_dir else data_dir()
+    try:
+        header, written = backup_bundle.restore_bundle_from_file(
+            seed=seed,
+            bundle_path=Path(bundle_path).expanduser().resolve(),
+            target_dir=target,
+            overwrite=overwrite,
+        )
+    except FileExistsError as e:
+        click.echo(
+            f"Refusing to overwrite existing file: {e}\n"
+            "Re-run with --overwrite to replace, or pick a clean --target-dir.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    except ValueError as e:
+        # Wrong seed, tampered file, bad magic, traversal attempt, etc.
+        raise click.ClickException(f"import failed: {e}")
+    except OSError as e:
+        raise click.ClickException(f"import failed: {e}")
+    click.echo(f"restored {len(written)} file(s) into {target}")
+    if written:
+        for name in written[:20]:
+            click.echo(f"  - {name}")
+        if len(written) > 20:
+            click.echo(f"  ... and {len(written) - 20} more")
+    click.echo(
+        "Restart the daemon (or `one-link daemon`) so the new state is\n"
+        "loaded into memory."
+    )
+
+
 @cli.command("native-status")
 def native_status():
     """Show whether the native transfer accelerator is active."""
