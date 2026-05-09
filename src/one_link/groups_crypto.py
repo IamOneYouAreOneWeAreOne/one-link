@@ -65,15 +65,42 @@ can add a sliding window in v0.6.2.
 Wire format
 ===========
 
+  v0.20.7+ frames (PROTOCOL_VERSION = "OL-GROUP-MSG-2"):
+
   {
-    "v": "OL-GROUP-MSG-1",
+    "v": "OL-GROUP-MSG-2",
     "group_id_b64": ...,
     "sender_pubkey_b64": ...,
     "epoch": int,
     "counter": int,
+    "nonce_salt_b64": ...,    # 4 bytes os.urandom (audit M3 defense)
     "ciphertext_b64": ...,
     "signature_b64": ...,
   }
+
+  Pre-v0.20.7 frames (PROTOCOL_VERSION = "OL-GROUP-MSG-1") omit the
+  ``nonce_salt_b64`` field and use a deterministic (epoch, counter)
+  nonce. Receivers continue to accept v1 frames so a daemon upgrade
+  on one side doesn't drop in-flight messages from the other; senders
+  always emit v2.
+
+Why the v2 salt (audit finding M3)
+==================================
+
+The v1 nonce was deterministic = ``(epoch || counter || zero4)``. The
+chain_key advances in RAM after each send, but if the daemon crashes
+and restarts before the new chain_key is fsynced to disk, the
+restarted daemon reads the *previous* chain_key from disk, advances
+it, and emits a frame at the same ``(epoch, counter)``. That is a
+catastrophic AEAD nonce-reuse: ChaCha20 keystream is xored with both
+plaintexts, leaking both messages.
+
+v2 folds 4 bytes of fresh ``os.urandom`` into the nonce + AAD per
+send. Even on the worst-case crash-replay scenario, the probability
+of two frames at the same ``(key, nonce)`` is 2^-32 per pair (~1 in
+4 billion). Not zero, but a probabilistic event practically
+impossible in any realistic group lifetime — a structural class
+upgrade vs. the deterministic v1 catastrophe.
 """
 from __future__ import annotations
 
@@ -93,12 +120,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-PROTOCOL_VERSION = "OL-GROUP-MSG-1"
+PROTOCOL_VERSION = "OL-GROUP-MSG-2"
+LEGACY_PROTOCOL_VERSION = "OL-GROUP-MSG-1"
+SUPPORTED_PROTOCOL_VERSIONS = (PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION)
 
 # Cryptographic constants.
 CHAIN_KEY_BYTES = 32              # HMAC-SHA256 output / ChaCha20Poly1305 key
 COUNTER_BYTES = 4                 # u32 — wraps after ~4B msgs / chain
 NONCE_BYTES = 12                  # ChaCha20-Poly1305 nonce
+NONCE_SALT_BYTES = 4              # v0.20.7 (audit M3) random salt in nonce
 TAG_BYTES = 16                    # Poly1305 auth tag
 MAX_MESSAGE_PLAINTEXT_BYTES = 1024 * 1024  # 1 MB sanity cap
 
@@ -137,10 +167,13 @@ def new_chain_key() -> bytes:
 
 # ─── per-message AEAD ───────────────────────────────────────────────
 
-def _build_nonce(epoch: int, counter: int) -> bytes:
-    """Deterministic nonce from (epoch, counter). 4 bytes epoch +
-    8 bytes counter (the lower 32 bits are the counter; upper 32
-    bits zero, leaving room to fold in extra entropy later)."""
+def _build_nonce_v1(epoch: int, counter: int) -> bytes:
+    """Pre-v0.20.7 deterministic nonce. Read-only path for legacy frames.
+
+    Vulnerable to (key, nonce) reuse on restart-after-crash with stale
+    persisted chain_key state. Kept ONLY for accepting in-flight
+    frames sent by older daemons; v0.20.7+ senders always use
+    ``_build_nonce_v2``."""
     if not (0 <= epoch < 2**32):
         raise ValueError(f"epoch out of u32 range: {epoch}")
     if not (0 <= counter < 2**32):
@@ -148,10 +181,27 @@ def _build_nonce(epoch: int, counter: int) -> bytes:
     return struct.pack(">II", epoch, counter) + b"\x00\x00\x00\x00"
 
 
-def _aad(group_id: bytes, sender_pubkey: bytes, epoch: int, counter: int) -> bytes:
-    """Associated data fed into AEAD — binds a ciphertext to its
-    routing context. Tampering with any of these fields invalidates
-    the Poly1305 tag."""
+def _build_nonce_v2(epoch: int, counter: int, nonce_salt: bytes) -> bytes:
+    """v0.20.7+ nonce: 4 bytes epoch + 4 bytes counter + 4 bytes
+    fresh os.urandom salt. Defends against (key, nonce) reuse on
+    restart-after-crash even if persisted chain_key is stale: the
+    salt is fresh per send so collision probability is 2^-32 per
+    pair of frames sharing the same ``(epoch, counter)``."""
+    if not (0 <= epoch < 2**32):
+        raise ValueError(f"epoch out of u32 range: {epoch}")
+    if not (0 <= counter < 2**32):
+        raise ValueError(f"counter out of u32 range: {counter}")
+    if len(nonce_salt) != NONCE_SALT_BYTES:
+        raise ValueError(
+            f"nonce_salt must be {NONCE_SALT_BYTES} bytes, got {len(nonce_salt)}"
+        )
+    return struct.pack(">II", epoch, counter) + bytes(nonce_salt)
+
+
+def _aad_v1(
+    group_id: bytes, sender_pubkey: bytes, epoch: int, counter: int
+) -> bytes:
+    """Associated data for legacy v1 frames."""
     if len(group_id) != 16:
         raise ValueError("group_id must be 16 bytes")
     if len(sender_pubkey) != 32:
@@ -164,6 +214,30 @@ def _aad(group_id: bytes, sender_pubkey: bytes, epoch: int, counter: int) -> byt
     )
 
 
+def _aad_v2(
+    group_id: bytes,
+    sender_pubkey: bytes,
+    epoch: int,
+    counter: int,
+    nonce_salt: bytes,
+) -> bytes:
+    """Associated data for v0.20.7+ frames. Includes the nonce_salt
+    so a flipped salt invalidates the Poly1305 tag."""
+    if len(group_id) != 16:
+        raise ValueError("group_id must be 16 bytes")
+    if len(sender_pubkey) != 32:
+        raise ValueError("sender_pubkey must be 32 bytes")
+    if len(nonce_salt) != NONCE_SALT_BYTES:
+        raise ValueError("nonce_salt wrong length")
+    return (
+        b"OL-GROUP-MSG-2"
+        + group_id
+        + sender_pubkey
+        + struct.pack(">II", epoch, counter)
+        + bytes(nonce_salt)
+    )
+
+
 def _encrypt_with_msg_key(
     msg_key: bytes,
     plaintext: bytes,
@@ -171,8 +245,9 @@ def _encrypt_with_msg_key(
     sender_pubkey: bytes,
     epoch: int,
     counter: int,
+    nonce_salt: bytes,
 ) -> bytes:
-    """ChaCha20-Poly1305 with deterministic nonce + AAD."""
+    """ChaCha20-Poly1305 with v0.20.7 salted nonce + AAD."""
     if len(msg_key) != CHAIN_KEY_BYTES:
         raise ValueError("msg_key wrong length")
     if len(plaintext) > MAX_MESSAGE_PLAINTEXT_BYTES:
@@ -181,8 +256,8 @@ def _encrypt_with_msg_key(
             f"{MAX_MESSAGE_PLAINTEXT_BYTES}"
         )
     aead = ChaCha20Poly1305(msg_key)
-    nonce = _build_nonce(epoch, counter)
-    aad = _aad(group_id, sender_pubkey, epoch, counter)
+    nonce = _build_nonce_v2(epoch, counter, nonce_salt)
+    aad = _aad_v2(group_id, sender_pubkey, epoch, counter, nonce_salt)
     return aead.encrypt(nonce, plaintext, aad)
 
 
@@ -193,12 +268,25 @@ def _decrypt_with_msg_key(
     sender_pubkey: bytes,
     epoch: int,
     counter: int,
+    *,
+    wire_version: str,
+    nonce_salt: Optional[bytes] = None,
 ) -> bytes:
-    """Inverse. Raises ValueError on auth failure (Poly1305 tag
-    mismatch) — caller must NOT reveal which check failed."""
+    """Inverse. Dispatches on ``wire_version`` so a v1 or v2 frame
+    is verified under the AAD/nonce shape it was sealed with.
+    Raises ValueError on auth failure (Poly1305 tag mismatch); caller
+    must NOT reveal which check failed."""
     aead = ChaCha20Poly1305(msg_key)
-    nonce = _build_nonce(epoch, counter)
-    aad = _aad(group_id, sender_pubkey, epoch, counter)
+    if wire_version == PROTOCOL_VERSION:
+        if nonce_salt is None or len(nonce_salt) != NONCE_SALT_BYTES:
+            raise ValueError("v2 frame missing valid nonce_salt")
+        nonce = _build_nonce_v2(epoch, counter, nonce_salt)
+        aad = _aad_v2(group_id, sender_pubkey, epoch, counter, nonce_salt)
+    elif wire_version == LEGACY_PROTOCOL_VERSION:
+        nonce = _build_nonce_v1(epoch, counter)
+        aad = _aad_v1(group_id, sender_pubkey, epoch, counter)
+    else:
+        raise ValueError(f"unsupported wire version: {wire_version!r}")
     try:
         return aead.decrypt(nonce, ciphertext, aad)
     except Exception as e:
@@ -261,11 +349,16 @@ def encrypt_message(
     The caller should treat the returned chain as the canonical
     sender state from this point. The previous chain_key is no
     longer usable (forward secrecy).
+
+    v0.20.7 (audit M3): emits a v2 wire frame with a 4-byte fresh
+    random ``nonce_salt``, eliminating the deterministic-nonce
+    catastrophic-reuse class on crash-restart.
     """
     if len(plaintext) == 0:
         raise ValueError("empty plaintext not allowed")
     if len(plaintext) > MAX_MESSAGE_PLAINTEXT_BYTES:
         raise ValueError("plaintext too large")
+    nonce_salt = os.urandom(NONCE_SALT_BYTES)
     msg_key = derive_message_key(chain.chain_key)
     ciphertext = _encrypt_with_msg_key(
         msg_key=msg_key,
@@ -274,13 +367,17 @@ def encrypt_message(
         sender_pubkey=chain.sender_pubkey,
         epoch=chain.epoch,
         counter=chain.counter,
+        nonce_salt=nonce_salt,
     )
-    # Sign (group_id || sender_pubkey || epoch || counter || ciphertext)
-    # so a member who holds the chain key can't forge as somebody else.
+    # Sign (group_id || sender_pubkey || epoch || counter || nonce_salt
+    # || ciphertext) so a member who holds the chain key can't forge
+    # as somebody else, and so the salt itself is sender-authenticated
+    # (a relay can't substitute a different salt to force a collision).
     sig_input = (
         chain.group_id
         + chain.sender_pubkey
         + struct.pack(">II", chain.epoch, chain.counter)
+        + nonce_salt
         + ciphertext
     )
     signature = private_key.sign(sig_input)
@@ -291,6 +388,7 @@ def encrypt_message(
         "sender_pubkey_b64": _b64(chain.sender_pubkey),
         "epoch": chain.epoch,
         "counter": chain.counter,
+        "nonce_salt_b64": _b64(nonce_salt),
         "ciphertext_b64": _b64(ciphertext),
         "signature_b64": _b64(signature),
     }
@@ -334,8 +432,9 @@ def decrypt_message(
     """
     if not isinstance(wire, dict):
         raise ValueError("wire must be a dict")
-    if wire.get("v") != PROTOCOL_VERSION:
-        raise ValueError(f"unsupported version: {wire.get('v')!r}")
+    wire_version = wire.get("v")
+    if wire_version not in SUPPORTED_PROTOCOL_VERSIONS:
+        raise ValueError(f"unsupported version: {wire_version!r}")
 
     # Parse + validate fields.
     group_id = _b64d(_require_str(wire.get("group_id_b64"), "group_id_b64"))
@@ -353,6 +452,17 @@ def decrypt_message(
     if len(signature) != 64:
         raise ValueError("signature must be 64 bytes")
 
+    nonce_salt: Optional[bytes] = None
+    if wire_version == PROTOCOL_VERSION:
+        nonce_salt = _b64d(_require_str(
+            wire.get("nonce_salt_b64"), "nonce_salt_b64"
+        ))
+        if len(nonce_salt) != NONCE_SALT_BYTES:
+            raise ValueError(
+                f"nonce_salt must be {NONCE_SALT_BYTES} bytes, "
+                f"got {len(nonce_salt)}"
+            )
+
     if epoch != chain.epoch:
         raise ValueError(
             f"epoch mismatch: chain at {chain.epoch}, message claims {epoch}"
@@ -364,12 +474,22 @@ def decrypt_message(
 
     # Verify Ed25519 signature BEFORE deriving keys / mutating chain
     # state so a malformed-but-counter-ahead frame can't push us
-    # past legitimate intermediates.
-    sig_input = (
-        group_id + sender_pubkey
-        + struct.pack(">II", epoch, counter)
-        + ciphertext
-    )
+    # past legitimate intermediates. v2 binds the nonce_salt into the
+    # signed input so a relay can't substitute a different salt to
+    # force a collision.
+    if wire_version == PROTOCOL_VERSION:
+        sig_input = (
+            group_id + sender_pubkey
+            + struct.pack(">II", epoch, counter)
+            + nonce_salt
+            + ciphertext
+        )
+    else:
+        sig_input = (
+            group_id + sender_pubkey
+            + struct.pack(">II", epoch, counter)
+            + ciphertext
+        )
     try:
         Ed25519PublicKey.from_public_bytes(sender_pubkey).verify(
             signature, sig_input
@@ -400,6 +520,8 @@ def decrypt_message(
             sender_pubkey=sender_pubkey,
             epoch=epoch,
             counter=counter,
+            wire_version=wire_version,
+            nonce_salt=nonce_salt,
         )
         # No chain advancement on OOO arrival; we just consumed a
         # cached key.
@@ -430,6 +552,8 @@ def decrypt_message(
             sender_pubkey=sender_pubkey,
             epoch=epoch,
             counter=counter,
+            wire_version=wire_version,
+            nonce_salt=nonce_salt,
         )
         next_chain_key = advance_chain_key(cur_chain_key)
         next_counter = counter + 1
