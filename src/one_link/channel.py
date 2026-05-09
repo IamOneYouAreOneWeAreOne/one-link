@@ -458,10 +458,45 @@ async def initiate(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     me: Identity,
+    *,
+    expected_responder_ed_pub: Optional[bytes] = None,
 ) -> Channel:
+    """Open an outbound encrypted channel.
+
+    v0.20.7 (security audit M1): when ``expected_responder_ed_pub`` is
+    provided, the initiator binds it into the HELLO signature
+    (``sig_i = me.sign(HELLO_TAG + me_pub + x_pub + nonce_i + resp_pub)``)
+    AND strictly equality-checks the actual REPLY's responder pubkey
+    against the claim. Together these defeat the unknown-key-share
+    attack: an attacker who re-routes the HELLO to a different
+    (paired) responder C cannot get C to verify the sig (the bound
+    pubkey identifies the original target), and even if C did
+    somehow accept, the initiator catches the redirect at the REPLY
+    pubkey check.
+
+    For TOFU first-meet flows where the responder pubkey isn't yet
+    known, leave ``expected_responder_ed_pub`` as None — the legacy
+    sig material is used and the responder side accepts both v1 and
+    v2 sigs. This is a soft transition: callers wire in the bind as
+    knowledge of the target identity becomes available.
+    """
+    if (
+        expected_responder_ed_pub is not None
+        and len(expected_responder_ed_pub) != 32
+    ):
+        raise ValueError(
+            f"expected_responder_ed_pub must be 32 bytes, "
+            f"got {len(expected_responder_ed_pub)}"
+        )
     x_priv, x_pub = _x25519_keypair()
     nonce_i = os.urandom(NONCE_LEN)
-    sig_i = me.sign(HELLO_TAG + me.public_bytes + x_pub + nonce_i)
+    if expected_responder_ed_pub is not None:
+        sig_i = me.sign(
+            HELLO_TAG + me.public_bytes + x_pub + nonce_i
+            + expected_responder_ed_pub
+        )
+    else:
+        sig_i = me.sign(HELLO_TAG + me.public_bytes + x_pub + nonce_i)
     hello = me.public_bytes + x_pub + nonce_i + sig_i
     await write_frame(writer, hello)
 
@@ -474,6 +509,18 @@ async def initiate(
     sig_r = reply[64 + NONCE_LEN :]
     if not verify(r_ed, sig_r, REPLY_TAG + nonce_i + r_ed + r_x + nonce_r):
         raise RuntimeError("REPLY signature invalid")
+    # v0.20.7 (M1): catch UKS redirect where attacker re-routes our
+    # HELLO to a different responder. If we didn't know who we were
+    # talking to (TOFU), the bind step above used legacy material and
+    # this check is skipped.
+    if (
+        expected_responder_ed_pub is not None
+        and r_ed != expected_responder_ed_pub
+    ):
+        raise RuntimeError(
+            "REPLY pubkey does not match expected responder identity "
+            "(possible unknown-key-share redirect)"
+        )
 
     transcript_hash = _sha256(hello + reply)
     shared = x_priv.exchange(X25519PublicKey.from_public_bytes(r_x))
@@ -508,7 +555,24 @@ async def respond(
     i_x = hello[32:64]
     nonce_i = hello[64 : 64 + NONCE_LEN]
     sig_i = hello[64 + NONCE_LEN :]
-    if not verify(i_ed, sig_i, HELLO_TAG + i_ed + i_x + nonce_i):
+    # v0.20.7 (security audit M1): try the v2 sig (with our pubkey
+    # bound in) first to defeat unknown-key-share. Fall back to the
+    # v1 sig material only if v2 fails — that's the rolling-upgrade
+    # hatch for initiators who don't yet know our identity (TOFU
+    # first-meet) and signed without the bind.
+    sig_v2_material = (
+        HELLO_TAG + i_ed + i_x + nonce_i + me.public_bytes
+    )
+    sig_v1_material = HELLO_TAG + i_ed + i_x + nonce_i
+    if verify(i_ed, sig_i, sig_v2_material):
+        pass  # v2 sig — UKS-defended path, the common case once peers upgrade.
+    elif verify(i_ed, sig_i, sig_v1_material):
+        log.info(
+            "respond: peer %s used legacy v1 HELLO sig (no responder-"
+            "pubkey binding); UKS defence not active for this handshake",
+            i_ed.hex()[:16],
+        )
+    else:
         raise RuntimeError("HELLO signature invalid")
 
     x_priv, x_pub = _x25519_keypair()

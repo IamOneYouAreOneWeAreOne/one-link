@@ -5430,8 +5430,14 @@ class Daemon:
         relay_pump = getattr(writer, "_relay_pump_task", None)
         try:
             try:
+                # v0.20.7 (M1): bind expected responder pubkey into the
+                # HELLO sig so an attacker re-routing our HELLO can't
+                # silently land us at a different paired peer.
                 channel = await asyncio.wait_for(
-                    ch.initiate(reader, writer, self.me),
+                    ch.initiate(
+                        reader, writer, self.me,
+                        expected_responder_ed_pub=bytes.fromhex(peer.ed_pub_hex),
+                    ),
                     timeout=HANDSHAKE_DEADLINE_OUTBOUND_S,
                 )
             except asyncio.TimeoutError as e:
@@ -5575,7 +5581,11 @@ class Daemon:
         """
         reader, writer = await self._dial_peer(peer)
         try:
-            channel = await ch.initiate(reader, writer, self.me)
+            # v0.20.7 (M1): bind expected responder pubkey to defeat UKS.
+            channel = await ch.initiate(
+                reader, writer, self.me,
+                expected_responder_ed_pub=bytes.fromhex(peer.ed_pub_hex),
+            )
             self._verify_channel_peer(peer, channel)
             transcript = getattr(channel, "transcript_hash", None)
             try:
@@ -6173,8 +6183,14 @@ class Daemon:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=3.0
             )
+            # v0.20.7 (M1): rec.pubkey is the canonical pubkey we
+            # already trust for this peer; bind it into HELLO.
             channel = await asyncio.wait_for(
-                ch.initiate(reader, writer, self.me), timeout=3.0
+                ch.initiate(
+                    reader, writer, self.me,
+                    expected_responder_ed_pub=rec.pubkey,
+                ),
+                timeout=3.0,
             )
             got_fp = fingerprint_of(channel.peer_ed_pub)
             if got_fp != peer_fp:
@@ -7684,7 +7700,11 @@ class Daemon:
         blobs_sent = 0
         bytes_sent = 0
         try:
-            channel = await ch.initiate(reader, writer, self.me)
+            # v0.20.7 (M1): bind expected responder pubkey to defeat UKS.
+            channel = await ch.initiate(
+                reader, writer, self.me,
+                expected_responder_ed_pub=bytes.fromhex(peer.ed_pub_hex),
+            )
             if channel.peer_short_id != peer.short_id:
                 raise RuntimeError(
                     f"fingerprint mismatch: expected {peer.short_id}"
