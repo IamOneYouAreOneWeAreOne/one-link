@@ -2086,6 +2086,19 @@ class Daemon:
             if not f:
                 log.warning("FILE_CHUNK with no offer: %s", blob[:8])
                 return
+            # v0.20.7 (security audit H15 / H17): re-check pinned +
+            # files capability on every chunk, not just at FILE_OFFER.
+            # Without this, a user revoking files mid-transfer leaves
+            # the IncomingFile entry intact and chunks keep landing
+            # on disk; the rejection becomes effective only on the
+            # next FILE_OFFER.
+            if not self._capability_allowed(peer_fp, FILES):
+                self._abort_incoming_file(blob, f)
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="capability_revoked_mid_stream",
+                )))
+                return
             try:
                 seq = int(msg.get("seq", -1))
             except (TypeError, ValueError, OverflowError):
@@ -3738,6 +3751,17 @@ class Daemon:
         if not f:
             log.warning("FILE_BIN_CHUNK with no offer: %s", blob[:8])
             return
+        # v0.20.7 (security audit H15 / H17): re-check pinned + files
+        # capability on every chunk so a mid-transfer revoke takes
+        # effect immediately. See the FILE_CHUNK comment for the full
+        # rationale.
+        if not self._capability_allowed(peer_fp, FILES):
+            self._abort_incoming_file(blob, f)
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="capability_revoked_mid_stream",
+            )))
+            return
         seq = int(msg.get("seq", -1))
         if seq != f.next_seq:
             self._abort_incoming_file(blob, f)
@@ -3831,6 +3855,18 @@ class Daemon:
         blob = str(msg.get("blob", ""))
         f = self._incoming_files.get(blob)
         if not f or f.cdc_chunks is None or f.cdc_missing is None:
+            return
+        # v0.20.7 (security audit H15 / H17): re-check pinned + files
+        # capability on every chunk so a mid-transfer revoke takes
+        # effect immediately. The CDC path additionally writes to the
+        # global chunk cache (which other peers can pull from), so
+        # leaking chunks past a revoke is doubly-bad without this gate.
+        if not self._capability_allowed(peer_fp, FILES):
+            self._abort_incoming_file(blob, f)
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="capability_revoked_mid_stream",
+            )))
             return
         try:
             idx = int(msg.get("index", -1))
