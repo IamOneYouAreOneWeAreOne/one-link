@@ -105,16 +105,36 @@ def test_pair_phone_section_present(index_html: str):
     assert 'id="pair-phone-qr-wrap"' in index_html
 
 
-def test_legacy_connect_info_demoted_to_advanced(index_html: str):
-    """The v0.15.4 'Connect another device' (URL-only desktop-UI
-    flow) MUST be demoted to advanced tier so the new pair-by-QR
-    is the only surface a default user sees."""
+def test_legacy_connect_info_section_invisible(index_html: str):
+    """v0.20.5 — the legacy 'Connect another device' surface is
+    fully removed from the visible UI. The previous demotion to
+    data-tier='advanced' didn't actually hide the section because
+    desktop's show-advanced-default-on un-hid it via the
+    !important reveal rule, leaving two QRs side-by-side. The
+    section is now an empty `<div hidden>` with no inner body
+    div, AND `_refreshConnectInfo` no longer runs from
+    `refreshSettingsAbout`. The element id stays for any external
+    tooling that grep'd for it."""
     idx = index_html.find('id="connect-info-section"')
     assert idx >= 0
     open_start = index_html.rfind("<div", 0, idx)
     open_end = index_html.find(">", idx)
     tag = index_html[open_start:open_end + 1]
-    assert 'data-tier="advanced"' in tag
+    # Element exists but is hidden via the HTML hidden attribute.
+    assert "hidden" in tag
+    # And NO data-tier="advanced" — that was the bug; desktop's
+    # show-advanced reveal rule un-hid the section.
+    assert 'data-tier="advanced"' not in tag
+    # The inner body div is also gone, so even if some refactor
+    # re-shows the outer wrapper, there's nowhere for
+    # _refreshConnectInfo to render its QR.
+    assert 'id="connect-info-body"' not in index_html
+    # And the about-pane refresh no longer calls _refreshConnectInfo.
+    refresh_idx = index_html.find("function refreshSettingsAbout()")
+    assert refresh_idx >= 0
+    refresh_body_end = index_html.find("\n  }\n", refresh_idx)
+    refresh_body = index_html[refresh_idx:refresh_body_end]
+    assert "_refreshConnectInfo()" not in refresh_body
 
 
 def test_mint_pair_button_handler_calls_endpoint(index_html: str):

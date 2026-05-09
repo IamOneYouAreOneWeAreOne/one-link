@@ -2577,6 +2577,36 @@
   .file-row .badge.failed   { background: rgba(255,107,107,.15); color: var(--bad); }
   .file-row .badge.queued   { background: rgba(245,196,81,.15); color: var(--warn); }
   .file-row .badge.paused   { background: rgba(78,193,255,.13); color: var(--accent-2, #4ec1ff); }
+  .transfer-command {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .transfer-command .tc-metric {
+    min-width: 0;
+    padding: 7px 8px;
+    border-radius: 7px;
+    background: rgba(255,255,255,.045);
+    border: 1px solid rgba(255,255,255,.07);
+  }
+  .transfer-command .tc-value {
+    color: var(--text);
+    font-weight: 800;
+    font-size: 12px;
+    line-height: 1.15;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .transfer-command .tc-label {
+    margin-top: 2px;
+    color: var(--text-dimmer);
+    font-size: 9px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: .7px;
+  }
 
   /* v0.7.5: reply quote inside a message bubble */
   .msg .reply-quote {
@@ -3873,12 +3903,18 @@
               </div>
             </div>
             <!-- v0.20.4 — legacy "Connect another device" (URL-only
-                 desktop-UI-on-phone flow) removed. The v0.20.1
-                 "Pair a phone" surface above is now the only path,
-                 because two QRs side-by-side was confusing. The
-                 underlying /api/connect-info endpoints stay alive
-                 for any external tooling that depends on them. -->
-            <div id="connect-info-section" data-tier="advanced" hidden></div>
+                 desktop-UI-on-phone flow) removed entirely. The
+                 "Pair a phone" surface above is the single source
+                 of truth for getting any other device connected to
+                 this daemon. The /api/connect-info endpoints stay
+                 alive for any external tooling that depends on
+                 them; this is purely a UI removal. The previous
+                 attempt left the section markup with `hidden +
+                 data-tier="advanced"`, but the desktop show-advanced
+                 reveal rule un-hid it with !important, so the
+                 second QR came back. Lesson: a removal is markup
+                 + JS-call removal both, every time. -->
+            <div id="connect-info-section" hidden></div>
             <!-- v0.15.0: PWA install affordance. Hidden by default;
                  the page's beforeinstallprompt handler unhides this
                  row when the browser deems the app installable. On
@@ -6011,6 +6047,54 @@
     }
     return wrap;
   }
+  function transferCommandMetrics(t) {
+    if (!t) return [];
+    const truth = t.autopilot_truth || {};
+    const meta = t.metadata || {};
+    const perf = meta.performance_summary || {};
+    const report = meta.transfer_report || {};
+    const liveBps = rateForTransfer(t);
+    const speedMbps = liveBps > 0
+      ? (liveBps * 8) / 1_000_000
+      : Number(truth.speed_mbps || perf.effective_mbps || 0);
+    const wireMbps = Number(truth.wire_mbps || perf.wire_mbps || 0);
+    const knownPct = Number(truth.known_pct || 0);
+    const savedBytes = Number(
+      truth.saved_bytes || perf.saved_bytes || report.saved_bytes ||
+      meta.saved_bytes || meta.swarm_assist?.assisted_bytes || 0
+    );
+    const wireBytes = Number(
+      truth.wire_bytes || report.wire_bytes_sent || t.wire_bytes || 0
+    );
+    const route = truth.route_label || transferRouteLabel(
+      truth.route || perf.route || meta.autopilot_plan?.route || meta.route
+    );
+    const rows = [];
+    if (speedMbps > 0) rows.push({ label: "effective", value: `${speedMbps >= 100 ? speedMbps.toFixed(0) : speedMbps.toFixed(1)} Mbps` });
+    if (wireMbps > 0) rows.push({ label: "wire", value: `${wireMbps >= 100 ? wireMbps.toFixed(0) : wireMbps.toFixed(1)} Mbps` });
+    if (knownPct > 0) rows.push({ label: "already known", value: `${knownPct >= 10 ? knownPct.toFixed(0) : knownPct.toFixed(1)}%` });
+    if (savedBytes > 0) rows.push({ label: "avoided", value: fmtBytes(savedBytes) });
+    if (wireBytes > 0) rows.push({ label: "sent over wire", value: fmtBytes(wireBytes) });
+    if (route && route !== "Best available") rows.push({ label: "route", value: route });
+    if (truth.fast_path_label) rows.push({ label: "path", value: truth.fast_path_label });
+    if (truth.automatic && truth.self_healing_action && !["none", "continue", "observe"].includes(truth.self_healing_action)) {
+      rows.push({ label: "self-healing", value: truth.self_healing_action.replace(/_/g, " ") });
+    }
+    return rows.slice(0, 8);
+  }
+  function renderTransferCommandCenter(t) {
+    const metrics = transferCommandMetrics(t);
+    if (!metrics.length) return null;
+    const wrap = el("div", "transfer-command");
+    wrap.title = "One Link transfer autopilot: effective speed, actual wire cost, savings, route, and self-healing state.";
+    for (const m of metrics) {
+      const card = el("div", "tc-metric");
+      card.appendChild(el("div", "tc-value", m.value));
+      card.appendChild(el("div", "tc-label", m.label));
+      wrap.appendChild(card);
+    }
+    return wrap;
+  }
   function aggregateActiveTransferStats() {
     let count = 0, bps = 0, sent = 0, total = 0;
     for (const t of state.transfers) {
@@ -6916,6 +7000,10 @@
         } else {
           meta.appendChild(el("div", "size", fmtBytes(t.size)));
         }
+        const command = renderTransferCommandCenter(t);
+        if (command) meta.appendChild(command);
+        const facts = renderTransferFacts(t, statusKind(t));
+        if (facts) meta.appendChild(facts);
         if (t.updated_ms) meta.appendChild(el("div", "when", new Date(t.updated_ms).toLocaleString()));
         row.appendChild(meta);
         list.appendChild(row);
@@ -8012,6 +8100,8 @@
       fill.style.width = `${Math.max(0, Math.min(100, t.progress_pct || 0))}%`;
       bar.appendChild(fill);
       meta.appendChild(bar);
+      const command = renderTransferCommandCenter(t);
+      if (command) meta.appendChild(command);
       const facts = renderTransferFacts(t, statusKind(t));
       if (facts) meta.appendChild(facts);
       row.appendChild(meta);
@@ -9683,7 +9773,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.20.4";
+  const PAGE_BUILT_FOR = "0.20.5";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -12504,9 +12594,12 @@
     if (protoEl) protoEl.textContent = me.protocol_version || "?";
     const schemaEl = $("#settings-about-schema");
     if (schemaEl) schemaEl.textContent = String(me.schema_version ?? "?");
-    // v0.15.4: refresh the connect-another-device QR each time
-    // settings opens so a re-LAN-bound daemon shows the new URL.
-    _refreshConnectInfo();
+    // v0.20.4: stop calling _refreshConnectInfo. The legacy
+    // "Connect another device" section is gone from the markup;
+    // populating an empty hidden div would just be wasted bytes
+    // on the wire. The function is left in place for any external
+    // tooling that still pokes the endpoint, but the UI no
+    // longer drives it.
     // v0.20.1: reset the pair-phone surface to the "click to mint"
     // state on every settings open. Tokens expire in 5 minutes; we
     // don't want a stale QR sitting around from a previous session.

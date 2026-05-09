@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
 import contextlib
 import json
 import logging
@@ -46,6 +47,7 @@ from aiohttp import WSMsgType, web
 
 from one_link.paths import data_dir, inbox_dir
 from one_link.transfer_doctor import enrich_transfer_event
+from one_link.transfer_safety import classify_file_risk
 
 if TYPE_CHECKING:
     from one_link.daemon import Daemon
@@ -56,6 +58,11 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 TOKEN_FILE = "ui.token"
 SERVER_PORT_FILE = "server.port"
 COOKIE_NAME = "ol_ui"
+MAX_JSON_REQUEST_BYTES = 256 * 1024
+MAX_REQUEST_TARGET_BYTES = 8 * 1024
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+MAX_FAILED_AUTH_ATTEMPTS = 32
+MAX_SIGNALING_ATTEMPTS = 24
 
 # Stable UI port. When the daemon restarts, the browser tab at this URL
 # stays alive. We fall through to 7118..7132 if the port is taken (other
@@ -488,7 +495,10 @@ class UIServer:
         # install → fresh token. Token is never embedded in any wire
         # protocol; it's purely for the local UI surface.
         self.token = self._load_or_create_token()
-        self.app = web.Application(client_max_size=1024 * 1024 * 1024)  # 1 GiB upload
+        self.app = web.Application(
+            client_max_size=1024 * 1024 * 1024,  # 1 GiB upload
+            middlewares=[self._security_middleware],
+        )
         self.runner: Optional[web.AppRunner] = None
         self.site: Optional[web.TCPSite] = None
         self.port: int = 0
@@ -497,6 +507,7 @@ class UIServer:
         # surface this so the launcher knows whether LAN mode is on.
         self.bind_host: str = "127.0.0.1"
         self._ws_clients: set[web.WebSocketResponse] = set()
+        self._rate_buckets: dict[tuple[str, str], deque[float]] = {}
         # v0.20.0: WebRTC peer manager for browser-as-peer connections.
         # Lazy-imported so daemons that don't ship aiortc still load
         # this module (the manager itself works fine; only the actual
@@ -527,6 +538,42 @@ class UIServer:
         """Bridges debug_log entries to WS clients as `debug_event`."""
         with contextlib.suppress(Exception):
             self.broadcast({"type": "debug_event", "entry": entry})
+
+    @web.middleware
+    async def _security_middleware(
+        self,
+        request: web.Request,
+        handler,
+    ) -> web.StreamResponse:
+        """Defense-in-depth around the local UI HTTP surface.
+
+        The app legitimately needs a large multipart budget for file uploads.
+        JSON/control endpoints do not. Keep the global aiohttp limit high for
+        uploads, then apply a much smaller cap to JSON-like requests before
+        any handler calls request.json().
+        """
+
+        target = request.raw_path or request.path_qs or request.path
+        if len(target.encode("utf-8", errors="ignore")) > MAX_REQUEST_TARGET_BYTES:
+            return web.json_response({"error": "request target too large"}, status=414)
+        content_type = (request.content_type or "").lower()
+        if (
+            request.method in ("POST", "PUT", "PATCH", "DELETE")
+            and (
+                content_type == "application/json"
+                or content_type.endswith("+json")
+                or request.path not in ("/api/send-file",)
+            )
+        ):
+            size = request.content_length
+            if size is not None and size > MAX_JSON_REQUEST_BYTES:
+                return web.json_response({"error": "json body too large"}, status=413)
+        resp = await handler(request)
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+        resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        return resp
 
     async def _probe_owned_http_port(self, bind_host: str, port: int) -> bool:
         """Return True only if the HTTP listener reached on this port is us.
@@ -786,9 +833,43 @@ class UIServer:
             return True
         return False
 
+    def _client_rate_key(self, request: web.Request) -> str:
+        peer = request.transport.get_extra_info("peername") if request.transport else None
+        if isinstance(peer, tuple) and peer:
+            return str(peer[0])
+        return request.remote or "unknown"
+
+    def _rate_limited(
+        self,
+        bucket_name: str,
+        key: str,
+        *,
+        limit: int,
+        window_seconds: float = RATE_LIMIT_WINDOW_SECONDS,
+    ) -> bool:
+        now = time.monotonic()
+        bucket_key = (bucket_name, key)
+        bucket = self._rate_buckets.setdefault(bucket_key, deque())
+        cutoff = now - window_seconds
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        if len(bucket) >= limit:
+            return True
+        bucket.append(now)
+        return False
+
     def _guarded(self, handler):
         async def wrap(request: web.Request) -> web.StreamResponse:
             if not self._check_token(request):
+                if self._rate_limited(
+                    "auth_fail",
+                    self._client_rate_key(request),
+                    limit=MAX_FAILED_AUTH_ATTEMPTS,
+                ):
+                    return web.json_response(
+                        {"error": "too many authentication attempts"},
+                        status=429,
+                    )
                 return web.json_response({"error": "unauthorized"}, status=401)
             return await handler(request)
         return wrap
@@ -796,6 +877,15 @@ class UIServer:
     def _guarded_ws(self, handler):
         async def wrap(request: web.Request) -> web.WebSocketResponse:
             if not self._check_token(request):
+                if self._rate_limited(
+                    "auth_fail",
+                    self._client_rate_key(request),
+                    limit=MAX_FAILED_AUTH_ATTEMPTS,
+                ):
+                    return web.Response(
+                        status=429,
+                        text="too many authentication attempts",
+                    )
                 ws = web.WebSocketResponse()
                 if ws.can_prepare(request).ok:
                     await ws.prepare(request)
@@ -1125,8 +1215,16 @@ class UIServer:
             BrowserPeer,
             DAEMON_BULK_LABEL,
             DAEMON_CONTROL_LABEL,
+            MAX_SIGNALING_TEXT_BYTES,
             PEER_RTC_PROTOCOL_VERSION,
         )
+
+        if self._rate_limited(
+            "peer_rtc_signaling",
+            self._client_rate_key(request),
+            limit=MAX_SIGNALING_ATTEMPTS,
+        ):
+            return web.Response(status=429, text="too many signaling attempts")
 
         ws = web.WebSocketResponse(heartbeat=20.0)
         await ws.prepare(request)
@@ -1159,6 +1257,10 @@ class UIServer:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
                     continue
+                if len(msg.data.encode("utf-8", errors="ignore")) > MAX_SIGNALING_TEXT_BYTES:
+                    await _send_error("frame_too_large", "signaling frame too large")
+                    await ws.close(code=1009, message=b"signaling frame too large")
+                    return ws
                 try:
                     envelope = json.loads(msg.data)
                 except json.JSONDecodeError:
@@ -1562,6 +1664,12 @@ class UIServer:
             "auto_accept_extensions": _normalize_ext_list(
                 s.get("auto_accept_extensions", "")
             ),
+            "safety_max_file_tb": _parse_int_or_none(s.get("safety_max_file_tb")) or 16,
+            "safety_min_free_mb": _parse_int_or_none(s.get("safety_min_free_mb")) or 2048,
+            "safety_peer_active_transfers": (
+                _parse_int_or_none(s.get("safety_peer_active_transfers")) or 3
+            ),
+            "safety_peer_active_gb": _parse_int_or_none(s.get("safety_peer_active_gb")) or 2048,
         })
 
     async def api_set_settings(self, request: web.Request) -> web.Response:
@@ -1803,6 +1911,28 @@ class UIServer:
                 )
             else:
                 self.daemon.state.delete_setting("auto_accept_extensions")
+        for key, default_value, min_value in (
+            ("safety_max_file_tb", 16, 1),
+            ("safety_min_free_mb", 2048, 256),
+            ("safety_peer_active_transfers", 3, 1),
+            ("safety_peer_active_gb", 2048, 1),
+        ):
+            if key in data:
+                v = data[key]
+                try:
+                    iv = int(v) if v is not None else default_value
+                except (TypeError, ValueError):
+                    return web.json_response(
+                        {"error": f"{key} must be an integer"}, status=400,
+                    )
+                if iv < min_value:
+                    return web.json_response(
+                        {"error": f"{key} must be >= {min_value}"}, status=400,
+                    )
+                if iv == default_value:
+                    self.daemon.state.delete_setting(key)
+                else:
+                    self.daemon.state.set_setting(key, str(iv))
         # v0.12.0: refresh the daemon's in-memory cache of settings
         # that affect hot paths (bandwidth pacer + auto-accept
         # rules). Cheap; runs once per save.
@@ -4895,6 +5025,7 @@ class UIServer:
                         "size": stat.st_size,
                         "mtime_ms": int(stat.st_mtime * 1000),
                         "mime": mimetypes.guess_type(f.name)[0] or "application/octet-stream",
+                        "risk": classify_file_risk(f.name),
                     }
                 )
         files.sort(key=lambda x: x["mtime_ms"], reverse=True)
@@ -5430,6 +5561,17 @@ class UIServer:
         # Try the well-known port first so browser tabs survive restarts.
         # Fall through 7118..7132 if taken, then OS-assigned random as
         # last resort.
+        #
+        # v0.20.5 — the previous "ownership probe" raced with TIME_WAIT
+        # entries from a just-killed daemon: bind() would succeed (so
+        # we own the port) but the probe's connect would briefly hit
+        # the kernel's TIME_WAIT-routing layer, fail to read a 200,
+        # and we'd fall through to a higher port. Result: every
+        # restart claimed a different port number, breaking every
+        # bookmark + previously-minted pair URL. On Windows + Linux,
+        # bind() succeeding ≠ "TIME_WAIT clear" but DOES mean "we
+        # own this listener now" — connections will route to us, not
+        # to the dead 5-tuples in TIME_WAIT. Probe removed.
         bound = False
         for candidate in range(
             PREFERRED_UI_PORT, PREFERRED_UI_PORT + UI_PORT_FALLBACK_RANGE
@@ -5437,19 +5579,15 @@ class UIServer:
             try:
                 site = web.TCPSite(self.runner, host=bind_host, port=candidate)
                 await site.start()
-                if not await self._probe_owned_http_port(bind_host, candidate):
-                    await site.stop()
-                    log.warning(
-                        "UI port %d started but failed ownership probe; trying next port",
-                        candidate,
-                    )
-                    continue
                 self.site = site
                 self.port = candidate
                 bound = True
                 break
             except OSError:
-                # Port in use — try the next.
+                # Port in use by ANOTHER LISTENER — try the next.
+                # TIME_WAIT entries don't cause this on Windows or
+                # modern Linux; only an actively-listening rival
+                # process does.
                 continue
         if not bound:
             site = web.TCPSite(self.runner, host=bind_host, port=0)
@@ -5457,11 +5595,6 @@ class UIServer:
             sock = site._server.sockets[0]  # type: ignore[union-attr]
             self.site = site
             self.port = sock.getsockname()[1]
-            if not await self._probe_owned_http_port(bind_host, self.port):
-                await site.stop()
-                raise RuntimeError(
-                    f"UI server bound port {self.port} but ownership probe failed"
-                )
         self.bind_host = bind_host
         _server_port_path().write_text(str(self.port))
         _token_path().write_text(self.token)
