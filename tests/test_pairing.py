@@ -158,7 +158,10 @@ async def test_pairing_round_trip_pins_both_sides():
             )
             assert fp_a, f"peer {p.a.short_id} not visible from B"
 
-            # Both sides compute SAS — must be equal
+            # v0.20.7 (security audit H11): both /api/peers/{fp}/sas
+            # endpoints return the legacy v1 SAS (transcript-unbound,
+            # 6 digits) as a static code preview. They must agree
+            # between A and B because pubkeys are symmetric.
             async with s.get(
                 f"{base_a}/api/peers/{fp_b}/sas",
                 headers={"Authorization": f"Bearer {ta}"},
@@ -171,14 +174,21 @@ async def test_pairing_round_trip_pins_both_sides():
                 sas_b = (await r.json())["sas"]
             assert sas_a == sas_b, f"SAS mismatch: A={sas_a!r} B={sas_b!r}"
 
-            # A initiates pairing with B
+            # v0.20.7 (security audit H11): the actual pair ceremony
+            # returns a v2 SAS bound to the live channel transcript,
+            # which is intentionally different from the static v1
+            # preview above. We assert only that both sides agree on
+            # the v2 SAS via their pair-flow returns + UI events
+            # (next block); we no longer require pair_init.sas ==
+            # static_preview_sas.
             async with s.post(
                 f"{base_a}/api/peers/{fp_b}/pair",
                 headers={"Authorization": f"Bearer {ta}"},
                 json={},
             ) as r:
                 init = await r.json()
-            assert init["ok"] and init["sas"] == sas_a
+            assert init["ok"]
+            assert isinstance(init["sas"], str) and init["sas"].isdigit()
 
             # Give the PAIR_REQUEST a moment to land at B
             await asyncio.sleep(0.5)

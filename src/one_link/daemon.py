@@ -2420,18 +2420,46 @@ class Daemon:
         elif t == "PING":
             await channel.send(encode_msg(make_msg("PONG", self.me.short_id)))
         elif t == "PAIR_REQUEST":
-            # Peer wants to pair with us. Compute the SAS (deterministic),
-            # store as incoming, surface to UI for the user to verify.
-            sas = compute_sas(self.me.public_bytes, channel.peer_ed_pub)
+            # Peer wants to pair with us. Compute the SAS bound to the
+            # channel's transcript_hash (audit fix H11) and store as
+            # incoming, surface to UI for the user to verify.
+            transcript = getattr(channel, "transcript_hash", None)
+            sas = compute_sas(
+                self.me.public_bytes,
+                channel.peer_ed_pub,
+                transcript_hash=transcript,
+            )
+            # v0.20.7 (security audit M20): if we previously rejected
+            # this peer, set the previously_rejected flag so the UI
+            # surfaces a "previously blocked" warning before the user
+            # clicks Match.
+            previously_rejected = False
+            if self.state is not None:
+                try:
+                    rec = self.state.get_peer(peer_fp)
+                    previously_rejected = bool(rec and rec.trust == "rejected")
+                except Exception:
+                    previously_rejected = False
             ctx = self.pairing.get(peer_fp)
-            if ctx is None or ctx.state in (PairState.NONE, PairState.PAIRED, PairState.REJECTED):
-                ctx = self.pairing.begin(peer_fp=peer_fp, sas=sas, incoming=True)
+            # v0.20.7 (security audit H12): treat an expired ctx as
+            # absent so a stale "Match" prompt that the user ignored
+            # earlier doesn't carry over and bypass the fresh ceremony.
+            if (
+                ctx is None
+                or ctx.state in (PairState.NONE, PairState.PAIRED, PairState.REJECTED)
+                or ctx.is_expired()
+            ):
+                ctx = self.pairing.begin(
+                    peer_fp=peer_fp, sas=sas, incoming=True,
+                    previously_rejected=previously_rejected,
+                )
             if self.ui_server is not None:
                 self.ui_server.broadcast({
                     "type": "pair_request",
                     "peer_fp": peer_fp,
                     "peer_short_id": peer_sid,
                     "sas": sas,
+                    "previously_rejected": previously_rejected,
                 })
             log.info("PAIR_REQUEST from %s sas=%s ctx.state=%s",
                      peer_sid, sas, ctx.state.value)
@@ -2440,13 +2468,25 @@ class Daemon:
         elif t == "PAIR_CONFIRM":
             # Peer says SAS matched on their side.
             ctx = self.pairing.they_confirm(peer_fp)
-            if ctx is None:
-                # We never started pairing on our side; treat as a fresh
-                # incoming so the UI can prompt.
-                sas = compute_sas(self.me.public_bytes, channel.peer_ed_pub)
-                ctx = self.pairing.begin(peer_fp=peer_fp, sas=sas, incoming=True)
-                self.pairing.they_confirm(peer_fp)
-                ctx = self.pairing.get(peer_fp)
+            if ctx is None or (ctx is not None and ctx.is_expired()):
+                # v0.20.7 (security audit H11 + H12): no live ctx (or
+                # the ctx is past its TTL). The legacy fallback used
+                # to silently fabricate a v1 SAS and begin a new ctx
+                # with they_confirmed=True; with v2 SAS bound to the
+                # transcript_hash, that fallback would display a
+                # different code than what the peer's side computed
+                # and the user would (correctly) see a mismatch.
+                # Refuse instead so the user retries pair from
+                # scratch with a fresh ceremony.
+                log.warning(
+                    "PAIR_CONFIRM refused: no live pair context for %s",
+                    peer_sid,
+                )
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg["id"],
+                    rejected="no_live_pair_context",
+                )))
+                return
             # Re-fetch the latest ctx (in case other handlers mutated it
             # while we were processing).
             ctx = self.pairing.get(peer_fp) or ctx
@@ -5419,14 +5459,22 @@ class Daemon:
             await self._drop_outbound_session(sess.peer_fp)
             raise
 
-    async def _send_control(self, peer: Peer, msg: dict) -> None:
+    async def _send_control(self, peer: Peer, msg: dict) -> Optional[bytes]:
         """Open a one-shot connection, send a single control msg, wait for
         ACK, close cleanly. Waiting for the ACK forces the receiver to fully
-        process the message before our close — avoids Win10053 abort races."""
+        process the message before our close — avoids Win10053 abort races.
+
+        v0.20.7 (security audit H11): returns the channel's
+        transcript_hash so callers (notably the pair flow) can bind
+        per-session derivations to it. Returns None on dial / handshake
+        failure so existing callers that ignore the return value
+        continue to work unchanged.
+        """
         reader, writer = await self._dial_peer(peer)
         try:
             channel = await ch.initiate(reader, writer, self.me)
             self._verify_channel_peer(peer, channel)
+            transcript = getattr(channel, "transcript_hash", None)
             try:
                 await channel.send(encode_msg(self._build_my_caps_for_channel(channel)))
                 # v0.8.2: half-step. This is _send_control — a
@@ -5467,6 +5515,7 @@ class Daemon:
                 # but the peer may have closed early. Acceptable for control.
                 pass
             await channel.close()
+            return transcript
         except Exception:
             with contextlib.suppress(Exception):
                 writer.close()
@@ -5474,19 +5523,20 @@ class Daemon:
             raise
 
     async def initiate_pair(self, peer: Peer) -> str:
-        """Start pairing with peer. Returns the SAS to display in our UI."""
+        """Start pairing with peer. Returns the SAS to display in our UI.
+
+        v0.20.7 (security audit H11): the SAS is computed AFTER the
+        encrypted channel opens, so it can be bound to the channel's
+        transcript_hash. Without that binding, an attacker grinding
+        Ed25519 keypairs can pre-compute a colliding SAS offline.
+        With the transcript bound in, the attacker has to grind during
+        the live pair window against a fresh per-session value.
+        """
         peer_fp = self._peer_fp_from_peer(peer) or fingerprint_of(
             bytes.fromhex(peer.ed_pub_hex)
         )
-        sas = compute_sas(
-            self.me.public_bytes, bytes.fromhex(peer.ed_pub_hex)
-        )
-        existing = self.pairing.get(peer_fp)
-        if existing is None or existing.state in (
-            PairState.NONE, PairState.PAIRED, PairState.REJECTED
-        ):
-            self.pairing.begin(peer_fp=peer_fp, sas=sas, incoming=False)
         # Make sure the peer DB has a row so trust changes can attach later
+        # AND so we can read the previously-rejected flag below.
         if self.state is not None:
             self.state.upsert_peer(
                 fingerprint=peer_fp,
@@ -5496,9 +5546,38 @@ class Daemon:
                 address=peer.address,
                 port=peer.port,
             )
-        await self._send_control(
+        # v0.20.7 (security audit M20): surface previously-rejected
+        # state so the UI can show a "this peer was previously
+        # blocked" warning before the user clicks Match.
+        previously_rejected = False
+        if self.state is not None:
+            try:
+                rec = self.state.get_peer(peer_fp)
+                previously_rejected = bool(rec and rec.trust == "rejected")
+            except Exception:
+                previously_rejected = False
+        # Send PAIR_REQUEST first so we have the channel's
+        # transcript_hash; SAS is bound to it.
+        transcript = await self._send_control(
             peer, make_msg("PAIR_REQUEST", self.me.short_id),
         )
+        sas = compute_sas(
+            self.me.public_bytes,
+            bytes.fromhex(peer.ed_pub_hex),
+            transcript_hash=transcript,
+        )
+        existing = self.pairing.get(peer_fp)
+        if (
+            existing is None
+            or existing.state in (
+                PairState.NONE, PairState.PAIRED, PairState.REJECTED,
+            )
+            or existing.is_expired()
+        ):
+            self.pairing.begin(
+                peer_fp=peer_fp, sas=sas, incoming=False,
+                previously_rejected=previously_rejected,
+            )
         return sas
 
     async def confirm_pair(self, peer: Peer) -> dict:
@@ -5522,14 +5601,26 @@ class Daemon:
                 pass
 
         ctx = self.pairing.we_confirm(peer_fp)
-        if ctx is None:
-            # No ctx — could be the case where we receive PAIR_REQUEST after
-            # we already pressed confirm. Begin one and mark we_confirmed.
-            sas = compute_sas(
-                self.me.public_bytes, bytes.fromhex(peer.ed_pub_hex)
+        if ctx is None or ctx.is_expired():
+            # v0.20.7 (security audit H12): no live ctx (or stale).
+            # Old behavior re-derived a v1 SAS from pubkeys-only and
+            # quietly continued; with v2 SAS that fallback would
+            # display a different code than what the peer sees and
+            # the user would (correctly) see a mismatch on the next
+            # exchange. Cleaner to refuse here and force a fresh
+            # ceremony from initiate_pair where the SAS gets bound
+            # to a real transcript.
+            log.warning(
+                "confirm_pair refused: no live pair context for %s",
+                peer.short_id,
             )
-            ctx = self.pairing.begin(peer_fp=peer_fp, sas=sas, incoming=False)
-            ctx = self.pairing.we_confirm(peer_fp)
+            return {
+                "ok": False,
+                "reason": "no_live_pair_context",
+                "user_message": (
+                    "Pair session expired. Click Pair again to restart."
+                ),
+            }
 
         await self._send_control(
             peer, make_msg("PAIR_CONFIRM", self.me.short_id),
