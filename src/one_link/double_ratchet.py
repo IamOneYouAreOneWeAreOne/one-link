@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 import struct
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -110,7 +111,26 @@ def x25519_keypair() -> tuple[X25519PrivateKey, bytes]:
 
 
 def x25519_dh(priv: X25519PrivateKey, peer_pub: bytes) -> bytes:
-    return priv.exchange(X25519PublicKey.from_public_bytes(peer_pub))
+    """ECDH on Curve25519. v0.20.7 (security audit M5): reject the
+    all-zero shared output that results from a low-order public key.
+
+    The cryptography library implements RFC 7748 X25519 faithfully,
+    which means ``priv.exchange(low_order_pub)`` returns 32 zero
+    bytes rather than raising — that's the spec. RFC 7748 §6.1 lists
+    the pubkeys that produce zero. An attacker who plants one of
+    those points as ``peer_pub`` (e.g. by tampering with a ratchet
+    header before the channel-AEAD check has run, or by being a
+    malicious-but-paired peer crafting a malformed handshake) drives
+    every party to derive the SAME root step from a known shared
+    value of zero. We refuse the operation outright; the channel
+    treats it the same as InvalidTag and tears down."""
+    out = priv.exchange(X25519PublicKey.from_public_bytes(peer_pub))
+    if out == b"\x00" * 32:
+        raise ValueError(
+            "ratchet: peer X25519 pubkey produced zero shared secret "
+            "(low-order point)"
+        )
+    return out
 
 
 # ─── header ────────────────────────────────────────────────────────
@@ -198,10 +218,21 @@ class RatchetState:
     skipped: dict[tuple[bytes, int], bytes] = field(default_factory=dict)
 
     # Replay defence: track which (dh_pub, n) pairs we've
-    # successfully decrypted. A second receive of the same
-    # tuple is rejected. Bounded — we sweep entries older than
-    # the current recv chain by a window.
-    decrypted_seen: set[tuple[bytes, int]] = field(default_factory=set)
+    # successfully decrypted. A second receive of the same tuple is
+    # rejected. Bounded — when we exceed MAX_SKIP_KEYS*4 we drop the
+    # OLDEST entries in insertion order (FIFO).
+    #
+    # v0.20.7 (security audit H2): use OrderedDict instead of set so
+    # the trim-on-overflow path has deterministic eviction order.
+    # The previous code did ``list(set)[-1000:]`` which picks an
+    # arbitrary 1000 of the 4000+ entries (Python set order is
+    # implementation-defined). That gap let a long-lived session
+    # accept replays of frames whose seen-entry got randomly
+    # evicted while the corresponding skipped-key still lived in
+    # state.skipped — _try_skipped would re-decrypt and re-add.
+    decrypted_seen: "OrderedDict[tuple[bytes, int], bool]" = field(
+        default_factory=OrderedDict
+    )
 
 
 def _evict_skipped_if_full(state: RatchetState) -> None:
@@ -362,7 +393,10 @@ def _try_skipped(
     nonce = _aead_nonce(header.n)
     aead_ad = header.encode() + (ad or b"")
     pt = _aead_for(msg_key).decrypt(nonce, ciphertext, aead_ad)
-    state.decrypted_seen.add(key)
+    # v0.20.7 (security audit H2): see RatchetState.decrypted_seen.
+    state.decrypted_seen[key] = True
+    while len(state.decrypted_seen) > MAX_SKIP_KEYS * 4:
+        state.decrypted_seen.popitem(last=False)
     return pt
 
 
@@ -425,15 +459,12 @@ def decrypt(
     aead_ad = header.encode() + (ad or b"")
     pt = _aead_for(msg_key).decrypt(nonce, ciphertext, aead_ad)
     state.recv_n += 1
-    state.decrypted_seen.add(seen_key)
-    # Bound the replay-seen set roughly the same way as skipped:
-    # tolerate some history but don't grow unbounded across a
-    # long-lived session.
-    if len(state.decrypted_seen) > MAX_SKIP_KEYS * 4:
-        # Drop the oldest half. Sets aren't ordered, but this is a
-        # rough trim — replay defence within a window suffices.
-        keep = list(state.decrypted_seen)[-MAX_SKIP_KEYS:]
-        state.decrypted_seen = set(keep)
+    # v0.20.7 (security audit H2): record the (dh, n) pair in
+    # insertion order. On overflow, evict the OLDEST entry — never
+    # an arbitrary one. This keeps the replay window deterministic.
+    state.decrypted_seen[seen_key] = True
+    while len(state.decrypted_seen) > MAX_SKIP_KEYS * 4:
+        state.decrypted_seen.popitem(last=False)
     return pt
 
 
