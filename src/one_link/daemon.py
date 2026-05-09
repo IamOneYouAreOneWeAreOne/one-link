@@ -3506,6 +3506,18 @@ class Daemon:
                     f"compressed payload exceeds maximum size ({cap} bytes)"
                 )
             out += dec.flush()
+            # v0.20.7 (security audit M6): re-check the per-call cap
+            # after dec.flush(), not just MAX_INCOMING_FILE_BYTES.
+            # flush() can emit additional bytes from the decoder's
+            # internal buffer that the bounded decompress() call did
+            # not return. Without this re-check, the per-chunk cap
+            # was leaky and a stream of small over-cap chunks could
+            # compound into noticeable extra allocation.
+            if len(out) > cap:
+                raise RuntimeError(
+                    f"compressed payload exceeds maximum size after flush "
+                    f"({len(out)} > {cap})"
+                )
             if len(out) > MAX_INCOMING_FILE_BYTES:
                 raise RuntimeError("compressed payload exceeds maximum size")
             return out
@@ -8607,6 +8619,27 @@ class Daemon:
                 self._maybe_inherit_rendezvous_from_mdns()
 
         self.discovery.registry.on_change = _on_peer_change
+        # v0.20.7 (security audit L1): refuse mDNS-driven pub-hex
+        # swaps for short_ids whose existing pubkey is already pinned
+        # via SAS pair. Defends against a LAN attacker advertising a
+        # victim's short_id with a different pub. The channel
+        # handshake already pins identity for impersonation defense;
+        # this closes the discovery-display side so the UI never
+        # surfaces an attacker-supplied pub for a paired short_id.
+        def _is_pub_hex_pinned(pub_hex: str) -> bool:
+            if self.state is None:
+                return False
+            try:
+                pub_bytes = bytes.fromhex(pub_hex)
+            except ValueError:
+                return False
+            try:
+                fp = fingerprint_of(pub_bytes)
+                rec = self.state.get_peer(fp)
+            except Exception:
+                return False
+            return bool(rec and rec.trust == "pinned")
+        self.discovery.registry.is_pinned_pubkey = _is_pub_hex_pinned
 
         # Background prune of unreachable mDNS entries. mDNS records can
         # outlive the daemon that announced them (OS-level / router caches);

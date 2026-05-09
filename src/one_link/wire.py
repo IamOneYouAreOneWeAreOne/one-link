@@ -29,6 +29,53 @@ from typing import Any
 
 MAX_FRAME = 16 * 1024 * 1024  # 16 MiB hard cap per frame; chunked above this
 
+# v0.20.7 (security audit M7): cap JSON nesting on encrypted-frame
+# plaintexts. Without this, a malicious peer can ship `{"a":{"a":...}}`
+# nested 1000+ levels deep and drive CPython's recursive json
+# decoder into RecursionError. The receive loop catches that as a
+# generic Exception and closes the channel — annoying but bounded;
+# combined with slowloris-style pinning it becomes a cheap log-spam
+# / fd-churn primitive. 64 levels is well beyond any legitimate
+# One Link payload (the deepest live shape today is ~6 levels) and
+# below the CPython recursion floor with comfortable headroom.
+MAX_JSON_DEPTH = 64
+
+
+def _check_json_depth(data: bytes, max_depth: int = MAX_JSON_DEPTH) -> None:
+    """Pre-scan the JSON byte string for max nesting depth. Raise
+    ValueError if the max-nesting peak exceeds ``max_depth``. Honors
+    string boundaries so `{` inside a string literal does not count.
+
+    Doing this BEFORE json.loads avoids the cost of full parsing for
+    obviously-malicious inputs and avoids tripping CPython's
+    recursion limit on the critical decode path."""
+    depth = 0
+    in_string = False
+    escape = False
+    for c in data:
+        if escape:
+            escape = False
+            continue
+        if in_string:
+            if c == 0x5c:  # backslash
+                escape = True
+                continue
+            if c == 0x22:  # closing quote
+                in_string = False
+            continue
+        if c == 0x22:  # opening quote
+            in_string = True
+            continue
+        if c == 0x7b or c == 0x5b:  # { or [
+            depth += 1
+            if depth > max_depth:
+                raise ValueError(
+                    f"JSON nesting too deep (>{max_depth}) — frame rejected"
+                )
+        elif c == 0x7d or c == 0x5d:  # } or ]
+            if depth > 0:
+                depth -= 1
+
 
 async def read_frame(reader: asyncio.StreamReader) -> bytes:
     header = await reader.readexactly(4)
@@ -73,4 +120,14 @@ def encode_msg(msg: dict[str, Any]) -> bytes:
 
 
 def decode_msg(data: bytes) -> dict[str, Any]:
-    return json.loads(data.decode("utf-8"))
+    # v0.20.7 (security audit M7 + L3): bound JSON nesting before
+    # json.loads runs, then enforce that the top-level value is an
+    # object. Old behavior accepted JSON null / array / string and
+    # downstream `msg.get("t")` raised AttributeError or TypeError,
+    # which the recv loop swallowed and closed the channel —
+    # functional but log-noisy and cheap to drive.
+    _check_json_depth(data)
+    out = json.loads(data.decode("utf-8"))
+    if not isinstance(out, dict):
+        raise ValueError("frame must be a JSON object")
+    return out

@@ -80,6 +80,14 @@ class Registry:
     on_change: Callable[[], None] | None = None
     self_ed_pub_hex: str = ""
     local_addresses: set[str] = field(default_factory=set)
+    # v0.20.7 (security audit L1): predicate that tells the registry
+    # whether an existing pubkey is "trusted" (pinned via SAS pair).
+    # If set and an upsert would swap the pub-hex for an existing
+    # short_id from a trusted-pubkey to a different one, the swap is
+    # refused and an audit warning is logged. Daemon installs this
+    # at startup so the registry can defend against an mDNS attacker
+    # who advertises a victim's short_id with a different pub.
+    is_pinned_pubkey: Callable[[str], bool] | None = None
 
     def upsert(self, peer: Peer) -> None:
         if not _valid_pub_hex(peer.ed_pub_hex):
@@ -94,6 +102,31 @@ class Registry:
         if peer.address in self.local_addresses:
             self.peers.pop(peer.short_id, None)
             return
+        # v0.20.7 (security audit L1): refuse a swap of the pub-hex
+        # for an existing short_id when the existing pub is already
+        # pinned. Without this, a LAN attacker who advertises the
+        # victim's short_id with a different pub silently replaces
+        # the registry entry; the channel-handshake key-pinning then
+        # blocks impersonation, but the UI may still surface the
+        # attacker's pub during pair-flow display.
+        existing = self.peers.get(peer.short_id)
+        if (
+            existing is not None
+            and existing.ed_pub_hex
+            and peer.ed_pub_hex
+            and existing.ed_pub_hex != peer.ed_pub_hex
+            and self.is_pinned_pubkey is not None
+        ):
+            try:
+                if self.is_pinned_pubkey(existing.ed_pub_hex):
+                    log.warning(
+                        "discovery: refusing pub-hex swap for short_id=%s "
+                        "(existing pub is pinned)",
+                        peer.short_id,
+                    )
+                    return
+            except Exception:
+                pass
         # mDNS can briefly surface multiple service names for the same device
         # after restarts. The public key is the durable identity; keep the
         # newest advertisement and remove older aliases so the UI does not
