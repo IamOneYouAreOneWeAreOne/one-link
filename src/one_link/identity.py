@@ -63,6 +63,107 @@ def _resolve_passphrase(passphrase: Optional[bytes | str]) -> Optional[bytes]:
     return passphrase
 
 
+def _restrict_windows_acl(p: Path) -> None:
+    """v0.20.7 (security audit H3): tighten the file's Windows ACL to
+    grant the current user full control and deny inheritance.
+
+    `os.chmod` on Windows only flips the read-only attribute; it does
+    nothing about access-control. The README's "user-only ACL on
+    Windows" claim depended on `%APPDATA%` directory ACLs, which on a
+    multi-admin / domain-joined box typically grant Administrators +
+    SYSTEM read access. This routine uses the Win32 SetFileSecurity
+    API via ctypes (no new dependency) to install an explicit
+    discretionary ACL on the identity-key file: PROTECTED + a single
+    ACE granting STANDARD_RIGHTS_ALL + GENERIC_ALL to the current
+    user's SID. SYSTEM is intentionally omitted; if the OS needs
+    SYSTEM access for backup it has to inherit from the parent dir
+    (which we set DACL_PROTECTED on, breaking inheritance).
+
+    Best-effort: any failure logs a debug message and falls back to
+    the inherited parent-dir ACL. No raise, because the rest of the
+    daemon must continue to function on stripped-down Windows
+    (containers, embedded, bypassed system policies)."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return
+    try:
+        # Constants
+        TOKEN_QUERY = 0x0008
+        TokenUser = 1
+        DACL_SECURITY_INFORMATION = 0x00000004
+        PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+        SECURITY_DESCRIPTOR_REVISION = 1
+        ACL_REVISION = 2
+        STANDARD_RIGHTS_ALL = 0x001F0000
+        GENERIC_ALL = 0x10000000
+        FILE_ALL_ACCESS = 0x001F01FF
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        # 1. Get current process token + the user SID.
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)
+        ):
+            return
+        try:
+            size = wintypes.DWORD(0)
+            advapi32.GetTokenInformation(
+                token, TokenUser, None, 0, ctypes.byref(size)
+            )
+            buf = (ctypes.c_byte * size.value)()
+            if not advapi32.GetTokenInformation(
+                token, TokenUser, buf, size, ctypes.byref(size)
+            ):
+                return
+            # TOKEN_USER struct: SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes }
+            user_sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+            sid_len = advapi32.GetLengthSid(user_sid_ptr)
+            if not sid_len:
+                return
+        finally:
+            kernel32.CloseHandle(token)
+
+        # 2. Build a security descriptor + DACL containing one ACE.
+        sd = (ctypes.c_byte * 1024)()
+        if not advapi32.InitializeSecurityDescriptor(
+            sd, SECURITY_DESCRIPTOR_REVISION
+        ):
+            return
+        # Allocate ACL: enough for the SD header (8) + one ACE
+        # (8 + sid_len). Round up.
+        acl_size = 8 + 8 + sid_len + 16
+        acl = (ctypes.c_byte * acl_size)()
+        if not advapi32.InitializeAcl(acl, acl_size, ACL_REVISION):
+            return
+        if not advapi32.AddAccessAllowedAce(
+            acl, ACL_REVISION,
+            FILE_ALL_ACCESS,
+            user_sid_ptr,
+        ):
+            return
+        if not advapi32.SetSecurityDescriptorDacl(sd, True, acl, False):
+            return
+        # 3. Apply to the file with PROTECTED so inheritance is broken.
+        path_w = ctypes.c_wchar_p(str(p))
+        if not advapi32.SetFileSecurityW(
+            path_w,
+            DACL_SECURITY_INFORMATION
+            | PROTECTED_DACL_SECURITY_INFORMATION,
+            sd,
+        ):
+            return
+    except Exception:
+        # Any reflection / API mismatch: drop quietly. The chmod
+        # below is the best-effort fallback.
+        return
+
+
 def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> None:
     """Atomically persist the Ed25519 identity key.
 
@@ -74,14 +175,20 @@ def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> 
     fingerprint, breaking every pinned-trust relationship with paired
     peers, and orphaning all on-disk chunk-availability state.
 
+    v0.20.7 (security audit H3): on Windows, also install an explicit
+    user-only DACL via _restrict_windows_acl. `os.chmod(0o600)` only
+    flips the read-only bit; the inherited %APPDATA% ACL on a multi-
+    admin box can grant Administrators / Authenticated Users read
+    access. Setting an explicit DACL with PROTECTED breaks the
+    inheritance and grants only the current user's SID.
+
     The fix:
       1. Write PEM bytes to a unique sibling temp file.
       2. fsync the temp fd so bytes are durable.
       3. os.replace temp → final (atomic on POSIX + Windows NTFS).
       4. fsync the parent directory on POSIX so the rename is durable.
-      5. chmod 0o600 (no-op for ACL bits on Windows; %APPDATA% ACL
-         inheritance remains the actual defense there until the
-         Windows-ACL hardening lands separately).
+      5. chmod 0o600 (POSIX file-mode bits).
+      6. Apply explicit user-only DACL on Windows (no-op on POSIX).
     """
     enc = (
         serialization.BestAvailableEncryption(passphrase)
@@ -119,6 +226,10 @@ def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> 
         os.chmod(p, 0o600)
     except (OSError, NotImplementedError):
         pass
+    # v0.20.7 (security audit H3): Windows-only explicit DACL.
+    # Best-effort; a failure here leaves the file under the
+    # inherited %APPDATA% ACL — same defense as before this fix.
+    _restrict_windows_acl(p)
 
 
 def load_or_create(
