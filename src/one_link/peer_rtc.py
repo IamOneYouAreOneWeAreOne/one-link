@@ -101,6 +101,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import contextlib
 import json
 import logging
@@ -141,6 +142,11 @@ PAIRING_TOKEN_BYTES = 32
 # (it's network-routing info), but we still bind freshness so a
 # stolen signed offer can't be re-played weeks later.
 OFFER_REPLAY_WINDOW_MS = 60 * 1000
+MAX_SIGNALING_TEXT_BYTES = 256 * 1024
+MAX_SDP_BYTES = 128 * 1024
+MAX_DC_TEXT_BYTES = 256 * 1024
+MAX_PENDING_PAIRING_TOKENS = 64
+_B64URL_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 
 # ── helpers (b64url no padding, canonical JSON) ──────────────────────
@@ -150,8 +156,13 @@ def _b64u(data: bytes) -> str:
 
 
 def _b64ud(s: str) -> bytes:
+    if not isinstance(s, str) or any(c not in _B64URL_ALPHABET for c in s):
+        raise ValueError("invalid base64url")
     pad = "=" * ((4 - len(s) % 4) % 4)
-    return base64.urlsafe_b64decode((s + pad).encode("ascii"))
+    try:
+        return base64.urlsafe_b64decode((s + pad).encode("ascii"))
+    except (binascii.Error, UnicodeEncodeError, ValueError) as e:
+        raise ValueError("invalid base64url") from e
 
 
 def _canonical(payload: dict) -> bytes:
@@ -237,6 +248,14 @@ class BrowserPeerManager:
         # Sweep expired tokens opportunistically — keeps memory bounded
         # without a background sweeper task.
         self._sweep_expired_pairings()
+        if len(self._pending_pairings) > MAX_PENDING_PAIRING_TOKENS:
+            oldest = sorted(
+                self._pending_pairings.items(),
+                key=lambda item: item[1].created_ms,
+            )
+            overflow = len(self._pending_pairings) - MAX_PENDING_PAIRING_TOKENS
+            for old_token, _old in oldest[:overflow]:
+                self._pending_pairings.pop(old_token, None)
         return pp
 
     def _sweep_expired_pairings(self) -> int:
@@ -316,6 +335,9 @@ class BrowserPeerManager:
         try:
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
+            if isinstance(raw, str) and len(raw.encode("utf-8", errors="ignore")) > MAX_DC_TEXT_BYTES:
+                log.warning("peer-rtc: oversized DC frame from %s", peer.fingerprint)
+                return
             envelope = json.loads(raw) if isinstance(raw, str) else None
         except Exception as e:
             log.debug("peer-rtc: bad DC frame from %s: %s", peer.fingerprint, e)
@@ -384,18 +406,29 @@ class BrowserPeerManager:
         pubkey_b64u = envelope.get("pubkey_b64u")
         if not isinstance(pubkey_b64u, str):
             raise ValueError("pubkey_b64u required")
+        if len(pubkey_b64u) > 64:
+            raise ValueError("pubkey_b64u too large")
         pubkey = _b64ud(pubkey_b64u)
         if len(pubkey) != 32:
             raise ValueError("pubkey must be 32 bytes")
         fingerprint = envelope.get("fingerprint")
         if not isinstance(fingerprint, str) or ":" not in fingerprint:
             raise ValueError("fingerprint required (algo:hex)")
+        if len(fingerprint) > 128:
+            raise ValueError("fingerprint too large")
         sig_b64u = envelope.get("signature")
         if not isinstance(sig_b64u, str):
             raise ValueError("signature required")
+        if len(sig_b64u) > 128:
+            raise ValueError("signature too large")
         sig = _b64ud(sig_b64u)
         if len(sig) != 64:
             raise ValueError("signature must be 64 bytes")
+        sdp = envelope.get("sdp")
+        if not isinstance(sdp, str) or not sdp:
+            raise ValueError("sdp required")
+        if len(sdp.encode("utf-8", errors="ignore")) > MAX_SDP_BYTES:
+            raise ValueError("sdp too large")
         ts = envelope.get("ts")
         if not isinstance(ts, int):
             raise ValueError("ts required (int ms)")

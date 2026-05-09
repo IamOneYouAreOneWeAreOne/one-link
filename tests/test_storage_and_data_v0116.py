@@ -181,6 +181,10 @@ async def test_settings_default_storage_keys(http):
     assert j["bandwidth_cap_kbps"] == 0
     assert j["auto_accept_max_size_mb"] == 0
     assert j["auto_accept_extensions"] == []
+    assert j["safety_max_file_tb"] == 16
+    assert j["safety_min_free_mb"] == 2048
+    assert j["safety_peer_active_transfers"] == 3
+    assert j["safety_peer_active_gb"] == 2048
 
 
 # ───────── Settings POST roundtrips ──────────────────────────────────
@@ -260,6 +264,40 @@ async def test_settings_auto_accept_extensions_accept_list_form(http):
                       json={"auto_accept_extensions": ["PDF", ".jpg"]})
     j = await (await client.get("/api/settings", headers=_h(token))).json()
     assert j["auto_accept_extensions"] == ["jpg", "pdf"]
+
+
+@pytest.mark.asyncio
+async def test_settings_transfer_safety_policy_persists_and_refreshes(http):
+    client, daemon, _, token = http
+    resp = await client.post(
+        "/api/settings",
+        headers=_h(token),
+        json={
+            "safety_max_file_tb": 4,
+            "safety_min_free_mb": 1024,
+            "safety_peer_active_transfers": 2,
+            "safety_peer_active_gb": 512,
+        },
+    )
+    assert resp.status == 200
+    j = await (await client.get("/api/settings", headers=_h(token))).json()
+    assert j["safety_max_file_tb"] == 4
+    assert j["safety_min_free_mb"] == 1024
+    assert j["safety_peer_active_transfers"] == 2
+    assert j["safety_peer_active_gb"] == 512
+    assert daemon._transfer_admission_policy.max_declared_bytes == 4 * 1024 ** 4
+    assert daemon._transfer_admission_policy.min_free_reserve_bytes == 1024 * 1024 ** 2
+
+
+@pytest.mark.asyncio
+async def test_settings_transfer_safety_rejects_unsafe_minimums(http):
+    client, _, _, token = http
+    resp = await client.post(
+        "/api/settings",
+        headers=_h(token),
+        json={"safety_min_free_mb": 10},
+    )
+    assert resp.status == 400
 
 
 @pytest.mark.asyncio

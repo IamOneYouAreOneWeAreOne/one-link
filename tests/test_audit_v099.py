@@ -44,7 +44,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.daemon import Daemon
 from one_link.identity import Identity, fingerprint_of
-from one_link.server import UIServer
+from one_link.server import MAX_FAILED_AUTH_ATTEMPTS, MAX_JSON_REQUEST_BYTES, UIServer
 from one_link.state import State
 
 
@@ -536,3 +536,43 @@ async def test_wrong_token_blocked(ctx):
         "/api/me", headers={"Authorization": "Bearer wrongtoken"}
     )
     assert resp.status == 401
+
+
+@pytest.mark.asyncio
+async def test_bad_auth_attempts_are_rate_limited(ctx):
+    client, _, _, _, _ = ctx
+    headers = {"Authorization": "Bearer wrongtoken"}
+    for _ in range(MAX_FAILED_AUTH_ATTEMPTS):
+        resp = await client.get("/api/me", headers=headers)
+        assert resp.status == 401
+    resp = await client.get("/api/me", headers=headers)
+    assert resp.status == 429
+    j = await resp.json()
+    assert "too many" in j["error"]
+
+
+@pytest.mark.asyncio
+async def test_json_control_surface_rejects_oversized_body(ctx):
+    client, _, _, token, _ = ctx
+    body = b'{"display_name":"' + (b"x" * (MAX_JSON_REQUEST_BYTES + 1)) + b'"}'
+    resp = await client.post(
+        "/api/settings",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status == 413
+    j = await resp.json()
+    assert j["error"] == "json body too large"
+
+
+@pytest.mark.asyncio
+async def test_security_headers_on_guarded_json_response(ctx):
+    client, _, _, token, _ = ctx
+    resp = await client.get("/api/me", headers=_h(token))
+    assert resp.status == 200
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert resp.headers["Cross-Origin-Resource-Policy"] == "same-origin"

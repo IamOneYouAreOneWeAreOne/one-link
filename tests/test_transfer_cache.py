@@ -74,6 +74,37 @@ def test_chunk_query_availability_uses_local_prior_before_answering(tmp_path, mo
     d.state.close()
 
 
+def test_available_hashes_can_use_durable_sources_after_cache_prune(tmp_path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+
+    import blake3
+    from one_link.daemon import Daemon
+    from one_link.identity import load_or_create
+    from one_link.state import State
+
+    d = Daemon(load_or_create())
+    d.state = State(db_path=Path(tmp_path) / "s.db")
+    source = tmp_path / "received-large.bin"
+    payload = b"durable-prior-source" * 20_000
+    source.write_bytes(payload)
+    h = blake3.blake3(payload).hexdigest()
+    d.state.record_chunk_source(
+        h,
+        path=str(source),
+        start=0,
+        size=len(payload),
+        mtime_ms=int(source.stat().st_mtime * 1000),
+        file_size=source.stat().st_size,
+        source="received_cdc",
+    )
+
+    assert not d._chunk_cache_path(h).is_file()
+    assert d._available_chunk_hashes([h], hydrate=False) == [h]
+    assert not d._chunk_cache_path(h).is_file()
+    assert d._read_chunk_cache(h) == payload
+    d.state.close()
+
+
 def test_prior_index_records_lazy_sources_without_copying_all_bytes(tmp_path, monkeypatch):
     monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
 

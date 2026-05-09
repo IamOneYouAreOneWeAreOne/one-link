@@ -48,6 +48,10 @@ from one_link.peer_rtc import (
     BrowserPeerManager,
     DAEMON_BULK_LABEL,
     DAEMON_CONTROL_LABEL,
+    MAX_DC_TEXT_BYTES,
+    MAX_PENDING_PAIRING_TOKENS,
+    MAX_SDP_BYTES,
+    MAX_SIGNALING_TEXT_BYTES,
     OFFER_REPLAY_WINDOW_MS,
     PAIRING_TOKEN_BYTES,
     PAIRING_TOKEN_TTL_MS,
@@ -58,7 +62,7 @@ from one_link.peer_rtc import (
     _canonical,
     _now_ms,
 )
-from one_link.server import UIServer
+from one_link.server import MAX_SIGNALING_ATTEMPTS, UIServer
 from one_link.state import State
 
 
@@ -223,6 +227,14 @@ def test_sweep_removes_expired_tokens(manager: BrowserPeerManager):
 
 # ───────── peer registry ───────────────────────────────────────────
 
+def test_pending_pairing_tokens_are_bounded(manager: BrowserPeerManager):
+    """A local page or extension should not be able to mint unbounded
+    pending pairing slots and grow daemon memory forever."""
+    for _ in range(MAX_PENDING_PAIRING_TOKENS + 10):
+        manager.mint_pairing_token()
+    assert len(manager._pending_pairings) == MAX_PENDING_PAIRING_TOKENS
+
+
 def test_register_peer_stores_by_fingerprint(manager: BrowserPeerManager):
     peer = BrowserPeer(fingerprint="sha256:abc", pubkey_bytes=b"\x00" * 32)
     manager.register_peer(peer)
@@ -344,6 +356,49 @@ def test_verify_rejects_short_pubkey():
 # ───────── DataChannel dispatch ────────────────────────────────────
 
 
+def test_verify_rejects_oversized_sdp_before_webrtc_work():
+    sk = Ed25519PrivateKey.generate()
+    envelope = _signed_offer(sk, sdp="v=0\r\n" + ("a" * (MAX_SDP_BYTES + 1)))
+    with pytest.raises(ValueError, match="sdp too large"):
+        BrowserPeerManager.verify_offer_envelope(envelope)
+
+
+def test_verify_rejects_oversized_signature_field_before_decode():
+    sk = Ed25519PrivateKey.generate()
+    envelope = _signed_offer(sk)
+    envelope["signature"] = "A" * 1024
+    with pytest.raises(ValueError, match="signature too large"):
+        BrowserPeerManager.verify_offer_envelope(envelope)
+
+
+def test_verify_rejects_non_base64url_wire_material():
+    sk = Ed25519PrivateKey.generate()
+    envelope = _signed_offer(sk)
+    envelope["pubkey_b64u"] = "not valid+base64/"
+    with pytest.raises(ValueError, match="invalid base64url"):
+        BrowserPeerManager.verify_offer_envelope(envelope)
+
+
+def test_verify_offer_malformed_envelope_corpus_rejected_cleanly():
+    sk = Ed25519PrivateKey.generate()
+    valid = _signed_offer(sk)
+    cases = [
+        None,
+        [],
+        {},
+        {**valid, "v": None},
+        {**valid, "t": "answer"},
+        {**valid, "pubkey_b64u": None},
+        {**valid, "fingerprint": "sha256"},
+        {**valid, "signature": None},
+        {**valid, "sdp": ""},
+        {**valid, "ts": "now"},
+    ]
+    for envelope in cases:
+        with pytest.raises(ValueError):
+            BrowserPeerManager.verify_offer_envelope(envelope)
+
+
 @pytest.mark.asyncio
 async def test_dispatch_ping_replies_pong(manager: BrowserPeerManager):
     """Ping is built into the manager — always replies pong with
@@ -435,6 +490,19 @@ async def test_dispatch_listener_exception_doesnt_break_others(manager: BrowserP
 
 
 # ───────── server route registration + mint endpoint ───────────────
+
+
+@pytest.mark.asyncio
+async def test_dispatch_drops_oversized_datachannel_frame(manager: BrowserPeerManager):
+    peer = BrowserPeer(fingerprint="sha256:abc", pubkey_bytes=b"\x00" * 32)
+    received: list[tuple] = []
+
+    async def listener(p, kind, t, env):
+        received.append((p.fingerprint, kind, t))
+
+    manager.add_dc_listener(listener)
+    await manager._dispatch_dc(peer, "control", "x" * (MAX_DC_TEXT_BYTES + 1))
+    assert received == []
 
 
 @pytest.mark.asyncio
@@ -530,6 +598,31 @@ async def test_signaling_rejects_unknown_pubkey_without_token(http):
 
 
 # ───────── version pin ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_signaling_rejects_oversized_text_frame(http):
+    """Reject oversized signaling before JSON parsing or signature work."""
+    import aiohttp
+    client, _ = http
+    async with client.ws_connect("/api/v1/peer-rtc") as ws:
+        await ws.send_str('{"x":"' + ("a" * (MAX_SIGNALING_TEXT_BYTES + 1)) + '"}')
+        msg = await ws.receive(timeout=2.0)
+        assert msg.type == aiohttp.WSMsgType.TEXT
+        payload = json.loads(msg.data)
+        assert payload["t"] == "error"
+        assert payload["code"] == "frame_too_large"
+
+
+@pytest.mark.asyncio
+async def test_signaling_handshake_attempts_are_rate_limited(http):
+    client, _ = http
+    for _ in range(MAX_SIGNALING_ATTEMPTS):
+        async with client.ws_connect("/api/v1/peer-rtc") as ws:
+            await ws.close()
+    resp = await client.get("/api/v1/peer-rtc")
+    assert resp.status == 429
+    assert "too many" in await resp.text()
 
 
 def test_package_version_at_or_above_v0200():

@@ -29,6 +29,59 @@ AUTO_ACTIONS = {
 }
 
 
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value is False:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value is False:
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _route_label(route: Any) -> str:
+    r = str(route or "").strip().lower()
+    if r in {"lan", "wifi", "wifi_direct", "wifi-direct"}:
+        return "Wi-Fi direct"
+    if r in {"ethernet", "ethernet_direct", "ethernet-direct"}:
+        return "Ethernet direct"
+    if r in {"relay", "rendezvous"}:
+        return "Relay"
+    if r in {"local_cache", "known", "cache", "swarm"}:
+        return "Known chunks"
+    if not r:
+        return "Best available"
+    return r.replace("_", " ").replace("-", " ")
+
+
+def _mbps_fact(prefix: str, mbps: float) -> str | None:
+    if mbps <= 0:
+        return None
+    if mbps >= 100:
+        shown = f"{mbps:.0f}"
+    elif mbps >= 10:
+        shown = f"{mbps:.1f}".rstrip("0").rstrip(".")
+    else:
+        shown = f"{mbps:.2f}".rstrip("0").rstrip(".")
+    return f"{prefix} {shown} Mbps"
+
+
 @dataclass(frozen=True)
 class TransferDiagnosis:
     code: str
@@ -303,10 +356,148 @@ def enrich_transfer_event(event: dict[str, Any], *, now_ms: int | None = None) -
     diag = diagnose_transfer(event, now_ms=now_ms).to_dict()
     out = dict(event)
     out["doctor"] = diag
+    out["autopilot_truth"] = transfer_autopilot_truth(out, diagnosis=diag)
     # Flatten the highest-value fields for older UI code and tests.
     out["display_state"] = diag["label"]
     out["user_message"] = diag["user_message"]
     return out
+
+
+def transfer_autopilot_truth(
+    rec: Any,
+    *,
+    diagnosis: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the user-facing transfer intelligence contract.
+
+    The daemon records rich engineering metadata: CDC decisions, binary frame
+    choices, performance reports, route observations, retry causes, and swarm
+    assists. This helper turns those details into a stable product surface the
+    UI can render directly. It is deterministic and side-effect free so tests,
+    WebSocket events, and REST snapshots all tell the same story.
+    """
+
+    md = _metadata(rec)
+    plan = _as_mapping(md.get("autopilot_plan"))
+    perf = _as_mapping(md.get("performance_summary"))
+    report = _as_mapping(md.get("transfer_report"))
+    assist = _as_mapping(md.get("swarm_assist"))
+    brain = _as_mapping(md.get("transfer_brain"))
+    scheduler = _as_mapping(md.get("adaptive_scheduler"))
+    diag = dict(diagnosis or diagnose_transfer(rec).to_dict())
+
+    status = str(_field(rec, "status", "") or "").lower()
+    direction = str(_field(rec, "direction", "out") or "out").lower()
+    progress_bytes = _as_int(_field(rec, "progress_bytes", 0))
+    total_bytes = _as_int(_field(rec, "total_bytes", _field(rec, "size", 0)))
+    wire_bytes = _as_int(_field(rec, "wire_bytes", report.get("wire_bytes_sent", 0)))
+    skipped_bytes = max(
+        _as_int(perf.get("skipped_bytes")),
+        _as_int(report.get("skipped_bytes")),
+        _as_int(md.get("skipped_bytes")),
+    )
+    saved_bytes = max(
+        _as_int(perf.get("saved_bytes")),
+        _as_int(report.get("saved_bytes")),
+        _as_int(md.get("saved_bytes")),
+        _as_int(assist.get("assisted_bytes")),
+    )
+    savings_ratio = max(
+        _as_float(perf.get("bandwidth_savings_ratio")),
+        _as_float(report.get("bandwidth_savings_ratio")),
+        _as_float(plan.get("estimated_savings_ratio")),
+        _as_float(md.get("bandwidth_savings_ratio")),
+        _as_float(md.get("prior_hit_rate_actual")),
+        _as_float(md.get("skipped_ratio")),
+    )
+    if savings_ratio <= 0 and total_bytes > 0 and (skipped_bytes > 0 or saved_bytes > 0):
+        savings_ratio = (skipped_bytes + saved_bytes) / max(1, total_bytes)
+    savings_ratio = _clamp01(savings_ratio)
+
+    effective_mbps = max(
+        _as_float(perf.get("effective_mbps")),
+        _as_float(plan.get("estimated_mbps")),
+        (_as_float(report.get("effective_throughput_bps")) / 1_000_000.0),
+    )
+    wire_mbps = max(
+        _as_float(perf.get("wire_mbps")),
+        (_as_float(report.get("wire_throughput_bps")) / 1_000_000.0),
+    )
+
+    route = (
+        perf.get("route")
+        or plan.get("route")
+        or md.get("route")
+        or brain.get("route")
+        or ("local_cache" if assist.get("strategy") == "multi_source_chunk_pull" else "")
+    )
+    route_label = _route_label(route)
+    frame_kind = str(
+        perf.get("frame_kind")
+        or plan.get("frame_kind")
+        or md.get("frame_kind")
+        or ""
+    ).lower()
+    fast_binary = bool(md.get("binary_frame")) or "binary" in frame_kind
+    sent_only_missing = skipped_bytes > 0 or saved_bytes > 0 or savings_ratio >= 0.01
+
+    facts: list[str] = []
+    speed_fact = _mbps_fact("Finished at" if status == "complete" else "Sending at", effective_mbps)
+    if speed_fact:
+        facts.append(speed_fact)
+    if savings_ratio >= 0.01:
+        facts.append(f"{round(savings_ratio * 100):.0f}% already known")
+    if sent_only_missing:
+        facts.append("Only sent missing pieces")
+    if fast_binary:
+        facts.append("Using fast binary path")
+    if diag.get("automatic") and diag.get("action") not in {"none", "continue", "observe"}:
+        facts.append("Resuming automatically")
+    pulled = _as_int(assist.get("pulled"))
+    if pulled > 0:
+        source_count = max(1, _as_int(assist.get("source_count"), len(_as_mapping(assist.get("sources"))) or 1))
+        facts.append(
+            f"Pulled {pulled} chunk{'s' if pulled != 1 else ''} from "
+            f"{source_count} trusted device{'s' if source_count != 1 else ''}"
+        )
+    facts.append(f"Route: {route_label}")
+
+    seen: set[str] = set()
+    deduped = []
+    for fact in facts:
+        if fact and fact not in seen:
+            seen.add(fact)
+            deduped.append(fact)
+
+    if diag.get("label") == "Done":
+        headline = "Verified and delivered"
+    elif speed_fact:
+        headline = speed_fact
+    else:
+        headline = str(diag.get("label") or ("Receiving" if direction == "in" else "Sending"))
+
+    return {
+        "state": str(diag.get("code") or status or "unknown"),
+        "state_label": str(diag.get("label") or headline),
+        "headline": headline,
+        "message": str(diag.get("user_message") or ""),
+        "facts": deduped[:7],
+        "route": str(route or ""),
+        "route_label": route_label,
+        "speed_mbps": round(effective_mbps, 3),
+        "wire_mbps": round(wire_mbps, 3),
+        "known_pct": round(savings_ratio * 100.0, 1),
+        "sent_only_missing_pieces": bool(sent_only_missing),
+        "fast_path_label": "Fast binary path" if fast_binary else "Compatible path",
+        "self_healing_action": str(diag.get("action") or "observe"),
+        "automatic": bool(diag.get("automatic")),
+        "progress_bytes": progress_bytes,
+        "total_bytes": total_bytes,
+        "wire_bytes": wire_bytes,
+        "saved_bytes": saved_bytes,
+        "skipped_bytes": skipped_bytes,
+        "parallelism": _as_int(scheduler.get("parallelism"), _as_int(plan.get("parallelism"), 1)),
+    }
 
 
 class RouteMemory:

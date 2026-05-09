@@ -338,6 +338,59 @@ def test_retry_pump_waits_for_live_discovered_peer(tmp_path: Path):
     state.close()
 
 
+def test_retry_pump_does_not_resume_in_flight_planning_row(tmp_path: Path):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    daemon.discovery = Discovery(
+        short_id=me.short_id,
+        hostname="me",
+        port=1,
+        ed_pub_hex=me.public_bytes.hex(),
+    )
+    scheduled: list[str] = []
+    daemon._schedule_resume_paused = scheduled.append  # type: ignore[method-assign]
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    src = tmp_path / "new-send.bin"
+    src.write_bytes(b"new send")
+    state.upsert_transfer(
+        id="planning-current-send",
+        direction="out",
+        peer_fp=them.fingerprint,
+        kind="file",
+        name=src.name,
+        size=src.stat().st_size,
+        status="queued",
+        progress_bytes=0,
+        total_bytes=src.stat().st_size,
+        chunks_done=0,
+        chunks_total=1,
+        metadata={
+            "mode": "planning",
+            "path": str(src),
+            "next_retry_ms": 0,
+        },
+    )
+    daemon.discovery.registry.upsert(Peer(
+        short_id=them.short_id,
+        hostname="them",
+        address="127.0.0.1",
+        port=12345,
+        ed_pub_hex=them.public_bytes.hex(),
+    ))
+
+    assert daemon._schedule_due_transfer_retries() == 0
+    assert scheduled == []
+    state.close()
+
+
 @pytest.mark.asyncio
 async def test_resume_reuses_existing_transfer_id(tmp_path: Path):
     """A resumed transfer updates the durable intent row instead of

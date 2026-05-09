@@ -293,6 +293,51 @@ def test_reap_stuck_transfers_marks_old_offered_as_waiting(tmp_path: Path):
     state.close()
 
 
+def test_reap_stuck_transfers_marks_old_planning_queue_as_waiting(tmp_path: Path):
+    me = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+
+    src = tmp_path / "huge-video.bin"
+    src.write_bytes(b"x" * 1024)
+    long_ago = int(time.time() * 1000) - (10 * 60 * 1000)
+    state.upsert_transfer(
+        id="planning1",
+        direction="out",
+        peer_fp="aa" * 32,
+        kind="file",
+        name=src.name,
+        size=src.stat().st_size,
+        status="queued",
+        progress_bytes=0,
+        total_bytes=src.stat().st_size,
+        chunks_done=0,
+        chunks_total=1,
+        metadata={
+            "mode": "planning",
+            "path": str(src),
+            "delivery_state": "queued",
+        },
+    )
+    with state._write_lock:
+        state._conn.execute(
+            "UPDATE transfers SET updated_ms = ? WHERE id = ?",
+            (long_ago, "planning1"),
+        )
+
+    reaped = daemon._reap_stuck_transfers()
+    assert reaped == 1
+    row = state.get_transfer("planning1")
+    assert row is not None
+    assert row.status == "paused"
+    assert row.metadata.get("transient") is True
+    assert row.metadata.get("delivery_state") == "waiting_for_device"
+    assert row.metadata.get("error_class") == "PlanningInterrupted"
+    assert row.metadata.get("reaped_reason") == "stale_planning_row"
+    state.close()
+
+
 def test_reap_stuck_transfers_ignores_complete_and_failed(tmp_path: Path):
     """Don't churn rows that are already in a terminal state."""
     me = _new_identity()

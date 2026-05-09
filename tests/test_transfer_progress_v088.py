@@ -101,6 +101,8 @@ def test_file_bubble_surfaces_autopilot_truth(index_html: str):
     start = index_html.find("function transferAutopilotFacts(")
     assert start > 0
     snippet = index_html[start:start + 4200]
+    assert "t.autopilot_truth" in snippet
+    assert "truth.facts" in snippet
     assert "Sending at" in snippet
     assert "already known" in snippet
     assert "Only sent missing pieces" in snippet
@@ -110,6 +112,39 @@ def test_file_bubble_surfaces_autopilot_truth(index_html: str):
     assert "Route:" in snippet
     assert "transfer-facts" in index_html
     assert "renderTransferFacts(t, kind)" in index_html
+
+
+def test_transfer_panel_surfaces_autopilot_truth(index_html: str):
+    start = index_html.find("function renderTransfers()")
+    assert start > 0
+    snippet = index_html[start:start + 1800]
+    assert "renderTransferFacts(t, statusKind(t))" in snippet
+    assert "renderTransferCommandCenter(t)" in snippet
+    assert ".file-row .transfer-facts" in index_html
+    assert ".file-row .transfer-fact" in index_html
+
+
+def test_transfer_command_center_shows_real_speed_and_savings(index_html: str):
+    start = index_html.find("function transferCommandMetrics(")
+    assert start > 0
+    snippet = index_html[start:start + 3600]
+    assert "autopilot_truth" in snippet
+    assert "speed_mbps" in snippet
+    assert "wire_mbps" in snippet
+    assert "known_pct" in snippet
+    assert "saved_bytes" in snippet
+    assert "wire_bytes" in snippet
+    assert "self_healing_action" in snippet
+    assert "transfer-command" in index_html
+    assert "tc-metric" in index_html
+
+
+def test_sent_files_panel_uses_transfer_command_center(index_html: str):
+    start = index_html.find("function renderFilesPanel()")
+    assert start > 0
+    snippet = index_html[start:start + 4200]
+    assert "renderTransferCommandCenter(t)" in snippet
+    assert "renderTransferFacts(t, statusKind(t))" in snippet
 
 
 # ───────── aggregate pill surface ────────────────────────────────────

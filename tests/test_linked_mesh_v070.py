@@ -783,6 +783,15 @@ def test_fast_fixed_chunk_size_is_version_gated():
     assert _fast_fixed_chunk_size_for_peer("0.12.4") == 256 * 1024
     assert _fast_fixed_chunk_size_for_peer("0.12.5") == 1024 * 1024
     assert _fast_fixed_chunk_size_for_peer("v0.13.0") == 1024 * 1024
+    assert _fast_fixed_chunk_size_for_peer(
+        None,
+        size=1024 * 1024 * 1024,
+        peer_features=["file_cdc_binary_frame"],
+    ) == 2 * 1024 * 1024
+    assert _fast_fixed_chunk_size_for_peer(
+        "v0.20.0",
+        size=4 * 1024 * 1024 * 1024,
+    ) == 4 * 1024 * 1024
 
 
 def test_normalize_cdc_chunks_accepts_fast_fixed_chunk_size(tmp_path: Path):
@@ -1313,6 +1322,279 @@ async def test_receive_empty_cdc_wants_schedules_finish_after_reply(
     assert chan.sent[-1]["t"] == "FILE_WANTS"
     assert chan.sent[-1]["wants"] == []
     assert scheduled == [blob]
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_receive_empty_cdc_wants_uses_durable_sources_after_cache_prune(
+    tmp_path: Path, monkeypatch
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    payload = b"already assembled large chunk" * 8192
+    source = tmp_path / "received-large.bin"
+    source.write_bytes(payload)
+    chunk_hash = blake3.blake3(payload).hexdigest()
+    blob = chunk_hash
+    state.record_chunk_source(
+        chunk_hash,
+        path=str(source),
+        start=0,
+        size=len(payload),
+        mtime_ms=int(source.stat().st_mtime * 1000),
+        file_size=source.stat().st_size,
+        source="received_cdc",
+    )
+    assert not daemon._chunk_cache_path(chunk_hash).is_file()
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        daemon,
+        "_schedule_finish_cdc_file",
+        lambda blob_hex, *_args: scheduled.append(blob_hex),
+    )
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+
+    await daemon._on_peer_message(
+        chan,
+        make_msg(
+            "FILE_OFFER",
+            them.short_id,
+            name="repeat-large.bin",
+            size=len(payload),
+            blob=blob,
+            chunks=[{
+                "index": 0,
+                "start": 0,
+                "end": len(payload),
+                "size": len(payload),
+                "hash": chunk_hash,
+            }],
+        ),
+    )
+
+    assert chan.sent[-1]["t"] == "FILE_WANTS"
+    assert chan.sent[-1]["wants"] == []
+    assert scheduled == [blob]
+    assert not daemon._chunk_cache_path(chunk_hash).is_file()
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_file_offer_absurd_size_is_rejected_before_opening_file(
+    tmp_path: Path,
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    blob = "a" * 64
+
+    await daemon._on_peer_message(
+        chan,
+        make_msg(
+            "FILE_OFFER",
+            them.short_id,
+            name="10000tb.bin",
+            size=10_000 * 1024 * 1024 * 1024 * 1024,
+            blob=blob,
+            chunks=[],
+        ),
+    )
+
+    assert chan.sent[-1]["t"] == "ACK"
+    assert chan.sent[-1]["rejected"] == "admission_declared_size_too_large"
+    assert not any(tmp_path.glob("*10000tb.bin"))
+    row = state.get_transfer(f"in:{blob}")
+    assert row is not None
+    assert row.status == "failed"
+    assert row.metadata["delivery_state"] == "blocked"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_huge_stream_offer_requires_resumable_chunk_map(tmp_path: Path):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    daemon._transfer_admission_policy = daemon._transfer_admission_policy.__class__(
+        max_declared_bytes=2 * 1024 * 1024 * 1024,
+        min_free_reserve_bytes=0,
+        free_reserve_ratio=0,
+    )
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    blob = "b" * 64
+
+    await daemon._on_peer_message(
+        chan,
+        make_msg(
+            "FILE_OFFER",
+            them.short_id,
+            name="large-stream.bin",
+            size=1024 * 1024 * 1024 + 1,
+            blob=blob,
+        ),
+    )
+
+    assert chan.sent[-1]["rejected"] == "admission_stream_offer_too_large"
+    assert not any(tmp_path.glob("*large-stream.bin"))
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_file_offer_malformed_size_is_rejected_not_raised(tmp_path: Path):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    blob = "c" * 64
+
+    await daemon._on_peer_message(
+        chan,
+        make_msg(
+            "FILE_OFFER",
+            them.short_id,
+            name="bad-size.bin",
+            size="not-a-number",
+            blob=blob,
+        ),
+    )
+
+    assert chan.sent[-1]["t"] == "ACK"
+    assert chan.sent[-1]["rejected"] == "admission_invalid_size"
+    assert state.get_transfer(f"in:{blob}").metadata["delivery_state"] == "blocked"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_file_offer_malformed_chunk_map_is_rejected_not_stream_downgraded(
+    tmp_path: Path,
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    blob = "d" * 64
+
+    await daemon._on_peer_message(
+        chan,
+        make_msg(
+            "FILE_OFFER",
+            them.short_id,
+            name="bad-map.bin",
+            size=1024,
+            blob=blob,
+            chunks=[{"hash": "e" * 64, "start": "nope", "end": 10, "size": 10}],
+        ),
+    )
+
+    assert chan.sent[-1]["t"] == "ACK"
+    assert chan.sent[-1]["rejected"] == "admission_invalid_chunk_map"
+    assert blob not in daemon._incoming_files
+    row = state.get_transfer(f"in:{blob}")
+    assert row.status == "failed"
+    assert row.metadata["error"] == "invalid_chunk_map"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_bad_cdc_chunk_is_rejected_and_partial_file_removed(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    daemon._transfer_admission_policy = daemon._transfer_admission_policy.__class__(
+        min_free_reserve_bytes=0,
+        free_reserve_ratio=0,
+    )
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chunk = b"verified piece"
+    chunk_hash = blake3.blake3(chunk).hexdigest()
+    blob = blake3.blake3(chunk).hexdigest()
+
+    await daemon._on_peer_message(
+        chan,
+        make_msg(
+            "FILE_OFFER",
+            them.short_id,
+            name="cdc.bin",
+            size=len(chunk),
+            blob=blob,
+            chunks=[{
+                "hash": chunk_hash,
+                "start": 0,
+                "end": len(chunk),
+                "size": len(chunk),
+            }],
+        ),
+    )
+    assert chan.sent[-1]["t"] == "FILE_WANTS"
+    assert blob in daemon._incoming_files
+
+    await daemon._on_peer_message(
+        chan,
+        make_msg(
+            "FILE_CDC_CHUNK",
+            them.short_id,
+            blob=blob,
+            index="not-an-index",
+            data="",
+        ),
+    )
+
+    assert chan.sent[-1]["t"] == "ACK"
+    assert chan.sent[-1]["rejected"] == "bad_cdc_chunk_index"
+    assert blob not in daemon._incoming_files
+    assert state.get_transfer(f"in:{blob}").status == "failed"
     state.close()
 
 

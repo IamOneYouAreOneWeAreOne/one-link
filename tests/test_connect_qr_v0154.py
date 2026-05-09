@@ -232,10 +232,10 @@ async def test_connect_qr_loopback_returns_409(http_loopback):
 # ───────── UI wiring ────────────────────────────────────────────────
 
 def test_connect_info_section_present(index_html: str):
-    """The About pane MUST carry the connect-info host element so
-    the JS handler has a target to populate."""
+    """The About pane keeps a hidden compatibility anchor, but the
+    legacy body target is gone so the old QR cannot render visibly."""
     assert 'id="connect-info-section"' in index_html
-    assert 'id="connect-info-body"' in index_html
+    assert 'id="connect-info-body"' not in index_html
 
 
 def test_refresh_connect_info_helper_present(index_html: str):
@@ -250,13 +250,12 @@ def test_refresh_connect_info_helper_present(index_html: str):
 
 
 def test_refresh_connect_info_called_on_settings_open(index_html: str):
-    """refreshSettingsAbout MUST invoke _refreshConnectInfo so opening
-    settings always shows the current QR (relevant if --lan was
-    toggled across daemon restarts)."""
+    """refreshSettingsAbout must not invoke the legacy connect-info
+    renderer; Pair a phone is the visible onboarding path."""
     idx = index_html.find("function refreshSettingsAbout()")
     assert idx > 0
     snippet = index_html[idx:idx + 1200]
-    assert "_refreshConnectInfo()" in snippet
+    assert "_refreshConnectInfo()" not in snippet
 
 
 def test_connect_info_renders_loopback_hint(index_html: str):

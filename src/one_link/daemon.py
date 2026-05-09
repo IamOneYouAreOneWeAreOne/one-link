@@ -121,6 +121,13 @@ from one_link.transfer_intent import (
     plan_transfer_intent,
     plan_transfer_intent_for_manifest,
 )
+from one_link.transfer_safety import (
+    TransferAdmissionContext,
+    TransferAdmissionPolicy,
+    classify_file_risk,
+    evaluate_transfer_admission,
+    known_bytes_from_chunks,
+)
 from one_link.wire import decode_msg, encode_msg, make_msg
 
 log = logging.getLogger("one_link.daemon")
@@ -136,6 +143,9 @@ STREAM_PIPELINE_MAX_CHUNKS = 16
 BINARY_FRAME_MAGIC = b"OLB1"
 BINARY_FRAME_HEADER_MAX = 64 * 1024
 MAX_INCOMING_FILE_BYTES = 1024 * 1024 * 1024  # match UI upload cap
+MAX_DECLARED_FILE_OFFER_BYTES = 16 * 1024 * 1024 * 1024 * 1024
+MAX_TRANSFER_FILE_NAME_BYTES = 240
+MAX_CDC_MANIFEST_CHUNKS = 262_144
 CDC_CACHE_MAX_BYTES = 512 * 1024 * 1024
 CDC_AUTO_INDEX_MAX_BYTES = 128 * 1024 * 1024
 FAST_FIXED_INDEX_MIN_BYTES = 16 * 1024 * 1024
@@ -328,7 +338,12 @@ def _version_at_least(version: str | None, major: int, minor: int, patch: int) -
         return False
 
 
-def _fast_fixed_chunk_size_for_peer(peer_version: str | None) -> int:
+def _fast_fixed_chunk_size_for_peer(
+    peer_version: str | None,
+    *,
+    size: int = 0,
+    peer_features: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> int:
     """Largest fixed-manifest chunk this peer can safely parse.
 
     v0.12.5 receivers accept up to STREAM_MAX_CHUNK_SIZE in FILE_OFFER
@@ -337,7 +352,18 @@ def _fast_fixed_chunk_size_for_peer(peer_version: str | None) -> int:
     zero-chunk repeat sends instead of silently falling back to streaming.
     """
 
-    if _version_at_least(peer_version, 0, 12, 5):
+    features = set(normalize_caps(peer_features or ()))
+    modern_peer = (
+        _version_at_least(peer_version, 0, 12, 5)
+        or FILE_CDC_BINARY_FRAME in features
+        or FILE_SWARM in features
+    )
+    if modern_peer:
+        size = max(0, int(size or 0))
+        if size >= 2 * 1024 * 1024 * 1024:
+            return STREAM_MAX_CHUNK_SIZE
+        if size >= 512 * 1024 * 1024:
+            return 2 * 1024 * 1024
         return FAST_FIXED_CHUNK_SIZE
     return CDC_MAX_CHUNK_BYTES
 
@@ -633,6 +659,9 @@ class Daemon:
         self.bandwidth_pacer = BandwidthPacer(cap_kbps=0)
         self._auto_accept_max_size_bytes: int = 0  # 0 = no limit
         self._auto_accept_extensions: set[str] = set()  # empty = no filter
+        self._transfer_admission_policy = TransferAdmissionPolicy(
+            max_declared_bytes=MAX_DECLARED_FILE_OFFER_BYTES,
+        )
         # v0.12.3: typing-indicator state + privacy.
         # _peer_typing[fp] = wall-clock ms when the peer's "still
         # typing" expires. The WS broadcasts peer_typing events;
@@ -1130,6 +1159,31 @@ class Daemon:
                 e.strip().lstrip(".").lower()
                 for e in raw.split(",") if e.strip()
             }
+        with contextlib.suppress(Exception):
+            max_tb = self.state.get_setting("safety_max_file_tb")
+            reserve_mb = self.state.get_setting("safety_min_free_mb")
+            peer_active = self.state.get_setting("safety_peer_active_transfers")
+            peer_bytes_gb = self.state.get_setting("safety_peer_active_gb")
+            self._transfer_admission_policy = TransferAdmissionPolicy(
+                max_declared_bytes=(
+                    max(1, int(max_tb)) * 1024 * 1024 * 1024 * 1024
+                    if max_tb else MAX_DECLARED_FILE_OFFER_BYTES
+                ),
+                min_free_reserve_bytes=(
+                    max(256, int(reserve_mb)) * 1024 * 1024
+                    if reserve_mb else TransferAdmissionPolicy().min_free_reserve_bytes
+                ),
+                max_active_inbound_transfers_per_peer=(
+                    max(1, int(peer_active))
+                    if peer_active
+                    else TransferAdmissionPolicy().max_active_inbound_transfers_per_peer
+                ),
+                max_active_inbound_bytes_per_peer=(
+                    max(1, int(peer_bytes_gb)) * 1024 * 1024 * 1024
+                    if peer_bytes_gb
+                    else TransferAdmissionPolicy().max_active_inbound_bytes_per_peer
+                ),
+            )
 
     def _file_passes_auto_accept(self, *, name: str, size: int) -> tuple[bool, str]:
         """v0.12.0: check the inbound file against the user's
@@ -1144,6 +1198,78 @@ class Daemon:
             if ext not in self._auto_accept_extensions:
                 return False, "extension_blocked"
         return True, ""
+
+    def _active_inbound_load_for_peer(self, peer_fp: str) -> tuple[int, int]:
+        if self.state is None:
+            return 0, 0
+        count = 0
+        total = 0
+        with contextlib.suppress(Exception):
+            for r in self.state.list_transfers(peer_fp=peer_fp, limit=500):
+                if r.direction != "in" or r.status not in ("offered", "active", "queued"):
+                    continue
+                count += 1
+                remaining = max(0, int(r.total_bytes or r.size or 0) - int(r.progress_bytes or 0))
+                total += remaining
+        return count, total
+
+    def _transfer_admission_context(
+        self,
+        *,
+        peer_fp: str,
+        already_known_bytes: int = 0,
+    ) -> TransferAdmissionContext:
+        active_count, active_bytes = self._active_inbound_load_for_peer(peer_fp)
+        return TransferAdmissionContext(
+            incoming_dir=inbox_dir(),
+            active_inbound_count_for_peer=active_count,
+            active_inbound_bytes_for_peer=active_bytes,
+            already_known_bytes=already_known_bytes,
+        )
+
+    async def _reject_file_offer(
+        self,
+        channel,
+        msg: dict,
+        *,
+        peer_fp: str,
+        name: str,
+        size: int,
+        blob: str | None,
+        reason: str,
+        user_message: str = "",
+        metadata: dict | None = None,
+    ) -> None:
+        transfer_id = f"in:{blob}" if blob and self._valid_blob_hex(blob) else f"in:rejected:{uuid.uuid4().hex[:12]}"
+        self._upsert_transfer(
+            id=transfer_id,
+            direction="in",
+            peer_fp=peer_fp,
+            kind="file",
+            name=name,
+            size=max(0, int(size or 0)),
+            blob_hash=blob if blob and self._valid_blob_hex(blob) else None,
+            status="failed",
+            progress_bytes=0,
+            total_bytes=max(0, int(size or 0)),
+            chunks_done=0,
+            chunks_total=0,
+            metadata={
+                "mode": "rejected",
+                "delivery_state": "blocked",
+                "error": reason,
+                "error_class": "TransferAdmissionDenied",
+                "user_message": user_message
+                or "One Link blocked this file before any bytes were received.",
+                "admission": metadata or {},
+            },
+        )
+        await channel.send(encode_msg(make_msg(
+            "ACK",
+            self.me.short_id,
+            of=msg.get("id"),
+            rejected=f"admission_{reason}",
+        )))
 
     def _on_folder_conflict(self, folder_name: str, conflict_id: int) -> None:
         """v0.8.9: invoked from foldersync.FolderEngine when a CRDT-
@@ -1350,6 +1476,7 @@ class Daemon:
 
     # v0.6.3: transfer-ledger watchdog.
     STUCK_TRANSFER_DEADLINE_MS = 5 * 60 * 1000  # 5 min without progress
+    STUCK_TRANSFER_PLANNING_DEADLINE_MS = 2 * 60 * 1000
 
     def _reap_stuck_transfers(self) -> int:
         """Mark any stale active transfer as paused/retryable if it
@@ -1366,6 +1493,43 @@ class Daemon:
             return 0
         reaped = 0
         for t in transfers:
+            meta = t.metadata or {}
+            if t.status == "queued" and meta.get("mode") == "planning":
+                planning_cutoff = now_ms - self.STUCK_TRANSFER_PLANNING_DEADLINE_MS
+                if t.updated_ms > planning_cutoff:
+                    continue
+                src_path = Path(meta.get("path") or t.name)
+                if not src_path.is_file():
+                    self._update_transfer(
+                        t.id,
+                        status="failed",
+                        metadata={
+                            **meta,
+                            "error": f"source file no longer exists: {src_path}",
+                            "error_class": "FileNotFoundError",
+                            "transient": False,
+                            "delivery_state": "needs_attention",
+                            "reaped": True,
+                            "reaped_reason": "planning_source_missing",
+                            "reaped_at_ms": now_ms,
+                        },
+                    )
+                    reaped += 1
+                    continue
+                self._mark_transfer_waiting(
+                    t.id,
+                    path=src_path,
+                    error="send was interrupted before transfer started; resuming automatically",
+                    error_class="PlanningInterrupted",
+                    base_metadata={
+                        **meta,
+                        "reaped": True,
+                        "reaped_reason": "stale_planning_row",
+                        "reaped_at_ms": now_ms,
+                    },
+                )
+                reaped += 1
+                continue
             if t.status not in ("offered", "active"):
                 continue
             if t.updated_ms > cutoff:
@@ -1373,11 +1537,11 @@ class Daemon:
             try:
                 rec = self._mark_transfer_waiting(
                     t.id,
-                    path=Path((t.metadata or {}).get("path") or t.name),
+                    path=Path(meta.get("path") or t.name),
                     error="transfer stalled; waiting to resume automatically",
                     error_class="StalledTransfer",
                     base_metadata={
-                        **(t.metadata or {}),
+                        **meta,
                         "reaped": True,
                         "reaped_reason": "no_progress_within_deadline",
                         "reaped_at_ms": now_ms,
@@ -1642,15 +1806,33 @@ class Daemon:
                     "ACK", self.me.short_id, of=msg["id"], rejected="capability_disabled",
                 )))
                 return
-            blob = str(msg["blob"])
+            blob = str(msg.get("blob") or "")
             if not self._valid_blob_hex(blob):
-                raise RuntimeError("invalid FILE_OFFER blob hash")
-            size = int(msg["size"])
-            if size < 0 or size > MAX_INCOMING_FILE_BYTES:
-                raise RuntimeError(f"invalid FILE_OFFER size: {size}")
-            name = Path(str(msg["name"])).name
-            if not name or name in (".", ".."):
-                name = "unnamed.bin"
+                await self._reject_file_offer(
+                    channel,
+                    msg,
+                    peer_fp=peer_fp,
+                    name=self._safe_transfer_name(msg.get("name")),
+                    size=0,
+                    blob=None,
+                    reason="invalid_blob",
+                    user_message="One Link blocked a file offer with an invalid file fingerprint.",
+                )
+                return
+            size = self._safe_transfer_size(msg.get("size"))
+            name = self._safe_transfer_name(msg.get("name"))
+            if size is None:
+                await self._reject_file_offer(
+                    channel,
+                    msg,
+                    peer_fp=peer_fp,
+                    name=name,
+                    size=0,
+                    blob=blob,
+                    reason="invalid_size",
+                    user_message="One Link blocked a file offer with an invalid size.",
+                )
+                return
             # v0.12.0: auto-accept rules. If the user has configured
             # a max size or extension allowlist and this file fails
             # them, ACK with the rejection reason and don't open a
@@ -1667,16 +1849,76 @@ class Daemon:
                     rejected=f"auto_accept_{reason}",
                 )))
                 return
-            cdc_chunks = self._normalize_cdc_chunks(msg.get("chunks"), declared_size=size)
-            out_path = inbox_dir() / f"{blob[:8]}_{name}"
-            handle = open(out_path, "wb")
+            raw_chunks = msg.get("chunks")
+            chunks_were_advertised = raw_chunks is not None
+            cdc_chunks = self._normalize_cdc_chunks(raw_chunks, declared_size=size)
+            if chunks_were_advertised and cdc_chunks is None:
+                await self._reject_file_offer(
+                    channel,
+                    msg,
+                    peer_fp=peer_fp,
+                    name=name,
+                    size=size,
+                    blob=blob,
+                    reason="invalid_chunk_map",
+                    user_message="One Link blocked a file offer with an invalid resumable chunk map.",
+                )
+                return
             missing = None
             swarm_assist: dict = {"pulled": 0, "sources": {}}
+            known_hashes: set[str] = set()
+            already_known_bytes = 0
             if cdc_chunks:
+                known_hashes = set(self._available_chunk_hashes(
+                    [str(c["hash"]) for c in cdc_chunks],
+                    hydrate=False,
+                    limit=len(cdc_chunks),
+                ))
+                already_known_bytes = known_bytes_from_chunks(cdc_chunks, known_hashes)
                 missing = {
                     int(c["index"]) for c in cdc_chunks
-                    if not self._chunk_cache_path(str(c["hash"])).is_file()
+                    if str(c["hash"]) not in known_hashes
                 }
+            admission = evaluate_transfer_admission(
+                name=name,
+                size=size,
+                peer_fp=peer_fp,
+                policy=self._transfer_admission_policy,
+                context=self._transfer_admission_context(
+                    peer_fp=peer_fp,
+                    already_known_bytes=already_known_bytes,
+                ),
+            )
+            if not admission.ok:
+                await self._reject_file_offer(
+                    channel,
+                    msg,
+                    peer_fp=peer_fp,
+                    name=name,
+                    size=size,
+                    blob=blob,
+                    reason=admission.wire_reason(),
+                    user_message=admission.user_message,
+                    metadata=admission.to_metadata(),
+                )
+                return
+            if size > MAX_INCOMING_FILE_BYTES and not cdc_chunks:
+                await self._reject_file_offer(
+                    channel,
+                    msg,
+                    peer_fp=peer_fp,
+                    name=name,
+                    size=size,
+                    blob=blob,
+                    reason="stream_offer_too_large",
+                    user_message=(
+                        "One Link needs a resumable chunk map before accepting a file this large."
+                    ),
+                )
+                return
+            out_path = inbox_dir() / f"{blob[:8]}_{name}"
+            handle = open(out_path, "wb")
+            if cdc_chunks:
                 if missing:
                     missing, swarm_assist = await self._swarm_assist_file_offer(
                         sender_fp=peer_fp,
@@ -1717,6 +1959,8 @@ class Daemon:
                     "path": str(out_path),
                     "missing_chunks": len(missing or []),
                     "swarm_assist": swarm_assist,
+                    "admission": admission.to_metadata(),
+                    "file_risk": classify_file_risk(name),
                 },
             )
             log.info(
@@ -1740,24 +1984,35 @@ class Daemon:
             if not f:
                 log.warning("FILE_CHUNK with no offer: %s", blob[:8])
                 return
-            seq = int(msg.get("seq", -1))
+            try:
+                seq = int(msg.get("seq", -1))
+            except (TypeError, ValueError, OverflowError):
+                self._abort_incoming_file(blob, f)
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"), rejected="bad_file_chunk_sequence",
+                )))
+                return
             if seq != f.next_seq:
                 self._abort_incoming_file(blob, f)
-                raise RuntimeError(
-                    f"FILE_CHUNK sequence mismatch for {blob[:8]}: "
-                    f"expected {f.next_seq}, got {seq}"
-                )
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"), rejected="file_chunk_sequence_mismatch",
+                )))
+                return
             try:
                 data = base64.b64decode(msg["data"], validate=True)
             except (binascii.Error, ValueError) as e:
                 self._abort_incoming_file(blob, f)
-                raise RuntimeError(f"invalid FILE_CHUNK base64: {e}") from e
+                log.warning("invalid FILE_CHUNK base64 from %s: %s", peer_sid, e)
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"), rejected="bad_file_chunk_data",
+                )))
+                return
             if f.received + len(data) > f.size:
                 self._abort_incoming_file(blob, f)
-                raise RuntimeError(
-                    f"FILE_CHUNK exceeds declared size for {blob[:8]}: "
-                    f"{f.received + len(data)} > {f.size}"
-                )
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"), rejected="file_chunk_size_overrun",
+                )))
+                return
             f.handle.write(data)
             f.hasher.update(data)
             f.received += len(data)
@@ -1784,6 +2039,7 @@ class Daemon:
                     "path": str(f.out_path),
                     "blob": f.blob_hex,
                     "ok": ok,
+                    "file_risk": classify_file_risk(f.name),
                 }
                 ev = self._persist(msg=done, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
                 self._broadcast_tail(ev)
@@ -2173,6 +2429,23 @@ class Daemon:
     def _chunk_cache_path(self, hash_hex: str) -> Path:
         return self._chunk_cache_dir() / hash_hex[:2] / hash_hex[2:]
 
+    def _safe_transfer_size(self, value) -> int | None:
+        try:
+            size = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return size if size >= 0 else None
+
+    def _safe_transfer_name(self, value) -> str:
+        name = Path(str(value or "")).name
+        if not name or name in (".", ".."):
+            name = "unnamed.bin"
+        encoded = name.encode("utf-8", errors="ignore")
+        if len(encoded) <= MAX_TRANSFER_FILE_NAME_BYTES:
+            return name
+        clipped = encoded[:MAX_TRANSFER_FILE_NAME_BYTES].decode("utf-8", errors="ignore").strip()
+        return clipped or "unnamed.bin"
+
     def _normalize_cdc_chunks(self, raw, *, declared_size: int | None = None) -> list[dict] | None:
         """Validate a peer-supplied CDC chunk index.
 
@@ -2191,11 +2464,17 @@ class Daemon:
         if not isinstance(raw, list):
             return None
         if declared_size is not None and declared_size >= 0:
-            max_chunks = max(1, declared_size // CDC_MIN_CHUNK_BYTES + 16)
+            max_chunks = min(
+                MAX_CDC_MANIFEST_CHUNKS,
+                max(1, declared_size // CDC_MIN_CHUNK_BYTES + 16),
+            )
         else:
             # Fallback: cap absolutely at the count for the largest file we
             # would ever accept on the wire.
-            max_chunks = (MAX_INCOMING_FILE_BYTES // CDC_MIN_CHUNK_BYTES) + 16
+            max_chunks = min(
+                MAX_CDC_MANIFEST_CHUNKS,
+                (MAX_INCOMING_FILE_BYTES // CDC_MIN_CHUNK_BYTES) + 16,
+            )
         if len(raw) > max_chunks:
             log.warning(
                 "rejecting FILE_OFFER chunks list: %d > %d (declared_size=%s)",
@@ -2210,9 +2489,12 @@ class Daemon:
             h = str(item.get("hash", ""))
             if not self._valid_blob_hex(h):
                 return None
-            start = int(item.get("start", 0))
-            end = int(item.get("end", 0))
-            size = int(item.get("size", end - start))
+            try:
+                start = int(item.get("start", 0))
+                end = int(item.get("end", 0))
+                size = int(item.get("size", end - start))
+            except (TypeError, ValueError, OverflowError):
+                return None
             if start < 0 or end < start or size != end - start:
                 return None
             if size < 0 or size > STREAM_MAX_CHUNK_SIZE:
@@ -2666,26 +2948,35 @@ class Daemon:
                     p.parent.rmdir()
         return {"removed": removed, "freed_bytes": freed, "bytes": total}
 
-    def _available_chunk_hashes(self, hashes: list[str]) -> list[str]:
+    def _available_chunk_hashes(
+        self,
+        hashes: list[str],
+        *,
+        hydrate: bool = True,
+        limit: int = 2048,
+    ) -> list[str]:
         requested = []
         seen = set()
-        for h in hashes[:2048]:
+        max_items = max(0, int(limit))
+        for h in hashes[:max_items]:
             h = str(h)
             if h in seen or not self._valid_blob_hex(h):
                 continue
             seen.add(h)
             requested.append(h)
         missing = {h for h in requested if not self._chunk_cache_path(h).is_file()}
-        if missing:
+        if hydrate and missing:
             self._hydrate_chunks_from_local_prior(missing)
+        sourced: set[str] = set()
         if self.state is not None and missing:
             with contextlib.suppress(Exception):
                 sourced = set(self.state.chunks_sourced(missing))
-                for h in sourced:
-                    self._read_chunk_cache(h)
+                if hydrate:
+                    for h in sourced:
+                        self._read_chunk_cache(h)
         clean = []
         for h in requested:
-            if self._chunk_cache_path(h).is_file():
+            if self._chunk_cache_path(h).is_file() or h in sourced:
                 clean.append(h)
         if self.state is not None and clean:
             with contextlib.suppress(Exception):
@@ -3267,10 +3558,20 @@ class Daemon:
         f = self._incoming_files.get(blob)
         if not f or f.cdc_chunks is None or f.cdc_missing is None:
             return
-        idx = int(msg.get("index", -1))
+        try:
+            idx = int(msg.get("index", -1))
+        except (TypeError, ValueError, OverflowError):
+            self._abort_incoming_file(blob, f)
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"), rejected="bad_cdc_chunk_index",
+            )))
+            return
         if idx < 0 or idx >= len(f.cdc_chunks) or idx not in f.cdc_missing:
             self._abort_incoming_file(blob, f)
-            raise RuntimeError(f"unexpected FILE_CDC_CHUNK index {idx}")
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"), rejected="unexpected_cdc_chunk",
+            )))
+            return
         expected = f.cdc_chunks[idx]
         # M4: bound decompression by the *expected* chunk size, not by the
         # whole-file cap. A zlib bomb is rejected at 1.5x the expected
@@ -3287,10 +3588,17 @@ class Daemon:
             )
         except (binascii.Error, ValueError) as e:
             self._abort_incoming_file(blob, f)
-            raise RuntimeError(f"invalid FILE_CDC_CHUNK base64: {e}") from e
+            log.warning("invalid FILE_CDC_CHUNK payload from %s: %s", peer_sid, e)
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"), rejected="bad_cdc_chunk_data",
+            )))
+            return
         if len(data) != expected["size"] or blake3.blake3(data).hexdigest() != expected["hash"]:
             self._abort_incoming_file(blob, f)
-            raise RuntimeError("FILE_CDC_CHUNK integrity failure")
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"), rejected="cdc_chunk_integrity_failure",
+            )))
+            return
         self._store_chunk_cache(
             expected["hash"],
             data,
@@ -3312,6 +3620,7 @@ class Daemon:
                 "mode": "cdc",
                 "path": str(f.out_path),
                 "missing_chunks": len(f.cdc_missing),
+                "file_risk": classify_file_risk(f.name),
             },
         )
         await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
@@ -3343,6 +3652,7 @@ class Daemon:
                 "from": src_msg["from"], "name": f.name, "size": f.size,
                 "path": str(f.out_path), "blob": blob, "ok": ok,
                 "cdc": True,
+                "file_risk": classify_file_risk(f.name),
             }
             ev = self._persist(msg=done, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
             self._broadcast_tail(ev)
@@ -4373,7 +4683,13 @@ class Daemon:
             try:
                 if len(candidates) == 1:
                     host, port = candidates[0]
-                    reader, writer = await asyncio.open_connection(host, port)
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(host, port),
+                        timeout=(
+                            self.HAPPY_EYEBALLS_TIMEOUT_S
+                            if timeout is None else float(timeout)
+                        ),
+                    )
                     return reader, writer, _classify_address_regime(host)
                 reader, writer, winning = await self._dial_first_responsive(
                     candidates, timeout=timeout
@@ -4672,7 +4988,12 @@ class Daemon:
         except Exception:
             return False
 
-    async def _get_outbound_session(self, peer: Peer) -> OutboundSession:
+    async def _get_outbound_session(
+        self,
+        peer: Peer,
+        *,
+        resume_pending: bool = True,
+    ) -> OutboundSession:
         peer_fp = self._peer_fp_from_peer(peer)
         if not peer_fp:
             raise RuntimeError("peer has no verifiable public key for persistent session")
@@ -4745,8 +5066,12 @@ class Daemon:
             self._schedule_outbox_flush(peer_fp)
             # v0.7.4: same trigger for paused outbound transfers.
             # The resume task acquires its own per-peer lock so two
-            # session-up events can't fire duplicate sends.
-            self._schedule_resume_paused(peer_fp)
+            # session-up events can't fire duplicate sends. Fresh
+            # send_file() calls disable this while their just-created
+            # "planning" row is still moving into offered/active; otherwise
+            # the resume worker can race and recursively resend the same row.
+            if resume_pending:
+                self._schedule_resume_paused(peer_fp)
             return sess
         except Exception:
             with contextlib.suppress(Exception):
@@ -6688,6 +7013,10 @@ class Daemon:
                 if r.status in ("paused", "queued")
                 and r.direction == "out"
                 and int((r.metadata or {}).get("next_retry_ms") or 0) <= now_ms
+                and not (
+                    r.status == "queued"
+                    and (r.metadata or {}).get("mode") == "planning"
+                )
             ]
             resumed = 0
             errors = 0
@@ -6792,6 +7121,8 @@ class Daemon:
             if r.direction != "out" or r.status not in ("paused", "queued"):
                 continue
             meta = r.metadata or {}
+            if r.status == "queued" and meta.get("mode") == "planning":
+                continue
             if not meta.get("path"):
                 continue
             if int(meta.get("next_retry_ms") or 0) > now_ms:
@@ -7076,7 +7407,7 @@ class Daemon:
         # on every drop. _get_outbound_session handles the dial-and-
         # handshake fall-back internally when no live session exists.
         try:
-            sess = await self._get_outbound_session(peer)
+            sess = await self._get_outbound_session(peer, resume_pending=False)
         except asyncio.TimeoutError as e:
             self._mark_transfer_waiting(
                 transfer_id,
@@ -7144,7 +7475,11 @@ class Daemon:
             from one_link import __version__ as local_version
         except Exception:
             local_version = None
-        fixed_chunk_size = _fast_fixed_chunk_size_for_peer(peer_version)
+        fixed_chunk_size = _fast_fixed_chunk_size_for_peer(
+            peer_version,
+            size=size,
+            peer_features=peer_features,
+        )
         if (
             cached_file_index is not None
             and cached_file_index.chunks

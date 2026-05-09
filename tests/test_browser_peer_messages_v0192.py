@@ -311,8 +311,10 @@ def test_test_surface_exposes_message_helpers(peer_html: str):
 
 # ───────── version pin ──────────────────────────────────────────────
 
-def test_version_bumped_to_v0192(peer_html: str):
-    assert 'version: "0.19.2"' in peer_html
+def test_peer_page_version_matches_package(peer_html: str):
+    from one_link import __version__
+
+    assert f'version: "{__version__}"' in peer_html
 
 
 def test_page_version_matches_package():

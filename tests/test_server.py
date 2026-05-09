@@ -441,6 +441,11 @@ async def test_api_status_and_transfers_surface_ledger(tmp_path: Path):
                     ],
                 },
                 "autopilot_plan": {"frame_kind": "cdc_binary"},
+                "performance_summary": {
+                    "effective_mbps": 420.0,
+                    "bandwidth_savings_ratio": 0.5,
+                    "route": "lan",
+                },
             },
         )
         daemon = SimpleNamespace(
@@ -460,6 +465,10 @@ async def test_api_status_and_transfers_surface_ledger(tmp_path: Path):
         assert transfers[0]["metadata"]["manifest"]["chunk_count"] == 2
         assert "chunks" not in transfers[0]["metadata"]["manifest"]
         assert transfers[0]["metadata"]["autopilot_plan"]["frame_kind"] == "cdc_binary"
+        assert transfers[0]["autopilot_truth"]["speed_mbps"] == 420.0
+        assert "50% already known" in transfers[0]["autopilot_truth"]["facts"]
+        assert "Using fast binary path" in transfers[0]["autopilot_truth"]["facts"]
+        assert "Route: Wi-Fi direct" in transfers[0]["autopilot_truth"]["facts"]
 
         status_resp = await server.api_status(None)
         status = json.loads(status_resp.text)
@@ -818,7 +827,10 @@ async def test_api_files_lists_and_downloads():
             names = [f["name"] for f in j["files"]]
             assert any("for_listing.bin" in n for n in names), names
 
-            target = next(n for n in names if "for_listing.bin" in n)
+            file_row = next(f for f in j["files"] if "for_listing.bin" in f["name"])
+            assert file_row["risk"]["level"] == "low"
+            assert file_row["risk"]["open_policy"] == "normal"
+            target = file_row["name"]
             async with s.get(
                 f"{base_b}/api/files/{target}",
                 headers={"Authorization": f"Bearer {tok_b}"},
