@@ -8841,6 +8841,29 @@ class Daemon:
         # can record into it.
         try:
             self.state = State()
+            # v0.20.7 (security audit H21 + partial C5): if the user
+            # set ONE_LINK_PASSPHRASE, build a LockBox and attach it
+            # to State so group sender chain_keys get AES-GCM-wrapped
+            # at rest. No-op when the env var is unset (cleartext
+            # storage stays — legacy behavior). Imported lazily so a
+            # missing cryptography-library feature can degrade
+            # gracefully rather than crashing daemon boot.
+            try:
+                from one_link.lockbox import lockbox_from_env
+                from one_link.paths import data_dir
+                lb = lockbox_from_env(data_dir())
+                if lb is not None:
+                    self.state.set_lockbox(lb)
+                    log.info(
+                        "lockbox: ONE_LINK_PASSPHRASE detected; "
+                        "wrapping group chain_keys at rest"
+                    )
+            except Exception as e:
+                log.warning(
+                    "lockbox: failed to initialize (%s); proceeding "
+                    "with cleartext at-rest storage",
+                    e,
+                )
             # Pin our own identity so it's a known peer.
             self.state.upsert_peer(
                 fingerprint=self.me.fingerprint,

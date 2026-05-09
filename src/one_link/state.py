@@ -423,8 +423,22 @@ class State:
         )
         self._conn.row_factory = sqlite3.Row
         self._write_lock = threading.RLock()
+        # v0.20.7 (security audit H21 + partial C5): optional
+        # at-rest wrap for the highest-value secrets in the schema
+        # (group sender chain_keys). Daemon wires a LockBox here at
+        # boot when ONE_LINK_PASSPHRASE is set; absent passphrase →
+        # None → values stored cleartext (legacy behavior). Wrapping
+        # is transparent to read paths via lockbox.maybe_unwrap so a
+        # mid-life passphrase opt-in coexists with legacy rows.
+        self._lockbox = None  # set via set_lockbox()
         self._init_pragmas()
         self._migrate()
+
+    def set_lockbox(self, lockbox) -> None:
+        """v0.20.7: late-attach the at-rest wrap key. Daemon calls
+        this once at boot after constructing State + the LockBox.
+        Subsequent writes wrap; subsequent reads unwrap on demand."""
+        self._lockbox = lockbox
 
     def _init_pragmas(self) -> None:
         c = self._conn.cursor()
@@ -1871,6 +1885,14 @@ class State:
             raise ValueError("sender_pub must be 32 bytes")
         if len(group_id) != 16:
             raise ValueError("group_id must be 16 bytes")
+        # v0.20.7 (security audit H21): wrap the chain_key at rest if
+        # the daemon was started with ONE_LINK_PASSPHRASE. Reads
+        # detect the wrap marker and decrypt transparently; a stolen-
+        # disk attacker without the passphrase sees AEAD ciphertext.
+        # When no lockbox is configured this is a no-op passthrough
+        # (cleartext on disk — same as before this fix).
+        from one_link.lockbox import maybe_wrap as _lb_wrap
+        chain_key_at_rest = _lb_wrap(chain_key, self._lockbox)
         with self._write_lock:
             self._conn.execute(
                 """
@@ -1886,7 +1908,7 @@ class State:
                     updated_ms = excluded.updated_ms
                 """,
                 (group_id, sender_pub, direction, int(epoch),
-                 chain_key, int(counter), _now_ms()),
+                 chain_key_at_rest, int(counter), _now_ms()),
             )
 
     def get_sender_chain(
@@ -1915,9 +1937,25 @@ class State:
             ).fetchone()
         if not row:
             return None
+        # v0.20.7 (security audit H21): unwrap if the stored value
+        # is lockbox-wrapped. Use length-based disambiguation: a
+        # cleartext chain_key is exactly 32 bytes (validated at
+        # write time), and a lockbox-wrapped one is 61 bytes
+        # (marker + nonce + ct + tag). This avoids the 1/256 false
+        # positive that a generic is_wrapped check would have on
+        # the small-marker-byte collision class.
+        chain_key = bytes(row["chain_key"])
+        if len(chain_key) != 32:
+            from one_link.lockbox import LockBox  # noqa: F401
+            if self._lockbox is None:
+                raise RuntimeError(
+                    "found a non-cleartext chain_key but no lockbox is "
+                    "configured (was ONE_LINK_PASSPHRASE removed?)"
+                )
+            chain_key = self._lockbox.unwrap(chain_key)
         return {
             "epoch": row["epoch"],
-            "chain_key": row["chain_key"],
+            "chain_key": chain_key,
             "counter": row["counter"],
         }
 

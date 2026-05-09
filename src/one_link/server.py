@@ -495,7 +495,13 @@ class UIServer:
         # so any open browser tab keeps working across restarts. New
         # install → fresh token. Token is never embedded in any wire
         # protocol; it's purely for the local UI surface.
-        self.token = self._load_or_create_token()
+        # v0.20.7: load via the daemon-aware path so a lockbox-wrapped
+        # token round-trips correctly. Daemon.state may not yet have a
+        # lockbox at the moment UIServer is constructed (depends on
+        # init order); the loader handles that case by rotating to a
+        # fresh cleartext token, which then gets re-wrapped on the
+        # next ``write_text`` flush.
+        self.token = self._load_or_create_token(daemon)
         self.app = web.Application(
             client_max_size=1024 * 1024 * 1024,  # 1 GiB upload
             middlewares=[self._security_middleware],
@@ -683,18 +689,55 @@ class UIServer:
             )
             return False
 
+    # v0.20.7 (security audit M29): when the daemon has a lockbox
+    # configured (ONE_LINK_PASSPHRASE set), persist the UI token in
+    # wrapped form. File format:
+    #   - cleartext (legacy): raw base64url token, possibly with
+    #     trailing whitespace.
+    #   - wrapped (new): "OLB1:" prefix + base64url(LockBox.wrap(token)).
+    # The prefix disambiguates without needing a length check.
+    _TOKEN_WRAPPED_PREFIX = "OLB1:"
+
     @staticmethod
-    def _load_or_create_token() -> str:
+    def _load_or_create_token(daemon: "Daemon | None" = None) -> str:
+        import base64 as _b64
         p = _token_path()
         try:
-            existing = p.read_text(encoding="utf-8").strip()
-            # Tokens we generate are 43 base64url chars (32 raw bytes).
-            # Be lenient on length but enforce at least 32 chars so a
-            # corrupted file can't turn into an unsafe short token.
-            if len(existing) >= 32 and all(
-                c.isalnum() or c in "-_" for c in existing
-            ):
-                return existing
+            raw = p.read_text(encoding="utf-8").strip()
+            if raw.startswith(UIServer._TOKEN_WRAPPED_PREFIX):
+                # Wrapped path — needs the daemon's lockbox to unwrap.
+                lb = None
+                if daemon is not None and daemon.state is not None:
+                    lb = getattr(daemon.state, "_lockbox", None)
+                if lb is None:
+                    log.warning(
+                        "UI token file is wrapped but lockbox is not "
+                        "configured; rotating to a fresh cleartext token"
+                    )
+                else:
+                    try:
+                        blob = _b64.urlsafe_b64decode(
+                            raw[len(UIServer._TOKEN_WRAPPED_PREFIX):].encode("ascii")
+                        )
+                        plain = lb.unwrap(blob).decode("ascii")
+                        if len(plain) >= 32 and all(
+                            c.isalnum() or c in "-_" for c in plain
+                        ):
+                            return plain
+                    except Exception as e:
+                        log.warning(
+                            "UI token unwrap failed (%s); rotating to "
+                            "a fresh token", e,
+                        )
+            else:
+                # Tokens we generate are 43 base64url chars (32 raw
+                # bytes). Be lenient on length but enforce at least
+                # 32 chars so a corrupted file can't turn into an
+                # unsafe short token.
+                if len(raw) >= 32 and all(
+                    c.isalnum() or c in "-_" for c in raw
+                ):
+                    return raw
         except (OSError, UnicodeDecodeError):
             pass
         return secrets.token_urlsafe(32)
@@ -5784,7 +5827,30 @@ class UIServer:
             self.port = sock.getsockname()[1]
         self.bind_host = bind_host
         _server_port_path().write_text(str(self.port))
-        _token_path().write_text(self.token)
+        # v0.20.7 (security audit M29): wrap the UI token with the
+        # daemon's lockbox if available. A stolen-disk attacker now
+        # sees the OLB1: marker + AES-GCM ciphertext rather than the
+        # raw bearer secret. No-op when no passphrase is configured.
+        import base64 as _b64
+        token_disk = self.token
+        try:
+            lb = (
+                getattr(self.daemon.state, "_lockbox", None)
+                if self.daemon.state is not None else None
+            )
+            if lb is not None:
+                blob = lb.wrap(self.token.encode("ascii"))
+                token_disk = self._TOKEN_WRAPPED_PREFIX + _b64.urlsafe_b64encode(
+                    blob
+                ).decode("ascii")
+        except Exception as e:
+            log.warning(
+                "UI token wrap failed (%s); falling back to cleartext", e,
+            )
+        _token_path().write_text(token_disk)
+        # POSIX permission tighten so a multi-user box doesn't read it.
+        with contextlib.suppress(OSError, NotImplementedError):
+            os.chmod(_token_path(), 0o600)
         log.info("UI server up — http://%s:%d/", bind_host, self.port)
 
         # v0.20.4 — start a parallel HTTPS listener on port+1 so
