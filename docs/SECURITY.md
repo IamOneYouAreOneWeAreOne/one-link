@@ -6,7 +6,43 @@ Status: living document. The companion to
 real security primitive corporations provide, and document every
 threat model with the countermeasure that addresses it."
 
-Last updated: 2026-05-08.
+Last updated: 2026-05-09 (v0.20.7 audit honesty pass).
+
+---
+
+## Storage tiers and where each defense applies
+
+The threat-model statuses below distinguish two implementation tiers,
+because the same product ships in two shapes that have very different
+at-rest stories. Mixing the two created false-positive ✅ cells in
+earlier revisions of this doc; the audit on 2026-05-09 corrected them.
+
+**Tier A — Browser PWA (planned, partial).** The PWA shell described
+in `ARCHITECTURE.md` v0.16+ is the load-bearing target for OPFS at-rest
+encryption, Argon2id passphrase derivation, plausibly deniable storage,
+and Service-Worker signature verification of update bundles. As of
+v0.20.7 the PWA shell renders, browser-as-peer transport is alive over
+WebRTC, but the at-rest encryption + signature verification primitives
+are still in flight (sw.js does not yet pin or verify a release pubkey;
+OPFS encryption is on the v0.21+ track). T2 / T4 / T5 cells that read
+✅ in earlier revisions of this doc were forward-looking commitments,
+not currently shipped guarantees.
+
+**Tier B — Desktop daemon (alive).** The Python daemon shipped via
+`pip install one_link` or the bundled binary is what most users run
+today. Its at-rest story is intentionally narrower than the PWA story
+above: the SQLite state file, blob store, UI bearer token, and Ed25519
+identity key live cleartext on disk under the user-account directory
+by default. The user can encrypt the identity key by setting
+`ONE_LINK_PASSPHRASE` before launch (PBKDF2-wrapped PKCS#8); the rest
+of the at-rest scope is documented as future work.
+
+**What this means for each threat status below.** Status cells that
+explicitly call out browser-PWA-only mechanisms (OPFS, Web Crypto
+non-extractable keys, Service Worker pinning) should be read as
+"defended in Tier A once those primitives ship; defended in Tier B
+only by user-account isolation today." Where this distinction matters,
+the threat row notes it inline.
 
 ---
 
@@ -73,15 +109,31 @@ Can attempt to MITM the TLS connection to our CDN.
 - Service Worker pins our release Ed25519 public key in source.
   An update fetched over MITM-broken TLS still has to verify
   against the pinned key. Mismatch → SW refuses to install.
+  *Tier A status: planned for v0.21+. As of v0.20.7 the SW does
+  cache-first asset delivery without pinned-pubkey signature
+  verification; release integrity for the PWA path currently
+  rests on GitHub release HTTPS plus the multi-mirror parity
+  story rather than cryptographic verification.*
 - WebRTC DataChannel uses DTLS-SRTP (active negotiation; certs
   exchanged at handshake; tampered offer/answer breaks the
-  handshake).
+  handshake). *Audit 2026-05-09 finding C1: the daemon-side
+  /api/v1/peer-rtc signaling endpoint accepts an unsigned answer,
+  and neither side cross-checks the SDP a=fingerprint against the
+  Ed25519 identity, so a network-on-path attacker can MITM the
+  DataChannel. Active fix in flight; until it lands, browser-as-
+  peer should be treated as MITM-vulnerable on hostile networks.*
 - Wire frames carry HMAC over content + sequence; replay attacks
-  fail.
+  fail. *Daemon-to-daemon channel: solid (transcript-bound AEAD
+  AAD plus required CAPS channel_bind as of v0.20.7 fix H1).*
 - Subresource Integrity on every external script (none currently;
   future-proofed).
 
-**Status:** ✅ defeated.
+**Status:** ✅ defeated for daemon-to-daemon channels at v0.20.7
+(transcript-bound AEAD, transcript-bound CAPS, no third-party
+JS / scripts). 🔄 in progress for browser-as-peer transport
+(audit C1) and Service Worker update integrity (audit C2). The
+release process compensates for the SW gap today; the WebRTC
+gap requires the C1 fix before it becomes "defeated".
 
 ### T3 — Compromised peer (a "friend" turns)
 
@@ -92,19 +144,38 @@ the user sent them historically.
 **Defenses (default tier):**
 - Forward secrecy via Double Ratchet: even compromise of the
   peer's CURRENT keys doesn't expose old messages, because old
-  ratchet keys are deleted.
+  ratchet keys are deleted. *The Double Ratchet primitive ships
+  at `src/one_link/double_ratchet.py` and the activation pathway
+  is wired into the channel. Audit 2026-05-09 finding C4: the
+  daemon currently filters `double_ratchet_v1` out of advertised
+  CAPS, so the activation half-step never fires and channels
+  remain on the static AEAD keys derived once at handshake. DR
+  activation ships next.*
 - Post-compromise security: future messages between user and a
   not-yet-compromised peer recover security after the ratchet
-  steps forward.
-- Block / unpair: instant cryptographic cutoff. After block, the
-  peer's old session keys are useless.
+  steps forward. *Same caveat as above; PCS depends on DR being
+  active in the channel.*
+- Block / unpair: cryptographic cutoff is the goal; today
+  `revoke_peer` is app-state only (drops the outbound session and
+  the DB trust flag). Once DR activates, a forced ratchet step
+  on block will give the documented "old session keys are useless"
+  guarantee. Audit 2026-05-09 finding H14.
+- Capability gate: as of v0.20.7 fix C3, SAS-pair finalize
+  installs a deny-by-default per-peer capability policy
+  (chat-only). A compromised paired peer cannot drive file
+  transfer, folder sync, or group operations without explicit
+  user consent for each capability.
 - Verifiable revocation log (v1.x): users can publish a
   revocation that propagates through the network; their other
   contacts cryptographically refuse messages from the revoked
   peer key.
 
-**Status:** ✅ contained. Old conversations protected; new
-conversations resumable post-compromise.
+**Status:** 🔄 partially contained at v0.20.7. The deny-by-default
+capability policy (C3 fix) limits a compromised peer's reach to
+chat-only without user consent. Forward secrecy + post-compromise
+security + cryptographic block-cutoff land when the DR activation
+ship completes (in flight). Until then a peer-key compromise
+exposes captured ciphertext history under that peer's static key.
 
 ### T4 — Lost / stolen device
 
@@ -112,7 +183,7 @@ conversations resumable post-compromise.
 break Secure Enclave but may attempt brute-force on the screen
 lock.
 
-**Defenses (default tier):**
+**Defenses (Tier A — browser PWA, planned for v0.16+):**
 - Device-bound storage encryption: OPFS + IDB at-rest AES-GCM
   with a key derived (Argon2id, ≥256MB memory, ≥3 iterations) from
   a passphrase the user sets at install. A physical exfiltration
@@ -129,10 +200,29 @@ lock.
   signed-out remotely from any 2 of the user's other devices.
   Its share of the master secret is revoked; the cluster reseals.
 
-**Status:** ✅ contained. Lost device → user revokes → device's
-historical message decryption ability remains (those messages
-are toast on the lost device anyway), but the device cannot
-participate in the cluster going forward.
+**Defenses (Tier B — desktop daemon, alive at v0.20.7):**
+- The SQLite state file, blob store, and UI bearer token live
+  cleartext on disk under the user-account directory. The
+  user-account isolation provided by the OS is the primary
+  defense. As of v0.20.7 (audit fix H22) `PRAGMA secure_delete=ON`
+  makes the disappearing-messages reaper actually scrub plaintext
+  from freed pages + WAL.
+- The Ed25519 identity key is unencrypted PEM by default. Setting
+  `ONE_LINK_PASSPHRASE` before launch wraps it with PBKDF2-derived
+  PKCS#8 encryption (transparent migration from unencrypted on
+  next successful load).
+- File-mode 0600 on POSIX (audit fix H19 makes the write atomic).
+  On Windows, `os.chmod` is a partial story; the inherited
+  `%APPDATA%` ACL is the practical defense until the explicit
+  user-only DACL ships (audit finding H3).
+
+**Status:** 🔄 contained for Tier A once OPFS encryption ships
+(planned v0.16+). Partially contained for Tier B at v0.20.7: the
+disappearing-messages contract is honored, identity-key passphrase
+is opt-in via `ONE_LINK_PASSPHRASE`, but the at-rest story for
+chat bodies + group chain keys + UI token is still user-account
+isolation rather than ciphertext-on-disk. Audit 2026-05-09
+finding C5 tracks the gap.
 
 ### T5 — Compromised CDN / mirror
 
@@ -150,10 +240,15 @@ canonical install URL. Could push a backdoored bundle.
 - Multi-source mirrors (v0.18.0+): user can fetch from
   whichever they trust most; signature check is the same.
 
-**Status:** ✅ defeated. A compromised mirror cannot push
-working malware unless they also compromise the multi-maintainer
-release-signing keys (which are HSM-bound + threshold-quorum;
-see `GOVERNANCE.md`).
+**Status:** 🔄 in progress. The pinned-pubkey + signature
+verification path described above is the v0.21+ design; today
+(v0.20.7) `web/sw.js` is plain cache-first with no crypto, and
+the published binaries / pip wheels rely on GitHub release
+HTTPS plus the multi-mirror parity story rather than
+cryptographic signature verification at the client. Audit
+2026-05-09 finding C2 tracks the gap. Multi-maintainer threshold
+signing (T6 below) is the structural defense that, once SW
+verification ships, blocks the compromised-mirror path.
 
 ### T6 — Compromised maintainer key
 
@@ -194,7 +289,11 @@ without an additional escape vuln.
 
 **Status:** mitigated. RCE in the browser engine is out-of-scope
 for us to fix (that's Apple/Google/Mozilla's job), but our
-hardening reduces the blast radius significantly.
+hardening reduces the blast radius significantly. v0.20.7 audit
+fixes H9 (CSP on `/`) and H10 (Host + Origin checks defending
+against DNS-rebinding) shipped; Trusted Types is still aspirational
+and many of the worker-isolation primitives are part of the
+Tier A browser PWA roadmap rather than the Tier B daemon today.
 
 ### T8 — Compromised OS
 
@@ -477,21 +576,48 @@ Where the bytes come from is as important as how they're written.
 
 ## What we promise vs. what we can't promise
 
-**We promise:**
+**We promise (v0.20.7 — what's actually shipped today):**
 - Source is open and auditable.
-- Reproducible builds.
-- Cryptographic primitives are correct (constant-time, no nonce
-  reuse, key separation, forward secrecy, post-compromise security,
-  post-quantum hybrid).
+- Reproducible builds (planned; pinning + SBOM gates landed at
+  v0.7.2).
+- The cryptographic primitives we ship are vetted libraries
+  (`cryptography` + audited `@noble/*` for the JS path) used in
+  constant-time, with key separation and unique nonces. The
+  Double Ratchet primitive ships at `src/one_link/double_ratchet.py`
+  and is wired into the channel; activation is gated behind audit
+  finding C4 and lands next.
 - No analytics, telemetry, third-party SDK, or phone-home of any
-  kind.
-- Every layer of corporate substrate has a documented defang.
-- Threat models 1-6 (Casual snoop through Compromised maintainer
-  key) are defeated in the default tier.
-- Threat models 7-8 are mitigated (we minimize blast radius; we
-  can't fix browser/OS RCE for free).
-- Threat model 9 (state actor) is contained in the hardened and
-  air-gap tiers.
+  kind from the daemon or PWA shell. WebRTC's STUN traffic is the
+  one third-party touchpoint; that's documented in
+  `architecture.md` and tunable.
+- Every layer of corporate substrate has a documented defang
+  (some shipped, some in flight; see the matrix above).
+- T1 (casual snoop) defeated.
+- T2 (active MITM) defeated for daemon-to-daemon channels;
+  browser-as-peer transport requires the C1 fix to fully defeat.
+- T3 (compromised peer) bounded to chat-only by the deny-by-
+  default capability gate (v0.20.7 fix C3); forward secrecy +
+  post-compromise security + cryptographic block-cutoff arrive
+  with the C4 / H14 ship.
+- T4 (lost device): Tier A (browser PWA) defended once the
+  OPFS-encryption + Argon2id ship lands. Tier B (desktop daemon)
+  protected today by user-account isolation only; identity-key
+  passphrase encryption is opt-in via `ONE_LINK_PASSPHRASE`.
+- T5-T6 (supply chain): in progress.
+
+**We don't promise:**
+- That the at-rest cell for Tier B (desktop daemon) is encrypted
+  by default. It isn't, today; user-account isolation is the
+  current line of defense. The roadmap to closing this is in
+  `docs/ROADMAP.md` under "first-launch lockbox".
+- Immunity from a 0-day RCE in WebKit / Blink. (Apple/Mozilla/
+  Google's job.)
+- Immunity from a fully compromised OS during an active session.
+- Anonymity at the network-metadata layer in the default tier
+  (default tier still uses the project rendezvous; Hardened or
+  air-gap tier is what does this).
+- That we'll never ship a bug. (Bugs happen; CVE response process
+  exists.)
 
 **We don't promise:**
 - Immunity from a 0-day RCE in WebKit / Blink. (Apple/Mozilla/
@@ -512,18 +638,38 @@ locks on theirs.
 
 ## Threat-model coverage matrix
 
+The matrix tracks what's actually shipped at the indicated tier as
+of v0.20.7 (2026-05-09). ✅ = defeated as documented. 🔄 = in
+progress (design committed; implementation still landing). ⚠️ =
+known gap; reading the threat row above describes the compensating
+control. Tier A = browser PWA path; Tier B = desktop daemon path;
+"Default" sums them (where a threat applies to both, the WORSE
+status wins).
+
 | Threat | Default | Hardened | Air-gap |
 |---|---|---|---|
 | T1 Casual snoop | ✅ | ✅ | N/A |
-| T2 Active MITM | ✅ | ✅ | N/A |
-| T3 Compromised peer | ✅ | ✅ | ✅ |
-| T4 Lost / stolen device | ✅ | ✅ (plausibly deniable) | ✅ |
-| T5 Compromised CDN/mirror | ✅ | ✅ (.onion / IPFS only) | ✅ (no fetch ever) |
-| T6 Compromised maintainer key | ✅ (threshold-quorum) | ✅ | ✅ |
-| T7 Compromised browser engine | mitigated | mitigated (worker isolation tighter) | mitigated |
-| T8 Compromised OS | mitigated (Secure Enclave on) | mitigated (no Secure Enclave reliance) | mitigated |
-| T9 State actor (passive global obs) | partial (sealed sender; rendezvous still seen) | ✅ (Tor + cover traffic) | ✅ (no internet) |
-| T9 State actor (active disruption) | partial (no app store, signed updates) | ✅ | ✅ |
+| T2 Active MITM (daemon channel) | ✅ | ✅ | N/A |
+| T2 Active MITM (browser-as-peer) | ⚠️ audit C1 | 🔄 fix in flight | N/A |
+| T3 Compromised peer (chat only) | ✅ (cap policy C3) | ✅ | ✅ |
+| T3 Compromised peer (FS / PCS) | 🔄 awaits DR activation (C4) | 🔄 | 🔄 |
+| T4 Lost device (Tier A — browser PWA) | 🔄 (OPFS + Argon2id v0.16+) | 🔄 (plausibly deniable) | 🔄 |
+| T4 Lost device (Tier B — daemon) | ⚠️ user-account isolation only; identity-key passphrase opt-in | ⚠️ same | ⚠️ same |
+| T5 Compromised CDN/mirror | 🔄 (audit C2; SW pinning planned) | 🔄 (.onion / IPFS planned) | ✅ (no fetch ever) |
+| T6 Compromised maintainer key | 🔄 (threshold-quorum design; not yet enforced) | 🔄 | ✅ |
+| T7 Compromised browser engine | mitigated (CSP on `/` + `/peer` at v0.20.7) | mitigated (Trusted Types aspirational) | mitigated |
+| T8 Compromised OS (Tier A) | mitigated (Secure Enclave on) | mitigated (no Secure Enclave reliance) | mitigated |
+| T8 Compromised OS (Tier B) | ⚠️ keys swappable to disk; no mlock yet | ⚠️ same | ⚠️ same |
+| T9 State actor (passive global obs) | partial (sealed sender planned; rendezvous still seen) | 🔄 (Tor + cover traffic planned) | ✅ (no internet) |
+| T9 State actor (active disruption) | partial (no app store; signed updates pending C2) | 🔄 | ✅ |
+
+The cells that read ✅ in the 2026-05-08 revision of this doc and
+now read 🔄 / ⚠️ were not regressions in the code; they were
+overstated promises. The 2026-05-09 audit identified five critical
+gaps (C1-C5 in the audit findings file) and the project is shipping
+fixes for all of them across the v0.20.7 → v0.21 cycle. Bundles 1-6
+of those fixes shipped on 2026-05-09 (commits `8857bcf`, `cd64bd6`,
+`e56e7ce`, `9a880f7`, `9f5a137`, `8a2cb1d` — 32 audit findings closed).
 
 ---
 
