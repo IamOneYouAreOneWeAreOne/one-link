@@ -5828,9 +5828,18 @@ class UIServer:
         self.bind_host = bind_host
         _server_port_path().write_text(str(self.port))
         # v0.20.7 (security audit M29): wrap the UI token with the
-        # daemon's lockbox if available. A stolen-disk attacker now
-        # sees the OLB1: marker + AES-GCM ciphertext rather than the
-        # raw bearer secret. No-op when no passphrase is configured.
+        # daemon's lockbox WHEN explicit passphrase mode is active.
+        # Silent-mode lockboxes (the default at-rest wrap for
+        # chain_keys) do NOT wrap the UI token because:
+        #   1. The on-disk lifetime is brief — every daemon restart
+        #      rotates the token.
+        #   2. The launcher and external tooling read the file as
+        #      raw text; wrapping silently would break that contract
+        #      without a corresponding security gain (an attacker
+        #      who can read the daemon's data dir during the
+        #      session can also read the daemon's memory).
+        # Explicit-passphrase mode is the user signaling "I want
+        # paranoid at-rest"; in that mode we wrap the token too.
         import base64 as _b64
         token_disk = self.token
         try:
@@ -5838,7 +5847,7 @@ class UIServer:
                 getattr(self.daemon.state, "_lockbox", None)
                 if self.daemon.state is not None else None
             )
-            if lb is not None:
+            if lb is not None and not getattr(lb, "is_silent", True):
                 blob = lb.wrap(self.token.encode("ascii"))
                 token_disk = self._TOKEN_WRAPPED_PREFIX + _b64.urlsafe_b64encode(
                     blob

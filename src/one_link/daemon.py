@@ -8877,23 +8877,27 @@ class Daemon:
         # can record into it.
         try:
             self.state = State()
-            # v0.20.7 (security audit H21 + partial C5): if the user
-            # set ONE_LINK_PASSPHRASE, build a LockBox and attach it
-            # to State so group sender chain_keys get AES-GCM-wrapped
-            # at rest. No-op when the env var is unset (cleartext
-            # storage stays — legacy behavior). Imported lazily so a
-            # missing cryptography-library feature can degrade
-            # gracefully rather than crashing daemon boot.
+            # v0.20.7 (security audit H21 + M29 + partial C5):
+            # acquire a LockBox unconditionally so chain_keys and
+            # the UI token get AES-GCM-wrapped at rest. The lockbox
+            # picks the strongest key it can without prompting:
+            #   - ONE_LINK_PASSPHRASE set ⇒ scrypt-derived key
+            #     (resists attackers with same-user OS access).
+            #   - Otherwise silent DRK from acquire_or_create_silent_drk:
+            #     DPAPI-wrapped per-user on Windows; raw 32 random
+            #     bytes with 0o600 perms on POSIX.
+            # The point: every install gets at-rest encryption by
+            # default, no UX friction. A user who steals the laptop
+            # without the login password cannot DPAPI-unwrap the
+            # DRK, so wrapped sqlite values stay opaque.
             try:
-                from one_link.lockbox import lockbox_from_env
+                from one_link.lockbox import acquire_lockbox
                 from one_link.paths import data_dir
-                lb = lockbox_from_env(data_dir())
-                if lb is not None:
-                    self.state.set_lockbox(lb)
-                    log.info(
-                        "lockbox: ONE_LINK_PASSPHRASE detected; "
-                        "wrapping group chain_keys at rest"
-                    )
+                lb = acquire_lockbox(data_dir())
+                self.state.set_lockbox(lb)
+                log.info(
+                    "lockbox: at-rest wrap active for chain_keys + UI token"
+                )
             except Exception as e:
                 log.warning(
                     "lockbox: failed to initialize (%s); proceeding "

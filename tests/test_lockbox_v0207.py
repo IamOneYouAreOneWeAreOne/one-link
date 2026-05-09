@@ -158,3 +158,79 @@ def test_state_chain_key_first_byte_collision_is_safe(tmp_path):
 def test_lockbox_top_level_helpers_passthrough_when_none():
     assert maybe_wrap(b"hello", None) == b"hello"
     assert maybe_unwrap(b"hello", None) == b"hello"
+
+
+def test_silent_drk_round_trips(tmp_path):
+    """Silent-mode DRK acquisition returns the same 32 bytes across
+    process restarts. On Windows DPAPI wraps it; on POSIX it's 32
+    raw bytes with 0o600 — either way load == mint."""
+    from one_link.lockbox import acquire_or_create_silent_drk
+    drk1 = acquire_or_create_silent_drk(tmp_path)
+    assert len(drk1) == 32
+    drk2 = acquire_or_create_silent_drk(tmp_path)
+    assert drk1 == drk2
+
+
+def test_silent_drk_persists_to_disk(tmp_path):
+    """The silent DRK actually lands on disk under the canonical
+    filename. On Windows the on-disk blob is DPAPI-wrapped (>32
+    bytes); on POSIX it's raw 32 bytes."""
+    import os
+    from one_link.lockbox import acquire_or_create_silent_drk, DRK_FILENAME
+    drk = acquire_or_create_silent_drk(tmp_path)
+    drk_file = tmp_path / DRK_FILENAME
+    assert drk_file.is_file()
+    if os.name == "nt":
+        # DPAPI wrap adds metadata — exact size varies with the user
+        # SID + master key version, but it's always > 32.
+        assert drk_file.stat().st_size > 32
+    else:
+        assert drk_file.stat().st_size == 32
+
+
+def test_acquire_lockbox_returns_a_working_lockbox(tmp_path, monkeypatch):
+    """When ONE_LINK_PASSPHRASE is unset, acquire_lockbox returns a
+    silent-mode LockBox (no user prompt). It wraps + unwraps."""
+    monkeypatch.delenv("ONE_LINK_PASSPHRASE", raising=False)
+    from one_link.lockbox import acquire_lockbox
+    lb = acquire_lockbox(tmp_path)
+    assert lb is not None
+    plain = b"\xab" * 32
+    wrapped = lb.wrap(plain)
+    assert lb.unwrap(wrapped) == plain
+
+
+def test_acquire_lockbox_passphrase_takes_precedence(tmp_path, monkeypatch):
+    """When ONE_LINK_PASSPHRASE is set, acquire_lockbox uses the
+    scrypt path. The resulting lockbox must NOT match the silent-
+    mode lockbox (different key derivation → different keys)."""
+    from one_link.lockbox import acquire_lockbox
+    monkeypatch.delenv("ONE_LINK_PASSPHRASE", raising=False)
+    lb_silent = acquire_lockbox(tmp_path)
+    monkeypatch.setenv("ONE_LINK_PASSPHRASE", "hunter2")
+    lb_passphrase = acquire_lockbox(tmp_path)
+    plain = b"x" * 32
+    blob_silent = lb_silent.wrap(plain)
+    # The passphrase-derived lockbox cannot unwrap the silent-derived
+    # blob and vice versa — independent key derivations.
+    with pytest.raises(LockBoxError):
+        lb_passphrase.unwrap(blob_silent)
+
+
+def test_silent_drk_does_not_leak_in_cleartext_on_windows(tmp_path):
+    """On Windows the on-disk DRK file must NOT contain the raw 32
+    bytes — the daemon process holds the unwrapped key in memory,
+    but DPAPI wrapping ensures stolen-disk attackers see only
+    DPAPI-wrapped ciphertext."""
+    import os
+    from one_link.lockbox import (
+        acquire_or_create_silent_drk, DRK_FILENAME,
+    )
+    if os.name != "nt":
+        pytest.skip("DPAPI wrap is Windows-only")
+    drk = acquire_or_create_silent_drk(tmp_path)
+    on_disk = (tmp_path / DRK_FILENAME).read_bytes()
+    assert drk not in on_disk, (
+        "raw DRK leaked into the on-disk file; DPAPI wrap is not "
+        "active or fell through to the raw-write path"
+    )
