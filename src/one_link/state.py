@@ -458,75 +458,115 @@ class State:
         c.close()
 
     def _migrate(self) -> None:
+        """Run schema migrations atomically.
+
+        v0.20.7 (security audit H20): each migration step + its
+        version stamp run inside a single ``BEGIN IMMEDIATE`` /
+        ``COMMIT`` transaction. A SIGKILL between an ALTER TABLE and
+        the version-stamp INSERT used to leave the DB in a half-
+        migrated state (table already had the new column but
+        ``schema_version`` claimed the old version, so the next boot
+        re-ran the migration and either errored on duplicate column
+        or quietly mis-stamped). With per-step transactions, the WAL
+        rolls back on crash and the next boot retries the same step
+        from a clean baseline.
+
+        SQLite's ``isolation_level=None`` (autocommit) still permits
+        explicit ``BEGIN``/``COMMIT`` to delimit a transaction, which
+        is what we want here — every other code path stays in
+        autocommit mode.
+        """
         with self._write_lock:
             c = self._conn.cursor()
             try:
+                # Bootstrap v1. SCHEMA_V1 is composed entirely of
+                # ``CREATE ... IF NOT EXISTS`` statements (tables,
+                # virtual tables, triggers, indexes), so a crash mid-
+                # script is safe: the next boot re-runs the script and
+                # idempotently fills in whatever is missing. We can't
+                # wrap ``executescript`` in BEGIN IMMEDIATE because
+                # SQLite's executescript implicitly commits the open
+                # transaction — but the idempotency property keeps v1
+                # bootstrap safe on its own.
                 c.executescript(SCHEMA_V1)
-                # Stamp version
                 cur = c.execute("SELECT MAX(version) FROM schema_version")
                 row = cur.fetchone()
                 current = row[0] if row and row[0] is not None else 0
                 if current < 1:
                     c.execute("INSERT INTO schema_version(version) VALUES(1)")
-                # v0.7.2: folder sandbox columns. Add only if not
-                # present so existing dbs upgrade cleanly. SQLite
-                # has no `ADD COLUMN IF NOT EXISTS`, so we PRAGMA-
-                # introspect first.
-                self._migrate_v2_folder_sandboxes(c)
-                if current < 2:
-                    c.execute("INSERT INTO schema_version(version) VALUES(2)")
-                # v0.7.3: per-device profile fields (local alias + mute).
-                self._migrate_v3_peer_profile(c)
-                if current < 3:
-                    c.execute("INSERT INTO schema_version(version) VALUES(3)")
-                # v0.7.5: messages gain reply_to column.
-                self._migrate_v4_messages_reply_to(c)
-                if current < 4:
-                    c.execute("INSERT INTO schema_version(version) VALUES(4)")
-                # v0.7.6: messages gain edit/delete columns +
-                # per-peer read marker table.
-                self._migrate_v5_edit_delete_read(c)
-                if current < 5:
-                    c.execute("INSERT INTO schema_version(version) VALUES(5)")
-                self._migrate_v6_group_reply(c)
-                if current < 6:
-                    c.execute("INSERT INTO schema_version(version) VALUES(6)")
-                self._migrate_v7_group_edit_delete(c)
-                if current < 7:
-                    c.execute("INSERT INTO schema_version(version) VALUES(7)")
-                # v0.7.7: peer verified-in-person trust state.
-                self._migrate_v8_peer_verification(c)
-                if current < 8:
-                    c.execute("INSERT INTO schema_version(version) VALUES(8)")
-                # v0.7.8: hostname-pubkey history + key-change events.
-                self._migrate_v9_key_change_tracking(c)
-                if current < 9:
-                    c.execute("INSERT INTO schema_version(version) VALUES(9)")
-                # v0.8.9: folder-sync concurrent-edit conflicts.
-                self._migrate_v10_folder_conflicts(c)
-                if current < 10:
-                    c.execute("INSERT INTO schema_version(version) VALUES(10)")
-                self._migrate_v11_chunk_availability(c)
-                if current < 11:
-                    c.execute("INSERT INTO schema_version(version) VALUES(11)")
-                # v0.10.2: disappearing messages (per-peer TTL).
-                self._migrate_v12_disappearing_messages(c)
-                if current < 12:
-                    c.execute("INSERT INTO schema_version(version) VALUES(12)")
-                self._migrate_v13_prior_chunk_sources(c)
-                if current < 13:
-                    c.execute("INSERT INTO schema_version(version) VALUES(13)")
-                self._migrate_v14_mute_until(c)
-                if current < 14:
-                    c.execute("INSERT INTO schema_version(version) VALUES(14)")
-                self._migrate_v15_file_index_cache(c)
-                if current < 15:
-                    c.execute("INSERT INTO schema_version(version) VALUES(15)")
-                self._migrate_v16_route_memory(c)
-                if current < 16:
-                    c.execute("INSERT INTO schema_version(version) VALUES(16)")
+                    current = 1
+
+                # vN+ migrations: each (apply_fn, target_version) pair
+                # runs in its own transaction so a crash in the middle
+                # of vN does not leave the schema with vN's tables but
+                # vN-1's stamp.
+                steps = [
+                    (2, self._migrate_v2_folder_sandboxes),
+                    (3, self._migrate_v3_peer_profile),
+                    (4, self._migrate_v4_messages_reply_to),
+                    (5, self._migrate_v5_edit_delete_read),
+                    (6, self._migrate_v6_group_reply),
+                    (7, self._migrate_v7_group_edit_delete),
+                    (8, self._migrate_v8_peer_verification),
+                    (9, self._migrate_v9_key_change_tracking),
+                    (10, self._migrate_v10_folder_conflicts),
+                    (11, self._migrate_v11_chunk_availability),
+                    (12, self._migrate_v12_disappearing_messages),
+                    (13, self._migrate_v13_prior_chunk_sources),
+                    (14, self._migrate_v14_mute_until),
+                    (15, self._migrate_v15_file_index_cache),
+                    (16, self._migrate_v16_route_memory),
+                ]
+                for target_version, apply_fn in steps:
+                    self._run_atomic_migration(
+                        c,
+                        target_version=target_version,
+                        current_version=current,
+                        apply=apply_fn,
+                    )
             finally:
                 c.close()
+
+    def _run_atomic_migration(
+        self,
+        c: sqlite3.Cursor,
+        *,
+        target_version: int,
+        apply,
+        current_version: Optional[int] = None,
+    ) -> None:
+        """Apply ``apply(cursor)`` and (if first-time-crossing) stamp
+        ``target_version`` in one transaction.
+
+        Each migration step is idempotent — most use ``CREATE ... IF
+        NOT EXISTS`` and PRAGMA-introspected ``ALTER TABLE``, and a few
+        also serve as boot-time backfills (e.g. v2's root_id sweep).
+        We therefore always run ``apply`` so backfills keep healing
+        any drifted rows, but only INSERT the version stamp the first
+        time we cross the boundary. The whole thing is wrapped in a
+        single ``BEGIN IMMEDIATE`` so a crash mid-step rolls back
+        cleanly — no half-applied DDL with a stale version stamp.
+        """
+        if current_version is None:
+            row = c.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            current_version = (
+                row[0] if row and row[0] is not None else 0
+            )
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            apply(c)
+            if current_version < target_version:
+                c.execute(
+                    "INSERT INTO schema_version(version) VALUES(?)",
+                    (target_version,),
+                )
+            c.execute("COMMIT")
+        except Exception:
+            try:
+                c.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
 
     def _migrate_v16_route_memory(self, c: sqlite3.Cursor) -> None:
         """v0.14.2: durable route memory for adaptive transfers."""
