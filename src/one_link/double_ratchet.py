@@ -110,20 +110,81 @@ def x25519_keypair() -> tuple[X25519PrivateKey, bytes]:
     return sk, pk
 
 
-def x25519_dh(priv: X25519PrivateKey, peer_pub: bytes) -> bytes:
-    """ECDH on Curve25519. v0.20.7 (security audit M5): reject the
-    all-zero shared output that results from a low-order public key.
+# RFC 7748 §6.1 + libsodium's blocklist: the 13 X25519 u-coordinate
+# pubkeys that produce a zero (or otherwise small-subgroup-confined)
+# shared secret regardless of the local private key. ``priv.exchange``
+# on these inputs returns 32 zero bytes — useful for a small-subgroup
+# attacker because every party derives the SAME root step from a known
+# value. We reject before even touching the exchange so a malformed
+# header from an outer-AEAD-broken state never even reaches the curve
+# op. The set covers:
+#   - u=0, u=1 (identity / generator-of-order-2 family)
+#   - the two points of order 8
+#   - p-1 (≡ -1 mod p), p (≡ 0), p+1 (≡ 1)
+#   - and the additive equivalents (pubkey high bit flipped — RFC 7748
+#     says implementations MUST mask the high bit of u, but a peer
+#     that doesn't may submit raw values with the bit set).
+_X25519_SMALL_ORDER_POINTS: frozenset[bytes] = frozenset(
+    bytes.fromhex(h) for h in (
+        # u=0
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        # u=1
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        # order-8 points
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        # p-1 (mod 2^255 - 19) = 0x7fffffff_..._ffffec
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        # p   (mod 2^255 - 19) = 0x7fffffff_..._ffffed → reduces to 0
+        "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        # p+1 (mod 2^255 - 19) = 0x7fffffff_..._ffffee → reduces to 1
+        "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        # u=0, u=1, order-8s with the (canonically masked) high bit
+        # flipped — covers peers that don't strip bit 255 of u.
+        "00000000000000000000000000000000000000000000000000000000000000ff",
+        "010000000000000000000000000000000000000000000000000000000000ff7f",
+        "010000000000000000000000000000000000000000000000000000000000ffff",
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b880",
+        "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f11d7",
+        # p-1 with high bit flipped
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    )
+)
 
-    The cryptography library implements RFC 7748 X25519 faithfully,
-    which means ``priv.exchange(low_order_pub)`` returns 32 zero
-    bytes rather than raising — that's the spec. RFC 7748 §6.1 lists
-    the pubkeys that produce zero. An attacker who plants one of
-    those points as ``peer_pub`` (e.g. by tampering with a ratchet
-    header before the channel-AEAD check has run, or by being a
-    malicious-but-paired peer crafting a malformed handshake) drives
-    every party to derive the SAME root step from a known shared
-    value of zero. We refuse the operation outright; the channel
-    treats it the same as InvalidTag and tears down."""
+
+def _is_small_order_x25519(pub: bytes) -> bool:
+    """Constant-time-ish lookup of the small-order block-list. We use
+    a frozenset here rather than a per-byte compare because the cost
+    we care about is operational (don't reach the curve op), not side-
+    channel: small-order points are public values."""
+    return pub in _X25519_SMALL_ORDER_POINTS
+
+
+def x25519_dh(priv: X25519PrivateKey, peer_pub: bytes) -> bytes:
+    """ECDH on Curve25519. v0.20.7 (security audit M5): two layers of
+    small-order defence:
+
+      1. **Reject known small-order inputs** before calling exchange()
+         (RFC 7748 §6.1 + libsodium's blocklist of 13 points). A
+         malicious-but-paired peer can craft a header with one of these
+         pubkeys to drive every party to the SAME root step from a
+         deterministic shared value — refuse outright.
+
+      2. **Reject all-zero outputs** as belt-and-suspenders. The
+         cryptography library implements RFC 7748 X25519 faithfully,
+         which means ``priv.exchange(low_order_pub)`` returns 32 zero
+         bytes rather than raising. Any pub we missed in (1) still
+         dies here. Channel treats either failure the same as InvalidTag
+         and tears down."""
+    if len(peer_pub) != 32:
+        raise ValueError(
+            f"ratchet: peer X25519 pubkey must be 32 bytes, got {len(peer_pub)}"
+        )
+    if _is_small_order_x25519(peer_pub):
+        raise ValueError(
+            "ratchet: peer X25519 pubkey is a known small-order point "
+            "(RFC 7748 §6.1)"
+        )
     out = priv.exchange(X25519PublicKey.from_public_bytes(peer_pub))
     if out == b"\x00" * 32:
         raise ValueError(
