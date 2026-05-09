@@ -14,8 +14,82 @@ HOME_ENV = "ONE_LINK_HOME"
 
 
 def _home_override() -> Path | None:
+    """Resolve ONE_LINK_HOME if set, after sanitization.
+
+    v0.20.7 (security audit M28): the previous implementation did
+    Path(env_value).expanduser() with no validation, which let an
+    attacker (or a stale setup script) point One Link at any path
+    they liked — including ``/etc``, ``$HOME/../other-user``, or a
+    UNC share on Windows. A daemon running with elevated
+    privileges (sudo, installer, CI runner) would then mkdir
+    config / data subdirs at the attacker's chosen location.
+
+    The hardening:
+      - Reject empty / whitespace-only values.
+      - Reject any path component equal to ".." (no traversal).
+      - Reject UNC paths on Windows (``\\\\server\\share``) — those
+        route storage onto a network share, which is generally not
+        what a multi-daemon-on-one-machine override is for.
+      - Require absolute paths after expanduser/resolve to fail
+        loudly on relative-path env injection.
+    On rejection we log a clear warning and fall through to the
+    default platform dirs.
+    """
     v = os.environ.get(HOME_ENV)
-    return Path(v).expanduser() if v else None
+    if v is None:
+        return None
+    raw = v.strip()
+    if not raw:
+        return None
+    # No traversal segments — even after expanduser/resolve, ".."
+    # in the original env value signals an attempt to break out of
+    # whatever the operator thought the override would be.
+    if ".." in raw.replace("\\", "/").split("/"):
+        import logging
+        logging.getLogger("one_link.paths").warning(
+            "ONE_LINK_HOME contains '..' (rejected): %r — falling "
+            "back to platform default",
+            v,
+        )
+        return None
+    # UNC on Windows: //server/share or \\server\share. Reject.
+    if os.name == "nt":
+        normalized = raw.replace("\\", "/")
+        if normalized.startswith("//"):
+            import logging
+            logging.getLogger("one_link.paths").warning(
+                "ONE_LINK_HOME is a UNC path (rejected): %r — "
+                "falling back to platform default",
+                v,
+            )
+            return None
+    try:
+        p = Path(raw).expanduser()
+        # Resolve to an absolute path; fail if the value still
+        # comes out relative (which can happen on a tmp-cwd layout
+        # we don't control).
+        if not p.is_absolute():
+            try:
+                p = p.resolve()
+            except OSError:
+                pass
+        if not p.is_absolute():
+            import logging
+            logging.getLogger("one_link.paths").warning(
+                "ONE_LINK_HOME is not an absolute path (rejected): "
+                "%r — falling back to platform default",
+                v,
+            )
+            return None
+        return p
+    except (ValueError, OSError) as e:
+        import logging
+        logging.getLogger("one_link.paths").warning(
+            "ONE_LINK_HOME unparseable (%s): %r — falling back to "
+            "platform default",
+            e, v,
+        )
+        return None
 
 
 def config_dir() -> Path:

@@ -1811,7 +1811,20 @@ class Daemon:
             self.record_peer_presence(peer_fp, msg.get("presence"))
             return
         if t == "CAPS":
-            features = list(normalize_caps(msg.get("features", [])))
+            # v0.20.7 (security audit M18): intersect peer-claimed
+            # features with our LOCAL_CAPABILITIES so an attacker
+            # can't poison state with arbitrary feature strings
+            # (e.g. claim "admin" / "grant_files" / "root_share")
+            # that future code might key off. We only persist
+            # features WE recognize. Backward-compat: peers
+            # advertising a future capability we haven't shipped
+            # yet are silently ignored — they'll keep working
+            # against the subset of caps that are common.
+            raw_features = list(normalize_caps(msg.get("features", [])))
+            features = [
+                f for f in raw_features
+                if f in LOCAL_CAPABILITIES or f in CAPS_FEATURES
+            ]
             bind = msg.get("channel_bind")
             # v0.20.7 (security audit H1): channel_bind is REQUIRED.
             # The v0.7.0 audit fix #10 added a transcript-bound CAPS
@@ -4103,12 +4116,58 @@ class Daemon:
             # path. Existing code in foldersync also normalizes; this
             # is a belt-and-suspenders check at the policy layer with
             # an audited reject so the user can see attempts.
+            #
+            # v0.20.7 (security audit M21): broader rejection set.
+            # The original guard caught `..` / leading `/` /
+            # `X:` Windows drive-letter starts, but missed:
+            #   - NUL + control characters (POSIX silently truncates
+            #     paths at NUL; Windows rejects but logs; either way
+            #     a control char in a filename is suspicious).
+            #   - UNC paths (``\\server\share\...``) — even after the
+            #     `\` → `/` flip these aren't local paths.
+            #   - Windows reserved device basenames (CON, NUL, COM1
+            #     etc., even with extensions) — opening one yields
+            #     the device, not a real file.
+            #   - Trailing dot / space — Windows silently strips
+            #     them, collapsing distinct names onto one on-disk
+            #     entry which an attacker can use for collision.
             norm = file_path.replace("\\", "/").lstrip("/")
+            has_control = any(
+                ord(c) < 0x20 or ord(c) == 0x7f for c in file_path
+            )
+            looks_unc = (
+                file_path.startswith("\\\\")
+                or file_path.startswith("//")
+                or "\\\\?\\" in file_path
+            )
+            from pathlib import PurePosixPath
+            try:
+                parts = PurePosixPath(norm).parts if norm else ()
+            except Exception:
+                parts = ()
+            reserved_windows = frozenset({
+                "CON", "PRN", "AUX", "NUL",
+                "COM1", "COM2", "COM3", "COM4", "COM5",
+                "COM6", "COM7", "COM8", "COM9",
+                "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+                "LPT6", "LPT7", "LPT8", "LPT9",
+            })
+            has_reserved = any(
+                part.split(".")[0].upper() in reserved_windows
+                for part in parts
+            )
+            has_trailing_dot_or_space = any(
+                part != part.rstrip(". ") for part in parts
+            )
             if (
                 not norm
                 or ".." in norm.split("/")
                 or file_path.startswith("/")
                 or (len(file_path) > 1 and file_path[1] == ":")
+                or has_control
+                or looks_unc
+                or has_reserved
+                or has_trailing_dot_or_space
             ):
                 with contextlib.suppress(Exception):
                     self.state.record_folder_audit_event(
