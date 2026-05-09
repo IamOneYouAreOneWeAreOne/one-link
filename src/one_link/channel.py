@@ -234,11 +234,38 @@ class Channel:
 
     # ─── send / recv ───────────────────────────────────────────────
 
+    def _can_send_ratchet(self) -> bool:
+        """v0.20.7 (security audit C4 send-side race fix): True only
+        when DR is active AND we have a usable send chain.
+
+        After both sides exchange CAPS and call maybe_activate_ratchet,
+        Alice's RatchetState has send_chain_key set (init_alice runs
+        an immediate root step). Bob's RatchetState is intentionally
+        send-empty until Alice's first message arrives — that's the
+        Signal Double Ratchet specification: Bob can't send before
+        receiving Alice's first ratchet message because his
+        send_chain_key is derived during the DH ratchet that
+        Alice's first frame triggers.
+
+        For us that means there's a brief window where Bob has
+        DR active but cannot encrypt outbound. Legacy AEAD keys are
+        still alive (the recv-side race tolerance keeps them around);
+        falling back to legacy for that window keeps the channel
+        bidirectional and matches the symmetry of the recv-side
+        DR-then-legacy fallback in recv(). Once Bob receives Alice's
+        first DR frame, his send_chain_key gets set and subsequent
+        sends go through the ratchet.
+        """
+        if self._dr_state is None:
+            return False
+        return getattr(self._dr_state, "send_chain_key", None) is not None
+
     async def send(self, plaintext: bytes) -> None:
-        if self._dr_state is not None:
+        if self._can_send_ratchet():
             await self._send_ratchet(plaintext)
             return
-        # Legacy path.
+        # Legacy path (also used by Bob immediately post-activation
+        # until Alice's first DR frame seeds his send chain).
         nonce = self._nonce(self.tx_seq)
         self.tx_seq += 1
         ct = self.tx_aead.encrypt(nonce, plaintext, self._aad())
@@ -252,7 +279,7 @@ class Channel:
         paths keep using ``send`` so small messages retain immediate
         backpressure and error visibility.
         """
-        if self._dr_state is not None:
+        if self._can_send_ratchet():
             self._queue_send_ratchet(plaintext)
             return
         nonce = self._nonce(self.tx_seq)
@@ -283,26 +310,44 @@ class Channel:
             try:
                 return self._decode_ratchet_payload(payload)
             except (ValueError, RuntimeError) as dr_err:
-                # Activation-race fingerprints: the header is too short
-                # to be a DR header (ValueError "header too short"
-                # raised by struct.unpack via Header.decode, OR
-                # RuntimeError "ratchet frame too short" from our
-                # length pre-check) OR the version byte isn't 1
-                # (ValueError "unsupported ratchet header version").
-                # Both fingerprints mean we received a frame queued by
-                # the peer's send-side BEFORE peer activated DR. Fall
-                # back to legacy AEAD on the same bytes — keys are
-                # disjoint so a wrong-path decrypt can't accidentally
-                # succeed. Other DR failures (CT corruption, MAC
-                # InvalidTag from dr_decrypt) propagate as-is to avoid
-                # half-advanced ratchet state from partial decrypts.
+                # Activation-race fingerprints: the bytes we just read
+                # were encrypted by the peer's send-side BEFORE peer
+                # activated DR (i.e. legacy AEAD ciphertext arriving
+                # AFTER our local activation). DR-parsing legacy
+                # bytes can fail in several ways:
+                #   - "header too short" / "ratchet frame too short"
+                #   - "ratchet header version" (the version byte
+                #     isn't 1)
+                #   - "too many skipped messages" (random middle
+                #     bytes interpreted as header.n)
+                #   - "low-order point" (M5: random ECDH bytes)
+                #   - "out-of-order delivery on current chain"
+                #   - AEAD InvalidTag (random keystream mismatch)
+                # All of these mean "this wasn't DR." Fall back to
+                # legacy AEAD on the same bytes; keys are disjoint
+                # so a wrong-path decrypt cannot accidentally
+                # succeed. If legacy also fails, surface the
+                # original DR error so the channel tears down on
+                # genuine corruption. v0.20.7 (security audit C4):
+                # broaden the fingerprint list so the activation-
+                # race window doesn't spuriously kill channels.
                 msg = str(dr_err)
-                if (
-                    "ratchet header version" not in msg
-                    and "ratchet frame too short" not in msg
-                    and "header too short" not in msg
-                ):
-                    raise
+                race_indicators = (
+                    "ratchet header version",
+                    "ratchet frame too short",
+                    "header too short",
+                    "too many skipped messages",
+                    "low-order point",
+                    "out-of-order delivery on current chain",
+                    "replayed message",
+                )
+                if not any(ind in msg for ind in race_indicators):
+                    # AEAD InvalidTag from dr_decrypt is a
+                    # cryptography library exception; re-classify it
+                    # as a race-fallback candidate too.
+                    from cryptography.exceptions import InvalidTag
+                    if not isinstance(dr_err, InvalidTag):
+                        raise
                 try:
                     nonce = self._nonce(self.rx_seq)
                     pt = self.rx_aead.decrypt(nonce, payload, self._aad())

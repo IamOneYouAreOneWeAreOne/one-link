@@ -428,12 +428,20 @@ def _delivery_backoff_ms(attempts: int) -> int:
 # peers ignore the field — strict-forward-compat.
 PROTOCOL_VERSION = "OL1.2"
 CAPS_FEATURES: list[str] = [
-    # Keep experimental transport upgrades out of default CAPS until
-    # their channel-level activation passes the normal send/file/group
-    # regression suite. The code can stay in-tree, but advertising a
-    # half-ready wire mode breaks the product promise: send must always
-    # work with the safest compatible path.
-    *[cap for cap in LOCAL_CAPABILITIES if cap != "double_ratchet_v1"],
+    # v0.20.7 (security audit C4 + H14): advertise the full
+    # LOCAL_CAPABILITIES set including `double_ratchet_v1`. The
+    # activation path was implemented in v0.7.2 (channel.py
+    # note_caps_sent / note_caps_received / maybe_activate_ratchet)
+    # but the cap was filtered out of advertised CAPS, leaving every
+    # channel on the static AEAD keys derived once at handshake — so
+    # captured ciphertext from a stolen long-term key stayed
+    # decryptable forever and "block = cryptographic cutoff" was
+    # fiction. The v0.7.2 ratchet activation regression suite
+    # (test_channel_ratchet_v082.py + test_double_ratchet_v072.py)
+    # is green; advertising the cap lets both sides activate and
+    # delivers the forward-secrecy + post-compromise-security
+    # guarantees that SECURITY.md §T3 commits to.
+    *LOCAL_CAPABILITIES,
     "audit",
     "fts",
     "trust",
