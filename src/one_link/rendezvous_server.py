@@ -34,8 +34,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
+import hmac
+import ipaddress
 import json
 import logging
+import os
+import secrets
 import signal
 import time
 from collections import deque
@@ -57,6 +62,21 @@ from one_link.rendezvous_proto import (
 )
 
 log = logging.getLogger("one_link.rendezvous_server")
+
+# v0.20.7 (security audit Bundle 2):
+#  - H25: every map keyed on attacker-controllable input (IPs, pubkeys,
+#    nonces) caps at this size. On insert when full, the oldest entry
+#    by first-timestamp is evicted. Without this an IPv6 spray (2^64
+#    distinct sources) can OOM the box. 256k entries × ~100 bytes ≈
+#    25 MB worst case across 5 maps; comfortably bounded.
+_MAX_RATE_LIMITER_KEYS = 256_000
+#  - H25: chunk sweeps so a single eviction tick doesn't stall the
+#    event loop. After every batch of this many keys we yield with
+#    asyncio.sleep(0).
+_SWEEP_CHUNK = 2_000
+#  - M32: per-request body-read deadline. Without this aiohttp's
+#    request.read() will happily wait forever for a slowloris client.
+_REQUEST_READ_TIMEOUT_S = 10.0
 
 
 # ─── config ─────────────────────────────────────────────────────────
@@ -101,6 +121,31 @@ class ServerConfig:
     # because a directly exposed server would otherwise let clients
     # spoof X-Forwarded-For and bypass per-IP rate limits.
     trust_proxy_headers: bool = False
+    # v0.20.7 (security audit H24): /lookup is unauthenticated and the
+    # response is meaningfully larger than the request (15-30x). Lower
+    # the lookup-specific cap so a botnet can't use the rendezvous as
+    # a reflector. Independent from rate_per_ip_per_min so register
+    # / revoke aren't dragged down with it.
+    rate_lookup_per_ip_per_min: int = 30
+    # v0.20.7 (security audit H26): per-IP NEW-pubkey registration
+    # limit, separate from per-pubkey. Defeats fresh-pubkey churn
+    # against the registry by forcing a per-source ceiling on how
+    # often a single IP can mint a brand-new device beacon.
+    rate_new_pubkey_register_per_ip_per_min: int = 10
+    # v0.20.7 (security audit M31): per-pubkey listener-slot
+    # replacement rate. Without this, a leaked listener key + repeated
+    # ping-pong reconnect = perma-kick the legitimate owner.
+    rate_listener_replace_per_pubkey_per_min: int = 2
+    # v0.20.7 (security audit M33): global cap on concurrent in-flight
+    # connections. Defends against fd / asyncio-task exhaustion under
+    # fan-out attack from many source IPs. 0 = unlimited (legacy).
+    max_concurrent_connections: int = 50_000
+    # v0.20.7 (security audit M36): when set, /metrics requires a
+    # Bearer token. Loopback callers (127.0.0.1, ::1) are still
+    # admitted unauthenticated for ops convenience. When unset, the
+    # endpoint is loopback-only and refuses non-loopback callers
+    # outright.
+    metrics_token: Optional[str] = None
 
 
 # ─── in-memory store ────────────────────────────────────────────────
@@ -152,17 +197,37 @@ class Registry:
 
 class _RateLimiter:
     """Sliding-window per-key counter. Bounded — keys with no activity
-    in the last `window_s` are dropped during sweeps."""
+    in the last `window_s` are dropped during sweeps. v0.20.7
+    (security audit H25): hard-capped at _MAX_RATE_LIMITER_KEYS so an
+    IPv6 spray cannot grow this dict without bound."""
 
-    def __init__(self, rate_per_min: int, window_s: float = 60.0):
+    def __init__(
+        self,
+        rate_per_min: int,
+        window_s: float = 60.0,
+        max_keys: int = _MAX_RATE_LIMITER_KEYS,
+    ):
         self.rate = int(rate_per_min)
         self.window_s = float(window_s)
+        self.max_keys = int(max_keys)
         self._hits: dict[str, deque[float]] = {}
 
     def admit(self, key: str) -> bool:
         now = time.monotonic()
         cutoff = now - self.window_s
-        dq = self._hits.setdefault(key, deque())
+        dq = self._hits.get(key)
+        if dq is None:
+            # Insert path: enforce hard cap by evicting the oldest-by-
+            # first-hit entry. Cheap because dict iteration order is
+            # insertion order in CPython 3.7+.
+            if len(self._hits) >= self.max_keys:
+                try:
+                    oldest_key = next(iter(self._hits))
+                    self._hits.pop(oldest_key, None)
+                except StopIteration:
+                    pass
+            dq = deque()
+            self._hits[key] = dq
         while dq and dq[0] < cutoff:
             dq.popleft()
         if len(dq) >= self.rate:
@@ -170,16 +235,27 @@ class _RateLimiter:
         dq.append(now)
         return True
 
-    def sweep(self) -> int:
-        """Drop keys with no live tokens. Returns dropped count."""
-        now = time.monotonic()
-        cutoff = now - self.window_s
-        dead = []
-        for k, dq in self._hits.items():
+    async def sweep(self) -> int:
+        """Drop keys with no live tokens. Returns dropped count.
+
+        v0.20.7 (H25): chunked + async-yielding so a sweep over a
+        large dict doesn't stall the event loop. Walks at most
+        _SWEEP_CHUNK keys before yielding."""
+        cutoff = time.monotonic() - self.window_s
+        dead: list[str] = []
+        seen = 0
+        # Snapshot keys so iteration is stable while we mutate.
+        for k in list(self._hits.keys()):
+            dq = self._hits.get(k)
+            if dq is None:
+                continue
             while dq and dq[0] < cutoff:
                 dq.popleft()
             if not dq:
                 dead.append(k)
+            seen += 1
+            if seen % _SWEEP_CHUNK == 0:
+                await asyncio.sleep(0)
         for k in dead:
             self._hits.pop(k, None)
         return len(dead)
@@ -237,6 +313,19 @@ class RendezvousApp:
         self.rate_register_per_pubkey = _RateLimiter(
             rate_per_min=config.rate_register_per_pubkey_per_min
         )
+        # v0.20.7 (security audit H24): /lookup-specific per-IP cap.
+        self.rate_lookup_per_ip = _RateLimiter(
+            rate_per_min=config.rate_lookup_per_ip_per_min
+        )
+        # v0.20.7 (security audit H26): per-IP NEW-pubkey register cap.
+        self.rate_new_pubkey_per_ip = _RateLimiter(
+            rate_per_min=config.rate_new_pubkey_register_per_ip_per_min
+        )
+        # v0.20.7 (security audit M31): per-pubkey listener-slot
+        # replacement cap.
+        self.rate_listener_replace_per_pubkey = _RateLimiter(
+            rate_per_min=config.rate_listener_replace_per_pubkey_per_min
+        )
         # v0.5.5: relay-side rate limit + state.
         self.rate_relay_connect_per_ip = _RateLimiter(
             rate_per_min=config.relay_connect_per_ip_per_min
@@ -246,10 +335,42 @@ class RendezvousApp:
         self._signed_replay_cache: dict[tuple[str, bytes], deque[tuple[int, bytes]]] = {}
         self.metrics = Metrics()
         self._eviction_task: asyncio.Task | None = None
+        # v0.20.7 (security audit M33): global concurrent-connection
+        # gate. Uses a plain counter (asyncio is single-threaded so
+        # check-then-increment without an await is atomic) instead of
+        # asyncio.Semaphore so we can fail-fast at the cap rather than
+        # block the request task. 0 / negative => unlimited (legacy).
+        self._max_concurrent: int = max(0, int(config.max_concurrent_connections))
+        self._concurrent: int = 0
+        # v0.20.7 (security audit M35): HMAC key for IP-in-logs. The
+        # raw IP shows up at DEBUG; INFO and above use the HMAC tag so
+        # log-pipeline operators don't hold raw client IPs by accident.
+        # Re-seeded every process restart — log correlation across
+        # restarts is intentionally not preserved.
+        self._log_ip_secret: bytes = secrets.token_bytes(32)
+
+    @web.middleware
+    async def _concurrency_middleware(self, request: web.Request, handler):
+        """v0.20.7 (security audit M33): global concurrent-connection
+        cap. Refuses fast at the ceiling so fan-out attacks from many
+        source IPs can't exhaust fds / asyncio task state. WebSocket
+        handlers count toward the cap for the lifetime of the WS,
+        which is exactly the period that holds the resources we care
+        about."""
+        if self._max_concurrent > 0 and self._concurrent >= self._max_concurrent:
+            return web.json_response(
+                {"error": "server at capacity"}, status=503
+            )
+        self._concurrent += 1
+        try:
+            return await handler(request)
+        finally:
+            self._concurrent -= 1
 
     def make_app(self) -> web.Application:
         app = web.Application(
-            client_max_size=max(MAX_REQUEST_BYTES, 2 * 1024 * 1024)
+            client_max_size=max(MAX_REQUEST_BYTES, 2 * 1024 * 1024),
+            middlewares=[self._concurrency_middleware],
         )
         app.router.add_post("/api/v1/register", self._handle_register)
         app.router.add_get("/api/v1/lookup/{pubkey_b64}", self._handle_lookup)
@@ -284,10 +405,17 @@ class RendezvousApp:
             while True:
                 await asyncio.sleep(self.config.eviction_interval_s)
                 evicted = self.registry.evict_expired(now_ms())
-                self.rate_per_ip.sweep()
-                self.rate_register_per_pubkey.sweep()
-                self._sweep_relay_listen_nonces()
-                self._sweep_signed_replay_cache()
+                # v0.20.7 (security audit H25): all sweeps are now
+                # async + chunked so the eviction tick yields the
+                # event loop frequently even with millions of keys.
+                await self.rate_per_ip.sweep()
+                await self.rate_register_per_pubkey.sweep()
+                await self.rate_lookup_per_ip.sweep()
+                await self.rate_new_pubkey_per_ip.sweep()
+                await self.rate_listener_replace_per_pubkey.sweep()
+                await self.rate_relay_connect_per_ip.sweep()
+                await self._sweep_relay_listen_nonces()
+                await self._sweep_signed_replay_cache()
                 if evicted:
                     log.debug("evicted %d expired registrations", evicted)
         except asyncio.CancelledError:
@@ -302,14 +430,49 @@ class RendezvousApp:
         enables trust_proxy_headers. Directly exposed servers must use
         the socket peer address so clients cannot spoof rate-limit
         identities.
+
+        v0.20.7 (security audit M34): when trust_proxy_headers is
+        enabled, take the LAST entry in XFF (the next-hop attested by
+        the proxy), not the first (the client-supplied value when
+        nginx uses the default `proxy_add_x_forwarded_for`). Validate
+        the result via ipaddress; on parse failure fall back to the
+        socket peer rather than trusting an attacker-shaped string.
         """
+        peer = (
+            request.transport.get_extra_info("peername")
+            if request.transport
+            else None
+        )
+        peer_ip = peer[0] if peer else "unknown"
         xff = request.headers.get("X-Forwarded-For")
         if self.config.trust_proxy_headers and xff:
-            return xff.split(",")[0].strip()
-        peer = request.transport.get_extra_info("peername") if request.transport else None
-        if peer:
-            return peer[0]
-        return "unknown"
+            # Last comma-token = proxy-attested next hop.
+            parts = [p.strip() for p in xff.split(",") if p.strip()]
+            if parts:
+                candidate = parts[-1]
+                try:
+                    ipaddress.ip_address(candidate)
+                    return candidate
+                except ValueError:
+                    return peer_ip
+        return peer_ip
+
+    def _ip_log_id(self, ip: str) -> str:
+        """v0.20.7 (security audit M35): HMAC tag for IP-in-logs.
+
+        Returns first 12 hex chars of HMAC-SHA256(secret, ip). The
+        secret is per-process so cross-restart correlation is broken,
+        but a single instance can still match same-IP behavior across
+        log lines for incident response. Operators who want the raw
+        IP can flip log-level to DEBUG.
+        """
+        try:
+            mac = hmac.new(
+                self._log_ip_secret, ip.encode("utf-8"), hashlib.sha256
+            ).digest()
+            return mac[:6].hex()
+        except Exception:
+            return "?"
 
     def _admit_relay_listen_nonce(
         self, pubkey: bytes, timestamp_ms: int, nonce: bytes
@@ -318,7 +481,17 @@ class RendezvousApp:
         from one_link.relay_proto import REPLAY_WINDOW_MS
 
         cutoff = now_ms() - REPLAY_WINDOW_MS
-        dq = self._relay_listen_nonces.setdefault(pubkey, deque())
+        dq = self._relay_listen_nonces.get(pubkey)
+        if dq is None:
+            # v0.20.7 (security audit H25): hard-cap the map. Attacker
+            # minting fresh pubkeys can otherwise grow it without
+            # bound. Evict the oldest pubkey (insertion order).
+            if len(self._relay_listen_nonces) >= _MAX_RATE_LIMITER_KEYS:
+                with contextlib.suppress(StopIteration):
+                    oldest = next(iter(self._relay_listen_nonces))
+                    self._relay_listen_nonces.pop(oldest, None)
+            dq = deque()
+            self._relay_listen_nonces[pubkey] = dq
         while dq and dq[0][0] < cutoff:
             dq.popleft()
         if any(seen_nonce == nonce for _seen_ts, seen_nonce in dq):
@@ -326,16 +499,23 @@ class RendezvousApp:
         dq.append((int(timestamp_ms), bytes(nonce)))
         return True
 
-    def _sweep_relay_listen_nonces(self) -> int:
+    async def _sweep_relay_listen_nonces(self) -> int:
         from one_link.relay_proto import REPLAY_WINDOW_MS
 
         cutoff = now_ms() - REPLAY_WINDOW_MS
         dead: list[bytes] = []
-        for pubkey, dq in self._relay_listen_nonces.items():
+        seen = 0
+        for pubkey in list(self._relay_listen_nonces.keys()):
+            dq = self._relay_listen_nonces.get(pubkey)
+            if dq is None:
+                continue
             while dq and dq[0][0] < cutoff:
                 dq.popleft()
             if not dq:
                 dead.append(pubkey)
+            seen += 1
+            if seen % _SWEEP_CHUNK == 0:
+                await asyncio.sleep(0)
         for pubkey in dead:
             self._relay_listen_nonces.pop(pubkey, None)
         return len(dead)
@@ -348,7 +528,16 @@ class RendezvousApp:
 
         cutoff = now_ms() - REPLAY_WINDOW_MS
         key = (kind, pubkey)
-        dq = self._signed_replay_cache.setdefault(key, deque())
+        dq = self._signed_replay_cache.get(key)
+        if dq is None:
+            # v0.20.7 (security audit H25): same cap as
+            # _relay_listen_nonces.
+            if len(self._signed_replay_cache) >= _MAX_RATE_LIMITER_KEYS:
+                with contextlib.suppress(StopIteration):
+                    oldest = next(iter(self._signed_replay_cache))
+                    self._signed_replay_cache.pop(oldest, None)
+            dq = deque()
+            self._signed_replay_cache[key] = dq
         while dq and dq[0][0] < cutoff:
             dq.popleft()
         if any(seen_sig == signature for _seen_ts, seen_sig in dq):
@@ -356,16 +545,23 @@ class RendezvousApp:
         dq.append((int(timestamp_ms), bytes(signature)))
         return True
 
-    def _sweep_signed_replay_cache(self) -> int:
+    async def _sweep_signed_replay_cache(self) -> int:
         from one_link.rendezvous_proto import REPLAY_WINDOW_MS
 
         cutoff = now_ms() - REPLAY_WINDOW_MS
         dead: list[tuple[str, bytes]] = []
-        for key, dq in self._signed_replay_cache.items():
+        seen = 0
+        for key in list(self._signed_replay_cache.keys()):
+            dq = self._signed_replay_cache.get(key)
+            if dq is None:
+                continue
             while dq and dq[0][0] < cutoff:
                 dq.popleft()
             if not dq:
                 dead.append(key)
+            seen += 1
+            if seen % _SWEEP_CHUNK == 0:
+                await asyncio.sleep(0)
         for key in dead:
             self._signed_replay_cache.pop(key, None)
         return len(dead)
@@ -381,11 +577,28 @@ class RendezvousApp:
         ok = self.rate_per_ip.admit(ip)
         if not ok:
             self.metrics.rate_limit_rejects_total += 1
-            log.info("rate-limited IP=%s on %s", ip, request.path)
+            # v0.20.7 (security audit M35): HMAC tag at INFO; raw IP
+            # only at DEBUG. log-pipeline operators stop accidentally
+            # retaining raw client IPs.
+            log.info(
+                "rate-limited iphash=%s on %s",
+                self._ip_log_id(ip), request.path,
+            )
+            log.debug("rate-limited raw-ip=%s on %s", ip, request.path)
         return ok
 
     async def _read_json(self, request: web.Request) -> dict:
-        body = await request.read()
+        # v0.20.7 (security audit M32): wrap the body read in
+        # asyncio.wait_for so a slowloris client (1 byte / 30s) can't
+        # hold a connection open for hours. aiohttp does not enforce
+        # a per-request body deadline by default; this is the missing
+        # ceiling.
+        try:
+            body = await asyncio.wait_for(
+                request.read(), timeout=_REQUEST_READ_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            raise web.HTTPRequestTimeout(text="body read timed out")
         if len(body) > MAX_REQUEST_BYTES:
             raise web.HTTPRequestEntityTooLarge(
                 max_size=MAX_REQUEST_BYTES, actual_size=len(body)
@@ -436,6 +649,23 @@ class RendezvousApp:
             self.metrics.rate_limit_rejects_total += 1
             return web.Response(status=429, text="too many registrations for this pubkey")
 
+        # v0.20.7 (security audit H26): per-IP NEW-pubkey limit.
+        # Per-pubkey rate alone doesn't catch an attacker minting fresh
+        # keys (Ed25519 keypair generation is microseconds). A single
+        # IP can therefore churn the bounded registry — 200k slots in
+        # ~28 hours from one box. Cap per-IP NEW-pubkey insertions at
+        # 10/min so an attacker can't sustain registry-flush.
+        is_new = self.registry.get(req.pubkey) is None
+        if is_new:
+            ip = self._client_ip(request)
+            if not self.rate_new_pubkey_per_ip.admit(ip):
+                self.metrics.rate_limit_rejects_total += 1
+                self.metrics.register_rejects_total += 1
+                return web.Response(
+                    status=429,
+                    text="too many new-pubkey registrations from this IP",
+                )
+
         # Cap advertised endpoints (defense-in-depth; proto already caps).
         if len(req.advertised_endpoints) > self.config.max_advertised_endpoints:
             self.metrics.register_rejects_total += 1
@@ -468,6 +698,17 @@ class RendezvousApp:
     async def _handle_lookup(self, request: web.Request) -> web.Response:
         if not self._rate_check_ip(request):
             return web.Response(status=429, text="rate limited")
+        # v0.20.7 (security audit H24): /lookup-specific cap on top of
+        # the global per-IP limit. Lookup is unauthenticated and the
+        # response is 15-30x the request, so it's a reflection-friendly
+        # endpoint without this stricter ceiling.
+        ip = self._client_ip(request)
+        if not self.rate_lookup_per_ip.admit(ip):
+            self.metrics.rate_limit_rejects_total += 1
+            log.info(
+                "lookup rate-limited iphash=%s", self._ip_log_id(ip),
+            )
+            return web.Response(status=429, text="lookup rate limited")
         from one_link.rendezvous_proto import _b64d  # type: ignore
 
         try:
@@ -534,7 +775,30 @@ class RendezvousApp:
             "registrations": len(self.registry),
         })
 
-    async def _handle_metrics(self, _request: web.Request) -> web.Response:
+    async def _handle_metrics(self, request: web.Request) -> web.Response:
+        # v0.20.7 (security audit M36): /metrics is operational
+        # telemetry. Exposing it to attackers gives them a feedback
+        # signal while they tune an attack (registry_evictions_total,
+        # rate_limit_rejects_total, relay_listeners_active). Gate it.
+        peer_host = ""
+        if request.transport is not None:
+            peer = request.transport.get_extra_info("peername")
+            if peer:
+                peer_host = peer[0]
+        is_loopback = peer_host in ("127.0.0.1", "::1", "localhost")
+        if not is_loopback:
+            token = self.config.metrics_token
+            if not token:
+                return web.Response(
+                    status=403,
+                    text="metrics endpoint is loopback-only; set "
+                         "--metrics-token to expose externally",
+                )
+            auth = request.headers.get("Authorization", "")
+            if not auth.startswith("Bearer ") or not hmac.compare_digest(
+                auth[7:], token
+            ):
+                return web.Response(status=401, text="unauthorized")
         return web.json_response({
             "started_at_ms": self.metrics.started_at_ms,
             "uptime_ms": now_ms() - self.metrics.started_at_ms,
@@ -644,11 +908,32 @@ class RendezvousApp:
         # Step 3: claim listener slot, kicking any prior one.
         prior = self._relay_listeners.get(auth.pubkey)
         if prior is not None and prior.ws is not ws:
+            # v0.20.7 (security audit M31): rate-limit listener-slot
+            # replacement per pubkey. Without this, a leaked listener
+            # key + ping-pong reconnect = perma-kick the legitimate
+            # owner. 2/min is comfortable for genuine roaming /
+            # network-flap reconnects but kills the abuse path.
+            if not self.rate_listener_replace_per_pubkey.admit(
+                auth.pubkey.hex()
+            ):
+                self.metrics.relay_listener_rejects_total += 1
+                await ws.close(
+                    code=4003,
+                    message=b"listener slot replacement rate-limited",
+                )
+                return ws
             with contextlib.suppress(Exception):
                 await prior.ws.close(code=4003, message=b"replaced by newer listener")
+            # Drain prior sessions so a new connector frame doesn't
+            # land on the about-to-be-replaced listener mid-swap.
+            for sid in list(prior.sessions):
+                await self._close_relay_session(prior, sid)
         listener = _RelayListener(pubkey=auth.pubkey, ws=ws)
         self._relay_listeners[auth.pubkey] = listener
         self.metrics.relay_listeners_total += 1
+        # v0.20.7 (security audit M35): pubkey hex prefix is public
+        # (it's an Ed25519 fingerprint), so logging 8 hex chars is
+        # acceptable. Belt-and-braces keep it short.
         log.info("relay: listener registered for %s", auth.pubkey.hex()[:8])
 
         # Step 4: forward demuxed traffic.
@@ -855,6 +1140,28 @@ def _parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
         action="store_true",
         help="trust X-Forwarded-For from a controlled reverse proxy",
     )
+    # v0.20.7 (security audit Bundle 2):
+    p.add_argument(
+        "--rate-lookup-per-ip-per-min", type=int, default=30,
+        help="lookup-specific per-IP rate (separate from global)",
+    )
+    p.add_argument(
+        "--rate-new-pubkey-register-per-ip-per-min", type=int, default=10,
+        help="per-IP cap on NEW-pubkey registrations (anti registry-flush)",
+    )
+    p.add_argument(
+        "--rate-listener-replace-per-pubkey-per-min", type=int, default=2,
+        help="per-pubkey cap on relay listener slot replacements",
+    )
+    p.add_argument(
+        "--max-concurrent-connections", type=int, default=50_000,
+        help="global cap on in-flight connections (0 = unlimited)",
+    )
+    p.add_argument(
+        "--metrics-token", type=str, default=None,
+        help="if set, /metrics requires Bearer auth from non-loopback "
+             "callers (loopback always allowed unauthenticated)",
+    )
     p.add_argument(
         "--log-level",
         default="INFO",
@@ -875,6 +1182,11 @@ def _parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
         relay_connect_per_ip_per_min=args.relay_connect_per_ip_per_min,
         relay_max_sessions_per_listener=args.relay_max_sessions_per_listener,
         trust_proxy_headers=args.trust_proxy_headers,
+        rate_lookup_per_ip_per_min=args.rate_lookup_per_ip_per_min,
+        rate_new_pubkey_register_per_ip_per_min=args.rate_new_pubkey_register_per_ip_per_min,
+        rate_listener_replace_per_pubkey_per_min=args.rate_listener_replace_per_pubkey_per_min,
+        max_concurrent_connections=args.max_concurrent_connections,
+        metrics_token=args.metrics_token,
     )
 
 
