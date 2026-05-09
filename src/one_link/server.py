@@ -1097,6 +1097,30 @@ class UIServer:
         resp = web.Response(text=html, content_type="text/html")
         resp.headers["Cache-Control"] = "no-store"
         resp.headers["Referrer-Policy"] = "no-referrer"
+        # v0.20.7 (security audit H9): Content-Security-Policy on the
+        # main UI. The previous response set X-Frame-Options + X-CTO
+        # via the security middleware but no CSP, so a regression
+        # that introduced an XSS sink would have nothing blocking
+        # exfiltration. SECURITY.md commits to a strict CSP; this
+        # gets us defense-in-depth coverage without breaking the
+        # bundled UI's existing inline scripts/styles. Mirrors the
+        # /peer shell CSP shape with adjustments for index's local
+        # WebSocket target. Tighten further once the bundle is
+        # refactored to remove inline scripts.
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "connect-src 'self' ws: wss: https:; "
+            "media-src 'self' blob:; "
+            "worker-src 'self' blob:; "
+            "frame-src 'none'; "
+            "frame-ancestors 'none'; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "form-action 'none'"
+        )
         if bootstrap_ok or request.cookies.get(COOKIE_NAME) == self.token:
             # v0.20.7 (security audit M13): mark Secure when this very
             # request was served over HTTPS so the cookie can never be

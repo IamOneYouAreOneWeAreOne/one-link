@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
 import os
 import socket
@@ -176,10 +177,35 @@ class Registry:
         return sorted(self.peers.values(), key=lambda p: p.hostname)
 
 
+def _is_lan_safe_address(addr: str) -> bool:
+    """v0.20.7 (security audit H5): refuse mDNS announcements whose
+    advertised address is not a private / link-local / loopback IPv4.
+
+    mDNS (RFC 6762) is link-local-only by spec, so a record that
+    points at a public IP is either misconfigured or a steering
+    attack. Without this check, a LAN attacker can advertise
+    `_onelink._tcp.local.` with any public IP and our outbound
+    dial / TCP-probe traffic gets redirected to that host. The
+    channel handshake's mutual auth catches impersonation, but a
+    pure DoS / outbound-traffic-redirector primitive remains.
+    """
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return bool(ip.is_private or ip.is_link_local or ip.is_loopback)
+
+
 def _info_to_peer(info: AsyncServiceInfo, self_short_id: str) -> Peer | None:
     if not info.addresses:
         return None
     addr = socket.inet_ntoa(info.addresses[0])
+    if not _is_lan_safe_address(addr):
+        log.debug(
+            "mDNS: rejecting non-LAN address %s for service %s",
+            addr, info.name,
+        )
+        return None
     props = {
         (k.decode() if isinstance(k, bytes) else k): (
             v.decode() if isinstance(v, bytes) else v

@@ -199,6 +199,16 @@ HANDSHAKE_PER_IP_RATE_MAX = 240     # attempts per window per IP
 # bytes, pinning fds + memory. The keepalive uses 30s PING/PONG so 120s
 # tolerates two missed PINGs before declaring the channel dead.
 PEER_IDLE_S = 120.0
+# v0.20.7 (security audit M8): global cap on concurrent inbound peer
+# connections. Per-IP HANDSHAKE_PER_IP_INFLIGHT_MAX bounds one source,
+# but a coordinated fan-in from N IPs (or one host with many NICs)
+# can pin N×32 inflight handshakes plus N×∞ post-handshake idle
+# channels (slowloris). 256 is a generous ceiling for friend-of-friend
+# households; tune via env if needed.
+MAX_TOTAL_PEER_CONNECTIONS = int(os.environ.get("ONE_LINK_MAX_PEERS", "256"))
+# Per-fingerprint cap so one peer key can't open many parallel
+# channels to wedge the global cap.
+MAX_PEER_CONNECTIONS_PER_FP = int(os.environ.get("ONE_LINK_MAX_PEERS_PER_FP", "4"))
 # Loopback gets a free pass — the test suite & the local UI talk to the
 # daemon on 127.0.0.1 in tight bursts, and an attacker on loopback already
 # owns the box.
@@ -665,6 +675,11 @@ class Daemon:
         self.bandwidth_pacer = BandwidthPacer(cap_kbps=0)
         self._auto_accept_max_size_bytes: int = 0  # 0 = no limit
         self._auto_accept_extensions: set[str] = set()  # empty = no filter
+        # v0.20.7 (security audit M8): inbound-peer concurrency
+        # accounting. Global counter for the absolute cap; per-fp
+        # counter for the one-key-many-channels case.
+        self._inbound_peer_count: int = 0
+        self._inbound_per_fp: dict[str, int] = {}
         self._transfer_admission_policy = TransferAdmissionPolicy(
             max_declared_bytes=MAX_DECLARED_FILE_OFFER_BYTES,
         )
@@ -1623,6 +1638,20 @@ class Daemon:
         """
         addr = writer.get_extra_info("peername")
         peer_ip = addr[0] if addr else ""
+        # v0.20.7 (security audit M8): refuse fast at the global
+        # concurrent-peer ceiling. Counter-based; asyncio is single-
+        # threaded so check-then-increment is atomic. The counter
+        # increments only after the cap check passes, so the limit
+        # is observed even under burst arrival.
+        if self._inbound_peer_count >= MAX_TOTAL_PEER_CONNECTIONS:
+            log.warning(
+                "peer connection refused: global cap %d reached",
+                MAX_TOTAL_PEER_CONNECTIONS,
+            )
+            with contextlib.suppress(Exception):
+                writer.close()
+                await writer.wait_closed()
+            return
         if not self._handshake_admit(peer_ip):
             log.warning("handshake throttled from %s", peer_ip)
             with contextlib.suppress(Exception):
@@ -1660,6 +1689,24 @@ class Daemon:
             log.warning("rejected peer attempted inbound connection: %s", peer_fp[:8])
             await channel.close()
             return
+        # v0.20.7 (security audit M8): per-fp cap. Defends against a
+        # single peer key opening many parallel inbound channels to
+        # crowd the global cap. Strict cap; refuse fast.
+        existing_for_fp = self._inbound_per_fp.get(peer_fp, 0)
+        if existing_for_fp >= MAX_PEER_CONNECTIONS_PER_FP:
+            log.warning(
+                "peer %s already has %d inbound channels (cap %d); refusing",
+                peer_fp[:8], existing_for_fp, MAX_PEER_CONNECTIONS_PER_FP,
+            )
+            await channel.close()
+            return
+        # v0.20.7 (security audit M8): increment counters AFTER all
+        # the early-return paths. The recv-loop's finally decrements
+        # both. Handshake-failure paths above don't touch counters,
+        # which means a flood of handshake-failures still doesn't
+        # leak counter slots.
+        self._inbound_peer_count += 1
+        self._inbound_per_fp[peer_fp] = existing_for_fp + 1
         if self.state is not None:
             try:
                 hostname: str | None = None
@@ -1722,6 +1769,18 @@ class Daemon:
         finally:
             await channel.close()
             log.info("peer disconnected: %s", channel.peer_short_id)
+            # v0.20.7 (security audit M8): decrement counters that
+            # were incremented after the rejected-check above. Both
+            # decrements are guarded against the (impossible-in-
+            # practice) negative-counter case to keep the daemon
+            # resilient against any future ordering bug.
+            if self._inbound_peer_count > 0:
+                self._inbound_peer_count -= 1
+            current_fp_count = self._inbound_per_fp.get(peer_fp, 0)
+            if current_fp_count <= 1:
+                self._inbound_per_fp.pop(peer_fp, None)
+            else:
+                self._inbound_per_fp[peer_fp] = current_fp_count - 1
 
     async def _on_peer_message(self, channel: ch.Channel, msg: dict) -> None:
         peer_fp = fingerprint_of(channel.peer_ed_pub)
