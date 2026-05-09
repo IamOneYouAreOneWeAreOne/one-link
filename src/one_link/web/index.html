@@ -3872,16 +3872,13 @@
                 </div>
               </div>
             </div>
-            <!-- v0.15.4 — connect-another-device QR (legacy daemon-UI mode).
-                 This is the URL-only flow that loads the desktop UI on
-                 phone. It's kept as an advanced fallback; the v0.20.1
-                 "Pair a phone" surface above is the recommended path. -->
-            <div class="settings-section" id="connect-info-section" data-tier="advanced">
-              <div class="settings-section-h"><span>Open desktop UI on another device (advanced)</span></div>
-              <div id="connect-info-body">
-                <p class="settings-help">Loading…</p>
-              </div>
-            </div>
+            <!-- v0.20.4 — legacy "Connect another device" (URL-only
+                 desktop-UI-on-phone flow) removed. The v0.20.1
+                 "Pair a phone" surface above is now the only path,
+                 because two QRs side-by-side was confusing. The
+                 underlying /api/connect-info endpoints stay alive
+                 for any external tooling that depends on them. -->
+            <div id="connect-info-section" data-tier="advanced" hidden></div>
             <!-- v0.15.0: PWA install affordance. Hidden by default;
                  the page's beforeinstallprompt handler unhides this
                  row when the browser deems the app installable. On
@@ -9686,7 +9683,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.20.3";
+  const PAGE_BUILT_FOR = "0.20.4";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {

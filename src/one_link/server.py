@@ -503,6 +503,13 @@ class UIServer:
         # peer-connection setup needs aiortc).
         from one_link.peer_rtc import BrowserPeerManager
         self.peer_rtc = BrowserPeerManager(daemon)
+        # v0.20.4: HTTPS listener metadata. Declared here so tests
+        # that create UIServer without calling start() can still
+        # read these attributes without an AttributeError. Real
+        # values populated by _start_https_listener().
+        self.https_site = None
+        self.https_port = None
+        self.https_cert_fp_sha256 = None
         # v0.20.2: hook the data-bridge listener so browser-peers
         # can fetch peer rosters + recent messages from the daemon
         # over the DataChannel. Without this hook, /peer phones
@@ -995,31 +1002,52 @@ class UIServer:
         daemon_pub = self.daemon.me.public_bytes
         daemon_pub_b64u = _peer_b64u(daemon_pub)
         daemon_fp = self.daemon.me.fingerprint
-        # Build the LAN URL the QR encodes. The browser's /peer page
-        # detects ?pair=<token> and runs the auto-pair flow.
+        # v0.20.4 — pair URLs MUST use https:// when the daemon has
+        # an HTTPS listener up, because phones running Safari /
+        # Chrome over plain HTTP to a LAN IP can't access Web Crypto
+        # (insecure context). With HTTPS the phone gets a "Not
+        # Private" warning once, taps Continue, and Web Crypto
+        # works from then on. Without HTTPS we still emit http://
+        # so desktop browsers can use the pair flow over loopback,
+        # but phones-over-LAN won't work.
         try:
-            from one_link.peer_rtc import _now_ms as _peer_now
             host = self.bind_host
             if host in ("0.0.0.0", "::", ""):
-                # The mint endpoint is auth-gated, so the caller is
-                # the desktop user; LAN-detect for them.
                 from one_link.app import _detect_lan_ip
                 host = _detect_lan_ip()
-            base = f"http://{host}:{self.port}"
+            if self.https_port:
+                base = f"https://{host}:{self.https_port}"
+                ws_scheme = "wss"
+                ws_port = self.https_port
+            else:
+                base = f"http://{host}:{self.port}"
+                ws_scheme = "ws"
+                ws_port = self.port
         except Exception:
             base = f"http://{self.bind_host}:{self.port}"
+            ws_scheme = "ws"
+            ws_port = self.port
+        ws_url = f"{ws_scheme}://{host}:{ws_port}/api/v1/peer-rtc"
         lan_url = (
             f"{base}/peer?pair={pp.token}&fp={daemon_fp}"
-            f"&ws={base.replace('http', 'ws')}/api/v1/peer-rtc"
+            f"&ws={ws_url}"
         )
+        if self.https_cert_fp_sha256:
+            # Embed the cert fingerprint so a future-ship phone-side
+            # check can verify "this is the same cert my laptop
+            # minted" before accepting the TLS connection. v0.20.4
+            # just emits it; v0.20.5+ can pin against it.
+            lan_url += f"&cert={self.https_cert_fp_sha256}"
         return web.json_response({
             "token": pp.token,
             "ttl_ms": pp.ttl_ms,
             "created_ms": pp.created_ms,
             "lan_url": lan_url,
+            "https_available": self.https_port is not None,
+            "https_cert_sha256": self.https_cert_fp_sha256,
             "daemon_pubkey_b64u": daemon_pub_b64u,
             "daemon_fingerprint": daemon_fp,
-            "ws_signaling_url": f"{base.replace('http', 'ws')}/api/v1/peer-rtc",
+            "ws_signaling_url": ws_url,
         })
 
     async def api_pair_qr(self, request: web.Request) -> web.StreamResponse:
@@ -5438,7 +5466,67 @@ class UIServer:
         _server_port_path().write_text(str(self.port))
         _token_path().write_text(self.token)
         log.info("UI server up — http://%s:%d/", bind_host, self.port)
+
+        # v0.20.4 — start a parallel HTTPS listener on port+1 so
+        # phones can hit the daemon over a secure context (Web
+        # Crypto Subtle requires HTTPS or localhost; a phone hitting
+        # http://<lan-ip> can't generate Ed25519 keys, breaking the
+        # whole browser-as-peer pair flow). The cert is self-signed,
+        # generated on first run, persisted to <data_dir>/peer_https/.
+        # Best-effort: if cert minting fails, log + skip; HTTP-only
+        # daemons still work (just not from phone Safari).
+        self.https_site = None
+        self.https_port = None
+        self.https_cert_fp_sha256 = None
+        await self._start_https_listener(bind_host)
+
         return self.port
+
+    async def _start_https_listener(self, bind_host: str) -> None:
+        """v0.20.4 — start the parallel HTTPS listener with the
+        self-signed cert. Lazy-imports peer_https so daemons that
+        don't have the module still boot."""
+        try:
+            from one_link.peer_https import build_ssl_context, cert_path, cert_fingerprint_sha256
+            from one_link.paths import data_dir
+        except ImportError as e:
+            log.info("peer-https unavailable: %s", e)
+            return
+        try:
+            ctx = build_ssl_context(data_dir())
+        except Exception as e:
+            log.warning("peer-https: build_ssl_context failed: %s", e)
+            return
+        if ctx is None:
+            log.info("peer-https: skipping (no cert)")
+            return
+        # Try port+1 first, then fall through to subsequent ports.
+        bound = False
+        for offset in range(1, UI_PORT_FALLBACK_RANGE + 1):
+            candidate = self.port + offset
+            try:
+                site = web.TCPSite(
+                    self.runner, host=bind_host, port=candidate, ssl_context=ctx,
+                )
+                await site.start()
+            except OSError:
+                continue
+            self.https_site = site
+            self.https_port = candidate
+            bound = True
+            break
+        if not bound:
+            log.warning("peer-https: couldn't bind any HTTPS port")
+            return
+        try:
+            self.https_cert_fp_sha256 = cert_fingerprint_sha256(cert_path(data_dir()))
+        except Exception:
+            self.https_cert_fp_sha256 = None
+        log.info(
+            "UI server HTTPS up — https://%s:%d/ (cert sha256=%s)",
+            bind_host, self.https_port,
+            (self.https_cert_fp_sha256 or "?")[:16],
+        )
 
     async def stop(self) -> None:
         for ws in list(self._ws_clients):
