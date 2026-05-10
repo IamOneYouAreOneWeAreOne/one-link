@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 
 import pytest
 
 from one_link import channel as ch
+from one_link.daemon import Daemon
 from one_link.identity import load_or_create
 
 
@@ -60,6 +62,28 @@ async def test_handshake_succeeds(tmp_path: Path):
     assert a_chan.transcript_hash == b_chan.transcript_hash
     await a_chan.close()
     await b_chan.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_pre_handshake_disconnect_is_benign(tmp_path: Path, caplog):
+    """Reachability probes can open a TCP socket and close before sending
+    the 4-byte frame header. That should not look like a protocol failure
+    in production logs."""
+    bob = load_or_create(tmp_path / "b.key")
+    daemon = Daemon(bob)
+    server = await asyncio.start_server(daemon._handle_peer, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    caplog.set_level(logging.WARNING, logger="one_link.daemon")
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.close()
+        await writer.wait_closed()
+        await asyncio.sleep(0.1)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert "handshake failed" not in caplog.text
 
 
 @pytest.mark.asyncio

@@ -1696,6 +1696,15 @@ class Daemon:
                     writer.close()
                     await writer.wait_closed()
                 return
+            except asyncio.IncompleteReadError as e:
+                if not e.partial:
+                    log.debug("empty pre-handshake disconnect from %s", addr)
+                else:
+                    log.warning("handshake failed from %s: %s", addr, e)
+                with contextlib.suppress(Exception):
+                    writer.close()
+                    await writer.wait_closed()
+                return
             except Exception as e:
                 log.warning("handshake failed from %s: %s", addr, e)
                 with contextlib.suppress(Exception):
