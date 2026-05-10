@@ -38,6 +38,20 @@ peer.port
 inbox/
 messages.jsonl
 peers.json
+# Bundle 24+: encrypted .olbak backup bundles. Encrypted to a
+# specific master seed; never tracked.
+*.olbak
+# Bundle 35: social-recovery share files. Encrypted to recipient,
+# but still per-setup state — never tracked.
+*.olshare
+# Bundle 23: master seed file + DRK + lockbox salt. DPAPI-wrapped
+# on Windows, mode 0600 on POSIX. Never tracked under any platform.
+master.seed
+data-root-key.bin
+lockbox.salt
+# Local development scratch
+shares/
+final_link_err.txt
 
 # Smoke test scratch
 .smoke_tmp/
