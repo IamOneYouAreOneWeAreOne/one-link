@@ -8118,6 +8118,15 @@ class Daemon:
         transfer_id = transfer_id or f"out:{blob_hex}:{uuid.uuid4().hex[:12]}"
         provisional_fp = peer_fp_for_policy or ""
         existing = self.state.get_transfer(transfer_id) if self.state else None
+        existing_progress_bytes = int(
+            getattr(existing, "progress_bytes", 0) or 0
+        ) if existing is not None else 0
+        existing_chunks_done = int(
+            getattr(existing, "chunks_done", 0) or 0
+        ) if existing is not None else 0
+        existing_chunks_total = int(
+            getattr(existing, "chunks_total", 0) or 0
+        ) if existing is not None else 0
         base_metadata = {
             **((existing.metadata if existing else {}) or {}),
             "mode": "planning",
@@ -8133,10 +8142,10 @@ class Daemon:
             size=size,
             blob_hash=blob_hex,
             status="queued",
-            progress_bytes=0,
+            progress_bytes=existing_progress_bytes,
             total_bytes=size,
-            chunks_done=0,
-            chunks_total=stream_chunks_total,
+            chunks_done=existing_chunks_done,
+            chunks_total=max(stream_chunks_total, existing_chunks_total),
             metadata=base_metadata,
         )
 
@@ -8424,10 +8433,10 @@ class Daemon:
                 size=size,
                 blob_hash=blob_hex,
                 status="offered",
-                progress_bytes=0,
+                progress_bytes=existing_progress_bytes,
                 total_bytes=size,
-                chunks_done=0,
-                chunks_total=planned_chunks_total,
+                chunks_done=existing_chunks_done,
+                chunks_total=max(planned_chunks_total, existing_chunks_total),
                 metadata={
                     **base_metadata,
                     "delivery_state": "sending",
@@ -8904,6 +8913,14 @@ class Daemon:
                     "transient": False,
                 },
             )
+            # A completed send is stronger evidence than the background
+            # timer: the peer, route, session, and receiver are healthy
+            # right now. Use that signal to quietly drain any older durable
+            # file intents for the same peer instead of waiting for the next
+            # retry window/prune tick. If this send itself is running inside
+            # resume_paused_transfers_for(), that per-peer lock makes the
+            # scheduled task no-op, avoiding recursive duplicate resumes.
+            self._schedule_resume_paused(sess.peer_fp)
             return {
                 "offer": offer,
                 "chunks": chunks_sent,

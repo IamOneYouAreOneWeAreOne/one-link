@@ -180,6 +180,66 @@ async def test_send_file_marks_transfer_paused_with_reason(
         state_a.close()
 
 
+@pytest.mark.asyncio
+async def test_resume_retry_preserves_existing_progress_on_handshake_timeout(
+    tmp_path: Path,
+):
+    """A retry attempt must not reset a durable transfer row back to 0%
+    before the peer answers. Crash/restart recovery depends on the ledger
+    staying truthful while One Link waits for the device again."""
+    me_a = _new_identity()
+    me_b = _new_identity()
+    state_a = State(db_path=tmp_path / "state.db")
+    state_a.upsert_peer(
+        fingerprint=me_b.fingerprint,
+        short_id=me_b.short_id,
+        pubkey=me_b.public_bytes,
+    )
+    state_a.set_peer_trust(me_b.fingerprint, "pinned")
+    daemon_a = Daemon(me_a)
+    daemon_a.state = state_a
+    src = tmp_path / "resume.bin"
+    src.write_bytes(b"x" * 1024 * 1024)
+    transfer_id = "resume-progress-row"
+    state_a.upsert_transfer(
+        id=transfer_id,
+        direction="out",
+        peer_fp=me_b.fingerprint,
+        kind="file",
+        name=src.name,
+        size=src.stat().st_size,
+        status="paused",
+        progress_bytes=256 * 1024,
+        total_bytes=src.stat().st_size,
+        chunks_done=1,
+        chunks_total=4,
+        metadata={"path": str(src), "next_retry_ms": 0},
+    )
+    peer_b = Peer(
+        short_id=me_b.short_id,
+        hostname="b",
+        address="127.0.0.1",
+        port=9,
+        ed_pub_hex=me_b.public_bytes.hex(),
+    )
+
+    async def _timeout(*_args, **_kwargs):
+        raise asyncio.TimeoutError()
+
+    daemon_a._get_outbound_session = _timeout  # type: ignore[method-assign]
+
+    with pytest.raises(TransferPausedError):
+        await daemon_a.send_file(peer_b, src, transfer_id=transfer_id)
+
+    rec = state_a.get_transfer(transfer_id)
+    assert rec.status == "paused"
+    assert rec.progress_bytes == 256 * 1024
+    assert rec.chunks_done == 1
+    assert rec.chunks_total >= 4
+    assert rec.metadata["delivery_state"] == "waiting_for_device"
+    state_a.close()
+
+
 def test_ratchet_header_mismatch_is_transient():
     assert _is_transient_send_error(
         ValueError("unsupported ratchet header version: 152")

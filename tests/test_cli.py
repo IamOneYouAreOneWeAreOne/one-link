@@ -10,8 +10,10 @@ import tempfile
 import time
 from pathlib import Path
 
+import click
 import pytest
 
+import one_link.cli as cli_mod
 from tests.harness import daemon_pair
 
 
@@ -87,6 +89,27 @@ def test_send_clean_error_when_daemon_not_running(tmp_path: Path):
     env["ONE_LINK_HOME"] = str(tmp_path)
     r = _cli("send", "abcdef12", "hi", env=env)
     assert r.returncode != 0
+
+
+def test_request_clean_error_when_daemon_drops_mid_command(monkeypatch):
+    class DropSocket:
+        def sendall(self, _data):
+            return None
+
+        def recv(self, _size):
+            raise ConnectionResetError("reset by peer")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(cli_mod, "_connect_control", lambda timeout=5.0: (DropSocket(), 12345))
+
+    with pytest.raises(click.ClickException) as exc:
+        cli_mod._request("send_file", timeout=0.1, peer="abc", path="x")
+
+    msg = str(exc.value).lower()
+    assert "daemon connection dropped" in msg
+    assert "resume after restart" in msg
 
 
 @pytest.mark.timeout(120)

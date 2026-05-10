@@ -42,14 +42,26 @@ def _connect_control(timeout: float = 5.0) -> tuple[socket.socket, int]:
 def _request(cmd: str, *, timeout: float = 5.0, **kwargs) -> dict:
     s, _ = _connect_control(timeout=timeout)
     try:
-        s.sendall((json.dumps({"cmd": cmd, **kwargs}) + "\n").encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode("utf-8").strip() or "{}")
+        try:
+            s.sendall((json.dumps({"cmd": cmd, **kwargs}) + "\n").encode("utf-8"))
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+        except (ConnectionAbortedError, ConnectionResetError, OSError) as e:
+            raise click.ClickException(
+                f"daemon connection dropped while handling {cmd}; "
+                "One Link will keep durable transfer work and resume after restart "
+                f"({e})"
+            )
+        try:
+            return json.loads(buf.decode("utf-8").strip() or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise click.ClickException(
+                f"daemon returned an invalid response while handling {cmd}: {e}"
+            )
     finally:
         s.close()
 
