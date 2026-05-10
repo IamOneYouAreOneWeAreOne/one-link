@@ -709,6 +709,16 @@ class Daemon:
         self.blob_store = None     # type: blobstore.BlobStore | None
         self._folder_sync_task: asyncio.Task | None = None
         self._outbound_sessions: dict[str, OutboundSession] = {}
+        # v0.20.7+ (Bundle 55): per-peer session-creation locks. Without
+        # these, N concurrent send_to() calls to the same peer that
+        # arrive before any session exists each see ``existing=None``,
+        # each dial a new TCP connection + run a fresh handshake, and
+        # the LAST one wins in the dict — leaving N-1 orphaned channels
+        # whose follow-up ACK reads fail with EOF when the peer's
+        # per-fp inbound cap kicks in. Hold this lock around the
+        # check-or-create critical section so concurrent callers
+        # collapse onto a single fresh session.
+        self._outbound_session_create_locks: dict[str, asyncio.Lock] = {}
         # M1: track which blob hashes we've explicitly requested from each
         # peer (via MANIFEST_WANTS). BLOB_OFFER / BLOB_CHUNK frames whose
         # hash isn't in this set are silently dropped — a paired peer can't
@@ -5410,19 +5420,46 @@ class Daemon:
         peer_fp = self._peer_fp_from_peer(peer)
         if not peer_fp:
             raise RuntimeError("peer has no verifiable public key for persistent session")
-        existing = self._outbound_sessions.get(peer_fp)
-        now = time.time()
-        if existing and now - existing.last_used <= OUTBOUND_SESSION_IDLE_S:
-            idle = now - existing.last_used
-            if idle <= OUTBOUND_SESSION_PING_AFTER_S:
-                return existing
-            if await self._probe_outbound_session(existing):
-                return existing
-            log.info(
-                "outbound session probe failed for %s — reopening",
-                peer.short_id,
+        # v0.20.7+ (Bundle 55): serialize the check-or-create critical
+        # section so N concurrent send_to() calls to the same peer
+        # collapse onto a single fresh session. Without this, each
+        # caller dials its own TCP connection while the others are
+        # mid-handshake; the last to store wins and the rest race to
+        # be torn down by the peer's per-fp cap.
+        create_lock = self._outbound_session_create_locks.get(peer_fp)
+        if create_lock is None:
+            create_lock = asyncio.Lock()
+            self._outbound_session_create_locks[peer_fp] = create_lock
+        async with create_lock:
+            existing = self._outbound_sessions.get(peer_fp)
+            now = time.time()
+            if existing and now - existing.last_used <= OUTBOUND_SESSION_IDLE_S:
+                idle = now - existing.last_used
+                if idle <= OUTBOUND_SESSION_PING_AFTER_S:
+                    return existing
+                if await self._probe_outbound_session(existing):
+                    return existing
+                log.info(
+                    "outbound session probe failed for %s — reopening",
+                    peer.short_id,
+                )
+            await self._drop_outbound_session(peer_fp)
+            return await self._create_outbound_session_locked(
+                peer, peer_fp, resume_pending=resume_pending,
             )
-        await self._drop_outbound_session(peer_fp)
+
+    async def _create_outbound_session_locked(
+        self,
+        peer: Peer,
+        peer_fp: str,
+        *,
+        resume_pending: bool = True,
+    ) -> OutboundSession:
+        """Caller holds ``self._outbound_session_create_locks[peer_fp]``.
+        Performs the dial + handshake + dict-store under the lock so a
+        racing caller arriving on the same peer_fp finds the session
+        already in the dict by the time it gets to the check."""
+        now = time.time()
 
         reader, writer, regime = await self._dial_peer_with_regime(peer)
         # Audit fix: when the regime is "relay", _dial_peer_with_regime
