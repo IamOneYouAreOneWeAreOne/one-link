@@ -819,6 +819,16 @@ def audit():
     click.echo("  Local UI routes:")
     for r in res.get("local_ui_routes", []):
         click.echo(f"    {r['method']:6} {r['path']}")
+    primitives = res.get("sovereign_primitives", [])
+    if primitives:
+        click.echo("  Sovereign primitives:")
+        for p in primitives:
+            status = p.get("status", "?")
+            ref = p.get("audit_ref", "")
+            click.echo(
+                f"    {p['name']:42} [{status}]  {ref}"
+            )
+            click.echo(f"      {p['summary']}")
 
 
 @cli.command()

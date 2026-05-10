@@ -58,6 +58,128 @@ log = logging.getLogger("one_link.server")
 WEB_DIR = Path(__file__).resolve().parent / "web"
 TOKEN_FILE = "ui.token"
 SERVER_PORT_FILE = "server.port"
+
+
+def _enumerate_sovereign_primitives() -> list[dict]:
+    """Return the catalog of sovereignty / privacy primitives this
+    binary ships. Surfaced via /api/audit so an inspecting user can
+    see the full surface without grepping the source.
+
+    Each entry is { module, name, status, summary, audit_ref }.
+    ``status`` is "primitive" (cryptographic + tested but not yet
+    wired into a live data path) or "live" (active in the daemon's
+    request flow). When a primitive lights up live, bump its status
+    here so the audit endpoint reflects reality.
+
+    Probe each module via importlib so a missing primitive (e.g.
+    optional install) cleanly degrades to "unavailable" instead of
+    raising on /api/audit."""
+    import importlib
+
+    catalog = [
+        ("one_link.threshold", "Shamir SSS",
+         "primitive", "Threshold secret sharing over GF(256) for "
+                      "split-key recovery", "Bundle 22"),
+        ("one_link.master_seed", "Master seed + BIP-39 24-word recovery",
+         "live", "Single recoverable secret; HKDF-domain-separated "
+                 "derivation of identity / DRK / cluster / backup keys",
+         "Bundle 23"),
+        ("one_link.mnemonic", "BIP-39 mnemonic encoding",
+         "live", "24-word phrase encodes 32-byte seed", "Bundle 23"),
+        ("one_link.backup_bundle", ".olbak encrypted backup",
+         "live", "AES-GCM-256 sealed daemon-state archive; key "
+                 "derived from master seed via HKDF",
+         "Bundle 24 (audit H23)"),
+        ("one_link.path_pii", "Deterministic AES-SIV path encryption",
+         "live", "Same path → same ciphertext (RFC 5297) so SQLite "
+                 "indexes still work; opaque without seed",
+         "Bundle 33 (audit M30)"),
+        ("one_link.social_recovery", "Social recovery (3-of-5 trusted contacts)",
+         "primitive", "Shamir shares wrapped to contact Ed25519 "
+                      "identities via Ed25519↔X25519 birational map",
+         "Bundle 35"),
+        ("one_link.dht", "Kademlia DHT primitive",
+         "primitive", "256-bit NodeID, XOR distance, k-buckets, "
+                      "iterative O(log N) lookup",
+         "Bundle 36"),
+        ("one_link.pq_hybrid", "Post-quantum hybrid KEM",
+         "primitive", "X25519+NullKEM today; ML-KEM-768 slot "
+                      "pre-allocated in wire format. HKDF-combine "
+                      "binds KEM names + transcript",
+         "Bundle 37"),
+        ("one_link.mls_treekem", "MLS TreeKEM (RFC 9420 §7)",
+         "primitive", "Left-balanced binary tree, O(log N) group "
+                      "ratchet, HKDF-derived path secrets",
+         "Bundle 38"),
+        ("one_link.sealed_sender", "Sealed Sender",
+         "primitive", "Signal-style sender-identity hiding via "
+                      "ECIES envelope + Ed25519 sig inside",
+         "Bundle 39"),
+        ("one_link.onion", "Onion routing",
+         "primitive", "Layered ECIES so no single relay sees both "
+                      "endpoints; Sphinx-inspired",
+         "Bundle 40"),
+        ("one_link.traffic_shaper", "Traffic shaping",
+         "primitive", "Cover frames + fixed size to defeat timing/"
+                      "size correlation analysis",
+         "Bundle 41"),
+        ("one_link.deletion_chain", "Provably-deletable messages",
+         "primitive", "Forward-secret chain + signed deletion proofs",
+         "Bundle 42"),
+        ("one_link.rdz_blind", "Rendezvous blinding",
+         "primitive", "HKDF-rotated lookup tokens per epoch — "
+                      "rendezvous never sees raw pubkeys",
+         "Bundle 43"),
+        ("one_link.caps_grants", "Signed capability grants",
+         "primitive", "Fine-grained authority with auto-expiry — "
+                      "offline-resilient revocation",
+         "Bundle 44"),
+        ("one_link.identity_dag", "Identity DAG (multi-device)",
+         "primitive", "Root keypair signs device certs; per-device "
+                      "Ed25519 priv never leaves the device",
+         "Bundle 45"),
+        ("one_link.vrf", "Verifiable Random Function (VRF)",
+         "primitive", "Unbiased pseudorandom output with publicly-"
+                      "verifiable proof; defeats eclipse attacks "
+                      "in DHT routing",
+         "Bundle 47"),
+        ("one_link.ring_sig", "Ring signatures (anonymous group creds)",
+         "primitive", "AOS construction on Ed25519 — prove I'm in "
+                      "{pubkey set} without revealing which one",
+         "Bundle 48"),
+        ("one_link.psi", "Private Set Intersection",
+         "primitive", "DH-OPRF based — find common contacts without "
+                      "revealing the non-shared ones",
+         "Bundle 49"),
+        ("one_link.beacon", "Coherence Beacon (cross-LAN discovery)",
+         "primitive", "IPv6 link-local multicast for peer discovery "
+                      "across VLAN trunk ports where mDNS sandboxes",
+         "Bundle 50"),
+        ("one_link.double_ratchet", "Double Ratchet",
+         "primitive", "Forward secrecy + post-compromise security "
+                      "(daemon path; channel.py wires it on CAPS)",
+         "Bundle 11+"),
+        ("one_link.lockbox", "At-rest secret wrap",
+         "live", "AES-GCM wrap of chain_keys + UI token via DPAPI "
+                 "(Windows) or scrypt-from-passphrase (POSIX)",
+         "Bundle 11"),
+    ]
+
+    out = []
+    for module_name, display_name, status, summary, audit_ref in catalog:
+        try:
+            importlib.import_module(module_name)
+            available = True
+        except Exception:
+            available = False
+        out.append({
+            "module": module_name,
+            "name": display_name,
+            "status": status if available else "unavailable",
+            "summary": summary,
+            "audit_ref": audit_ref,
+        })
+    return out
 COOKIE_NAME = "ol_ui"
 MAX_JSON_REQUEST_BYTES = 256 * 1024
 MAX_REQUEST_TARGET_BYTES = 8 * 1024
@@ -5616,6 +5738,13 @@ class UIServer:
             "outbound_destinations": outbound,
             "no_external_telemetry": True,
             "sovereign_network": doctrine(),
+            # v0.20.7+ (Bundles 22-45): every sovereignty / privacy
+            # primitive shipped in this build, advertised so an
+            # inspecting user can see the full surface without having
+            # to grep the source tree. Each entry is a (name, status,
+            # one-line summary) — name maps to the module that
+            # implements it.
+            "sovereign_primitives": _enumerate_sovereign_primitives(),
         })
 
     async def api_file_download(self, request: web.Request) -> web.StreamResponse:
