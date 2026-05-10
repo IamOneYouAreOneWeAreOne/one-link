@@ -130,6 +130,7 @@ proptest! {
                 | FrameKind::BloomFilter
                 | FrameKind::FountainBurst
                 | FrameKind::ScopedBloomFilter
+                | FrameKind::MissingChunks
         );
         if is_bulk {
             prop_assert_eq!(max, MAX_BULK_FRAME_BYTES);

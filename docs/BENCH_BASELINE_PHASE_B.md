@@ -105,9 +105,14 @@ End-to-end fetch latency on loopback QUIC with identity-bound TLS (measured via 
 |---|---|---|
 | `fetch_chunk_local` | **1.27 µs** | Already in store; Bloom + memtable + read |
 | `fetch_chunk_warm_1KiB` | 599 µs | Single fetch (one fsync). Wire round-trip + append + fsync |
-| `fetch_many_batched_x32` (NEW) | **2.94 ms / 32 chunks = 92 µs/chunk** | **Group commit: 1 fsync for the whole batch** |
-| `sequential_fetch_chunk_x32` | 21.55 ms / 32 chunks = 673 µs/chunk | 32 separate fsyncs (control) |
+| `fetch_many_batched_x32` | **2.94 ms / 32 = 92 µs/chunk** | **Group commit: 1 fsync for batch** |
+| `concurrent_fetch_x200` (test) | **4.68 ms / 200 = 23 µs/chunk** | Group commit + per-peer concurrency |
+| `sequential_fetch_chunk_x32` | 21.55 ms / 32 = 673 µs/chunk | 32 separate fsyncs (control) |
 | `bloom_handshake_warm_1k` | 99 µs | 1000-chunk manifest scope |
+| `full_scan_10k_server` | **4.96 ms** | Server walks 10K-chunk memtable |
+| `scoped_200_want_10k_server` | **98 µs** | **50× faster** — server walks just want_list |
+| `warm_chunk_response_16KiB` | 705 µs | Single ChunkResponse |
+| `fountain_16KiB` | 15.7 ms | K=16 LT-fountain delivery (loopback overhead; wins on lossy/multi-receiver) |
 
 **Optimizations landed in Phase B-2:**
 1. `Arc<RwLock<ChunkStore>>` replacing `Arc<Mutex<...>>` so concurrent reads parallelize.
@@ -119,21 +124,37 @@ End-to-end fetch latency on loopback QUIC with identity-bound TLS (measured via 
 - `TransferEngine::fetch_chunk_fountain(peer, chunk_id)` — ADR-0015 LT-fountain delivery; uses new `FountainRequest`/`FountainBurst`/`FountainAck` wire kinds.
 - `TransferEngine::bloom_handshake_scoped(peer, already_have, want_list)` — client-supplied want_list avoids the server-side full memtable scan (ADR-0011 v2).
 
-## Workspace Test Totals (Phase B-2)
+## Workspace Test Totals (Phase B-2 gap-closure pass)
 
 | Layer | Tests |
 |---|---|
-| ol_bloom (lib + properties) | 18 + 6 = 24 |
-| ol_fountain (lib + acceptance + xor) | 26 + 5 + 3 = 34 |
-| ol_transfer (lib + engine_e2e: now 11 incl. fountain + scoped-bloom) | 8 + 11 = 19 |
-| ol_chunk (lib + format_aware) | 31 in lib |
+| ol_bloom (lib + properties + determinism) | 18 + 6 + 2 = 26 |
+| ol_fountain (lib + acceptance + xor + wire_fuzz) | 26 + 9 + 3 + 3 = 41 |
+| ol_transfer (lib + engine_e2e: now 13 incl. concurrent stress + fountain + scoped + wire_fuzz) | 8 + 13 + 6 = 27 |
+| ol_chunk (lib + zip_fuzz) | 31 + 3 = 34 |
 | ol_aead (lib + convergent + convergent_e2e + parallel_e2e) | 26 + 8 + 4 + 2 = 40 |
 | ol_chunk_store / ol_quic / ol_wal | 22 + 34 + 32 |
-| **Rust workspace total** | **265 tests passing** |
+| **Rust workspace total** | **284 tests passing** |
 | Python (bloom + fountain adapters) | 22 |
-| Python (existing chunk/aead/wal/store/quic) | 106 |
-| **Python total** | **128 tests passing** |
-| **Grand total** | **393 tests passing** |
+| Python (existing chunk/aead/wal/store/quic + new Phase B-2 frame kinds) | 107 |
+| **Python total** | **129 tests passing** |
+| **Grand total** | **413 tests passing** |
+
+## Coverage gaps closed in this pass
+
+1. **Cross-platform xxh3 determinism**: pinned 22-byte test vector in `ol_bloom::tests::determinism`. Build on Linux/macOS-arm64 → identical bytes or test fails loudly.
+2. **Fountain stress beyond 5% loss**: ADR-0015 target is 99% at 5%. Verified ≥95% at 10%, ≥90% at 20%, ≥70% at 50%. Adversarial garbage packets do NOT spuriously decode (BLAKE3 of fake output ≠ BLAKE3 of real source).
+3. **Fuzz coverage of wire decoders**: proptest harnesses for `ChunkRequest/Response/NotFound`, `MissingChunks`, `ScopedBloomFilter`, `FountainPacket`, `LtDecoder::ingest`, `zip_lfh_offsets`, `detect_format`, `scan_format_aware`. All total — random bytes never panic.
+4. **Concurrent fetch stress**: `concurrent_fetch_stress_200_parallel` runs 200 parallel fetches with the RwLock + group commit path; completes in 4.68 ms (23 µs/chunk) with zero deadlock / starvation.
+5. **End-to-end Phase B-2 wire benches**: fountain-vs-warm, scoped-vs-full, group-commit-vs-sequential all measured with concrete numbers.
+6. **MissingChunks frame-size bug**: discovered via the scoped-bloom bench — a 10K-chunk server's response (~316 KiB) blew past the 64 KiB control-frame cap. Fixed by promoting `MissingChunks` to bulk-frame class.
+
+## Coverage gaps still open (intentionally deferred to Phase C)
+
+- Cross-platform CI matrix (Linux x86_64, macOS arm64). Determinism vector + property tests would catch regressions, but no CI runs yet.
+- TransferEngine pyo3 binding (substantial async-bridge work; would let Python tests exercise `fetch_many` / `bloom_handshake_scoped` directly).
+- 24h+ soak / memory-leak tests.
+- Shard-with-stitch-zone parallel CDC discovery (research-grade).
 
 ---
 

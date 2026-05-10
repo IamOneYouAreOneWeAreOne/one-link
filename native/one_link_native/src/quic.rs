@@ -605,6 +605,10 @@ pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
     m.add("FRAME_MANIFEST_SYNC_END", FrameKind::ManifestSyncEnd.as_u8())?;
     m.add("FRAME_BLOOM_FILTER", FrameKind::BloomFilter.as_u8())?;
     m.add("FRAME_MISSING_CHUNKS", FrameKind::MissingChunks.as_u8())?;
+    m.add("FRAME_FOUNTAIN_BURST", FrameKind::FountainBurst.as_u8())?;
+    m.add("FRAME_FOUNTAIN_ACK", FrameKind::FountainAck.as_u8())?;
+    m.add("FRAME_FOUNTAIN_REQUEST", FrameKind::FountainRequest.as_u8())?;
+    m.add("FRAME_SCOPED_BLOOM_FILTER", FrameKind::ScopedBloomFilter.as_u8())?;
     m.add("FRAME_CAPABILITY_CHECK", FrameKind::CapabilityCheck.as_u8())?;
     m.add("FRAME_CAPABILITY_ACK", FrameKind::CapabilityAck.as_u8())?;
     m.add("FRAME_PING", FrameKind::Ping.as_u8())?;

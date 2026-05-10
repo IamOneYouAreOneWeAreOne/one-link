@@ -550,6 +550,57 @@ async fn fetch_chunk_fountain_not_found() {
     assert!(matches!(result, Err(TransferError::ChunkNotFound { .. })));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_fetch_stress_200_parallel() {
+    // Stress: bob asks alice for 200 chunks in parallel via fetch_many.
+    // Confirms the RwLock + group commit + fetch task spawn pattern
+    // doesn't deadlock under concurrent load.
+    let (alice, bob) = pair();
+    let mut chunk_ids = Vec::with_capacity(200);
+    for i in 0u32..200 {
+        let r = mk_record_u32(i, 1024, 1040);
+        let id = r.chunk_id;
+        {
+            let mut s = alice.store.write().unwrap();
+            s.append_chunk(&r).unwrap();
+        }
+        chunk_ids.push(id);
+    }
+    {
+        let mut s = alice.store.write().unwrap();
+        s.flush().unwrap();
+    }
+
+    let alice_engine =
+        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
+    let bob_engine =
+        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_server = Arc::clone(&alice_engine);
+    tokio::spawn(async move {
+        let _ = alice_server.run_server().await;
+    });
+    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+
+    let start = std::time::Instant::now();
+    let outcomes = bob_engine.fetch_many(&alice.fingerprint, chunk_ids.clone()).await.unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(outcomes.len(), 200);
+    let success_count = outcomes.iter().filter(|o| o.is_success()).count();
+    assert_eq!(success_count, 200);
+    eprintln!("200 parallel fetches: {:?}", elapsed);
+
+    // Bob now has all 200 chunks.
+    let s = bob.store.read().unwrap();
+    let mut found = 0;
+    for cid in &chunk_ids {
+        if s.has_chunk(cid) {
+            found += 1;
+        }
+    }
+    assert_eq!(found, 200);
+}
+
 #[tokio::test]
 async fn cached_connection_reused_across_fetches() {
     let (alice, bob) = pair();

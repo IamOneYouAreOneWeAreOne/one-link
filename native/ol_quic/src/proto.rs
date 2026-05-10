@@ -139,7 +139,15 @@ impl FrameKind {
             // symbol (typically ≤1 KiB) + 44 B header. ScopedBloomFilter
             // adds an explicit want_list of chunk_ids in front of the
             // bloom; allow bulk cap.
-            Self::BloomFilter | Self::FountainBurst | Self::ScopedBloomFilter => MAX_BULK_FRAME_BYTES,
+            //
+            // MissingChunks carries u32(count) + 32*count bytes; for a
+            // large-server full-scan handshake this easily exceeds the
+            // 64 KiB control-frame cap. Promote to bulk so the wire
+            // protocol matches the in-engine arithmetic.
+            Self::BloomFilter
+            | Self::FountainBurst
+            | Self::ScopedBloomFilter
+            | Self::MissingChunks => MAX_BULK_FRAME_BYTES,
             // Everything else is control / fixed-size.
             _ => MAX_CONTROL_FRAME_BYTES,
         }

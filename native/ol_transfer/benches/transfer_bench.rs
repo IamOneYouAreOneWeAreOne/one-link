@@ -188,6 +188,96 @@ fn bench_bloom_handshake_warm(c: &mut Criterion) {
     });
 }
 
+/// Compare `fetch_chunk_fountain` vs `fetch_chunk` (single ChunkResponse)
+/// on loopback. On a no-loss link, fountain has wire overhead from the
+/// FountainPacket header (~4.4% per symbol) + extra symbols beyond K
+/// for decode safety. This bench tells us how much that costs.
+fn bench_fountain_vs_warm(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+
+    let mut group = c.benchmark_group("fountain_vs_warm");
+    // 16 KiB chunk = K=16 source symbols at 1 KiB. Big enough for the
+    // fountain overhead to be visible; small enough to keep the bench
+    // fast.
+    let chunk_bytes = 16 * 1024u32;
+    group.throughput(Throughput::Bytes(chunk_bytes as u64));
+
+    group.bench_function("warm_chunk_response_16KiB", |b| {
+        let fx = rt.block_on(setup_pair(rt.handle(), 10_000, chunk_bytes));
+        let mut i = 0u32;
+        b.iter(|| {
+            let idx = (i as usize) % fx.chunk_ids.len();
+            rt.block_on(async {
+                let _ = fx
+                    .bob_engine
+                    .fetch_chunk(&fx.alice_fp, &fx.chunk_ids[idx])
+                    .await
+                    .unwrap();
+            });
+            i = i.wrapping_add(1);
+        });
+    });
+
+    group.bench_function("fountain_16KiB", |b| {
+        let fx = rt.block_on(setup_pair(rt.handle(), 10_000, chunk_bytes));
+        let mut i = 0u32;
+        b.iter(|| {
+            let idx = (i as usize) % fx.chunk_ids.len();
+            rt.block_on(async {
+                let _ = fx
+                    .bob_engine
+                    .fetch_chunk_fountain(&fx.alice_fp, &fx.chunk_ids[idx])
+                    .await
+                    .unwrap();
+            });
+            i = i.wrapping_add(1);
+        });
+    });
+
+    group.finish();
+}
+
+/// Compare `bloom_handshake_scoped` vs `bloom_handshake` on a server
+/// with a large memtable (10K chunks) where the want_list is small
+/// (100 chunks). Scoped path should crush the full-scan path because
+/// it doesn't walk the server's 10K chunks.
+fn bench_scoped_vs_full_bloom(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let fx = rt.block_on(setup_pair(rt.handle(), 10_000, 1024));
+
+    // Bob has a subset of 100 chunks; want_list is 200 chunks (50% missing).
+    let bob_have: Vec<[u8; 32]> = fx.chunk_ids.iter().take(100).copied().collect();
+    let want_list: Vec<[u8; 32]> = fx.chunk_ids.iter().take(200).copied().collect();
+
+    let mut group = c.benchmark_group("scoped_vs_full_bloom");
+
+    group.bench_function("full_scan_10k_server", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _missing = fx
+                    .bob_engine
+                    .bloom_handshake(&fx.alice_fp, &bob_have)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    group.bench_function("scoped_200_want_10k_server", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _missing = fx
+                    .bob_engine
+                    .bloom_handshake_scoped(&fx.alice_fp, &bob_have, &want_list)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    group.finish();
+}
+
 /// Group-commit win: 32 chunks via `fetch_many` (1 fsync) vs 32
 /// sequential `fetch_chunk` calls (32 fsyncs).
 fn bench_group_commit_win(c: &mut Criterion) {
@@ -235,5 +325,7 @@ criterion_group!(
     bench_fetch_chunk_warm,
     bench_bloom_handshake_warm,
     bench_group_commit_win,
+    bench_fountain_vs_warm,
+    bench_scoped_vs_full_bloom,
 );
 criterion_main!(benches);

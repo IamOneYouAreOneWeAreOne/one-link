@@ -88,6 +88,16 @@ def test_module_constants_present():
     assert quic_native.FRAME_CLOSE == 0xFF
 
 
+def test_phase_b2_frame_kinds_exposed():
+    """Phase B-2 wire-protocol frame kinds (ADR-0015 fountain + ADR-0011 v2 scoped bloom)."""
+    assert quic_native.FRAME_BLOOM_FILTER == 0x20
+    assert quic_native.FRAME_MISSING_CHUNKS == 0x21
+    assert quic_native.FRAME_FOUNTAIN_BURST == 0x22
+    assert quic_native.FRAME_FOUNTAIN_ACK == 0x23
+    assert quic_native.FRAME_FOUNTAIN_REQUEST == 0x24
+    assert quic_native.FRAME_SCOPED_BLOOM_FILTER == 0x25
+
+
 def test_diagnostics_when_native_available():
     diag = quic_native.diagnostics()
     assert diag.native_available is True

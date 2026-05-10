@@ -177,33 +177,64 @@ impl TransferEngine {
         let k = encoder.k();
         let source_len_u32 = u32::try_from(source.len()).unwrap_or(u32::MAX);
 
-        // Emit symbols. We monotonically increment symbol_id. After each
-        // batch (small step) check the recv half for a FountainAck;
-        // if seen, stop early.
+        // Phase B-2 emission protocol:
+        //   Step 1: emit `initial_burst` = ceil(K * 1.25) symbols (the
+        //           "25% overhead" from ADR-0015's robust-soliton
+        //           targets ≥99.9% decode probability on loss-free links).
+        //   Step 2: await ACK with a bounded timeout. If ACK arrives,
+        //           stop. If timeout, emit another `top_up` = ceil(K * 0.25)
+        //           and repeat until ACK or `FOUNTAIN_MAX_SYMBOLS`.
+        //
+        // This avoids the broken pattern where we'd emit every symbol
+        // up to the cap because a 0-duration peek never observes the
+        // client's ACK in flight.
+        let initial_burst = k.saturating_add(k / 4).max(k + 4);
+        let top_up = (k / 4).max(2);
+        // 2ms ack wait: loopback ACKs arrive in tens of microseconds; on
+        // LAN/WAN the bound is sub-RTT. If the client genuinely needs
+        // more symbols (loss > overhead margin) we top up after this
+        // timeout, repeated until ACK or MAX_ENCODED_PER_CHUNK.
+        let ack_wait = std::time::Duration::from_millis(2);
+
         let mut sid: u32 = 0;
-        while sid < FOUNTAIN_MAX_SYMBOLS {
+        // Step 1: initial burst.
+        while sid < initial_burst && sid < FOUNTAIN_MAX_SYMBOLS {
             let symbol = encoder.encode_symbol(sid);
             let packet =
                 FountainPacket::new(chunk_id, k, sid, source_len_u32, symbol).encode();
             let frame = Frame::new(FrameKind::FountainBurst, packet)?;
             write_frame(send, &frame).await?;
-
-            // Check for an ack between symbols. Non-blocking: peek with
-            // a zero-duration timeout. quinn's recv.read() blocks; we
-            // race a tiny timeout to peek.
-            let peek = tokio::time::timeout(
-                std::time::Duration::from_millis(0),
-                read_frame(recv),
-            )
-            .await;
-            if let Ok(Ok(ack)) = peek {
-                if ack.kind == FrameKind::FountainAck {
-                    break;
-                }
-                // Anything else is a protocol violation; close.
-                break;
-            }
             sid += 1;
+        }
+
+        // Step 2: wait-for-ACK + optional top-up loop.
+        loop {
+            match tokio::time::timeout(ack_wait, read_frame(recv)).await {
+                Ok(Ok(ack)) if ack.kind == FrameKind::FountainAck => break,
+                Ok(Ok(_)) => break, // unexpected frame; bail
+                Ok(Err(_)) => break, // stream error; bail
+                Err(_) => {
+                    // Timeout: top up if there's headroom.
+                    if sid >= FOUNTAIN_MAX_SYMBOLS {
+                        break;
+                    }
+                    let limit = (sid + top_up).min(FOUNTAIN_MAX_SYMBOLS);
+                    while sid < limit {
+                        let symbol = encoder.encode_symbol(sid);
+                        let packet = FountainPacket::new(
+                            chunk_id,
+                            k,
+                            sid,
+                            source_len_u32,
+                            symbol,
+                        )
+                        .encode();
+                        let frame = Frame::new(FrameKind::FountainBurst, packet)?;
+                        write_frame(send, &frame).await?;
+                        sid += 1;
+                    }
+                }
+            }
         }
         send.finish().map_err(|e| TransferError::Transport(e.into()))?;
         Ok(())
