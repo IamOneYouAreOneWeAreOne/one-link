@@ -440,6 +440,37 @@ class State:
         Subsequent writes wrap; subsequent reads unwrap on demand."""
         self._lockbox = lockbox
 
+    # v0.20.7 (security audit M30): path-PII encryptor. Daemon late-
+    # attaches one of these at boot when the master seed is available;
+    # all chunk_sources / file_index_cache writes go through wrap, all
+    # reads go through unwrap. Legacy cleartext rows are detected by
+    # absence of the marker prefix and remain readable.
+    _path_pii = None
+
+    def set_path_pii_encryptor(self, encryptor) -> None:
+        self._path_pii = encryptor
+
+    # AAD strings: distinct per column so a path that exists in both
+    # tables encrypts to different ciphertext, ensuring a leak of one
+    # column doesn't help an attacker pivot via the other.
+    _PATH_PII_AAD_CHUNK_SOURCES = b"OL/state/chunk_sources/path|v1"
+    _PATH_PII_AAD_FILE_INDEX = b"OL/state/file_index_cache/path|v1"
+
+    def _wrap_path(self, value: str, *, aad: bytes) -> str:
+        if self._path_pii is None or not value:
+            return value
+        return self._path_pii.wrap(value, aad=aad)
+
+    def _unwrap_path(self, value: str, *, aad: bytes) -> str:
+        if self._path_pii is None or not value:
+            return value
+        out = self._path_pii.unwrap(value, aad=aad)
+        # If unwrap returned None, the value is wrapped but
+        # un-decryptable (tamper / wrong install). Surface the
+        # opaque marker so callers don't accidentally treat stale
+        # ciphertext as a real filesystem path.
+        return out if out is not None else value
+
     def _init_pragmas(self) -> None:
         c = self._conn.cursor()
         c.execute("PRAGMA journal_mode = WAL")
@@ -3923,6 +3954,10 @@ class State:
         source: str = "prior",
     ) -> None:
         now = _now_ms()
+        # v0.20.7 (M30): wrap path before persisting.
+        wrapped_path = self._wrap_path(
+            str(path), aad=self._PATH_PII_AAD_CHUNK_SOURCES,
+        )
         with self._write_lock:
             self._conn.execute(
                 """
@@ -3939,7 +3974,7 @@ class State:
                 """,
                 (
                     str(chunk_hash),
-                    str(path),
+                    wrapped_path,
                     int(start),
                     int(size),
                     int(mtime_ms),
@@ -3972,6 +4007,12 @@ class State:
         """
 
         now = _now_ms()
+        # v0.20.7 (M30): wrap path once for the whole batch — same
+        # plaintext path → same ciphertext (AES-SIV deterministic),
+        # so the existing PRIMARY KEY de-duplication still works.
+        wrapped_path = self._wrap_path(
+            str(path), aad=self._PATH_PII_AAD_CHUNK_SOURCES,
+        )
         clean: list[tuple[str, str, int, int, int, int, str, int]] = []
         avail: list[tuple[str, int, str, int]] = []
         for c in chunks:
@@ -3985,7 +4026,7 @@ class State:
                 continue
             clean.append((
                 chunk_hash,
-                str(path),
+                wrapped_path,
                 start,
                 size,
                 int(mtime_ms),
@@ -4041,7 +4082,11 @@ class State:
         return [
             {
                 "chunk_hash": r["chunk_hash"],
-                "path": r["path"],
+                # v0.20.7 (M30): unwrap on read; legacy cleartext rows
+                # pass through untouched via PathPIIEncryptor.unwrap.
+                "path": self._unwrap_path(
+                    r["path"], aad=self._PATH_PII_AAD_CHUNK_SOURCES,
+                ),
                 "start": int(r["start"]),
                 "size": int(r["size"]),
                 "mtime_ms": int(r["mtime_ms"]),
@@ -4110,6 +4155,10 @@ class State:
                 "size": int(c.get("size", int(c["end"]) - int(c["start"]))),
                 "hash": str(c["hash"]),
             })
+        # v0.20.7 (M30): wrap path before persisting.
+        wrapped_path = self._wrap_path(
+            str(path), aad=self._PATH_PII_AAD_FILE_INDEX,
+        )
         with self._write_lock:
             self._conn.execute(
                 """
@@ -4127,7 +4176,7 @@ class State:
                     updated_ms = excluded.updated_ms
                 """,
                 (
-                    str(path),
+                    wrapped_path,
                     int(size),
                     int(mtime_ns),
                     int(ctime_ns),
@@ -4146,6 +4195,13 @@ class State:
         mtime_ns: int,
         ctime_ns: int,
     ) -> Optional[dict]:
+        # v0.20.7 (M30): wrap query path so the SELECT matches the
+        # deterministic-encrypted row written in record_file_index_cache.
+        # Same plaintext + AAD → same ciphertext (AES-SIV), so the
+        # index lookup still works.
+        wrapped_path = self._wrap_path(
+            str(path), aad=self._PATH_PII_AAD_FILE_INDEX,
+        )
         row = self._conn.execute(
             """
             SELECT path, size, mtime_ns, ctime_ns, blob_hash, index_kind,
@@ -4153,8 +4209,20 @@ class State:
             FROM file_index_cache
             WHERE path = ? AND size = ? AND mtime_ns = ? AND ctime_ns = ?
             """,
-            (str(path), int(size), int(mtime_ns), int(ctime_ns)),
+            (wrapped_path, int(size), int(mtime_ns), int(ctime_ns)),
         ).fetchone()
+        # If the wrapped lookup missed but we have an encryptor, also
+        # try the legacy cleartext path so pre-v0.20.7 rows still hit.
+        if row is None and self._path_pii is not None and wrapped_path != str(path):
+            row = self._conn.execute(
+                """
+                SELECT path, size, mtime_ns, ctime_ns, blob_hash, index_kind,
+                       chunks_json, updated_ms
+                FROM file_index_cache
+                WHERE path = ? AND size = ? AND mtime_ns = ? AND ctime_ns = ?
+                """,
+                (str(path), int(size), int(mtime_ns), int(ctime_ns)),
+            ).fetchone()
         if row is None:
             return None
         try:
@@ -4164,7 +4232,9 @@ class State:
         if not isinstance(chunks, list):
             chunks = []
         return {
-            "path": row["path"],
+            "path": self._unwrap_path(
+                row["path"], aad=self._PATH_PII_AAD_FILE_INDEX,
+            ),
             "size": int(row["size"]),
             "mtime_ns": int(row["mtime_ns"]),
             "ctime_ns": int(row["ctime_ns"]),

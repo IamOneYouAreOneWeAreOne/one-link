@@ -9005,6 +9005,33 @@ class Daemon:
                     "with cleartext at-rest storage",
                     e,
                 )
+            # v0.20.7 (security audit M30): attach the path-PII
+            # encryptor when the master seed is available. Same-path-
+            # → same-ciphertext (AES-SIV deterministic AEAD), so the
+            # chunk_sources / file_index_cache indexes still work; a
+            # T4 attacker sees opaque ciphertext instead of the user's
+            # full home-dir layout. Daemons without a master seed
+            # (legacy installs that haven't run `backup init`) keep
+            # cleartext paths — there's no recoverable secret to
+            # derive a key from anyway, so the gain would be illusory.
+            try:
+                from one_link import master_seed as _ms
+                from one_link.path_pii import PathPIIEncryptor
+                from one_link.paths import data_dir as _data_dir
+                _seed = _ms.load_seed(_data_dir())
+                if _seed is not None:
+                    self.state.set_path_pii_encryptor(PathPIIEncryptor(_seed))
+                    log.info(
+                        "path-pii: AES-SIV deterministic encryption "
+                        "active for chunk_sources / file_index_cache "
+                        "path columns (audit M30)"
+                    )
+            except Exception as e:
+                log.warning(
+                    "path-pii: failed to initialize (%s); paths in "
+                    "chunk_sources / file_index_cache stay cleartext",
+                    e,
+                )
             # Pin our own identity so it's a known peer.
             self.state.upsert_peer(
                 fingerprint=self.me.fingerprint,
