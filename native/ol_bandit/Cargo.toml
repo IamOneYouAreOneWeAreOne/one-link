@@ -1,0 +1,21 @@
+[package]
+name = "ol_bandit"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: multi-armed bandit auto-tuning (Thompson sampling) per ADR-0019"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_bandit"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rand      = { workspace = true }
+proptest  = { workspace = true }
+
+[lints]
+workspace = true

@@ -23,6 +23,9 @@ members = [
     "ol_fountain",
     "ol_fec",
     "ol_pqkem",
+    "ol_erasure",
+    "ol_bandit",
+    "ol_ratchet",
     "one_link_native",
     # Future crates (added as they ship):
     # Future Phase A2:

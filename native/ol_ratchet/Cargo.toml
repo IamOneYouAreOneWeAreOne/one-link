@@ -1,0 +1,25 @@
+[package]
+name = "ol_ratchet"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: per-chunk forward-secret ratchet per ADR-0020"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_ratchet"
+crate-type = ["lib"]
+
+[dependencies]
+blake3       = { workspace = true }
+zeroize      = { workspace = true }
+thiserror    = { workspace = true }
+
+[dev-dependencies]
+rand         = { workspace = true }
+proptest     = { workspace = true }
+hex          = { workspace = true }
+ol_aead      = { path = "../ol_aead" }
+
+[lints]
+workspace = true
