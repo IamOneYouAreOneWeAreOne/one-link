@@ -25,6 +25,10 @@ fn arb_frame_kind() -> impl Strategy<Value = FrameKind> {
         Just(FrameKind::ManifestSyncEnd),
         Just(FrameKind::BloomFilter),
         Just(FrameKind::MissingChunks),
+        Just(FrameKind::FountainBurst),
+        Just(FrameKind::FountainAck),
+        Just(FrameKind::FountainRequest),
+        Just(FrameKind::ScopedBloomFilter),
         Just(FrameKind::CapabilityCheck),
         Just(FrameKind::CapabilityAck),
         Just(FrameKind::Ping),
@@ -45,10 +49,12 @@ proptest! {
     #[test]
     fn unregistered_kind_byte_yields_none(b in 0u8..=u8::MAX) {
         let registered: &[u8] = &[
-            0x01, 0x02, 0x03,  // chunk
-            0x10, 0x11, 0x12,  // manifest
-            0x20, 0x21,         // bloom / missing
-            0x30, 0x31,         // capability
+            0x01, 0x02, 0x03,  // chunk request / response / not-found
+            0x10, 0x11, 0x12,  // manifest sync / record / end
+            0x20, 0x21,         // bloom filter / missing chunks
+            0x22, 0x23, 0x24,   // fountain burst / ack / request
+            0x25,               // scoped bloom filter
+            0x30, 0x31,         // capability check / ack
             0xF0, 0xF1,         // ping / pong
             0xFE, 0xFF,         // proto error / close
         ];
@@ -117,7 +123,14 @@ proptest! {
     #[test]
     fn bulk_kind_implies_one_mib_cap(kind in arb_frame_kind()) {
         let max = kind.max_payload_bytes();
-        let is_bulk = matches!(kind, FrameKind::ChunkResponse | FrameKind::ManifestRecord);
+        let is_bulk = matches!(
+            kind,
+            FrameKind::ChunkResponse
+                | FrameKind::ManifestRecord
+                | FrameKind::BloomFilter
+                | FrameKind::FountainBurst
+                | FrameKind::ScopedBloomFilter
+        );
         if is_bulk {
             prop_assert_eq!(max, MAX_BULK_FRAME_BYTES);
         } else {

@@ -1,6 +1,6 @@
 # Phase B Benchmark Baseline
 
-**Date:** 2026-05-10 (revised after Phase B optimization sweep)
+**Date:** 2026-05-10 (revised after Phase B-2 sweep: group commit, fountain wire, scoped bloom, AEAD parallel, CDC parallel BLAKE3)
 **Hardware:** Windows 11 Home (x86_64 with AES-NI + AVX2)
 **Rust:** stable, `cargo bench --release` profile (lto=fat, codegen-units=1)
 
@@ -70,9 +70,32 @@ CDC + BLAKE3 baselines remain pinned at the Phase A1 numbers:
 - `blake3_address/raw/64`: ≥3 GiB/s/core
 - `derive_aead_key`: <300 ns
 
+### Phase B-2 parallel CDC scan baseline (rayon BLAKE3 hashing)
+
+`scan_to_vec_parallel` keeps boundary discovery sequential but shards BLAKE3 hashing of each discovered chunk across cores. The CDC kernel itself stays sequential because the rolling hash carries state across bytes.
+
+| Buffer | Sequential | Parallel | Speedup |
+|---|---|---|---|
+| 16 MiB | 2.21 GiB/s | **2.92 GiB/s** | **1.32×** |
+| 64 MiB | 2.16 GiB/s | 2.82 GiB/s | 1.31× |
+| 256 MiB | 2.08 GiB/s | **3.08 GiB/s** | **1.48×** |
+
+Sequential FastCDC discovery is now the throughput floor (~2 GiB/s). Pushing past it requires shard-with-stitch-zone parallelism (research-grade; Phase C+).
+
 ## ol_aead convergent (ADR-0012)
 
 Identical performance to standard AES-256-GCM path (4-5 GiB/s/core on AES-NI hardware) — the only added cost is the `BLAKE3.derive_key(plaintext)` call to compute the convergent key, which is dominated by the BLAKE3 throughput (~3 GiB/s/core for the plaintext-length hash). For typical 64 KiB chunks: ~20µs overhead per chunk (one-time per chunk).
+
+## ol_aead parallel multi-chunk (Phase B-2)
+
+Multi-chunk encrypt/decrypt parallelized across cores via rayon. Each chunk's AEAD is independent (different chunk_id → different nonce + AAD), so the work shards cleanly.
+
+| Bench (64 KiB chunks) | Sequential | Parallel | Speedup |
+|---|---|---|---|
+| 32 chunks | 943 µs (2.07 GiB/s) | **469 µs (4.17 GiB/s)** | **2.0×** |
+| 128 chunks | 3.84 ms (2.03 GiB/s) | **1.10 ms (7.13 GiB/s)** | **3.5×** |
+
+Speedup scales with batch size (rayon dispatch cost amortizes over more chunks). For typical ingest workloads (≥ 100 chunks per file), `encrypt_chunks_par` is the right path.
 
 ## ol_transfer (ADR-0013)
 
@@ -81,28 +104,36 @@ End-to-end fetch latency on loopback QUIC with identity-bound TLS (measured via 
 | Operation | Loopback latency | Note |
 |---|---|---|
 | `fetch_chunk_local` | **1.27 µs** | Already in store; Bloom + memtable + read |
-| `fetch_chunk_warm_1KiB` | 599 µs | Wire round-trip + chunk_store.append + fsync |
+| `fetch_chunk_warm_1KiB` | 599 µs | Single fetch (one fsync). Wire round-trip + append + fsync |
+| `fetch_many_batched_x32` (NEW) | **2.94 ms / 32 chunks = 92 µs/chunk** | **Group commit: 1 fsync for the whole batch** |
+| `sequential_fetch_chunk_x32` | 21.55 ms / 32 chunks = 673 µs/chunk | 32 separate fsyncs (control) |
 | `bloom_handshake_warm_1k` | 99 µs | 1000-chunk manifest scope |
 
-**Optimization landed this phase:** chunk store wrapped in `std::sync::RwLock` instead of `Mutex` so concurrent `read_chunk` / `has_chunk` calls parallelize across cores. Writes (`append_chunk` + `flush`) still serialize.
+**Optimizations landed in Phase B-2:**
+1. `Arc<RwLock<ChunkStore>>` replacing `Arc<Mutex<...>>` so concurrent reads parallelize.
+2. **Group commit**: `fetch_many` uses `write_local_no_flush` for each task + one `commit()` at the end. **7.3× speedup on multi-chunk fetch** (92 µs/chunk vs 673 µs/chunk).
+3. Per-chunk `fsync` cost is now amortized across the whole batch; warm-path fetches are QUIC-RTT-bound (~100 µs) rather than disk-bound.
 
-**Note on the 599 µs warm fetch:** ~100 µs is the QUIC round trip + frame codec; the remaining ~500 µs is the **per-chunk `fsync`** in `chunk_store.flush()` (durability guarantee per ADR-0007). Group commit / batched fsync is a Phase B-2 opportunity (caller-controlled `commit` on the engine that flushes once per batch).
+**New API:**
+- `TransferEngine::commit()` — explicit batched-commit barrier.
+- `TransferEngine::fetch_chunk_fountain(peer, chunk_id)` — ADR-0015 LT-fountain delivery; uses new `FountainRequest`/`FountainBurst`/`FountainAck` wire kinds.
+- `TransferEngine::bloom_handshake_scoped(peer, already_have, want_list)` — client-supplied want_list avoids the server-side full memtable scan (ADR-0011 v2).
 
-## Workspace Test Totals (Phase B optimization sweep)
+## Workspace Test Totals (Phase B-2)
 
 | Layer | Tests |
 |---|---|
 | ol_bloom (lib + properties) | 18 + 6 = 24 |
 | ol_fountain (lib + acceptance + xor) | 26 + 5 + 3 = 34 |
-| ol_transfer (lib + engine_e2e) | 8 + 9 = 17 |
+| ol_transfer (lib + engine_e2e: now 11 incl. fountain + scoped-bloom) | 8 + 11 = 19 |
 | ol_chunk (lib + format_aware) | 31 in lib |
-| ol_aead (lib + convergent + convergent_e2e) | 26 + 8 + 4 = 38 |
-| ol_chunk_store / ol_quic / ol_wal | unchanged |
-| **Rust workspace total** | **260 tests passing** |
-| Python (bloom + fountain adapters) | 22 new |
-| Python (existing chunk/aead/wal/store/quic) | 106 unchanged |
+| ol_aead (lib + convergent + convergent_e2e + parallel_e2e) | 26 + 8 + 4 + 2 = 40 |
+| ol_chunk_store / ol_quic / ol_wal | 22 + 34 + 32 |
+| **Rust workspace total** | **265 tests passing** |
+| Python (bloom + fountain adapters) | 22 |
+| Python (existing chunk/aead/wal/store/quic) | 106 |
 | **Python total** | **128 tests passing** |
-| **Grand total** | **388 tests passing** |
+| **Grand total** | **393 tests passing** |
 
 ---
 

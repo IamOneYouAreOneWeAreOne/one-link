@@ -111,6 +111,55 @@ pub fn encode_missing_chunks(ids: &[[u8; 32]]) -> Vec<u8> {
     out
 }
 
+/// Encode a `ScopedBloomFilter` payload.
+///
+/// Format: `[want_count: u32 LE][want_id_1..n: 32 bytes each][bloom_bytes]`.
+#[must_use]
+pub fn encode_scoped_bloom(want_list: &[[u8; 32]], bloom_bytes: &[u8]) -> Vec<u8> {
+    let count = u32::try_from(want_list.len()).unwrap_or(u32::MAX);
+    let mut out = Vec::with_capacity(4 + want_list.len() * CHUNK_ID_LEN + bloom_bytes.len());
+    out.extend_from_slice(&count.to_le_bytes());
+    for id in want_list {
+        out.extend_from_slice(id);
+    }
+    out.extend_from_slice(bloom_bytes);
+    out
+}
+
+/// Decode a `ScopedBloomFilter` payload into the want_list and the
+/// encoded bloom bytes (caller passes the bloom bytes to
+/// `Bloom::decode`).
+///
+/// # Errors
+///
+/// [`TransferError::MalformedPayload`] if the header is missing or
+/// the declared want_count overflows the available bytes.
+pub fn decode_scoped_bloom(payload: &[u8]) -> Result<(Vec<[u8; 32]>, &[u8]), TransferError> {
+    if payload.len() < 4 {
+        return Err(TransferError::MalformedPayload {
+            kind: FrameKind::ScopedBloomFilter,
+            reason: "scoped-bloom payload < 4 bytes",
+        });
+    }
+    let count = u32::from_le_bytes(payload[0..4].try_into().expect("4 bytes")) as usize;
+    let want_bytes_len = count * CHUNK_ID_LEN;
+    if payload.len() < 4 + want_bytes_len {
+        return Err(TransferError::MalformedPayload {
+            kind: FrameKind::ScopedBloomFilter,
+            reason: "scoped-bloom want_list exceeds payload",
+        });
+    }
+    let mut want = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = 4 + i * CHUNK_ID_LEN;
+        let mut cid = [0u8; 32];
+        cid.copy_from_slice(&payload[start..start + CHUNK_ID_LEN]);
+        want.push(cid);
+    }
+    let bloom_bytes = &payload[4 + want_bytes_len..];
+    Ok((want, bloom_bytes))
+}
+
 /// Decode a `MissingChunks` payload into a vector of chunk_ids.
 ///
 /// # Errors

@@ -11,8 +11,8 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ol_chunk::{
-    blake3_wrap, scan_format_aware, zip_lfh_offsets, CdcParams, ChunkScanner, ContainerFormat,
-    ZIP_LFH_FIXED_LEN, ZIP_LFH_MAGIC,
+    blake3_wrap, scan_format_aware, scan_to_vec, scan_to_vec_parallel, zip_lfh_offsets, CdcParams,
+    ChunkScanner, ContainerFormat, ZIP_LFH_FIXED_LEN, ZIP_LFH_MAGIC,
 };
 
 /// Deterministic xorshift RNG so the benchmark workload is identical across
@@ -144,6 +144,36 @@ fn bench_zip_lfh_walk(c: &mut Criterion) {
     group.finish();
 }
 
+/// Parallel scan path: CDC boundary discovery is inherently sequential
+/// (rolling-hash state), but BLAKE3 hashing of each discovered chunk is
+/// embarrassingly parallel. `scan_to_vec_parallel` shards the BLAKE3
+/// pass across rayon. Win lands above ~1 MiB buffers.
+fn bench_par_scan(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cdc_scan_par");
+    for &size_mib in &[16usize, 64, 256] {
+        let n = size_mib * 1024 * 1024;
+        let mut buf = vec![0u8; n];
+        fill_pseudo_random(
+            &mut buf,
+            0xBEEF_F00D_u64.wrapping_add(size_mib as u64),
+        );
+        group.throughput(Throughput::Bytes(n as u64));
+        group.bench_with_input(BenchmarkId::new("seq", size_mib), &buf, |b, buf| {
+            b.iter(|| {
+                let v = scan_to_vec(black_box(buf));
+                black_box(v);
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("par", size_mib), &buf, |b, buf| {
+            b.iter(|| {
+                let v = scan_to_vec_parallel(black_box(buf));
+                black_box(v);
+            });
+        });
+    }
+    group.finish();
+}
+
 fn bench_format_aware_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("format_aware_scan");
     // 50-MiB-class dummy ZIP: 100 entries × 512 KiB each.
@@ -178,5 +208,6 @@ criterion_group!(
     bench_aead_key_derivation,
     bench_zip_lfh_walk,
     bench_format_aware_scan,
+    bench_par_scan,
 );
 criterion_main!(benches);

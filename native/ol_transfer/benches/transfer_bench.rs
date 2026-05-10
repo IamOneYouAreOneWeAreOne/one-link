@@ -188,10 +188,52 @@ fn bench_bloom_handshake_warm(c: &mut Criterion) {
     });
 }
 
+/// Group-commit win: 32 chunks via `fetch_many` (1 fsync) vs 32
+/// sequential `fetch_chunk` calls (32 fsyncs).
+fn bench_group_commit_win(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    const BATCH: u32 = 32;
+
+    let mut group = c.benchmark_group("group_commit");
+    group.throughput(Throughput::Elements(BATCH as u64));
+
+    group.bench_function("fetch_many_batched_x32", |b| {
+        // Fresh fixture per measurement so each iter has un-fetched chunks.
+        b.iter_with_setup(
+            || rt.block_on(setup_pair(rt.handle(), BATCH, 1024)),
+            |fx| {
+                rt.block_on(async {
+                    let outcomes = fx
+                        .bob_engine
+                        .fetch_many(&fx.alice_fp, fx.chunk_ids.clone())
+                        .await
+                        .unwrap();
+                    assert_eq!(outcomes.len(), BATCH as usize);
+                });
+            },
+        );
+    });
+
+    group.bench_function("sequential_fetch_chunk_x32", |b| {
+        b.iter_with_setup(
+            || rt.block_on(setup_pair(rt.handle(), BATCH, 1024)),
+            |fx| {
+                rt.block_on(async {
+                    for cid in &fx.chunk_ids {
+                        let _ = fx.bob_engine.fetch_chunk(&fx.alice_fp, cid).await.unwrap();
+                    }
+                });
+            },
+        );
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_fetch_chunk_local,
     bench_fetch_chunk_warm,
     bench_bloom_handshake_warm,
+    bench_group_commit_win,
 );
 criterion_main!(benches);

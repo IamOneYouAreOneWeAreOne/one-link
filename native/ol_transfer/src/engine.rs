@@ -8,7 +8,11 @@ use std::time::Duration;
 
 use ol_bloom::Bloom;
 use ol_chunk_store::{ChunkRecord, ChunkStore};
-use ol_quic::{Connection, Endpoint, Frame, FrameKind, PeerFingerprint};
+use ol_fountain::{FountainPacket, LtDecoder};
+use ol_quic::{
+    transport::{read_frame, write_frame},
+    Connection, Endpoint, Frame, FrameKind, PeerFingerprint,
+};
 use tokio::sync::RwLock;
 
 use crate::config::TransferConfig;
@@ -143,6 +147,27 @@ impl TransferEngine {
         peer: &PeerFingerprint,
         chunk_id: &[u8; 32],
     ) -> Result<ChunkRecord, TransferError> {
+        self.fetch_chunk_inner(peer, chunk_id, /* flush_on_write = */ true).await
+    }
+
+    /// Variant of [`Self::fetch_chunk`] that defers the post-write
+    /// `flush` (fsync) for batched commit. The caller is responsible
+    /// for invoking [`Self::commit`] before treating the chunk as
+    /// durable. Used internally by [`Self::fetch_many`].
+    async fn fetch_chunk_no_flush(
+        &self,
+        peer: &PeerFingerprint,
+        chunk_id: &[u8; 32],
+    ) -> Result<ChunkRecord, TransferError> {
+        self.fetch_chunk_inner(peer, chunk_id, /* flush_on_write = */ false).await
+    }
+
+    async fn fetch_chunk_inner(
+        &self,
+        peer: &PeerFingerprint,
+        chunk_id: &[u8; 32],
+        flush_on_write: bool,
+    ) -> Result<ChunkRecord, TransferError> {
         if let Some(rec) = self.read_local(chunk_id) {
             return Ok(rec);
         }
@@ -172,7 +197,11 @@ impl TransferEngine {
                         got_hex_prefix: hex_prefix_8(&record.chunk_id),
                     });
                 }
-                self.write_local(&record)?;
+                if flush_on_write {
+                    self.write_local(&record)?;
+                } else {
+                    self.write_local_no_flush(&record)?;
+                }
                 Ok(record)
             }
             FrameKind::ChunkNotFound => {
@@ -221,8 +250,13 @@ impl TransferEngine {
         for cid in chunk_ids {
             let engine = Arc::clone(self);
             let peer_fp = *peer;
+            // Each task uses the no-flush write path; we batch-commit
+            // ONCE at the end. This amortizes the fsync across N chunks
+            // and is the primary cost of the wire-fetch hot path (per
+            // the bench baseline, a single fsync costs ~500 µs vs ~100
+            // µs for the QUIC round-trip itself).
             let handle = tokio::spawn(async move {
-                match engine.fetch_chunk(&peer_fp, &cid).await {
+                match engine.fetch_chunk_no_flush(&peer_fp, &cid).await {
                     Ok(rec) => FetchOutcome::Fetched {
                         chunk_id: cid,
                         length_plaintext: rec.length_plaintext,
@@ -254,6 +288,14 @@ impl TransferEngine {
                     });
                 }
             }
+        }
+        // Single batched fsync. After this returns, every Fetched
+        // outcome in `out` is durable.
+        if out
+            .iter()
+            .any(|o| matches!(o, FetchOutcome::Fetched { .. }))
+        {
+            self.commit()?;
         }
         Ok(out)
     }
@@ -289,6 +331,195 @@ impl TransferEngine {
         }
         let encoded = bloom.encode()?;
         let request = Frame::new(FrameKind::BloomFilter, encoded)?;
+        let reply = self
+            .send_request_with_timeout(
+                &connection,
+                request,
+                self.config.bloom_handshake_timeout_ms,
+            )
+            .await?;
+
+        match reply.kind {
+            FrameKind::MissingChunks => wire::decode_missing_chunks(&reply.payload),
+            other => Err(TransferError::ProtocolViolation {
+                expected_kind: FrameKind::MissingChunks,
+                actual_kind: other,
+            }),
+        }
+    }
+
+    /// Fetch a chunk via LT-fountain delivery per ADR-0015.
+    ///
+    /// Opens a fresh bi-directional stream, sends a `FountainRequest`
+    /// frame carrying the chunk_id, then ingests the inbound stream of
+    /// `FountainBurst` frames until the LT decoder reconstructs the
+    /// chunk plaintext. Sends `FountainAck` to tell the sender to stop
+    /// emitting once decode succeeds.
+    ///
+    /// Use this in preference to [`Self::fetch_chunk`] on lossy or
+    /// many-receivers workloads where ARQ retransmission round-trips
+    /// would dominate latency.
+    ///
+    /// # Errors
+    ///
+    /// - [`TransferError::ChunkNotFound`] if the server has no such chunk.
+    /// - [`TransferError::ChunkIdMismatch`] if the decoded bytes hash to
+    ///   a different chunk_id than requested (catches buggy / malicious peer).
+    /// - [`TransferError::Timeout`] if the full decode exceeds the
+    ///   chunk request timeout.
+    /// - [`TransferError::Transport`] for QUIC stream errors.
+    pub async fn fetch_chunk_fountain(
+        &self,
+        peer: &PeerFingerprint,
+        chunk_id: &[u8; 32],
+    ) -> Result<ChunkRecord, TransferError> {
+        if let Some(rec) = self.read_local(chunk_id) {
+            return Ok(rec);
+        }
+        let entry = self.peer_entry(peer).await?;
+        let _permit = entry
+            .inflight
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore not closed");
+
+        let connection = self.connection_for(peer, &entry).await?;
+        let (mut send, mut recv) = connection
+            .open_bi_stream()
+            .await
+            .map_err(TransferError::Transport)?;
+
+        // Request side.
+        let req = Frame::new(FrameKind::FountainRequest, chunk_id.to_vec())?;
+        write_frame(&mut send, &req)
+            .await
+            .map_err(TransferError::Transport)?;
+
+        // Response loop with overall timeout.
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(self.config.chunk_request_timeout_ms);
+        let mut decoder: Option<LtDecoder> = None;
+        let mut chunk_source_len: u32 = 0;
+
+        loop {
+            let read_future = read_frame(&mut recv);
+            let frame = match tokio::time::timeout_at(deadline, read_future).await {
+                Ok(Ok(f)) => f,
+                Ok(Err(e)) => return Err(TransferError::Transport(e)),
+                Err(_) => {
+                    return Err(TransferError::Timeout {
+                        timeout_ms: self.config.chunk_request_timeout_ms,
+                    });
+                }
+            };
+            match frame.kind {
+                FrameKind::FountainBurst => {
+                    let pkt = FountainPacket::decode(&frame.payload)?;
+                    if &pkt.chunk_id != chunk_id {
+                        return Err(TransferError::ChunkIdMismatch {
+                            requested_hex_prefix: hex_prefix_8(chunk_id),
+                            got_hex_prefix: hex_prefix_8(&pkt.chunk_id),
+                        });
+                    }
+                    let dec = decoder.get_or_insert_with(|| {
+                        chunk_source_len = pkt.source_length;
+                        LtDecoder::new(
+                            pkt.k,
+                            pkt.payload.len(),
+                            pkt.source_length as usize,
+                        )
+                        .expect("packet parameters valid")
+                    });
+                    if dec.ingest(pkt.symbol_id, &pkt.payload)? {
+                        // Decode complete; tell sender to stop.
+                        let ack = Frame::new(
+                            FrameKind::FountainAck,
+                            chunk_id.to_vec(),
+                        )?;
+                        write_frame(&mut send, &ack)
+                            .await
+                            .map_err(TransferError::Transport)?;
+                        let _ = send.finish();
+                        break;
+                    }
+                }
+                FrameKind::ChunkNotFound => {
+                    return Err(TransferError::ChunkNotFound {
+                        chunk_id_hex_prefix: hex_prefix_8(chunk_id),
+                    });
+                }
+                other => {
+                    return Err(TransferError::ProtocolViolation {
+                        expected_kind: FrameKind::FountainBurst,
+                        actual_kind: other,
+                    });
+                }
+            }
+        }
+
+        let dec = decoder.expect("decoder created on first FountainBurst");
+        let source_bytes = dec.finish()?;
+        // Parse `(kind, flags, payload)` back into a ChunkRecord.
+        if source_bytes.len() < 2 {
+            return Err(TransferError::MalformedPayload {
+                kind: FrameKind::FountainBurst,
+                reason: "decoded chunk source < 2 bytes",
+            });
+        }
+        let record = ChunkRecord::decode(source_bytes[0], source_bytes[1], &source_bytes[2..])?;
+        if &record.chunk_id != chunk_id {
+            return Err(TransferError::ChunkIdMismatch {
+                requested_hex_prefix: hex_prefix_8(chunk_id),
+                got_hex_prefix: hex_prefix_8(&record.chunk_id),
+            });
+        }
+        // Persist durably.
+        self.write_local(&record)?;
+        let _ = chunk_source_len; // silence unused-mut warning on early-decode path
+        Ok(record)
+    }
+
+    /// Scoped bloom-init handshake per ADR-0011 v2.
+    ///
+    /// Sends both a Bloom of `already_have` AND an explicit `want_list`
+    /// of chunk_ids the client cares about. Server walks `want_list`
+    /// against the bloom and returns the missing subset — avoiding the
+    /// full memtable scan that [`Self::bloom_handshake`] triggers on
+    /// large servers.
+    ///
+    /// Use this when the client knows the manifest scope it's syncing
+    /// (the common case for shared folders). Fall back to
+    /// `bloom_handshake` only when the scope is "everything the server
+    /// has."
+    ///
+    /// # Errors
+    ///
+    /// - [`TransferError::PeerUnknown`]
+    /// - [`TransferError::Bloom`] on encode failure (filter too large).
+    /// - [`TransferError::ProtocolViolation`] if the peer doesn't reply
+    ///   with `MissingChunks`.
+    /// - [`TransferError::Timeout`] on
+    ///   [`TransferConfig::bloom_handshake_timeout_ms`].
+    pub async fn bloom_handshake_scoped(
+        &self,
+        peer: &PeerFingerprint,
+        already_have: &[[u8; 32]],
+        want_list: &[[u8; 32]],
+    ) -> Result<Vec<[u8; 32]>, TransferError> {
+        let entry = self.peer_entry(peer).await?;
+        let connection = self.connection_for(peer, &entry).await?;
+
+        let mut bloom = Bloom::with_target_fp(
+            already_have.len().max(1),
+            self.config.bloom_target_fp,
+        );
+        for cid in already_have {
+            bloom.insert(cid);
+        }
+        let bloom_bytes = bloom.encode()?;
+        let payload = wire::encode_scoped_bloom(want_list, &bloom_bytes);
+        let request = Frame::new(FrameKind::ScopedBloomFilter, payload)?;
         let reply = self
             .send_request_with_timeout(
                 &connection,
@@ -343,9 +574,40 @@ impl TransferEngine {
         store.read_chunk(chunk_id).ok()
     }
 
+    /// Persist a received chunk record durably (append + flush). Used
+    /// by `fetch_chunk` for single-chunk fetches.
     pub(crate) fn write_local(&self, record: &ChunkRecord) -> Result<(), TransferError> {
         let mut store = self.store.write().expect("store rwlock poisoned");
         store.append_chunk(record)?;
+        store.flush()?;
+        Ok(())
+    }
+
+    /// Append a chunk record WITHOUT flushing. Used by `fetch_many` and
+    /// other batch paths that amortize the fsync across many writes via
+    /// a single trailing [`TransferEngine::commit`] call.
+    ///
+    /// **Durability:** the record is in the kernel page cache after this
+    /// call but is **not** guaranteed to survive a crash. Caller MUST
+    /// invoke `commit()` before treating the chunk as durable.
+    pub(crate) fn write_local_no_flush(
+        &self,
+        record: &ChunkRecord,
+    ) -> Result<(), TransferError> {
+        let mut store = self.store.write().expect("store rwlock poisoned");
+        store.append_chunk(record)?;
+        Ok(())
+    }
+
+    /// Flush both chunk_log and manifest_log to durable storage. After
+    /// this returns, all chunks previously appended via the
+    /// `write_local_no_flush` path are durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransferError::Store`] on I/O failure during fsync.
+    pub fn commit(&self) -> Result<(), TransferError> {
+        let mut store = self.store.write().expect("store rwlock poisoned");
         store.flush()?;
         Ok(())
     }

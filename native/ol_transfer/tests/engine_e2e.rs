@@ -42,6 +42,24 @@ fn fast_config() -> EndpointConfig {
     c
 }
 
+fn mk_record_u32(seed: u32, plaintext_len: u32, ciphertext_len: usize) -> ChunkRecord {
+    let mut chunk_id = [0u8; 32];
+    chunk_id[..4].copy_from_slice(&seed.to_le_bytes());
+    chunk_id[31] = 0xCD;
+    ChunkRecord {
+        kind: ChunkRecordKind::ChunkBlob,
+        address_kind: ChunkAddressKind::Raw,
+        aead_kind: ChunkAeadKind::AesGcm256,
+        compressed: false,
+        format_aware: false,
+        length_plaintext: plaintext_len,
+        chunk_id,
+        ratchet_key_id: [0x77u8; 16],
+        stripe_descriptor: StripeDescriptor::NONE,
+        ciphertext: vec![0xCDu8; ciphertext_len],
+    }
+}
+
 fn mk_record(id_byte: u8, plaintext_len: u32, ciphertext_len: usize) -> ChunkRecord {
     let mut chunk_id = [0u8; 32];
     chunk_id[0] = id_byte;
@@ -418,6 +436,118 @@ async fn known_peers_reflects_registry() {
     assert_eq!(bob_engine.known_peers().await, vec![fp]);
     bob_engine.forget_peer(&fp).await;
     assert!(bob_engine.known_peers().await.is_empty());
+}
+
+#[tokio::test]
+async fn bloom_handshake_scoped_filters_to_want_list() {
+    // Server has 200 chunks. Client has 50 of them. Client's want_list
+    // is a 100-chunk subset of the server's chunks. The server should
+    // return exactly the 50 in want_list that the client doesn't have.
+    let (alice, bob) = pair();
+    let mut all_ids = Vec::new();
+    for i in 0u32..200 {
+        let r = mk_record_u32(i, 32, 48);
+        let id = r.chunk_id;
+        {
+            let mut s = alice.store.write().unwrap();
+            s.append_chunk(&r).unwrap();
+            s.flush().unwrap();
+        }
+        all_ids.push(id);
+    }
+    // Bob's existing: first 50.
+    let bob_have: Vec<[u8; 32]> = all_ids.iter().take(50).copied().collect();
+    // Want list: 100 ids spanning ids 25..125 (so 25 overlap with already_have, 75 are missing).
+    let want_list: Vec<[u8; 32]> = all_ids.iter().skip(25).take(100).copied().collect();
+
+    let alice_engine =
+        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
+    let bob_engine =
+        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_server = Arc::clone(&alice_engine);
+    tokio::spawn(async move {
+        let _ = alice_server.run_server().await;
+    });
+    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+
+    let missing = bob_engine
+        .bloom_handshake_scoped(&alice.fingerprint, &bob_have, &want_list)
+        .await
+        .unwrap();
+    // Expected count: roughly 75 (want_list minus bob_have intersection).
+    // Bloom FP rate 1% means we may see slightly fewer.
+    assert!(
+        missing.len() >= 70 && missing.len() <= 75,
+        "expected ~75 missing, got {}",
+        missing.len()
+    );
+    // None of the returned ids should be in bob_have.
+    for cid in &missing {
+        assert!(!bob_have.contains(cid));
+    }
+    // All returned ids should be in want_list.
+    for cid in &missing {
+        assert!(want_list.contains(cid));
+    }
+}
+
+#[tokio::test]
+async fn fetch_chunk_fountain_round_trip() {
+    // ADR-0015 wire path: client requests via FountainRequest, server
+    // streams FountainBurst frames, client decodes + acks.
+    let (alice, bob) = pair();
+
+    // Alice has a 16 KiB chunk (so K=16-ish at the 1 KiB symbol size).
+    let record = mk_record(0x9F, 16 * 1024, 16 * 1024 + 16);
+    let chunk_id = record.chunk_id;
+    {
+        let mut s = alice.store.write().unwrap();
+        s.append_chunk(&record).unwrap();
+        s.flush().unwrap();
+    }
+
+    let alice_engine =
+        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
+    let bob_engine =
+        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+
+    let alice_server = Arc::clone(&alice_engine);
+    tokio::spawn(async move {
+        let _ = alice_server.run_server().await;
+    });
+    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+
+    let fetched = bob_engine
+        .fetch_chunk_fountain(&alice.fingerprint, &chunk_id)
+        .await
+        .unwrap();
+    assert_eq!(fetched.chunk_id, chunk_id);
+    assert_eq!(fetched.length_plaintext, 16 * 1024);
+    assert_eq!(fetched.ciphertext.len(), 16 * 1024 + 16);
+
+    // Bob's store has it.
+    let s = bob.store.read().unwrap();
+    assert!(s.has_chunk(&chunk_id));
+}
+
+#[tokio::test]
+async fn fetch_chunk_fountain_not_found() {
+    let (alice, bob) = pair();
+    let alice_engine =
+        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
+    let bob_engine =
+        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+
+    let alice_server = Arc::clone(&alice_engine);
+    tokio::spawn(async move {
+        let _ = alice_server.run_server().await;
+    });
+    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+
+    let result = bob_engine
+        .fetch_chunk_fountain(&alice.fingerprint, &[0xFFu8; 32])
+        .await;
+    assert!(matches!(result, Err(TransferError::ChunkNotFound { .. })));
 }
 
 #[tokio::test]

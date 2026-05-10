@@ -76,7 +76,10 @@ pub use convergent::{
     ContentType, ConvergentPolicy, EncryptionMode, CONVERGENT_AEAD_KEY_CONTEXT,
 };
 pub use error::AeadError;
-pub use frame::{decrypt_chunk, decrypt_frame, encrypt_chunk, encrypt_frame, FrameRef};
+pub use frame::{
+    decrypt_chunk, decrypt_chunks_par, decrypt_frame, encrypt_chunk, encrypt_chunks_par,
+    encrypt_frame, FrameRef,
+};
 pub use key::{ChunkAeadKey, FRAME_KEY_LEN};
 pub use nonce::{frame_nonce, FRAME_NONCE_LEN};
 

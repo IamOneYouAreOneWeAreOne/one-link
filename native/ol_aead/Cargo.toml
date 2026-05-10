@@ -20,6 +20,10 @@ subtle           = { workspace = true }
 zeroize          = { workspace = true }
 thiserror        = { workspace = true }
 tracing          = { workspace = true }
+# Parallel multi-chunk encrypt/decrypt path. Single-chunk paths stay
+# sequential (4 frames at 16 KiB each is too few to amortize dispatch);
+# the win lands when ingesting hundreds of chunks at once.
+rayon            = "1.10"
 
 [dev-dependencies]
 proptest         = { workspace = true }

@@ -39,6 +39,27 @@ pub enum FrameKind {
     BloomFilter,
     /// Response listing chunk_ids the receiver still needs (ADR-0011).
     MissingChunks,
+    /// Client-side request for a chunk via fountain delivery (ADR-0015).
+    /// Payload = 32-byte chunk_id. Server responds with a stream of
+    /// `FountainBurst` frames on the same bi-stream until either the
+    /// chunk is fully encoded or the client sends `FountainAck`.
+    FountainRequest,
+    /// Scoped Bloom-filter handshake (ADR-0011 v2): the client supplies
+    /// **both** a Bloom of what it already has AND an explicit
+    /// `want_list` of chunk_ids it cares about. The server walks the
+    /// want_list against the Bloom and returns the missing subset,
+    /// avoiding a full memtable scan on large servers.
+    ///
+    /// Payload format:
+    /// `[want_count: u32 LE][want_id_1..n: 32 bytes each][bloom_bytes]`.
+    ScopedBloomFilter,
+    /// One LT-fountain-encoded packet for a chunk (ADR-0015).
+    /// Payload = FountainPacket wire bytes (44-byte header + symbol).
+    FountainBurst,
+    /// Acknowledgement that the receiver has fully decoded a chunk via
+    /// fountain codes; tells the sender to stop emitting symbols.
+    /// Payload = 32-byte chunk_id.
+    FountainAck,
     /// Capability check against a peer's pairing record.
     CapabilityCheck,
     /// Acknowledgement of a capability check (accept / deny).
@@ -67,6 +88,10 @@ impl FrameKind {
             Self::ManifestSyncEnd => 0x12,
             Self::BloomFilter => 0x20,
             Self::MissingChunks => 0x21,
+            Self::FountainBurst => 0x22,
+            Self::FountainAck => 0x23,
+            Self::FountainRequest => 0x24,
+            Self::ScopedBloomFilter => 0x25,
             Self::CapabilityCheck => 0x30,
             Self::CapabilityAck => 0x31,
             Self::Ping => 0xF0,
@@ -88,6 +113,10 @@ impl FrameKind {
             0x12 => Some(Self::ManifestSyncEnd),
             0x20 => Some(Self::BloomFilter),
             0x21 => Some(Self::MissingChunks),
+            0x22 => Some(Self::FountainBurst),
+            0x23 => Some(Self::FountainAck),
+            0x24 => Some(Self::FountainRequest),
+            0x25 => Some(Self::ScopedBloomFilter),
             0x30 => Some(Self::CapabilityCheck),
             0x31 => Some(Self::CapabilityAck),
             0xF0 => Some(Self::Ping),
@@ -105,6 +134,12 @@ impl FrameKind {
         match self {
             // Bulk frames carry full chunk_log / manifest_log records.
             Self::ChunkResponse | Self::ManifestRecord => MAX_BULK_FRAME_BYTES,
+            // Bloom filters and fountain bursts can be moderately large.
+            // ADR-0011 caps bloom at 1 MiB; FountainBurst is one
+            // symbol (typically ≤1 KiB) + 44 B header. ScopedBloomFilter
+            // adds an explicit want_list of chunk_ids in front of the
+            // bloom; allow bulk cap.
+            Self::BloomFilter | Self::FountainBurst | Self::ScopedBloomFilter => MAX_BULK_FRAME_BYTES,
             // Everything else is control / fixed-size.
             _ => MAX_CONTROL_FRAME_BYTES,
         }
@@ -241,6 +276,10 @@ mod tests {
             FrameKind::ManifestSyncEnd,
             FrameKind::BloomFilter,
             FrameKind::MissingChunks,
+            FrameKind::FountainBurst,
+            FrameKind::FountainAck,
+            FrameKind::FountainRequest,
+            FrameKind::ScopedBloomFilter,
             FrameKind::CapabilityCheck,
             FrameKind::CapabilityAck,
             FrameKind::Ping,

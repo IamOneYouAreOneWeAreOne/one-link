@@ -2,6 +2,7 @@
 
 use ol_bloom::BloomError;
 use ol_chunk_store::ChunkStoreError;
+use ol_fountain::FountainError;
 use ol_quic::{FrameKind, QuicError};
 use thiserror::Error;
 
@@ -19,6 +20,10 @@ pub enum TransferError {
     /// Bloom filter encode/decode error.
     #[error("bloom: {0}")]
     Bloom(#[from] BloomError),
+
+    /// LT-fountain encode/decode error (ADR-0015).
+    #[error("fountain: {0}")]
+    Fountain(#[from] FountainError),
 
     /// I/O error from a non-WAL non-QUIC source.
     #[error("I/O: {0}")]

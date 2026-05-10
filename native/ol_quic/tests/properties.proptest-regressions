@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a961166c4b003c7458d90a4b7a0502fdb78ca0048c78653b6b55c368ac8e380f # shrinks to kind = BloomFilter
+cc 07a731e5cefe43bbef0d380f897c665bd8e81033f0c2054491ee62f34bba4a63 # shrinks to b = 34
