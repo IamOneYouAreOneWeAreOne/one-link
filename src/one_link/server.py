@@ -157,6 +157,12 @@ def _enumerate_sovereign_primitives() -> list[dict]:
          "primitive", "IPv6 link-local multicast for peer discovery "
                       "across VLAN trunk ports where mDNS sandboxes",
          "Bundle 50"),
+        ("one_link.sealed_relay", "Sealed sender + capability grant (relay path)",
+         "primitive", "Combines Bundle 39 sealed-sender with Bundle 44 "
+                      "capability grants. Relay sees opaque envelope; "
+                      "recipient gets sender identity + auto-verified "
+                      "auto-expiring grant atomically",
+         "Bundle 52"),
         ("one_link.double_ratchet", "Double Ratchet",
          "primitive", "Forward secrecy + post-compromise security "
                       "(daemon path; channel.py wires it on CAPS)",
