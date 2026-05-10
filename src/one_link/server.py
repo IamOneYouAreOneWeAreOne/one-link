@@ -127,9 +127,11 @@ def _enumerate_sovereign_primitives() -> list[dict]:
          "primitive", "Forward-secret chain + signed deletion proofs",
          "Bundle 42"),
         ("one_link.rdz_blind", "Rendezvous blinding",
-         "primitive", "HKDF-rotated lookup tokens per epoch — "
-                      "rendezvous never sees raw pubkeys",
-         "Bundle 43"),
+         "live", "HKDF-rotated lookup tokens per epoch — "
+                 "rendezvous_server.py /api/v2/lookup_token serves "
+                 "blinded queries; raw pubkey never appears on the "
+                 "lookup wire",
+         "Bundle 43+51"),
         ("one_link.caps_grants", "Signed capability grants",
          "primitive", "Fine-grained authority with auto-expiry — "
                       "offline-resilient revocation",

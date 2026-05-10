@@ -162,11 +162,26 @@ class Registration:
 
 
 class Registry:
-    """Pubkey -> Registration. Bounded; evicts on insert when full."""
+    """Pubkey -> Registration. Bounded; evicts on insert when full.
+
+    v0.20.7 (Bundle 51): also maintains a *blinded-token alias map*
+    so the rendezvous can answer /api/v2/lookup_token queries
+    without ever seeing a raw pubkey on the lookup wire. The alias
+    is derived from (pubkey, current epoch) via HKDF and rotates
+    per epoch — an attacker logging tokens gets nothing usable
+    once the rotation window passes."""
 
     def __init__(self, max_entries: int):
         self.max_entries = max_entries
         self._entries: dict[bytes, Registration] = {}
+        # Bundle 43/51: token (32 bytes) → pubkey (32 bytes). Same
+        # entry can have multiple tokens active at once across epoch
+        # boundaries; we keep ALL of them indexed so a query at the
+        # epoch boundary doesn't miss.
+        self._token_index: dict[bytes, bytes] = {}
+        # Reverse map: pubkey → set of tokens we've ever indexed for
+        # them, so removal cleans up the alias map too.
+        self._tokens_for_pubkey: dict[bytes, set[bytes]] = {}
         self.evictions = 0
 
     def __len__(self) -> int:
@@ -175,21 +190,57 @@ class Registry:
     def get(self, pubkey: bytes) -> Optional[Registration]:
         return self._entries.get(pubkey)
 
+    def get_by_token(self, token: bytes) -> Optional[Registration]:
+        """v0.20.7 (Bundle 51): blinded-token lookup. Returns the
+        Registration whose pubkey was previously aliased to this
+        token, or None if no such alias exists / the alias is
+        stale."""
+        pub = self._token_index.get(token)
+        if pub is None:
+            return None
+        return self._entries.get(pub)
+
     def upsert(self, reg: Registration) -> None:
         # If we'd exceed capacity, evict the oldest-expiring entry.
         if reg.pubkey not in self._entries and len(self._entries) >= self.max_entries:
             victim = min(self._entries.values(), key=lambda r: r.expires_at_ms)
             self._entries.pop(victim.pubkey, None)
+            self._cleanup_token_aliases(victim.pubkey)
             self.evictions += 1
         self._entries[reg.pubkey] = reg
+        # v0.20.7 (Bundle 51): compute blinded tokens for the
+        # current + previous + next epochs so a query at any time
+        # within the rotation window finds the entry. 1-hour
+        # default epoch (rdz_blind.DEFAULT_EPOCH_SECONDS); 3 epochs
+        # = 3 hours of token coverage. New aliases on each upsert
+        # so rotated tokens supersede old ones in the index.
+        from one_link import rdz_blind as _rb
+        current = _rb.current_epoch_id()
+        for delta in (-1, 0, 1):
+            token = _rb.derive_blinded_token(
+                peer_pub=reg.pubkey, epoch_id=max(0, current + delta),
+            )
+            self._token_index[token] = reg.pubkey
+            self._tokens_for_pubkey.setdefault(
+                reg.pubkey, set()
+            ).add(token)
 
     def remove(self, pubkey: bytes) -> bool:
-        return self._entries.pop(pubkey, None) is not None
+        present = self._entries.pop(pubkey, None) is not None
+        if present:
+            self._cleanup_token_aliases(pubkey)
+        return present
+
+    def _cleanup_token_aliases(self, pubkey: bytes) -> None:
+        tokens = self._tokens_for_pubkey.pop(pubkey, set())
+        for t in tokens:
+            self._token_index.pop(t, None)
 
     def evict_expired(self, now_ms_value: int) -> int:
         dead = [k for k, v in self._entries.items() if v.expires_at_ms <= now_ms_value]
         for k in dead:
             self._entries.pop(k, None)
+            self._cleanup_token_aliases(k)
         return len(dead)
 
 
@@ -374,6 +425,13 @@ class RendezvousApp:
         )
         app.router.add_post("/api/v1/register", self._handle_register)
         app.router.add_get("/api/v1/lookup/{pubkey_b64}", self._handle_lookup)
+        # v0.20.7 (Bundle 51): blinded-token lookup. The rendezvous
+        # never sees the raw pubkey on this path — it uses an
+        # HKDF-derived per-epoch token. Daemons compute the same
+        # token from (peer_pub, epoch) and look up by it.
+        app.router.add_get(
+            "/api/v2/lookup_token/{token_b64}", self._handle_lookup_token,
+        )
         app.router.add_post("/api/v1/revoke", self._handle_revoke)
         app.router.add_get("/health", self._handle_health)
         app.router.add_get("/metrics", self._handle_metrics)
@@ -729,6 +787,47 @@ class RendezvousApp:
 
         ack = LookupAck(
             pubkey=reg.pubkey,
+            observed_endpoint=reg.observed_endpoint,
+            advertised_endpoints=list(reg.advertised_endpoints),
+            nat_type=reg.nat_type,
+            capabilities=list(reg.capabilities),
+            expires_at_ms=reg.expires_at_ms,
+            server_time_ms=now,
+        )
+        self.metrics.lookups_total += 1
+        return web.json_response(ack.to_wire())
+
+    async def _handle_lookup_token(self, request: web.Request) -> web.Response:
+        """v0.20.7 (Bundle 51): blinded-token lookup. Same rate-limit
+        story as v1; the wire never carries a raw pubkey."""
+        if not self._rate_check_ip(request):
+            return web.Response(status=429, text="rate limited")
+        ip = self._client_ip(request)
+        if not self.rate_lookup_per_ip.admit(ip):
+            self.metrics.rate_limit_rejects_total += 1
+            log.info(
+                "lookup_token rate-limited iphash=%s",
+                self._ip_log_id(ip),
+            )
+            return web.Response(status=429, text="lookup rate limited")
+        from one_link.rendezvous_proto import _b64d  # type: ignore
+
+        try:
+            token = _b64d(request.match_info["token_b64"])
+        except Exception:
+            return web.Response(status=400, text="invalid token_b64")
+        if len(token) != 32:
+            return web.Response(status=400, text="token must be 32 bytes")
+        reg = self.registry.get_by_token(token)
+        now = now_ms()
+        if reg is None or reg.expires_at_ms <= now:
+            self.metrics.lookups_total += 1
+            self.metrics.lookup_misses_total += 1
+            return web.Response(status=404, text="not registered")
+        ack = LookupAck(
+            pubkey=reg.pubkey,  # the recipient learns the pubkey;
+                                # the rendezvous never sent it on
+                                # the *lookup* wire (only the alias)
             observed_endpoint=reg.observed_endpoint,
             advertised_endpoints=list(reg.advertised_endpoints),
             nat_type=reg.nat_type,
