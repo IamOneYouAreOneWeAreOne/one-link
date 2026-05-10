@@ -719,6 +719,14 @@ class Daemon:
         # check-or-create critical section so concurrent callers
         # collapse onto a single fresh session.
         self._outbound_session_create_locks: dict[str, asyncio.Lock] = {}
+        # Bundle 56: signed-capability-grant store. Daemons accept
+        # grants from peers (typically over the existing channel
+        # frame format) and consult the store from
+        # ``_capability_allowed``. Active grants override the binary
+        # pinned/unpinned policy for the specific (capability, scope)
+        # they cover; expired grants auto-drop.
+        from one_link.cap_store import CapStore
+        self._cap_store: CapStore = CapStore()
         # M1: track which blob hashes we've explicitly requested from each
         # peer (via MANIFEST_WANTS). BLOB_OFFER / BLOB_CHUNK frames whose
         # hash isn't in this set are silently dropped — a paired peer can't
@@ -5241,10 +5249,45 @@ class Daemon:
         return None
 
     def _capability_allowed(self, peer_fp: str, cap: str) -> bool:
+        # Bundle 56: a peer with a valid signed capability grant
+        # (Bundle 44) for this exact (cap) is allowed regardless of
+        # the binary pinned-policy state. Useful for one-shot
+        # delegation flows (e.g. a colleague granted "files:read"
+        # for the next hour) without forcing them through the full
+        # SAS pair flow. The grant's signature attests authority;
+        # CapStore enforces auto-expiry + replay.
+        if self._cap_store is not None and self.state is not None:
+            try:
+                peer_pub = self._peer_pub_for_fp(peer_fp)
+                # Local granter pubkey == this device's identity. A
+                # future bundle adds delegation chains where another
+                # paired peer can act as granter; for now self-grant
+                # is the only authority recognized.
+                if peer_pub is not None and self._cap_store.has_capability(
+                    granter_pub=self.me.public_bytes,
+                    subject_pub=peer_pub,
+                    capability=cap,
+                ):
+                    return True
+            except Exception:
+                pass
         if self.state is None:
             return True
         policy = self.state.get_peer_capability_policy(peer_fp)
         return policy is None or cap in policy
+
+    def _peer_pub_for_fp(self, peer_fp: str) -> Optional[bytes]:
+        """Resolve a hex fingerprint back to the 32-byte raw pubkey
+        from the peer registry, when known. Used by Bundle 56's
+        grant lookup; returns None if we don't have a pub on file
+        (in which case grant-based authority is unavailable for
+        this peer)."""
+        if self.state is None:
+            return None
+        rec = self.state.get_peer(peer_fp)
+        if rec is None or not rec.pubkey:
+            return None
+        return rec.pubkey
 
     def _apply_default_capability_policy(self, peer_fp: str) -> None:
         """v0.20.7 (security audit C3): at SAS-pair finalize, the per-peer

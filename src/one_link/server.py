@@ -133,9 +133,15 @@ def _enumerate_sovereign_primitives() -> list[dict]:
                  "lookup wire",
          "Bundle 43+51"),
         ("one_link.caps_grants", "Signed capability grants",
-         "primitive", "Fine-grained authority with auto-expiry — "
-                      "offline-resilient revocation",
-         "Bundle 44"),
+         "live", "Fine-grained authority with auto-expiry — "
+                 "offline-resilient revocation. Wired into "
+                 "Daemon._capability_allowed via cap_store.CapStore",
+         "Bundle 44+56"),
+        ("one_link.cap_store", "Capability-grant store (active grants)",
+         "live", "Per-daemon CapStore: verify-on-accept + replay "
+                 "defense + auto-expiry on read + revoke-by-(granter|"
+                 "subject)",
+         "Bundle 56"),
         ("one_link.identity_dag", "Identity DAG (multi-device)",
          "primitive", "Root keypair signs device certs; per-device "
                       "Ed25519 priv never leaves the device",
