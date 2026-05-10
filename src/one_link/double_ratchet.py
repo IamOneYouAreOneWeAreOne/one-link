@@ -124,7 +124,25 @@ def x25519_keypair() -> tuple[X25519PrivateKey, bytes]:
 #   - and the additive equivalents (pubkey high bit flipped — RFC 7748
 #     says implementations MUST mask the high bit of u, but a peer
 #     that doesn't may submit raw values with the bit set).
-_X25519_SMALL_ORDER_POINTS: frozenset[bytes] = frozenset(
+# Phase C constant-time audit (ADR-0017 acceptance gate item):
+# the small-order block-list is consulted on every inbound peer key
+# exchange. The previous v0.20 implementation used a `frozenset`
+# (`pub in _X25519_SMALL_ORDER_POINTS`) which short-circuits on the
+# first byte-mismatch via the dictionary lookup path — that's a
+# data-dependent timing leak. Even though the block-listed points are
+# public values, timing differences distinguish "rejected here" from
+# "rejected later", and "rejected at entry k vs k+1" reveals which
+# attack the peer attempted. Per the Phase C gate:
+#
+#   > Constant-time check: timing variance across cap-validity /
+#   > crypto-input-validity < 1% of mean.
+#
+# Replace with a constant-time linear scan that compares every entry
+# regardless of an early match. `hmac.compare_digest` does
+# constant-time byte-wise comparison; we OR the results into a single
+# accumulator (no short-circuit branch) so the function's runtime is
+# data-independent.
+_X25519_SMALL_ORDER_POINTS: tuple[bytes, ...] = tuple(
     bytes.fromhex(h) for h in (
         # u=0
         "0000000000000000000000000000000000000000000000000000000000000000",
@@ -153,11 +171,38 @@ _X25519_SMALL_ORDER_POINTS: frozenset[bytes] = frozenset(
 
 
 def _is_small_order_x25519(pub: bytes) -> bool:
-    """Constant-time-ish lookup of the small-order block-list. We use
-    a frozenset here rather than a per-byte compare because the cost
-    we care about is operational (don't reach the curve op), not side-
-    channel: small-order points are public values."""
-    return pub in _X25519_SMALL_ORDER_POINTS
+    """Constant-time check whether ``pub`` is in the small-order block-list.
+
+    Phase C constant-time gate (per the file-engine-v2 plan): timing
+    variance must be < 1% of the mean across all inputs. We achieve
+    this by:
+
+      * Comparing ``pub`` to **every** block-list entry via
+        ``hmac.compare_digest`` (constant-time byte-wise XOR over the
+        32-byte key), regardless of whether an earlier entry matched.
+      * Accumulating the boolean results into an ``int`` via ``|`` so
+        no Python-level short-circuit branch leaks "which entry hit."
+      * Returning a single bool at the end.
+
+    Cost: 13 × (32-byte ``compare_digest``) ≈ a few µs per call.
+    The curve-op cost dominates; this gate is negligible.
+    """
+    import hmac
+
+    # Wrong-length inputs are not "small order" per se, but they're
+    # malformed; reject them up front. Treating a wrong-length input
+    # as accepted-but-pending-curve-op would let the curve operation
+    # fail later in a way that mixes lengths into timing. Length itself
+    # isn't secret (it's the protocol frame size), so this guard is
+    # public-info-only and safe to branch on.
+    if len(pub) != 32:
+        return True
+    matched = 0
+    for entry in _X25519_SMALL_ORDER_POINTS:
+        # bool → int (0/1) via int(); OR into the accumulator without
+        # short-circuiting. compare_digest itself is CT byte-wise.
+        matched |= int(hmac.compare_digest(pub, entry))
+    return matched == 1
 
 
 def x25519_dh(priv: X25519PrivateKey, peer_pub: bytes) -> bytes:

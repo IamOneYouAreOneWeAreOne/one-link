@@ -21,6 +21,8 @@ members = [
     "ol_bloom",
     "ol_transfer",
     "ol_fountain",
+    "ol_fec",
+    "ol_pqkem",
     "one_link_native",
     # Future crates (added as they ship):
     # Future Phase A2:
