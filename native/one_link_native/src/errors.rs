@@ -14,6 +14,7 @@ create_exception!(one_link_native, OlChunkError, OlError);
 create_exception!(one_link_native, OlAeadError, OlError);
 create_exception!(one_link_native, OlWalError, OlError);
 create_exception!(one_link_native, OlChunkStoreError, OlError);
+create_exception!(one_link_native, OlQuicError, OlError);
 
 /// Register all `one_link_native.*` exception classes on the given
 /// top-level module.
@@ -26,6 +27,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         "OlChunkStoreError",
         m.py().get_type_bound::<OlChunkStoreError>(),
     )?;
+    m.add("OlQuicError", m.py().get_type_bound::<OlQuicError>())?;
     Ok(())
 }
 
@@ -58,4 +60,10 @@ pub fn wal_error_to_pyerr(err: ol_wal::WalError) -> PyErr {
 #[inline]
 pub fn chunk_store_error_to_pyerr(err: ol_chunk_store::ChunkStoreError) -> PyErr {
     OlChunkStoreError::new_err(err.to_string())
+}
+
+/// Convert an `ol_quic::QuicError` to a Python `OlQuicError`.
+#[inline]
+pub fn quic_error_to_pyerr(err: ol_quic::QuicError) -> PyErr {
+    OlQuicError::new_err(err.to_string())
 }

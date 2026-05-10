@@ -18,14 +18,14 @@
   },
   "results": [
     {
-      "name": "native_cdc_scan_256MiB",
-      "bytes_processed": 268435456,
+      "name": "native_cdc_scan_128MiB",
+      "bytes_processed": 134217728,
       "iterations": 5,
-      "seconds_total": 0.4147888,
-      "seconds_per_iter_median": 0.0821207,
-      "bytes_per_second_median": 3268791620.1396236,
+      "seconds_total": 0.2086423,
+      "seconds_per_iter_median": 0.0412868,
+      "bytes_per_second_median": 3250862939.2445045,
       "metadata": {
-        "input_bytes": 268435456,
+        "input_bytes": 134217728,
         "kernel": "FastCDC v2020 + Gear-256"
       }
     },
@@ -33,9 +33,9 @@
       "name": "native_blake3_addr_raw_64KiB",
       "bytes_processed": 65536,
       "iterations": 1000,
-      "seconds_total": 0.0100911,
-      "seconds_per_iter_median": 1.01e-05,
-      "bytes_per_second_median": 6488712871.287128,
+      "seconds_total": 0.0110989,
+      "seconds_per_iter_median": 1.08e-05,
+      "bytes_per_second_median": 6068148148.148149,
       "metadata": {
         "input_bytes": 65536
       }
@@ -44,9 +44,9 @@
       "name": "native_blake3_addr_convergent_64KiB",
       "bytes_processed": 65536,
       "iterations": 1000,
-      "seconds_total": 0.0102239,
-      "seconds_per_iter_median": 1.03e-05,
-      "bytes_per_second_median": 6362718446.601942,
+      "seconds_total": 0.0094869,
+      "seconds_per_iter_median": 9.4e-06,
+      "bytes_per_second_median": 6971914893.617022,
       "metadata": {
         "input_bytes": 65536
       }
@@ -55,7 +55,7 @@
       "name": "native_derive_aead_key",
       "bytes_processed": 64,
       "iterations": 100000,
-      "seconds_total": 0.021785,
+      "seconds_total": 0.021567799999999998,
       "seconds_per_iter_median": 2e-07,
       "bytes_per_second_median": 320000000.0,
       "metadata": {
@@ -66,7 +66,7 @@
       "name": "native_derive_stripe_seed",
       "bytes_processed": 33,
       "iterations": 100000,
-      "seconds_total": 0.0228801,
+      "seconds_total": 0.0232181,
       "seconds_per_iter_median": 2e-07,
       "bytes_per_second_median": 165000000.0,
       "metadata": {
@@ -78,9 +78,9 @@
       "name": "native_aead_aes_encrypt_16KiB",
       "bytes_processed": 16384,
       "iterations": 100,
-      "seconds_total": 0.0009237,
-      "seconds_per_iter_median": 9e-06,
-      "bytes_per_second_median": 1820444444.4444444,
+      "seconds_total": 0.0008715,
+      "seconds_per_iter_median": 8.6e-06,
+      "bytes_per_second_median": 1905116279.0697672,
       "metadata": {
         "input_bytes": 16384,
         "kind": "aes"
@@ -90,9 +90,9 @@
       "name": "native_aead_aes_decrypt_16KiB",
       "bytes_processed": 16384,
       "iterations": 100,
-      "seconds_total": 0.0009044,
-      "seconds_per_iter_median": 9e-06,
-      "bytes_per_second_median": 1820444444.4444444,
+      "seconds_total": 0.0008676000000000001,
+      "seconds_per_iter_median": 8.6e-06,
+      "bytes_per_second_median": 1905116279.0697672,
       "metadata": {
         "input_bytes": 16384,
         "kind": "aes"
@@ -102,9 +102,9 @@
       "name": "native_aead_aes_encrypt_64KiB",
       "bytes_processed": 65536,
       "iterations": 100,
-      "seconds_total": 0.0034869,
-      "seconds_per_iter_median": 3.39e-05,
-      "bytes_per_second_median": 1933215339.2330384,
+      "seconds_total": 0.0035625,
+      "seconds_per_iter_median": 3.54e-05,
+      "bytes_per_second_median": 1851299435.0282485,
       "metadata": {
         "input_bytes": 65536,
         "kind": "aes"
@@ -114,9 +114,9 @@
       "name": "native_aead_aes_decrypt_64KiB",
       "bytes_processed": 65536,
       "iterations": 100,
-      "seconds_total": 0.0033144999999999997,
-      "seconds_per_iter_median": 3.29e-05,
-      "bytes_per_second_median": 1991975683.8905776,
+      "seconds_total": 0.0034507,
+      "seconds_per_iter_median": 3.415e-05,
+      "bytes_per_second_median": 1919062957.5402634,
       "metadata": {
         "input_bytes": 65536,
         "kind": "aes"
@@ -126,9 +126,9 @@
       "name": "native_aead_aes_encrypt_256KiB",
       "bytes_processed": 262144,
       "iterations": 100,
-      "seconds_total": 0.0362644,
-      "seconds_per_iter_median": 0.0003542,
-      "bytes_per_second_median": 740101637.4929419,
+      "seconds_total": 0.0292608,
+      "seconds_per_iter_median": 0.00028885,
+      "bytes_per_second_median": 907543707.8068202,
       "metadata": {
         "input_bytes": 262144,
         "kind": "aes"
@@ -138,9 +138,9 @@
       "name": "native_aead_aes_decrypt_256KiB",
       "bytes_processed": 262144,
       "iterations": 100,
-      "seconds_total": 0.0352571,
-      "seconds_per_iter_median": 0.0003496,
-      "bytes_per_second_median": 749839816.9336385,
+      "seconds_total": 0.0288435,
+      "seconds_per_iter_median": 0.00028724999999999996,
+      "bytes_per_second_median": 912598781.5491734,
       "metadata": {
         "input_bytes": 262144,
         "kind": "aes"
@@ -150,9 +150,9 @@
       "name": "native_aead_chacha_encrypt_16KiB",
       "bytes_processed": 16384,
       "iterations": 100,
-      "seconds_total": 0.0009507,
-      "seconds_per_iter_median": 9.3e-06,
-      "bytes_per_second_median": 1761720430.1075268,
+      "seconds_total": 0.000987,
+      "seconds_per_iter_median": 9.6e-06,
+      "bytes_per_second_median": 1706666666.6666667,
       "metadata": {
         "input_bytes": 16384,
         "kind": "chacha"
@@ -162,9 +162,9 @@
       "name": "native_aead_chacha_decrypt_16KiB",
       "bytes_processed": 16384,
       "iterations": 100,
-      "seconds_total": 0.0009418,
-      "seconds_per_iter_median": 9.4e-06,
-      "bytes_per_second_median": 1742978723.4042554,
+      "seconds_total": 0.0009577,
+      "seconds_per_iter_median": 9.55e-06,
+      "bytes_per_second_median": 1715602094.2408376,
       "metadata": {
         "input_bytes": 16384,
         "kind": "chacha"
@@ -174,9 +174,9 @@
       "name": "native_aead_chacha_encrypt_64KiB",
       "bytes_processed": 65536,
       "iterations": 100,
-      "seconds_total": 0.0037343,
-      "seconds_per_iter_median": 3.71e-05,
-      "bytes_per_second_median": 1766469002.695418,
+      "seconds_total": 0.0038409,
+      "seconds_per_iter_median": 3.8e-05,
+      "bytes_per_second_median": 1724631578.9473684,
       "metadata": {
         "input_bytes": 65536,
         "kind": "chacha"
@@ -186,9 +186,9 @@
       "name": "native_aead_chacha_decrypt_64KiB",
       "bytes_processed": 65536,
       "iterations": 100,
-      "seconds_total": 0.0038425,
-      "seconds_per_iter_median": 3.82e-05,
-      "bytes_per_second_median": 1715602094.2408376,
+      "seconds_total": 0.0037457000000000002,
+      "seconds_per_iter_median": 3.73e-05,
+      "bytes_per_second_median": 1756997319.0348525,
       "metadata": {
         "input_bytes": 65536,
         "kind": "chacha"
@@ -198,9 +198,9 @@
       "name": "native_aead_chacha_encrypt_256KiB",
       "bytes_processed": 262144,
       "iterations": 100,
-      "seconds_total": 0.0301708,
-      "seconds_per_iter_median": 0.00030055,
-      "bytes_per_second_median": 872214273.8313092,
+      "seconds_total": 0.0308578,
+      "seconds_per_iter_median": 0.00029975,
+      "bytes_per_second_median": 874542118.4320267,
       "metadata": {
         "input_bytes": 262144,
         "kind": "chacha"
@@ -210,9 +210,9 @@
       "name": "native_aead_chacha_decrypt_256KiB",
       "bytes_processed": 262144,
       "iterations": 100,
-      "seconds_total": 0.0315183,
-      "seconds_per_iter_median": 0.00031125,
-      "bytes_per_second_median": 842229718.875502,
+      "seconds_total": 0.031296,
+      "seconds_per_iter_median": 0.00030674999999999995,
+      "bytes_per_second_median": 854585167.0741647,
       "metadata": {
         "input_bytes": 262144,
         "kind": "chacha"
@@ -222,9 +222,9 @@
       "name": "native_wal_group_commit_batch=128_payload=4KiB",
       "bytes_processed": 524288,
       "iterations": 5,
-      "seconds_total": 0.0273949,
-      "seconds_per_iter_median": 0.004278,
-      "bytes_per_second_median": 122554464.70313232,
+      "seconds_total": 0.0214688,
+      "seconds_per_iter_median": 0.0036681,
+      "bytes_per_second_median": 142931763.0380851,
       "metadata": {
         "batch_size": 128,
         "payload_kib": 4
@@ -234,9 +234,9 @@
       "name": "native_wal_group_commit_batch=128_payload=64KiB",
       "bytes_processed": 8388608,
       "iterations": 5,
-      "seconds_total": 0.085506,
-      "seconds_per_iter_median": 0.0171227,
-      "bytes_per_second_median": 489911520.9633994,
+      "seconds_total": 0.08824370000000001,
+      "seconds_per_iter_median": 0.017909,
+      "bytes_per_second_median": 468401809.1462393,
       "metadata": {
         "batch_size": 128,
         "payload_kib": 64
@@ -246,9 +246,9 @@
       "name": "native_chunk_store_write_batch=32_plaintext=64KiB",
       "bytes_processed": 2097152,
       "iterations": 5,
-      "seconds_total": 0.0380408,
-      "seconds_per_iter_median": 0.0076604,
-      "bytes_per_second_median": 273765338.6246149,
+      "seconds_total": 0.039979100000000004,
+      "seconds_per_iter_median": 0.0080333,
+      "bytes_per_second_median": 261057348.7856796,
       "metadata": {
         "batch_size": 32,
         "plaintext_kib": 64
@@ -258,9 +258,9 @@
       "name": "native_chunk_store_write_batch=128_plaintext=64KiB",
       "bytes_processed": 8388608,
       "iterations": 5,
-      "seconds_total": 0.0991041,
-      "seconds_per_iter_median": 0.018649,
-      "bytes_per_second_median": 449815432.46286666,
+      "seconds_total": 0.09360170000000001,
+      "seconds_per_iter_median": 0.0186198,
+      "bytes_per_second_median": 450520843.4032589,
       "metadata": {
         "batch_size": 128,
         "plaintext_kib": 64
@@ -270,12 +270,86 @@
       "name": "native_chunk_store_locate",
       "bytes_processed": 16000000,
       "iterations": 1,
-      "seconds_total": 0.1109279,
-      "seconds_per_iter_median": 0.1109279,
-      "bytes_per_second_median": 144237833.7640936,
+      "seconds_total": 0.1157468,
+      "seconds_per_iter_median": 0.1157468,
+      "bytes_per_second_median": 138232763.23837894,
       "metadata": {
         "chunks_indexed": 1024,
         "lookups": 500000
+      }
+    },
+    {
+      "name": "native_quic_round_trip_16KiB_x200",
+      "bytes_processed": 3276800,
+      "iterations": 1,
+      "seconds_total": 0.0199083,
+      "seconds_per_iter_median": 0.0199083,
+      "bytes_per_second_median": 164594666.54611394,
+      "metadata": {
+        "payload_kib": 16,
+        "round_trips": 200
+      }
+    },
+    {
+      "name": "native_quic_round_trip_64KiB_x200",
+      "bytes_processed": 13107200,
+      "iterations": 1,
+      "seconds_total": 0.0367653,
+      "seconds_per_iter_median": 0.0367653,
+      "bytes_per_second_median": 356510078.79712665,
+      "metadata": {
+        "payload_kib": 64,
+        "round_trips": 200
+      }
+    },
+    {
+      "name": "native_quic_round_trip_256KiB_x50",
+      "bytes_processed": 13107200,
+      "iterations": 1,
+      "seconds_total": 0.0298966,
+      "seconds_per_iter_median": 0.0298966,
+      "bytes_per_second_median": 438417746.49960196,
+      "metadata": {
+        "payload_kib": 256,
+        "round_trips": 50
+      }
+    },
+    {
+      "name": "native_quic_round_trip_1024KiB_x20",
+      "bytes_processed": 20971520,
+      "iterations": 1,
+      "seconds_total": 0.045374,
+      "seconds_per_iter_median": 0.045374,
+      "bytes_per_second_median": 462192445.0125623,
+      "metadata": {
+        "payload_kib": 1024,
+        "round_trips": 20
+      }
+    },
+    {
+      "name": "native_quic_parallel_16x4_64KiB",
+      "bytes_processed": 4194304,
+      "iterations": 1,
+      "seconds_total": 0.0079524,
+      "seconds_per_iter_median": 0.0079524,
+      "bytes_per_second_median": 527426185.80554295,
+      "metadata": {
+        "payload_kib": 64,
+        "parallelism": 16,
+        "iterations_per_stream": 4
+      }
+    },
+    {
+      "name": "native_quic_parallel_8x4_256KiB",
+      "bytes_processed": 8388608,
+      "iterations": 1,
+      "seconds_total": 0.0151145,
+      "seconds_per_iter_median": 0.0151145,
+      "bytes_per_second_median": 555004002.7787886,
+      "metadata": {
+        "payload_kib": 256,
+        "parallelism": 8,
+        "iterations_per_stream": 4
       }
     }
   ]

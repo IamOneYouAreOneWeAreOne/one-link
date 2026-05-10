@@ -28,8 +28,9 @@ from typing import Callable
 import os
 import secrets
 import tempfile
+import threading
 
-from . import aead_native, chunk_native, chunk_store_native, wal_native
+from . import aead_native, chunk_native, chunk_store_native, quic_native, wal_native
 from .cdc import chunk_bytes as legacy_chunk_bytes
 
 
@@ -334,6 +335,165 @@ def bench_native_chunk_store_locate(iterations: int = 1_000_000) -> BenchResult:
     return result
 
 
+# ─── QUIC benchmarks ──────────────────────────────────────────────────
+
+
+def _bench_quic_loopback_round_trip(
+    payload_kib: int,
+    iterations: int = 50,
+) -> BenchResult:
+    """Sequential request/response round-trips on a single connection."""
+    if not quic_native.HAS_NATIVE:
+        raise RuntimeError("quic_native unavailable")
+    payload_bytes = payload_kib * 1024
+    bulk_response = b"\xCD" * payload_bytes
+
+    alice = quic_native.Identity.generate()
+    bob = quic_native.Identity.generate()
+    permitted = {bob.fingerprint}
+    server = quic_native.Endpoint.server(
+        alice,
+        lambda fp: fp in permitted,
+        quic_native.EndpointConfig(bind="127.0.0.1:0", idle_timeout_ms=30_000),
+    )
+    addr = server.local_addr
+
+    holder: list = []
+    done = threading.Event()
+
+    def loop() -> None:
+        conn = server.accept_blocking(timeout_ms=30_000)
+        holder.append(conn)
+        if conn is None:
+            done.set()
+            return
+        for _ in range(iterations):
+            r = conn.recv_frame_blocking(timeout_ms=10_000)
+            if r is None:
+                break
+            sid, _kind, _payload = r
+            conn.send_response_on(sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
+        done.set()
+
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+
+    client = quic_native.Endpoint.client(
+        bob, quic_native.EndpointConfig(bind="127.0.0.1:0", idle_timeout_ms=30_000)
+    )
+    conn = client.connect_blocking(addr, alice.fingerprint, timeout_ms=10_000)
+
+    def go() -> int:
+        for i in range(iterations):
+            cid = bytes([i & 0xFF] * 32)
+            kind, _payload = conn.send_frame_round_trip(quic_native.FRAME_CHUNK_REQUEST, cid)
+            if kind != quic_native.FRAME_CHUNK_RESPONSE:
+                raise RuntimeError(f"unexpected response kind {kind:#x}")
+        return iterations * payload_bytes
+
+    result = _bench(
+        f"native_quic_round_trip_{payload_kib}KiB_x{iterations}",
+        go,
+        iterations=1,
+        metadata={"payload_kib": payload_kib, "round_trips": iterations},
+    )
+    done.wait(timeout=5)
+    conn.close()
+    if holder and holder[0] is not None:
+        holder[0].close()
+    server.close()
+    t.join(timeout=2)
+    client.close()
+    return result
+
+
+def _bench_quic_parallel_streams(
+    payload_kib: int = 64,
+    parallelism: int = 16,
+    iterations_per_stream: int = 4,
+) -> BenchResult:
+    """Concurrent request/response round-trips on one connection."""
+    if not quic_native.HAS_NATIVE:
+        raise RuntimeError("quic_native unavailable")
+    payload_bytes = payload_kib * 1024
+    bulk_response = b"\xCD" * payload_bytes
+    total_round_trips = parallelism * iterations_per_stream
+
+    alice = quic_native.Identity.generate()
+    bob = quic_native.Identity.generate()
+    permitted = {bob.fingerprint}
+    server = quic_native.Endpoint.server(
+        alice,
+        lambda fp: fp in permitted,
+        quic_native.EndpointConfig(bind="127.0.0.1:0", idle_timeout_ms=30_000),
+    )
+    addr = server.local_addr
+
+    holder: list = []
+    done = threading.Event()
+
+    def loop() -> None:
+        conn = server.accept_blocking(timeout_ms=30_000)
+        holder.append(conn)
+        if conn is None:
+            done.set()
+            return
+        for _ in range(total_round_trips):
+            r = conn.recv_frame_blocking(timeout_ms=10_000)
+            if r is None:
+                break
+            sid, _kind, _payload = r
+            conn.send_response_on(sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
+        done.set()
+
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+
+    client = quic_native.Endpoint.client(
+        bob, quic_native.EndpointConfig(bind="127.0.0.1:0", idle_timeout_ms=30_000)
+    )
+    conn = client.connect_blocking(addr, alice.fingerprint, timeout_ms=10_000)
+
+    def go() -> int:
+        threads: list[threading.Thread] = []
+
+        def worker(worker_id: int) -> None:
+            for i in range(iterations_per_stream):
+                cid = bytes([(worker_id * 37 + i) & 0xFF] * 32)
+                kind, _payload = conn.send_frame_round_trip(
+                    quic_native.FRAME_CHUNK_REQUEST, cid
+                )
+                if kind != quic_native.FRAME_CHUNK_RESPONSE:
+                    raise RuntimeError(f"unexpected response kind {kind:#x}")
+
+        for w in range(parallelism):
+            th = threading.Thread(target=worker, args=(w,), daemon=True)
+            threads.append(th)
+            th.start()
+        for th in threads:
+            th.join(timeout=30)
+        return total_round_trips * payload_bytes
+
+    result = _bench(
+        f"native_quic_parallel_{parallelism}x{iterations_per_stream}_{payload_kib}KiB",
+        go,
+        iterations=1,
+        metadata={
+            "payload_kib": payload_kib,
+            "parallelism": parallelism,
+            "iterations_per_stream": iterations_per_stream,
+        },
+    )
+    done.wait(timeout=10)
+    conn.close()
+    if holder and holder[0] is not None:
+        holder[0].close()
+    server.close()
+    t.join(timeout=5)
+    client.close()
+    return result
+
+
 def run_full_suite(size_mib: int = 256, include_legacy: bool = True) -> list[BenchResult]:
     """Run the complete A1 native-bench suite.
 
@@ -371,6 +531,14 @@ def run_full_suite(size_mib: int = 256, include_legacy: bool = True) -> list[Ben
         results.append(bench_native_chunk_store_write(batch_size=32, plaintext_kib=64))
         results.append(bench_native_chunk_store_write(batch_size=128, plaintext_kib=64))
         results.append(bench_native_chunk_store_locate(iterations=500_000))
+    # ol_quic
+    if quic_native.HAS_NATIVE:
+        for size_kib in (16, 64, 256, 1024):
+            iters = 200 if size_kib <= 64 else 50 if size_kib <= 256 else 20
+            results.append(_bench_quic_loopback_round_trip(payload_kib=size_kib, iterations=iters))
+        # Parallel multi-stream: hits multi-thread tokio scheduler hard.
+        results.append(_bench_quic_parallel_streams(payload_kib=64, parallelism=16, iterations_per_stream=4))
+        results.append(_bench_quic_parallel_streams(payload_kib=256, parallelism=8, iterations_per_stream=4))
     return results
 
 

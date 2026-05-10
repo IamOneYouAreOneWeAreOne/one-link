@@ -31,6 +31,7 @@ use pyo3::prelude::*;
 mod aead;
 mod chunk;
 mod errors;
+mod quic;
 mod store;
 mod wal;
 
@@ -81,6 +82,13 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.store", store_mod)?;
+
+    let quic_mod = PyModule::new_bound(py, "quic")?;
+    quic::register(py, &quic_mod)?;
+    m.add_submodule(&quic_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.quic", quic_mod)?;
 
     Ok(())
 }

@@ -18,6 +18,9 @@ ol_chunk        = { path = "../ol_chunk" }
 ol_aead         = { path = "../ol_aead" }
 ol_wal          = { path = "../ol_wal" }
 ol_chunk_store  = { path = "../ol_chunk_store" }
+ol_quic         = { path = "../ol_quic" }
+quinn           = { workspace = true }
+tokio           = { workspace = true }
 thiserror       = { workspace = true }
 tracing         = { workspace = true }
 
