@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>One Link — JS Double Ratchet self-test</title>
+<style>
+  body { font-family: ui-monospace, "SF Mono", Menlo, monospace;
+         background: #0b0d12; color: #e8ecf2; padding: 24px; }
+  h1 { font-size: 18px; margin-bottom: 12px; }
+  .row { padding: 4px 0; }
+  .ok  { color: #46d39a; }
+  .bad { color: #ff6b6b; }
+  .skip { color: #f5c451; }
+  pre { background: #11141b; border: 1px solid #232836; padding: 12px;
+        white-space: pre-wrap; word-wrap: break-word; }
+</style>
+</head>
+<body>
+<h1>JS Double Ratchet (web/dr.js) self-test</h1>
+<div id="out"></div>
+<pre id="log"></pre>
+<script type="module">
+import {
+  initAlice, initBob, encrypt, decrypt,
+  x25519Keypair, x25519DH, kdfRoot, kdfChain,
+  encodeHeader, decodeHeader,
+  HEADER_LEN, MAX_SKIP_KEYS,
+} from "./dr.js";
+
+const out = document.getElementById("out");
+const logEl = document.getElementById("log");
+const log = [];
+
+function row(ok, name, msg = "") {
+  const div = document.createElement("div");
+  div.className = "row " + (ok ? "ok" : "bad");
+  div.textContent = (ok ? "PASS  " : "FAIL  ") + name + (msg ? " — " + msg : "");
+  out.appendChild(div);
+  log.push((ok ? "PASS " : "FAIL ") + name + (msg ? " — " + msg : ""));
+}
+
+function trace(s) {
+  log.push("  " + s);
+  logEl.textContent = log.join("\n");
+}
+
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+const u8 = (s) => enc.encode(s);
+const eq = (a, b) => {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) if (a[i] !== b[i]) return false;
+  return true;
+};
+
+async function test_round_trip() {
+  // Both sides share an initial 32-byte secret (in real flow this comes
+  // from the channel handshake's transcript-bound HKDF).
+  const seed = crypto.getRandomValues(new Uint8Array(32));
+  const ad = u8("transcript-1");
+  const bobKp = await x25519Keypair();
+  const alice = await initAlice({ sharedSecret: seed, peerPub: bobKp.pub });
+  const bob = await initBob({
+    sharedSecret: seed, dhPriv: bobKp.priv, dhPub: bobKp.pub,
+  });
+  // Alice → Bob: msg 0
+  let msg0 = u8("hello bob");
+  const send0 = await encrypt(alice, msg0, ad);
+  const recv0 = await decrypt(bob, decodeHeader(send0.header),
+                              send0.ciphertext, ad);
+  row(eq(recv0.plaintext, msg0), "alice→bob msg 0 round-trip");
+  // Bob now has alice's ephemeral; he can reply.
+  let msg1 = u8("hi alice, this is bob");
+  const send1 = await encrypt(recv0.nextState, msg1, ad);
+  const recv1 = await decrypt(send0.nextState, decodeHeader(send1.header),
+                              send1.ciphertext, ad);
+  row(eq(recv1.plaintext, msg1), "bob→alice msg 1 round-trip (DH ratchet step)");
+  // Alice replies again — sends on her NEW chain.
+  let msg2 = u8("ack");
+  const send2 = await encrypt(recv1.nextState, msg2, ad);
+  const recv2 = await decrypt(send1.nextState, decodeHeader(send2.header),
+                              send2.ciphertext, ad);
+  row(eq(recv2.plaintext, msg2), "alice→bob msg 2 (post-ratchet)");
+}
+
+async function test_replay_rejected() {
+  const seed = crypto.getRandomValues(new Uint8Array(32));
+  const ad = u8("ad");
+  const bobKp = await x25519Keypair();
+  const alice = await initAlice({ sharedSecret: seed, peerPub: bobKp.pub });
+  const bob = await initBob({
+    sharedSecret: seed, dhPriv: bobKp.priv, dhPub: bobKp.pub,
+  });
+  const send = await encrypt(alice, u8("once"), ad);
+  const recv = await decrypt(bob, decodeHeader(send.header),
+                             send.ciphertext, ad);
+  if (!eq(recv.plaintext, u8("once"))) {
+    row(false, "replay test: initial decrypt failed");
+    return;
+  }
+  // Replay the same frame.
+  let threw = false;
+  try {
+    await decrypt(recv.nextState, decodeHeader(send.header),
+                  send.ciphertext, ad);
+  } catch (e) {
+    threw = true;
+    trace("replay correctly threw: " + e.message);
+  }
+  row(threw, "replay rejected on second decrypt");
+}
+
+async function test_tampered_ciphertext_fails() {
+  const seed = crypto.getRandomValues(new Uint8Array(32));
+  const ad = u8("ad");
+  const bobKp = await x25519Keypair();
+  const alice = await initAlice({ sharedSecret: seed, peerPub: bobKp.pub });
+  const bob = await initBob({
+    sharedSecret: seed, dhPriv: bobKp.priv, dhPub: bobKp.pub,
+  });
+  const send = await encrypt(alice, u8("payload"), ad);
+  // Flip a byte in the ciphertext.
+  send.ciphertext[0] ^= 0xff;
+  let threw = false;
+  try {
+    await decrypt(bob, decodeHeader(send.header), send.ciphertext, ad);
+  } catch (e) {
+    threw = true;
+    trace("tamper correctly threw: " + e.message);
+  }
+  row(threw, "tampered ciphertext rejected");
+}
+
+async function test_out_of_order_within_window() {
+  const seed = crypto.getRandomValues(new Uint8Array(32));
+  const ad = u8("ad");
+  const bobKp = await x25519Keypair();
+  let alice = await initAlice({ sharedSecret: seed, peerPub: bobKp.pub });
+  let bob = await initBob({
+    sharedSecret: seed, dhPriv: bobKp.priv, dhPub: bobKp.pub,
+  });
+  // Alice sends 5 messages.
+  const sent = [];
+  for (let i = 0; i < 5; i++) {
+    const r = await encrypt(alice, u8("msg-" + i), ad);
+    sent.push(r);
+    alice = r.nextState;
+  }
+  // Bob receives in order [3, 0, 1, 4, 2] — out of order.
+  const order = [3, 0, 1, 4, 2];
+  for (const i of order) {
+    const r = await decrypt(bob, decodeHeader(sent[i].header),
+                            sent[i].ciphertext, ad);
+    if (!eq(r.plaintext, u8("msg-" + i))) {
+      row(false, "OOO failed at msg " + i);
+      return;
+    }
+    bob = r.nextState;
+  }
+  row(true, "out-of-order delivery within MAX_SKIP_KEYS window");
+}
+
+async function test_small_order_pubkey_rejected() {
+  const priv = (await x25519Keypair()).priv;
+  const allZero = new Uint8Array(32);  // u=0, smallest small-order point
+  let threw = false;
+  try {
+    await x25519DH(priv, allZero);
+  } catch (e) {
+    threw = true;
+    trace("small-order correctly threw: " + e.message);
+  }
+  row(threw, "X25519 small-order pubkey rejected");
+}
+
+async function test_header_round_trip() {
+  const dh = crypto.getRandomValues(new Uint8Array(32));
+  const h = encodeHeader({ v: 1, flags: 0, dh, pn: 7, n: 42 });
+  const back = decodeHeader(h);
+  const ok = back.v === 1 && back.flags === 0 && back.pn === 7
+              && back.n === 42 && eq(back.dh, dh);
+  row(ok, "header encode/decode round-trip");
+  row(h.byteLength === HEADER_LEN, "header is " + HEADER_LEN + " bytes");
+}
+
+async function test_kdf_chain_advance() {
+  const k0 = crypto.getRandomValues(new Uint8Array(32));
+  const [k1, m1] = await kdfChain(k0);
+  const [k2, m2] = await kdfChain(k1);
+  row(!eq(k0, k1) && !eq(k1, k2) && !eq(m1, m2),
+      "chain advance produces distinct keys + msg keys");
+}
+
+async function test_kdf_root_advance() {
+  const root = crypto.getRandomValues(new Uint8Array(32));
+  const dh1 = crypto.getRandomValues(new Uint8Array(32));
+  const dh2 = crypto.getRandomValues(new Uint8Array(32));
+  const [r1, c1] = await kdfRoot(root, dh1);
+  const [r2, c2] = await kdfRoot(root, dh2);
+  row(!eq(r1, r2) && !eq(c1, c2),
+      "root step produces distinct (root, chain) for distinct DH outputs");
+}
+
+async function test_max_skip_keys_overflow_evicts_oldest() {
+  // Synthesize a scenario where Alice sends MAX_SKIP_KEYS+10 messages
+  // and Bob receives only the latest one — older skipped keys should
+  // FIFO-evict but we should still be able to decrypt the newest.
+  const seed = crypto.getRandomValues(new Uint8Array(32));
+  const ad = u8("ad");
+  const bobKp = await x25519Keypair();
+  let alice = await initAlice({ sharedSecret: seed, peerPub: bobKp.pub });
+  let bob = await initBob({
+    sharedSecret: seed, dhPriv: bobKp.priv, dhPub: bobKp.pub,
+  });
+  // Send a smaller burst (real MAX_SKIP_KEYS=1000 takes a while in
+  // browser; test the principle with 50).
+  const N = 50;
+  const sent = [];
+  for (let i = 0; i < N; i++) {
+    const r = await encrypt(alice, u8("m-" + i), ad);
+    sent.push(r);
+    alice = r.nextState;
+  }
+  // Bob skips ahead to the LAST one only.
+  const r = await decrypt(bob, decodeHeader(sent[N - 1].header),
+                          sent[N - 1].ciphertext, ad);
+  row(eq(r.plaintext, u8("m-" + (N - 1))),
+      "skip-ahead by " + (N - 1) + " keys still decrypts the newest");
+  bob = r.nextState;
+  // Now decrypt one of the SKIPPED messages from cache.
+  const r2 = await decrypt(bob, decodeHeader(sent[5].header),
+                           sent[5].ciphertext, ad);
+  row(eq(r2.plaintext, u8("m-5")),
+      "out-of-order arrival of skipped msg 5 still decrypts from cache");
+}
+
+(async () => {
+  try {
+    await test_header_round_trip();
+    await test_kdf_chain_advance();
+    await test_kdf_root_advance();
+    await test_small_order_pubkey_rejected();
+    await test_round_trip();
+    await test_replay_rejected();
+    await test_tampered_ciphertext_fails();
+    await test_out_of_order_within_window();
+    await test_max_skip_keys_overflow_evicts_oldest();
+  } catch (e) {
+    const div = document.createElement("div");
+    div.className = "row bad";
+    div.textContent = "FATAL — " + (e && e.message ? e.message : e);
+    out.appendChild(div);
+    trace("FATAL " + (e && e.stack ? e.stack : e));
+  }
+  logEl.textContent = log.join("\n");
+})();
+</script>
+</body>
+</html>

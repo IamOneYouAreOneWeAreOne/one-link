@@ -770,6 +770,13 @@ class UIServer:
         # browser is its own peer; the daemon is unrelated.
         r.add_get("/peer", self._peer_shell)
         r.add_get("/peer/", self._peer_shell)
+        # v0.20.7 (security audit H7): JS port of the Double Ratchet
+        # for browser-as-peer DataChannel transport. Standalone ESM
+        # module + a self-test page that exercises the round-trip
+        # in-browser (open /dr_test in any tab to see the suite).
+        r.add_get("/dr.js", self._dr_module)
+        r.add_get("/dr_test", self._dr_test_page)
+        r.add_get("/dr_test.html", self._dr_test_page)
         # v0.20.0: WebRTC signaling endpoint for browser-as-peer ↔
         # daemon DataChannel transport. Unauthenticated WebSocket;
         # the browser authenticates via Ed25519 signature on the SDP
@@ -1106,6 +1113,40 @@ class UIServer:
         # hour is fine. The IDENTITY itself lives in OPFS, not the
         # HTML, so a stale shell is just stale code, not stale auth.
         resp.headers["Cache-Control"] = "max-age=3600"
+        return resp
+
+    async def _dr_module(self, request: web.Request) -> web.StreamResponse:
+        """v0.20.7 (audit H7): JS Double Ratchet module. Standalone
+        ESM file the peer shell imports for forward-secrecy + post-
+        compromise security on the browser-as-peer DataChannel."""
+        p = WEB_DIR / "dr.js"
+        if not p.is_file():
+            return web.Response(status=404, text="dr.js not bundled")
+        body = p.read_text(encoding="utf-8")
+        resp = web.Response(text=body, content_type="application/javascript")
+        resp.headers["Cache-Control"] = "max-age=3600"
+        return resp
+
+    async def _dr_test_page(self, request: web.Request) -> web.StreamResponse:
+        """v0.20.7 (audit H7): JS Double Ratchet self-test harness.
+        Open /dr_test in any browser to run the unit-test suite for
+        the module — exercises round-trip, replay rejection, tamper
+        rejection, OOO delivery, small-order rejection, header
+        encode/decode, kdf advance. Useful for verifying browser
+        compatibility (X25519 in WebCrypto requires a recent build)."""
+        p = WEB_DIR / "dr_test.html"
+        if not p.is_file():
+            return web.Response(status=404, text="dr_test.html not bundled")
+        body = p.read_text(encoding="utf-8")
+        resp = web.Response(text=body, content_type="text/html")
+        # Self-test page: same-origin scripts only; no third-party fetches.
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "frame-ancestors 'none'"
+        )
+        resp.headers["Cache-Control"] = "no-store"
         return resp
 
     async def _favicon(self, request: web.Request) -> web.StreamResponse:

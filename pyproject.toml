@@ -70,6 +70,10 @@ one_link = [
   # v0.20.7 master-seed: BIP-39 English wordlist for the
   # 24-word recovery phrase encoding.
   "data/bip39-english.txt",
+  # v0.20.7 (audit H7): JS Double Ratchet for browser-as-peer +
+  # the in-browser self-test harness.
+  "web/dr.js",
+  "web/dr_test.html",
 ]
 
 [tool.pytest.ini_options]
