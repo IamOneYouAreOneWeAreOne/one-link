@@ -276,7 +276,7 @@ pub fn frame_count(plaintext_len: usize) -> usize {
 }
 
 /// Register the chunk submodule on the given Python module.
-pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Constants (per ADR-0001 + ADR-0002).
     m.add("CDC_MIN_SIZE", 8 * 1024usize)?;
     m.add("CDC_AVG_SIZE", 64 * 1024usize)?;

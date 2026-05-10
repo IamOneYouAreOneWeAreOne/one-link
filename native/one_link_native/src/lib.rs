@@ -29,8 +29,10 @@
 use pyo3::prelude::*;
 
 mod aead;
+mod bloom;
 mod chunk;
 mod errors;
+mod fountain;
 mod quic;
 mod store;
 mod wal;
@@ -89,6 +91,20 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.quic", quic_mod)?;
+
+    let bloom_mod = PyModule::new_bound(py, "bloom")?;
+    bloom::register(py, &bloom_mod)?;
+    m.add_submodule(&bloom_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.bloom", bloom_mod)?;
+
+    let fountain_mod = PyModule::new_bound(py, "fountain")?;
+    fountain::register(py, &fountain_mod)?;
+    m.add_submodule(&fountain_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.fountain", fountain_mod)?;
 
     Ok(())
 }

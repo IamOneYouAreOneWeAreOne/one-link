@@ -53,7 +53,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
 use tokio::runtime::Runtime;
-use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::errors::quic_error_to_pyerr;
 
@@ -589,7 +589,7 @@ impl PyConnection {
 
 // ───────────────────────────── module registration ─────────────────────
 
-pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     use ol_quic::{MAX_BULK_FRAME_BYTES, MAX_CONTROL_FRAME_BYTES, ALPN};
     m.add("ALPN", PyBytes::new_bound(m.py(), ALPN))?;
     m.add("MAX_BULK_FRAME_BYTES", MAX_BULK_FRAME_BYTES)?;

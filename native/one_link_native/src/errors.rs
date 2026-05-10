@@ -15,10 +15,12 @@ create_exception!(one_link_native, OlAeadError, OlError);
 create_exception!(one_link_native, OlWalError, OlError);
 create_exception!(one_link_native, OlChunkStoreError, OlError);
 create_exception!(one_link_native, OlQuicError, OlError);
+create_exception!(one_link_native, OlBloomError, OlError);
+create_exception!(one_link_native, OlFountainError, OlError);
 
 /// Register all `one_link_native.*` exception classes on the given
 /// top-level module.
-pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("OlError", m.py().get_type_bound::<OlError>())?;
     m.add("OlChunkError", m.py().get_type_bound::<OlChunkError>())?;
     m.add("OlAeadError", m.py().get_type_bound::<OlAeadError>())?;
@@ -28,6 +30,8 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type_bound::<OlChunkStoreError>(),
     )?;
     m.add("OlQuicError", m.py().get_type_bound::<OlQuicError>())?;
+    m.add("OlBloomError", m.py().get_type_bound::<OlBloomError>())?;
+    m.add("OlFountainError", m.py().get_type_bound::<OlFountainError>())?;
     Ok(())
 }
 
@@ -66,4 +70,16 @@ pub fn chunk_store_error_to_pyerr(err: ol_chunk_store::ChunkStoreError) -> PyErr
 #[inline]
 pub fn quic_error_to_pyerr(err: ol_quic::QuicError) -> PyErr {
     OlQuicError::new_err(err.to_string())
+}
+
+/// Convert an `ol_bloom::BloomError` to a Python `OlBloomError`.
+#[inline]
+pub fn bloom_error_to_pyerr(err: ol_bloom::BloomError) -> PyErr {
+    OlBloomError::new_err(err.to_string())
+}
+
+/// Convert an `ol_fountain::FountainError` to a Python `OlFountainError`.
+#[inline]
+pub fn fountain_error_to_pyerr(err: ol_fountain::FountainError) -> PyErr {
+    OlFountainError::new_err(err.to_string())
 }

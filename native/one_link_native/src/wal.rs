@@ -219,7 +219,7 @@ fn log_kind_magic<'py>(py: Python<'py>, kind: &str) -> PyResult<Bound<'py, PyByt
 }
 
 /// Register the wal submodule.
-pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     use ol_wal::{FILE_HEADER_LEN, MAX_PAYLOAD_LEN, RECORD_HEADER_LEN, RECORD_TRAILER_LEN, ROTATION_SIZE};
 
     m.add("FILE_HEADER_LEN", FILE_HEADER_LEN)?;

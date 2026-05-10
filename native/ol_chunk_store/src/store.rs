@@ -415,6 +415,16 @@ impl ChunkStore {
         s
     }
 
+    /// Collect all chunk_ids currently in the memtable. Used by
+    /// higher-level engines (e.g. `ol_transfer`) that need to feed the
+    /// inventory into a Bloom-init handshake or a manifest scope check.
+    ///
+    /// Order is unspecified (HashMap iteration order). Cost is O(N).
+    #[must_use]
+    pub fn collect_chunk_ids(&self) -> Vec<[u8; 32]> {
+        self.memtable.iter().map(|(cid, _)| *cid).collect()
+    }
+
     /// Close the store, flushing both logs. Subsequent calls fail with
     /// [`ChunkStoreError::Closed`].
     ///

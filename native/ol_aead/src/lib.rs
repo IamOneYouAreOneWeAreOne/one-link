@@ -64,12 +64,17 @@
 #![doc(html_root_url = "https://docs.rs/ol_aead/0.21.0")]
 
 pub mod cipher;
+pub mod convergent;
 pub mod error;
 pub mod frame;
 pub mod key;
 pub mod nonce;
 
 pub use cipher::{AeadCipher, AeadKind, FrameKey};
+pub use convergent::{
+    content_type_from_extension, derive_convergent_aead_key, is_convergent_safe, resolve_mode,
+    ContentType, ConvergentPolicy, EncryptionMode, CONVERGENT_AEAD_KEY_CONTEXT,
+};
 pub use error::AeadError;
 pub use frame::{decrypt_chunk, decrypt_frame, encrypt_chunk, encrypt_frame, FrameRef};
 pub use key::{ChunkAeadKey, FRAME_KEY_LEN};

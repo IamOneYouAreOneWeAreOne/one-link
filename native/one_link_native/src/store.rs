@@ -447,7 +447,7 @@ fn open_store(py: Python<'_>, root: &str) -> PyResult<PyChunkStore> {
     Ok(PyChunkStore { inner: Some(inner) })
 }
 
-pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     use ol_chunk_store::{
         CHUNK_RECORD_HEADER_LEN, MANIFEST_RECORD_HEADER_LEN, STRIPE_DESCRIPTOR_LEN,
     };

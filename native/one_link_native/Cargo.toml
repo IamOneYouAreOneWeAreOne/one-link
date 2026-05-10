@@ -19,6 +19,8 @@ ol_aead         = { path = "../ol_aead" }
 ol_wal          = { path = "../ol_wal" }
 ol_chunk_store  = { path = "../ol_chunk_store" }
 ol_quic         = { path = "../ol_quic" }
+ol_bloom        = { path = "../ol_bloom" }
+ol_fountain     = { path = "../ol_fountain" }
 quinn           = { workspace = true }
 tokio           = { workspace = true }
 thiserror       = { workspace = true }

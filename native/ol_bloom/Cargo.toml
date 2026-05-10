@@ -1,0 +1,28 @@
+[package]
+name = "ol_bloom"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: content-addressed Bloom filter for transfer-init handshake (ADR-0011)"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_bloom"
+crate-type = ["lib"]
+
+[dependencies]
+blake3    = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest  = { workspace = true }
+criterion = { workspace = true }
+hex       = { workspace = true }
+rand      = { workspace = true }
+
+[[bench]]
+name    = "bloom_bench"
+harness = false
+
+[lints]
+workspace = true

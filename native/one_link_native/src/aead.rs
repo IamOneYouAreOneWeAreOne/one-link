@@ -244,7 +244,7 @@ fn host_has_hardware_aes() -> bool {
 }
 
 /// Register the aead submodule.
-pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Constants per ADR-0002.
     m.add("FRAME_KEY_LEN", RUST_FRAME_KEY_LEN)?;
     m.add("AEAD_TAG_LEN", RUST_AEAD_TAG_LEN)?;

@@ -188,6 +188,7 @@ mod tests {
     use super::*;
     use crate::record::Record;
     use crate::wal::Wal;
+    use std::io::Write;
     use tempfile::tempdir;
 
     fn rec(kind: u8, flags: u8, payload: &[u8]) -> Record {

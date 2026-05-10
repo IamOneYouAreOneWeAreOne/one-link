@@ -18,8 +18,11 @@ members = [
     "ol_wal",
     "ol_chunk_store",
     "ol_quic",
+    "ol_bloom",
+    "ol_transfer",
+    "ol_fountain",
     "one_link_native",
-    # Future Phase A1 crates (added as they ship):
+    # Future crates (added as they ship):
     # Future Phase A2:
     # "ol_quic",
     # Future Phase B:
@@ -45,6 +48,9 @@ members = [
 [workspace.dependencies]
 # Hashing: BLAKE3 reference impl with SIMD acceleration.
 blake3       = { version = "1.5", features = ["traits-preview", "rayon"] }
+# Fast single-byte and multi-byte pattern search (used by format-aware
+# chunking to walk ZIP LFH signatures with SSE2/AVX2 acceleration).
+memchr       = "2.7"
 # Content-defined chunking (FastCDC/Gear-256 per ADR-0001).
 fastcdc      = "3.1"
 # AEAD primitives. RustCrypto suite is the standard well-audited choice;

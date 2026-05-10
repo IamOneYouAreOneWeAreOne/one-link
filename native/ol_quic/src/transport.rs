@@ -22,7 +22,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use quinn::{ClientConfig, Endpoint as QuinnEndpoint, ServerConfig, TransportConfig, VarInt};
-use rustls::pki_types::ServerName;
 
 use crate::error::QuicError;
 use crate::identity::{Identity, PeerFingerprint};

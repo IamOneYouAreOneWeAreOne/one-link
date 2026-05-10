@@ -44,6 +44,7 @@
 pub mod blake3_wrap;
 pub mod cdc;
 pub mod error;
+pub mod format_aware;
 pub mod frame;
 
 pub use blake3_wrap::{
@@ -52,6 +53,10 @@ pub use blake3_wrap::{
 };
 pub use cdc::{scan_to_vec, scan_to_vec_parallel, Boundary, CdcParams, ChunkScanner};
 pub use error::ChunkError;
+pub use format_aware::{
+    detect_format, scan_format_aware, zip_lfh_offsets, ContainerFormat, FormatAwareChunkSet,
+    ZIP_LFH_FIXED_LEN, ZIP_LFH_MAGIC,
+};
 pub use frame::{frame_count_for_plaintext, AEAD_FRAME_PLAINTEXT_LEN, AEAD_TAG_LEN};
 
 /// Crate version embedded for diagnostics.

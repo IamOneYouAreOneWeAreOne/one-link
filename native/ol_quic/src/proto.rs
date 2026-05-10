@@ -23,19 +23,33 @@ pub const MAX_CONTROL_FRAME_BYTES: u64 = 64 * 1024;
 /// Frame kind byte per ADR-0009.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum FrameKind {
+    /// Request a chunk by chunk_id. Payload = 32-byte chunk_id.
     ChunkRequest,
+    /// Response carrying a chunk's full chunk_log record bytes.
     ChunkResponse,
+    /// Echo of a `ChunkRequest` when the peer doesn't have the chunk.
     ChunkNotFound,
+    /// Request manifest delta from a peer.
     ManifestSync,
+    /// One manifest record bundled in a manifest-sync stream.
     ManifestRecord,
+    /// Sentinel marking the end of a manifest-sync exchange.
     ManifestSyncEnd,
+    /// Bloom filter of chunk_ids the sender has (ADR-0011 init).
     BloomFilter,
+    /// Response listing chunk_ids the receiver still needs (ADR-0011).
     MissingChunks,
+    /// Capability check against a peer's pairing record.
     CapabilityCheck,
+    /// Acknowledgement of a capability check (accept / deny).
     CapabilityAck,
+    /// Liveness probe; arbitrary echo payload.
     Ping,
+    /// Reply to `Ping` echoing the same payload.
     Pong,
+    /// Protocol-level error (unknown frame kind, malformed payload, etc).
     ProtoError,
+    /// Graceful close marker.
     Close,
 }
 

@@ -13,6 +13,7 @@ crate-type = ["lib"]
 [dependencies]
 blake3      = { workspace = true }
 fastcdc     = { workspace = true }
+memchr      = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
 # Parallel BLAKE3-per-chunk hashing via thread pool.
