@@ -153,12 +153,15 @@ def test_control_status_and_shutdown_contract():
         proc = _spawn_daemon(home, tmp / "out.log")
         try:
             ctrl = _read_port(home, "control.port")
+            ui_port = _read_port(home, "server.port")
             status = _control_request(ctrl, "status")
             assert status["ok"] is True
             assert status["app_version"] == __version__
             assert status["pid"] == proc.pid
             assert status["schema_version"] >= 1
             assert status["protocol_version"]
+            assert isinstance(status["ui_server_port"], int)
+            assert status["ui_server_port"] == ui_port
 
             shutdown = _control_request(ctrl, "shutdown")
             assert shutdown == {"ok": True, "stopping": True}
@@ -206,6 +209,91 @@ def test_launcher_rejects_unknown_or_mismatched_daemon():
     assert good.compatible is True
     assert old.compatible is False
     assert unknown.compatible is False
+
+
+def test_launcher_rejects_ui_that_does_not_match_control_identity():
+    from one_link import __version__
+    from one_link.app import _runtime_matches_control
+
+    control = {
+        "ok": True,
+        "app_version": __version__,
+        "me": {"fingerprint": "aa" * 32},
+    }
+    matching_ui = {
+        "ok": True,
+        "app_version": __version__,
+        "me": {"fingerprint": "aa" * 32},
+    }
+    wrong_identity = {
+        "ok": True,
+        "app_version": __version__,
+        "me": {"fingerprint": "bb" * 32},
+    }
+    wrong_version = {
+        "ok": True,
+        "app_version": "0.0.1",
+        "me": {"fingerprint": "aa" * 32},
+    }
+
+    assert _runtime_matches_control(control, matching_ui) is True
+    assert _runtime_matches_control(control, wrong_identity) is False
+    assert _runtime_matches_control(control, wrong_version) is False
+    assert _runtime_matches_control(control, {"ok": False}) is False
+
+
+def test_launcher_uses_native_windows_url_open(monkeypatch):
+    from one_link import app as app_mod
+
+    opened = []
+
+    monkeypatch.setattr(app_mod.os, "name", "nt")
+    monkeypatch.setattr(app_mod.os, "startfile", lambda url: opened.append(url), raising=False)
+    monkeypatch.setattr(app_mod.webbrowser, "open", lambda *_args, **_kw: (_ for _ in ()).throw(AssertionError("webbrowser fallback used")))
+
+    app_mod._open_browser_url("http://127.0.0.1:7117/?t=test")
+
+    assert opened == ["http://127.0.0.1:7117/?t=test"]
+
+
+def test_launcher_prefers_control_reported_ui_port(monkeypatch):
+    from one_link import __version__
+    from one_link import app as app_mod
+
+    monkeypatch.setattr(app_mod.daemon_mod, "read_control_port", lambda: 43210)
+    monkeypatch.setattr(app_mod, "_alive", lambda port: port == 43210)
+    monkeypatch.setattr(app_mod.server_mod, "read_ui_token", lambda: "token")
+    monkeypatch.setattr(
+        app_mod.server_mod,
+        "read_server_port",
+        lambda: (_ for _ in ()).throw(AssertionError("stale file read")),
+    )
+    monkeypatch.setattr(
+        app_mod,
+        "_control_request",
+        lambda _port, _cmd: {
+            "ok": True,
+            "app_version": __version__,
+            "protocol_version": "OL1.2",
+            "schema_version": 16,
+            "ui_server_port": 7999,
+            "me": {"fingerprint": "cc" * 32},
+        },
+    )
+    monkeypatch.setattr(
+        app_mod,
+        "_ui_status",
+        lambda port, token: {
+            "ok": port == 7999 and token == "token",
+            "app_version": __version__,
+            "me": {"fingerprint": "cc" * 32},
+        },
+    )
+
+    info = app_mod._resolve_running_daemon()
+
+    assert info is not None
+    assert info.server_port == 7999
 
 
 @pytest.mark.timeout(60)

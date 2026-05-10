@@ -19,6 +19,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from dataclasses import dataclass
 from typing import Optional
@@ -90,6 +92,30 @@ def _control_request(port: int, cmd: str, timeout: float = 2.0, **kwargs) -> dic
         s.close()
 
 
+def _ui_status(server_port: int, token: str, timeout: float = 1.5) -> dict:
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{server_port}/api/status",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _runtime_matches_control(control_status: dict, ui_status: dict) -> bool:
+    if ui_status.get("ok") is not True:
+        return False
+    control_me = control_status.get("me") or {}
+    ui_me = ui_status.get("me") or {}
+    control_fp = control_me.get("fingerprint")
+    ui_fp = ui_me.get("fingerprint")
+    if control_fp and ui_fp and control_fp != ui_fp:
+        return False
+    return ui_status.get("app_version") == control_status.get("app_version")
+
+
 def _resolve_running_daemon() -> Optional[RunningDaemon]:
     """Return the reachable daemon plus its self-reported status."""
     try:
@@ -98,13 +124,25 @@ def _resolve_running_daemon() -> Optional[RunningDaemon]:
         return None
     if not _alive(ctrl):
         return None
+    status = _control_request(ctrl, "status")
+    if status.get("ok") is not True:
+        return None
+    srv = status.get("ui_server_port")
+    if not isinstance(srv, int) or srv <= 0:
+        srv = None
     try:
-        srv = server_mod.read_server_port()
         token = server_mod.read_ui_token()
     except RuntimeError:
         return None
-    status = _control_request(ctrl, "status")
-    return RunningDaemon(ctrl, srv, token, status)
+    if srv is None:
+        try:
+            srv = server_mod.read_server_port()
+        except RuntimeError:
+            return None
+    ui_status = _ui_status(int(srv), token)
+    if not _runtime_matches_control(status, ui_status):
+        return None
+    return RunningDaemon(ctrl, int(srv), token, status)
 
 
 def _wait_for_daemon(timeout: float = 12.0) -> Optional[RunningDaemon]:
@@ -185,6 +223,15 @@ def _spawn_daemon() -> subprocess.Popen:
     )
 
 
+def _open_browser_url(url: str) -> None:
+    if os.name == "nt":
+        os.startfile(url)  # type: ignore[attr-defined]
+        return
+    opened = webbrowser.open(url, new=2)
+    if not opened:
+        raise RuntimeError("browser did not accept the URL")
+
+
 def _detect_lan_ip() -> str:
     """v0.15.2 — best-effort LAN IPv4 detection. Opens a UDP socket
     and "connects" to a public address; the OS picks the right
@@ -243,6 +290,11 @@ def run_app(*, no_browser: bool = False, lan: bool = False) -> int:
 
     spawned: Optional[subprocess.Popen] = None
     info = _resolve_running_daemon()
+    if info is None:
+        # The control socket can appear a beat before the UI port/token are
+        # published. Desktop shortcuts must treat that as "still starting",
+        # not as permission to launch a competing daemon.
+        info = _wait_for_daemon(timeout=2.0)
 
     # v0.15.2: --lan forces a daemon replacement when an existing
     # daemon is bound to loopback. We don't have a bind-host field
@@ -291,7 +343,7 @@ def run_app(*, no_browser: bool = False, lan: bool = False) -> int:
     click.echo(f"  open: {url}")
     if not no_browser:
         try:
-            webbrowser.open(url, new=2)
+            _open_browser_url(url)
         except Exception as e:
             click.echo(f"  (couldn't auto-open browser: {e})")
 

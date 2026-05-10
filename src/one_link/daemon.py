@@ -9079,6 +9079,14 @@ class Daemon:
             "schema_version": schema_version,
             "python": sys.executable,
             "home": str(data_dir()),
+            "ui_server_port": (
+                getattr(self.ui_server, "port", None)
+                if self.ui_server is not None else None
+            ),
+            "ui_https_port": (
+                getattr(self.ui_server, "https_port", None)
+                if self.ui_server is not None else None
+            ),
             "me": {
                 "short_id": self.me.short_id,
                 "fingerprint": self.me.fingerprint,
