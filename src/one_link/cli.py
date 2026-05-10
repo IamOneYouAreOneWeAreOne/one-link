@@ -423,6 +423,247 @@ def backup_import(bundle_path, overwrite, target_dir):
     )
 
 
+@cli.group()
+def recovery():
+    """Social recovery — your social graph IS your backup layer.
+
+    Instead of keeping a 24-word phrase on paper (and hoping it's
+    not lost / read by a thief / destroyed in a fire), split your
+    master seed into 5 Shamir shares and hand each to a different
+    trusted contact. ANY 3 of the 5 reconstruct your identity on a
+    new device. Up to 2 contacts can be malicious or coerced and
+    still gain nothing — Shamir's information-theoretic threshold
+    holds.
+
+    Trust model: you trust that 3 of your 5 chosen contacts won't
+    all collude against you. Different from custodial recovery
+    (Apple iCloud, Google account) where ONE entity holds every-
+    thing; here no platform — and no single person — can lock you
+    out of your own identity.
+
+    Workflow:
+
+      one-link recovery setup <name1> <ed_pub_hex_1> ... <name5> <ed_pub_hex_5>
+        Mints 5 wrapped shares + writes each to ./shares/<name>.olshare
+        ready to deliver to the named contact (USB stick, in-person
+        QR, encrypted email, channel message — the medium is up to
+        you, the wrap is sealed).
+
+      one-link recovery unwrap <share_path>
+        For a CONTACT who has received a share addressed to them:
+        decrypt it with this device's identity and print the share
+        bytes (also as a QR-friendly base64 string ready to scan
+        back to the recovering user).
+
+      one-link recovery restore <share_blob_1> ... <share_blob_K>
+        On a fresh device: reconstruct the master seed from K
+        decrypted shares (each is the base64 the unwrap step
+        emitted) and persist it. On next daemon start, identity +
+        DRK + everything else derives from the recovered seed.
+    """
+
+
+@recovery.command("setup")
+@click.argument("guardians", nargs=-1)
+@click.option(
+    "--threshold", "threshold_k", default=3, type=int,
+    help="K in K-of-N (default 3)",
+)
+@click.option(
+    "--out-dir", type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Where to write the wrapped shares (default ./shares/).",
+)
+def recovery_setup(guardians, threshold_k, out_dir):
+    """Split this device's master seed into wrapped shares.
+
+    GUARDIANS is a flat list of (name ed_pub_hex) pairs:
+
+        one-link recovery setup \\
+            mom    a1b2c3...64hex \\
+            dad    11223344...64hex \\
+            sister deadbeef...64hex \\
+            old-laptop  abcdef...64hex \\
+            backup-yubikey 99887766...64hex
+    """
+    from one_link import master_seed, social_recovery
+    from one_link.paths import data_dir
+    if len(guardians) % 2 != 0 or len(guardians) < 4:
+        raise click.ClickException(
+            "GUARDIANS must be (name pub_hex) pairs; need at least 2 guardians.\n"
+            "Example: one-link recovery setup mom abc... dad def... sister 123..."
+        )
+    parsed: list[tuple[str, bytes]] = []
+    for i in range(0, len(guardians), 2):
+        name = guardians[i]
+        try:
+            pub = bytes.fromhex(guardians[i + 1])
+        except ValueError:
+            raise click.ClickException(
+                f"guardian {name!r}: pub_hex is not valid hex"
+            )
+        if len(pub) != 32:
+            raise click.ClickException(
+                f"guardian {name!r}: pub_hex must be 32 bytes (64 hex chars), "
+                f"got {len(pub)} bytes"
+            )
+        parsed.append((name, pub))
+    total_n = len(parsed)
+    if not (2 <= threshold_k <= total_n):
+        raise click.ClickException(
+            f"--threshold must be 2 ≤ K ≤ N (got K={threshold_k}, N={total_n})"
+        )
+    seed = master_seed.load_seed(data_dir())
+    if seed is None:
+        raise click.ClickException(
+            "No master seed on this install. Run `one-link backup init` "
+            "first to provision one (or `one-link backup restore <24 words>` "
+            "to recover an existing identity)."
+        )
+    shares = social_recovery.setup_social_recovery(
+        seed=seed, guardians=parsed, threshold_k=threshold_k,
+    )
+    target_dir = (
+        Path(out_dir).expanduser().resolve() if out_dir
+        else Path("./shares").expanduser().resolve()
+    )
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for name, share in shares:
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+        out = target_dir / f"{safe_name}.olshare"
+        out.write_bytes(share.encoded)
+    click.echo(
+        f"wrote {len(shares)} shares ({threshold_k}-of-{total_n}) -> {target_dir}\n"
+        f"deliver each .olshare file to the named guardian. Any {threshold_k} "
+        f"of the {total_n} reconstruct your seed."
+    )
+
+
+@recovery.command("unwrap")
+@click.argument(
+    "share_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+def recovery_unwrap(share_path):
+    """Decrypt a share addressed to this device.
+
+    Run as a guardian who has received a .olshare file from someone
+    asking you to be a recovery contact. Prints the decrypted share
+    bytes (hex) and a QR-friendly base64 form. The recovering
+    person will paste / scan that base64 along with K-1 others.
+    """
+    import base64
+
+    from one_link import master_seed, social_recovery
+    from one_link.paths import data_dir, key_path
+    seed = master_seed.load_seed(data_dir())
+    if seed is None:
+        # Fall back to the raw identity key — older daemons without a
+        # master seed still have an Ed25519 priv on disk.
+        if not key_path().is_file():
+            raise click.ClickException(
+                "no master seed AND no identity.key — this device has no "
+                "private key to unwrap a share with"
+            )
+        # Best-effort load of the raw priv seed from PEM:
+        from cryptography.hazmat.primitives import serialization
+        try:
+            from one_link.identity import _identity_key_passphrase
+            pw = _identity_key_passphrase()
+        except Exception:
+            pw = None
+        try:
+            priv_obj = serialization.load_pem_private_key(
+                key_path().read_bytes(), password=pw,
+            )
+            ed_seed = priv_obj.private_bytes_raw()
+        except Exception as e:
+            raise click.ClickException(f"identity key load failed: {e}")
+    else:
+        ed_seed = master_seed.derive_identity_priv(seed).private_bytes_raw()
+
+    blob = Path(share_path).read_bytes()
+    try:
+        idx, share_bytes = social_recovery.unwrap_share(
+            wrapped=blob, my_ed_priv_seed=ed_seed,
+        )
+    except ValueError as e:
+        raise click.ClickException(f"unwrap failed: {e}")
+    parsed = social_recovery.WrappedShare.parse(blob)
+    click.echo(
+        f"share index:  {idx}\n"
+        f"threshold:    {parsed.threshold}-of-{parsed.total}\n"
+        f"setup_ms:     {parsed.setup_ms}\n"
+    )
+    # Encode as base64 for in-person paste / QR.
+    payload = bytes([idx]) + share_bytes
+    portable = base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+    click.echo(
+        "Send this single string to the person recovering. They will\n"
+        "combine it with shares from K-1 other contacts to reconstruct\n"
+        "their identity. Treat it as sensitive: anyone holding K shares\n"
+        "can take over the original device's identity.\n"
+    )
+    click.echo(portable)
+
+
+@recovery.command("restore")
+@click.argument("portable_shares", nargs=-1)
+@click.option(
+    "--force", is_flag=True,
+    help="Overwrite an existing master seed on this device.",
+)
+def recovery_restore(portable_shares, force):
+    """Reconstruct the master seed from K guardian shares.
+
+    PORTABLE_SHARES is the list of base64 strings collected from the
+    `recovery unwrap` step on each of K guardian devices.
+    """
+    import base64
+
+    from one_link import master_seed, social_recovery
+    from one_link.paths import data_dir, key_path
+    if len(portable_shares) < 2:
+        raise click.ClickException(
+            "need at least 2 portable shares (from `recovery unwrap` on "
+            "each guardian device)"
+        )
+    if master_seed.has_seed(data_dir()) and not force:
+        click.echo(
+            "A master seed already exists on this install. Re-run with\n"
+            "--force to replace it. The existing identity will be REPLACED.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    decrypted: list[tuple[int, bytes]] = []
+    for s in portable_shares:
+        try:
+            pad = "=" * ((4 - len(s) % 4) % 4)
+            payload = base64.urlsafe_b64decode((s + pad).encode("ascii"))
+        except Exception as e:
+            raise click.ClickException(f"share {s[:8]}…: not valid base64 ({e})")
+        if len(payload) < 2:
+            raise click.ClickException(f"share {s[:8]}…: too short")
+        idx = payload[0]
+        share_bytes = payload[1:]
+        decrypted.append((idx, share_bytes))
+    try:
+        seed = social_recovery.reconstruct_from_decrypted_shares(decrypted)
+    except ValueError as e:
+        raise click.ClickException(f"reconstruct failed: {e}")
+    if force:
+        with __import__("contextlib").suppress(OSError):
+            key_path().unlink()
+        from one_link.lockbox import DRK_FILENAME
+        with __import__("contextlib").suppress(OSError):
+            (data_dir() / DRK_FILENAME).unlink()
+    master_seed.store_seed(data_dir(), seed)
+    click.echo(
+        "master seed reconstructed + persisted. Start the daemon — it\n"
+        "will derive your identity + at-rest key from the recovered seed.\n"
+        "Peers paired with the original device will recognize you."
+    )
+
+
 @cli.command("native-status")
 def native_status():
     """Show whether the native transfer accelerator is active."""
