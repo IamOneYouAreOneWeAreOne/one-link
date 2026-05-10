@@ -157,6 +157,15 @@ def _enumerate_sovereign_primitives() -> list[dict]:
          "primitive", "IPv6 link-local multicast for peer discovery "
                       "across VLAN trunk ports where mDNS sandboxes",
          "Bundle 50"),
+        ("one_link.beacon_listener", "Beacon UDP listener + emitter",
+         "primitive", "asyncio DatagramProtocol on the multicast "
+                      "group, periodic 1-Hz emit; daemon plumbs in",
+         "Bundle 54"),
+        ("one_link.dht_vrf_routing", "VRF-routed DHT (eclipse-resistant)",
+         "primitive", "Lookup ranks candidates by VRF score instead "
+                      "of raw XOR distance; attacker can't pre-bias "
+                      "node IDs against a specific target",
+         "Bundle 53"),
         ("one_link.sealed_relay", "Sealed sender + capability grant (relay path)",
          "primitive", "Combines Bundle 39 sealed-sender with Bundle 44 "
                       "capability grants. Relay sees opaque envelope; "
