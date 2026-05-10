@@ -1919,6 +1919,50 @@ class Daemon:
             # v0.10.4: peer reported a status change. No ACK needed.
             self.record_peer_presence(peer_fp, str(msg.get("presence") or ""))
             return
+        if t == "CAPABILITY_GRANT":
+            # Bundle 58: peer ships a signed capability grant over the
+            # established channel. Receiver verifies + accepts into
+            # _cap_store; subsequent _capability_allowed checks
+            # consult the store. The grant authorizes the SENDER (us)
+            # to perform actions against the SENDING peer's resources.
+            #
+            # Wire shape: { "t": "CAPABILITY_GRANT", "id": <id>,
+            #               "grant_b64": "<base64 caps_grants record>" }
+            # NB: do NOT use a local ``import base64`` here — base64 is
+            # already imported at module level and shadowing it would
+            # cause UnboundLocalError on FILE_CHUNK handling later in
+            # the same function (Python's local-name analysis).
+            from one_link import caps_grants as _caps_grants
+            try:
+                grant_b64 = msg.get("grant_b64", "")
+                if not isinstance(grant_b64, str) or not grant_b64:
+                    raise ValueError("grant_b64 missing or wrong type")
+                blob = base64.urlsafe_b64decode(
+                    grant_b64 + "=" * (-len(grant_b64) % 4)
+                )
+                self._cap_store.accept(
+                    blob,
+                    expected_subject_pub=self.me.public_bytes,
+                    expected_granter_pub=channel.peer_ed_pub,
+                )
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"), ok=True,
+                )))
+                log.info(
+                    "accepted capability grant from %s (active grants: %d)",
+                    peer_fp[:8], len(self._cap_store),
+                )
+            except Exception as e:
+                log.warning(
+                    "rejected capability grant from %s: %s",
+                    peer_fp[:8], e,
+                )
+                with contextlib.suppress(Exception):
+                    await channel.send(encode_msg(make_msg(
+                        "ACK", self.me.short_id, of=msg.get("id"),
+                        rejected=f"grant_rejected: {e}",
+                    )))
+            return
         if t == "TEXT":
             if not self._capability_allowed(peer_fp, CHAT):
                 self._emit_capability_request(peer_fp, peer_sid, CHAT)
@@ -5275,6 +5319,76 @@ class Daemon:
             return True
         policy = self.state.get_peer_capability_policy(peer_fp)
         return policy is None or cap in policy
+
+    async def issue_capability_grant(
+        self,
+        peer_fp: str,
+        *,
+        capabilities: list[str],
+        scope: bytes = b"",
+        duration_ms: int = 60 * 60 * 1000,
+    ) -> bytes:
+        """Bundle 58: mint a signed capability grant authorizing the
+        named peer to take ``capabilities`` against this daemon's
+        resources, store the grant in our local cap_store (which
+        ``_capability_allowed`` consults), and ship a notification
+        to the peer over the established channel.
+
+        Returns the grant blob. The peer's ACK (success / failure)
+        is logged; failure to ship doesn't roll back our local
+        store, since the grant is locally authoritative."""
+        import time as _time
+
+        from one_link import caps_grants as _caps_grants
+
+        peer_pub = self._peer_pub_for_fp(peer_fp)
+        if peer_pub is None:
+            raise RuntimeError(
+                f"no pubkey on file for peer {peer_fp[:16]}; cannot grant"
+            )
+        now = int(_time.time() * 1000)
+        priv_seed = self.me.private.private_bytes_raw()
+        grant_blob = _caps_grants.encode_grant(
+            granter_priv_seed=priv_seed,
+            granter_pub=self.me.public_bytes,
+            subject_pub=peer_pub,
+            capabilities=capabilities,
+            not_before_ms=now,
+            not_after_ms=now + duration_ms,
+            scope=scope,
+        )
+        # Local-authoritative: store in OUR cap_store first, so
+        # _capability_allowed picks it up immediately even if the
+        # wire ship fails.
+        self._cap_store.accept(
+            grant_blob,
+            expected_subject_pub=peer_pub,
+            expected_granter_pub=self.me.public_bytes,
+        )
+        # Ship to the peer for their UI / audit. Module-level base64
+        # is already in scope; do NOT shadow it with a local import.
+        peer = self._peer_from_fp(peer_fp)
+        if peer is not None:
+            grant_b64 = base64.urlsafe_b64encode(grant_blob).rstrip(
+                b"=",
+            ).decode("ascii")
+            with contextlib.suppress(Exception):
+                await self.send_to(peer, [make_msg(
+                    "CAPABILITY_GRANT",
+                    self.me.short_id,
+                    grant_b64=grant_b64,
+                )])
+        return grant_blob
+
+    def _peer_from_fp(self, peer_fp: str) -> Optional[Peer]:
+        """Resolve a peer_fp to a discovery.Peer if present in
+        the registry, else None."""
+        if self.discovery is None or self.discovery.registry is None:
+            return None
+        for p in self.discovery.registry.list():
+            if fingerprint_of(bytes.fromhex(p.ed_pub_hex)) == peer_fp:
+                return p
+        return None
 
     def _peer_pub_for_fp(self, peer_fp: str) -> Optional[bytes]:
         """Resolve a hex fingerprint back to the 32-byte raw pubkey
