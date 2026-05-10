@@ -77,5 +77,51 @@ fn bench_encode_decode(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_insert, bench_contains, bench_encode_decode);
+/// Parallel build path: build a fresh Bloom from N ids using rayon.
+fn bench_extend_par(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bloom_extend_par");
+    for &n in &[16384usize, 262144, 1_000_000] {
+        let ids: Vec<_> = (0u32..n as u32).map(make_id).collect();
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &ids, |b, ids| {
+            b.iter_with_setup(
+                || Bloom::new(n),
+                |mut f| {
+                    f.extend_par(black_box(ids));
+                    black_box(&f);
+                },
+            );
+        });
+    }
+    group.finish();
+}
+
+/// Batch presence check: walk N ids through `contains_many`.
+fn bench_contains_many(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bloom_contains_many");
+    for &n in &[1024usize, 16384, 262144] {
+        let mut f = Bloom::new(n);
+        let ids: Vec<_> = (0u32..n as u32).map(make_id).collect();
+        for cid in &ids {
+            f.insert(cid);
+        }
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &ids, |b, ids| {
+            b.iter(|| {
+                let v = f.contains_many(black_box(ids));
+                black_box(v);
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_insert,
+    bench_contains,
+    bench_encode_decode,
+    bench_extend_par,
+    bench_contains_many,
+);
 criterion_main!(benches);

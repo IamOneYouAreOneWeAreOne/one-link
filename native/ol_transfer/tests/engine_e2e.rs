@@ -12,7 +12,7 @@
 //! 7. Concurrent fetch backpressure — bounded by `max_inflight_per_peer`.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, RwLock as StdRwLock};
 
 use ol_chunk_store::{
     ChunkAddressKind, ChunkAeadKind, ChunkRecord, ChunkRecordKind, ChunkStore, StripeDescriptor,
@@ -64,7 +64,7 @@ struct Peer {
     identity: Arc<Identity>,
     fingerprint: PeerFingerprint,
     _root: TempDir,
-    store: Arc<StdMutex<ChunkStore>>,
+    store: Arc<StdRwLock<ChunkStore>>,
     endpoint: Arc<Endpoint>,
     addr: SocketAddr,
 }
@@ -74,7 +74,7 @@ fn build_peer(permitted_partners: Vec<PeerFingerprint>) -> Peer {
     let fingerprint = identity.fingerprint();
     let root = TempDir::new().unwrap();
     let store = ChunkStore::open(root.path()).unwrap();
-    let store = Arc::new(StdMutex::new(store));
+    let store = Arc::new(StdRwLock::new(store));
     let registry = Arc::new(PairedRegistry {
         permitted: permitted_partners,
     });
@@ -102,8 +102,8 @@ fn pair() -> (Peer, Peer) {
 
     let alice_root = TempDir::new().unwrap();
     let bob_root = TempDir::new().unwrap();
-    let alice_store = Arc::new(StdMutex::new(ChunkStore::open(alice_root.path()).unwrap()));
-    let bob_store = Arc::new(StdMutex::new(ChunkStore::open(bob_root.path()).unwrap()));
+    let alice_store = Arc::new(StdRwLock::new(ChunkStore::open(alice_root.path()).unwrap()));
+    let bob_store = Arc::new(StdRwLock::new(ChunkStore::open(bob_root.path()).unwrap()));
 
     let alice_registry = Arc::new(PairedRegistry {
         permitted: vec![bob_fp],
@@ -150,7 +150,7 @@ async fn fetch_chunk_round_trip() {
     let record = mk_record(0x42, 1024, 1040);
     let chunk_id = record.chunk_id;
     {
-        let mut s = alice.store.lock().unwrap();
+        let mut s = alice.store.write().unwrap();
         s.append_chunk(&record).unwrap();
         s.flush().unwrap();
     }
@@ -177,7 +177,7 @@ async fn fetch_chunk_round_trip() {
 
     // Bob's store now has it.
     {
-        let s = bob.store.lock().unwrap();
+        let s = bob.store.read().unwrap();
         assert!(s.has_chunk(&chunk_id));
     }
 }
@@ -188,7 +188,7 @@ async fn fetch_chunk_idempotent_returns_local() {
     let record = mk_record(0x55, 256, 272);
     let chunk_id = record.chunk_id;
     {
-        let mut s = alice.store.lock().unwrap();
+        let mut s = alice.store.write().unwrap();
         s.append_chunk(&record).unwrap();
         s.flush().unwrap();
     }
@@ -268,7 +268,7 @@ async fn bloom_handshake_returns_missing_chunks() {
         let r = mk_record(i, 64, 80);
         let id = r.chunk_id;
         {
-            let mut s = alice.store.lock().unwrap();
+            let mut s = alice.store.write().unwrap();
             s.append_chunk(&r).unwrap();
             s.flush().unwrap();
         }
@@ -279,7 +279,7 @@ async fn bloom_handshake_returns_missing_chunks() {
         let r = mk_record(i, 64, 80);
         let id = r.chunk_id;
         {
-            let mut s = bob.store.lock().unwrap();
+            let mut s = bob.store.write().unwrap();
             s.append_chunk(&r).unwrap();
             s.flush().unwrap();
         }
@@ -349,7 +349,7 @@ async fn fetch_many_with_mix_of_outcomes() {
         let r = mk_record(i, 32, 48);
         let id = r.chunk_id;
         {
-            let mut s = alice.store.lock().unwrap();
+            let mut s = alice.store.write().unwrap();
             s.append_chunk(&r).unwrap();
             s.flush().unwrap();
         }
@@ -430,7 +430,7 @@ async fn cached_connection_reused_across_fetches() {
         let r = mk_record(i, 64, 80);
         let id = r.chunk_id;
         {
-            let mut s = alice.store.lock().unwrap();
+            let mut s = alice.store.write().unwrap();
             s.append_chunk(&r).unwrap();
             s.flush().unwrap();
         }

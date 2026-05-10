@@ -29,6 +29,7 @@ pub mod encoder;
 pub mod error;
 pub mod packet;
 pub mod rng;
+mod xor;
 
 pub use decoder::{LtDecoder, MAX_ENCODED_PER_CHUNK};
 pub use distribution::{robust_soliton_cdf, sample_degree, sample_neighbors, C, DELTA};

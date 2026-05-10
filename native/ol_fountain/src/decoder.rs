@@ -21,6 +21,7 @@ use std::collections::{HashMap, VecDeque};
 use crate::distribution::{robust_soliton_cdf, sample_degree, sample_neighbors};
 use crate::error::FountainError;
 use crate::rng::SplitMix64;
+use crate::xor::xor_into;
 
 /// Maximum encoded-symbol count the decoder will hold per chunk. Caps
 /// memory at K * symbol_len * MAX_ENCODED_PER_CHUNK / K = symbol_len *
@@ -166,9 +167,7 @@ impl LtDecoder {
         let mut unresolved = Vec::with_capacity(neighbors.len());
         for n in &neighbors {
             if let Some(src) = &self.sources[*n as usize] {
-                for (o, s) in working_payload.iter_mut().zip(src.iter()) {
-                    *o ^= *s;
-                }
+                xor_into(&mut working_payload, src);
             } else {
                 unresolved.push(*n);
             }
@@ -228,9 +227,12 @@ impl LtDecoder {
                 None => continue,
             };
             let target = pkt.neighbors[0];
-            // pkt.payload IS source[target].
-            self.sources[target as usize] = Some(pkt.payload.clone());
-            self.resolved += 1;
+            // pkt.payload IS source[target]. Cascade BEFORE we move the
+            // payload into self.sources, so the inner XOR borrows
+            // pkt.payload as `&[u8]` (cheap) instead of indexing into
+            // self.sources (which would conflict with the &mut on
+            // self.pending). After the cascade, move the payload Vec
+            // directly into the resolved-sources slot — no clone.
             let dependents = self.inverse.remove(&target).unwrap_or_default();
             for dep_sid in dependents {
                 if dep_sid == sid {
@@ -239,15 +241,15 @@ impl LtDecoder {
                 if let Some(dep) = self.pending.get_mut(&dep_sid) {
                     if let Some(pos) = dep.neighbors.iter().position(|n| *n == target) {
                         dep.neighbors.remove(pos);
-                        for (o, s) in dep.payload.iter_mut().zip(pkt.payload.iter()) {
-                            *o ^= *s;
-                        }
+                        xor_into(&mut dep.payload, &pkt.payload);
                         if dep.neighbors.len() == 1 {
                             self.degree1_queue.push_back(dep_sid);
                         }
                     }
                 }
             }
+            self.sources[target as usize] = Some(pkt.payload);
+            self.resolved += 1;
             if self.is_complete() {
                 self.degree1_queue.clear();
                 break;

@@ -10,15 +10,18 @@
 //! 64-bit hashes (`h1`, `h2`) per chunk_id; the k bit positions are
 //! `(h1 + i * h2) mod m` for i in 0..k.
 //!
-//! Implementation: BLAKE3 keyed-hash with a single domain-separated
-//! key (derived once via [`OnceLock`] from the context
-//! `"ol-bloom-doublehash-v1"` per
-//! [ADR-0006](../../../docs/decisions/0006-blake3-derive-scheme.md)).
-//! One BLAKE3 pass produces 32 output bytes; the first 8 become `h1`
-//! and the next 8 become `h2`. This halves the per-insert / per-query
-//! cycles compared to two separate `derive_key` calls — meaningful on
-//! the Phase B Bloom-init handshake hot path where receivers scan
-//! millions of chunk_ids.
+//! Implementation: **xxh3-128 with a domain-separation seed**. The
+//! 128-bit output splits into a 64-bit `h1` (low half) and a 64-bit
+//! `h2` (high half) in a single hash call. xxh3 is ~10 GiB/s scalar /
+//! ~30 GiB/s SIMD on 32-byte inputs — roughly **5-8× faster than
+//! BLAKE3 keyed_hash** at this size because BLAKE3 is setup-dominated
+//! below one block (64 bytes).
+//!
+//! The Bloom filter only requires uniform distribution, not
+//! cryptographic collision resistance, so a non-cryptographic hash is
+//! the right primitive for this layer. Domain separation against other
+//! xxh3 uses on the same chunk_id is provided by the seed value
+//! [`XXH3_BLOOM_SEED`].
 
 use crate::error::BloomError;
 use crate::sizing::{optimal_k, optimal_m_bits, target_fp_rate};
@@ -31,21 +34,10 @@ pub const BLOOM_HEADER_LEN: usize = 12;
 /// (Phase B-2 work; v1 caps at this limit).
 pub const MAX_FILTER_BYTES: usize = 1024 * 1024;
 
-/// BLAKE3 derive_key context for the bloom-filter double-hash key.
-///
-/// Registered in ADR-0006. The context is hashed once at first use to
-/// produce the 32-byte keyed-hash key, then every insert/query uses
-/// that key with one BLAKE3 pass over the chunk_id.
-const DOUBLE_HASH_CONTEXT: &str = "ol-bloom-doublehash-v1";
-
-/// Lazily-derived keyed-hash key. 32 bytes from
-/// `blake3::derive_key(DOUBLE_HASH_CONTEXT, b"")`. Computed once per
-/// process; subsequent insert/query calls are one `keyed_hash` each.
-fn double_hash_key() -> &'static [u8; 32] {
-    use std::sync::OnceLock;
-    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
-    KEY.get_or_init(|| blake3::derive_key(DOUBLE_HASH_CONTEXT, b""))
-}
+/// xxh3 seed for the Bloom double-hash. Domain-separation marker; the
+/// exact value is arbitrary but FROZEN — changing it changes which bits
+/// get set, breaking the wire format.
+const XXH3_BLOOM_SEED: u64 = 0xB100_F117_E000_0001;
 
 /// A Bloom filter sized for a target false-positive rate.
 ///
@@ -165,6 +157,72 @@ impl Bloom {
         }
     }
 
+    /// Bulk-insert from a slice in parallel via rayon. Cores split the
+    /// (h1, h2) hash derivation; the bit-set pass is serial because the
+    /// bit array is single-writer.
+    ///
+    /// Wins start above ~4K chunk_ids; below that the rayon dispatch
+    /// cost exceeds the per-id work. Falls back to the serial path for
+    /// small inputs.
+    pub fn extend_par(&mut self, ids: &[[u8; 32]]) {
+        use rayon::prelude::*;
+
+        // xxh3 made the serial path so fast (~66 Melem/s) that rayon's
+        // dispatch overhead only pays off above ~512K ids per benches.
+        // Below that, the serial loop is at most a few ms.
+        const PARALLEL_THRESHOLD: usize = 512 * 1024;
+        if ids.len() < PARALLEL_THRESHOLD {
+            for cid in ids {
+                self.insert(cid);
+            }
+            return;
+        }
+        // Parallel: derive (h1, h2) per id, collect, then set bits serially.
+        let m = self.m_bits;
+        let k = self.k;
+        let positions: Vec<[u32; 8]> = ids
+            .par_iter()
+            .map(|cid| {
+                let (h1, h2) = derive_hashes(cid);
+                // Pre-compute up to k positions; 8 is a generous upper
+                // bound for the Phase B target k≤7 at 1% FP rate. Larger
+                // k values fall through to the serial path inside the
+                // bit-set loop below.
+                let mut out = [0u32; 8];
+                let cap = (k as usize).min(8);
+                for (i, slot) in out.iter_mut().enumerate().take(cap) {
+                    *slot = double_hash_position(h1, h2, i as u32, m);
+                }
+                out
+            })
+            .collect();
+
+        for (cid, pos) in ids.iter().zip(positions.iter()) {
+            if k as usize <= 8 {
+                for i in 0..(k as usize) {
+                    set_bit(&mut self.bits, pos[i]);
+                }
+            } else {
+                // Tall-k fallback: re-derive on the bit-set pass for
+                // any positions past slot 8.
+                self.insert(cid);
+            }
+        }
+    }
+
+    /// Batch presence check: returns one `bool` per input chunk_id.
+    ///
+    /// Faster than calling `contains` in a loop because:
+    ///  - The hot loop is straight-line, helping branch prediction.
+    ///  - The output `Vec<bool>` lets the compiler unroll cleanly.
+    ///
+    /// Used by the server-side bloom-handshake's "for each chunk_id in
+    /// my memtable, does the peer have it?" scan.
+    #[must_use]
+    pub fn contains_many(&self, ids: &[[u8; 32]]) -> Vec<bool> {
+        ids.iter().map(|cid| self.contains(cid)).collect()
+    }
+
     /// Encode to wire bytes per ADR-0011.
     ///
     /// # Errors
@@ -241,17 +299,15 @@ impl Bloom {
 
 /// Derive (h1, h2) — two independent 64-bit hashes from a chunk_id.
 ///
-/// One BLAKE3 `keyed_hash` pass with the precomputed
-/// [`double_hash_key`]. Output is 32 bytes; first 8 become `h1`,
-/// next 8 become `h2`. Domain separation against other BLAKE3 uses on
-/// the same chunk_id is provided by the keyed-hash key being derived
-/// from a registered ADR-0006 context.
+/// One xxh3-128 pass with [`XXH3_BLOOM_SEED`]. Output is 128 bits;
+/// the low 64 become `h1`, the high 64 become `h2`. Domain separation
+/// against other uses of xxh3 on the same chunk_id is provided by the
+/// seed value.
 #[inline]
 fn derive_hashes(chunk_id: &[u8; 32]) -> (u64, u64) {
-    let out = blake3::keyed_hash(double_hash_key(), chunk_id);
-    let bytes = out.as_bytes();
-    let h1 = u64::from_le_bytes(bytes[0..8].try_into().expect("8 bytes"));
-    let h2 = u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes"));
+    let out = xxhash_rust::xxh3::xxh3_128_with_seed(chunk_id, XXH3_BLOOM_SEED);
+    let h1 = out as u64;
+    let h2 = (out >> 64) as u64;
     // Ensure h2 != 0; degenerate (h2 == 0) would map all k positions to
     // the same bit. Probability is 2^-64; we still guard.
     let h2 = if h2 == 0 { 1 } else { h2 };

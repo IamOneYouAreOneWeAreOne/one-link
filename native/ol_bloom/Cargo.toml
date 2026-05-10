@@ -11,8 +11,12 @@ name = "ol_bloom"
 crate-type = ["lib"]
 
 [dependencies]
-blake3    = { workspace = true }
-thiserror = { workspace = true }
+xxhash-rust = { workspace = true }
+thiserror   = { workspace = true }
+# Parallel bloom build for server-side bloom-handshake (collect_chunk_ids
+# scans the full memtable; rayon parallelizes the (h1,h2) derivation
+# across cores before the sequential bit-set pass).
+rayon       = "1.10"
 
 [dev-dependencies]
 proptest  = { workspace = true }

@@ -51,6 +51,11 @@ blake3       = { version = "1.5", features = ["traits-preview", "rayon"] }
 # Fast single-byte and multi-byte pattern search (used by format-aware
 # chunking to walk ZIP LFH signatures with SSE2/AVX2 acceleration).
 memchr       = "2.7"
+# Non-cryptographic fast hash for Bloom filter h1/h2 derivation (xxh3
+# is ~10-15 GiB/s scalar, ~10x faster than BLAKE3 on 32-byte inputs).
+# Bloom filter only requires uniform-distribution hashes, not
+# cryptographic collision resistance.
+xxhash-rust  = { version = "0.8", features = ["xxh3"] }
 # Content-defined chunking (FastCDC/Gear-256 per ADR-0001).
 fastcdc      = "3.1"
 # AEAD primitives. RustCrypto suite is the standard well-audited choice;

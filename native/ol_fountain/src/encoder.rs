@@ -4,6 +4,7 @@
 use crate::distribution::{robust_soliton_cdf, sample_degree, sample_neighbors};
 use crate::error::FountainError;
 use crate::rng::SplitMix64;
+use crate::xor::xor_into;
 
 /// LT encoder over a fixed source buffer.
 ///
@@ -110,13 +111,15 @@ impl<'a> LtEncoder<'a> {
         let mut rng = SplitMix64::for_symbol(self.k, symbol_id);
         let d = sample_degree(&self.cdf, &mut rng);
         let neighbors = sample_neighbors(self.k, d, &mut rng);
-        // XOR the chosen source symbols.
-        let mut out = vec![0u8; self.symbol_len];
-        for n in &neighbors {
-            let src = self.source_symbol(*n);
-            for (o, s) in out.iter_mut().zip(src.iter()) {
-                *o ^= *s;
-            }
+        // First neighbor: clone directly into the output buffer (skips
+        // a zero-fill + first XOR-against-zero, which is the dominant
+        // cost at degree=1 under Robust Soliton).
+        let mut iter = neighbors.iter();
+        let first = *iter.next().expect("sample_neighbors yields ≥ 1");
+        let mut out = self.source_symbol(first).to_vec();
+        // Remaining neighbors: word-wide XOR into `out`.
+        for n in iter {
+            xor_into(&mut out, self.source_symbol(*n));
         }
         out
     }

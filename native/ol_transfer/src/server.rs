@@ -113,7 +113,7 @@ impl TransferEngine {
     async fn handle_chunk_request(&self, request: &Frame) -> Result<Frame, TransferError> {
         let chunk_id = wire::decode_chunk_request(&request.payload)?;
         let record_opt = {
-            let store = self.store.lock().expect("store mutex poisoned");
+            let store = self.store.read().expect("store rwlock poisoned");
             if store.has_chunk(&chunk_id) {
                 Some(store.read_chunk(&chunk_id)?)
             } else {
@@ -154,7 +154,7 @@ impl TransferEngine {
         // narrow this to a specific manifest's chunk set; for v1 we
         // serve the engine's whole inventory.
         let local_ids: Vec<[u8; 32]> = {
-            let store = self.store.lock().expect("store mutex poisoned");
+            let store = self.store.read().expect("store rwlock poisoned");
             store.collect_chunk_ids()
         };
         let missing: Vec<[u8; 32]> =

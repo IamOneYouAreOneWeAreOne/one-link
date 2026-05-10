@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
 use ol_bloom::Bloom;
@@ -27,7 +27,7 @@ pub struct TransferEngine {
     /// Local chunk store. `std::sync::Mutex` because all calls into the
     /// store are sync I/O and we only hold the lock for short critical
     /// sections — never across an `.await`.
-    pub(crate) store: Arc<StdMutex<ChunkStore>>,
+    pub(crate) store: Arc<StdRwLock<ChunkStore>>,
 
     /// QUIC endpoint. Either server+dialer (built via
     /// `Endpoint::server_for_identity`) or dial-only.
@@ -56,7 +56,7 @@ impl TransferEngine {
     /// freely between the inbound server task and outbound fetch callers.
     #[must_use]
     pub fn new(
-        store: Arc<StdMutex<ChunkStore>>,
+        store: Arc<StdRwLock<ChunkStore>>,
         endpoint: Arc<Endpoint>,
         config: TransferConfig,
     ) -> Arc<Self> {
@@ -111,7 +111,7 @@ impl TransferEngine {
     /// Snapshot of chunk-store stats (cheap; counters only).
     #[must_use]
     pub fn store_stats(&self) -> ol_chunk_store::StoreStats {
-        self.store.lock().expect("store mutex poisoned").stats()
+        self.store.read().expect("store rwlock poisoned").stats()
     }
 
     /// Snapshot of the engine's endpoint local address (diagnostic).
@@ -336,7 +336,7 @@ impl TransferEngine {
     // ─────────────────────────── internals ─────────────────────────────
 
     fn read_local(&self, chunk_id: &[u8; 32]) -> Option<ChunkRecord> {
-        let store = self.store.lock().expect("store mutex poisoned");
+        let store = self.store.read().expect("store rwlock poisoned");
         if !store.has_chunk(chunk_id) {
             return None;
         }
@@ -344,7 +344,7 @@ impl TransferEngine {
     }
 
     pub(crate) fn write_local(&self, record: &ChunkRecord) -> Result<(), TransferError> {
-        let mut store = self.store.lock().expect("store mutex poisoned");
+        let mut store = self.store.write().expect("store rwlock poisoned");
         store.append_chunk(record)?;
         store.flush()?;
         Ok(())
