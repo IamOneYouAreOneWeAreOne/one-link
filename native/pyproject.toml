@@ -1,0 +1,53 @@
+# One Link native — pyo3 binding crate package manifest.
+#
+# Per ADR-0008 (../docs/decisions/0008-ffi-contract.md). Built with
+# maturin; produces a single wheel `one_link_native` containing the
+# pyo3 .so/.pyd plus the Python type stubs in
+# `one_link_native/python/one_link_native/`.
+
+[build-system]
+requires      = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name            = "one_link_native"
+version         = "0.21.0a0"
+description     = "One Link file engine v2: hot-path Rust crates exposed to Python"
+readme          = "README.md"
+license         = { text = "AGPL-3.0-or-later" }
+authors         = [{ name = "One Link contributor", email = "weareone@oneunity.earth" }]
+requires-python = ">=3.11"
+
+# pyo3-built native module is the one classifier we need.
+classifiers = [
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: System :: Filesystems",
+    "Topic :: Security :: Cryptography",
+    "Development Status :: 3 - Alpha",
+]
+
+[project.urls]
+Homepage      = "https://github.com/IamOne1/One_Link"
+Documentation = "https://github.com/IamOne1/One_Link/tree/master/docs/decisions"
+"Source Code" = "https://github.com/IamOne1/One_Link"
+
+[tool.maturin]
+# This is the pyo3 binding crate (matches the [package].name in
+# one_link_native/Cargo.toml).
+manifest-path = "one_link_native/Cargo.toml"
+# Python module name. abi3 wheel: forward-compatible across Python 3.11+.
+module-name   = "one_link_native"
+features      = ["pyo3/extension-module", "pyo3/abi3-py311"]
+# Strip release builds for smaller wheels.
+strip         = true
+# Type stubs live in a sibling package one_link_native-stubs/ shipped via include.
+# (Importable via the package name + "-stubs" suffix per PEP 561.)
+include       = [
+    { path = "one_link_native-stubs/__init__.pyi", format = "wheel" },
+    { path = "one_link_native-stubs/py.typed",      format = "wheel" },
+]

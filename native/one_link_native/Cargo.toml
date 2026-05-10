@@ -1,0 +1,28 @@
+[package]
+name = "one_link_native"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine v2: pyo3 binding crate for hot-path Rust crates"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+# cdylib for maturin / pyo3 (built into the importable .so/.pyd).
+# rlib for use as a normal Rust dependency in tests.
+crate-type = ["cdylib", "rlib"]
+name = "one_link_native"
+
+[dependencies]
+pyo3            = { workspace = true }
+ol_chunk        = { path = "../ol_chunk" }
+ol_aead         = { path = "../ol_aead" }
+ol_wal          = { path = "../ol_wal" }
+ol_chunk_store  = { path = "../ol_chunk_store" }
+thiserror       = { workspace = true }
+tracing         = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

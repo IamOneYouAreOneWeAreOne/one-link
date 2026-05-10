@@ -1,0 +1,68 @@
+# File engine v2 — per-PR benchmark gate.
+#
+# Per FILE_ENGINE_V2_PLAN.md "Verification (end-to-end)" #2:
+# "PR rejected if cycles/byte regresses or throughput drops by >5% on any
+# standardized corpus."
+#
+# This workflow:
+#  1. Builds the native module (maturin develop --release).
+#  2. Runs the perf_lab_native suite, emits JSON.
+#  3. Compares against a baseline JSON committed at
+#     `bench_baselines/native_chunk.json` (only the metrics tracked there;
+#     extra metrics are ignored).
+#  4. Fails if any tracked metric regresses by > 5 % vs. the baseline.
+#
+# The baseline is updated by the maintainer after a PR that intentionally
+# changes the kernel; this is the single accepted way to relax a gate.
+
+name: file-engine v2 bench gate
+
+on:
+  pull_request:
+    paths:
+      - "native/**"
+      - "src/one_link/chunk_native.py"
+      - "src/one_link/perf_lab_native.py"
+      - "bench_baselines/**"
+      - ".github/workflows/native_bench_gate.yml"
+
+jobs:
+  bench_gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache cargo target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install "maturin>=1.5,<2.0" blake3
+          pip install -e .
+
+      - name: Build native (release)
+        working-directory: native
+        run: maturin develop --release
+
+      - name: Run perf_lab_native and emit JSON
+        run: |
+          python -m one_link.perf_lab_native --json --no-legacy --size-mib 64 > bench_results.json
+          cat bench_results.json
+
+      - name: Gate against bench_baselines/native_chunk.json
+        run: |
+          python scripts/bench_gate.py \
+            --results bench_results.json \
+            --baseline bench_baselines/native_chunk.json \
+            --max-regression-percent 5

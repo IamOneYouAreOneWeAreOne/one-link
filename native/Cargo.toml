@@ -1,0 +1,121 @@
+# One Link native workspace root.
+#
+# Per FILE_ENGINE_V2_PLAN.md: hot-path Rust crates that the existing Python
+# daemon imports via the one_link_native pyo3 binding crate. Phase A1 ships
+# the foundation crates listed below; later phases add member crates without
+# breaking existing ABIs.
+#
+# Build:  maturin develop --release   (dev, editable install)
+#         maturin build --release     (wheel for distribution)
+#
+# Reference ADRs in ../docs/decisions/.
+
+[workspace]
+resolver = "2"
+members = [
+    "ol_chunk",
+    "ol_aead",
+    "ol_wal",
+    "ol_chunk_store",
+    "one_link_native",
+    # Future Phase A1 crates (added as they ship):
+    # Future Phase A2:
+    # "ol_quic",
+    # Future Phase B:
+    # "ol_fountain",
+    # "ol_netcode",
+    # "ol_fuse",
+    # "ol_fskit",
+    # "ol_winfs",
+    # Future Phase C:
+    # "ol_fec",
+    # "ol_erasure",
+    # "ol_capability",
+    # "ol_crdt",
+    # "ol_canon",
+    # Future Phase D:
+    # "ol_routing",
+    # "ol_homology",
+    # "ol_active_inference",
+    # "ol_grammar",
+]
+
+# Pinned across all crates so the engine has one decision per dep.
+[workspace.dependencies]
+# Hashing: BLAKE3 reference impl with SIMD acceleration.
+blake3       = { version = "1.5", features = ["traits-preview", "rayon"] }
+# Content-defined chunking (FastCDC/Gear-256 per ADR-0001).
+fastcdc      = "3.1"
+# AEAD primitives. RustCrypto suite is the standard well-audited choice;
+# AES-256-GCM uses aesni hardware accel on x86 (AVX2 + AES-NI), NEON on ARM.
+# ChaCha20-Poly1305 fallback runs on every architecture in constant time.
+aead              = "0.5"
+aes-gcm           = { version = "0.10", features = ["aes", "stream"] }
+chacha20poly1305  = { version = "0.10", features = ["stream"] }
+# Constant-time helpers (used in tag comparison, error paths).
+subtle            = "2.6"
+# Zeroize secrets on drop.
+zeroize           = { version = "1.8", features = ["derive"] }
+# CRC32-Castagnoli with hardware acceleration (SSE4.2 / ARM CRC ext).
+# Used by the crash-only WAL per ADR-0007 for per-record integrity.
+crc32c            = "0.6"
+# Cross-platform fsync helpers (macOS F_FULLFSYNC etc).
+fs2               = "0.4"
+# Temp file utilities for tests.
+tempfile          = "3.27"
+# Quickcheck-style randomized fuzzing of WAL replay.
+rand              = "0.9"
+# Bloom filter for chunk-presence front in the LSM index per ADR-0003.
+# bloomfilter is a small, well-audited crate; deterministic seeded hashes.
+bloomfilter       = "3.0"
+# pyo3 / maturin Python binding (per ADR-0008).
+pyo3         = { version = "0.22", features = ["abi3-py311", "extension-module"] }
+# Error types.
+thiserror    = "1.0"
+anyhow       = "1.0"
+# Property-based testing.
+proptest     = "1.5"
+# Benchmarking.
+criterion    = { version = "0.5", features = ["html_reports"] }
+# Hex for tests.
+hex          = "0.4"
+# Logging.
+tracing      = "0.1"
+tracing-subscriber = "0.3"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# Tighten the default clippy set; engine code must be well-mannered.
+all = "warn"
+pedantic = "warn"
+# Allow specific pedantic lints that are noisy in our domain:
+module_name_repetitions = "allow"  # we have ol_chunk::chunk, etc.
+must_use_candidate = "allow"
+missing_errors_doc = "allow"  # error docs are in the error type itself
+missing_panics_doc = "allow"  # we use thiserror; panics are bugs
+
+[profile.release]
+# Maximum performance for hot path.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+debug = 0
+
+[profile.bench]
+# Benchmarks need the same optimization as release.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = 0
+
+[profile.dev]
+# Dev builds are still fast enough for tests.
+opt-level = 1
+debug = true

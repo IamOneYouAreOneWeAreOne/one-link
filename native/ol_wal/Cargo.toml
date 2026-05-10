@@ -1,0 +1,31 @@
+[package]
+name = "ol_wal"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: crash-only write-ahead log per ADR-0007"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_wal"
+crate-type = ["lib"]
+
+[dependencies]
+crc32c    = { workspace = true }
+fs2       = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+
+[dev-dependencies]
+proptest  = { workspace = true }
+criterion = { workspace = true }
+hex       = { workspace = true }
+tempfile  = { workspace = true }
+rand      = { workspace = true }
+
+[[bench]]
+name    = "wal_bench"
+harness = false
+
+[lints]
+workspace = true

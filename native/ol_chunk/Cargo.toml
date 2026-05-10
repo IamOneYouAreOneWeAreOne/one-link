@@ -1,0 +1,32 @@
+[package]
+name = "ol_chunk"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: CDC chunking + BLAKE3 content-addressing"
+license = "AGPL-3.0-or-later"
+publish = false  # internal workspace crate; not published to crates.io
+
+[lib]
+name = "ol_chunk"
+crate-type = ["lib"]
+
+[dependencies]
+blake3      = { workspace = true }
+fastcdc     = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+# Parallel BLAKE3-per-chunk hashing via thread pool.
+rayon       = "1.10"
+
+[dev-dependencies]
+proptest    = { workspace = true }
+criterion   = { workspace = true }
+hex         = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bench]]
+name    = "cdc_bench"
+harness = false
+
+[lints]
+workspace = true

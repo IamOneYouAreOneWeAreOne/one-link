@@ -1,0 +1,446 @@
+"""File engine v2 — perf-lab benchmarks for the native chunk layer.
+
+Companion to ``perf_lab.py``. Surfaces the Phase A1 acceptance-gate numbers
+for the native FastCDC v2020 + BLAKE3 + ADR-0006 derivation kernels:
+
+- CDC scan throughput (target ≥ 2 GiB/s/core scalar; ≥ 5 GiB/s/core SIMD).
+- BLAKE3 raw + convergent chunk-address throughput.
+- AEAD key / ratchet_key_id / stripe_seed derivation throughput.
+- Comparison against the legacy ``cdc.py`` Python kernel for context.
+
+Per ADR-0008 these benchmarks are JSON-serializable and feed the per-PR
+benchmark gate. CI rejects PRs that regress any reported throughput by >5%.
+The CI workflow lives at ``.github/workflows/native_bench_gate.yml``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import statistics
+import sys
+import time
+from dataclasses import asdict, dataclass
+from typing import Callable
+
+import os
+import secrets
+import tempfile
+
+from . import aead_native, chunk_native, chunk_store_native, wal_native
+from .cdc import chunk_bytes as legacy_chunk_bytes
+
+
+MiB = 1024 * 1024
+GiB = 1024 * 1024 * 1024
+
+
+def _xorshift_buf(seed: int, size: int) -> bytes:
+    state = seed & 0xFFFF_FFFF_FFFF_FFFF
+    out = bytearray(size)
+    for i in range(size):
+        state ^= (state << 13) & 0xFFFF_FFFF_FFFF_FFFF
+        state ^= state >> 7
+        state ^= (state << 17) & 0xFFFF_FFFF_FFFF_FFFF
+        out[i] = state & 0xFF
+    return bytes(out)
+
+
+@dataclass
+class BenchResult:
+    """One measured throughput data point.
+
+    All times are wall-clock seconds. Throughput is reported in bytes per
+    second; callers convert to MiB/s or GiB/s as desired.
+    """
+
+    name: str
+    bytes_processed: int
+    iterations: int
+    seconds_total: float
+    seconds_per_iter_median: float
+    bytes_per_second_median: float
+    metadata: dict[str, object]
+
+
+def _bench(
+    name: str,
+    fn: Callable[[], int],
+    iterations: int = 5,
+    metadata: dict[str, object] | None = None,
+) -> BenchResult:
+    """Run ``fn`` ``iterations`` times. ``fn`` returns bytes processed.
+
+    Reports median to suppress outliers from cold caches and OS scheduling.
+    """
+    durations: list[float] = []
+    bytes_one_iter = 0
+    for _ in range(iterations):
+        start = time.perf_counter_ns()
+        bytes_one_iter = fn()
+        elapsed_ns = time.perf_counter_ns() - start
+        durations.append(elapsed_ns / 1e9)
+    median_s = statistics.median(durations)
+    return BenchResult(
+        name=name,
+        bytes_processed=bytes_one_iter,
+        iterations=iterations,
+        seconds_total=sum(durations),
+        seconds_per_iter_median=median_s,
+        bytes_per_second_median=(bytes_one_iter / median_s) if median_s > 0 else 0.0,
+        metadata=metadata or {},
+    )
+
+
+def bench_native_cdc_scan(size_mib: int = 256, iterations: int = 5) -> BenchResult:
+    if not chunk_native.HAS_NATIVE:
+        raise RuntimeError("native chunk module unavailable")
+    n = size_mib * MiB
+    buf = _xorshift_buf(0x1234_5678_DEAD_BEEF + size_mib, n)
+
+    def go() -> int:
+        count = 0
+        for _b in chunk_native.cdc_iter(buf):
+            count += 1
+        return n
+
+    return _bench(
+        f"native_cdc_scan_{size_mib}MiB",
+        go,
+        iterations=iterations,
+        metadata={"input_bytes": n, "kernel": "FastCDC v2020 + Gear-256"},
+    )
+
+
+def bench_legacy_cdc_scan(size_mib: int = 256, iterations: int = 3) -> BenchResult:
+    """Benchmark the legacy Gear-CDC for context. Slow; small iterations."""
+    n = size_mib * MiB
+    buf = _xorshift_buf(0x1234_5678_DEAD_BEEF + size_mib, n)
+
+    def go() -> int:
+        chunks = legacy_chunk_bytes(buf)
+        return n
+
+    return _bench(
+        f"legacy_cdc_scan_{size_mib}MiB",
+        go,
+        iterations=iterations,
+        metadata={"input_bytes": n, "kernel": "legacy Gear-CDC (16/64/256 KiB)"},
+    )
+
+
+def bench_native_chunk_address_raw(size_kib: int = 64, iterations: int = 1000) -> BenchResult:
+    n = size_kib * 1024
+    buf = _xorshift_buf(0xCAFE_BABE + size_kib, n)
+
+    def go() -> int:
+        chunk_native.chunk_address_raw(buf)
+        return n
+
+    return _bench(
+        f"native_blake3_addr_raw_{size_kib}KiB",
+        go,
+        iterations=iterations,
+        metadata={"input_bytes": n},
+    )
+
+
+def bench_native_chunk_address_convergent(
+    size_kib: int = 64, iterations: int = 1000
+) -> BenchResult:
+    n = size_kib * 1024
+    buf = _xorshift_buf(0xCAFE_BABE + size_kib + 1, n)
+
+    def go() -> int:
+        chunk_native.chunk_address_convergent(buf)
+        return n
+
+    return _bench(
+        f"native_blake3_addr_convergent_{size_kib}KiB",
+        go,
+        iterations=iterations,
+        metadata={"input_bytes": n},
+    )
+
+
+def bench_native_aead_key_derivation(iterations: int = 100_000) -> BenchResult:
+    chain = b"\x42" * 32
+    chunk = b"\x01" * 32
+
+    def go() -> int:
+        chunk_native.derive_aead_key(chain, chunk)
+        return 64  # bytes of input
+
+    return _bench(
+        "native_derive_aead_key",
+        go,
+        iterations=iterations,
+        metadata={"per_iter_bytes": 64},
+    )
+
+
+def bench_native_stripe_seed(iterations: int = 100_000) -> BenchResult:
+    chunk = b"\x77" * 32
+
+    def go() -> int:
+        chunk_native.derive_stripe_seed(chunk, 10)
+        return 33  # 32 + stripe_k
+
+    return _bench(
+        "native_derive_stripe_seed",
+        go,
+        iterations=iterations,
+        metadata={"per_iter_bytes": 33, "stripe_k": 10},
+    )
+
+
+# ─── AEAD benchmarks ──────────────────────────────────────────────────
+
+
+def bench_native_aead(
+    kind: str = "aes",
+    chunk_size_kib: int = 64,
+    iterations: int = 200,
+) -> tuple[BenchResult, BenchResult]:
+    """Encrypt + decrypt one chunk per iteration; return (enc_result, dec_result)."""
+    if not aead_native.HAS_NATIVE:
+        raise RuntimeError("aead_native unavailable")
+    n = chunk_size_kib * 1024
+    plaintext = _xorshift_buf(0xCAFE_AEAD ^ chunk_size_kib, n)
+    chunk_id = secrets.token_bytes(32)
+    key = secrets.token_bytes(32)
+    cipher = aead_native.AeadCipher.with_kind(key, kind)  # type: ignore[arg-type]
+    # warm-up
+    ct = cipher.encrypt_chunk(chunk_id, plaintext)
+    cipher.decrypt_chunk(chunk_id, len(plaintext), ct)
+
+    def enc() -> int:
+        ct = cipher.encrypt_chunk(chunk_id, plaintext)
+        return len(plaintext)
+
+    def dec() -> int:
+        cipher.decrypt_chunk(chunk_id, len(plaintext), ct)
+        return len(plaintext)
+
+    enc_res = _bench(
+        f"native_aead_{kind}_encrypt_{chunk_size_kib}KiB",
+        enc,
+        iterations=iterations,
+        metadata={"input_bytes": n, "kind": kind},
+    )
+    dec_res = _bench(
+        f"native_aead_{kind}_decrypt_{chunk_size_kib}KiB",
+        dec,
+        iterations=iterations,
+        metadata={"input_bytes": n, "kind": kind},
+    )
+    return enc_res, dec_res
+
+
+# ─── WAL benchmarks ───────────────────────────────────────────────────
+
+
+def bench_native_wal_group_commit(
+    batch_size: int = 128,
+    payload_kib: int = 4,
+    iterations: int = 5,
+) -> BenchResult:
+    if not wal_native.HAS_NATIVE:
+        raise RuntimeError("wal_native unavailable")
+    payload = b"\xCD" * (payload_kib * 1024)
+    total_bytes = batch_size * len(payload)
+
+    def go() -> int:
+        with tempfile.TemporaryDirectory() as d:
+            with wal_native.Wal.create(d, "chunk") as wal:
+                for _ in range(batch_size):
+                    wal.append(wal_native.WalRecord(0x01, 0x00, payload))
+                wal.flush()
+        return total_bytes
+
+    return _bench(
+        f"native_wal_group_commit_batch={batch_size}_payload={payload_kib}KiB",
+        go,
+        iterations=iterations,
+        metadata={"batch_size": batch_size, "payload_kib": payload_kib},
+    )
+
+
+# ─── Chunk store benchmarks ──────────────────────────────────────────
+
+
+def bench_native_chunk_store_write(
+    batch_size: int = 32,
+    plaintext_kib: int = 64,
+    iterations: int = 5,
+) -> BenchResult:
+    if not chunk_store_native.HAS_NATIVE:
+        raise RuntimeError("chunk_store_native unavailable")
+    plaintext_bytes = plaintext_kib * 1024
+    total_bytes = batch_size * plaintext_bytes
+
+    def go() -> int:
+        with tempfile.TemporaryDirectory() as d:
+            with chunk_store_native.ChunkStore.open(d) as store:
+                ct_len = plaintext_bytes + ((plaintext_bytes + 16383) // 16384) * 16
+                ct = b"\xCD" * ct_len
+                for i in range(batch_size):
+                    cid = i.to_bytes(4, "little") + b"\xAA" * 28
+                    store.append_chunk(
+                        cid, b"\x55" * 16, plaintext_bytes, ct
+                    )
+                store.flush()
+        return total_bytes
+
+    return _bench(
+        f"native_chunk_store_write_batch={batch_size}_plaintext={plaintext_kib}KiB",
+        go,
+        iterations=iterations,
+        metadata={"batch_size": batch_size, "plaintext_kib": plaintext_kib},
+    )
+
+
+def bench_native_chunk_store_locate(iterations: int = 1_000_000) -> BenchResult:
+    """Memtable + bloom lookup throughput (warm path)."""
+    if not chunk_store_native.HAS_NATIVE:
+        raise RuntimeError("chunk_store_native unavailable")
+    with tempfile.TemporaryDirectory() as d:
+        store = chunk_store_native.ChunkStore.open(d)
+        ids = []
+        ct = b"\xEE" * 80
+        for i in range(1024):
+            cid = i.to_bytes(4, "little") + b"\xBB" * 28
+            store.append_chunk(cid, b"\x33" * 16, 64, ct)
+            ids.append(cid)
+        store.flush()
+
+        def go() -> int:
+            stride = 101
+            idx = 0
+            for _ in range(iterations):
+                store.locate_chunk(ids[idx % len(ids)])
+                idx = (idx + stride) % (len(ids) * stride)
+            return iterations * 32
+
+        result = _bench(
+            "native_chunk_store_locate",
+            go,
+            iterations=1,
+            metadata={"chunks_indexed": len(ids), "lookups": iterations},
+        )
+        store.close()
+    return result
+
+
+def run_full_suite(size_mib: int = 256, include_legacy: bool = True) -> list[BenchResult]:
+    """Run the complete A1 native-bench suite.
+
+    ``size_mib`` controls the CDC scan input size (256 MiB default; reduce
+    for quick checks on slow disks).
+    """
+    results: list[BenchResult] = []
+    if not chunk_native.HAS_NATIVE:
+        raise RuntimeError(
+            "one_link_native not installed; run `cd native && maturin "
+            "develop --release` before running native benches"
+        )
+    # ol_chunk
+    results.append(bench_native_cdc_scan(size_mib=size_mib))
+    if include_legacy:
+        # Legacy is slow (~8 MiB/s); use 32 MiB so the run finishes quickly.
+        results.append(bench_legacy_cdc_scan(size_mib=min(size_mib, 32)))
+    results.append(bench_native_chunk_address_raw(size_kib=64))
+    results.append(bench_native_chunk_address_convergent(size_kib=64))
+    results.append(bench_native_aead_key_derivation())
+    results.append(bench_native_stripe_seed())
+    # ol_aead
+    if aead_native.HAS_NATIVE:
+        for kind in ("aes", "chacha"):
+            for size_kib in (16, 64, 256):
+                enc, dec = bench_native_aead(kind=kind, chunk_size_kib=size_kib, iterations=100)
+                results.append(enc)
+                results.append(dec)
+    # ol_wal
+    if wal_native.HAS_NATIVE:
+        results.append(bench_native_wal_group_commit(batch_size=128, payload_kib=4))
+        results.append(bench_native_wal_group_commit(batch_size=128, payload_kib=64))
+    # ol_chunk_store
+    if chunk_store_native.HAS_NATIVE:
+        results.append(bench_native_chunk_store_write(batch_size=32, plaintext_kib=64))
+        results.append(bench_native_chunk_store_write(batch_size=128, plaintext_kib=64))
+        results.append(bench_native_chunk_store_locate(iterations=500_000))
+    return results
+
+
+def render_report(results: list[BenchResult]) -> str:
+    """Render a tabular summary suitable for terminal + CI logs."""
+    lines = []
+    diag = chunk_native.diagnostics()
+    lines.append("# One Link file-engine v2 — native chunk benchmarks")
+    lines.append(
+        f"# native: {diag['native_available']} | version: {diag.get('version')} "
+        f"| kernel: {diag.get('kernel', 'n/a')}"
+    )
+    lines.append(
+        f"# host: {platform.platform()} | python: {platform.python_version()}"
+    )
+    lines.append("")
+    header = (
+        f"{'name':<48} {'iter':>6} {'GiB/s':>10} {'MB/s':>10} {'ms/iter':>10}"
+    )
+    lines.append(header)
+    lines.append("-" * len(header))
+    for r in results:
+        gibs = r.bytes_per_second_median / GiB
+        mbs = r.bytes_per_second_median / 1_000_000
+        ms = r.seconds_per_iter_median * 1000
+        lines.append(
+            f"{r.name:<48} {r.iterations:>6} {gibs:>10.3f} {mbs:>10.2f} {ms:>10.3f}"
+        )
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Run One Link file-engine v2 native chunk benchmarks."
+    )
+    parser.add_argument(
+        "--size-mib",
+        type=int,
+        default=256,
+        help="CDC scan input size in MiB (default 256).",
+    )
+    parser.add_argument(
+        "--no-legacy",
+        action="store_true",
+        help="Skip the slow legacy Python CDC comparison run.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON results for CI ingestion (default: human-readable).",
+    )
+    args = parser.parse_args(argv)
+
+    results = run_full_suite(size_mib=args.size_mib, include_legacy=not args.no_legacy)
+    if args.json:
+        out = {
+            "diagnostics": chunk_native.diagnostics(),
+            "host": {
+                "platform": platform.platform(),
+                "python": platform.python_version(),
+                "cpu_count": os.cpu_count(),
+            },
+            "results": [asdict(r) for r in results],
+        }
+        json.dump(out, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(render_report(results))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

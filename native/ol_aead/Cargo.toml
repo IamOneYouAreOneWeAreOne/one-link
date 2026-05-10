@@ -1,0 +1,33 @@
+[package]
+name = "ol_aead"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: per-chunk AEAD pipeline (AES-256-GCM + ChaCha20-Poly1305 fallback) per ADR-0002"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_aead"
+crate-type = ["lib"]
+
+[dependencies]
+ol_chunk         = { path = "../ol_chunk" }
+aead             = { workspace = true }
+aes-gcm          = { workspace = true }
+chacha20poly1305 = { workspace = true }
+subtle           = { workspace = true }
+zeroize          = { workspace = true }
+thiserror        = { workspace = true }
+tracing          = { workspace = true }
+
+[dev-dependencies]
+proptest         = { workspace = true }
+criterion        = { workspace = true }
+hex              = { workspace = true }
+
+[[bench]]
+name    = "aead_bench"
+harness = false
+
+[lints]
+workspace = true

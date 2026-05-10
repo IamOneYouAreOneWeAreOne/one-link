@@ -1,0 +1,33 @@
+[package]
+name = "ol_chunk_store"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: chunk_log + manifest_log + LSM index + bloom filter front (ADR-0003, ADR-0005)"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_chunk_store"
+crate-type = ["lib"]
+
+[dependencies]
+ol_chunk    = { path = "../ol_chunk" }
+ol_aead     = { path = "../ol_aead" }
+ol_wal      = { path = "../ol_wal" }
+bloomfilter = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+criterion   = { workspace = true }
+hex         = { workspace = true }
+tempfile    = { workspace = true }
+rand        = { workspace = true }
+
+[[bench]]
+name    = "store_bench"
+harness = false
+
+[lints]
+workspace = true

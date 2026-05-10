@@ -36,6 +36,20 @@ Companion docs (the project's plan-of-record at every layer):
   trademark (non-profit only), release signing (multi-maintainer
   threshold), refuse-acquisition charter, warrant canary,
   funding posture. Project structure as security primitive.
+- [`FILE_ENGINE_V2_PLAN.md`](./FILE_ENGINE_V2_PLAN.md) — multi-phase
+  architectural rebuild for the next-generation file-delivery
+  engine. 10-layer stack (substrate → chunk store → crypto →
+  capability → transport → information layer → routing →
+  adaptation → shared state → filesystem surface → operability).
+  Phase A1 → A2 → B/C → D ordered by dependency, not calendar.
+  Harvests OneField Mesh `transport/`, `mesh/`, `bridge/`,
+  `privacy/` primitives; built on Coherence Language stdlib
+  `std.{capability, crdt, codec.canon, distributed}`. New
+  parallel track to the v0.14.x phone tier and v0.15.x → v0.25.x
+  PWA pivot. Phase A1 first ship is the chunk-store rewrite
+  (line-rate CDC, content-addressed LSM with bloom front,
+  crash-only WAL, AEAD pipeline, manifest WAL, stripe-layout-
+  ready, both-address capable).
 
 Read order for someone joining cold:
 1. `PRINCIPLES.md` — what gates ships.
