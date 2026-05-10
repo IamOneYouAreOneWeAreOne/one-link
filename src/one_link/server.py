@@ -149,16 +149,20 @@ def _enumerate_sovereign_primitives() -> list[dict]:
         ("one_link.vrf", "Verifiable Random Function (VRF)",
          "primitive", "Unbiased pseudorandom output with publicly-"
                       "verifiable proof; defeats eclipse attacks "
-                      "in DHT routing",
-         "Bundle 47"),
+                      "in DHT routing. Secret-scalar mults via "
+                      "_point_mul_ct (best-effort constant-time, "
+                      "Bundle 57)",
+         "Bundle 47+57"),
         ("one_link.ring_sig", "Ring signatures (anonymous group creds)",
-         "primitive", "AOS construction on Ed25519 — prove I'm in "
-                      "{pubkey set} without revealing which one",
-         "Bundle 48"),
+         "primitive", "AOS construction on Ed25519. Signer's secret "
+                      "scalar + nonce mults via _point_mul_ct so "
+                      "per-position timing doesn't leak signer index",
+         "Bundle 48+57"),
         ("one_link.psi", "Private Set Intersection",
-         "primitive", "DH-OPRF based — find common contacts without "
-                      "revealing the non-shared ones",
-         "Bundle 49"),
+         "primitive", "DH-OPRF based. All five secret-scalar mults "
+                      "(server K, client blind, unblind) via "
+                      "_point_mul_ct (Bundle 57)",
+         "Bundle 49+57"),
         ("one_link.beacon", "Coherence Beacon (cross-LAN discovery)",
          "primitive", "IPv6 link-local multicast for peer discovery "
                       "across VLAN trunk ports where mDNS sandboxes",

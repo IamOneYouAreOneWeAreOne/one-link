@@ -71,6 +71,7 @@ _L = _vrf._L
 _BASE = _vrf._BASE
 _point_add = _vrf._point_add
 _point_mul = _vrf._point_mul
+_point_mul_ct = _vrf._point_mul_ct  # v0.20.7+ Bundle 57: secret-scalar mult
 _point_compress = _vrf._point_compress
 _point_decompress = _vrf._point_decompress
 _hash_to_point = _vrf._hash_to_point
@@ -87,7 +88,8 @@ def server_keypair() -> tuple[bytes, bytes]:
     k_int = int.from_bytes(secrets.token_bytes(32), "little") % _L
     if k_int == 0:
         k_int = 1  # vanishingly unlikely; defense
-    pub = _point_compress(_point_mul(k_int, _BASE))
+    # Bundle 57: k_int is the OPRF private key — constant-time mult.
+    pub = _point_compress(_point_mul_ct(k_int, _BASE))
     return k_int.to_bytes(32, "little"), pub
 
 
@@ -101,7 +103,8 @@ def server_evaluate_image(*, server_priv: bytes, contact: bytes) -> bytes:
         raise ValueError("server_priv must be 32 bytes")
     k = int.from_bytes(server_priv, "little") % _L
     h_pt = _hash_to_point(contact)
-    return _point_compress(_point_mul(k, h_pt))
+    # Bundle 57: secret OPRF key — constant-time mult.
+    return _point_compress(_point_mul_ct(k, h_pt))
 
 
 def client_blind(*, contact: bytes) -> tuple[bytes, bytes]:
@@ -116,7 +119,8 @@ def client_blind(*, contact: bytes) -> tuple[bytes, bytes]:
         r = int.from_bytes(secrets.token_bytes(32), "little") % _L
         if r != 0:
             break
-    T = _point_mul(r, h_pt)
+    # Bundle 57: r is the client's blind scalar — constant-time mult.
+    T = _point_mul_ct(r, h_pt)
     return r.to_bytes(32, "little"), _point_compress(T)
 
 
@@ -131,7 +135,8 @@ def server_evaluate_query(
     T = _point_decompress(blinded_query)
     if T is None:
         raise ValueError("blinded_query is not a valid curve point")
-    return _point_compress(_point_mul(k, T))
+    # Bundle 57: secret OPRF key — constant-time mult.
+    return _point_compress(_point_mul_ct(k, T))
 
 
 def client_unblind(
@@ -149,7 +154,8 @@ def client_unblind(
     T_prime = _point_decompress(server_response)
     if T_prime is None:
         raise ValueError("server_response is not a valid curve point")
-    Y = _point_mul(r_inv, T_prime)
+    # Bundle 57: r_inv is derived from the secret blind scalar — CT.
+    Y = _point_mul_ct(r_inv, T_prime)
     return _point_compress(Y)
 
 

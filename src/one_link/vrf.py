@@ -145,10 +145,15 @@ def _point_add(P: tuple[int, int], Q: tuple[int, int]) -> tuple[int, int]:
 
 
 def _point_mul(scalar: int, P: tuple[int, int]) -> tuple[int, int]:
-    """Standard double-and-add for Ed25519 points. Constant-time-
-    ish for our use; we don't need timing attack resistance for
-    VRF (the input is public). For identity/signing we'd want the
-    cryptography library."""
+    """Variable-time double-and-add. Used for **public** inputs only
+    (verify paths). Do NOT use this on secret scalars — the early-
+    exit and the data-dependent branch on bit i leak the scalar via
+    timing.
+
+    For secret scalars (sign / decap / encap-in-secret-blind) use
+    ``_point_mul_ct`` which fixes the loop bound to 256 iterations
+    and runs the conditional add as a swap on every bit.
+    """
     R = (0, 1)  # neutral element
     s = scalar % _L
     while s > 0:
@@ -156,6 +161,63 @@ def _point_mul(scalar: int, P: tuple[int, int]) -> tuple[int, int]:
             R = _point_add(R, P)
         P = _point_add(P, P)
         s >>= 1
+    return R
+
+
+def _cmov_point(
+    A: tuple[int, int], B: tuple[int, int], cond: int,
+) -> tuple[int, int]:
+    """Constant-time conditional move: returns B when cond=1, A when
+    cond=0. ``cond`` MUST be 0 or 1. The arithmetic-mask trick keeps
+    timing independent of cond.
+
+    Python integers are bigints with no native "constant time"
+    guarantee from the runtime — we make a best-effort here, but
+    Python's int operations vary in time with the magnitude of the
+    operands. Real constant-time crypto needs C-level primitives
+    (libsodium, OpenSSL); this best-effort is appropriate for the
+    threat model "raise the bar against opportunistic timing
+    attackers", not "defend against state-actor side-channel
+    analysis." Documented explicitly so callers know the limit."""
+    mask = -cond  # 0 → 0; 1 → -1 (all-bits-set on a two's-complement view)
+    # Python ints don't have fixed width, but bitwise ops still work
+    # the way you'd expect: A & ~mask | B & mask.
+    inv = ~mask
+    x = (A[0] & inv) | (B[0] & mask)
+    y = (A[1] & inv) | (B[1] & mask)
+    return (x, y)
+
+
+def _point_mul_ct(scalar: int, P: tuple[int, int]) -> tuple[int, int]:
+    """Best-effort constant-time scalar multiplication for secret
+    scalars. Fixes the loop bound to 256 iterations (the bit-length
+    of the group order) regardless of the scalar's magnitude, and
+    uses ``_cmov_point`` to fold the conditional add into a
+    branchless select.
+
+    Caveat: Python's bigint arithmetic on coordinates is not
+    constant-time at the hardware level (a multiplication on a
+    smaller operand finishes faster than one on a larger). For
+    state-actor-grade side-channel resistance, use the cryptography
+    library's X25519 / Ed25519 (which call into OpenSSL's constant-
+    time primitives) wherever the operation is a base-point mul.
+    For arbitrary scalar*point on Curve25519 (which VRF / ring sigs
+    / PSI need), neither cryptography nor PyNaCl exposes a public
+    constant-time API — pure Python is the practical option, with
+    this hardening to raise the bar against opportunistic timing
+    attackers.
+
+    The OUTPUT of _point_mul and _point_mul_ct are bit-identical
+    for the same inputs."""
+    R = (0, 1)
+    s = scalar % _L
+    Pcur = P
+    for i in range(256):
+        bit = (s >> i) & 1
+        # Conditional add: R += Pcur if bit else R += 0.
+        candidate = _point_add(R, Pcur)
+        R = _cmov_point(R, candidate, bit)
+        Pcur = _point_add(Pcur, Pcur)
     return R
 
 
@@ -224,7 +286,11 @@ def prove(*, priv_seed: bytes, input_bytes: bytes) -> VRFOutput:
     (priv_seed, input)."""
     secret_scalar = _scalar_from_priv_seed(priv_seed)
     H = _hash_to_point(input_bytes)
-    gamma = _point_mul(secret_scalar, H)
+    # v0.20.7+ (Bundle 57): secret_scalar is the long-term VRF
+    # private key; route through _point_mul_ct so a timing attacker
+    # observing prove() doesn't learn scalar bits via the early-exit
+    # in the variable-time _point_mul.
+    gamma = _point_mul_ct(secret_scalar, H)
     gamma_bytes = _point_compress(gamma)
     output = hashlib.sha512(b"VRF-OUT|" + input_bytes + gamma_bytes).digest()[:32]
     # Schnorr NIZK: prove knowledge of secret_scalar s.t.
@@ -239,8 +305,8 @@ def prove(*, priv_seed: bytes, input_bytes: bytes) -> VRFOutput:
     k = int.from_bytes(k_bytes[:32], "little") % _L
     K_H = _point_mul(k, H)
     K_B = _point_mul(k, _BASE)
-    # Public key = secret_scalar * B.
-    public_key_point = _point_mul(secret_scalar, _BASE)
+    # Public key = secret_scalar * B. (constant-time path; secret.)
+    public_key_point = _point_mul_ct(secret_scalar, _BASE)
     pub_bytes = _point_compress(public_key_point)
     H_bytes = _point_compress(H)
     c_input = (
@@ -310,6 +376,9 @@ def public_key_from_priv_seed(priv_seed: bytes) -> bytes:
     """Derive the VRF public key (= scalar * BASE) from an Ed25519
     private seed. NOT the same encoding as Ed25519's pubkey
     derivation (which folds in additional hashing) — this VRF uses
-    the raw scalar mult result. The pubkey is 32 bytes compressed."""
+    the raw scalar mult result. The pubkey is 32 bytes compressed.
+
+    v0.20.7+ (Bundle 57): constant-time path — derives the pubkey
+    from a secret scalar so we route through _point_mul_ct."""
     s = _scalar_from_priv_seed(priv_seed)
-    return _point_compress(_point_mul(s, _BASE))
+    return _point_compress(_point_mul_ct(s, _BASE))

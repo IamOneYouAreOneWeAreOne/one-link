@@ -77,6 +77,7 @@ _L = _vrf._L
 _BASE = _vrf._BASE
 _point_add = _vrf._point_add
 _point_mul = _vrf._point_mul
+_point_mul_ct = _vrf._point_mul_ct  # v0.20.7+ Bundle 57: secret-scalar mult
 _point_compress = _vrf._point_compress
 _point_decompress = _vrf._point_decompress
 
@@ -100,7 +101,8 @@ def public_key_from_priv_seed(priv_seed: bytes) -> bytes:
     derivation steps). For ring signatures, use this function on
     every member's priv_seed to produce the ring."""
     s = _scalar_from_priv_seed(priv_seed)
-    return _point_compress(_point_mul(s, _BASE))
+    # Bundle 57: secret scalar — constant-time path.
+    return _point_compress(_point_mul_ct(s, _BASE))
 
 
 def _hash_to_scalar(*chunks: bytes) -> int:
@@ -157,7 +159,8 @@ def sign(
     # Pick the nonce alpha (signer's secret) — used to start the ring
     # at position (signer_idx + 1).
     alpha = int.from_bytes(secrets.token_bytes(32), "little") % _L
-    R = _point_mul(alpha, _BASE)
+    # Bundle 57: alpha is the signer's secret nonce — constant-time mult.
+    R = _point_mul_ct(alpha, _BASE)
     next_idx = (signer_idx + 1) % n
     c[next_idx] = _hash_to_scalar(
         ring_bytes, message, _point_compress(R),
@@ -169,8 +172,13 @@ def sign(
     while i != signer_idx:
         s[i] = int.from_bytes(secrets.token_bytes(32), "little") % _L
         # R_i = s_i * B + c_i * P_i
+        # Bundle 57: s[i] is fresh secret randomness; constant-time
+        # mult prevents the per-position timing from leaking the
+        # signer's index. c[i] is derived from the public ring +
+        # message + previous R, so the c[i]*P_i mult can stay
+        # variable-time.
         R_i = _point_add(
-            _point_mul(s[i], _BASE),
+            _point_mul_ct(s[i], _BASE),
             _point_mul(c[i], ring_points[i]),
         )
         next_i = (i + 1) % n
