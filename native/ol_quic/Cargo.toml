@@ -1,0 +1,41 @@
+[package]
+name = "ol_quic"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: QUIC transport via quinn, identity-bound TLS per ADR-0009 + ADR-0010"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_quic"
+crate-type = ["lib"]
+
+[dependencies]
+quinn          = { workspace = true }
+rustls         = { workspace = true }
+rustls-pemfile = { workspace = true }
+rcgen          = { workspace = true }
+ring           = { workspace = true }
+tokio          = { workspace = true }
+ed25519-dalek  = { workspace = true }
+x509-parser    = { workspace = true }
+rand_core      = { workspace = true }
+blake3         = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+
+[dev-dependencies]
+proptest          = { workspace = true }
+criterion         = { workspace = true }
+hex               = { workspace = true }
+tempfile          = { workspace = true }
+rand              = { workspace = true }
+tokio             = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+tracing-subscriber = { workspace = true }
+
+[[bench]]
+name    = "quic_bench"
+harness = false
+
+[lints]
+workspace = true
