@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from one_link import channel as ch
+from one_link import daemon as daemon_mod
 from one_link.daemon import Daemon
 from one_link.identity import load_or_create
 
@@ -84,6 +85,53 @@ async def test_empty_pre_handshake_disconnect_is_benign(tmp_path: Path, caplog):
         await server.wait_closed()
 
     assert "handshake failed" not in caplog.text
+
+
+def test_windows_proactor_reset_exception_handler_suppresses_teardown_noise(monkeypatch):
+    calls = []
+
+    class _Loop:
+        def get_exception_handler(self):
+            return None
+
+        def set_exception_handler(self, handler):
+            self.handler = handler
+
+        def default_exception_handler(self, context):
+            calls.append(context)
+
+    exc = ConnectionResetError("reset")
+    exc.winerror = 10054
+    loop = _Loop()
+    monkeypatch.setattr(daemon_mod.os, "name", "nt")
+
+    daemon_mod._install_asyncio_exception_handler(loop)  # type: ignore[arg-type]
+    loop.handler(loop, {"message": "connection_lost", "exception": exc})
+
+    assert calls == []
+
+
+def test_asyncio_exception_handler_delegates_real_errors(monkeypatch):
+    calls = []
+
+    class _Loop:
+        def get_exception_handler(self):
+            return None
+
+        def set_exception_handler(self, handler):
+            self.handler = handler
+
+        def default_exception_handler(self, context):
+            calls.append(context)
+
+    loop = _Loop()
+    monkeypatch.setattr(daemon_mod.os, "name", "nt")
+
+    daemon_mod._install_asyncio_exception_handler(loop)  # type: ignore[arg-type]
+    ctx = {"message": "boom", "exception": RuntimeError("real failure")}
+    loop.handler(loop, ctx)
+
+    assert calls == [ctx]
 
 
 @pytest.mark.asyncio

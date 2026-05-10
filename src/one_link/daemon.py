@@ -132,6 +132,40 @@ from one_link.wire import decode_msg, encode_msg, make_msg
 
 log = logging.getLogger("one_link.daemon")
 
+
+def _is_benign_windows_transport_reset(exc: BaseException | None) -> bool:
+    return (
+        os.name == "nt"
+        and isinstance(exc, ConnectionResetError)
+        and getattr(exc, "winerror", None) == 10054
+    )
+
+
+def _install_asyncio_exception_handler(loop: asyncio.AbstractEventLoop) -> None:
+    """Suppress Windows Proactor teardown noise for already-closed sockets.
+
+    Real peer/session errors are still handled and logged by the protocol
+    paths. This only catches callback-level ``connection_lost`` resets that
+    can happen after a successful transfer when the remote peer has already
+    closed its side of the pipe.
+    """
+    previous_handler = loop.get_exception_handler()
+
+    def _handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+        exc = context.get("exception")
+        if _is_benign_windows_transport_reset(exc):
+            log.debug(
+                "suppressed benign Windows transport reset: %s",
+                context.get("message", ""),
+            )
+            return
+        if previous_handler is not None:
+            previous_handler(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+
 CONTROL_PORT_FILE = "control.port"
 PEER_PORT_FILE = "peer.port"
 DAEMON_LOCK_FILE = "daemon.lock"
@@ -9610,6 +9644,7 @@ class Daemon:
 
 
 async def run() -> None:
+    _install_asyncio_exception_handler(asyncio.get_running_loop())
     me = load_or_create()
     daemon = Daemon(me)
     await daemon.start()
