@@ -31,11 +31,14 @@ use pyo3::prelude::*;
 mod aead;
 mod bandit;
 mod bloom;
+mod capability;
 mod chunk;
+mod crdt;
 mod erasure;
 mod errors;
 mod fec;
 mod fountain;
+mod hwkey;
 mod pqkem;
 mod quic;
 mod ratchet;
@@ -145,6 +148,27 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.bandit", bandit_mod)?;
+
+    let capability_mod = PyModule::new_bound(py, "capability")?;
+    capability::register(py, &capability_mod)?;
+    m.add_submodule(&capability_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.capability", capability_mod)?;
+
+    let crdt_mod = PyModule::new_bound(py, "crdt")?;
+    crdt::register(py, &crdt_mod)?;
+    m.add_submodule(&crdt_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.crdt", crdt_mod)?;
+
+    let hwkey_mod = PyModule::new_bound(py, "hwkey")?;
+    hwkey::register(py, &hwkey_mod)?;
+    m.add_submodule(&hwkey_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.hwkey", hwkey_mod)?;
 
     Ok(())
 }

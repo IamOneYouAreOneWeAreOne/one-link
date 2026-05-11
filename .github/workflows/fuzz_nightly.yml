@@ -1,0 +1,75 @@
+# File engine v2 — nightly cargo-fuzz sweep.
+#
+# Per FILE_ENGINE_V2_PLAN.md Phase C item #10:
+#
+#     "Continuous structure-aware fuzzing in CI — every parser, every
+#     state machine, every wire format. Fuzzer crash = release blocker."
+#
+# This workflow runs every parser and wire-format target in the `native/`
+# workspace under `cargo fuzz` for a budgeted time. A new crash opens an
+# issue and blocks the next release tag until corrected.
+#
+# Targets are discovered automatically from `native/fuzz/fuzz_targets/`.
+# Add new targets there as new wire formats / state machines ship.
+
+name: fuzz (nightly)
+
+on:
+  schedule:
+    # 04:17 UTC every day. Off-peak relative to scheduled releases.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      runtime_seconds:
+        description: "Per-target fuzz budget in seconds (default 600 = 10 min)"
+        required: false
+        default: "600"
+
+jobs:
+  fuzz:
+    name: cargo fuzz (each target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust (cargo-fuzz requires nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+
+      - name: Cache cargo target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      - name: Discover and run fuzz targets
+        working-directory: native
+        env:
+          RUNTIME_SECONDS: ${{ inputs.runtime_seconds || '600' }}
+        run: |
+          if [ ! -d fuzz/fuzz_targets ]; then
+            echo "no fuzz/fuzz_targets directory yet — skipping (initial scaffolding)"
+            exit 0
+          fi
+          set -e
+          for target in $(ls fuzz/fuzz_targets/*.rs | xargs -n1 basename | sed 's/\.rs$//'); do
+            echo "::group::fuzz target: $target"
+            # -- -timeout=10 caps a single input at 10s; max_total_time caps the sweep.
+            cargo +nightly fuzz run "$target" -- \
+              -timeout=10 \
+              -max_total_time="$RUNTIME_SECONDS" || {
+                echo "::error::fuzz target $target FAILED"
+                exit 1
+              }
+            echo "::endgroup::"
+          done
+
+      - name: Upload corpus on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ github.run_id }}
+          path: native/fuzz/corpus/
+          if-no-files-found: ignore

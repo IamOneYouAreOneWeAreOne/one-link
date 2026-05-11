@@ -21,11 +21,15 @@ on:
       - "src/one_link/chunk_store_native.py"
       - "src/one_link/quic_native.py"
       - "src/one_link/perf_lab_native.py"
+      - "src/one_link/capability_native.py"
+      - "src/one_link/crdt_native.py"
+      - "src/one_link/hwkey_native.py"
       - "tests/test_chunk_native_*.py"
       - "tests/test_aead_native_*.py"
       - "tests/test_wal_native_*.py"
       - "tests/test_chunk_store_native_*.py"
       - "tests/test_quic_native_*.py"
+      - "tests/unit/test_phase_c3_native_smoke.py"
       - ".github/workflows/native_build.yml"
   pull_request:
     paths:
@@ -36,11 +40,15 @@ on:
       - "src/one_link/chunk_store_native.py"
       - "src/one_link/quic_native.py"
       - "src/one_link/perf_lab_native.py"
+      - "src/one_link/capability_native.py"
+      - "src/one_link/crdt_native.py"
+      - "src/one_link/hwkey_native.py"
       - "tests/test_chunk_native_*.py"
       - "tests/test_aead_native_*.py"
       - "tests/test_wal_native_*.py"
       - "tests/test_chunk_store_native_*.py"
       - "tests/test_quic_native_*.py"
+      - "tests/unit/test_phase_c3_native_smoke.py"
       - ".github/workflows/native_build.yml"
 
 jobs:
@@ -123,6 +131,10 @@ jobs:
                  tests/test_chunk_store_native_v0210.py \
                  tests/test_quic_native_v0210.py \
                  -v --tb=short
+
+      - name: Run Phase C-3 smoke tests (capability + crdt + hwkey)
+        run: |
+          pytest tests/unit/test_phase_c3_native_smoke.py -v --tb=short
 
       - name: Run perf_lab_native (smoke)
         run: |

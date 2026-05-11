@@ -1,0 +1,24 @@
+[package]
+name = "ol_hwkey"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: hardware-bound keys (TOFU-degrading) per ADR-0023"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_hwkey"
+crate-type = ["lib"]
+
+[dependencies]
+blake3    = { workspace = true }
+subtle    = { workspace = true }
+zeroize   = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest  = { workspace = true }
+rand      = { workspace = true }
+
+[lints]
+workspace = true

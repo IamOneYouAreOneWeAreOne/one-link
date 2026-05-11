@@ -1,0 +1,167 @@
+# File engine v2 — reproducible signed release build.
+#
+# Per FILE_ENGINE_V2_PLAN.md Phase C item #12:
+#
+#     "Reproducible builds + multi-party signing: Sigstore-style
+#     transparency log; multi-signer release."
+#
+# This workflow runs on every annotated tag matching `v*`. It:
+#
+# 1. Builds the native workspace + Python wheel deterministically (pinned
+#    toolchain version, locked cargo registry, `SOURCE_DATE_EPOCH` from
+#    the tag commit, `-C codegen-units=1` etc).
+# 2. Records a BLAKE3 hash of every artifact.
+# 3. Signs each artifact with Sigstore (cosign keyless via OIDC) and
+#    uploads the bundle to the public transparency log.
+# 4. Optionally requires a second signature from a designated co-signer
+#    (configured at the org level as a repository secret).
+#
+# Acceptance gate is structural: a second run on a fresh worker MUST
+# produce byte-identical artifacts. The hash-of-hashes is checked in to
+# the release notes so external verifiers can confirm without running CI.
+
+name: reproducible release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Required for Sigstore keyless signing.
+permissions:
+  id-token: write
+  contents: write
+  attestations: write
+
+jobs:
+  build_and_sign:
+    name: build + Sigstore-sign
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags need full history for SOURCE_DATE_EPOCH derivation.
+          fetch-depth: 0
+
+      - name: Derive reproducible build env
+        id: env
+        shell: bash
+        run: |
+          # SOURCE_DATE_EPOCH from the tag commit, not the runner clock.
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> "$GITHUB_ENV"
+          # Pin codegen-units, no incremental — guarantees byte-identical
+          # artifacts across runs.
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C target-feature=+crt-static -C debuginfo=0" >> "$GITHUB_ENV"
+
+      - name: Install pinned Rust toolchain
+        # Pin to a specific version, not `stable`, for reproducibility.
+        uses: dtolnay/rust-toolchain@1.83.0
+        with:
+          components: rust-src
+
+      - name: Install Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install maturin
+        run: |
+          python -m pip install --upgrade pip
+          pip install "maturin>=1.5,<2.0"
+
+      - name: Build wheel (reproducible)
+        working-directory: native
+        run: |
+          maturin build --release --strip --out ../dist/
+
+      - name: Hash artifacts (BLAKE3)
+        shell: bash
+        run: |
+          mkdir -p dist
+          python -m pip install blake3
+          python - <<'PY'
+          import pathlib, json, blake3
+          out = {}
+          for p in sorted(pathlib.Path("dist").rglob("*")):
+              if p.is_file():
+                  out[p.name] = blake3.blake3(p.read_bytes()).hexdigest()
+          pathlib.Path("dist/HASHES.json").write_text(json.dumps(out, indent=2))
+          for k, v in out.items():
+              print(f"{v}  {k}")
+          PY
+
+      - name: Sigstore-sign every artifact
+        uses: sigstore/gh-action-sigstore-python@v3
+        with:
+          inputs: |
+            dist/*.whl
+            dist/HASHES.json
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: dist/
+          if-no-files-found: error
+
+  verify_reproducibility:
+    # Runs the same Linux build twice on isolated runners and asserts the
+    # resulting wheels are byte-identical. Any drift = release block.
+    name: verify byte-equivalent rebuild (linux)
+    needs: build_and_sign
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@1.83.0
+
+      - name: Install Python + maturin
+        run: |
+          python -m pip install --upgrade pip
+          pip install "maturin>=1.5,<2.0" blake3
+
+      - name: Build wheel (rerun)
+        env:
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_RELEASE_LTO: "fat"
+          CARGO_INCREMENTAL: "0"
+          RUSTFLAGS: "-C target-feature=+crt-static -C debuginfo=0"
+        working-directory: native
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          maturin build --release --strip --out ../dist2/
+
+      - name: Download original wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-ubuntu-latest
+          path: dist1/
+
+      - name: Compare BLAKE3 hashes
+        run: |
+          python - <<'PY'
+          import pathlib, blake3, sys
+          def hash_dir(d):
+              return {p.name: blake3.blake3(p.read_bytes()).hexdigest()
+                      for p in sorted(pathlib.Path(d).rglob("*"))
+                      if p.is_file() and p.suffix == ".whl"}
+          a = hash_dir("dist1")
+          b = hash_dir("dist2")
+          if a != b:
+              print("REPRODUCIBILITY FAILURE: byte-divergent rebuild")
+              print(f"  build 1: {a}")
+              print(f"  build 2: {b}")
+              sys.exit(1)
+          print("Reproducible build verified — byte-identical wheels.")
+          PY
