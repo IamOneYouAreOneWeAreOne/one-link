@@ -61,9 +61,12 @@ import zlib
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import blake3
+
+if TYPE_CHECKING:
+    from one_link import rendezvous_client
 
 from one_link import blobstore, channel as ch, foldersync
 from one_link.capabilities import (
@@ -663,10 +666,15 @@ class IncomingFile:
     size: int
     blob_hex: str
     out_path: Path
-    handle: object
+    # ``handle`` is the writable file object the receiver streams
+    # chunks into; ``hasher`` is the blake3.Hasher instance running
+    # in parallel. Both lack PEP-561 stubs in their upstream packages
+    # so we type-erase to ``Any`` — runtime contract is enforced by
+    # the call sites.
+    handle: Any
     received: int = 0
     next_seq: int = 0
-    hasher: object = None
+    hasher: Any = None
     cdc_chunks: list[dict] | None = None
     cdc_missing: set[int] | None = None
     cdc_parts: dict[int, bytes] | None = None
@@ -705,7 +713,11 @@ class Daemon:
         self._tail_subs: set[asyncio.StreamWriter] = set()
         self._incoming_files: dict[str, IncomingFile] = {}
         self._incoming_blobs: dict[str, dict] = {}
-        self.ui_server = None  # one_link.server.UIServer | None
+        # ``Any`` keeps the UIServer import lazy (it pulls aiohttp) —
+        # see start() where it's imported on demand. The runtime
+        # contract: None until start() succeeds; UIServer instance
+        # afterward.
+        self.ui_server: Any = None
         self.state: State | None = None
         self.pairing = PairingTracker()
         # v0.12.0: bandwidth pacer + auto-accept rules cache. Both
@@ -736,7 +748,11 @@ class Daemon:
         self._prune_task: asyncio.Task | None = None
         self._dm_reaper_task: asyncio.Task | None = None
         self._prior_index_task: asyncio.Task | None = None
-        self._lock_file = None
+        # ``_lock_file`` is opened in ``_acquire_pid_lock`` after start;
+        # typed ``Any`` because the platform-specific lock path (msvcrt
+        # on Windows, fcntl on POSIX) returns different concrete file
+        # types and mypy can't unify them cleanly.
+        self._lock_file: Any = None
         # Folder sync — populated in start() when state + blob store are up.
         self.folder_engine = None  # type: foldersync.FolderEngine | None
         self.blob_store = None     # type: blobstore.BlobStore | None
@@ -769,7 +785,10 @@ class Daemon:
         # Phase D #3 (ADR-0033): per-daemon active inference prefetch
         # predictor. Built lazily on first observation so daemons without
         # the native crate installed don't pay the cost.
-        self._prefetch_predictor: object | None = None
+        # ``Any`` because the native predictor object is exposed by
+        # the pyo3 binding (no PEP-561 stub yet on its methods like
+        # observe / predict_top_n / storage_entries).
+        self._prefetch_predictor: Any = None
         self._prefetch_unavailable_logged: bool = False
         # Phase D #1 (ADR-0028): per-relay empirical metrics. Maps
         # relay URL → {rtt_ms, loss_rate, n_attempts, n_successes,
@@ -820,7 +839,10 @@ class Daemon:
         # UI can show real "last alive" + latency instead of guessing
         # from mDNS visibility.
         # peer_fp -> {"last_alive_ms": int, "latency_ewma_ms": float}
-        self._pair_health: dict[str, dict[str, float]] = {}
+        # Per-peer pair-health snapshot: latency / bandwidth are floats,
+        # ``last_alive_ms`` is an int (ms), ``best_route`` is a str
+        # tag. Heterogeneous values so the inner dict is ``Any``.
+        self._pair_health: dict[str, dict[str, Any]] = {}
         # v0.10.8: live route memory. Transfer outcomes feed this so
         # swarm planning can prefer routes that actually work for this
         # peer instead of static guesses.
@@ -935,10 +957,16 @@ class Daemon:
                         "One Link daemon is already running for this ONE_LINK_HOME"
                     ) from e
             else:
-                import fcntl
+                # fcntl is POSIX-only; mypy on Windows doesn't ship a
+                # stub. The runtime guard above ensures we never reach
+                # this branch on Windows.
+                import fcntl  # type: ignore[import-not-found]
 
                 try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(  # type: ignore[attr-defined]
+                        f.fileno(),
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,  # type: ignore[attr-defined]
+                    )
                 except OSError as e:
                     raise RuntimeError(
                         "One Link daemon is already running for this ONE_LINK_HOME"
@@ -963,10 +991,15 @@ class Daemon:
                 with contextlib.suppress(OSError):
                     msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_UNLCK, 1)
             else:
-                import fcntl
+                # fcntl is POSIX-only — see lock-acquire branch above
+                # for the type-ignore rationale.
+                import fcntl  # type: ignore[import-not-found]
 
                 with contextlib.suppress(OSError):
-                    fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(  # type: ignore[attr-defined]
+                        self._lock_file.fileno(),
+                        fcntl.LOCK_UN,  # type: ignore[attr-defined]
+                    )
         finally:
             with contextlib.suppress(OSError):
                 self._lock_file.close()
@@ -1120,9 +1153,13 @@ class Daemon:
                     )))
         return s
 
-    def record_peer_presence(self, peer_fp: str, presence: str) -> None:
+    def record_peer_presence(
+        self, peer_fp: str, presence: Optional[str],
+    ) -> None:
         """Cache a peer's reported presence + broadcast peer_presence
-        WS event so the UI updates the avatar dot."""
+        WS event so the UI updates the avatar dot. ``presence=None`` is
+        treated as ``"online"`` so wire frames with a missing field
+        fall through to the default."""
         if not peer_fp:
             return
         s = (presence or "online").lower()
@@ -1956,11 +1993,14 @@ class Daemon:
                 grant_b64 = msg.get("grant_b64", "")
                 if not isinstance(grant_b64, str) or not grant_b64:
                     raise ValueError("grant_b64 missing or wrong type")
-                blob = base64.urlsafe_b64decode(
+                # Local-name distinct from the FILE_OFFER ``blob``
+                # below so mypy's type inference for the outer scope
+                # doesn't collide.
+                grant_blob = base64.urlsafe_b64decode(
                     grant_b64 + "=" * (-len(grant_b64) % 4)
                 )
                 self._cap_store.accept(
-                    blob,
+                    grant_blob,
                     expected_subject_pub=self.me.public_bytes,
                     expected_granter_pub=channel.peer_ed_pub,
                 )
@@ -2299,35 +2339,36 @@ class Daemon:
                 return
             try:
                 from one_link import groups as gmod
-                ev = gmod.GroupEvent.from_wire(event_wire)
+                group_ev = gmod.GroupEvent.from_wire(event_wire)
             except Exception as e:
                 log.warning("malformed GROUP_EVENT from %s: %s", peer_fp[:8], e)
                 return
-            # Verify signature. ev.verify() raises ValueError on
+            # Verify signature. group_ev.verify() raises ValueError on
             # bad signature; treat any exception as untrusted.
             try:
-                ev.verify()
+                group_ev.verify()
             except Exception as e:
                 log.warning(
                     "GROUP_EVENT signature failed: from=%s peer=%s: %s",
-                    ev.author_pubkey.hex()[:8], peer_fp[:8], e,
+                    group_ev.author_pubkey.hex()[:8], peer_fp[:8], e,
                 )
                 return
             if self.state is not None:
                 with contextlib.suppress(Exception):
                     self.state.upsert_group_event(
-                        group_id=ev.group_id, event_id=ev.event_id,
-                        timestamp_ms=ev.timestamp_ms,
-                        wire_dict=ev.to_wire(),
+                        group_id=group_ev.group_id,
+                        event_id=group_ev.event_id,
+                        timestamp_ms=group_ev.timestamp_ms,
+                        wire_dict=group_ev.to_wire(),
                     )
                 # Bump the cached group_meta name so the sidebar
                 # reflects the latest reduce result without forcing
                 # the UI to recompute.
                 with contextlib.suppress(Exception):
-                    gstate = self._group_state_for(ev.group_id)
+                    gstate = self._group_state_for(group_ev.group_id)
                     if gstate is not None:
                         self.state.upsert_group_meta(
-                            group_id=ev.group_id,
+                            group_id=group_ev.group_id,
                             name=gstate.name or "",
                             created_ms=int(time.time() * 1000),
                             state_hash="",
@@ -2336,8 +2377,8 @@ class Daemon:
                 with contextlib.suppress(Exception):
                     self.ui_server.broadcast({
                         "type": "group_event",
-                        "group_id": ev.group_id.hex(),
-                        "event_kind": ev.kind,
+                        "group_id": group_ev.group_id.hex(),
+                        "event_kind": group_ev.kind,
                     })
             await channel.send(encode_msg(make_msg(
                 "ACK", self.me.short_id, of=msg.get("id"),
@@ -4166,6 +4207,9 @@ class Daemon:
             blob_hash=f.blob_hex,
             chunk_index=idx,
         )
+        assert f.cdc_parts is not None
+        assert f.cdc_missing is not None
+        assert f.cdc_chunks is not None
         f.cdc_parts[idx] = data
         f.cdc_missing.remove(idx)
         cached = len(f.cdc_chunks) - len(f.cdc_missing)
@@ -5138,12 +5182,12 @@ class Daemon:
         observed_host: str | None = (
             ack.observed_endpoint.host if ack.observed_endpoint else None
         )
-        for e in ack.advertised_endpoints:
-            if e.port <= 0:
+        for endpoint in ack.advertised_endpoints:
+            if endpoint.port <= 0:
                 continue
-            candidates.append((e.host, e.port))
-            if observed_host and observed_host != e.host:
-                candidates.append((observed_host, e.port))
+            candidates.append((endpoint.host, endpoint.port))
+            if observed_host and observed_host != endpoint.host:
+                candidates.append((observed_host, endpoint.port))
         if not candidates:
             return None
         host, port = candidates[0]
@@ -5351,7 +5395,7 @@ class Daemon:
 
     async def _dial_via_relay(
         self, peer: Peer
-    ) -> tuple[object, object, asyncio.Task] | None:
+    ) -> tuple[Any, Any, asyncio.Task] | None:
         """v0.5.5: open an encrypted-relay session targeting the
         peer's pubkey. Returns a (reader, writer, pump_task) triple,
         or None if no relay is available / peer can't be addressed
@@ -6719,13 +6763,13 @@ class Daemon:
             except Exception:
                 continue
         for blob in partials_to_drop:
-            f = self._incoming_files.get(blob)
-            if f is None:
+            partial = self._incoming_files.get(blob)
+            if partial is None:
                 continue
             with contextlib.suppress(Exception):
-                self._abort_incoming_file(blob, f)
+                self._abort_incoming_file(blob, partial)
             with contextlib.suppress(OSError):
-                f.out_path.unlink()
+                partial.out_path.unlink()
         # Step 5.
         if self.ui_server is not None:
             with contextlib.suppress(Exception):
@@ -7483,6 +7527,7 @@ class Daemon:
                 epoch=epoch,
             )
 
+        assert chain_row is not None, "sender chain missing after upsert"
         sender_chain = gc.SenderChain(
             group_id=group_id,
             sender_pubkey=self.me.public_bytes,
@@ -8628,8 +8673,9 @@ class Daemon:
             with contextlib.suppress(Exception):
                 peer_features = self.state.get_peer_capabilities(peer_fp)
         peer_version = peer_caps_frame.get("app_version")
+        local_version: Optional[str]
         try:
-            from one_link import __version__ as local_version
+            from one_link import __version__ as local_version  # type: ignore[no-redef]
         except Exception:
             local_version = None
         fixed_chunk_size = _fast_fixed_chunk_size_for_peer(
@@ -9488,7 +9534,7 @@ class Daemon:
                 await self._reply(writer, {"ok": True, "stopping": True})
                 asyncio.create_task(self._control_shutdown())
             elif cmd == "peers":
-                peers = [
+                peer_rows = [
                     {
                         "short_id": p.short_id,
                         "hostname": p.hostname,
@@ -9501,7 +9547,7 @@ class Daemon:
                     "short_id": self.me.short_id,
                     "hostname": self.me.hostname,
                 }
-                await self._reply(writer, {"ok": True, "me": me, "peers": peers})
+                await self._reply(writer, {"ok": True, "me": me, "peers": peer_rows})
             elif cmd == "send":
                 peers = self._resolve_peer_candidates(req["peer"])
                 # v0.5.1: rendezvous fallback for paired peers off-LAN.
@@ -9940,8 +9986,11 @@ class Daemon:
                     on_local_change=self._on_local_folder_change,
                 )
                 # v0.8.9: hook divergent-edit conflict detection so the UI
-                # raises a banner the moment a conflict is logged.
-                self.folder_engine._on_conflict_recorded = self._on_folder_conflict
+                # raises a banner the moment a conflict is logged. The
+                # attribute is set dynamically on the FolderEngine
+                # instance; mypy can't see it because the class doesn't
+                # declare it. Live wire — keep the dynamic set.
+                self.folder_engine._on_conflict_recorded = self._on_folder_conflict  # type: ignore[attr-defined]
                 await self.folder_engine.start()
                 self._folder_sync_task = asyncio.create_task(self._folder_sync_loop())
             except Exception as e:
