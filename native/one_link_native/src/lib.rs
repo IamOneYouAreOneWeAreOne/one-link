@@ -25,6 +25,21 @@
 // Our hand-written code in this crate keeps the workspace deny semantics
 // via local `unsafe { ... }` blocks where actually needed.
 #![allow(unsafe_op_in_unsafe_fn)]
+// pyo3 0.22 macros emit `#[cfg(feature = "gil-refs")]` arms which are not
+// reachable on our feature set; the unexpected_cfgs lint is therefore a
+// false positive. pyo3 0.23 cleans this up; until then we silence it
+// uniformly so the release build is warning-clean.
+#![allow(unexpected_cfgs)]
+// pyo3 wraps every #[pymethods] item in a private module, so explicit
+// `pub fn` declarations on those methods become "unreachable pub". This
+// is structural — there's no actual visibility leakage. Suppress for
+// the whole crate; the macro-generated code is the source.
+#![allow(unreachable_pub)]
+// pyo3-wrapped types (PyChunkStore, PyAeadCipher, ...) hold non-Debug
+// inner state (file handles, ring keys). Adding manual Debug impls
+// would leak implementation details into operator logs; instead we
+// suppress the missing_debug_implementations workspace lint locally.
+#![allow(missing_debug_implementations)]
 
 use pyo3::prelude::*;
 

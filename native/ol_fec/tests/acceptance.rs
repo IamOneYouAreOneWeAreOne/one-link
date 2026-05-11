@@ -31,7 +31,7 @@ fn adr0016_rs_10_4_survives_any_4_erasure_across_10k_seeds() {
     for seed in 0..SEEDS {
         let mut rng = StdRng::seed_from_u64(seed);
         let data: Vec<Vec<u8>> = (0..K)
-            .map(|_| (0..SHARD_LEN).map(|_| rng.r#gen::<u8>()).collect())
+            .map(|_| (0..SHARD_LEN).map(|_| rng.random::<u8>()).collect())
             .collect();
         let data_refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
         let parity = codec.encode(&data_refs).expect("encode");
@@ -88,7 +88,7 @@ fn adr0016_rs_10_4_recovers_from_every_4_erasure_pattern() {
     let codec = Codec::new(K, M).expect("RS(10,4) constructs");
     let mut rng = StdRng::seed_from_u64(0xCAFE_BABE);
     let data: Vec<Vec<u8>> = (0..K)
-        .map(|_| (0..SHARD_LEN).map(|_| rng.r#gen::<u8>()).collect())
+        .map(|_| (0..SHARD_LEN).map(|_| rng.random::<u8>()).collect())
         .collect();
     let data_refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
     let parity = codec.encode(&data_refs).expect("encode");

@@ -13,7 +13,11 @@
 
 use ol_bloom::Bloom;
 
-/// Convert a hex string to a `[u8; 32]` chunk_id.
+/// Convert a hex string to a `[u8; 32]` chunk_id. Currently unused by
+/// the active determinism harness but kept available for ad-hoc
+/// fixture work; gated `#[allow(dead_code)]` so the test harness
+/// stays warning-clean.
+#[allow(dead_code)]
 fn hex32(s: &str) -> [u8; 32] {
     let bytes = hex::decode(s).expect("valid hex");
     assert_eq!(bytes.len(), 32, "hex {s} must decode to 32 bytes");

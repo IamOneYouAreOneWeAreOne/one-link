@@ -305,19 +305,19 @@ class FolderEngine:
         """Return a ``dict`` summary of the native mirror state for
         operator diagnostics: per-folder file counts plus the running
         divergence counter."""
-        out = {
+        folders: dict[str, dict] = {}
+        for name, mirror in self._native_mirrors.items():
+            snap = mirror.snapshot()
+            folders[name] = {"present_files": snap.len()}
+        return {
             "available": _MIRROR_AVAILABLE,
-            "folders": {},
+            "folders": folders,
             "divergence_events": self._native_mirror_divergence,
             "reconcile_checks": getattr(self, "_native_reconcile_checks", 0),
             "reconcile_disagreements": getattr(
                 self, "_native_reconcile_disagreements", 0
             ),
         }
-        for name, mirror in self._native_mirrors.items():
-            snap = mirror.snapshot()
-            out["folders"][name] = {"present_files": snap.len()}
-        return out
 
     def _native_reconcile_check(
         self,

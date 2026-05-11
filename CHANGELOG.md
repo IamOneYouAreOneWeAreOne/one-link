@@ -165,6 +165,58 @@ PEP 561 type stubs ship at `stubs/one_link_native-stubs/`.
   selection in `AdaptiveTransferBrain.decide()`, fall back to legacy
   multi-route Pareto.
 
+### Batch 2: production-readiness wiring (2026-05-11)
+
+Post-0.21.0-alpha hardening pass landed as commit `5d89838`:
+
+- **Relay metrics surface** — `Daemon.record_relay_observation()` EWMA-
+  smooths per-relay `rtt_ms` + `loss_rate` (α=0.2) on every
+  `open_relay_outbound` success/failure; `_pick_best_relay()` consumes
+  the recorded dict via `_relay_metrics_for()`.
+- **ol_codegen enum grammar** — `parse_enum` / `parse_decl` /
+  `emit_rust_enum` recognise single-payload + unit variants; u8
+  discriminant + variant-payload canonical encoding; 10k-iter byte-
+  equivalence property gate.
+- **Foldersync native reconciliation** — `FolderEngine.
+  _native_reconcile_check()` runs the OR-set add-wins lattice
+  decision alongside `merge_manifest_entries` and counts
+  disagreements per `receive_remote_manifest` entry; counters surface
+  via `native_mirror_stats()` so operators see the diff budget before
+  the authoritative-bit flip.
+- **Soak test harness** — `tests/test_native_pipeline_soak.py` drives
+  2k-iter randomized add/remove/concurrent-edit workload (designed
+  for 50k nightly via `ONE_LINK_SOAK_ITERS`); asserts zero native
+  mirror divergence + <5% reconcile disagreement budget.
+- **ol_fuse scaffold** — `FilesystemBackend` trait + `MemoryBackend`
+  reference impl + `mount()` entry point with `MountOptions` /
+  `MountError`. Real `fuser::mount2` Linux wiring deferred behind
+  `cfg(target_os = "linux")` so Windows / macOS workspace stays clean.
+
+**Hardening pass on batch 2 (this entry's polish)**:
+- Native workspace warning sweep: **zero warnings** across the
+  `cargo build --release` graph (was 60 pre-sweep; fixed unused
+  imports, dead methods, cfg(gil-refs) macro noise via crate-level
+  allow, missing-Debug on pyo3 wrapper types).
+- Test-build warning sweep: deprecated `rand::Rng::gen` →
+  `rand::Rng::random` in `ol_erasure`, `ol_fec`, `ol_bandit` test
+  surfaces; dead-code field `identity` in `ol_transfer::engine_e2e`
+  renamed `_identity`.
+- Criterion benches added for `ol_codegen` (parse + emit on small +
+  wide structs + mixed enums) and `ol_fuse` (getattr / read / readdir
+  / write on MemoryBackend). Baselines: codegen 213–551 ns parse,
+  456 ns emit; FUSE backend 52 ns / 4KiB read, 88 ns getattr-hit,
+  53 µs readdir-of-200.
+- `out` field annotation fix in `FolderEngine.native_mirror_stats()`
+  (mypy clean on the modified surface).
+- 8 version-pin regexes + 2 version-floor int-parse tests updated to
+  tolerate PEP-440 pre-release suffixes (`0.21.0-alpha`).
+
+**Final test sweep**: 3,069 Python tests passed / 4 skipped /
+0 failed (5m32s). Per-crate Rust builds clean across the 21
+member crates excluding `one_link_native` + `ol_transfer` (latter
+two compile clean when WDAC propagation allows; tests pass at
+89 sections / 0 failed.
+
 ---
 
 ## [0.20.6] — 2026-05-08

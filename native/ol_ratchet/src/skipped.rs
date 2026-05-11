@@ -10,7 +10,9 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::chain::{MessageKey, MESSAGE_KEY_LEN};
+use crate::chain::MessageKey;
+#[cfg(test)]
+use crate::chain::MESSAGE_KEY_LEN;
 use crate::error::RatchetError;
 
 /// Default capacity. Tuned so that a moderately-out-of-order fountain

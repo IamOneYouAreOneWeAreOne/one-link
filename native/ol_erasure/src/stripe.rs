@@ -303,8 +303,8 @@ mod tests {
         // 100 random chunks at various sizes; each encodes + decodes.
         let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF);
         for trial in 0..100 {
-            let len = 1 + rng.r#gen_range(0..16_384);
-            let plaintext: Vec<u8> = (0..len).map(|_| rng.r#gen::<u8>()).collect();
+            let len = 1 + rng.random_range(0..16_384);
+            let plaintext: Vec<u8> = (0..len).map(|_| rng.random::<u8>()).collect();
             let shards = encode_stripe(&plaintext, StripeParams::STANDARD).unwrap();
             let present: Vec<Option<&Shard>> = shards.iter().map(Some).collect();
             let decoded = decode_stripe(StripeParams::STANDARD, &present).unwrap();

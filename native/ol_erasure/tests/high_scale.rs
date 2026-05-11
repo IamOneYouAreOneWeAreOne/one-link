@@ -14,8 +14,8 @@ fn standard_stripe_round_trip_with_random_erasures_1000_trials() {
     let mut failures = 0usize;
     for seed in 0..TRIALS {
         let mut rng = StdRng::seed_from_u64(0xCAFE_F00D + seed as u64);
-        let len = 1 + rng.r#gen_range(0..32_768);
-        let plaintext: Vec<u8> = (0..len).map(|_| rng.r#gen::<u8>()).collect();
+        let len = 1 + rng.random_range(0..32_768);
+        let plaintext: Vec<u8> = (0..len).map(|_| rng.random::<u8>()).collect();
         let shards = encode_stripe(&plaintext, StripeParams::STANDARD).unwrap();
         assert_eq!(shards.len(), 14);
 

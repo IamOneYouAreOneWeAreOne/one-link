@@ -13,7 +13,6 @@ use ol_pqkem::{
     HybridCiphertext, HybridPublicKey, HybridSecretKey, HYBRID_CIPHERTEXT_LEN,
     HYBRID_PUBLIC_KEY_LEN, HYBRID_SECRET_KEY_LEN, SHARED_SECRET_LEN,
 };
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 

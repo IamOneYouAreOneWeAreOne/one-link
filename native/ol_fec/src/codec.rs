@@ -171,7 +171,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let shard_len = 1024;
         let data: Vec<Vec<u8>> = (0..10)
-            .map(|_| (0..shard_len).map(|_| rng.r#gen::<u8>()).collect())
+            .map(|_| (0..shard_len).map(|_| rng.random::<u8>()).collect())
             .collect();
         let data_refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
         let parity = codec.encode(&data_refs).unwrap();
@@ -195,7 +195,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0xCAFE);
         let shard_len = 256;
         let data: Vec<Vec<u8>> = (0..10)
-            .map(|_| (0..shard_len).map(|_| rng.r#gen::<u8>()).collect())
+            .map(|_| (0..shard_len).map(|_| rng.random::<u8>()).collect())
             .collect();
         let data_refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
         let parity = codec.encode(&data_refs).unwrap();

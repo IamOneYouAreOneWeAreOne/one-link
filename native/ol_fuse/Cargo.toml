@@ -24,7 +24,12 @@ blake3    = { workspace = true }
 # crate's consumers (daemon FUSE mount endpoint) can build today.
 
 [dev-dependencies]
-tempfile = { workspace = true }
+tempfile  = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "fuse_bench"
+harness = false
 
 [lints]
 workspace = true

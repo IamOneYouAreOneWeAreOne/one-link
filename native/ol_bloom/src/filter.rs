@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn rejects_nonzero_reserved() {
-        let mut f = Bloom::new(64);
+        let f = Bloom::new(64);
         let mut encoded = f.encode().unwrap();
         encoded[10] = 0xFF;
         let result = Bloom::decode(&encoded);

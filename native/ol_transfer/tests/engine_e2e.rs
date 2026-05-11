@@ -79,7 +79,12 @@ fn mk_record(id_byte: u8, plaintext_len: u32, ciphertext_len: usize) -> ChunkRec
 }
 
 struct Peer {
-    identity: Arc<Identity>,
+    // `identity` is referenced through endpoint TLS plumbing during
+    // setup; it stays owned here so the Arc isn't dropped before the
+    // endpoint, but isn't read directly inside the test body — keep
+    // the field with a leading underscore so Rust knows we hold it
+    // deliberately.
+    _identity: Arc<Identity>,
     fingerprint: PeerFingerprint,
     _root: TempDir,
     store: Arc<StdRwLock<ChunkStore>>,
@@ -140,7 +145,7 @@ fn pair() -> (Peer, Peer) {
     let bob_addr = bob_endpoint.local_addr().unwrap();
 
     let alice = Peer {
-        identity: alice_id,
+        _identity: alice_id,
         fingerprint: alice_fp,
         _root: alice_root,
         store: alice_store,
@@ -148,7 +153,7 @@ fn pair() -> (Peer, Peer) {
         addr: alice_addr,
     };
     let bob = Peer {
-        identity: bob_id,
+        _identity: bob_id,
         fingerprint: bob_fp,
         _root: bob_root,
         store: bob_store,

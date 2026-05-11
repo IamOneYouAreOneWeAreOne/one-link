@@ -4,7 +4,7 @@
 //! The daemon's `transfer_brain.py` (currently using EMA route memory)
 //! replaces its arm-selection loop with calls into this binding.
 
-use ol_bandit::{Bandit, BanditError, BanditRng, BanditSeed};
+use ol_bandit::{Bandit, BanditError, BanditSeed};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;

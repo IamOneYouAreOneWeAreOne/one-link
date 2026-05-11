@@ -1,6 +1,6 @@
 //! Fragility scoring: how badly would losing a chunk hurt the swarm?
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::components::components_of;
 

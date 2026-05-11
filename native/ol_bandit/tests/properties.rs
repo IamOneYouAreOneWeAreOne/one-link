@@ -1,6 +1,6 @@
 //! Proptest properties for `ol_bandit`.
 
-use ol_bandit::{Bandit, BanditRng, BanditSeed};
+use ol_bandit::{Bandit, BanditSeed};
 use proptest::prelude::*;
 
 proptest! {
