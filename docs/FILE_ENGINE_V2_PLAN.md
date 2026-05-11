@@ -7,6 +7,95 @@
 
 ---
 
+## Honest Status Scorecard (updated 2026-05-11)
+
+This table tracks what is **shipped + verified** vs **shipped but unverified** vs **not yet built**. The plan ahead is what the doc describes; this scorecard is the reality.
+
+### Crates
+
+| Plan crate | Status | Notes |
+|---|:-:|---|
+| `ol_chunk` | shipped | CDC + BLAKE3 + format-aware (ZIP + MP4 + WAV) |
+| `ol_chunk_store` | shipped | LSM + WAL + bloom; both-address ready (raw + convergent) |
+| `ol_aead` | shipped | AES-NI + ChaCha20-Poly1305 via ring |
+| `ol_wal` | shipped | crash-only WAL with CRC32C |
+| `ol_quic` | shipped (not yet wired) | quinn-based transport; daemon still on WebRTC |
+| `ol_capability` | shipped | Macaroon-style caps with attenuation gate |
+| `ol_crdt` | shipped | lattice + OR-set + vector clock + folder |
+| `ol_canon` | shipped (2026-05-11) | self-describing canonical encoder + 1M-iter byte-equiv gate |
+| `ol_fountain` | shipped | RaptorQ codec |
+| `ol_netcode` | shipped (2026-05-11) | XOR coded packets + tampered-manifest integrity gate |
+| `ol_fec` | shipped | Reed-Solomon (10,4) |
+| `ol_erasure` | shipped | stripe layout + encode/decode |
+| `ol_fuse` | shipped scaffold + real adapter | Linux adapter compiles; libfuse mount round-trip unverified |
+| `ol_fskit` | shipped scaffold (2026-05-11) | Trait surface live; Swift/FSKit bridge pending |
+| `ol_winfs` | shipped scaffold (2026-05-11) | WinFSP-preferred / Dokan fallback; adapters pending |
+| `ol_routing` | shipped | τ_c-weighted Dijkstra |
+| `ol_homology` | shipped | persistent-homology fragility detector |
+| `ol_grammar` | shipped | Re-Pair compression |
+| `ol_active_inference` | partial | functionality lives in `ol_prefetch` (cohort-prior + time-weighted co-occurrence); free-energy minimization still deferred |
+
+### Phase A1 acceptance gates
+
+| Gate | Plan target | Status |
+|---|---|:-:|
+| End-to-end ingest throughput | ≥ 1 GiB/s on Linux NVMe | **Unmet on Windows/NTFS test box (peak 442 MiB/s); needs Linux NVMe verification** |
+| AEAD throughput AES-NI | ≥ 4 GiB/s/core | **Met: 9.0–9.7 GiB/s measured** |
+| AEAD throughput ChaCha20 | ≥ 3 GiB/s/core | **Met: 3.17–3.26 GiB/s measured** |
+| Crash survival | 10,000 kill -9 injection points, 0 chunk loss | **Met: `OL_STORE_CRASH_ITERS=10000` passes in 58.58s** |
+| Manifest WAL coupling | crash between chunk-write + manifest-update converges | **Met: existing `replay_rebuilds_memtable` + crash-injection harness** |
+| Canonical-encoding byte-equivalence | 1M random structured inputs | **Met: `OL_CANON_GATE_ITERS=1000000` passes in 0.08s** |
+
+### Phase A2 acceptance gates
+
+| Gate | Plan target | Status |
+|---|---|:-:|
+| QUIC stream throughput | within 10% of TCP on tuned LAN | **Unmeasured** |
+| 0-RTT resume latency | < 50ms warm cache | **Unmeasured** |
+| Cellular ↔ WiFi migration | zero application-visible drop | **Unmeasured** |
+| Daemon cutover | daemon ↔ daemon over QUIC | **Not wired — daemon still uses WebRTC** |
+
+### Phase B acceptance gates
+
+| Gate | Plan target | Status |
+|---|---|:-:|
+| Bloom-init savings | ≥ 90% bytes-on-wire on 80% known | **Unmeasured** |
+| RaptorQ decode | K=1024 at 5% loss, ≥ 1000 seeds | **Codec ships; per-spec stress run pending** |
+| FUSE survives fsx-linux 24h | yes | **Unrun (Linux host required)** |
+| Convergent encryption | N senders → identical CT for raw media | **Layout supported in chunk_store; default still raw-BLAKE3** |
+| Format-aware chunking | GOP / ZIP / audio | **ZIP + MP4 top-level boxes + WAV data-chunk; GOP keyframe detection still pending** |
+
+### Phase C acceptance gates
+
+| Gate | Plan target | Status |
+|---|---|:-:|
+| RS (10,4) erasure recovery | 100% across 10,000 seeds | **Met** |
+| Bandit converges within 200 interactions | yes | **Met** |
+| Macaroon attenuation | property test 1M random delegation chains | **Met** |
+| ML-KEM-768 + X25519 hybrid | handshake at PQ params | **Met** |
+| Constant-time check | < 1% timing variance | **Met (ratchet 1.0103×, duress 1.014×)** |
+| Fuzzer in CI; 48h since last crash | yes | **Nightly fuzz wired; 48h-since-crash gate operational** |
+
+### Phase D acceptance gates
+
+| Gate | Plan target | Status |
+|---|---|:-:|
+| Tau-routing margin | ≥ 20% reduction in chunks-lost-on-partition | **Met: 100% reduction measured** |
+| Persistent-homology detector | ≤ 5% FP, partition flag in ≤ N rounds | **Met: 0% FP, 1-round detection** |
+| Active inference cold-start | bandit-equivalent within ≤ 50 transfers | **Met: cohort prior 1-iter, cold 50-iter** |
+| Plausibly deniable | duress key unlocks decoy, no observable disk pattern | **Met: gate-side timing 1.014×** |
+| TLA+ formal model | no double-grant / key reuse / downgrade / replay | **Met: `docs/formal/capability.tla` + `.cfg`** |
+
+### End-to-end demos (plan-mandated, not yet run)
+
+- [ ] 10 GbE LAN saturation (≥ 1.19 GiB/s, ≤ 2 cores)
+- [ ] 100 GB folder + 4 swarm peers → receiver finishes < 14 min
+- [ ] Premiere project resend with ≥ 90% dedup, ≤ 10% delta in < 10s
+- [ ] Cellular flicker mid-transfer with zero retransmits visible
+- [ ] 48h cross-platform soak (Linux + macOS + Windows; FUSE/FSKit/Dokan all stable)
+
+---
+
 ## Context
 
 **Problem.** One Link's current file engine (Python BlobStore + Python CDC at ~8 MiB/s + WebRTC/DTLS-SRTP transport + Ed25519-signed grant capabilities + EMA-based transfer brain) is solid for chat-class transfers but is not capable of becoming the world's best file-sharing engine. The strategic wedge requires the engine itself to be insanely advanced — line-rate throughput, hard durability guarantees, content-addressed dedup approaching the information-theoretic floor, fountain-coded swarm transfer, filesystem-native surface, capability-secured shares with provenance + revocation, and frontier-grade resilience under any failure mode.

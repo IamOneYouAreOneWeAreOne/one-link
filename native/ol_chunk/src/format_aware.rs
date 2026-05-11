@@ -41,9 +41,12 @@ pub enum ContainerFormat {
     /// `.apk`, `.jar`, `.epub`, `.kra`. Local-file-header offsets used
     /// as forced cuts.
     Zip,
-    /// MP4 / Matroska / WebM. Reserved for Phase B-2 (returns empty
-    /// forced-cut list for now).
-    Video,
+    /// ISO Base Media File Format (MP4 / M4V / MOV / 3GP). Top-level
+    /// box boundaries used as forced cuts.
+    Mp4,
+    /// WAV / RIFF audio. `data` chunk start used as a forced cut so
+    /// re-tagged audio doesn't shift downstream chunks.
+    Wav,
 }
 
 /// ZIP local-file-header signature (`PK\x03\x04`).
@@ -55,23 +58,138 @@ pub const ZIP_LFH_FIXED_LEN: usize = 30;
 /// Detect a container format from leading bytes + an optional file
 /// extension hint.
 ///
-/// Returns `None` when no recognized format is detected. The detection
-/// is intentionally conservative: ambiguous matches fall back to pure
-/// CDC.
+/// Returns `None` when no recognized format is detected. Detection is
+/// intentionally conservative — ambiguous matches fall back to pure
+/// CDC rather than risk false-positive cuts that would tank dedup.
 #[must_use]
 pub fn detect_format(leading: &[u8], path_extension: Option<&str>) -> Option<ContainerFormat> {
     if leading.starts_with(&ZIP_LFH_MAGIC) {
         return Some(ContainerFormat::Zip);
     }
-    // If the magic doesn't match but the extension strongly suggests ZIP,
-    // we still allow ZIP scanning — but only at the magic offset. A
-    // file claiming `.zip` extension that lacks the leading magic is
-    // a misnamed file; conservative: return None.
+    // ISO BMFF top-level boxes start with a 4-byte big-endian size
+    // followed by a 4-byte ASCII type. The first box in a valid file
+    // is almost always ``ftyp`` (or ``styp`` for segmented).
+    if leading.len() >= 8 {
+        let kind = &leading[4..8];
+        if matches!(kind, b"ftyp" | b"styp" | b"moov" | b"mdat" | b"free") {
+            return Some(ContainerFormat::Mp4);
+        }
+    }
+    // WAV/RIFF: bytes 0..4 = "RIFF", bytes 8..12 = "WAVE".
+    if leading.len() >= 12
+        && &leading[0..4] == b"RIFF"
+        && &leading[8..12] == b"WAVE"
+    {
+        return Some(ContainerFormat::Wav);
+    }
     if let Some(ext) = path_extension {
         match ext.to_ascii_lowercase().as_str() {
-            "mp4" | "m4v" | "mkv" | "webm" | "mov" => return Some(ContainerFormat::Video),
+            // Anything with the extension but missing magic falls
+            // back to None — refusing to scan minimises false
+            // positives on misnamed files.
+            "mp4" | "m4v" | "mov" | "3gp" if matches_iso_bmff_extension(leading) => {
+                return Some(ContainerFormat::Mp4);
+            }
+            "wav" if leading.len() >= 12
+                && &leading[0..4] == b"RIFF"
+                && &leading[8..12] == b"WAVE" =>
+            {
+                return Some(ContainerFormat::Wav);
+            }
             _ => {}
         }
+    }
+    None
+}
+
+/// Helper: does the leading 8 bytes look plausibly like an ISO BMFF
+/// box header (size + 4-letter ASCII type)?
+fn matches_iso_bmff_extension(leading: &[u8]) -> bool {
+    if leading.len() < 8 {
+        return false;
+    }
+    leading[4..8]
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b' ')
+}
+
+/// Walk an ISO BMFF (MP4 / MOV) buffer and collect top-level box
+/// start offsets — every box header `[size:u32 BE][type:4]` becomes
+/// a forced cut. Stops on the first malformed header so a
+/// non-BMFF buffer that happens to match the leading-bytes check
+/// can't drive the scanner off a cliff.
+#[must_use]
+pub fn mp4_box_offsets(buffer: &[u8]) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    let mut pos = 0usize;
+    while pos + 8 <= buffer.len() {
+        let size = u32::from_be_bytes([
+            buffer[pos],
+            buffer[pos + 1],
+            buffer[pos + 2],
+            buffer[pos + 3],
+        ]) as u64;
+        let kind = &buffer[pos + 4..pos + 8];
+        // Sanity: the 4-byte type MUST be 4 ASCII chars. Any non-
+        // printable rejects the rest of the buffer.
+        if !kind.iter().all(|b| b.is_ascii_alphanumeric() || *b == b' ') {
+            break;
+        }
+        offsets.push(pos);
+        let advance = match size {
+            // Size == 1 means a 64-bit extended size in the next 8
+            // bytes (rare in practice; bail out if not enough room).
+            1 => {
+                if pos + 16 > buffer.len() {
+                    break;
+                }
+                let mut be = [0u8; 8];
+                be.copy_from_slice(&buffer[pos + 8..pos + 16]);
+                u64::from_be_bytes(be)
+            }
+            // Size == 0 means "to end of file". This is the last
+            // box; stop after collecting its offset.
+            0 => break,
+            _ => size,
+        };
+        // Defensive: a corrupt size field smaller than the header
+        // would loop forever. Refuse to advance less than 8 bytes.
+        if advance < 8 {
+            break;
+        }
+        pos = pos.saturating_add(advance as usize);
+    }
+    offsets
+}
+
+/// Walk a RIFF/WAV buffer and return the offset of the `data` chunk
+/// header (length-prefixed RIFF sub-chunk). The data chunk is the
+/// dominant payload of a WAV; cutting there isolates the audio
+/// samples from the variable-size metadata before it.
+#[must_use]
+pub fn wav_data_offset(buffer: &[u8]) -> Option<usize> {
+    if buffer.len() < 12 || &buffer[0..4] != b"RIFF" || &buffer[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut pos = 12usize;
+    while pos + 8 <= buffer.len() {
+        let id = &buffer[pos..pos + 4];
+        let size = u32::from_le_bytes([
+            buffer[pos + 4],
+            buffer[pos + 5],
+            buffer[pos + 6],
+            buffer[pos + 7],
+        ]) as usize;
+        if id == b"data" {
+            return Some(pos);
+        }
+        // RIFF sub-chunks are byte-aligned but their size word is
+        // not padded; the actual layout pads odd sizes by 1.
+        let advance = 8 + size + (size & 1);
+        if advance < 8 {
+            break;
+        }
+        pos = pos.saturating_add(advance);
     }
     None
 }
@@ -167,8 +285,15 @@ pub fn scan_format_aware(
 
     let forced_cuts = match format {
         Some(ContainerFormat::Zip) => zip_lfh_offsets(buffer),
-        // Phase B-2 placeholder: video GOP scanner returns no cuts.
-        Some(ContainerFormat::Video) | None => Vec::new(),
+        Some(ContainerFormat::Mp4) => mp4_box_offsets(buffer),
+        Some(ContainerFormat::Wav) => {
+            // Single forced cut at the `data` chunk header (if any).
+            // The metadata in `fmt ` / `LIST` etc. before it tends
+            // to be small, so one cut is enough to isolate the
+            // audio body.
+            wav_data_offset(buffer).into_iter().collect()
+        }
+        None => Vec::new(),
     };
 
     // Absorb cuts that are too close together to be useful. Any cut
@@ -320,10 +445,56 @@ mod tests {
     }
 
     #[test]
-    fn detect_video_from_extension() {
-        let buf = b"random non-zip bytes";
-        assert_eq!(detect_format(buf, Some("mp4")), Some(ContainerFormat::Video));
-        assert_eq!(detect_format(buf, Some("mkv")), Some(ContainerFormat::Video));
+    fn detect_mp4_from_magic() {
+        // ftyp box: 0x00000020 size, b"ftyp", brand "isom"
+        let mut buf = vec![0u8; 32];
+        buf[0..4].copy_from_slice(&32u32.to_be_bytes());
+        buf[4..8].copy_from_slice(b"ftyp");
+        buf[8..12].copy_from_slice(b"isom");
+        assert_eq!(detect_format(&buf, None), Some(ContainerFormat::Mp4));
+        assert_eq!(detect_format(&buf, Some("mp4")), Some(ContainerFormat::Mp4));
+    }
+
+    #[test]
+    fn detect_wav_from_magic() {
+        // Minimal RIFF/WAVE header.
+        let mut buf = vec![0u8; 64];
+        buf[0..4].copy_from_slice(b"RIFF");
+        buf[4..8].copy_from_slice(&56u32.to_le_bytes());
+        buf[8..12].copy_from_slice(b"WAVE");
+        assert_eq!(detect_format(&buf, None), Some(ContainerFormat::Wav));
+        assert_eq!(detect_format(&buf, Some("wav")), Some(ContainerFormat::Wav));
+    }
+
+    #[test]
+    fn mp4_box_offsets_finds_top_level_boxes() {
+        // Three top-level boxes: ftyp(32) + moov(64) + mdat(128).
+        let mut buf = vec![0u8; 32 + 64 + 128];
+        buf[0..4].copy_from_slice(&32u32.to_be_bytes());
+        buf[4..8].copy_from_slice(b"ftyp");
+        buf[32..36].copy_from_slice(&64u32.to_be_bytes());
+        buf[36..40].copy_from_slice(b"moov");
+        buf[96..100].copy_from_slice(&128u32.to_be_bytes());
+        buf[100..104].copy_from_slice(b"mdat");
+        let offsets = mp4_box_offsets(&buf);
+        assert_eq!(offsets, vec![0, 32, 96]);
+    }
+
+    #[test]
+    fn wav_data_offset_finds_data_chunk() {
+        // RIFF + WAVE + fmt (24 bytes) + data + payload (8 bytes)
+        let mut buf = vec![0u8; 12 + 24 + 8 + 8];
+        let payload_len = (buf.len() - 8) as u32;
+        buf[0..4].copy_from_slice(b"RIFF");
+        buf[4..8].copy_from_slice(&payload_len.to_le_bytes());
+        buf[8..12].copy_from_slice(b"WAVE");
+        // fmt sub-chunk
+        buf[12..16].copy_from_slice(b"fmt ");
+        buf[16..20].copy_from_slice(&16u32.to_le_bytes());
+        // data sub-chunk at offset 12 + 24 = 36
+        buf[36..40].copy_from_slice(b"data");
+        buf[40..44].copy_from_slice(&8u32.to_le_bytes());
+        assert_eq!(wav_data_offset(&buf), Some(36));
     }
 
     #[test]
