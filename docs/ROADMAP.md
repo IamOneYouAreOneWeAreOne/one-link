@@ -1,7 +1,20 @@
 # One Link Roadmap
 
 Status: living document. Updated as releases ship.
-Last updated: 2026-05-08.
+Last updated: 2026-05-11.
+
+> **File engine v2 status (2026-05-11)**: All four phases of
+> [`FILE_ENGINE_V2_PLAN.md`](./FILE_ENGINE_V2_PLAN.md) are structurally
+> complete. 16 Rust crates ship in `native/`; ADRs 0001–0033 record
+> every architectural decision. Native chunk-store transport is
+> default-on for capable peers; Phase D primitives (tau-field
+> routing, active inference prefetch, persistent homology durability,
+> grammar compression, plausibly deniable storage, formal
+> verification, Coherence ↔ Rust codegen) all shipped + tested +
+> Python-callable. Production wiring of Phase D crates lands per-item
+> as surrounding daemon paths mature (multi-relay graph, chunk-store
+> warm-cache hooks, operator diagnostics endpoints). See ADR-0033
+> for the wiring matrix.
 
 This roadmap is gated by [`PRINCIPLES.md`](./PRINCIPLES.md). Every
 unfinished ship below has been (or will be) restated against the

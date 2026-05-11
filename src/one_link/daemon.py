@@ -768,6 +768,11 @@ class Daemon:
         # clients. `None` until the first share is minted or when the
         # native cap_migration module is unavailable.
         self._last_minted_macaroon: bytes | None = None
+        # Phase D #3 (ADR-0033): per-daemon active inference prefetch
+        # predictor. Built lazily on first observation so daemons without
+        # the native crate installed don't pay the cost.
+        self._prefetch_predictor: object | None = None
+        self._prefetch_unavailable_logged: bool = False
         # M1: track which blob hashes we've explicitly requested from each
         # peer (via MANIFEST_WANTS). BLOB_OFFER / BLOB_CHUNK frames whose
         # hash isn't in this set are silently dropped — a paired peer can't
@@ -2299,6 +2304,10 @@ class Daemon:
                 await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
                 if ok:
                     self._cache_file_chunks(f.out_path)
+                    # Phase D #3: observe successful receive in prefetch
+                    # predictor so the warm-cache model sees both ends
+                    # of every transfer.
+                    self._observe_prefetch(peer_fp, f.blob_hex)
                 return
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_BIN_CHUNK":
@@ -5414,7 +5423,14 @@ class Daemon:
             else None
         )
 
-        for listener in list(self._relay_listener_clients):
+        # Phase D #1 (ADR-0028): when multiple relays are available
+        # AND ol_routing is installed AND we have per-relay
+        # RTT/loss telemetry, sort by τ_c-weighted cost. Currently
+        # this is a no-op pass-through (metrics surface comes in a
+        # follow-up commit); future-proofing means we add the
+        # selector at the dial site now so the wire is ready.
+        listeners = self._pick_best_relay(list(self._relay_listener_clients))
+        for listener in listeners:
             url = listener._rendezvous_url  # type: ignore[attr-defined]
             try:
                 reader, writer, pump = await open_relay_outbound(
@@ -5438,6 +5454,179 @@ class Daemon:
             return True
         except ValueError:
             return False
+
+    # ─── Phase D #3 prefetch hook (ADR-0033) ──────────────────────────
+    def _observe_prefetch(self, peer_fp: str, blob_hex: str) -> None:
+        """Record a (peer, file_id, t_ms) tuple in the native prefetch
+        predictor. Pure observer — failures (native crate missing,
+        bad input) are swallowed so they never affect a successful
+        transfer. Daemon callers invoke this on every send_file /
+        file-receive success so the predictor builds a model of
+        peer-pair demand over time."""
+        try:
+            from one_link import prefetch_native
+
+            if not prefetch_native.HAS_NATIVE:
+                if not self._prefetch_unavailable_logged:
+                    log.debug(
+                        "prefetch_native unavailable — predictor disabled"
+                    )
+                    self._prefetch_unavailable_logged = True
+                return
+            if self._prefetch_predictor is None:
+                self._prefetch_predictor = prefetch_native.predictor()
+            # Map (peer_fp hex string, blob_hex string) -> 32B keys.
+            try:
+                peer_bytes = bytes.fromhex(peer_fp)[:32]
+                file_bytes = bytes.fromhex(blob_hex)[:32]
+            except (ValueError, AttributeError):
+                return
+            if len(peer_bytes) != 32 or len(file_bytes) != 32:
+                return
+            t_ms = int(time.time() * 1000)
+            self._prefetch_predictor.observe(peer_bytes, file_bytes, t_ms)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.debug("prefetch observe failed (%s)", exc)
+
+    def predict_next_files_for_peer(self, peer_fp: str, n: int = 3):
+        """Operator-facing helper: return the predictor's top-N next-
+        likely file_ids for ``peer_fp``. Empty list if the predictor
+        isn't initialized or the peer has no observations yet."""
+        if self._prefetch_predictor is None:
+            return []
+        try:
+            peer_bytes = bytes.fromhex(peer_fp)[:32]
+            if len(peer_bytes) != 32:
+                return []
+            return self._prefetch_predictor.predict_top_n(peer_bytes, n)
+        except Exception:
+            return []
+
+    def native_diagnostics(self) -> dict:
+        """Phase D operator diagnostics — current state of the native
+        primitives wired into this daemon.
+
+        Returns a dict with:
+          - prefetch.available: bool, prefetch.storage_entries: int
+          - routing.available: bool, routing.aead_kind_default: str
+            (when the native pipeline is loaded)
+          - native_transfer_v1.advertised: bool (whether THIS daemon
+            ships NATIVE_TRANSFER_V1 in its CAPS frame)
+          - macaroon_dual_issue.last_minted: bool (whether any
+            macaroon has been minted since startup)
+
+        Returns the keys for any unavailable subsystem with
+        ``available=False`` so the operator sees the full surface."""
+        out: dict = {
+            "prefetch": {
+                "available": False,
+                "storage_entries": 0,
+            },
+            "routing": {
+                "available": False,
+            },
+            "homology": {
+                "available": False,
+            },
+            "native_transfer_v1": {
+                "advertised": False,
+            },
+            "macaroon_dual_issue": {
+                "last_minted": False,
+                "last_minted_len": 0,
+            },
+        }
+        try:
+            from one_link import prefetch_native as _pf
+
+            if _pf.HAS_NATIVE:
+                out["prefetch"]["available"] = True
+                if self._prefetch_predictor is not None:
+                    try:
+                        out["prefetch"]["storage_entries"] = (
+                            self._prefetch_predictor.storage_entries()
+                        )
+                    except Exception:  # pragma: no cover
+                        pass
+        except ImportError:
+            pass
+        try:
+            from one_link import routing_native as _rt
+
+            if _rt.HAS_NATIVE:
+                out["routing"]["available"] = True
+        except ImportError:
+            pass
+        try:
+            from one_link import homology_native as _hm
+
+            if _hm.HAS_NATIVE:
+                out["homology"]["available"] = True
+        except ImportError:
+            pass
+        # NATIVE_TRANSFER_V1 is advertised whenever it's in
+        # LOCAL_CAPABILITIES — see capabilities.py for the source.
+        try:
+            from one_link.capabilities import LOCAL_CAPABILITIES
+
+            out["native_transfer_v1"]["advertised"] = (
+                NATIVE_TRANSFER_V1 in LOCAL_CAPABILITIES
+            )
+        except Exception:  # pragma: no cover
+            pass
+        if self._last_minted_macaroon is not None:
+            out["macaroon_dual_issue"]["last_minted"] = True
+            out["macaroon_dual_issue"]["last_minted_len"] = len(
+                self._last_minted_macaroon
+            )
+        return out
+
+    def _pick_best_relay(self, available_relays: list) -> list:
+        """Phase D #1 (ADR-0028) — sort relay candidates by τ_c-
+        weighted cost when ol_routing is available + we have empirical
+        RTT/loss metrics for the relay set. Falls back to the input
+        order otherwise. Pure helper: never raises, never drops a relay
+        (just reorders).
+
+        The cost model uses per-relay τ_c = max(1ms, 1.0 / max(rtt_ms,
+        1.0)) and loss_rate from the relay's recent ACK record. Without
+        empirical metrics, every relay defaults to the same cost so
+        the input order is preserved."""
+        if len(available_relays) <= 1:
+            return list(available_relays)
+        try:
+            from one_link import routing_native as _rt
+
+            if not _rt.HAS_NATIVE:
+                return list(available_relays)
+        except ImportError:
+            return list(available_relays)
+        # Without per-relay RTT/loss telemetry in this daemon (yet),
+        # the routing-aware sort is currently a no-op pass-through.
+        # When peer_rtc / relay_client start recording per-relay
+        # metrics, this picks them up via _relay_metrics_for(url).
+        scored: list[tuple[float, object]] = []
+        for relay in available_relays:
+            url = getattr(relay, "_rendezvous_url", str(relay))
+            metrics = self._relay_metrics_for(url)
+            if metrics is None:
+                # No empirical metrics → arbitrary stable cost.
+                scored.append((1.0, relay))
+                continue
+            rtt_ms = max(1.0, float(metrics.get("rtt_ms", 100.0)))
+            loss = min(0.99, max(0.0, float(metrics.get("loss_rate", 0.0))))
+            tau_c_s = max(1.0e-3, 1.0 / rtt_ms)
+            cost = _rt.edge_cost(tau_c_s, 100.0, loss)
+            scored.append((cost, relay))
+        scored.sort(key=lambda x: x[0])
+        return [r for _, r in scored]
+
+    def _relay_metrics_for(self, _url: str) -> dict | None:
+        """Per-relay empirical metrics (rtt_ms, loss_rate). Returns
+        ``None`` when not yet tracked. The relay-metrics surface is
+        a future commit; this stub returns ``None`` for every relay
+        so :meth:`_pick_best_relay` falls back to input order."""
+        return None
 
     def _abort_incoming_file(self, blob: str, f: IncomingFile) -> None:
         with contextlib.suppress(Exception):
@@ -9091,6 +9280,10 @@ class Daemon:
                 # the persistent session is alive for the next send.
                 sess.last_used = time.time()
                 sess.messages_sent += 1
+                # Phase D #3 (ADR-0033): record the successful transfer
+                # in the prefetch predictor so future warm-cache +
+                # next-file prediction sees the access pattern.
+                self._observe_prefetch(peer_fp, blob_hex)
                 done_ms = int(time.time() * 1000)
                 started_ms = int(base_metadata.get("last_attempt_ms") or now_ms)
                 elapsed_s = max(0.001, (done_ms - started_ms) / 1000.0)
