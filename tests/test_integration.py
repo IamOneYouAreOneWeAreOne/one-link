@@ -167,11 +167,12 @@ def test_file_send_various_sizes(size: int):
         )
         assert res["ok"], res
 
-        time.sleep(0.5)
+        got = wait_for_inbox_file(
+            p.b.home, src.name, expected_size=size, timeout=20.0,
+        )
         files = inbox_files(p.b.home)
         match = [f for f in files if f.name.endswith(src.name)]
         assert len(match) == 1, f"expected exactly one inbox file, got {files}"
-        got = match[0]
         assert got.stat().st_size == size
         assert got.read_bytes() == src.read_bytes()
 
@@ -225,10 +226,11 @@ def test_file_send_compresses_easy_payloads():
         assert result["compressed_chunks"] > 0
         assert result["wire_bytes_sent"] < result["raw_bytes_sent"]
 
-        time.sleep(0.8)
-        match = [f for f in inbox_files(p.b.home) if f.name.endswith(src.name)]
-        assert match
-        assert match[0].read_bytes() == src.read_bytes()
+        src_bytes = src.read_bytes()
+        got = wait_for_inbox_file(
+            p.b.home, src.name, expected_size=len(src_bytes), timeout=20.0,
+        )
+        assert got.read_bytes() == src_bytes
 
 
 # ─────────────────────── Filename safety ───────────────────────────
@@ -239,7 +241,9 @@ def test_unicode_filename():
         src.write_text("hello", encoding="utf-8")
         res = request(p.a.control_port, cmd="send_file", peer=p.b.short_id, path=str(src))
         assert res["ok"], res
-        time.sleep(0.5)
+        wait_for_inbox_file(
+            p.b.home, "résumé_日本.txt", expected_size=5, timeout=15.0,
+        )
         files = inbox_files(p.b.home)
         assert any("résumé_日本.txt" in f.name for f in files), files
 
@@ -251,7 +255,9 @@ def test_filename_with_unusual_chars_lands_in_inbox():
         src.write_bytes(b"data")
         res = request(p.a.control_port, cmd="send_file", peer=p.b.short_id, path=str(src))
         assert res["ok"], res
-        time.sleep(0.5)
+        wait_for_inbox_file(
+            p.b.home, "weird name with spaces.bin", expected_size=4, timeout=15.0,
+        )
         inbox = p.b.home / "data" / "inbox"
         files = list(inbox.iterdir())
         assert any("weird name with spaces.bin" in f.name for f in files), files

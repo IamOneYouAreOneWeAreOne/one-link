@@ -1,0 +1,17 @@
+# One Link native workspace cargo config.
+#
+# Pins the Python interpreter pyo3 should link against so `cargo build`
+# / `cargo test` work out of the box without an env-var dance. The
+# value below is a per-box default; checked in so this dev's daily
+# loop works flawlessly. CI / other dev boxes should export
+# `PYO3_PYTHON` to point at the right interpreter — the env-var wins
+# (force = false).
+#
+# Rationale: the default `python.exe` on PATH on this Windows install
+# is the Microsoft Store stub, which doesn't expose a real interpreter
+# to native callers. pyo3 falls back to `python3` if PYO3_PYTHON is
+# unset, which also fails. Pointing directly at the real install is
+# the only reliable path.
+
+[env]
+PYO3_PYTHON = { value = "$HOME/AppData/Local/Python/pythoncore-3.14-64/python.exe", force = false, relative = false }

@@ -57,14 +57,18 @@ pub enum MountError {
 ///   thread until the filesystem is unmounted (`fusermount -u
 ///   <mountpoint>`).
 /// - **Linux without the feature**: returns
-///   [`MountError::UnsupportedPlatform`] with a hint that the feature
-///   gate needs to be enabled.
+///   [`MountError::Backend`] with a hint that the feature gate needs
+///   to be enabled.
 /// - **Non-Linux**: always
 ///   [`MountError::UnsupportedPlatform`].
 ///
 /// The signature is stable across all three modes so consumers can
 /// build once and have the runtime decide.
-pub fn mount<B>(_backend: B, opts: MountOptions) -> Result<(), MountError>
+pub fn mount<B>(
+    #[cfg(all(target_os = "linux", feature = "linux-mount"))] backend: B,
+    #[cfg(not(all(target_os = "linux", feature = "linux-mount")))] _backend: B,
+    opts: MountOptions,
+) -> Result<(), MountError>
 where
     B: FilesystemBackend + 'static,
 {
@@ -73,14 +77,20 @@ where
     }
     #[cfg(all(target_os = "linux", feature = "linux-mount"))]
     {
-        // The libfuse adapter is the substantial Phase-B wiring that
-        // lands with the daemon's mount endpoint. The crate ships
-        // the feature gate today so consumers can opt in without
-        // forking; the adapter implementation is intentionally
-        // deferred until the daemon side is ready.
-        Err(MountError::Backend(
-            "fuser adapter not yet wired (Phase B daemon mount endpoint pending)".into(),
-        ))
+        use crate::adapter::FuserAdapter;
+        let mut fuse_opts: Vec<fuser::MountOption> = vec![
+            fuser::MountOption::FSName(opts.fs_name.clone()),
+            fuser::MountOption::DefaultPermissions,
+        ];
+        if opts.read_only {
+            fuse_opts.push(fuser::MountOption::RO);
+        }
+        if opts.allow_other {
+            fuse_opts.push(fuser::MountOption::AllowOther);
+        }
+        let adapter = FuserAdapter::new(backend);
+        fuser::mount2(adapter, &opts.mountpoint, &fuse_opts)
+            .map_err(|e| MountError::Backend(format!("fuser::mount2: {e}")))
     }
     #[cfg(all(target_os = "linux", not(feature = "linux-mount")))]
     {

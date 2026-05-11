@@ -26,7 +26,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from watchdog.events import (
     FileCreatedEvent,
@@ -149,7 +149,12 @@ class _Handler(FileSystemEventHandler):
 class FolderState:
     name: str
     root: Path
-    observer: Observer
+    # ``watchdog.observers.Observer`` is a platform-specific factory
+    # (InotifyObserver / FSEventsObserver / WindowsApiObserver) — at
+    # runtime it always exposes ``.stop()`` and ``.join()``. mypy
+    # can't statically resolve the dispatch, so we type-erase to
+    # ``Any`` and rely on the runtime contract.
+    observer: Any  # noqa: ANN401 - see comment above
     handler: _Handler
 
 
@@ -433,7 +438,12 @@ class FolderEngine:
         except Exception:
             self.state.remove_folder(name)
             raise
-        return self.state.get_folder(name)
+        # ``add_folder`` guarantees the row exists by the time we reach
+        # here (we just inserted it + the start_watch ran). Assert non-
+        # None so mypy stops widening the return to Optional.
+        row = self.state.get_folder(name)
+        assert row is not None, "folder row missing immediately after insert"
+        return row
 
     def remove_folder(self, name: str) -> None:
         fs = self._folders.pop(name, None)

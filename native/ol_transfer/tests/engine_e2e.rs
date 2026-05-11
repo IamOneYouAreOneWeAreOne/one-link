@@ -106,7 +106,7 @@ fn build_peer(permitted_partners: Vec<PeerFingerprint>) -> Peer {
     );
     let addr = endpoint.local_addr().unwrap();
     Peer {
-        identity,
+        _identity: identity,
         fingerprint,
         _root: root,
         store,

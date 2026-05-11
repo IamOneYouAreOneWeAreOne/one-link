@@ -42,6 +42,9 @@
 mod backend;
 mod mount;
 
+#[cfg(all(target_os = "linux", feature = "linux-mount"))]
+mod adapter;
+
 pub use backend::{
     DirEntry, EntryKind, FilesystemBackend, FsError, MemoryBackend, Stat,
 };
