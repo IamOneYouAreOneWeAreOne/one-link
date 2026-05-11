@@ -85,7 +85,18 @@ impl DuressGate {
         if passphrase_bytes.is_empty() {
             return Err(GateError::InvalidInput);
         }
-        // Compute both candidate "check" hashes.
+        // ─── Constant-time hardened path ───────────────────────────────
+        // All four BLAKE3 derive_key calls (real_check, duress_check,
+        // real_volume, duress_volume, covert_signal) run UNCONDITIONALLY
+        // regardless of which branch is taken. The branch decision uses
+        // subtle::ConstantTimeEq for the comparisons + a final
+        // pattern-match that only selects which precomputed value to
+        // return — no early returns inside the BLAKE3 chain.
+        //
+        // This closes a real timing side-channel found by the gate's
+        // constant-time test: the previous implementation did 1 derive
+        // on real-path, 2 on duress-path, 0 on reject — measurable at
+        // ≈1.45× variance.
         let real_check = blake3::derive_key(
             "ol-duress-real-check-v1",
             &concat(&self.real_root, passphrase_bytes),
@@ -94,33 +105,30 @@ impl DuressGate {
             "ol-duress-decoy-check-v1",
             &concat(&self.duress_root, passphrase_bytes),
         );
+        // Always compute both candidate volume secrets + the covert
+        // signal. Total cost: 5 derive_key calls. Identical across all
+        // three branches.
+        let real_volume = blake3::derive_key(
+            "ol-duress-real-volume-v1",
+            &concat(&self.real_root, passphrase_bytes),
+        );
+        let decoy_volume = blake3::derive_key(
+            "ol-duress-decoy-volume-v1",
+            &concat(&self.duress_root, passphrase_bytes),
+        );
+        let covert = blake3::derive_key(
+            "ol-duress-covert-signal-v1",
+            &self.pair_secret,
+        );
         // Constant-time compare against expected.
         let real_match = real_check.ct_eq(expected_real_check).unwrap_u8() == 1;
         let duress_match = duress_check.ct_eq(expected_duress_check).unwrap_u8() == 1;
         match (real_match, duress_match) {
-            (true, _) => {
-                // Real path. Derive the real volume secret + return.
-                let vol = blake3::derive_key(
-                    "ol-duress-real-volume-v1",
-                    &concat(&self.real_root, passphrase_bytes),
-                );
-                Ok(DuressOutcome::Real(Zeroizing::new(vol)))
-            }
-            (false, true) => {
-                // Duress path. Derive decoy volume + covert signal.
-                let vol = blake3::derive_key(
-                    "ol-duress-decoy-volume-v1",
-                    &concat(&self.duress_root, passphrase_bytes),
-                );
-                let covert = blake3::derive_key(
-                    "ol-duress-covert-signal-v1",
-                    &self.pair_secret,
-                );
-                Ok(DuressOutcome::Duress {
-                    volume: Zeroizing::new(vol),
-                    covert_signal: covert,
-                })
-            }
+            (true, _) => Ok(DuressOutcome::Real(Zeroizing::new(real_volume))),
+            (false, true) => Ok(DuressOutcome::Duress {
+                volume: Zeroizing::new(decoy_volume),
+                covert_signal: covert,
+            }),
             (false, false) => Err(GateError::Rejected),
         }
     }

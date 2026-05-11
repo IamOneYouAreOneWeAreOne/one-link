@@ -18,6 +18,13 @@ ol_capability = { path = "../ol_capability" }
 ol_crdt       = { path = "../ol_crdt" }
 ol_wal        = { path = "../ol_wal" }
 ol_chunk      = { path = "../ol_chunk" }
+# Phase D crates.
+ol_routing    = { path = "../ol_routing" }
+ol_homology   = { path = "../ol_homology" }
+ol_grammar    = { path = "../ol_grammar" }
+ol_duress     = { path = "../ol_duress" }
+ol_prefetch   = { path = "../ol_prefetch" }
+ol_codegen    = { path = "../ol_codegen" }
 
 [profile.release]
 debug = 1
@@ -39,6 +46,50 @@ bench = false
 [[bin]]
 name = "fuzz_crdt_merge"
 path = "fuzz_targets/fuzz_crdt_merge.rs"
+test = false
+doc = false
+bench = false
+
+# ── Phase D fuzz targets ────────────────────────────────────────────
+
+[[bin]]
+name = "fuzz_routing_dijkstra"
+path = "fuzz_targets/fuzz_routing_dijkstra.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_homology_fragility"
+path = "fuzz_targets/fuzz_homology_fragility.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_grammar_repair"
+path = "fuzz_targets/fuzz_grammar_repair.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_duress_gate"
+path = "fuzz_targets/fuzz_duress_gate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_prefetch_observe"
+path = "fuzz_targets/fuzz_prefetch_observe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_codegen_parser"
+path = "fuzz_targets/fuzz_codegen_parser.rs"
 test = false
 doc = false
 bench = false

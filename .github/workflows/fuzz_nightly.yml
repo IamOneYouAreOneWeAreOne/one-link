@@ -54,6 +54,11 @@ jobs:
             exit 0
           fi
           set -e
+          # Auto-discover every fuzz target in fuzz/fuzz_targets/. As of
+          # Phase D (ADR-0033) the workspace ships 9 targets covering:
+          # Phase A1/B/C (capability_decode, capability_attenuate_roundtrip,
+          # crdt_merge) plus Phase D (routing_dijkstra, homology_fragility,
+          # grammar_repair, duress_gate, prefetch_observe, codegen_parser).
           for target in $(ls fuzz/fuzz_targets/*.rs | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "::group::fuzz target: $target"
             # -- -timeout=10 caps a single input at 10s; max_total_time caps the sweep.
