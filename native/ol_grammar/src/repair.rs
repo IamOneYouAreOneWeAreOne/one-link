@@ -4,10 +4,17 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
+/// Errors the grammar layer can surface to callers.
 #[derive(Debug, Error)]
 pub enum GrammarError {
+    /// A rule's non-terminal symbol points at an id that has no
+    /// corresponding production — corrupt grammar.
     #[error("rule reference {0} out of range")]
     InvalidReference(u32),
+    /// Rule expansion exceeded the safety-stop depth. Suggests a
+    /// cycle in the rule graph (should be impossible for a valid
+    /// grammar emitted by [`crate::compress`], so this indicates
+    /// corruption or hand-crafted malicious input).
     #[error("rule expansion infinite-loops at id {0}")]
     InfiniteLoop(u32),
 }
@@ -16,8 +23,11 @@ pub enum GrammarError {
 /// The non-terminal `lhs` expands to the pair `(left, right)`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Rule {
+    /// Non-terminal symbol id (always ≥ 256 since 0-255 are terminals).
     pub lhs: u32,
+    /// First child symbol in the expansion (terminal or non-terminal).
     pub left: u32,
+    /// Second child symbol in the expansion.
     pub right: u32,
 }
 
@@ -26,7 +36,10 @@ pub struct Rule {
 /// the rules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Grammar {
+    /// Top-level symbol sequence; replacing every non-terminal with
+    /// its rule expansion (recursively) yields the original bytes.
     pub sequence: Vec<u32>,
+    /// Production rules — one per minted non-terminal.
     pub rules: Vec<Rule>,
 }
 

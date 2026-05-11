@@ -26,7 +26,7 @@
 //! and lets the workspace grow into the full grammar incrementally.
 
 #![forbid(unsafe_code)]
-#![allow(missing_docs)]
+#![warn(missing_docs)]
 
 mod emitter;
 mod parser;
@@ -34,4 +34,5 @@ mod parser;
 pub use emitter::{emit_rust_struct, EmitError, EmitOptions};
 pub use parser::{parse_struct, FieldType, ParsedField, ParsedStruct, ParseError};
 
+/// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

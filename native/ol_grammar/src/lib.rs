@@ -31,7 +31,7 @@
 //! port).
 
 #![forbid(unsafe_code)]
-#![allow(missing_docs)]
+#![warn(missing_docs)]
 
 mod repair;
 
@@ -39,4 +39,5 @@ pub use repair::{
     compress, compression_ratio, decompress, Grammar, GrammarError, Rule,
 };
 
+/// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

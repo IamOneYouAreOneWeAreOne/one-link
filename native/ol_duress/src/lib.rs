@@ -39,7 +39,7 @@
 //!   pair-shared decoder.
 
 #![forbid(unsafe_code)]
-#![allow(missing_docs)]
+#![warn(missing_docs)]
 
 mod gate;
 
@@ -48,4 +48,5 @@ pub use gate::{
     SIGNAL_LEN, VOLUME_SECRET_LEN,
 };
 
+/// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

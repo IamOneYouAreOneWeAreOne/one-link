@@ -38,10 +38,13 @@ mod erasure;
 mod errors;
 mod fec;
 mod fountain;
+mod homology;
 mod hwkey;
 mod pqkem;
+mod prefetch;
 mod quic;
 mod ratchet;
+mod routing;
 mod store;
 mod wal;
 
@@ -169,6 +172,28 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.hwkey", hwkey_mod)?;
+
+    // Phase D pyo3 bindings.
+    let routing_mod = PyModule::new_bound(py, "routing")?;
+    routing::register(py, &routing_mod)?;
+    m.add_submodule(&routing_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.routing", routing_mod)?;
+
+    let prefetch_mod = PyModule::new_bound(py, "prefetch")?;
+    prefetch::register(py, &prefetch_mod)?;
+    m.add_submodule(&prefetch_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.prefetch", prefetch_mod)?;
+
+    let homology_mod = PyModule::new_bound(py, "homology")?;
+    homology::register(py, &homology_mod)?;
+    m.add_submodule(&homology_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.homology", homology_mod)?;
 
     Ok(())
 }

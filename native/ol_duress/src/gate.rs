@@ -9,10 +9,14 @@ pub const VOLUME_SECRET_LEN: usize = 32;
 /// Length of the covert duress signal embedded in ratchet headers.
 pub const SIGNAL_LEN: usize = 32;
 
+/// Errors the duress gate's `open()` can produce.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum GateError {
+    /// Presented passphrase matched neither the real check-hash nor
+    /// the duress check-hash. No volume unlocked, no covert signal.
     #[error("passphrase did not match real or duress key")]
     Rejected,
+    /// Empty passphrase or other invalid input shape.
     #[error("invalid input length")]
     InvalidInput,
 }
@@ -28,7 +32,11 @@ pub enum DuressOutcome {
     /// Duress-key path; caller MUST embed `covert_signal` in the
     /// next ratchet header so paired peers see the coercion event.
     Duress {
+        /// The decoy volume secret. Looks identical-on-the-wire to
+        /// the real volume secret.
         volume: Volume,
+        /// 32-byte covert signal the caller MUST embed in the next
+        /// ratchet header so paired peers detect the coercion event.
         covert_signal: [u8; SIGNAL_LEN],
     },
 }

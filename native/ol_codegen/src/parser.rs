@@ -16,6 +16,10 @@
 
 use thiserror::Error;
 
+/// Errors the parser can return. The `Error::source` chain conveys
+/// the structural reason; variants exist for `UnexpectedToken`,
+/// `UnexpectedEof`, `UnknownType`, and `InvalidArrayLength`.
+#[allow(missing_docs)]
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
     #[error("expected token {expected}, found {found} at offset {offset}")]
@@ -32,6 +36,10 @@ pub enum ParseError {
     InvalidArrayLength(String),
 }
 
+/// CL spec field types this minimal grammar recognizes. Maps 1:1 to
+/// Rust types in the emitter (`u8`, `u16`, `u32`, `u64`,
+/// `[u8; N]`, `String`).
+#[allow(missing_docs)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldType {
     U8,
@@ -44,15 +52,21 @@ pub enum FieldType {
     String,
 }
 
+/// A parsed `name: type` pair inside a struct body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedField {
+    /// Field name in the CL source.
     pub name: String,
+    /// Field type per the spec.
     pub ty: FieldType,
 }
 
+/// A parsed CL `struct Foo { ... }` declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedStruct {
+    /// Struct name (becomes the Rust struct identifier).
     pub name: String,
+    /// Field declarations in source order.
     pub fields: Vec<ParsedField>,
 }
 

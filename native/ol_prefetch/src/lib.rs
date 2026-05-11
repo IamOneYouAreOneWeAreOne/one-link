@@ -32,7 +32,7 @@
 //!   to bound storage growth and let stale patterns fade.
 
 #![forbid(unsafe_code)]
-#![allow(missing_docs)]
+#![warn(missing_docs)]
 
 mod predictor;
 
@@ -40,4 +40,5 @@ pub use predictor::{
     Prediction, PrefetchError, PrefetchPredictor, MAX_CO_OCCURRENCE_GAP_MS,
 };
 
+/// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

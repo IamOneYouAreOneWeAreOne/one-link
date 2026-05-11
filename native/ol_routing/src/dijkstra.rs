@@ -22,10 +22,13 @@ pub enum RoutingError {
 /// f64 monotonic-in-quality metric).
 #[derive(Debug, Clone, Default)]
 pub struct AdjacencyGraph {
+    /// Outgoing edges keyed by source node; each entry is a list of
+    /// `(destination_node, edge_cost)` tuples.
     pub edges: HashMap<NodeId, Vec<(NodeId, f64)>>,
 }
 
 impl AdjacencyGraph {
+    /// Construct an empty graph.
     pub fn new() -> Self {
         Self::default()
     }
@@ -41,10 +44,10 @@ impl AdjacencyGraph {
         self.edges.get(node).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
+    /// Number of distinct source nodes (nodes that appear as a `from`
+    /// in any edge). Useful for diagnostics; callers needing total
+    /// node count should pre-compute the union of `from` + `to`.
     pub fn node_count(&self) -> usize {
-        // Returns # of distinct nodes that appear as a `from`.
-        // Useful for diagnostics — call sites looking for total node
-        // count should pre-compute their own union.
         self.edges.len()
     }
 }
@@ -52,7 +55,9 @@ impl AdjacencyGraph {
 /// Result of a single shortest-path query.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathResult {
+    /// Ordered sequence of nodes from `start` to `goal`.
     pub path: Vec<NodeId>,
+    /// Sum of edge costs along `path`.
     pub total_cost: f64,
 }
 

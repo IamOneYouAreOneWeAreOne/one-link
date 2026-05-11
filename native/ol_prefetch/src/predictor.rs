@@ -4,10 +4,13 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
+/// Errors the predictor surface can produce.
 #[derive(Debug, Error)]
 pub enum PrefetchError {
+    /// Decay factor argument was outside the valid `(0.0, 1.0]` range.
     #[error("decay factor must be in (0.0, 1.0], got {0}")]
     InvalidDecay(f64),
+    /// Half-life argument was zero — must be positive milliseconds.
     #[error("co-occurrence half-life must be positive, got {0} ms")]
     InvalidHalfLife(u64),
 }
@@ -20,7 +23,10 @@ pub const MAX_CO_OCCURRENCE_GAP_MS: u64 = 600_000; // 10 minutes
 /// Predicted next file with a normalized confidence score (0.0 - 1.0).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prediction {
+    /// 32-byte content-addressed id of the predicted next file.
     pub file_id: [u8; 32],
+    /// Posterior probability the predictor assigns to this file
+    /// being accessed next, normalized into `[0, 1]`.
     pub confidence: f64,
 }
 
@@ -57,6 +63,8 @@ impl Default for PrefetchPredictor {
 }
 
 impl PrefetchPredictor {
+    /// Build a predictor with explicit `half_life_ms` + `decay_factor`.
+    /// Returns `Err` if either arg is out of its valid range.
     pub fn new(half_life_ms: u64, decay_factor: f64) -> Result<Self, PrefetchError> {
         if half_life_ms == 0 {
             return Err(PrefetchError::InvalidHalfLife(half_life_ms));

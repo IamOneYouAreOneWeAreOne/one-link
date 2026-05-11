@@ -36,7 +36,7 @@
 //! That benchmark lives in `tests/fragile_graph.rs`.
 
 #![forbid(unsafe_code)]
-#![allow(missing_docs)]
+#![warn(missing_docs)]
 
 mod byzantine;
 mod dijkstra;

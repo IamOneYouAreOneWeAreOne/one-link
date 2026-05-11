@@ -8,7 +8,9 @@ use crate::components::components_of;
 /// for preemptive replication).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FragilityScore {
+    /// Identifier of the chunk this score applies to.
     pub chunk_id: String,
+    /// Number of distinct peers currently holding this chunk.
     pub n_peers_holding: usize,
     /// True iff removing this chunk increases the connected-component
     /// count. Bridge chunks lose the swarm if they fail without
@@ -18,8 +20,11 @@ pub struct FragilityScore {
     pub score: f64,
 }
 
+/// Bundle of per-chunk fragility scores + a flat priority list for
+/// the operator's replication scheduler.
 #[derive(Debug, Clone)]
 pub struct FragilityReport {
+    /// Per-chunk scores, sorted by descending score.
     pub scores: Vec<FragilityScore>,
     /// Chunks the operator should replicate FIRST (sorted score desc).
     pub replication_priority: Vec<String>,

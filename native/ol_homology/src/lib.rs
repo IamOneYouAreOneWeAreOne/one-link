@@ -28,7 +28,7 @@
 //! NOW) without the cubic-time computation.
 
 #![forbid(unsafe_code)]
-#![allow(missing_docs)]
+#![warn(missing_docs)]
 
 mod components;
 mod fragility;
@@ -36,4 +36,5 @@ mod fragility;
 pub use components::{components_of, ComponentReport};
 pub use fragility::{fragility_score, FragilityReport, FragilityScore};
 
+/// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
