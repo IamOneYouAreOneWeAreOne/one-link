@@ -62,6 +62,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -134,6 +135,69 @@ class Channel:
 
     def _aad(self) -> bytes:
         return AAD_PREFIX + self.transcript_hash
+
+    # ─── Phase C-3 native transfer integration (ADR-0025) ─────────────
+    def derive_native_transfer_secret(self) -> bytes:
+        """Derive a 32-byte session secret suitable for seeding a
+        :class:`one_link.native_transfer.NativeTransferSession`.
+
+        The native pipeline (ChunkRatchet + per-chunk AEAD) needs a
+        distinct 32-byte secret separate from this channel's
+        legacy AEAD keys and from the Double Ratchet root seed. We
+        derive via HKDF with a fresh info tag so each domain has
+        its own derived material — leaking either the legacy
+        channel keys or the DR root doesn't compromise the native
+        transfer secret.
+
+        The same derivation runs on both peers (deterministic from
+        ``transcript_hash`` + the DR bootstrap shared secret), so
+        sender + receiver hold matching native sessions without
+        any wire-format change."""
+        if self._dr_shared is None:
+            raise RuntimeError(
+                "channel cannot derive native transfer secret: DR "
+                "bootstrap material missing (handshake incomplete)"
+            )
+        return HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=self.transcript_hash,
+            info=b"OL1/native-transfer/seed|v1",
+        ).derive(self._dr_shared)
+
+    def establish_native_transfer(
+        self,
+        *,
+        cipher_backend: str = "fast",
+        store_root: "Path | None" = None,
+    ):
+        """Build a :class:`NativeTransferSession` from this channel's
+        derived native-transfer secret.
+
+        The daemon's ``send_file`` / chunk-store transport call sites
+        invoke this once per channel and reuse the returned session
+        across all chunks of that channel. The session is matched on
+        both peers (same shared secret, deterministic derivation), so
+        the receiver's instance decrypts what the sender's produces.
+
+        ``cipher_backend`` defaults to ``"fast"`` (cryptography.hazmat
+        BoringSSL); pass ``"native"`` for the ring-backed
+        ``ol_aead.AeadCipher`` multi-frame layout (use when partial-
+        chunk integrity is needed)."""
+        from one_link import native_transfer as _native_transfer
+
+        if not _native_transfer.HAS_NATIVE:
+            raise RuntimeError(
+                "channel.establish_native_transfer requires "
+                "one_link_native; build via `cd native && maturin "
+                "develop --release`"
+            )
+        secret = self.derive_native_transfer_secret()
+        return _native_transfer.session_from_shared_secret(
+            secret,
+            cipher_backend=cipher_backend,
+            store_root=store_root,
+        )
 
     @property
     def is_ratchet_active(self) -> bool:

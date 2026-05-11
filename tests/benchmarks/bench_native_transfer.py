@@ -73,7 +73,10 @@ class _NativeSession:
     """Session pair sharing the SAME shared secret so they advance the
     same ratchet in lockstep. Mirrors what
     ``native_transfer.establish_session_pair`` produces, minus the
-    KEM round trip cost on every iteration."""
+    KEM round trip cost on every iteration. Uses
+    ``cipher_backend='fast'`` (cryptography.hazmat / BoringSSL)."""
+
+    BACKEND = "fast"
 
     def __init__(self) -> None:
         from one_link import native_transfer
@@ -81,8 +84,12 @@ class _NativeSession:
         # Use the same shared secret on both ends — eliminates the
         # ML-KEM-768 keypair generation cost from the timed region.
         ss = os.urandom(32)
-        self.sender = native_transfer.session_from_shared_secret(ss)
-        self.receiver = native_transfer.session_from_shared_secret(ss)
+        self.sender = native_transfer.session_from_shared_secret(
+            ss, cipher_backend=self.BACKEND
+        )
+        self.receiver = native_transfer.session_from_shared_secret(
+            ss, cipher_backend=self.BACKEND
+        )
 
     def round_trip(self, plaintext: bytes) -> bytes:
         from one_link_native import chunk as _native_chunk
@@ -133,12 +140,23 @@ def _bench_one_session(
     return statistics.median(speeds)
 
 
-def bench(size_bytes: int, *, runs: int = 5) -> tuple[float, float]:
-    """Return (legacy MiB/s, native MiB/s) medians on ``size_bytes``."""
+class _NativeSessionRing(_NativeSession):
+    """Native session pinned to ``cipher_backend='native'`` — uses
+    ``ol_aead`` (ring-backed AES-GCM / ChaCha20-Poly1305) instead of
+    cryptography.hazmat. Post Phase-C-3 ol_aead upgrade these should
+    be at parity."""
+
+    BACKEND = "native"
+
+
+def bench(size_bytes: int, *, runs: int = 5) -> tuple[float, float, float]:
+    """Return (legacy MiB/s, native-fast MiB/s, native-ring MiB/s)
+    medians on ``size_bytes``."""
     payload = os.urandom(size_bytes)
     legacy = _bench_one_session(_LegacySession, payload, runs)
-    native = _bench_one_session(_NativeSession, payload, runs)
-    return legacy, native
+    native_fast = _bench_one_session(_NativeSession, payload, runs)
+    native_ring = _bench_one_session(_NativeSessionRing, payload, runs)
+    return legacy, native_fast, native_ring
 
 
 def main() -> int:
@@ -153,16 +171,21 @@ def main() -> int:
         64 * 1024 * 1024,   # 64 MiB  (large-file regime)
     ]
     print(
-        f"{'size':>12}  {'legacy MiB/s':>14}  {'native MiB/s':>14}  {'ratio':>10}"
+        f"{'size':>10}  {'legacy':>10}  {'fast (Py)':>10}  {'ring (Rs)':>10}  "
+        f"{'f/leg':>7}  {'r/leg':>7}"
     )
-    print("-" * 60)
+    print("-" * 70)
     for size in sizes:
-        legacy, native = bench(size, runs=5)
-        ratio = native / legacy if legacy > 0 else float("inf")
+        legacy, fast, ring = bench(size, runs=5)
+        r_fast = fast / legacy if legacy > 0 else float("inf")
+        r_ring = ring / legacy if legacy > 0 else float("inf")
         size_label = (
-            f"{size // 1024} KiB" if size < 1024 * 1024 else f"{size // (1024 * 1024)} MiB"
+            f"{size // 1024}K" if size < 1024 * 1024 else f"{size // (1024 * 1024)}M"
         )
-        print(f"{size_label:>12}  {legacy:>14.2f}  {native:>14.2f}  {ratio:>10.3f}x")
+        print(
+            f"{size_label:>10}  {legacy:>10.0f}  {fast:>10.0f}  {ring:>10.0f}  "
+            f"{r_fast:>6.2f}x  {r_ring:>6.2f}x"
+        )
     return 0
 
 

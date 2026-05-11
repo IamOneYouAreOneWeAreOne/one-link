@@ -12,9 +12,14 @@ crate-type = ["lib"]
 
 [dependencies]
 ol_chunk         = { path = "../ol_chunk" }
-aead             = { workspace = true }
-aes-gcm          = { workspace = true }
-chacha20poly1305 = { workspace = true }
+# Phase C-3: AEAD primitives via `ring` (BoringSSL-derived hand-tuned
+# assembly). Replaces RustCrypto's pure-Rust + intrinsics implementation,
+# which was 1.5-2x slower than BoringSSL on small chunks. Same wire
+# format (AES-256-GCM and ChaCha20-Poly1305 are RFC-specified — distinct
+# implementations of the same algorithm produce byte-identical
+# ciphertexts for the same (key, nonce, AAD, plaintext)), so this is
+# a drop-in swap from the wire-compatibility POV.
+ring             = { workspace = true }
 blake3           = { workspace = true }
 subtle           = { workspace = true }
 zeroize          = { workspace = true }

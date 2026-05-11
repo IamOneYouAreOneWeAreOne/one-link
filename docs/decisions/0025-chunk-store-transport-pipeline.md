@@ -99,6 +99,36 @@ Properties unique to the native path (not available from the legacy single-key c
 - **Post-quantum-secure session establishment** via ML-KEM-768 + X25519 hybrid (HNDL resistance today).
 - **Configurable backend**: fast-path (BoringSSL single-shot) or native multi-frame (partial-chunk integrity for streaming-decrypt scenarios).
 
+### ol_aead upgrade: RustCrypto → ring (BoringSSL-derived)
+
+The original `cipher_backend="native"` (multi-frame AEAD via `ol_aead`) was 1.5-2× slower than `cipher_backend="fast"` (BoringSSL via cryptography.hazmat) because the underlying RustCrypto `aes-gcm` / `chacha20poly1305` crates use pure-Rust + intrinsics, while BoringSSL uses hand-tuned assembly.
+
+Phase C-3 swaps `ol_aead`'s primitives to [`ring`](https://docs.rs/ring/0.17/) (a Rust crate around BoringSSL-derived assembly). AES-256-GCM and ChaCha20-Poly1305 are RFC-specified, so different conformant implementations produce byte-identical ciphertexts for the same `(key, nonce, AAD, plaintext)` tuple — the on-wire format is unchanged.
+
+After the upgrade, `cipher_backend="native"` measures within 5-10% of `cipher_backend="fast"` on large chunks:
+
+| Size | Legacy (cryptography.hazmat) | Fast (BoringSSL via Python) | Native (ring multi-frame) |
+|---:|---:|---:|---:|
+| 16 KiB | 1,383 | 1,594 (1.15×) | 1,460 (1.06×) |
+| 64 KiB | 1,521 | 2,111 (1.39×) | 1,485 (0.98×) |
+| 4 MiB | 628 | 758 (1.21×) | 659 (1.05×) |
+| 16 MiB | 598 | 707 (1.18×) | 657 (1.10×) |
+| 64 MiB | 577 | 686 (1.19×) | 624 (1.08×) |
+
+The fast backend remains the default because single-shot AEAD per 256 KiB chunk amortizes better than 16× 16-KiB frame AEAD calls. The native backend stays competitive (1.05-1.10× legacy on large sizes) and is the preferred choice when partial-chunk integrity is needed (random-access reads).
+
+### Daemon cutover integration
+
+`Channel.derive_native_transfer_secret()` and `Channel.establish_native_transfer()` (channel.py) bridge the existing channel handshake to a `NativeTransferSession`. Both peers, given matching DR-bootstrap material + transcript_hash, derive the same 32-byte session secret via `HKDF(_dr_shared, salt=transcript_hash, info=b"OL1/native-transfer/seed|v1")` — so sender + receiver end up on matched ratchets without any wire-format change to the handshake.
+
+The daemon's `send_file()` call site can now invoke `channel.establish_native_transfer()` to get a ready-to-go pipeline. The actual swap of FILE_CHUNK encryption from legacy AEAD to native AEAD is a follow-up commit (gated on a `NATIVE_TRANSFER_V1` capability advertisement so legacy peers continue to interoperate).
+
+5 integration tests at `tests/unit/test_channel_native_transfer.py` verify:
+- Matched peers derive identical native-transfer secrets.
+- Pre-handshake call raises `RuntimeError`.
+- End-to-end round trip via paired channel instances works with both `cipher_backend="fast"` and `cipher_backend="native"`.
+- Distinct channel pairs derive distinct secrets (no cross-session leakage).
+
 ## Wiring state (post-`<THIS>`)
 
 | Component | Current state |

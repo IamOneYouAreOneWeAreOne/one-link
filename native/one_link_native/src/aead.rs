@@ -98,10 +98,16 @@ fn check_tag(tag: &[u8]) -> PyResult<[u8; RUST_AEAD_TAG_LEN]> {
 /// Construct via :func:`new_cipher` or :func:`default_cipher_for_host`.
 /// Reuse across many encrypt / decrypt calls; cipher state is the
 /// expanded round keys derived once at construction.
+///
+/// Wraps the inner cipher in an Arc so the pyo3 binding can clone
+/// cheaply (refcount bump) for ``py.allow_threads`` closures that
+/// release the GIL. The ring-backed `AeadCipher` itself is not Clone
+/// because `ring::aead::LessSafeKey` doesn't expose its key bytes —
+/// the Arc sidesteps that without compromising key isolation.
 #[pyclass(name = "AeadCipher", module = "one_link_native.aead", frozen, unsendable)]
 #[derive(Debug, Clone)]
 pub struct PyAeadCipher {
-    inner: RustAeadCipher,
+    inner: std::sync::Arc<RustAeadCipher>,
 }
 
 #[pymethods]
@@ -215,7 +221,7 @@ fn new_cipher(key: &[u8], kind: &str) -> PyResult<PyAeadCipher> {
     let key = check_key(key)?;
     let kind = parse_kind(kind)?;
     Ok(PyAeadCipher {
-        inner: RustAeadCipher::with_kind(kind, &key),
+        inner: std::sync::Arc::new(RustAeadCipher::with_kind(kind, &key)),
     })
 }
 
@@ -226,7 +232,7 @@ fn new_cipher(key: &[u8], kind: &str) -> PyResult<PyAeadCipher> {
 fn default_cipher_for_host(key: &[u8]) -> PyResult<PyAeadCipher> {
     let key = check_key(key)?;
     Ok(PyAeadCipher {
-        inner: RustAeadCipher::default_for_host(&key),
+        inner: std::sync::Arc::new(RustAeadCipher::default_for_host(&key)),
     })
 }
 
