@@ -29,11 +29,14 @@
 use pyo3::prelude::*;
 
 mod aead;
+mod bandit;
 mod bloom;
 mod chunk;
+mod erasure;
 mod errors;
 mod fec;
 mod fountain;
+mod pqkem;
 mod quic;
 mod ratchet;
 mod store;
@@ -121,6 +124,27 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.ratchet", ratchet_mod)?;
+
+    let pqkem_mod = PyModule::new_bound(py, "pqkem")?;
+    pqkem::register(py, &pqkem_mod)?;
+    m.add_submodule(&pqkem_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.pqkem", pqkem_mod)?;
+
+    let erasure_mod = PyModule::new_bound(py, "erasure")?;
+    erasure::register(py, &erasure_mod)?;
+    m.add_submodule(&erasure_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.erasure", erasure_mod)?;
+
+    let bandit_mod = PyModule::new_bound(py, "bandit")?;
+    bandit::register(py, &bandit_mod)?;
+    m.add_submodule(&bandit_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.bandit", bandit_mod)?;
 
     Ok(())
 }
