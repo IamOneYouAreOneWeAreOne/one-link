@@ -26,6 +26,15 @@ FUTURE_TRANSPORTS = "future_transports"
 # capability + audited library only, so deployments can interop
 # without yet flipping the wire format).
 DOUBLE_RATCHET_V1 = "double_ratchet_v1"
+# Phase C-3 (ADR-0025, ADR-0026): capability advertisement for the
+# native chunk-store transport pipeline. When both peers advertise
+# this AND the sender opts in via ONE_LINK_NATIVE_TRANSFER=1, file
+# chunks travel as FILE_NATIVE_CHUNK messages encrypted by the
+# ring-backed AEAD pipeline (ADR-0002) keyed off the channel's
+# native-transfer-derived session secret (ADR-0025). Legacy peers
+# (no NATIVE_TRANSFER_V1 in caps) keep using FILE_CHUNK /
+# FILE_BIN_CHUNK transparently.
+NATIVE_TRANSFER_V1 = "native_transfer_v1"
 
 LOCAL_CAPABILITIES = (
     CHAT,
@@ -40,6 +49,7 @@ LOCAL_CAPABILITIES = (
     MERKLE_SYNC,
     FUTURE_TRANSPORTS,
     DOUBLE_RATCHET_V1,
+    NATIVE_TRANSFER_V1,
 )
 
 # v0.7.1 deny-by-default capability split. The audit doc
@@ -63,6 +73,7 @@ TRANSPORT_LAYER_CAPS = (
     FILE_BINARY_FRAME,
     FILE_CDC_BINARY_FRAME,
     DOUBLE_RATCHET_V1,
+    NATIVE_TRANSFER_V1,
 )
 
 

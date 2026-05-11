@@ -74,6 +74,7 @@ from one_link.capabilities import (
     FILE_SWARM,
     FOLDER_SYNC,
     LOCAL_CAPABILITIES,
+    NATIVE_TRANSFER_V1,
     normalize_caps,
 )
 from one_link.cdc import (
@@ -2302,6 +2303,9 @@ class Daemon:
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         elif t == "FILE_BIN_CHUNK":
             await self._handle_file_binary_chunk(channel, msg, peer_fp, peer_sid)
+        elif t == "FILE_NATIVE_CHUNK":
+            # Phase C-3 (ADR-0026): native chunk-store transport.
+            await self._handle_file_native_chunk(channel, msg, peer_fp, peer_sid)
         elif t == "FILE_CDC_CHUNK":
             await self._handle_file_cdc_chunk(channel, msg, peer_fp, peer_sid)
         elif t == "CHUNK_QUERY":
@@ -3866,6 +3870,156 @@ class Daemon:
                 raise RuntimeError("compressed payload exceeds maximum size")
             return out
         raise RuntimeError(f"unknown payload encoding: {encoding}")
+
+    async def _handle_file_native_chunk(self, channel, msg, peer_fp, peer_sid) -> None:
+        """Phase C-3 (ADR-0026) — receive a FILE_NATIVE_CHUNK message.
+
+        Wire shape::
+
+            {
+              "t": "FILE_NATIVE_CHUNK",
+              "id": ..., "ts": ..., "from": ...,
+              "blob": <hex>,
+              "seq": <int>,
+              "chunk_id": <hex 32B BLAKE3>,
+              "plaintext_len": <int>,
+              "data": <base64 of native ciphertext>,
+              "eof": <bool>,
+            }
+
+        Decryption flows through ``channel.get_or_create_native_transfer_session()``;
+        the AEAD tag binds chunk_id as AAD so any swap/tamper raises
+        before plaintext is exposed. The receiver's native session
+        is matched to the sender's by the shared derive_native_transfer
+        secret, so chunks decrypt in lockstep without any per-chunk
+        key exchange.
+        """
+        from one_link import native_transfer as _nt
+
+        blob = str(msg.get("blob", ""))
+        f = self._incoming_files.get(blob)
+        if not f:
+            log.warning("FILE_NATIVE_CHUNK with no offer: %s", blob[:8])
+            return
+        # Mid-stream capability re-check (matches FILE_BIN_CHUNK pattern).
+        if not self._capability_allowed(peer_fp, FILES):
+            self._abort_incoming_file(blob, f)
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="capability_revoked_mid_stream",
+            )))
+            return
+        seq = int(msg.get("seq", -1))
+        if seq != f.next_seq:
+            self._abort_incoming_file(blob, f)
+            raise RuntimeError(
+                f"FILE_NATIVE_CHUNK sequence mismatch for {blob[:8]}: "
+                f"expected {f.next_seq}, got {seq}"
+            )
+        try:
+            chunk_id_hex = str(msg["chunk_id"])
+            chunk_id = bytes.fromhex(chunk_id_hex)
+            if len(chunk_id) != 32:
+                raise ValueError(f"chunk_id must be 32 bytes, got {len(chunk_id)}")
+            plaintext_len = int(msg["plaintext_len"])
+            ciphertext = base64.b64decode(msg["data"], validate=True)
+        except (KeyError, ValueError, binascii.Error) as exc:
+            self._abort_incoming_file(blob, f)
+            log.warning("FILE_NATIVE_CHUNK decode error from %s: %s", peer_sid, exc)
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="bad_native_chunk_envelope",
+            )))
+            return
+        # Build the session lazily on first chunk. After this it's
+        # reused for the rest of the channel's lifetime — both peers
+        # cache matched instances independently.
+        try:
+            session = channel.get_or_create_native_transfer_session()
+        except Exception as exc:
+            self._abort_incoming_file(blob, f)
+            log.warning("native transfer session unavailable: %s", exc)
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="native_transfer_unavailable",
+            )))
+            return
+        record = _nt.NativeChunkRecord(
+            chunk_id=chunk_id,
+            chunk_index=seq,
+            plaintext_len=plaintext_len,
+            ciphertext=ciphertext,
+        )
+        try:
+            data = session.decrypt_chunk(record)
+        except Exception as exc:
+            # AEAD tag failure means the chunk was tampered, the
+            # session secret diverged, or the chunk_id was swapped.
+            # Any of those is fatal for the transfer.
+            self._abort_incoming_file(blob, f)
+            log.warning(
+                "FILE_NATIVE_CHUNK decrypt failure for %s (seq=%d): %s",
+                blob[:8], seq, exc,
+            )
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="native_chunk_decrypt_failed",
+            )))
+            return
+        if f.received + len(data) > f.size:
+            self._abort_incoming_file(blob, f)
+            raise RuntimeError(
+                f"FILE_NATIVE_CHUNK exceeds declared size for {blob[:8]}: "
+                f"{f.received + len(data)} > {f.size}"
+            )
+        f.handle.write(data)
+        f.hasher.update(data)
+        f.received += len(data)
+        f.next_seq += 1
+        self._update_transfer(
+            f.transfer_id,
+            status="active",
+            progress_bytes=f.received,
+            total_bytes=f.size,
+            chunks_done=f.next_seq,
+            chunks_total=max(f.next_seq, (f.size + CHUNK_SIZE - 1) // CHUNK_SIZE),
+        )
+        if msg.get("eof"):
+            f.handle.close()
+            got = f.hasher.hexdigest()
+            ok = got == f.blob_hex and f.received == f.size
+            done = {
+                "t": "FILE_DONE",
+                "id": msg["id"],
+                "ts": msg["ts"],
+                "from": msg["from"],
+                "name": f.name,
+                "size": f.size,
+                "path": str(f.out_path),
+                "blob": f.blob_hex,
+                "ok": ok,
+                "file_risk": classify_file_risk(f.name),
+            }
+            ev = self._persist(msg=done, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
+            self._broadcast_tail(ev)
+            self._incoming_files.pop(blob, None)
+            if not ok:
+                with contextlib.suppress(OSError):
+                    f.out_path.unlink()
+                self._update_transfer(f.transfer_id, status="failed")
+            else:
+                self._update_transfer(
+                    f.transfer_id,
+                    status="complete",
+                    progress_bytes=f.size,
+                    total_bytes=f.size,
+                )
+            log.info("native file done: %s ok=%s -> %s", f.name, ok, f.out_path)
+            await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+            if ok:
+                self._cache_file_chunks(f.out_path)
+            return
+        await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
 
     async def _handle_file_binary_chunk(self, channel, msg, peer_fp, peer_sid) -> None:
         """Receive one raw binary file chunk carried inside the encrypted channel."""
@@ -8715,6 +8869,32 @@ class Daemon:
                     adaptive_scheduler_snapshot = cdc_scheduler.snapshot()
                 else:
                     binary_stream_used = FILE_BINARY_FRAME in peer_feature_set
+                    # Phase C-3 (ADR-0026): native chunk-store transport
+                    # is opt-in via env flag, gated on peer capability.
+                    # When both signals are present, file chunks travel
+                    # as FILE_NATIVE_CHUNK encrypted by the ring-backed
+                    # ol_aead pipeline keyed off the channel's native-
+                    # transfer-derived session secret (ADR-0025). The
+                    # env flag is intentional: production stays on the
+                    # legacy FILE_CHUNK / FILE_BIN_CHUNK path until
+                    # operators flip ``ONE_LINK_NATIVE_TRANSFER=1`` to
+                    # try the new transport.
+                    native_transfer_used = (
+                        NATIVE_TRANSFER_V1 in peer_feature_set
+                        and os.environ.get("ONE_LINK_NATIVE_TRANSFER") == "1"
+                    )
+                    native_session = None
+                    if native_transfer_used:
+                        try:
+                            native_session = channel.get_or_create_native_transfer_session()
+                        except Exception as exc:
+                            log.warning(
+                                "native transfer requested but unavailable (%s) — "
+                                "falling back to %s",
+                                exc,
+                                "FILE_BIN_CHUNK" if binary_stream_used else "FILE_CHUNK",
+                            )
+                            native_transfer_used = False
                     if can_offer_cdc:
                         attempts = list(base_metadata.get("protocol_attempts") or [])
                         attempts.append({
@@ -8805,7 +8985,29 @@ class Daemon:
                             # v0.12.0: pace before send. No-op when
                             # the user hasn't set a bandwidth cap.
                             await self.bandwidth_pacer.pace(len(data))
-                            if binary_stream_used:
+                            if native_transfer_used and native_session is not None:
+                                # ADR-0026: encrypt plaintext via the
+                                # cached native session; ship encrypted
+                                # bytes + chunk_id + plaintext_len. The
+                                # receiver's matched session decrypts
+                                # in lockstep (same derivation, same
+                                # ratchet position).
+                                record = native_session.encrypt_chunk_bytes(data)
+                                chunk_msg = make_msg(
+                                    "FILE_NATIVE_CHUNK",
+                                    self.me.short_id,
+                                    blob=blob_hex,
+                                    seq=seq,
+                                    chunk_id=record.chunk_id.hex(),
+                                    plaintext_len=record.plaintext_len,
+                                    data=base64.b64encode(record.ciphertext).decode("ascii"),
+                                    eof=eof,
+                                )
+                                queued_write = await _queue_or_send(
+                                    channel,
+                                    encode_msg(chunk_msg),
+                                )
+                            elif binary_stream_used:
                                 chunk_msg = make_msg(
                                     "FILE_BIN_CHUNK",
                                     self.me.short_id,

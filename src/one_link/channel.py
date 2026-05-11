@@ -85,6 +85,10 @@ REPLY_TAG = b"OL1|REPLY|"
 AAD_PREFIX = b"OL1/data|"
 # v0.8.2: capability tag both peers must advertise to enable ratchet.
 DR_CAP = "double_ratchet_v1"
+# Phase C-3 (ADR-0026): capability tag both peers must advertise to
+# enable the native chunk-store transport (FILE_NATIVE_CHUNK messages).
+# Keep in sync with `capabilities.NATIVE_TRANSFER_V1`.
+NATIVE_TRANSFER_CAP = "native_transfer_v1"
 # v0.8.2: HKDF info label for the ratchet-bootstrap root key. Distinct
 # from the legacy session-key derivation so the two are independent;
 # even if the legacy AEAD keys leak, they don't reveal the ratchet
@@ -121,10 +125,23 @@ class Channel:
     _caps_sent: bool = False
     _caps_received: bool = False
     _peer_dr_capable: bool = False
+    # Phase C-3 (ADR-0026): native transfer capability tracking.
+    # True iff the peer's CAPS frame included NATIVE_TRANSFER_V1.
+    # Independent of ratchet status — the native pipeline derives
+    # its own session secret from the DR-bootstrap material via
+    # `derive_native_transfer_secret`, so we don't gate on DR
+    # activation.
+    _peer_native_transfer_capable: bool = False
     # When non-None, channel is in ratchet mode. send/recv branch
     # to the ratchet path and the legacy AEADs go unused. Set
     # exactly once per channel by maybe_activate_ratchet.
     _dr_state: object = None  # one_link.double_ratchet.RatchetState
+    # Phase C-3 (ADR-0026): cached native transfer session for
+    # FILE_NATIVE_CHUNK encrypt/decrypt. Lazily built by the daemon
+    # on first chunk; sender and receiver hold MATCHED instances
+    # because both sides derive the same secret via
+    # `derive_native_transfer_secret`.
+    _native_transfer_session: object = None  # NativeTransferSession
 
     def _nonce(self, seq: int) -> bytes:
         return seq.to_bytes(12, "little")
@@ -164,6 +181,25 @@ class Channel:
             salt=self.transcript_hash,
             info=b"OL1/native-transfer/seed|v1",
         ).derive(self._dr_shared)
+
+    def get_or_create_native_transfer_session(
+        self,
+        *,
+        cipher_backend: str = "fast",
+        store_root: "Path | None" = None,
+    ):
+        """Lazy, cached version of :meth:`establish_native_transfer`.
+
+        Daemon callers invoke this on every chunk — the session is
+        built once on first call and reused for the rest of the
+        channel's lifetime. Sender and receiver each cache their
+        own instance; matched derivation makes them line up."""
+        if self._native_transfer_session is None:
+            self._native_transfer_session = self.establish_native_transfer(
+                cipher_backend=cipher_backend,
+                store_root=store_root,
+            )
+        return self._native_transfer_session
 
     def establish_native_transfer(
         self,
@@ -215,11 +251,22 @@ class Channel:
 
     def note_caps_received(self, features: list[str] | tuple[str, ...] | set[str]) -> None:
         """Daemon calls this immediately after parsing the peer's
-        CAPS frame. Records DR capability + marks recv-side ready."""
+        CAPS frame. Records DR + native-transfer capabilities, marks
+        recv-side ready."""
         if features is None:
             features = []
-        self._peer_dr_capable = DR_CAP in features
+        # Normalize to a set once so membership checks are O(1).
+        feature_set = set(features)
+        self._peer_dr_capable = DR_CAP in feature_set
+        self._peer_native_transfer_capable = NATIVE_TRANSFER_CAP in feature_set
         self._caps_received = True
+
+    @property
+    def peer_native_transfer_capable(self) -> bool:
+        """True iff the peer's CAPS frame advertised
+        ``NATIVE_TRANSFER_V1`` (ADR-0026). Read-only — set by
+        :meth:`note_caps_received`."""
+        return self._peer_native_transfer_capable
 
     def maybe_activate_ratchet(self) -> bool:
         """If both sides have exchanged CAPS, both advertise
