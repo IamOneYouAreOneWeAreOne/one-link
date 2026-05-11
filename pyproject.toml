@@ -83,6 +83,25 @@ one_link = [
 # hanging before collection on WMI-unhealthy machines.
 addopts = "-p no:benchmark -p no:hypothesispytest"
 
+# Phase C-3 (ADR-0008): mypy resolves `one_link_native` types from the
+# PEP 561 stub-only package shipped under `stubs/`. The stubs are
+# hand-written .pyi files (one per pyo3 binding); pyright reads them
+# directly off `mypy_path`. Mypy 1.20 only auto-discovers `*-stubs`
+# packages when they're pip-installed, so we additionally silence
+# the import-untyped warning for one_link_native.
+[tool.mypy]
+mypy_path = "stubs:src"
+explicit_package_bases = true
+namespace_packages = true
+
+[[tool.mypy.overrides]]
+module = "one_link_native.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "one_link_native"
+ignore_missing_imports = true
+
 # v0.7.2 bandit config (audit finding C). We exclude tests because
 # fake-data + pytest harness use patterns bandit flags but are safe
 # in a test context (e.g. assert in tests, hardcoded keys for

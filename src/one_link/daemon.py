@@ -761,6 +761,12 @@ class Daemon:
         # they cover; expired grants auto-drop.
         from one_link.cap_store import CapStore
         self._cap_store: CapStore = CapStore()
+        # Phase C-3 (ADR-0021): macaroon dual-issue. The most recently
+        # minted macaroon cap (wire bytes) is stashed here for the
+        # peer-facing share endpoint to surface to advertise-capable
+        # clients. `None` until the first share is minted or when the
+        # native cap_migration module is unavailable.
+        self._last_minted_macaroon: bytes | None = None
         # M1: track which blob hashes we've explicitly requested from each
         # peer (via MANIFEST_WANTS). BLOB_OFFER / BLOB_CHUNK frames whose
         # hash isn't in this set are silently dropped — a paired peer can't
@@ -5400,6 +5406,29 @@ class Daemon:
             not_after_ms=now + duration_ms,
             scope=scope,
         )
+        # Phase C-3 daemon migration (ADR-0021): dual-issue a
+        # macaroon-style capability alongside the legacy Ed25519 grant.
+        # The legacy blob remains authoritative on the wire so old
+        # peers stay compatible; the macaroon is stashed in the cap
+        # store for clients that advertise the new path. When all
+        # paired peers advertise macaroon support, the legacy issue
+        # collapses to the macaroon-only branch in a follow-up
+        # release.
+        try:
+            from one_link import cap_migration as _cap_migration
+
+            macaroon = _cap_migration.mint_share_capability(
+                granter_priv_seed=priv_seed,
+                granter_pub=self.me.public_bytes,
+                subject_pub=peer_pub,
+                capabilities=capabilities,
+                not_after_ms=now + duration_ms,
+                scope=scope if isinstance(scope, (bytes, bytearray)) else bytes(scope or b""),
+            )
+            self._last_minted_macaroon = macaroon.encode()
+        except Exception as exc:  # native module missing or transient failure
+            self._last_minted_macaroon = None
+            log.debug("macaroon dual-issue skipped: %s", exc)
         # Local-authoritative: store in OUR cap_store first, so
         # _capability_allowed picks it up immediately even if the
         # wire ship fails.

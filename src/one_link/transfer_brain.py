@@ -823,7 +823,16 @@ def pareto_frontier(candidates: Iterable[TransferCandidate]) -> tuple[TransferCa
 
 
 class AdaptiveTransferBrain:
-    """Learns route cost and chooses a transfer strategy."""
+    """Learns route cost and chooses a transfer strategy.
+
+    Phase C-3 (ADR-0019): when ``one_link_native.bandit`` is available
+    the brain ALSO feeds every observation into a
+    :class:`BanditRouteSelector` so the Thompson-sampled posterior
+    builds in parallel with the EMA. ``best_route_bandit()`` exposes
+    the bandit's greedy pick for diagnostics + the future cutover
+    (per stress-test #3 the bandit *replaces*, doesn't coexist with,
+    the EMA route memory; today the EMA path is still authoritative
+    so the legacy 798-test daemon suite keeps passing)."""
 
     DEFAULT_HASH_MIB_S = 1500.0
     DEFAULT_FIXED_MIB_S = 1100.0
@@ -832,10 +841,55 @@ class AdaptiveTransferBrain:
 
     def __init__(self) -> None:
         self._routes: dict[str, RouteStats] = {}
+        # Phase C-3 bandit shadow. Built lazily on first observe() so
+        # the route arms match what the daemon actually sees.
+        self._bandit: BanditRouteSelector | None = None
 
     def observe(self, obs: TransferRouteObservation) -> None:
         current = self._routes.get(obs.route, RouteStats(route=obs.route))
         self._routes[obs.route] = current.observe(obs)
+        self._bandit_record(obs)
+
+    def _bandit_record(self, obs: TransferRouteObservation) -> None:
+        """Mirror every legacy observation into the bandit. Pure
+        observer — failures are swallowed and never affect routing."""
+        try:
+            from . import bandit_native
+
+            if not bandit_native.HAS_NATIVE:
+                return
+        except ImportError:
+            return
+        # Build the bandit lazily and grow as new routes appear. The
+        # ol_bandit Bandit is fixed-arity, so we re-create it when a
+        # new route is observed. This is cheap (microseconds) and
+        # only happens at route discovery; the steady-state path is
+        # straight-line update().
+        seen_routes = tuple(sorted(self._routes.keys()))
+        if self._bandit is None or self._bandit.routes != seen_routes:
+            try:
+                self._bandit = BanditRouteSelector(seen_routes, seed=0xCAFE_BABE)
+            except Exception:
+                self._bandit = None
+                return
+        # TransferRouteObservation reports bandwidth in bits-per-second
+        # already; pass it through directly. `ok=False` records a
+        # zero-reward failure regardless of bandwidth.
+        try:
+            self._bandit.record_outcome(
+                obs.route,
+                bandwidth_bps=float(obs.bandwidth_bps or 0.0),
+                success=bool(obs.ok),
+            )
+        except Exception:
+            # A divergence (e.g. unknown arm) silently drops the
+            # observation; the EMA path is unaffected.
+            return
+
+    def best_route_bandit(self) -> str | None:
+        """Greedy bandit pick — useful for diagnostics + the future
+        cutover. Returns ``None`` when the bandit isn't initialised."""
+        return self._bandit.best_route() if self._bandit is not None else None
 
     def route_stats(self) -> tuple[RouteStats, ...]:
         return tuple(sorted(

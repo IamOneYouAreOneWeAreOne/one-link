@@ -39,6 +39,21 @@ from watchdog.observers import Observer
 
 from one_link.blobstore import BlobStore
 from one_link.crdt import ManifestEntry, VectorClock, merge_manifest_entries
+
+# Phase C-3 daemon migration (ADR-0022): the FolderEngine shadow-mirrors
+# every add/remove into a native ol_crdt.Folder so the lattice-correct
+# merge path is exercised in production before the legacy merge code
+# is removed. The mirror is a pure observer — divergence between the
+# legacy + native states is logged, never acted on. Activate by
+# importing folder_native; if the native module isn't available, the
+# mirror becomes a no-op.
+try:
+    from one_link import folder_native as _folder_native
+
+    _MIRROR_AVAILABLE = _folder_native is not None
+except ImportError:  # pragma: no cover
+    _folder_native = None  # type: ignore[assignment]
+    _MIRROR_AVAILABLE = False
 from one_link.merkle import build_tree, manifest_leaf_hashes
 from one_link.state import State
 
@@ -168,6 +183,12 @@ class FolderEngine:
         self._stop = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._scan_task: Optional[asyncio.Task] = None
+        # Phase C-3: per-folder native ol_crdt.Folder shadow-mirror. Each
+        # mirror observes the legacy manifest's lifecycle so the native
+        # lattice merge is exercised in production without changing
+        # behavior. Divergence between legacy/native paths is logged.
+        self._native_mirrors: dict[str, "_folder_native.NativeManifestMirror"] = {}
+        self._native_mirror_divergence: int = 0  # surfaced via debug snapshot
 
     # ─── lifecycle ────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -199,6 +220,63 @@ class FolderEngine:
                     await t
                 except (asyncio.CancelledError, Exception):
                     pass
+
+    # ─── Phase C-3 native mirror (ADR-0022) ──────────────────────────
+    def _mirror_for(self, folder_name: str):
+        """Lazily build/return the native shadow-mirror for ``folder_name``.
+
+        Returns ``None`` if the native CRDT module isn't available
+        (e.g. ``one_link_native`` not built yet). Callers should
+        no-op on ``None``."""
+        if not _MIRROR_AVAILABLE:
+            return None
+        existing = self._native_mirrors.get(folder_name)
+        if existing is not None:
+            return existing
+        try:
+            replica = self.me_fp.encode("utf-8") if isinstance(self.me_fp, str) else self.me_fp
+            mirror = _folder_native.NativeManifestMirror(replica_id=replica)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("native folder mirror unavailable: %s", exc)
+            return None
+        self._native_mirrors[folder_name] = mirror
+        return mirror
+
+    def _mirror_observe(self, folder_name: str, entry: ManifestEntry) -> None:
+        """Reflect a merge winner into the native shadow-mirror. Pure
+        observer — failures are swallowed and counted."""
+        mirror = self._mirror_for(folder_name)
+        if mirror is None:
+            return
+        try:
+            if entry.blob_hash is None:
+                mirror.remove_entry(entry.file_path)
+            else:
+                mirror.add_entry(entry)
+        except Exception as exc:
+            self._native_mirror_divergence += 1
+            log.debug("native folder mirror divergence (%s): %s", folder_name, exc)
+
+    def native_folder_snapshot(self, folder_name: str):
+        """Return the native :class:`Folder` mirroring ``folder_name`` —
+        useful for diagnostics and the future cutover. ``None`` if
+        the mirror isn't initialised or native is unavailable."""
+        mirror = self._native_mirrors.get(folder_name)
+        return mirror.snapshot() if mirror is not None else None
+
+    def native_mirror_stats(self) -> dict:
+        """Return a ``dict`` summary of the native mirror state for
+        operator diagnostics: per-folder file counts plus the running
+        divergence counter."""
+        out = {
+            "available": _MIRROR_AVAILABLE,
+            "folders": {},
+            "divergence_events": self._native_mirror_divergence,
+        }
+        for name, mirror in self._native_mirrors.items():
+            snap = mirror.snapshot()
+            out["folders"][name] = {"present_files": snap.len()}
+        return out
 
     # ─── folder management ────────────────────────────────────────────
     def add_folder(
@@ -308,6 +386,7 @@ class FolderEngine:
                 mtime_ms=winner.mtime_ms,
                 vclock=winner.vclock.to_dict(),
             )
+            self._mirror_observe(folder_name, winner)
             # If winner is live and we don't have its blob, request it
             if winner.blob_hash is not None and not self.blobs.has(winner.blob_hash):
                 wants.append(winner.to_dict())
