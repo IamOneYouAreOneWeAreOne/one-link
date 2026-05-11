@@ -80,11 +80,35 @@ This table tracks what is **shipped + verified** vs **shipped but unverified** v
 
 | Gate | Plan target | Status |
 |---|---|:-:|
-| Tau-routing margin | ≥ 20% reduction in chunks-lost-on-partition | **Met: 100% reduction measured** |
+| Tau-routing margin (Dijkstra) | ≥ 20% reduction in chunks-lost-on-partition | **Met: 100% reduction measured** |
 | Persistent-homology detector | ≤ 5% FP, partition flag in ≤ N rounds | **Met: 0% FP, 1-round detection** |
 | Active inference cold-start | bandit-equivalent within ≤ 50 transfers | **Met: cohort prior 1-iter, cold 50-iter** |
 | Plausibly deniable | duress key unlocks decoy, no observable disk pattern | **Met: gate-side timing 1.014×** |
 | TLA+ formal model | no double-grant / key reuse / downgrade / replay | **Met: `docs/formal/capability.tla` + `.cfg`** |
+
+### Phase E acceptance gates — Coherence Field Substrate (NEW)
+
+Phase E lifts τ_c-routing from "weighted Dijkstra over a graph" (the Phase D
+shipped form) to **a real Coherence Field**: the scalar field that the
+Coherence Energy Labs S_One derivation identifies as the same field whose
+limits produce Newtonian gravity, deep-MOND BTFR, BE-RAR rotation curves,
+and apparent-horizon acceleration. The plan now treats network routing as
+**one limit of the same coherence field**, sharing one Rust crate with
+OneField Mesh's RF τ_c routing and BioMesh's biological signals.
+
+| Gate | Plan target | Status |
+|---|---|:-:|
+| Reaction-diffusion field solve | `∂_t δτ_c = D·∇² δτ_c − Γ·δτ_c + S` converges over peer graph; spectral residual < 10⁻⁶ | **Not yet built** |
+| Green-function nonlocal kernel | `g_coh(P) = (c²/4πDτ_∞) ∫ S(P')·(P−P')/|P−P'|³` matches Helmholtz limit at scale `ell_screen` | **Not yet built** |
+| Screening length calibration | `ell_screen = √(D/Γ)` discovered from swarm metrics; gates Poisson vs Yukawa regime | **Not yet built** |
+| BE-RAR interpolation (α = 1/2) | Replace `loss_penalty = 1/(1−loss)²` with `nu(y) = 1/(1−exp(−√y))` — Bose-statistics-forced, not heuristic | **Not yet built** |
+| Apparent-horizon anchor `g_A` | Per-swarm `g_A`-equivalent calibrated from observed bandwidth-jitter ceiling | **Not yet built** |
+| Transport + alignment + boundary | Three operators (not just transport); support-phase kernel `k_phase = tanh((c0 − C_support)/w_phase)` | **Not yet built** |
+| Linear-source no-go escape | Nonlinear source functional `S_b[ρ, J, ∇ρ]` (density + flux dual sourcing) | **Not yet built** |
+| Cross-domain unity | Same `ol_coherence_field` crate calibrates One Link (network) + OneField (RF) + BioMesh (biology) | **Not yet built** |
+| τ_c-coupled ratchet rotation | Ratchet rotation cadence scales with `δτ_c/τ_∞`; peers in low-coherence wells rotate faster | **Not yet built** |
+| τ_c × homology coupling | Closing-loop fragility events from `ol_homology` source into reaction-diffusion `S` term; field anticipates partitions | **Not yet built** |
+| τ_c × active-inference coupling | `ol_prefetch` cohort prior pre-positions chunks along high-τ_c paths before request | **Not yet built** |
 
 ### End-to-end demos (plan-mandated, not yet run)
 
@@ -93,6 +117,8 @@ This table tracks what is **shipped + verified** vs **shipped but unverified** v
 - [ ] Premiere project resend with ≥ 90% dedup, ≤ 10% delta in < 10s
 - [ ] Cellular flicker mid-transfer with zero retransmits visible
 - [ ] 48h cross-platform soak (Linux + macOS + Windows; FUSE/FSKit/Dokan all stable)
+- [ ] **Phase E end-to-end demo**: 100-peer swarm under sustained 30% loss, BE-RAR interpolation engaged, recipient measures **chunks-lost-on-partition reduction ≥ 80%** vs Phase D Dijkstra baseline.
+- [ ] **Cross-domain calibration demo**: same `ol_coherence_field` crate solves One Link's network field AND OneField's RF τ_c routing AND BioMesh's signal field, all from identical Rust + per-domain calibration constants.
 
 ---
 
@@ -141,6 +167,115 @@ Each clause is one architectural primitive. The same primitive serves every qual
 
 ---
 
+## Deeper Load-Bearing Insight: One Link Routes on a Real Coherence Field
+
+> **One Link's "tau-field routing" is not a metaphor.** It is a network-scale limit of the same scalar coherence field whose other limits (galaxy rotation curves, the BE-RAR, the apparent-horizon acceleration) the Coherence Energy Labs S_One derivation identifies as the source of dark-matter / dark-energy phenomenology without new particles.
+
+The same `tau_c` field that organizes proper-time on cosmological scales organizes route-coherence on the swarm. The math is shared; only the calibration constants change.
+
+### Source-of-truth references
+
+Algebraic specifications (`coherence_lang/std/*`, `OneField/onefield/*`,
+forge_shootouts) are the design layer. The deeper physical specification is
+in the Coherence Energy Labs program:
+
+- `Coherence_Energy_Labs_Website/data/evidence/Dark_Matter_Cosmology/S_ONE_DERIVATION_STORY.md` — full derivation chain from one root action to all limits
+- `.../ALL_FORMS_OF_S_ONE.md` — every equation form + parentage
+- `.../COHERENCE_FIELD_THEORY_EVIDENCE.md` — empirical confrontation against 15 public datasets
+- `.../REPLICATION_PROTOCOL.md` — how to reproduce every result
+- ONE Docs: `UNIFIED COHERENCE FIELD THEORY (UFT).md`, `GAP_CLOSURES — Derivation Chain Completions.md`
+- `analysis_v2/results/closure_claim_audit/closure_claim_audit_summary.md` — live branch-confidence ledger
+
+### Canonical theorem stack (galaxy → network specialization)
+
+```text
+S_One                                                          [root action]
+  → Einstein + Klein-Gordon variation                          [field equations]
+  → tau_c = tau_∞ · √(-g_tt)                                   [proper-time bridge]
+  → δτ_c / τ_∞ = Φ / c²                                        [weak-field map]
+  → ∂_t δτ_c = D·∇²(δτ_c) − Γ·δτ_c + S                         [reaction-diffusion]
+  → ell_screen = √(D/Γ) = c/(√3·H_0)                           [screening length]
+  → (ell_screen ≫ r_local) ⇒ ∇²(δτ_c) = −S/D                   [Poisson limit]
+  → g_coh = −c²·∇ ln(τ_c)                                       [coherence flux]
+  → nu(y) = 1/(1 − exp(−√y))                                   [BE-RAR, α = 1/2]
+  → g_A = c·H_0 / (2π)                                          [apparent-horizon anchor]
+```
+
+### Cosmology ↔ One Link variable map
+
+| Cosmological variable | One Link network analog |
+|---|---|
+| `τ_c(x)` proper-time scalar field | route-coherence scalar field over the peer graph |
+| `Φ` gravitational potential | aggregate-traffic potential (central / lossy peers = potential wells) |
+| `D` diffusion coefficient | info-mixing rate across swarm neighbors (gossip horizon) |
+| `Γ` damping rate | peer-churn / connection-tear rate per second |
+| `ell_screen = √(D/Γ)` | swarm-coherence radius; beyond it the Yukawa cutoff kicks in |
+| `S` source term | data-flux source from senders + replicators (analog of baryon ρ) |
+| `g_coh = −c²·∇ ln(τ_c)` | per-chunk routing pressure: data flows ↓ along ln(τ_c) gradient |
+| `g_A = c·H_0 / (2π)` | swarm-wide acceleration anchor; sets per-chunk pressure ceiling |
+| BE-RAR `nu(y) = 1/(1−exp(−√y))` | replaces ad-hoc `loss_penalty`; α = 1/2 forced by Bose statistics |
+| Green-function nonlocal integral | multi-source per-chunk selection (not single shortest path) |
+| Apparent-horizon anchor | adversarial-relay dominance cap (no peer can exceed `g_A` pressure) |
+| Identity-sector dual sourcing (density + flux) | peer source as both chunks-held AND chunks-flowing |
+| Support-phase kernel `k_phase = tanh((c0 − C_support)/w_phase)` | core-like behavior until ~80% of swarm support enclosed |
+
+### The linear-source no-go theorem (and why it matters for routing)
+
+The S_One galaxy derivation proves a sharp no-go: if the source functional
+is linear in baryon density (`S_b ∝ ρ_b`), then the coherence response
+collapses to `g_coh ∝ g_bar` — i.e. you get nothing the linear gravitational
+potential already gave you. The rotation-curve win requires a **nonlinear,
+profile-dependent source functional** that mixes density with flux,
+geometry, and boundary state.
+
+**Direct network corollary**: weighting peers linearly by `1/RTT` (what
+`ol_routing` ships today) is the network equivalent of `S_b ∝ ρ_b`. Pure
+shortest-path-with-weights leaves the real gains on the table. The win
+comes from a **nonlinear source** that combines per-peer density (chunks
+held), flux (transfer rate), geometry (graph position), and boundary
+state (peripheral vs central).
+
+### Phase D shipped a limit; Phase E ships the full field
+
+What `ol_routing` ships today is the **graph-Dijkstra limit** of the full
+theory: collapse the field to per-edge scalars, lose the nonlocal kernel,
+lose the BE-RAR shape, lose the apparent-horizon anchor, lose the screening
+length. The Phase D acceptance gate (≥ 20% chunks-lost reduction on a
+fragile graph) measures *that limit* — and we exceed it 5×.
+
+**Phase E is the full field**: a real PDE solve over the peer graph, a
+real Green-function evaluator, a real BE-RAR interpolation, all in a new
+crate `ol_coherence_field`. The fragile-graph gate becomes a trivial
+sub-case of Phase E's far broader machinery.
+
+### Cross-domain unity (the architectural commitment)
+
+The deepest claim of the S_One program is that gravity, particle physics,
+thermodynamics, and structure formation are **limits of one underlying
+coherence structure**, not separate phenomena. The corresponding software
+commitment for the One / OneField / BioMesh ecosystem:
+
+```text
+One Rust crate `ol_coherence_field`:
+  - One PDE solver (reaction-diffusion + Helmholtz reduction)
+  - One Green-function evaluator
+  - One BE-RAR interpolation `nu(y) = 1/(1-exp(-√y))`
+  - One apparent-horizon anchor calibration
+
+Three calibrations:
+  - One Link        → D = info-mixing rate, Γ = churn rate, S = chunk-flow
+  - OneField Mesh   → D = RF τ_c-diffusion, Γ = atmospheric damping, S = baryonic RF source
+  - BioMesh         → D = biological-signal diffusion, Γ = metabolic decay, S = bio-source
+
+Each domain consumes the same crate as a Cargo dependency and supplies
+domain-specific calibration constants. The algebra is identical because
+the underlying field is identical.
+```
+
+This is the literal software expression of the theory's central claim.
+
+---
+
 ## Architectural Stack (10 layers, bottom up)
 
 "Design ref" = the .cl/.py file that documents the algebra; Rust crates port it. CL is never linked at runtime.
@@ -153,7 +288,8 @@ Each clause is one architectural primitive. The same primitive serves every qual
 | 3. Identity & capability | Hardware-bound keys (TOFU-degrading) + Merkle revocation log + Macaroon-style caps with provenance/attenuation/revocation/audit | **Rust** (`ol_capability`, `ol_revoke`); Python orchestration unchanged for share-link UI | `coherence_lang/std/capability/{cap, delegate, grant, revoke}.cl`; `OneField/onefield/privacy/{zk_prover, no_reconstruct_proof}.cl` |
 | 4. Transport | QUIC primary (multi-stream + multi-path + 0-RTT + connection migration) + topology auto-detection (shm / unix / LAN-QUIC / WAN-QUIC / relay) + BBR pacing | **Rust** (`ol_quic` via `quinn`); existing `peer_rtc.py` retained for browser-as-peer signaling | `OneField/onefield/transport/{quic_congestion, mptcp, parallel}.cl` |
 | 5. Information layer | Bloom-filter transfer init + RaptorQ fountain codes + XOR network coding + Reed-Solomon FEC | **Rust** (`ol_fountain`, `ol_netcode`, `ol_fec`) | `OneField/onefield/transport/udp_fec.cl` |
-| 6. Routing | Tau-field PDE on swarm graph + persistent-homology fragility detection + Byzantine-tolerant tau measurement | **Rust** (`ol_routing`, `ol_homology`) | `OneField/onefield/mesh/{routing, byzantine}.cl` (production τ_c routing); `forge_shootouts/tau_field_lib.py` |
+| 6. Routing — graph limit | τ_c-weighted Dijkstra + persistent-homology fragility detection + Byzantine-tolerant tau measurement | **Rust** (`ol_routing`, `ol_homology`) | `OneField/onefield/mesh/{routing, byzantine}.cl` (production τ_c routing); `forge_shootouts/tau_field_lib.py` |
+| 6.5. Coherence field — full theory | Real scalar coherence field τ_c(x) over peer graph: reaction-diffusion + Green-function nonlocal kernel + BE-RAR α=1/2 interpolation + apparent-horizon anchor + three-operator stack (transport + alignment + boundary). Shared crate with OneField + BioMesh. | **Rust** (`ol_coherence_field`) | S_ONE_DERIVATION_STORY.md + UFT.md (canonical theorem stack); ONE Docs identity-sector dual sourcing; `forge_shootouts/tau_field_lib.py` (FEM design ref) |
 | 7. Adaptation | Active inference prefetch + multi-armed bandit per peer-pair + self-pacing under host stress | **Rust** core (`ol_active_inference`); Python `transfer_brain.py` shim during migration | `forge_shootouts/hardened_active_inference.py`; `OneField/onefield/sensing/bayesian_fusion.cl` |
 | 8. Shared state | Folder = CRDT (lattice merge); Manifest = chunk-ref list with format-aware metadata; Capability = the share link itself | **Rust** (`ol_crdt`, `ol_manifest`); existing `foldersync.py` Python orchestration retained for watchdog file events | `coherence_lang/std/crdt/{lattice, causality, vector_clock, sync}.cl` |
 | 9. Filesystem surface | FUSE on Linux; FSKit on macOS (NOT macFUSE); Dokan/WinFSP on Windows | **Rust** (`ol_fuse`, `ol_fskit`, `ol_winfs`) | (no .cl analog; native platform APIs) |
@@ -236,13 +372,33 @@ Convergent encryption MUST land in the same cut as Bloom-init (or chunk store ca
 
 D is unmeasurable without B's empirical link costs.
 
-1. **Tau-field routing on swarm graph** — harvest `OneField/onefield/mesh/routing.cl` (production τ_c-weighted Dijkstra already shipping) as starting point. Adapt edge-weight from RF τ_c gradient → empirical network metrics (RTT, jitter, observed-throughput). PDE solver runs once per topology change, not per chunk.
+1. **Tau-field routing on swarm graph (graph-Dijkstra limit)** — harvest `OneField/onefield/mesh/routing.cl` (production τ_c-weighted Dijkstra already shipping) as starting point. Adapt edge-weight from RF τ_c gradient → empirical network metrics (RTT, jitter, observed-throughput). PDE solver runs once per topology change, not per chunk. **Phase D ships the graph-Dijkstra limit only**; the full PDE / Green-function machinery lands in Phase E.
 2. **Byzantine-tolerant tau measurement** — harvest `OneField/onefield/mesh/byzantine.cl`. A malicious peer reporting fake high τ gets cross-validated against observed delivery; ignored if no corroboration.
 3. **Active inference prefetch** — extends bandit (Phase C) with generative model of peer-pair demand. Cold-start prior transferred from user's other peer-pairs; "lukewarm" start via cohort priors.
 4. **Persistent homology durability** — H1 over the chunk-co-hold graph; flag closing-loops as fragility events; preemptive replication. Approximations (witness complexes, sparse filtrations) needed for production scale; naive O(n³) is prohibitive.
 5. **Grammar compression secondary index** — Re-Pair on structural-token streams of recognized formats. Layered on CDC, not replacing it. Rust port of `forge_shootouts/hardened_grammar_compression.py`.
 6. **Plausibly deniable storage + duress codes** — decoy volume + duress-key-unlocks-decoy + steganographic coercion signal in ratchet header. Coercion-resistant tier.
 7. **Formal verification of safety-critical state machines** — TLA+ or Coq models of pairing, capability grant, key rotation, revocation. Verified properties: no double-grant, no key reuse, no downgrade, no replay.
+
+### Phase E: Coherence Field Substrate (requires D shipped; benefits from C)
+
+Phase E is the upgrade from "τ_c-weighted Dijkstra" (Phase D graph limit) to
+the **full Coherence Field**. It is the largest research+engineering
+program in the plan and produces software that is shared across One Link,
+OneField Mesh, and BioMesh.
+
+1. **Reaction-diffusion PDE solver** over the peer graph. `∂_t δτ_c = D·∇² δτ_c − Γ·δτ_c + S` discretized via graph Laplacian. Sparse-matrix CG / preconditioned-CG solver; multigrid for large swarms. Re-solve only on topology change.
+2. **Green-function nonlocal kernel** — `g_coh(P) = (c²/4πDτ_∞) ∫ S(P')·(P−P')/|P−P'|³ dP'`. Multi-source per-chunk routing decisions, not single shortest path.
+3. **Screening-length calibration** — `ell_screen = √(D/Γ)` discovered from observed swarm-scale metrics. Gates Poisson regime (inside `ell_screen`) vs Yukawa regime (outside).
+4. **BE-RAR interpolation** — replace ad-hoc `loss_penalty(loss) = 1/(1−loss)²` with `nu(y) = 1/(1 − exp(−√y))`. The α = 1/2 exponent is forced by Bose-Einstein statistics, not chosen heuristically.
+5. **Apparent-horizon anchor** — calibrate per-swarm `g_A` analog from observed bandwidth-jitter ceiling. Sets the absolute scale that bounds any peer's contribution; adversarial relays cannot exceed it.
+6. **Identity-sector dual sourcing** — source functional `S_b[ρ, J]` combines chunk-density `ρ` (chunks held per peer) AND chunk-flux `J` (chunks per second moving through peer). Escapes the linear-source no-go theorem.
+7. **Three-operator stack**: (a) transport (diffusion + advection + coherence-taxis), (b) alignment-taxis (routes whose direction aligns with peer's other flows get reinforcement), (c) boundary projection (support-phase kernel at swarm edges). All three needed to match the galaxy-side closure.
+8. **Support-phase boundary kernel** — `k_phase = tanh((c0 − C_support)/w_phase)` with c0 ≈ 0.80. Core-like behavior until ~80% of swarm support is enclosed; matches the empirically-derived galaxy closure.
+9. **τ_c × persistent-homology coupling** — closing-loop fragility events from `ol_homology` feed into the source term `S`. The field anticipates partitions by raising τ_c in neighborhoods adjacent to detected fragility loops, biasing routes away before the partition actually opens.
+10. **τ_c × active-inference coupling** — `ol_prefetch` cohort-prior + free-energy minimization runs on the field's gradient: pre-position chunks along **high-τ_c paths before they're requested**. Latency wins from prediction × coherence.
+11. **τ_c-coupled ratchet rotation** — ratchet rotation cadence in `ol_ratchet` scales with `δτ_c/τ_∞`. Peers in low-coherence wells (central, lossy, churning) get keys rotated faster per byte — coupling crypto cadence to network physics.
+12. **Cross-domain calibration** — same Rust crate consumed by `One Link` (network field), `OneField Mesh` (RF τ_c field), `BioMesh` (biological signal field). Each domain supplies its own (D, Γ, S) calibration; the algebra is identical.
 
 ---
 
@@ -338,10 +494,57 @@ native/                              (currently has C ext, becomes Rust workspac
 ├── ol_fuse/                        # Phase B: FUSE binding (Linux)
 ├── ol_fskit/                       # Phase B: FSKit binding (macOS)
 ├── ol_winfs/                       # Phase B: Dokan/WinFSP binding (Windows)
-├── ol_routing/                     # Phase D: tau-field PDE
+├── ol_routing/                     # Phase D: τ_c-weighted Dijkstra (graph limit)
 ├── ol_homology/                    # Phase D: persistent homology
 ├── ol_active_inference/            # Phase D: free-energy minimization
-└── ol_grammar/                     # Phase D: Re-Pair grammar compression
+├── ol_grammar/                     # Phase D: Re-Pair grammar compression
+└── ol_coherence_field/             # Phase E: full coherence-field PDE +
+                                    # Green-function + BE-RAR + apparent-horizon
+                                    # anchor; shared with OneField + BioMesh
+```
+
+### Phase E new crate: `ol_coherence_field` (the load-bearing addition)
+
+```text
+ol_coherence_field/
+├── src/
+│   ├── lib.rs                       # public surface + cross-domain calibration
+│   ├── pde/
+│   │   ├── reaction_diffusion.rs    # ∂_t δτ_c = D·∇² δτ_c − Γ·δτ_c + S
+│   │   ├── helmholtz_reduction.rs   # quasi-static FRW → Helmholtz
+│   │   ├── poisson_limit.rs         # ell_screen ≫ r_local case
+│   │   └── sparse_solver.rs         # CG / preconditioned-CG / multigrid
+│   ├── green/
+│   │   ├── kernel.rs                # nonlocal Green-function evaluator
+│   │   └── integration.rs           # adaptive quadrature on peer graph
+│   ├── source/
+│   │   ├── linear.rs                # S_b ∝ ρ (no-go theorem reference)
+│   │   ├── identity_dual.rs         # density + flux dual sourcing
+│   │   └── support_phase.rs         # k_phase = tanh((c0 − C_support)/w_phase)
+│   ├── transport.rs                 # diffusion + advection + coherence-taxis
+│   ├── alignment.rs                 # alignment-taxis (route-direction matching)
+│   ├── boundary.rs                  # support-phase boundary projection
+│   ├── interpolation/
+│   │   ├── be_rar.rs                # nu(y) = 1/(1 − exp(−√y))  [α = 1/2 forced]
+│   │   └── alpha_constraint.rs      # Bose-statistics derivation
+│   ├── anchor/
+│   │   ├── apparent_horizon.rs      # g_A = c·H_0/(2π) analog calibration
+│   │   └── screening_length.rs      # ell_screen = √(D/Γ)
+│   └── calibration/
+│       ├── one_link.rs              # network-scale constants
+│       ├── one_field.rs             # RF-scale constants
+│       └── bio_mesh.rs              # biological-signal-scale constants
+├── tests/
+│   ├── reaction_diffusion_converges.rs
+│   ├── helmholtz_screening_length.rs
+│   ├── green_function_matches_poisson_limit.rs
+│   ├── be_rar_alpha_half_property.rs
+│   ├── linear_source_no_go.rs
+│   ├── apparent_horizon_calibration.rs
+│   ├── cross_domain_calibration_unity.rs
+│   └── fragile_swarm_phase_e_gate.rs    # 100-peer swarm, 30% loss, ≥ 80% reduction
+└── benches/
+    └── coherence_field_bench.rs
 ```
 
 ---
@@ -387,6 +590,20 @@ Every phase ships when its falsifiable acceptance number passes, not when "imple
 - Active inference cold-start: bandit-equivalent performance within ≤50 transfers (lukewarm via cohort prior)
 - Plausibly deniable storage: duress key unlocks decoy with no observable disk-pattern difference from real-key unlock
 - Formal model passes for: no double-grant, no key reuse, no downgrade, no replay (all four state machines)
+
+### Phase E acceptance gate (Coherence Field Substrate)
+
+- **Reaction-diffusion convergence**: graph-Laplacian solve of `∂_t δτ_c = D·∇² δτ_c − Γ·δτ_c + S` converges with spectral residual < 10⁻⁶ on swarms up to 10,000 peers
+- **Green-function correctness**: at scale `ell_screen` the integral kernel matches the Helmholtz/Poisson reduction to within 0.1% on a synthetic 1000-peer swarm
+- **Screening length discovery**: `ell_screen = √(D/Γ)` calibrated from observed swarm metrics within 5% of theoretical value
+- **BE-RAR interpolation property**: `nu(y) = 1/(1 − exp(−√y))` matches galaxy-side BE-RAR shape on synthetic data with α = 1/2 to within 10⁻⁴ (locking the α = 1/2 exponent as a theorem, not a fit parameter)
+- **Linear-source no-go**: regression test that `S_b ∝ ρ` collapses to `g_coh ∝ g_bar` (sanity-checks the implementation against the theorem)
+- **Apparent-horizon anchor calibration**: per-swarm `g_A` analog discovered from observed bandwidth × jitter ceiling; matches `c·H_0/(2π)` scaling under a defined network ↔ cosmology mapping
+- **Phase E fragile-swarm gate**: 100-peer swarm under sustained 30% loss, BE-RAR interpolation engaged. **Chunks-lost-on-partition reduction ≥ 80% vs Phase D Dijkstra baseline.** (Phase D's gate was ≥ 20% vs naive shortest-path; Phase E is measured against Phase D itself.)
+- **Cross-domain calibration unity**: same `ol_coherence_field` crate, fed different (D, Γ, S) constants, solves One Link's network field AND OneField's RF τ_c field AND BioMesh's signal field; per-domain solutions remain numerically stable + spec-conformant
+- **τ_c × homology coupling**: when `ol_homology` flags a fragility loop, the field re-solve preemptively raises τ_c in a 2-hop neighborhood within 1 measurement round (anticipates partitions instead of reacting to them)
+- **τ_c × active-inference coupling**: `ol_prefetch` cohort-prior pre-positions ≥ 50% of next-likely chunks along high-τ_c paths before request, measured as a latency win vs prefetch-without-routing
+- **τ_c-coupled ratchet rotation**: peers in low-τ_c regions show measurably-faster ratchet-rotation cadence; observable in per-peer ratchet-key-id throughput
 
 ---
 
