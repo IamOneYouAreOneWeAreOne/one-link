@@ -1,0 +1,20 @@
+[package]
+name = "ol_codegen"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: Coherence Language → Rust codegen scaffolding (Phase D, ADR-0032)."
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_codegen"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest  = { workspace = true }
+
+[lints]
+workspace = true

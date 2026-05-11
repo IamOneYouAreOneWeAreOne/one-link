@@ -1,0 +1,24 @@
+[package]
+name = "ol_duress"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: plausibly deniable storage + duress codes (Phase D, ADR-0031)."
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_duress"
+crate-type = ["lib"]
+
+[dependencies]
+blake3    = { workspace = true }
+subtle    = { workspace = true }
+zeroize   = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest  = { workspace = true }
+criterion = { workspace = true }
+
+[lints]
+workspace = true
