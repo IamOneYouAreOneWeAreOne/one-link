@@ -8869,19 +8869,17 @@ class Daemon:
                     adaptive_scheduler_snapshot = cdc_scheduler.snapshot()
                 else:
                     binary_stream_used = FILE_BINARY_FRAME in peer_feature_set
-                    # Phase C-3 (ADR-0026): native chunk-store transport
-                    # is opt-in via env flag, gated on peer capability.
-                    # When both signals are present, file chunks travel
-                    # as FILE_NATIVE_CHUNK encrypted by the ring-backed
-                    # ol_aead pipeline keyed off the channel's native-
-                    # transfer-derived session secret (ADR-0025). The
-                    # env flag is intentional: production stays on the
-                    # legacy FILE_CHUNK / FILE_BIN_CHUNK path until
-                    # operators flip ``ONE_LINK_NATIVE_TRANSFER=1`` to
-                    # try the new transport.
+                    # Phase C-3 (ADR-0026 + follow-up): native chunk-store
+                    # transport is now DEFAULT-ON when the peer advertises
+                    # NATIVE_TRANSFER_V1. Operators can disable explicitly
+                    # via ``ONE_LINK_NATIVE_TRANSFER=0`` (e.g. for rolling
+                    # back during a production incident). When the peer
+                    # lacks the cap, sender falls through to FILE_BIN_CHUNK
+                    # / FILE_CHUNK transparently.
+                    _native_env = os.environ.get("ONE_LINK_NATIVE_TRANSFER", "1")
                     native_transfer_used = (
                         NATIVE_TRANSFER_V1 in peer_feature_set
-                        and os.environ.get("ONE_LINK_NATIVE_TRANSFER") == "1"
+                        and _native_env != "0"
                     )
                     native_session = None
                     if native_transfer_used:

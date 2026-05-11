@@ -227,27 +227,42 @@ def test_multi_chunk_round_trip_via_paired_channels():
 # --- env flag gating (sender opt-in) ---------------------------------------
 
 
-def test_env_flag_default_off():
-    """ONE_LINK_NATIVE_TRANSFER is opt-in: unset env should keep the
-    sender on the legacy FILE_CHUNK path. We don't have a unit-test
-    hook for the full send_file branch, so we assert the env variable
-    semantic directly — daemon code reads
-    ``os.environ.get("ONE_LINK_NATIVE_TRANSFER") == "1"``."""
+def test_env_flag_default_on():
+    """Post default-flip (ADR-0026 follow-up): unset env defaults to
+    native transport when peer advertises the capability. Daemon
+    reads ``os.environ.get("ONE_LINK_NATIVE_TRANSFER", "1") != "0"``,
+    so absence → default-on."""
     saved = os.environ.pop("ONE_LINK_NATIVE_TRANSFER", None)
     try:
-        opted_in = os.environ.get("ONE_LINK_NATIVE_TRANSFER") == "1"
-        assert opted_in is False
+        # Replicate the daemon's exact check shape.
+        native_enabled = os.environ.get("ONE_LINK_NATIVE_TRANSFER", "1") != "0"
+        assert native_enabled is True
     finally:
         if saved is not None:
             os.environ["ONE_LINK_NATIVE_TRANSFER"] = saved
 
 
-def test_env_flag_explicit_opt_in():
+def test_env_flag_explicit_disable():
+    """Operators rolling back during incident can set
+    ONE_LINK_NATIVE_TRANSFER=0 to force the legacy path."""
+    saved = os.environ.get("ONE_LINK_NATIVE_TRANSFER")
+    try:
+        os.environ["ONE_LINK_NATIVE_TRANSFER"] = "0"
+        native_enabled = os.environ.get("ONE_LINK_NATIVE_TRANSFER", "1") != "0"
+        assert native_enabled is False
+    finally:
+        if saved is None:
+            os.environ.pop("ONE_LINK_NATIVE_TRANSFER", None)
+        else:
+            os.environ["ONE_LINK_NATIVE_TRANSFER"] = saved
+
+
+def test_env_flag_explicit_enable():
     saved = os.environ.get("ONE_LINK_NATIVE_TRANSFER")
     try:
         os.environ["ONE_LINK_NATIVE_TRANSFER"] = "1"
-        opted_in = os.environ.get("ONE_LINK_NATIVE_TRANSFER") == "1"
-        assert opted_in is True
+        native_enabled = os.environ.get("ONE_LINK_NATIVE_TRANSFER", "1") != "0"
+        assert native_enabled is True
     finally:
         if saved is None:
             os.environ.pop("ONE_LINK_NATIVE_TRANSFER", None)
