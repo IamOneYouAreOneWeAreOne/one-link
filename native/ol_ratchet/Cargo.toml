@@ -18,8 +18,13 @@ thiserror    = { workspace = true }
 [dev-dependencies]
 rand         = { workspace = true }
 proptest     = { workspace = true }
+criterion    = { workspace = true }
 hex          = { workspace = true }
 ol_aead      = { path = "../ol_aead" }
+
+[[bench]]
+name    = "ratchet_bench"
+harness = false
 
 [lints]
 workspace = true

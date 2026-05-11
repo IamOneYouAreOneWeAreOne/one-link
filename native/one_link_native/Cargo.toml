@@ -14,6 +14,7 @@ name = "one_link_native"
 
 [dependencies]
 pyo3            = { workspace = true }
+zeroize         = { workspace = true }
 ol_chunk        = { path = "../ol_chunk" }
 ol_aead         = { path = "../ol_aead" }
 ol_wal          = { path = "../ol_wal" }
@@ -21,6 +22,8 @@ ol_chunk_store  = { path = "../ol_chunk_store" }
 ol_quic         = { path = "../ol_quic" }
 ol_bloom        = { path = "../ol_bloom" }
 ol_fountain     = { path = "../ol_fountain" }
+ol_fec          = { path = "../ol_fec" }
+ol_ratchet      = { path = "../ol_ratchet" }
 quinn           = { workspace = true }
 tokio           = { workspace = true }
 thiserror       = { workspace = true }

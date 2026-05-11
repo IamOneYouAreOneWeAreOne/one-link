@@ -17,6 +17,8 @@ create_exception!(one_link_native, OlChunkStoreError, OlError);
 create_exception!(one_link_native, OlQuicError, OlError);
 create_exception!(one_link_native, OlBloomError, OlError);
 create_exception!(one_link_native, OlFountainError, OlError);
+create_exception!(one_link_native, OlFecError, OlError);
+create_exception!(one_link_native, OlRatchetError, OlError);
 
 /// Register all `one_link_native.*` exception classes on the given
 /// top-level module.
@@ -32,6 +34,8 @@ pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
     m.add("OlQuicError", m.py().get_type_bound::<OlQuicError>())?;
     m.add("OlBloomError", m.py().get_type_bound::<OlBloomError>())?;
     m.add("OlFountainError", m.py().get_type_bound::<OlFountainError>())?;
+    m.add("OlFecError", m.py().get_type_bound::<OlFecError>())?;
+    m.add("OlRatchetError", m.py().get_type_bound::<OlRatchetError>())?;
     Ok(())
 }
 

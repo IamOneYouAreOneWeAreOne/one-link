@@ -29,6 +29,11 @@ thiserror     = { workspace = true }
 rand          = "0.8"
 hex           = { workspace = true }
 proptest      = { workspace = true }
+criterion     = { workspace = true }
+
+[[bench]]
+name    = "pqkem_bench"
+harness = false
 
 [lints]
 workspace = true

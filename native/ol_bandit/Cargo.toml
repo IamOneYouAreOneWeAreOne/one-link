@@ -16,6 +16,11 @@ thiserror = { workspace = true }
 [dev-dependencies]
 rand      = { workspace = true }
 proptest  = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name    = "bandit_bench"
+harness = false
 
 [lints]
 workspace = true

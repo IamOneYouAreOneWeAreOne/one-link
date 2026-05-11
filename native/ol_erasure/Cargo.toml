@@ -17,8 +17,13 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest  = { workspace = true }
+criterion = { workspace = true }
 rand      = { workspace = true }
 hex       = { workspace = true }
+
+[[bench]]
+name    = "erasure_bench"
+harness = false
 
 [lints]
 workspace = true

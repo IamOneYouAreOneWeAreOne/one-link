@@ -1,24 +1,38 @@
-# Phase C Benchmark Baseline (C-1 + C-2 drops)
+# Phase C Benchmark Baseline (C-1 + C-2 + C-2 polish)
 
-**Date:** 2026-05-10 (revised after C-2 drop)
-**Hardware:** Windows 11 Home (x86_64 with AES-NI + AVX2)
+**Date:** 2026-05-10 (revised after C-2 polish: SIMD, benches, determinism, CT timing, fuzz, Python adapters, high-scale integration)
+**Hardware:** Windows 11 Home (x86_64 with AES-NI + AVX2 + SSSE3)
 **Rust:** stable, `cargo bench --release` profile (lto=fat, codegen-units=1)
 
-Phase C-1 shipped items **1 (RS FEC), 7 (PQ-hybrid KEM), 9 (constant-time audit)**. Phase C-2 adds items **2 (erasure-coded durability), 5 (multi-armed bandit), 6 (per-chunk forward-secret ratchet)**. Remaining items (3 capability layer, 4 CRDT folders, 8 hardware-bound keys, 10 CI fuzzing, 11 full property tests, 12 reproducible builds) are queued for Phase C-3..C-N — see `PHASE_C_N_ROADMAP.md` for status + blockers.
+Phase C-1 shipped items **1, 7, 9**. Phase C-2 added items **2, 5, 6**. C-2 polish closed the test/perf gaps surfaced by an honest audit: bench harnesses for all crates, cross-platform determinism vectors, ml-kem CT timing test, 8 proptest harnesses, **ol_fec SIMD optimization (7.9× speedup)**, Python adapters for fec + ratchet, and high-scale (1K + 10K) integration tests.
 
 **6 of 12 Phase C items shipped. All falsifiable acceptance gates with currently-shippable scope: PASSED.**
+
+## C-2 polish wins
+
+| Optimization | Before | After | Speedup |
+|---|---|---|---|
+| `ol_fec` encode RS(4,2)/16KiB | 2.24 GiB/s | **17.18 GiB/s** | **7.7×** |
+| `ol_fec` encode RS(10,4)/64KiB | 1.13 GiB/s | **8.98 GiB/s** | **7.9×** |
+| `ol_fec` encode RS(16,8)/64KiB | 0.58 GiB/s | **4.48 GiB/s** | **7.8×** |
+| `ol_erasure` encode STANDARD/64KiB | 0.91 GiB/s | **2.81 GiB/s** | **3.1×** |
+| `ol_erasure` encode ARCHIVAL/64KiB | 0.63 GiB/s | **2.46 GiB/s** | **3.9×** |
+
+The win came from a 4-bit-by-4-bit table-split using SSSE3 PSHUFB (Plank-Greenan-Miller 2013). Two 16-entry tables per coefficient (high-nibble + low-nibble) fit in SSE registers; PSHUFB does 16 GF(2^8) multiplications per instruction.
+
+**Property test guarantees the SIMD path is byte-identical to scalar across all 256 coefficients × 16 input sizes.** Cross-platform determinism vector (10×64-byte data shards → 4 parity shards) is pinned in `ol_fec/tests/determinism.rs` — any platform that diverges fails CI loudly.
 
 ---
 
 ## ol_fec (ADR-0016)
 
-Reed-Solomon over GF(2^8) with a **Cauchy systematic matrix** (always-invertible submatrices). No external RS-codec dependency.
+Reed-Solomon over GF(2^8) with a **Cauchy systematic matrix** + **SSSE3 PSHUFB SIMD path** (Plank-Greenan-Miller 2013). No external RS-codec dependency.
 
-| Bench | Encode throughput | Decode throughput |
+| Bench | Encode throughput (SIMD) | Decode throughput |
 |---|---|---|
-| RS(4,2) at 16 KiB shards | **2.24 GiB/s** | 2.10 GiB/s |
-| RS(10,4) at 64 KiB shards | **1.13 GiB/s** | 1.10 GiB/s (recovery path) |
-| RS(16,8) at 64 KiB shards | 575 MiB/s | 560 MiB/s |
+| RS(4,2) at 16 KiB shards | **17.18 GiB/s** | ~17 GiB/s |
+| RS(10,4) at 64 KiB shards | **8.98 GiB/s** | ~9 GiB/s |
+| RS(16,8) at 64 KiB shards | **4.48 GiB/s** | ~4 GiB/s |
 
 **Acceptance gate (Phase C plan line 287):**
 > Reed-Solomon (10,4) survives any 4-shard erasure with 100% recovery across ≥10,000 seeds.
@@ -119,24 +133,26 @@ Symmetric BLAKE3 chain ratchet with per-step domain-separation tags (0x4D for me
 - Integration with `ol_aead`: 100-chunk per-step encrypt/decrypt round trip (all 100 keys distinct).
 - Reordered delivery via SkippedKeyStore: 10 chunks delivered in reverse order, all decrypt correctly.
 
-## Workspace test totals (Phase C-1 + C-2 drops)
+## Workspace test totals (after Phase C-2 polish)
 
 | Layer | Tests |
 |---|---|
-| **ol_fec** (lib + acceptance) | **19 + 2 = 21** |
-| **ol_pqkem** (lib + acceptance) | **4 + 4 = 8** |
-| **ol_erasure** (lib) | **8** |
-| **ol_bandit** (lib + acceptance) | **8 + 2 = 10** |
-| **ol_ratchet** (lib + aead_integration) | **18 + 2 = 20** |
+| **ol_fec** (lib + acceptance + determinism + properties) | **20 + 2 + 1 + 3 = 26** |
+| **ol_pqkem** (lib + acceptance + constant_time) | **4 + 4 + 2 = 10** |
+| **ol_erasure** (lib + determinism + high_scale) | **8 + 2 + 1 = 11** |
+| **ol_bandit** (lib + acceptance + properties) | **8 + 2 + 3 = 13** |
+| **ol_ratchet** (lib + aead_integration + determinism + properties + high_scale) | **18 + 2 + 1 + 5 + 2 = 28** |
 | ol_bloom (lib + properties + determinism) | 26 |
 | ol_fountain (lib + acceptance + xor + wire_fuzz) | 41 |
 | ol_transfer (lib + engine_e2e + wire_fuzz) | 27 |
 | ol_chunk (lib + zip_fuzz) | 34 |
 | ol_aead (lib + convergent + convergent_e2e + parallel_e2e) | 40 |
 | ol_chunk_store / ol_quic / ol_wal | 88 |
-| **Rust workspace total** | **342 tests passing (in release mode)** |
-| Python tests | 181 (unchanged from C-1) |
-| **Grand total** | **523 tests passing** |
+| **Rust workspace total** | **367 tests passing (release mode)** |
+| Python (existing + bloom/fountain/quic/ratchet adapters + CT audit) | 181 |
+| **Python (new C-2 polish: fec_native + ratchet_native)** | **+16** |
+| **Python total** | **197 tests passing** |
+| **Grand total** | **564 tests passing** |
 
 ## Phase C-1 + C-2 acceptance gates: PASSED
 

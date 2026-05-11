@@ -32,8 +32,10 @@ mod aead;
 mod bloom;
 mod chunk;
 mod errors;
+mod fec;
 mod fountain;
 mod quic;
+mod ratchet;
 mod store;
 mod wal;
 
@@ -105,6 +107,20 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.fountain", fountain_mod)?;
+
+    let fec_mod = PyModule::new_bound(py, "fec")?;
+    fec::register(py, &fec_mod)?;
+    m.add_submodule(&fec_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.fec", fec_mod)?;
+
+    let ratchet_mod = PyModule::new_bound(py, "ratchet")?;
+    ratchet::register(py, &ratchet_mod)?;
+    m.add_submodule(&ratchet_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.ratchet", ratchet_mod)?;
 
     Ok(())
 }
