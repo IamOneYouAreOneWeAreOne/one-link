@@ -31,8 +31,11 @@
 mod emitter;
 mod parser;
 
-pub use emitter::{emit_rust_struct, EmitError, EmitOptions};
-pub use parser::{parse_struct, FieldType, ParsedField, ParsedStruct, ParseError};
+pub use emitter::{emit_rust_decl, emit_rust_enum, emit_rust_struct, EmitError, EmitOptions};
+pub use parser::{
+    parse_decl, parse_enum, parse_struct, FieldType, ParsedDecl, ParsedEnum, ParsedField,
+    ParsedStruct, ParsedVariant, ParseError,
+};
 
 /// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

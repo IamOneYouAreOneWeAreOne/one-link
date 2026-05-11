@@ -491,7 +491,7 @@ def test_test_surface_exposes_rendezvous_helpers(peer_html: str):
 
 def test_version_pin_is_semver(peer_html: str):
     import re
-    m = re.search(r"version:\s*['\"]\d+\.\d+\.\d+['\"]", peer_html)
+    m = re.search(r"version:\s*['\"]\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?['\"]", peer_html)
     assert m
 
 

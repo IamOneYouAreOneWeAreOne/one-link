@@ -130,3 +130,113 @@ def test_native_diagnostics_reports_prefetch_available():
     assert diag["prefetch"]["available"] is True
     assert diag["routing"]["available"] is True
     assert diag["homology"]["available"] is True
+
+
+# ── Relay metrics surface (Phase D #1) ──────────────────────────────
+
+
+def test_record_relay_observation_first_success():
+    """First successful observation populates the metrics dict for a
+    relay URL with the dial RTT + n_attempts=1 + n_successes=1."""
+    from one_link.daemon import Daemon
+
+    class _Stub:
+        _relay_metrics: dict = {}
+
+    stub = _Stub()
+    Daemon.record_relay_observation(
+        stub, "https://relay-a.example.com", rtt_ms=45.0, success=True
+    )
+    m = stub._relay_metrics["https://relay-a.example.com"]
+    assert m["n_attempts"] == 1
+    assert m["n_successes"] == 1
+    # EWMA(prev=100, alpha=0.2, obs=45) = 0.8*100 + 0.2*45 = 89.
+    assert abs(m["rtt_ms"] - 89.0) < 1e-9
+    # loss_rate EWMA(prev=0, alpha=0.2, obs=0) = 0.
+    assert m["loss_rate"] == 0.0
+
+
+def test_record_relay_observation_failure_bumps_loss_rate():
+    from one_link.daemon import Daemon
+
+    class _Stub:
+        _relay_metrics: dict = {}
+
+    stub = _Stub()
+    Daemon.record_relay_observation(
+        stub, "https://relay-a.example.com", rtt_ms=None, success=False
+    )
+    m = stub._relay_metrics["https://relay-a.example.com"]
+    assert m["n_attempts"] == 1
+    assert m["n_successes"] == 0
+    # First failure: loss_rate EWMA(0, alpha=0.2, obs=1) = 0.2.
+    assert abs(m["loss_rate"] - 0.2) < 1e-9
+
+
+def test_record_relay_observation_ewma_smoothing_converges():
+    """20 consecutive successes at 50 ms should converge close to 50 ms."""
+    from one_link.daemon import Daemon
+
+    class _Stub:
+        _relay_metrics: dict = {}
+
+    stub = _Stub()
+    for _ in range(20):
+        Daemon.record_relay_observation(
+            stub, "https://relay-a.example.com", rtt_ms=50.0, success=True
+        )
+    m = stub._relay_metrics["https://relay-a.example.com"]
+    # After 20 EWMA steps with alpha=0.2 starting from prev=100, residual
+    # is (1-alpha)^20 * (100-50) = 0.0115 * 50 ≈ 0.576 — converging but
+    # still ~1% off. Tolerance of 1.0 ms covers the closed-form value
+    # with margin.
+    assert abs(m["rtt_ms"] - 50.0) < 1.0
+
+
+def test_relay_metrics_for_returns_recorded_dict():
+    """After observation, _relay_metrics_for returns the recorded dict."""
+    from one_link.daemon import Daemon
+
+    class _Stub:
+        _relay_metrics: dict = {}
+
+    stub = _Stub()
+    Daemon.record_relay_observation(
+        stub, "https://relay-a.example.com", rtt_ms=20.0, success=True
+    )
+    out = Daemon._relay_metrics_for(stub, "https://relay-a.example.com")
+    assert out is not None
+    assert "rtt_ms" in out
+    assert "loss_rate" in out
+
+
+@pytest.mark.skipif(
+    not _native_available(),
+    reason="one_link_native Phase D submodules not installed",
+)
+def test_pick_best_relay_with_metrics_promotes_low_loss_relay():
+    """With real metrics: a low-RTT, low-loss relay should rank above
+    a high-RTT, high-loss one."""
+    from one_link.daemon import Daemon
+
+    class _R:
+        def __init__(self, url):
+            self._rendezvous_url = url
+
+    class _Stub:
+        _relay_metrics: dict = {}
+
+    stub = _Stub()
+    # Relay A: fast (20 ms) + reliable (0% loss).
+    for _ in range(10):
+        Daemon.record_relay_observation(stub, "fast", rtt_ms=20.0, success=True)
+    # Relay B: slow (500 ms) + lossy (50% loss).
+    for _ in range(5):
+        Daemon.record_relay_observation(stub, "slow", rtt_ms=500.0, success=True)
+        Daemon.record_relay_observation(stub, "slow", rtt_ms=None, success=False)
+
+    relays = [_R("slow"), _R("fast")]  # input order: slow first
+    sorted_relays = Daemon._pick_best_relay(stub, relays)  # type: ignore[arg-type]
+    # Fast should be promoted to first slot.
+    assert sorted_relays[0]._rendezvous_url == "fast"
+    assert sorted_relays[1]._rendezvous_url == "slow"

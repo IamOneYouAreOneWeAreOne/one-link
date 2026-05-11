@@ -627,9 +627,16 @@ async def test_signaling_handshake_attempts_are_rate_limited(http):
 
 def test_package_version_at_or_above_v0200():
     """Forward-compat: v0.20.x ships build on v0.20.0; pin the
-    floor, not a literal."""
+    floor, not a literal. Tolerates PEP 440 pre-release suffixes
+    (e.g. ``0.21.0-alpha``) by stripping anything past the first
+    non-digit character of each version part."""
     from one_link import __version__
-    parts = [int(p) for p in __version__.split(".")]
+
+    def _num(p: str) -> int:
+        digits = "".join(c for c in p if c.isdigit())
+        return int(digits) if digits else 0
+
+    parts = [_num(p) for p in __version__.split(".")]
     assert parts >= [0, 20, 0]
 
 

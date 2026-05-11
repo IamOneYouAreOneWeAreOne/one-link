@@ -773,6 +773,12 @@ class Daemon:
         # the native crate installed don't pay the cost.
         self._prefetch_predictor: object | None = None
         self._prefetch_unavailable_logged: bool = False
+        # Phase D #1 (ADR-0028): per-relay empirical metrics. Maps
+        # relay URL → {rtt_ms, loss_rate, n_attempts, n_successes,
+        # last_observed_ms}. EWMA-smoothed by `record_relay_observation`
+        # so a one-off bad dial doesn't permanently demote a relay.
+        # Consumed by `_pick_best_relay` via `_relay_metrics_for`.
+        self._relay_metrics: dict[str, dict] = {}
         # M1: track which blob hashes we've explicitly requested from each
         # peer (via MANIFEST_WANTS). BLOB_OFFER / BLOB_CHUNK frames whose
         # hash isn't in this set are silently dropped — a paired peer can't
@@ -5432,16 +5438,24 @@ class Daemon:
         listeners = self._pick_best_relay(list(self._relay_listener_clients))
         for listener in listeners:
             url = listener._rendezvous_url  # type: ignore[attr-defined]
+            dial_start = time.perf_counter()
             try:
                 reader, writer, pump = await open_relay_outbound(
                     url, dst_pubkey, session=shared_session,
                 )
+                dial_ms = (time.perf_counter() - dial_start) * 1000.0
+                # Phase D #1: record successful dial RTT + success
+                # so the next call to _pick_best_relay has fresh data.
+                self.record_relay_observation(url, rtt_ms=dial_ms, success=True)
                 log.info(
                     "relay dial succeeded for %s via %s",
                     peer.short_id, url,
                 )
                 return reader, writer, pump
             except Exception as e:
+                # Record the failure so future _pick_best_relay calls
+                # demote this URL.
+                self.record_relay_observation(url, rtt_ms=None, success=False)
                 log.debug("relay dial via %s failed: %s", url, e)
                 continue
         return None
@@ -5605,10 +5619,16 @@ class Daemon:
         # the routing-aware sort is currently a no-op pass-through.
         # When peer_rtc / relay_client start recording per-relay
         # metrics, this picks them up via _relay_metrics_for(url).
+        # Bind through the unbound class form so the helper works on
+        # both real Daemon instances and lightweight stubs that supply
+        # ``_relay_metrics`` directly without rebinding the method.
+        metrics_for = getattr(
+            self, "_relay_metrics_for", None
+        ) or (lambda u: Daemon._relay_metrics_for(self, u))
         scored: list[tuple[float, object]] = []
         for relay in available_relays:
             url = getattr(relay, "_rendezvous_url", str(relay))
-            metrics = self._relay_metrics_for(url)
+            metrics = metrics_for(url)
             if metrics is None:
                 # No empirical metrics → arbitrary stable cost.
                 scored.append((1.0, relay))
@@ -5621,12 +5641,53 @@ class Daemon:
         scored.sort(key=lambda x: x[0])
         return [r for _, r in scored]
 
-    def _relay_metrics_for(self, _url: str) -> dict | None:
-        """Per-relay empirical metrics (rtt_ms, loss_rate). Returns
-        ``None`` when not yet tracked. The relay-metrics surface is
-        a future commit; this stub returns ``None`` for every relay
-        so :meth:`_pick_best_relay` falls back to input order."""
-        return None
+    def _relay_metrics_for(self, url: str) -> dict | None:
+        """Per-relay empirical metrics (``rtt_ms``, ``loss_rate``).
+        Returns ``None`` for relays we haven't observed yet so
+        :meth:`_pick_best_relay` falls back to input order; otherwise
+        returns the EWMA-smoothed dict recorded by
+        :meth:`record_relay_observation`. Tolerates a missing
+        ``_relay_metrics`` field (returns ``None``) so the helper is
+        safe to call on stubs / partially-initialized daemons."""
+        store = getattr(self, "_relay_metrics", None)
+        if store is None:
+            return None
+        return store.get(url)
+
+    def record_relay_observation(
+        self, url: str, *, rtt_ms: float | None, success: bool
+    ) -> None:
+        """Record one relay dial outcome. EWMA-smooths rtt_ms with
+        alpha=0.2; loss_rate is the fraction of failed attempts in a
+        moving window via the same EWMA. Call from every
+        :func:`open_relay_outbound` success/failure site so
+        :meth:`_pick_best_relay` has fresh data to sort on.
+
+        Idempotent + thread-safe: dict-level updates are atomic in
+        CPython under the GIL; the EWMA math is read-modify-write of a
+        single key. The metrics surface tolerates a benign race that
+        loses one update — never crashes."""
+        alpha = 0.2
+        now_ms = int(time.time() * 1000)
+        cur = self._relay_metrics.get(url) or {
+            "rtt_ms": 100.0,
+            "loss_rate": 0.0,
+            "n_attempts": 0,
+            "n_successes": 0,
+            "last_observed_ms": now_ms,
+        }
+        cur["n_attempts"] = int(cur.get("n_attempts", 0)) + 1
+        if success:
+            cur["n_successes"] = int(cur.get("n_successes", 0)) + 1
+            if rtt_ms is not None and rtt_ms > 0:
+                prev = float(cur.get("rtt_ms", rtt_ms))
+                cur["rtt_ms"] = (1.0 - alpha) * prev + alpha * float(rtt_ms)
+        # Loss-rate EWMA: 0 for success, 1 for failure.
+        prev_loss = float(cur.get("loss_rate", 0.0))
+        obs_loss = 0.0 if success else 1.0
+        cur["loss_rate"] = (1.0 - alpha) * prev_loss + alpha * obs_loss
+        cur["last_observed_ms"] = now_ms
+        self._relay_metrics[url] = cur
 
     def _abort_incoming_file(self, blob: str, f: IncomingFile) -> None:
         with contextlib.suppress(Exception):

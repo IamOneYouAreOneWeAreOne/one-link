@@ -287,7 +287,7 @@ def test_peer_html_version_pin(peer_html: str):
     pin the SHAPE (string with semver-ish content) not a literal."""
     import re
 
-    m = re.search(r"version:\s*['\"]\d+\.\d+\.\d+['\"]", peer_html)
+    m = re.search(r"version:\s*['\"]\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?['\"]", peer_html)
     assert m, "peer.html __oneLinkPeer.version must be a quoted semver"
 
 

@@ -35,6 +35,7 @@ members = [
     "ol_grammar",
     "ol_duress",
     "ol_codegen",
+    "ol_fuse",
     "one_link_native",
     # Future crates (added as they ship):
     # Future Phase A2:

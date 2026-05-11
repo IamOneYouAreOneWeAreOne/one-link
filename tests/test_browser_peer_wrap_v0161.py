@@ -323,7 +323,7 @@ def test_version_pin_bumped(peer_html: str):
     """The peer JS surface advertises a semver. Forward-compat:
     pin shape, not literal."""
     import re
-    m = re.search(r"version:\s*['\"]\d+\.\d+\.\d+['\"]", peer_html)
+    m = re.search(r"version:\s*['\"]\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?['\"]", peer_html)
     assert m
 
 

@@ -218,7 +218,7 @@ def test_autopair_also_hides_welcome_card(peer_html: str):
 def test_peer_version_at_or_above_v0203(peer_html: str):
     """Forward-compat: pin shape, not literal."""
     import re
-    m = re.search(r"version:\s*['\"](\d+)\.(\d+)\.(\d+)['\"]", peer_html)
+    m = re.search(r"version:\s*['\"](\d+)\.(\d+)\.(\d+)(?:-[A-Za-z0-9.]+)?['\"]", peer_html)
     assert m
     parts = tuple(int(p) for p in m.groups())
     assert parts >= (0, 20, 3)

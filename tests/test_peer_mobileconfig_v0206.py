@@ -254,7 +254,15 @@ def test_reset_pair_card_clears_trust_qr(index_html: str):
 
 
 def test_version_at_or_above_v0206():
-    """Forward-compat shape pin — passes for v0.20.6 or later."""
+    """Forward-compat shape pin — passes for v0.20.6 or later.
+    Tolerates PEP 440 pre-release suffixes (e.g. ``0.21.0-alpha``) by
+    stripping anything past the first non-digit character of each part.
+    """
     from one_link import __version__
-    parts = tuple(int(p) for p in __version__.split(".")[:3])
+
+    def _num(p: str) -> int:
+        digits = "".join(c for c in p if c.isdigit())
+        return int(digits) if digits else 0
+
+    parts = tuple(_num(p) for p in __version__.split(".")[:3])
     assert parts >= (0, 20, 6)

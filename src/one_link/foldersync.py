@@ -189,6 +189,14 @@ class FolderEngine:
         # behavior. Divergence between legacy/native paths is logged.
         self._native_mirrors: dict[str, "_folder_native.NativeManifestMirror"] = {}
         self._native_mirror_divergence: int = 0  # surfaced via debug snapshot
+        # Phase D #3 (ADR-0022): active reconciliation counters. Every
+        # ``receive_remote_manifest`` call increments ``_checks`` and,
+        # when the native OR-set disagrees with the legacy merge winner,
+        # ``_disagreements``. Zero disagreement over a production
+        # window is the precondition for flipping the authoritative
+        # bit from legacy to native.
+        self._native_reconcile_checks: int = 0
+        self._native_reconcile_disagreements: int = 0
 
     # ─── lifecycle ────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -301,11 +309,85 @@ class FolderEngine:
             "available": _MIRROR_AVAILABLE,
             "folders": {},
             "divergence_events": self._native_mirror_divergence,
+            "reconcile_checks": getattr(self, "_native_reconcile_checks", 0),
+            "reconcile_disagreements": getattr(
+                self, "_native_reconcile_disagreements", 0
+            ),
         }
         for name, mirror in self._native_mirrors.items():
             snap = mirror.snapshot()
             out["folders"][name] = {"present_files": snap.len()}
         return out
+
+    def _native_reconcile_check(
+        self,
+        folder_name: str,
+        local: Optional[ManifestEntry],
+        remote: ManifestEntry,
+        legacy_winner: Optional[ManifestEntry],
+    ) -> None:
+        """Run the native OR-set add-wins reconciliation in parallel
+        with the legacy ``merge_manifest_entries`` decision and count
+        disagreements. Pure observer — never mutates the live
+        manifest. Used to validate that the lattice-correct CRDT
+        agrees with the legacy merge before any cutover flips the
+        authoritative bit.
+
+        Disagreement definition: the native folder's view of whether
+        the file is *present* (``contains(file_id) == True``) after
+        merging the two sides differs from whether the legacy winner
+        is live (``winner.blob_hash is not None``). Tombstone-vs-edit
+        and concurrent-edit cases are surfaced here so the diff
+        budget is visible to operators."""
+        if not _MIRROR_AVAILABLE:
+            return
+        self._native_reconcile_checks = (
+            getattr(self, "_native_reconcile_checks", 0) + 1
+        )
+        try:
+            local_entries = [local] if local is not None else []
+            remote_entries = [remote]
+            replica = (
+                self.me_fp.encode("utf-8") if isinstance(self.me_fp, str) else self.me_fp
+            )
+            local_folder = _folder_native.manifest_entries_to_native_folder(
+                local_entries, replica_id=replica
+            )
+            # Remote folder uses a distinct synthetic replica id so the
+            # OR-set tags don't collide with the local side.
+            remote_replica = bytes(
+                ((b + 1) & 0xFF) for b in replica[:32].ljust(32, b"\x00")
+            )
+            remote_folder = _folder_native.manifest_entries_to_native_folder(
+                remote_entries, replica_id=remote_replica
+            )
+            local_folder.merge(remote_folder)
+            fid = _folder_native.file_path_to_id(remote.file_path)
+            present_in_native = local_folder.contains(fid)
+            legacy_present = (
+                legacy_winner is not None and legacy_winner.blob_hash is not None
+            )
+            if present_in_native != legacy_present:
+                self._native_reconcile_disagreements = (
+                    getattr(self, "_native_reconcile_disagreements", 0) + 1
+                )
+                log.warning(
+                    "native reconcile disagreement: %s/%s native_present=%s "
+                    "legacy_present=%s (local=%s remote=%s)",
+                    folder_name,
+                    remote.file_path,
+                    present_in_native,
+                    legacy_present,
+                    "alive" if (local and local.blob_hash) else "absent",
+                    "alive" if remote.blob_hash else "tombstone",
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug(
+                "native reconcile check failed (%s/%s): %s",
+                folder_name,
+                remote.file_path,
+                exc,
+            )
 
     # ─── folder management ────────────────────────────────────────────
     def add_folder(
@@ -405,6 +487,11 @@ class FolderEngine:
             )
 
             winner = merge_manifest_entries(local, remote)
+            # Phase D #3 (ADR-0022): active native reconciliation
+            # cross-check. The OR-set add-wins lattice decides
+            # independently; disagreement is logged + counted so we can
+            # confirm zero-diff before flipping authoritative.
+            self._native_reconcile_check(folder_name, local, remote, winner)
             if winner is None:
                 continue
             self.state.upsert_manifest_entry(

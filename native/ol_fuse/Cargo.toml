@@ -1,0 +1,30 @@
+[package]
+name = "ol_fuse"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: FUSE filesystem surface scaffold (Phase B, ADR pending)."
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_fuse"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror = { workspace = true }
+blake3    = { workspace = true }
+
+# fuser is Linux-only. Pulling it on Windows/macOS breaks the workspace
+# build, so we gate the dependency on cfg(target_os = "linux") via
+# target-cfg dependency tables. The non-Linux platforms get a stub
+# implementation that returns ``MountError::UnsupportedPlatform``.
+#
+# Adding `fuser` as a real dependency lands when the Linux mount path
+# starts shipping; the scaffold keeps the API surface stable so the
+# crate's consumers (daemon FUSE mount endpoint) can build today.
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

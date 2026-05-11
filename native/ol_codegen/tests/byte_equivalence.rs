@@ -25,7 +25,9 @@
 //! (default 10_000 for CI; gate run sets it to 100_000 — the plan's
 //! ≥1M target is for when the full grammar lands).
 
-use ol_codegen::{emit_rust_struct, parse_struct, EmitOptions, FieldType};
+use ol_codegen::{
+    emit_rust_enum, emit_rust_struct, parse_enum, parse_struct, EmitOptions, FieldType,
+};
 
 /// SplitMix64 — deterministic PRNG, same as ol_crdt/ol_capability
 /// gates. Reproducibility matters more than crypto quality here.
@@ -180,6 +182,110 @@ fn reference_encode(fields: &[(String, FieldType, Vec<u8>)]) -> Vec<u8> {
         }
     }
     out
+}
+
+fn random_variant_payload(state: &mut u64) -> Option<FieldType> {
+    // 25% unit variant, 75% payload variant.
+    if next_rng(state) % 4 == 0 {
+        None
+    } else {
+        Some(random_field_type(state))
+    }
+}
+
+fn random_enum_cl(state: &mut u64) -> String {
+    let name = {
+        let mut n = random_ident(state, 8);
+        if let Some(c) = n.chars().next() {
+            n.replace_range(..1, &c.to_ascii_uppercase().to_string());
+        }
+        n
+    };
+    let mut s = format!("enum {} {{\n", name);
+    let n_variants = (next_rng(state) as usize) % 6 + 1;
+    for i in 0..n_variants {
+        let mut vname = format!("V{}_{}", i, random_ident(state, 4));
+        if let Some(c) = vname.chars().next() {
+            vname.replace_range(..1, &c.to_ascii_uppercase().to_string());
+        }
+        match random_variant_payload(state) {
+            None => s.push_str(&format!("    {},\n", vname)),
+            Some(ft) => {
+                let ty_str = match ft {
+                    FieldType::U8 => "u8".to_string(),
+                    FieldType::U16 => "u16".to_string(),
+                    FieldType::U32 => "u32".to_string(),
+                    FieldType::U64 => "u64".to_string(),
+                    FieldType::ByteArray(n) => format!("[u8; {}]", n),
+                    FieldType::String => "String".to_string(),
+                };
+                s.push_str(&format!("    {}({}),\n", vname, ty_str));
+            }
+        }
+    }
+    s.push('}');
+    s
+}
+
+#[test]
+fn property_random_enum_specs_round_trip() {
+    let iters: u64 = std::env::var("OL_CODEGEN_GATE_ITERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_000);
+    let mut state: u64 = 0xDEAD_BEEF_F00D_C0DE;
+    let mut fail = 0u64;
+    for _ in 0..iters {
+        let cl = random_enum_cl(&mut state);
+        let parsed = match parse_enum(&cl) {
+            Ok(p) => p,
+            Err(_) => {
+                fail += 1;
+                continue;
+            }
+        };
+        let rust = match emit_rust_enum(&parsed, &EmitOptions::default()) {
+            Ok(r) => r,
+            Err(_) => {
+                fail += 1;
+                continue;
+            }
+        };
+        // Verify the emitted enum contains an arm + tag for every
+        // variant in the parsed spec.
+        for (idx, variant) in parsed.variants.iter().enumerate() {
+            let tag = idx as u8;
+            let header = match variant.payload {
+                None => format!("{}::{} => {{ out.push({})", parsed.name, variant.name, tag),
+                Some(_) => format!("{}::{}(__payload) => {{", parsed.name, variant.name),
+            };
+            if !rust.contains(&header) {
+                eprintln!(
+                    "MISSING match arm for variant {} (payload={:?}): expected substring {:?}",
+                    variant.name, variant.payload, header
+                );
+                fail += 1;
+                break;
+            }
+            // The discriminant byte must appear inside the arm body
+            // for payload variants too.
+            if variant.payload.is_some() {
+                let needle = format!("out.push({});", tag);
+                if !rust.contains(&needle) {
+                    eprintln!(
+                        "MISSING discriminant byte {} for payload variant {}",
+                        tag, variant.name
+                    );
+                    fail += 1;
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        fail, 0,
+        "byte-equivalence gate: {fail} / {iters} random enum spec → encoder mismatches"
+    );
 }
 
 #[test]

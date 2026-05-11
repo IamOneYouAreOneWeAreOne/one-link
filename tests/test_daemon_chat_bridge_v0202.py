@@ -470,7 +470,7 @@ def test_test_surface_exposes_daemon_helpers(peer_html: str):
 def test_peer_version_at_or_above_v0202(peer_html: str):
     """Forward-compat: pin shape, not literal."""
     import re
-    m = re.search(r"version:\s*['\"](\d+)\.(\d+)\.(\d+)['\"]", peer_html)
+    m = re.search(r"version:\s*['\"](\d+)\.(\d+)\.(\d+)(?:-[A-Za-z0-9.]+)?['\"]", peer_html)
     assert m
     parts = tuple(int(p) for p in m.groups())
     assert parts >= (0, 20, 2)
