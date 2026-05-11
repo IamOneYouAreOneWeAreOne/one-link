@@ -1,0 +1,29 @@
+[package]
+name = "ol_fskit"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: macOS FSKit filesystem surface scaffold (Phase B layer 9)."
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_fskit"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror = { workspace = true }
+ol_fuse   = { path = "../ol_fuse" }
+
+# FSKit is macOS 15+ (Sequoia). Crate's Swift/ObjC bindings land in
+# the `macos-mount` feature. Without it, mount() returns
+# `MountError::UnsupportedPlatform` on non-macOS and a typed
+# "feature required" error on macOS.
+[features]
+default = []
+macos-mount = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

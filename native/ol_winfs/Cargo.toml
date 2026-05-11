@@ -1,0 +1,31 @@
+[package]
+name = "ol_winfs"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: Windows filesystem surface scaffold (Dokan / WinFSP, Phase B layer 9)."
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_winfs"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror = { workspace = true }
+ol_fuse   = { path = "../ol_fuse" }
+
+# WinFSP is the preferred Windows backend (kernel-driver-class user-
+# mode FS, MIT-licensed, no Microsoft Store / Defender exclusion
+# required). Dokan is the fallback (LGPL, less battle-tested but
+# wider compatibility). Crate ships both gates so the daemon's mount
+# call can pick at runtime.
+[features]
+default = []
+winfsp = []
+dokan = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

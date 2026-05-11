@@ -39,17 +39,17 @@ fn bench_chunk_encrypt(c: &mut Criterion) {
                 AeadKind::AesGcm256 => "aes",
                 AeadKind::ChaCha20Poly1305 => "chacha",
             };
-            group.bench_with_input(
-                BenchmarkId::new(label, size_kib),
-                &(cipher.clone(), buf.clone()),
-                |b, (cipher, buf)| {
-                    b.iter(|| {
-                        let ct = encrypt_chunk(black_box(cipher), black_box(&chunk_id), black_box(buf))
-                            .expect("encrypt");
-                        black_box(ct);
-                    });
-                },
-            );
+            group.bench_function(BenchmarkId::new(label, size_kib), |b| {
+                b.iter(|| {
+                    let ct = encrypt_chunk(
+                        black_box(&cipher),
+                        black_box(&chunk_id),
+                        black_box(&buf),
+                    )
+                    .expect("encrypt");
+                    black_box(ct);
+                });
+            });
         }
     }
     group.finish();
@@ -68,26 +68,23 @@ fn bench_chunk_decrypt(c: &mut Criterion) {
         for kind in [AeadKind::AesGcm256, AeadKind::ChaCha20Poly1305] {
             let cipher = AeadCipher::with_kind(kind, &key);
             let ct = encrypt_chunk(&cipher, &chunk_id, &buf).expect("encrypt for decrypt bench");
+            let plaintext_len = buf.len();
             let label = match kind {
                 AeadKind::AesGcm256 => "aes",
                 AeadKind::ChaCha20Poly1305 => "chacha",
             };
-            group.bench_with_input(
-                BenchmarkId::new(label, size_kib),
-                &(cipher.clone(), ct.clone(), buf.len()),
-                |b, (cipher, ct, plaintext_len)| {
-                    b.iter(|| {
-                        let pt = decrypt_chunk(
-                            black_box(cipher),
-                            black_box(&chunk_id),
-                            black_box(*plaintext_len),
-                            black_box(ct),
-                        )
-                        .expect("decrypt");
-                        black_box(pt);
-                    });
-                },
-            );
+            group.bench_function(BenchmarkId::new(label, size_kib), |b| {
+                b.iter(|| {
+                    let pt = decrypt_chunk(
+                        black_box(&cipher),
+                        black_box(&chunk_id),
+                        black_box(plaintext_len),
+                        black_box(&ct),
+                    )
+                    .expect("decrypt");
+                    black_box(pt);
+                });
+            });
         }
     }
     group.finish();
@@ -115,41 +112,29 @@ fn bench_par_encrypt(c: &mut Criterion) {
         group.throughput(Throughput::Bytes((n_chunks * chunk_size) as u64));
 
         // Sequential reference.
-        let ids_ref = ids.clone();
-        let bufs_ref = bufs.clone();
-        let cipher_seq = cipher.clone();
-        group.bench_with_input(
-            BenchmarkId::new("seq", n_chunks),
-            &(cipher_seq, ids_ref, bufs_ref),
-            |b, (cipher, ids, bufs)| {
-                b.iter(|| {
-                    for (id, buf) in ids.iter().zip(bufs.iter()) {
-                        let ct = encrypt_chunk(black_box(cipher), black_box(id), black_box(buf)).unwrap();
-                        black_box(ct);
-                    }
-                });
-            },
-        );
+        group.bench_function(BenchmarkId::new("seq", n_chunks), |b| {
+            b.iter(|| {
+                for (id, buf) in ids.iter().zip(bufs.iter()) {
+                    let ct =
+                        encrypt_chunk(black_box(&cipher), black_box(id), black_box(buf))
+                            .unwrap();
+                    black_box(ct);
+                }
+            });
+        });
 
         // Parallel via rayon.
-        let cipher_par = cipher.clone();
-        let ids_par = ids.clone();
-        let bufs_par = bufs.clone();
-        group.bench_with_input(
-            BenchmarkId::new("par", n_chunks),
-            &(cipher_par, ids_par, bufs_par),
-            |b, (cipher, ids, bufs)| {
-                b.iter(|| {
-                    let inputs: Vec<(&[u8; 32], &[u8])> = ids
-                        .iter()
-                        .zip(bufs.iter())
-                        .map(|(id, buf)| (id, buf.as_slice()))
-                        .collect();
-                    let cts = encrypt_chunks_par(black_box(cipher), &inputs).unwrap();
-                    black_box(cts);
-                });
-            },
-        );
+        group.bench_function(BenchmarkId::new("par", n_chunks), |b| {
+            b.iter(|| {
+                let inputs: Vec<(&[u8; 32], &[u8])> = ids
+                    .iter()
+                    .zip(bufs.iter())
+                    .map(|(id, buf)| (id, buf.as_slice()))
+                    .collect();
+                let cts = encrypt_chunks_par(black_box(&cipher), &inputs).unwrap();
+                black_box(cts);
+            });
+        });
     }
     group.finish();
 }

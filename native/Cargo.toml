@@ -38,6 +38,8 @@ members = [
     "ol_canon",
     "ol_netcode",
     "ol_fuse",
+    "ol_fskit",
+    "ol_winfs",
     "one_link_native",
     # Future crates (added as they ship):
     # Future Phase A2:
