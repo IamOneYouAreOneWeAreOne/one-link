@@ -38,9 +38,14 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
 
+mod byzantine;
 mod dijkstra;
 mod metrics;
 
+pub use byzantine::{
+    max_byzantine_count, quorum_safe, rgg_connectivity_radius, rgg_mean_degree,
+    tau_claim_corroborated,
+};
 pub use dijkstra::{shortest_path, AdjacencyGraph, NodeId, PathResult};
 pub use metrics::{
     edge_cost, edge_weight, loss_penalty, prefer_first, should_swap_hop,

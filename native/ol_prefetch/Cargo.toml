@@ -1,0 +1,25 @@
+[package]
+name = "ol_prefetch"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: active inference prefetch over peer access traces (Phase D, ADR-0029)."
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_prefetch"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest  = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name    = "prefetch_bench"
+harness = false
+
+[lints]
+workspace = true

@@ -30,6 +30,7 @@ members = [
     "ol_crdt",
     "ol_hwkey",
     "ol_routing",
+    "ol_prefetch",
     "one_link_native",
     # Future crates (added as they ship):
     # Future Phase A2:
