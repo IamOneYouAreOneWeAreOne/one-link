@@ -26,7 +26,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from watchdog.events import (
     FileCreatedEvent,
@@ -194,6 +194,12 @@ class FolderEngine:
         # behavior. Divergence between legacy/native paths is logged.
         self._native_mirrors: dict[str, "_folder_native.NativeManifestMirror"] = {}
         self._native_mirror_divergence: int = 0  # surfaced via debug snapshot
+        # v0.8.9: divergent-edit conflict hook. Daemon sets this
+        # post-init so the UI can render a live banner the moment a
+        # conflict row lands. None until daemon.start() wires it.
+        self._on_conflict_recorded: Optional[
+            Callable[[str, int], None]
+        ] = None
         # Phase D #3 (ADR-0022): active reconciliation counters. Every
         # ``receive_remote_manifest`` call increments ``_checks`` and,
         # when the native OR-set disagrees with the legacy merge winner,
@@ -599,10 +605,9 @@ class FolderEngine:
                 (peer_fp or "?")[:8],
             )
             # Notify the UI live (best-effort — daemon owns ui_server).
-            cb = getattr(self, "_on_conflict_recorded", None)
-            if callable(cb):
+            if self._on_conflict_recorded is not None:
                 try:
-                    cb(folder_name, cid)
+                    self._on_conflict_recorded(folder_name, cid)
                 except Exception:
                     pass
         except Exception as exc:

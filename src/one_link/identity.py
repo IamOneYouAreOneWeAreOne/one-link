@@ -17,6 +17,7 @@ Optional passphrase encryption-at-rest:
 from __future__ import annotations
 
 import os
+import sys
 import secrets
 import socket
 from dataclasses import dataclass
@@ -216,13 +217,12 @@ def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> 
     finally:
         os.close(fd)
     os.replace(tmp, p)
-    if os.name != "nt":
+    if sys.platform != "win32":
         try:
-            # POSIX-only flag — Windows lacks O_DIRECTORY entirely;
-            # the runtime guard above prevents reaching this branch
-            # on Windows. The getattr keeps mypy quiet without
-            # changing semantics.
-            dfd = os.open(str(p.parent), getattr(os, "O_DIRECTORY"))
+            # POSIX-only flag — guarded by sys.platform narrow so
+            # mypy resolves os.O_DIRECTORY from the POSIX stub set
+            # and the constant is reachable on the runtime platform.
+            dfd = os.open(str(p.parent), os.O_DIRECTORY)
             try:
                 os.fsync(dfd)
             finally:

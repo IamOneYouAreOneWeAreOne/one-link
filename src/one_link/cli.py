@@ -11,6 +11,7 @@ import socket
 import sys
 import threading
 from pathlib import Path
+from typing import Any, Optional
 
 import click
 
@@ -68,7 +69,7 @@ def _request(cmd: str, *, timeout: float = 5.0, **kwargs) -> dict:
 
 @click.group()
 @click.version_option(__version__, prog_name="one-link")
-def cli():
+def cli() -> None:
     """One Link — peer-to-peer LAN chat + file sync."""
 
 
@@ -76,7 +77,7 @@ def cli():
 @click.option("-v", "--verbose", is_flag=True)
 @click.option("--tray/--no-tray", default=True,
               help="Run a system tray icon alongside the daemon (default: on).")
-def daemon(verbose, tray):
+def daemon(verbose: bool, tray: bool) -> None:
     """Run the One Link daemon (leave this in a terminal/service)."""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
@@ -85,7 +86,10 @@ def daemon(verbose, tray):
     # v0.10.5/v0.12.2: optional tray icon. Start it off the critical daemon
     # boot path so slow Windows/Pillow/pystray initialization cannot delay
     # discovery, the control socket, or the local web UI coming online.
-    tray_icon_holder: dict[str, object | None] = {"icon": None}
+    # ``Any`` so the threaded tray loader can park the TrayIcon
+    # without forcing the top-level cli module to import the
+    # pystray-pulling tray module at decl time.
+    tray_icon_holder: dict[str, Any] = {"icon": None}
 
     def _start_tray_icon() -> None:
         try:
@@ -486,7 +490,11 @@ def recovery():
     default=None,
     help="Where to write the wrapped shares (default ./shares/).",
 )
-def recovery_setup(guardians, threshold_k, out_dir):
+def recovery_setup(
+    guardians: tuple[str, ...],
+    threshold_k: int,
+    out_dir: Optional[Path],
+) -> None:
     """Split this device's master seed into wrapped shares.
 
     GUARDIANS is a flat list of (name ed_pub_hex) pairs:
@@ -576,20 +584,30 @@ def recovery_unwrap(share_path):
                 "no master seed AND no identity.key — this device has no "
                 "private key to unwrap a share with"
             )
-        # Best-effort load of the raw priv seed from PEM:
+        # Best-effort load of the raw priv seed from PEM. Same env
+        # var as the daemon's normal identity-load path so an
+        # operator with a passphrase-protected key on disk can
+        # decrypt for recovery without supplying it twice.
         from cryptography.hazmat.primitives import serialization
-        try:
-            from one_link.identity import _identity_key_passphrase
-            pw = _identity_key_passphrase()
-        except Exception:
-            pw = None
+        from one_link.identity import PASSPHRASE_ENV
+        pw_env = os.environ.get(PASSPHRASE_ENV)
+        pw = pw_env.encode("utf-8") if pw_env else None
         try:
             priv_obj = serialization.load_pem_private_key(
                 key_path().read_bytes(), password=pw,
             )
-            ed_seed = priv_obj.private_bytes_raw()
         except Exception as e:
             raise click.ClickException(f"identity key load failed: {e}")
+        # Only Ed25519 keys carry a raw seed; identity.key on disk is
+        # always Ed25519 (we minted it that way), so narrow.
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey,
+        )
+        if not isinstance(priv_obj, Ed25519PrivateKey):
+            raise click.ClickException(
+                "identity key on disk is not Ed25519 — cannot recover."
+            )
+        ed_seed = priv_obj.private_bytes_raw()
     else:
         ed_seed = master_seed.derive_identity_priv(seed).private_bytes_raw()
 
@@ -624,7 +642,7 @@ def recovery_unwrap(share_path):
     "--force", is_flag=True,
     help="Overwrite an existing master seed on this device.",
 )
-def recovery_restore(portable_shares, force):
+def recovery_restore(portable_shares: tuple[str, ...], force: bool) -> None:
     """Reconstruct the master seed from K guardian shares.
 
     PORTABLE_SHARES is the list of base64 strings collected from the

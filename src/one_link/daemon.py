@@ -61,12 +61,14 @@ import zlib
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import IO, TYPE_CHECKING, Any, Optional, Protocol, TypedDict, cast
 
 import blake3
 
 if TYPE_CHECKING:
     from one_link import rendezvous_client
+    from one_link.server import UIServer
+    from one_link_native.prefetch import Predictor as _NativePredictor
 
 from one_link import blobstore, channel as ch, foldersync
 from one_link.capabilities import (
@@ -666,19 +668,46 @@ class IncomingFile:
     size: int
     blob_hex: str
     out_path: Path
-    # ``handle`` is the writable file object the receiver streams
-    # chunks into; ``hasher`` is the blake3.Hasher instance running
-    # in parallel. Both lack PEP-561 stubs in their upstream packages
-    # so we type-erase to ``Any`` — runtime contract is enforced by
-    # the call sites.
-    handle: Any
+    # Writable binary file handle the receiver streams chunks into.
+    # ``IO[bytes]`` covers both the builtins.open(...) result and any
+    # custom binary writer we might inject in tests.
+    handle: IO[bytes]
+    # ``hasher`` is the blake3 Hasher instance running in parallel
+    # with the write stream. blake3 doesn't ship PEP-561 stubs, so
+    # the field is type-checked as ``_HasherProtocol`` (a small
+    # nominal protocol the call sites need — update + hexdigest).
+    # Required field — the construction site always supplies it.
+    hasher: "_HasherProtocol"
     received: int = 0
     next_seq: int = 0
-    hasher: Any = None
     cdc_chunks: list[dict] | None = None
     cdc_missing: set[int] | None = None
     cdc_parts: dict[int, bytes] | None = None
     transfer_id: str | None = None
+
+
+class _HasherProtocol(Protocol):
+    """Minimal interface IncomingFile needs from a streaming hasher.
+
+    blake3.blake3() returns an instance that satisfies this contract.
+    Pinned as a Protocol so we don't depend on blake3 shipping stubs
+    and tests can substitute a stub without subclassing."""
+
+    def update(self, data: bytes) -> None: ...
+
+    def hexdigest(self) -> str: ...
+
+
+class _PairHealth(TypedDict, total=False):
+    """Per-peer health snapshot kept in ``Daemon._pair_health``.
+    Keys are populated incrementally as PING / ACK / chunk-arrival
+    events fire, so ``total=False``."""
+
+    last_alive_ms: int
+    latency_ewma_ms: float
+    bandwidth_bps: float
+    reliability: float
+    best_route: str
 
 
 @dataclass
@@ -713,11 +742,11 @@ class Daemon:
         self._tail_subs: set[asyncio.StreamWriter] = set()
         self._incoming_files: dict[str, IncomingFile] = {}
         self._incoming_blobs: dict[str, dict] = {}
-        # ``Any`` keeps the UIServer import lazy (it pulls aiohttp) —
-        # see start() where it's imported on demand. The runtime
-        # contract: None until start() succeeds; UIServer instance
-        # afterward.
-        self.ui_server: Any = None
+        # TYPE_CHECKING import keeps UIServer (and its aiohttp deps)
+        # off the import graph for CLI / status paths — see start()
+        # where it's imported on demand. The runtime contract: None
+        # until start() succeeds; UIServer instance afterward.
+        self.ui_server: Optional["UIServer"] = None
         self.state: State | None = None
         self.pairing = PairingTracker()
         # v0.12.0: bandwidth pacer + auto-accept rules cache. Both
@@ -748,11 +777,11 @@ class Daemon:
         self._prune_task: asyncio.Task | None = None
         self._dm_reaper_task: asyncio.Task | None = None
         self._prior_index_task: asyncio.Task | None = None
-        # ``_lock_file`` is opened in ``_acquire_pid_lock`` after start;
-        # typed ``Any`` because the platform-specific lock path (msvcrt
-        # on Windows, fcntl on POSIX) returns different concrete file
-        # types and mypy can't unify them cleanly.
-        self._lock_file: Any = None
+        # Opened in ``_acquire_pid_lock`` after start. ``IO[bytes]``
+        # covers both the msvcrt + fcntl branches — both eventually
+        # bind the same builtins.open(..., "wb+") result before
+        # locking, so the underlying type unifies.
+        self._lock_file: Optional[IO[bytes]] = None
         # Folder sync — populated in start() when state + blob store are up.
         self.folder_engine = None  # type: foldersync.FolderEngine | None
         self.blob_store = None     # type: blobstore.BlobStore | None
@@ -785,10 +814,11 @@ class Daemon:
         # Phase D #3 (ADR-0033): per-daemon active inference prefetch
         # predictor. Built lazily on first observation so daemons without
         # the native crate installed don't pay the cost.
-        # ``Any`` because the native predictor object is exposed by
-        # the pyo3 binding (no PEP-561 stub yet on its methods like
-        # observe / predict_top_n / storage_entries).
-        self._prefetch_predictor: Any = None
+        # Type-resolved via the PEP-561 stubs in
+        # ``stubs/one_link_native-stubs/prefetch.pyi`` so the daemon
+        # actually verifies the .observe / .predict_top_n /
+        # .storage_entries calls against the native ABI.
+        self._prefetch_predictor: Optional["_NativePredictor"] = None
         self._prefetch_unavailable_logged: bool = False
         # Phase D #1 (ADR-0028): per-relay empirical metrics. Maps
         # relay URL → {rtt_ms, loss_rate, n_attempts, n_successes,
@@ -839,10 +869,9 @@ class Daemon:
         # UI can show real "last alive" + latency instead of guessing
         # from mDNS visibility.
         # peer_fp -> {"last_alive_ms": int, "latency_ewma_ms": float}
-        # Per-peer pair-health snapshot: latency / bandwidth are floats,
-        # ``last_alive_ms`` is an int (ms), ``best_route`` is a str
-        # tag. Heterogeneous values so the inner dict is ``Any``.
-        self._pair_health: dict[str, dict[str, Any]] = {}
+        # Per-peer pair-health snapshot keyed by fingerprint. See the
+        # ``_PairHealth`` TypedDict above for the field set.
+        self._pair_health: dict[str, _PairHealth] = {}
         # v0.10.8: live route memory. Transfer outcomes feed this so
         # swarm planning can prefer routes that actually work for this
         # peer instead of static guesses.
@@ -956,16 +985,16 @@ class Daemon:
                     raise RuntimeError(
                         "One Link daemon is already running for this ONE_LINK_HOME"
                     ) from e
-            else:
-                # fcntl is POSIX-only; mypy on Windows doesn't ship a
-                # stub. The runtime guard above ensures we never reach
-                # this branch on Windows.
-                import fcntl  # type: ignore[import-not-found]
+            elif sys.platform != "win32":
+                # ``sys.platform != "win32"`` is a guard mypy
+                # understands as a platform narrow — fcntl is then
+                # resolvable from its real stub set.
+                import fcntl
 
                 try:
-                    fcntl.flock(  # type: ignore[attr-defined]
+                    fcntl.flock(
                         f.fileno(),
-                        fcntl.LOCK_EX | fcntl.LOCK_NB,  # type: ignore[attr-defined]
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
                     )
                 except OSError as e:
                     raise RuntimeError(
@@ -990,16 +1019,11 @@ class Daemon:
                 self._lock_file.seek(0)
                 with contextlib.suppress(OSError):
                     msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                # fcntl is POSIX-only — see lock-acquire branch above
-                # for the type-ignore rationale.
-                import fcntl  # type: ignore[import-not-found]
+            elif sys.platform != "win32":
+                import fcntl
 
                 with contextlib.suppress(OSError):
-                    fcntl.flock(  # type: ignore[attr-defined]
-                        self._lock_file.fileno(),
-                        fcntl.LOCK_UN,  # type: ignore[attr-defined]
-                    )
+                    fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
         finally:
             with contextlib.suppress(OSError):
                 self._lock_file.close()
@@ -2171,7 +2195,11 @@ class Daemon:
                 blob_hex=blob,
                 out_path=out_path,
                 handle=handle,
-                hasher=blake3.blake3(),
+                # blake3 lacks PEP-561 stubs; the runtime hasher
+                # exposes update/hexdigest exactly per _HasherProtocol.
+                # ``cast`` documents the contract for the type
+                # checker without bypassing it.
+                hasher=cast(_HasherProtocol, blake3.blake3()),
                 cdc_chunks=cdc_chunks,
                 cdc_missing=missing,
                 cdc_parts={},
@@ -4705,6 +4733,11 @@ class Daemon:
             # Drop the satisfied entry from the expected-pull set.
             self._expected_blob_pulls.get(peer_fp, set()).discard(blob)
             self.blob_store.path(got_hash)  # confirms it lives
+            # State + folder_engine are both initialised inside
+            # ``start()`` before any chunk can land here; the wider
+            # nullable typing is for the boot window.
+            assert self.state is not None
+            assert self.folder_engine is not None
             try:
                 self.state.record_blob(got_hash, ctx["received"])
             except Exception:
@@ -6600,11 +6633,16 @@ class Daemon:
         h = self._pair_health.get(peer_fp)
         if h is None:
             return None
-        out = dict(h)
+        # Cast through dict[str, Any] so we can mix in non-_PairHealth
+        # fields (route_scores) for the /api/peers UI surface — the
+        # public diagnostic shape is broader than the internal one.
+        out: dict[str, Any] = dict(h)
         mem = self._route_memory.get(peer_fp)
         if mem is not None:
             out["route_scores"] = [c.__dict__ for c in mem.candidates()]
-            out["best_route"] = mem.best_route(out.get("best_route") or "lan")
+            out["best_route"] = mem.best_route(
+                str(out.get("best_route") or "lan")
+            )
         return out
 
     def _transfer_route_observations(
@@ -9985,12 +10023,12 @@ class Daemon:
                     loop=asyncio.get_running_loop(),
                     on_local_change=self._on_local_folder_change,
                 )
-                # v0.8.9: hook divergent-edit conflict detection so the UI
-                # raises a banner the moment a conflict is logged. The
-                # attribute is set dynamically on the FolderEngine
-                # instance; mypy can't see it because the class doesn't
-                # declare it. Live wire — keep the dynamic set.
-                self.folder_engine._on_conflict_recorded = self._on_folder_conflict  # type: ignore[attr-defined]
+                # v0.8.9: hook divergent-edit conflict detection so the
+                # UI raises a banner the moment a conflict is logged.
+                # FolderEngine now declares the field as
+                # ``Optional[Callable[[str, int], None]]`` so the
+                # assignment is fully type-checked.
+                self.folder_engine._on_conflict_recorded = self._on_folder_conflict
                 await self.folder_engine.start()
                 self._folder_sync_task = asyncio.create_task(self._folder_sync_loop())
             except Exception as e:

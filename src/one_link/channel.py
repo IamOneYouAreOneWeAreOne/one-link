@@ -63,7 +63,10 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from one_link.double_ratchet import RatchetState
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -135,10 +138,12 @@ class Channel:
     # When non-None, channel is in ratchet mode. send/recv branch
     # to the ratchet path and the legacy AEADs go unused. Set
     # exactly once per channel by maybe_activate_ratchet.
-    # ``Any`` so we don't pull double_ratchet at import time; the
-    # runtime contract: None until maybe_activate_ratchet flips it,
-    # then a one_link.double_ratchet.RatchetState until close().
-    _dr_state: Any = None
+    # Lazy-imported under TYPE_CHECKING so we don't pull
+    # double_ratchet at module import time (it pulls cryptography
+    # primitives). Runtime contract: None until
+    # maybe_activate_ratchet flips it, then a RatchetState until
+    # close().
+    _dr_state: Optional["RatchetState"] = None
     # Phase C-3 (ADR-0026): cached native transfer session for
     # FILE_NATIVE_CHUNK encrypt/decrypt. Lazily built by the daemon
     # on first chunk; sender and receiver hold MATCHED instances
@@ -491,6 +496,11 @@ class Channel:
         from one_link.double_ratchet import (
             Header as DRHeader, decrypt as dr_decrypt,
         )
+        # All four ratchet methods are only reached after
+        # ``is_ratcheting`` returns True, which guarantees
+        # ``_dr_state is not None``. The asserts encode that
+        # invariant for the type checker.
+        assert self._dr_state is not None, "ratchet not yet activated"
         if len(payload) < DR_HEADER_LEN:
             raise RuntimeError(
                 f"ratchet frame too short: {len(payload)} bytes "
@@ -504,6 +514,7 @@ class Channel:
 
     async def _send_ratchet(self, plaintext: bytes) -> None:
         from one_link.double_ratchet import encrypt as dr_encrypt
+        assert self._dr_state is not None, "ratchet not yet activated"
         header, ct = dr_encrypt(
             self._dr_state, plaintext, ad=self.transcript_hash,
         )
@@ -512,6 +523,7 @@ class Channel:
 
     def _queue_send_ratchet(self, plaintext: bytes) -> None:
         from one_link.double_ratchet import encrypt as dr_encrypt
+        assert self._dr_state is not None, "ratchet not yet activated"
         header, ct = dr_encrypt(
             self._dr_state, plaintext, ad=self.transcript_hash,
         )
@@ -521,6 +533,7 @@ class Channel:
         from one_link.double_ratchet import (
             Header as DRHeader, decrypt as dr_decrypt,
         )
+        assert self._dr_state is not None, "ratchet not yet activated"
         payload = await read_frame(self.reader)
         if len(payload) < DR_HEADER_LEN:
             raise RuntimeError(

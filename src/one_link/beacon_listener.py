@@ -38,9 +38,11 @@ Platform notes
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import socket
 import struct
+import sys
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -134,14 +136,14 @@ async def start_listener(
     sock = socket.socket(family, socket.SOCK_DGRAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            # POSIX-only; getattr keeps mypy quiet on Windows where
-            # the constant doesn't exist on the socket module.
-            sock.setsockopt(
-                socket.SOL_SOCKET, getattr(socket, "SO_REUSEPORT"), 1,
-            )
-        except (AttributeError, OSError):
-            pass  # not supported on Windows
+        if sys.platform != "win32":
+            # SO_REUSEPORT is POSIX-only. The sys.platform narrow
+            # tells mypy to resolve socket.SO_REUSEPORT against the
+            # POSIX stub set; runtime can still throw OSError on
+            # kernels that don't support it (e.g. older Linux), so
+            # we keep the suppress.
+            with contextlib.suppress(AttributeError, OSError):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         if use_ipv6:
             sock.bind(("::", beacon.BEACON_PORT))
             # IPV6_JOIN_GROUP: pack 16-byte addr + u32 ifindex.

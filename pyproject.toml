@@ -84,22 +84,31 @@ one_link = [
 addopts = "-p no:benchmark -p no:hypothesispytest"
 
 # Phase C-3 (ADR-0008): mypy resolves `one_link_native` types from the
-# PEP 561 stub-only package shipped under `stubs/`. The stubs are
-# hand-written .pyi files (one per pyo3 binding); pyright reads them
-# directly off `mypy_path`. Mypy 1.20 only auto-discovers `*-stubs`
-# packages when they're pip-installed, so we additionally silence
-# the import-untyped warning for one_link_native.
+# PEP 561 stub-only package shipped under `stubs/one_link_native-stubs/`.
+#
+# Mypy's stub-only package discovery looks for ``<name>-stubs`` next to
+# the runtime ``<name>`` on ``sys.path`` (i.e. site-packages of the
+# active interpreter). In-tree stubs on ``mypy_path`` are visible to
+# the type checker but mypy still emits ``import-untyped`` on the
+# runtime side because the ``py.typed`` marker has to live in the
+# RUNTIME package (which is a compiled .pyd, no way to add a marker
+# without rebuilding the wheel). The override below tells mypy to
+# trust the stub package and skip the marker check.
+#
+# Single-file stubs that ARE on mypy_path (e.g. ``stubs/pystray.pyi``)
+# resolve cleanly without an override — those don't run into the
+# marker requirement.
 [tool.mypy]
 mypy_path = "stubs:src"
 explicit_package_bases = true
 namespace_packages = true
+# Strict-ish defaults: every function body gets type-checked, even
+# ones whose signatures lack annotations. Prevents the "untyped def
+# silently hides errors" pattern from creeping back in.
+check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = "one_link_native.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "one_link_native"
+module = ["one_link_native", "one_link_native.*"]
 ignore_missing_imports = true
 
 # v0.7.2 bandit config (audit finding C). We exclude tests because

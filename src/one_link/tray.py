@@ -21,7 +21,10 @@ import sys
 import threading
 import webbrowser
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+    import pystray
 
 log = logging.getLogger("one_link.tray")
 
@@ -75,11 +78,13 @@ class TrayIcon:
         self._on_quit = on_quit
         self._url = url
         self._inbox_path = inbox_path
-        self._icon = None
+        # Lazy-imported pystray Icon — None until ``start()`` creates
+        # the real one. Local stubs live under ``stubs/pystray.pyi``.
+        self._icon: Optional["pystray.Icon"] = None
         self._thread: Optional[threading.Thread] = None
         self._available = False
         try:
-            import pystray  # type: ignore[import-untyped]  # noqa: F401
+            import pystray  # noqa: F401  # stubs under stubs/pystray.pyi
             self._available = True
         except Exception as e:
             log.info(
@@ -138,9 +143,9 @@ class TrayIcon:
         draw.ellipse([(2, 2), (61, 61)], outline=ring_color, width=4)
         return out
 
-    def _build_menu(self):
+    def _build_menu(self) -> "pystray.Menu":
         from pystray import MenuItem, Menu
-        items: list = [
+        items: list[MenuItem] = [
             MenuItem("Open One Link", self._on_open, default=True),
         ]
         if self._inbox_path is not None:

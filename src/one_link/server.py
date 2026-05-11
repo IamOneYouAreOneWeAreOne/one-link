@@ -1429,8 +1429,8 @@ class UIServer:
                 status=409,
             )
         try:
-            import qrcode  # type: ignore[import-untyped]
-            import qrcode.image.svg  # type: ignore[import-untyped]
+            import qrcode  # types-qrcode stub package supplies the type info
+            import qrcode.image.svg
         except ImportError:
             return web.json_response(
                 {"error": "qrcode_lib_missing", "hint": "pip install qrcode>=7"},
@@ -1582,8 +1582,8 @@ class UIServer:
                 status=413,
             )
         try:
-            import qrcode  # type: ignore[import-untyped]
-            import qrcode.image.svg  # type: ignore[import-untyped]
+            import qrcode  # types-qrcode stub package supplies the type info
+            import qrcode.image.svg
         except ImportError:
             return web.json_response(
                 {"error": "qrcode_lib_missing", "hint": "pip install qrcode>=7"},
