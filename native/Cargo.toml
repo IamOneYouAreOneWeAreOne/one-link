@@ -35,6 +35,8 @@ members = [
     "ol_grammar",
     "ol_duress",
     "ol_codegen",
+    "ol_canon",
+    "ol_netcode",
     "ol_fuse",
     "one_link_native",
     # Future crates (added as they ship):

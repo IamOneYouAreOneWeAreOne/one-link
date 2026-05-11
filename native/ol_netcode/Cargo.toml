@@ -1,0 +1,21 @@
+[package]
+name = "ol_netcode"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link file engine: XOR network coding for relay paths (Phase B #3)."
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_netcode"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror = { workspace = true }
+blake3    = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true
