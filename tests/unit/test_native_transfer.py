@@ -99,12 +99,13 @@ def test_per_chunk_keys_are_distinct():
     assert r1.chunk_index != r2.chunk_index
 
 
-def test_chunk_id_verification_catches_swapped_records():
-    """Sender produces records with chunk_id = BLAKE3(plaintext).
-    If a record's ciphertext is replaced with another (same-length)
-    ciphertext under the same session, the BLAKE3 verify catches
-    it — even though the AEAD tag is technically still valid for
-    the swapped ciphertext under the matching key."""
+def test_chunk_id_swap_caught_by_aead_aad_binding():
+    """The AEAD tag binds ``chunk_id`` as AAD: decrypting a record
+    whose ``chunk_id`` was rewritten to point at a DIFFERENT chunk's
+    ciphertext + length raises ``OlAeadError`` before any plaintext
+    is exposed. This is what lets us drop the explicit Python-level
+    BLAKE3 recompute on receive (a full hash pass per chunk that was
+    pure overhead given the AAD binding)."""
     from one_link import native_transfer
 
     sender, receiver = native_transfer.establish_session_pair()
@@ -118,8 +119,77 @@ def test_chunk_id_verification_catches_swapped_records():
         plaintext_len=b.plaintext_len,
         ciphertext=b.ciphertext,
     )
-    with pytest.raises((ValueError, Exception)):
+    with pytest.raises(Exception):
         receiver.decrypt_chunk(swapped)
+
+
+def test_corrupted_ciphertext_caught_by_aead_tag():
+    """Bit-flip in the ciphertext fails the AEAD tag check.
+    Necessary regression cover for dropping the BLAKE3 recompute."""
+    from one_link import native_transfer
+
+    sender, receiver = native_transfer.establish_session_pair()
+    r = sender.encrypt_chunk_bytes(b"x" * 1024)
+    tampered = bytearray(r.ciphertext)
+    tampered[len(tampered) // 2] ^= 0xFF
+    swapped = native_transfer.NativeChunkRecord(
+        chunk_id=r.chunk_id,
+        chunk_index=r.chunk_index,
+        plaintext_len=r.plaintext_len,
+        ciphertext=bytes(tampered),
+    )
+    with pytest.raises(Exception):
+        receiver.decrypt_chunk(swapped)
+
+
+def test_corrupted_chunk_id_caught_by_aead_aad():
+    """Bit-flip in the chunk_id (the AAD) fails the AEAD tag check.
+    This is the primitive that makes the post-decrypt BLAKE3 verify
+    redundant."""
+    from one_link import native_transfer
+
+    sender, receiver = native_transfer.establish_session_pair()
+    r = sender.encrypt_chunk_bytes(b"y" * 2048)
+    tampered_id = bytearray(r.chunk_id)
+    tampered_id[0] ^= 0x01
+    swapped = native_transfer.NativeChunkRecord(
+        chunk_id=bytes(tampered_id),
+        chunk_index=r.chunk_index,
+        plaintext_len=r.plaintext_len,
+        ciphertext=r.ciphertext,
+    )
+    with pytest.raises(Exception):
+        receiver.decrypt_chunk(swapped)
+
+
+def test_small_file_uses_single_chunk_fast_path(tmp_path):
+    """Files at or below SINGLE_CHUNK_FAST_PATH_MAX (256 KiB) should
+    yield exactly one record — confirming the fast path bypasses
+    CDC's potential to produce more chunks."""
+    from one_link import native_transfer
+
+    sender, _ = native_transfer.establish_session_pair()
+    payload = os.urandom(200 * 1024)
+    p = tmp_path / "small.bin"
+    p.write_bytes(payload)
+    records = list(sender.encrypt_file(p))
+    assert len(records) == 1
+    assert records[0].plaintext_len == len(payload)
+
+
+def test_streaming_path_handles_very_large_file(tmp_path):
+    """Files above the 16 MiB threshold take the streaming path. The
+    round trip still produces byte-identical output."""
+    from one_link import native_transfer
+
+    sender, receiver = native_transfer.establish_session_pair()
+    payload = os.urandom(20 * 1024 * 1024)  # 20 MiB — over the threshold
+    p = tmp_path / "big.bin"
+    p.write_bytes(payload)
+    records = list(sender.encrypt_file(p))
+    assert len(records) >= 30, f"expected many CDC chunks, got {len(records)}"
+    recovered = receiver.decrypt_records_to_bytes(records)
+    assert recovered == payload
 
 
 def test_chunk_store_persistence_round_trip(tmp_path):
@@ -180,6 +250,73 @@ def test_rejects_oversize_chunk_plaintext():
     too_big = os.urandom(300 * 1024)
     with pytest.raises(ValueError, match="256 KiB"):
         sender.encrypt_chunk_bytes(too_big)
+
+
+def test_native_aead_backend_still_works(tmp_path):
+    """The original ADR-0002 multi-frame AEAD path stays selectable
+    via cipher_backend='native'. Used for scenarios that demand
+    partial-chunk integrity (streaming-decrypt before the chunk
+    is complete)."""
+    from one_link import native_transfer
+
+    sender, receiver = native_transfer.establish_session_pair(
+        cipher_backend="native"
+    )
+    p = tmp_path / "f.bin"
+    p.write_bytes(os.urandom(200 * 1024))
+    records = list(sender.encrypt_file(p))
+    recovered = receiver.decrypt_records_to_bytes(records)
+    assert recovered == p.read_bytes()
+
+
+def test_cdc_strategy_still_supported(tmp_path):
+    """chunk_strategy='cdc' uses ADR-0001 content-defined chunking.
+    Slower steady-state than fixed but better dedup on edited
+    files."""
+    from one_link import native_transfer
+
+    sender, receiver = native_transfer.establish_session_pair()
+    p = tmp_path / "f.bin"
+    payload = os.urandom(2 * 1024 * 1024)  # 2 MiB
+    p.write_bytes(payload)
+    records = list(sender.encrypt_file(p, chunk_strategy="cdc"))
+    # CDC produces multiple chunks (avg 64 KiB → ~30+).
+    assert len(records) > 4
+    recovered = receiver.decrypt_records_to_bytes(records)
+    assert recovered == payload
+
+
+def test_fixed_strategy_produces_predictable_chunk_count(tmp_path):
+    """chunk_strategy='fixed' (the default) uses 256 KiB blocks. A
+    1 MiB file should produce exactly 4 chunks."""
+    from one_link import native_transfer
+
+    sender, _ = native_transfer.establish_session_pair()
+    p = tmp_path / "f.bin"
+    p.write_bytes(os.urandom(1024 * 1024))  # 1 MiB exactly
+    records = list(sender.encrypt_file(p))  # default fixed
+    assert len(records) == 4
+
+
+def test_rejects_invalid_chunk_strategy(tmp_path):
+    from one_link import native_transfer
+
+    sender, _ = native_transfer.establish_session_pair()
+    p = tmp_path / "f.bin"
+    p.write_bytes(os.urandom(300 * 1024))  # over single-chunk path
+    with pytest.raises(ValueError, match="chunk_strategy"):
+        list(sender.encrypt_file(p, chunk_strategy="random-strategy"))
+
+
+def test_rejects_invalid_cipher_backend():
+    from one_link import native_transfer
+
+    with pytest.raises(ValueError, match="cipher_backend"):
+        native_transfer.NativeTransferSession(
+            shared_secret=b"\x00" * 32,
+            aead_kind="chacha",
+            cipher_backend="bogus",
+        )
 
 
 def test_distinct_sessions_have_distinct_ciphertexts():

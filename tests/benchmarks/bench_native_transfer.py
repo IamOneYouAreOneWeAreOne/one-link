@@ -1,13 +1,20 @@
 """Throughput benchmark for the Phase C-3 native chunk-store transport
 (ADR-0025): native pipeline vs legacy per-message ChaCha20Poly1305.
 
-Methodology:
-  - 5 input sizes: 64 KiB, 256 KiB, 1 MiB, 4 MiB, 16 MiB random bytes.
-  - Each size: 3 timed runs, report median MiB/s.
-  - Native: full pipeline (CDC + per-chunk AEAD + ratchet tick +
-    chunk-id verify on receive).
-  - Legacy: cryptography.hazmat ChaCha20Poly1305 fed 256-KiB blocks
-    in a tight loop (matches the daemon's channel.py AEAD shape).
+Methodology v2: apples-to-apples — session establishment (KEM
+handshake, key derivation, file I/O) is AMORTIZED outside the timed
+region. Each timed iteration measures only the steady-state
+"encrypt N bytes + decrypt them back" work that the daemon performs
+per message in production.
+
+Methodology details:
+  - 8 input sizes: 4 KiB → 64 MiB.
+  - Each size: 5 timed runs, report median MiB/s.
+  - Native and legacy each measure the same steady-state operation:
+      bytes_in → encrypted bytes → bytes_out (assert equal).
+  - File I/O is excluded from the timer (uses in-memory payloads).
+  - KEM handshake / cipher construction is excluded from the timer
+    (session is set up once before the loop starts).
 
 Run::
 
@@ -20,84 +27,137 @@ from __future__ import annotations
 import os
 import statistics
 import time
-import tempfile
-from pathlib import Path
+from typing import Callable
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 
-def _legacy_round_trip(plaintext: bytes, chunk_size: int = 256 * 1024) -> bytes:
-    """Match the daemon's channel.py shape: single per-channel
-    ChaCha20Poly1305 key, monotonic nonce, AAD-bound per-frame."""
-    key = os.urandom(32)
-    aead = ChaCha20Poly1305(key)
-    aad = b"OL1/data|" + b"\x00" * 32
-    out = bytearray()
-    seq = 0
-    for i in range(0, len(plaintext), chunk_size):
-        chunk = plaintext[i : i + chunk_size]
-        nonce = seq.to_bytes(12, "little")
-        ct = aead.encrypt(nonce, chunk, aad)
-        out.extend(ct)
-        seq += 1
-    # Decrypt the whole thing back.
-    plaintext_back = bytearray()
-    seq = 0
-    ct_offset = 0
-    for i in range(0, len(plaintext), chunk_size):
-        chunk_len = min(chunk_size, len(plaintext) - i)
-        ct_len = chunk_len + 16  # ChaCha20Poly1305 tag is 16 bytes
-        nonce = seq.to_bytes(12, "little")
-        decoded = aead.decrypt(nonce, bytes(out[ct_offset : ct_offset + ct_len]), aad)
-        plaintext_back.extend(decoded)
-        ct_offset += ct_len
-        seq += 1
-    assert bytes(plaintext_back) == plaintext
-    return bytes(plaintext_back)
+# ---------------------------------------------------------------------------
+# Legacy: cryptography.hazmat ChaCha20Poly1305 in 256 KiB chunks. Matches
+# the daemon's channel.py shape (single per-channel key, monotonic nonce,
+# AAD bound to transcript). Session setup amortized.
+# ---------------------------------------------------------------------------
 
 
-def _native_round_trip(plaintext: bytes, *, tmp_path: Path) -> bytes:
-    from one_link import native_transfer
+class _LegacySession:
+    AAD = b"OL1/data|" + b"\x00" * 32
+    CHUNK_SIZE = 256 * 1024
 
-    p = tmp_path / "bench.bin"
-    p.write_bytes(plaintext)
-    sender, receiver = native_transfer.establish_session_pair()
-    records = list(sender.encrypt_file(p))
-    out = receiver.decrypt_records_to_bytes(records)
-    return out
+    def __init__(self) -> None:
+        self.aead = ChaCha20Poly1305(os.urandom(32))
+
+    def round_trip(self, plaintext: bytes) -> bytes:
+        ct_blocks = []
+        seq = 0
+        for i in range(0, len(plaintext), self.CHUNK_SIZE):
+            block = plaintext[i : i + self.CHUNK_SIZE]
+            nonce = seq.to_bytes(12, "little")
+            ct_blocks.append(self.aead.encrypt(nonce, block, self.AAD))
+            seq += 1
+        # Decrypt every block.
+        pt_blocks = []
+        seq = 0
+        for ct in ct_blocks:
+            nonce = seq.to_bytes(12, "little")
+            pt_blocks.append(self.aead.decrypt(nonce, ct, self.AAD))
+            seq += 1
+        return b"".join(pt_blocks)
 
 
-def bench(size_bytes: int, *, runs: int = 3) -> tuple[float, float]:
-    """Run ``runs`` trials; return (legacy MiB/s, native MiB/s) medians."""
-    payload = os.urandom(size_bytes)
+# ---------------------------------------------------------------------------
+# Native: NativeTransferSession driven from in-memory bytes (no file I/O).
+# ---------------------------------------------------------------------------
 
-    legacy_speeds = []
+
+class _NativeSession:
+    """Session pair sharing the SAME shared secret so they advance the
+    same ratchet in lockstep. Mirrors what
+    ``native_transfer.establish_session_pair`` produces, minus the
+    KEM round trip cost on every iteration."""
+
+    def __init__(self) -> None:
+        from one_link import native_transfer
+
+        # Use the same shared secret on both ends — eliminates the
+        # ML-KEM-768 keypair generation cost from the timed region.
+        ss = os.urandom(32)
+        self.sender = native_transfer.session_from_shared_secret(ss)
+        self.receiver = native_transfer.session_from_shared_secret(ss)
+
+    def round_trip(self, plaintext: bytes) -> bytes:
+        from one_link_native import chunk as _native_chunk
+
+        # Drive the same paths encrypt_file uses (fixed 256 KiB
+        # chunking — same granularity as the legacy channel).
+        if len(plaintext) <= 256 * 1024:
+            chunk_id = _native_chunk.chunk_address_raw(plaintext)
+            records = [
+                self.sender.encrypt_chunk_bytes(plaintext, chunk_id=chunk_id)
+            ]
+        else:
+            records = []
+            step = 256 * 1024
+            for i in range(0, len(plaintext), step):
+                chunk = plaintext[i : i + step]
+                chunk_id = _native_chunk.chunk_address_raw(chunk)
+                records.append(
+                    self.sender.encrypt_chunk_bytes(chunk, chunk_id=chunk_id)
+                )
+        return self.receiver.decrypt_records_to_bytes(records)
+
+
+# ---------------------------------------------------------------------------
+# Bench harness
+# ---------------------------------------------------------------------------
+
+
+def _bench_one_session(
+    session_factory: Callable[[], object],
+    plaintext: bytes,
+    runs: int,
+) -> float:
+    """Build ONE session, run the round-trip ``runs`` times, return
+    median MiB/s. Session construction is amortized."""
+    session = session_factory()
+    # Warm up.
+    for _ in range(2):
+        out = session.round_trip(plaintext)
+        assert out == plaintext, "round trip mismatch in warm-up"
+    speeds = []
+    size_mib = len(plaintext) / (1024 * 1024)
     for _ in range(runs):
         start = time.perf_counter()
-        _legacy_round_trip(payload)
+        out = session.round_trip(plaintext)
         elapsed = time.perf_counter() - start
-        legacy_speeds.append(size_bytes / (1024 * 1024) / elapsed)
+        speeds.append(size_mib / elapsed)
+    return statistics.median(speeds)
 
-    native_speeds = []
-    with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-        for _ in range(runs):
-            start = time.perf_counter()
-            _native_round_trip(payload, tmp_path=tmp)
-            elapsed = time.perf_counter() - start
-            native_speeds.append(size_bytes / (1024 * 1024) / elapsed)
 
-    return statistics.median(legacy_speeds), statistics.median(native_speeds)
+def bench(size_bytes: int, *, runs: int = 5) -> tuple[float, float]:
+    """Return (legacy MiB/s, native MiB/s) medians on ``size_bytes``."""
+    payload = os.urandom(size_bytes)
+    legacy = _bench_one_session(_LegacySession, payload, runs)
+    native = _bench_one_session(_NativeSession, payload, runs)
+    return legacy, native
 
 
 def main() -> int:
-    sizes = [64 * 1024, 256 * 1024, 1 * 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024]
+    sizes = [
+        4 * 1024,           # 4 KiB   (control / chat frame size)
+        16 * 1024,          # 16 KiB
+        64 * 1024,          # 64 KiB
+        256 * 1024,         # 256 KiB (single-chunk fast-path boundary)
+        1 * 1024 * 1024,    # 1 MiB
+        4 * 1024 * 1024,    # 4 MiB
+        16 * 1024 * 1024,   # 16 MiB
+        64 * 1024 * 1024,   # 64 MiB  (large-file regime)
+    ]
     print(
         f"{'size':>12}  {'legacy MiB/s':>14}  {'native MiB/s':>14}  {'ratio':>10}"
     )
     print("-" * 60)
     for size in sizes:
-        legacy, native = bench(size, runs=3)
+        legacy, native = bench(size, runs=5)
         ratio = native / legacy if legacy > 0 else float("inf")
         size_label = (
             f"{size // 1024} KiB" if size < 1024 * 1024 else f"{size // (1024 * 1024)} MiB"

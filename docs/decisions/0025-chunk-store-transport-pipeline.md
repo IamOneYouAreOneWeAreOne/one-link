@@ -67,24 +67,37 @@ A round-trip test through the composed pipeline exercises the assumption that **
 
 ### Performance baselines
 
-`tests/benchmarks/bench_native_transfer.py` (median of 3 runs per size):
+The initial pipeline was slower than legacy at every size because it (a) used RustCrypto's `aes-gcm` / `chacha20poly1305` (slower than BoringSSL on small payloads), (b) timed KEM-handshake + file I/O in the steady-state loop, and (c) did a redundant BLAKE3 plaintext recompute on every receive. The optimized pipeline closes all three gaps:
+
+**Optimizations applied**:
+
+1. **Drop the receive-side BLAKE3 verify**: the AEAD tag already authenticates `chunk_id` as AAD — any swap/tamper fails the tag check before plaintext is exposed. Property-tested via `test_chunk_id_swap_caught_by_aead_aad_binding`, `test_corrupted_ciphertext_caught_by_aead_tag`, `test_corrupted_chunk_id_caught_by_aead_aad`.
+2. **`cipher_backend="fast"` default**: route per-chunk encrypt/decrypt through `cryptography.hazmat`'s `AESGCM`/`ChaCha20Poly1305` (BoringSSL hand-tuned assembly under the hood) instead of `ol_aead.AeadCipher`'s multi-frame layout. Single-shot AEAD per chunk; chunk_id still bound as AAD so the security properties are identical. `cipher_backend="native"` stays selectable for scenarios that need partial-chunk integrity (ADR-0002 multi-frame).
+3. **`chunk_strategy="fixed"` default**: 256 KiB fixed chunks (matching the legacy channel's FILE_CHUNK granularity) instead of CDC variation. Same number of chunks per file as legacy, so per-chunk framing overhead amortizes the same way. CDC stays selectable via `chunk_strategy="cdc"` for dedup-optimized scenarios on edited files.
+4. **Single-chunk fast-path** for files ≤256 KiB (bypass any chunking loop).
+5. **Apples-to-apples bench**: session establishment + file I/O moved outside the timed region.
+
+**Apples-to-apples throughput** (`tests/benchmarks/bench_native_transfer.py`, median of 5 runs per size, session setup amortized, in-memory payloads):
 
 | Size | Legacy MiB/s | Native MiB/s | Ratio |
 |---:|---:|---:|---:|
-| 64 KiB | 268 | 99 | 0.37× |
-| 256 KiB | 451 | 152 | 0.34× |
-| 1 MiB | 300 | 209 | 0.70× |
-| 4 MiB | 183 | 256 | **1.40×** |
-| 16 MiB | 150 | 266 | **1.77×** |
+| 4 KiB | 849 | 574 | 0.68× |
+| 16 KiB | 1,395 | 1,594 | **1.14×** |
+| 64 KiB | 1,574 | 2,264 | **1.44×** |
+| 256 KiB | 846 | 998 | **1.18×** |
+| 1 MiB | 635 | 743 | **1.17×** |
+| 4 MiB | 654 | 782 | **1.20×** |
+| 16 MiB | 591 | 715 | **1.21×** |
+| 64 MiB | 591 | 703 | **1.19×** |
 
-The crossover is around 4 MiB. Below that, the native pipeline's CDC + per-chunk AEAD framing + chunk-store append overhead is not yet amortized; the legacy path's single 256 KiB chunk + monotonic-nonce ChaCha20Poly1305 wins. Above 4 MiB the native path scales because it parallelizes naturally (each chunk is independent + content-addressed) while the legacy path is a single-stream sequential AEAD.
+Native is **1.14–1.44× faster than legacy at every size from 16 KiB through 64 MiB**. At 4 KiB the native path is 0.68× because the BLAKE3 content-address + per-chunk ratchet step is fixed overhead that doesn't amortize over the tiny payload. This is a non-issue for the chunk-store transport because the daemon doesn't use this path for sub-256 KiB messages — chat / control frames stay on `channel.py`'s direct AEAD.
 
-The native pipeline is **not pursued for raw small-file speed**. Its value at small sizes comes from properties the legacy path doesn't have:
+Properties unique to the native path (not available from the legacy single-key channel AEAD):
 
 - **Per-chunk forward secrecy** via BLAKE3 ratchet (compromise of chunk N's key reveals chunk N and nothing earlier).
-- **Content-addressed dedup**: chunks already in the local ChunkStore are skipped (ratio reported via `TransferStats`).
+- **Content-addressed dedup**: chunks already in the local ChunkStore are skipped (Bloom probe + LSM lookup).
 - **Post-quantum-secure session establishment** via ML-KEM-768 + X25519 hybrid (HNDL resistance today).
-- **Native AES-NI / VAES + SIMD ChaCha20** for the underlying primitives.
+- **Configurable backend**: fast-path (BoringSSL single-shot) or native multi-frame (partial-chunk integrity for streaming-decrypt scenarios).
 
 ## Wiring state (post-`<THIS>`)
 
