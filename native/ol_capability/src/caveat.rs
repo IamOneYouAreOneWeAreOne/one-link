@@ -6,11 +6,11 @@ use crate::error::CapError;
 /// Tag bytes for the wire encoding of each caveat kind. Stable; new
 /// kinds get new tags (don't reuse).
 mod tag {
-    pub const EXPIRES_AT: u8 = 0x01;
-    pub const PEER_FINGERPRINT: u8 = 0x02;
-    pub const PATH_PREFIX: u8 = 0x03;
-    pub const OPERATION_IN: u8 = 0x04;
-    pub const AUDIT_TAG: u8 = 0x05;
+    pub(super) const EXPIRES_AT: u8 = 0x01;
+    pub(super) const PEER_FINGERPRINT: u8 = 0x02;
+    pub(super) const PATH_PREFIX: u8 = 0x03;
+    pub(super) const OPERATION_IN: u8 = 0x04;
+    pub(super) const AUDIT_TAG: u8 = 0x05;
 }
 
 /// A single caveat. Caveats compose: a capability's permission is the

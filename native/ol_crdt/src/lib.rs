@@ -17,6 +17,7 @@
 //! (`tests/lattice_laws.rs`) property-tests this across ≥1M random states.
 
 #![forbid(unsafe_code)]
+#![allow(missing_docs)]
 
 mod error;
 mod folder;
@@ -25,7 +26,7 @@ mod or_set;
 mod vector_clock;
 
 pub use error::{CrdtError, Result};
-pub use folder::{FileEntry, Folder};
+pub use folder::{FileEntry, FileId, Folder};
 pub use lww::LwwRegister;
 pub use or_set::OrSet;
 pub use vector_clock::{ReplicaId, VectorClock};

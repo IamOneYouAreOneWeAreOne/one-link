@@ -66,6 +66,10 @@ The plan's item #8 doesn't have a quantitative acceptance number (unlike RaptorQ
 3. **Constant-time TOFU compare**: byte-level XOR accumulator via `subtle::ConstantTimeEq`; same primitive that ADR-0021's signature check uses, same ≤1 % timing-variance gate from Phase C item #9.
 4. **No vendor CA dependency at module-level**: `ol_hwkey/Cargo.toml` declares zero dependencies on `apple-*`, `android-*`, `windows-tpm-*`. Sovereignty preserved at the workspace level.
 
+### Performance
+
+Criterion benches at [`ol_hwkey/benches/hwkey_bench.rs`](../../native/ol_hwkey/benches/hwkey_bench.rs): `check_tofu` 134 ns (match) / 111 ns (mismatch) — within 21% of each other; difference is the BLAKE3 derivation on first lookup, not the CT compare itself. `get_or_create` (existing label) 44 ns. The TOFU path is fast enough for every pair-up flow to invoke it without metering.
+
 ## Consequences
 
 **Positive:**

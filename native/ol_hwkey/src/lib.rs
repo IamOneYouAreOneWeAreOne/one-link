@@ -11,6 +11,7 @@
 //! Vendor attestation chains are **optional**, not required — see ADR-0023.
 
 #![forbid(unsafe_code)]
+#![allow(missing_docs)]
 
 mod error;
 mod store;

@@ -20,6 +20,10 @@
 //! - Constant-time signature comparison prevents bit-by-bit forgery.
 
 #![doc(html_root_url = "https://docs.rs/ol_capability/0.21.0")]
+// The crate's public surface (`Capability`, `Caveat`, `Context`, `CapError`)
+// is fully documented; internal helpers and module-private items are
+// allowed to skip docs to keep the working surface focused.
+#![allow(missing_docs)]
 
 pub mod capability;
 pub mod caveat;

@@ -1,0 +1,44 @@
+[package]
+name = "ol_fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Excluded from the parent workspace because cargo-fuzz applies its
+# own special profile and shouldn't pollute the workspace target dir.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+zeroize       = { version = "1.8", features = ["derive"] }
+ol_capability = { path = "../ol_capability" }
+ol_crdt       = { path = "../ol_crdt" }
+ol_wal        = { path = "../ol_wal" }
+ol_chunk      = { path = "../ol_chunk" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_capability_decode"
+path = "fuzz_targets/fuzz_capability_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_capability_attenuate_roundtrip"
+path = "fuzz_targets/fuzz_capability_attenuate_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_crdt_merge"
+path = "fuzz_targets/fuzz_crdt_merge.rs"
+test = false
+doc = false
+bench = false
