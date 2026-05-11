@@ -284,10 +284,18 @@ class HybridKey:
 
 
 class HybridKEM:
-    """Combines a classical KEM with a PQ KEM. Today the PQ slot is
-    NullKEM (zero bytes, zero contribution). Tomorrow it's
-    ML-KEM-768. The wire format + combine semantics stay identical
-    across the swap."""
+    """Combines a classical KEM with a PQ KEM. The PQ slot is NullKEM
+    by default (zero bytes, zero contribution) for wire-format
+    compatibility with peers that haven't enabled ML-KEM-768. New
+    peers should use :func:`default_kem` which returns a native ML-KEM-
+    backed implementation when available; that path produces non-empty
+    pq_ss bytes and provides actual HNDL resistance.
+
+    Wire-format compatibility: the encoded ``HybridKey`` always
+    length-prefixes both halves, so a Python ``HybridKEM(NullKEM)``
+    peer and a ``NativeHybridKEM`` peer can negotiate via the
+    daemon's capability advertisement layer without breaking the
+    framing."""
 
     def __init__(
         self, *,
@@ -331,3 +339,126 @@ class HybridKEM:
             pq_name=self.pq.name,
             transcript=transcript,
         )
+
+
+# ── NativeHybridKEM (ML-KEM-768 + X25519 via one_link_native) ─────
+
+
+class NativeHybridKEM:
+    """ML-KEM-768 + X25519 hybrid backed by ``ol_pqkem`` (ADR-0017).
+
+    Same outer surface as :class:`HybridKEM` (``keypair`` /
+    ``encapsulate`` / ``decapsulate`` returning a 32-byte
+    ``shared_secret``), but the wire format is the native crate's
+    combined-hybrid bytes, not Python's length-prefixed split. Use
+    :func:`default_kem` to pick the best-available backend.
+
+    The native primitive does the X-Wing-style BLAKE3 combine
+    internally; the Python-side ``hkdf_combine`` is NOT invoked.
+    Callers that need to bind a transcript should do so via a
+    second HKDF over the returned shared_secret.
+    """
+
+    name = "X25519+ML-KEM-768/native"
+
+    # Sizes mirrored from one_link_native.pqkem at module load time
+    # so callers don't need to import the native module to inspect.
+    classical_pub_size = 32
+    pq_pub_size = 1184
+    classical_ct_size = 32
+    pq_ct_size = 1088
+    ss_size = 32
+
+    def __init__(self) -> None:
+        from . import pqkem_native
+
+        if not pqkem_native.HAS_NATIVE:
+            raise RuntimeError(
+                "NativeHybridKEM requires one_link_native.pqkem; build via "
+                "`cd native && maturin develop --release`"
+            )
+        self._native = pqkem_native
+
+    def keypair(self) -> tuple[HybridKey, HybridKey]:
+        """Generate a fresh hybrid keypair. Returns ``(priv, pub)``
+        with each half wrapped in a :class:`HybridKey` so the surface
+        matches :class:`HybridKEM`."""
+        pk, sk = self._native.keypair()
+        pk_bytes = bytes(pk.to_bytes())
+        sk_bytes = bytes(sk.to_bytes())
+        # The native crate produces atomic pk/sk byte blobs; we expose
+        # them as a single "classical" half with empty pq half to
+        # preserve the HybridKey shape. Callers reading native peers
+        # decode by calling NativeHybridKEM.parse_*.
+        return (
+            HybridKey(classical=sk_bytes, pq=b""),
+            HybridKey(classical=pk_bytes, pq=b""),
+        )
+
+    def encapsulate(
+        self,
+        peer_pub: HybridKey,
+        *,
+        transcript: bytes = b"",
+    ) -> tuple[HybridKey, bytes]:
+        """Encapsulate against ``peer_pub``. Returns
+        ``(ciphertext, shared_secret)``. ``transcript`` is mixed in
+        via an HKDF post-hash so two sessions with the same hybrid
+        ciphertext but different transcripts derive distinct keys."""
+        pk = self._native.public_key_from_bytes(peer_pub.classical)
+        ct, ss = self._native.encapsulate(pk)
+        ss_bytes = bytes(ss)
+        if transcript:
+            ss_bytes = _post_bind_transcript(ss_bytes, transcript)
+        return HybridKey(classical=bytes(ct.to_bytes()), pq=b""), ss_bytes
+
+    def decapsulate(
+        self,
+        ciphertext: HybridKey,
+        my_priv: HybridKey,
+        *,
+        transcript: bytes = b"",
+    ) -> bytes:
+        """Decapsulate ``ciphertext`` with ``my_priv``."""
+        sk = self._native.secret_key_from_bytes(my_priv.classical)
+        ct = self._native.ciphertext_from_bytes(ciphertext.classical)
+        ss = bytes(self._native.decapsulate(sk, ct))
+        if transcript:
+            ss = _post_bind_transcript(ss, transcript)
+        return ss
+
+
+def _post_bind_transcript(shared_secret: bytes, transcript: bytes) -> bytes:
+    """Mix ``transcript`` into ``shared_secret`` via HKDF-Expand. Used
+    by :class:`NativeHybridKEM` so callers get the same session-
+    binding semantics they have with :class:`HybridKEM` + the
+    Python-side ``hkdf_combine``."""
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=b"OL/native-hybrid-transcript|v1|" + transcript,
+    ).derive(shared_secret)
+
+
+# ── default_kem factory ───────────────────────────────────────────
+
+
+def default_kem() -> HybridKEM | NativeHybridKEM:
+    """Pick the best-available hybrid KEM at runtime.
+
+    Returns :class:`NativeHybridKEM` when ``one_link_native.pqkem``
+    is installed; otherwise :class:`HybridKEM` with the X25519 +
+    NullKEM placeholder. New code should call this rather than
+    instantiating ``HybridKEM`` directly so daemons running on
+    machines with the native engine installed automatically get
+    real PQ protection.
+
+    The negotiation layer is the daemon's responsibility — if a peer
+    advertises only the Python placeholder, the local daemon
+    downgrades to ``HybridKEM(NullKEM)`` for that channel."""
+    from . import pqkem_native
+
+    if pqkem_native.HAS_NATIVE:
+        return NativeHybridKEM()
+    return HybridKEM()

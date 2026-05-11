@@ -1009,6 +1009,72 @@ class AdaptiveTransferBrain:
         return HealthState.HEALTHY, "send"
 
 
+class BanditRouteSelector:
+    """Per peer-pair bandit for route selection (ADR-0019, Phase C
+    item #5). Replaces the EMA-derived route choice in
+    :class:`AdaptiveTransferBrain` when ``one_link_native.bandit`` is
+    available.
+
+    Each candidate route is one bandit arm; the reward signal is the
+    observed bandwidth normalized into ``[0, 1]``. The bandit's
+    Beta-Bernoulli Thompson sampling explores under-tested routes
+    while exploiting known-good ones; per stress-test #3 it
+    SUBSUMES the EMA route memory rather than coexisting with it.
+    """
+
+    # Bandit reward is in [0, 1]. We saturate at this throughput so a
+    # 1 Gbps observation maps to roughly 1.0 reward; lower observations
+    # produce proportional reward, terminal failure produces 0.
+    REWARD_SATURATION_BPS = 1_000_000_000.0
+
+    def __init__(self, routes: tuple[str, ...], *, seed: int = 0xBABE_F00D) -> None:
+        if not routes:
+            raise ValueError("BanditRouteSelector requires at least one route")
+        from . import bandit_native
+
+        if not bandit_native.HAS_NATIVE:
+            raise RuntimeError(
+                "BanditRouteSelector requires one_link_native.bandit; "
+                "build via `cd native && maturin develop --release`"
+            )
+        self._routes: tuple[str, ...] = tuple(routes)
+        self._route_to_arm: dict[str, int] = {r: i for i, r in enumerate(self._routes)}
+        self._bandit = bandit_native.bandit(len(self._routes), seed)
+
+    @property
+    def routes(self) -> tuple[str, ...]:
+        return self._routes
+
+    def select_route(self) -> str:
+        """Thompson-sample an arm and return the corresponding route."""
+        return self._routes[self._bandit.select()]
+
+    def record_outcome(self, route: str, *, bandwidth_bps: float, success: bool) -> None:
+        """Update the bandit with observed throughput.
+
+        Failed observations (``success=False``) record reward 0; a
+        successful observation maps ``bandwidth_bps`` into ``[0, 1]``
+        by clamping at :attr:`REWARD_SATURATION_BPS`."""
+        if route not in self._route_to_arm:
+            raise KeyError(f"unknown route {route!r}; bandit arms: {self._routes}")
+        if not success:
+            reward = 0.0
+        else:
+            reward = min(1.0, max(0.0, bandwidth_bps / self.REWARD_SATURATION_BPS))
+        self._bandit.update(self._route_to_arm[route], reward)
+
+    def best_route(self) -> str:
+        """Return the route with the highest posterior mean (greedy
+        pick — useful for telemetry, NOT for exploration)."""
+        return self._routes[self._bandit.best_arm()]
+
+    def arm_stats(self) -> tuple[tuple[str, float, float], ...]:
+        """Per-arm ``(route, alpha, beta)`` tuples for diagnostics."""
+        return tuple(
+            (self._routes[i], a, b) for i, (a, b) in enumerate(self._bandit.arms())
+        )
+
+
 def decision_from_observations(
     *,
     size_bytes: int,
