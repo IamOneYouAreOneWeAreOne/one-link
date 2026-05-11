@@ -338,7 +338,7 @@ class _RelayListener:
     """A destination peer that has authenticated and is now waiting
     for incoming connector sessions."""
     pubkey: bytes
-    ws: object  # aiohttp.web.WebSocketResponse
+    ws: web.WebSocketResponse
     sessions: dict[bytes, "_RelaySession"] = field(default_factory=dict)
 
 
@@ -349,8 +349,8 @@ class _RelaySession:
     sides see only that id, never the other side's pubkey."""
     session_id: bytes
     listener_pubkey: bytes
-    connector_ws: object
-    listener_ws: object  # the listener's WS — server forwards to it tagged
+    connector_ws: web.WebSocketResponse
+    listener_ws: web.WebSocketResponse  # the listener's WS — server forwards to it tagged
     last_activity_at: float = field(default_factory=time.monotonic)
 
 
@@ -920,7 +920,7 @@ class RendezvousApp:
 
     # ─── relay (v0.5.5) ───────────────────────────────────────────
 
-    async def _handle_relay_listen(self, request: web.Request) -> web.WebSocketResponse:
+    async def _handle_relay_listen(self, request: web.Request) -> web.StreamResponse:
         """Destination side of the relay.
 
         Flow:
@@ -1083,7 +1083,7 @@ class RendezvousApp:
 
     async def _handle_relay_connect(
         self, request: web.Request
-    ) -> web.WebSocketResponse:
+    ) -> web.StreamResponse:
         """Source side of the relay.
 
         Flow:

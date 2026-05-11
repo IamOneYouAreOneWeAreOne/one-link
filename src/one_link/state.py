@@ -1758,7 +1758,7 @@ class State:
             # the broadcast id. Subsequent prior_rows iterations will
             # only fire when the hostname has rotated keys 3+ times,
             # which is rare; keeping the freshest is the practical UX.
-            if new_event_id is None:
+            if new_event_id is None and cur.lastrowid is not None:
                 new_event_id = int(cur.lastrowid)
         return new_event_id
 
@@ -3120,7 +3120,7 @@ class State:
                 """,
                 (peer_fp, msg_id, msg_kind, body_json, now),
             )
-            if cur.rowcount > 0:
+            if cur.rowcount > 0 and cur.lastrowid is not None:
                 return int(cur.lastrowid)
             row = self._conn.execute(
                 "SELECT id FROM outbox WHERE peer_fp = ? AND msg_id = ?",
@@ -3556,6 +3556,7 @@ class State:
                     note,
                 ),
             )
+            assert cur.lastrowid is not None, "INSERT did not return a rowid"
             return int(cur.lastrowid)
 
     def list_folder_audit(
@@ -3749,6 +3750,7 @@ class State:
                     applied_choice,
                 ),
             )
+            assert cur.lastrowid is not None, "INSERT did not return a rowid"
             return int(cur.lastrowid)
 
     def list_manifest_conflicts(

@@ -135,7 +135,11 @@ async def start_listener(
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            # POSIX-only; getattr keeps mypy quiet on Windows where
+            # the constant doesn't exist on the socket module.
+            sock.setsockopt(
+                socket.SOL_SOCKET, getattr(socket, "SO_REUSEPORT"), 1,
+            )
         except (AttributeError, OSError):
             pass  # not supported on Windows
         if use_ipv6:

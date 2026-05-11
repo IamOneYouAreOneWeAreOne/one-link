@@ -39,7 +39,7 @@ class ChunkSource:
         latency = self.latency_ms if self.latency_ms is not None else 10_000.0
         return (has_chunk, self.trust_score, -latency)
 
-    def route_score(self) -> tuple[float, float, float, float, float, str]:
+    def route_score(self) -> tuple[float, float, float, float, float, float, str]:
         """Deterministic strength score for this source.
 
         Higher is better. Trust remains first because chunk data is always
@@ -73,7 +73,9 @@ class ChunkSource:
 
     def route_score_without_tiebreaker(self) -> tuple[float, float, float, float, float, float]:
         score = self.route_score()
-        return score[:5]
+        # First 6 elements are floats; the 7th is peer_fp (the
+        # tie-breaker we strip).
+        return (score[0], score[1], score[2], score[3], score[4], score[5])
 
     def estimated_finish_seconds(self, *, queued_bytes: int, next_bytes: int) -> float:
         """Predict when this source would finish if assigned one more chunk."""

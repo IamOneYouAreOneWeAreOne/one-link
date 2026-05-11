@@ -16,7 +16,7 @@ import secrets
 import shutil
 import time
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import IO, Iterable, Iterator
 
 import blake3
 
@@ -187,7 +187,7 @@ class BlobWriter:
     """Streaming write context. Hash computed incrementally."""
 
     def __init__(self, tmp_path: Path, store: BlobStore):
-        self._fh = open(tmp_path, "wb")
+        self._fh: IO[bytes] | None = open(tmp_path, "wb")
         self._h = blake3.blake3()
         self._tmp = tmp_path
         self._store = store

@@ -221,10 +221,17 @@ def _point_mul_ct(scalar: int, P: tuple[int, int]) -> tuple[int, int]:
     return R
 
 
-_BASE = (None, _BY)
-# Recover x of base point.
+# Two-step: the first assignment is just a forward declaration so
+# ``_x_from_y`` can be called immediately below. The final value is
+# fully populated before any caller can observe ``_BASE``. Annotated
+# tuple[int, int] so the rest of the module can pass it to
+# ``_point_mul`` etc. without type narrowing.
 _BX = _x_from_y(_BY, 0)
-_BASE = (_BX, _BY)
+# The Curve25519 base point's Y is the canonical 9; _x_from_y always
+# returns a real int for the canonical base. Assert so mypy can drop
+# the Optional.
+assert _BX is not None, "Curve25519 base point _x_from_y returned None"
+_BASE: tuple[int, int] = (_BX, _BY)
 
 
 # ── Hash-to-point ──────────────────────────────────────────────────

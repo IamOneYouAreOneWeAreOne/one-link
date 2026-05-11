@@ -230,6 +230,8 @@ def verify_beacon(
         # Body is everything except the trailing 64-byte sig.
         body = blob[:-SIG_LEN]
         sig = blob[-SIG_LEN:]
+        if parsed.ed_pub is None:
+            raise ValueError("signed beacon missing ed_pub")
         try:
             Ed25519PublicKey.from_public_bytes(parsed.ed_pub).verify(sig, body)
         except InvalidSignature:

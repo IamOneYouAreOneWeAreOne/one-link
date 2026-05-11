@@ -79,7 +79,7 @@ class TrayIcon:
         self._thread: Optional[threading.Thread] = None
         self._available = False
         try:
-            import pystray  # noqa: F401
+            import pystray  # type: ignore[import-untyped]  # noqa: F401
             self._available = True
         except Exception as e:
             log.info(
@@ -210,6 +210,8 @@ class TrayIcon:
         self._thread.start()
 
     def _run_safely(self) -> None:
+        if self._icon is None:
+            return
         try:
             self._icon.run()
         except Exception as e:

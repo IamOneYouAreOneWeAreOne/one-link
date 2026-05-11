@@ -218,7 +218,11 @@ def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> 
     os.replace(tmp, p)
     if os.name != "nt":
         try:
-            dfd = os.open(str(p.parent), os.O_DIRECTORY)
+            # POSIX-only flag — Windows lacks O_DIRECTORY entirely;
+            # the runtime guard above prevents reaching this branch
+            # on Windows. The getattr keeps mypy quiet without
+            # changing semantics.
+            dfd = os.open(str(p.parent), getattr(os, "O_DIRECTORY"))
             try:
                 os.fsync(dfd)
             finally:
@@ -256,8 +260,14 @@ def load_or_create(
             try:
                 priv = serialization.load_pem_private_key(data, password=None)
                 # File was unencrypted on disk; if a passphrase is set now,
-                # re-save encrypted for "transparent migration."
+                # re-save encrypted for "transparent migration." The
+                # narrowing-cast tells mypy the loaded key is Ed25519
+                # (verified downstream by the caller); _save_key's
+                # signature is intentionally tight.
                 if pw:
+                    assert isinstance(priv, Ed25519PrivateKey), (
+                        "key file must hold an Ed25519 private key"
+                    )
                     _save_key(p, priv, pw)
             except (TypeError, ValueError):
                 pass

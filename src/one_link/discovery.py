@@ -16,9 +16,19 @@ import logging
 import os
 import socket
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from one_link.platform_guard import install_windows_platform_fastpath
+
+if TYPE_CHECKING:
+    # zeroconf is imported lazily off the event loop; surface the
+    # type names to the type checker so module-level annotations
+    # resolve without paying the runtime import cost.
+    from zeroconf.asyncio import (
+        AsyncServiceBrowser,
+        AsyncServiceInfo,
+        AsyncZeroconf,
+    )
 
 SERVICE_TYPE = "_onelink._tcp.local."
 ZEROCONF_IMPORT_TIMEOUT_S = 3.0
@@ -215,7 +225,7 @@ def _info_to_peer(info: AsyncServiceInfo, self_short_id: str) -> Peer | None:
     short_id = props.get("sid") or info.name.split(".", 1)[0]
     if short_id == self_short_id:
         return None
-    pub = props.get("pub", "")
+    pub = props.get("pub", "") or ""
     if not _valid_pub_hex(pub):
         return None
     server = info.server.rstrip(".") if info.server else "?"
@@ -233,10 +243,10 @@ def _info_to_peer(info: AsyncServiceInfo, self_short_id: str) -> Peer | None:
                     break
     return Peer(
         short_id=short_id,
-        hostname=props.get("host", server),
+        hostname=props.get("host", server) or "",
         address=addr,
         port=info.port or 0,
-        ed_pub_hex=pub,
+        ed_pub_hex=pub or "",
         rendezvous_urls=rdz_urls,
         # v0.7.3: device kind ("macos-laptop", etc). Bounded length;
         # we don't trust arbitrary strings inside the UI but the

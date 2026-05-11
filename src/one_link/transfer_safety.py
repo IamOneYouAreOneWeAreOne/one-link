@@ -117,6 +117,8 @@ def _disk_free_bytes(path: Path) -> int:
 
 
 def _clean_size(value: int | float | str | None) -> int | None:
+    if value is None:
+        return None
     try:
         size = int(value)
     except (TypeError, ValueError, OverflowError):

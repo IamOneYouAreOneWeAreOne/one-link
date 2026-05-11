@@ -478,6 +478,7 @@ def decrypt_message(
     # signed input so a relay can't substitute a different salt to
     # force a collision.
     if wire_version == PROTOCOL_VERSION:
+        assert nonce_salt is not None, "v2 wire frame must carry nonce_salt"
         sig_input = (
             group_id + sender_pubkey
             + struct.pack(">II", epoch, counter)

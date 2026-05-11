@@ -63,7 +63,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -135,7 +135,10 @@ class Channel:
     # When non-None, channel is in ratchet mode. send/recv branch
     # to the ratchet path and the legacy AEADs go unused. Set
     # exactly once per channel by maybe_activate_ratchet.
-    _dr_state: object = None  # one_link.double_ratchet.RatchetState
+    # ``Any`` so we don't pull double_ratchet at import time; the
+    # runtime contract: None until maybe_activate_ratchet flips it,
+    # then a one_link.double_ratchet.RatchetState until close().
+    _dr_state: Any = None
     # Phase C-3 (ADR-0026): cached native transfer session for
     # FILE_NATIVE_CHUNK encrypt/decrypt. Lazily built by the daemon
     # on first chunk; sender and receiver hold MATCHED instances

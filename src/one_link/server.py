@@ -458,10 +458,12 @@ def _translate_send_error(exc: BaseException) -> dict:
     # peers. The single most common cause is one device running an
     # older build than the other — the v0.7.0 wire-format change
     # binds AAD to the handshake transcript, which old builds don't.
+    InvalidTag: type | tuple = ()
     try:
-        from cryptography.exceptions import InvalidTag
+        from cryptography.exceptions import InvalidTag as _InvalidTag
+        InvalidTag = _InvalidTag
     except Exception:  # pragma: no cover
-        InvalidTag = ()  # type: ignore[assignment]
+        pass
     if isinstance(exc, InvalidTag):
         return {
             "status": 502,
@@ -674,9 +676,9 @@ class UIServer:
         # that create UIServer without calling start() can still
         # read these attributes without an AttributeError. Real
         # values populated by _start_https_listener().
-        self.https_site = None
-        self.https_port = None
-        self.https_cert_fp_sha256 = None
+        self.https_site: Optional[web.TCPSite] = None
+        self.https_port: Optional[int] = None
+        self.https_cert_fp_sha256: Optional[str] = None
         # v0.20.2: hook the data-bridge listener so browser-peers
         # can fetch peer rosters + recent messages from the daemon
         # over the DataChannel. Without this hook, /peer phones
@@ -1182,7 +1184,7 @@ class UIServer:
         return wrap
 
     def _guarded_ws(self, handler):
-        async def wrap(request: web.Request) -> web.WebSocketResponse:
+        async def wrap(request: web.Request) -> web.StreamResponse:
             if not self._check_token(request):
                 if self._rate_limited(
                     "auth_fail",
@@ -1427,8 +1429,8 @@ class UIServer:
                 status=409,
             )
         try:
-            import qrcode
-            import qrcode.image.svg
+            import qrcode  # type: ignore[import-untyped]
+            import qrcode.image.svg  # type: ignore[import-untyped]
         except ImportError:
             return web.json_response(
                 {"error": "qrcode_lib_missing", "hint": "pip install qrcode>=7"},
@@ -1580,8 +1582,8 @@ class UIServer:
                 status=413,
             )
         try:
-            import qrcode
-            import qrcode.image.svg
+            import qrcode  # type: ignore[import-untyped]
+            import qrcode.image.svg  # type: ignore[import-untyped]
         except ImportError:
             return web.json_response(
                 {"error": "qrcode_lib_missing", "hint": "pip install qrcode>=7"},
@@ -1601,7 +1603,7 @@ class UIServer:
 
     async def _peer_rtc_signaling(
         self, request: web.Request
-    ) -> web.WebSocketResponse:
+    ) -> web.StreamResponse:
         """v0.20.0: WebSocket signaling endpoint for browser-as-peer
         WebRTC connections. Handles the offer → answer + ICE trickle
         + DataChannel-up handshake, then closes the WS (the
@@ -1722,7 +1724,7 @@ class UIServer:
                         fingerprint=fingerprint,
                         pubkey_bytes=pubkey,
                         pc=pc,
-                        paired_ms=time.time() * 1000 if redeemed or is_known else None,
+                        paired_ms=int(time.time() * 1000) if redeemed or is_known else None,
                     )
 
                     # Hook DataChannels created by the browser side.
@@ -2422,25 +2424,25 @@ class UIServer:
             except Exception:
                 pass
         if self.daemon.discovery:
-            for p in self.daemon.discovery.registry.list():
+            for discovered in self.daemon.discovery.registry.list():
                 fp = ""
-                if p.ed_pub_hex:
+                if discovered.ed_pub_hex:
                     try:
                         from one_link.identity import fingerprint_of
-                        fp = fingerprint_of(bytes.fromhex(p.ed_pub_hex))
+                        fp = fingerprint_of(bytes.fromhex(discovered.ed_pub_hex))
                     except ValueError:
                         fp = ""
                 if fp and fp == self.daemon.me.fingerprint:
                     continue
-                if p.short_id == self.daemon.me.short_id:
+                if discovered.short_id == self.daemon.me.short_id:
                     continue
-                same_host = p.hostname in local_names
-                live[fp or p.short_id] = {
-                    "short_id": p.short_id,
-                    "hostname": p.hostname,
-                    "address": p.address,
-                    "port": p.port,
-                    "ed_pub_hex": p.ed_pub_hex,
+                same_host = discovered.hostname in local_names
+                live[fp or discovered.short_id] = {
+                    "short_id": discovered.short_id,
+                    "hostname": discovered.hostname,
+                    "address": discovered.address,
+                    "port": discovered.port,
+                    "ed_pub_hex": discovered.ed_pub_hex,
                     "fingerprint": fp,
                     "online": True,
                     "trust": "pending",  # default if no DB row yet
@@ -2449,7 +2451,7 @@ class UIServer:
                     "same_host": same_host,
                     # v0.7.3: device kind advertised via mDNS TXT
                     # (e.g. "macos-laptop", "windows-desktop").
-                    "device_kind": getattr(p, "device_kind", "") or "",
+                    "device_kind": getattr(discovered, "device_kind", "") or "",
                 }
         # Merge persistent state
         if self.daemon.state is not None:
@@ -2526,10 +2528,10 @@ class UIServer:
         # The rest are almost always stale daemon instances on this box
         # whose mDNS records haven't expired yet.
         by_local_hostname: dict[str, list[dict]] = {}
-        for p in live.values():
-            if p.get("same_host") and p.get("trust") == "pending":
-                key = (p.get("hostname") or "").lower()
-                by_local_hostname.setdefault(key, []).append(p)
+        for rec_dict in live.values():
+            if rec_dict.get("same_host") and rec_dict.get("trust") == "pending":
+                key = (rec_dict.get("hostname") or "").lower()
+                by_local_hostname.setdefault(key, []).append(rec_dict)
         ghosted_keys: set[str] = set()
         for group in by_local_hostname.values():
             if len(group) <= 1:
@@ -2544,7 +2546,8 @@ class UIServer:
                 )
             group.sort(key=_freshness, reverse=True)
             for stale in group[1:]:
-                ghosted_keys.add(stale.get("fingerprint") or stale.get("short_id"))
+                ghost_key = stale.get("fingerprint") or stale.get("short_id") or ""
+                ghosted_keys.add(ghost_key)
 
         # Filter according to mode + ghost collapse.
         # Order matters: rejected gets its own gate so include_rejected
@@ -2603,7 +2606,7 @@ class UIServer:
             # CAPS) so the UI can warn before a wire-mismatch turns into
             # an opaque InvalidTag. None until first CAPS exchange.
             p["app_version"] = None
-            peer_features = []
+            peer_features: list[str] = []
             if sess is not None:
                 ch = getattr(sess, "channel", None)
                 if ch is not None and getattr(ch, "peer_caps", None):
@@ -3784,6 +3787,7 @@ class UIServer:
         ):
             return web.json_response({"error": "bad group id"}, status=400)
         key = self._chat_pref_key(scope, ident, kind)
+        stored: bool | str | None
         if value is None or value == "":
             self.daemon.state.delete_setting(key)
             stored = None
@@ -4325,12 +4329,15 @@ class UIServer:
         # v0.7.5: bulk-fetch reactions for the returned messages so
         # the UI can render the chip row in one shot.
         try:
-            ids = [m.get("id") for m in msgs if m.get("id")]
+            ids: list[str] = [
+                str(m.get("id")) for m in msgs if m.get("id")
+            ]
             reactions = self.daemon.state.list_reactions_for_messages(ids)
         except Exception:
             reactions = {}
         for m in msgs:
-            r = reactions.get(m.get("id"))
+            mid = m.get("id")
+            r = reactions.get(str(mid)) if mid is not None else None
             if r:
                 m["reactions"] = r
         return web.json_response({"messages": msgs})
@@ -4720,7 +4727,11 @@ class UIServer:
                 status=403,
             )
         try:
-            result = await self.daemon.rename_group(group_id=gid, name=name)
+            # rename_group is added dynamically via groups extension;
+            # mypy can't see the runtime attribute on Daemon.
+            result = await self.daemon.rename_group(  # type: ignore[attr-defined]
+                group_id=gid, name=name,
+            )
             return web.json_response({"ok": True, **result})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -4739,7 +4750,9 @@ class UIServer:
             limit = 200
         rows = self.daemon.state.recent_group_messages(group_id=gid, limit=limit)
         try:
-            ids = [r.get("id") for r in rows if r.get("id")]
+            ids: list[str] = [
+                str(r.get("id")) for r in rows if r.get("id")
+            ]
             reactions = self.daemon.state.list_reactions_for_messages(ids)
         except Exception:
             reactions = {}
@@ -4765,7 +4778,8 @@ class UIServer:
                 "deleted": bool(r.get("deleted_at_ms")),
                 "ts_ms": r.get("ts_ms"),
             }
-            rx = reactions.get(item["id"])
+            item_id = item.get("id")
+            rx = reactions.get(str(item_id)) if item_id is not None else None
             if rx:
                 item["reactions"] = rx
             out.append(item)
@@ -5341,8 +5355,20 @@ class UIServer:
         upload_path: Optional[Path] = None
         upload_name: str = "upload.bin"
 
+        from aiohttp.multipart import MultipartReader as _MultipartReader
+
         try:
-            async for part in reader:
+            async for raw_part in reader:
+                # aiohttp's reader yields either BodyPartReader (the
+                # leaves we care about) or nested MultipartReader.
+                # Skip the latter — the API only accepts a flat form.
+                # Test doubles aren't either type but expose ``name``;
+                # accept them via duck-typing so the server tests can
+                # exercise this surface without spinning up an aiohttp
+                # request.
+                if isinstance(raw_part, _MultipartReader) or raw_part is None:
+                    continue
+                part: Any = raw_part
                 if part.name == "peer":
                     peer_needle = (await part.text()).strip()
                 elif part.name == "file":
@@ -5413,13 +5439,14 @@ class UIServer:
             try:
                 result = await self.daemon.send_file(peer, upload_path)
             except (RuntimeError, OSError) as first_err:
-                if getattr(first_err, "transfer_id", None):
+                transfer_id_attr = getattr(first_err, "transfer_id", None)
+                if transfer_id_attr:
                     keep_upload_for_resume = True
                     return web.json_response(
                         {
                             "ok": True,
                             "paused": True,
-                            "transfer_id": first_err.transfer_id,
+                            "transfer_id": transfer_id_attr,
                             "error": str(first_err),
                             "hint": "Transfer paused; it will resume automatically when the device reconnects.",
                         },
@@ -5435,13 +5462,14 @@ class UIServer:
                 result = await self.daemon.send_file(fresh_peer, upload_path)
             return web.json_response({"ok": True, "result": result})
         except Exception as e:
-            if getattr(e, "transfer_id", None):
+            transfer_id_attr = getattr(e, "transfer_id", None)
+            if transfer_id_attr:
                 keep_upload_for_resume = True
                 return web.json_response(
                     {
                         "ok": True,
                         "paused": True,
-                        "transfer_id": e.transfer_id,
+                        "transfer_id": transfer_id_attr,
                         "error": str(e),
                         "hint": "Transfer paused; it will resume automatically when the device reconnects.",
                     },
@@ -5474,7 +5502,7 @@ class UIServer:
                         "risk": classify_file_risk(f.name),
                     }
                 )
-        files.sort(key=lambda x: x["mtime_ms"], reverse=True)
+        files.sort(key=lambda x: int(x["mtime_ms"]), reverse=True)  # type: ignore[arg-type, call-overload]
         return web.json_response({"files": files})
 
     async def api_transfers(self, request: web.Request) -> web.Response:
@@ -6122,6 +6150,7 @@ class UIServer:
             log.info("peer-https: skipping (no cert)")
             return
         # Try port+1 first, then fall through to subsequent ports.
+        assert self.runner is not None, "https path needs the main UI runner up"
         bound = False
         for offset in range(1, UI_PORT_FALLBACK_RANGE + 1):
             candidate = self.port + offset

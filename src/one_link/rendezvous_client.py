@@ -87,7 +87,7 @@ from one_link.rendezvous_proto import (
     RegisterAck,
     sign_register,
     sign_revoke,
-    _b64,  # type: ignore  - private helper, used for lookup URL building
+    _b64,  # noqa: F401 — private helper, used for lookup URL building
 )
 
 log = logging.getLogger("one_link.rendezvous_client")
@@ -219,9 +219,12 @@ class RendezvousClient:
             raise ValueError("target_pubkey must be 32 bytes")
         path = f"/api/v1/lookup/{_b64(target_pubkey)}"
 
+        assert self._session is not None, "RendezvousClient.start() must be called first"
+        session = self._session
+
         async def _try_one(url: str) -> Optional[LookupAck]:
             try:
-                async with self._session.get(url + path) as r:
+                async with session.get(url + path) as r:
                     if r.status == 404:
                         return None
                     if r.status != 200:
@@ -284,6 +287,7 @@ class RendezvousClient:
                 nat_type="unknown",
                 capabilities=self._capabilities,
             )
+            assert self._session is not None
             try:
                 async with self._session.post(
                     url + "/api/v1/register", json=req.to_wire()
@@ -315,11 +319,12 @@ class RendezvousClient:
     async def _revoke_all(self) -> None:
         if self._session is None:
             return
+        session = self._session
         rev = sign_revoke(private_key=self._private_key, pubkey=self._pubkey)
 
         async def _try_one(url: str) -> None:
             try:
-                async with self._session.post(
+                async with session.post(
                     url + "/api/v1/revoke", json=rev.to_wire()
                 ) as r:
                     log.debug("rendezvous %s revoke status=%d", url, r.status)
@@ -370,7 +375,11 @@ def discover_local_endpoints(
     try:
         host = socket.gethostname()
         for info in socket.getaddrinfo(host, None, family=socket.AF_INET):
-            addr = info[4][0]
+            # info[4] for AF_INET is (host, port); host is always str.
+            addr_raw = info[4][0]
+            if not isinstance(addr_raw, str):
+                continue
+            addr: str = addr_raw
             if not addr or addr in seen:
                 continue
             seen.add(addr)

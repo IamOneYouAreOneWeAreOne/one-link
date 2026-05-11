@@ -179,7 +179,10 @@ class _RelayStreamWriter:
         if self._on_close is not None:
             with contextlib.suppress(Exception):
                 loop = asyncio.get_event_loop()
-                loop.create_task(self._on_close())
+                # Wrap in ensure_future so an Awaitable that isn't a
+                # native coroutine (e.g. a generator-based future)
+                # still schedules cleanly.
+                asyncio.ensure_future(self._on_close(), loop=loop)
 
     async def wait_closed(self) -> None:
         # Wait for sender_loop to flush + exit.

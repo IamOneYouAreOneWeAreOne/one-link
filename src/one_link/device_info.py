@@ -126,7 +126,7 @@ def _detect_windows() -> DeviceInfo:
     # without elevation. Try psutil first; fall back to powershell.
     has_battery = False
     try:
-        import psutil  # type: ignore[import-not-found]
+        import psutil  # type: ignore[import-untyped]
         b = psutil.sensors_battery()
         has_battery = b is not None
     except Exception:

@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
 
 MiB = 1024 * 1024
@@ -430,7 +430,10 @@ def build_transfer_autopilot_plan(
     compression posture, retry mode, and the speed/savings users care about.
     """
 
-    d = decision.to_dict() if isinstance(decision, TransferBrainDecision) else dict(decision)
+    d: dict[str, Any] = (
+        decision.to_dict() if isinstance(decision, TransferBrainDecision)
+        else dict(decision)
+    )
     features = {str(f) for f in peer_features}
     mode = str(d.get("selected") or "hash_stream")
     route = str(d.get("route") or "lan")
@@ -682,7 +685,7 @@ class AdaptiveTransferScheduler:
 
     def __init__(
         self,
-        profile: Mapping[str, object],
+        profile: Mapping[str, Any],
         *,
         min_window_chunks: int = 1,
         max_window_chunks: int = 32,
@@ -782,7 +785,7 @@ class AdaptiveTransferScheduler:
             reason=str(reason)[:80],
         )
 
-    def snapshot(self) -> dict[str, int | float | str | list[dict]]:
+    def snapshot(self) -> dict[str, Any]:
         return {
             "window_chunks": self.window_chunks,
             "window_bytes": self.window_bytes,
