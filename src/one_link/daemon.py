@@ -61,6 +61,7 @@ import zlib
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import blake3
 
@@ -70,7 +71,6 @@ from one_link.capabilities import (
     FILE_BINARY_FRAME,
     FILE_CDC_BINARY_FRAME,
     FILES,
-    FILE_CDC,
     FILE_SWARM,
     FOLDER_SYNC,
     LOCAL_CAPABILITIES,
@@ -86,7 +86,6 @@ from one_link.cdc import (
     hash_path,
     index_path,
 )
-from one_link.crdt import ManifestEntry, VectorClock
 from one_link.discovery import Discovery, Peer
 from one_link.identity import Identity, fingerprint_of, load_or_create
 from one_link.native_cdc import native_cdc_status
@@ -94,7 +93,6 @@ from one_link.pairing import PairingTracker, PairState, compute_sas
 from one_link.paths import (
     data_dir,
     inbox_dir,
-    message_log_path,
 )
 from one_link.state import State
 from one_link.swarm_plan import plan_swarm_sources, source_from_hashes
@@ -868,50 +866,11 @@ class Daemon:
             presence=self._presence_for_wire(self.get_my_presence()),
         )
 
-    def get_my_presence(self) -> str:
-        if self.state is None:
-            return "online"
-        with contextlib.suppress(Exception):
-            status = (self.state.get_setting("presence", "online") or "online").lower()
-            if status in {"online", "away", "dnd", "invisible"}:
-                return status
-        return "online"
-
     def _presence_for_wire(self, status: str) -> str:
         clean = (status or "online").lower()
         if clean == "invisible":
             return "offline"
         return clean if clean in {"online", "away", "dnd", "offline"} else "online"
-
-    def record_peer_presence(self, peer_fp: str | None, status: str | None) -> None:
-        if not peer_fp:
-            return
-        clean = str(status or "online").lower()
-        if clean not in {"online", "away", "dnd", "offline"}:
-            return
-        self._peer_presence[str(peer_fp)] = clean
-        if self.ui_server is not None:
-            with contextlib.suppress(Exception):
-                self.ui_server.broadcast({
-                    "type": "peer_presence",
-                    "fingerprint": str(peer_fp),
-                    "presence": clean,
-                })
-
-    async def set_my_presence(self, status: str) -> str:
-        clean = str(status or "online").lower()
-        if clean not in {"online", "away", "dnd", "invisible"}:
-            raise ValueError("presence must be online, away, dnd, or invisible")
-        if self.state is not None:
-            with contextlib.suppress(Exception):
-                self.state.set_setting("presence", clean)
-        wire_status = self._presence_for_wire(clean)
-        msg = make_msg("PRESENCE", self.me.short_id, presence=wire_status)
-        for sess in list(self._outbound_sessions.values()):
-            with contextlib.suppress(Exception):
-                async with sess.lock:
-                    await sess.channel.send(encode_msg(msg))
-        return clean
 
     def _channel_bind_for(self, channel: ch.Channel) -> dict:
         """Session binding advertised inside encrypted CAPS."""
@@ -1634,7 +1593,7 @@ class Daemon:
             if t.updated_ms > cutoff:
                 continue
             try:
-                rec = self._mark_transfer_waiting(
+                self._mark_transfer_waiting(
                     t.id,
                     path=Path(meta.get("path") or t.name),
                     error="transfer stalled; waiting to resume automatically",
@@ -1993,7 +1952,6 @@ class Daemon:
             # already imported at module level and shadowing it would
             # cause UnboundLocalError on FILE_CHUNK handling later in
             # the same function (Python's local-name analysis).
-            from one_link import caps_grants as _caps_grants
             try:
                 grant_b64 = msg.get("grant_b64", "")
                 if not isinstance(grant_b64, str) or not grant_b64:

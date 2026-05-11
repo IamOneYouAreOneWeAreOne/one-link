@@ -9,7 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.harness import daemon_pair, inbox_files, message_log, request
+from tests.harness import (
+    daemon_pair,
+    inbox_files,
+    message_log,
+    request,
+    wait_for_inbox_file,
+)
 
 
 # Global slow flag — these tests spin processes and use real mDNS, give them
@@ -182,7 +188,13 @@ def test_file_send_cdc_skips_chunks_receiver_already_has():
             p.a.control_port, cmd="send_file", peer=p.b.short_id, path=str(base)
         )
         assert first["ok"], first
-        time.sleep(0.8)
+        # Wait for the first transfer to fully land before issuing the
+        # second — chunks must be in the receiver's store for CDC skip
+        # to fire. Event-driven w/ size gate; the inbox file appears
+        # at stream-start, not at completion.
+        wait_for_inbox_file(
+            p.b.home, "base.bin", expected_size=len(payload), timeout=20.0,
+        )
 
         second = request(
             p.a.control_port, cmd="send_file", peer=p.b.short_id, path=str(derived)
@@ -192,11 +204,11 @@ def test_file_send_cdc_skips_chunks_receiver_already_has():
         assert result["cdc"] is True
         assert result["cdc_skipped"] > 0
 
-        time.sleep(0.8)
-        files = inbox_files(p.b.home)
-        match = [f for f in files if f.name.endswith("derived.bin")]
-        assert match
-        assert match[0].read_bytes() == derived.read_bytes()
+        derived_bytes = derived.read_bytes()
+        match_path = wait_for_inbox_file(
+            p.b.home, "derived.bin", expected_size=len(derived_bytes), timeout=20.0,
+        )
+        assert match_path.read_bytes() == derived_bytes
 
 
 def test_file_send_compresses_easy_payloads():

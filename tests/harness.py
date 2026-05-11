@@ -348,3 +348,69 @@ def inbox_files(home: Path) -> list[Path]:
     if not p.exists():
         return []
     return sorted(p.iterdir())
+
+
+def wait_for_inbox_file(
+    home: Path,
+    name_suffix: str,
+    *,
+    expected_size: int | None = None,
+    timeout: float = 15.0,
+    poll_interval: float = 0.05,
+    stable_for: float = 0.2,
+) -> Path:
+    """Wait until a file whose name ends with ``name_suffix`` appears in
+    the daemon's inbox AND the size has stabilised. Returns the
+    matching Path. Raises ``AssertionError`` if the file does not
+    appear within ``timeout``, or never settles.
+
+    ``expected_size`` — if set, wait until the file is at least that
+    large. The receiver creates the inbox file when streaming starts,
+    not when the transfer completes; without a size gate the caller
+    races a partially-written file.
+
+    ``stable_for`` — additional seconds the size must remain unchanged
+    before the file is considered settled. Cheap insurance against the
+    last-chunk-still-flushing race.
+
+    Replaces brittle ``time.sleep(N)`` patterns in integration tests
+    with an event-driven check that keeps the suite fast on a hot box
+    and reliable on a slow one (CI, AV scan, hot native rebuild)."""
+    deadline = time.monotonic() + timeout
+    last_files: list[Path] = []
+    target: Path | None = None
+    while time.monotonic() < deadline:
+        last_files = inbox_files(home)
+        for f in last_files:
+            if f.name.endswith(name_suffix):
+                target = f
+                break
+        if target is not None:
+            try:
+                size = target.stat().st_size
+            except FileNotFoundError:
+                target = None
+                time.sleep(poll_interval)
+                continue
+            if expected_size is None or size >= expected_size:
+                stable_until = time.monotonic() + stable_for
+                last_size = size
+                ok = True
+                while time.monotonic() < stable_until:
+                    time.sleep(poll_interval)
+                    try:
+                        cur = target.stat().st_size
+                    except FileNotFoundError:
+                        ok = False
+                        break
+                    if cur != last_size:
+                        last_size = cur
+                        stable_until = time.monotonic() + stable_for
+                if ok:
+                    return target
+        time.sleep(poll_interval)
+    raise AssertionError(
+        f"timed out after {timeout}s waiting for stable inbox file "
+        f"ending with {name_suffix!r} "
+        f"(expected_size={expected_size}); saw {[f.name for f in last_files]}"
+    )

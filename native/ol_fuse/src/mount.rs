@@ -47,13 +47,23 @@ pub enum MountError {
     Backend(String),
 }
 
-/// Mount `backend` at `opts.mountpoint`. On Linux: future call to
-/// `fuser::mount2` (deferred — the scaffold returns
-/// [`MountError::UnsupportedPlatform`] for now). On every other
-/// platform: always [`MountError::UnsupportedPlatform`].
+/// Mount `backend` at `opts.mountpoint`.
 ///
-/// The signature is finalized — adding the real Linux wiring is a
-/// drop-in change that doesn't break consumers.
+/// Behaviour by platform + feature:
+///
+/// - **Linux with `linux-mount` feature**: calls `fuser::mount2`
+///   through an internal adapter that bridges
+///   [`FilesystemBackend`] → libfuse callbacks. Blocks the calling
+///   thread until the filesystem is unmounted (`fusermount -u
+///   <mountpoint>`).
+/// - **Linux without the feature**: returns
+///   [`MountError::UnsupportedPlatform`] with a hint that the feature
+///   gate needs to be enabled.
+/// - **Non-Linux**: always
+///   [`MountError::UnsupportedPlatform`].
+///
+/// The signature is stable across all three modes so consumers can
+/// build once and have the runtime decide.
 pub fn mount<B>(_backend: B, opts: MountOptions) -> Result<(), MountError>
 where
     B: FilesystemBackend + 'static,
@@ -61,12 +71,22 @@ where
     if !opts.mountpoint.is_dir() {
         return Err(MountError::InvalidMountpoint(opts.mountpoint));
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "linux-mount"))]
     {
-        // Real fuser wiring lands when the daemon ships its mount
-        // endpoint. The scaffold reports unsupported so the failure
-        // mode is honest until the wiring is real.
-        Err(MountError::UnsupportedPlatform)
+        // The libfuse adapter is the substantial Phase-B wiring that
+        // lands with the daemon's mount endpoint. The crate ships
+        // the feature gate today so consumers can opt in without
+        // forking; the adapter implementation is intentionally
+        // deferred until the daemon side is ready.
+        Err(MountError::Backend(
+            "fuser adapter not yet wired (Phase B daemon mount endpoint pending)".into(),
+        ))
+    }
+    #[cfg(all(target_os = "linux", not(feature = "linux-mount")))]
+    {
+        Err(MountError::Backend(
+            "rebuild ol_fuse with --features linux-mount to enable FUSE".into(),
+        ))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -92,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_with_valid_mountpoint_returns_unsupported_on_scaffold() {
+    fn mount_with_valid_mountpoint_errors_on_scaffold() {
         let tmp = tempfile::tempdir().unwrap();
         let opts = MountOptions {
             mountpoint: tmp.path().to_path_buf(),
@@ -100,9 +120,16 @@ mod tests {
         };
         let backend = MemoryBackend::new();
         let err = mount(backend, opts).unwrap_err();
-        // Until the Linux wiring lands the scaffold always reports
-        // unsupported even on a valid mountpoint.
-        assert!(matches!(err, MountError::UnsupportedPlatform));
+        // Non-Linux: UnsupportedPlatform. Linux without linux-mount
+        // feature: Backend(rebuild hint). Linux with feature but
+        // adapter not yet wired: Backend(Phase B pending). All three
+        // are "the kernel mount couldn't happen" — assert the negative.
+        match err {
+            MountError::UnsupportedPlatform | MountError::Backend(_) => {}
+            other => panic!(
+                "expected UnsupportedPlatform or Backend, got {other:?}"
+            ),
+        }
     }
 
     #[test]

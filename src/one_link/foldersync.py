@@ -325,6 +325,8 @@ class FolderEngine:
         local: Optional[ManifestEntry],
         remote: ManifestEntry,
         legacy_winner: Optional[ManifestEntry],
+        *,
+        peer_fp: Optional[str] = None,
     ) -> None:
         """Run the native OR-set add-wins reconciliation in parallel
         with the legacy ``merge_manifest_entries`` decision and count
@@ -332,6 +334,14 @@ class FolderEngine:
         manifest. Used to validate that the lattice-correct CRDT
         agrees with the legacy merge before any cutover flips the
         authoritative bit.
+
+        ``peer_fp`` — the remote peer's fingerprint hex string, if
+        known. Used to derive a stable remote replica id so the
+        OR-set's add tags are deterministic across replicas with the
+        same view. When ``peer_fp`` is None (rare; legacy callers
+        without the parameter), we fall back to a synthesised id that
+        is still distinct from the local replica but loses the
+        cross-daemon-stable property.
 
         Disagreement definition: the native folder's view of whether
         the file is *present* (``contains(file_id) == True``) after
@@ -353,11 +363,21 @@ class FolderEngine:
             local_folder = _folder_native.manifest_entries_to_native_folder(
                 local_entries, replica_id=replica
             )
-            # Remote folder uses a distinct synthetic replica id so the
-            # OR-set tags don't collide with the local side.
-            remote_replica = bytes(
-                ((b + 1) & 0xFF) for b in replica[:32].ljust(32, b"\x00")
-            )
+            # Derive the remote replica id from the peer fingerprint
+            # if available — keeps OR-set tags deterministic per peer
+            # pair. Fall back to a synthesised id when peer_fp is
+            # missing; the id still has to differ from the local one
+            # so the OR-set tags don't collide.
+            if peer_fp:
+                remote_replica = (
+                    peer_fp.encode("utf-8")
+                    if isinstance(peer_fp, str)
+                    else peer_fp
+                )
+            else:
+                remote_replica = bytes(
+                    ((b + 1) & 0xFF) for b in replica[:32].ljust(32, b"\x00")
+                )
             remote_folder = _folder_native.manifest_entries_to_native_folder(
                 remote_entries, replica_id=remote_replica
             )
@@ -491,7 +511,9 @@ class FolderEngine:
             # cross-check. The OR-set add-wins lattice decides
             # independently; disagreement is logged + counted so we can
             # confirm zero-diff before flipping authoritative.
-            self._native_reconcile_check(folder_name, local, remote, winner)
+            self._native_reconcile_check(
+                folder_name, local, remote, winner, peer_fp=peer_fp,
+            )
             if winner is None:
                 continue
             self.state.upsert_manifest_entry(

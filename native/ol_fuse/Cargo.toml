@@ -14,14 +14,20 @@ crate-type = ["lib"]
 thiserror = { workspace = true }
 blake3    = { workspace = true }
 
-# fuser is Linux-only. Pulling it on Windows/macOS breaks the workspace
-# build, so we gate the dependency on cfg(target_os = "linux") via
-# target-cfg dependency tables. The non-Linux platforms get a stub
-# implementation that returns ``MountError::UnsupportedPlatform``.
-#
-# Adding `fuser` as a real dependency lands when the Linux mount path
-# starts shipping; the scaffold keeps the API surface stable so the
-# crate's consumers (daemon FUSE mount endpoint) can build today.
+# fuser is Linux-only and links against libfuse3. Pulling it on
+# Windows/macOS breaks the workspace build, so it goes in the Linux-
+# only target-cfg block below. Non-Linux platforms get a stub mount()
+# returning ``MountError::UnsupportedPlatform``.
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser     = { version = "0.15", optional = true }
+libc      = { version = "0.2", optional = true }
+
+[features]
+# Default: scaffold only. Enabling `linux-mount` pulls in fuser + libc
+# and switches `mount()` to the real `fuser::mount2` path. Daemon
+# consumers opt in once the Linux distro packages libfuse3.
+default = []
+linux-mount = ["dep:fuser", "dep:libc"]
 
 [dev-dependencies]
 tempfile  = { workspace = true }

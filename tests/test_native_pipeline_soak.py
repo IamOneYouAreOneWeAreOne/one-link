@@ -125,15 +125,18 @@ def test_foldersync_native_pipeline_soak(tmp_path: Path):
         # sends a higher-vclock tombstone. Legacy says tombstone wins
         # (vclock dominance); the OR-set is add-wins so the local
         # entry survives. This divergence is *expected* during the
-        # transition window (ADR-0022). The soak bounds it at 5% so a
-        # genuine regression (e.g. a bug that causes the lattice to
-        # drop entries) still trips the gate.
+        # transition window (ADR-0022).
+        #
+        # Measured rate at 5k iters with the default workload mix is
+        # ≈0.04% (2 / 5000). We bound at 1.0% — 25x measured headroom,
+        # tight enough that a real regression (e.g. lattice losing
+        # entries to a merge bug) blows the gate immediately.
         disagree_ratio = stats["reconcile_disagreements"] / max(
             1, stats["reconcile_checks"]
         )
-        assert disagree_ratio < 0.05, (
+        assert disagree_ratio < 0.01, (
             f"native reconcile disagreement ratio {disagree_ratio:.2%} "
-            f"exceeds 5% budget — likely a real regression: {stats}"
+            f"exceeds 1% budget — likely a real regression: {stats}"
         )
         assert stats["reconcile_checks"] >= iters, (
             "reconcile check counter should have incremented every iter"
