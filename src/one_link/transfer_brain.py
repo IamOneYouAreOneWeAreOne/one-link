@@ -15,6 +15,7 @@ likely to save more than it costs.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Iterable, Mapping
@@ -914,6 +915,31 @@ class AdaptiveTransferBrain:
         size = max(0, int(size_bytes))
         hit_rate = min(1.0, max(0.0, float(prior_hit_rate or 0.0)))
         candidate_routes = tuple(routes or (s.route for s in self.route_stats()) or ("lan",))
+        # Phase C-3 (ADR-0027): bandit-driven route picker. Per the
+        # plan's stress-test #3, the bandit REPLACES (not coexists with)
+        # the EMA route memory. When the bandit has been seeded by
+        # observations and we have ≥2 candidate routes, Thompson-sample
+        # one route and constrain decide()'s candidate generation to
+        # that route only. The Pareto frontier still picks the MODE
+        # within the chosen route (hash mode / fixed-size / CDC /
+        # swarm / etc.).
+        #
+        # Roll back via ONE_LINK_BANDIT_ROUTE_PICKER=0 for production
+        # incidents that need the legacy multi-route Pareto search.
+        if (
+            self._bandit is not None
+            and len(candidate_routes) > 1
+            and os.environ.get("ONE_LINK_BANDIT_ROUTE_PICKER", "1") != "0"
+        ):
+            try:
+                bandit_pick = self._bandit.select_route()
+                if bandit_pick in candidate_routes:
+                    candidate_routes = (bandit_pick,)
+            except Exception:
+                # Bandit divergence (e.g. arm-count mismatch) silently
+                # falls back to the legacy multi-route path. Never
+                # break a transfer because of a bandit hiccup.
+                pass
         mesh = tuple(mesh_nodes or ())
         mesh_coherence = max((n.coherence for n in mesh), default=0.5)
         mesh_parallelism = max(1, min(8, sum(1 for n in mesh if n.coherence >= 0.55)))

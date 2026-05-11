@@ -142,6 +142,54 @@ def test_two_replicas_merge_lattice_correctly():
     assert b_into.len() == 4
 
 
+def test_mirror_observe_zero_divergence_on_live_then_tombstone(tmp_path):
+    """Phase C-3 (ADR-0027) active cross-check: observing a live entry
+    then a tombstone should produce zero divergence events because the
+    native folder's contains_path tracks the legacy merge decisions
+    exactly."""
+    from one_link.blobstore import BlobStore
+    from one_link.foldersync import FolderEngine
+    from one_link.state import State
+
+    state_path = tmp_path / "state.sqlite"
+    blobs_path = tmp_path / "blobs"
+    blobs_path.mkdir()
+    state = State(str(state_path))
+    blobs = BlobStore(str(blobs_path))
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    try:
+        engine = FolderEngine(
+            state=state,
+            blob_store=blobs,
+            my_fingerprint="alicedevice0000000000000000000000",
+            loop=loop,
+        )
+        live = legacy_crdt.ManifestEntry(
+            file_path="/share/x.pdf",
+            blob_hash="abc",
+            size=1024,
+            mtime_ms=100,
+            vclock=legacy_crdt.VectorClock.from_dict({"alice": 1}),
+        )
+        engine._mirror_observe("f", live)
+        tomb = legacy_crdt.ManifestEntry(
+            file_path="/share/x.pdf",
+            blob_hash=None,
+            size=None,
+            mtime_ms=None,
+            vclock=legacy_crdt.VectorClock.from_dict({"alice": 2}),
+        )
+        engine._mirror_observe("f", tomb)
+        stats = engine.native_mirror_stats()
+        # The cross-check fires after each observe(); both should agree
+        # with the legacy decision, so divergence should remain at 0.
+        assert stats["divergence_events"] == 0
+    finally:
+        loop.close()
+
+
 def test_idempotent_remerge_via_twin():
     """Idempotency at the adapter level: merging two folders built
     from the SAME manifest produces the same length. (The full

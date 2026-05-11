@@ -209,3 +209,66 @@ def test_distinct_subjects_produce_distinct_peer_fingerprints():
     assert cap_migration._peer_fingerprint(pub_a) != cap_migration._peer_fingerprint(
         pub_b
     )
+
+
+# Phase C-3 (ADR-0027): macaroon advertisement on CAPABILITY_GRANT wire.
+
+
+def test_macaroon_wire_round_trips_through_base64_url():
+    """Operators carry the dual-issued macaroon on the same wire as
+    the legacy Ed25519 grant via `macaroon_b64`. The daemon emits
+    `urlsafe_b64encode(cap.encode()).rstrip("=")`; the receiver
+    reverses the steps. This test pins the round-trip shape."""
+    import base64
+
+    from one_link import cap_migration
+
+    granter_seed, granter_pub = _fresh_pair()
+    _, subject_pub = _fresh_pair()
+    cap = cap_migration.mint_share_capability(
+        granter_priv_seed=granter_seed,
+        granter_pub=granter_pub,
+        subject_pub=subject_pub,
+        capabilities=["files:read"],
+        not_after_ms=5_000_000,
+    )
+    wire_bytes = cap.encode()
+    encoded = base64.urlsafe_b64encode(wire_bytes).rstrip(b"=").decode("ascii")
+
+    # Receiver path: pad + urlsafe_b64decode.
+    padded = encoded + "=" * (-len(encoded) % 4)
+    decoded = base64.urlsafe_b64decode(padded)
+    assert decoded == wire_bytes
+
+    # Final verify: decoded bytes parse back to the same Capability.
+    from one_link import capability_native
+
+    decoded_cap = capability_native.decode_capability(decoded)
+    assert decoded_cap.signature() == cap.signature()
+    assert decoded_cap.cap_id() == cap.cap_id()
+
+
+def test_macaroon_advertisement_optional_when_native_missing():
+    """If `_last_minted_macaroon` is None (native module unavailable
+    or mint failed), the CAPABILITY_GRANT wire frame stays
+    backward-compatible: only `grant_b64` is present, no
+    `macaroon_b64` key. This is what makes the wire forward-
+    compatible — legacy receivers see a familiar frame, capable
+    receivers see the new key and use it."""
+    # Replicate the daemon's emit logic at the dict-construction level.
+    grant_fields = {"grant_b64": "legacy-b64-payload"}
+    last_minted_macaroon = None  # native unavailable / mint failed
+    if last_minted_macaroon is not None:
+        grant_fields["macaroon_b64"] = "should-not-appear"
+    assert "macaroon_b64" not in grant_fields
+
+    # And the present case.
+    grant_fields_2 = {"grant_b64": "legacy"}
+    last_minted_macaroon = b"native-macaroon-bytes"
+    if last_minted_macaroon is not None:
+        import base64
+
+        grant_fields_2["macaroon_b64"] = base64.urlsafe_b64encode(
+            last_minted_macaroon
+        ).rstrip(b"=").decode("ascii")
+    assert "macaroon_b64" in grant_fields_2

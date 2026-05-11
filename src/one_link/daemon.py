@@ -5598,11 +5598,25 @@ class Daemon:
             grant_b64 = base64.urlsafe_b64encode(grant_blob).rstrip(
                 b"=",
             ).decode("ascii")
+            # Phase C-3 (ADR-0027): if a macaroon was dual-issued
+            # alongside this Ed25519 grant, advertise it on the
+            # CAPABILITY_GRANT wire frame as `macaroon_b64`. Receivers
+            # that understand the new format can verify the macaroon
+            # path; legacy receivers ignore unknown keys. The wire
+            # is forward-compatible: this field is purely additive.
+            grant_fields = {"grant_b64": grant_b64}
+            if self._last_minted_macaroon is not None:
+                try:
+                    grant_fields["macaroon_b64"] = base64.urlsafe_b64encode(
+                        self._last_minted_macaroon
+                    ).rstrip(b"=").decode("ascii")
+                except Exception as exc:  # pragma: no cover - defensive
+                    log.debug("macaroon advertisement skipped: %s", exc)
             with contextlib.suppress(Exception):
                 await self.send_to(peer, [make_msg(
                     "CAPABILITY_GRANT",
                     self.me.short_id,
-                    grant_b64=grant_b64,
+                    **grant_fields,
                 )])
         return grant_blob
 

@@ -244,7 +244,16 @@ class FolderEngine:
 
     def _mirror_observe(self, folder_name: str, entry: ManifestEntry) -> None:
         """Reflect a merge winner into the native shadow-mirror. Pure
-        observer — failures are swallowed and counted."""
+        observer — failures are swallowed and counted.
+
+        Phase C-3 (ADR-0027): also ACTIVELY VALIDATES that the native
+        folder's view of the entry's presence matches what the legacy
+        merge decision produced. Specifically: after a winner is
+        observed, the native folder should agree on whether the file
+        is present (live) or absent (tombstoned). Divergence is
+        logged + counted so operators can confirm zero-disagreement
+        over a production window before the full authoritative
+        cutover lands."""
         mirror = self._mirror_for(folder_name)
         if mirror is None:
             return
@@ -256,6 +265,26 @@ class FolderEngine:
         except Exception as exc:
             self._native_mirror_divergence += 1
             log.debug("native folder mirror divergence (%s): %s", folder_name, exc)
+            return
+        # Active cross-check: the legacy merge decided this entry is
+        # the winner. If it's live (blob_hash != None), the native
+        # folder should report contains(file_id) == True. If it's a
+        # tombstone, native should report False.
+        try:
+            present_in_native = mirror.contains_path(entry.file_path)
+            expected_present = entry.blob_hash is not None
+            if present_in_native != expected_present:
+                self._native_mirror_divergence += 1
+                log.warning(
+                    "native folder cross-check divergence for %s/%s: "
+                    "native_present=%s legacy_winner=%s",
+                    folder_name,
+                    entry.file_path,
+                    present_in_native,
+                    expected_present,
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("native folder cross-check failed (%s)", exc)
 
     def native_folder_snapshot(self, folder_name: str):
         """Return the native :class:`Folder` mirroring ``folder_name`` —

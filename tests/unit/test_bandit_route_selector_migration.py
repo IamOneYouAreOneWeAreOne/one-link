@@ -84,3 +84,129 @@ def test_bandit_selector_requires_nonempty_routes():
 
     with pytest.raises(ValueError):
         BanditRouteSelector((), seed=0)
+
+
+# ── Phase C-3 (ADR-0027): bandit cutover into AdaptiveTransferBrain.decide() ──
+
+
+def test_decide_uses_bandit_route_when_initialized():
+    """Once the brain has observed traffic and built its bandit, decide()
+    must restrict candidate_routes to the bandit's Thompson-sampled
+    pick (per stress-test #3: bandit REPLACES EMA route memory)."""
+    import os
+
+    from one_link.transfer_brain import (
+        AdaptiveTransferBrain,
+        TransferRouteObservation,
+    )
+
+    saved = os.environ.pop("ONE_LINK_BANDIT_ROUTE_PICKER", None)
+    try:
+        brain = AdaptiveTransferBrain()
+        # Seed both arms with biased observations so the bandit
+        # converges on "lan".
+        for _ in range(200):
+            brain.observe(
+                TransferRouteObservation(route="lan", ok=True, bandwidth_bps=8e8)
+            )
+            brain.observe(
+                TransferRouteObservation(route="wan", ok=True, bandwidth_bps=1e7)
+            )
+        assert brain.best_route_bandit() == "lan"
+        # Call decide() across many trials — over enough Thompson
+        # samples the bandit overwhelmingly picks "lan". Confirm the
+        # decision's selected route is among the candidate set.
+        picks = []
+        for _ in range(50):
+            d = brain.decide(
+                size_bytes=10 * 1024 * 1024,
+                supports_cdc=True,
+                routes=("lan", "wan"),
+            )
+            picks.append(d.selected.route)
+        # With 200 strongly-biased observations toward lan, the
+        # bandit's Thompson sample should pick lan most of the time.
+        # We accept a small fraction of wan picks (exploration).
+        lan_share = picks.count("lan") / len(picks)
+        assert lan_share >= 0.8, f"bandit pick lan share: {lan_share}"
+    finally:
+        if saved is not None:
+            os.environ["ONE_LINK_BANDIT_ROUTE_PICKER"] = saved
+
+
+def test_decide_falls_back_to_pareto_when_bandit_disabled():
+    """ONE_LINK_BANDIT_ROUTE_PICKER=0 rolls back to legacy multi-route
+    Pareto search — used during production incidents."""
+    import os
+
+    from one_link.transfer_brain import (
+        AdaptiveTransferBrain,
+        TransferRouteObservation,
+    )
+
+    saved = os.environ.get("ONE_LINK_BANDIT_ROUTE_PICKER")
+    try:
+        os.environ["ONE_LINK_BANDIT_ROUTE_PICKER"] = "0"
+        brain = AdaptiveTransferBrain()
+        # Same biased observations — but the env flag disables
+        # bandit-driven route selection.
+        for _ in range(200):
+            brain.observe(
+                TransferRouteObservation(route="lan", ok=True, bandwidth_bps=8e8)
+            )
+            brain.observe(
+                TransferRouteObservation(route="wan", ok=True, bandwidth_bps=1e7)
+            )
+        # decide() should now consider BOTH routes via the EMA-driven
+        # Pareto path — we can't predict which it picks without
+        # replicating cost math, so we just assert it picks SOME route
+        # from the candidate set + the call doesn't blow up.
+        d = brain.decide(
+            size_bytes=10 * 1024 * 1024,
+            supports_cdc=True,
+            routes=("lan", "wan"),
+        )
+        assert d.selected.route in {"lan", "wan"}
+    finally:
+        if saved is None:
+            os.environ.pop("ONE_LINK_BANDIT_ROUTE_PICKER", None)
+        else:
+            os.environ["ONE_LINK_BANDIT_ROUTE_PICKER"] = saved
+
+
+def test_decide_handles_single_route_with_bandit():
+    """With only one candidate route, the bandit narrowing is a no-op
+    (no choice to make). Single-route case must still produce a
+    decision."""
+    from one_link.transfer_brain import (
+        AdaptiveTransferBrain,
+        TransferRouteObservation,
+    )
+
+    brain = AdaptiveTransferBrain()
+    brain.observe(
+        TransferRouteObservation(route="lan", ok=True, bandwidth_bps=1e9)
+    )
+    d = brain.decide(
+        size_bytes=1 * 1024 * 1024,
+        supports_cdc=False,
+        routes=("lan",),
+    )
+    assert d.selected.route == "lan"
+
+
+def test_decide_without_bandit_observations_uses_pareto():
+    """A fresh brain (no observe() calls) has no bandit yet. decide()
+    must work + pick from the candidate routes via the existing
+    multi-route Pareto path."""
+    from one_link.transfer_brain import AdaptiveTransferBrain
+
+    brain = AdaptiveTransferBrain()
+    # Bandit isn't initialized until observe() is called.
+    assert brain.best_route_bandit() is None
+    d = brain.decide(
+        size_bytes=512 * 1024,
+        supports_cdc=False,
+        routes=("lan", "wan"),
+    )
+    assert d.selected.route in {"lan", "wan"}
