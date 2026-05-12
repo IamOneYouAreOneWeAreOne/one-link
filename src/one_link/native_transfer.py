@@ -219,15 +219,28 @@ class NativeTransferSession:
     # ── send side ───────────────────────────────────────────────────
 
     def encrypt_chunk_bytes(
-        self, plaintext: bytes, *, chunk_id: Optional[bytes] = None
+        self,
+        plaintext: bytes,
+        *,
+        chunk_id: Optional[bytes] = None,
+        address_kind: str = "raw",
     ) -> NativeChunkRecord:
         """Encrypt one chunk. ``plaintext`` must be ≤256 KiB (the
         native AEAD layer's hard cap). If ``chunk_id`` is None we
-        derive it as ``BLAKE3(plaintext)`` (raw content address).
+        derive it from the chosen ``address_kind``:
 
-        Performance: the AEAD layer's tag covers chunk_id as AAD, so
-        we DON'T re-hash the plaintext on receive — verification is
-        achieved by the AEAD tag itself. This eliminates one full
+        * ``"raw"`` (default): ``BLAKE3(plaintext)`` — per-recipient
+          chunk IDs; identical plaintext from two senders produces
+          different chunk IDs. The conservative choice.
+        * ``"convergent"``: ``BLAKE3.derive_key("ol-chunk-addr-
+          convergent-v1", plaintext)`` — opt-in for raw-media types
+          whose plaintext bytes don't leak per-recipient information.
+          Enables cross-sender dedup at the storage layer.
+
+        Explicit ``chunk_id`` (already-computed) bypasses the
+        derivation entirely. Performance: the AEAD layer's tag
+        covers chunk_id as AAD, so we DON'T re-hash on receive —
+        verification is via the AEAD tag itself, saving one full
         BLAKE3 pass per chunk on both sides.
         """
         if len(plaintext) > 256 * 1024:
@@ -236,7 +249,10 @@ class NativeTransferSession:
                 f"({len(plaintext)} bytes); split via cdc_iter first"
             )
         if chunk_id is None:
-            chunk_id = _native_chunk.chunk_address_raw(plaintext)
+            if address_kind == "convergent":
+                chunk_id = _native_chunk.chunk_address_convergent(plaintext)
+            else:
+                chunk_id = _native_chunk.chunk_address_raw(plaintext)
         # The pyo3 binding already produces a bytes-like object; only
         # wrap when the upstream returned something non-bytes
         # (defensive — saves an allocation in the common path).

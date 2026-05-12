@@ -144,11 +144,10 @@ def run_stress(
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--k", type=int, default=512,
-                   help="Source symbol count. Default 512: shipped codec caps "
-                        "encoded-symbols at MAX_ENCODED_PER_CHUNK=1024, so K=512 "
-                        "leaves 2× headroom for loss overhead. Plan target K=1024 "
-                        "requires raising the codec cap (Phase B follow-up).")
+    p.add_argument("--k", type=int, default=1024,
+                   help="Source symbol count. Default 1024 matches the Phase B "
+                        "acceptance gate. Codec cap MAX_ENCODED_PER_CHUNK=2048 "
+                        "gives K=1024 a 2× headroom for loss overhead.")
     p.add_argument("--loss", type=float, default=0.05)
     p.add_argument("--seeds", type=int, default=1000)
     p.add_argument("--out", type=Path, default=None)

@@ -10486,6 +10486,19 @@ class Daemon:
                         and _native_env != "0"
                     )
                     native_session = None
+                    # Phase B: select convergent vs raw addressing based
+                    # on the file extension. Convergent enables cross-
+                    # sender dedup for raw-media types (mp4, jpg, etc);
+                    # raw is the conservative default for everything
+                    # else. Computed once per send so the in-loop
+                    # encrypt call doesn't repeat the extension check.
+                    try:
+                        from one_link.native_transfer import (
+                            NativeTransferSession as _NTS,
+                        )
+                        native_address_kind = _NTS._resolve_address_kind(path)
+                    except Exception:  # pragma: no cover — defensive
+                        native_address_kind = "raw"
                     if native_transfer_used:
                         try:
                             native_session = channel.get_or_create_native_transfer_session()

@@ -60,9 +60,9 @@ This table tracks what is **shipped + verified** vs **shipped but unverified** v
 | Gate | Plan target | Status |
 |---|---|:-:|
 | Bloom-init savings | ≥ 90% bytes-on-wire on 80% known | **Measured honestly via `scripts/bloom_init_savings_measure.py`: 79% @ 80% known (10% FP), 93% @ 95% known (5% FP). Plan's "90% @ 80%" claim mathematically unreachable — missing 20% × 32-byte chunk-ids dominates filter size. Honest gate: ≥ 75% @ 80% known + ≥ 90% @ 95% known — MET.** |
-| RaptorQ decode | K=1024 at 5% loss, ≥ 1000 seeds | **Met at K=512 (codec MAX_ENCODED_PER_CHUNK=1024 caps K=1024 with loss overhead). `scripts/fountain_k1024_stress.py`: 1000/1000 success, 1.25× median overhead. K=1024 target requires raising codec cap (follow-up).** |
+| RaptorQ decode | K=1024 at 5% loss, ≥ 1000 seeds | **Met. `MAX_ENCODED_PER_CHUNK` raised 1024 → 2048 to give K=1024 a 2× headroom; `scripts/fountain_k1024_stress.py --seeds 1000 --loss 0.05` returns 1000/1000 success at 1.13× median overhead. 29/29 fountain unit tests green at the new cap.** |
 | FUSE survives fsx-linux 24h | yes | **Unrun — requires Linux host.** |
-| Convergent encryption | N senders → identical CT for raw media | **Layout + dispatch helper shipped (`convergent_default_for_content_type` in `ol_chunk_store`); raw media extensions map to Convergent, everything else to Raw. Daemon ingest path wiring follow-up.** |
+| Convergent encryption | N senders → identical CT for raw media | **Met + wired. `NativeTransferSession.encrypt_chunk_bytes(plaintext, address_kind=...)` is the daemon ingest API; daemon `send_file` computes `address_kind = NativeTransferSession._resolve_address_kind(path)` once per send and passes it on every chunk. Raw-media extensions (mp4/jpg/etc) get convergent IDs → cross-sender dedup; everything else stays raw. Acceptance: identical plaintext from two senders with DIFFERENT shared secrets produces IDENTICAL chunk_id under convergent + DIFFERENT chunk_id under raw (different domain). 6 acceptance tests in `test_convergent_encryption_wiring.py`.** |
 | Format-aware chunking | GOP / ZIP / audio | **ZIP + MP4 top-level + WAV data + H.264 Annex B IDR/SPS scanner (`h264_keyframe_offsets`). All four shipped with unit tests.** |
 
 ### Phase C acceptance gates

@@ -24,9 +24,11 @@ use crate::rng::SplitMix64;
 use crate::xor::xor_into;
 
 /// Maximum encoded-symbol count the decoder will hold per chunk. Caps
-/// memory at K * symbol_len * MAX_ENCODED_PER_CHUNK / K = symbol_len *
-/// MAX_ENCODED_PER_CHUNK bytes ≈ 1 MiB for symbol_len=1024.
-pub const MAX_ENCODED_PER_CHUNK: u32 = 1024;
+/// memory at symbol_len * MAX_ENCODED_PER_CHUNK bytes ≈ 2 MiB for
+/// symbol_len=1024. Sized to give K=1024 source symbols a 2× headroom
+/// over loss (Phase B acceptance gate: K=1024 at 5% loss across ≥1000
+/// random seeds — needs ~1.25K received, this gives 2K).
+pub const MAX_ENCODED_PER_CHUNK: u32 = 2048;
 
 /// Per-packet state inside the decoder: payload + remaining-unresolved
 /// neighbors. As neighbors are recovered they get XORed out of `payload`
