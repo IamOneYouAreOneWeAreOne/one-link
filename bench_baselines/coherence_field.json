@@ -1,0 +1,94 @@
+{
+  "version": "ol_coherence_field",
+  "samples_per_bench": 200,
+  "results": [
+    {
+      "name": "scalar/be_rar_y1",
+      "samples": 200,
+      "median_ns": 100,
+      "min_ns": 0,
+      "max_ns": 500,
+      "bytes_per_second_median": 10000000.0
+    },
+    {
+      "name": "scalar/be_rar_y_small",
+      "samples": 200,
+      "median_ns": 100,
+      "min_ns": 0,
+      "max_ns": 200,
+      "bytes_per_second_median": 10000000.0
+    },
+    {
+      "name": "scalar/be_rar_y_large",
+      "samples": 200,
+      "median_ns": 100,
+      "min_ns": 0,
+      "max_ns": 200,
+      "bytes_per_second_median": 10000000.0
+    },
+    {
+      "name": "scalar/apparent_horizon",
+      "samples": 200,
+      "median_ns": 100,
+      "min_ns": 0,
+      "max_ns": 200,
+      "bytes_per_second_median": 10000000.0
+    },
+    {
+      "name": "scalar/screening_length",
+      "samples": 200,
+      "median_ns": 100,
+      "min_ns": 0,
+      "max_ns": 100,
+      "bytes_per_second_median": 10000000.0
+    },
+    {
+      "name": "calibration/one_link",
+      "samples": 200,
+      "median_ns": 500,
+      "min_ns": 400,
+      "max_ns": 600,
+      "bytes_per_second_median": 2000000.0
+    },
+    {
+      "name": "solve/helmholtz_100",
+      "samples": 200,
+      "median_ns": 12600,
+      "min_ns": 12400,
+      "max_ns": 38400,
+      "bytes_per_second_median": 79365.07936507936
+    },
+    {
+      "name": "solve/helmholtz_1000",
+      "samples": 200,
+      "median_ns": 126800,
+      "min_ns": 125800,
+      "max_ns": 133700,
+      "bytes_per_second_median": 7886.435331230284
+    },
+    {
+      "name": "solve/helmholtz_5000",
+      "samples": 200,
+      "median_ns": 709400,
+      "min_ns": 704400,
+      "max_ns": 746900,
+      "bytes_per_second_median": 1409.6419509444602
+    },
+    {
+      "name": "coupling/prefetch_priorities_1k",
+      "samples": 200,
+      "median_ns": 13300,
+      "min_ns": 13000,
+      "max_ns": 16400,
+      "bytes_per_second_median": 75187.96992481203
+    },
+    {
+      "name": "coupling/rotation_cadence_1k",
+      "samples": 200,
+      "median_ns": 43800,
+      "min_ns": 42100,
+      "max_ns": 59000,
+      "bytes_per_second_median": 22831.0502283105
+    }
+  ]
+}
