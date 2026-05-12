@@ -10974,6 +10974,80 @@ class Daemon:
                             self.discovery.registry.remove(peer.short_id)
                         continue
                 await self._reply(writer, {"ok": False, "error": str(last_error)})
+            elif cmd == "transfers":
+                if self.state is None:
+                    await self._reply(writer, {"ok": False, "error": "state not available"})
+                    return
+                try:
+                    limit = int(req.get("limit") or 100)
+                except (TypeError, ValueError):
+                    limit = 100
+                peer_fp = req.get("peer_fp")
+                transfer_id = req.get("transfer_id")
+                try:
+                    from one_link.server import _transfer_record_to_event
+                    if transfer_id:
+                        rec = self.state.get_transfer(str(transfer_id))
+                        rows = [rec] if rec is not None else []
+                    else:
+                        rows = self.state.list_transfers(
+                            peer_fp=str(peer_fp) if peer_fp else None,
+                            limit=limit,
+                        )
+                    await self._reply(writer, {
+                        "ok": True,
+                        "transfers": [
+                            _transfer_record_to_event(r)
+                            for r in rows
+                            if r is not None
+                        ],
+                    })
+                except Exception as e:
+                    await self._reply(writer, {"ok": False, "error": str(e)})
+            elif cmd == "queue_file_transfer":
+                if self.state is None:
+                    await self._reply(writer, {"ok": False, "error": "state not available"})
+                    return
+                path = Path(str(req.get("path") or ""))
+                if not path.is_file():
+                    await self._reply(writer, {"ok": False, "error": f"no file: {path}"})
+                    return
+                peer_fp = self._resolve_pinned_peer_fp(str(req.get("peer") or ""))
+                if not peer_fp:
+                    await self._reply(
+                        writer,
+                        {"ok": False, "error": f"no pinned peer {req.get('peer')!r}"},
+                    )
+                    return
+                try:
+                    from one_link.server import _transfer_record_to_event
+                    rec = self.queue_file_transfer(
+                        peer_fp=peer_fp,
+                        path=path,
+                        reason=str(req.get("reason") or "queued for automatic send"),
+                    )
+                    await self._reply(writer, {
+                        "ok": True,
+                        "transfer": (
+                            _transfer_record_to_event(rec)
+                            if rec is not None else None
+                        ),
+                    })
+                except Exception as e:
+                    await self._reply(writer, {"ok": False, "error": str(e)})
+            elif cmd == "resume_peer_transfers":
+                if self.state is None:
+                    await self._reply(writer, {"ok": False, "error": "state not available"})
+                    return
+                peer_fp = self._resolve_pinned_peer_fp(str(req.get("peer") or req.get("peer_fp") or ""))
+                if not peer_fp:
+                    await self._reply(
+                        writer,
+                        {"ok": False, "error": f"no pinned peer {req.get('peer') or req.get('peer_fp')!r}"},
+                    )
+                    return
+                result = await self.resume_paused_transfers_for(peer_fp)
+                await self._reply(writer, {"ok": bool(result.get("ok")), "result": result})
             elif cmd == "tail":
                 self._tail_subs.add(writer)
                 await self._reply(writer, {"ok": True, "tailing": True})
@@ -11047,6 +11121,47 @@ class Daemon:
 
     def _resolve_peer_candidates(self, needle: str) -> list[Peer]:
         return self.discovery.registry.candidates(needle) if self.discovery else []
+
+    def _resolve_pinned_peer_fp(self, needle: str) -> str | None:
+        """Resolve UI/CLI-friendly peer names to a pinned fingerprint.
+
+        The control plane uses this for durable queued sends, where the
+        device might be offline and therefore absent from the live discovery
+        registry. Prefer live cryptographic identity when available, then fall
+        back to the persistent peer table by fingerprint, short id, hostname,
+        or local alias.
+        """
+        needle = str(needle or "").strip()
+        if not needle or self.state is None:
+            return None
+        lowered = needle.lower()
+        for peer in self._resolve_peer_candidates(needle):
+            fp = self._peer_fp_from_peer(peer)
+            if not fp:
+                continue
+            rec = self.state.get_peer(fp)
+            if rec is not None and rec.trust == "pinned":
+                return fp
+        rec = self.state.get_peer(needle)
+        if rec is not None and rec.trust == "pinned":
+            return rec.fingerprint
+        rec = self.state.get_peer_by_short_id(needle)
+        if rec is not None and rec.trust == "pinned":
+            return rec.fingerprint
+        for rec in self.state.list_peers():
+            values = (
+                rec.fingerprint,
+                rec.short_id,
+                rec.hostname or "",
+                rec.local_alias or "",
+                rec.display_name,
+            )
+            if rec.trust == "pinned" and any(
+                v and (v.lower() == lowered or lowered in v.lower())
+                for v in values
+            ):
+                return rec.fingerprint
+        return None
 
     async def resolve_for_send(self, needle: str) -> Peer | None:
         """v0.5.1: send-path peer resolution. mDNS first, rendezvous
