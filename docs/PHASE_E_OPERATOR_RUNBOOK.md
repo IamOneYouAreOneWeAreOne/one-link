@@ -77,8 +77,7 @@ the heuristic `1/(1−loss)²`. Specifically:
   relays still get rejected.
 - **BE-RAR can pick a low-RTT, moderately-lossy relay over a high-RTT,
   low-loss one.** This is the correct math, not a bug. If you want the
-  heuristic back, set `ONE_LINK_DISABLE_BE_RAR=1` (TODO: not yet
-  exposed as an env flag — for now, uninstall `ol_coherence_field`).
+  heuristic back, set `ONE_LINK_DISABLE_BE_RAR=1`.
 
 To compare picks:
 1. Capture `/api/metrics` + `per_peer_field_advisories` while the
@@ -121,17 +120,23 @@ If a file you expect to dedup isn't, verify:
 
 ## "Ratchet keys feel like they're rotating too often"
 
-The field-driven cadence advisory shrinks `bytes_between_rotations`
-for peers in low-coherence wells. Cap is 4× faster than baseline.
-If you want to force baseline cadence:
+The field-driven cadence advisory shrinks the chunk size sent to
+peers in low-coherence wells, which (via the per-chunk ratchet)
+makes rotation faster per byte. Floor is 64 KiB so framing
+overhead never dominates.
+
+The advisory is **actively wired** into `Daemon.send_file`: after
+`_fast_fixed_chunk_size_for_peer` picks the baseline, the daemon
+queries `Daemon.cadence_for_peer(peer_short_id)` and clamps down
+when the field reports a smaller cadence.
+
+To investigate or force baseline:
 
 1. `/api/metrics` — check `per_peer_field_advisories[peer].cadence_bytes`.
 2. Compare with baseline 1,000,000 bytes (1 MiB).
-3. The advisory is a recommendation — the ratchet manager currently
-   reads it via `Daemon.cadence_for_peer(short_id)`. To bypass
-   entirely set `ONE_LINK_FIELD_CADENCE_DISABLE=1` (TODO: not yet
-   exposed; for now don't call `cadence_for_peer` from the ratchet
-   path).
+3. To bypass entirely set `ONE_LINK_FIELD_CADENCE_DISABLE=1` —
+   `cadence_for_peer` will return `None` and `send_file` keeps the
+   peer-version-derived baseline.
 
 ## Field-snapshot manager doesn't seem to be updating
 
@@ -197,6 +202,33 @@ heuristics immediately:
 The daemon stays fully functional; you lose only the Phase E
 performance + alignment gains.
 
+## Per-feature operator escape hatches (env kill-switches)
+
+Each Phase E coupling has its own env-var disable so a misbehaving
+coupling can be flipped off without rebuilding the crate or
+restarting users. All read at the call site, so toggling takes
+effect on the next solve / consumer call.
+
+| Env var | Effect when set to `1` / `true` / `yes` / `on` |
+|---|---|
+| `ONE_LINK_FIELD_DISABLE` | Pauses the whole solve loop. Manager stays running so consumers still query without crashing (they get safe-default fallbacks). Flipping back off resumes solving on the next tick. |
+| `ONE_LINK_DISABLE_BE_RAR` | Relay scoring falls back to the heuristic `1 / (1 − loss)²` penalty. |
+| `ONE_LINK_FIELD_CADENCE_DISABLE` | `cadence_for_peer` returns `None`; `send_file` keeps the peer-version-derived baseline chunk size. |
+| `ONE_LINK_FIELD_HOMOLOGY_DISABLE` | Homology feeder tick still fires but skips the fragility computation. No fragility events get injected. |
+| `ONE_LINK_FIELD_PREFETCH_DISABLE` | `field_rank_holders` returns the input order unchanged (any future multi-holder fetch path gets bandit-only ranking). |
+
+## Snapshot persistence across daemon restart
+
+The manager now writes its latest snapshot to
+`data_dir() / "field-snapshot.json"` after every successful solve
+(atomic tempfile + `os.replace`). On boot, the constructor reads
+that file and seeds `_current` so consumers get field guidance
+**before** the first post-restart solve completes — no 5-second
+post-restart gap.
+
+A malformed or absent file is silently ignored; the daemon falls
+back to "no snapshot until the first tick."
+
 ## Things that DON'T exist yet (and why)
 
 These are on the production roadmap but NOT shipped:
@@ -204,13 +236,18 @@ These are on the production roadmap but NOT shipped:
 - **Prometheus / OpenMetrics text format** — `/api/metrics` returns
   JSON only. Wrap externally with a Prometheus exporter if you need
   scraping.
-- **Env-var disables for individual Phase E consumers** —
-  `ONE_LINK_DISABLE_BE_RAR`, `ONE_LINK_FIELD_CADENCE_DISABLE`. Currently
-  the only kill-switch is uninstalling the crate. Per-feature flags
-  are a follow-up.
-- **Field-snapshot persistence** — every daemon restart loses the
-  last snapshot; the first solve happens 5s after start. The warm-
-  start optimisation only applies *within* a daemon lifetime.
+- **Multi-holder swarm fetch decision path** — `Daemon.field_rank_holders`
+  is wired and tested as the consumer-facing helper. The upstream
+  "fetch this chunk from N candidate holders" code path itself
+  doesn't exist yet (single-peer send is the dominant path); when
+  it lands, `field_rank_holders` is its natural call site. Single-
+  daemon behaviour today is "rank works, never called with > 1
+  holder."
+- **Chunk-holder gossip protocol** — the homology feeder's
+  cohold-graph view is populated from locally-observed FILE_DONE
+  events only (`_observe_prefetch` → `_chunk_holders`). Wider
+  visibility (knowing what peers hold what chunks across the swarm)
+  requires a gossip / announce protocol that's tracked separately.
 
 See [FILE_ENGINE_V2_PLAN.md](FILE_ENGINE_V2_PLAN.md) for the full
 remaining-work picture.
