@@ -27,6 +27,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Native hot-path crates (chunk store, AEAD, WAL, QUIC, coherence-field).
+# Prebuilt wheels ship in GitHub Releases per `.github/workflows/release.yml`.
+# Users get the binary in seconds without needing Rust installed locally:
+#
+#     pip install one_link_native --find-links \
+#       https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest
+#
+# Or download the OS+arch-matching wheel from the release page and
+# `pip install <wheel.whl>`. Source builds via `cd native && maturin build --release`.
+native = ["one_link_native>=0.21,<1.0"]
 window = ["pywebview>=5.0"]  # optional native-window wrapper (Tier 2)
 # v0.10.5 system tray icon. Lets the daemon live in the OS tray
 # instead of always-needing-a-browser-tab. Optional — fresh

@@ -100,9 +100,59 @@ jobs:
             dist/*.tar.gz
             dist/SHA256SUMS
 
+  # Native wheels per OS — one_link_native (Rust hot-path: chunk store,
+  # AEAD, WAL, QUIC, coherence-field). abi3 means one wheel per OS
+  # covers Python 3.11+, so this is a 3-job matrix rather than 9.
+  native_wheels:
+    name: native wheel — ${{ matrix.os }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: native-wheel-linux
+          - os: macos-latest
+            artifact: native-wheel-macos
+          - os: windows-latest
+            artifact: native-wheel-windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install maturin
+        run: |
+          python -m pip install --upgrade pip
+          pip install "maturin>=1.5,<2.0"
+
+      - name: cache cargo target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      - name: build native wheel (abi3, release)
+        working-directory: native
+        env:
+          SOURCE_DATE_EPOCH: ${{ needs.build.outputs.source_date_epoch }}
+        run: python -m maturin build --release --strip
+
+      - name: upload native wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: native/target/wheels/*.whl
+
   sign:
     name: sigstore-attest dist
-    needs: build
+    needs: [build, native_wheels]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -115,6 +165,31 @@ jobs:
         with:
           name: dist
           path: dist/
+
+      # Merge per-OS native wheels into dist/ so they get signed and
+      # attached to the release alongside the pure-Python wheel.
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-wheel-linux
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-wheel-macos
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-wheel-windows
+          path: dist/
+
+      # Re-compute the SHA256SUMS manifest now that native wheels
+      # are included. The build job's manifest only covered the
+      # pure-Python artifacts; downloads of the native wheels would
+      # otherwise have no verifiable hash in the release.
+      - name: recompute SHA256SUMS to include native wheels
+        run: |
+          cd dist
+          sha256sum *.whl *.tar.gz | sort -k 2 > SHA256SUMS
+          cat SHA256SUMS
 
       - name: setup Python
         uses: actions/setup-python@v5
