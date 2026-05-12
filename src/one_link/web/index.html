@@ -2036,6 +2036,67 @@
     }
   }
 
+  /* ── New-message scroll pill ────────────────────────────────────
+     A floating "↓ N new" button that appears just above the
+     composer when the user is scrolled UP in the message list and
+     new messages arrive. Replaces the old "always jump to bottom
+     on render" behaviour, which yanked the user away from history
+     they were reading. iMessage / WhatsApp / Telegram all do this.
+
+     Positioned via the .convo flex parent — sits above .composer
+     in the conversation panel, centered horizontally. Hidden via
+     [hidden] attribute when count is 0. */
+  .msg-new-pill {
+    position: absolute;
+    left: 50%;
+    bottom: 76px;            /* above the composer */
+    transform: translateX(-50%) translateY(0);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: white;
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: 0 6px 22px rgba(0, 0, 0, .35);
+    z-index: 6;
+    cursor: pointer;
+    animation: ol-pill-pop .22s cubic-bezier(.2, .8, .2, 1.2);
+    /* Animate the count change without re-mounting the element. */
+    transition: bottom .18s ease-out, opacity .18s ease-out;
+  }
+  .msg-new-pill[hidden] {
+    display: none !important;
+  }
+  .msg-new-pill .msg-new-pill-arrow {
+    font-size: 14px;
+    line-height: 1;
+  }
+  .msg-new-pill .msg-new-pill-count {
+    font-variant-numeric: tabular-nums;
+  }
+  .msg-new-pill:hover {
+    filter: brightness(1.08);
+  }
+  .msg-new-pill:active {
+    transform: translateX(-50%) scale(.96);
+  }
+  @keyframes ol-pill-pop {
+    from { transform: translateX(-50%) translateY(10px); opacity: 0; }
+    to   { transform: translateX(-50%) translateY(0);    opacity: 1; }
+  }
+  /* On phone, position the pill slightly higher to clear the larger
+     touch-target composer + safe-area inset on home-indicator devices. */
+  @media (max-width: 720px) {
+    .msg-new-pill {
+      bottom: calc(84px + env(safe-area-inset-bottom));
+      padding: 9px 16px;
+      font-size: 14px;
+    }
+  }
+
   /* Focus-visible polish: only show focus ring for keyboard nav,
      not for tap. iOS / Android touch users were getting the chunky
      accent-ring on every button tap. This is the modern selector
@@ -3331,6 +3392,19 @@
              Ctrl+,) → "Permissions for this device". -->
 
         <div class="messages" id="messages"></div>
+
+        <!-- v0.21.1: scroll-to-bottom + new-message pill. Hidden by
+             default; appears as a floating button above the composer
+             when the user is scrolled up + new messages arrive. The
+             count badge auto-clears when the user scrolls to bottom
+             (or taps the pill). Anchored to the conversation panel
+             via CSS position:absolute. -->
+        <button id="msg-new-pill" class="msg-new-pill" hidden type="button"
+                aria-label="Jump to latest messages">
+          <span class="msg-new-pill-arrow" aria-hidden="true">↓</span>
+          <span class="msg-new-pill-count" id="msg-new-pill-count">0</span>
+          <span class="msg-new-pill-label">new</span>
+        </button>
 
         <div class="composer">
           <!-- v0.7.5: shows the message we're replying to. -->
@@ -6573,6 +6647,100 @@
     return parts.join("Â¶");
   }
 
+  // ── v0.21.1 smart scroll-to-bottom + new-message pill ───────────
+  //
+  // The conversation surface (#messages) used to unconditionally
+  // snap to bottom on every render. That yanked the user away from
+  // history they were reading whenever a new message arrived.
+  //
+  // New behaviour:
+  //   - If the user was at-or-near the bottom (within 80px) before
+  //     the render, snap to bottom afterward — what they're reading
+  //     is the live edge.
+  //   - If the user was scrolled up reading history, PRESERVE their
+  //     scroll position; show a floating "↓ N new" pill they can
+  //     tap to jump to bottom. Pill count auto-increments per new
+  //     arrival, auto-clears on tap or when they manually scroll
+  //     back to bottom.
+  //   - On peer switch, force snap (no pill for new conversation).
+  //
+  // Used by both renderMessages (direct chat) and
+  // renderGroupConversation (group chat) — same container, same
+  // behaviour.
+  const NEAR_BOTTOM_PX = 80;
+  let _msgPillCount = 0;
+  let _lastRenderedLen = 0;
+
+  function _captureScrollState(container) {
+    if (!container) return { wasAtBottom: true, prevLen: 0 };
+    const distFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    return {
+      wasAtBottom: distFromBottom <= NEAR_BOTTOM_PX,
+      prevLen: _lastRenderedLen,
+    };
+  }
+
+  function _smartScrollAfter(container, before, newLen) {
+    if (!container) return;
+    const grew = newLen > (before?.prevLen ?? 0);
+    _lastRenderedLen = newLen;
+    if (before?.wasAtBottom) {
+      // User was at the live edge — keep them there.
+      container.scrollTop = container.scrollHeight;
+      _hideNewMessagePill();
+      return;
+    }
+    // User was scrolled up. Preserve their position (do NOT touch
+    // scrollTop). If new messages arrived, increment the pill.
+    if (grew) {
+      const delta = newLen - (before?.prevLen ?? 0);
+      _showNewMessagePill(_msgPillCount + delta);
+    }
+  }
+
+  function _showNewMessagePill(count) {
+    _msgPillCount = count;
+    const pill = document.querySelector("#msg-new-pill");
+    const num = document.querySelector("#msg-new-pill-count");
+    if (!pill || !num) return;
+    num.textContent = String(_msgPillCount);
+    pill.hidden = false;
+  }
+
+  function _hideNewMessagePill() {
+    _msgPillCount = 0;
+    const pill = document.querySelector("#msg-new-pill");
+    const num = document.querySelector("#msg-new-pill-count");
+    if (pill) pill.hidden = true;
+    if (num) num.textContent = "0";
+  }
+
+  // Pill tap → smooth scroll to bottom + clear count.
+  // Messages container scroll → if user reached the bottom, clear pill.
+  // Both registered once at module load.
+  (() => {
+    const pill = document.querySelector("#msg-new-pill");
+    if (pill) {
+      pill.addEventListener("click", () => {
+        const m = document.querySelector("#messages");
+        if (!m) return;
+        m.scrollTo({ top: m.scrollHeight, behavior: "smooth" });
+        _hideNewMessagePill();
+        try { window._olHaptic && window._olHaptic(6); } catch {}
+      });
+    }
+    const m = document.querySelector("#messages");
+    if (m) {
+      m.addEventListener("scroll", () => {
+        const distFromBottom = m.scrollHeight - m.scrollTop - m.clientHeight;
+        if (distFromBottom <= NEAR_BOTTOM_PX && _msgPillCount > 0) {
+          _hideNewMessagePill();
+        }
+      }, { passive: true });
+    }
+  })();
+
   function renderMessages() {
     return _measure("renderMessages", _renderMessagesImpl);
   }
@@ -6609,6 +6777,10 @@
     );
     renderPins();
     if (m._renderSig === sig) return;
+    // Capture scroll position BEFORE we blow away the DOM so
+    // _smartScrollAfter can preserve user position if they're
+    // reading history, or snap to bottom if they're already there.
+    const prevBottomState = _captureScrollState(m);
     m._renderSig = sig;
     m.innerHTML = "";
 
@@ -6710,7 +6882,7 @@
         m.appendChild(renderFileBubble(msg));
       }
     }
-    m.scrollTop = m.scrollHeight;
+    _smartScrollAfter(m, prevBottomState, source.length);
   }
 
   // v0.10.2: live countdown badge for disappearing messages.
@@ -7473,6 +7645,9 @@
     if (state.selecting) exitSelection();
     // v0.14.0 mobile: tapping a group auto-closes the drawer.
     closeMobileSidebar();
+    // v0.21.1: reset the new-message pill on conversation switch.
+    _hideNewMessagePill();
+    _lastRenderedLen = 0;
     // v0.14.1 persist for boot-time restore.
     _saveLastSelection("group", gidHex);
     state.selectedGroup = gidHex;
@@ -7902,6 +8077,7 @@
       `Group chat · ${g.member_count} member${g.member_count === 1 ? "" : "s"}`
     ));
     const m = $("#messages");
+    const prevBottomState = _captureScrollState(m);
     m.innerHTML = "";
     if (state.groupMessages.length === 0) {
       m.appendChild(el("div", "day-sep", "No messages yet"));
@@ -7961,7 +8137,7 @@
       }
       m.appendChild(b);
     }
-    m.scrollTop = m.scrollHeight;
+    _smartScrollAfter(m, prevBottomState, state.groupMessages.length);
   }
 
   function findPeerLabelByPubHex(pubHex) {
@@ -8990,6 +9166,11 @@
     if (state.selecting) exitSelection();
     // v0.14.0 mobile: tapping a peer auto-closes the drawer.
     closeMobileSidebar();
+    // v0.21.1: switching peers resets the new-message pill state
+    // — a stale "↓ 3 new" badge from the previous conversation
+    // would mislead the user about the new one.
+    _hideNewMessagePill();
+    _lastRenderedLen = 0;
     // v0.14.0 prefetch: record this switch in the Markov chain
     // and pre-warm the predicted next peer in idle time.
     _recordSwitch(shortId);
