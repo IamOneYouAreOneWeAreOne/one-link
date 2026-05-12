@@ -1,5 +1,16 @@
 """Per-chunk forward-secret ratchet (ADR-0020, Phase C item #6).
 
+Phase E coupling: when the coherence field is available, the ratchet
+manager can query a per-peer **rotation cadence advisory** via
+``field_driven_rotation_cadence`` — peers in low-coherence wells get a
+faster recommended rotation rate per byte than peers in stable
+neighbourhoods. The advisory is consumed by the transfer layer when
+deciding chunk size / re-key cadence, but the ratchet chain itself
+still advances one step per chunk as before. The cadence is an
+advisory ceiling, not a mandate.
+
+
+
 This module extends ``double_ratchet.py`` from per-message to per-chunk
 forward secrecy. Each ``ChunkRatchet`` is bootstrapped from the
 channel's existing Double Ratchet root key (or any 32-byte shared
@@ -132,3 +143,45 @@ def derive_chunk_key(shared_secret: bytes, chunk_idx: int) -> bytes:
     for _ in range(chunk_idx):
         r.next_key()
     return r.next_key()[0]
+
+
+def field_driven_rotation_cadence(
+    field: list[float],
+    *,
+    baseline_bytes: int = 1_000_000,
+    mu_max: float = 4.0,
+    power: float = 2.0,
+) -> list[tuple[int, float, int]]:
+    """Per-peer rotation-cadence advisory derived from a coherence
+    field snapshot.
+
+    Returns a list of ``(peer_index, multiplier, bytes_between_rotations)``
+    sorted in input order. Peers in low-coherence wells get a higher
+    ``multiplier`` and a smaller ``bytes_between_rotations`` — the
+    ratchet manager should rotate keys / shrink chunk sizes faster
+    on those edges.
+
+    Implementation: thin wrapper around
+    ``coherence_field_native.rotation_cadence_multiplier``. Returns
+    an empty list when the native crate isn't available (callers
+    treat as "no recommendation; use baseline cadence").
+
+    Daemon usage:
+
+    .. code-block:: python
+
+        field = cf.solve_helmholtz(graph, d, gamma, source)["field"]
+        for peer, mult, btw in field_driven_rotation_cadence(field):
+            # btw is the recommended bytes-between-rotations for `peer`
+            # in the swarm-wide peer index space.
+            transfer_brain.set_rotation_cadence(peer, btw)
+    """
+    try:
+        from one_link import coherence_field_native as _cf
+    except ImportError:
+        return []
+    if not _cf.HAS_NATIVE:
+        return []
+    return _cf.rotation_cadence_multiplier(
+        field, baseline_bytes, mu_max=mu_max, power=power
+    )

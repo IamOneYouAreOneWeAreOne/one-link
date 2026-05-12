@@ -123,6 +123,31 @@ def prefetch_priorities(
     )
 
 
+def identity_dual_source_with_phase(
+    density: list[float],
+    flux: list[float],
+    c_support: list[float],
+    *,
+    alpha: float = 0.5,
+    beta: float = 0.5,
+    c0: float = 0.80,
+    w_phase: float = 0.12,
+) -> list[float]:
+    """Composed production source: identity-sector dual sourcing
+    ``α·ρ + β·|J|`` modulated pointwise by the support-phase boundary
+    kernel ``k_phase = tanh((c0 − C_support) / w_phase)``.
+
+    Closes the "transport + alignment + boundary" Phase E gate. This
+    is the production form the daemon should use for field-solve
+    source terms — `identity_dual_source` alone misses the boundary
+    weighting.
+    """
+    _require_native()
+    return _native_field.identity_dual_source_with_phase(
+        density, flux, c_support, alpha, beta, c0, w_phase
+    )
+
+
 def inject_fragility_events(
     source: list[float],
     events: list[tuple[list[int], float]],

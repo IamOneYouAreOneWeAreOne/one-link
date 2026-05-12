@@ -22,7 +22,7 @@ mod support_phase;
 
 use thiserror::Error;
 
-pub use dual::identity_dual_source;
+pub use dual::{identity_dual_source, identity_dual_source_with_phase};
 pub use linear::linear_source;
 pub use support_phase::{support_phase_kernel, SupportPhaseConfig};
 

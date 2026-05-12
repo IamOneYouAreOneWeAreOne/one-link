@@ -70,7 +70,8 @@ pub use pde::{
     GraphLaplacian, HelmholtzSolver, SolveResult,
 };
 pub use source::{
-    identity_dual_source, linear_source, support_phase_kernel, SourceError,
+    identity_dual_source, identity_dual_source_with_phase, linear_source,
+    support_phase_kernel, SourceError,
 };
 
 /// Crate version embedded for diagnostics.

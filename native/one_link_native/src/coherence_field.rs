@@ -12,8 +12,8 @@
 
 use ol_coherence_field::{
     apparent_horizon_anchor, be_rar, green_function, identity_dual_source,
-    inject_fragility_events, linear_source, prefetch_priorities,
-    rotation_cadence_multiplier, screening_length, solve_helmholtz,
+    identity_dual_source_with_phase, inject_fragility_events, linear_source,
+    prefetch_priorities, rotation_cadence_multiplier, screening_length, solve_helmholtz,
     support_phase_kernel,
     anchor::{ApparentHorizonInputs, G_A_GALAXY_PLANCK},
     calibration::{bio_mesh_calibration, one_field_calibration, one_link_calibration},
@@ -156,6 +156,29 @@ fn py_identity_dual_source(
 }
 
 #[pyfunction]
+#[pyo3(name = "identity_dual_source_with_phase")]
+#[pyo3(signature = (density, flux, c_support, alpha, beta, c0=0.80, w_phase=0.12))]
+fn py_identity_dual_source_with_phase(
+    density: Vec<f64>,
+    flux: Vec<f64>,
+    c_support: Vec<f64>,
+    alpha: f64,
+    beta: f64,
+    c0: f64,
+    w_phase: f64,
+) -> PyResult<Vec<f64>> {
+    identity_dual_source_with_phase(
+        &density,
+        &flux,
+        &c_support,
+        alpha,
+        beta,
+        SupportPhaseConfig { c0, w_phase },
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+#[pyfunction]
 #[pyo3(name = "support_phase_kernel")]
 #[pyo3(signature = (c_support, c0=0.80, w_phase=0.12))]
 fn py_support_phase_kernel(c_support: Vec<f64>, c0: f64, w_phase: f64) -> Vec<f64> {
@@ -269,6 +292,7 @@ pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
     m.add_function(wrap_pyfunction!(py_apparent_horizon_anchor, m)?)?;
     m.add_function(wrap_pyfunction!(py_linear_source, m)?)?;
     m.add_function(wrap_pyfunction!(py_identity_dual_source, m)?)?;
+    m.add_function(wrap_pyfunction!(py_identity_dual_source_with_phase, m)?)?;
     m.add_function(wrap_pyfunction!(py_support_phase_kernel, m)?)?;
     m.add_function(wrap_pyfunction!(py_inject_fragility_events, m)?)?;
     m.add_function(wrap_pyfunction!(py_prefetch_priorities, m)?)?;
