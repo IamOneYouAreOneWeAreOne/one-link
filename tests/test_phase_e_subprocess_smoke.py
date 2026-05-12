@@ -102,3 +102,35 @@ def test_daemon_pair_routing_homology_prefetch_also_reported():
                 f"{subsystem}.available is False on a real daemon — "
                 "the production build is missing a Phase D/E crate"
             )
+
+
+def test_daemon_pair_bloom_init_capability_advertised_in_status():
+    """BLOOM_INIT_V1 must show up in the live daemon's status surface.
+    The cap is what gates the entire Phase B handshake."""
+    with daemon_pair() as p:
+        res = request(p.a.control_port, cmd="status")
+        assert res.get("ok")
+        ns = res["native_status"]
+        bi = ns.get("bloom_init")
+        assert bi is not None
+        # Native availability depends on the wheel build; the cap MUST
+        # be advertised either way (a daemon without the wheel still
+        # advertises so peers know to NOT bother sending the bloom).
+        assert isinstance(bi.get("advertised"), bool)
+        assert bi.get("advertised") is True
+
+
+def test_daemon_pair_quic_transport_capability_advertised_in_status():
+    """QUIC_TRANSPORT_V1 must show up in the live daemon's status."""
+    with daemon_pair() as p:
+        res = request(p.a.control_port, cmd="status")
+        assert res.get("ok")
+        ns = res["native_status"]
+        qt = ns.get("quic_transport")
+        assert qt is not None
+        assert isinstance(qt.get("advertised"), bool)
+        assert qt.get("advertised") is True
+        # endpoint_up depends on whether the local make_endpoint
+        # succeeded. We don't assert True (platform-dependent) but
+        # we do assert the key exists.
+        assert "endpoint_up" in qt

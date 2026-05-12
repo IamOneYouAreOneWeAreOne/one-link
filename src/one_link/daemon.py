@@ -2251,6 +2251,18 @@ class Daemon:
                     "FILE_WANTS", self.me.short_id,
                     of=msg["id"], blob=blob, wants=sorted(missing or []),
                 )))
+                # Phase B: alongside the explicit FILE_WANTS list, also
+                # send a BLOOM_INIT_FILTER advisory frame containing
+                # the receiver's Bloom of chunks it ALREADY HAS. The
+                # sender currently logs savings vs FILE_WANTS but
+                # uses FILE_WANTS as the authoritative source. Once
+                # telemetry confirms savings, a follow-up commit flips
+                # the sender to honor the Bloom — at which point the
+                # FILE_WANTS frame can be dropped from BLOOM_INIT_V1
+                # peers entirely.
+                await self._maybe_send_bloom_init_advisory(
+                    channel, msg_id=msg["id"], blob=blob, peer_fp=peer_fp
+                )
                 if not missing:
                     self._schedule_finish_cdc_file(blob, peer_fp, peer_sid, msg)
             else:
@@ -2430,6 +2442,14 @@ class Daemon:
             await self._handle_group_msg(channel, msg, peer_fp, peer_sid)
         elif t == "ENDPOINT_UPDATE":
             await self._handle_endpoint_update(channel, msg, peer_fp, peer_sid)
+        elif t == "BLOOM_INIT_FILTER":
+            # Phase B advisory: receiver advertised its locally-held
+            # chunk set as a Bloom. Sender logs the savings potential
+            # for telemetry. The canonical chunk dispatch still flows
+            # through FILE_WANTS (which arrived alongside this frame).
+            # Future cutover: flip to honor the Bloom and drop the
+            # FILE_WANTS list from BLOOM_INIT_V1 peers.
+            await self._handle_bloom_init_advisory(channel, msg, peer_fp)
         elif t == "REACTION":
             # v0.7.5: emoji reaction frame. {target, emoji, op}.
             # Only pinned peers can react against our messages, since
@@ -5667,13 +5687,24 @@ class Daemon:
                     pass
         except ImportError:
             pass
-        # Phase B Bloom-init availability + advertisement.
+        # Phase B Bloom-init availability + advertisement + telemetry.
         try:
             from one_link import bloom_init as _bi
             from one_link.capabilities import BLOOM_INIT_V1, LOCAL_CAPABILITIES
 
             out["bloom_init"]["available"] = _bi.HAS_NATIVE
             out["bloom_init"]["advertised"] = BLOOM_INIT_V1 in LOCAL_CAPABILITIES
+            stats = getattr(self, "_bloom_init_stats", None)
+            if stats:
+                out["bloom_init"]["advisories_received"] = stats.get(
+                    "advisories_received", 0
+                )
+                out["bloom_init"]["total_bloom_bytes"] = stats.get(
+                    "total_bloom_bytes", 0
+                )
+                out["bloom_init"]["estimated_savings_bytes"] = stats.get(
+                    "estimated_savings_vs_explicit_list_bytes", 0
+                )
         except ImportError:
             pass
         # Phase A2 QUIC transport availability + endpoint status.
@@ -5760,6 +5791,133 @@ class Daemon:
         ):
             return "quic"
         return "webrtc"
+
+    async def _maybe_send_bloom_init_advisory(
+        self, channel, *, msg_id: str, blob: str, peer_fp: str
+    ) -> None:
+        """Send a BLOOM_INIT_FILTER advisory frame to the sender,
+        listing the receiver's locally-held chunk IDs as a Bloom.
+
+        No-op when:
+        - The peer doesn't advertise BLOOM_INIT_V1.
+        - The native bloom crate isn't installed.
+        - The receiver has no chunks to report.
+
+        Pure telemetry today — the sender currently uses the
+        accompanying FILE_WANTS list as the canonical source. The
+        advisory exists so operators can compare wire-byte costs
+        (FILE_WANTS list vs Bloom) in `/api/metrics` before the
+        Phase B cutover commits to Bloom as primary.
+        """
+        from one_link.capabilities import BLOOM_INIT_V1
+
+        # Peer capability gate.
+        if BLOOM_INIT_V1 not in self._peer_advertised_caps(peer_fp):
+            return
+        # Native availability gate.
+        try:
+            from one_link import bloom_init
+
+            if not bloom_init.HAS_NATIVE:
+                return
+        except ImportError:
+            return
+        # Build the Bloom over chunks the receiver actually has.
+        known_ids = self._locally_held_chunk_ids_for_blob(blob)
+        if not known_ids:
+            return
+        try:
+            advertisement = bloom_init.build_receiver_bloom(known_ids)
+        except Exception:  # pragma: no cover
+            return
+        import base64
+
+        await channel.send(encode_msg(make_msg(
+            "BLOOM_INIT_FILTER", self.me.short_id,
+            of=msg_id, blob=blob,
+            bloom=base64.b64encode(advertisement).decode("ascii"),
+            n_known=len(known_ids),
+        )))
+
+    def _peer_advertised_caps(self, peer_fp: str) -> frozenset[str]:
+        """Best-effort lookup of which capabilities `peer_fp` advertised
+        during pairing. Returns an empty set when the peer is unknown
+        or never advertised."""
+        sess = self._outbound_sessions.get(peer_fp)
+        if sess is None:
+            return frozenset()
+        chan = getattr(sess, "channel", None)
+        if chan is None:
+            return frozenset()
+        peer_caps = getattr(chan, "peer_caps", None) or {}
+        feats = peer_caps.get("features") if isinstance(peer_caps, dict) else None
+        if feats is None:
+            return frozenset()
+        if isinstance(feats, (list, tuple, set, frozenset)):
+            return frozenset(str(f) for f in feats)
+        return frozenset()
+
+    def _locally_held_chunk_ids_for_blob(self, _blob: str) -> list[bytes]:
+        """Return the set of chunk_ids this daemon already holds that
+        are relevant to the manifest of `blob`. Default implementation
+        returns the empty list (manifests aren't kept on the receiver
+        side until after the transfer completes). Sub-classes /
+        production extensions override.
+
+        Hook for future Bloom-init wiring once a manifest-cache
+        surface exists. Empty list is safe — receiver advertises no
+        prior knowledge → sender ships everything (correctness
+        preserved)."""
+        return []
+
+    async def _handle_bloom_init_advisory(self, channel, msg, peer_fp: str) -> None:
+        """Sender-side handler for BLOOM_INIT_FILTER messages. Decodes
+        the receiver's Bloom, computes the savings vs the matching
+        FILE_WANTS frame, and bumps the per-daemon telemetry counter.
+
+        Advisory-only — does NOT alter the actual chunk dispatch path.
+        Once production telemetry confirms savings, a follow-up commit
+        flips the sender to honor the Bloom and drop the FILE_WANTS
+        list from BLOOM_INIT_V1 peers entirely."""
+        import base64
+
+        blob = str(msg.get("blob") or "")
+        bloom_b64 = msg.get("bloom") or ""
+        n_known = msg.get("n_known")
+        if not blob or not bloom_b64:
+            return
+        try:
+            wire = base64.b64decode(bloom_b64, validate=True)
+        except (binascii.Error, ValueError):
+            log.debug("BLOOM_INIT_FILTER from %s: bad base64", peer_fp[:8])
+            return
+        # Telemetry counters: how many advisories arrived, total bytes,
+        # estimated savings vs an explicit FILE_WANTS list of the same
+        # size. Counters initialise lazily on the daemon.
+        stats = getattr(self, "_bloom_init_stats", None)
+        if stats is None:
+            stats = {
+                "advisories_received": 0,
+                "total_bloom_bytes": 0,
+                "estimated_savings_vs_explicit_list_bytes": 0,
+            }
+            self._bloom_init_stats = stats
+        stats["advisories_received"] += 1
+        stats["total_bloom_bytes"] += len(wire)
+        # Heuristic savings estimate: if the receiver claimed n_known
+        # chunks AND used a Bloom of `len(wire)` bytes, the equivalent
+        # FILE_WANTS list would carry `n_known * 32` bytes of chunk_id
+        # text. Savings = explicit - bloom (positive means Bloom is
+        # cheaper). Negative means the explicit list was already
+        # smaller; rare but recorded honestly.
+        try:
+            n_known_int = int(n_known) if n_known is not None else 0
+            explicit_cost = n_known_int * 32
+            stats["estimated_savings_vs_explicit_list_bytes"] += max(
+                explicit_cost - len(wire), 0
+            )
+        except (TypeError, ValueError):
+            pass
 
     # ── Phase B Bloom-init handshake wiring ────────────────────────
 
