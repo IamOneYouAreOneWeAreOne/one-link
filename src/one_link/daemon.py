@@ -841,6 +841,20 @@ class Daemon:
         # Phase E topology feeder task — pushes peer-graph updates
         # to the snapshot manager every 5s once start() runs.
         self._field_topology_feeder_task: Optional[asyncio.Task] = None
+        # Phase E homology feeder task — runs persistent-homology
+        # fragility detection over the chunk-cohold graph every 30s
+        # and pushes resulting events to the snapshot manager so the
+        # field anticipates partitions before they open.
+        self._field_homology_feeder_task: Optional[asyncio.Task] = None
+        # Phase E chunk-cohold registry: ``blob_hex -> set[short_id]``.
+        # Populated by `_observe_prefetch` as FILE_DONE events flow,
+        # consumed by the homology feeder to build a cohold graph.
+        # Single-daemon view today; richer once peer-gossip on chunk
+        # holdings lands.
+        self._chunk_holders: dict[str, set[str]] = {}
+        # Capped to prevent unbounded memory growth on long-running
+        # daemons that have received many distinct chunks.
+        self._chunk_holders_cap: int = 8192
         # Phase A2 dual-stack QUIC endpoint. Stays None when ol_quic
         # isn't installed; transport_choice_for_peer() then keeps
         # every peer on WebRTC. Lazy-built in start().
@@ -5688,7 +5702,34 @@ class Daemon:
         bad input) are swallowed so they never affect a successful
         transfer. Daemon callers invoke this on every send_file /
         file-receive success so the predictor builds a model of
-        peer-pair demand over time."""
+        peer-pair demand over time.
+
+        Side effect: also registers ``peer_short_id`` as a known
+        holder of ``blob_hex`` in the chunk-cohold registry. The
+        Phase E homology feeder uses that registry to build the
+        cohold graph that drives fragility detection."""
+        # Update the chunk-cohold registry first — pure dict work,
+        # always succeeds. The native-predictor block below may
+        # bail early on import errors but we still want to track
+        # holders.
+        if self._valid_blob_hex(blob_hex) and len(peer_fp) >= 8:
+            try:
+                short_id = peer_fp[:8]
+                holders = self._chunk_holders.setdefault(blob_hex, set())
+                holders.add(short_id)
+                # Bound memory: evict the oldest chunk by insertion
+                # order when we hit the cap. The dict iteration
+                # order is insertion-order (Python 3.7+), so taking
+                # next(iter()) gives the eldest.
+                while len(self._chunk_holders) > self._chunk_holders_cap:
+                    eldest = next(iter(self._chunk_holders))
+                    if eldest == blob_hex:
+                        # Should not happen — but be safe against
+                        # the degenerate cap=0 case.
+                        break
+                    del self._chunk_holders[eldest]
+            except Exception:  # pragma: no cover — defensive
+                pass
         try:
             from one_link import prefetch_native
 
@@ -6451,6 +6492,165 @@ class Daemon:
             return snap_mgr.field_score_for_peer(peer_short_id)
         except Exception:  # pragma: no cover
             return None
+
+    def field_rank_holders(
+        self,
+        holders: list[str],
+        *,
+        requester_short_id: str | None = None,
+    ) -> list[str]:
+        """Phase E #2 — rank candidate chunk-holders by field-distance.
+
+        Given a list of peer short-ids that could serve a chunk,
+        returns the same list re-ordered so the highest-coherence
+        holder (smallest field-distance to the local peer or the
+        requester) comes first. Single-element / empty input is
+        passed through unchanged.
+
+        Falls back to the input order when:
+        - No snapshot exists yet
+        - None of the holders is in the current snapshot
+        - ``ONE_LINK_FIELD_PREFETCH_DISABLE=1`` is set
+        - The native crate isn't available
+
+        Intended consumer: any future multi-holder fetch decision
+        path. The helper is wired and available; the only thing
+        missing is a code path that calls it with a non-trivial
+        holder list. Once swarm fetch lands, the call site is here."""
+        if not holders or len(holders) < 2:
+            return list(holders)
+        if os.environ.get("ONE_LINK_FIELD_PREFETCH_DISABLE", "").lower() in (
+            "1", "true", "yes", "on",
+        ):
+            return list(holders)
+        snap_mgr = getattr(self, "_field_snapshot", None)
+        if snap_mgr is None:
+            return list(holders)
+        try:
+            snap = snap_mgr.snapshot()
+        except Exception:  # pragma: no cover
+            return list(holders)
+        if snap is None:
+            return list(holders)
+        # Score each holder by its field value; sort descending.
+        scored: list[tuple[float, str]] = []
+        for h in holders:
+            try:
+                s = snap_mgr.field_score_for_peer(h)
+            except Exception:  # pragma: no cover
+                s = None
+            scored.append((s if s is not None else -1.0, h))
+        # If NONE of the holders is in the snapshot, fall back.
+        if all(score < 0 for score, _ in scored):
+            return list(holders)
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        return [h for _, h in scored]
+
+    async def _field_homology_feeder_loop(self) -> None:
+        """Background loop that runs persistent-homology fragility
+        detection over the chunk-cohold graph every 30s and pushes
+        the resulting events to the FieldSnapshotManager so the field
+        anticipates partitions before they actually open.
+
+        Data flow:
+            _observe_prefetch -> self._chunk_holders[blob_hex] += short_id
+            self._chunk_holders -> cohold graph (chunks, edges, holders)
+            homology.fragility_score(...) -> ranked fragile chunks
+            top-N fragile chunks -> [(holder_short_ids, weight), ...]
+            FieldSnapshotManager.update_fragility_events(events)
+
+        Single-daemon view is sparse (only locally-observed FILE_DONE
+        events) but the wiring is end-to-end correct; chunk-holder
+        gossip enriches the graph automatically without code changes.
+
+        Honors ``ONE_LINK_FIELD_HOMOLOGY_DISABLE=1`` as an operator
+        escape hatch — when set, the loop still runs but skips the
+        actual fragility computation."""
+        try:
+            while True:
+                await asyncio.sleep(30.0)
+                mgr = getattr(self, "_field_snapshot", None)
+                if mgr is None:
+                    continue
+                if os.environ.get(
+                    "ONE_LINK_FIELD_HOMOLOGY_DISABLE", ""
+                ).lower() in ("1", "true", "yes", "on"):
+                    continue
+                try:
+                    self._tick_homology_feeder(mgr)
+                except Exception as exc:  # pragma: no cover
+                    log.debug("homology feeder tick failed: %s", exc)
+        except asyncio.CancelledError:
+            pass
+
+    def _tick_homology_feeder(self, mgr) -> None:
+        """Single tick of the homology feeder. Pure helper so the
+        tick body is testable without spinning the asyncio loop."""
+        try:
+            from one_link import homology_native
+        except ImportError:
+            return
+        if not homology_native.HAS_NATIVE:
+            return
+        # Snapshot the registry; release the daemon's reference
+        # before doing graph work.
+        cohold = {
+            blob_hex: list(short_ids)
+            for blob_hex, short_ids in self._chunk_holders.items()
+            if short_ids
+        }
+        if len(cohold) < 2:
+            # Too few chunks to compute meaningful cohomology.
+            # Clear any stale events so the field re-equilibrates.
+            mgr.update_fragility_events([])
+            return
+        nodes = list(cohold.keys())
+        # Edges: chunk_a -- chunk_b when they share at least one holder.
+        # O(N²) in chunk count; capped by self._chunk_holders_cap.
+        node_set = set(nodes)
+        edges: list[tuple[str, str]] = []
+        for i, a in enumerate(nodes):
+            holders_a = set(cohold[a])
+            for b in nodes[i + 1:]:
+                if a == b:
+                    continue
+                if holders_a & set(cohold[b]):
+                    edges.append((a, b))
+        # Native fragility_score wants {chunk_id -> holder_count}, not
+        # {chunk_id -> [holder_ids]}. Map down before the call.
+        holder_counts = {cid: len(cohold[cid]) for cid in nodes}
+        try:
+            scores, _replication_priority = homology_native.fragility_score(
+                nodes, edges, holder_counts,
+            )
+        except Exception:  # pragma: no cover
+            return
+        # Translate top-N most-fragile chunks into per-peer events.
+        # Each event is (peer_short_ids, weight) — the holders of
+        # that chunk get a negative spike in the field source.
+        top_n = 8
+        events: list[tuple[list[str], float]] = []
+        # `scores` items have .chunk_id + .score attributes; defensive
+        # fall-throughs for crate-version differences.
+        score_list: list = []
+        try:
+            for s in scores:
+                cid = getattr(s, "chunk_id", None)
+                score_val = float(getattr(s, "score", 0.0))
+                if cid is None or cid not in node_set:
+                    continue
+                score_list.append((score_val, cid))
+        except (TypeError, ValueError):  # pragma: no cover
+            return
+        score_list.sort(key=lambda x: -x[0])
+        for score_val, cid in score_list[:top_n]:
+            if score_val <= 0:
+                continue
+            holders_of_cid = list(cohold.get(cid, []))
+            if not holders_of_cid:
+                continue
+            events.append((holders_of_cid, score_val))
+        mgr.update_fragility_events(events)
 
     def _pick_best_relay(self, available_relays: list) -> list:
         """Phase D #1 (ADR-0028) + Phase E (FILE_ENGINE_V2_PLAN.md) —
@@ -11146,6 +11346,12 @@ class Daemon:
         self._field_topology_feeder_task = asyncio.create_task(
             self._field_topology_feeder_loop()
         )
+        # Phase E: also run the homology fragility feeder on a 30s
+        # cadence. Pushes chunk-cohold-graph fragility events into
+        # the snapshot manager so the field anticipates partitions.
+        self._field_homology_feeder_task = asyncio.create_task(
+            self._field_homology_feeder_loop()
+        )
 
         # Phase A2: bring up the local QUIC endpoint (no-op if the
         # native crate isn't installed). Dual-stack with WebRTC; the
@@ -11255,6 +11461,15 @@ class Daemon:
             feeder.cancel()
             try:
                 await feeder
+            except (asyncio.CancelledError, Exception):
+                pass
+        homology_feeder = getattr(
+            self, "_field_homology_feeder_task", None,
+        )
+        if homology_feeder is not None and not homology_feeder.done():
+            homology_feeder.cancel()
+            try:
+                await homology_feeder
             except (asyncio.CancelledError, Exception):
                 pass
         if self._field_snapshot is not None:
