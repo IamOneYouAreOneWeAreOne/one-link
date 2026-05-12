@@ -11,45 +11,25 @@ Usage:
 
 Output goes to dist/one-link[.exe] at the repo root.
 
-──────────────────────────────────────────────────────────────────
-KNOWN GAP — one_link_native (Rust hot-path) is NOT yet bundled.
-──────────────────────────────────────────────────────────────────
+Native (Rust) module bundling:
 
-This script bundles `src/one_link/web/` (HTML UI) and the legacy
-`src/one_link/native/` directory (the old ol_native_cdc shared
-libs). It does NOT currently bundle the new `one_link_native`
-Python extension produced by `native/` via maturin.
+This script auto-detects whether one_link_native is installed in
+the active environment. When present, `--collect-all one_link_native`
+is added to the PyInstaller arg list so the .pyd / .so / .dylib
+files are bundled into the exe; the produced binary then realizes
+the Phase A1/A2 gains (CDC, AEAD, QUIC, coherence-field) without
+needing a separate `pip install`.
 
-That means: a standalone exe built today RUNS, but falls back to
-the pure-Python paths for QUIC and coherence-field routing — no
-performance regression from the user's perspective, but the
-shipped binary doesn't realize the Phase A1/A2 gains.
+When one_link_native is NOT installed, the build proceeds without
+it — the resulting exe still works, falling back to the pure-Python
+transport paths. Users who want the native fast path on a binary
+build should run, before this script:
 
-To fix in a follow-up PR (Phase 4 of the production-install plan):
+    pip install one_link_native --find-links \\
+      https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest
 
-  1. Build the native wheel first: `cd native && maturin build --release`
-     and `pip install` the wheel into the environment that PyInstaller
-     scans, so its .pyd files appear in site-packages/.
-  2. Add `--collect-all one_link_native` to the PyInstaller args
-     in this script (after `--collect-submodules aiohttp`). That
-     pulls in the .pyd files and any data files (PEP 561 stubs are
-     irrelevant at runtime).
-  3. Smoke-test: run the produced exe on a host that does NOT have
-     one_link_native installed via pip, and confirm `from
-     one_link_native import quic; quic.is_available()` succeeds. The
-     daemon log should no longer say "QUIC unavailable" on startup.
-  4. The Sigstore + reproducible-build pipeline in
-     .github/workflows/release.yml expects byte-identical rebuilds.
-     Bundling .pyd files makes the binary architecture-specific (one
-     exe per OS+arch), which is already what release.yml's
-     native_wheels job does for the wheel — extend that pattern to
-     the PyInstaller artifacts.
-
-The release.yml workflow already publishes the native wheels
-themselves to GitHub Releases (Phase 1). Until this script is
-updated, users who want both the binary and the native fast path
-should install both: download `one-link.exe` AND run `pip install
-one_link_native --find-links <release-page>`.
+The release.yml workflow already publishes the native wheels per
+OS to GitHub Releases (Phase 1 of the production-install plan).
 """
 
 from __future__ import annotations
@@ -123,6 +103,24 @@ def main() -> int:
         if ico.is_file():
             icon_arg = ["--icon", str(ico)]
 
+    # v0.21.x: include the Rust-built native extension (one_link_native)
+    # so the bundled binary gets the QUIC + coherence-field fast paths.
+    # If the wheel isn't installed in the active env, PyInstaller will
+    # log a warning and the resulting exe will fall back to pure-Python
+    # paths — same behavior as before this change, no regression.
+    try:
+        import one_link_native  # noqa: F401
+        native_collect = ["--collect-all", "one_link_native"]
+        print("[build] one_link_native detected — bundling into exe")
+    except ImportError:
+        native_collect = []
+        print(
+            "[build] one_link_native not installed in this env — building "
+            "without native fast path. To include it: install the wheel "
+            "first via `pip install one_link_native --find-links "
+            "https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest`"
+        )
+
     cmd = [
         sys.executable,
         "-m",
@@ -140,6 +138,7 @@ def main() -> int:
         "cryptography",
         "--collect-submodules",
         "aiohttp",
+        *native_collect,
         # Bundle the web UI (HTML/CSS/JS/assets) into the exe:
         "--add-data",
         add_data_web,
