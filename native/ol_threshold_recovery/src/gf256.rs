@@ -137,6 +137,53 @@ pub fn gf_mul_fast(a: u8, b: u8) -> u8 {
     gf_mul_table()[a as usize][b as usize]
 }
 
+/// Precomputed 256-byte multiplicative-inverse LUT for GF(2^8).
+/// `INV_LUT[a] = a^-1` for a in 1..256; `INV_LUT[0] = 0` (undefined
+/// in field; conventional sentinel). Built once on first access.
+fn gf_inv_lut() -> &'static [u8; 256] {
+    use std::sync::OnceLock;
+    static LUT: OnceLock<Box<[u8; 256]>> = OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut t = Box::new([0u8; 256]);
+        // gf_inv via Fermat (a^254) for each a; LUT it once.
+        for a in 1u32..256 {
+            t[a as usize] = gf_inv(a) as u8;
+        }
+        t
+    })
+}
+
+/// Fast non-constant-time GF(2^8) inverse via 256-byte LUT.
+/// ~8× faster than [`gf_inv`] (which does 8 multiplications via
+/// `a^254`). Use ONLY with public-value operands (share x-coords
+/// during Lagrange basis evaluation).
+///
+/// Returns 0 for input 0 (sentinel; caller must avoid by construction).
+///
+/// # Side-channel warning
+/// Same as [`gf_mul_fast`]: NOT constant-time wrt cache state. Use
+/// only with public-value operands.
+#[inline]
+#[must_use]
+pub fn gf_inv_fast(a: u8) -> u8 {
+    gf_inv_lut()[a as usize]
+}
+
+/// Fast non-constant-time GF(2^8) division via LUT.
+/// Equivalent to `gf_mul_fast(a, gf_inv_fast(b))`. Returns 0 when b=0.
+///
+/// # Side-channel warning
+/// Cache-timing-leakable. Use only with public-value operands.
+#[inline]
+#[must_use]
+pub fn gf_div_fast(a: u8, b: u8) -> u8 {
+    if b == 0 {
+        0
+    } else {
+        gf_mul_fast(a, gf_inv_fast(b))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

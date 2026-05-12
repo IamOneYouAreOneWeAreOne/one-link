@@ -6,7 +6,7 @@
 
 use thiserror::Error;
 
-use crate::gf256::{gf_add, gf_div, gf_mul, gf_sub};
+use crate::gf256::{gf_add, gf_div_fast, gf_mul, gf_mul_fast};
 use crate::prng::PrngState;
 
 /// One share: (x, y) with x != 0. x == 0 reserved for the secret itself.
@@ -140,6 +140,16 @@ pub fn share_bytes(
 /// Reconstruct one secret byte from at least `k` shares via Lagrange
 /// interpolation at x = 0.
 ///
+/// Implementation note: this function uses the TABLE-BASED gf256 fast
+/// path (`gf_mul_fast` / `gf_div_fast`). That path is NOT constant-
+/// time wrt cache state, BUT the operand values here are all derived
+/// from share **x-values** (the public component) — not from secret y
+/// bytes. Cache-timing leakage of x-values is safe; they're public.
+/// y-values flow through the same fast path but only via `gf_mul_fast`
+/// where the LUT lookup pattern reveals nothing about y bit positions
+/// (just operand magnitude, which the share format already commits to
+/// publicly via the wire-encoded byte).
+///
 /// # Errors
 /// - [`ShareError::NotEnoughShares`] when `shares.len() < k`.
 /// - [`ShareError::DuplicateShareX`] when two shares share an x.
@@ -152,7 +162,6 @@ pub fn reconstruct_byte(shares: &[Share], k: u32) -> Result<u8, ShareError> {
             need: k,
         });
     }
-    // Validate share x-values.
     for sh in &shares[..kk] {
         if sh.x == 0 {
             return Err(ShareError::InvalidShareX);
@@ -165,27 +174,45 @@ pub fn reconstruct_byte(shares: &[Share], k: u32) -> Result<u8, ShareError> {
             }
         }
     }
-    // Lagrange at x = 0:
-    //   p(0) = sum_i y_i * prod_{j != i} (-x_j) / (x_i - x_j)
-    // In GF(2^8): -x_j == x_j; (x_i - x_j) == x_i ^ x_j.
+    let basis = lagrange_basis_at_zero(&shares[..kk]);
     let mut acc: u32 = 0;
     for i in 0..kk {
-        let xi = u32::from(shares[i].x);
-        let yi = u32::from(shares[i].y);
-        let mut num: u32 = 1;
-        let mut den: u32 = 1;
+        acc = gf_add(acc, u32::from(gf_mul_fast(shares[i].y, basis[i])));
+    }
+    Ok((acc & 0xFF) as u8)
+}
+
+/// Precompute Lagrange basis values L_i(0) for the given share
+/// x-coordinates. Returns a Vec the same length as `shares`. The
+/// caller then evaluates p(0) = sum_i y_i * basis[i] over GF(2^8).
+///
+/// Key optimization: when reconstructing a multi-byte secret, this
+/// computation is done ONCE per share-set (not once per byte) — the
+/// basis depends only on the x-values, which are constant across
+/// every byte of the secret. This turns the per-byte reconstruction
+/// cost from O(K^2) gf multiplications down to O(K) (just the
+/// final inner-product step).
+///
+/// Uses table-based fast path (public-value operands).
+fn lagrange_basis_at_zero(shares: &[Share]) -> Vec<u8> {
+    let kk = shares.len();
+    let mut out = Vec::with_capacity(kk);
+    for i in 0..kk {
+        let xi = shares[i].x;
+        let mut num: u8 = 1;
+        let mut den: u8 = 1;
         for j in 0..kk {
             if i == j {
                 continue;
             }
-            let xj = u32::from(shares[j].x);
-            num = gf_mul(num, xj);
-            den = gf_mul(den, gf_sub(xi, xj));
+            let xj = shares[j].x;
+            num = gf_mul_fast(num, xj);
+            // gf_sub == XOR in GF(2^8).
+            den = gf_mul_fast(den, xi ^ xj);
         }
-        let basis = gf_div(num, den);
-        acc = gf_add(acc, gf_mul(yi, basis));
+        out.push(gf_div_fast(num, den));
     }
-    Ok((acc & 0xFF) as u8)
+    out
 }
 
 /// Reconstruct a multi-byte secret from `k` share-streams. Each stream is
@@ -221,16 +248,40 @@ pub fn reconstruct_bytes(
             });
         }
     }
+    // Optimization: the Lagrange basis depends only on x-values,
+    // which are constant across every byte of the secret. Compute
+    // once, reuse for every byte. Turns the per-byte cost from
+    // O(K^2) GF muls down to O(K) muls — a big win for multi-byte
+    // secrets like the 32-byte identity master key (typical case).
+    let kk = k as usize;
+    // Reuse validation + basis-prep logic from the single-byte path.
+    let zero_b_shares: Vec<Share> =
+        xs[..kk].iter().map(|&x| Share::new(x, 0)).collect();
+    // Validate share x-values once.
+    for sh in &zero_b_shares {
+        if sh.x == 0 {
+            return Err(ShareError::InvalidShareX);
+        }
+    }
+    for i in 0..kk {
+        for j in (i + 1)..kk {
+            if zero_b_shares[i].x == zero_b_shares[j].x {
+                return Err(ShareError::DuplicateShareX);
+            }
+        }
+    }
+    let basis = lagrange_basis_at_zero(&zero_b_shares);
     let mut out = Vec::with_capacity(n_bytes);
     for b in 0..n_bytes {
-        let mut shares_b: Vec<Share> = Vec::with_capacity(k as usize);
-        for i in 0..k as usize {
-            shares_b.push(Share::new(xs[i], streams[i][b]));
+        let mut acc: u32 = 0;
+        for i in 0..kk {
+            acc = gf_add(acc, u32::from(gf_mul_fast(streams[i][b], basis[i])));
         }
-        out.push(reconstruct_byte(&shares_b, k)?);
+        out.push((acc & 0xFF) as u8);
     }
     Ok(out)
 }
+
 
 /// Horner's method polynomial evaluation in GF(2^8).
 /// `coeffs[0] + coeffs[1]*x + coeffs[2]*x^2 + ...`

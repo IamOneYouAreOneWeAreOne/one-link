@@ -24,15 +24,18 @@ fn nightly_gate() -> bool {
 }
 
 fn plain_cases() -> u32 {
-    if nightly_gate() { 1_000_000 } else { 100_000 }
+    // CI default 100k -> 1M to match Phase C macaroon 1M-delegation gate.
+    if nightly_gate() { 5_000_000 } else { 1_000_000 }
 }
 
 fn field_cases() -> u32 {
-    if nightly_gate() { 200_000 } else { 20_000 }
+    // CI default 20k -> 200k (10x field_bound is more expensive per iter).
+    if nightly_gate() { 1_000_000 } else { 200_000 }
 }
 
 fn wrong_witness_cases() -> u32 {
-    if nightly_gate() { 100_000 } else { 10_000 }
+    // CI default 10k -> 100k.
+    if nightly_gate() { 500_000 } else { 100_000 }
 }
 
 // Plain Shamir round-trip: split (K, N) on a random secret, reconstruct

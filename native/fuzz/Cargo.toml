@@ -25,6 +25,8 @@ ol_grammar    = { path = "../ol_grammar" }
 ol_duress     = { path = "../ol_duress" }
 ol_prefetch   = { path = "../ol_prefetch" }
 ol_codegen    = { path = "../ol_codegen" }
+# Phase F crates.
+ol_threshold_recovery = { path = "../ol_threshold_recovery" }
 
 [profile.release]
 debug = 1
@@ -90,6 +92,29 @@ bench = false
 [[bin]]
 name = "fuzz_codegen_parser"
 path = "fuzz_targets/fuzz_codegen_parser.rs"
+test = false
+doc = false
+bench = false
+
+# ── Phase F fuzz targets ────────────────────────────────────────────
+
+[[bin]]
+name = "fuzz_threshold_shamir_roundtrip"
+path = "fuzz_targets/fuzz_threshold_shamir_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_threshold_reconstruct_arbitrary"
+path = "fuzz_targets/fuzz_threshold_reconstruct_arbitrary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_threshold_field_bound_roundtrip"
+path = "fuzz_targets/fuzz_threshold_field_bound_roundtrip.rs"
 test = false
 doc = false
 bench = false

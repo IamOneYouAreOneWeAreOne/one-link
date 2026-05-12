@@ -52,7 +52,10 @@ pub mod shamir;
 pub mod refresh;
 pub mod field_bound;
 
-pub use gf256::{gf_add, gf_div, gf_inv, gf_mul, gf_pow, gf_sub, GF_PRIMITIVE};
+pub use gf256::{
+    gf_add, gf_div, gf_div_fast, gf_inv, gf_inv_fast, gf_mul, gf_mul_fast,
+    gf_pow, gf_sub, GF_PRIMITIVE,
+};
 pub use prng::{PrngState, SplitMix64};
 pub use shamir::{
     max_participants, params_valid, reconstruct_byte, reconstruct_bytes,
