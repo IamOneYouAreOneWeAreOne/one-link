@@ -27,8 +27,8 @@ use ol_coherence_field::{
     solve_helmholtz,
     anchor::ApparentHorizonInputs,
     calibration::one_link_calibration,
-    pde::CgConfig,
-    FragilityEvent, GraphLaplacian, HelmholtzSolver,
+    pde::{CgConfig, CgConfigF32},
+    FragilityEvent, GraphLaplacian, HelmholtzSolver, HelmholtzSolverF32,
 };
 
 // ── Scalar / per-tick microbenches ──────────────────────────────────
@@ -337,6 +337,51 @@ fn bench_solver_warm_start(c: &mut Criterion) {
     group.finish();
 }
 
+// ── f32 vs f64 helmholtz solve ──────────────────────────────────────
+
+fn bench_helmholtz_f32_vs_f64(c: &mut Criterion) {
+    let mut group = c.benchmark_group("helmholtz_f32_vs_f64");
+    group.sample_size(30);
+    for &n in &[1_000usize, 10_000] {
+        let g = build_ring_chord(n);
+        g.freeze();
+
+        // f64 reference
+        let mut s64 = vec![0.0_f64; n];
+        s64[n / 2] = 1.0;
+        let cfg64 = CgConfig {
+            max_iter: 2_000,
+            tolerance: 1e-6,
+        };
+        group.bench_function(BenchmarkId::new("f64", n), |b| {
+            let mut solver = HelmholtzSolver::new(n);
+            b.iter(|| {
+                solver.clear_warm_start();
+                let r = solver
+                    .solve(&g, 1.0, 0.1, &s64, cfg64)
+                    .unwrap();
+                black_box(r);
+            });
+        });
+
+        // f32 path
+        let mut s32 = vec![0.0_f32; n];
+        s32[n / 2] = 1.0;
+        let cfg32 = CgConfigF32 {
+            max_iter: 2_000,
+            tolerance: 1e-5,
+        };
+        group.bench_function(BenchmarkId::new("f32", n), |b| {
+            let mut solver = HelmholtzSolverF32::new(n);
+            b.iter(|| {
+                let r = solver.solve(&g, 1.0, 0.1, &s32, cfg32).unwrap();
+                black_box(r);
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_scalar_ops,
@@ -346,5 +391,6 @@ criterion_group!(
     bench_couplings,
     bench_end_to_end_topology_change,
     bench_solver_warm_start,
+    bench_helmholtz_f32_vs_f64,
 );
 criterion_main!(benches);

@@ -29,6 +29,7 @@
 //! - [`sparse_solver`] — conjugate-gradient implementation used by all
 //!   of the above.
 
+pub mod f32_solver;
 pub mod helmholtz_reduction;
 pub mod poisson_limit;
 pub mod reaction_diffusion;
@@ -36,6 +37,7 @@ pub mod sparse_solver;
 
 use thiserror::Error;
 
+pub use f32_solver::{CgConfigF32, CgWorkspaceF32, HelmholtzSolverF32, SolveResultF32};
 pub use helmholtz_reduction::{solve_helmholtz, HelmholtzSolver};
 pub use reaction_diffusion::solve_reaction_diffusion_steady;
 pub use sparse_solver::{

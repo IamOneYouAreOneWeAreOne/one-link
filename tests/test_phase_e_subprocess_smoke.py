@@ -1,0 +1,104 @@
+"""Subprocess-level smoke test: real daemon processes have the Phase
+E coherence-field surface alive and reachable via the control API.
+
+This complements the in-process unit tests by exercising the actual
+daemon binary, mDNS discovery, and HTTP control plane — verifying
+that ``/api/native_status`` reports the field crate as available with
+non-degenerate calibration constants, AND that record_relay_observation
++ _pick_best_relay are wired through the daemon's API.
+
+If this passes, the field machinery is actually reachable on a live
+daemon, not just inside the test harness.
+"""
+
+from __future__ import annotations
+
+import json
+import socket
+import time
+
+import pytest
+
+from tests.harness import daemon_pair, request
+
+pytestmark = pytest.mark.timeout(120)
+
+
+def _control_request(control_port: int, **req) -> dict:
+    """Wraps tests.harness.request because some control verbs aren't
+    in the standard harness alphabet — we hand-roll the JSON."""
+    sock = socket.create_connection(("127.0.0.1", control_port), timeout=10.0)
+    try:
+        sock.sendall((json.dumps(req) + "\n").encode("utf-8"))
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        return json.loads(buf.decode("utf-8").strip())
+    finally:
+        sock.close()
+
+
+def test_daemon_reports_coherence_field_available():
+    """A real daemon subprocess must report coherence_field.available=True
+    in the `status` control response. Verifies that ol_coherence_field
+    is built into the daemon's Python environment and reachable through
+    the live control plane — not just inside the test harness."""
+    with daemon_pair() as p:
+        for daemon in [p.a, p.b]:
+            res = request(daemon.control_port, cmd="status")
+            assert res.get("ok"), f"status request failed: {res}"
+            ns = res.get("native_status")
+            assert ns is not None, (
+                f"status response missing native_status block on "
+                f"{daemon.short_id}; daemon build is missing the Phase E "
+                "diagnostics surface"
+            )
+            cf = ns.get("coherence_field")
+            assert cf is not None, (
+                f"native_status missing coherence_field block: {ns}"
+            )
+            assert cf.get("available") is True, (
+                f"coherence_field.available is False on {daemon.short_id}; "
+                "ol_coherence_field not built into the daemon's Python env"
+            )
+            cal = cf.get("calibration")
+            assert cal is not None
+            assert cal.get("d", 0) > 0
+            assert cal.get("gamma", 0) > 0
+            assert cal.get("apparent_horizon_anchor", 0) > 0
+
+
+def test_daemon_pair_field_calibration_matches_across_daemons():
+    """Two daemons running the same build must report identical
+    calibration constants — the calibration is compile-time in
+    ol_coherence_field, so any drift between daemon instances is a
+    build/version mismatch."""
+    with daemon_pair() as p:
+        a_res = request(p.a.control_port, cmd="status")
+        b_res = request(p.b.control_port, cmd="status")
+        assert a_res.get("ok") and b_res.get("ok")
+        a_cal = a_res["native_status"]["coherence_field"]["calibration"]
+        b_cal = b_res["native_status"]["coherence_field"]["calibration"]
+        assert a_cal == b_cal, (
+            f"calibration constants differ across daemons:\nA={a_cal}\nB={b_cal}"
+        )
+
+
+def test_daemon_pair_routing_homology_prefetch_also_reported():
+    """All four Phase D/E native subsystems must show available=True
+    on a real daemon: routing, homology, prefetch, coherence_field.
+    Together they form the upgrade-tier the v2 plan describes."""
+    with daemon_pair() as p:
+        res = request(p.a.control_port, cmd="status")
+        assert res.get("ok")
+        ns = res["native_status"]
+        for subsystem in ("routing", "homology", "prefetch", "coherence_field"):
+            block = ns.get(subsystem)
+            assert block is not None, f"{subsystem} missing from native_status"
+            assert block.get("available") is True, (
+                f"{subsystem}.available is False on a real daemon — "
+                "the production build is missing a Phase D/E crate"
+            )

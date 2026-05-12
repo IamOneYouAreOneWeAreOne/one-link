@@ -5717,13 +5717,31 @@ class Daemon:
             loss = min(0.99, max(0.0, float(metrics.get("loss_rate", 0.0))))
             tau_c_s = max(1.0e-3, 1.0 / rtt_ms)
             if use_be_rar:
-                # BE-RAR-weighted edge cost: edge_weight × nu(y_loss).
-                # y = loss / (1 - loss); diverges as loss → 1, matches
-                # the heuristic 1/(1-loss)^2 in spirit but with the
-                # Bose-statistics-forced alpha = 1/2 asymptote.
+                # BE-RAR-weighted edge cost: edge_weight × nu(y_quality).
+                #
+                # Cosmological BE-RAR shape: nu(y) is monotonically
+                # DECREASING from ∞ at y=0 to 1 at y=∞. In the galaxy
+                # mapping, y = a_bar²/a_0² (gravitational pull relative
+                # to anchor): outer regions (low y) have huge nu boost
+                # (deep MOND), inner regions (high y) have nu = 1
+                # (Newtonian).
+                #
+                # Network analog: define y = (1 - loss)/loss as the
+                # "quality ratio." At loss = 0 (perfect) → y = ∞ →
+                # nu = 1 (baseline cost, no penalty). At loss → 1 →
+                # y → 0 → nu → ∞ (huge penalty multiplier). This is
+                # the physically-correct mapping; the earlier wiring
+                # (y = loss/(1 - loss)) was inverted.
+                #
+                # alpha = 1/2 is forced by Bose statistics — not a
+                # free knob — and the same nu(y) drives galaxy
+                # rotation-curve fitting in the S_One canonical stack.
                 edge_w = _rt.edge_weight(tau_c_s, 100.0)
-                y_loss = loss / max(1.0 - loss, 1e-9)
-                penalty = _cf.be_rar(y_loss) if y_loss > 0.0 else 1.0
+                # Loss clamped to (1e-6, 1−1e-6) so y is finite and
+                # be_rar() gets a positive input.
+                clamped_loss = min(max(loss, 1e-6), 1.0 - 1e-6)
+                y_quality = (1.0 - clamped_loss) / clamped_loss
+                penalty = _cf.be_rar(y_quality)
                 cost = edge_w * penalty
             else:
                 cost = _rt.edge_cost(tau_c_s, 100.0, loss)
@@ -9746,6 +9764,11 @@ class Daemon:
                 "fingerprint": self.me.fingerprint,
                 "hostname": self.me.hostname,
             },
+            # Surface the full native-subsystem availability matrix so
+            # operators + integration tests can verify Phase E is
+            # wired through the live daemon process, not just inside
+            # the harness.
+            "native_status": self.native_diagnostics(),
         }
 
     async def _control_shutdown(self) -> None:
