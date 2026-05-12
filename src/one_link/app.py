@@ -310,15 +310,62 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                 # conflicts when Edge is also open as a browser.
                 profile_dir = data_dir() / "edge-app-profile"
                 profile_dir.mkdir(parents=True, exist_ok=True)
+                # Edge --app= mode on Win11 still reserves a visible
+                # strip beneath the title bar. Three things contribute:
+                #
+                #   1. Win11 "Window Controls Overlay" — Edge reserves
+                #      a region for the WCO API even when the page
+                #      doesn't draw under it (WindowControlsOverlay,
+                #      WebAppWindowControlsOverlay).
+                #   2. Edge's sidebar / hubs / Copilot strip
+                #      (msEdgeSidebar, msHubsSidebar, msEdgeCopilot,
+                #      msEdgeFollow, msEdgeShoppingAssistant).
+                #   3. Personalization / signin pill (msImplicitSignIn,
+                #      Translate, InterestFeedV2).
+                #
+                # All disabled below. --app-auto-launched tells Edge
+                # this is a launcher, not a browser session, which
+                # further trims new-tab / restore UI. --window-name
+                # gives Edge an explicit title-bar caption so it
+                # doesn't lag waiting on the page title.
+                disable_features = ",".join([
+                    # Signin / personalization pills.
+                    "msImplicitSignIn",
+                    "Translate",
+                    "InterestFeedV2",
+                    # Edge sidebar / hubs / Copilot / shopping / follow.
+                    "msEdgeSidebar",
+                    "msHubsSidebar",
+                    "msEdgeCopilot",
+                    "msEdgeFollow",
+                    "msEdgeShoppingAssistant",
+                    "msEdgeAutomaticPasswordSave",
+                    "msSplitButton",
+                    # Window-controls-overlay reservation — the big
+                    # one on Win11 Edge --app= mode.
+                    "WindowControlsOverlay",
+                    "WebAppWindowControlsOverlay",
+                    # PWA promotion / install bubble.
+                    "DesktopPWAsAppHomePage",
+                    "DesktopPWAsTabStrip",
+                    "PwaUpdateDialogForAppIcon",
+                    # Misc residual UI.
+                    "DownloadBubble",
+                    "ChromeWebuiRefresh2023",
+                ])
                 args = [
                     browser,
                     f"--app={url}",
                     "--new-window",
+                    "--app-auto-launched",
                     f"--user-data-dir={profile_dir}",
+                    "--window-name=One Link",
                     "--no-first-run",
                     "--no-default-browser-check",
-                    "--disable-features=msImplicitSignIn,Translate,InterestFeedV2",
+                    f"--disable-features={disable_features}",
                     "--disable-sync",
+                    "--disable-extensions",
+                    "--no-experiments",
                 ]
                 flags = (
                     subprocess.CREATE_NO_WINDOW
