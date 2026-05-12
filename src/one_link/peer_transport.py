@@ -64,7 +64,17 @@ class PeerTransport(Protocol):
 
     def is_open(self) -> bool: ...
 
-    def send_bytes(self, payload: bytes) -> None: ...
+    def send_bytes(self, payload: bytes) -> None:
+        """Sync send. Implementations either fully synchronous (QUIC
+        wraps a blocking ``quinn`` call) or raise when the underlying
+        is async-only (WebRTC channel.send)."""
+        ...
+
+    async def send_bytes_async(self, payload: bytes) -> None:
+        """Async send — production-path. WebRTC awaits the channel
+        coroutine directly; QUIC offloads the blocking call to a
+        thread-pool executor."""
+        ...
 
     def rtt_ms(self) -> Optional[float]: ...
 
@@ -112,34 +122,56 @@ class WebRTCTransport:
         return not closed
 
     def send_bytes(self, payload: bytes) -> None:
+        """Sync send (test-stub callers + fallback paths). Production
+        daemon code uses :meth:`send_bytes_async`."""
         if not self.is_open():
             self.stats.send_failures += 1
             raise TransportSendError("WebRTC channel closed")
-        try:
-            # Existing channel.send accepts pre-encoded bytes. The
-            # facade does NOT re-encode; encoding happens upstream.
-            import asyncio
+        import asyncio
 
-            send_fn = getattr(self.channel, "send", None)
-            if send_fn is None:
-                raise TransportSendError("WebRTC channel has no send()")
+        send_fn = getattr(self.channel, "send", None)
+        if send_fn is None:
+            self.stats.send_failures += 1
+            raise TransportSendError("WebRTC channel has no send()")
+        try:
             coro_or_none = send_fn(payload)
-            # `send` may be sync or async. Tolerate both for stub
-            # usage in tests; production uses awaitable returns.
             if asyncio.iscoroutine(coro_or_none):
-                # Daemon hot path is async; if a caller invokes the
-                # facade outside an event loop, this raises clearly.
+                self.stats.send_failures += 1
                 raise TransportSendError(
                     "channel.send() returned a coroutine; await it at "
-                    "the daemon call site"
+                    "the daemon call site or use send_bytes_async()"
                 )
         except TransportSendError:
-            self.stats.send_failures += 1
             raise
         except Exception as e:
             self.stats.send_failures += 1
             raise TransportSendError(str(e)) from e
-        self.stats.bytes_sent += len(payload)
+        self._record_send(len(payload))
+
+    async def send_bytes_async(self, payload: bytes) -> None:
+        """Async send — the production-path entry point. Channel's
+        send() in real daemons is a coroutine; awaiting it here keeps
+        the call-site contract clean."""
+        if not self.is_open():
+            self.stats.send_failures += 1
+            raise TransportSendError("WebRTC channel closed")
+        import asyncio
+
+        send_fn = getattr(self.channel, "send", None)
+        if send_fn is None:
+            self.stats.send_failures += 1
+            raise TransportSendError("WebRTC channel has no send()")
+        try:
+            coro_or_none = send_fn(payload)
+            if asyncio.iscoroutine(coro_or_none):
+                await coro_or_none
+        except Exception as e:
+            self.stats.send_failures += 1
+            raise TransportSendError(str(e)) from e
+        self._record_send(len(payload))
+
+    def _record_send(self, n_bytes: int) -> None:
+        self.stats.bytes_sent += n_bytes
         self.stats.sends += 1
         import time
 
@@ -191,31 +223,42 @@ class QuicTransport:
         return bool(is_conn()) if callable(is_conn) else False
 
     def send_bytes(self, payload: bytes) -> None:
+        """Sync send. QuicPeerSession.send_frame is blocking under
+        the hood (calls quinn's blocking API); safe to invoke from
+        sync code paths."""
         if not self.is_open():
             self.stats.send_failures += 1
             raise TransportSendError("QUIC session closed")
         # The ol_quic frame type used for generic message-layer bytes
         # — we encode an existing channel-layer message into a single
         # QUIC frame so the channel's message format stays intact.
-        # FRAME_CHUNK_REQUEST is a generic carrier in the current
-        # ol_quic wire spec; if a dedicated FRAME_MESSAGE lands, swap
-        # the import here. The receiver dispatches by frame type, so
-        # the choice of carrier matters only for cross-version compat.
         try:
             from one_link import peer_quic
 
             frame_type = peer_quic.FRAME_CHUNK_REQUEST  # generic carrier
             send_fn = getattr(self.session, "send_frame", None)
             if send_fn is None:
+                self.stats.send_failures += 1
                 raise TransportSendError("QUIC session has no send_frame()")
             send_fn(frame_type, payload)
         except TransportSendError:
-            self.stats.send_failures += 1
             raise
         except Exception as e:
             self.stats.send_failures += 1
             raise TransportSendError(str(e)) from e
-        self.stats.bytes_sent += len(payload)
+        self._record_send(len(payload))
+
+    async def send_bytes_async(self, payload: bytes) -> None:
+        """Async-flavoured send. The underlying QUIC send is blocking;
+        we offload it to a thread pool so the asyncio loop doesn't
+        block on the I/O wait."""
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.send_bytes, payload)
+
+    def _record_send(self, n_bytes: int) -> None:
+        self.stats.bytes_sent += n_bytes
         self.stats.sends += 1
         import time
 

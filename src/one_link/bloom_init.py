@@ -64,16 +64,67 @@ except ImportError as exc:
     )
 
 
-# Production-tuned false-positive target. See
-# scripts/bloom_init_savings_measure.py for the rationale: 5% gives
-# the best size/savings trade-off in the resume-from-80%-known case.
-PRODUCTION_FP_RATE = 0.05
+# Production-tuned false-positive target.
+#
+# Sizing math:
+# - 5% FP, 1000 chunks: Bloom ~600 bytes. Best wire-byte savings but
+#   ~50 chunks/transfer would be mistakenly skipped if the sender
+#   trusted the Bloom alone.
+# - 0.1% FP, 1000 chunks: Bloom ~1800 bytes. ~1 chunk/transfer false-
+#   positive. Compatible with the integrity-check-and-recover
+#   correction round.
+# - 0.001% FP, 1000 chunks: Bloom ~3700 bytes. Effectively zero
+#   false positives; full Bloom-as-canonical safe without
+#   correction rounds.
+#
+# We pick 0.1% as the production default: rare enough false positives
+# that the recovery round fires <1×/transfer on average, small enough
+# Bloom to still win vs FILE_WANTS at the 1000-chunk scale (1800
+# bytes Bloom vs ~6400 bytes wants list at 80% known).
+#
+# The measurement script `scripts/bloom_init_savings_measure.py`
+# sweeps multiple FP rates; operators can re-tune via the
+# ``ONE_LINK_BLOOM_FP_RATE`` env var.
+PRODUCTION_FP_RATE = 0.001
+
+
+def _resolve_fp_rate(override: float | None) -> float:
+    """Pick the FP rate to use. Caller's override wins; otherwise
+    consult ONE_LINK_BLOOM_FP_RATE env var; final fallback is
+    PRODUCTION_FP_RATE."""
+    if override is not None:
+        return override
+    import os
+
+    env = os.environ.get("ONE_LINK_BLOOM_FP_RATE")
+    if env:
+        try:
+            v = float(env)
+            if 0 < v < 1:
+                return v
+        except ValueError:
+            pass
+    return PRODUCTION_FP_RATE
+
+
+def bloom_honor_enabled() -> bool:
+    """True when production daemons should drop FILE_WANTS frames in
+    favour of Bloom-only mode for BLOOM_INIT_V1-advertising peers.
+
+    Default OFF for safety: production cutover happens by setting
+    ``ONE_LINK_BLOOM_HONOR=1`` on the daemon. Until then both wire
+    formats fly and operators monitor disagreement / savings telemetry
+    in ``/api/metrics``.
+    """
+    import os
+
+    return os.environ.get("ONE_LINK_BLOOM_HONOR", "0") in ("1", "true", "yes")
 
 
 def build_receiver_bloom(
     known_chunk_ids: Iterable[bytes],
     *,
-    target_fp_rate: float = PRODUCTION_FP_RATE,
+    target_fp_rate: float | None = None,
 ) -> bytes:
     """Build the receiver-side Bloom of locally-held chunk IDs and
     return its wire-encoded form (4-byte length prefix + encoded
@@ -92,7 +143,8 @@ def build_receiver_bloom(
     # everything). Sizing at n=0 would be degenerate; clamp to n=1 so
     # the encoded Bloom is well-formed.
     n = max(len(ids), 1)
-    bf = _native_bloom.Bloom(n, target_fp_rate)
+    fp = _resolve_fp_rate(target_fp_rate)
+    bf = _native_bloom.Bloom(n, fp)
     for cid in ids:
         bf.insert(cid)
     encoded = bf.encode()

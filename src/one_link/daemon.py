@@ -2247,19 +2247,21 @@ class Daemon:
             ev = self._persist(msg=msg, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
             self._broadcast_tail(ev)
             if cdc_chunks is not None:
-                await channel.send(encode_msg(make_msg(
-                    "FILE_WANTS", self.me.short_id,
-                    of=msg["id"], blob=blob, wants=sorted(missing or []),
-                )))
-                # Phase B: alongside the explicit FILE_WANTS list, also
-                # send a BLOOM_INIT_FILTER advisory frame containing
-                # the receiver's Bloom of chunks it ALREADY HAS. The
-                # sender currently logs savings vs FILE_WANTS but
-                # uses FILE_WANTS as the authoritative source. Once
-                # telemetry confirms savings, a follow-up commit flips
-                # the sender to honor the Bloom — at which point the
-                # FILE_WANTS frame can be dropped from BLOOM_INIT_V1
-                # peers entirely.
+                # Phase B Bloom-init honor mode: when ONE_LINK_BLOOM_HONOR=1
+                # AND peer advertises BLOOM_INIT_V1 AND native crate is
+                # available, drop the FILE_WANTS list and rely on the
+                # accompanying BLOOM_INIT_FILTER for chunk dispatch. The
+                # sender + receiver still run an integrity-check-and-
+                # recover round at transfer end to catch the rare
+                # false-positive-induced miss. When the env flag is off
+                # (the default), both messages fly and FILE_WANTS stays
+                # canonical.
+                use_bloom_only = self._bloom_only_for_peer(peer_fp)
+                if not use_bloom_only:
+                    await channel.send(encode_msg(make_msg(
+                        "FILE_WANTS", self.me.short_id,
+                        of=msg["id"], blob=blob, wants=sorted(missing or []),
+                    )))
                 await self._maybe_send_bloom_init_advisory(
                     channel, msg_id=msg["id"], blob=blob, peer_fp=peer_fp
                 )
@@ -5747,6 +5749,74 @@ class Daemon:
             )
         return out
 
+    async def _send_via_transport(
+        self,
+        peer_fp: str,
+        channel,
+        payload: bytes,
+    ) -> None:
+        """Send ``payload`` via the per-peer transport facade.
+
+        Selects WebRTC or QUIC based on ``transport_choice_for_peer``
+        (when caps + endpoint allow). Falls through to
+        ``channel.send`` directly if the facade isn't built for this
+        peer (no-op compat path for code that hasn't migrated yet).
+
+        Per-peer transport facades cache lazily inside
+        ``_outbound_sessions[peer_fp]._transport``. The first send
+        builds; subsequent sends reuse.
+
+        Returns when the underlying transport accepts the bytes.
+        Raises whatever the underlying transport raised (after
+        bumping stats). The caller's existing error handling
+        applies unchanged.
+        """
+        sess = self._outbound_sessions.get(peer_fp)
+        # No session → fall back to direct channel.send. This is the
+        # "we don't own this peer yet" path; rare on the production
+        # hot path but possible during pairing handshake.
+        if sess is None:
+            await channel.send(payload)
+            return
+        # Cached facade or lazy-build.
+        facade = getattr(sess, "_transport", None)
+        if facade is None:
+            from one_link.peer_transport import make_transport_for_peer
+
+            peer = getattr(sess, "peer", None)
+            kind = "webrtc"
+            if peer is not None:
+                try:
+                    kind = self.transport_choice_for_peer(peer)
+                except Exception:
+                    kind = "webrtc"
+            if kind == "quic":
+                quic_sess = getattr(sess, "_quic_session", None)
+                if quic_sess is not None:
+                    facade = make_transport_for_peer(
+                        "quic", quic_session=quic_sess
+                    )
+                else:
+                    # Daemon's QUIC track flag is set but no live QUIC
+                    # session for this peer yet — fall back to WebRTC.
+                    facade = make_transport_for_peer(
+                        "webrtc", channel=channel
+                    )
+            else:
+                facade = make_transport_for_peer("webrtc", channel=channel)
+            sess._transport = facade  # type: ignore[attr-defined]
+        try:
+            await facade.send_bytes_async(payload)
+        except Exception:
+            # Drop the facade so the next send rebuilds (e.g. after
+            # transport-level reconnect). Re-raise so the existing
+            # error path is intact.
+            try:
+                sess._transport = None  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            raise
+
     # ── Phase A2 QUIC dual-stack transport wiring ──────────────────
 
     def _ensure_quic_endpoint(self):
@@ -5800,6 +5870,39 @@ class Daemon:
         ):
             return "quic"
         return "webrtc"
+
+    def _bloom_only_for_peer(self, peer_fp: str) -> bool:
+        """Predicate: should this peer's offer-ack drop the FILE_WANTS
+        list and rely on BLOOM_INIT_FILTER alone?
+
+        All four must hold:
+        1. ``ONE_LINK_BLOOM_HONOR=1`` env flag set.
+        2. Peer advertises ``BLOOM_INIT_V1`` capability.
+        3. The native ``ol_bloom`` crate is installed.
+        4. The receiver has some chunks to advertise (empty Bloom means
+           "send everything" — keep FILE_WANTS as the clear signal).
+
+        Returns False on any failure → caller falls back to the
+        legacy FILE_WANTS path. This preserves correctness for every
+        peer that doesn't meet all four conditions.
+        """
+        try:
+            from one_link import bloom_init
+
+            if not bloom_init.HAS_NATIVE:
+                return False
+            if not bloom_init.bloom_honor_enabled():
+                return False
+        except ImportError:
+            return False
+        from one_link.capabilities import BLOOM_INIT_V1
+
+        if BLOOM_INIT_V1 not in self._peer_advertised_caps(peer_fp):
+            return False
+        # Empty receiver inventory → no advantage to Bloom-only.
+        # Falling back to FILE_WANTS preserves the explicit "send
+        # everything" semantics.
+        return bool(self._locally_held_chunk_ids_for_blob(""))
 
     async def _maybe_send_bloom_init_advisory(
         self, channel, *, msg_id: str, blob: str, peer_fp: str
@@ -6601,7 +6704,16 @@ class Daemon:
         try:
             async with sess.lock:
                 ping_at = time.monotonic()
-                await sess.channel.send(encode_msg(make_msg("PING", self.me.short_id)))
+                # Route PING through the PeerTransport facade — the
+                # first message-type to migrate from raw channel.send.
+                # Pure facade path for WebRTC peers (no behavior change);
+                # routes through QuicTransport for peers on the QUIC
+                # track once that cap negotiates true. See
+                # PHASE_A2_QUIC_CUTOVER_PLAN.md.
+                ping_bytes = encode_msg(make_msg("PING", self.me.short_id))
+                await self._send_via_transport(
+                    sess.peer_fp, sess.channel, ping_bytes
+                )
                 deadline = ping_at + OUTBOUND_SESSION_PING_DEADLINE_S
                 while True:
                     remaining = deadline - time.monotonic()
