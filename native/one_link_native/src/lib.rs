@@ -50,6 +50,7 @@ mod capability;
 mod chunk;
 mod coherence_field;
 mod crdt;
+mod discovery;
 mod erasure;
 mod errors;
 mod fec;
@@ -221,6 +222,18 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.coherence_field", coherence_field_mod)?;
+
+    // Phase F1.3 — sovereign Kademlia DHT discovery.
+    // Two daemons that have never met find each other WITHOUT any
+    // rendezvous server. NodeId + RoutingTable + SignedRecord pieces
+    // exposed; iterative-lookup driver remains pure Rust for now
+    // (daemon orchestrates lookup at the Python level).
+    let discovery_mod = PyModule::new_bound(py, "discovery")?;
+    discovery::register(py, &discovery_mod)?;
+    m.add_submodule(&discovery_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.discovery", discovery_mod)?;
 
     // Phase F1.1 — threshold recovery (Shamir + coherence-field-bound).
     // First crate of the Coherence Mesh track. Identity master-key
