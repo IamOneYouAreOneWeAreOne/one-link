@@ -1608,6 +1608,7 @@ class Daemon:
         peer_fp: str,
         path: Path,
         reason: str = "peer offline",
+        schedule_resume: bool = True,
     ):
         """Create the durable transfer intent before any live route exists."""
         if self.state is None:
@@ -1657,7 +1658,8 @@ class Daemon:
                     "user_message": diag["user_message"],
                 },
             )
-        self._schedule_resume_paused(peer_fp)
+        if schedule_resume:
+            self._schedule_resume_paused(peer_fp)
         return queued
 
     def _mark_due_transfers_waiting_for_peer(

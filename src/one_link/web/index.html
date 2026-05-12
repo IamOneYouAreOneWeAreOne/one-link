@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
 <title>One Link</title>
 <link rel="icon" type="image/png" href="/static/one-glyph.png" />
 <link rel="apple-touch-icon" href="/static/one-glyph.png" />
@@ -21,6 +21,24 @@
 <style>
   /* ── Reset + tokens ─────────────────────────────────────────────────── */
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  /* Mobile-foundational reset. Three things that matter for the
+     phone-feel before any other rule applies:
+       - touch-action: manipulation eliminates the legacy 300ms tap
+         delay that browsers used to wait for a double-tap-zoom
+         gesture. The page is already user-scalable=no via the
+         viewport meta, so the delay buys us nothing.
+       - -webkit-tap-highlight-color hides the grey flash iOS draws
+         on every tap. We surface our own :active states.
+       - text-size-adjust prevents iOS Safari from auto-inflating
+         body text when the user rotates from portrait to landscape. */
+  * {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
   :root {
     --bg-0:        #0b0d12;
     --bg-1:        #11141b;
@@ -1860,6 +1878,184 @@
         gap: 4px;
       }
     }
+
+    /* ── v0.21.1 mobile-feel polish ─────────────────────────────────
+       Everything below this comment is the "native-feeling" layer
+       on top of the v0.14 responsive baseline. Goals:
+         - momentum scroll on every scrollable surface
+         - overscroll-behavior: contain so a chat-list overscroll
+           doesn't accidentally pull-to-refresh the page itself
+         - safe-area-inset on every screen-edge element so notch /
+           home-indicator phones look right
+         - tap-state feedback that replaces hover (which doesn't
+           exist on touch)
+         - keyboard-aware viewport: the app uses 100dvh (dynamic
+           viewport height) so the soft keyboard doesn't overlap
+           the composer
+         - typography clamps so body text never gets too small to
+           read on a tiny phone screen
+    */
+
+    /* Use dynamic viewport units so the app actually fills the
+       visible area when the URL bar collapses / keyboard opens.
+       --ol-vh is set by JS on every visualViewport resize, which
+       gives us pixel-accurate height even on iOS Safari where the
+       interactive-widget meta hint isn't fully implemented yet. */
+    .app {
+      height: var(--ol-vh, 100dvh);
+      /* iOS Safari < 15.4 doesn't support dvh; the old 100vh in
+         the base rule below is the fallback. */
+    }
+
+    /* Top header sits at the top edge — needs safe-area padding to
+       avoid the notch / status bar on iOS / status indicators on
+       Android. The 56px row height in .app grid still defines the
+       interactive area; the safe-area pad is extra above it. */
+    .top {
+      padding-top: max(8px, env(safe-area-inset-top));
+      padding-left: max(10px, env(safe-area-inset-left));
+      padding-right: max(10px, env(safe-area-inset-right));
+      box-sizing: content-box;
+    }
+    /* Sidebar drawer also gets safe-area on its left edge for
+       landscape-orientation notch hardware. */
+    .side {
+      padding-left: env(safe-area-inset-left);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    /* Files panel (when stacked below conv) gets bottom safe-area. */
+    .files {
+      padding-bottom: max(8px, env(safe-area-inset-bottom));
+    }
+
+    /* Momentum scroll + overscroll containment on every long
+       scrollable surface. Without this an enthusiastic flick in
+       the message list can drag the whole page (or trigger the
+       browser's pull-to-refresh, which we don't want — the WS
+       feed is live, manual refresh is a desktop concept). */
+    .side,
+    .convo,
+    .files,
+    .messages,
+    #messages,
+    .settings-pane-host,
+    .modal {
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
+    }
+
+    /* Hide scrollbars on phone — they take horizontal pixels and
+       feel out of place. Touch users scroll with fingers, not bars.
+       Webkit form: ::-webkit-scrollbar; Firefox: scrollbar-width. */
+    .side::-webkit-scrollbar,
+    .convo::-webkit-scrollbar,
+    .messages::-webkit-scrollbar,
+    #messages::-webkit-scrollbar {
+      display: none;
+    }
+    .side, .convo, .messages, #messages {
+      scrollbar-width: none;
+    }
+
+    /* Replace hover affordance with active feedback. Hover doesn't
+       exist on touch; an active-state colour change confirms the
+       tap registered. */
+    .peer:active,
+    .pane-tabs .btn:active,
+    .gear:active,
+    .icon-btn:active,
+    .btn:active {
+      background: var(--bg-3) !important;
+      transition: background .08s ease-out;
+    }
+
+    /* Typography clamps. body text stays readable on the narrowest
+       phones (320px wide). Title strings can grow on tablets. */
+    body {
+      font-size: clamp(14px, 3.8vw, 16px);
+    }
+    .brand,
+    .convo-h .who .name,
+    .peer .name {
+      font-size: clamp(14px, 4vw, 16px);
+    }
+    .msg-body, .messages .msg .body {
+      font-size: clamp(15px, 4.2vw, 16px);
+      line-height: 1.4;
+    }
+
+    /* Composer: textarea autosize cap (so 6-line message doesn't
+       eat the message list), and ensure send button is reachable
+       above the iOS home indicator even when the keyboard is up.
+       Use 100dvh-aware sticky positioning so the composer follows
+       the visual viewport as the keyboard opens. */
+    .composer {
+      position: sticky;
+      bottom: 0;
+      background: var(--bg-0);
+      z-index: 5;
+    }
+    .composer textarea {
+      max-height: 38vh;
+    }
+
+    /* Modal entry feels heavier on phone — slow the slide so it
+       reads as a page transition, not a popover. */
+    .modal-backdrop.show .modal,
+    .backdrop.show .modal,
+    .pair-backdrop.show .modal {
+      animation: ol-modal-slide-up .26s cubic-bezier(.2, .8, 0, 1);
+    }
+    @keyframes ol-modal-slide-up {
+      from { transform: translateY(16px); opacity: 0; }
+      to   { transform: translateY(0);    opacity: 1; }
+    }
+
+    /* Bigger tap target for messages — long-press on a message
+       should be easy to land. The message bubble itself was hard
+       to grab on narrow phones because horizontal padding was
+       desktop-sized. */
+    .messages .msg {
+      padding-left: 4px;
+      padding-right: 4px;
+    }
+
+    /* Pane-tab row could overflow on narrow phones with all four
+       tabs (Chat / Files / Folders / Activity). Allow horizontal
+       scroll if needed without a scrollbar; tabs themselves snap
+       so a partial scroll lands cleanly on a tab. */
+    .pane-tabs {
+      overflow-x: auto;
+      scroll-snap-type: x mandatory;
+      scrollbar-width: none;
+    }
+    .pane-tabs::-webkit-scrollbar { display: none; }
+    .pane-tabs .btn {
+      scroll-snap-align: center;
+      flex-shrink: 0;
+    }
+  }
+
+  /* Focus-visible polish: only show focus ring for keyboard nav,
+     not for tap. iOS / Android touch users were getting the chunky
+     accent-ring on every button tap. This is the modern selector
+     for "focused via keyboard or AT, not via pointer". Applies to
+     every form factor. */
+  *:focus { outline: none; }
+  *:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* Light/dark theme-color hookup so iOS status bar matches the
+     active theme. Without these, the status bar stayed dark even
+     in the light theme. */
+  @media (prefers-color-scheme: dark) {
+    html { color-scheme: dark; }
+  }
+  @media (prefers-color-scheme: light) {
+    html { color-scheme: light; }
   }
   /* Hamburger button only renders inline on mobile; default hidden. */
   .mobile-hamburger {
@@ -9905,6 +10101,125 @@
       closeMobileSidebar();
     }
   });
+
+  // ── v0.21.1 mobile-feel polish: gesture + viewport handlers ─────
+  //
+  // Three behaviours layer onto the existing CSS responsive shell:
+  //
+  //   1. Edge-swipe-right from the left edge opens the sidebar
+  //      drawer. Swipe-left while the drawer is open closes it.
+  //      Mimics iOS / Android system back gestures so the drawer
+  //      feels native, not "tap the tiny hamburger".
+  //
+  //   2. visualViewport tracking keeps `.app` height matched to
+  //      the visible-after-keyboard area. Without this, when the
+  //      soft keyboard slides up, our 100dvh-sized `.app` stays
+  //      tall and the composer ends up BEHIND the keyboard. Modern
+  //      browsers also honour viewport meta `interactive-widget=
+  //      resizes-content`, but the JS belt-and-suspenders catches
+  //      iOS Safari, which still hasn't fully implemented it as
+  //      of 2026-05.
+  //
+  //   3. Haptic feedback hook: tiny vibration on send + reaction
+  //      so the user knows the gesture took. Browser API is
+  //      navigator.vibrate; iOS Safari ignores it (no haptics on
+  //      web yet), but Android Chrome / Edge / Firefox all honour
+  //      a 10ms tick.
+  //
+  // The handlers all no-op on desktop form-factor so a hover-only
+  // accidental cursor drag doesn't fire phantom gestures.
+  (() => {
+    function _isPhone() {
+      return document.documentElement.getAttribute("data-form-factor") === "phone";
+    }
+
+    // ---- Edge-swipe drawer gesture ----
+    // Touch starts on the left 24px of the screen → open drawer
+    // (or close if already open and swiping the other way).
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let touchStartTime = 0;
+    let touchActive = false;
+    const EDGE_ZONE_PX = 24;
+    const MIN_SWIPE_PX = 60;
+    const MAX_VERTICAL_DRIFT_PX = 50;
+    const MAX_SWIPE_DURATION_MS = 500;
+
+    function onTouchStart(ev) {
+      if (!_isPhone()) return;
+      // Don't compete with any open modal / backdrop.
+      if (document.querySelector(
+        ".modal-backdrop.show, .backdrop.show, .discover-overlay.show",
+      )) return;
+      const t = ev.touches[0];
+      const drawerOpen = document.querySelector(".app")?.classList.contains("mobile-side-open");
+      // To open: must start in the left edge zone.
+      // To close: drawer is open and finger started anywhere right of
+      // the drawer's right edge (~320px) — closes via swipe-left from
+      // the conversation area.
+      if (!drawerOpen && t.clientX > EDGE_ZONE_PX) return;
+      if (drawerOpen && t.clientX < 100) return;  // ignore drag from inside drawer
+      touchStartX = t.clientX;
+      touchStartY = t.clientY;
+      touchStartTime = Date.now();
+      touchActive = true;
+    }
+    function onTouchEnd(ev) {
+      if (!touchActive) return;
+      touchActive = false;
+      const t = ev.changedTouches[0];
+      const dx = t.clientX - touchStartX;
+      const dy = Math.abs(t.clientY - touchStartY);
+      const dt = Date.now() - touchStartTime;
+      if (dt > MAX_SWIPE_DURATION_MS) return;
+      if (dy > MAX_VERTICAL_DRIFT_PX) return;
+      const drawerOpen = document.querySelector(".app")?.classList.contains("mobile-side-open");
+      if (!drawerOpen && dx > MIN_SWIPE_PX) {
+        openMobileSidebar();
+        _haptic(8);
+      } else if (drawerOpen && dx < -MIN_SWIPE_PX) {
+        closeMobileSidebar();
+        _haptic(8);
+      }
+    }
+    document.addEventListener("touchstart", onTouchStart, { passive: true });
+    document.addEventListener("touchend", onTouchEnd, { passive: true });
+
+    // ---- visualViewport keyboard-aware sizing ----
+    // When the soft keyboard slides up, visualViewport.height shrinks
+    // by the keyboard height. We mirror that into a CSS custom prop
+    // --ol-vh that the composer + chat list consume so the composer
+    // stays just above the keyboard instead of being hidden behind it.
+    const _vv = window.visualViewport;
+    function _syncViewportHeight() {
+      const h = (_vv && _vv.height) ? _vv.height : window.innerHeight;
+      document.documentElement.style.setProperty("--ol-vh", `${h}px`);
+    }
+    if (_vv) {
+      _vv.addEventListener("resize", _syncViewportHeight);
+      _vv.addEventListener("scroll", _syncViewportHeight);
+    }
+    window.addEventListener("orientationchange", _syncViewportHeight);
+    _syncViewportHeight();
+
+    // ---- Haptic feedback hook ----
+    // Tiny tick on send / reaction. iOS Safari ignores (no Web Vibration
+    // API support); Android browsers honour. Wrap in try/catch because
+    // some browsers (Firefox in iframe) throw on .vibrate().
+    function _haptic(ms) {
+      try { navigator.vibrate && navigator.vibrate(ms); } catch {}
+    }
+    // Expose globally so existing send / reaction handlers can use it.
+    window._olHaptic = _haptic;
+
+    // Wire haptic to message-send: when the send button is tapped, fire
+    // an 8ms tick before the network call. Coordinated through the
+    // existing send button click handler so we don't double-bind.
+    const sendBtn = document.querySelector("#btn-send");
+    if (sendBtn) {
+      sendBtn.addEventListener("click", () => _haptic(8), { passive: true });
+    }
+  })();
 
   async function setCapability(cap, enabled, opts = {}) {
     // v0.7.3: drawer can pass an explicit `fingerprint`; otherwise
