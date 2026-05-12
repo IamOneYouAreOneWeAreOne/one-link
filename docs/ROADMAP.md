@@ -358,6 +358,71 @@ Ordered by leverage:
 
 ---
 
+### Track D — Coherence Mesh (sovereign network + multi-device identity)
+
+> Principle: all five. This track is the apex of the engine work —
+> turns One Link from "best-in-class file + chat engine" into
+> "a global communications layer that no company, government, ISP,
+> or attacker can lock out, surveil, censor, or destroy — and that
+> any person can use without understanding any of that."
+
+Canonical plan: [`COHERENCE_MESH_PLAN.md`](./COHERENCE_MESH_PLAN.md)
+
+**The load-bearing insight:** three trust tiers, three default
+privacy modes. Self-traffic (your own devices talking to each
+other) is direct + fast because there's no metadata to hide.
+Friend-traffic is 1-hop-onion + sealed-sender by default.
+Paranoid mode is 3-hop-onion + Loopix-class cover traffic for
+users in hostile environments. The user never picks; pair-by-QR
+puts your devices in self-mesh, friends in pinned-contact, and
+paranoid is an explicit opt-in.
+
+Phase F ships in 8 sub-phases (F1–F8); see the plan for
+acceptance gates per phase. Ordered by leverage:
+
+1. **F1 — Harvest the easy wins.** Port `OneField/onefield/privacy/sharding.cl`
+   (Shamir threshold recovery, Tier 15 production) and
+   `OneField/onefield/bridge/discovery.cl` (peer-cache TTL/announce
+   logic) and `OneField/onefield/mesh/bootstrap.cl` (channel-
+   reciprocity pair-trust). All three are pre-built in OneField
+   Mesh and harvest directly into Rust crates.
+
+2. **F2 — Pair-by-QR.** Ed25519 + Dilithium handshake + optional
+   channel-reciprocity Factor-2. Replaces the `--lan` token URL
+   entirely. Eliminates remote-pair vulnerabilities.
+
+3. **F3 — Onion circuits.** 1-hop default for pinned-contact friend
+   traffic; 3-hop for paranoid mode. Path selection via Phase E
+   coherence-field routing (already shipped).
+
+4. **F4 — Sealed sender + cover traffic.** Loopix-style constant-
+   rate background between pinned contacts. Defeats timing analysis.
+
+5. **F5 — Personal Device Mesh.** Master identity + per-device
+   subkeys + device-presence CRDT + remote-instruct command channel.
+   Your phone, laptop, tablet, desktop are ONE identity to friends
+   AND separately addressable to you. Phone in TX grabs file from
+   laptop in CA at full network speed (self-traffic skips onion).
+
+6. **F6 — DPI-evading transport.** Cloak/Obfs4-style pluggable
+   transport. Bytes on the wire look like generic HTTPS;
+   censorship-resistant by default.
+
+7. **F7 — PQ signatures.** Ed25519 + Dilithium hybrid. Survives
+   quantum computers. Defense-in-depth: either scheme alone
+   authenticates.
+
+8. **F8 — Confidential-compute daemon.** Per-platform: Apple Secure
+   Memory / Intel SGX / AMD SEV-SNP / Windows TPM. Local malware
+   with root cannot extract identity keys.
+
+**End state**: capabilities no other consumer messenger ships
+(see comparison table in [`COHERENCE_MESH_PLAN.md`](./COHERENCE_MESH_PLAN.md)).
+The "everyone on any device, super easily" promise becomes
+literally what the architecture delivers.
+
+---
+
 ## Suggested next ship
 
 **v0.14.2 — Phone tier foundation.** Smallest first step in the
