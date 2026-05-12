@@ -10,10 +10,11 @@ use ol_discovery::node_id::{closer_to, NodeId, NODE_ID_BITS};
 use ol_discovery::routing::{InsertOutcome, RoutingTable, K_BUCKET_DEFAULT};
 
 fn cases() -> u32 {
+    // CI default: 1M to match F1.1 bar. Nightly: 5M.
     if std::env::var("ONE_LINK_F1_GATE").as_deref() == Ok("1") {
-        500_000
+        5_000_000
     } else {
-        50_000
+        1_000_000
     }
 }
 

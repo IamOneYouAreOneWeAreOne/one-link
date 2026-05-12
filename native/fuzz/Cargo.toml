@@ -27,6 +27,8 @@ ol_prefetch   = { path = "../ol_prefetch" }
 ol_codegen    = { path = "../ol_codegen" }
 # Phase F crates.
 ol_threshold_recovery = { path = "../ol_threshold_recovery" }
+ol_discovery       = { path = "../ol_discovery" }
+ol_proximity_pair  = { path = "../ol_proximity_pair" }
 
 [profile.release]
 debug = 1
@@ -115,6 +117,45 @@ bench = false
 [[bin]]
 name = "fuzz_threshold_field_bound_roundtrip"
 path = "fuzz_targets/fuzz_threshold_field_bound_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+# ── F1.3 ol_discovery fuzz targets ────────────────────────────────
+
+[[bin]]
+name = "fuzz_discovery_wire_decode"
+path = "fuzz_targets/fuzz_discovery_wire_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_discovery_routing_insert"
+path = "fuzz_targets/fuzz_discovery_routing_insert.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_discovery_signed_record_verify"
+path = "fuzz_targets/fuzz_discovery_signed_record_verify.rs"
+test = false
+doc = false
+bench = false
+
+# ── F1.4 ol_proximity_pair fuzz targets ───────────────────────────
+
+[[bin]]
+name = "fuzz_proximity_hamming_reconcile"
+path = "fuzz_targets/fuzz_proximity_hamming_reconcile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_proximity_quantize"
+path = "fuzz_targets/fuzz_proximity_quantize.rs"
 test = false
 doc = false
 bench = false
