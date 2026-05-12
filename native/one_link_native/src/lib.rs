@@ -59,6 +59,7 @@ mod homology;
 mod hwkey;
 mod pqkem;
 mod prefetch;
+mod proximity_pair;
 mod quic;
 mod ratchet;
 mod routing;
@@ -234,6 +235,19 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.discovery", discovery_mod)?;
+
+    // Phase F1.4 — channel-reciprocity Factor-2 pair-trust.
+    // Physics-layer proximity proof: two devices in the same physical
+    // environment derive matching Factor-2 secrets from their shared
+    // observations (WiFi/BLE/mDNS scan results). The crate exposes
+    // quantize/syndrome/reconcile/amplify primitives + the multi-pass
+    // CASCADE driver; daemon provides the observation source.
+    let proximity_mod = PyModule::new_bound(py, "proximity_pair")?;
+    proximity_pair::register(py, &proximity_mod)?;
+    m.add_submodule(&proximity_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.proximity_pair", proximity_mod)?;
 
     // Phase F1.1 — threshold recovery (Shamir + coherence-field-bound).
     // First crate of the Coherence Mesh track. Identity master-key

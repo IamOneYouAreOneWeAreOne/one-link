@@ -1,0 +1,183 @@
+"""Acceptance tests for proximity_pair_native (Phase F1.4 wiring)."""
+
+from __future__ import annotations
+
+import pytest
+
+
+def _native_available() -> bool:
+    try:
+        from one_link_native import proximity_pair  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _native_available(),
+    reason="one_link_native.proximity_pair not installed",
+)
+
+
+def test_module_imports():
+    from one_link import proximity_pair_native as pp
+
+    assert pp.HAS_NATIVE is True
+    assert pp.AMPLIFIED_KEY_BYTES == 32
+    assert pp.OBSERVATION_BYTES_DEFAULT == 128
+    assert pp.SYNDROME_BLOCK_BITS_DEFAULT == 8
+    assert pp.CASCADE_PASSES_DEFAULT == 4
+
+
+def test_quantize_observations_basic():
+    from one_link import proximity_pair_native as pp
+
+    obs = bytes((i * 17) % 256 for i in range(256))
+    bits = pp.quantize_observations(obs, min_bytes=128, guard_band=0.1)
+    # All bits must be 0 or 1.
+    assert all(b in (0, 1) for b in bits)
+    # Both classes present (non-trivial input distribution).
+    assert 0 in bits
+    assert 1 in bits
+
+
+def test_quantize_observation_too_short_raises():
+    from one_link import proximity_pair_native as pp
+
+    with pytest.raises(ValueError):
+        pp.quantize_observations(b"too short", min_bytes=128)
+
+
+def test_block_syndrome_deterministic():
+    from one_link import proximity_pair_native as pp
+
+    bits = bytes([1, 0, 1, 1, 0, 0, 1, 0] * 8)
+    s1 = pp.block_syndrome(bits, block_bits=8)
+    s2 = pp.block_syndrome(bits, block_bits=8)
+    assert s1 == s2
+    assert len(s1) == 8  # 64 bits / 8 = 8 blocks
+
+
+def test_reconcile_aligns_block_parities():
+    from one_link import proximity_pair_native as pp
+
+    # Peer + me, with one bit flipped in my version.
+    peer = bytes([1, 0, 1, 1, 0, 0, 1, 0] * 8)  # 64 bits
+    my = bytearray(peer)
+    my[5] ^= 1
+    peer_syn = pp.block_syndrome(peer)
+    reconciled = pp.reconcile_with_syndrome(bytes(my), peer_syn)
+    # After reconciliation, block syndromes match.
+    rec_syn = pp.block_syndrome(reconciled)
+    assert rec_syn == peer_syn
+
+
+def test_multi_pass_syndromes_length():
+    from one_link import proximity_pair_native as pp
+
+    bits = bytes([1, 0] * 64)
+    syndromes = pp.multi_pass_syndromes(bits, block_bits=8, passes=4)
+    assert len(syndromes) == 4
+    # Each syndrome is one byte per block.
+    for s in syndromes:
+        assert len(s) == 128 // 8  # 16 blocks
+
+
+def test_multi_pass_roundtrip_aligns_block_parities():
+    from one_link import proximity_pair_native as pp
+
+    peer = bytes([(i * 7) & 1 for i in range(512)])
+    my = bytearray(peer)
+    for pos in (10, 50, 100):
+        my[pos] ^= 1
+    seed = 0xCAFE_BABE
+    syndromes = pp.multi_pass_syndromes(
+        peer, block_bits=8, passes=4, permutation_seed=seed
+    )
+    reconciled = pp.multi_pass_reconcile(
+        bytes(my),
+        syndromes,
+        block_bits=8,
+        passes=4,
+        permutation_seed=seed,
+    )
+    # Post-CASCADE: last-pass syndrome of reconciled matches.
+    from one_link_native import proximity_pair as _np
+    last_perm = _np.permutation_for_pass(seed, 3, len(reconciled))
+    permuted = bytes(reconciled[p] for p in last_perm)
+    final_syn = pp.block_syndrome(permuted, block_bits=8)
+    assert final_syn == syndromes[3]
+
+
+def test_privacy_amplify_deterministic():
+    from one_link import proximity_pair_native as pp
+
+    bits = bytes([1, 0, 1, 1, 0, 0, 1, 0])
+    salt = b"x" * 32
+    k1 = pp.privacy_amplify(bits, salt=salt)
+    k2 = pp.privacy_amplify(bits, salt=salt)
+    assert k1 == k2
+    assert len(k1) == 32
+
+
+def test_privacy_amplify_salt_size_validated():
+    from one_link import proximity_pair_native as pp
+
+    with pytest.raises(ValueError):
+        pp.privacy_amplify(b"\x01\x00", salt=b"too short")
+
+
+def test_privacy_amplify_different_salt_yields_different_key():
+    from one_link import proximity_pair_native as pp
+
+    bits = bytes([1, 0] * 8)
+    k1 = pp.privacy_amplify(bits, salt=b"\x01" * 32)
+    k2 = pp.privacy_amplify(bits, salt=b"\x02" * 32)
+    assert k1 != k2
+
+
+def test_full_pipeline_one_shot():
+    from one_link import proximity_pair_native as pp
+
+    # Alice + Bob co-located (tiny perturbation).
+    base = bytes((i * 7 + 13) % 256 for i in range(512))
+    alice_obs = base
+    bob_obs = bytearray(base)
+    bob_obs[5] = (bob_obs[5] + 1) % 256
+    bob_obs[100] = (bob_obs[100] - 1) % 256
+
+    bob_bits = pp.quantize_observations(bytes(bob_obs))
+    bob_syndrome = pp.block_syndrome(bob_bits)
+
+    salt = b"OL-proximity-pair-v1-default-sal"
+    alice_key = pp.derive_factor2_secret(
+        my_observations=alice_obs,
+        peer_syndrome=bob_syndrome,
+        salt=salt,
+    )
+    assert len(alice_key) == 32
+    # No exceptions — pipeline executed end-to-end.
+
+
+def test_distant_attacker_derives_different_key():
+    from one_link import proximity_pair_native as pp
+
+    alice_obs = bytes((i * 7) % 256 for i in range(512))
+    attacker_obs = bytes((i * 19 + 50) % 256 for i in range(512))
+    salt = b"x" * 32
+
+    alice_bits = pp.quantize_observations(alice_obs)
+    alice_syn = pp.block_syndrome(alice_bits)
+    alice_key = pp.derive_factor2_secret(
+        my_observations=alice_obs,
+        peer_syndrome=alice_syn,
+        salt=salt,
+    )
+    attacker_key = pp.derive_factor2_secret(
+        my_observations=attacker_obs,
+        peer_syndrome=alice_syn,  # attacker has alice's syndrome but wrong obs
+        salt=salt,
+    )
+    # Attacker without co-presence cannot derive matching key.
+    assert alice_key != attacker_key
