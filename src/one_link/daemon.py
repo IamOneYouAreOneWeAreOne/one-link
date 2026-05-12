@@ -1187,10 +1187,15 @@ class Daemon:
         for peer_fp, sess in list(self._outbound_sessions.items()):
             with contextlib.suppress(Exception):
                 async with sess.lock:
-                    await sess.channel.send(encode_msg(make_msg(
-                        "PRESENCE", self.me.short_id,
-                        presence=wire_value,
-                    )))
+                    # Phase A2: route through PeerTransport facade.
+                    await self._send_via_transport(
+                        peer_fp,
+                        sess.channel,
+                        encode_msg(make_msg(
+                            "PRESENCE", self.me.short_id,
+                            presence=wire_value,
+                        )),
+                    )
         return s
 
     def record_peer_presence(
@@ -3500,7 +3505,11 @@ class Daemon:
         sess = await self._get_outbound_session(peer)
         async with sess.lock:
             q = make_msg("CHUNK_QUERY", self.me.short_id, hashes=clean)
-            await sess.channel.send(encode_msg(q))
+            # Phase A2: routed through PeerTransport facade (CHUNK_QUERY
+            # is the third message-type migration after PING + send_to).
+            await self._send_via_transport(
+                sess.peer_fp, sess.channel, encode_msg(q)
+            )
             while True:
                 reply = decode_msg(await asyncio.wait_for(
                     sess.channel.recv(), timeout=FILE_ACK_DEADLINE_S,
@@ -3531,7 +3540,10 @@ class Daemon:
         sess = await self._get_outbound_session(peer)
         async with sess.lock:
             q = make_msg("CHUNK_PULL", self.me.short_id, hash=str(chunk_hash))
-            await sess.channel.send(encode_msg(q))
+            # Phase A2: routed through PeerTransport facade.
+            await self._send_via_transport(
+                sess.peer_fp, sess.channel, encode_msg(q)
+            )
             while True:
                 reply = decode_msg(await asyncio.wait_for(
                     sess.channel.recv(), timeout=FILE_ACK_DEADLINE_S,
@@ -6964,7 +6976,16 @@ class Daemon:
                 results: list[dict] = []
                 for m in msgs:
                     send_started = time.monotonic()
-                    await sess.channel.send(encode_msg(m))
+                    # Phase A2: route through the PeerTransport facade
+                    # — the second message-type migration after PING.
+                    # send_to handles text + control messages, the
+                    # next-highest-traffic path after PING. WebRTC
+                    # behavior unchanged; QUIC peers (when capability
+                    # negotiation flips true) route through QuicTransport
+                    # via _send_via_transport.
+                    await self._send_via_transport(
+                        sess.peer_fp, sess.channel, encode_msg(m)
+                    )
                     while True:
                         ack = decode_msg(await sess.channel.recv())
                         if ack.get("t") == "CAPS":
