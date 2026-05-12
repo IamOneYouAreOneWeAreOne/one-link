@@ -5504,13 +5504,45 @@ class UIServer:
             }, status=404)
 
         keep_upload_for_resume = False
+        durable_transfer_id: Optional[str] = None
+        if target_fp:
+            try:
+                rec = self.daemon.queue_file_transfer(
+                    peer_fp=target_fp,
+                    path=upload_path,
+                    reason="sending",
+                    schedule_resume=False,
+                )
+                durable_transfer_id = rec.id if rec else None
+                keep_upload_for_resume = True
+            except TypeError:
+                # Older test doubles / older daemon objects may not expose
+                # schedule_resume yet. Fall back to the legacy queue call and
+                # still send against the durable row if one is returned.
+                rec = self.daemon.queue_file_transfer(
+                    peer_fp=target_fp,
+                    path=upload_path,
+                    reason="sending",
+                )
+                durable_transfer_id = rec.id if rec else None
+                keep_upload_for_resume = True
+            except Exception as e:
+                log.warning(
+                    "durable pre-queue failed before live send; "
+                    "continuing with direct send: %s",
+                    e,
+                )
         try:
             # v0.6.3: auto-retry once on ordinary transient failure.
             # v0.7.4: if send_file already created a paused transfer row,
             # return 202 and keep the staged upload so auto-resume has
             # bytes to send later instead of turning the pause into a 500.
             try:
-                result = await self.daemon.send_file(peer, upload_path)
+                result = await self.daemon.send_file(
+                    peer,
+                    upload_path,
+                    transfer_id=durable_transfer_id,
+                )
             except (RuntimeError, OSError) as first_err:
                 transfer_id_attr = getattr(first_err, "transfer_id", None)
                 if transfer_id_attr:
@@ -5532,7 +5564,12 @@ class UIServer:
                 fresh_peer = await self.daemon.resolve_for_send(peer_needle)
                 if fresh_peer is None:
                     raise first_err
-                result = await self.daemon.send_file(fresh_peer, upload_path)
+                result = await self.daemon.send_file(
+                    fresh_peer,
+                    upload_path,
+                    transfer_id=durable_transfer_id,
+                )
+            keep_upload_for_resume = False
             return web.json_response({"ok": True, "result": result})
         except Exception as e:
             transfer_id_attr = getattr(e, "transfer_id", None)

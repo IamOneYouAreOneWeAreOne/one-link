@@ -744,6 +744,110 @@ async def test_api_send_file_paused_keeps_staged_upload(tmp_path: Path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_api_send_file_online_creates_durable_intent_before_send(
+    tmp_path: Path, monkeypatch,
+):
+    """Browser uploads should never be a naked best-effort send.
+
+    The server must stage bytes, create a durable transfer row, then run the
+    live transfer against that row so a later network drop can resume instead
+    of losing the user's upload.
+    """
+    from one_link.server import UIServer
+    from one_link.state import State
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    state = State(db_path=tmp_path / "state.db")
+    peer_fp = "bb" * 32
+    state.upsert_peer(
+        fingerprint=peer_fp,
+        short_id="bbbbbbbb",
+        pubkey=b"\xbb" * 32,
+        hostname="OnlineBox",
+        trust_default="pinned",
+    )
+    queued: list[dict] = []
+    sends: list[dict] = []
+
+    class _Daemon:
+        me = SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa")
+
+        def __init__(self):
+            self.state = state
+
+        async def resolve_for_send(self, needle):
+            return SimpleNamespace(
+                short_id="bbbbbbbb",
+                ed_pub_hex=(b"\xbb" * 32).hex(),
+            )
+
+        def _peer_fp_from_peer(self, peer):
+            return peer_fp
+
+        def queue_file_transfer(
+            self, *, peer_fp, path, reason="peer offline", schedule_resume=True,
+        ):
+            queued.append({
+                "peer_fp": peer_fp,
+                "path": Path(path),
+                "reason": reason,
+                "schedule_resume": schedule_resume,
+            })
+            return self.state.upsert_transfer(
+                id="durable-online-1",
+                direction="out",
+                peer_fp=peer_fp,
+                kind="file",
+                name=Path(path).name,
+                size=Path(path).stat().st_size,
+                status="paused",
+                progress_bytes=0,
+                total_bytes=Path(path).stat().st_size,
+                chunks_done=0,
+                chunks_total=1,
+                metadata={
+                    "path": str(path),
+                    "delivery_state": "waiting_for_device",
+                    "transient": True,
+                },
+            )
+
+        async def send_file(self, peer, path, *, transfer_id=None):
+            sends.append({
+                "peer": peer.short_id,
+                "path": Path(path),
+                "transfer_id": transfer_id,
+                "exists_during_send": Path(path).is_file(),
+            })
+            self.state.update_transfer(
+                transfer_id,
+                status="complete",
+                progress_bytes=Path(path).stat().st_size,
+            )
+            return {"transfer_id": transfer_id}
+
+    server = UIServer(_Daemon())
+    resp = await server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text="bbbbbbbb"),
+        _FakePart("file", data=b"send me safely", filename="online.bin"),
+    ]))
+    body = json.loads(resp.text)
+
+    assert resp.status == 200
+    assert body["ok"] is True
+    assert body["result"]["transfer_id"] == "durable-online-1"
+    assert queued and queued[0]["schedule_resume"] is False
+    assert queued[0]["path"].is_file() is False
+    assert sends == [{
+        "peer": "bbbbbbbb",
+        "path": sends[0]["path"],
+        "transfer_id": "durable-online-1",
+        "exists_during_send": True,
+    }]
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_api_send_file_offline_paired_peer_queues_staged_upload(
     tmp_path: Path, monkeypatch,
 ):
