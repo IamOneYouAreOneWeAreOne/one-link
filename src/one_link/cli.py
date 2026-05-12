@@ -764,7 +764,17 @@ def send_file(peer, path):
 
 
 @cli.command()
-@click.option("--no-browser", is_flag=True, help="Don't auto-open a browser tab.")
+@click.option("--no-browser", is_flag=True, help="Don't auto-open a window.")
+@click.option(
+    "--browser-tab",
+    is_flag=True,
+    help=(
+        "Open as a regular browser tab instead of a standalone "
+        "Chromium app-mode window. Default opens in app-mode "
+        "(frameless, no URL bar / tabs) when Edge or Chrome is "
+        "available, falling back to a tab otherwise."
+    ),
+)
 @click.option(
     "--lan",
     is_flag=True,
@@ -774,10 +784,19 @@ def send_file(peer, path):
         "security warning. Default is loopback-only."
     ),
 )
-def app(no_browser, lan):
-    """Open the One Link desktop app (auto-starts daemon, opens browser UI)."""
+def app(no_browser, browser_tab, lan):
+    """Open the One Link desktop app (auto-starts daemon, opens UI).
+
+    Default opens a standalone Chromium-style app-mode window (no
+    browser chrome — looks/feels like a native app). Pass
+    ``--browser-tab`` to fall back to a regular browser tab, or
+    ``--no-browser`` to start the daemon headless."""
     from one_link.app import run_app
-    raise SystemExit(run_app(no_browser=no_browser, lan=lan))
+    raise SystemExit(run_app(
+        no_browser=no_browser,
+        standalone=not browser_tab,
+        lan=lan,
+    ))
 
 
 @cli.command()

@@ -243,6 +243,10 @@ def test_launcher_rejects_ui_that_does_not_match_control_identity():
 
 
 def test_launcher_uses_native_windows_url_open(monkeypatch):
+    """Fallback path: when no Chromium browser is available AND/OR the
+    caller opts out of standalone mode, the launcher uses
+    os.startfile on Windows (the native shell-open) rather than
+    webbrowser.open."""
     from one_link import app as app_mod
 
     opened = []
@@ -250,6 +254,11 @@ def test_launcher_uses_native_windows_url_open(monkeypatch):
     monkeypatch.setattr(app_mod.os, "name", "nt")
     monkeypatch.setattr(app_mod.os, "startfile", lambda url: opened.append(url), raising=False)
     monkeypatch.setattr(app_mod.webbrowser, "open", lambda *_args, **_kw: (_ for _ in ()).throw(AssertionError("webbrowser fallback used")))
+    # Force the Chromium-detector to return None so the launcher
+    # takes the os.startfile fallback (the legacy path this test was
+    # written for). The standalone-window path is exercised separately
+    # in tests/unit/test_standalone_window.py.
+    monkeypatch.setattr(app_mod, "_find_chromium_browser_exe", lambda: None)
 
     app_mod._open_browser_url("http://127.0.0.1:7117/?t=test")
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -241,7 +242,82 @@ def _spawn_daemon() -> subprocess.Popen:
     )
 
 
-def _open_browser_url(url: str) -> None:
+def _find_chromium_browser_exe() -> Optional[str]:
+    """Locate Edge or Chrome on the local machine. Used by the
+    standalone-window launcher: both browsers support ``--app=URL``
+    which opens a Chromium tab in a frameless standalone window
+    (no tabs, no URL bar) — the closest to "native desktop app"
+    we can get without bundling a runtime.
+
+    Returns the absolute path to the browser exe, or ``None`` if
+    neither is found. Edge wins the tie because it's preinstalled
+    on every Windows 10/11 machine.
+    """
+    if os.name == "nt":
+        candidates = [
+            os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
+            os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
+            os.path.expandvars(r"%LocalAppData%\Microsoft\Edge\Application\msedge.exe"),
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+        ]
+        for p in candidates:
+            if p and os.path.isfile(p):
+                return p
+        return None
+    # POSIX: check $PATH.
+    for name in ("microsoft-edge", "google-chrome", "chromium", "chrome"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def _open_browser_url(url: str, *, standalone: bool = True) -> None:
+    """Open ``url`` in the user's default browser, OR — when
+    ``standalone`` is True (the default) — in a Chromium-style
+    "app window" via ``msedge --app=URL`` / ``chrome --app=URL``.
+
+    The app-mode flag tells the browser to:
+    - drop the URL bar, tabs, and bookmark strip
+    - open a single window with just the page content
+    - use a separate process group so closing it doesn't take down
+      other browser tabs
+
+    Net visual effect: the user sees a One Link "desktop app" with
+    just our UI — no browser chrome. Indistinguishable from a
+    native app for everyday use.
+
+    Falls back to ``os.startfile``/``webbrowser.open`` when no
+    Chromium binary is found or the launch fails.
+    """
+    if standalone:
+        browser = _find_chromium_browser_exe()
+        if browser is not None:
+            try:
+                # --new-window guarantees a fresh window even if the
+                # browser is already running; --app=URL is the
+                # app-mode flag both Edge and Chrome accept.
+                flags = (
+                    subprocess.CREATE_NO_WINDOW
+                    | subprocess.DETACHED_PROCESS
+                    if os.name == "nt"
+                    else 0
+                )
+                subprocess.Popen(
+                    [browser, f"--app={url}", "--new-window"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    creationflags=flags,
+                    close_fds=True,
+                )
+                return
+            except Exception:
+                # Standalone failed — fall through to default
+                # browser. User gets a tab but at least sees something.
+                pass
     if os.name == "nt":
         os.startfile(url)  # type: ignore[attr-defined]
         return
@@ -297,7 +373,12 @@ def _print_lan_warning(lan_ip: str, port: int, token: str) -> None:
     click.echo("")
 
 
-def run_app(*, no_browser: bool = False, lan: bool = False) -> int:
+def run_app(
+    *,
+    no_browser: bool = False,
+    standalone: bool = True,
+    lan: bool = False,
+) -> int:
     click.echo("One Link")
     # v0.15.2: --lan opt-in. Set BEFORE we try to reuse a running
     # daemon so any spawned-fresh daemon inherits the right bind
@@ -361,7 +442,7 @@ def run_app(*, no_browser: bool = False, lan: bool = False) -> int:
     click.echo(f"  open: {url}")
     if not no_browser:
         try:
-            _open_browser_url(url)
+            _open_browser_url(url, standalone=standalone)
         except Exception as e:
             click.echo(f"  (couldn't auto-open browser: {e})")
 
