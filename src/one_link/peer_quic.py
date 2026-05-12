@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 
 
 try:
-    from one_link_native import quic as _native_quic  # type: ignore[import-not-found]
+    from one_link_native import quic as _native_quic  # type: ignore[import-not-found,attr-defined]
 
     HAS_NATIVE: bool = True
     NATIVE_VERSION: str | None = getattr(_native_quic, "__version__", None)
@@ -120,22 +120,20 @@ def make_endpoint(
     if not HAS_NATIVE:
         return None
     cfg = config or QuicEndpointConfig()
-    try:
-        # The ol_quic surface exposes Endpoint.server() and .client()
-        # constructors. The daemon needs a server to accept inbound
-        # AND outbound dialing capability — current ol_quic exposes
-        # this via the Endpoint(server-capable) form. Server identity
-        # comes from the workspace certs; production wiring uses
-        # the daemon's existing Ed25519 identity to derive a
-        # certificate.
-        return _native_quic.Endpoint.server(
-            cfg.bind_addr,
-            cfg.keep_alive_interval_ms,
-            cfg.max_idle_timeout_ms,
-        )
-    except Exception as e:
-        log.warning("QUIC endpoint construction failed: %s", e)
-        return None
+    # `Endpoint.server(identity, is_paired_callback, config)` requires
+    # a native ``Identity`` object + a Python callback + a native
+    # ``EndpointConfig`` — the full plumbing to derive the Identity
+    # from the daemon's existing Ed25519 keypair and build the
+    # paired-peer callback is Phase A2 datapath work that hasn't
+    # landed yet. Per PHASE_A2_QUIC_CUTOVER_PLAN.md the capability is
+    # advertised so peer negotiation works, but the endpoint stays
+    # unbuilt at startup until the Identity bridge ships.
+    #
+    # Returning None here means transport_choice_for_peer falls back
+    # to WebRTC for every peer. No log spam, no warning — this is
+    # the documented Phase A2 wiring state, not a failure.
+    _ = cfg
+    return None
 
 
 class QuicPeerSession:

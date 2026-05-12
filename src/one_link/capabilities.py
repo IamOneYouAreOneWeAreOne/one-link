@@ -15,6 +15,7 @@ FILE_SWARM = "file_swarm"
 FILE_COMPRESSION = "file_compression"
 FILE_BINARY_FRAME = "file_binary_frame"
 FILE_CDC_BINARY_FRAME = "file_cdc_binary_frame"
+FILE_ACK_BATCH = "file_ack_batch"
 FOLDER_SYNC = "folder_sync"
 MERKLE_SYNC = "merkle_sync"
 FUTURE_TRANSPORTS = "future_transports"
@@ -57,6 +58,7 @@ LOCAL_CAPABILITIES = (
     FILE_COMPRESSION,
     FILE_BINARY_FRAME,
     FILE_CDC_BINARY_FRAME,
+    FILE_ACK_BATCH,
     FOLDER_SYNC,
     MERKLE_SYNC,
     FUTURE_TRANSPORTS,
@@ -86,6 +88,7 @@ TRANSPORT_LAYER_CAPS = (
     FILE_COMPRESSION,
     FILE_BINARY_FRAME,
     FILE_CDC_BINARY_FRAME,
+    FILE_ACK_BATCH,
     DOUBLE_RATCHET_V1,
     NATIVE_TRANSFER_V1,
     BLOOM_INIT_V1,

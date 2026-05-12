@@ -2051,6 +2051,13 @@ class UIServer:
         transfers = state.list_transfers(limit=25) if state is not None else []
         live = self.daemon.discovery.registry.list() if self.daemon.discovery else []
         return web.json_response({
+            # Explicit ok=True so the desktop launcher's
+            # _runtime_matches_control(control_status, ui_status) check
+            # in app.py treats a healthy 200 OK as success. Without
+            # this field the launcher rejects every otherwise-healthy
+            # daemon ("daemon failed to start cleanly") because its
+            # ok-check defaults to None != True.
+            "ok": True,
             "version": __import__("one_link").__version__,
             "app_version": __import__("one_link").__version__,
             "protocol_version": __import__("one_link.daemon").daemon.PROTOCOL_VERSION,

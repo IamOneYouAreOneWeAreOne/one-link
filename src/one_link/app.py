@@ -214,11 +214,29 @@ def _stop_incompatible_daemon(info: RunningDaemon) -> bool:
 
 
 def _spawn_daemon() -> subprocess.Popen:
+    """Spawn the daemon child. Redirects stderr to a known log file
+    instead of DEVNULL so the desktop-shortcut launch path (pythonw
+    no-console) leaves an inspectable trail when the daemon fails to
+    come up. Without this trail the user sees "daemon failed to start
+    cleanly" with no diagnostic — every operator support call ends up
+    needing the daemon re-launched with `-v` from a terminal just to
+    capture the error.
+
+    The log rotates per process (overwritten each launch) so it never
+    grows unbounded; the daemon's own logging already handles
+    long-term retention via its in-app log files.
+    """
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    log_path = data_dir() / "daemon-launch.err.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(log_path, "wb")
+    except OSError:
+        log_fh = None
     return subprocess.Popen(
-        [sys.executable, "-m", "one_link.cli", "daemon"],
+        [sys.executable, "-m", "one_link.cli", "daemon", "-v"],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=(log_fh if log_fh is not None else subprocess.DEVNULL),
         creationflags=flags,
     )
 
