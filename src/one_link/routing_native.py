@@ -39,6 +39,14 @@ def edge_cost(tau_c_s: float, dist_m: float, loss_rate: float) -> float:
     return _native_routing.edge_cost(tau_c_s, dist_m, loss_rate)
 
 
+def edge_weight(tau_c_s: float, dist_m: float) -> float:
+    """Raw τ_c-weighted edge weight (no loss penalty applied). Used by
+    the Phase E BE-RAR scorer, which composes its own loss-penalty term
+    over this weight."""
+    _require_native()
+    return _native_routing.edge_weight(tau_c_s, dist_m)
+
+
 def tau_claim_corroborated(
     claimed_tau_c_s: float, observed_success_rate: float, tolerance: float = 0.5
 ) -> bool:

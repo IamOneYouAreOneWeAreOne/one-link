@@ -5577,6 +5577,10 @@ class Daemon:
             "homology": {
                 "available": False,
             },
+            "coherence_field": {
+                "available": False,
+                "calibration": None,
+            },
             "native_transfer_v1": {
                 "advertised": False,
             },
@@ -5613,6 +5617,25 @@ class Daemon:
                 out["homology"]["available"] = True
         except ImportError:
             pass
+        try:
+            from one_link import coherence_field_native as _cf
+
+            if _cf.HAS_NATIVE:
+                out["coherence_field"]["available"] = True
+                # Surface the One Link calibration so operators can
+                # eyeball g_A / ell_screen without dropping into Python.
+                try:
+                    cal = _cf.one_link_calibration()
+                    out["coherence_field"]["calibration"] = {
+                        "d": cal["d"],
+                        "gamma": cal["gamma"],
+                        "screening_length": cal["screening_length"],
+                        "apparent_horizon_anchor": cal["apparent_horizon_anchor"],
+                    }
+                except Exception:  # pragma: no cover
+                    pass
+        except ImportError:
+            pass
         # NATIVE_TRANSFER_V1 is advertised whenever it's in
         # LOCAL_CAPABILITIES — see capabilities.py for the source.
         try:
@@ -5631,16 +5654,23 @@ class Daemon:
         return out
 
     def _pick_best_relay(self, available_relays: list) -> list:
-        """Phase D #1 (ADR-0028) — sort relay candidates by τ_c-
-        weighted cost when ol_routing is available + we have empirical
-        RTT/loss metrics for the relay set. Falls back to the input
-        order otherwise. Pure helper: never raises, never drops a relay
-        (just reorders).
+        """Phase D #1 (ADR-0028) + Phase E (FILE_ENGINE_V2_PLAN.md) —
+        sort relay candidates by τ_c-weighted cost when ol_routing is
+        available + we have empirical RTT/loss metrics for the relay
+        set. Falls back to the input order otherwise. Pure helper:
+        never raises, never drops a relay (just reorders).
 
         The cost model uses per-relay τ_c = max(1ms, 1.0 / max(rtt_ms,
         1.0)) and loss_rate from the relay's recent ACK record. Without
         empirical metrics, every relay defaults to the same cost so
-        the input order is preserved."""
+        the input order is preserved.
+
+        Phase E upgrade: when ``ol_coherence_field`` is available the
+        heuristic ``loss_penalty = 1/(1-loss)^2`` is replaced with the
+        BE-RAR interpolation ``nu(y) = 1/(1 - exp(-sqrt(y)))``. α = 1/2
+        is forced by Bose statistics rather than fit, and the same
+        function drives galaxy rotation-curve fitting in the S_One
+        canonical theorem stack — see ``coherence_field_native``."""
         if len(available_relays) <= 1:
             return list(available_relays)
         try:
@@ -5660,6 +5690,21 @@ class Daemon:
         metrics_for = getattr(
             self, "_relay_metrics_for", None
         ) or (lambda u: Daemon._relay_metrics_for(self, u))
+        # Phase E upgrade: when ol_coherence_field is available, replace
+        # the heuristic `loss_penalty = 1/(1-loss)^2` with the BE-RAR
+        # interpolation `nu(y) = 1/(1 - exp(-sqrt(y)))` (alpha = 1/2
+        # forced by Bose statistics — not a free knob). y = loss / (1 -
+        # loss) is the loss-deficit ratio, the network analog of the
+        # gravitational potential the BE-RAR was originally derived for.
+        # When the crate isn't installed, fall back to the Phase D
+        # routing-native cost.
+        use_be_rar = False
+        try:
+            from one_link import coherence_field_native as _cf
+
+            use_be_rar = _cf.HAS_NATIVE
+        except ImportError:
+            _cf = None  # type: ignore[assignment]
         scored: list[tuple[float, object]] = []
         for relay in available_relays:
             url = getattr(relay, "_rendezvous_url", str(relay))
@@ -5671,7 +5716,17 @@ class Daemon:
             rtt_ms = max(1.0, float(metrics.get("rtt_ms", 100.0)))
             loss = min(0.99, max(0.0, float(metrics.get("loss_rate", 0.0))))
             tau_c_s = max(1.0e-3, 1.0 / rtt_ms)
-            cost = _rt.edge_cost(tau_c_s, 100.0, loss)
+            if use_be_rar:
+                # BE-RAR-weighted edge cost: edge_weight × nu(y_loss).
+                # y = loss / (1 - loss); diverges as loss → 1, matches
+                # the heuristic 1/(1-loss)^2 in spirit but with the
+                # Bose-statistics-forced alpha = 1/2 asymptote.
+                edge_w = _rt.edge_weight(tau_c_s, 100.0)
+                y_loss = loss / max(1.0 - loss, 1e-9)
+                penalty = _cf.be_rar(y_loss) if y_loss > 0.0 else 1.0
+                cost = edge_w * penalty
+            else:
+                cost = _rt.edge_cost(tau_c_s, 100.0, loss)
             scored.append((cost, relay))
         scored.sort(key=lambda x: x[0])
         return [r for _, r in scored]

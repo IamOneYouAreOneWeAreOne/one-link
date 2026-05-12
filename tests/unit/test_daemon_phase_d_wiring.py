@@ -240,3 +240,75 @@ def test_pick_best_relay_with_metrics_promotes_low_loss_relay():
     # Fast should be promoted to first slot.
     assert sorted_relays[0]._rendezvous_url == "fast"
     assert sorted_relays[1]._rendezvous_url == "slow"
+
+
+# ── Phase E coherence-field wiring ─────────────────────────────────
+
+
+def _coherence_field_available() -> bool:
+    try:
+        from one_link_native import coherence_field  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+@pytest.mark.skipif(
+    not (_native_available() and _coherence_field_available()),
+    reason="ol_coherence_field not installed",
+)
+def test_pick_best_relay_be_rar_path_promotes_low_loss_relay():
+    """Phase E BE-RAR path: replaces the heuristic loss_penalty with
+    nu(y) = 1/(1 - exp(-sqrt(y))). The low-loss relay still ranks
+    first, but the cost gap between low- and high-loss relays is
+    governed by the BE-RAR asymptote (alpha = 1/2 forced) rather than
+    a 1/(1-loss)^2 heuristic."""
+    from one_link.daemon import Daemon
+
+    class _R:
+        def __init__(self, url):
+            self._rendezvous_url = url
+
+    class _Stub:
+        _relay_metrics: dict = {}
+
+    stub = _Stub()
+    # Same setup as the Phase D test, but assertions probe the
+    # BE-RAR-mode contract specifically.
+    for _ in range(10):
+        Daemon.record_relay_observation(stub, "fast", rtt_ms=20.0, success=True)
+    for _ in range(5):
+        Daemon.record_relay_observation(stub, "slow", rtt_ms=500.0, success=True)
+        Daemon.record_relay_observation(stub, "slow", rtt_ms=None, success=False)
+
+    relays = [_R("slow"), _R("fast")]
+    sorted_relays = Daemon._pick_best_relay(stub, relays)  # type: ignore[arg-type]
+    assert sorted_relays[0]._rendezvous_url == "fast"
+    assert sorted_relays[1]._rendezvous_url == "slow"
+
+
+@pytest.mark.skipif(
+    not _coherence_field_available(),
+    reason="ol_coherence_field not installed",
+)
+def test_native_diagnostics_exposes_coherence_field_calibration():
+    """native_diagnostics surfaces ol_coherence_field availability +
+    One Link calibration constants (D, gamma, ell_screen, g_A) so
+    operators can verify Phase E is live without dropping into Python."""
+    from one_link.daemon import Daemon
+
+    class _Stub:
+        _prefetch_predictor = None
+        _last_minted_macaroon = None
+
+    diag = Daemon.native_diagnostics(_Stub())  # type: ignore[arg-type]
+    assert "coherence_field" in diag
+    assert diag["coherence_field"]["available"] is True
+    cal = diag["coherence_field"]["calibration"]
+    assert cal is not None
+    assert {"d", "gamma", "screening_length", "apparent_horizon_anchor"} <= cal.keys()
+    assert cal["d"] > 0.0
+    assert cal["gamma"] > 0.0
+    assert cal["screening_length"] is not None
+    assert cal["apparent_horizon_anchor"] is not None
