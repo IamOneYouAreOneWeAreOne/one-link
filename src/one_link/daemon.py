@@ -9982,6 +9982,23 @@ class Daemon:
                             ),
                         },
                     )
+                    if actual_prior_hit_rate < 0.25:
+                        safe_window = 4 if size >= 64 * 1024 * 1024 else 8
+                        current_window = max(1, int(cdc_profile.get("window_chunks") or 1))
+                        if current_window > safe_window:
+                            chunk_size_for_window = max(
+                                1,
+                                int(cdc_profile.get("chunk_size") or CHUNK_SIZE),
+                            )
+                            cdc_profile = {
+                                **cdc_profile,
+                                "window_chunks": safe_window,
+                                "window_bytes": safe_window * chunk_size_for_window,
+                                "reason": (
+                                    f"{cdc_profile.get('reason', 'adaptive')}"
+                                    "_fresh_content_warm_start"
+                                ),
+                            }
                     cdc_scheduler = AdaptiveTransferScheduler(
                         cdc_profile,
                         max_window_chunks=max(1, int(cdc_profile["window_chunks"]) * 2),
@@ -10060,9 +10077,12 @@ class Daemon:
                                 },
                             )
 
+                        wanted_total = len(wanted_indexes)
+                        wanted_sent_index = 0
                         for c in cdc_chunks:
                             if c.index not in wanted_indexes:
                                 continue
+                            wanted_sent_index += 1
                             f.seek(c.start)
                             data = f.read(c.size)
                             if len(data) != c.size or blake3.blake3(data).hexdigest() != c.hash:
@@ -10089,8 +10109,14 @@ class Daemon:
                                 enc=enc,
                                 wire_size=len(payload),
                             )
-                            if negotiated_ack_batch > 1:
-                                chunk_msg["ack_batch"] = negotiated_ack_batch
+                            remaining_wanted = max(1, wanted_total - wanted_sent_index + 1)
+                            chunk_ack_batch = min(
+                                negotiated_ack_batch,
+                                max(1, int(cdc_scheduler.window_chunks)),
+                                remaining_wanted,
+                            )
+                            if chunk_ack_batch > 1:
+                                chunk_msg["ack_batch"] = chunk_ack_batch
                             if cdc_binary_used:
                                 wire_payload = _encode_binary_frame(chunk_msg, payload)
                             else:
@@ -10236,6 +10262,12 @@ class Daemon:
                             # v0.12.0: pace before send. No-op when
                             # the user hasn't set a bandwidth cap.
                             await self.bandwidth_pacer.pace(len(data))
+                            remaining_stream_chunks = max(1, total_stream_chunks - seq)
+                            chunk_ack_batch = min(
+                                negotiated_ack_batch,
+                                max(1, int(stream_scheduler.window_chunks)),
+                                remaining_stream_chunks,
+                            )
                             if native_transfer_used and native_session is not None:
                                 # ADR-0026: encrypt plaintext via the
                                 # cached native session; ship encrypted
@@ -10254,8 +10286,8 @@ class Daemon:
                                     data=base64.b64encode(record.ciphertext).decode("ascii"),
                                     eof=eof,
                                 )
-                                if negotiated_ack_batch > 1 and not eof:
-                                    chunk_msg["ack_batch"] = negotiated_ack_batch
+                                if chunk_ack_batch > 1 and not eof:
+                                    chunk_msg["ack_batch"] = chunk_ack_batch
                                 queued_write = await _queue_or_send(
                                     channel,
                                     encode_msg(chunk_msg),
@@ -10268,8 +10300,8 @@ class Daemon:
                                     seq=seq,
                                     eof=eof,
                                 )
-                                if negotiated_ack_batch > 1 and not eof:
-                                    chunk_msg["ack_batch"] = negotiated_ack_batch
+                                if chunk_ack_batch > 1 and not eof:
+                                    chunk_msg["ack_batch"] = chunk_ack_batch
                                 queued_write = await _queue_or_send(
                                     channel,
                                     _encode_binary_frame(chunk_msg, data),
@@ -10283,8 +10315,8 @@ class Daemon:
                                     data=base64.b64encode(data).decode("ascii"),
                                     eof=eof,
                                 )
-                                if negotiated_ack_batch > 1 and not eof:
-                                    chunk_msg["ack_batch"] = negotiated_ack_batch
+                                if chunk_ack_batch > 1 and not eof:
+                                    chunk_msg["ack_batch"] = chunk_ack_batch
                                 queued_write = await _queue_or_send(
                                     channel,
                                     encode_msg(chunk_msg),

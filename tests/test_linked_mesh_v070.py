@@ -1831,7 +1831,7 @@ async def test_send_file_accepts_batched_chunk_acks_for_capable_peer(
 
     assert result["chunks"] == 3
     assert [c["seq"] for c in chunks] == [0, 1, 2]
-    assert [c.get("ack_batch") for c in chunks] == [4, 4, None]
+    assert [c.get("ack_batch") for c in chunks] == [2, 2, None]
     assert row.metadata["ack_batch"] == 4
     assert row.metadata["adaptive_scheduler"]["ack_count"] == 3
     state.close()
