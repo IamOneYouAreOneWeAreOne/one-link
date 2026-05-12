@@ -1505,6 +1505,45 @@
     30% { opacity: 1; transform: translateY(-3px); }
   }
 
+  /* v0.21.x update-available banner. Sits at the top of the viewport
+     when a newer release is published on GitHub. Orange (warn) instead
+     of red so it reads as "informational nudge" not "broken." */
+  .update-banner {
+    display: none;
+    position: fixed; top: 0; left: 0; right: 0;
+    z-index: 9998;  /* one below session-expired so a real expired
+                      session still wins for layering */
+    background: linear-gradient(90deg, rgba(245,196,81,.22), rgba(245,196,81,.10));
+    border-bottom: 1px solid rgba(245,196,81,.55);
+    color: var(--text);
+    padding: 10px 18px;
+    font-size: 13px;
+    line-height: 1.5;
+    align-items: center; gap: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,.35);
+  }
+  .update-banner.show { display: flex; }
+  .update-banner strong { color: var(--warn); }
+  .update-banner .ub-text { flex: 1; min-width: 0; }
+  .update-banner .ub-actions { display: flex; gap: 8px; }
+  .update-banner a, .update-banner button {
+    color: white;
+    text-decoration: none;
+    background: var(--warn);
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 0;
+    cursor: pointer;
+  }
+  .update-banner .dismiss {
+    background: transparent;
+    color: var(--text-dim);
+    padding: 6px 10px;
+  }
+  .update-banner .dismiss:hover { color: var(--text); }
+
   /* v0.11.4 session-expired banner. Sits at the top of the viewport
      above all other UI so the user can't miss it. */
   .session-expired-banner {
@@ -2897,6 +2936,20 @@
 </head>
 <body>
 <div class="app">
+
+  <!-- v0.21.x update-available banner. Shown when /api/update/check
+       reports the latest GitHub Release tag is newer than this build.
+       Per-version dismiss in localStorage so users see it once. -->
+  <div class="update-banner" id="update-banner" role="status">
+    <span class="ub-text">
+      <strong>Update available.</strong>
+      <span id="update-banner-text">A newer version of One Link is on GitHub.</span>
+    </span>
+    <div class="ub-actions">
+      <button class="dismiss" id="update-banner-dismiss" type="button">Dismiss</button>
+      <a id="update-banner-link" href="#" target="_blank" rel="noopener noreferrer">View release</a>
+    </div>
+  </div>
 
   <!-- v0.14.0 mobile scrim. Sits between sidebar drawer + page on
        narrow screens; tap to dismiss. CSS-driven — JS only flips
@@ -5063,6 +5116,58 @@
     // status now renders in the settings modal's "Desktop
     // notifications" row, populated by populateNotifSettings().
   }
+
+  // v0.21.x: read /api/update/check and surface the orange "update
+  // available" banner if the latest GitHub Release is newer than
+  // this build. Per-version dismiss in localStorage so a user who
+  // dismissed v0.22.0 still sees the banner when v0.23.0 ships.
+  async function checkForUpdate() {
+    const banner = $("#update-banner");
+    if (!banner) return;
+    let info;
+    try {
+      info = await api.get("/api/update/check");
+    } catch (_e) {
+      return;  // network/auth fail — silently no-op
+    }
+    if (!info || info.status !== "newer") {
+      banner.classList.remove("show");
+      return;
+    }
+    const dismissKey = `ol_update_dismissed:${info.latest_version}`;
+    if (localStorage.getItem(dismissKey) === "1") {
+      banner.classList.remove("show");
+      return;
+    }
+    const txt = $("#update-banner-text");
+    const link = $("#update-banner-link");
+    if (txt) {
+      txt.textContent =
+        ` Latest is ${info.latest_version}; you're on v${info.local_version}. Run "pip install --upgrade one-link" or click the link.`;
+    }
+    if (link && info.latest_url) {
+      link.href = info.latest_url;
+    }
+    banner.classList.add("show");
+  }
+
+  // Per-version dismiss; clicked once, hidden until a newer version
+  // is published.
+  document.addEventListener("DOMContentLoaded", () => {
+    const dismiss = document.getElementById("update-banner-dismiss");
+    if (!dismiss) return;
+    dismiss.addEventListener("click", () => {
+      const link = document.getElementById("update-banner-link");
+      // Derive the version from the link href if we have it; otherwise
+      // just hide the banner for this session.
+      try {
+        const url = new URL(link?.href || "");
+        const tag = url.pathname.split("/").pop();
+        if (tag) localStorage.setItem(`ol_update_dismissed:${tag}`, "1");
+      } catch (_e) { /* swallow — best-effort */ }
+      document.getElementById("update-banner")?.classList.remove("show");
+    });
+  });
   function populateNotifSettings() {
     const btn = $("#set-notif");
     if (!btn) return;
@@ -9875,6 +9980,10 @@
     setInterval(refreshStatus, 8000);
     setInterval(refreshGroups, 12000);
     maybeShowNotifBanner();
+    // v0.21.x: check GitHub Releases for a newer version and surface
+    // the update banner if one's out. Fire-and-forget — the banner
+    // stays hidden if the check fails (offline, rate-limited, etc.).
+    checkForUpdate().catch(() => {});
     // v0.10.0: load + apply persisted settings (theme + DND + sound).
     // Done BEFORE the onboarding pop so the wizard renders in the
     // user's chosen theme.

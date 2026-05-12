@@ -1121,6 +1121,7 @@ class UIServer:
         r.add_get(r"/api/files/{name:.+}/preview", self._guarded(self.api_file_preview))
         r.add_get(r"/api/files/{name:.+}", self._guarded(self.api_file_download))
         r.add_get("/api/audit", self._guarded(self.api_audit))
+        r.add_get("/api/update/check", self._guarded(self.api_update_check))
         r.add_get("/api/events", self._guarded_ws(self.ws_events))
 
     # ─── auth helpers ─────────────────────────────────────────────────
@@ -6047,6 +6048,52 @@ class UIServer:
         except OSError as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
         return web.json_response({"ok": True, "path": str(path)})
+
+    # ─── /api/update/check ───────────────────────────────────────────
+    # Reads the latest GitHub Release for this repo and compares its
+    # tag against the local app_version. UI surfaces the result as an
+    # orange "Update available" banner. Never raises; failures
+    # (offline, rate-limited, repo private) return status='unknown' so
+    # the UI silently stays clean instead of showing a scary error.
+    #
+    # Cached in-process for 15 minutes per daemon-startup to avoid
+    # hammering the GitHub API on UI reloads. Force-bypass via
+    # ?fresh=1 (used by the Settings "Check now" button).
+    _update_cache: tuple[float, dict] | None = None
+    _update_cache_ttl_s: float = 900.0  # 15 minutes
+
+    async def api_update_check(self, request: web.Request) -> web.Response:
+        import time as _time
+        from one_link import __version__ as _local_ver
+        from one_link.update_check import fetch_latest
+
+        force_fresh = request.query.get("fresh") in ("1", "true", "yes")
+        now = _time.monotonic()
+        if not force_fresh and self._update_cache is not None:
+            ts, payload = self._update_cache
+            if now - ts < self._update_cache_ttl_s:
+                return web.json_response({**payload, "cached": True})
+
+        # fetch_latest is synchronous (one urllib call). Bounce off the
+        # default executor so we don't block the event loop on slow
+        # networks; the timeout inside fetch_latest is the inner limit.
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None, lambda: fetch_latest(_local_ver)
+            )
+        except Exception as e:  # safety net — fetch_latest already swallows
+            log.warning("update_check unexpected error: %s", e)
+            payload = {
+                "status": "unknown",
+                "local_version": _local_ver,
+                "error": str(e),
+            }
+        else:
+            payload = result.to_dict()
+
+        self._update_cache = (now, payload)
+        return web.json_response({**payload, "cached": False})
 
     # ─── WebSocket events ─────────────────────────────────────────────
     async def ws_events(self, request: web.Request) -> web.WebSocketResponse:
