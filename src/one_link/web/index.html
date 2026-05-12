@@ -9794,10 +9794,20 @@
     console.warn(
       `One Link page/backend version drift: page=${pageVer}, daemon=${daemonVer}`,
     );
-    const key = `ol_local_version_drift:${daemonVer}:vs:${pageVer}`;
-    if (sessionStorage.getItem(key) === "1") return;
-    sessionStorage.setItem(key, "1");
-    toast("One Link refreshed itself in the background. If anything feels off, reopen it.", "info", 5000);
+    // Hand off to LiveRefresh: it schedules a soft reload as soon as
+    // the user is idle (no draft text, no open modal, no recent typing)
+    // so the UI quietly upgrades itself without disrupting work.
+    if (typeof LiveRefresh !== "undefined" && LiveRefresh.scheduleSoftReload) {
+      LiveRefresh.scheduleSoftReload(daemonVer, "boot");
+    } else {
+      // Fallback: should never fire because LiveRefresh is defined
+      // earlier in this file. Keeps behavior safe if init order
+      // changes someday.
+      const key = `ol_local_version_drift:${daemonVer}:vs:${pageVer}`;
+      if (sessionStorage.getItem(key) === "1") return;
+      sessionStorage.setItem(key, "1");
+      toast("One Link refreshed itself in the background. If anything feels off, reopen it.", "info", 5000);
+    }
   }
 
   // v0.8.0.1: the version the page's HTML+JS was built against.
@@ -9854,6 +9864,11 @@
     // instantly.
     _restoreLastSelection();
     connectWS();
+    // Wire visibilitychange + window 'online' so a tab returning to
+    // the foreground (or the OS reporting network-up) triggers an
+    // immediate reconnect + daemon-version-drift check. Idempotent;
+    // call once.
+    LiveRefresh.attachWindowHandlers();
     setInterval(refreshPeers, 5000);
     setInterval(refreshTransfers, 4000);
     setInterval(refreshStatus, 8000);
@@ -9997,12 +10012,245 @@
     } catch (e) { console.warn(e); }
   }
 
+  // ── LiveRefresh: smart auto-reconnect + auto-update controller ────
+  //
+  // Goals (in priority order):
+  //   1. Just work. Recover automatically from network blips, daemon
+  //      restarts, laptop sleep/wake, tab dormancy, OS-level offline,
+  //      and version upgrades. The user should never have to hit
+  //      reload or restart One Link manually for a routine event.
+  //   2. Don't disrupt the user. Never auto-reload while the user has
+  //      draft text in a composer, is mid-pair, has a modal open, or
+  //      typed in the last few seconds. If they're busy, defer the
+  //      reload until they're idle — there is no hurry.
+  //   3. Stay silent when normal. A brief WS reconnect (< 4s) should
+  //      pass without surfacing anything. Only when reconnect drags
+  //      do we light up the existing offline banner with a calm
+  //      "Reconnecting…" message — same channel users already know
+  //      from the OS-offline path, so it reads as familiar, not new.
+  //   4. Never reload-loop. We persist "already refreshed for version
+  //      X" in sessionStorage so a misbehaving daemon can't flap us
+  //      into a refresh cycle.
+  const LiveRefresh = (() => {
+    let reconnectAttempts = 0;
+    let reconnectTimer = null;
+    let bannerTimer = null;
+    let bannerShown = false;
+    let pendingReloadTimer = null;
+    let lastInputActivity = 0;
+    let lastConnectedAt = 0;
+    let wsHadOpen = false;
+
+    // Track any keystroke / pointer activity so we can tell whether
+    // the user is currently driving the UI vs idle. Used to avoid
+    // mid-action reloads. Capture-phase so we see events regardless
+    // of which handler stops propagation.
+    document.addEventListener("input",   () => { lastInputActivity = Date.now(); }, true);
+    document.addEventListener("keydown", () => { lastInputActivity = Date.now(); }, true);
+    document.addEventListener("pointerdown", () => { lastInputActivity = Date.now(); }, true);
+
+    function isUserBusy() {
+      // Composer has draft text → user is mid-message.
+      const inp = document.querySelector("#input");
+      if (inp && inp.value && inp.value.trim().length > 0) return true;
+      const gInp = document.querySelector("#group-input");
+      if (gInp && gInp.value && gInp.value.trim().length > 0) return true;
+      // Any modal / backdrop currently open → defer.
+      if (document.querySelector(".modal-backdrop.show, .backdrop.show")) return true;
+      if (document.querySelector(".pair-modal.show, .pair-backdrop.show")) return true;
+      // Recent activity → defer (5s grace).
+      if (Date.now() - lastInputActivity < 5000) return true;
+      // Tab not visible → safe-but-not-now: don't reload a hidden
+      // tab (next visible focus will re-check and reload then).
+      if (document.visibilityState === "hidden") return true;
+      return false;
+    }
+
+    function backoffMs() {
+      // Exponential: 1s, 2s, 4s, 8s, 16s, 30s cap. ±25% jitter so
+      // many tabs reconnecting after a daemon restart don't pile in
+      // lock-step.
+      const base = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts));
+      const jitter = (Math.random() - 0.5) * 0.5 * base;
+      return Math.floor(base + jitter);
+    }
+
+    function showReconnectBanner() {
+      if (bannerShown) return;
+      bannerShown = true;
+      const b = document.querySelector("#offline-banner");
+      if (!b) return;
+      const txt = b.querySelector("span:not(.offline-dot)");
+      if (txt && b._savedText == null) {
+        b._savedText = txt.textContent;
+        txt.textContent = "Reconnecting to One Link…";
+      }
+      b.classList.add("show");
+    }
+
+    function hideReconnectBanner() {
+      if (!bannerShown && navigator.onLine !== false) return;
+      bannerShown = false;
+      const b = document.querySelector("#offline-banner");
+      if (!b) return;
+      const txt = b.querySelector("span:not(.offline-dot)");
+      if (txt && b._savedText != null) {
+        txt.textContent = b._savedText;
+        b._savedText = null;
+      }
+      // Only fully clear if the OS reports online. If the OS still
+      // says offline, the offline handler's "You're offline" copy
+      // belongs there.
+      if (navigator.onLine !== false) {
+        b.classList.remove("show");
+      } else {
+        // Restore the OS-offline copy (saved above already).
+      }
+    }
+
+    function onOpen() {
+      reconnectAttempts = 0;
+      lastConnectedAt = Date.now();
+      const wasReconnect = wsHadOpen;
+      wsHadOpen = true;
+      if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+      hideReconnectBanner();
+      // After a reconnect (not the very first open), the daemon may
+      // have upgraded. Check now so any version drift triggers a
+      // soft reload instead of stale-page mystery errors.
+      if (wasReconnect) {
+        checkVersionDrift();
+        // Best-effort refresh of UI surfaces that may have missed
+        // events during the gap.
+        try { refreshPeers && refreshPeers(); } catch {}
+        try { refreshTransfers && refreshTransfers(); } catch {}
+        try { refreshStatus && refreshStatus(); } catch {}
+      }
+    }
+
+    function onClose() {
+      if (!bannerTimer) {
+        // Don't flash the banner for sub-4s reconnects. Most daemon
+        // restarts during dev / upgrade complete inside this window.
+        bannerTimer = setTimeout(showReconnectBanner, 4000);
+      }
+      scheduleReconnect();
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) return;
+      const delay = backoffMs();
+      reconnectAttempts++;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        try { connectWS(); }
+        catch (e) {
+          // connectWS itself blew up (e.g. invalid host). Treat as
+          // a close; the next backoff slot will try again.
+          onClose();
+        }
+      }, delay);
+    }
+
+    function forceReconnectNow() {
+      // Used by visibilitychange / network-restored. Cancel pending
+      // backoff, reset attempt counter, fire immediately.
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      reconnectAttempts = 0;
+      try { connectWS(); } catch { scheduleReconnect(); }
+    }
+
+    async function checkVersionDrift() {
+      try {
+        const me = await api.get("/api/me");
+        const v = me && me.app_version;
+        if (!v) return;
+        if (v === PAGE_BUILT_FOR) return;
+        scheduleSoftReload(v, "reconnect");
+      } catch {
+        // Ignore — we'll get another shot on the next reconnect.
+      }
+    }
+
+    function scheduleSoftReload(targetVersion, reason) {
+      // Loop guard: never refresh twice for the same daemon version
+      // in one tab session.
+      const key = `ol_refreshed_for_version:${targetVersion}`;
+      if (sessionStorage.getItem(key) === "1") return;
+      if (pendingReloadTimer) return;
+      console.info(`LiveRefresh: daemon version drift (${PAGE_BUILT_FOR} → ${targetVersion}); reason=${reason}; scheduling soft reload when idle.`);
+
+      let waitedMs = 0;
+      function attempt() {
+        pendingReloadTimer = null;
+        if (isUserBusy()) {
+          // Defer up to 5 minutes; after that, just reload — the
+          // user might have walked away leaving draft text behind,
+          // and a stale page is more dangerous than a lost draft.
+          if (waitedMs >= 5 * 60 * 1000) {
+            doReload();
+            return;
+          }
+          waitedMs += 10000;
+          pendingReloadTimer = setTimeout(attempt, 10000);
+          return;
+        }
+        doReload();
+      }
+      function doReload() {
+        sessionStorage.setItem(key, "1");
+        toast("Updating One Link…", "info", 2500);
+        // Give the toast ~1 frame to render before reload yanks the
+        // page out from under it. Use a short delay (not setImmediate)
+        // so the user actually sees the reassuring copy.
+        setTimeout(() => {
+          try { location.reload(); }
+          catch { location.href = location.href; }
+        }, 800);
+      }
+      // Initial 2s settle window so a noisy reconnect (multiple
+      // open/close handshakes during a daemon restart) doesn't
+      // race us to reload before the daemon stabilizes.
+      pendingReloadTimer = setTimeout(attempt, 2000);
+    }
+
+    function attachWindowHandlers() {
+      // Tab returns to foreground → daemon may have restarted while
+      // we were dormant. Force a reconnect and re-check version.
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "visible") return;
+        if (!ws || ws.readyState >= 2 /* CLOSING|CLOSED */) {
+          forceReconnectNow();
+        } else if (ws.readyState === 1 /* OPEN */) {
+          // Long-dormant tab: WS might be a half-open zombie, and
+          // the daemon may have upgraded. Probe + check.
+          checkVersionDrift();
+        }
+      });
+      // OS reports network-up → reconnect immediately, don't wait
+      // for the backoff window.
+      window.addEventListener("online", () => {
+        forceReconnectNow();
+      });
+    }
+
+    return {
+      onOpen, onClose,
+      forceReconnectNow,
+      scheduleSoftReload,
+      checkVersionDrift,
+      attachWindowHandlers,
+      isUserBusy,
+    };
+  })();
+
   // ── WebSocket live events ──────────────────────────────────────────
   let ws = null;
   function connectWS() {
     try { if (ws) ws.close(); } catch {}
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(`${proto}//${location.host}/api/events`);
+    ws.onopen = LiveRefresh.onOpen;
     ws.onmessage = (ev) => {
       let m;
       try { m = JSON.parse(ev.data); } catch { return; }
@@ -10349,7 +10597,7 @@
         scheduleRefreshStatus();
       }
     };
-    ws.onclose = () => setTimeout(connectWS, 1500);
+    ws.onclose = () => { try { LiveRefresh.onClose(); } catch (e) { console.warn(e); } };
     ws.onerror = () => { try { ws.close(); } catch {} };
   }
 
