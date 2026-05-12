@@ -14,11 +14,13 @@ crate-type = ["lib"]
 thiserror     = { workspace = true }
 ed25519-dalek = { workspace = true }
 blake3        = { workspace = true }
+tokio         = { workspace = true }
 
 [dev-dependencies]
 proptest  = { workspace = true }
 criterion = { workspace = true }
 rand_core = { workspace = true }
+tokio     = { workspace = true, features = ["full"] }
 
 [[bench]]
 name    = "discovery_bench"

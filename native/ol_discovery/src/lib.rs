@@ -64,6 +64,8 @@ pub mod node_id;
 pub mod record;
 pub mod routing;
 pub mod rpc;
+pub mod udp_transport;
+pub mod wire;
 
 pub use lookup::{
     Lookup, LookupError, LookupQueryResult, LookupResult, Transport,
@@ -80,4 +82,11 @@ pub use rpc::{
     Header, Nonce, Request, Response, RpcEnvelope, RpcError,
     FindValueOutcome, StoreOutcome,
     MAX_CLOCK_SKEW_SECS, MAX_FIND_RESULTS,
+};
+pub use udp_transport::{
+    EndpointResolver, RequestHandler, UdpTransport, DEFAULT_QUERY_TIMEOUT_MS,
+};
+pub use wire::{
+    decode, encode_request, encode_response, DecodedEnvelope, WireError,
+    MAX_WIRE_BYTES, WIRE_MAGIC, WIRE_VERSION,
 };
