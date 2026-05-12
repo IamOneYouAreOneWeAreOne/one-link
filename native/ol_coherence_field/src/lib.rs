@@ -66,8 +66,8 @@ pub use couplings::{
 pub use green::{green_function, GreenError};
 pub use interpolation::{be_rar, BeRarError};
 pub use pde::{
-    solve_helmholtz, solve_reaction_diffusion_steady, FieldError, GraphLaplacian,
-    SolveResult,
+    solve_helmholtz, solve_reaction_diffusion_steady, CgConfig, CgWorkspace, FieldError,
+    GraphLaplacian, HelmholtzSolver, SolveResult,
 };
 pub use source::{
     identity_dual_source, linear_source, support_phase_kernel, SourceError,

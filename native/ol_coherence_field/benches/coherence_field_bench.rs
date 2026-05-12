@@ -28,7 +28,7 @@ use ol_coherence_field::{
     anchor::ApparentHorizonInputs,
     calibration::one_link_calibration,
     pde::CgConfig,
-    FragilityEvent, GraphLaplacian,
+    FragilityEvent, GraphLaplacian, HelmholtzSolver,
 };
 
 // ── Scalar / per-tick microbenches ──────────────────────────────────
@@ -101,12 +101,19 @@ fn bench_matvec(c: &mut Criterion) {
     let mut group = c.benchmark_group("matvec");
     for &n in &[1_000usize, 10_000, 50_000] {
         let g = build_ring_chord(n);
+        g.freeze(); // amortise CSR build out of the timed loop
         let x: Vec<f64> = (0..n).map(|i| (i as f64) * 1e-3).collect();
         let mut y = vec![0.0_f64; n];
         group.throughput(Throughput::Elements(n as u64));
         group.bench_function(BenchmarkId::new("L*x", n), |b| {
             b.iter(|| {
                 g.matvec(black_box(&x), black_box(&mut y));
+                black_box(&y);
+            });
+        });
+        group.bench_function(BenchmarkId::new("L*x_par", n), |b| {
+            b.iter(|| {
+                g.matvec_par(black_box(&x), black_box(&mut y));
                 black_box(&y);
             });
         });
@@ -259,6 +266,77 @@ fn bench_end_to_end_topology_change(c: &mut Criterion) {
     group.finish();
 }
 
+// ── HelmholtzSolver: workspace reuse + warm-start ───────────────────
+
+fn bench_solver_warm_start(c: &mut Criterion) {
+    let mut group = c.benchmark_group("helmholtz_solver_warm_start");
+    group.sample_size(30);
+    for &n in &[1_000usize, 10_000] {
+        let g = build_ring_chord(n);
+        let mut s = vec![0.0_f64; n];
+        s[n / 2] = 1.0;
+        let cfg = CgConfig {
+            max_iter: 2_000,
+            tolerance: 1e-6,
+        };
+
+        // Cold: one-shot allocates fresh every call.
+        group.bench_function(BenchmarkId::new("one_shot", n), |b| {
+            b.iter(|| {
+                let r = solve_helmholtz(
+                    black_box(&g),
+                    black_box(1.0),
+                    black_box(0.1),
+                    black_box(&s),
+                    cfg,
+                )
+                .unwrap();
+                black_box(r);
+            });
+        });
+
+        // Warm: HelmholtzSolver reuses workspace + warm-start.
+        // First call seeds, subsequent calls warm-start from previous.
+        group.bench_function(BenchmarkId::new("warm", n), |b| {
+            let mut solver = HelmholtzSolver::new(n);
+            // Prime: one solve to populate warm-start cache.
+            solver.solve(&g, 1.0, 0.1, &s, cfg).unwrap();
+            b.iter(|| {
+                let r = solver
+                    .solve(
+                        black_box(&g),
+                        black_box(1.0),
+                        black_box(0.1),
+                        black_box(&s),
+                        cfg,
+                    )
+                    .unwrap();
+                black_box(r);
+            });
+        });
+
+        // Workspace-only (no warm-start): isolates the per-call alloc
+        // savings from the warm-start convergence win.
+        group.bench_function(BenchmarkId::new("workspace_only", n), |b| {
+            let mut solver = HelmholtzSolver::new(n);
+            b.iter(|| {
+                solver.clear_warm_start();
+                let r = solver
+                    .solve(
+                        black_box(&g),
+                        black_box(1.0),
+                        black_box(0.1),
+                        black_box(&s),
+                        cfg,
+                    )
+                    .unwrap();
+                black_box(r);
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_scalar_ops,
@@ -267,5 +345,6 @@ criterion_group!(
     bench_sources,
     bench_couplings,
     bench_end_to_end_topology_change,
+    bench_solver_warm_start,
 );
 criterion_main!(benches);

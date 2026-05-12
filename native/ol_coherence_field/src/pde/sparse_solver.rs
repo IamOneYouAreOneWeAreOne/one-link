@@ -44,6 +44,75 @@ pub struct CgResult {
     pub converged: bool,
 }
 
+/// Pre-allocated CG workspace.
+///
+/// For repeated solves on the same graph (Green-function adjoint
+/// readouts, time-stepped reaction-diffusion, daemon field snapshots
+/// every ~1s), allocating fresh `Vec<f64>` buffers per call wastes
+/// ~5 × N × 8 bytes of allocator churn. A reusable workspace eliminates
+/// that — call [`conjugate_gradient_with_workspace`] in a loop with
+/// the same workspace and the only allocation cost is the initial
+/// construction.
+#[derive(Debug)]
+pub struct CgWorkspace {
+    n: usize,
+    pub(crate) x: Vec<f64>,
+    pub(crate) r: Vec<f64>,
+    pub(crate) z: Vec<f64>,
+    pub(crate) p: Vec<f64>,
+    pub(crate) ap: Vec<f64>,
+}
+
+impl CgWorkspace {
+    /// Allocate a workspace for problems over `n` unknowns.
+    #[must_use]
+    pub fn new(n: usize) -> Self {
+        Self {
+            n,
+            x: vec![0.0; n],
+            r: vec![0.0; n],
+            z: vec![0.0; n],
+            p: vec![0.0; n],
+            ap: vec![0.0; n],
+        }
+    }
+
+    /// Size the workspace was allocated for.
+    #[must_use]
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// Resize the workspace if `n` changed (e.g. graph topology grew).
+    /// Cheap when already-sized; only reallocates on growth.
+    pub fn resize(&mut self, n: usize) {
+        if self.n == n {
+            return;
+        }
+        self.x.resize(n, 0.0);
+        self.r.resize(n, 0.0);
+        self.z.resize(n, 0.0);
+        self.p.resize(n, 0.0);
+        self.ap.resize(n, 0.0);
+        self.n = n;
+    }
+
+    /// Seed the solver's initial guess `x` with the caller's vector.
+    /// Used for warm-starting from a previous solution when the
+    /// underlying operator only changed incrementally.
+    pub fn set_initial_guess(&mut self, x0: &[f64]) {
+        debug_assert_eq!(x0.len(), self.n);
+        self.x.copy_from_slice(x0);
+    }
+
+    /// Zero the initial guess (the default).
+    pub fn zero_initial_guess(&mut self) {
+        for xi in &mut self.x {
+            *xi = 0.0;
+        }
+    }
+}
+
 /// Solve `A · x = b` via conjugate gradient. `apply_a` computes
 /// `y = A · x` for an arbitrary `x` (closure form means the operator
 /// can be a matrix, a sum of matrices, a Laplacian-plus-shift, etc.).
@@ -61,40 +130,87 @@ pub fn conjugate_gradient<F>(
 where
     F: Fn(&[f64], &mut [f64]),
 {
+    // One-shot path: allocate a workspace, run, return owned x. The
+    // workspace is dropped on return.
+    let mut ws = CgWorkspace::new(n);
+    let (residual, iterations, converged) =
+        conjugate_gradient_with_workspace(&mut ws, apply_a, diag, b, config);
+    CgResult {
+        x: std::mem::take(&mut ws.x),
+        residual,
+        iterations,
+        converged,
+    }
+}
+
+/// Workspace-flavoured CG. Same algorithm as [`conjugate_gradient`]
+/// but the caller owns the workspace, eliminating per-call allocs.
+/// Returns `(residual, iterations, converged)`; the recovered field
+/// lives in `workspace.x` after the call (caller can read it via
+/// `&workspace.x[..]`).
+///
+/// Warm-start: if the caller pre-set `workspace.x` to a non-zero
+/// guess (via [`CgWorkspace::set_initial_guess`]), the solver uses it.
+/// Otherwise call [`CgWorkspace::zero_initial_guess`] first.
+pub fn conjugate_gradient_with_workspace<F>(
+    workspace: &mut CgWorkspace,
+    apply_a: F,
+    diag: &[f64],
+    b: &[f64],
+    config: CgConfig,
+) -> (f64, usize, bool)
+where
+    F: Fn(&[f64], &mut [f64]),
+{
+    let n = workspace.n;
     debug_assert_eq!(b.len(), n);
     debug_assert_eq!(diag.len(), n);
 
-    // All buffers pre-allocated. CG body does ZERO heap allocs.
-    let mut x = vec![0.0_f64; n];
-    let mut r = b.to_vec(); // r = b - A · x; x = 0 so r = b
-    let mut z = vec![0.0_f64; n];
-    let mut p = vec![0.0_f64; n];
-    let mut ap = vec![0.0_f64; n];
+    // Borrow disjoint workspace fields. CG body does ZERO heap allocs.
+    let CgWorkspace {
+        n: _,
+        x,
+        r,
+        z,
+        p,
+        ap,
+    } = workspace;
 
-    apply_preconditioner_into(diag, &r, &mut z);
-    p.copy_from_slice(&z);
+    // r = b - A·x (where x is the caller's initial guess, possibly 0).
+    // For warm-start cases we evaluate A·x explicitly; for the common
+    // zero-start case we short-circuit to r = b.
+    let zero_start = x.iter().all(|&v| v == 0.0);
+    if zero_start {
+        r.copy_from_slice(b);
+    } else {
+        apply_a(x, ap);
+        for i in 0..n {
+            r[i] = b[i] - ap[i];
+        }
+    }
 
-    let mut r_dot_z = dot(&r, &z);
+    apply_preconditioner_into(diag, r, z);
+    p.copy_from_slice(z);
+
+    let mut r_dot_z = dot(r, z);
     let bnorm_sq = dot(b, b).max(1.0e-60);
     let tol_sq = config.tolerance * config.tolerance;
 
     let mut iterations = 0;
-    let mut r_norm_sq = dot(&r, &r);
+    let mut r_norm_sq = dot(r, r);
     let mut residual = (r_norm_sq / bnorm_sq).sqrt();
     let mut converged = r_norm_sq <= tol_sq * bnorm_sq;
 
     while !converged && iterations < config.max_iter {
-        apply_a(&p, &mut ap);
-        let p_ap = dot(&p, &ap);
+        apply_a(p, ap);
+        let p_ap = dot(p, ap);
         if p_ap.abs() < 1e-30 {
             // Operator is singular along p — can't make progress.
             break;
         }
         let alpha = r_dot_z / p_ap;
-        // Fused x += α·p and r -= α·ap with running r·r accumulation in
-        // the same pass — one walk of memory instead of three (the
-        // separate axpy / axpy / norm2 sequence). Lets the optimizer
-        // emit a single vectorized loop.
+        // Fused x += α·p and r -= α·ap with running r·r accumulation
+        // in the same pass — one walk of memory instead of three.
         let mut new_r_norm_sq = 0.0_f64;
         for i in 0..n {
             x[i] += alpha * p[i];
@@ -104,8 +220,8 @@ where
         }
         r_norm_sq = new_r_norm_sq;
 
-        apply_preconditioner_into(diag, &r, &mut z);
-        let r_dot_z_new = dot(&r, &z);
+        apply_preconditioner_into(diag, r, z);
+        let r_dot_z_new = dot(r, z);
         let beta = r_dot_z_new / r_dot_z.max(1.0e-30);
         // p = z + β·p (in-place, one pass).
         for i in 0..n {
@@ -117,12 +233,7 @@ where
         converged = r_norm_sq <= tol_sq * bnorm_sq;
     }
 
-    CgResult {
-        x,
-        residual,
-        iterations,
-        converged,
-    }
+    (residual, iterations, converged)
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {

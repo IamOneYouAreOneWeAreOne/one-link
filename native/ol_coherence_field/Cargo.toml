@@ -12,6 +12,7 @@ crate-type = ["lib"]
 
 [dependencies]
 thiserror = { workspace = true }
+rayon     = "1.10"
 
 [dev-dependencies]
 proptest = { workspace = true }
