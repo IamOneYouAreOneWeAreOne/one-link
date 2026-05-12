@@ -29,6 +29,7 @@ ol_codegen    = { path = "../ol_codegen" }
 ol_threshold_recovery = { path = "../ol_threshold_recovery" }
 ol_discovery       = { path = "../ol_discovery" }
 ol_proximity_pair  = { path = "../ol_proximity_pair" }
+ol_pair_qr         = { path = "../ol_pair_qr" }
 
 [profile.release]
 debug = 1
@@ -156,6 +157,36 @@ bench = false
 [[bin]]
 name = "fuzz_proximity_quantize"
 path = "fuzz_targets/fuzz_proximity_quantize.rs"
+test = false
+doc = false
+bench = false
+
+# ── F2 ol_pair_qr fuzz targets ────────────────────────────────────
+
+[[bin]]
+name = "fuzz_pair_qr_invite_decode"
+path = "fuzz_targets/fuzz_pair_qr_invite_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pair_qr_response_decode"
+path = "fuzz_targets/fuzz_pair_qr_response_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pair_qr_confirm_decode"
+path = "fuzz_targets/fuzz_pair_qr_confirm_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pair_qr_canon_roundtrip"
+path = "fuzz_targets/fuzz_pair_qr_canon_roundtrip.rs"
 test = false
 doc = false
 bench = false

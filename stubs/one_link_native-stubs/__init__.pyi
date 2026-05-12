@@ -19,6 +19,7 @@ from . import bandit as bandit
 from . import capability as capability
 from . import crdt as crdt
 from . import hwkey as hwkey
+from . import pair_qr as pair_qr
 from . import pqkem as pqkem
 from . import ratchet as ratchet
 

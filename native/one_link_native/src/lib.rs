@@ -59,6 +59,7 @@ mod homology;
 mod hwkey;
 mod pqkem;
 mod prefetch;
+mod pair_qr;
 mod proximity_pair;
 mod quic;
 mod ratchet;
@@ -259,6 +260,18 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.threshold_recovery", threshold_mod)?;
+
+    // Phase F2 — pair-by-QR Factor-1 trust establishment.
+    // In-person QR scan + Ed25519-signed invite + transcript hash +
+    // human-readable SAS comparison + optional Factor-2 mix-in.
+    // Two devices that have never met derive a shared chain key with
+    // no third-party trust at any point in the flow.
+    let pair_qr_mod = PyModule::new_bound(py, "pair_qr")?;
+    pair_qr::register(py, &pair_qr_mod)?;
+    m.add_submodule(&pair_qr_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.pair_qr", pair_qr_mod)?;
 
     Ok(())
 }
