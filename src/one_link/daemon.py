@@ -3763,6 +3763,26 @@ class Daemon:
                 claims[peer_fp] = have
 
         await asyncio.gather(*(_query(p) for p in peers))
+        # Phase E #1: enrich the chunk-cohold registry from swarm
+        # query results. Each claim ("peer X has these chunk hashes")
+        # is exactly the gossip-equivalent the homology feeder's
+        # cohold graph needs. Without this hook the feeder only sees
+        # locally-observed FILE_DONE events; with it, every swarm
+        # query brightens the picture.
+        try:
+            for peer_fp, chunk_hashes in claims.items():
+                short_id = peer_fp[:8]
+                for blob_hex in chunk_hashes:
+                    if self._valid_blob_hex(blob_hex):
+                        holders = self._chunk_holders.setdefault(
+                            blob_hex, set(),
+                        )
+                        holders.add(short_id)
+            while len(self._chunk_holders) > self._chunk_holders_cap:
+                eldest = next(iter(self._chunk_holders))
+                del self._chunk_holders[eldest]
+        except Exception:  # pragma: no cover — defensive
+            pass
         return claims
 
     async def pull_swarm_missing_chunks(
@@ -3811,6 +3831,26 @@ class Daemon:
             reliability = health.get("reliability")
             if isinstance(reliability, (int, float)):
                 health_reliability[fp] = max(0.0, min(1.0, float(reliability)))
+        # Phase E #2: feed the field score for each source peer into
+        # the swarm planner so high-coherence holders are ranked
+        # ahead of equally-trusted low-coherence ones. The planner's
+        # ChunkSource already has a coherence_score slot;
+        # source_from_hashes accepts it; route_score already promotes
+        # it above bandwidth/latency. The only thing that was
+        # missing was this single call-site fill-in. Honors the
+        # ONE_LINK_FIELD_PREFETCH_DISABLE kill-switch.
+        field_disabled = os.environ.get(
+            "ONE_LINK_FIELD_PREFETCH_DISABLE", "",
+        ).strip().lower() in ("1", "true", "yes", "on")
+
+        def _coherence_for(fp: str) -> float | None:
+            if field_disabled:
+                return None
+            try:
+                return self.field_score_for_peer(fp[:8])
+            except Exception:  # pragma: no cover
+                return None
+
         source_objects = [
             source_from_hashes(
                 fp,
@@ -3819,6 +3859,7 @@ class Daemon:
                 latency_ms=health_latency.get(fp),
                 bandwidth_bps=health_bandwidth.get(fp),
                 reliability=health_reliability.get(fp, 1.0),
+                coherence_score=_coherence_for(fp),
             )
             for fp, hashes in claims.items()
         ]

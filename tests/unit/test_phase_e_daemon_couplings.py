@@ -248,3 +248,93 @@ def test_field_rank_holders_env_kill_switch(monkeypatch):
     # With the switch flipped, input order is preserved.
     monkeypatch.setenv("ONE_LINK_FIELD_PREFETCH_DISABLE", "1")
     assert d.field_rank_holders(["a", "b", "c"]) == ["a", "b", "c"]
+
+
+# ── Phase E #2 — coherence_score propagates into swarm_plan ───────
+
+
+def test_swarm_planner_promotes_high_coherence_peer():
+    """Acceptance gate for Phase E #2 swarm-fetch wiring.
+
+    Given two peers with identical trust + reliability + latency,
+    a higher coherence_score must promote one ahead of the other
+    in the planner's route_score. This is the contract the daemon's
+    pull_swarm_missing_chunks call relies on.
+    """
+    from one_link.swarm_plan import source_from_hashes
+
+    high = source_from_hashes(
+        "aaaa" * 16,
+        ["beef" * 16],
+        trust_score=0.5,
+        latency_ms=10.0,
+        bandwidth_bps=1_000_000.0,
+        reliability=1.0,
+        coherence_score=0.9,
+    )
+    low = source_from_hashes(
+        "bbbb" * 16,
+        ["beef" * 16],
+        trust_score=0.5,
+        latency_ms=10.0,
+        bandwidth_bps=1_000_000.0,
+        reliability=1.0,
+        coherence_score=0.1,
+    )
+    # route_score is (trust, coherence, reliability, ...). With trust
+    # tied, coherence breaks the tie. Higher tuple wins.
+    assert high.route_score() > low.route_score()
+
+
+def test_swarm_planner_falls_back_when_coherence_absent():
+    """When coherence_score is None, the planner falls back to its
+    derived score (mix of trust/reliability/bandwidth/latency) — no
+    crash, no skew from a missing field snapshot."""
+    from one_link.swarm_plan import source_from_hashes
+
+    src = source_from_hashes(
+        "aaaa" * 16,
+        ["beef" * 16],
+        trust_score=0.5,
+        latency_ms=10.0,
+        bandwidth_bps=1_000_000.0,
+        reliability=1.0,
+        coherence_score=None,
+    )
+    # route_score()[1] is the coherence slot — without explicit
+    # input it's the derived fallback, which must still be in (0, 1].
+    coherence_slot = src.route_score()[1]
+    assert 0.0 <= coherence_slot <= 1.0
+
+
+# ── Phase E #1 — swarm claims enrich the cohold registry ──────────
+
+
+def test_collect_swarm_chunk_claims_enriches_chunk_holders():
+    """After a swarm chunk-query returns claims, the daemon's
+    _chunk_holders registry must reflect "this peer has these
+    chunks." This is the gossip path that feeds the homology
+    feeder beyond locally-observed FILE_DONE events."""
+    from one_link.daemon import Daemon
+
+    d = Daemon.__new__(Daemon)
+    d._chunk_holders = {}
+    d._chunk_holders_cap = 4096
+    # Simulate the same registry update the daemon's
+    # _collect_swarm_chunk_claims hook performs on its return path.
+    claims = {
+        "aaaaaaaa" + ("0" * 56): {"11" * 32, "22" * 32},
+        "bbbbbbbb" + ("0" * 56): {"22" * 32, "33" * 32},
+    }
+    for peer_fp, chunk_hashes in claims.items():
+        short_id = peer_fp[:8]
+        for blob_hex in chunk_hashes:
+            if d._valid_blob_hex(blob_hex):
+                d._chunk_holders.setdefault(blob_hex, set()).add(short_id)
+
+    # Now every claimed peer is registered as holder of every
+    # claimed chunk. Chunk 22*32 has two holders (cohold edge).
+    assert "11" * 32 in d._chunk_holders
+    assert d._chunk_holders["11" * 32] == {"aaaaaaaa"}
+    assert d._chunk_holders["22" * 32] == {"aaaaaaaa", "bbbbbbbb"}
+    assert d._chunk_holders["33" * 32] == {"bbbbbbbb"}

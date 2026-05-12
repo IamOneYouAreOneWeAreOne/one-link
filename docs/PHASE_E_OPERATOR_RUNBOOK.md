@@ -229,6 +229,25 @@ post-restart gap.
 A malformed or absent file is silently ignored; the daemon falls
 back to "no snapshot until the first tick."
 
+## Upstream feature wirings (now also complete)
+
+The two upstream features the field couplings depend on are also
+wired into production code paths:
+
+- **Multi-holder swarm fetch** — `Daemon.pull_swarm_missing_chunks`
+  (the production swarm-fetch path that fans a query out to peers,
+  collects claims, plans assignments via `plan_swarm_sources`, and
+  pulls in parallel) now passes `coherence_score=field_score_for_peer(fp[:8])`
+  into each `ChunkSource`. The planner's `route_score` already had
+  a coherence slot ranked above bandwidth/latency, so a high-τ_c
+  peer is automatically promoted over a low-τ_c one when trust
+  ties. Honors `ONE_LINK_FIELD_PREFETCH_DISABLE=1`.
+- **Chunk-holder gossip (for the homology feeder)** — every swarm
+  query response (`_collect_swarm_chunk_claims`) now folds the
+  returned claims into `_chunk_holders`. The homology feeder's
+  cohold-graph view is no longer limited to locally-observed
+  FILE_DONE events — every swarm query brightens the picture.
+
 ## Things that DON'T exist yet (and why)
 
 These are on the production roadmap but NOT shipped:
@@ -236,18 +255,6 @@ These are on the production roadmap but NOT shipped:
 - **Prometheus / OpenMetrics text format** — `/api/metrics` returns
   JSON only. Wrap externally with a Prometheus exporter if you need
   scraping.
-- **Multi-holder swarm fetch decision path** — `Daemon.field_rank_holders`
-  is wired and tested as the consumer-facing helper. The upstream
-  "fetch this chunk from N candidate holders" code path itself
-  doesn't exist yet (single-peer send is the dominant path); when
-  it lands, `field_rank_holders` is its natural call site. Single-
-  daemon behaviour today is "rank works, never called with > 1
-  holder."
-- **Chunk-holder gossip protocol** — the homology feeder's
-  cohold-graph view is populated from locally-observed FILE_DONE
-  events only (`_observe_prefetch` → `_chunk_holders`). Wider
-  visibility (knowing what peers hold what chunks across the swarm)
-  requires a gossip / announce protocol that's tracked separately.
 
 See [FILE_ENGINE_V2_PLAN.md](FILE_ENGINE_V2_PLAN.md) for the full
 remaining-work picture.
