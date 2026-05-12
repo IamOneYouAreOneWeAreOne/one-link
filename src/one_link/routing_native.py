@@ -12,7 +12,7 @@ import logging
 log = logging.getLogger(__name__)
 
 try:
-    from one_link_native import routing as _native_routing  # type: ignore[import-not-found]
+    from one_link_native import routing as _native_routing  # type: ignore[attr-defined]
 
     HAS_NATIVE: bool = True
     NATIVE_VERSION: str | None = getattr(_native_routing, "__version__", None)

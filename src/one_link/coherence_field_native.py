@@ -22,7 +22,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 try:
-    from one_link_native import coherence_field as _native_field  # type: ignore[import-not-found]
+    from one_link_native import coherence_field as _native_field  # type: ignore[attr-defined]
 
     HAS_NATIVE: bool = True
     NATIVE_VERSION: str | None = getattr(_native_field, "__version__", None)

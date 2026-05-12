@@ -139,9 +139,11 @@ async def test_outbound_query_and_pull_store_remote_chunk(tmp_path: Path, monkey
     daemon._outbound_sessions[them.fingerprint] = sess
     payload = b"remote-piece"
     h = blake3.blake3(payload).hexdigest()
+    chan.queue_reply(make_msg("PRESENCE", them.short_id, presence="away"))
     chan.queue_reply(make_msg("CHUNK_HAVE", them.short_id, hashes=[h]))
     assert await daemon.query_peer_chunks(peer, [h]) == {"ok": True, "hashes": [h], "rejected": None}
     enc, wire = daemon._encode_payload(payload)
+    chan.queue_reply(make_msg("PRESENCE", them.short_id, presence="online"))
     chan.queue_reply(make_msg(
         "CHUNK_DATA",
         them.short_id,
@@ -154,6 +156,42 @@ async def test_outbound_query_and_pull_store_remote_chunk(tmp_path: Path, monkey
     pulled = await daemon.pull_peer_chunk(peer, h)
     assert pulled["ok"] is True
     assert daemon._read_chunk_cache(h) == payload
+    assert daemon._peer_presence[them.fingerprint] == "online"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_outbound_chunk_wait_ignores_stale_chunk_replies(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(fingerprint=them.fingerprint, short_id=them.short_id, pubkey=them.public_bytes)
+    state.set_peer_trust(them.fingerprint, "pinned")
+    state.set_peer_capability_policy(them.fingerprint, [CHAT, FILES])
+    peer = Peer(them.short_id, "them", "127.0.0.1", 1234, them.public_bytes.hex())
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    daemon._outbound_sessions[them.fingerprint] = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=peer,
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    h = blake3.blake3(b"remote-piece").hexdigest()
+    chan.queue_reply(make_msg("CHUNK_HAVE", them.short_id, of="old-request", hashes=[]))
+    chan.queue_reply(make_msg("CHUNK_HAVE", them.short_id, hashes=[h]))
+
+    assert await daemon.query_peer_chunks(peer, [h]) == {
+        "ok": True,
+        "hashes": [h],
+        "rejected": None,
+    }
     state.close()
 
 

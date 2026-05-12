@@ -62,17 +62,17 @@ log = logging.getLogger(__name__)
 # Lazy native-module loading so the module imports cleanly on hosts
 # without the wheel installed. Callers check `HAS_NATIVE` before
 # touching any function that needs the native crates.
+_native_aead: Any = None
+_native_chunk: Any = None
+_native_store: Any = None
 try:
-    from one_link_native import aead as _native_aead
-    from one_link_native import chunk as _native_chunk
-    from one_link_native import store as _native_store
+    from one_link_native import aead as _native_aead  # type: ignore[attr-defined,no-redef]
+    from one_link_native import chunk as _native_chunk  # type: ignore[attr-defined,no-redef]
+    from one_link_native import store as _native_store  # type: ignore[attr-defined,no-redef]
 
     HAS_NATIVE: bool = True
 except ImportError as exc:
     HAS_NATIVE = False
-    _native_aead = None  # type: ignore[assignment]
-    _native_chunk = None  # type: ignore[assignment]
-    _native_store = None  # type: ignore[assignment]
     log.info(
         "native_transfer requires one_link_native (%s); the pipeline is "
         "unavailable until the wheel is built via `cd native && "

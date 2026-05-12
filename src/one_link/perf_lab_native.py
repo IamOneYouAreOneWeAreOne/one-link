@@ -373,27 +373,12 @@ def _bench_quic_loopback_round_trip(
         if conn is None:
             done.set()
             return
-        remaining = iterations * bench_iterations
-        while remaining > 0:
-            if hasattr(conn, "recv_frames_blocking") and hasattr(conn, "send_responses_on"):
-                batch = conn.recv_frames_blocking(min(64, remaining), timeout_ms=10_000)
-                if not batch:
-                    break
-                conn.send_responses_on(
-                    [
-                        (sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
-                        for sid, _kind, _payload in batch
-                    ],
-                    max_in_flight=64,
-                )
-                remaining -= len(batch)
-            else:
-                r = conn.recv_frame_blocking(timeout_ms=10_000)
-                if r is None:
-                    break
-                sid, _kind, _payload = r
-                conn.send_response_on(sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
-                remaining -= 1
+        for _ in range(iterations * bench_iterations):
+            r = conn.recv_frame_blocking(timeout_ms=10_000)
+            if r is None:
+                break
+            sid, _kind, _payload = r
+            conn.send_response_on(sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
         time.sleep(0.05)
         done.set()
 
@@ -474,27 +459,12 @@ def _bench_quic_parallel_streams(
         if conn is None:
             done.set()
             return
-        remaining = total_round_trips * bench_iterations
-        while remaining > 0:
-            if hasattr(conn, "recv_frames_blocking") and hasattr(conn, "send_responses_on"):
-                batch = conn.recv_frames_blocking(min(64, remaining), timeout_ms=10_000)
-                if not batch:
-                    break
-                conn.send_responses_on(
-                    [
-                        (sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
-                        for sid, _kind, _payload in batch
-                    ],
-                    max_in_flight=64,
-                )
-                remaining -= len(batch)
-            else:
-                r = conn.recv_frame_blocking(timeout_ms=10_000)
-                if r is None:
-                    break
-                sid, _kind, _payload = r
-                conn.send_response_on(sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
-                remaining -= 1
+        for _ in range(total_round_trips * bench_iterations):
+            r = conn.recv_frame_blocking(timeout_ms=10_000)
+            if r is None:
+                break
+            sid, _kind, _payload = r
+            conn.send_response_on(sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
         time.sleep(0.05)
         done.set()
 

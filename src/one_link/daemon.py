@@ -59,7 +59,7 @@ import time
 import uuid
 import zlib
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Optional, Protocol, TypedDict, cast
 
@@ -73,6 +73,7 @@ if TYPE_CHECKING:
 from one_link import blobstore, channel as ch, foldersync
 from one_link.capabilities import (
     CHAT,
+    FILE_ACK_BATCH,
     FILE_BINARY_FRAME,
     FILE_CDC_BINARY_FRAME,
     FILES,
@@ -178,6 +179,7 @@ STREAM_MIN_CHUNK_SIZE = 256 * 1024
 STREAM_MAX_CHUNK_SIZE = 4 * 1024 * 1024
 STREAM_PIPELINE_TARGET_BYTES = 24 * 1024 * 1024
 STREAM_PIPELINE_MAX_CHUNKS = 16
+FILE_ACK_BATCH_MAX = 32
 BINARY_FRAME_MAGIC = b"OLB1"
 BINARY_FRAME_HEADER_MAX = 64 * 1024
 MAX_INCOMING_FILE_BYTES = 1024 * 1024 * 1024  # match UI upload cap
@@ -684,6 +686,7 @@ class IncomingFile:
     cdc_missing: set[int] | None = None
     cdc_parts: dict[int, bytes] | None = None
     transfer_id: str | None = None
+    ack_batch_ids: list[str] = field(default_factory=list)
 
 
 class _HasherProtocol(Protocol):
@@ -2368,7 +2371,7 @@ class Daemon:
                         total_bytes=f.size,
                     )
                 log.info("file done: %s ok=%s -> %s", f.name, ok, f.out_path)
-                await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+                await self._ack_file_chunk(channel, msg, f, force_individual=True)
                 if ok:
                     self._cache_file_chunks(f.out_path)
                     # Phase D #3: observe successful receive in prefetch
@@ -2376,7 +2379,7 @@ class Daemon:
                     # of every transfer.
                     self._observe_prefetch(peer_fp, f.blob_hex)
                 return
-            await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+            await self._ack_file_chunk(channel, msg, f)
         elif t == "FILE_BIN_CHUNK":
             await self._handle_file_binary_chunk(channel, msg, peer_fp, peer_sid)
         elif t == "FILE_NATIVE_CHUNK":
@@ -3511,13 +3514,12 @@ class Daemon:
                 sess.peer_fp, sess.channel, encode_msg(q)
             )
             while True:
-                reply = decode_msg(await asyncio.wait_for(
-                    sess.channel.recv(), timeout=FILE_ACK_DEADLINE_S,
-                ))
-                if reply.get("t") == "CAPS":
-                    continue
-                if reply.get("t") != "CHUNK_HAVE":
-                    raise RuntimeError(f"unexpected chunk query reply: {reply.get('t')}")
+                reply = await self._recv_chunk_protocol_reply(
+                    sess=sess,
+                    request_id=str(q.get("id")),
+                    expected_types={"CHUNK_HAVE"},
+                    timeout_s=FILE_ACK_DEADLINE_S,
+                )
                 have = [
                     str(h) for h in (reply.get("hashes") or [])
                     if self._valid_blob_hex(str(h))
@@ -3545,15 +3547,15 @@ class Daemon:
                 sess.peer_fp, sess.channel, encode_msg(q)
             )
             while True:
-                reply = decode_msg(await asyncio.wait_for(
-                    sess.channel.recv(), timeout=FILE_ACK_DEADLINE_S,
-                ))
-                if reply.get("t") == "CAPS":
-                    continue
+                reply = await self._recv_chunk_protocol_reply(
+                    sess=sess,
+                    request_id=str(q.get("id")),
+                    expected_types={"CHUNK_DATA"},
+                    timeout_s=FILE_ACK_DEADLINE_S,
+                    accept_rejected_ack=True,
+                )
                 if reply.get("t") == "ACK" and reply.get("rejected"):
                     return {"ok": False, "rejected": reply.get("rejected")}
-                if reply.get("t") != "CHUNK_DATA":
-                    raise RuntimeError(f"unexpected chunk pull reply: {reply.get('t')}")
                 data = base64.b64decode(reply.get("data", ""), validate=True)
                 data = self._decode_payload(
                     str(reply.get("enc", "raw")),
@@ -3569,6 +3571,63 @@ class Daemon:
                     "size": len(data),
                     "wire_size": int(reply.get("wire_size") or len(data)),
                 }
+
+    async def _recv_chunk_protocol_reply(
+        self,
+        *,
+        sess: OutboundSession,
+        request_id: str,
+        expected_types: set[str],
+        timeout_s: float,
+        accept_rejected_ack: bool = False,
+    ) -> dict:
+        """Receive the matching chunk-protocol reply on a shared peer channel.
+
+        Swarm chunk query/pull rides the same encrypted channel as chat,
+        presence, grants, and file-control traffic. Production peers can send
+        those frames while a chunk request is in flight, so treating the next
+        frame as "the reply" makes large transfers flaky. This helper waits
+        for the response with a matching ``of`` id, tolerates legacy responses
+        that omit ``of``, and lets ordinary out-of-band frames continue through
+        the normal peer-message handler.
+        """
+        deadline = time.monotonic() + max(0.001, float(timeout_s))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError(
+                    f"timed out waiting for {sorted(expected_types)} reply"
+                )
+            reply = decode_msg(await asyncio.wait_for(
+                sess.channel.recv(), timeout=remaining,
+            ))
+            t = str(reply.get("t") or "")
+            if t == "CAPS":
+                continue
+            of = reply.get("of")
+            if of not in (None, request_id):
+                log.debug(
+                    "ignored stale chunk-protocol frame %s of=%s while waiting for %s",
+                    t, of, request_id,
+                )
+                continue
+            if t in expected_types:
+                return reply
+            if accept_rejected_ack and t == "ACK" and reply.get("rejected"):
+                return reply
+            if t.startswith("CHUNK_") or t == "ACK":
+                log.debug(
+                    "ignored unrelated chunk-protocol frame %s while waiting for %s",
+                    t, sorted(expected_types),
+                )
+                continue
+            try:
+                await self._on_peer_message(sess.channel, reply)
+            except Exception as e:
+                log.debug(
+                    "out-of-band peer frame %s failed during chunk wait: %s",
+                    t, e,
+                )
 
     def _swarm_trust_score(self, peer_fp: str) -> float:
         if self.state is None:
@@ -4107,11 +4166,11 @@ class Daemon:
                     total_bytes=f.size,
                 )
             log.info("native file done: %s ok=%s -> %s", f.name, ok, f.out_path)
-            await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+            await self._ack_file_chunk(channel, msg, f, force_individual=True)
             if ok:
                 self._cache_file_chunks(f.out_path)
             return
-        await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+        await self._ack_file_chunk(channel, msg, f)
 
     async def _handle_file_binary_chunk(self, channel, msg, peer_fp, peer_sid) -> None:
         """Receive one raw binary file chunk carried inside the encrypted channel."""
@@ -4215,11 +4274,11 @@ class Daemon:
                     total_bytes=f.size,
                 )
             log.info("binary file done: %s ok=%s -> %s", f.name, ok, f.out_path)
-            await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+            await self._ack_file_chunk(channel, msg, f, force_individual=True)
             if ok:
                 self._cache_file_chunks(f.out_path)
             return
-        await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+        await self._ack_file_chunk(channel, msg, f)
 
     async def _handle_file_cdc_chunk(self, channel, msg, peer_fp, peer_sid) -> None:
         blob = str(msg.get("blob", ""))
@@ -4306,9 +4365,11 @@ class Daemon:
                 "file_risk": classify_file_risk(f.name),
             },
         )
-        await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
         if not f.cdc_missing:
+            await self._ack_file_chunk(channel, msg, f, force_individual=True)
             self._schedule_finish_cdc_file(blob, peer_fp, peer_sid, msg)
+        else:
+            await self._ack_file_chunk(channel, msg, f)
 
     async def _finish_cdc_file(self, blob: str, peer_fp: str, peer_sid: str, src_msg: dict) -> None:
         f = self._incoming_files.get(blob)
@@ -6467,6 +6528,52 @@ class Daemon:
         with contextlib.suppress(OSError):
             f.out_path.unlink()
         self._update_transfer(f.transfer_id, status="failed")
+
+    def _ack_batch_size_from_chunk(self, msg: dict) -> int:
+        try:
+            requested = int(msg.get("ack_batch") or 1)
+        except (TypeError, ValueError, OverflowError):
+            requested = 1
+        return max(1, min(FILE_ACK_BATCH_MAX, requested))
+
+    async def _flush_file_ack_batch(self, channel, f: IncomingFile) -> None:
+        if not f.ack_batch_ids:
+            return
+        ids = [str(v) for v in f.ack_batch_ids if v]
+        f.ack_batch_ids.clear()
+        if not ids:
+            return
+        await channel.send(encode_msg(make_msg(
+            "FILE_ACK_BATCH",
+            self.me.short_id,
+            blob=f.blob_hex,
+            ofs=ids,
+            count=len(ids),
+        )))
+
+    async def _ack_file_chunk(
+        self,
+        channel,
+        msg: dict,
+        f: IncomingFile,
+        *,
+        force_individual: bool = False,
+    ) -> None:
+        msg_id = str(msg.get("id") or "")
+        if not msg_id:
+            return
+        batch_size = self._ack_batch_size_from_chunk(msg)
+        if force_individual or batch_size <= 1:
+            await self._flush_file_ack_batch(channel, f)
+            await channel.send(encode_msg(make_msg(
+                "ACK",
+                self.me.short_id,
+                of=msg_id,
+            )))
+            return
+        f.ack_batch_ids.append(msg_id)
+        if len(f.ack_batch_ids) >= batch_size:
+            await self._flush_file_ack_batch(channel, f)
 
     def _inbound_is_rejected(self, peer_fp: str) -> bool:
         """Returns True if the peer is on our local rejection list.
@@ -9697,13 +9804,30 @@ class Daemon:
                 },
             )
 
-        async def _await_ack(ch_: ch.Channel, *, deadline: float | None = None) -> dict:
+        batched_acks: set[str] = set()
+
+        async def _await_ack(
+            ch_: ch.Channel,
+            *,
+            request_id: str | None = None,
+            expected_types: set[str] | None = None,
+            deadline: float | None = None,
+        ) -> dict:
             # v0.6.3: bound each recv. Without this, a peer that
             # received our chunk but never ACKed (e.g., crashed,
             # NAT dropped, channel hung mid-flush) would freeze
             # the entire transfer indefinitely.
             deadline = FILE_ACK_DEADLINE_S if deadline is None else float(deadline)
+            expected = expected_types or {"ACK"}
             while True:
+                if request_id is not None and request_id in batched_acks:
+                    batched_acks.remove(request_id)
+                    return {
+                        "t": "ACK",
+                        "from": peer.short_id,
+                        "of": request_id,
+                        "batched": True,
+                    }
                 try:
                     plaintext = await asyncio.wait_for(
                         ch_.recv(), timeout=deadline,
@@ -9714,7 +9838,8 @@ class Daemon:
                         f"ACK within {deadline}s — transfer aborted"
                     ) from e
                 m = decode_msg(plaintext)
-                if m.get("t") == "CAPS":
+                t = str(m.get("t") or "")
+                if t == "CAPS":
                     features = list(normalize_caps(m.get("features", [])))
                     ch_.peer_caps = {
                         "protocol": m.get("protocol", "?"),
@@ -9730,7 +9855,41 @@ class Daemon:
                         with contextlib.suppress(Exception):
                             self.state.set_peer_capabilities(peer_fp, features)
                     continue
-                return m
+                if t == "PRESENCE":
+                    self.record_peer_presence(peer_fp, str(m.get("presence") or ""))
+                    continue
+                if t == "FILE_ACK_BATCH":
+                    acked = {
+                        str(v) for v in (m.get("ofs") or m.get("acks") or [])
+                        if v is not None and str(v)
+                    }
+                    if request_id is not None and request_id in acked:
+                        acked.remove(request_id)
+                        batched_acks.update(acked)
+                        return {
+                            "t": "ACK",
+                            "from": m.get("from", peer.short_id),
+                            "of": request_id,
+                            "batched": True,
+                            "batch_count": int(m.get("count") or (len(acked) + 1)),
+                        }
+                    batched_acks.update(acked)
+                    continue
+                of = m.get("of")
+                if request_id is not None and of not in (None, request_id):
+                    log.debug(
+                        "ignored stale file-transfer reply %s of=%s while waiting for %s",
+                        t, of, request_id,
+                    )
+                    continue
+                if t in expected:
+                    return m
+                if t == "ACK" and m.get("rejected"):
+                    return m
+                log.debug(
+                    "ignored out-of-band file-transfer frame %s while waiting for %s",
+                    t, sorted(expected),
+                )
 
         adaptive_scheduler: AdaptiveTransferScheduler | None = None
         try:
@@ -9741,7 +9900,11 @@ class Daemon:
             # unaware they're sharing a TCP connection.
             async with sess.lock:
                 await channel.send(encode_msg(offer))
-                first_reply = await _await_ack(channel)
+                first_reply = await _await_ack(
+                    channel,
+                    request_id=str(offer.get("id")),
+                    expected_types={"ACK", "FILE_WANTS"},
+                )
                 ev = self._persist(
                     msg=offer, direction="out", peer_fp=peer_fp, peer_short_id=peer.short_id,
                 )
@@ -9756,6 +9919,21 @@ class Daemon:
                 peer_feature_set = set(normalize_caps(
                     (getattr(channel, "peer_caps", None) or {}).get("features", peer_features)
                 ))
+                ack_batch_raw = (
+                    autopilot_plan.get("ack_batch", 1)
+                    if isinstance(autopilot_plan, dict) else 1
+                )
+                try:
+                    ack_batch_requested = int(cast(Any, ack_batch_raw))
+                except (TypeError, ValueError, OverflowError):
+                    ack_batch_requested = 1
+                negotiated_ack_batch = (
+                    max(1, min(
+                        FILE_ACK_BATCH_MAX,
+                        ack_batch_requested,
+                    ))
+                    if FILE_ACK_BATCH in peer_feature_set else 1
+                )
                 if first_reply.get("rejected"):
                     raise RuntimeError(
                         f"peer rejected file offer: {first_reply.get('rejected')}"
@@ -9827,6 +10005,7 @@ class Daemon:
                             skipped_bytes / max(1, size), 6,
                         ),
                         "binary_frame": cdc_binary_used,
+                        "ack_batch": negotiated_ack_batch,
                     }
                     self._update_transfer(
                         transfer_id,
@@ -9843,16 +10022,17 @@ class Daemon:
                         },
                     )
                     with open(path, "rb") as f:
-                        pending_cdc_sizes: deque[tuple[int, int, float]] = deque()
+                        pending_cdc_sizes: deque[tuple[str, int, int, float]] = deque()
                         compression_enabled = True
                         compression_trials = 0
                         compression_misses = 0
 
                         async def _settle_one_cdc_ack() -> None:
                             nonlocal chunks_sent, raw_bytes_sent, wire_bytes_sent
-                            await _await_ack(channel)
+                            msg_id, raw_size, wire_size, sent_at = pending_cdc_sizes[0]
+                            await _await_ack(channel, request_id=msg_id)
                             ack_done = time.perf_counter()
-                            raw_size, wire_size, sent_at = pending_cdc_sizes.popleft()
+                            pending_cdc_sizes.popleft()
                             cdc_scheduler.observe_ack(
                                 ack_ms=(ack_done - sent_at) * 1000.0,
                                 raw_bytes=raw_size,
@@ -9909,6 +10089,8 @@ class Daemon:
                                 enc=enc,
                                 wire_size=len(payload),
                             )
+                            if negotiated_ack_batch > 1:
+                                chunk_msg["ack_batch"] = negotiated_ack_batch
                             if cdc_binary_used:
                                 wire_payload = _encode_binary_frame(chunk_msg, payload)
                             else:
@@ -9918,7 +10100,12 @@ class Daemon:
                                 channel,
                                 wire_payload,
                             )
-                            pending_cdc_sizes.append((len(data), len(payload), time.perf_counter()))
+                            pending_cdc_sizes.append((
+                                str(chunk_msg.get("id")),
+                                len(data),
+                                len(payload),
+                                time.perf_counter(),
+                            ))
                             while not cdc_scheduler.can_send(len(pending_cdc_sizes)):
                                 await _flush_if_queued(channel, queued_write)
                                 queued_write = False
@@ -9990,10 +10177,11 @@ class Daemon:
                         "stream_window_bytes": stream_window_bytes,
                         "pipeline_tuning": stream_profile,
                         "binary_frame": binary_stream_used,
+                        "ack_batch": negotiated_ack_batch,
                     }
                     with open(path, "rb") as f:
                         seq = 0
-                        pending_sizes: deque[tuple[int, float]] = deque()
+                        pending_sizes: deque[tuple[str, int, float]] = deque()
                         total_stream_chunks = max(
                             1, (size + stream_chunk_size - 1) // stream_chunk_size,
                         )
@@ -10002,9 +10190,14 @@ class Daemon:
                             *, deadline: float | None = None,
                         ) -> None:
                             nonlocal chunks_sent, raw_bytes_sent, wire_bytes_sent
-                            await _await_ack(channel, deadline=deadline)
+                            msg_id, acked_size, sent_at = pending_sizes[0]
+                            await _await_ack(
+                                channel,
+                                request_id=msg_id,
+                                deadline=deadline,
+                            )
                             ack_done = time.perf_counter()
-                            acked_size, sent_at = pending_sizes.popleft()
+                            pending_sizes.popleft()
                             stream_scheduler.observe_ack(
                                 ack_ms=(ack_done - sent_at) * 1000.0,
                                 raw_bytes=acked_size,
@@ -10061,6 +10254,8 @@ class Daemon:
                                     data=base64.b64encode(record.ciphertext).decode("ascii"),
                                     eof=eof,
                                 )
+                                if negotiated_ack_batch > 1 and not eof:
+                                    chunk_msg["ack_batch"] = negotiated_ack_batch
                                 queued_write = await _queue_or_send(
                                     channel,
                                     encode_msg(chunk_msg),
@@ -10073,6 +10268,8 @@ class Daemon:
                                     seq=seq,
                                     eof=eof,
                                 )
+                                if negotiated_ack_batch > 1 and not eof:
+                                    chunk_msg["ack_batch"] = negotiated_ack_batch
                                 queued_write = await _queue_or_send(
                                     channel,
                                     _encode_binary_frame(chunk_msg, data),
@@ -10086,11 +10283,17 @@ class Daemon:
                                     data=base64.b64encode(data).decode("ascii"),
                                     eof=eof,
                                 )
+                                if negotiated_ack_batch > 1 and not eof:
+                                    chunk_msg["ack_batch"] = negotiated_ack_batch
                                 queued_write = await _queue_or_send(
                                     channel,
                                     encode_msg(chunk_msg),
                                 )
-                            pending_sizes.append((len(data), time.perf_counter()))
+                            pending_sizes.append((
+                                str(chunk_msg.get("id")),
+                                len(data),
+                                time.perf_counter(),
+                            ))
                             while not stream_scheduler.can_send(len(pending_sizes)):
                                 await _flush_if_queued(channel, queued_write)
                                 queued_write = False
@@ -10116,7 +10319,7 @@ class Daemon:
                             eof=True,
                         )
                         await channel.send(encode_msg(empty))
-                        await _await_ack(channel)
+                        await _await_ack(channel, request_id=str(empty.get("id")))
                         chunks_sent = 1
                         self._update_transfer(
                             transfer_id,

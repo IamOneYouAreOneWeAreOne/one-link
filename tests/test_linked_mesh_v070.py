@@ -39,7 +39,14 @@ from one_link.daemon import (
     _fast_fixed_chunk_size_for_peer,
     _stream_transfer_profile,
 )
-from one_link.capabilities import CHAT, FILES, FILE_BINARY_FRAME, FILE_CDC, FILE_CDC_BINARY_FRAME
+from one_link.capabilities import (
+    CHAT,
+    FILES,
+    FILE_ACK_BATCH,
+    FILE_BINARY_FRAME,
+    FILE_CDC,
+    FILE_CDC_BINARY_FRAME,
+)
 from one_link.discovery import Peer
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
@@ -98,6 +105,38 @@ class _TracingFakeChannel(_FakeChannel):
 
     async def recv(self) -> bytes:
         self.recv_sent_counts.append(len(self.sent))
+        return await super().recv()
+
+
+class _BatchAckFakeChannel(_TracingFakeChannel):
+    def __init__(
+        self,
+        *,
+        peer_ed_pub: bytes,
+        peer_short_id: str,
+        chunk_type: str = "FILE_CHUNK",
+    ):
+        super().__init__(peer_ed_pub=peer_ed_pub, peer_short_id=peer_short_id)
+        self.chunk_type = chunk_type
+        self._acked: set[str] = set()
+
+    async def recv(self) -> bytes:
+        if self._replies.empty():
+            chunks = [
+                m for m in self.sent
+                if m.get("t") == self.chunk_type
+                and m.get("id") not in self._acked
+            ]
+            if chunks:
+                batch = chunks[:2]
+                ids = [str(m["id"]) for m in batch]
+                self._acked.update(ids)
+                self.queue_reply(make_msg(
+                    "FILE_ACK_BATCH",
+                    self.peer_short_id,
+                    ofs=ids,
+                    count=len(ids),
+                ))
         return await super().recv()
 
 
@@ -1043,6 +1082,79 @@ async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_file_cdc_ignores_stale_chunk_acks(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path / "home"))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    chan = _TracingFakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, FILE_CDC],
+        "from": them.short_id,
+        "app_version": "0.12.5",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id, hostname="them",
+            address="127.0.0.1", port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    monkeypatch.setattr("one_link.daemon.STREAM_MIN_CHUNK_SIZE", 2)
+    monkeypatch.setattr("one_link.daemon.STREAM_PIPELINE_TARGET_BYTES", 4)
+    monkeypatch.setattr("one_link.daemon.STREAM_PIPELINE_MAX_CHUNKS", 2)
+
+    f = tmp_path / "cdc-stale-acks.bin"
+    f.write_bytes(b"abcdefgh")
+    chunks = []
+    for i in range(4):
+        start = i * 2
+        data = f.read_bytes()[start:start + 2]
+        chunks.append({
+            "index": i,
+            "start": start,
+            "end": start + len(data),
+            "size": len(data),
+            "hash": blake3.blake3(data).hexdigest(),
+        })
+    state.record_file_index_cache(
+        path=str(f.resolve()),
+        size=f.stat().st_size,
+        mtime_ns=f.stat().st_mtime_ns,
+        ctime_ns=f.stat().st_ctime_ns,
+        blob_hash=blake3.blake3(f.read_bytes()).hexdigest(),
+        index_kind="fixed",
+        chunks=chunks,
+    )
+    chan.queue_reply(make_msg("FILE_WANTS", them.short_id, wants=[0, 1, 2, 3]))
+    for i in range(4):
+        chan.queue_reply(make_msg("ACK", them.short_id, of=f"old-chunk-{i}"))
+        chan.queue_reply(make_msg("ACK", them.short_id))
+
+    result = await daemon.send_file(sess.peer, f)
+
+    assert result["chunks"] == 4
+    assert chan._replies.qsize() == 0
+    assert state.list_transfers(limit=1)[0].metadata["adaptive_scheduler"]["ack_count"] == 4
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_send_file_cdc_uses_binary_frames_when_peer_supports_them(
     tmp_path: Path, monkeypatch
 ):
@@ -1658,6 +1770,74 @@ async def test_send_file_stream_pipelines_bounded_ack_window(
 
 
 @pytest.mark.asyncio
+async def test_send_file_accepts_batched_chunk_acks_for_capable_peer(
+    tmp_path: Path, monkeypatch
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    chan = _BatchAckFakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, FILE_ACK_BATCH],
+        "from": them.short_id,
+        "app_version": "0.12.0",
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id,
+            hostname="them",
+            address="127.0.0.1",
+            port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    monkeypatch.setattr("one_link.daemon.STREAM_MIN_CHUNK_SIZE", 2)
+    monkeypatch.setattr("one_link.daemon.STREAM_PIPELINE_TARGET_BYTES", 6)
+    monkeypatch.setattr("one_link.daemon.STREAM_PIPELINE_MAX_CHUNKS", 3)
+    monkeypatch.setattr(
+        "one_link.daemon.build_transfer_autopilot_plan",
+        lambda **_kw: SimpleNamespace(to_dict=lambda: {
+            "ack_batch": 4,
+            "frame_kind": "json",
+            "retry_posture": "auto_resume",
+            "estimated_savings_ratio": 0.0,
+            "reasons": ["test_ack_batch"],
+        }),
+    )
+
+    f = tmp_path / "batch-send.bin"
+    f.write_bytes(b"abcdef")
+    chan.queue_reply(make_msg("ACK", them.short_id))
+
+    result = await daemon.send_file(sess.peer, f)
+    chunks = [m for m in chan.sent if m.get("t") == "FILE_CHUNK"]
+    row = state.list_transfers(limit=1)[0]
+
+    assert result["chunks"] == 3
+    assert [c["seq"] for c in chunks] == [0, 1, 2]
+    assert [c.get("ack_batch") for c in chunks] == [4, 4, None]
+    assert row.metadata["ack_batch"] == 4
+    assert row.metadata["adaptive_scheduler"]["ack_count"] == 3
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_send_file_uses_binary_stream_for_capable_peer(
     tmp_path: Path, monkeypatch
 ):
@@ -1850,6 +2030,92 @@ async def test_binary_stream_receiver_writes_raw_payload_and_acks(
     assert out_path.read_bytes() == content
     assert chan.sent[-1]["t"] == "ACK"
     assert chan.sent[-1]["of"] == "binary-final"
+    assert state.get_transfer(transfer_id).status == "complete"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_receiver_batches_chunk_acks_when_sender_opts_in(
+    tmp_path: Path, monkeypatch
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+
+    chunks = [b"aa", b"bb", b"cc"]
+    content = b"".join(chunks)
+    blob = blake3.blake3(content).hexdigest()
+    out_path = tmp_path / "batched-received.bin"
+    transfer_id = "in:test-batched-acks"
+    state.upsert_transfer(
+        id=transfer_id,
+        direction="in",
+        peer_fp=them.fingerprint,
+        kind="file",
+        name=out_path.name,
+        size=len(content),
+        blob_hash=blob,
+        status="offered",
+        progress_bytes=0,
+        total_bytes=len(content),
+        chunks_done=0,
+        chunks_total=3,
+        metadata={"mode": "stream", "path": str(out_path)},
+    )
+    daemon._incoming_files[blob] = IncomingFile(
+        name=out_path.name,
+        size=len(content),
+        blob_hex=blob,
+        out_path=out_path,
+        handle=open(out_path, "wb"),
+        hasher=blake3.blake3(),
+        transfer_id=transfer_id,
+    )
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    monkeypatch.setattr(daemon, "_cache_file_chunks", lambda path: None)
+
+    for seq, data in enumerate(chunks[:2]):
+        await daemon._on_peer_message(
+            chan,
+            make_msg(
+                "FILE_CHUNK",
+                them.short_id,
+                id=f"chunk-{seq}",
+                blob=blob,
+                seq=seq,
+                data=base64.b64encode(data).decode("ascii"),
+                eof=False,
+                ack_batch=2,
+            ),
+        )
+
+    assert [m.get("t") for m in chan.sent] == ["FILE_ACK_BATCH"]
+    assert chan.sent[-1]["ofs"] == ["chunk-0", "chunk-1"]
+
+    await daemon._on_peer_message(
+        chan,
+        make_msg(
+            "FILE_CHUNK",
+            them.short_id,
+            id="chunk-2",
+            blob=blob,
+            seq=2,
+            data=base64.b64encode(chunks[2]).decode("ascii"),
+            eof=True,
+            ack_batch=2,
+        ),
+    )
+
+    assert out_path.read_bytes() == content
+    assert chan.sent[-1]["t"] == "ACK"
+    assert chan.sent[-1]["of"] == "chunk-2"
     assert state.get_transfer(transfer_id).status == "complete"
     state.close()
 

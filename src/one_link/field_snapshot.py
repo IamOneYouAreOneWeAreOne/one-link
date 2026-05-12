@@ -227,7 +227,7 @@ class FieldSnapshotManager:
         # Use the bare identity-dual source; phase-kernel modulation
         # is the right call for swarms with a clear core/edge
         # topology, but in production we don't know c_support yet.
-        from one_link_native import coherence_field as _native_cf
+        from one_link_native import coherence_field as _native_cf  # type: ignore[attr-defined]
 
         source_vec = _native_cf.identity_dual_source(density, flux, 0.5, 0.5)
         t0 = time.perf_counter_ns()
