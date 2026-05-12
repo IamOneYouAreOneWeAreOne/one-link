@@ -40,6 +40,7 @@ members = [
     "ol_coherence_field",
     "ol_threshold_recovery",
     "ol_discovery",
+    "ol_proximity_pair",
     "ol_fuse",
     "ol_fskit",
     "ol_winfs",
