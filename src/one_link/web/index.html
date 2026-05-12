@@ -2948,6 +2948,9 @@
     <div class="ub-actions">
       <button class="dismiss" id="update-banner-dismiss" type="button">Dismiss</button>
       <a id="update-banner-link" href="#" target="_blank" rel="noopener noreferrer">View release</a>
+      <!-- Hidden by default. JS unhides this only when /api/me reports
+           autoinstall_enabled=true (the experimental gate). -->
+      <button id="update-banner-install" type="button" style="display:none">Update now</button>
     </div>
   </div>
 
@@ -5148,8 +5151,44 @@
     if (link && info.latest_url) {
       link.href = info.latest_url;
     }
+    // Reveal the experimental "Update now" button only if the daemon
+    // reports the autoinstall gate is enabled. /api/me's
+    // autoinstall_enabled is populated by ONE_LINK_EXPERIMENTAL_AUTOINSTALL.
+    const installBtn = $("#update-banner-install");
+    if (installBtn) {
+      installBtn.style.display = state.me?.autoinstall_enabled ? "" : "none";
+    }
     banner.classList.add("show");
   }
+
+  // Wire the "Update now" click. Calls POST /api/update/install, shows
+  // a "Updating..." spinner, waits for the WebSocket to reconnect.
+  // The daemon respawns into the new version; checkForUpdate fires
+  // again automatically once the new WS hello arrives.
+  document.addEventListener("DOMContentLoaded", () => {
+    const installBtn = document.getElementById("update-banner-install");
+    if (!installBtn) return;
+    installBtn.addEventListener("click", async () => {
+      if (!confirm("Install the latest update? One Link will restart automatically.")) return;
+      installBtn.disabled = true;
+      installBtn.textContent = "Installing…";
+      try {
+        const res = await api.post("/api/update/install", {});
+        // The daemon will shut itself down in ~500ms. The WS will
+        // drop and reconnect; once the new daemon is up the banner
+        // re-renders against the fresh /api/me.
+        if (typeof toast === "function") {
+          toast(`Installing ${res.tag || "update"}… reconnecting`, "info", 8000);
+        }
+      } catch (e) {
+        installBtn.disabled = false;
+        installBtn.textContent = "Update now";
+        if (typeof toast === "function") {
+          toast(`Update failed: ${e.message || e}`, "bad", 10000);
+        }
+      }
+    });
+  });
 
   // Per-version dismiss; clicked once, hidden until a newer version
   // is published.
@@ -10500,6 +10539,17 @@
           target.deleted_at_ms = m.deleted_at_ms;
           scheduleRenderMessages();
         }
+      } else if (m.type === "update_status") {
+        // v0.21.x: daemon's background poll says the GitHub-Releases
+        // picture changed. Re-fetch /api/update/check so the banner
+        // appears/clears without a page reload. ?fresh=1 bypasses the
+        // server-side 15-min cache (we want the change reflected now).
+        // checkForUpdate() reads from the cached endpoint by default,
+        // so we hit /api/update/check?fresh=1 to push past the cache.
+        (async () => {
+          try { await api.get("/api/update/check?fresh=1"); } catch (_e) {}
+          try { await checkForUpdate(); } catch (_e) {}
+        })();
       } else if (m.type === "peer_typing") {
         // v0.12.3: a peer reports they're typing. Cache the
         // expires_at_ms so we can render the banner + auto-hide

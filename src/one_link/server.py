@@ -1979,6 +1979,14 @@ class UIServer:
             suggested_folder = str(Path.home() / "Documents" / "One Link")
         except Exception:
             suggested_folder = ""
+        # v0.21.x: surface whether the experimental one-click
+        # auto-install is enabled (ONE_LINK_EXPERIMENTAL_AUTOINSTALL=1
+        # in the daemon's env). UI uses this to decide whether to
+        # show the "Update now" button alongside "View release".
+        import os as _os
+        autoinstall_enabled = _os.environ.get(
+            "ONE_LINK_EXPERIMENTAL_AUTOINSTALL"
+        ) in ("1", "true", "yes")
         return web.json_response({
             "short_id": me.short_id,
             "fingerprint": me.fingerprint,
@@ -1992,6 +2000,7 @@ class UIServer:
             # status pill renders correctly on every load.
             "presence": self.daemon.get_my_presence(),
             "suggested_folder": suggested_folder,
+            "autoinstall_enabled": autoinstall_enabled,
         })
 
     async def api_metrics(self, request: web.Request) -> web.Response:

@@ -1159,6 +1159,72 @@ class Daemon:
             except Exception as e:
                 log.warning("dm reaper loop error: %s", e)
 
+    # v0.21.x update-check poll
+    UPDATE_CHECK_INTERVAL_S = 6 * 60 * 60  # 6 hours
+
+    async def _update_check_loop(self) -> None:
+        """Periodically poll GitHub Releases and broadcast an
+        `update_status` WS event when the picture changes — e.g.
+        the local build was current at startup, and 4 hours later a
+        new release lands. The UI listens and refreshes its banner
+        in place.
+
+        Errors (offline, rate-limited, etc.) fold into status='unknown'
+        inside fetch_latest and are silently swallowed. The loop
+        never propagates a failure out, so a long-running daemon
+        can't lose this task to a transient network blip.
+        """
+        # Sleep a few seconds at startup so the daemon's other init
+        # tasks (DB warmup, peer registry hydration) settle first.
+        # The /api/update/check endpoint already covers "did anyone
+        # load the UI tab in the last 15 minutes," so this loop is
+        # purely a "while the UI is open and nothing else has run"
+        # nudge.
+        try:
+            from one_link.update_check import fetch_latest
+        except Exception:
+            return
+        from one_link import __version__ as _local_ver
+
+        last_status: str | None = None
+        last_version: str | None = None
+        try:
+            await asyncio.sleep(60.0)  # 1 minute warmup
+        except asyncio.CancelledError:
+            return
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                result = await loop.run_in_executor(
+                    None, lambda: fetch_latest(_local_ver)
+                )
+                status = result.status
+                version = result.latest_version
+                # Only broadcast when something interesting changed so
+                # we don't spam every connected UI tab every 6h.
+                changed = (status != last_status) or (version != last_version)
+                if changed and self.ui_server is not None:
+                    with contextlib.suppress(Exception):
+                        self.ui_server.broadcast({
+                            "type": "update_status",
+                            "status": status,
+                            "local_version": _local_ver,
+                            "latest_version": version,
+                        })
+                    log.info(
+                        "update-check: %s (local=%s latest=%s)",
+                        status, _local_ver, version,
+                    )
+                last_status, last_version = status, version
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.debug("update-check loop tolerated error: %s", e)
+            try:
+                await asyncio.sleep(self.UPDATE_CHECK_INTERVAL_S)
+            except asyncio.CancelledError:
+                raise
+
     # v0.10.4 presence helpers ─────────────────────────────────────
     PRESENCE_VALUES = ("online", "away", "dnd", "invisible")
 
@@ -11059,6 +11125,16 @@ class Daemon:
         # broadcasts msg_delete WS events.
         self._dm_reaper_task = asyncio.create_task(self._dm_reaper_loop())
         self._prior_index_task = asyncio.create_task(self._prior_index_loop())
+
+        # v0.21.x update-check poll. Hits GitHub Releases every 6h and
+        # broadcasts an `update_status` WS event when the status
+        # changes (e.g. 'same' -> 'newer' when a new release lands).
+        # The UI listens and refreshes its banner without needing a
+        # page reload. Errors swallowed silently — the loop never
+        # raises in a way that takes down the daemon.
+        self._update_check_task = asyncio.create_task(
+            self._update_check_loop()
+        )
 
         # Phase E: spin up the coherence-field snapshot manager. The
         # manager idles harmlessly when no peers / no native crate; it
