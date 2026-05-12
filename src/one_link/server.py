@@ -2025,6 +2025,14 @@ class UIServer:
                     entry["cadence_bytes"] = cadence
                 if score is not None:
                     entry["field_score"] = score
+                # Per-peer transport choice: which transport the
+                # daemon would route this peer through right now.
+                # Either "webrtc" (default) or "quic" (when both
+                # peers advertise QUIC_TRANSPORT_V1 + endpoint up).
+                try:
+                    entry["transport_kind"] = d.transport_choice_for_peer(peer)
+                except Exception:
+                    pass
                 if entry:
                     per_peer[short_id] = entry
         relay_count = len(getattr(d, "_relay_metrics", {}) or {})

@@ -5699,11 +5699,20 @@ class Daemon:
                 out["bloom_init"]["advisories_received"] = stats.get(
                     "advisories_received", 0
                 )
+                out["bloom_init"]["advisories_decode_failed"] = stats.get(
+                    "advisories_decode_failed", 0
+                )
                 out["bloom_init"]["total_bloom_bytes"] = stats.get(
                     "total_bloom_bytes", 0
                 )
                 out["bloom_init"]["estimated_savings_bytes"] = stats.get(
                     "estimated_savings_vs_explicit_list_bytes", 0
+                )
+                out["bloom_init"]["bloom_honored_chunks"] = stats.get(
+                    "bloom_honored_chunks", 0
+                )
+                out["bloom_init"]["bloom_vs_file_wants_disagreements"] = (
+                    stats.get("bloom_vs_file_wants_disagreements", 0)
                 )
         except ImportError:
             pass
@@ -5871,14 +5880,30 @@ class Daemon:
         return []
 
     async def _handle_bloom_init_advisory(self, channel, msg, peer_fp: str) -> None:
-        """Sender-side handler for BLOOM_INIT_FILTER messages. Decodes
-        the receiver's Bloom, computes the savings vs the matching
-        FILE_WANTS frame, and bumps the per-daemon telemetry counter.
+        """Sender-side handler for BLOOM_INIT_FILTER messages.
 
-        Advisory-only — does NOT alter the actual chunk dispatch path.
-        Once production telemetry confirms savings, a follow-up commit
-        flips the sender to honor the Bloom and drop the FILE_WANTS
-        list from BLOOM_INIT_V1 peers entirely."""
+        Phase B canonical-honor path: decodes the Bloom and caches it
+        keyed by ``(peer_fp, blob)``. The transfer's chunk-dispatch
+        loop consults the cache via :meth:`bloom_decision_for_chunk`
+        as the canonical "does the receiver have this chunk?" answer.
+
+        The FILE_WANTS list that arrived alongside stays as a cross-
+        check + a fallback for transfers initiated before the
+        advisory landed (race window) or for blobs the receiver
+        hasn't sent a Bloom for.
+
+        Telemetry counters:
+        - ``advisories_received`` — wire frames seen.
+        - ``advisories_decode_failed`` — wire frames we couldn't decode.
+        - ``total_bloom_bytes`` — sum of advisory body sizes.
+        - ``estimated_savings_vs_explicit_list_bytes`` — what a
+          FILE_WANTS list of the same n_known would have cost.
+        - ``bloom_honored_chunks`` — chunks whose dispatch decision
+          consulted the cached Bloom.
+        - ``bloom_vs_file_wants_disagreements`` — Bloom said "have it"
+          but FILE_WANTS said "send it." Expected at ~5% of the
+          receiver's known-chunk count (the Bloom false-positive rate).
+        """
         import base64
 
         blob = str(msg.get("blob") or "")
@@ -5891,25 +5916,42 @@ class Daemon:
         except (binascii.Error, ValueError):
             log.debug("BLOOM_INIT_FILTER from %s: bad base64", peer_fp[:8])
             return
-        # Telemetry counters: how many advisories arrived, total bytes,
-        # estimated savings vs an explicit FILE_WANTS list of the same
-        # size. Counters initialise lazily on the daemon.
+        # Decode + cache the Bloom keyed by (peer_fp, blob). The
+        # transfer's chunk-dispatch loop reads this via
+        # bloom_decision_for_chunk on each chunk decision.
+        bloom_obj = None
+        try:
+            from one_link import bloom_init
+
+            if bloom_init.HAS_NATIVE:
+                bloom_obj = bloom_init.decode_receiver_bloom(wire)
+        except Exception as e:  # pragma: no cover
+            log.debug("BLOOM_INIT_FILTER decode failed (%s)", e)
+        if bloom_obj is not None:
+            cache = getattr(self, "_bloom_init_cache", None)
+            if cache is None:
+                cache = {}
+                self._bloom_init_cache = cache
+            cache[(peer_fp, blob)] = bloom_obj
+
+        # Telemetry: always bump (failure path is its own counter).
         stats = getattr(self, "_bloom_init_stats", None)
         if stats is None:
             stats = {
                 "advisories_received": 0,
+                "advisories_decode_failed": 0,
                 "total_bloom_bytes": 0,
                 "estimated_savings_vs_explicit_list_bytes": 0,
+                "bloom_honored_chunks": 0,
+                "bloom_vs_file_wants_disagreements": 0,
             }
             self._bloom_init_stats = stats
         stats["advisories_received"] += 1
         stats["total_bloom_bytes"] += len(wire)
-        # Heuristic savings estimate: if the receiver claimed n_known
-        # chunks AND used a Bloom of `len(wire)` bytes, the equivalent
-        # FILE_WANTS list would carry `n_known * 32` bytes of chunk_id
-        # text. Savings = explicit - bloom (positive means Bloom is
-        # cheaper). Negative means the explicit list was already
-        # smaller; rare but recorded honestly.
+        if bloom_obj is None:
+            stats["advisories_decode_failed"] = (
+                stats.get("advisories_decode_failed", 0) + 1
+            )
         try:
             n_known_int = int(n_known) if n_known is not None else 0
             explicit_cost = n_known_int * 32
@@ -5918,6 +5960,78 @@ class Daemon:
             )
         except (TypeError, ValueError):
             pass
+
+    def bloom_decision_for_chunk(
+        self, peer_fp: str, blob: str, chunk_id: bytes
+    ) -> bool | None:
+        """Phase B canonical honor query: "does ``peer_fp`` already
+        have ``chunk_id`` for ``blob`` per their advertised Bloom?"
+
+        Returns:
+        - ``True`` — Bloom says receiver has it; sender may skip (modulo
+          ~5% false-positive rate which an out-of-band ACK-retry
+          corrects).
+        - ``False`` — Bloom says missing; sender must ship.
+        - ``None`` — no cached Bloom for this peer/blob; caller must
+          fall back to FILE_WANTS or send-everything.
+
+        The honored-chunks counter is bumped on every consult so the
+        ``/api/metrics`` surface shows operational adoption.
+        """
+        cache = getattr(self, "_bloom_init_cache", None)
+        if cache is None:
+            return None
+        bf = cache.get((peer_fp, blob))
+        if bf is None:
+            return None
+        try:
+            in_receiver = bf.contains(chunk_id)
+        except Exception:
+            return None
+        stats = getattr(self, "_bloom_init_stats", None)
+        if stats is not None:
+            stats["bloom_honored_chunks"] = (
+                stats.get("bloom_honored_chunks", 0) + 1
+            )
+        return in_receiver
+
+    def bloom_cross_check_with_file_wants(
+        self,
+        peer_fp: str,
+        blob: str,
+        file_wants_list: list[str],
+        full_manifest: list[bytes],
+    ) -> None:
+        """Cross-check accounting. For each manifest chunk the Bloom
+        claims the receiver has BUT the FILE_WANTS list says is
+        missing, bump a disagreement counter. Operators watch this in
+        production; large values mean the Bloom is mis-sized or the
+        receiver lied about its inventory.
+        """
+        cache = getattr(self, "_bloom_init_cache", None)
+        if cache is None:
+            return
+        bf = cache.get((peer_fp, blob))
+        if bf is None:
+            return
+        wants_set = set(file_wants_list or [])
+        stats = getattr(self, "_bloom_init_stats", None)
+        if stats is None:
+            return
+        for chunk_id in full_manifest:
+            try:
+                in_bloom = bf.contains(chunk_id)
+            except Exception:
+                continue
+            hex_id = (
+                chunk_id.hex() if isinstance(chunk_id, (bytes, bytearray))
+                else str(chunk_id)
+            )
+            in_wants = hex_id in wants_set
+            if in_bloom and in_wants:
+                stats["bloom_vs_file_wants_disagreements"] = (
+                    stats.get("bloom_vs_file_wants_disagreements", 0) + 1
+                )
 
     # ── Phase B Bloom-init handshake wiring ────────────────────────
 
