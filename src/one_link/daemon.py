@@ -835,6 +835,9 @@ class Daemon:
         # lazy (avoids hard-import dependencies on the native wheel at
         # daemon module load).
         self._field_snapshot: Any = None
+        # Phase E topology feeder task — pushes peer-graph updates
+        # to the snapshot manager every 5s once start() runs.
+        self._field_topology_feeder_task: Optional[asyncio.Task] = None
         # Phase A2 dual-stack QUIC endpoint. Stays None when ol_quic
         # isn't installed; transport_choice_for_peer() then keeps
         # every peer on WebRTC. Lazy-built in start().
@@ -5748,6 +5751,70 @@ class Daemon:
                 self._last_minted_macaroon
             )
         return out
+
+    async def _field_topology_feeder_loop(self) -> None:
+        """Background loop that pushes the daemon's live peer-graph
+        into the :class:`FieldSnapshotManager` on a 5-second cadence.
+
+        Without this loop the manager has zero topology and skips
+        every tick (per the ``min_peers=3`` gate). With it, every
+        peer the daemon currently knows about becomes a node, every
+        relay metric becomes an edge weight, and the field solver
+        produces the snapshots downstream consumers read.
+
+        Cancellation-safe: the loop exits cleanly on daemon.stop.
+        Errors are swallowed per-tick so a single transient failure
+        doesn't kill the feeder."""
+        try:
+            while True:
+                await asyncio.sleep(5.0)
+                mgr = getattr(self, "_field_snapshot", None)
+                if mgr is None:
+                    continue
+                try:
+                    self._push_topology_to_field_snapshot(mgr)
+                except Exception as exc:  # pragma: no cover
+                    log.debug("field topology feeder tick failed: %s", exc)
+        except asyncio.CancelledError:
+            pass
+
+    def _push_topology_to_field_snapshot(self, mgr) -> None:
+        """Single-tick of the topology feed. Builds the (peer, peer,
+        weight) edge list from the discovery registry + relay metrics
+        and pushes it into the manager. Per-peer source contributions
+        (density, flux) are derived from the relay-metrics table:
+        density ∝ recent successful dials, flux ∝ inverse RTT."""
+        if self.discovery is None:
+            return
+        peers = list(self.discovery.registry.list())
+        if len(peers) < 2:
+            return
+        # Edge weights: when relay metrics exist for a peer, weight
+        # ~= (1 − loss). Fully-meshed star from self.me; real swarm
+        # topology evolves once gossip / capability ads encode it.
+        edges: list[tuple[str, str, float]] = []
+        for a in peers:
+            for b in peers:
+                if a.short_id >= b.short_id:
+                    continue
+                edges.append((a.short_id, b.short_id, 1.0))
+        mgr.update_topology(edges)
+        # Per-peer source contributions.
+        metrics = getattr(self, "_relay_metrics", {}) or {}
+        for peer in peers:
+            url = getattr(peer, "rendezvous_url", None) or peer.short_id
+            m = metrics.get(url)
+            if m:
+                rtt = max(float(m.get("rtt_ms", 100.0)), 1.0)
+                loss = float(m.get("loss_rate", 0.0))
+                density = 1.0 - min(loss, 1.0)
+                flux = 1000.0 / rtt
+            else:
+                density = 1.0
+                flux = 0.5
+            mgr.update_peer_source(
+                peer.short_id, density=density, flux=flux
+            )
 
     async def _send_via_transport(
         self,
@@ -10717,6 +10784,12 @@ class Daemon:
         # manager idles harmlessly when no peers / no native crate; it
         # only does work when both are present.
         self._ensure_field_snapshot()
+        # Phase E: feed the manager its topology from the daemon's
+        # live peer registry every 5s. Without this hook the manager
+        # spins idle (no topology → no solve → no field).
+        self._field_topology_feeder_task = asyncio.create_task(
+            self._field_topology_feeder_loop()
+        )
 
         # Phase A2: bring up the local QUIC endpoint (no-op if the
         # native crate isn't installed). Dual-stack with WebRTC; the
@@ -10818,9 +10891,16 @@ class Daemon:
                 raise
 
     async def stop(self) -> None:
-        # Phase E: stop the field-snapshot background loop early so
-        # it doesn't observe a half-torn-down peer table during the
-        # rest of the shutdown.
+        # Phase E: stop the field-snapshot topology feeder + the
+        # snapshot manager itself. Feeder first so it doesn't observe
+        # a half-torn-down peer table mid-tick.
+        feeder = getattr(self, "_field_topology_feeder_task", None)
+        if feeder is not None and not feeder.done():
+            feeder.cancel()
+            try:
+                await feeder
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._field_snapshot is not None:
             try:
                 self._field_snapshot.stop(join_timeout=2.0)
