@@ -82,6 +82,64 @@
   .download:hover { border-color: var(--accent); }
   .download .what { font-weight: 600; color: var(--fg); }
   .download .for { color: var(--dim); font-size: 13px; }
+
+  /* Primary download button — auto-detects OS, one click. */
+  .download-primary {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 22px 32px;
+    background: linear-gradient(135deg, #6ee7ff 0%, #75e29c 100%);
+    color: #0e0e10;
+    border: 0;
+    border-radius: 14px;
+    font: 600 18px/1.2 inherit;
+    text-decoration: none;
+    margin: 24px 0 12px;
+    box-shadow: 0 10px 32px rgba(110, 231, 255, 0.18);
+    transition: transform 0.08s ease, box-shadow 0.15s ease;
+    cursor: pointer;
+  }
+  .download-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 14px 40px rgba(110, 231, 255, 0.28);
+    border-bottom-color: transparent;
+  }
+  .download-primary:active { transform: translateY(0); }
+  .download-primary[data-os="unknown"] {
+    background: var(--code-bg);
+    color: var(--fg);
+    border: 1px solid var(--hr);
+    box-shadow: none;
+  }
+  .download-primary .arrow { font-size: 22px; opacity: 0.7; }
+  .download-meta {
+    color: var(--dim);
+    font-size: 13px;
+    margin: 0 0 24px;
+    text-align: center;
+  }
+  .download-meta a { color: var(--dim); border-bottom: 1px dotted var(--dim); }
+  .download-meta a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+  details.alt {
+    margin: 18px 0;
+    padding: 10px 14px;
+    background: var(--code-bg);
+    border: 1px solid var(--hr);
+    border-radius: 10px;
+  }
+  details.alt summary {
+    cursor: pointer;
+    color: var(--dim);
+    font-size: 14px;
+    list-style: none;
+    padding: 4px 0;
+  }
+  details.alt summary::-webkit-details-marker { display: none; }
+  details.alt summary::before { content: "▸ "; color: var(--dim); }
+  details.alt[open] summary::before { content: "▾ "; }
+  details.alt[open] summary { margin-bottom: 8px; }
   .footer {
     color: var(--dim);
     font-size: 13px;
@@ -96,7 +154,7 @@
 </head>
 <body>
 <main>
-  <span class="pill">v0.20.7 — for the people</span>
+  <span class="pill" id="version-pill">for the people</span>
   <h1>One Link</h1>
   <p class="lede">
     Peer-to-peer chat and file sync. No accounts. No servers.
@@ -116,40 +174,38 @@
 
   <h2>Download</h2>
   <p>
-    Each release is built from a tagged commit on GitHub Actions
-    with reproducible-build settings, and every artifact carries a
-    Sigstore attestation in the public Rekor transparency log.
-    You can verify any download independently with the script
-    below — no need to trust this page or even the maintainer.
+    One click. No Python, no command line, no setup. Double-click
+    the file you download and One Link starts. Open browser tab,
+    done.
   </p>
 
-  <div class="download-grid">
-    <a class="download" href="https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest">
-      <div>
-        <div class="what">Latest release ↗</div>
-        <div class="for">All platforms · sources, wheel, signature bundles</div>
-      </div>
-      <div>→</div>
-    </a>
-    <a class="download" href="https://github.com/IamOneYouAreOneWeAreOne/one-link">
-      <div>
-        <div class="what">Source on GitHub ↗</div>
-        <div class="for">git clone https://github.com/IamOneYouAreOneWeAreOne/one-link</div>
-      </div>
-      <div>→</div>
-    </a>
-  </div>
+  <!-- Primary download — auto-detects OS via JS. data-os defaults
+       to 'unknown' (linked to releases page); JS sets it to a
+       direct asset URL on detection. -->
+  <a class="download-primary" id="download-primary"
+     href="https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest"
+     data-os="unknown">
+    <span class="text">Download for your platform</span>
+    <span class="arrow">↓</span>
+  </a>
+  <p class="download-meta" id="download-meta">
+    <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest">All downloads + signatures →</a>
+  </p>
 
-  <h2>Install</h2>
-  <p>From PyPI (once published):</p>
-  <pre><code>pip install one_link
+  <details class="alt">
+    <summary>Other ways to install (advanced)</summary>
+    <p>From PyPI (once published):</p>
+    <pre><code>pip install one_link
 one-link app</code></pre>
-
-  <p>From source (anyone, today):</p>
-  <pre><code>git clone https://github.com/IamOneYouAreOneWeAreOne/one-link
+    <p>Native fast path (QUIC + coherence-field):</p>
+    <pre><code>pip install one_link_native --find-links \
+  https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest</code></pre>
+    <p>From source:</p>
+    <pre><code>git clone https://github.com/IamOneYouAreOneWeAreOne/one-link
 cd one-link
 pip install -e .
 one-link app</code></pre>
+  </details>
 
   <h2>Verify before you trust</h2>
   <p>
@@ -225,5 +281,136 @@ one-link app</code></pre>
     AGPLv3 — copy, modify, share. Build something good.
   </div>
 </main>
+
+<script>
+  // OS-detect + dynamic-release download wiring. Everything runs
+  // client-side from this page; no telemetry beats back to a server.
+  // GitHub Pages serves this static file; the only outbound call
+  // is to api.github.com to find the latest release tag, and even
+  // that's optional (the page works without it).
+  (function () {
+    "use strict";
+    const OWNER = "Jphilbrick10";
+    const REPO = "one-link";
+    const RELEASE_BASE =
+      `https://github.com/${OWNER}/${REPO}/releases`;
+
+    // Detect the user's OS. We accept a few false-negatives (e.g.
+    // BSDs report as Linux, ChromeOS reports as Linux) — they get
+    // the Linux binary, which is the right answer anyway.
+    function detectOS() {
+      const ua = (navigator.userAgent || "").toLowerCase();
+      const platform = (navigator.platform || "").toLowerCase();
+      const data = navigator.userAgentData && navigator.userAgentData.platform;
+      const hint = (data || "").toLowerCase();
+      if (hint.includes("win") || ua.includes("windows") || platform.includes("win")) {
+        return "windows";
+      }
+      if (hint.includes("mac") || ua.includes("mac os") || ua.includes("macintosh") || platform.includes("mac")) {
+        return "macos";
+      }
+      if (ua.includes("iphone") || ua.includes("ipad")) {
+        // No iOS binary yet; send to the source page so users see
+        // the roadmap entry rather than a 404.
+        return "ios";
+      }
+      if (ua.includes("android")) {
+        return "android";
+      }
+      if (ua.includes("linux") || platform.includes("linux") || hint.includes("linux")) {
+        return "linux";
+      }
+      return "unknown";
+    }
+
+    // Map detected OS -> {asset filename, friendly label}. The
+    // filenames must match the release.yml workflow's asset_name
+    // values. If those change, this table changes.
+    const OS_ASSETS = {
+      windows: {
+        asset: "one-link-windows.exe",
+        label: "Download for Windows",
+        note: "Double-click the .exe to start.",
+      },
+      macos: {
+        asset: "one-link-macos",
+        label: "Download for macOS",
+        note: "Open Terminal and run: chmod +x one-link-macos && ./one-link-macos app",
+      },
+      linux: {
+        asset: "one-link-linux-x86_64",
+        label: "Download for Linux",
+        note: "chmod +x one-link-linux-x86_64 && ./one-link-linux-x86_64 app",
+      },
+      ios: {
+        asset: null,
+        label: "iOS coming soon",
+        note: "Browser-as-peer support today. Native iOS in the v1.0 roadmap.",
+      },
+      android: {
+        asset: null,
+        label: "Android coming soon",
+        note: "Browser-as-peer support today. Native Android in the v1.0 roadmap.",
+      },
+      unknown: {
+        asset: null,
+        label: "Choose your platform",
+        note: "We couldn't detect your OS automatically.",
+      },
+    };
+
+    function wireDownload() {
+      const os = detectOS();
+      const info = OS_ASSETS[os] || OS_ASSETS.unknown;
+      const btn = document.getElementById("download-primary");
+      const meta = document.getElementById("download-meta");
+      if (!btn) return;
+      btn.dataset.os = os;
+      const textEl = btn.querySelector(".text");
+      if (textEl) textEl.textContent = info.label;
+      if (info.asset) {
+        // Direct asset URL — GitHub redirects /releases/latest/download/<file>
+        // to the actual versioned URL. No API call needed.
+        btn.href = `${RELEASE_BASE}/latest/download/${info.asset}`;
+      } else {
+        btn.href = `${RELEASE_BASE}/latest`;
+      }
+      if (meta) {
+        const allLink = '<a href="' + RELEASE_BASE + '/latest">All downloads + signatures →</a>';
+        meta.innerHTML = info.note ? `${info.note} · ${allLink}` : allLink;
+      }
+    }
+
+    // Pull the latest release tag from the GitHub API to display
+    // it in the pill. Best-effort; if the API is rate-limited
+    // (60 req/hr unauthenticated) or the repo is private, we just
+    // leave the static text alone. No errors, no retries.
+    async function setLatestVersionPill() {
+      const pill = document.getElementById("version-pill");
+      if (!pill) return;
+      try {
+        const r = await fetch(
+          `https://api.github.com/repos/${OWNER}/${REPO}/releases/latest`,
+          { headers: { "Accept": "application/vnd.github+json" } }
+        );
+        if (!r.ok) return;
+        const j = await r.json();
+        if (j.tag_name) {
+          pill.textContent = `${j.tag_name} — for the people`;
+        }
+      } catch (_e) { /* swallow — pill stays as fallback text */ }
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", function () {
+        wireDownload();
+        setLatestVersionPill();
+      });
+    } else {
+      wireDownload();
+      setLatestVersionPill();
+    }
+  })();
+</script>
 </body>
 </html>

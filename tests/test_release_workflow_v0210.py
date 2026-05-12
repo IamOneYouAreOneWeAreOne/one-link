@@ -191,6 +191,100 @@ def test_sign_attaches_wheels_to_release(workflow):
 
 # ─── pyproject.toml: declares the native optional dep ─────────────────
 
+def test_workflow_has_binaries_job(workflow):
+    """End-users download .exe / mac binary / linux binary from the
+    website. The binaries job is what produces those — without it,
+    the website's download button 404s."""
+    assert "binaries" in workflow["jobs"]
+
+
+def test_binaries_matrix_covers_all_three_oses(workflow):
+    matrix = workflow["jobs"]["binaries"]["strategy"]["matrix"]["include"]
+    oses = {entry["os"] for entry in matrix}
+    assert oses >= {"ubuntu-latest", "macos-latest", "windows-latest"}
+
+
+def test_binaries_asset_names_match_landing_page_expectations(workflow):
+    """The landing-page JS expects assets named exactly:
+        one-link-windows.exe
+        one-link-macos
+        one-link-linux-x86_64
+    If the workflow changes the asset name, the website's download
+    button breaks. This test pins the contract on both ends."""
+    matrix = workflow["jobs"]["binaries"]["strategy"]["matrix"]["include"]
+    names = {entry["asset_name"] for entry in matrix}
+    required = {
+        "one-link-windows.exe",
+        "one-link-macos",
+        "one-link-linux-x86_64",
+    }
+    assert required <= names, (
+        f"binaries job is missing required asset name(s); "
+        f"have {names}, need {required}"
+    )
+
+
+def test_binaries_job_installs_native_wheel_before_pyinstaller(workflow):
+    """For the bundled binary to include the Rust hot-path, the
+    matching native wheel must be installed in the build env BEFORE
+    `python scripts/build_binary.py` runs. The script's auto-detect
+    only finds one_link_native via the active site-packages."""
+    steps = workflow["jobs"]["binaries"]["steps"]
+    step_names = [s.get("name", "") for s in steps]
+    # The install-native-wheel step must come before the
+    # build-standalone-binary step.
+    try:
+        install_idx = next(
+            i for i, n in enumerate(step_names)
+            if "install native wheel" in n.lower()
+        )
+        build_idx = next(
+            i for i, n in enumerate(step_names)
+            if "build standalone" in n.lower()
+        )
+    except StopIteration:
+        pytest.fail(
+            f"binaries job missing required steps; got {step_names!r}"
+        )
+    assert install_idx < build_idx, (
+        f"native wheel install must precede binary build, got "
+        f"install at {install_idx}, build at {build_idx}"
+    )
+
+
+def test_sign_attaches_binaries_to_release(workflow):
+    """The standalone binaries must end up on the GitHub Release
+    page so the website's download links resolve."""
+    steps = workflow["jobs"]["sign"]["steps"]
+    release_step = next(
+        (s for s in steps if isinstance(s.get("uses"), str)
+         and s["uses"].startswith("softprops/action-gh-release")),
+        None,
+    )
+    assert release_step is not None
+    files = release_step["with"]["files"]
+    assert "dist/one-link-*" in files, (
+        f"release upload doesn't include one-link-* binaries: {files!r}"
+    )
+
+
+def test_sign_signs_binaries_with_sigstore(workflow):
+    """The standalone binaries are the highest-stakes artifact
+    (they're what end users execute). They must be sigstore-signed
+    so anyone can verify the .exe was built by Actions from the
+    matching tag."""
+    steps = workflow["jobs"]["sign"]["steps"]
+    sign_step = next(
+        (s for s in steps if "sigstore sign" in s.get("run", "")),
+        None,
+    )
+    assert sign_step is not None
+    cmd = sign_step["run"]
+    assert "one-link-*" in cmd, (
+        "sigstore-sign loop doesn't cover the standalone binaries"
+    )
+
+
 def test_pyproject_declares_native_optional_dependency():
     """`pip install one-link[native]` must resolve a real package name
     so users have a single-command install path. The Phase-1 contract

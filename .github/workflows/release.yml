@@ -150,9 +150,90 @@ jobs:
           name: ${{ matrix.artifact }}
           path: native/target/wheels/*.whl
 
+  # Standalone binaries per OS — what end users actually download
+  # from the website. PyInstaller bundles Python + all deps + the
+  # native wheels into a single executable. Users double-click and
+  # the daemon starts; no pip, no Python install.
+  binaries:
+    name: standalone binary — ${{ matrix.os }}
+    needs: [build, native_wheels]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: binary-linux
+            asset_name: one-link-linux-x86_64
+            native_artifact: native-wheel-linux
+          - os: macos-latest
+            artifact: binary-macos
+            asset_name: one-link-macos
+            native_artifact: native-wheel-macos
+          - os: windows-latest
+            artifact: binary-windows
+            asset_name: one-link-windows.exe
+            native_artifact: native-wheel-windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install build deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -e .
+
+      # Pull the native wheel built earlier in the same workflow
+      # and install it so PyInstaller's --collect-all picks up the
+      # .pyd / .so / .dylib. This is the link between phases 1 + 4
+      # in the production-install plan.
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.native_artifact }}
+          path: native-wheel/
+      - name: install native wheel into build env
+        shell: bash
+        run: |
+          pip install --force-reinstall --no-deps native-wheel/*.whl
+
+      - name: build standalone binary
+        shell: bash
+        env:
+          SOURCE_DATE_EPOCH: ${{ needs.build.outputs.source_date_epoch }}
+        run: python scripts/build_binary.py
+
+      # Rename the produced binary to a per-OS asset name so users
+      # downloading from the release page see `one-link-windows.exe`
+      # / `one-link-macos` / `one-link-linux-x86_64`, not three
+      # identically-named files.
+      - name: stage binary for upload (windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          mkdir -p staged
+          cp dist/one-link.exe staged/${{ matrix.asset_name }}
+      - name: stage binary for upload (posix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          mkdir -p staged
+          cp dist/one-link staged/${{ matrix.asset_name }}
+          chmod +x staged/${{ matrix.asset_name }}
+
+      - name: upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staged/${{ matrix.asset_name }}
+
   sign:
     name: sigstore-attest dist
-    needs: [build, native_wheels]
+    needs: [build, native_wheels, binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -181,14 +262,39 @@ jobs:
           name: native-wheel-windows
           path: dist/
 
-      # Re-compute the SHA256SUMS manifest now that native wheels
-      # are included. The build job's manifest only covered the
-      # pure-Python artifacts; downloads of the native wheels would
-      # otherwise have no verifiable hash in the release.
-      - name: recompute SHA256SUMS to include native wheels
+      # Standalone binaries — what end users download from the
+      # website. Sigstore signs these too so anyone can verify
+      # the .exe / mac binary / linux binary was built from the
+      # matching tag by GitHub Actions.
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary-linux
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary-macos
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary-windows
+          path: dist/
+
+      # Re-compute the SHA256SUMS manifest now that native wheels +
+      # standalone binaries are included. The build job's manifest
+      # only covered the pure-Python artifacts; downloads of the
+      # native wheels or binaries would otherwise have no verifiable
+      # hash in the release.
+      - name: recompute SHA256SUMS to include native wheels + binaries
         run: |
           cd dist
-          sha256sum *.whl *.tar.gz | sort -k 2 > SHA256SUMS
+          # Hash every distributable file. The binaries have no
+          # extension on macOS/Linux, so we glob on `one-link*`
+          # to catch them all, then dedupe with sort -u.
+          {
+            sha256sum *.whl 2>/dev/null
+            sha256sum *.tar.gz 2>/dev/null
+            sha256sum one-link* 2>/dev/null
+          } | sort -k 2 -u > SHA256SUMS
           cat SHA256SUMS
 
       - name: setup Python
@@ -204,7 +310,11 @@ jobs:
       - name: sigstore-sign each artifact
         run: |
           cd dist
-          for f in *.whl *.tar.gz SHA256SUMS; do
+          # Sign every wheel, source tarball, the SHA manifest, AND
+          # the standalone binaries. The binaries are what end users
+          # actually download from the website, so they're the most
+          # important to attest.
+          for f in *.whl *.tar.gz one-link-* SHA256SUMS; do
             [ -f "$f" ] || continue
             python -m sigstore sign --bundle "$f.sigstore" "$f"
           done
@@ -216,6 +326,7 @@ jobs:
           subject-path: |
             dist/*.whl
             dist/*.tar.gz
+            dist/one-link-*
             dist/SHA256SUMS
 
       - name: create or update GitHub Release
@@ -224,6 +335,7 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
+            dist/one-link-*
             dist/*.sigstore
             dist/SHA256SUMS
           generate_release_notes: true
