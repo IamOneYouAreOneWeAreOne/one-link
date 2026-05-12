@@ -160,6 +160,48 @@ def test_full_pipeline_one_shot():
     # No exceptions — pipeline executed end-to-end.
 
 
+def test_hamming_reconcile_byte_identical_at_low_error_rate():
+    """Alien-tech acceptance gate through Python: with <=1 error per
+    120-bit block, Hamming reconciliation produces byte-identical
+    bits, and BLAKE3 amplification produces byte-identical 32-byte
+    Factor-2 keys on both sides."""
+    from one_link import proximity_pair_native as pp
+
+    # Alice's bits = Bob's bits with 3 errors spread across 3 blocks.
+    bob_bits = bytes(((i * 13 + 7) & 1) for i in range(360))  # 3 blocks
+    alice_bits = bytearray(bob_bits)
+    alice_bits[10] ^= 1   # block 0
+    alice_bits[150] ^= 1  # block 1
+    alice_bits[330] ^= 1  # block 2
+
+    bob_parity = pp.hamming_parity(bob_bits)
+    alice_reconciled = pp.hamming_reconcile(bytes(alice_bits), bob_parity)
+
+    # BIT-IDENTICAL output.
+    assert alice_reconciled == bob_bits
+
+    # Privacy amplify both sides with same salt → same key.
+    salt = b"OL-proximity-pair-v1-default-sal"
+    alice_key = pp.privacy_amplify(alice_reconciled, salt=salt)
+    bob_key = pp.privacy_amplify(bob_bits, salt=salt)
+    assert alice_key == bob_key, "byte-identical keys after Hamming reconciliation"
+
+
+def test_hamming_parity_length():
+    """Parity output length matches the Hamming(127,120) block structure."""
+    from one_link import proximity_pair_native as pp
+
+    # 240 bits = 2 full blocks → 14 parity bytes
+    bits = bytes(((i * 7) & 1) for i in range(240))
+    p = pp.hamming_parity(bits)
+    assert len(p) == 14
+
+    # 130 bits = 1 full + 1 partial → 14 parity bytes (partial padded)
+    bits = bytes(((i * 7) & 1) for i in range(130))
+    p = pp.hamming_parity(bits)
+    assert len(p) == 14
+
+
 def test_distant_attacker_derives_different_key():
     from one_link import proximity_pair_native as pp
 

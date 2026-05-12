@@ -12,11 +12,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use ol_proximity_pair::{
-    block_syndrome, derive_factor2_secret, multi_pass_reconcile,
-    multi_pass_syndromes, permutation_for_pass, privacy_amplify,
-    quantize_observations, reconcile_with_syndrome, PairError,
-    PipelineConfig, QuantizeConfig, AMPLIFIED_KEY_BYTES,
-    CASCADE_PASSES_DEFAULT, GUARD_BAND_DEFAULT,
+    block_syndrome, derive_factor2_secret, hamming_reconcile,
+    multi_pass_reconcile, multi_pass_syndromes, parity_bits_for_string,
+    permutation_for_pass, privacy_amplify, quantize_observations,
+    reconcile_with_syndrome, PairError, PipelineConfig, QuantizeConfig,
+    AMPLIFIED_KEY_BYTES, CASCADE_PASSES_DEFAULT, GUARD_BAND_DEFAULT,
+    HAMMING_CODEWORD_BITS, HAMMING_DATA_BITS, HAMMING_PARITY_BITS,
     OBSERVATION_BYTES_DEFAULT, SYNDROME_BLOCK_BITS_DEFAULT,
 };
 
@@ -121,6 +122,34 @@ fn py_permutation_for_pass(seed: u64, pass_idx: usize, n: usize) -> Vec<usize> {
     permutation_for_pass(seed, pass_idx, n)
 }
 
+// ── Stage 3b: Hamming(127,120) SEC reconciliation ────────────────
+
+/// Compute Hamming(127,120) parity bits for an entire bit string.
+/// Block size = 120 data bits; 7 parity bits per block. Last partial
+/// block is zero-padded internally.
+#[pyfunction]
+fn py_hamming_parity<'py>(
+    py: Python<'py>,
+    bits: &[u8],
+) -> Bound<'py, PyBytes> {
+    let p = parity_bits_for_string(bits);
+    PyBytes::new_bound(py, &p)
+}
+
+/// One-pass Hamming reconciliation. Corrects up to 1 error per
+/// 120-bit block (mathematically certain for the 1-error case;
+/// miscorrects 2+ error blocks — combine with multi-pass +
+/// permutation for those).
+#[pyfunction]
+fn py_hamming_reconcile<'py>(
+    py: Python<'py>,
+    my_bits: &[u8],
+    peer_parity: &[u8],
+) -> Bound<'py, PyBytes> {
+    let r = hamming_reconcile(my_bits, peer_parity);
+    PyBytes::new_bound(py, &r)
+}
+
 // ── Stage 4: Privacy Amplification ────────────────────────────────
 
 /// BLAKE3-keyed privacy amplification. Hashes reconciled bits down
@@ -194,6 +223,8 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_multi_pass_syndromes, m)?)?;
     m.add_function(wrap_pyfunction!(py_multi_pass_reconcile, m)?)?;
     m.add_function(wrap_pyfunction!(py_permutation_for_pass, m)?)?;
+    m.add_function(wrap_pyfunction!(py_hamming_parity, m)?)?;
+    m.add_function(wrap_pyfunction!(py_hamming_reconcile, m)?)?;
     m.add_function(wrap_pyfunction!(py_privacy_amplify, m)?)?;
     m.add_function(wrap_pyfunction!(py_derive_factor2_secret, m)?)?;
     // Friendly names: alias each py_* to its short name.
@@ -204,6 +235,8 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         ("multi_pass_syndromes", "py_multi_pass_syndromes"),
         ("multi_pass_reconcile", "py_multi_pass_reconcile"),
         ("permutation_for_pass", "py_permutation_for_pass"),
+        ("hamming_parity", "py_hamming_parity"),
+        ("hamming_reconcile", "py_hamming_reconcile"),
         ("privacy_amplify", "py_privacy_amplify"),
         ("derive_factor2_secret", "py_derive_factor2_secret"),
     ] {
@@ -216,5 +249,8 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("GUARD_BAND_DEFAULT", GUARD_BAND_DEFAULT)?;
     m.add("SYNDROME_BLOCK_BITS_DEFAULT", SYNDROME_BLOCK_BITS_DEFAULT)?;
     m.add("CASCADE_PASSES_DEFAULT", CASCADE_PASSES_DEFAULT)?;
+    m.add("HAMMING_CODEWORD_BITS", HAMMING_CODEWORD_BITS)?;
+    m.add("HAMMING_DATA_BITS", HAMMING_DATA_BITS)?;
+    m.add("HAMMING_PARITY_BITS", HAMMING_PARITY_BITS)?;
     Ok(())
 }

@@ -7,6 +7,9 @@ OBSERVATION_BYTES_DEFAULT: int
 GUARD_BAND_DEFAULT: float
 SYNDROME_BLOCK_BITS_DEFAULT: int
 CASCADE_PASSES_DEFAULT: int
+HAMMING_CODEWORD_BITS: int
+HAMMING_DATA_BITS: int
+HAMMING_PARITY_BITS: int
 
 def quantize_observations(
     observations: bytes,
@@ -33,6 +36,8 @@ def multi_pass_reconcile(
 def permutation_for_pass(
     seed: int, pass_idx: int, n: int
 ) -> List[int]: ...
+def hamming_parity(bits: bytes) -> bytes: ...
+def hamming_reconcile(my_bits: bytes, peer_parity: bytes) -> bytes: ...
 def privacy_amplify(reconciled_bits: bytes, salt: bytes) -> bytes: ...
 def derive_factor2_secret(
     my_observations: bytes,

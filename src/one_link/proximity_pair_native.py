@@ -57,6 +57,9 @@ try:
     GUARD_BAND_DEFAULT: float = _native_pp.GUARD_BAND_DEFAULT
     SYNDROME_BLOCK_BITS_DEFAULT: int = _native_pp.SYNDROME_BLOCK_BITS_DEFAULT
     CASCADE_PASSES_DEFAULT: int = _native_pp.CASCADE_PASSES_DEFAULT
+    HAMMING_CODEWORD_BITS: int = _native_pp.HAMMING_CODEWORD_BITS
+    HAMMING_DATA_BITS: int = _native_pp.HAMMING_DATA_BITS
+    HAMMING_PARITY_BITS: int = _native_pp.HAMMING_PARITY_BITS
 except ImportError as exc:
     HAS_NATIVE = False
     _native_pp = None  # type: ignore[assignment]
@@ -65,6 +68,9 @@ except ImportError as exc:
     GUARD_BAND_DEFAULT = 0.10
     SYNDROME_BLOCK_BITS_DEFAULT = 8
     CASCADE_PASSES_DEFAULT = 4
+    HAMMING_CODEWORD_BITS = 127
+    HAMMING_DATA_BITS = 120
+    HAMMING_PARITY_BITS = 7
     log.info(
         "one_link_native.proximity_pair not installed (%s); channel-"
         "reciprocity Factor-2 pair-trust unavailable. Build via "
@@ -145,6 +151,26 @@ def multi_pass_reconcile(
         int(passes),
         int(permutation_seed),
     )
+
+
+def hamming_parity(bits: bytes) -> bytes:
+    """Compute Hamming(127,120) parity bits for `bits`.
+
+    Each 120-bit block produces 7 parity bytes. Last partial block
+    is zero-padded internally. Output length = ceil(len/120) * 7.
+    """
+    _require_native()
+    return _native_pp.hamming_parity(bytes(bits))
+
+
+def hamming_reconcile(my_bits: bytes, peer_parity: bytes) -> bytes:
+    """One-pass Hamming(127,120) SEC reconciliation.
+
+    Mathematically corrects 1 bit error per 120-bit block. Multi-
+    error blocks need SECDED + multi-pass permutation (F1.4-polish v2).
+    """
+    _require_native()
+    return _native_pp.hamming_reconcile(bytes(my_bits), bytes(peer_parity))
 
 
 def privacy_amplify(reconciled_bits: bytes, *, salt: bytes) -> bytes:

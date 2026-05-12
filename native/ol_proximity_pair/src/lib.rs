@@ -60,6 +60,7 @@
 
 pub mod amplify;
 pub mod cascade;
+pub mod hamming;
 pub mod prng;
 pub mod quantize;
 pub mod reconcile;
@@ -68,6 +69,11 @@ pub use amplify::{privacy_amplify, AMPLIFIED_KEY_BYTES};
 pub use cascade::{
     multi_pass_reconcile, multi_pass_syndromes, permutation_for_pass,
     CASCADE_PASSES_DEFAULT,
+};
+pub use hamming::{
+    decode_syndrome_to_data_index, hamming_reconcile,
+    parity_bits_for_block, parity_bits_for_string,
+    HAMMING_CODEWORD_BITS, HAMMING_DATA_BITS, HAMMING_PARITY_BITS,
 };
 pub use quantize::{
     quantize_observations, QuantizeConfig, GUARD_BAND_DEFAULT,
