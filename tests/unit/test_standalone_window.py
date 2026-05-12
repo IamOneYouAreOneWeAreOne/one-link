@@ -64,6 +64,54 @@ def test_open_browser_url_standalone_invokes_app_mode_when_chrome_found():
     assert "--new-window" in args
 
 
+def test_open_browser_url_standalone_passes_isolation_and_suppression_flags():
+    """The app-mode invocation must pass:
+      - --user-data-dir=<isolated path>  (clean profile, no MS account
+        sync / extensions / "already open" conflicts)
+      - --no-first-run                    (suppress first-run UI)
+      - --no-default-browser-check        (suppress nag)
+      - --disable-features=... msImplicitSignIn  (suppress signin pill
+        that otherwise reserves an empty strip under the title bar)
+      - --disable-sync                    (no Edge sync on our profile)
+
+    Without these flags Edge --app= mode renders a visible empty
+    horizontal gap below its title bar — the residual chrome / signin
+    / first-run UI takes space even when blank."""
+    from one_link import app as app_mod
+
+    captured = []
+    fake_browser = r"C:\msedge.exe"
+
+    def fake_popen(args, **kwargs):
+        captured.append(list(args))
+
+        class _FakeProc:
+            pass
+
+        return _FakeProc()
+
+    with mock.patch.object(
+        app_mod, "_find_chromium_browser_exe", return_value=fake_browser
+    ):
+        with mock.patch.object(app_mod.subprocess, "Popen", side_effect=fake_popen):
+            app_mod._open_browser_url(
+                "http://127.0.0.1:7117/?t=abc", standalone=True
+            )
+
+    assert len(captured) == 1
+    args = captured[0]
+    # Every required suppression / isolation flag is present.
+    assert any(a.startswith("--user-data-dir=") for a in args), args
+    assert "--no-first-run" in args
+    assert "--no-default-browser-check" in args
+    assert any(a.startswith("--disable-features=") for a in args)
+    # The features list must include the signin pill suppressor —
+    # that's the one most directly responsible for the visible gap.
+    feature_flag = next(a for a in args if a.startswith("--disable-features="))
+    assert "msImplicitSignIn" in feature_flag
+    assert "--disable-sync" in args
+
+
 def test_open_browser_url_standalone_false_skips_app_mode():
     """When standalone=False (the --browser-tab flag), we should NOT
     invoke a Chromium app-mode launch even if one is available."""

@@ -299,6 +299,27 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                 # --new-window guarantees a fresh window even if the
                 # browser is already running; --app=URL is the
                 # app-mode flag both Edge and Chrome accept.
+                #
+                # The extra flags suppress Edge's residual UI strip
+                # (signin pill, first-run banner, default-browser
+                # prompt) which otherwise renders as an empty gap
+                # below the title bar. --user-data-dir isolates One
+                # Link's Edge profile from the user's regular Edge
+                # — no synced bookmarks, no extensions, no Microsoft
+                # account, no "you already have this profile open"
+                # conflicts when Edge is also open as a browser.
+                profile_dir = data_dir() / "edge-app-profile"
+                profile_dir.mkdir(parents=True, exist_ok=True)
+                args = [
+                    browser,
+                    f"--app={url}",
+                    "--new-window",
+                    f"--user-data-dir={profile_dir}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-features=msImplicitSignIn,Translate,InterestFeedV2",
+                    "--disable-sync",
+                ]
                 flags = (
                     subprocess.CREATE_NO_WINDOW
                     | subprocess.DETACHED_PROCESS
@@ -306,7 +327,7 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                     else 0
                 )
                 subprocess.Popen(
-                    [browser, f"--app={url}", "--new-window"],
+                    args,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     stdin=subprocess.DEVNULL,
