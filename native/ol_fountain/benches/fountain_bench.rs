@@ -52,7 +52,9 @@ fn bench_decode_full_chunk(c: &mut Criterion) {
         let enc = LtEncoder::new(&source, SYMBOL_LEN).unwrap();
         // Pre-compute enough symbols to guarantee decode succeeds.
         let max_symbols = (k * 3).max(64);
-        let symbols: Vec<_> = (0u32..max_symbols).map(|sid| (sid, enc.encode_symbol(sid))).collect();
+        let symbols: Vec<_> = (0u32..max_symbols)
+            .map(|sid| (sid, enc.encode_symbol(sid)))
+            .collect();
         group.throughput(Throughput::Bytes((k as u64) * (SYMBOL_LEN as u64)));
         group.bench_with_input(BenchmarkId::from_parameter(k), &k, |b, _| {
             b.iter(|| {

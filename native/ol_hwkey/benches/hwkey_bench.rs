@@ -10,9 +10,7 @@ use ol_hwkey::{KeyStore, PublicKey, TofuStore};
 fn bench_check_tofu_match(c: &mut Criterion) {
     let s = TofuStore::new([0x42; 32]);
     s.get_or_create("alice").unwrap();
-    let pk = s
-        .public_key(&ol_hwkey::KeyHandle("alice".into()))
-        .unwrap();
+    let pk = s.public_key(&ol_hwkey::KeyHandle("alice".into())).unwrap();
     c.bench_function("check_tofu_match", |b| {
         b.iter(|| {
             let r = black_box(&s).check_tofu(black_box("alice"), black_box(&pk));

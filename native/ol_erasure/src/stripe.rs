@@ -97,10 +97,7 @@ pub fn stripe_id_of(plaintext: &[u8], params: StripeParams) -> StripeId {
 /// - [`ErasureError::InvalidParameters`] if the underlying `ol_fec`
 ///   codec rejects `(k, m)`.
 /// - [`ErasureError::EmptyPlaintext`] if `plaintext.is_empty()`.
-pub fn encode_stripe(
-    plaintext: &[u8],
-    params: StripeParams,
-) -> Result<Vec<Shard>, ErasureError> {
+pub fn encode_stripe(plaintext: &[u8], params: StripeParams) -> Result<Vec<Shard>, ErasureError> {
     if plaintext.is_empty() {
         return Err(ErasureError::EmptyPlaintext);
     }
@@ -295,7 +292,10 @@ mod tests {
         let mut present: Vec<Option<&Shard>> = shards.iter().map(Some).collect();
         present.swap(0, 1);
         let result = decode_stripe(StripeParams::STANDARD, &present);
-        assert!(matches!(result, Err(ErasureError::ShardDescriptorMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(ErasureError::ShardDescriptorMismatch { .. })
+        ));
     }
 
     #[test]

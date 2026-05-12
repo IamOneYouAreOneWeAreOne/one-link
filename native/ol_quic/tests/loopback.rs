@@ -10,8 +10,8 @@
 //! - rejection from a server whose registry doesn't recognize the client,
 //! - 100 MiB single-stream throughput as the Phase A2 acceptance number.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use ol_quic::{
     Endpoint, EndpointConfig, Frame, FrameKind, Identity, PeerFingerprint, PeerRegistry,
@@ -54,12 +54,9 @@ async fn handshake_and_frame_round_trip() {
     let alice_registry = Arc::new(PairedRegistry {
         permitted: vec![bob.fingerprint()],
     });
-    let alice_server = Endpoint::server_for_identity(
-        alice.clone(),
-        alice_registry,
-        ipv4_loopback_config(),
-    )
-    .unwrap();
+    let alice_server =
+        Endpoint::server_for_identity(alice.clone(), alice_registry, ipv4_loopback_config())
+            .unwrap();
     let alice_addr = alice_server.local_addr().unwrap();
 
     let bob_client = Endpoint::client_for_identity(bob.clone(), ipv4_loopback_config()).unwrap();
@@ -73,7 +70,9 @@ async fn handshake_and_frame_round_trip() {
         let frame = ol_quic::transport::read_frame(&mut recv).await.unwrap();
         assert_eq!(frame.kind, FrameKind::Ping);
         let reply = Frame::new(FrameKind::Pong, frame.payload).unwrap();
-        ol_quic::transport::write_frame(&mut send, &reply).await.unwrap();
+        ol_quic::transport::write_frame(&mut send, &reply)
+            .await
+            .unwrap();
         send.finish().unwrap();
         // Wait for the client to close before tearing down the endpoint.
         let _ = conn.closed().await;
@@ -81,17 +80,16 @@ async fn handshake_and_frame_round_trip() {
 
     let conn = bob_client.connect(alice_addr, alice_fp).await.unwrap();
     let request = Frame::new(FrameKind::Ping, vec![0x42u8; 8]).unwrap();
-    let response = conn.send_frame_request_response(request.clone()).await.unwrap();
+    let response = conn
+        .send_frame_request_response(request.clone())
+        .await
+        .unwrap();
     assert_eq!(response.kind, FrameKind::Pong);
     assert_eq!(response.payload, request.payload);
 
     conn.close(0, b"ok");
     // server_handle joins on close.
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        server_handle,
-    )
-    .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server_handle).await;
 }
 
 #[tokio::test]
@@ -146,12 +144,9 @@ async fn rejects_on_fingerprint_mismatch() {
     let alice_registry = Arc::new(PairedRegistry {
         permitted: vec![bob.fingerprint()],
     });
-    let alice_server = Endpoint::server_for_identity(
-        alice.clone(),
-        alice_registry,
-        ipv4_loopback_config(),
-    )
-    .unwrap();
+    let alice_server =
+        Endpoint::server_for_identity(alice.clone(), alice_registry, ipv4_loopback_config())
+            .unwrap();
     let alice_addr = alice_server.local_addr().unwrap();
 
     let bob_client = Endpoint::client_for_identity(bob.clone(), ipv4_loopback_config()).unwrap();
@@ -182,12 +177,9 @@ async fn bulk_throughput_100_mib() {
     let alice_registry = Arc::new(PairedRegistry {
         permitted: vec![bob.fingerprint()],
     });
-    let alice_server = Endpoint::server_for_identity(
-        alice.clone(),
-        alice_registry,
-        ipv4_loopback_config(),
-    )
-    .unwrap();
+    let alice_server =
+        Endpoint::server_for_identity(alice.clone(), alice_registry, ipv4_loopback_config())
+            .unwrap();
     let alice_addr = alice_server.local_addr().unwrap();
     let alice_fp = alice.fingerprint();
 
@@ -206,9 +198,10 @@ async fn bulk_throughput_100_mib() {
             // Read the request (ChunkRequest with a 32-byte chunk_id),
             // ignore the payload, reply with ChunkResponse of 1 MiB.
             let _req = ol_quic::transport::read_frame(&mut recv).await.unwrap();
-            let frame =
-                Frame::new(FrameKind::ChunkResponse, payload_for_server.clone()).unwrap();
-            ol_quic::transport::write_frame(&mut send, &frame).await.unwrap();
+            let frame = Frame::new(FrameKind::ChunkResponse, payload_for_server.clone()).unwrap();
+            ol_quic::transport::write_frame(&mut send, &frame)
+                .await
+                .unwrap();
             send.finish().unwrap();
         }
         let _ = conn.closed().await;
@@ -234,7 +227,10 @@ async fn bulk_throughput_100_mib() {
         mibps,
     );
     assert_eq!(total, CHUNKS * CHUNK_SIZE);
-    assert!(mibps > 100.0, "expected >100 MiB/s on loopback, got {mibps}");
+    assert!(
+        mibps > 100.0,
+        "expected >100 MiB/s on loopback, got {mibps}"
+    );
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle).await;
 }
@@ -246,12 +242,9 @@ async fn parallel_streams_no_head_of_line_blocking() {
     let alice_registry = Arc::new(PairedRegistry {
         permitted: vec![bob.fingerprint()],
     });
-    let alice_server = Endpoint::server_for_identity(
-        alice.clone(),
-        alice_registry,
-        ipv4_loopback_config(),
-    )
-    .unwrap();
+    let alice_server =
+        Endpoint::server_for_identity(alice.clone(), alice_registry, ipv4_loopback_config())
+            .unwrap();
     let alice_addr = alice_server.local_addr().unwrap();
     let alice_fp = alice.fingerprint();
 
@@ -268,7 +261,9 @@ async fn parallel_streams_no_head_of_line_blocking() {
             handles.push(tokio::spawn(async move {
                 let req = ol_quic::transport::read_frame(&mut recv).await.unwrap();
                 let reply = Frame::new(FrameKind::Pong, req.payload).unwrap();
-                ol_quic::transport::write_frame(&mut send, &reply).await.unwrap();
+                ol_quic::transport::write_frame(&mut send, &reply)
+                    .await
+                    .unwrap();
                 send.finish().unwrap();
             }));
         }

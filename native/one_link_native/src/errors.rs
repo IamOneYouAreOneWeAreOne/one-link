@@ -39,7 +39,10 @@ pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
     )?;
     m.add("OlQuicError", m.py().get_type_bound::<OlQuicError>())?;
     m.add("OlBloomError", m.py().get_type_bound::<OlBloomError>())?;
-    m.add("OlFountainError", m.py().get_type_bound::<OlFountainError>())?;
+    m.add(
+        "OlFountainError",
+        m.py().get_type_bound::<OlFountainError>(),
+    )?;
     m.add("OlFecError", m.py().get_type_bound::<OlFecError>())?;
     m.add("OlRatchetError", m.py().get_type_bound::<OlRatchetError>())?;
     m.add("OlPqKemError", m.py().get_type_bound::<OlPqKemError>())?;

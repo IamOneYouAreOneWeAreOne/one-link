@@ -57,7 +57,7 @@ jobs:
 
       - name: Run perf_lab_native and emit JSON
         run: |
-          python -m one_link.perf_lab_native --json --no-legacy --size-mib 64 > bench_results.json
+          python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > bench_results.json
           cat bench_results.json
 
       - name: Gate against bench_baselines/native_chunk.json

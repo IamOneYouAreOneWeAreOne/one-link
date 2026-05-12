@@ -53,7 +53,10 @@ impl Default for ReplayOutcome {
 /// - I/O errors.
 /// - Header validation errors (bubble up; an unparseable header is fatal
 ///   for the whole log: the operator must investigate manually).
-pub fn replay_log_file(path: &Path, expected_kind: LogKind) -> Result<(ReplayOutcome, u64), WalError> {
+pub fn replay_log_file(
+    path: &Path,
+    expected_kind: LogKind,
+) -> Result<(ReplayOutcome, u64), WalError> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let file_len = file.metadata()?.len();
     let mut outcome = ReplayOutcome::default();
@@ -103,7 +106,8 @@ pub fn replay_log_file(path: &Path, expected_kind: LogKind) -> Result<(ReplayOut
                 break;
             }
         };
-        let total_record_len = (RECORD_HEADER_LEN + header.length as usize + RECORD_TRAILER_LEN) as u64;
+        let total_record_len =
+            (RECORD_HEADER_LEN + header.length as usize + RECORD_TRAILER_LEN) as u64;
         if cursor + total_record_len > file_len {
             // Torn payload or trailer in the tail.
             truncated_at = Some(cursor);
@@ -118,9 +122,8 @@ pub fn replay_log_file(path: &Path, expected_kind: LogKind) -> Result<(ReplayOut
             truncated_at = Some(cursor);
             break;
         }
-        let payload = record_bytes
-            [RECORD_HEADER_LEN..RECORD_HEADER_LEN + header.length as usize]
-            .to_vec();
+        let payload =
+            record_bytes[RECORD_HEADER_LEN..RECORD_HEADER_LEN + header.length as usize].to_vec();
         outcome.records.push(Record {
             kind: header.kind,
             flags: header.flags,
@@ -309,7 +312,11 @@ mod tests {
         // Append a torn record header (8 bytes that pretends to have a
         // 100-byte payload but no actual payload follows).
         {
-            let mut f = OpenOptions::new().write(true).append(true).open(&path).unwrap();
+            let mut f = OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
             f.write_all(&[
                 0x99u8, 0x00, // kind, flags
                 0x00, 0x00, // reserved

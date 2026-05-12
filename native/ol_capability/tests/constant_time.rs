@@ -22,7 +22,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use ol_capability::{Capability, Caveat, Context, ROOT_KEY_LEN, CAP_ID_LEN};
+use ol_capability::{Capability, Caveat, Context, CAP_ID_LEN, ROOT_KEY_LEN};
 use zeroize::Zeroizing;
 
 #[test]

@@ -101,9 +101,8 @@ fn build_peer(permitted_partners: Vec<PeerFingerprint>) -> Peer {
     let registry = Arc::new(PairedRegistry {
         permitted: permitted_partners,
     });
-    let endpoint = Arc::new(
-        Endpoint::server_for_identity(identity.clone(), registry, fast_config()).unwrap(),
-    );
+    let endpoint =
+        Arc::new(Endpoint::server_for_identity(identity.clone(), registry, fast_config()).unwrap());
     let addr = endpoint.local_addr().unwrap();
     Peer {
         _identity: identity,
@@ -178,17 +177,26 @@ async fn fetch_chunk_round_trip() {
         s.flush().unwrap();
     }
 
-    let alice_engine =
-        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_engine = TransferEngine::new(
+        alice.store.clone(),
+        alice.endpoint.clone(),
+        TransferConfig::default(),
+    );
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
 
     let alice_server = Arc::clone(&alice_engine);
     tokio::spawn(async move {
         let _ = alice_server.run_server().await;
     });
 
-    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+    bob_engine
+        .register_peer(alice.fingerprint, alice.addr)
+        .await
+        .unwrap();
 
     let fetched = bob_engine
         .fetch_chunk(&alice.fingerprint, &chunk_id)
@@ -216,17 +224,26 @@ async fn fetch_chunk_idempotent_returns_local() {
         s.flush().unwrap();
     }
 
-    let alice_engine =
-        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_engine = TransferEngine::new(
+        alice.store.clone(),
+        alice.endpoint.clone(),
+        TransferConfig::default(),
+    );
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
 
     let alice_server = Arc::clone(&alice_engine);
     tokio::spawn(async move {
         let _ = alice_server.run_server().await;
     });
 
-    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+    bob_engine
+        .register_peer(alice.fingerprint, alice.addr)
+        .await
+        .unwrap();
 
     // First fetch: over the wire.
     let first = bob_engine
@@ -253,28 +270,42 @@ async fn fetch_chunk_idempotent_returns_local() {
 #[tokio::test]
 async fn chunk_not_found_at_peer() {
     let (alice, bob) = pair();
-    let alice_engine =
-        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_engine = TransferEngine::new(
+        alice.store.clone(),
+        alice.endpoint.clone(),
+        TransferConfig::default(),
+    );
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
 
     let alice_server = Arc::clone(&alice_engine);
     tokio::spawn(async move {
         let _ = alice_server.run_server().await;
     });
 
-    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+    bob_engine
+        .register_peer(alice.fingerprint, alice.addr)
+        .await
+        .unwrap();
 
     let missing_id = [0xDEu8; 32];
-    let result = bob_engine.fetch_chunk(&alice.fingerprint, &missing_id).await;
+    let result = bob_engine
+        .fetch_chunk(&alice.fingerprint, &missing_id)
+        .await;
     assert!(matches!(result, Err(TransferError::ChunkNotFound { .. })));
 }
 
 #[tokio::test]
 async fn peer_unknown_returns_error() {
     let bob = build_peer(vec![]);
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
 
     let mystery_fp = Identity::generate().unwrap().fingerprint();
     let result = bob_engine.fetch_chunk(&mystery_fp, &[0u8; 32]).await;
@@ -309,17 +340,26 @@ async fn bloom_handshake_returns_missing_chunks() {
         bob_local.push(id);
     }
 
-    let alice_engine =
-        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_engine = TransferEngine::new(
+        alice.store.clone(),
+        alice.endpoint.clone(),
+        TransferConfig::default(),
+    );
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
 
     let alice_server = Arc::clone(&alice_engine);
     tokio::spawn(async move {
         let _ = alice_server.run_server().await;
     });
 
-    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+    bob_engine
+        .register_peer(alice.fingerprint, alice.addr)
+        .await
+        .unwrap();
 
     // Bob sends bloom of its 50 chunks; the server-side (Alice) iterates
     // its memtable (100 chunks) and returns the ones NOT in Bob's bloom.
@@ -343,17 +383,26 @@ async fn bloom_handshake_returns_missing_chunks() {
 #[tokio::test]
 async fn ping_round_trip() {
     let (alice, bob) = pair();
-    let alice_engine =
-        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_engine = TransferEngine::new(
+        alice.store.clone(),
+        alice.endpoint.clone(),
+        TransferConfig::default(),
+    );
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
 
     let alice_server = Arc::clone(&alice_engine);
     tokio::spawn(async move {
         let _ = alice_server.run_server().await;
     });
 
-    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+    bob_engine
+        .register_peer(alice.fingerprint, alice.addr)
+        .await
+        .unwrap();
 
     let pong = bob_engine
         .ping(&alice.fingerprint, b"hello".to_vec())
@@ -386,19 +435,31 @@ async fn fetch_many_with_mix_of_outcomes() {
     want.push(missing_1);
     want.push(missing_2);
 
-    let alice_engine =
-        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_engine = TransferEngine::new(
+        alice.store.clone(),
+        alice.endpoint.clone(),
+        TransferConfig::default(),
+    );
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
 
     let alice_server = Arc::clone(&alice_engine);
     tokio::spawn(async move {
         let _ = alice_server.run_server().await;
     });
 
-    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+    bob_engine
+        .register_peer(alice.fingerprint, alice.addr)
+        .await
+        .unwrap();
 
-    let outcomes = bob_engine.fetch_many(&alice.fingerprint, want.clone()).await.unwrap();
+    let outcomes = bob_engine
+        .fetch_many(&alice.fingerprint, want.clone())
+        .await
+        .unwrap();
     assert_eq!(outcomes.len(), 12);
 
     let mut fetched = 0;
@@ -406,7 +467,9 @@ async fn fetch_many_with_mix_of_outcomes() {
     for (i, o) in outcomes.iter().enumerate() {
         if i < 10 {
             match o {
-                FetchOutcome::Fetched { length_plaintext, .. } => {
+                FetchOutcome::Fetched {
+                    length_plaintext, ..
+                } => {
                     assert_eq!(*length_plaintext, 32);
                     fetched += 1;
                 }
@@ -431,8 +494,11 @@ async fn fetch_many_with_mix_of_outcomes() {
 #[tokio::test]
 async fn known_peers_reflects_registry() {
     let bob = build_peer(vec![]);
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
 
     assert!(bob_engine.known_peers().await.is_empty());
     let fp = Identity::generate().unwrap().fingerprint();
@@ -465,15 +531,24 @@ async fn bloom_handshake_scoped_filters_to_want_list() {
     // Want list: 100 ids spanning ids 25..125 (so 25 overlap with already_have, 75 are missing).
     let want_list: Vec<[u8; 32]> = all_ids.iter().skip(25).take(100).copied().collect();
 
-    let alice_engine =
-        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_engine = TransferEngine::new(
+        alice.store.clone(),
+        alice.endpoint.clone(),
+        TransferConfig::default(),
+    );
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
     let alice_server = Arc::clone(&alice_engine);
     tokio::spawn(async move {
         let _ = alice_server.run_server().await;
     });
-    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+    bob_engine
+        .register_peer(alice.fingerprint, alice.addr)
+        .await
+        .unwrap();
 
     let missing = bob_engine
         .bloom_handshake_scoped(&alice.fingerprint, &bob_have, &want_list)
@@ -511,16 +586,25 @@ async fn fetch_chunk_fountain_round_trip() {
         s.flush().unwrap();
     }
 
-    let alice_engine =
-        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_engine = TransferEngine::new(
+        alice.store.clone(),
+        alice.endpoint.clone(),
+        TransferConfig::default(),
+    );
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
 
     let alice_server = Arc::clone(&alice_engine);
     tokio::spawn(async move {
         let _ = alice_server.run_server().await;
     });
-    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+    bob_engine
+        .register_peer(alice.fingerprint, alice.addr)
+        .await
+        .unwrap();
 
     let fetched = bob_engine
         .fetch_chunk_fountain(&alice.fingerprint, &chunk_id)
@@ -538,16 +622,25 @@ async fn fetch_chunk_fountain_round_trip() {
 #[tokio::test]
 async fn fetch_chunk_fountain_not_found() {
     let (alice, bob) = pair();
-    let alice_engine =
-        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_engine = TransferEngine::new(
+        alice.store.clone(),
+        alice.endpoint.clone(),
+        TransferConfig::default(),
+    );
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
 
     let alice_server = Arc::clone(&alice_engine);
     tokio::spawn(async move {
         let _ = alice_server.run_server().await;
     });
-    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+    bob_engine
+        .register_peer(alice.fingerprint, alice.addr)
+        .await
+        .unwrap();
 
     let result = bob_engine
         .fetch_chunk_fountain(&alice.fingerprint, &[0xFFu8; 32])
@@ -576,18 +669,30 @@ async fn concurrent_fetch_stress_200_parallel() {
         s.flush().unwrap();
     }
 
-    let alice_engine =
-        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_engine = TransferEngine::new(
+        alice.store.clone(),
+        alice.endpoint.clone(),
+        TransferConfig::default(),
+    );
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
     let alice_server = Arc::clone(&alice_engine);
     tokio::spawn(async move {
         let _ = alice_server.run_server().await;
     });
-    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+    bob_engine
+        .register_peer(alice.fingerprint, alice.addr)
+        .await
+        .unwrap();
 
     let start = std::time::Instant::now();
-    let outcomes = bob_engine.fetch_many(&alice.fingerprint, chunk_ids.clone()).await.unwrap();
+    let outcomes = bob_engine
+        .fetch_many(&alice.fingerprint, chunk_ids.clone())
+        .await
+        .unwrap();
     let elapsed = start.elapsed();
 
     assert_eq!(outcomes.len(), 200);
@@ -623,17 +728,26 @@ async fn cached_connection_reused_across_fetches() {
         ids.push(id);
     }
 
-    let alice_engine =
-        TransferEngine::new(alice.store.clone(), alice.endpoint.clone(), TransferConfig::default());
-    let bob_engine =
-        TransferEngine::new(bob.store.clone(), bob.endpoint.clone(), TransferConfig::default());
+    let alice_engine = TransferEngine::new(
+        alice.store.clone(),
+        alice.endpoint.clone(),
+        TransferConfig::default(),
+    );
+    let bob_engine = TransferEngine::new(
+        bob.store.clone(),
+        bob.endpoint.clone(),
+        TransferConfig::default(),
+    );
 
     let alice_server = Arc::clone(&alice_engine);
     tokio::spawn(async move {
         let _ = alice_server.run_server().await;
     });
 
-    bob_engine.register_peer(alice.fingerprint, alice.addr).await.unwrap();
+    bob_engine
+        .register_peer(alice.fingerprint, alice.addr)
+        .await
+        .unwrap();
 
     // Each fetch reuses the cached connection. We can't directly assert
     // "exactly one connection" from outside, but we CAN observe that all
@@ -641,7 +755,10 @@ async fn cached_connection_reused_across_fetches() {
     // would be ~500ms total; cached path should be <100ms total). On a
     // loopback this is easily met; we just assert all succeed.
     for id in &ids {
-        let _ = bob_engine.fetch_chunk(&alice.fingerprint, id).await.unwrap();
+        let _ = bob_engine
+            .fetch_chunk(&alice.fingerprint, id)
+            .await
+            .unwrap();
     }
     let stats = bob_engine.store_stats();
     assert!(stats.indexed_chunks >= 5);

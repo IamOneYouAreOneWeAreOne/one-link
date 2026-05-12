@@ -9,10 +9,8 @@ use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
 
 /// Type aliases for the ML-KEM-768 encoded forms. Using these by name
 /// is cleaner than inlining the trait projections.
-type MlKem768EkEncoded =
-    <<MlKem768 as KemCore>::EncapsulationKey as EncodedSizeUser>::EncodedSize;
-type MlKem768DkEncoded =
-    <<MlKem768 as KemCore>::DecapsulationKey as EncodedSizeUser>::EncodedSize;
+type MlKem768EkEncoded = <<MlKem768 as KemCore>::EncapsulationKey as EncodedSizeUser>::EncodedSize;
+type MlKem768DkEncoded = <<MlKem768 as KemCore>::DecapsulationKey as EncodedSizeUser>::EncodedSize;
 type MlKem768CtSize = <MlKem768 as KemCore>::CiphertextSize;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
@@ -236,11 +234,9 @@ pub fn encapsulate<R: RngCore + CryptoRng>(
     let ek_bytes_arr: hybrid_array::Array<u8, MlKem768EkEncoded> =
         hybrid_array::Array::from(pk.ml_kem_ek_bytes);
     let ek = <ml_kem::MlKem768 as KemCore>::EncapsulationKey::from_bytes(&ek_bytes_arr);
-    let (ct, mlkem_ss) = ek
-        .encapsulate(rng)
-        .map_err(|_| PqKemError::MlKemFailed {
-            reason: "encapsulate",
-        })?;
+    let (ct, mlkem_ss) = ek.encapsulate(rng).map_err(|_| PqKemError::MlKemFailed {
+        reason: "encapsulate",
+    })?;
     let mut ml_kem_ct_bytes = [0u8; ML_KEM_CT_LEN];
     ml_kem_ct_bytes.copy_from_slice(&ct);
     let mut mlkem_ss_bytes = Zeroizing::new([0u8; X25519_LEN]);

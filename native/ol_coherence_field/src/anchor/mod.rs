@@ -12,7 +12,5 @@
 mod apparent_horizon;
 mod screening;
 
-pub use apparent_horizon::{
-    apparent_horizon_anchor, ApparentHorizonInputs, G_A_GALAXY_PLANCK,
-};
+pub use apparent_horizon::{apparent_horizon_anchor, ApparentHorizonInputs, G_A_GALAXY_PLANCK};
 pub use screening::{classify_regime, screening_length, ScreeningRegime};

@@ -4,8 +4,8 @@
 //! daemon: `Capability` minted from a root key + caveats; the existing
 //! Ed25519 grant scheme is migrated against this in Phase C.
 
-use ol_capability::{CAP_ID_LEN, ROOT_KEY_LEN, SIGNATURE_LEN};
 use ol_capability::{CapError, Capability, Caveat, Context};
+use ol_capability::{CAP_ID_LEN, ROOT_KEY_LEN, SIGNATURE_LEN};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -80,9 +80,7 @@ impl PyCapability {
     /// Attenuate with a path-prefix caveat.
     fn attenuate_path_prefix(&self, prefix: &str) -> Self {
         Self {
-            inner: self
-                .inner
-                .attenuate(Caveat::PathPrefix(prefix.to_string())),
+            inner: self.inner.attenuate(Caveat::PathPrefix(prefix.to_string())),
         }
     }
 

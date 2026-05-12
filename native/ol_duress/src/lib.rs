@@ -44,8 +44,8 @@
 mod gate;
 
 pub use gate::{
-    decode_covert_signal, DuressGate, DuressOutcome, GateError, Volume,
-    SIGNAL_LEN, VOLUME_SECRET_LEN,
+    decode_covert_signal, DuressGate, DuressOutcome, GateError, Volume, SIGNAL_LEN,
+    VOLUME_SECRET_LEN,
 };
 
 /// Crate version embedded for diagnostics.

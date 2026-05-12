@@ -81,17 +81,13 @@ pub fn detect_format(leading: &[u8], path_extension: Option<&str>) -> Option<Con
         }
     }
     // WAV/RIFF: bytes 0..4 = "RIFF", bytes 8..12 = "WAVE".
-    if leading.len() >= 12
-        && &leading[0..4] == b"RIFF"
-        && &leading[8..12] == b"WAVE"
-    {
+    if leading.len() >= 12 && &leading[0..4] == b"RIFF" && &leading[8..12] == b"WAVE" {
         return Some(ContainerFormat::Wav);
     }
     // H.264 Annex B elementary stream: starts with a NAL start code
     // (0x00 0x00 0x00 0x01) or the shorter 3-byte variant. Detect
     // either; downstream scanner walks both forms.
-    if leading.len() >= 4
-        && (leading.starts_with(&[0, 0, 0, 1]) || leading.starts_with(&[0, 0, 1]))
+    if leading.len() >= 4 && (leading.starts_with(&[0, 0, 0, 1]) || leading.starts_with(&[0, 0, 1]))
     {
         return Some(ContainerFormat::H264AnnexB);
     }
@@ -103,9 +99,10 @@ pub fn detect_format(leading: &[u8], path_extension: Option<&str>) -> Option<Con
             "mp4" | "m4v" | "mov" | "3gp" if matches_iso_bmff_extension(leading) => {
                 return Some(ContainerFormat::Mp4);
             }
-            "wav" if leading.len() >= 12
-                && &leading[0..4] == b"RIFF"
-                && &leading[8..12] == b"WAVE" =>
+            "wav"
+                if leading.len() >= 12
+                    && &leading[0..4] == b"RIFF"
+                    && &leading[8..12] == b"WAVE" =>
             {
                 return Some(ContainerFormat::Wav);
             }
@@ -134,18 +131,15 @@ pub fn h264_keyframe_offsets(buffer: &[u8]) -> Vec<usize> {
         // Look for the 4-byte start code (0x00 0x00 0x00 0x01) or the
         // 3-byte one (0x00 0x00 0x01). The 4-byte form is required at
         // the very start; either is legal mid-stream.
-        let (start_code_len, nal_byte_idx) = if buffer[i] == 0
-            && buffer[i + 1] == 0
-            && buffer[i + 2] == 0
-            && buffer[i + 3] == 1
-        {
-            (4, i + 4)
-        } else if buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 1 {
-            (3, i + 3)
-        } else {
-            i += 1;
-            continue;
-        };
+        let (start_code_len, nal_byte_idx) =
+            if buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 0 && buffer[i + 3] == 1 {
+                (4, i + 4)
+            } else if buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 1 {
+                (3, i + 3)
+            } else {
+                i += 1;
+                continue;
+            };
         if nal_byte_idx >= buffer.len() {
             break;
         }
@@ -516,7 +510,10 @@ mod tests {
     fn detect_zip_from_magic() {
         let buf = make_dummy_zip(1, 100);
         assert_eq!(detect_format(&buf, None), Some(ContainerFormat::Zip));
-        assert_eq!(detect_format(&buf, Some("xlsx")), Some(ContainerFormat::Zip));
+        assert_eq!(
+            detect_format(&buf, Some("xlsx")),
+            Some(ContainerFormat::Zip)
+        );
     }
 
     #[test]
@@ -606,13 +603,13 @@ mod tests {
         // SPS at 0: 0x00 0x00 0x00 0x01 0x67 ...
         buf[0..4].copy_from_slice(&[0, 0, 0, 1]);
         buf[4] = 0x67; // forbidden_zero=0, ref_idc=11, type=7 (SPS)
-        // PPS at 16: 0x00 0x00 0x00 0x01 0x68
+                       // PPS at 16: 0x00 0x00 0x00 0x01 0x68
         buf[16..20].copy_from_slice(&[0, 0, 0, 1]);
         buf[20] = 0x68; // type=8 (PPS)
-        // Non-IDR slice at 32: 0x00 0x00 0x00 0x01 0x41
+                        // Non-IDR slice at 32: 0x00 0x00 0x00 0x01 0x41
         buf[32..36].copy_from_slice(&[0, 0, 0, 1]);
         buf[36] = 0x41; // type=1 (slice, non-IDR)
-        // IDR slice at 48: 0x00 0x00 0x00 0x01 0x65
+                        // IDR slice at 48: 0x00 0x00 0x00 0x01 0x65
         buf[48..52].copy_from_slice(&[0, 0, 0, 1]);
         buf[52] = 0x65; // type=5 (IDR slice)
         let offsets = h264_keyframe_offsets(&buf);
@@ -734,11 +731,9 @@ mod tests {
         edited[target_lfh + ZIP_LFH_FIXED_LEN + 7 + 100] ^= 0xFF;
 
         let orig_chunks =
-            scan_format_aware(&original, Some(ContainerFormat::Zip), CdcParams::default())
-                .unwrap();
+            scan_format_aware(&original, Some(ContainerFormat::Zip), CdcParams::default()).unwrap();
         let edit_chunks =
-            scan_format_aware(&edited, Some(ContainerFormat::Zip), CdcParams::default())
-                .unwrap();
+            scan_format_aware(&edited, Some(ContainerFormat::Zip), CdcParams::default()).unwrap();
 
         // Both must have the same number of chunks (entry layouts are
         // identical; one byte flip doesn't change LFH positions).
@@ -746,7 +741,11 @@ mod tests {
 
         // Most chunks unchanged: at least 5 of 8 entries are identical.
         let mut unchanged = 0;
-        for (a, b) in orig_chunks.boundaries.iter().zip(edit_chunks.boundaries.iter()) {
+        for (a, b) in orig_chunks
+            .boundaries
+            .iter()
+            .zip(edit_chunks.boundaries.iter())
+        {
             if a.raw_address == b.raw_address {
                 unchanged += 1;
             }

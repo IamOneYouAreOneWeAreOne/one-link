@@ -107,9 +107,7 @@ pub enum ChunkAddressKind {
 /// this helper, NOT a hardcoded enum, so the policy can evolve
 /// without re-spinning every call site.
 #[must_use]
-pub fn convergent_default_for_content_type(
-    extension: Option<&str>,
-) -> ChunkAddressKind {
+pub fn convergent_default_for_content_type(extension: Option<&str>) -> ChunkAddressKind {
     let Some(ext) = extension else {
         return ChunkAddressKind::Raw;
     };
@@ -118,10 +116,9 @@ pub fn convergent_default_for_content_type(
         // (a JPEG byte stream is fixed), so convergent IDs enable
         // cross-sender dedup without leaking anything that isn't
         // already public.
-        "mp4" | "m4v" | "mov" | "3gp" | "mkv" | "webm" | "avi"
-        | "mp3" | "wav" | "flac" | "ogg" | "opus" | "aac" | "m4a"
-        | "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic"
-        | "h264" | "264" | "avc" => ChunkAddressKind::Convergent,
+        "mp4" | "m4v" | "mov" | "3gp" | "mkv" | "webm" | "avi" | "mp3" | "wav" | "flac" | "ogg"
+        | "opus" | "aac" | "m4a" | "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "h264"
+        | "264" | "avc" => ChunkAddressKind::Convergent,
         // Everything else: project files, docs, archives, code,
         // unknown types. Default to raw-BLAKE3.
         _ => ChunkAddressKind::Raw,
@@ -201,7 +198,9 @@ impl ChunkRecord {
     }
 
     /// Decode the boolean fields back from a flags byte.
-    fn parse_flags(flags: u8) -> Result<(ChunkAddressKind, ChunkAeadKind, bool, bool), ChunkStoreError> {
+    fn parse_flags(
+        flags: u8,
+    ) -> Result<(ChunkAddressKind, ChunkAeadKind, bool, bool), ChunkStoreError> {
         if flags & flag_bits::RESERVED != 0 {
             return Err(ChunkStoreError::MalformedRecord {
                 offset: 0,

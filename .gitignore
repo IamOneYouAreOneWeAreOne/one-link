@@ -63,3 +63,4 @@ htmlcov/
 # stray daemon-test log files
 _exe_test.log
 *.log
+_wsl_linux_report.json

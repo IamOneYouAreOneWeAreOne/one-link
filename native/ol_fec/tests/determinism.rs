@@ -96,12 +96,7 @@ fn pinned_parity_hex() -> [&'static str; 4] {
     PINNED_PARITY_HEX
 }
 
-const PINNED_PARITY_HEX: [&str; 4] = [
-    PINNED_P0,
-    PINNED_P1,
-    PINNED_P2,
-    PINNED_P3,
-];
+const PINNED_PARITY_HEX: [&str; 4] = [PINNED_P0, PINNED_P1, PINNED_P2, PINNED_P3];
 
 // Pinned on Windows x86_64 with SSSE3 path (also verified equal to the
 // scalar path by `simd_matches_scalar_across_all_coefficients_and_sizes`).

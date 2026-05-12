@@ -35,13 +35,7 @@ fn bench_add_file(c: &mut Criterion) {
     c.bench_function("add_file_to_empty", |b| {
         b.iter(|| {
             let mut f = Folder::new();
-            f.add_file(
-                &rid(1),
-                fid(black_box(0)),
-                "f.bin".into(),
-                1024,
-                100,
-            );
+            f.add_file(&rid(1), fid(black_box(0)), "f.bin".into(), 1024, 100);
             black_box(f);
         });
     });

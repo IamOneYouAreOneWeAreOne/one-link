@@ -25,8 +25,8 @@
 //! so a Poisson solve is only well-posed when the source is mean-zero
 //! (Σᵢ Sᵢ = 0). We require it explicitly.
 
-use super::{FieldError, GraphLaplacian, SolveResult};
 use super::sparse_solver::{conjugate_gradient, CgConfig};
+use super::{FieldError, GraphLaplacian, SolveResult};
 
 /// Solve the pure graph-Poisson `D · L · δτ_c = S`.
 ///
@@ -70,7 +70,11 @@ pub fn solve_poisson(
     let diag: Vec<f64> = (0..n)
         .map(|i| {
             let deg = graph.degree(i);
-            if deg > 0.0 { d * deg } else { 1.0 }
+            if deg > 0.0 {
+                d * deg
+            } else {
+                1.0
+            }
         })
         .collect();
 

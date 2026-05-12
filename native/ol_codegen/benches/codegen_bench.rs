@@ -9,12 +9,11 @@
 #![allow(missing_docs)]
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use ol_codegen::{
-    emit_rust_enum, emit_rust_struct, parse_enum, parse_struct, EmitOptions,
-};
+use ol_codegen::{emit_rust_enum, emit_rust_struct, parse_enum, parse_struct, EmitOptions};
 
 const STRUCT_SMALL: &str = "struct Cap { id: [u8; 32], not_after: u64 }";
-const STRUCT_WIDE: &str = "struct Wide { a: u8, b: u16, c: u32, d: u64, e: [u8; 32], f: String, g: u32, h: u64 }";
+const STRUCT_WIDE: &str =
+    "struct Wide { a: u8, b: u16, c: u32, d: u64, e: [u8; 32], f: String, g: u32, h: u64 }";
 const ENUM_MIXED: &str = "enum Caveat { NotAfter(u64), Scope(String), Audit([u8; 32]), Sentinel }";
 
 fn bench_parser(c: &mut Criterion) {

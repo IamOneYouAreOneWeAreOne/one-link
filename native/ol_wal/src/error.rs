@@ -12,9 +12,7 @@ pub enum WalError {
     Io(#[from] io::Error),
 
     /// File header magic did not match.
-    #[error(
-        "WAL file at {path}: magic mismatch (got {got_hex}, expected {expected_hex})"
-    )]
+    #[error("WAL file at {path}: magic mismatch (got {got_hex}, expected {expected_hex})")]
     MagicMismatch {
         /// File path (for diagnostics).
         path: String,

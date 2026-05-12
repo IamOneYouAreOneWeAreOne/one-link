@@ -100,7 +100,10 @@ mod tests {
                 distinct += 1;
             }
         }
-        assert!(distinct >= 990, "expected near-total divergence, got {distinct}");
+        assert!(
+            distinct >= 990,
+            "expected near-total divergence, got {distinct}"
+        );
     }
 
     #[test]

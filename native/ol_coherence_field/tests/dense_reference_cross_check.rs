@@ -154,7 +154,9 @@ fn high_loss_low_diffusion_extreme_regime() {
             let _ = g.add_edge(i, j, 0.3);
         }
     }
-    let b: Vec<f64> = (0..n).map(|i| if i % 2 == 0 { 1.0 } else { -0.5 }).collect();
+    let b: Vec<f64> = (0..n)
+        .map(|i| if i % 2 == 0 { 1.0 } else { -0.5 })
+        .collect();
     cg_vs_dense(&g, 0.01, 5.0, &b);
 }
 

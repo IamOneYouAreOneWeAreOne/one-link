@@ -127,9 +127,7 @@ pub fn xor_inplace(dst: &mut [u8], src: &[u8]) -> Result<(), NetcodeError> {
 /// Build a coded packet from N participant chunks, all the same
 /// length. Returns the [`CodedPacket`] with the integrity tag bound
 /// to the manifest + payload.
-pub fn encode_coded_packet(
-    participants: &[(ChunkId, &[u8])],
-) -> Result<CodedPacket, NetcodeError> {
+pub fn encode_coded_packet(participants: &[(ChunkId, &[u8])]) -> Result<CodedPacket, NetcodeError> {
     if participants.is_empty() {
         return Err(NetcodeError::EmptyParticipants);
     }
@@ -189,8 +187,7 @@ pub fn decode_coded_packet(
         });
     }
     // Identify which participants the recipient is missing.
-    let known_ids: std::collections::HashSet<&ChunkId> =
-        known.iter().map(|(id, _)| id).collect();
+    let known_ids: std::collections::HashSet<&ChunkId> = known.iter().map(|(id, _)| id).collect();
     let mut missing: Vec<ChunkId> = packet
         .participants
         .iter()
@@ -266,11 +263,7 @@ mod tests {
     fn encode_then_decode_degree_2() {
         let chunk_a = vec![0xAAu8; 64];
         let chunk_b = vec![0xBBu8; 64];
-        let packet = encode_coded_packet(&[
-            (id(1), &chunk_a),
-            (id(2), &chunk_b),
-        ])
-        .unwrap();
+        let packet = encode_coded_packet(&[(id(1), &chunk_a), (id(2), &chunk_b)]).unwrap();
         // Recipient holds A; recovers B.
         let (recovered_id, recovered_bytes) =
             decode_coded_packet(&packet, &[(id(1), &chunk_a)]).unwrap();
@@ -283,11 +276,9 @@ mod tests {
         let a = vec![0x11u8; 32];
         let b = vec![0x22u8; 32];
         let c = vec![0x33u8; 32];
-        let packet =
-            encode_coded_packet(&[(id(1), &a), (id(2), &b), (id(3), &c)]).unwrap();
+        let packet = encode_coded_packet(&[(id(1), &a), (id(2), &b), (id(3), &c)]).unwrap();
         // Recipient missing B; holds A + C.
-        let (rec_id, rec) =
-            decode_coded_packet(&packet, &[(id(1), &a), (id(3), &c)]).unwrap();
+        let (rec_id, rec) = decode_coded_packet(&packet, &[(id(1), &a), (id(3), &c)]).unwrap();
         assert_eq!(rec_id, id(2));
         assert_eq!(rec, b);
     }
@@ -297,10 +288,8 @@ mod tests {
         let a = vec![0u8; 16];
         let b = vec![0u8; 16];
         let c = vec![0u8; 16];
-        let packet =
-            encode_coded_packet(&[(id(1), &a), (id(2), &b), (id(3), &c)]).unwrap();
-        let err =
-            decode_coded_packet(&packet, &[(id(1), &a)]).unwrap_err();
+        let packet = encode_coded_packet(&[(id(1), &a), (id(2), &b), (id(3), &c)]).unwrap();
+        let err = decode_coded_packet(&packet, &[(id(1), &a)]).unwrap_err();
         assert!(matches!(
             err,
             NetcodeError::InsufficientKnown { missing: 2 }
@@ -325,13 +314,11 @@ mod tests {
     fn tampered_manifest_fails_integrity_check() {
         let a = vec![0xCC; 32];
         let b = vec![0xDD; 32];
-        let mut packet =
-            encode_coded_packet(&[(id(1), &a), (id(2), &b)]).unwrap();
+        let mut packet = encode_coded_packet(&[(id(1), &a), (id(2), &b)]).unwrap();
         // Substitute a chunk id; the integrity tag was computed
         // against the original list, so decode fails.
         packet.participants[0] = id(99);
-        let err =
-            decode_coded_packet(&packet, &[(id(99), &a)]).unwrap_err();
+        let err = decode_coded_packet(&packet, &[(id(99), &a)]).unwrap_err();
         // The integrity check is the first failure path.
         assert!(matches!(err, NetcodeError::LengthMismatch { .. }));
     }

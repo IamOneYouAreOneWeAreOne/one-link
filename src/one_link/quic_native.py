@@ -243,6 +243,35 @@ class Connection:
         """
         return self._inner.send_frame_round_trip(frame_kind, payload)
 
+    def send_frame_round_trips(
+        self, frame_kind: int, payloads: list[bytes]
+    ) -> list[tuple[int, bytes]]:
+        """Sequential batch request/response helper.
+
+        Enters the native runtime once and sends all payloads on the same
+        connection. This removes per-frame Python/Rust call overhead from
+        high-throughput chunk-pull paths.
+        """
+        return list(self._inner.send_frame_round_trips(frame_kind, payloads))
+
+    def send_frame_round_trips_parallel(
+        self,
+        frame_kind: int,
+        payloads: list[bytes],
+        *,
+        max_in_flight: int | None = None,
+    ) -> list[tuple[int, bytes]]:
+        """Parallel batch request/response helper.
+
+        Opens multiple QUIC bidirectional streams concurrently while the
+        native layer preserves response order.
+        """
+        return list(
+            self._inner.send_frame_round_trips_parallel(
+                frame_kind, payloads, max_in_flight
+            )
+        )
+
     def recv_frame_blocking(
         self, timeout_ms: int
     ) -> Optional[tuple[int, int, bytes]]:
@@ -253,11 +282,26 @@ class Connection:
         """
         return self._inner.recv_frame_blocking(timeout_ms)
 
+    def recv_frames_blocking(
+        self, max_frames: int, timeout_ms: int
+    ) -> list[tuple[int, int, bytes]]:
+        """Server-side: receive a native batch of inbound request streams."""
+        return list(self._inner.recv_frames_blocking(max_frames, timeout_ms))
+
     def send_response_on(
         self, stream_id: int, frame_kind: int, payload: bytes
     ) -> None:
         """Send the response frame on a stream returned by :meth:`recv_frame_blocking`."""
         self._inner.send_response_on(stream_id, frame_kind, payload)
+
+    def send_responses_on(
+        self,
+        responses: list[tuple[int, int, bytes]],
+        *,
+        max_in_flight: int | None = None,
+    ) -> None:
+        """Server-side: send a native batch of response frames."""
+        self._inner.send_responses_on(responses, max_in_flight)
 
     def close(self, error_code: int = 0, reason: bytes = b"") -> None:
         self._inner.close(error_code, reason)

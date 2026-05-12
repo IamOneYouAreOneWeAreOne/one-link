@@ -111,8 +111,9 @@ impl StripeDescriptor {
     ///   is unrecognized or the reserved bytes are non-zero.
     pub fn decode(buf: &[u8; STRIPE_DESCRIPTOR_LEN]) -> Result<Self, ChunkStoreError> {
         let stripe_id_lo64 = u64::from_le_bytes(buf[0..8].try_into().expect("8 bytes"));
-        let stripe_role = StripeRole::from_u8(buf[8])
-            .ok_or(ChunkStoreError::InvalidStripeDescriptor("unknown role byte"))?;
+        let stripe_role = StripeRole::from_u8(buf[8]).ok_or(
+            ChunkStoreError::InvalidStripeDescriptor("unknown role byte"),
+        )?;
         let stripe_index = buf[9];
         let stripe_k = buf[10];
         let stripe_m = buf[11];

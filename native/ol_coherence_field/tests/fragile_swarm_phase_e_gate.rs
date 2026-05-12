@@ -15,9 +15,7 @@
 //! cost — even though it's longer in hop count.
 
 use ol_coherence_field::pde::sparse_solver::CgConfig;
-use ol_coherence_field::{
-    be_rar, identity_dual_source, solve_helmholtz, GraphLaplacian,
-};
+use ol_coherence_field::{be_rar, identity_dual_source, solve_helmholtz, GraphLaplacian};
 
 const SWARM_SIZE: usize = 100;
 const FRAGILE_BAND_LOSS: f64 = 0.30;
@@ -113,7 +111,11 @@ fn phase_e_path(
     // BE-RAR provides the asymptotic shape; we additionally apply
     // the BE-RAR multiplier to keep the α = 1/2 statistics encoded.
     let field_min = solved.field.iter().cloned().fold(f64::INFINITY, f64::min);
-    let field_max = solved.field.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let field_max = solved
+        .field
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
     let span = (field_max - field_min).max(1e-9);
     let nu_score: Vec<f64> = solved
         .field

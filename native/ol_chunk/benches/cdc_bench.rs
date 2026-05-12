@@ -124,7 +124,11 @@ fn make_dummy_zip(entries: usize, entry_size: usize) -> Vec<u8> {
 fn bench_zip_lfh_walk(c: &mut Criterion) {
     let mut group = c.benchmark_group("zip_lfh_walk");
     // Realistic mix: 16 KiB-1 MiB entries, 10-80 entries per archive.
-    for &(entries, entry_size) in &[(10usize, 16 * 1024usize), (80, 16 * 1024), (10, 1024 * 1024)] {
+    for &(entries, entry_size) in &[
+        (10usize, 16 * 1024usize),
+        (80, 16 * 1024),
+        (10, 1024 * 1024),
+    ] {
         let buf = make_dummy_zip(entries, entry_size);
         group.throughput(Throughput::Bytes(buf.len() as u64));
         group.bench_with_input(
@@ -153,10 +157,7 @@ fn bench_par_scan(c: &mut Criterion) {
     for &size_mib in &[16usize, 64, 256] {
         let n = size_mib * 1024 * 1024;
         let mut buf = vec![0u8; n];
-        fill_pseudo_random(
-            &mut buf,
-            0xBEEF_F00D_u64.wrapping_add(size_mib as u64),
-        );
+        fill_pseudo_random(&mut buf, 0xBEEF_F00D_u64.wrapping_add(size_mib as u64));
         group.throughput(Throughput::Bytes(n as u64));
         group.bench_with_input(BenchmarkId::new("seq", size_mib), &buf, |b, buf| {
             b.iter(|| {

@@ -129,7 +129,10 @@ mod tests {
         // For K=64, expect ~half the mass to land at d ≤ ~8 (sqrt(K) area).
         let cdf = robust_soliton_cdf(64);
         let cdf_at_8 = cdf[7];
-        assert!(cdf_at_8 > 0.5, "expected >50% mass at d ≤ 8, got {cdf_at_8}");
+        assert!(
+            cdf_at_8 > 0.5,
+            "expected >50% mass at d ≤ 8, got {cdf_at_8}"
+        );
     }
 
     #[test]

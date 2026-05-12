@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn rejects_total_exceeding_field() {
         assert!(CauchyMatrix::new(200, 100).is_err()); // 300 > 255
-        // k + m must be ≤ 255.
+                                                       // k + m must be ≤ 255.
         assert!(CauchyMatrix::new(128, 127).is_ok()); // 255 — boundary OK
         assert!(CauchyMatrix::new(128, 128).is_err()); // 256 — boundary fails
         assert!(CauchyMatrix::new(255, 1).is_err()); // 256 — fails
@@ -259,7 +259,10 @@ mod tests {
                 }
             }
             assert_eq!(sub.len(), k);
-            assert!(invert(sub).is_some(), "submatrix bits={bits:b} not invertible");
+            assert!(
+                invert(sub).is_some(),
+                "submatrix bits={bits:b} not invertible"
+            );
             tested += 1;
             // Gosper's hack: next bitmask with same popcount.
             let c2 = bits & bits.wrapping_neg();

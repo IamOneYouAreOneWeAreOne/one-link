@@ -202,14 +202,10 @@ pub fn scan_to_vec_parallel(buffer: &[u8]) -> Vec<Boundary> {
 
     // Pass 1: discover ranges sequentially.
     let params = CdcParams::default();
-    let ranges: Vec<(usize, usize)> = fastcdc::v2020::FastCDC::new(
-        buffer,
-        params.min_size,
-        params.avg_size,
-        params.max_size,
-    )
-    .map(|c| (c.offset, c.offset + c.length))
-    .collect();
+    let ranges: Vec<(usize, usize)> =
+        fastcdc::v2020::FastCDC::new(buffer, params.min_size, params.avg_size, params.max_size)
+            .map(|c| (c.offset, c.offset + c.length))
+            .collect();
 
     // Pass 2: hash each range in parallel.
     ranges

@@ -166,7 +166,10 @@ fn parse_struct_body(cursor: &mut Cursor<'_>) -> Result<ParsedStruct, ParseError
         if cursor.peek() == Some(',') {
             cursor.advance(1);
         }
-        fields.push(ParsedField { name: field_name, ty });
+        fields.push(ParsedField {
+            name: field_name,
+            ty,
+        });
     }
     Ok(ParsedStruct { name, fields })
 }
@@ -199,7 +202,10 @@ fn parse_enum_body(cursor: &mut Cursor<'_>) -> Result<ParsedEnum, ParseError> {
         if cursor.peek() == Some(',') {
             cursor.advance(1);
         }
-        variants.push(ParsedVariant { name: variant_name, payload });
+        variants.push(ParsedVariant {
+            name: variant_name,
+            payload,
+        });
     }
     Ok(ParsedEnum { name, variants })
 }
@@ -242,7 +248,10 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn new(src: &'a str) -> Self {
-        Self { src: src.as_bytes(), pos: 0 }
+        Self {
+            src: src.as_bytes(),
+            pos: 0,
+        }
     }
 
     fn peek(&self) -> Option<char> {

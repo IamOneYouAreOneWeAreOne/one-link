@@ -51,9 +51,10 @@ use ol_quic::{
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyTuple};
+use pyo3::types::{PyBytes, PyList, PyTuple};
 use tokio::runtime::Runtime;
-use tokio::sync::{mpsc, Mutex as AsyncMutex};
+use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
+use tokio::task::JoinSet;
 
 use crate::errors::quic_error_to_pyerr;
 
@@ -376,11 +377,7 @@ impl PyEndpoint {
 
     /// Accept the next inbound connection. Blocks until one arrives or
     /// the timeout expires (returns None on timeout).
-    fn accept_blocking(
-        &self,
-        py: Python<'_>,
-        timeout_ms: u64,
-    ) -> PyResult<Option<PyConnection>> {
+    fn accept_blocking(&self, py: Python<'_>, timeout_ms: u64) -> PyResult<Option<PyConnection>> {
         let rx = self.accept_rx.clone().ok_or_else(|| {
             PyValueError::new_err("accept_blocking called on a client-only endpoint")
         })?;
@@ -471,8 +468,7 @@ impl PyConnection {
 
         let conn = self.inner.clone();
         let response = py.allow_threads(|| {
-            runtime()
-                .block_on(async move { conn.send_frame_request_response(request).await })
+            runtime().block_on(async move { conn.send_frame_request_response(request).await })
         });
         let response = response.map_err(quic_error_to_pyerr)?;
         let kind_int = response.kind.as_u8();
@@ -484,6 +480,98 @@ impl PyConnection {
                 payload_bytes.into_any(),
             ],
         ))
+    }
+
+    /// Batched request/response helper: enter the Rust async runtime once,
+    /// then issue many sequential frame round-trips on the same connection.
+    ///
+    /// This avoids one Pythonâ†”Rust boundary crossing per chunk request,
+    /// which matters for high-throughput loopback and LAN chunk pulls.
+    fn send_frame_round_trips<'py>(
+        &self,
+        py: Python<'py>,
+        frame_kind: u8,
+        payloads: Vec<Vec<u8>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let kind = FrameKind::from_u8(frame_kind).ok_or_else(|| {
+            PyValueError::new_err(format!("unknown frame kind 0x{frame_kind:02x}"))
+        })?;
+        let mut requests = Vec::with_capacity(payloads.len());
+        for payload in payloads {
+            requests.push(Frame::new(kind, payload).map_err(quic_error_to_pyerr)?);
+        }
+
+        let conn = self.inner.clone();
+        let responses = py.allow_threads(|| {
+            runtime().block_on(async move {
+                let mut out = Vec::with_capacity(requests.len());
+                for request in requests {
+                    out.push(conn.send_frame_request_response(request).await?);
+                }
+                Ok::<_, ol_quic::QuicError>(out)
+            })
+        });
+        let responses = responses.map_err(quic_error_to_pyerr)?;
+        frames_to_pylist(py, responses)
+    }
+
+    /// Parallel batched request/response helper. Opens multiple QUIC
+    /// bidirectional streams concurrently while preserving response order
+    /// in the returned Python list.
+    #[pyo3(signature = (frame_kind, payloads, max_in_flight=None))]
+    fn send_frame_round_trips_parallel<'py>(
+        &self,
+        py: Python<'py>,
+        frame_kind: u8,
+        payloads: Vec<Vec<u8>>,
+        max_in_flight: Option<usize>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let kind = FrameKind::from_u8(frame_kind).ok_or_else(|| {
+            PyValueError::new_err(format!("unknown frame kind 0x{frame_kind:02x}"))
+        })?;
+        let mut requests = Vec::with_capacity(payloads.len());
+        for payload in payloads {
+            requests.push(Frame::new(kind, payload).map_err(quic_error_to_pyerr)?);
+        }
+        let cap = max_in_flight.unwrap_or(64).clamp(1, 1024);
+        let conn = self.inner.clone();
+        let responses = py.allow_threads(|| {
+            runtime().block_on(async move {
+                let semaphore = Arc::new(Semaphore::new(cap));
+                let mut set = JoinSet::new();
+                let total = requests.len();
+                for (idx, request) in requests.into_iter().enumerate() {
+                    let conn = conn.clone();
+                    let semaphore = semaphore.clone();
+                    set.spawn(async move {
+                        let permit = semaphore.acquire_owned().await.map_err(|e| {
+                            ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
+                        })?;
+                        let _permit = permit;
+                        let response = conn.send_frame_request_response(request).await?;
+                        Ok::<_, ol_quic::QuicError>((idx, response))
+                    });
+                }
+                let mut out: Vec<Option<Frame>> = vec![None; total];
+                while let Some(joined) = set.join_next().await {
+                    let (idx, response) = joined.map_err(|e| {
+                        ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
+                    })??;
+                    out[idx] = Some(response);
+                }
+                let mut ordered = Vec::with_capacity(total);
+                for item in out {
+                    ordered.push(item.ok_or_else(|| {
+                        ol_quic::QuicError::Io(std::io::Error::other(
+                            "parallel QUIC batch missing response",
+                        ))
+                    })?);
+                }
+                Ok::<_, ol_quic::QuicError>(ordered)
+            })
+        });
+        let responses = responses.map_err(quic_error_to_pyerr)?;
+        frames_to_pylist(py, responses)
     }
 
     /// Server-side: accept the next inbound bidirectional stream and
@@ -544,6 +632,70 @@ impl PyConnection {
         }
     }
 
+    /// Server-side: accept and read up to ``max_frames`` inbound streams in
+    /// one native call. Blocks for the first frame up to ``timeout_ms`` and
+    /// then opportunistically drains immediately-ready frames. Returned
+    /// stream ids must be answered with ``send_response_on`` or
+    /// ``send_responses_on``.
+    #[pyo3(signature = (max_frames, timeout_ms))]
+    fn recv_frames_blocking<'py>(
+        &self,
+        py: Python<'py>,
+        max_frames: usize,
+        timeout_ms: u64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let max_frames = max_frames.clamp(1, 4096);
+        let conn = self.inner.clone();
+        let timeout = Duration::from_millis(timeout_ms);
+
+        let result = py.allow_threads(|| {
+            runtime().block_on(async move {
+                let mut out = Vec::with_capacity(max_frames);
+                for idx in 0..max_frames {
+                    let wait = if idx == 0 {
+                        timeout
+                    } else {
+                        Duration::from_millis(0)
+                    };
+                    let pair = match tokio::time::timeout(wait, conn.accept_bi_stream()).await {
+                        Ok(Ok(p)) => p,
+                        Ok(Err(e)) => {
+                            if idx == 0 {
+                                return Err(e);
+                            }
+                            break;
+                        }
+                        Err(_) => break,
+                    };
+                    let (send, mut recv) = pair;
+                    let frame = read_frame(&mut recv).await?;
+                    out.push((send, recv, frame));
+                }
+                Ok::<_, ol_quic::QuicError>(out)
+            })
+        });
+        let frames = result.map_err(quic_error_to_pyerr)?;
+
+        let items = PyList::empty_bound(py);
+        let mut pending = self.pending_streams.lock().expect("mutex");
+        let mut counter = self.stream_counter.lock().expect("mutex");
+        for (send, recv, frame) in frames {
+            *counter += 1;
+            let stream_id = *counter;
+            pending.insert(stream_id, (send, recv));
+            let payload = PyBytes::new_bound(py, &frame.payload);
+            items.append(PyTuple::new_bound(
+                py,
+                vec![
+                    stream_id.into_py(py).into_bound(py),
+                    frame.kind.as_u8().into_py(py).into_bound(py),
+                    payload.into_any(),
+                ],
+            ))?;
+        }
+        Ok(items)
+    }
+
     /// Server-side: write the response frame on a stream returned by
     /// `recv_frame_blocking` and close the stream.
     fn send_response_on(
@@ -575,6 +727,62 @@ impl PyConnection {
         result.map_err(quic_error_to_pyerr)
     }
 
+    /// Server-side: write many responses in one native call. This is the
+    /// fast path for chunk servers that receive a batch of request streams,
+    /// prepare chunk payloads in Python, and then hand the whole response
+    /// batch back to Rust for concurrent QUIC writes.
+    #[pyo3(signature = (responses, max_in_flight=None))]
+    fn send_responses_on(
+        &self,
+        py: Python<'_>,
+        responses: Vec<(u64, u8, Vec<u8>)>,
+        max_in_flight: Option<usize>,
+    ) -> PyResult<()> {
+        let mut streams = Vec::with_capacity(responses.len());
+        {
+            let mut pending = self.pending_streams.lock().expect("mutex");
+            for (stream_id, frame_kind, payload) in responses {
+                let kind = FrameKind::from_u8(frame_kind).ok_or_else(|| {
+                    PyValueError::new_err(format!("unknown frame kind 0x{frame_kind:02x}"))
+                })?;
+                let frame = Frame::new(kind, payload).map_err(quic_error_to_pyerr)?;
+                let pair = pending.remove(&stream_id).ok_or_else(|| {
+                    PyValueError::new_err(format!("unknown stream_id {stream_id}"))
+                })?;
+                streams.push((pair, frame));
+            }
+        }
+
+        let cap = max_in_flight.unwrap_or(64).clamp(1, 1024);
+        let result = py.allow_threads(|| {
+            runtime().block_on(async move {
+                let semaphore = Arc::new(Semaphore::new(cap));
+                let mut set = JoinSet::new();
+                for ((mut send, _recv), frame) in streams {
+                    let semaphore = semaphore.clone();
+                    set.spawn(async move {
+                        let permit = semaphore.acquire_owned().await.map_err(|e| {
+                            ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
+                        })?;
+                        let _permit = permit;
+                        write_frame(&mut send, &frame).await?;
+                        send.finish().map_err(|e| {
+                            ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
+                        })?;
+                        Ok::<_, ol_quic::QuicError>(())
+                    });
+                }
+                while let Some(joined) = set.join_next().await {
+                    joined.map_err(|e| {
+                        ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
+                    })??;
+                }
+                Ok::<_, ol_quic::QuicError>(())
+            })
+        });
+        result.map_err(quic_error_to_pyerr)
+    }
+
     /// RTT estimate in milliseconds.
     #[getter]
     fn rtt_ms(&self) -> u64 {
@@ -590,7 +798,7 @@ impl PyConnection {
 // ───────────────────────────── module registration ─────────────────────
 
 pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    use ol_quic::{MAX_BULK_FRAME_BYTES, MAX_CONTROL_FRAME_BYTES, ALPN};
+    use ol_quic::{ALPN, MAX_BULK_FRAME_BYTES, MAX_CONTROL_FRAME_BYTES};
     m.add("ALPN", PyBytes::new_bound(m.py(), ALPN))?;
     m.add("MAX_BULK_FRAME_BYTES", MAX_BULK_FRAME_BYTES)?;
     m.add("MAX_CONTROL_FRAME_BYTES", MAX_CONTROL_FRAME_BYTES)?;
@@ -602,13 +810,19 @@ pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
     m.add("FRAME_CHUNK_NOT_FOUND", FrameKind::ChunkNotFound.as_u8())?;
     m.add("FRAME_MANIFEST_SYNC", FrameKind::ManifestSync.as_u8())?;
     m.add("FRAME_MANIFEST_RECORD", FrameKind::ManifestRecord.as_u8())?;
-    m.add("FRAME_MANIFEST_SYNC_END", FrameKind::ManifestSyncEnd.as_u8())?;
+    m.add(
+        "FRAME_MANIFEST_SYNC_END",
+        FrameKind::ManifestSyncEnd.as_u8(),
+    )?;
     m.add("FRAME_BLOOM_FILTER", FrameKind::BloomFilter.as_u8())?;
     m.add("FRAME_MISSING_CHUNKS", FrameKind::MissingChunks.as_u8())?;
     m.add("FRAME_FOUNTAIN_BURST", FrameKind::FountainBurst.as_u8())?;
     m.add("FRAME_FOUNTAIN_ACK", FrameKind::FountainAck.as_u8())?;
     m.add("FRAME_FOUNTAIN_REQUEST", FrameKind::FountainRequest.as_u8())?;
-    m.add("FRAME_SCOPED_BLOOM_FILTER", FrameKind::ScopedBloomFilter.as_u8())?;
+    m.add(
+        "FRAME_SCOPED_BLOOM_FILTER",
+        FrameKind::ScopedBloomFilter.as_u8(),
+    )?;
     m.add("FRAME_CAPABILITY_CHECK", FrameKind::CapabilityCheck.as_u8())?;
     m.add("FRAME_CAPABILITY_ACK", FrameKind::CapabilityAck.as_u8())?;
     m.add("FRAME_PING", FrameKind::Ping.as_u8())?;
@@ -632,4 +846,20 @@ fn hex_lower(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0x0F) as usize] as char);
     }
     out
+}
+
+fn frames_to_pylist<'py>(py: Python<'py>, frames: Vec<Frame>) -> PyResult<Bound<'py, PyList>> {
+    let items = PyList::empty_bound(py);
+    for frame in frames {
+        let kind_int = frame.kind.as_u8();
+        let payload_bytes = PyBytes::new_bound(py, &frame.payload);
+        items.append(PyTuple::new_bound(
+            py,
+            vec![
+                kind_int.into_py(py).into_bound(py),
+                payload_bytes.into_any(),
+            ],
+        ))?;
+    }
+    Ok(items)
 }

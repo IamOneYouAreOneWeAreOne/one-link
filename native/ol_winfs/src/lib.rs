@@ -30,9 +30,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-pub use ol_fuse::{
-    DirEntry, EntryKind, FilesystemBackend, FsError, MemoryBackend, Stat,
-};
+pub use ol_fuse::{DirEntry, EntryKind, FilesystemBackend, FsError, MemoryBackend, Stat};
 
 /// Windows-specific mount options.
 #[derive(Debug, Clone)]
@@ -87,10 +85,8 @@ pub enum MountError {
 ///   rebuild hint.
 /// - **Non-Windows**: [`MountError::UnsupportedPlatform`].
 pub fn mount<B>(
-    #[cfg(all(target_os = "windows", any(feature = "winfsp", feature = "dokan")))]
-    _backend: B,
-    #[cfg(not(all(target_os = "windows", any(feature = "winfsp", feature = "dokan"))))]
-    _backend: B,
+    #[cfg(all(target_os = "windows", any(feature = "winfsp", feature = "dokan")))] _backend: B,
+    #[cfg(not(all(target_os = "windows", any(feature = "winfsp", feature = "dokan"))))] _backend: B,
     opts: MountOptions,
 ) -> Result<(), MountError>
 where

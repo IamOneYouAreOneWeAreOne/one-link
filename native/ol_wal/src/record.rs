@@ -101,14 +101,21 @@ impl Record {
 /// # Errors
 ///
 /// - [`WalError::InvalidRecordReserved`] if the reserved bytes are not zero.
-pub fn parse_header(header: &[u8; RECORD_HEADER_LEN], offset: u64) -> Result<RecordHeader, WalError> {
+pub fn parse_header(
+    header: &[u8; RECORD_HEADER_LEN],
+    offset: u64,
+) -> Result<RecordHeader, WalError> {
     let kind = header[0];
     let flags = header[1];
     if header[2] != 0 || header[3] != 0 {
         return Err(WalError::InvalidRecordReserved { offset });
     }
     let length = u32::from_le_bytes(header[4..8].try_into().expect("4 bytes"));
-    Ok(RecordHeader { kind, flags, length })
+    Ok(RecordHeader {
+        kind,
+        flags,
+        length,
+    })
 }
 
 /// Verify a record's CRC32C trailer against its header + payload.
@@ -214,6 +221,9 @@ mod tests {
         let mut header = [0u8; RECORD_HEADER_LEN];
         header.copy_from_slice(&bytes[..RECORD_HEADER_LEN]);
         let result = parse_header(&header, 0);
-        assert!(matches!(result, Err(WalError::InvalidRecordReserved { .. })));
+        assert!(matches!(
+            result,
+            Err(WalError::InvalidRecordReserved { .. })
+        ));
     }
 }

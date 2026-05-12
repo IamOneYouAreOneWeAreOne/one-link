@@ -36,9 +36,7 @@
 
 mod predictor;
 
-pub use predictor::{
-    Prediction, PrefetchError, PrefetchPredictor, MAX_CO_OCCURRENCE_GAP_MS,
-};
+pub use predictor::{Prediction, PrefetchError, PrefetchPredictor, MAX_CO_OCCURRENCE_GAP_MS};
 
 /// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

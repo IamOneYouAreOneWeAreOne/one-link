@@ -102,9 +102,7 @@ impl TransferEngine {
         // on the same bi-stream, then optionally reads back a
         // FountainAck. Dispatch separately.
         if request.kind == FrameKind::FountainRequest {
-            return self
-                .handle_fountain_request(&request, send, recv)
-                .await;
+            return self.handle_fountain_request(&request, send, recv).await;
         }
         let reply = match request.kind {
             FrameKind::ChunkRequest => self.handle_chunk_request(&request).await?,
@@ -121,7 +119,8 @@ impl TransferEngine {
             }
         };
         write_frame(send, &reply).await?;
-        send.finish().map_err(|e| TransferError::Transport(e.into()))?;
+        send.finish()
+            .map_err(|e| TransferError::Transport(e.into()))?;
         Ok(())
     }
 
@@ -146,7 +145,8 @@ impl TransferEngine {
                 b"FountainRequest payload must be 32-byte chunk_id".to_vec(),
             )?;
             write_frame(send, &err).await?;
-            send.finish().map_err(|e| TransferError::Transport(e.into()))?;
+            send.finish()
+                .map_err(|e| TransferError::Transport(e.into()))?;
             return Ok(());
         }
         let mut chunk_id = [0u8; 32];
@@ -164,7 +164,8 @@ impl TransferEngine {
         let Some(record) = record_opt else {
             let reply = Frame::new(FrameKind::ChunkNotFound, chunk_id.to_vec())?;
             write_frame(send, &reply).await?;
-            send.finish().map_err(|e| TransferError::Transport(e.into()))?;
+            send.finish()
+                .map_err(|e| TransferError::Transport(e.into()))?;
             return Ok(());
         };
         let (kind_byte, flags_byte, body) = record.encode();
@@ -200,8 +201,7 @@ impl TransferEngine {
         // Step 1: initial burst.
         while sid < initial_burst && sid < FOUNTAIN_MAX_SYMBOLS {
             let symbol = encoder.encode_symbol(sid);
-            let packet =
-                FountainPacket::new(chunk_id, k, sid, source_len_u32, symbol).encode();
+            let packet = FountainPacket::new(chunk_id, k, sid, source_len_u32, symbol).encode();
             let frame = Frame::new(FrameKind::FountainBurst, packet)?;
             write_frame(send, &frame).await?;
             sid += 1;
@@ -211,7 +211,7 @@ impl TransferEngine {
         loop {
             match tokio::time::timeout(ack_wait, read_frame(recv)).await {
                 Ok(Ok(ack)) if ack.kind == FrameKind::FountainAck => break,
-                Ok(Ok(_)) => break, // unexpected frame; bail
+                Ok(Ok(_)) => break,  // unexpected frame; bail
                 Ok(Err(_)) => break, // stream error; bail
                 Err(_) => {
                     // Timeout: top up if there's headroom.
@@ -221,14 +221,8 @@ impl TransferEngine {
                     let limit = (sid + top_up).min(FOUNTAIN_MAX_SYMBOLS);
                     while sid < limit {
                         let symbol = encoder.encode_symbol(sid);
-                        let packet = FountainPacket::new(
-                            chunk_id,
-                            k,
-                            sid,
-                            source_len_u32,
-                            symbol,
-                        )
-                        .encode();
+                        let packet =
+                            FountainPacket::new(chunk_id, k, sid, source_len_u32, symbol).encode();
                         let frame = Frame::new(FrameKind::FountainBurst, packet)?;
                         write_frame(send, &frame).await?;
                         sid += 1;
@@ -236,7 +230,8 @@ impl TransferEngine {
                 }
             }
         }
-        send.finish().map_err(|e| TransferError::Transport(e.into()))?;
+        send.finish()
+            .map_err(|e| TransferError::Transport(e.into()))?;
         Ok(())
     }
 
@@ -310,8 +305,10 @@ impl TransferEngine {
             let store = self.store.read().expect("store rwlock poisoned");
             store.collect_chunk_ids()
         };
-        let missing: Vec<[u8; 32]> =
-            local_ids.into_iter().filter(|cid| !bloom.contains(cid)).collect();
+        let missing: Vec<[u8; 32]> = local_ids
+            .into_iter()
+            .filter(|cid| !bloom.contains(cid))
+            .collect();
         let payload = wire::encode_missing_chunks(&missing);
         Ok(Frame::new(FrameKind::MissingChunks, payload)?)
     }

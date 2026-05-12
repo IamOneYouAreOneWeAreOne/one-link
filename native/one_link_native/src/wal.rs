@@ -139,7 +139,8 @@ impl PyWal {
             .inner
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("WAL is closed"))?;
-        py.allow_threads(|| inner.flush()).map_err(wal_error_to_pyerr)
+        py.allow_threads(|| inner.flush())
+            .map_err(wal_error_to_pyerr)
     }
 
     /// Rotate to the next file id (flushes pending first, then allocates
@@ -149,13 +150,15 @@ impl PyWal {
             .inner
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("WAL is closed"))?;
-        py.allow_threads(|| inner.rotate()).map_err(wal_error_to_pyerr)
+        py.allow_threads(|| inner.rotate())
+            .map_err(wal_error_to_pyerr)
     }
 
     /// Close the WAL writer, flushing pending records.
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if let Some(mut inner) = self.inner.take() {
-            py.allow_threads(|| inner.flush()).map_err(wal_error_to_pyerr)?;
+            py.allow_threads(|| inner.flush())
+                .map_err(wal_error_to_pyerr)?;
         }
         Ok(())
     }
@@ -220,7 +223,9 @@ fn log_kind_magic<'py>(py: Python<'py>, kind: &str) -> PyResult<Bound<'py, PyByt
 
 /// Register the wal submodule.
 pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    use ol_wal::{FILE_HEADER_LEN, MAX_PAYLOAD_LEN, RECORD_HEADER_LEN, RECORD_TRAILER_LEN, ROTATION_SIZE};
+    use ol_wal::{
+        FILE_HEADER_LEN, MAX_PAYLOAD_LEN, RECORD_HEADER_LEN, RECORD_TRAILER_LEN, ROTATION_SIZE,
+    };
 
     m.add("FILE_HEADER_LEN", FILE_HEADER_LEN)?;
     m.add("RECORD_HEADER_LEN", RECORD_HEADER_LEN)?;

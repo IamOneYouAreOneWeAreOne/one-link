@@ -19,7 +19,10 @@ impl<'a> CanonDecoder<'a> {
     /// Build a decoder over `buffer` starting at byte 0.
     #[must_use]
     pub fn new(buffer: &'a [u8]) -> Self {
-        Self { buffer, position: 0 }
+        Self {
+            buffer,
+            position: 0,
+        }
     }
 
     /// Bytes still ahead of the cursor.

@@ -304,7 +304,10 @@ mod tests {
             for b in 1u8..=255 {
                 let q = div(a, b);
                 let r = mul(q, b);
-                assert_eq!(r, a, "div({a:#x}, {b:#x}) = {q:#x} but {q:#x}*{b:#x} = {r:#x}");
+                assert_eq!(
+                    r, a,
+                    "div({a:#x}, {b:#x}) = {q:#x} but {q:#x}*{b:#x} = {r:#x}"
+                );
             }
         }
     }
@@ -363,9 +366,13 @@ mod tests {
     #[test]
     fn simd_matches_scalar_across_all_coefficients_and_sizes() {
         // Cover lengths that exercise the 16-byte SIMD lane + scalar tail.
-        let lengths = [0usize, 1, 7, 15, 16, 17, 31, 32, 33, 63, 64, 127, 128, 1023, 1024, 1025];
+        let lengths = [
+            0usize, 1, 7, 15, 16, 17, 31, 32, 33, 63, 64, 127, 128, 1023, 1024, 1025,
+        ];
         // Use a deterministic source pattern.
-        let src_base: Vec<u8> = (0..1025u32).map(|i| (i.wrapping_mul(31) & 0xFF) as u8).collect();
+        let src_base: Vec<u8> = (0..1025u32)
+            .map(|i| (i.wrapping_mul(31) & 0xFF) as u8)
+            .collect();
         for &len in &lengths {
             let src = &src_base[..len];
             for coeff in 0u8..=255 {

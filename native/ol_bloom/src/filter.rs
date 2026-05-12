@@ -274,9 +274,7 @@ impl Bloom {
             return Err(BloomError::ReservedNonZero);
         }
         if m_bits == 0 || k == 0 {
-            return Err(BloomError::InvalidParameters(
-                "m_bits/k must be > 0",
-            ));
+            return Err(BloomError::InvalidParameters("m_bits/k must be > 0"));
         }
         let expected_bytes = m_bits.div_ceil(8) as usize;
         let bits = &encoded[BLOOM_HEADER_LEN..];
@@ -350,7 +348,10 @@ mod tests {
     fn empty_filter_contains_nothing() {
         let f = Bloom::new(1024);
         for i in 0u8..50 {
-            assert!(!f.contains(&id(i)), "empty filter should not contain id {i}");
+            assert!(
+                !f.contains(&id(i)),
+                "empty filter should not contain id {i}"
+            );
         }
     }
 

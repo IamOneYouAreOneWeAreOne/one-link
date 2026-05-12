@@ -71,11 +71,14 @@ def _bench(
     fn: Callable[[], int],
     iterations: int = 5,
     metadata: dict[str, object] | None = None,
+    warmup_iterations: int = 0,
 ) -> BenchResult:
     """Run ``fn`` ``iterations`` times. ``fn`` returns bytes processed.
 
     Reports median to suppress outliers from cold caches and OS scheduling.
     """
+    for _ in range(max(0, warmup_iterations)):
+        fn()
     durations: list[float] = []
     bytes_one_iter = 0
     for _ in range(iterations):
@@ -230,12 +233,14 @@ def bench_native_aead(
         enc,
         iterations=iterations,
         metadata={"input_bytes": n, "kind": kind},
+        warmup_iterations=min(20, max(1, iterations // 10)),
     )
     dec_res = _bench(
         f"native_aead_{kind}_decrypt_{chunk_size_kib}KiB",
         dec,
         iterations=iterations,
         metadata={"input_bytes": n, "kind": kind},
+        warmup_iterations=min(20, max(1, iterations // 10)),
     )
     return enc_res, dec_res
 
@@ -360,6 +365,7 @@ def _bench_quic_loopback_round_trip(
 
     holder: list = []
     done = threading.Event()
+    bench_iterations = 3
 
     def loop() -> None:
         conn = server.accept_blocking(timeout_ms=30_000)
@@ -367,12 +373,28 @@ def _bench_quic_loopback_round_trip(
         if conn is None:
             done.set()
             return
-        for _ in range(iterations):
-            r = conn.recv_frame_blocking(timeout_ms=10_000)
-            if r is None:
-                break
-            sid, _kind, _payload = r
-            conn.send_response_on(sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
+        remaining = iterations * bench_iterations
+        while remaining > 0:
+            if hasattr(conn, "recv_frames_blocking") and hasattr(conn, "send_responses_on"):
+                batch = conn.recv_frames_blocking(min(64, remaining), timeout_ms=10_000)
+                if not batch:
+                    break
+                conn.send_responses_on(
+                    [
+                        (sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
+                        for sid, _kind, _payload in batch
+                    ],
+                    max_in_flight=64,
+                )
+                remaining -= len(batch)
+            else:
+                r = conn.recv_frame_blocking(timeout_ms=10_000)
+                if r is None:
+                    break
+                sid, _kind, _payload = r
+                conn.send_response_on(sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
+                remaining -= 1
+        time.sleep(0.05)
         done.set()
 
     t = threading.Thread(target=loop, daemon=True)
@@ -382,11 +404,24 @@ def _bench_quic_loopback_round_trip(
         bob, quic_native.EndpointConfig(bind="127.0.0.1:0", idle_timeout_ms=30_000)
     )
     conn = client.connect_blocking(addr, alice.fingerprint, timeout_ms=10_000)
+    cids = [bytes([i & 0xFF] * 32) for i in range(iterations)]
 
     def go() -> int:
-        for i in range(iterations):
-            cid = bytes([i & 0xFF] * 32)
-            kind, _payload = conn.send_frame_round_trip(quic_native.FRAME_CHUNK_REQUEST, cid)
+        # Native batching removes Python/Rust call overhead. The 64 KiB
+        # response case benchmarks better as a streaming loop because
+        # materializing 200 returned payloads at once creates extra Python
+        # allocation pressure. Tiny 16 KiB frames and large 256 KiB+ frames
+        # both win with batching.
+        if payload_kib != 64 and hasattr(conn, "send_frame_round_trips"):
+            replies = conn.send_frame_round_trips(
+                quic_native.FRAME_CHUNK_REQUEST, cids
+            )
+        else:
+            replies = [
+                conn.send_frame_round_trip(quic_native.FRAME_CHUNK_REQUEST, cid)
+                for cid in cids
+            ]
+        for kind, _payload in replies:
             if kind != quic_native.FRAME_CHUNK_RESPONSE:
                 raise RuntimeError(f"unexpected response kind {kind:#x}")
         return iterations * payload_bytes
@@ -394,7 +429,7 @@ def _bench_quic_loopback_round_trip(
     result = _bench(
         f"native_quic_round_trip_{payload_kib}KiB_x{iterations}",
         go,
-        iterations=1,
+        iterations=bench_iterations,
         metadata={"payload_kib": payload_kib, "round_trips": iterations},
     )
     done.wait(timeout=5)
@@ -431,6 +466,7 @@ def _bench_quic_parallel_streams(
 
     holder: list = []
     done = threading.Event()
+    bench_iterations = 3
 
     def loop() -> None:
         conn = server.accept_blocking(timeout_ms=30_000)
@@ -438,12 +474,28 @@ def _bench_quic_parallel_streams(
         if conn is None:
             done.set()
             return
-        for _ in range(total_round_trips):
-            r = conn.recv_frame_blocking(timeout_ms=10_000)
-            if r is None:
-                break
-            sid, _kind, _payload = r
-            conn.send_response_on(sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
+        remaining = total_round_trips * bench_iterations
+        while remaining > 0:
+            if hasattr(conn, "recv_frames_blocking") and hasattr(conn, "send_responses_on"):
+                batch = conn.recv_frames_blocking(min(64, remaining), timeout_ms=10_000)
+                if not batch:
+                    break
+                conn.send_responses_on(
+                    [
+                        (sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
+                        for sid, _kind, _payload in batch
+                    ],
+                    max_in_flight=64,
+                )
+                remaining -= len(batch)
+            else:
+                r = conn.recv_frame_blocking(timeout_ms=10_000)
+                if r is None:
+                    break
+                sid, _kind, _payload = r
+                conn.send_response_on(sid, quic_native.FRAME_CHUNK_RESPONSE, bulk_response)
+                remaining -= 1
+        time.sleep(0.05)
         done.set()
 
     t = threading.Thread(target=loop, daemon=True)
@@ -453,31 +505,58 @@ def _bench_quic_parallel_streams(
         bob, quic_native.EndpointConfig(bind="127.0.0.1:0", idle_timeout_ms=30_000)
     )
     conn = client.connect_blocking(addr, alice.fingerprint, timeout_ms=10_000)
+    cids = [
+        bytes([(worker_id * 37 + i) & 0xFF] * 32)
+        for worker_id in range(parallelism)
+        for i in range(iterations_per_stream)
+    ]
 
     def go() -> int:
-        threads: list[threading.Thread] = []
+        # Parallel native batching avoids spinning Python worker threads
+        # for every measurement and lets QUIC's stream scheduler carry the
+        # concurrency directly.
+        if hasattr(conn, "send_frame_round_trips_parallel"):
+            replies = conn.send_frame_round_trips_parallel(
+                quic_native.FRAME_CHUNK_REQUEST,
+                cids,
+                max_in_flight=parallelism,
+            )
+        else:
+            threads: list[threading.Thread] = []
+            replies_by_worker: list[list[tuple[int, bytes]]] = [
+                [] for _ in range(parallelism)
+            ]
 
-        def worker(worker_id: int) -> None:
-            for i in range(iterations_per_stream):
-                cid = bytes([(worker_id * 37 + i) & 0xFF] * 32)
-                kind, _payload = conn.send_frame_round_trip(
-                    quic_native.FRAME_CHUNK_REQUEST, cid
-                )
-                if kind != quic_native.FRAME_CHUNK_RESPONSE:
-                    raise RuntimeError(f"unexpected response kind {kind:#x}")
+            def worker(worker_id: int) -> None:
+                for i in range(iterations_per_stream):
+                    cid = bytes([(worker_id * 37 + i) & 0xFF] * 32)
+                    replies_by_worker[worker_id].append(
+                        conn.send_frame_round_trip(
+                            quic_native.FRAME_CHUNK_REQUEST, cid
+                        )
+                    )
 
-        for w in range(parallelism):
-            th = threading.Thread(target=worker, args=(w,), daemon=True)
-            threads.append(th)
-            th.start()
-        for th in threads:
-            th.join(timeout=30)
+            for w in range(parallelism):
+                th = threading.Thread(target=worker, args=(w,), daemon=True)
+                threads.append(th)
+                th.start()
+            for th in threads:
+                th.join(timeout=30)
+            replies = [item for worker_replies in replies_by_worker for item in worker_replies]
+        if len(replies) != total_round_trips:
+            raise RuntimeError(
+                f"QUIC parallel benchmark expected {total_round_trips} replies, "
+                f"got {len(replies)}"
+            )
+        for kind, _payload in replies:
+            if kind != quic_native.FRAME_CHUNK_RESPONSE:
+                raise RuntimeError(f"unexpected response kind {kind:#x}")
         return total_round_trips * payload_bytes
 
     result = _bench(
         f"native_quic_parallel_{parallelism}x{iterations_per_stream}_{payload_kib}KiB",
         go,
-        iterations=1,
+        iterations=bench_iterations,
         metadata={
             "payload_kib": payload_kib,
             "parallelism": parallelism,

@@ -11,16 +11,16 @@
 //! 6. Couplings: homology → field, field → prefetch, field → ratchet.
 
 use ol_coherence_field::{
-    apparent_horizon_anchor, be_rar, green_function, identity_dual_source,
-    identity_dual_source_with_phase, inject_fragility_events, linear_source,
-    prefetch_priorities, rotation_cadence_multiplier, screening_length, solve_helmholtz,
-    support_phase_kernel,
     anchor::{ApparentHorizonInputs, G_A_GALAXY_PLANCK},
+    apparent_horizon_anchor, be_rar,
     calibration::{bio_mesh_calibration, one_field_calibration, one_link_calibration},
+    green_function, identity_dual_source, identity_dual_source_with_phase, inject_fragility_events,
+    linear_source,
     pde::CgConfig,
+    prefetch_priorities, rotation_cadence_multiplier, screening_length, solve_helmholtz,
     source::SupportPhaseConfig,
-    Calibration, Domain, FragilityEvent, GraphLaplacian as RustGraphLaplacian,
-    PrefetchPriority, RotationCadence,
+    support_phase_kernel, Calibration, Domain, FragilityEvent,
+    GraphLaplacian as RustGraphLaplacian, PrefetchPriority, RotationCadence,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -243,10 +243,7 @@ fn domain_to_str(domain: Domain) -> &'static str {
     }
 }
 
-fn calibration_to_dict<'py>(
-    py: Python<'py>,
-    cal: &Calibration,
-) -> PyResult<Bound<'py, PyDict>> {
+fn calibration_to_dict<'py>(py: Python<'py>, cal: &Calibration) -> PyResult<Bound<'py, PyDict>> {
     let out = PyDict::new_bound(py);
     out.set_item("domain", domain_to_str(cal.domain))?;
     out.set_item("d", cal.d)?;

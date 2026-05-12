@@ -50,10 +50,7 @@ impl Default for SupportPhaseConfig {
 /// `c_support[i] ∈ [0, 1]` is the cumulative-support fraction at peer
 /// `i`. Returns the per-peer kernel value ∈ (−1, 1).
 #[must_use]
-pub fn support_phase_kernel(
-    c_support: &[f64],
-    config: SupportPhaseConfig,
-) -> Vec<f64> {
+pub fn support_phase_kernel(c_support: &[f64], config: SupportPhaseConfig) -> Vec<f64> {
     let w = config.w_phase.max(1e-12);
     c_support
         .iter()

@@ -84,9 +84,8 @@ impl PyBloom {
                 MAX_FILTER_BYTES
             )));
         }
-        let slice = unsafe {
-            std::slice::from_raw_parts(buf.buf_ptr() as *const u8, buf.len_bytes())
-        };
+        let slice =
+            unsafe { std::slice::from_raw_parts(buf.buf_ptr() as *const u8, buf.len_bytes()) };
         let inner = py
             .allow_threads(|| Bloom::decode(slice))
             .map_err(bloom_error_to_pyerr)?;
@@ -113,9 +112,7 @@ fn chunk_id_from_buffer(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<[u8;
     }
     let mut out = [0u8; 32];
     let _ = py; // GIL token not needed for this short copy
-    let slice = unsafe {
-        std::slice::from_raw_parts(buf.buf_ptr() as *const u8, 32)
-    };
+    let slice = unsafe { std::slice::from_raw_parts(buf.buf_ptr() as *const u8, 32) };
     out.copy_from_slice(slice);
     Ok(out)
 }

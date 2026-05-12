@@ -340,7 +340,9 @@ impl PyChunkStore {
             },
             ciphertext: ciphertext.to_vec(),
         };
-        inner.append_chunk(&record).map_err(chunk_store_error_to_pyerr)
+        inner
+            .append_chunk(&record)
+            .map_err(chunk_store_error_to_pyerr)
     }
 
     /// Append a manifest record.
@@ -367,7 +369,9 @@ impl PyChunkStore {
             chunk_log_anchor,
             body: body.to_vec(),
         };
-        inner.append_manifest(&r).map_err(chunk_store_error_to_pyerr)
+        inner
+            .append_manifest(&r)
+            .map_err(chunk_store_error_to_pyerr)
     }
 
     /// Flush both logs to durable storage.
@@ -376,7 +380,8 @@ impl PyChunkStore {
             .inner
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("ChunkStore is closed"))?;
-        py.allow_threads(|| inner.flush()).map_err(chunk_store_error_to_pyerr)
+        py.allow_threads(|| inner.flush())
+            .map_err(chunk_store_error_to_pyerr)
     }
 
     /// Check if a chunk exists.
@@ -431,7 +436,8 @@ impl PyChunkStore {
     /// Close, flushing both logs.
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if let Some(mut inner) = self.inner.take() {
-            py.allow_threads(|| inner.close()).map_err(chunk_store_error_to_pyerr)?;
+            py.allow_threads(|| inner.close())
+                .map_err(chunk_store_error_to_pyerr)?;
         }
         Ok(())
     }

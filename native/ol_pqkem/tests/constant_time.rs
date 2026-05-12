@@ -73,15 +73,10 @@ fn adr0017_constant_time_decap_valid_vs_malformed() {
 
     let valid_per_iter = valid_ns as f64 / (ITER_PER_BURST * BURSTS as u32) as f64;
     let malformed_per_iter = malformed_ns as f64 / (ITER_PER_BURST * BURSTS as u32) as f64;
-    let ratio = (valid_per_iter.max(malformed_per_iter))
-        / (valid_per_iter.min(malformed_per_iter));
+    let ratio = (valid_per_iter.max(malformed_per_iter)) / (valid_per_iter.min(malformed_per_iter));
 
-    eprintln!(
-        "decap valid:     {valid_per_iter:.1} ns/iter"
-    );
-    eprintln!(
-        "decap malformed: {malformed_per_iter:.1} ns/iter"
-    );
+    eprintln!("decap valid:     {valid_per_iter:.1} ns/iter");
+    eprintln!("decap malformed: {malformed_per_iter:.1} ns/iter");
     eprintln!("ratio: {ratio:.4} (target: < 1.05 for the loose Python-level gate)");
 
     // The plan's 1% target is for isolated-thread Criterion benches.

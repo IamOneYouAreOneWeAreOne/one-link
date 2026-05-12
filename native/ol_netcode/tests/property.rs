@@ -58,12 +58,9 @@ fn property_recover_any_single_drop() {
             .filter(|(i, _)| *i != drop_idx)
             .map(|(_, (id, p))| (*id, p.as_slice()))
             .collect();
-        let (recovered_id, recovered_bytes) =
-            decode_coded_packet(&packet, &known).unwrap();
+        let (recovered_id, recovered_bytes) = decode_coded_packet(&packet, &known).unwrap();
         if recovered_id != chunks[drop_idx].0 || recovered_bytes != chunks[drop_idx].1 {
-            eprintln!(
-                "mismatch at degree={degree} len={len} drop_idx={drop_idx}"
-            );
+            eprintln!("mismatch at degree={degree} len={len} drop_idx={drop_idx}");
             fail += 1;
         }
     }

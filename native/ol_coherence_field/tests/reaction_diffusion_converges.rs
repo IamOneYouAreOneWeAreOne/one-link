@@ -4,9 +4,7 @@
 //! converges to the same steady-state as the direct Helmholtz solve.
 //! Both should agree to within tight numerical tolerance.
 
-use ol_coherence_field::pde::reaction_diffusion::{
-    solve_reaction_diffusion_steady, EulerConfig,
-};
+use ol_coherence_field::pde::reaction_diffusion::{solve_reaction_diffusion_steady, EulerConfig};
 use ol_coherence_field::pde::sparse_solver::CgConfig;
 use ol_coherence_field::{solve_helmholtz, GraphLaplacian};
 
@@ -26,14 +24,8 @@ fn euler_steady_state_matches_helmholtz_solve() {
     let d = 1.0;
     let gamma = 0.3;
 
-    let euler = solve_reaction_diffusion_steady(
-        &g,
-        d,
-        gamma,
-        &source,
-        EulerConfig::default(),
-    )
-    .unwrap();
+    let euler =
+        solve_reaction_diffusion_steady(&g, d, gamma, &source, EulerConfig::default()).unwrap();
     let helm = solve_helmholtz(&g, d, gamma, &source, CgConfig::default()).unwrap();
 
     // Compare elementwise.

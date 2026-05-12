@@ -5,9 +5,7 @@
 //! deterministic encoded symbols and the decoder to reconstruct the
 //! original chunk plaintext from any sufficient subset.
 
-use ol_fountain::{
-    FountainPacket, LtDecoder, LtEncoder, MAX_ENCODED_PER_CHUNK, PACKET_HEADER_LEN,
-};
+use ol_fountain::{FountainPacket, LtDecoder, LtEncoder, MAX_ENCODED_PER_CHUNK, PACKET_HEADER_LEN};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -99,17 +97,24 @@ impl PyLtDecoder {
     /// `symbol_len` bytes encoding an original of `source_length` bytes.
     #[new]
     fn new(k: u32, symbol_len: usize, source_length: usize) -> PyResult<Self> {
-        let inner = LtDecoder::new(k, symbol_len, source_length).map_err(fountain_error_to_pyerr)?;
+        let inner =
+            LtDecoder::new(k, symbol_len, source_length).map_err(fountain_error_to_pyerr)?;
         Ok(Self { inner: Some(inner) })
     }
 
     /// Ingest one encoded packet. Returns `True` if this packet
     /// completed the decode.
-    fn ingest(&mut self, py: Python<'_>, symbol_id: u32, payload: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn ingest(
+        &mut self,
+        py: Python<'_>,
+        symbol_id: u32,
+        payload: &Bound<'_, PyAny>,
+    ) -> PyResult<bool> {
         let bytes = bytes_from_buffer(py, payload)?;
-        let dec = self.inner.as_mut().ok_or_else(|| {
-            PyValueError::new_err("decoder already consumed via finish()")
-        })?;
+        let dec = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("decoder already consumed via finish()"))?;
         let r = py
             .allow_threads(|| dec.ingest(symbol_id, &bytes))
             .map_err(fountain_error_to_pyerr)?;
@@ -135,10 +140,13 @@ impl PyLtDecoder {
 
     /// Consume the decoder + return the reconstructed source bytes.
     fn finish<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let dec = self.inner.take().ok_or_else(|| {
-            PyValueError::new_err("decoder already consumed via finish()")
-        })?;
-        let bytes = py.allow_threads(|| dec.finish()).map_err(fountain_error_to_pyerr)?;
+        let dec = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("decoder already consumed via finish()"))?;
+        let bytes = py
+            .allow_threads(|| dec.finish())
+            .map_err(fountain_error_to_pyerr)?;
         Ok(PyBytes::new_bound(py, &bytes))
     }
 
@@ -193,9 +201,7 @@ fn decode_packet<'py>(
 fn bytes_from_buffer(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     let _ = py;
     let buf = PyBuffer::<u8>::get_bound(obj)?;
-    let slice = unsafe {
-        std::slice::from_raw_parts(buf.buf_ptr() as *const u8, buf.len_bytes())
-    };
+    let slice = unsafe { std::slice::from_raw_parts(buf.buf_ptr() as *const u8, buf.len_bytes()) };
     Ok(slice.to_vec())
 }
 

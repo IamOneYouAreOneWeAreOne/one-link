@@ -88,9 +88,8 @@ impl PrefetchPredictor {
                 let gap = t_ms - state.last_t_ms;
                 if gap <= MAX_CO_OCCURRENCE_GAP_MS {
                     // weight = exp(-gap * ln(2) / half_life)
-                    let kernel = (-(gap as f64) * std::f64::consts::LN_2
-                        / self.half_life_ms as f64)
-                        .exp();
+                    let kernel =
+                        (-(gap as f64) * std::f64::consts::LN_2 / self.half_life_ms as f64).exp();
                     let key = (prev, file_id);
                     *state.pairs.entry(key).or_insert(0.0) += kernel;
                 }
@@ -287,7 +286,10 @@ mod tests {
         // location to A and predict next.
         p.observe(&peer(2), file(0xA), 1000);
         let preds = p.predict_top_n(&peer(2), 1);
-        assert!(!preds.is_empty(), "Bob's cohort prior should produce a prediction");
+        assert!(
+            !preds.is_empty(),
+            "Bob's cohort prior should produce a prediction"
+        );
         assert_eq!(preds[0].file_id, file(0xB));
     }
 

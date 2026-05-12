@@ -147,7 +147,8 @@ impl TransferEngine {
         peer: &PeerFingerprint,
         chunk_id: &[u8; 32],
     ) -> Result<ChunkRecord, TransferError> {
-        self.fetch_chunk_inner(peer, chunk_id, /* flush_on_write = */ true).await
+        self.fetch_chunk_inner(peer, chunk_id, /* flush_on_write = */ true)
+            .await
     }
 
     /// Variant of [`Self::fetch_chunk`] that defers the post-write
@@ -159,7 +160,8 @@ impl TransferEngine {
         peer: &PeerFingerprint,
         chunk_id: &[u8; 32],
     ) -> Result<ChunkRecord, TransferError> {
-        self.fetch_chunk_inner(peer, chunk_id, /* flush_on_write = */ false).await
+        self.fetch_chunk_inner(peer, chunk_id, /* flush_on_write = */ false)
+            .await
     }
 
     async fn fetch_chunk_inner(
@@ -182,14 +184,18 @@ impl TransferEngine {
 
         let connection = self.connection_for(peer, &entry).await?;
 
-        let request = Frame::new(FrameKind::ChunkRequest, wire::encode_chunk_request(chunk_id))?;
+        let request = Frame::new(
+            FrameKind::ChunkRequest,
+            wire::encode_chunk_request(chunk_id),
+        )?;
         let reply = self
             .send_request_with_timeout(&connection, request, self.config.chunk_request_timeout_ms)
             .await?;
 
         match reply.kind {
             FrameKind::ChunkResponse => {
-                let (rec_kind, rec_flags, rec_payload) = wire::decode_chunk_response(&reply.payload)?;
+                let (rec_kind, rec_flags, rec_payload) =
+                    wire::decode_chunk_response(&reply.payload)?;
                 let record = ChunkRecord::decode(rec_kind, rec_flags, rec_payload)?;
                 if &record.chunk_id != chunk_id {
                     return Err(TransferError::ChunkIdMismatch {
@@ -322,21 +328,15 @@ impl TransferEngine {
         let entry = self.peer_entry(peer).await?;
         let connection = self.connection_for(peer, &entry).await?;
 
-        let mut bloom = Bloom::with_target_fp(
-            local_chunk_ids.len().max(1),
-            self.config.bloom_target_fp,
-        );
+        let mut bloom =
+            Bloom::with_target_fp(local_chunk_ids.len().max(1), self.config.bloom_target_fp);
         for cid in local_chunk_ids {
             bloom.insert(cid);
         }
         let encoded = bloom.encode()?;
         let request = Frame::new(FrameKind::BloomFilter, encoded)?;
         let reply = self
-            .send_request_with_timeout(
-                &connection,
-                request,
-                self.config.bloom_handshake_timeout_ms,
-            )
+            .send_request_with_timeout(&connection, request, self.config.bloom_handshake_timeout_ms)
             .await?;
 
         match reply.kind {
@@ -397,8 +397,8 @@ impl TransferEngine {
             .map_err(TransferError::Transport)?;
 
         // Response loop with overall timeout.
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_millis(self.config.chunk_request_timeout_ms);
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(self.config.chunk_request_timeout_ms);
         let mut decoder: Option<LtDecoder> = None;
         let mut chunk_source_len: u32 = 0;
 
@@ -424,19 +424,12 @@ impl TransferEngine {
                     }
                     let dec = decoder.get_or_insert_with(|| {
                         chunk_source_len = pkt.source_length;
-                        LtDecoder::new(
-                            pkt.k,
-                            pkt.payload.len(),
-                            pkt.source_length as usize,
-                        )
-                        .expect("packet parameters valid")
+                        LtDecoder::new(pkt.k, pkt.payload.len(), pkt.source_length as usize)
+                            .expect("packet parameters valid")
                     });
                     if dec.ingest(pkt.symbol_id, &pkt.payload)? {
                         // Decode complete; tell sender to stop.
-                        let ack = Frame::new(
-                            FrameKind::FountainAck,
-                            chunk_id.to_vec(),
-                        )?;
+                        let ack = Frame::new(FrameKind::FountainAck, chunk_id.to_vec())?;
                         write_frame(&mut send, &ack)
                             .await
                             .map_err(TransferError::Transport)?;
@@ -510,10 +503,8 @@ impl TransferEngine {
         let entry = self.peer_entry(peer).await?;
         let connection = self.connection_for(peer, &entry).await?;
 
-        let mut bloom = Bloom::with_target_fp(
-            already_have.len().max(1),
-            self.config.bloom_target_fp,
-        );
+        let mut bloom =
+            Bloom::with_target_fp(already_have.len().max(1), self.config.bloom_target_fp);
         for cid in already_have {
             bloom.insert(cid);
         }
@@ -521,11 +512,7 @@ impl TransferEngine {
         let payload = wire::encode_scoped_bloom(want_list, &bloom_bytes);
         let request = Frame::new(FrameKind::ScopedBloomFilter, payload)?;
         let reply = self
-            .send_request_with_timeout(
-                &connection,
-                request,
-                self.config.bloom_handshake_timeout_ms,
-            )
+            .send_request_with_timeout(&connection, request, self.config.bloom_handshake_timeout_ms)
             .await?;
 
         match reply.kind {
@@ -590,10 +577,7 @@ impl TransferEngine {
     /// **Durability:** the record is in the kernel page cache after this
     /// call but is **not** guaranteed to survive a crash. Caller MUST
     /// invoke `commit()` before treating the chunk as durable.
-    pub(crate) fn write_local_no_flush(
-        &self,
-        record: &ChunkRecord,
-    ) -> Result<(), TransferError> {
+    pub(crate) fn write_local_no_flush(&self, record: &ChunkRecord) -> Result<(), TransferError> {
         let mut store = self.store.write().expect("store rwlock poisoned");
         store.append_chunk(record)?;
         Ok(())
@@ -617,9 +601,12 @@ impl TransferEngine {
         peer: &PeerFingerprint,
     ) -> Result<Arc<PeerEntry>, TransferError> {
         let peers = self.peers.read().await;
-        peers.get(peer).cloned().ok_or_else(|| TransferError::PeerUnknown {
-            fingerprint_hex_prefix: hex_prefix_8(peer),
-        })
+        peers
+            .get(peer)
+            .cloned()
+            .ok_or_else(|| TransferError::PeerUnknown {
+                fingerprint_hex_prefix: hex_prefix_8(peer),
+            })
     }
 
     pub(crate) async fn connection_for(

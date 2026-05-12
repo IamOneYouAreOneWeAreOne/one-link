@@ -36,9 +36,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-pub use ol_fuse::{
-    DirEntry, EntryKind, FilesystemBackend, FsError, MemoryBackend, Stat,
-};
+pub use ol_fuse::{DirEntry, EntryKind, FilesystemBackend, FsError, MemoryBackend, Stat};
 
 /// Options the daemon passes when mounting a folder as FSKit.
 #[derive(Debug, Clone)]

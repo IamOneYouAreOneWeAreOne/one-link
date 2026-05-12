@@ -41,12 +41,9 @@ fn bench_chunk_encrypt(c: &mut Criterion) {
             };
             group.bench_function(BenchmarkId::new(label, size_kib), |b| {
                 b.iter(|| {
-                    let ct = encrypt_chunk(
-                        black_box(&cipher),
-                        black_box(&chunk_id),
-                        black_box(&buf),
-                    )
-                    .expect("encrypt");
+                    let ct =
+                        encrypt_chunk(black_box(&cipher), black_box(&chunk_id), black_box(&buf))
+                            .expect("encrypt");
                     black_box(ct);
                 });
             });
@@ -116,8 +113,7 @@ fn bench_par_encrypt(c: &mut Criterion) {
             b.iter(|| {
                 for (id, buf) in ids.iter().zip(bufs.iter()) {
                     let ct =
-                        encrypt_chunk(black_box(&cipher), black_box(id), black_box(buf))
-                            .unwrap();
+                        encrypt_chunk(black_box(&cipher), black_box(id), black_box(buf)).unwrap();
                     black_box(ct);
                 }
             });
@@ -139,5 +135,10 @@ fn bench_par_encrypt(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_chunk_encrypt, bench_chunk_decrypt, bench_par_encrypt);
+criterion_group!(
+    benches,
+    bench_chunk_encrypt,
+    bench_chunk_decrypt,
+    bench_par_encrypt
+);
 criterion_main!(benches);

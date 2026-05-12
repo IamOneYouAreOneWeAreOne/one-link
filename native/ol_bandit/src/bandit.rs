@@ -264,9 +264,18 @@ mod tests {
     #[test]
     fn rejects_invalid_reward() {
         let mut b = Bandit::new(2).unwrap();
-        assert!(matches!(b.update(0, -0.1), Err(BanditError::InvalidReward { .. })));
-        assert!(matches!(b.update(0, 1.5), Err(BanditError::InvalidReward { .. })));
-        assert!(matches!(b.update(0, f64::NAN), Err(BanditError::InvalidReward { .. })));
+        assert!(matches!(
+            b.update(0, -0.1),
+            Err(BanditError::InvalidReward { .. })
+        ));
+        assert!(matches!(
+            b.update(0, 1.5),
+            Err(BanditError::InvalidReward { .. })
+        ));
+        assert!(matches!(
+            b.update(0, f64::NAN),
+            Err(BanditError::InvalidReward { .. })
+        ));
         assert!(b.update(0, 0.0).is_ok());
         assert!(b.update(0, 1.0).is_ok());
         assert!(b.update(0, 0.5).is_ok());

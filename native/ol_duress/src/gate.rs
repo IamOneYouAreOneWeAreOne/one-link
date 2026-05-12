@@ -62,7 +62,11 @@ impl DuressGate {
     ///   signal that paired peers can verify.
     #[must_use]
     pub fn new(real_root: [u8; 32], duress_root: [u8; 32], pair_secret: [u8; 32]) -> Self {
-        Self { real_root, duress_root, pair_secret }
+        Self {
+            real_root,
+            duress_root,
+            pair_secret,
+        }
     }
 
     /// Open a volume given a presented passphrase.
@@ -124,10 +128,7 @@ impl DuressGate {
             "ol-duress-decoy-volume-v1",
             &concat(&self.duress_root, passphrase_bytes),
         );
-        let covert = blake3::derive_key(
-            "ol-duress-covert-signal-v1",
-            &self.pair_secret,
-        );
+        let covert = blake3::derive_key("ol-duress-covert-signal-v1", &self.pair_secret);
         // Constant-time compare against expected.
         let real_match = real_check.ct_eq(expected_real_check).unwrap_u8() == 1;
         let duress_match = duress_check.ct_eq(expected_duress_check).unwrap_u8() == 1;
@@ -262,8 +263,9 @@ mod tests {
         let DuressOutcome::Real(real_vol) = g.open(real_pw, &r_check, &d_check).unwrap() else {
             panic!("expected real path");
         };
-        let DuressOutcome::Duress { volume: decoy_vol, .. } =
-            g.open(duress_pw, &r_check, &d_check).unwrap()
+        let DuressOutcome::Duress {
+            volume: decoy_vol, ..
+        } = g.open(duress_pw, &r_check, &d_check).unwrap()
         else {
             panic!("expected duress path");
         };

@@ -61,10 +61,8 @@ proptest! {
 fn real_passphrase_reaches_real_path() {
     let gate = DuressGate::new([0x42u8; 32], [0xAAu8; 32], [0x77u8; 32]);
     let pw = b"my-real-passphrase";
-    let real_check = blake3::derive_key(
-        "ol-duress-real-check-v1",
-        &[&[0x42u8; 32][..], pw].concat(),
-    );
+    let real_check =
+        blake3::derive_key("ol-duress-real-check-v1", &[&[0x42u8; 32][..], pw].concat());
     let duress_check = blake3::derive_key(
         "ol-duress-decoy-check-v1",
         &[&[0xAAu8; 32][..], b"some-other-pw".as_slice()].concat(),

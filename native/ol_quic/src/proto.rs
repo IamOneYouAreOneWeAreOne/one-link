@@ -315,10 +315,7 @@ mod tests {
             FrameKind::ManifestRecord.max_payload_bytes(),
             MAX_BULK_FRAME_BYTES
         );
-        assert_eq!(
-            FrameKind::Ping.max_payload_bytes(),
-            MAX_CONTROL_FRAME_BYTES
-        );
+        assert_eq!(FrameKind::Ping.max_payload_bytes(), MAX_CONTROL_FRAME_BYTES);
     }
 
     #[test]

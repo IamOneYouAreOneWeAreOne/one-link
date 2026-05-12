@@ -30,12 +30,14 @@ fn hex32(s: &str) -> [u8; 32] {
 fn cross_platform_known_chunk_ids_encode_to_pinned_bytes() {
     // Eight chunk_ids drawn from a deterministic stream so anyone can
     // re-derive them. The first four bytes are an LE u32 counter.
-    let inputs: Vec<[u8; 32]> = (0u32..8).map(|i| {
-        let mut a = [0u8; 32];
-        a[..4].copy_from_slice(&i.to_le_bytes());
-        a[31] = 0xCD;
-        a
-    }).collect();
+    let inputs: Vec<[u8; 32]> = (0u32..8)
+        .map(|i| {
+            let mut a = [0u8; 32];
+            a[..4].copy_from_slice(&i.to_le_bytes());
+            a[31] = 0xCD;
+            a
+        })
+        .collect();
 
     // Build a filter sized for n=8 at the default 1% FP rate.
     // m_bits and k are deterministic from these parameters.
@@ -52,7 +54,11 @@ fn cross_platform_known_chunk_ids_encode_to_pinned_bytes() {
     //   m_bits = ceil(-(8 * ln(0.01)) / (ln(2)^2)) = 77
     //   bytes_for_bits = ceil(77 / 8) = 10
     //   encoded_len = 12 (header) + 10 = 22
-    assert_eq!(encoded.len(), 22, "expected 22-byte encoding for n=8, p=0.01");
+    assert_eq!(
+        encoded.len(),
+        22,
+        "expected 22-byte encoding for n=8, p=0.01"
+    );
 
     // Pin the first 8 bytes of the encoded form (the header carries
     // m_bits + k as u32 LE):
@@ -93,12 +99,14 @@ fn round_trip_pinned_filter_finds_only_inputs() {
     // bloom-rejected with high probability. We assert ≥6 of 8 random
     // outsiders are rejected (the 1% FP rate is per-query; for n=8 the
     // empirical rate is noisier).
-    let inputs: Vec<[u8; 32]> = (0u32..8).map(|i| {
-        let mut a = [0u8; 32];
-        a[..4].copy_from_slice(&i.to_le_bytes());
-        a[31] = 0xCD;
-        a
-    }).collect();
+    let inputs: Vec<[u8; 32]> = (0u32..8)
+        .map(|i| {
+            let mut a = [0u8; 32];
+            a[..4].copy_from_slice(&i.to_le_bytes());
+            a[31] = 0xCD;
+            a
+        })
+        .collect();
     let mut bloom = Bloom::new(inputs.len());
     for cid in &inputs {
         bloom.insert(cid);

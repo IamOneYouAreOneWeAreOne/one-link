@@ -78,7 +78,11 @@ pub fn solve_reaction_diffusion_steady(
         // 0.4 leaves headroom below the strict CFL boundary (2/bound)
         // so small numerical perturbations don't drive the iterate
         // unstable.
-        if bound > 0.0 { 0.4 / bound } else { 1e-3 }
+        if bound > 0.0 {
+            0.4 / bound
+        } else {
+            1e-3
+        }
     });
 
     let mut x = vec![0.0; n];
@@ -116,14 +120,8 @@ mod tests {
         let g = GraphLaplacian::new(n);
         let s = vec![1.0, 2.0, 4.0, 8.0];
         let gamma = 3.0;
-        let result = solve_reaction_diffusion_steady(
-            &g,
-            1.0,
-            gamma,
-            &s,
-            EulerConfig::default(),
-        )
-        .unwrap();
+        let result =
+            solve_reaction_diffusion_steady(&g, 1.0, gamma, &s, EulerConfig::default()).unwrap();
         for i in 0..n {
             assert!(
                 (result.field[i] - s[i] / gamma).abs() < 1e-5,

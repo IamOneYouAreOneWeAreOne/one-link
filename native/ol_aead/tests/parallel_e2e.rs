@@ -1,12 +1,11 @@
 //! End-to-end test for the parallel multi-chunk encrypt/decrypt path.
 
-use ol_aead::{
-    decrypt_chunks_par, encrypt_chunks_par, AeadCipher, AeadKind, ChunkAeadKey,
-};
+use ol_aead::{decrypt_chunks_par, encrypt_chunks_par, AeadCipher, AeadKind, ChunkAeadKey};
 
 #[test]
 fn round_trip_64_chunks_parallel() {
-    let cipher = AeadCipher::with_kind(AeadKind::AesGcm256, &ChunkAeadKey::from_bytes([0x42u8; 32]));
+    let cipher =
+        AeadCipher::with_kind(AeadKind::AesGcm256, &ChunkAeadKey::from_bytes([0x42u8; 32]));
     let mut plaintexts: Vec<Vec<u8>> = Vec::new();
     let mut chunk_ids: Vec<[u8; 32]> = Vec::new();
     for i in 0..64u32 {
@@ -14,7 +13,11 @@ fn round_trip_64_chunks_parallel() {
         id[..4].copy_from_slice(&i.to_le_bytes());
         chunk_ids.push(id);
         // 64 KiB chunk
-        plaintexts.push((0..(64 * 1024u32)).map(|j| (j.wrapping_mul(i.wrapping_add(1))) as u8).collect());
+        plaintexts.push(
+            (0..(64 * 1024u32))
+                .map(|j| (j.wrapping_mul(i.wrapping_add(1))) as u8)
+                .collect(),
+        );
     }
     let inputs: Vec<(&[u8; 32], &[u8])> = chunk_ids
         .iter()

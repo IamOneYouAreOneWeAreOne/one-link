@@ -31,11 +31,7 @@ impl PyGraph {
         self.inner.add_edge(from, to, cost);
     }
 
-    fn neighbors<'py>(
-        &self,
-        py: Python<'py>,
-        node: &str,
-    ) -> PyResult<Bound<'py, PyList>> {
+    fn neighbors<'py>(&self, py: Python<'py>, node: &str) -> PyResult<Bound<'py, PyList>> {
         let out = PyList::empty_bound(py);
         for (to, cost) in self.inner.neighbors(node) {
             out.append((to.clone(), *cost))?;

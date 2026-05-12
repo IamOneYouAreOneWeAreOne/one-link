@@ -119,7 +119,9 @@ impl FdPool {
                     }
                 }
             }
-            let path = root.join(CHUNK_LOG_DIRNAME).join(format!("{file_id:06}.wal"));
+            let path = root
+                .join(CHUNK_LOG_DIRNAME)
+                .join(format!("{file_id:06}.wal"));
             let f = File::open(&path)?;
             self.fds.insert(file_id, f);
         }
@@ -167,7 +169,8 @@ impl ChunkStore {
         // but doesn't expose per-record offsets; we re-walk the files
         // for offset reconstruction.
         let chunk_files = sorted_log_files(&chunk_dir)?;
-        let mut chunk_offsets: Vec<(u64, u64, ChunkRecord)> = Vec::with_capacity(chunk_replay.records.len());
+        let mut chunk_offsets: Vec<(u64, u64, ChunkRecord)> =
+            Vec::with_capacity(chunk_replay.records.len());
         for (file_id, path) in chunk_files {
             let bytes = std::fs::read(&path)?;
             let mut cursor: u64 = u64::from(ol_wal::FILE_HEADER_LEN);
@@ -179,9 +182,8 @@ impl ChunkStore {
                 }
                 let kind = bytes[pos];
                 let flags = bytes[pos + 1];
-                let length = u32::from_le_bytes(
-                    bytes[pos + 4..pos + 8].try_into().expect("4 bytes"),
-                );
+                let length =
+                    u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().expect("4 bytes"));
                 let total = 8 + length as usize + 4;
                 if pos + total > bytes.len() {
                     break;
@@ -369,17 +371,14 @@ impl ChunkStore {
     ///   fails to parse (would indicate corruption past the WAL CRC,
     ///   which is logically impossible; raise loudly).
     pub fn read_chunk(&self, chunk_id: &[u8; 32]) -> Result<ChunkRecord, ChunkStoreError> {
-        let location = self
-            .memtable
-            .get(chunk_id)
-            .copied()
-            .ok_or_else(|| ChunkStoreError::ChunkNotFound {
-                chunk_id_hex_prefix: hex_lower_8(&chunk_id[..8]),
-            })?;
-        let total = 8
-            + CHUNK_RECORD_HEADER_LEN
-            + location.length_ciphertext as usize
-            + 4;
+        let location =
+            self.memtable
+                .get(chunk_id)
+                .copied()
+                .ok_or_else(|| ChunkStoreError::ChunkNotFound {
+                    chunk_id_hex_prefix: hex_lower_8(&chunk_id[..8]),
+                })?;
+        let total = 8 + CHUNK_RECORD_HEADER_LEN + location.length_ciphertext as usize + 4;
         let mut buf = vec![0u8; total];
         {
             let mut pool = self
@@ -483,9 +482,7 @@ fn hex_lower_8(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk_record::{
-        ChunkAddressKind, ChunkAeadKind, ChunkRecord, ChunkRecordKind,
-    };
+    use crate::chunk_record::{ChunkAddressKind, ChunkAeadKind, ChunkRecord, ChunkRecordKind};
     use crate::manifest_record::{ManifestRecord, ManifestRecordKind};
     use crate::stripe::StripeDescriptor;
     use tempfile::tempdir;

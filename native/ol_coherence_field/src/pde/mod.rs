@@ -296,12 +296,7 @@ impl GraphLaplacian {
     /// `par_chunks_mut` over fixed-size row blocks (defaults to ~256
     /// rows per task) so the work-per-task is large enough to amortise
     /// rayon's scheduling cost.
-    pub fn matvec_par_with_threshold(
-        &self,
-        x: &[f64],
-        y: &mut [f64],
-        threshold: usize,
-    ) {
+    pub fn matvec_par_with_threshold(&self, x: &[f64], y: &mut [f64], threshold: usize) {
         debug_assert_eq!(x.len(), self.n);
         debug_assert_eq!(y.len(), self.n);
         if self.n < threshold {

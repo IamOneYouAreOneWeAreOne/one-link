@@ -54,7 +54,11 @@ impl PyPredictor {
         let p = bytes_to_32(peer, "peer")?;
         let preds = self.inner.predict_top_n(&p, n);
         let out = PyList::empty_bound(py);
-        for Prediction { file_id, confidence } in preds {
+        for Prediction {
+            file_id,
+            confidence,
+        } in preds
+        {
             let fid_py = PyBytes::new_bound(py, &file_id);
             out.append((fid_py, confidence))?;
         }

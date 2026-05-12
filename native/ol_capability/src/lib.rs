@@ -30,7 +30,7 @@ pub mod caveat;
 pub mod context;
 pub mod error;
 
-pub use capability::{Capability, RootKey, SIGNATURE_LEN, ROOT_KEY_LEN, CAP_ID_LEN};
+pub use capability::{Capability, RootKey, CAP_ID_LEN, ROOT_KEY_LEN, SIGNATURE_LEN};
 pub use caveat::Caveat;
 pub use context::Context;
 pub use error::CapError;

@@ -252,8 +252,8 @@ mod tests {
     #[test]
     fn tampered_caveat_breaks_signature() {
         let root = fixed_root();
-        let cap = Capability::root(fixed_id(), &root)
-            .attenuate(Caveat::PathPrefix("/safe".to_string()));
+        let cap =
+            Capability::root(fixed_id(), &root).attenuate(Caveat::PathPrefix("/safe".to_string()));
         // Tamper: rewrite caveat without recomputing signature.
         let mut tampered = cap.clone();
         tampered.caveats[0] = Caveat::PathPrefix("/danger".to_string());
@@ -268,7 +268,10 @@ mod tests {
         let cap = Capability::root(fixed_id(), &root)
             .attenuate(Caveat::ExpiresAt(123))
             .attenuate(Caveat::PathPrefix("/a/b".to_string()))
-            .attenuate(Caveat::OperationIn(vec!["read".to_string(), "list".to_string()]))
+            .attenuate(Caveat::OperationIn(vec![
+                "read".to_string(),
+                "list".to_string(),
+            ]))
             .attenuate(Caveat::PeerFingerprint([0x77u8; 32]))
             .attenuate(Caveat::AuditTag("share-from-alice".to_string()));
         let bytes = cap.encode();
@@ -286,8 +289,8 @@ mod tests {
     #[test]
     fn path_prefix_caveat_rejects_non_matching() {
         let root = fixed_root();
-        let cap = Capability::root(fixed_id(), &root)
-            .attenuate(Caveat::PathPrefix("/a/b".to_string()));
+        let cap =
+            Capability::root(fixed_id(), &root).attenuate(Caveat::PathPrefix("/a/b".to_string()));
         let ctx_ok = Context::new().with_path("/a/b/c");
         let ctx_bad = Context::new().with_path("/a/c");
         assert!(cap.verify(&root, &ctx_ok).is_ok());

@@ -23,9 +23,7 @@
 use thiserror::Error;
 
 use crate::pde::{
-    helmholtz_reduction::solve_helmholtz,
-    sparse_solver::CgConfig,
-    FieldError, GraphLaplacian,
+    helmholtz_reduction::solve_helmholtz, sparse_solver::CgConfig, FieldError, GraphLaplacian,
 };
 
 /// Errors the Green-function evaluator can return.
@@ -105,8 +103,7 @@ mod tests {
             g.add_edge(i, i + 1, 1.0).unwrap();
         }
         let contributions =
-            green_function(&g, 1.0, 0.5, 0, &[1, 2, 3, 4], CgConfig::default())
-                .unwrap();
+            green_function(&g, 1.0, 0.5, 0, &[1, 2, 3, 4], CgConfig::default()).unwrap();
         for w in contributions.windows(2) {
             assert!(
                 w[1] < w[0],
@@ -135,15 +132,8 @@ mod tests {
             g.add_edge(i, i + 1, 1.0).unwrap();
         }
         // Destination = 2 (middle); sources = all nodes.
-        let contributions = green_function(
-            &g,
-            1.0,
-            0.5,
-            2,
-            &[0, 1, 2, 3, 4],
-            CgConfig::default(),
-        )
-        .unwrap();
+        let contributions =
+            green_function(&g, 1.0, 0.5, 2, &[0, 1, 2, 3, 4], CgConfig::default()).unwrap();
         let self_contribution = contributions[2];
         for (i, &c) in contributions.iter().enumerate() {
             if i != 2 {

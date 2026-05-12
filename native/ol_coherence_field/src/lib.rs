@@ -60,19 +60,19 @@ pub mod source;
 pub use anchor::{apparent_horizon_anchor, screening_length, ScreeningRegime};
 pub use calibration::{Calibration, Domain};
 pub use couplings::{
-    inject_fragility_events, prefetch_priorities, rotation_cadence_multiplier,
-    FragilityEvent, PrefetchPriority, RotationCadence,
+    inject_fragility_events, prefetch_priorities, rotation_cadence_multiplier, FragilityEvent,
+    PrefetchPriority, RotationCadence,
 };
 pub use green::{green_function, GreenError};
 pub use interpolation::{be_rar, BeRarError};
 pub use pde::{
     solve_helmholtz, solve_reaction_diffusion_steady, CgConfig, CgConfigF32, CgWorkspace,
-    CgWorkspaceF32, FieldError, GraphLaplacian, HelmholtzSolver, HelmholtzSolverF32,
-    SolveResult, SolveResultF32,
+    CgWorkspaceF32, FieldError, GraphLaplacian, HelmholtzSolver, HelmholtzSolverF32, SolveResult,
+    SolveResultF32,
 };
 pub use source::{
-    align_source, alignment_scalars, identity_dual_source,
-    identity_dual_source_with_phase, linear_source, support_phase_kernel, SourceError,
+    align_source, alignment_scalars, identity_dual_source, identity_dual_source_with_phase,
+    linear_source, support_phase_kernel, SourceError,
 };
 
 /// Crate version embedded for diagnostics.

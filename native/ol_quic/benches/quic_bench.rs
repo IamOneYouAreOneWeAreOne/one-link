@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use ol_quic::{Endpoint, EndpointConfig, Frame, FrameKind, Identity, PeerFingerprint, PeerRegistry};
+use ol_quic::{
+    Endpoint, EndpointConfig, Frame, FrameKind, Identity, PeerFingerprint, PeerRegistry,
+};
 use tokio::runtime::Runtime;
 
 #[derive(Debug)]
@@ -46,12 +48,9 @@ fn bench_loopback_round_trip(c: &mut Criterion) {
                         let alice_registry = Arc::new(PairedRegistry {
                             permitted: vec![bob.fingerprint()],
                         });
-                        let server = Endpoint::server_for_identity(
-                            alice.clone(),
-                            alice_registry,
-                            cfg(),
-                        )
-                        .unwrap();
+                        let server =
+                            Endpoint::server_for_identity(alice.clone(), alice_registry, cfg())
+                                .unwrap();
                         let addr = server.local_addr().unwrap();
                         let alice_fp = alice.fingerprint();
                         let client = Endpoint::client_for_identity(bob.clone(), cfg()).unwrap();
@@ -60,11 +59,8 @@ fn bench_loopback_round_trip(c: &mut Criterion) {
                         let server_handle = tokio::spawn(async move {
                             let conn = server.accept().await.expect("incoming").unwrap();
                             for _ in 0..iters {
-                                let (mut send, mut recv) =
-                                    conn.accept_bi_stream().await.unwrap();
-                                let _req = ol_quic::transport::read_frame(&mut recv)
-                                    .await
-                                    .unwrap();
+                                let (mut send, mut recv) = conn.accept_bi_stream().await.unwrap();
+                                let _req = ol_quic::transport::read_frame(&mut recv).await.unwrap();
                                 let resp = Frame::new(
                                     FrameKind::ChunkResponse,
                                     payload_for_server.clone(),
@@ -81,18 +77,15 @@ fn bench_loopback_round_trip(c: &mut Criterion) {
                         let conn = client.connect(addr, alice_fp).await.unwrap();
                         let start = std::time::Instant::now();
                         for _ in 0..iters {
-                            let req =
-                                Frame::new(FrameKind::ChunkRequest, vec![0u8; 32]).unwrap();
+                            let req = Frame::new(FrameKind::ChunkRequest, vec![0u8; 32]).unwrap();
                             let resp = conn.send_frame_request_response(req).await.unwrap();
                             black_box(resp);
                         }
                         let elapsed = start.elapsed();
                         conn.close(0, b"ok");
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(3),
-                            server_handle,
-                        )
-                        .await;
+                        let _ =
+                            tokio::time::timeout(std::time::Duration::from_secs(3), server_handle)
+                                .await;
                         elapsed
                     })
                 });

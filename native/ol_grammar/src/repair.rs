@@ -129,9 +129,7 @@ pub fn decompress(grammar: &Grammar) -> Result<Vec<u8>, GrammarError> {
             out.push(sym as u8);
             return Ok(());
         }
-        let &(left, right) = rules
-            .get(&sym)
-            .ok_or(GrammarError::InvalidReference(sym))?;
+        let &(left, right) = rules.get(&sym).ok_or(GrammarError::InvalidReference(sym))?;
         expand(left, rules, out, depth + 1)?;
         expand(right, rules, out, depth + 1)?;
         Ok(())
@@ -218,8 +216,16 @@ mod tests {
         let g = Grammar {
             sequence: vec![0, 1, 2, 3, 4, 5],
             rules: vec![
-                Rule { lhs: 256, left: 0, right: 1 },
-                Rule { lhs: 257, left: 2, right: 3 },
+                Rule {
+                    lhs: 256,
+                    left: 0,
+                    right: 1,
+                },
+                Rule {
+                    lhs: 257,
+                    left: 2,
+                    right: 3,
+                },
             ],
         };
         assert_eq!(g.size(), 10);

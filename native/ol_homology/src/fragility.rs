@@ -166,7 +166,10 @@ mod tests {
             &[(s("a"), s("b"))],
             &holders_for(&[("a", 1), ("b", 10)]),
         );
-        assert_eq!(r.replication_priority.first().map(|x| x.as_str()), Some("a"));
+        assert_eq!(
+            r.replication_priority.first().map(|x| x.as_str()),
+            Some("a")
+        );
     }
 
     #[test]

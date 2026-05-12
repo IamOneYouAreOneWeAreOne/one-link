@@ -19,8 +19,8 @@ use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
 use ol_chunk_store::{
-    ChunkAddressKind, ChunkAeadKind, ChunkRecord, ChunkRecordKind, ChunkStore,
-    ChunkStoreError, StripeDescriptor,
+    ChunkAddressKind, ChunkAeadKind, ChunkRecord, ChunkRecordKind, ChunkStore, ChunkStoreError,
+    StripeDescriptor,
 };
 use tempfile::tempdir;
 
@@ -147,9 +147,7 @@ fn crash_injection_survives_random_truncations() {
             Ok(s) => s,
             Err(e) => {
                 replay_failures += 1;
-                eprintln!(
-                    "iter {iter}: replay failed: {e:?} (would be FATAL in production)"
-                );
+                eprintln!("iter {iter}: replay failed: {e:?} (would be FATAL in production)");
                 continue;
             }
         };

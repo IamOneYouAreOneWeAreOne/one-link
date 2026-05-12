@@ -4,9 +4,7 @@
 //! truncated content — must either yield a list of offsets or pass
 //! through without crashing. The walker MUST NOT panic.
 
-use ol_chunk::{
-    detect_format, scan_format_aware, zip_lfh_offsets, CdcParams, ContainerFormat,
-};
+use ol_chunk::{detect_format, scan_format_aware, zip_lfh_offsets, CdcParams, ContainerFormat};
 use proptest::prelude::*;
 
 proptest! {

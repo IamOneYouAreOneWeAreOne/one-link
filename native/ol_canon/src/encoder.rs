@@ -35,7 +35,11 @@ impl CanonEncoder {
     /// otherwise drive unbounded allocation.
     #[must_use]
     pub fn with_limit(max_size: usize) -> Self {
-        let cap = if max_size == 0 { 256 } else { max_size.min(256) };
+        let cap = if max_size == 0 {
+            256
+        } else {
+            max_size.min(256)
+        };
         Self {
             buffer: Vec::with_capacity(cap),
             max_size,
@@ -169,7 +173,9 @@ impl CanonEncoder {
     /// `field_count` values in source-declaration order immediately
     /// after.
     pub fn encode_struct_header(
-        &mut self, type_id: u32, field_count: usize,
+        &mut self,
+        type_id: u32,
+        field_count: usize,
     ) -> Result<(), EncodeError> {
         self.reserve(1 + 10 + 10)?;
         self.buffer.push(TypeTag::Struct.to_byte());
@@ -180,9 +186,7 @@ impl CanonEncoder {
 
     /// Emit an enum variant header (type-id + variant-id). Caller
     /// writes the payload (if any) immediately after.
-    pub fn encode_enum_header(
-        &mut self, type_id: u32, variant: u32,
-    ) -> Result<(), EncodeError> {
+    pub fn encode_enum_header(&mut self, type_id: u32, variant: u32) -> Result<(), EncodeError> {
         self.reserve(1 + 10 + 10)?;
         self.buffer.push(TypeTag::Enum.to_byte());
         encode_varint(u64::from(type_id), &mut self.buffer);
@@ -220,9 +224,7 @@ impl CanonEncoder {
     /// Encode a vector clock from a pre-sorted `(node_id, counter)`
     /// iterator. Callers MUST sort by `node_id` for canonical output;
     /// the encoder writes entries in iteration order.
-    pub fn encode_vector_clock(
-        &mut self, entries: &[(Vec<u8>, u64)],
-    ) -> Result<(), EncodeError> {
+    pub fn encode_vector_clock(&mut self, entries: &[(Vec<u8>, u64)]) -> Result<(), EncodeError> {
         self.reserve(1 + 10)?;
         self.buffer.push(TypeTag::VectorClock.to_byte());
         encode_varint(entries.len() as u64, &mut self.buffer);
@@ -236,7 +238,10 @@ impl CanonEncoder {
     /// Encode an HLC timestamp (wall-time micros, logical counter,
     /// node id).
     pub fn encode_hlc(
-        &mut self, wall_time: i64, logical: u32, node_id: &[u8],
+        &mut self,
+        wall_time: i64,
+        logical: u32,
+        node_id: &[u8],
     ) -> Result<(), EncodeError> {
         self.reserve(1 + 10 + 10 + 10 + node_id.len())?;
         self.buffer.push(TypeTag::HLC.to_byte());

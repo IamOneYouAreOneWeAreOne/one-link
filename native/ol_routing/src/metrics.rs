@@ -59,11 +59,7 @@ pub fn prefer_first(cost_a: f64, cost_b: f64) -> bool {
 /// midpoint. Typical `hysteresis_factor` is 0.9 (require 10%
 /// improvement to swap).
 #[must_use]
-pub fn should_swap_hop(
-    current_cost: f64,
-    candidate_cost: f64,
-    hysteresis_factor: f64,
-) -> bool {
+pub fn should_swap_hop(current_cost: f64, candidate_cost: f64, hysteresis_factor: f64) -> bool {
     candidate_cost < current_cost * hysteresis_factor
 }
 

@@ -92,14 +92,23 @@ fn tau_field_routing_reduces_chunks_lost_on_partition_by_at_least_20_percent() {
     let naive_lost = count_chunks_lost(&naive_path, n_chunks, lossy_drop_rate);
     let tau_lost = count_chunks_lost(&tau_path, n_chunks, lossy_drop_rate);
 
-    eprintln!("naive path: {:?} → lost {} / {} chunks", naive_path, naive_lost, n_chunks);
-    eprintln!("tau path:   {:?} → lost {} / {} chunks", tau_path, tau_lost, n_chunks);
+    eprintln!(
+        "naive path: {:?} → lost {} / {} chunks",
+        naive_path, naive_lost, n_chunks
+    );
+    eprintln!(
+        "tau path:   {:?} → lost {} / {} chunks",
+        tau_path, tau_lost, n_chunks
+    );
 
     assert!(
         naive_lost > 0,
         "naive shortest-path should pick the fragile route + lose chunks"
     );
-    assert_eq!(tau_lost, 0, "tau_field routing should avoid the lossy edge entirely");
+    assert_eq!(
+        tau_lost, 0,
+        "tau_field routing should avoid the lossy edge entirely"
+    );
 
     let reduction = if naive_lost == 0 {
         0.0

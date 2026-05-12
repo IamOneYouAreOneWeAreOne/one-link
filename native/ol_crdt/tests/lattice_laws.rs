@@ -46,16 +46,14 @@ fn random_folder(state: &mut u64, bucket: u8) -> Folder {
     let replicas: Vec<ReplicaId> = (0..3)
         .map(|i| ReplicaId(random_id(state, i as u8)))
         .collect();
-    let file_ids: Vec<[u8; 32]> = (0..6)
-        .map(|i| random_id(state, 0x80 | i as u8))
-        .collect();
+    let file_ids: Vec<[u8; 32]> = (0..6).map(|i| random_id(state, 0x80 | i as u8)).collect();
 
     let n_ops = (next_rng(state) % 8) + 1;
     for _ in 0..n_ops {
         let r = &replicas[(next_rng(state) as usize) % replicas.len()];
         let fid = file_ids[(next_rng(state) as usize) % file_ids.len()];
         let action = match bucket {
-            0 => 0, // pure adds
+            0 => 0,                   // pure adds
             1 => next_rng(state) % 2, // add or remove
             2 => next_rng(state) % 3, // add / remove / re-add
             _ => next_rng(state) % 4, // also rename battles
@@ -185,8 +183,5 @@ fn folder_merge_laws() {
         assoc_fail, 0,
         "associativity violations across {iters} iters"
     );
-    assert_eq!(
-        idem_fail, 0,
-        "idempotency violations across {iters} iters"
-    );
+    assert_eq!(idem_fail, 0, "idempotency violations across {iters} iters");
 }

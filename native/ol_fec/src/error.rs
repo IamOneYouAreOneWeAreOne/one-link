@@ -25,7 +25,9 @@ pub enum FecError {
     },
 
     /// Data shards are not all the same length.
-    #[error("data shards must be equal-length; got at least one length={len} differing from {expected}")]
+    #[error(
+        "data shards must be equal-length; got at least one length={len} differing from {expected}"
+    )]
     InconsistentShardLen {
         /// First shard's length (the reference).
         expected: usize,

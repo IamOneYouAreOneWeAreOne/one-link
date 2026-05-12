@@ -136,9 +136,7 @@ mod tests {
         // are "the kernel mount couldn't happen" — assert the negative.
         match err {
             MountError::UnsupportedPlatform | MountError::Backend(_) => {}
-            other => panic!(
-                "expected UnsupportedPlatform or Backend, got {other:?}"
-            ),
+            other => panic!("expected UnsupportedPlatform or Backend, got {other:?}"),
         }
     }
 

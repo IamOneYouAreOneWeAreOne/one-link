@@ -77,5 +77,11 @@ fn bench_write(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_getattr, bench_read, bench_readdir, bench_write);
+criterion_group!(
+    benches,
+    bench_getattr,
+    bench_read,
+    bench_readdir,
+    bench_write
+);
 criterion_main!(benches);

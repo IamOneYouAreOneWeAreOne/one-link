@@ -67,10 +67,7 @@ fn adr0016_rs_10_4_survives_any_4_erasure_across_10k_seeds() {
         let decoded = codec.decode(&present).expect("decode");
         if decoded != data {
             failures += 1;
-            eprintln!(
-                "seed {seed}: dropped={:?}, decoded mismatch",
-                dropped
-            );
+            eprintln!("seed {seed}: dropped={:?}, decoded mismatch", dropped);
         }
     }
     assert_eq!(failures, 0, "Phase C gate: failed {failures}/{SEEDS}");

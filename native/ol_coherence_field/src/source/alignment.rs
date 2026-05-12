@@ -69,8 +69,7 @@ pub fn alignment_scalars(flux: &[f64]) -> Vec<f64> {
         return Vec::new();
     }
     let mean: f64 = flux.iter().sum::<f64>() / n as f64;
-    let variance: f64 =
-        flux.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / n as f64;
+    let variance: f64 = flux.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / n as f64;
     let std_dev = variance.sqrt().max(1e-9);
     flux.iter()
         .map(|&v| {

@@ -21,7 +21,8 @@ fn bench_primitive_encode(c: &mut Criterion) {
     c.bench_function("encode_string_short", |b| {
         b.iter(|| {
             let mut e = CanonEncoder::new();
-            e.encode_string(black_box("hello, canonical world")).unwrap();
+            e.encode_string(black_box("hello, canonical world"))
+                .unwrap();
             black_box(e.finish());
         });
     });

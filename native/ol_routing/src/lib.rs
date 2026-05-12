@@ -47,9 +47,7 @@ pub use byzantine::{
     tau_claim_corroborated,
 };
 pub use dijkstra::{shortest_path, AdjacencyGraph, NodeId, PathResult};
-pub use metrics::{
-    edge_cost, edge_weight, loss_penalty, prefer_first, should_swap_hop,
-};
+pub use metrics::{edge_cost, edge_weight, loss_penalty, prefer_first, should_swap_hop};
 
 /// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

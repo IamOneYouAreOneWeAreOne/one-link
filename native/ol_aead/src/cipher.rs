@@ -244,7 +244,10 @@ mod tests {
         // Most CI x86 hosts have AES-NI. ARM64 + AES too. Other archs
         // would prefer ChaCha20.
         let kind = AeadKind::default_for_host();
-        assert!(matches!(kind, AeadKind::AesGcm256 | AeadKind::ChaCha20Poly1305));
+        assert!(matches!(
+            kind,
+            AeadKind::AesGcm256 | AeadKind::ChaCha20Poly1305
+        ));
     }
 
     #[test]
@@ -257,7 +260,9 @@ mod tests {
         let mut buf = plaintext.clone();
         let tag = cipher.encrypt_in_place(&nonce, &aad, &mut buf).unwrap();
         // Decrypt
-        cipher.decrypt_in_place(&nonce, &aad, &mut buf, &tag).unwrap();
+        cipher
+            .decrypt_in_place(&nonce, &aad, &mut buf, &tag)
+            .unwrap();
         assert_eq!(buf, plaintext);
     }
 
@@ -270,7 +275,9 @@ mod tests {
         let plaintext = b"hello, ChaCha20-Poly1305".to_vec();
         let mut buf = plaintext.clone();
         let tag = cipher.encrypt_in_place(&nonce, &aad, &mut buf).unwrap();
-        cipher.decrypt_in_place(&nonce, &aad, &mut buf, &tag).unwrap();
+        cipher
+            .decrypt_in_place(&nonce, &aad, &mut buf, &tag)
+            .unwrap();
         assert_eq!(buf, plaintext);
     }
 
@@ -341,7 +348,9 @@ mod tests {
         let aes = AeadCipher::with_kind(AeadKind::AesGcm256, &key);
         let chacha = AeadCipher::with_kind(AeadKind::ChaCha20Poly1305, &key);
         let _ = aes.encrypt_in_place(&nonce, &aad, &mut buf_aes).unwrap();
-        let _ = chacha.encrypt_in_place(&nonce, &aad, &mut buf_chacha).unwrap();
+        let _ = chacha
+            .encrypt_in_place(&nonce, &aad, &mut buf_chacha)
+            .unwrap();
         assert_ne!(buf_aes, buf_chacha);
     }
 

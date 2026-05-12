@@ -121,7 +121,10 @@ pub fn write_header<W: Write>(mut w: W, kind: LogKind) -> Result<(), WalError> {
 /// - [`WalError::UnsupportedVersion`] if the format version is in the
 ///   future.
 /// - [`WalError::InvalidHeaderReserved`] if the reserved bytes are not zero.
-pub fn parse_header(header: &[u8; FILE_HEADER_LEN as usize], path_for_diag: &str) -> Result<LogKind, WalError> {
+pub fn parse_header(
+    header: &[u8; FILE_HEADER_LEN as usize],
+    path_for_diag: &str,
+) -> Result<LogKind, WalError> {
     let mut magic = [0u8; 8];
     magic.copy_from_slice(&header[..8]);
     let kind = LogKind::from_magic(&magic).ok_or_else(|| WalError::MagicMismatch {
@@ -221,7 +224,10 @@ mod tests {
         header.copy_from_slice(&buf);
         header[20] = 0x01;
         let result = parse_header(&header, "test");
-        assert!(matches!(result, Err(WalError::InvalidHeaderReserved { .. })));
+        assert!(matches!(
+            result,
+            Err(WalError::InvalidHeaderReserved { .. })
+        ));
     }
 
     #[test]

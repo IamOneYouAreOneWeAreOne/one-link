@@ -86,7 +86,10 @@ impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Endpoint")
             .field("local_addr", &self.inner.local_addr().ok())
-            .field("identity_fingerprint", &hex_lower(&self.identity.fingerprint()))
+            .field(
+                "identity_fingerprint",
+                &hex_lower(&self.identity.fingerprint()),
+            )
             .finish()
     }
 }
@@ -241,10 +244,7 @@ impl Connection {
     ///
     /// This is the canonical pattern for `ChunkRequest`/`ChunkResponse`,
     /// `BloomFilter`/`MissingChunks`, etc.
-    pub async fn send_frame_request_response(
-        &self,
-        request: Frame,
-    ) -> Result<Frame, QuicError> {
+    pub async fn send_frame_request_response(&self, request: Frame) -> Result<Frame, QuicError> {
         let (mut send, mut recv) = self.inner.open_bi().await?;
         write_frame(&mut send, &request).await?;
         send.finish()?;
@@ -286,12 +286,11 @@ impl Connection {
 
 /// Write a frame to a `quinn::SendStream`. Caller is responsible for
 /// closing the stream (e.g. via `send.finish()`).
-pub async fn write_frame(
-    send: &mut quinn::SendStream,
-    frame: &Frame,
-) -> Result<(), QuicError> {
+pub async fn write_frame(send: &mut quinn::SendStream, frame: &Frame) -> Result<(), QuicError> {
     let bytes = frame.encode();
-    send.write_all(&bytes).await.map_err(QuicError::StreamWrite)?;
+    send.write_all(&bytes)
+        .await
+        .map_err(QuicError::StreamWrite)?;
     Ok(())
 }
 

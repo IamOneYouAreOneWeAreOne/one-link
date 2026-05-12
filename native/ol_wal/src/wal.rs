@@ -25,9 +25,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::error::WalError;
-use crate::file::{
-    parse_header, write_header, LogKind, FILE_HEADER_LEN, ROTATION_SIZE,
-};
+use crate::file::{parse_header, write_header, LogKind, FILE_HEADER_LEN, ROTATION_SIZE};
 use crate::record::Record;
 
 /// WAL writer handle.
@@ -181,12 +179,12 @@ impl Wal {
             use fs2::FileExt;
             let _ = &self.file;
             self.file.sync_data()?; // file.sync_all() also OK; sync_data is faster.
-            // Note: `fs2` does not currently expose F_FULLFSYNC directly
-            // on stable; we rely on `sync_data` mapping to fcntl(F_FULLFSYNC)
-            // when the file was opened with `fcntl(F_FULLFSYNC)`. On macOS,
-            // `sync_data` defaults to fsync — to truly hit the platter we
-            // open the file with `F_FULLFSYNC` set; for now `sync_data`
-            // is the closest portable surface.
+                                    // Note: `fs2` does not currently expose F_FULLFSYNC directly
+                                    // on stable; we rely on `sync_data` mapping to fcntl(F_FULLFSYNC)
+                                    // when the file was opened with `fcntl(F_FULLFSYNC)`. On macOS,
+                                    // `sync_data` defaults to fsync — to truly hit the platter we
+                                    // open the file with `F_FULLFSYNC` set; for now `sync_data`
+                                    // is the closest portable surface.
         }
         #[cfg(not(target_os = "macos"))]
         {

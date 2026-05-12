@@ -40,7 +40,9 @@ fn arb_ring_with_chords() -> impl Strategy<Value = GraphLaplacian> {
         // Pseudo-random chords driven by the seed.
         let mut s = seed.wrapping_mul(0x9E37_79B9);
         for i in 0..n {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             if (s >> 56) < 64 {
                 let j = ((s >> 32) as usize) % n;
                 if i != j {

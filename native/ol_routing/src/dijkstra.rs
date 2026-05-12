@@ -36,7 +36,10 @@ impl AdjacencyGraph {
     /// Add a directed edge `from -> to` with the given cost. Call
     /// twice (a→b and b→a) for an undirected link.
     pub fn add_edge(&mut self, from: impl Into<NodeId>, to: impl Into<NodeId>, cost: f64) {
-        self.edges.entry(from.into()).or_default().push((to.into(), cost));
+        self.edges
+            .entry(from.into())
+            .or_default()
+            .push((to.into(), cost));
     }
 
     /// All neighbors of `node`, if any.
@@ -125,7 +128,10 @@ pub fn shortest_path(
                 cur = p;
             }
             path.reverse();
-            return Ok(PathResult { path, total_cost: cost });
+            return Ok(PathResult {
+                path,
+                total_cost: cost,
+            });
         }
         // Stale entry — we already found a better path to `node`.
         if cost > *dist.get(&node).unwrap_or(&f64::INFINITY) {
@@ -165,7 +171,10 @@ mod tests {
     fn shortest_path_picks_two_hop_when_cheaper() {
         let g = simple_graph();
         let r = shortest_path(&g, "A", "C").unwrap();
-        assert_eq!(r.path, vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+        assert_eq!(
+            r.path,
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
         assert!((r.total_cost - 2.0).abs() < 1e-9);
     }
 

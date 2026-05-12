@@ -36,7 +36,11 @@
 //! `fuser` wiring lands as a focused PR against this crate without
 //! changing the surface.
 
-#![forbid(unsafe_code)]
+// `deny` (not `forbid`) so the one place that calls libc::getuid /
+// getgid in the FUSE adapter can locally lift it with
+// #[allow(unsafe_code)]. Every other module stays unsafe-free; the
+// crate-level intent (no unsafe by default) is preserved.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 mod backend;
@@ -45,9 +49,7 @@ mod mount;
 #[cfg(all(target_os = "linux", feature = "linux-mount"))]
 mod adapter;
 
-pub use backend::{
-    DirEntry, EntryKind, FilesystemBackend, FsError, MemoryBackend, Stat,
-};
+pub use backend::{DirEntry, EntryKind, FilesystemBackend, FsError, MemoryBackend, Stat};
 pub use mount::{mount, MountError, MountOptions};
 
 /// Crate version embedded for diagnostics.

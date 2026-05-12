@@ -35,9 +35,7 @@ fn adr0017_hybrid_round_trip_10k_seeds() {
         failures, 0,
         "Phase C gate: ADR-0017 hybrid KEM failed {failures}/{SEEDS} round trips"
     );
-    eprintln!(
-        "ADR-0017 acceptance: PASSED {SEEDS}/{SEEDS} hybrid KEM encap/decap round trips"
-    );
+    eprintln!("ADR-0017 acceptance: PASSED {SEEDS}/{SEEDS} hybrid KEM encap/decap round trips");
 }
 
 #[test]

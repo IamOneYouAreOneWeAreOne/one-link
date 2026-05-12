@@ -6,10 +6,12 @@ use ol_homology::{components_of, fragility_score};
 use proptest::prelude::*;
 
 /// A small graph generator: 1-8 nodes with random edges.
-fn small_graph()
-    -> impl Strategy<Value = (Vec<String>, Vec<(String, String)>)> {
-    (1usize..8usize, proptest::collection::vec((0usize..8, 0usize..8), 0..16)).prop_map(
-        |(n_nodes, edge_seeds)| {
+fn small_graph() -> impl Strategy<Value = (Vec<String>, Vec<(String, String)>)> {
+    (
+        1usize..8usize,
+        proptest::collection::vec((0usize..8, 0usize..8), 0..16),
+    )
+        .prop_map(|(n_nodes, edge_seeds)| {
             let nodes: Vec<String> = (0..n_nodes).map(|i| format!("n{}", i)).collect();
             let edges: Vec<(String, String)> = edge_seeds
                 .into_iter()
@@ -17,8 +19,7 @@ fn small_graph()
                 .map(|(a, b)| (nodes[a].clone(), nodes[b].clone()))
                 .collect();
             (nodes, edges)
-        },
-    )
+        })
 }
 
 proptest! {

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""File engine v2 — benchmark regression gate.
+"""File engine v2 benchmark regression gate.
 
 Compares a fresh ``perf_lab_native --json`` output against a baseline JSON
 committed at ``bench_baselines/native_chunk.json``. Fails if any baseline
-metric regresses by more than the threshold (default 5%).
+metric regresses by more than the threshold, default 5%.
 
-The gate is intentionally one-way: regressions fail the PR; *improvements*
-are silent. To accept a regression, a maintainer updates the baseline in
-the same PR with a justification commit message. There is no auto-update
-path.
+The gate is intentionally one-way: regressions fail the PR; improvements are
+silent. To accept a regression, a maintainer updates the baseline in the same
+PR with a justification commit message. There is no auto-update path.
 """
 
 from __future__ import annotations
@@ -20,11 +19,21 @@ from pathlib import Path
 
 
 def _index_results(payload: dict) -> dict[str, float]:
-    """Index ``perf_lab_native --json`` output by benchmark name → bytes_per_second_median."""
+    """Index benchmark name to bytes_per_second_median."""
     out: dict[str, float] = {}
     for r in payload.get("results", []):
         out[r["name"]] = float(r["bytes_per_second_median"])
     return out
+
+
+def _read_json(path: Path) -> dict:
+    # PowerShell redirection can write UTF-16LE with a BOM on Windows, while CI
+    # shell redirection normally writes UTF-8. Accept both so the gate measures
+    # performance instead of failing on host console encoding.
+    raw = path.read_bytes()
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        return json.loads(raw.decode("utf-16"))
+    return json.loads(raw.decode("utf-8-sig"))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,8 +55,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAIL: results file missing: {results_path}", file=sys.stderr)
         return 2
     if not baseline_path.is_file():
-        # First-run shortcut: no baseline yet → emit the fresh results as the
-        # baseline candidate and EXIT NEUTRAL. The maintainer commits this.
         print(
             f"NEUTRAL: baseline file missing ({baseline_path}); commit current "
             f"results as the initial baseline.",
@@ -55,8 +62,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    fresh = _index_results(json.loads(results_path.read_text(encoding="utf-8")))
-    baseline = _index_results(json.loads(baseline_path.read_text(encoding="utf-8")))
+    fresh = _index_results(_read_json(results_path))
+    baseline = _index_results(_read_json(baseline_path))
 
     if not baseline:
         print(f"FAIL: baseline empty: {baseline_path}", file=sys.stderr)
@@ -73,21 +80,20 @@ def main(argv: list[str] | None = None) -> int:
             )
             continue
         if base_bps <= 0:
-            # Pathological baseline; cannot compute a ratio.
             continue
         ratio = fresh_bps / base_bps
         if ratio < (1.0 - threshold):
             regress_pct = (1.0 - ratio) * 100.0
             failures.append(
                 f"  - {name}: regressed {regress_pct:.2f}% "
-                f"({base_bps / 1e6:.2f} MB/s → {fresh_bps / 1e6:.2f} MB/s)"
+                f"({base_bps / 1e6:.2f} MB/s -> {fresh_bps / 1e6:.2f} MB/s)"
             )
         else:
             delta_pct = (ratio - 1.0) * 100.0
             sign = "+" if delta_pct >= 0 else ""
             print(
                 f"  ok {name}: {sign}{delta_pct:.2f}% "
-                f"({base_bps / 1e6:.2f} MB/s → {fresh_bps / 1e6:.2f} MB/s)"
+                f"({base_bps / 1e6:.2f} MB/s -> {fresh_bps / 1e6:.2f} MB/s)"
             )
 
     if failures:

@@ -294,13 +294,21 @@ fn reference_encoder_canonical_le_layout() {
     let fields = vec![
         ("a".to_string(), FieldType::U8, vec![0x42]),
         ("b".to_string(), FieldType::U16, vec![0x34, 0x12]), // 0x1234 LE
-        ("c".to_string(), FieldType::U32, vec![0x78, 0x56, 0x34, 0x12]), // 0x12345678 LE
+        (
+            "c".to_string(),
+            FieldType::U32,
+            vec![0x78, 0x56, 0x34, 0x12],
+        ), // 0x12345678 LE
         (
             "d".to_string(),
             FieldType::U64,
             vec![0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01],
         ),
-        ("e".to_string(), FieldType::ByteArray(4), vec![0xAA, 0xBB, 0xCC, 0xDD]),
+        (
+            "e".to_string(),
+            FieldType::ByteArray(4),
+            vec![0xAA, 0xBB, 0xCC, 0xDD],
+        ),
         ("f".to_string(), FieldType::String, b"hi".to_vec()),
     ];
     let bytes = reference_encode(&fields);

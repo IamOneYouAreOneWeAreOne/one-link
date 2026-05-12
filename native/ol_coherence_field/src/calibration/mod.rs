@@ -78,12 +78,10 @@ impl Calibration {
     /// Derived: apparent-horizon anchor `g_A`.
     #[must_use]
     pub fn apparent_horizon_anchor(&self) -> Option<f64> {
-        crate::anchor::apparent_horizon_anchor(
-            crate::anchor::ApparentHorizonInputs {
-                c_wire: self.c_propagation,
-                h_swarm: self.h_0_equivalent,
-            },
-        )
+        crate::anchor::apparent_horizon_anchor(crate::anchor::ApparentHorizonInputs {
+            c_wire: self.c_propagation,
+            h_swarm: self.h_0_equivalent,
+        })
     }
 }
 

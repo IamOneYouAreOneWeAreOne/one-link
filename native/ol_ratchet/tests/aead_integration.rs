@@ -57,11 +57,14 @@ fn ratchet_per_chunk_round_trip_100_chunks() {
 
         // Receiver side: mirror the chain.
         let recv_mk = receiver_chain.next_message_key();
-        assert_eq!(*recv_mk, *mk, "sender + receiver chains diverged at step {step}");
+        assert_eq!(
+            *recv_mk, *mk,
+            "sender + receiver chains diverged at step {step}"
+        );
         let recv_aead_key = mk_to_aead_key(&recv_mk);
         let recv_cipher = AeadCipher::with_kind(AeadKind::AesGcm256, &recv_aead_key);
-        let decrypted = decrypt_chunk(&recv_cipher, &chunk_id, plaintext.len(), &ciphertext)
-            .expect("decrypt");
+        let decrypted =
+            decrypt_chunk(&recv_cipher, &chunk_id, plaintext.len(), &ciphertext).expect("decrypt");
         assert_eq!(decrypted, plaintext);
     }
 
@@ -106,8 +109,7 @@ fn ratchet_handles_reordered_delivery_via_skipped_keys() {
                 // The key we actually want — use it directly.
                 let aead_key = mk_to_aead_key(&mk);
                 let cipher = AeadCipher::with_kind(AeadKind::AesGcm256, &aead_key);
-                let decrypted =
-                    decrypt_chunk(&cipher, chunk_id, pt.len(), ct).expect("decrypt");
+                let decrypted = decrypt_chunk(&cipher, chunk_id, pt.len(), ct).expect("decrypt");
                 assert_eq!(decrypted, *pt);
             } else {
                 skipped.insert(cur_step, mk).unwrap();

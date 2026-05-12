@@ -78,10 +78,7 @@ impl PyFragilityScore {
 /// Compute union-find connected components of a chunk-co-hold graph.
 #[pyfunction]
 #[pyo3(name = "components_of")]
-fn py_components_of(
-    nodes: Vec<String>,
-    edges: Vec<(String, String)>,
-) -> PyComponentReport {
+fn py_components_of(nodes: Vec<String>, edges: Vec<(String, String)>) -> PyComponentReport {
     components_of(&nodes, &edges).into()
 }
 

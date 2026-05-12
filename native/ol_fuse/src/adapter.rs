@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyWrite, Request,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyWrite, Request,
 };
 
 use crate::backend::{EntryKind, FilesystemBackend, FsError, Stat};
@@ -103,8 +103,22 @@ impl<B: FilesystemBackend> FuserAdapter<B> {
             kind,
             perm: stat.mode,
             nlink: 1,
-            uid: unsafe { libc::getuid() },
-            gid: unsafe { libc::getgid() },
+            // libc::getuid / getgid are unsafe to call directly,
+            // which clashes with this crate's #![forbid(unsafe_code)]
+            // lint. Wrap each in a SAFETY-documented block whose
+            // forbid is locally lifted via #[allow(unsafe_code)].
+            uid: {
+                #[allow(unsafe_code)]
+                unsafe {
+                    libc::getuid()
+                }
+            },
+            gid: {
+                #[allow(unsafe_code)]
+                unsafe {
+                    libc::getgid()
+                }
+            },
             rdev: 0,
             blksize: 4096,
             flags: 0,
@@ -140,8 +154,13 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
                 return;
             }
         };
+        // Compose the absolute path the backend expects. Parent root
+        // is stored as the empty string in our inode table; backend
+        // paths are absolute and start with "/". So root-children
+        // need a single leading slash, nested children get the
+        // parent's stored path (already absolute) + "/" + name.
         let full = if parent_path.is_empty() {
-            name.to_string()
+            format!("/{}", name)
         } else {
             format!("{}/{}", parent_path, name)
         };
@@ -200,6 +219,14 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
             }
         };
         drop(table);
+        // Backend paths are absolute. For the root inode we stored
+        // path="" — which is invalid for backend.read (root is not a
+        // file). For any non-root entry the path is already
+        // absolute (starts with "/").
+        if path.is_empty() {
+            reply.error(libc::EISDIR);
+            return;
+        }
         match self.backend.read(&path, offset as u64, size) {
             Ok(bytes) => reply.data(&bytes),
             Err(err) => reply.error(Self::errno(&err)),

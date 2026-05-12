@@ -47,8 +47,13 @@ fn ratchet_10000_chunk_stream_aead_round_trip() {
         assert_eq!(*recv_mk, *mk);
         let recv_key = mk_to_aead_key(&recv_mk);
         let recv_cipher = AeadCipher::with_kind(AeadKind::AesGcm256, &recv_key);
-        let recovered =
-            decrypt_chunk(&recv_cipher, &chunk_id, plaintext_template.len(), &ciphertext).unwrap();
+        let recovered = decrypt_chunk(
+            &recv_cipher,
+            &chunk_id,
+            plaintext_template.len(),
+            &ciphertext,
+        )
+        .unwrap();
         assert_eq!(recovered, plaintext_template);
     }
     let elapsed = start.elapsed();

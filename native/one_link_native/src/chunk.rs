@@ -131,8 +131,7 @@ pub fn cdc_iter(py: Python<'_>, buf: PyBuffer<u8>) -> PyResult<PyBoundaryIterato
     // protocol's pin is independent of GIL state — the Python object
     // cannot be deallocated while a buffer view is held. The slice we
     // form here is valid for the entirety of the scan.
-    let bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(buf.buf_ptr().cast::<u8>(), len) };
+    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(buf.buf_ptr().cast::<u8>(), len) };
 
     let boundaries: Vec<PyBoundary> = py.allow_threads(|| {
         scan_to_vec_parallel(bytes)

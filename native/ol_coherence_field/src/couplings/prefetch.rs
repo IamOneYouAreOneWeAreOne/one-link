@@ -88,7 +88,11 @@ pub fn prefetch_priorities(
             }
         })
         .collect();
-    priorities.sort_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap_or(std::cmp::Ordering::Equal));
+    priorities.sort_by(|a, b| {
+        a.cost
+            .partial_cmp(&b.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     priorities
 }
 

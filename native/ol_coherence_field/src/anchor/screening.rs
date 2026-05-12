@@ -88,20 +88,11 @@ mod tests {
     #[test]
     fn regime_classification() {
         // Big screening length, small graph → Poisson.
-        assert_eq!(
-            classify_regime(1_000.0, 10.0),
-            ScreeningRegime::Poisson
-        );
+        assert_eq!(classify_regime(1_000.0, 10.0), ScreeningRegime::Poisson);
         // Comparable → Helmholtz.
-        assert_eq!(
-            classify_regime(20.0, 10.0),
-            ScreeningRegime::Helmholtz
-        );
+        assert_eq!(classify_regime(20.0, 10.0), ScreeningRegime::Helmholtz);
         // Tiny screening, big graph → Yukawa.
-        assert_eq!(
-            classify_regime(1.0, 100.0),
-            ScreeningRegime::Yukawa
-        );
+        assert_eq!(classify_regime(1.0, 100.0), ScreeningRegime::Yukawa);
     }
 
     #[test]
@@ -110,10 +101,7 @@ mod tests {
         // ≈ 30 kpc. Ratio is enormous → Poisson regime, matching the
         // S_One galaxy derivation.
         let ell_gpc = 4_400.0; // Mpc
-        let r_galaxy = 0.030;  // Mpc (30 kpc)
-        assert_eq!(
-            classify_regime(ell_gpc, r_galaxy),
-            ScreeningRegime::Poisson
-        );
+        let r_galaxy = 0.030; // Mpc (30 kpc)
+        assert_eq!(classify_regime(ell_gpc, r_galaxy), ScreeningRegime::Poisson);
     }
 }

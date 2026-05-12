@@ -67,7 +67,11 @@ struct Fixture {
     chunk_ids: Vec<[u8; 32]>,
 }
 
-async fn setup_pair(rt_handle: &tokio::runtime::Handle, num_chunks: u32, chunk_size: u32) -> Fixture {
+async fn setup_pair(
+    rt_handle: &tokio::runtime::Handle,
+    num_chunks: u32,
+    chunk_size: u32,
+) -> Fixture {
     let alice_id = Arc::new(Identity::generate().unwrap());
     let bob_id = Arc::new(Identity::generate().unwrap());
     let alice_fp = alice_id.fingerprint();
@@ -78,7 +82,8 @@ async fn setup_pair(rt_handle: &tokio::runtime::Handle, num_chunks: u32, chunk_s
     let bob_store = Arc::new(RwLock::new(ChunkStore::open(bob_root.path()).unwrap()));
 
     let alice_endpoint = Arc::new(
-        Endpoint::server_for_identity(alice_id.clone(), Arc::new(AlwaysPair), fast_config()).unwrap(),
+        Endpoint::server_for_identity(alice_id.clone(), Arc::new(AlwaysPair), fast_config())
+            .unwrap(),
     );
     let bob_endpoint = Arc::new(
         Endpoint::server_for_identity(bob_id.clone(), Arc::new(AlwaysPair), fast_config()).unwrap(),
@@ -105,7 +110,10 @@ async fn setup_pair(rt_handle: &tokio::runtime::Handle, num_chunks: u32, chunk_s
         let _ = alice_server.run_server().await;
     });
 
-    bob_engine.register_peer(alice_fp, alice_addr).await.unwrap();
+    bob_engine
+        .register_peer(alice_fp, alice_addr)
+        .await
+        .unwrap();
     // Warm the connection cache.
     let _ = bob_engine.ping(&alice_fp, vec![0u8; 8]).await.unwrap();
 

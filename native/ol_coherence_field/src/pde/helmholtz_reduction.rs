@@ -28,10 +28,10 @@
 //! component (when `Γ = 0` the constant mode is in the kernel, so we
 //! require `Γ > 0` for uniqueness).
 
-use super::{FieldError, GraphLaplacian, SolveResult};
 use super::sparse_solver::{
     conjugate_gradient, conjugate_gradient_with_workspace, CgConfig, CgWorkspace,
 };
+use super::{FieldError, GraphLaplacian, SolveResult};
 
 /// Solve the steady-state Helmholtz reduction
 /// `(Γ · I + D · L) · δτ_c = S` on `graph` with diffusion `d`,
@@ -250,7 +250,10 @@ mod tests {
         let s = vec![0.0; 4];
         assert_eq!(
             solve_helmholtz(&g, -1.0, 0.0, &s, CgConfig::default()).unwrap_err(),
-            FieldError::NonPhysicalConstants { d: -1.0, gamma: 0.0 }
+            FieldError::NonPhysicalConstants {
+                d: -1.0,
+                gamma: 0.0
+            }
         );
     }
 

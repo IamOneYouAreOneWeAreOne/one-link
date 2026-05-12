@@ -4,11 +4,11 @@
 //! Python callers bootstrap a `Chain` from a shared secret and call
 //! `next_message_key()` per chunk.
 
+use ::zeroize::Zeroizing;
 use ol_ratchet::{Chain, MessageKey, RatchetError, SkippedKeyStore};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use ::zeroize::Zeroizing;
 
 /// Python-visible chain ratchet.
 #[pyclass(name = "Chain", module = "one_link_native.ratchet")]
@@ -52,7 +52,10 @@ impl PyChain {
         py: Python<'py>,
         target_step: u64,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let mk = self.inner.peek_message_key(target_step).map_err(ratchet_err_to_py)?;
+        let mk = self
+            .inner
+            .peek_message_key(target_step)
+            .map_err(ratchet_err_to_py)?;
         Ok(PyBytes::new_bound(py, &mk[..]))
     }
 

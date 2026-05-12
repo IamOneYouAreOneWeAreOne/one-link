@@ -34,8 +34,14 @@ fn cross_platform_stripe_id_pinned() {
         eprintln!("(divergence vs {PINNED_STRIPE_ID_ARCHIVAL})");
     }
 
-    assert_eq!(std_hex, PINNED_STRIPE_ID_STANDARD, "STANDARD StripeId diverged");
-    assert_eq!(arc_hex, PINNED_STRIPE_ID_ARCHIVAL, "ARCHIVAL StripeId diverged");
+    assert_eq!(
+        std_hex, PINNED_STRIPE_ID_STANDARD,
+        "STANDARD StripeId diverged"
+    );
+    assert_eq!(
+        arc_hex, PINNED_STRIPE_ID_ARCHIVAL,
+        "ARCHIVAL StripeId diverged"
+    );
     // Distinct params → distinct IDs.
     assert_ne!(id_standard, id_archival);
 }

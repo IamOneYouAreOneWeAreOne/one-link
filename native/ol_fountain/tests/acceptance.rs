@@ -56,7 +56,12 @@ fn run_acceptance(k_target: u32, trials: u32) -> u32 {
     // cap. Acceptance gate: ≥99% success across `trials`.
     let mut success = 0u32;
     for seed in 0..trials {
-        if one_trial(&source, 0.05, 4096.min(ol_fountain::MAX_ENCODED_PER_CHUNK - 1), seed as u64) {
+        if one_trial(
+            &source,
+            0.05,
+            4096.min(ol_fountain::MAX_ENCODED_PER_CHUNK - 1),
+            seed as u64,
+        ) {
             success += 1;
         }
     }
@@ -69,7 +74,10 @@ fn adr0015_k_8_decodes_at_5pct_loss() {
     let success = run_acceptance(8, 200);
     let rate = success as f64 / 200.0;
     eprintln!("K=8: {success}/200 ({:.1}%)", rate * 100.0);
-    assert!(rate >= 0.98, "K=8 success rate {rate} below 98% (target 99%, with smaller batch tolerance)");
+    assert!(
+        rate >= 0.98,
+        "K=8 success rate {rate} below 98% (target 99%, with smaller batch tolerance)"
+    );
 }
 
 #[test]
@@ -77,7 +85,10 @@ fn adr0015_k_64_decodes_at_5pct_loss() {
     let success = run_acceptance(64, 200);
     let rate = success as f64 / 200.0;
     eprintln!("K=64: {success}/200 ({:.1}%)", rate * 100.0);
-    assert!(rate >= 0.97, "K=64 success rate {rate} below 97% (target 99%, with smaller batch tolerance)");
+    assert!(
+        rate >= 0.97,
+        "K=64 success rate {rate} below 97% (target 99%, with smaller batch tolerance)"
+    );
 }
 
 #[test]
@@ -87,7 +98,10 @@ fn adr0015_k_256_decodes_at_5pct_loss() {
     let success = run_acceptance(256, 50);
     let rate = success as f64 / 50.0;
     eprintln!("K=256: {success}/50 ({:.1}%)", rate * 100.0);
-    assert!(rate >= 0.94, "K=256 success rate {rate} below 94% (target 99%, with smaller batch tolerance)");
+    assert!(
+        rate >= 0.94,
+        "K=256 success rate {rate} below 94% (target 99%, with smaller batch tolerance)"
+    );
 }
 
 #[test]
@@ -97,7 +111,12 @@ fn high_loss_still_decodes_with_enough_symbols() {
     let source: Vec<u8> = (0..source_len)
         .map(|i| ((i as u64).wrapping_mul(0xC4CEB9FE1A85EC53) >> 33) as u8)
         .collect();
-    assert!(one_trial(&source, 0.20, ol_fountain::MAX_ENCODED_PER_CHUNK - 1, 7));
+    assert!(one_trial(
+        &source,
+        0.20,
+        ol_fountain::MAX_ENCODED_PER_CHUNK - 1,
+        7
+    ));
 }
 
 #[test]
@@ -109,7 +128,12 @@ fn stress_10pct_loss_k_64_high_success_rate() {
     let mut success = 0u32;
     let trials = 50u32;
     for seed in 0..trials {
-        if one_trial(&source, 0.10, ol_fountain::MAX_ENCODED_PER_CHUNK - 1, seed as u64) {
+        if one_trial(
+            &source,
+            0.10,
+            ol_fountain::MAX_ENCODED_PER_CHUNK - 1,
+            seed as u64,
+        ) {
             success += 1;
         }
     }
@@ -128,7 +152,12 @@ fn stress_20pct_loss_k_64_still_usable() {
     let mut success = 0u32;
     let trials = 50u32;
     for seed in 0..trials {
-        if one_trial(&source, 0.20, ol_fountain::MAX_ENCODED_PER_CHUNK - 1, seed as u64) {
+        if one_trial(
+            &source,
+            0.20,
+            ol_fountain::MAX_ENCODED_PER_CHUNK - 1,
+            seed as u64,
+        ) {
             success += 1;
         }
     }
@@ -148,7 +177,12 @@ fn stress_50pct_loss_k_64_degrades_gracefully() {
     let mut success = 0u32;
     let trials = 30u32;
     for seed in 0..trials {
-        if one_trial(&source, 0.50, ol_fountain::MAX_ENCODED_PER_CHUNK - 1, seed as u64) {
+        if one_trial(
+            &source,
+            0.50,
+            ol_fountain::MAX_ENCODED_PER_CHUNK - 1,
+            seed as u64,
+        ) {
             success += 1;
         }
     }

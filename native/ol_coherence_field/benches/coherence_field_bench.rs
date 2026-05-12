@@ -18,16 +18,14 @@
 
 #![allow(missing_docs)] // criterion_group! emits a fn that we can't doc
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ol_coherence_field::{
-    apparent_horizon_anchor, be_rar, identity_dual_source, inject_fragility_events,
-    linear_source, prefetch_priorities, rotation_cadence_multiplier, screening_length,
-    solve_helmholtz,
     anchor::ApparentHorizonInputs,
+    apparent_horizon_anchor, be_rar,
     calibration::one_link_calibration,
+    identity_dual_source, inject_fragility_events, linear_source,
     pde::{CgConfig, CgConfigF32},
+    prefetch_priorities, rotation_cadence_multiplier, screening_length, solve_helmholtz,
     FragilityEvent, GraphLaplacian, HelmholtzSolver, HelmholtzSolverF32,
 };
 
@@ -357,9 +355,7 @@ fn bench_helmholtz_f32_vs_f64(c: &mut Criterion) {
             let mut solver = HelmholtzSolver::new(n);
             b.iter(|| {
                 solver.clear_warm_start();
-                let r = solver
-                    .solve(&g, 1.0, 0.1, &s64, cfg64)
-                    .unwrap();
+                let r = solver.solve(&g, 1.0, 0.1, &s64, cfg64).unwrap();
                 black_box(r);
             });
         });

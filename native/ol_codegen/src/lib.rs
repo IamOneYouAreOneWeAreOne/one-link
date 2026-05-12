@@ -33,8 +33,8 @@ mod parser;
 
 pub use emitter::{emit_rust_decl, emit_rust_enum, emit_rust_struct, EmitError, EmitOptions};
 pub use parser::{
-    parse_decl, parse_enum, parse_struct, FieldType, ParsedDecl, ParsedEnum, ParsedField,
-    ParsedStruct, ParsedVariant, ParseError,
+    parse_decl, parse_enum, parse_struct, FieldType, ParseError, ParsedDecl, ParsedEnum,
+    ParsedField, ParsedStruct, ParsedVariant,
 };
 
 /// Crate version embedded for diagnostics.

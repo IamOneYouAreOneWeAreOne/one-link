@@ -18,9 +18,9 @@ fn make_data(k: usize, shard_len: usize, seed: u64) -> Vec<Vec<u8>> {
 fn bench_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("fec_encode");
     let configs: &[(usize, usize, usize)] = &[
-        (4, 2, 16 * 1024),   // small RS(4,2), 16 KiB shards
-        (10, 4, 64 * 1024),  // standard RS(10,4), 64 KiB shards
-        (16, 8, 64 * 1024),  // wide RS(16,8), 64 KiB shards
+        (4, 2, 16 * 1024),  // small RS(4,2), 16 KiB shards
+        (10, 4, 64 * 1024), // standard RS(10,4), 64 KiB shards
+        (16, 8, 64 * 1024), // wide RS(16,8), 64 KiB shards
     ];
     for &(k, m, shard_len) in configs {
         let codec = Codec::new(k, m).unwrap();
@@ -44,11 +44,8 @@ fn bench_encode(c: &mut Criterion) {
 
 fn bench_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("fec_decode");
-    let configs: &[(usize, usize, usize)] = &[
-        (4, 2, 16 * 1024),
-        (10, 4, 64 * 1024),
-        (16, 8, 64 * 1024),
-    ];
+    let configs: &[(usize, usize, usize)] =
+        &[(4, 2, 16 * 1024), (10, 4, 64 * 1024), (16, 8, 64 * 1024)];
     for &(k, m, shard_len) in configs {
         let codec = Codec::new(k, m).unwrap();
         let data = make_data(k, shard_len, 0xCAFE_BABE);

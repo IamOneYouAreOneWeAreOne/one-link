@@ -117,34 +117,35 @@ fn bench_read_latency(c: &mut Criterion) {
 fn bench_replay(c: &mut Criterion) {
     let mut group = c.benchmark_group("chunk_store_replay");
     for &count in &[100usize, 1000, 5000] {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(count),
-            &count,
-            |b, &count| {
-                b.iter_with_setup(
-                    || {
-                        let dir = tempdir().unwrap();
-                        {
-                            let mut store = ChunkStore::open(dir.path()).unwrap();
-                            for i in 0..count {
-                                let mut r = make_chunk(0, 4 * 1024);
-                                r.chunk_id[0..4].copy_from_slice(&(i as u32).to_le_bytes());
-                                store.append_chunk(&r).unwrap();
-                            }
-                            store.flush().unwrap();
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            b.iter_with_setup(
+                || {
+                    let dir = tempdir().unwrap();
+                    {
+                        let mut store = ChunkStore::open(dir.path()).unwrap();
+                        for i in 0..count {
+                            let mut r = make_chunk(0, 4 * 1024);
+                            r.chunk_id[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+                            store.append_chunk(&r).unwrap();
                         }
-                        dir
-                    },
-                    |dir| {
-                        let store = ChunkStore::open(dir.path()).unwrap();
-                        black_box(store.stats());
-                    },
-                );
-            },
-        );
+                        store.flush().unwrap();
+                    }
+                    dir
+                },
+                |dir| {
+                    let store = ChunkStore::open(dir.path()).unwrap();
+                    black_box(store.stats());
+                },
+            );
+        });
     }
     group.finish();
 }
 
-criterion_group!(benches, bench_write_throughput, bench_read_latency, bench_replay);
+criterion_group!(
+    benches,
+    bench_write_throughput,
+    bench_read_latency,
+    bench_replay
+);
 criterion_main!(benches);

@@ -193,7 +193,10 @@ impl FilesystemBackend for MemoryBackend {
                     mode: 0o755,
                 }
             };
-            out.push(DirEntry { name: bare.to_string(), stat });
+            out.push(DirEntry {
+                name: bare.to_string(),
+                stat,
+            });
         }
         Ok(out)
     }
@@ -275,11 +278,20 @@ mod tests {
         fs.write("a.txt", 0, b"a").unwrap();
         fs.write("b.txt", 0, b"b").unwrap();
         fs.write("sub/c.txt", 0, b"c").unwrap();
-        let mut names: Vec<_> =
-            fs.readdir("/").unwrap().into_iter().map(|e| e.name).collect();
+        let mut names: Vec<_> = fs
+            .readdir("/")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
         names.sort();
         assert_eq!(names, vec!["a.txt", "b.txt", "sub"]);
-        let sub: Vec<_> = fs.readdir("sub").unwrap().into_iter().map(|e| e.name).collect();
+        let sub: Vec<_> = fs
+            .readdir("sub")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
         assert_eq!(sub, vec!["c.txt"]);
     }
 

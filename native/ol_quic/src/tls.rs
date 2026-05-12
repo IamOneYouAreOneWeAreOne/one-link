@@ -224,10 +224,8 @@ fn verify_self_signature_and_alg(cert_der: &CertificateDer<'_>) -> Result<(), Ru
             "Ed25519 SubjectPublicKey must be 32 bytes".into(),
         ));
     }
-    let pubkey = ed25519_dalek::VerifyingKey::from_bytes(
-        pubkey_raw.try_into().expect("32 bytes"),
-    )
-    .map_err(|e| RustlsError::General(format!("Ed25519 pubkey: {e}")))?;
+    let pubkey = ed25519_dalek::VerifyingKey::from_bytes(pubkey_raw.try_into().expect("32 bytes"))
+        .map_err(|e| RustlsError::General(format!("Ed25519 pubkey: {e}")))?;
     let sig_bytes = cert.signature_value.as_ref();
     if sig_bytes.len() != 64 {
         return Err(RustlsError::General(format!(
@@ -235,8 +233,7 @@ fn verify_self_signature_and_alg(cert_der: &CertificateDer<'_>) -> Result<(), Ru
             sig_bytes.len(),
         )));
     }
-    let sig =
-        ed25519_dalek::Signature::from_bytes(sig_bytes.try_into().expect("64 bytes"));
+    let sig = ed25519_dalek::Signature::from_bytes(sig_bytes.try_into().expect("64 bytes"));
     let tbs = cert.tbs_certificate.as_ref();
     pubkey
         .verify_strict(tbs, &sig)

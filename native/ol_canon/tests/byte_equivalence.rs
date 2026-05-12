@@ -58,9 +58,7 @@ fn random_value(state: &mut u64) -> Value {
         }
         _ => {
             let len = (next_rng(state) % 32) as usize;
-            let bytes: Vec<u8> = (0..len)
-                .map(|_| (next_rng(state) & 0xFF) as u8)
-                .collect();
+            let bytes: Vec<u8> = (0..len).map(|_| (next_rng(state) & 0xFF) as u8).collect();
             Value::Bytes(bytes)
         }
     }
@@ -88,9 +86,7 @@ fn decode(bytes: &[u8]) -> Value {
             d.decode_null().unwrap();
             Value::Null
         }
-        ol_canon::TypeTag::True | ol_canon::TypeTag::False => {
-            Value::Bool(d.decode_bool().unwrap())
-        }
+        ol_canon::TypeTag::True | ol_canon::TypeTag::False => Value::Bool(d.decode_bool().unwrap()),
         ol_canon::TypeTag::UInt => Value::U64(d.decode_u64().unwrap()),
         ol_canon::TypeTag::Int => Value::I64(d.decode_i64().unwrap()),
         ol_canon::TypeTag::Float64 => Value::F64(d.decode_f64().unwrap()),

@@ -77,20 +77,20 @@ pub fn content_type_from_extension(ext: &str) -> ContentType {
     let ext = ext.to_ascii_lowercase();
     match ext.as_str() {
         // Mass media.
-        "mp4" | "m4v" | "mov" | "mkv" | "webm" | "mp3" | "aac" | "flac" | "ogg" | "wav"
-        | "m4a" | "opus" => ContentType::MassMedia,
+        "mp4" | "m4v" | "mov" | "mkv" | "webm" | "mp3" | "aac" | "flac" | "ogg" | "wav" | "m4a"
+        | "opus" => ContentType::MassMedia,
         // Public images.
         "jpg" | "jpeg" | "png" | "heic" | "heif" | "gif" | "webp" => ContentType::PublicImage,
         // Archives — convergent-safe only when share explicitly opts in.
         "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" => ContentType::Archive,
         // Source code.
-        "rs" | "py" | "js" | "ts" | "go" | "cpp" | "h" | "cl" | "java" | "cs" | "kt"
-        | "swift" | "rb" | "md" | "sh" => ContentType::SourceCode,
+        "rs" | "py" | "js" | "ts" | "go" | "cpp" | "h" | "cl" | "java" | "cs" | "kt" | "swift"
+        | "rb" | "md" | "sh" => ContentType::SourceCode,
         // Plain text — non-source.
         "txt" | "log" => ContentType::PlainText,
         // Office.
-        "docx" | "xlsx" | "pptx" | "doc" | "xls" | "ppt" | "odt" | "ods" | "odp"
-        | "pages" | "numbers" | "key" => ContentType::OfficeDocument,
+        "docx" | "xlsx" | "pptx" | "doc" | "xls" | "ppt" | "odt" | "ods" | "odp" | "pages"
+        | "numbers" | "key" => ContentType::OfficeDocument,
         // Encrypted / keys.
         "pgp" | "gpg" | "asc" | "pem" | "p12" | "pfx" | "cer" | "crt" | "der" => {
             ContentType::EncryptedOrKey
@@ -152,9 +152,7 @@ pub fn resolve_mode(policy: &ConvergentPolicy, content: ContentType) -> Encrypti
             // against UX bugs in the caller.
             if matches!(
                 content,
-                ContentType::EncryptedOrKey
-                    | ContentType::SensitiveConfig
-                    | ContentType::DataStore
+                ContentType::EncryptedOrKey | ContentType::SensitiveConfig | ContentType::DataStore
             ) {
                 EncryptionMode::Standard
             } else {
@@ -207,10 +205,19 @@ mod tests {
         assert_eq!(content_type_from_extension("png"), ContentType::PublicImage);
         assert_eq!(content_type_from_extension("ZIP"), ContentType::Archive);
         assert_eq!(content_type_from_extension("rs"), ContentType::SourceCode);
-        assert_eq!(content_type_from_extension("docx"), ContentType::OfficeDocument);
-        assert_eq!(content_type_from_extension("pem"), ContentType::EncryptedOrKey);
+        assert_eq!(
+            content_type_from_extension("docx"),
+            ContentType::OfficeDocument
+        );
+        assert_eq!(
+            content_type_from_extension("pem"),
+            ContentType::EncryptedOrKey
+        );
         assert_eq!(content_type_from_extension("csv"), ContentType::DataStore);
-        assert_eq!(content_type_from_extension("env"), ContentType::SensitiveConfig);
+        assert_eq!(
+            content_type_from_extension("env"),
+            ContentType::SensitiveConfig
+        );
         assert_eq!(content_type_from_extension("ttf"), ContentType::Unknown);
     }
 
@@ -241,7 +248,10 @@ mod tests {
             ContentType::OfficeDocument,
             ContentType::Unknown,
         ] {
-            assert_eq!(resolve_mode(&ConvergentPolicy::Never, c), EncryptionMode::Standard);
+            assert_eq!(
+                resolve_mode(&ConvergentPolicy::Never, c),
+                EncryptionMode::Standard
+            );
         }
     }
 

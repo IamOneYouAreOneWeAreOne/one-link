@@ -8,13 +8,10 @@
 //! fed the three production calibrations.
 
 use ol_coherence_field::calibration::{
-    bio_mesh_calibration, one_field_calibration, one_link_calibration, Calibration,
-    Domain,
+    bio_mesh_calibration, one_field_calibration, one_link_calibration, Calibration, Domain,
 };
 use ol_coherence_field::pde::sparse_solver::CgConfig;
-use ol_coherence_field::{
-    be_rar, identity_dual_source, solve_helmholtz, GraphLaplacian,
-};
+use ol_coherence_field::{be_rar, identity_dual_source, solve_helmholtz, GraphLaplacian};
 
 /// Solve the field for one domain. Returns the recovered field +
 /// the BE-RAR-mapped routing scores.
@@ -37,8 +34,7 @@ fn solve_for_domain(cal: &Calibration) -> (Vec<f64>, Vec<f64>) {
         .iter()
         .map(|&f| if f { 0.02 } else { 0.6 })
         .collect();
-    let s = identity_dual_source(&density, &flux, cal.alpha_density, cal.beta_flux)
-        .unwrap();
+    let s = identity_dual_source(&density, &flux, cal.alpha_density, cal.beta_flux).unwrap();
     let cfg = CgConfig {
         max_iter: 5_000,
         tolerance: 1e-9,
@@ -71,7 +67,11 @@ fn same_algebra_solves_all_three_domains() {
     eprintln!("One Link: domain={:?}", one_link.domain);
     eprintln!("  ell_screen = {:?}", one_link.screening_length());
     eprintln!("  g_A = {:?}", one_link.apparent_horizon_anchor());
-    eprintln!("  field range: {:.3e} .. {:.3e}", ol_field.iter().cloned().fold(f64::INFINITY, f64::min), ol_field.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+    eprintln!(
+        "  field range: {:.3e} .. {:.3e}",
+        ol_field.iter().cloned().fold(f64::INFINITY, f64::min),
+        ol_field.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    );
 
     eprintln!("OneField:  domain={:?}", one_field.domain);
     eprintln!("  ell_screen = {:?}", one_field.screening_length());
@@ -89,10 +89,7 @@ fn same_algebra_solves_all_three_domains() {
         ("BioMesh", &bm_field),
     ] {
         for (i, v) in field.iter().enumerate() {
-            assert!(
-                v.is_finite(),
-                "{name} field[{i}] is not finite: {v}"
-            );
+            assert!(v.is_finite(), "{name} field[{i}] is not finite: {v}");
         }
         // Field shouldn't be the zero vector (sources are non-trivial).
         let max_abs = field.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
@@ -115,8 +112,14 @@ fn same_algebra_solves_all_three_domains() {
         ("OneField", &of_nu),
         ("BioMesh", &bm_nu),
     ] {
-        let frag_min = fragile_indices.iter().map(|&i| nu[i]).fold(f64::INFINITY, f64::min);
-        let safe_max = safe_indices.iter().map(|&i| nu[i]).fold(f64::NEG_INFINITY, f64::max);
+        let frag_min = fragile_indices
+            .iter()
+            .map(|&i| nu[i])
+            .fold(f64::INFINITY, f64::min);
+        let safe_max = safe_indices
+            .iter()
+            .map(|&i| nu[i])
+            .fold(f64::NEG_INFINITY, f64::max);
         assert!(
             frag_min > safe_max,
             "{name}: fragile nu ({frag_min:.4}) should exceed safe nu ({safe_max:.4})"

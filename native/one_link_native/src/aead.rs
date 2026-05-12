@@ -104,7 +104,12 @@ fn check_tag(tag: &[u8]) -> PyResult<[u8; RUST_AEAD_TAG_LEN]> {
 /// release the GIL. The ring-backed `AeadCipher` itself is not Clone
 /// because `ring::aead::LessSafeKey` doesn't expose its key bytes —
 /// the Arc sidesteps that without compromising key isolation.
-#[pyclass(name = "AeadCipher", module = "one_link_native.aead", frozen, unsendable)]
+#[pyclass(
+    name = "AeadCipher",
+    module = "one_link_native.aead",
+    frozen,
+    unsendable
+)]
 #[derive(Debug, Clone)]
 pub struct PyAeadCipher {
     inner: std::sync::Arc<RustAeadCipher>,
@@ -181,7 +186,10 @@ impl PyAeadCipher {
             .map_err(aead_error_to_pyerr)?;
         let ct_py = PyBytes::new_bound(py, &ct);
         let tag_py = PyBytes::new_bound(py, &tag);
-        Ok(PyTuple::new_bound(py, vec![ct_py.into_any(), tag_py.into_any()]))
+        Ok(PyTuple::new_bound(
+            py,
+            vec![ct_py.into_any(), tag_py.into_any()],
+        ))
     }
 
     /// Decrypt a single frame.
@@ -255,7 +263,10 @@ pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
     m.add("FRAME_KEY_LEN", RUST_FRAME_KEY_LEN)?;
     m.add("AEAD_TAG_LEN", RUST_AEAD_TAG_LEN)?;
     m.add("AEAD_FRAME_PLAINTEXT_LEN", RUST_AEAD_FRAME_PLAINTEXT_LEN)?;
-    m.add("MAX_CHUNK_PLAINTEXT_LEN", ol_aead::frame::MAX_CHUNK_PLAINTEXT_LEN)?;
+    m.add(
+        "MAX_CHUNK_PLAINTEXT_LEN",
+        ol_aead::frame::MAX_CHUNK_PLAINTEXT_LEN,
+    )?;
 
     // Types and functions.
     m.add_class::<PyAeadCipher>()?;

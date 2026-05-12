@@ -21,7 +21,8 @@ pub struct ComponentReport {
 /// undirected edge once.
 pub fn components_of(nodes: &[String], edges: &[(String, String)]) -> ComponentReport {
     // Union-find.
-    let mut parent: HashMap<String, String> = nodes.iter().map(|n| (n.clone(), n.clone())).collect();
+    let mut parent: HashMap<String, String> =
+        nodes.iter().map(|n| (n.clone(), n.clone())).collect();
     let mut rank: HashMap<String, usize> = nodes.iter().map(|n| (n.clone(), 0)).collect();
 
     fn find(parent: &mut HashMap<String, String>, x: &str) -> String {
@@ -84,7 +85,13 @@ pub fn components_of(nodes: &[String], edges: &[(String, String)]) -> ComponentR
     sizes.sort_unstable_by(|a, b| b.cmp(a));
     let singletons: Vec<String> = comp_sizes
         .values()
-        .filter_map(|v| if v.len() == 1 { Some(v[0].clone()) } else { None })
+        .filter_map(|v| {
+            if v.len() == 1 {
+                Some(v[0].clone())
+            } else {
+                None
+            }
+        })
         .collect();
 
     ComponentReport {

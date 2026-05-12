@@ -87,7 +87,10 @@ fn lukewarm_via_cohort_prior_converges_in_one_transfer() {
     // Anchor Bob at A and predict.
     p.observe(&bob, trigger, 9999);
     let preds = p.predict_top_n(&bob, 1);
-    assert!(!preds.is_empty(), "cohort prior should immediately produce a prediction");
+    assert!(
+        !preds.is_empty(),
+        "cohort prior should immediately produce a prediction"
+    );
     assert_eq!(
         preds[0].file_id, truth,
         "cohort prior should rank B first for Bob's first prediction"

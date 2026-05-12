@@ -58,7 +58,22 @@ mod tests {
 
     #[test]
     fn matches_naive_on_aligned_lengths() {
-        for len in [0usize, 1, 7, 8, 9, 31, 32, 63, 64, 65, 127, 128, 1024, 1024 + 3] {
+        for len in [
+            0usize,
+            1,
+            7,
+            8,
+            9,
+            31,
+            32,
+            63,
+            64,
+            65,
+            127,
+            128,
+            1024,
+            1024 + 3,
+        ] {
             let a: Vec<u8> = (0..len).map(|i| (i as u32 * 31) as u8).collect();
             let b: Vec<u8> = (0..len).map(|i| ((i as u32) ^ 0xDEAD) as u8).collect();
             let mut x = a.clone();

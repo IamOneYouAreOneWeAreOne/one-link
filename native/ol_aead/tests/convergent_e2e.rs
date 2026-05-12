@@ -6,7 +6,7 @@
 //! fails, the convergent mode is broken at the wire level.
 
 use ol_aead::{
-    derive_convergent_aead_key, encrypt_chunk, decrypt_chunk, resolve_mode, AeadCipher, AeadKind,
+    decrypt_chunk, derive_convergent_aead_key, encrypt_chunk, resolve_mode, AeadCipher, AeadKind,
     ContentType, ConvergentPolicy, EncryptionMode,
 };
 use ol_chunk::chunk_address_convergent;
@@ -19,7 +19,8 @@ fn cipher_for_key(key: &ol_aead::ChunkAeadKey) -> AeadCipher {
 fn cross_sender_determinism_aes_gcm() {
     // Two senders each independently encrypt the same plaintext under
     // convergent mode. Their ciphertexts must be byte-identical.
-    let plaintext = b"the raw camera footage that twelve people want to share with the colorist".to_vec();
+    let plaintext =
+        b"the raw camera footage that twelve people want to share with the colorist".to_vec();
 
     let alice_key = derive_convergent_aead_key(&plaintext);
     let bob_key = derive_convergent_aead_key(&plaintext);

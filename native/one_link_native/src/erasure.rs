@@ -6,8 +6,8 @@
 //! `k`-of-`k+m` subset.
 
 use ol_erasure::{
-    decode_stripe as rust_decode, encode_stripe as rust_encode, stripe::stripe_id_of,
-    ErasureError, Shard as RustShard, ShardRole, StripeParams,
+    decode_stripe as rust_decode, encode_stripe as rust_encode, stripe::stripe_id_of, ErasureError,
+    Shard as RustShard, ShardRole, StripeParams,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

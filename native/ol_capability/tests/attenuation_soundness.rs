@@ -15,9 +15,7 @@
 //! Iteration count is configurable via `OL_CAPABILITY_GATE_ITERS`
 //! (default 10_000 for CI; gate run sets it to 1_000_000).
 
-use ol_capability::{
-    Capability, Caveat, Context, ROOT_KEY_LEN, CAP_ID_LEN,
-};
+use ol_capability::{Capability, Caveat, Context, CAP_ID_LEN, ROOT_KEY_LEN};
 use zeroize::Zeroizing;
 
 // SplitMix64 — same deterministic PRNG used by the ol_crdt gate.

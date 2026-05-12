@@ -30,7 +30,10 @@ pub const FRAME_NONCE_LEN: usize = 12;
 /// # Errors
 ///
 /// Returns [`AeadError::FrameIndexOverflow`] if `frame_index` exceeds `u32::MAX`.
-pub fn frame_nonce(chunk_id: &[u8; 32], frame_index: u64) -> Result<[u8; FRAME_NONCE_LEN], AeadError> {
+pub fn frame_nonce(
+    chunk_id: &[u8; 32],
+    frame_index: u64,
+) -> Result<[u8; FRAME_NONCE_LEN], AeadError> {
     if frame_index > u64::from(u32::MAX) {
         return Err(AeadError::FrameIndexOverflow { got: frame_index });
     }

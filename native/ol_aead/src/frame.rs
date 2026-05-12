@@ -166,8 +166,8 @@ pub fn decrypt_chunk(
         let nonce = frame_nonce(chunk_id, f.index as u64)?;
         // Slice out frame ciphertext + trailing tag.
         let frame_ct = &ciphertext[ct_cursor..ct_cursor + f.plaintext_len];
-        let tag_slice = &ciphertext[ct_cursor + f.plaintext_len
-            ..ct_cursor + f.plaintext_len + AEAD_TAG_LEN_USIZE];
+        let tag_slice = &ciphertext
+            [ct_cursor + f.plaintext_len..ct_cursor + f.plaintext_len + AEAD_TAG_LEN_USIZE];
         let mut tag_arr = [0u8; AEAD_TAG_LEN_USIZE];
         tag_arr.copy_from_slice(tag_slice);
         // Copy ciphertext into the output buffer in the right plaintext position.
@@ -299,7 +299,9 @@ mod tests {
     fn chunk_round_trip_chacha() {
         let cipher = fixed_cipher(AeadKind::ChaCha20Poly1305);
         let chunk_id = [0x22u8; 32];
-        let plaintext = (0..150_000u32).map(|i| (i & 0xFF) as u8).collect::<Vec<_>>();
+        let plaintext = (0..150_000u32)
+            .map(|i| (i & 0xFF) as u8)
+            .collect::<Vec<_>>();
         let ciphertext = encrypt_chunk(&cipher, &chunk_id, &plaintext).unwrap();
         let recovered = decrypt_chunk(&cipher, &chunk_id, plaintext.len(), &ciphertext).unwrap();
         assert_eq!(recovered, plaintext);
@@ -344,7 +346,10 @@ mod tests {
         let mut ciphertext = encrypt_chunk(&cipher, &chunk_id, &plaintext).unwrap();
         ciphertext.pop(); // truncate by 1 byte
         let result = decrypt_chunk(&cipher, &chunk_id, plaintext.len(), &ciphertext);
-        assert!(matches!(result, Err(AeadError::InvalidCiphertextLength { .. })));
+        assert!(matches!(
+            result,
+            Err(AeadError::InvalidCiphertextLength { .. })
+        ));
     }
 
     #[test]
@@ -418,7 +423,10 @@ mod tests {
             assert_eq!(f.index, i);
             assert_eq!(f.plaintext_len, AEAD_FRAME_PLAINTEXT_LEN);
             assert_eq!(f.plaintext_offset, i * AEAD_FRAME_PLAINTEXT_LEN);
-            assert_eq!(f.ciphertext_offset, i * (AEAD_FRAME_PLAINTEXT_LEN + AEAD_TAG_LEN_USIZE));
+            assert_eq!(
+                f.ciphertext_offset,
+                i * (AEAD_FRAME_PLAINTEXT_LEN + AEAD_TAG_LEN_USIZE)
+            );
         }
     }
 }

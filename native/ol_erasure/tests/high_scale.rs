@@ -33,5 +33,8 @@ fn standard_stripe_round_trip_with_random_erasures_1000_trials() {
             failures += 1;
         }
     }
-    assert_eq!(failures, 0, "high-scale stripe failures: {failures}/{TRIALS}");
+    assert_eq!(
+        failures, 0,
+        "high-scale stripe failures: {failures}/{TRIALS}"
+    );
 }

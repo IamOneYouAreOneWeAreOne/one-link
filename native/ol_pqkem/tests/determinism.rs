@@ -72,5 +72,4 @@ fn deterministic_seed_round_trip_pinned() {
 const PINNED_PK_FIRST16: &str = "d1055e4d2c1ab8c21baf6452455103a1";
 const PINNED_SK_FIRST16: &str = "40ea7584222c1d56ca37a81042e981af";
 const PINNED_CT_FIRST16: &str = "37df38d5f4761421dfb40fdb07aa43d2";
-const PINNED_SS_HEX: &str =
-    "430df9f1f29dd3879a34af9aa5956466264fcc9d3d9586967c0889673b4942d1";
+const PINNED_SS_HEX: &str = "430df9f1f29dd3879a34af9aa5956466264fcc9d3d9586967c0889673b4942d1";

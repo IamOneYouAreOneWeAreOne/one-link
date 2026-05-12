@@ -145,14 +145,17 @@ impl Codec {
         // corresponding to the chosen indices.
         let gen = self.cauchy.generator();
         let sub: Vec<Vec<u8>> = indices.iter().map(|&i| gen[i].clone()).collect();
-        let inv =
-            invert(sub).expect("Cauchy submatrices are always invertible");
+        let inv = invert(sub).expect("Cauchy submatrices are always invertible");
 
         // Decode: data = inv * recv_data (matrix-vector across shards).
         let mut data: Vec<Vec<u8>> = (0..self.k()).map(|_| vec![0u8; shard_len]).collect();
         for (out_row, inv_row) in data.iter_mut().zip(inv.iter()) {
             for (j, &coeff) in inv_row.iter().enumerate() {
-                fma_into(out_row, present[indices[j]].expect("indexed present"), coeff);
+                fma_into(
+                    out_row,
+                    present[indices[j]].expect("indexed present"),
+                    coeff,
+                );
             }
         }
         Ok(data)
