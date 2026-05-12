@@ -10,6 +10,46 @@ Usage:
     python scripts/build_binary.py
 
 Output goes to dist/one-link[.exe] at the repo root.
+
+──────────────────────────────────────────────────────────────────
+KNOWN GAP — one_link_native (Rust hot-path) is NOT yet bundled.
+──────────────────────────────────────────────────────────────────
+
+This script bundles `src/one_link/web/` (HTML UI) and the legacy
+`src/one_link/native/` directory (the old ol_native_cdc shared
+libs). It does NOT currently bundle the new `one_link_native`
+Python extension produced by `native/` via maturin.
+
+That means: a standalone exe built today RUNS, but falls back to
+the pure-Python paths for QUIC and coherence-field routing — no
+performance regression from the user's perspective, but the
+shipped binary doesn't realize the Phase A1/A2 gains.
+
+To fix in a follow-up PR (Phase 4 of the production-install plan):
+
+  1. Build the native wheel first: `cd native && maturin build --release`
+     and `pip install` the wheel into the environment that PyInstaller
+     scans, so its .pyd files appear in site-packages/.
+  2. Add `--collect-all one_link_native` to the PyInstaller args
+     in this script (after `--collect-submodules aiohttp`). That
+     pulls in the .pyd files and any data files (PEP 561 stubs are
+     irrelevant at runtime).
+  3. Smoke-test: run the produced exe on a host that does NOT have
+     one_link_native installed via pip, and confirm `from
+     one_link_native import quic; quic.is_available()` succeeds. The
+     daemon log should no longer say "QUIC unavailable" on startup.
+  4. The Sigstore + reproducible-build pipeline in
+     .github/workflows/release.yml expects byte-identical rebuilds.
+     Bundling .pyd files makes the binary architecture-specific (one
+     exe per OS+arch), which is already what release.yml's
+     native_wheels job does for the wheel — extend that pattern to
+     the PyInstaller artifacts.
+
+The release.yml workflow already publishes the native wheels
+themselves to GitHub Releases (Phase 1). Until this script is
+updated, users who want both the binary and the native fast path
+should install both: download `one-link.exe` AND run `pip install
+one_link_native --find-links <release-page>`.
 """
 
 from __future__ import annotations

@@ -1122,6 +1122,8 @@ class UIServer:
         r.add_get(r"/api/files/{name:.+}", self._guarded(self.api_file_download))
         r.add_get("/api/audit", self._guarded(self.api_audit))
         r.add_get("/api/update/check", self._guarded(self.api_update_check))
+        r.add_get("/api/update/plan", self._guarded(self.api_update_plan))
+        r.add_post("/api/update/install", self._guarded(self.api_update_install))
         r.add_get("/api/events", self._guarded_ws(self.ws_events))
 
     # ─── auth helpers ─────────────────────────────────────────────────
@@ -6094,6 +6096,153 @@ class UIServer:
 
         self._update_cache = (now, payload)
         return web.json_response({**payload, "cached": False})
+
+    # ─── /api/update/plan ───────────────────────────────────────────
+    # Inspects the latest GitHub Release, picks the wheel for this
+    # OS+ABI, looks up its SHA-256 in SHA256SUMS. Read-only: does
+    # NOT download or install anything. The UI calls this to decide
+    # whether to show the "Update now" button as enabled, and to
+    # display the wheel filename + size to the user before they click.
+    async def api_update_plan(self, request: web.Request) -> web.Response:
+        from one_link.updater import build_install_plan
+        loop = asyncio.get_running_loop()
+        try:
+            plan = await loop.run_in_executor(None, build_install_plan)
+        except Exception as e:
+            log.warning("update_plan unexpected error: %s", e)
+            return web.json_response(
+                {"status": "error", "error": str(e)}, status=200
+            )
+        return web.json_response(plan.to_dict())
+
+    # ─── /api/update/install ────────────────────────────────────────
+    # GATED OFF by default. Setting ONE_LINK_EXPERIMENTAL_AUTOINSTALL=1
+    # in the daemon's environment enables it. The destructive parts
+    # (pip install + daemon respawn) need per-OS integration testing
+    # before going on by default; until then the UI's update banner
+    # falls back to the "View release" link and the user runs
+    # `pip install --upgrade one_link_native` manually.
+    #
+    # Flow when enabled:
+    #   1. Re-fetch the install plan (current OS, matched wheel).
+    #   2. Download wheel to a temp file.
+    #   3. SHA-256 verify against the release's SHA256SUMS.
+    #   4. Generate an updater script that:
+    #        a. Waits for THIS daemon's PID to exit
+    #        b. Runs pip install <wheel>
+    #        c. Relaunches the daemon
+    #   5. Spawn the updater script as a detached subprocess.
+    #   6. Return 202 to the UI.
+    #   7. Initiate daemon shutdown after sending the response.
+    #
+    # The client should expect the WebSocket to drop momentarily and
+    # auto-reconnect to the freshly-respawned daemon.
+    async def api_update_install(self, request: web.Request) -> web.Response:
+        import os as _os
+        gate = _os.environ.get("ONE_LINK_EXPERIMENTAL_AUTOINSTALL")
+        if gate not in ("1", "true", "yes"):
+            return web.json_response({
+                "status": "disabled",
+                "error": (
+                    "auto-install is experimental and disabled by default. "
+                    "Set ONE_LINK_EXPERIMENTAL_AUTOINSTALL=1 in the daemon's "
+                    "environment to enable, or run `pip install --upgrade "
+                    "one_link_native` manually."
+                ),
+            }, status=503)
+
+        from one_link.updater import (
+            build_install_plan, download_to_temp, sha256_file,
+            write_updater_script, spawn_detached,
+        )
+        loop = asyncio.get_running_loop()
+
+        # Step 1: plan
+        plan = await loop.run_in_executor(None, build_install_plan)
+        if plan.status != "ready" or plan.wheel is None:
+            return web.json_response({
+                "status": "no_match",
+                "error": plan.error or "no wheel available for this host",
+                "plan": plan.to_dict(),
+            }, status=409)
+
+        # Step 2: download
+        try:
+            wheel_path = await loop.run_in_executor(
+                None,
+                lambda: download_to_temp(
+                    plan.wheel.asset_url,
+                    expected_size=plan.wheel.size,
+                ),
+            )
+        except Exception as e:
+            log.exception("update download failed")
+            return web.json_response({
+                "status": "download_failed", "error": str(e),
+            }, status=502)
+
+        # Step 3: SHA-256 verify (mandatory; abort if missing/mismatch)
+        expected = plan.wheel.expected_sha256
+        if not expected:
+            try:
+                wheel_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return web.json_response({
+                "status": "unverified",
+                "error": (
+                    "SHA256SUMS did not contain a hash for the wheel. "
+                    "Refusing to install an unverified binary."
+                ),
+            }, status=409)
+        got = await loop.run_in_executor(None, sha256_file, wheel_path)
+        if got != expected:
+            try:
+                wheel_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return web.json_response({
+                "status": "hash_mismatch",
+                "error": f"expected {expected}, got {got}",
+            }, status=409)
+
+        # Step 4: write updater script
+        script_path = await loop.run_in_executor(
+            None,
+            lambda: write_updater_script(
+                wheel_path,
+                parent_pid=_os.getpid(),
+            ),
+        )
+
+        # Step 5: spawn detached
+        updater_pid = await loop.run_in_executor(
+            None, spawn_detached, script_path
+        )
+
+        # Step 6: tell client we're going down
+        resp = web.json_response({
+            "status": "installing",
+            "tag": plan.tag,
+            "wheel": plan.wheel.filename,
+            "updater_pid": updater_pid,
+            "hint": (
+                "The daemon is shutting down. The updater will install the "
+                "new wheel and start a fresh daemon. Your browser tab will "
+                "reconnect automatically once the new daemon is ready."
+            ),
+        })
+
+        # Step 7: shut down AFTER the response is sent. Schedule on
+        # the event loop so the response is flushed first.
+        async def _shutdown_soon():
+            await asyncio.sleep(0.5)
+            log.info("auto-update: daemon exiting so updater can run")
+            # Hard exit — the updater is responsible for restart.
+            _os._exit(0)
+        asyncio.create_task(_shutdown_soon())
+
+        return resp
 
     # ─── WebSocket events ─────────────────────────────────────────────
     async def ws_events(self, request: web.Request) -> web.WebSocketResponse:
