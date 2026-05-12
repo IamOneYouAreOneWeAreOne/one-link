@@ -59,14 +59,25 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
 
+pub mod lookup;
 pub mod node_id;
 pub mod record;
 pub mod routing;
+pub mod rpc;
 
+pub use lookup::{
+    Lookup, LookupError, LookupQueryResult, LookupResult, Transport,
+    ALPHA_DEFAULT, LOOKUP_K_DEFAULT, MAX_LOOKUP_ITERS,
+};
 pub use node_id::{NodeId, NODE_ID_BYTES, NODE_ID_BITS};
 pub use record::{
     PeerRecord, RecordError, SignedRecord, RECORD_DEFAULT_TTL_SECS,
 };
 pub use routing::{
     RoutingTable, K_BUCKET_DEFAULT, MAX_BUCKETS,
+};
+pub use rpc::{
+    Header, Nonce, Request, Response, RpcEnvelope, RpcError,
+    FindValueOutcome, StoreOutcome,
+    MAX_CLOCK_SKEW_SECS, MAX_FIND_RESULTS,
 };

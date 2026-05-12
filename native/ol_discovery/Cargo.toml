@@ -20,5 +20,9 @@ proptest  = { workspace = true }
 criterion = { workspace = true }
 rand_core = { workspace = true }
 
+[[bench]]
+name    = "discovery_bench"
+harness = false
+
 [lints]
 workspace = true
