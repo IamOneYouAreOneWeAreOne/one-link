@@ -26,7 +26,11 @@ from typing import Any
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from one_link.daemon import Daemon, _is_transient_send_error
+from one_link.daemon import (
+    Daemon,
+    _delivery_backoff_ms_for_error,
+    _is_transient_send_error,
+)
 from one_link.discovery import Discovery, Peer
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
@@ -64,6 +68,14 @@ def test_asyncio_timeout_is_transient():
 def test_runtimeerror_handshake_timeout_is_transient():
     e = RuntimeError("file send to abc: handshake timed out after 8.0s")
     assert _is_transient_send_error(e) is True
+
+
+def test_route_error_retry_stays_fast_while_peer_is_online():
+    assert _delivery_backoff_ms_for_error(
+        8,
+        "file send to abc: handshake timed out after 8.0s - peer not responsive",
+    ) == 5_000
+    assert _delivery_backoff_ms_for_error(13, "handshake timed out") > 5_000
 
 
 def test_runtimeerror_no_ack_is_transient():
@@ -285,6 +297,59 @@ async def test_resume_respects_retry_backoff(tmp_path: Path):
     state.close()
 
 
+@pytest.mark.asyncio
+async def test_resume_force_bypasses_retry_backoff_after_fresh_session(tmp_path: Path):
+    """A fresh successful session is stronger than an old backoff timer."""
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    src = tmp_path / "wake-now.bin"
+    src.write_bytes(b"wake")
+    state.upsert_transfer(
+        id="t-force", direction="out", peer_fp=them.fingerprint,
+        kind="file", name="wake-now.bin", size=4, status="paused",
+        progress_bytes=0, total_bytes=4,
+        chunks_done=0, chunks_total=1,
+        metadata={
+            "path": str(src),
+            "next_retry_ms": 9_999_999_999_999,
+            "delivery_state": "waiting_for_device",
+        },
+    )
+    fake_peer = Peer(
+        short_id=them.short_id,
+        hostname="them",
+        address="127.0.0.1",
+        port=12345,
+        ed_pub_hex=them.public_bytes.hex(),
+    )
+    sends = []
+
+    async def _fake_resolve(needle):
+        return fake_peer
+
+    async def _fake_send_file(peer, path, *, transfer_id=None):
+        sends.append((path, transfer_id))
+        state.update_transfer("t-force", status="complete")
+        return {}
+
+    daemon.resolve_for_send = _fake_resolve  # type: ignore[method-assign]
+    daemon.send_file = _fake_send_file  # type: ignore[method-assign]
+
+    result = await daemon.resume_paused_transfers_for(them.fingerprint, force=True)
+    assert result["resumed"] == 1
+    assert sends == [(src, "t-force")]
+    state.close()
+
+
 def test_retry_pump_waits_for_live_discovered_peer(tmp_path: Path):
     me = _new_identity()
     them = _new_identity()
@@ -469,7 +534,72 @@ async def test_control_queue_file_transfer_creates_auto_resume_intent(tmp_path: 
     assert scheduled == [them.fingerprint]
     rows = state.list_transfers(peer_fp=them.fingerprint, limit=10)
     assert len(rows) == 1
-    assert rows[0].metadata["path"] == str(src)
+    assert rows[0].metadata["original_path"] == str(src)
+    assert rows[0].metadata["source_staged"] is True
+    assert Path(rows[0].metadata["path"]).is_file()
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_control_queue_file_transfer_can_wait_for_boot_resume(tmp_path: Path):
+    """Live restart gates need a deterministic way to queue durable work
+    without immediately racing the background sender. The next daemon boot or
+    explicit resume command then owns the drain.
+    """
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+        hostname="Computer 2",
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    src = tmp_path / "queued-after-restart.bin"
+    src.write_bytes(b"wait for boot")
+    scheduled: list[str] = []
+    daemon._schedule_resume_paused = scheduled.append  # type: ignore[method-assign]
+
+    reader = asyncio.StreamReader()
+    reader.feed_data(json.dumps({
+        "cmd": "queue_file_transfer",
+        "peer": "Computer 2",
+        "path": str(src),
+        "schedule_resume": "false",
+    }).encode("utf-8") + b"\n")
+    reader.feed_eof()
+
+    class _Writer:
+        def __init__(self):
+            self.buf = b""
+
+        def write(self, data):
+            self.buf += data
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    writer = _Writer()
+    await daemon._handle_control(reader, writer)  # type: ignore[arg-type]
+    payload = json.loads(writer.buf.decode("utf-8"))
+
+    assert payload["ok"] is True
+    assert payload["transfer"]["status"] == "paused"
+    assert scheduled == []
+    rows = state.list_transfers(peer_fp=them.fingerprint, limit=10)
+    assert len(rows) == 1
+    assert rows[0].metadata["original_path"] == str(src)
+    assert rows[0].metadata["source_staged"] is True
+    assert Path(rows[0].metadata["path"]).is_file()
     state.close()
 
 

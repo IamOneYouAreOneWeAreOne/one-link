@@ -53,7 +53,9 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import socket
+import subprocess
 import sys
 import time
 import uuid
@@ -462,6 +464,29 @@ def _delivery_backoff_ms(attempts: int) -> int:
     delay_s = min(TRANSFER_RETRY_MAX_S, TRANSFER_RETRY_BASE_S * (2 ** (attempts - 1)))
     return int(delay_s * 1000)
 
+
+def _delivery_backoff_ms_for_error(attempts: int, error: str) -> int:
+    """Self-healing retry policy for durable file sends.
+
+    Peer-offline rows should back off quietly. Route/session errors while a
+    peer is visible are different: they often mean stale address, stale TCP, or
+    peer startup churn, so we retry quickly for a bounded window instead of
+    making the user wait behind exponential backoff.
+    """
+    msg = str(error).lower()
+    route_markers = (
+        "handshake timed out",
+        "peer not responsive",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+        "winerror 10053",
+        "winerror 10054",
+    )
+    if attempts <= 12 and any(marker in msg for marker in route_markers):
+        return 5_000
+    return _delivery_backoff_ms(attempts)
+
 # Capabilities this build advertises in CAPS messages.
 # v0.5.4 bumps to OL1.2: CAPS optionally includes `share_rdz` so paired
 # devices auto-inherit each other's rendezvous URL list. Older OL1.1
@@ -662,6 +687,123 @@ def _clear_stale_runtime_files() -> None:
     for p in (*_runtime_port_paths(), _daemon_lock_path()):
         with contextlib.suppress(OSError):
             p.unlink()
+
+
+def _candidate_control_ports_for_pid(pid: int) -> list[int]:
+    """Return localhost listen ports owned by ``pid``.
+
+    This is a recovery path for launchers: if a stale helper removes
+    ``control.port`` while the daemon is healthy, the app should repair the
+    hint file instead of spinning or starting a duplicate daemon.
+    """
+    if pid <= 0:
+        return []
+    ports: set[int] = set()
+    try:
+        import psutil  # type: ignore
+        proc = psutil.Process(pid)
+        for conn in proc.net_connections(kind="tcp"):
+            if getattr(conn, "status", "") != "LISTEN":
+                continue
+            laddr = getattr(conn, "laddr", None)
+            port = getattr(laddr, "port", None)
+            if port:
+                ports.add(int(port))
+        if ports:
+            return sorted(ports)
+    except Exception:
+        pass
+    if os.name == "nt":
+        try:
+            out = subprocess.check_output(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "Get-NetTCPConnection -State Listen "
+                        f"-OwningProcess {int(pid)} -ErrorAction SilentlyContinue | "
+                        "Select-Object -ExpandProperty LocalPort"
+                    ),
+                ],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            )
+            for line in out.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    ports.add(int(line))
+        except Exception:
+            pass
+    return sorted(ports)
+
+
+def _candidate_local_listen_ports() -> list[int]:
+    ports: set[int] = set()
+    try:
+        import psutil  # type: ignore
+        for conn in psutil.net_connections(kind="tcp"):
+            if getattr(conn, "status", "") != "LISTEN":
+                continue
+            laddr = getattr(conn, "laddr", None)
+            host = str(getattr(laddr, "ip", "") or "")
+            port = getattr(laddr, "port", None)
+            if port and host in ("", "0.0.0.0", "::", "127.0.0.1", "::1"):
+                ports.add(int(port))
+        if ports:
+            return sorted(ports)
+    except Exception:
+        pass
+    if os.name == "nt":
+        try:
+            out = subprocess.check_output(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "Get-NetTCPConnection -State Listen "
+                        "-ErrorAction SilentlyContinue | "
+                        "Where-Object { $_.LocalAddress -in "
+                        "@('127.0.0.1','0.0.0.0','::1','::') } | "
+                        "Select-Object -ExpandProperty LocalPort"
+                    ),
+                ],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            )
+            for line in out.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    ports.add(int(line))
+        except Exception:
+            pass
+    return sorted(ports)
+
+
+def _recover_control_port_from_live_pid() -> int | None:
+    pid = _read_lock_pid()
+    candidates: list[int] = []
+    if pid is not None and _pid_is_alive(pid):
+        candidates.extend(_candidate_control_ports_for_pid(pid))
+    candidates.extend(p for p in _candidate_local_listen_ports() if p not in candidates)
+    home = str(data_dir())
+    for port in candidates:
+        try:
+            status = query_control_status(port, timeout=0.75)
+        except Exception:
+            continue
+        if (
+            status.get("ok") is True
+            and (pid is None or int(status.get("pid") or 0) == int(pid))
+            and str(status.get("home") or "") == home
+        ):
+            with contextlib.suppress(OSError):
+                _control_port_path().write_text(str(port))
+            return int(port)
+    return None
 
 
 @dataclass
@@ -1583,7 +1725,10 @@ class Daemon:
             "paused_at_ms": now_ms,
             "last_attempt_ms": now_ms,
             "attempts": attempts,
-            "next_retry_ms": now_ms + _delivery_backoff_ms(attempts),
+            "next_retry_ms": now_ms + _delivery_backoff_ms_for_error(
+                attempts,
+                error,
+            ),
             "delivery_state": "waiting_for_device",
         })
         diagnosis = diagnose_transfer({
@@ -1620,6 +1765,10 @@ class Daemon:
         size = path.stat().st_size
         file_index = index_path(path)
         transfer_id = f"out:{file_index.blob_hash}:{uuid.uuid4().hex[:12]}"
+        source_path = self._stage_queued_file_source(
+            path,
+            transfer_id=transfer_id,
+        )
         now_ms = int(time.time() * 1000)
         queued = self._upsert_transfer(
             id=transfer_id,
@@ -1636,7 +1785,9 @@ class Daemon:
             chunks_total=len(file_index.chunks),
             metadata={
                 "mode": "cdc",
-                "path": str(path),
+                "path": str(source_path),
+                "original_path": str(path),
+                "source_staged": str(source_path) != str(path),
                 "queued_at_ms": now_ms,
                 "paused_at_ms": now_ms,
                 "attempts": 0,
@@ -1661,6 +1812,35 @@ class Daemon:
         if schedule_resume:
             self._schedule_resume_paused(peer_fp)
         return queued
+
+    def _stage_queued_file_source(self, path: Path, *, transfer_id: str) -> Path:
+        """Make queued file sends independent of caller-owned temp paths.
+
+        Browser uploads are already staged under One Link's upload store before
+        transfer begins. Control/CLI live gates can point at temp files, though;
+        a durable intent cannot depend on those surviving a daemon restart.
+        """
+        path = Path(path)
+        try:
+            uploads_root = (data_dir() / "uploads").resolve()
+            if path.resolve().is_relative_to(uploads_root):
+                return path
+        except Exception:
+            pass
+        stage_dir = data_dir() / "uploads" / "queued"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        safe_id = "".join(
+            ch if ch.isalnum() or ch in ("-", "_") else "_"
+            for ch in transfer_id
+        )[:96]
+        safe_name = path.name.replace("/", "_").replace("\\", "_")[:160]
+        staged = stage_dir / f"{safe_id}_{safe_name}"
+        if staged.exists():
+            return staged
+        tmp = staged.with_suffix(staged.suffix + f".{os.getpid()}.tmp")
+        shutil.copy2(path, tmp)
+        os.replace(tmp, staged)
+        return staged
 
     def _mark_due_transfers_waiting_for_peer(
         self,
@@ -7379,7 +7559,7 @@ class Daemon:
             # "planning" row is still moving into offered/active; otherwise
             # the resume worker can race and recursively resend the same row.
             if resume_pending:
-                self._schedule_resume_paused(peer_fp)
+                self._schedule_resume_paused(peer_fp, force=True)
             return sess
         except Exception:
             with contextlib.suppress(Exception):
@@ -7461,6 +7641,7 @@ class Daemon:
                             peer_short_id=peer.short_id,
                         )
                         self._broadcast_tail(ev)
+                self._schedule_resume_paused(sess.peer_fp, force=True)
                 return results
         except Exception:
             await self._drop_outbound_session(sess.peer_fp)
@@ -9383,7 +9564,12 @@ class Daemon:
             self._resume_lock_dict[peer_fp] = lk
         return lk
 
-    async def resume_paused_transfers_for(self, peer_fp: str) -> dict:
+    async def resume_paused_transfers_for(
+        self,
+        peer_fp: str,
+        *,
+        force: bool = False,
+    ) -> dict:
         """v0.7.4: re-run send_file for every transfer this daemon
         paused mid-stream against `peer_fp`. The CDC FILE_OFFER /
         FILE_WANTS protocol is naturally idempotent — receiver replies
@@ -9418,7 +9604,10 @@ class Daemon:
                 r for r in rows
                 if r.status in ("paused", "queued")
                 and r.direction == "out"
-                and int((r.metadata or {}).get("next_retry_ms") or 0) <= now_ms
+                and (
+                    force
+                    or int((r.metadata or {}).get("next_retry_ms") or 0) <= now_ms
+                )
                 and not (
                     r.status == "queued"
                     and (r.metadata or {}).get("mode") == "planning"
@@ -9482,7 +9671,7 @@ class Daemon:
                 ),
             }
 
-    def _schedule_resume_paused(self, peer_fp: str) -> None:
+    def _schedule_resume_paused(self, peer_fp: str, *, force: bool = False) -> None:
         """Fire-and-forget background resume. Called from the same
         session-up hook as the outbox flush."""
         if self.state is None or not peer_fp:
@@ -9499,11 +9688,11 @@ class Daemon:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._resume_paused_swallow(peer_fp))
+        loop.create_task(self._resume_paused_swallow(peer_fp, force=force))
 
-    async def _resume_paused_swallow(self, peer_fp: str) -> None:
+    async def _resume_paused_swallow(self, peer_fp: str, *, force: bool = False) -> None:
         try:
-            await self.resume_paused_transfers_for(peer_fp)
+            await self.resume_paused_transfers_for(peer_fp, force=force)
         except Exception as e:
             log.warning("resume task errored for %s: %s", peer_fp[:8], e)
 
@@ -10863,6 +11052,8 @@ class Daemon:
             # opens a fresh handshake instead of inheriting the rot.
             with contextlib.suppress(Exception):
                 await self._drop_outbound_session(sess.peer_fp)
+            if transient:
+                self._schedule_resume_paused(sess.peer_fp)
             diag = diagnose_transfer({
                 "status": "paused" if transient else "failed",
                 "direction": "out",
@@ -11023,10 +11214,19 @@ class Daemon:
                     return
                 try:
                     from one_link.server import _transfer_record_to_event
+                    schedule_resume_raw = req.get("schedule_resume", True)
+                    if isinstance(schedule_resume_raw, str):
+                        schedule_resume = (
+                            schedule_resume_raw.strip().lower()
+                            not in ("0", "false", "no", "off")
+                        )
+                    else:
+                        schedule_resume = bool(schedule_resume_raw)
                     rec = self.queue_file_transfer(
                         peer_fp=peer_fp,
                         path=path,
                         reason=str(req.get("reason") or "queued for automatic send"),
+                        schedule_resume=schedule_resume,
                     )
                     await self._reply(writer, {
                         "ok": True,
@@ -11738,6 +11938,9 @@ async def run() -> None:
 def read_control_port() -> int:
     p = _control_port_path()
     if not p.exists():
+        recovered = _recover_control_port_from_live_pid()
+        if recovered is not None:
+            return recovered
         raise RuntimeError("daemon not running (no control.port file)")
     try:
         port = int(p.read_text().strip())
@@ -11752,17 +11955,11 @@ def read_control_port() -> int:
     raise RuntimeError(f"daemon not running (stale control.port {port})")
 
 
-def is_daemon_alive(port: int, *, timeout: float = 0.5) -> bool:
-    """Return True only when the local One Link control protocol answers.
-
-    A bare TCP connect is not enough: a stale port can be reused by an
-    unrelated process, and a wedged daemon can accept sockets without ever
-    replying. The launcher and CLI need the stronger signal.
-    """
+def query_control_status(port: int, *, timeout: float = 0.5) -> dict[str, Any]:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
-        s.connect(("127.0.0.1", port))
+        s.connect(("127.0.0.1", int(port)))
         s.sendall(b'{"cmd":"status"}\n')
         buf = b""
         while not buf.endswith(b"\n") and len(buf) < 65536:
@@ -11771,10 +11968,20 @@ def is_daemon_alive(port: int, *, timeout: float = 0.5) -> bool:
                 break
             buf += chunk
         if not buf:
-            return False
-        msg = json.loads(buf.decode("utf-8").strip() or "{}")
-        return msg.get("ok") is True and bool(msg.get("pid"))
+            return {}
+        return json.loads(buf.decode("utf-8").strip() or "{}")
     except Exception:
-        return False
+        return {}
     finally:
         s.close()
+
+
+def is_daemon_alive(port: int, *, timeout: float = 0.5) -> bool:
+    """Return True only when the local One Link control protocol answers.
+
+    A bare TCP connect is not enough: a stale port can be reused by an
+    unrelated process, and a wedged daemon can accept sockets without ever
+    replying. The launcher and CLI need the stronger signal.
+    """
+    msg = query_control_status(port, timeout=timeout)
+    return msg.get("ok") is True and bool(msg.get("pid"))
