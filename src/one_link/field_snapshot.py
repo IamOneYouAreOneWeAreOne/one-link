@@ -23,14 +23,37 @@ multipliers) so callers behave as if Phase E weren't active.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger(__name__)
+
+
+def _env_disabled(name: str) -> bool:
+    """Truthy environment-variable kill-switch reader.
+
+    A coupling is "disabled" when its env var is set to anything in
+    ``{"1", "true", "yes", "on"}`` (case-insensitive). All four
+    coupling switches honour this:
+
+    * ``ONE_LINK_FIELD_DISABLE``           — disable the whole manager
+    * ``ONE_LINK_DISABLE_BE_RAR``          — relay scoring fallback
+    * ``ONE_LINK_FIELD_CADENCE_DISABLE``   — ratchet cadence advisory
+    * ``ONE_LINK_FIELD_HOMOLOGY_DISABLE``  — homology → source injection
+    * ``ONE_LINK_FIELD_PREFETCH_DISABLE``  — field-distance holder rank
+
+    Operator escape hatch: a noisy / suspected-broken coupling can be
+    flipped off without rebuilding the crate or restarting the user."""
+    val = os.environ.get(name, "").strip().lower()
+    return val in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -95,7 +118,12 @@ class FieldSnapshotManager:
     under a lock; queries take the lock briefly to read it.
     """
 
-    def __init__(self, config: Optional[FieldConfig] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[FieldConfig] = None,
+        *,
+        persist_path: Optional[Path] = None,
+    ) -> None:
         self._config = config or FieldConfig()
         self._current: Optional[FieldSnapshot] = None
         self._lock = threading.Lock()
@@ -107,14 +135,28 @@ class FieldSnapshotManager:
         # Per-peer source contribution (`(peer, density, flux)`).
         # The daemon updates these as relay metrics evolve.
         self._sources: dict[str, tuple[float, float]] = {}
+        # Phase E homology coupling: pending fragility events to inject
+        # into the source vector at the next solve. Each event is
+        # ``(peer_short_ids, weight)`` — peers in the affected cycle,
+        # and how strongly to suppress the field there. The manager
+        # converts to per-peer index space at solve time.
+        self._fragility_events: list[tuple[list[str], float]] = []
+        self._fragility_coupling_strength: float = 1.0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         # Counters surfaced via /api/metrics.
         self.solve_count = 0
         self.solve_failures = 0
         self.last_solve_wall_ns = 0
+        # Optional persistence path for save-on-shutdown / load-on-boot.
+        # When set, the first solve doesn't have to wait 5s after a
+        # daemon restart — the previous snapshot warms the cache.
+        self._persist_path = persist_path
         # Try to apply One Link calibration at construction.
         self._apply_calibration()
+        # Try to warm-start from the persisted snapshot, if any.
+        if persist_path is not None:
+            self._try_load_persisted_snapshot()
 
     def _apply_calibration(self) -> None:
         """Replace the fallback (D, gamma) with the canonical One Link
@@ -149,6 +191,31 @@ class FieldSnapshotManager:
         with self._lock:
             self._sources.pop(peer, None)
 
+    def update_fragility_events(
+        self,
+        events: list[tuple[list[str], float]],
+        *,
+        coupling_strength: float = 1.0,
+    ) -> None:
+        """Replace the pending fragility-event list.
+
+        Each event is a ``(peer_short_ids, weight)`` pair describing
+        peers that participate in a closing-loop fragility cycle
+        detected by ``ol_homology``. At the next ``_tick``, the manager
+        translates short-ids to peer indices and calls
+        ``inject_fragility_events()`` to negatively spike the source
+        vector at those nodes. The field then re-equilibrates so that
+        routes naturally avoid the fragile region BEFORE the partition
+        actually completes.
+
+        Replaces the entire pending list, so the caller can pass an
+        empty list to clear events (e.g. after the fragility resolved).
+        ``coupling_strength`` scales the spike magnitude — operators
+        can dial it down if the field over-reacts."""
+        with self._lock:
+            self._fragility_events = list(events)
+            self._fragility_coupling_strength = float(coupling_strength)
+
     # ── lifecycle ───────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -173,11 +240,16 @@ class FieldSnapshotManager:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            try:
-                self._tick()
-            except Exception as exc:  # pragma: no cover
-                self.solve_failures += 1
-                log.debug("field snapshot tick failed: %s", exc)
+            # Master env kill-switch: skip the solve entirely. The
+            # manager keeps running so consumers can still query
+            # (they'll get None / safe-default fallbacks); flipping
+            # the switch back off resumes solving on the next tick.
+            if not _env_disabled("ONE_LINK_FIELD_DISABLE"):
+                try:
+                    self._tick()
+                except Exception as exc:  # pragma: no cover
+                    self.solve_failures += 1
+                    log.debug("field snapshot tick failed: %s", exc)
             self._stop.wait(self._config.update_interval_s)
 
     def _tick(self) -> None:
@@ -194,6 +266,8 @@ class FieldSnapshotManager:
         with self._lock:
             edges = list(self._topology)
             sources = dict(self._sources)
+            pending_fragility = list(self._fragility_events)
+            fragility_strength = self._fragility_coupling_strength
 
         # Collect the peer set referenced by either the topology or
         # the source map. Stable-sorted for reproducibility.
@@ -230,6 +304,37 @@ class FieldSnapshotManager:
         from one_link_native import coherence_field as _native_cf  # type: ignore[attr-defined]
 
         source_vec = _native_cf.identity_dual_source(density, flux, 0.5, 0.5)
+
+        # Phase E #2 coupling — homology fragility events negatively
+        # spike S at affected nodes so the next solve re-equilibrates
+        # away from the fragile region. Operator escape hatch:
+        # ONE_LINK_FIELD_HOMOLOGY_DISABLE=1 skips injection.
+        if (
+            pending_fragility
+            and not _env_disabled("ONE_LINK_FIELD_HOMOLOGY_DISABLE")
+        ):
+            translated: list[tuple[list[int], float]] = []
+            for peer_ids, weight in pending_fragility:
+                idx_list: list[int] = []
+                for pid in peer_ids:
+                    idx = index.get(pid)
+                    if idx is not None:
+                        idx_list.append(idx)
+                if idx_list:
+                    translated.append((idx_list, float(weight)))
+            if translated:
+                try:
+                    source_vec_out, _penalties = cf.inject_fragility_events(
+                        list(source_vec),
+                        translated,
+                        coupling_strength=fragility_strength,
+                    )
+                    source_vec = source_vec_out
+                except Exception:  # pragma: no cover
+                    # Native crate raised; fall through with the
+                    # un-injected source. Couplings degrade gracefully.
+                    pass
+
         t0 = time.perf_counter_ns()
         try:
             result = cf.solve_helmholtz(
@@ -268,6 +373,106 @@ class FieldSnapshotManager:
         with self._lock:
             self._current = snapshot
         self.solve_count += 1
+        # Persistence: after each successful solve, atomically write
+        # the snapshot to disk so a daemon restart can warm-start
+        # instead of waiting 5s for the next tick. Best-effort; a
+        # disk write failure is not fatal.
+        if self._persist_path is not None:
+            try:
+                self._save_snapshot_to_disk(snapshot)
+            except Exception:  # pragma: no cover
+                log.debug("snapshot persistence write failed", exc_info=True)
+
+    # ── persistence (warm-start across daemon restart) ─────────────
+
+    def _save_snapshot_to_disk(self, snap: FieldSnapshot) -> None:
+        """Atomically serialize ``snap`` to ``self._persist_path``.
+
+        Uses tempfile + os.replace for atomicity: a daemon kill in
+        the middle of the write leaves the previous good snapshot
+        untouched. Format is plain JSON — the snapshot is small
+        (O(peers²) floats) so binary packing isn't worth the cost."""
+        if self._persist_path is None:
+            return
+        payload = {
+            "version": 1,
+            "peers": list(snap.peers),
+            "field": list(snap.field),
+            "cadences": [
+                [int(idx), float(mult), int(btw)]
+                for idx, mult, btw in snap.cadences
+            ],
+            "solve_iterations": int(snap.solve_iterations),
+            "solve_residual": float(snap.solve_residual),
+            "solve_wall_ns": int(snap.solve_wall_ns),
+            "saved_at_ns": time.perf_counter_ns(),
+        }
+        self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".field-snapshot-",
+            suffix=".json.tmp",
+            dir=str(self._persist_path.parent),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            os.replace(tmp_path, self._persist_path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:  # pragma: no cover
+                pass
+            raise
+
+    def _try_load_persisted_snapshot(self) -> None:
+        """Read the on-disk snapshot at construction time, if present.
+
+        Best-effort: a malformed file is silently ignored — the
+        manager falls back to "no snapshot until the first solve."
+        This is a UX win (first 5s of post-restart life has guidance
+        from the previous run) not a correctness requirement."""
+        if self._persist_path is None or not self._persist_path.exists():
+            return
+        try:
+            payload = json.loads(
+                self._persist_path.read_text(encoding="utf-8")
+            )
+        except Exception:
+            log.debug(
+                "discarding malformed persisted field snapshot at %s",
+                self._persist_path,
+                exc_info=True,
+            )
+            return
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            return
+        try:
+            snap = FieldSnapshot(
+                peers=tuple(payload["peers"]),
+                field=tuple(float(x) for x in payload["field"]),
+                cadences=tuple(
+                    (int(c[0]), float(c[1]), int(c[2]))
+                    for c in payload["cadences"]
+                ),
+                solve_iterations=int(payload["solve_iterations"]),
+                solve_residual=float(payload["solve_residual"]),
+                solve_wall_ns=int(payload["solve_wall_ns"]),
+                captured_at_ns=time.perf_counter_ns(),
+            )
+        except (KeyError, TypeError, ValueError):
+            log.debug(
+                "persisted field snapshot at %s has unexpected shape",
+                self._persist_path,
+                exc_info=True,
+            )
+            return
+        with self._lock:
+            self._current = snap
+        log.info(
+            "field snapshot warm-started from %s (%d peers)",
+            self._persist_path,
+            len(snap.peers),
+        )
 
     # ── query API (called from consumers) ──────────────────────────
 
@@ -279,7 +484,13 @@ class FieldSnapshotManager:
     def cadence_for_peer(self, peer: str) -> Optional[int]:
         """Recommended bytes-between-rotations for the given peer, or
         ``None`` if no snapshot or the peer isn't in it. Callers
-        treating `None` as "use baseline" preserve correctness."""
+        treating `None` as "use baseline" preserve correctness.
+
+        Operator escape hatch: ``ONE_LINK_FIELD_CADENCE_DISABLE=1``
+        forces ``None`` regardless of snapshot — useful when the
+        cadence advisory is suspected of misbehaving on production."""
+        if _env_disabled("ONE_LINK_FIELD_CADENCE_DISABLE"):
+            return None
         snap = self.snapshot()
         if snap is None:
             return None

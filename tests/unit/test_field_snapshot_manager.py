@@ -178,3 +178,160 @@ def test_start_stop_lifecycle():
     mgr.stop()
     # No assertion on solve count — if native is missing this is 0,
     # which is the expected safe-default behavior.
+
+
+# ── Phase E #4: env-var kill switches ──────────────────────────────
+
+
+def test_cadence_disable_env_var_returns_none(monkeypatch):
+    """ONE_LINK_FIELD_CADENCE_DISABLE=1 must force cadence_for_peer
+    to return None even when a fresh snapshot exists."""
+    from one_link.field_snapshot import FieldSnapshot, FieldSnapshotManager
+
+    mgr = FieldSnapshotManager()
+    # Seed an in-memory snapshot directly so the test doesn't depend
+    # on the native crate.
+    fake = FieldSnapshot(
+        peers=("a", "b"),
+        field=(0.5, 0.5),
+        cadences=((0, 1.5, 666666), (1, 1.5, 666666)),
+        solve_iterations=10,
+        solve_residual=1e-7,
+        solve_wall_ns=12345,
+        captured_at_ns=time.perf_counter_ns(),
+    )
+    mgr._current = fake  # type: ignore[attr-defined]
+    # Sanity: without the kill switch, the cadence is the seeded value.
+    assert mgr.cadence_for_peer("a") == 666666
+    # Flip the kill switch — cadence_for_peer now refuses to advise.
+    monkeypatch.setenv("ONE_LINK_FIELD_CADENCE_DISABLE", "1")
+    assert mgr.cadence_for_peer("a") is None
+    # Clearing the var (or any non-truthy value) re-enables.
+    monkeypatch.setenv("ONE_LINK_FIELD_CADENCE_DISABLE", "0")
+    assert mgr.cadence_for_peer("a") == 666666
+
+
+def test_master_field_disable_pauses_solve_loop(monkeypatch):
+    """ONE_LINK_FIELD_DISABLE=1 pauses the background tick — solve
+    count stays at 0 even after we let the loop run."""
+    from one_link.field_snapshot import FieldConfig, FieldSnapshotManager
+
+    monkeypatch.setenv("ONE_LINK_FIELD_DISABLE", "1")
+    cfg = FieldConfig(update_interval_s=0.02)
+    mgr = FieldSnapshotManager(cfg)
+    # Seed enough topology so _tick *would* solve if it ran.
+    mgr.update_topology(
+        [("a", "b", 1.0), ("b", "c", 1.0), ("c", "a", 1.0)]
+    )
+    for p in ("a", "b", "c"):
+        mgr.update_peer_source(p, density=1.0, flux=0.5)
+    mgr.start()
+    time.sleep(0.12)  # 6 tick windows; would normally produce ≥1 solve
+    mgr.stop()
+    assert mgr.solve_count == 0
+
+
+# ── Phase E #2: fragility-event surface ────────────────────────────
+
+
+def test_update_fragility_events_stores_and_replaces():
+    """update_fragility_events replaces (not appends to) the pending
+    list — caller passing [] clears."""
+    from one_link.field_snapshot import FieldSnapshotManager
+
+    mgr = FieldSnapshotManager()
+    mgr.update_fragility_events([(["a", "b"], 1.0), (["c"], 0.5)])
+    assert len(mgr._fragility_events) == 2  # type: ignore[attr-defined]
+    mgr.update_fragility_events([(["d"], 2.0)])
+    assert len(mgr._fragility_events) == 1  # type: ignore[attr-defined]
+    mgr.update_fragility_events([])
+    assert mgr._fragility_events == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.skipif(
+    not _phase_e_available(),
+    reason="one_link_native.coherence_field not installed",
+)
+def test_fragility_events_reduce_field_at_affected_nodes():
+    """Acceptance gate for Phase E #2 (homology → field): peers in a
+    fragility event must have a lower recovered field value than
+    peers in the same baseline graph WITHOUT the event."""
+    from one_link.field_snapshot import FieldSnapshotManager
+
+    def _solve(events):
+        mgr = FieldSnapshotManager()
+        mgr.update_topology(
+            [
+                ("a", "b", 1.0), ("b", "c", 1.0), ("c", "d", 1.0),
+                ("d", "a", 1.0), ("a", "c", 0.5), ("b", "d", 0.5),
+            ]
+        )
+        for p in ("a", "b", "c", "d"):
+            mgr.update_peer_source(p, density=1.0, flux=0.5)
+        if events:
+            mgr.update_fragility_events(events, coupling_strength=2.0)
+        mgr._tick()  # type: ignore[attr-defined]
+        snap = mgr.snapshot()
+        assert snap is not None
+        return dict(zip(snap.peers, snap.field))
+
+    baseline = _solve([])
+    fragile = _solve([(["a", "b"], 1.0)])
+    # Affected peers' field is lower (suppressed by the negative
+    # spike injected via inject_fragility_events). Pure correctness
+    # check; the exact magnitude depends on (D, gamma, weight).
+    assert fragile["a"] < baseline["a"]
+    assert fragile["b"] < baseline["b"]
+
+
+# ── Phase E #5: snapshot persistence across restart ────────────────
+
+
+@pytest.mark.skipif(
+    not _phase_e_available(),
+    reason="one_link_native.coherence_field not installed",
+)
+def test_snapshot_persists_and_warm_starts_next_manager(tmp_path):
+    """A solved snapshot survives a manager restart when persist_path
+    is provided — the new manager's snapshot() returns the persisted
+    value before its own first tick."""
+    from one_link.field_snapshot import FieldSnapshotManager
+
+    persist_path = tmp_path / "field-snapshot.json"
+    mgr1 = FieldSnapshotManager(persist_path=persist_path)
+    mgr1.update_topology(
+        [("a", "b", 1.0), ("b", "c", 1.0), ("c", "a", 1.0)]
+    )
+    for p in ("a", "b", "c"):
+        mgr1.update_peer_source(p, density=1.0, flux=0.5)
+    mgr1._tick()  # type: ignore[attr-defined]
+    snap1 = mgr1.snapshot()
+    assert snap1 is not None
+    assert persist_path.exists()
+
+    # New manager pointed at the same path warm-starts.
+    mgr2 = FieldSnapshotManager(persist_path=persist_path)
+    snap2 = mgr2.snapshot()
+    assert snap2 is not None
+    assert snap2.peers == snap1.peers
+    assert snap2.field == snap1.field
+    assert snap2.cadences == snap1.cadences
+
+
+def test_snapshot_load_tolerates_missing_file(tmp_path):
+    """No persisted file → snapshot() is None, no exception."""
+    from one_link.field_snapshot import FieldSnapshotManager
+
+    mgr = FieldSnapshotManager(persist_path=tmp_path / "absent.json")
+    assert mgr.snapshot() is None
+
+
+def test_snapshot_load_tolerates_malformed_file(tmp_path):
+    """Corrupt persisted file is silently discarded — manager keeps
+    operating as if no snapshot were on disk."""
+    from one_link.field_snapshot import FieldSnapshotManager
+
+    bad = tmp_path / "field-snapshot.json"
+    bad.write_text("not-valid-json{", encoding="utf-8")
+    mgr = FieldSnapshotManager(persist_path=bad)
+    assert mgr.snapshot() is None

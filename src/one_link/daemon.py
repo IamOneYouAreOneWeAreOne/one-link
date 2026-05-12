@@ -6324,13 +6324,22 @@ class Daemon:
 
     def _ensure_field_snapshot(self):
         """Lazily build + start the FieldSnapshotManager on first
-        access. Safe to call repeatedly; idempotent."""
+        access. Safe to call repeatedly; idempotent.
+
+        Persists the latest snapshot under the daemon's data dir so a
+        restart can warm-start from the previous run — no 5-second
+        post-restart gap before downstream consumers get field
+        guidance again."""
         if self._field_snapshot is not None:
             return self._field_snapshot
         try:
             from one_link.field_snapshot import FieldSnapshotManager
+            from one_link.app import data_dir
 
-            self._field_snapshot = FieldSnapshotManager()
+            persist_path = data_dir() / "field-snapshot.json"
+            self._field_snapshot = FieldSnapshotManager(
+                persist_path=persist_path,
+            )
             self._field_snapshot.start()
         except Exception as e:  # pragma: no cover
             log.warning("field-snapshot manager unavailable: %s", e)
