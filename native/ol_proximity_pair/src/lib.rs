@@ -59,10 +59,16 @@
 #![allow(clippy::cast_sign_loss)]
 
 pub mod amplify;
+pub mod cascade;
+pub mod prng;
 pub mod quantize;
 pub mod reconcile;
 
 pub use amplify::{privacy_amplify, AMPLIFIED_KEY_BYTES};
+pub use cascade::{
+    multi_pass_reconcile, multi_pass_syndromes, permutation_for_pass,
+    CASCADE_PASSES_DEFAULT,
+};
 pub use quantize::{
     quantize_observations, QuantizeConfig, GUARD_BAND_DEFAULT,
     OBSERVATION_BYTES_DEFAULT,
