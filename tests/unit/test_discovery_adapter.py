@@ -326,3 +326,108 @@ def test_end_to_end_publish_and_lookup():
     found = table_b.closest_to(a_node_id)
     assert len(found) >= 1
     assert found[0].as_bytes() == a_node_id.as_bytes()
+
+
+# ── F1.3++ DhtNode end-to-end (the production acceptance gate) ────
+
+
+def test_two_dht_nodes_find_each_other_over_udp():
+    """THE production acceptance gate: two Python-constructed
+    DhtNodes on real UDP loopback sockets discover each other,
+    look each other up by NodeId, and retrieve cryptographically-
+    signed records end-to-end."""
+    import time
+
+    from one_link import discovery_native as disc
+
+    seed_a, pk_a = _make_keypair()
+    seed_b, pk_b = _make_keypair()
+    id_a = disc.node_id_from_pubkey(pk_a)
+    id_b = disc.node_id_from_pubkey(pk_b)
+
+    # Spin up A first.
+    node_a = disc.dht_node(
+        bind_addr="127.0.0.1:0", own_id=id_a, seed_peers=[]
+    )
+    try:
+        addr_a = node_a.local_addr()
+        rec_a = disc.peer_record(
+            publisher_pubkey=pk_a,
+            endpoints=[f"udp://{addr_a}"],
+            publish_time_unix=int(time.time()),
+        )
+        signed_a = disc.sign_record(rec_a, signing_key_seed=seed_a)
+        node_a.publish_self_record(signed_a)
+
+        # Spin up B, seed it with A.
+        node_b = disc.dht_node(
+            bind_addr="127.0.0.1:0",
+            own_id=id_b,
+            seed_peers=[(id_a, addr_a)],
+        )
+        try:
+            addr_b = node_b.local_addr()
+            rec_b = disc.peer_record(
+                publisher_pubkey=pk_b,
+                endpoints=[f"udp://{addr_b}"],
+                publish_time_unix=int(time.time()),
+            )
+            signed_b = disc.sign_record(rec_b, signing_key_seed=seed_b)
+            node_b.publish_self_record(signed_b)
+            node_a.add_seed_peer(id_b, addr_b)
+
+            # Let receivers warm up.
+            time.sleep(0.05)
+
+            # B looks up A's RECORD via FIND_VALUE over the wire.
+            found_a = node_b.lookup_record(id_a)
+            assert found_a is not None
+            found_a.verify()  # cryptographic verification
+            assert found_a.record().publisher_pubkey() == pk_a
+
+            # A looks up B via FIND_NODE.
+            closest_to_b = node_a.lookup(id_b)
+            assert any(p.as_bytes() == id_b.as_bytes() for p in closest_to_b)
+
+            # Both routing tables have learned each other.
+            assert node_a.routing_table_len() >= 1
+            assert node_b.routing_table_len() >= 1
+        finally:
+            node_b.shutdown()
+    finally:
+        node_a.shutdown()
+
+
+def test_dht_node_local_addr_returns_bound_port():
+    from one_link import discovery_native as disc
+
+    _, pk = _make_keypair()
+    id_ = disc.node_id_from_pubkey(pk)
+    node = disc.dht_node(bind_addr="127.0.0.1:0", own_id=id_)
+    try:
+        addr = node.local_addr()
+        assert addr.startswith("127.0.0.1:")
+        port = int(addr.split(":")[1])
+        assert port > 0
+    finally:
+        node.shutdown()
+
+
+def test_dht_node_shutdown_then_methods_raise():
+    from one_link import discovery_native as disc
+
+    _, pk = _make_keypair()
+    id_ = disc.node_id_from_pubkey(pk)
+    node = disc.dht_node(bind_addr="127.0.0.1:0", own_id=id_)
+    node.shutdown()
+    with pytest.raises(RuntimeError):
+        node.local_addr()
+
+
+def test_dht_node_rejects_bad_bind_addr():
+    from one_link import discovery_native as disc
+
+    _, pk = _make_keypair()
+    id_ = disc.node_id_from_pubkey(pk)
+    with pytest.raises(ValueError):
+        disc.dht_node(bind_addr="not-an-addr", own_id=id_)

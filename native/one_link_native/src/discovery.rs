@@ -12,6 +12,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use std::net::SocketAddr;
+
+use ol_discovery::dht_node::{DhtError, DhtNode as InnerDhtNode};
 use ol_discovery::node_id::{NodeId as InnerNodeId, NODE_ID_BITS, NODE_ID_BYTES};
 use ol_discovery::record::{
     PeerRecord as InnerPeerRecord, RecordError,
@@ -375,6 +378,144 @@ impl PyRoutingTable {
     }
 }
 
+// ── DhtNode (production-deployable orchestrator) ─────────────────
+
+/// High-level Kademlia DHT node. Owns the tokio runtime, UDP socket,
+/// routing table, record store, and background receiver task.
+///
+/// Construct once, call `publish_self_record` + `add_seed_peer` to
+/// wire up bootstrap, then `lookup` / `lookup_record` to find peers
+/// over the real network.
+#[pyclass(module = "one_link_native.discovery", unsendable)]
+struct PyDhtNode {
+    inner: Option<InnerDhtNode>,
+}
+
+#[pymethods]
+impl PyDhtNode {
+    /// Construct a new DhtNode.
+    ///
+    /// `bind_addr`: "host:port" (e.g. "0.0.0.0:7117" for the daemon's
+    /// UDP port, or "127.0.0.1:0" for an ephemeral test port).
+    /// `own_id`: this node's NodeId.
+    /// `seed_peers`: list of (NodeId, "host:port") tuples for
+    /// bootstrap. May be empty for the first node in a fresh swarm.
+    #[new]
+    #[pyo3(signature = (bind_addr, own_id, seed_peers))]
+    fn new(
+        bind_addr: &str,
+        own_id: &PyNodeId,
+        seed_peers: Vec<(PyNodeId, String)>,
+    ) -> PyResult<Self> {
+        let addr: SocketAddr = bind_addr.parse().map_err(|e| {
+            PyValueError::new_err(format!("bad bind_addr {bind_addr:?}: {e}"))
+        })?;
+        let seeds: Result<Vec<(InnerNodeId, SocketAddr)>, _> = seed_peers
+            .into_iter()
+            .map(|(id, addr_s)| {
+                addr_s.parse::<SocketAddr>().map(|a| (id.inner, a))
+            })
+            .collect();
+        let seeds = seeds.map_err(|e| {
+            PyValueError::new_err(format!("bad seed address: {e}"))
+        })?;
+        let node =
+            InnerDhtNode::new(addr, own_id.inner, seeds).map_err(map_dht_err)?;
+        Ok(Self { inner: Some(node) })
+    }
+
+    /// Local bound socket address as "host:port".
+    fn local_addr(&self) -> PyResult<String> {
+        let node = self.require()?;
+        Ok(node.local_addr().to_string())
+    }
+
+    /// The node's own NodeId.
+    fn own_id(&self) -> PyResult<PyNodeId> {
+        let node = self.require()?;
+        Ok(PyNodeId { inner: node.own_id() })
+    }
+
+    /// Publish this node's own self-record.
+    fn publish_self_record(
+        &self,
+        record: &PySignedRecord,
+    ) -> PyResult<()> {
+        let node = self.require()?;
+        node.publish_self_record(record.inner.clone());
+        Ok(())
+    }
+
+    /// Add a seed peer (NodeId + "host:port" address) to the
+    /// resolver + routing table.
+    fn add_seed_peer(
+        &self,
+        id: &PyNodeId,
+        addr: &str,
+    ) -> PyResult<()> {
+        let node = self.require()?;
+        let addr: SocketAddr = addr.parse().map_err(|e| {
+            PyValueError::new_err(format!("bad addr {addr:?}: {e}"))
+        })?;
+        node.add_seed_peer(id.inner, addr);
+        Ok(())
+    }
+
+    /// Iterative FIND_NODE lookup. Returns the K closest NodeIds.
+    /// Blocking.
+    fn lookup(&self, target: &PyNodeId) -> PyResult<Vec<PyNodeId>> {
+        let node = self.require()?;
+        let ids = node.lookup(target.inner).map_err(map_dht_err)?;
+        Ok(ids.into_iter().map(|i| PyNodeId { inner: i }).collect())
+    }
+
+    /// Iterative FIND_VALUE lookup. Returns the SignedRecord if the
+    /// target's record was found anywhere in the swarm; None if the
+    /// search converged without finding it.
+    fn lookup_record(
+        &self,
+        target: &PyNodeId,
+    ) -> PyResult<Option<PySignedRecord>> {
+        let node = self.require()?;
+        let rec = node.lookup_record(target.inner).map_err(map_dht_err)?;
+        Ok(rec.map(|r| PySignedRecord { inner: r }))
+    }
+
+    /// How many peers are currently in the routing table.
+    fn routing_table_len(&self) -> PyResult<usize> {
+        let node = self.require()?;
+        Ok(node.routing_table_len())
+    }
+
+    /// How many records the node is currently storing.
+    fn records_len(&self) -> PyResult<usize> {
+        let node = self.require()?;
+        Ok(node.records_len())
+    }
+
+    /// Graceful shutdown. After this call the node is dead and any
+    /// further method call returns a RuntimeError.
+    fn shutdown(&mut self) {
+        if let Some(node) = self.inner.take() {
+            node.shutdown();
+        }
+    }
+}
+
+impl PyDhtNode {
+    fn require(&self) -> PyResult<&InnerDhtNode> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                "DhtNode is shut down",
+            ))
+    }
+}
+
+fn map_dht_err(e: DhtError) -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+}
+
 // ── Error mapping ────────────────────────────────────────────────
 
 fn map_record_err(e: RecordError) -> PyErr {
@@ -389,6 +530,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySignedRecord>()?;
     m.add_class::<PyRoutingTable>()?;
     m.add_class::<PyInsertOutcome>()?;
+    m.add_class::<PyDhtNode>()?;
     // Surface Python-friendly aliases.
     let cls = m.getattr("PyNodeId")?;
     m.add("NodeId", cls)?;
@@ -400,6 +542,8 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("RoutingTable", cls)?;
     let cls = m.getattr("PyInsertOutcome")?;
     m.add("InsertOutcome", cls)?;
+    let cls = m.getattr("PyDhtNode")?;
+    m.add("DhtNode", cls)?;
     // Constants.
     m.add("NODE_ID_BYTES", NODE_ID_BYTES)?;
     m.add("NODE_ID_BITS", NODE_ID_BITS)?;

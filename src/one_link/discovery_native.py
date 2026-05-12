@@ -140,6 +140,31 @@ def routing_table(own_id: Any, *, k: int = K_BUCKET_DEFAULT) -> Any:
     return _native_disc.RoutingTable(own_id, int(k))
 
 
+def dht_node(
+    *,
+    bind_addr: str,
+    own_id: Any,
+    seed_peers: list[tuple[Any, str]] | None = None,
+) -> Any:
+    """Build a production-deployable DhtNode.
+
+    ``bind_addr``: "host:port" the UDP socket binds to (use
+    "0.0.0.0:7117" in production; "127.0.0.1:0" for ephemeral test).
+    ``own_id``: this node's NodeId.
+    ``seed_peers``: optional list of (NodeId, "host:port") bootstrap
+    peers. Empty for the first node in a fresh swarm.
+
+    The returned object owns a tokio runtime + UDP socket + receiver
+    task. Call ``shutdown()`` to release cleanly.
+    """
+    _require_native()
+    return _native_disc.DhtNode(
+        bind_addr,
+        own_id,
+        list(seed_peers or []),
+    )
+
+
 def _require_native() -> None:
     if not HAS_NATIVE:
         raise RuntimeError(
