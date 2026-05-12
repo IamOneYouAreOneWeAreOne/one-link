@@ -18,6 +18,20 @@
 //! and survive screen-reader / accessibility paths. Numbers are
 //! more error-prone for the user; emoji rendering varies across
 //! devices and can collide ambiguously.
+//!
+//! ## Example
+//!
+//! ```
+//! use ol_pair_qr::sas::Sas;
+//! use ol_pair_qr::transcript::TranscriptHash;
+//!
+//! let t = TranscriptHash::from_bytes([0x42u8; 32]);
+//! let sas = Sas::derive(&t);
+//! // Five words, space-joined, all from the 64-word dictionary.
+//! assert_eq!(sas.display().split(' ').count(), 5);
+//! // Determinism: same transcript → same SAS.
+//! assert_eq!(sas, Sas::derive(&t));
+//! ```
 
 use blake3::Hasher;
 

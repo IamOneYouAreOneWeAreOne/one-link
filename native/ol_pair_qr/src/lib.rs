@@ -40,6 +40,43 @@
 //! [`canon`] module. Same struct → same bytes, every platform,
 //! every build. Required because the transcript hash is the trust
 //! anchor and any encoder ambiguity = security hole.
+//!
+//! ## End-to-end example
+//!
+//! ```
+//! use ed25519_dalek::SigningKey;
+//! use rand_core::OsRng;
+//!
+//! use ol_pair_qr::invite::CapabilityScope;
+//! use ol_pair_qr::{Inviter, Scanner};
+//!
+//! // Inviter generates a QR-encodable invite.
+//! let mut inviter = Inviter::new(
+//!     SigningKey::generate(&mut OsRng),
+//!     &mut OsRng,
+//!     1_900_000_000, // expiry_unix (year 2030+)
+//!     CapabilityScope::from_bytes(b"contact:alice").unwrap(),
+//! );
+//! let qr_bytes = inviter.invite_bytes();
+//!
+//! // Scanner reads the QR, verifies, builds a response.
+//! let scanner_sk = SigningKey::generate(&mut OsRng);
+//! let now_unix = 100; // current wall clock
+//! let (mut scanner, response_bytes) =
+//!     Scanner::scan(scanner_sk, &qr_bytes, now_unix, &mut OsRng).unwrap();
+//!
+//! // Inviter receives the response, computes SAS for user comparison.
+//! let sas_inviter = inviter.receive_response(&response_bytes).unwrap();
+//! let sas_scanner = scanner.sas();
+//! assert_eq!(sas_inviter, sas_scanner); // identical 5-word string
+//!
+//! // Users compare SAS verbally. On match, inviter confirms.
+//! let (confirm_bytes, chain_key_inviter) = inviter.confirm().unwrap();
+//! let chain_key_scanner = scanner.receive_confirm(&confirm_bytes).unwrap();
+//!
+//! // Both sides derive byte-identical 32-byte chain keys.
+//! assert_eq!(chain_key_inviter, chain_key_scanner);
+//! ```
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

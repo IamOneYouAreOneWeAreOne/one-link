@@ -256,6 +256,76 @@ def sas_from_transcript(transcript: bytes) -> str:
     return str(_native_pq.sas_from_transcript(transcript))
 
 
+def render_invite_qr_svg(
+    invite_bytes: bytes,
+    *,
+    border: int = 2,
+    box_size: int = 8,
+    error_correction: str = "M",
+) -> bytes:
+    """Render an Invite payload as a scannable QR code SVG.
+
+    Uses QR binary (byte) mode for compactness — INVITE_MAX_BYTES
+    (512) easily fits at QR version 15-16 with error-correction
+    level M, leaving headroom for the rendered SVG to remain
+    phone-camera-readable at typical screen sizes.
+
+    Parameters:
+      invite_bytes: raw output of `Inviter.invite_bytes()`.
+      border: quiet-zone modules (QR spec recommends >= 4 for
+              wild-environment reads; 2 is fine when both devices
+              are screen-to-camera in good light).
+      box_size: pixels per module in the rendered SVG.
+      error_correction: one of "L" (~7%), "M" (~15%, default),
+                        "Q" (~25%), "H" (~30%).
+
+    Returns: SVG document as UTF-8 bytes ready to write to disk or
+    serve directly from an HTTP response.
+    """
+    try:
+        import qrcode  # type: ignore[import-untyped]
+        import qrcode.constants  # type: ignore[import-untyped]
+        import qrcode.image.svg  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise RuntimeError(
+            "qrcode>=7 is required for render_invite_qr_svg "
+            "(pip install qrcode)"
+        ) from exc
+
+    ec_map = {
+        "L": qrcode.constants.ERROR_CORRECT_L,
+        "M": qrcode.constants.ERROR_CORRECT_M,
+        "Q": qrcode.constants.ERROR_CORRECT_Q,
+        "H": qrcode.constants.ERROR_CORRECT_H,
+    }
+    if error_correction not in ec_map:
+        raise ValueError(
+            f"error_correction must be one of {list(ec_map)}, "
+            f"got {error_correction!r}"
+        )
+    if len(invite_bytes) > INVITE_MAX_BYTES:
+        raise ValueError(
+            f"invite_bytes oversize: {len(invite_bytes)} > "
+            f"INVITE_MAX_BYTES={INVITE_MAX_BYTES}"
+        )
+
+    qr = qrcode.QRCode(
+        border=border,
+        box_size=box_size,
+        error_correction=ec_map[error_correction],
+    )
+    # Binary (byte) mode is selected automatically when add_data
+    # receives bytes (vs str). Saves ~38% vs base32 alphanumeric.
+    qr.add_data(invite_bytes)
+    qr.make(fit=True)
+    img = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
+    import io
+
+    buf = io.BytesIO()
+    img.save(buf)
+    return buf.getvalue()
+
+
 __all__ = [
     "HAS_NATIVE",
     "Inviter",
@@ -263,6 +333,7 @@ __all__ = [
     "NativeMissingError",
     "decode_invite",
     "sas_from_transcript",
+    "render_invite_qr_svg",
     "SAS_WORD_COUNT",
     "SAS_BITS",
     "CHAIN_KEY_LEN",

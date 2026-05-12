@@ -76,13 +76,20 @@ impl PairConfirm {
     /// `expected_transcript` is the transcript the scanner computed
     /// locally; this method refuses any confirm committed to a
     /// different transcript (defeats MITM swap).
+    ///
+    /// Both checks use `subtle::ConstantTimeEq` so a timing oracle
+    /// cannot leak which byte mismatched. Symmetry with the
+    /// transcript check + protection-in-depth (pubkey is public, but
+    /// keeping the verification surface uniformly constant-time is
+    /// the auditable property).
     pub fn decode_and_verify(
         bytes: &[u8],
         expected_inviter_pubkey: &[u8; PUBLIC_KEY_LENGTH],
         expected_transcript: &TranscriptHash,
     ) -> PairResult<Self> {
+        use subtle::ConstantTimeEq;
         let conf = Self::decode_raw(bytes)?;
-        if &conf.id_pubkey != expected_inviter_pubkey {
+        if !bool::from(conf.id_pubkey.ct_eq(expected_inviter_pubkey)) {
             return Err(PairError::BadSignature);
         }
         if !conf.transcript.ct_eq(expected_transcript) {

@@ -14,6 +14,13 @@ Per [`FILE_ENGINE_V2_PLAN.md`](../FILE_ENGINE_V2_PLAN.md) Phase D item #7:
 - `Capability.cfg` — TLC model-check config (Granters, Subjects, Scopes,
   RootKeys, MaxClock). Production verification runs TLC over this finite
   space on every change to the capability state machine.
+- `pair_qr.tla` — TLA+ specification of the pair-by-QR Factor-1
+  trust state machine (Phase F2 / Coherence Mesh). Models Inviter +
+  Scanner + an active network attacker; verifies that the Scanner
+  cannot reach Done with a forged transcript and that cross-invite
+  response replay cannot be accepted by an inviter.
+- `PairQr.cfg` — TLC config for the pair-by-QR spec (2 inviters,
+  2 scanners, 2 invites, AttackerOn = TRUE).
 
 ## Verified safety invariants
 
@@ -23,6 +30,10 @@ Per [`FILE_ENGINE_V2_PLAN.md`](../FILE_ENGINE_V2_PLAN.md) Phase D item #7:
 | `NoDoubleGrant` | No two grant records share a `(granter, cap_id)` pair. |
 | `NoReplay` | A revoked `(granter, subject, scope)` tuple never appears in `ActiveGrants` after revocation lands. |
 | `ClockMonotonic` | Logical clock is non-decreasing. |
+| `NoUnverifiedConfirm` (pair-by-QR) | A Scanner only reaches Done when the confirm it accepted commits to the transcript it locally computed. |
+| `NoCrossInviteReplay` (pair-by-QR) | An Inviter never advances state on a response that wasn't bound to its specific invite. |
+| `SAS_AgreementOnHonestRun` (pair-by-QR) | Two honest peers that both reach Done hold byte-identical chain keys. |
+| `StateTypesOk` (pair-by-QR) | State variables only take values from the declared enums (catches off-by-one Rust enum extensions). |
 
 ## Running TLC
 

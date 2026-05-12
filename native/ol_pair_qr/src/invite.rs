@@ -79,6 +79,29 @@ impl CapabilityScope {
 /// Created via [`Invite::sign`]; verified + decoded via
 /// [`Invite::decode_and_verify`]. The raw constructor (`new_unsigned`)
 /// exists only to support test vectors and adversarial fuzzing.
+///
+/// ## Example
+///
+/// ```
+/// use ed25519_dalek::SigningKey;
+/// use rand_core::OsRng;
+/// use ol_pair_qr::invite::{CapabilityScope, Invite, INVITE_NONCE_LEN};
+/// use x25519_dalek::{PublicKey, StaticSecret};
+///
+/// let sk = SigningKey::generate(&mut OsRng);
+/// let esk = StaticSecret::random_from_rng(OsRng);
+/// let epk = PublicKey::from(&esk).to_bytes();
+/// let mut nonce = [0u8; INVITE_NONCE_LEN];
+/// rand_core::RngCore::fill_bytes(&mut OsRng, &mut nonce);
+///
+/// let invite = Invite::sign(
+///     &sk, epk, nonce, 1_900_000_000,
+///     CapabilityScope::from_bytes(b"contact").unwrap(),
+/// );
+/// let encoded = invite.encode();
+/// let decoded = Invite::decode_and_verify(&encoded).unwrap();
+/// assert_eq!(decoded, invite);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invite {
     /// Master identity public key of the inviter.

@@ -238,6 +238,46 @@ def test_sas_from_transcript_validates_length():
 # ── Cross-Python-process two-daemon smoke ─────────────────────────
 
 
+def test_render_invite_qr_svg_produces_scannable_svg():
+    from one_link import pair_qr_native as pq
+
+    inviter = pq.Inviter(_seed(), _future_expiry(), b"contact:test")
+    qr_bytes = inviter.invite_bytes()
+    svg = pq.render_invite_qr_svg(qr_bytes)
+    assert isinstance(svg, bytes)
+    assert len(svg) > 0
+    # Valid SVG header (qrcode lib emits standard SVG 1.1 paths).
+    assert svg.startswith(b"<?xml") or svg.startswith(b"<svg")
+    assert b"</svg>" in svg
+
+
+def test_render_invite_qr_svg_rejects_unknown_ec_level():
+    from one_link import pair_qr_native as pq
+
+    inviter = pq.Inviter(_seed(), _future_expiry())
+    qr_bytes = inviter.invite_bytes()
+    with pytest.raises(ValueError, match="error_correction"):
+        pq.render_invite_qr_svg(qr_bytes, error_correction="Z")
+
+
+def test_render_invite_qr_svg_rejects_oversize_input():
+    from one_link import pair_qr_native as pq
+
+    too_big = b"\x00" * (pq.INVITE_MAX_BYTES + 1)
+    with pytest.raises(ValueError, match="oversize"):
+        pq.render_invite_qr_svg(too_big)
+
+
+def test_render_invite_qr_svg_supports_all_ec_levels():
+    from one_link import pair_qr_native as pq
+
+    inviter = pq.Inviter(_seed(), _future_expiry())
+    qr_bytes = inviter.invite_bytes()
+    for ec in ("L", "M", "Q", "H"):
+        svg = pq.render_invite_qr_svg(qr_bytes, error_correction=ec)
+        assert b"</svg>" in svg
+
+
 def test_two_independent_inviter_scanner_pairs_dont_collide():
     """Two independent pairs (different identities) running in parallel
     derive different chain keys + their messages don't cross-verify."""

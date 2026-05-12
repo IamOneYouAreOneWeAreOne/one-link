@@ -47,3 +47,8 @@ def decode_invite(
     invite_bytes: bytes,
 ) -> Tuple[bytes, bytes, bytes, int, bytes]: ...
 def sas_from_transcript(transcript: bytes) -> str: ...
+
+# Note: render_invite_qr_svg lives in src/one_link/pair_qr_native.py
+# (Python-side wrapper using the qrcode dep), NOT in the native
+# extension — so it's not exposed as a function on this stub
+# module.
