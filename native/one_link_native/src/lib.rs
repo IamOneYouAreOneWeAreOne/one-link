@@ -62,6 +62,7 @@ mod quic;
 mod ratchet;
 mod routing;
 mod store;
+mod threshold_recovery;
 mod wal;
 
 /// Top-level Python module entrypoint.
@@ -220,6 +221,17 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.coherence_field", coherence_field_mod)?;
+
+    // Phase F1.1 — threshold recovery (Shamir + coherence-field-bound).
+    // First crate of the Coherence Mesh track. Identity master-key
+    // seeds split across trusted contacts; recovery requires K of N
+    // shares AND (optionally) the coherence-field witness at mint time.
+    let threshold_mod = PyModule::new_bound(py, "threshold_recovery")?;
+    threshold_recovery::register(py, &threshold_mod)?;
+    m.add_submodule(&threshold_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.threshold_recovery", threshold_mod)?;
 
     Ok(())
 }
