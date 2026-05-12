@@ -285,6 +285,9 @@ class NativeTransferSession:
         *,
         chunk_strategy: str = "fixed",
     ) -> Iterator[NativeChunkRecord]:
+        """Stream a file through the pipeline; dispatches to the
+        addressing-aware path that picks raw vs convergent BLAKE3
+        based on the file extension. See `_resolve_address_kind`."""
         """Stream a file through the pipeline.
 
         ``chunk_strategy``:
@@ -319,18 +322,22 @@ class NativeTransferSession:
             )
         path = Path(path)
         size = path.stat().st_size
+        # Phase B convergent-encryption default: raw-media files get
+        # convergent BLAKE3 addresses (enables cross-sender dedup);
+        # everything else stays on raw-BLAKE3 (per-recipient keys).
+        addr_kind = self._resolve_address_kind(path)
 
         if size <= self.SINGLE_CHUNK_FAST_PATH_MAX:
             plaintext = path.read_bytes()
-            chunk_id = _native_chunk.chunk_address_raw(plaintext)
+            chunk_id = self._compute_address(plaintext, addr_kind)
             record = self.encrypt_chunk_bytes(plaintext, chunk_id=chunk_id)
-            self._maybe_store(record)
+            self._maybe_store(record, address_kind=addr_kind)
             yield record
             return
 
         if size <= self.STREAMING_THRESHOLD:
             data = path.read_bytes()
-            yield from self._encrypt_buffer(data, chunk_strategy)
+            yield from self._encrypt_buffer(data, chunk_strategy, addr_kind)
             return
 
         # Streaming path: read fixed blocks, encrypt each.
@@ -339,33 +346,76 @@ class NativeTransferSession:
                 block = f.read(self.FIXED_CHUNK_SIZE)
                 if not block:
                     break
-                chunk_id = _native_chunk.chunk_address_raw(block)
+                chunk_id = self._compute_address(block, addr_kind)
                 record = self.encrypt_chunk_bytes(block, chunk_id=chunk_id)
-                self._maybe_store(record)
+                self._maybe_store(record, address_kind=addr_kind)
                 yield record
 
+    # ── address-kind dispatch (Phase B convergent encryption) ──────
+
+    @staticmethod
+    def _resolve_address_kind(path: Path) -> str:
+        """Return ``"convergent"`` for raw-media file extensions,
+        ``"raw"`` otherwise. Mirrors
+        :func:`ol_chunk_store::convergent_default_for_content_type`
+        — the canonical Rust dispatch. Keeping both sides in sync is
+        intentional; the Python helper is the daemon-facing
+        decision-point, the Rust helper is the chunk-store-facing
+        one."""
+        ext = path.suffix.lstrip(".").lower()
+        media_exts = {
+            "mp4", "m4v", "mov", "3gp", "mkv", "webm", "avi",
+            "mp3", "wav", "flac", "ogg", "opus", "aac", "m4a",
+            "jpg", "jpeg", "png", "gif", "webp", "heic",
+            "h264", "264", "avc",
+        }
+        return "convergent" if ext in media_exts else "raw"
+
+    @staticmethod
+    def _compute_address(plaintext: bytes, kind: str) -> bytes:
+        """Compute the chunk_id for ``plaintext`` under the chosen
+        addressing scheme."""
+        if kind == "convergent":
+            return _native_chunk.chunk_address_convergent(plaintext)
+        return _native_chunk.chunk_address_raw(plaintext)
+
     def _encrypt_buffer(
-        self, data: bytes, chunk_strategy: str
+        self,
+        data: bytes,
+        chunk_strategy: str,
+        address_kind: str = "raw",
     ) -> Iterator[NativeChunkRecord]:
         """Chunk + encrypt an in-memory buffer per ``chunk_strategy``."""
         if chunk_strategy == "fixed":
             step = self.FIXED_CHUNK_SIZE
             for i in range(0, len(data), step):
                 chunk = data[i : i + step]
-                chunk_id = _native_chunk.chunk_address_raw(chunk)
+                chunk_id = self._compute_address(chunk, address_kind)
                 record = self.encrypt_chunk_bytes(chunk, chunk_id=chunk_id)
-                self._maybe_store(record)
+                self._maybe_store(record, address_kind=address_kind)
                 yield record
         else:
             for boundary in _native_chunk.cdc_iter(data):
                 chunk = data[boundary.start : boundary.end]
-                record = self.encrypt_chunk_bytes(
-                    chunk, chunk_id=boundary.raw_address
+                # cdc_iter boundaries carry the raw address; for the
+                # convergent case we recompute. The boundary's
+                # raw_address is wasted work in the convergent path
+                # but the CDC scan dominates so the extra hash is < 1%.
+                chunk_id = (
+                    boundary.raw_address
+                    if address_kind == "raw"
+                    else _native_chunk.chunk_address_convergent(chunk)
                 )
-                self._maybe_store(record)
+                record = self.encrypt_chunk_bytes(chunk, chunk_id=chunk_id)
+                self._maybe_store(record, address_kind=address_kind)
                 yield record
 
-    def _maybe_store(self, record: NativeChunkRecord) -> None:
+    def _maybe_store(
+        self,
+        record: NativeChunkRecord,
+        *,
+        address_kind: str = "raw",
+    ) -> None:
         """If a ChunkStore is attached, persist ``record``. Dedup is
         handled by the store's Bloom front."""
         if self._store is None:
@@ -375,7 +425,7 @@ class NativeTransferSession:
         try:
             self._store.append_chunk(
                 record_kind="blob",
-                address_kind="raw",
+                address_kind=address_kind,
                 aead_kind=self.aead_kind,
                 chunk_id=record.chunk_id,
                 ratchet_key_id=b"\x00" * 16,

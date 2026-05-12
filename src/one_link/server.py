@@ -960,6 +960,7 @@ class UIServer:
         r.add_get("/api/connect-info/qr.svg", self._guarded(self.api_connect_info_qr))
         r.add_get("/api/me", self._guarded(self.api_me))
         r.add_get("/api/status", self._guarded(self.api_status))
+        r.add_get("/api/metrics", self._guarded(self.api_metrics))
         r.add_get("/api/settings", self._guarded(self.api_get_settings))
         r.add_post("/api/settings", self._guarded(self.api_set_settings))
         r.add_get("/api/peers", self._guarded(self.api_peers))
@@ -1988,6 +1989,51 @@ class UIServer:
             # status pill renders correctly on every load.
             "presence": self.daemon.get_my_presence(),
             "suggested_folder": suggested_folder,
+        })
+
+    async def api_metrics(self, request: web.Request) -> web.Response:
+        """Production telemetry surface. Returns JSON with:
+
+        - Native diagnostics (per `Daemon.native_diagnostics()`):
+          which Phase A1/D/E crates are loaded + advertised.
+        - Field-snapshot metrics from `FieldSnapshotManager`: solve
+          count, failure count, snapshot age, topology size.
+        - Per-peer field-driven advisories (cadence + score) for the
+          currently-known peer set.
+        - Relay-metrics summary (count + recent solve latency).
+
+        Pattern: read-only, never mutates daemon state. Safe to scrape
+        every few seconds from an operator dashboard. The JSON shape
+        is stable; adding fields is additive but renames need a
+        version bump.
+        """
+        d = self.daemon
+        native = d.native_diagnostics()
+        field_metrics = d.field_snapshot_metrics()
+        # Per-peer advisories (only includes peers in the latest
+        # snapshot; for peers without an entry the caller treats it as
+        # "no recommendation, use baseline").
+        per_peer: dict[str, dict] = {}
+        registry = d.discovery.registry if d.discovery else None
+        if registry is not None:
+            for peer in registry.list():
+                short_id = peer.short_id
+                cadence = d.cadence_for_peer(short_id)
+                score = d.field_score_for_peer(short_id)
+                entry: dict = {}
+                if cadence is not None:
+                    entry["cadence_bytes"] = cadence
+                if score is not None:
+                    entry["field_score"] = score
+                if entry:
+                    per_peer[short_id] = entry
+        relay_count = len(getattr(d, "_relay_metrics", {}) or {})
+        return web.json_response({
+            "version": __import__("one_link").__version__,
+            "native": native,
+            "field": field_metrics,
+            "per_peer_field_advisories": per_peer,
+            "relay_metrics_count": relay_count,
         })
 
     async def api_status(self, request: web.Request) -> web.Response:

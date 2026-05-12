@@ -826,6 +826,15 @@ class Daemon:
         # so a one-off bad dial doesn't permanently demote a relay.
         # Consumed by `_pick_best_relay` via `_relay_metrics_for`.
         self._relay_metrics: dict[str, dict] = {}
+        # Phase E coherence-field snapshot manager. Background-ticking
+        # solver that every Phase E consumer (ratchet cadence, bandit
+        # prior, prefetch scheduler, /api/metrics surface) reads from.
+        # Constructed lazily on first start() so daemons that don't
+        # have the native crate installed never instantiate it.
+        # Typed as Any because the FieldSnapshotManager import is also
+        # lazy (avoids hard-import dependencies on the native wheel at
+        # daemon module load).
+        self._field_snapshot: Any = None
         # M1: track which blob hashes we've explicitly requested from each
         # peer (via MANIFEST_WANTS). BLOB_OFFER / BLOB_CHUNK frames whose
         # hash isn't in this set are silently dropped — a paired peer can't
@@ -5634,6 +5643,15 @@ class Daemon:
                     }
                 except Exception:  # pragma: no cover
                     pass
+                # Field-snapshot live metrics: solve count, failure count,
+                # most-recent snapshot age. -1ms age means "no snapshot
+                # yet" (manager started but tick hasn't completed).
+                try:
+                    out["coherence_field"]["snapshot_metrics"] = (
+                        self.field_snapshot_metrics()
+                    )
+                except Exception:  # pragma: no cover
+                    pass
         except ImportError:
             pass
         # NATIVE_TRANSFER_V1 is advertised whenever it's in
@@ -5652,6 +5670,63 @@ class Daemon:
                 self._last_minted_macaroon
             )
         return out
+
+    # ── Phase E field-snapshot manager wiring ──────────────────────
+
+    def _ensure_field_snapshot(self):
+        """Lazily build + start the FieldSnapshotManager on first
+        access. Safe to call repeatedly; idempotent."""
+        if self._field_snapshot is not None:
+            return self._field_snapshot
+        try:
+            from one_link.field_snapshot import FieldSnapshotManager
+
+            self._field_snapshot = FieldSnapshotManager()
+            self._field_snapshot.start()
+        except Exception as e:  # pragma: no cover
+            log.warning("field-snapshot manager unavailable: %s", e)
+            self._field_snapshot = None
+        return self._field_snapshot
+
+    def field_snapshot_metrics(self) -> dict:
+        """Operator-facing metrics from the field-snapshot manager.
+        Returns the safe-default zero block if Phase E isn't running."""
+        snap_mgr = getattr(self, "_field_snapshot", None)
+        if snap_mgr is None:
+            return {
+                "field_solve_count": 0,
+                "field_solve_failures": 0,
+                "field_snapshot_age_ms": -1.0,
+                "field_topology_edge_count": 0,
+            }
+        try:
+            return snap_mgr.metrics()
+        except Exception:  # pragma: no cover
+            return {}
+
+    def cadence_for_peer(self, peer_short_id: str) -> int | None:
+        """Field-driven bytes-between-rotations advisory for the named
+        peer. Returns ``None`` when no snapshot exists or the peer is
+        absent from the latest snapshot — callers fall back to the
+        baseline cadence."""
+        snap_mgr = getattr(self, "_field_snapshot", None)
+        if snap_mgr is None:
+            return None
+        try:
+            return snap_mgr.cadence_for_peer(peer_short_id)
+        except Exception:  # pragma: no cover
+            return None
+
+    def field_score_for_peer(self, peer_short_id: str) -> float | None:
+        """Normalised field score (0, 1] at the named peer. Consumed
+        by the bandit-prior shaper and the prefetch scheduler."""
+        snap_mgr = getattr(self, "_field_snapshot", None)
+        if snap_mgr is None:
+            return None
+        try:
+            return snap_mgr.field_score_for_peer(peer_short_id)
+        except Exception:  # pragma: no cover
+            return None
 
     def _pick_best_relay(self, available_relays: list) -> list:
         """Phase D #1 (ADR-0028) + Phase E (FILE_ENGINE_V2_PLAN.md) —
@@ -10120,6 +10195,11 @@ class Daemon:
         self._dm_reaper_task = asyncio.create_task(self._dm_reaper_loop())
         self._prior_index_task = asyncio.create_task(self._prior_index_loop())
 
+        # Phase E: spin up the coherence-field snapshot manager. The
+        # manager idles harmlessly when no peers / no native crate; it
+        # only does work when both are present.
+        self._ensure_field_snapshot()
+
         # Start UI server if available. Import lazily so CLI/status paths do
         # not pay aiohttp's Windows platform/WMI import cost before the daemon
         # has even published its control socket.
@@ -10215,6 +10295,14 @@ class Daemon:
                 raise
 
     async def stop(self) -> None:
+        # Phase E: stop the field-snapshot background loop early so
+        # it doesn't observe a half-torn-down peer table during the
+        # rest of the shutdown.
+        if self._field_snapshot is not None:
+            try:
+                self._field_snapshot.stop(join_timeout=2.0)
+            except Exception:  # pragma: no cover
+                pass
         # v0.5.1: revoke rendezvous registration first so peers learn
         # we're going offline before we tear down anything else.
         if self.rendezvous is not None:
