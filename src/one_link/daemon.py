@@ -835,6 +835,10 @@ class Daemon:
         # lazy (avoids hard-import dependencies on the native wheel at
         # daemon module load).
         self._field_snapshot: Any = None
+        # Phase A2 dual-stack QUIC endpoint. Stays None when ol_quic
+        # isn't installed; transport_choice_for_peer() then keeps
+        # every peer on WebRTC. Lazy-built in start().
+        self._quic_endpoint: Any = None
         # M1: track which blob hashes we've explicitly requested from each
         # peer (via MANIFEST_WANTS). BLOB_OFFER / BLOB_CHUNK frames whose
         # hash isn't in this set are silently dropped — a paired peer can't
@@ -5590,6 +5594,15 @@ class Daemon:
                 "available": False,
                 "calibration": None,
             },
+            "bloom_init": {
+                "available": False,
+                "advertised": False,
+            },
+            "quic_transport": {
+                "available": False,
+                "advertised": False,
+                "endpoint_up": False,
+            },
             "native_transfer_v1": {
                 "advertised": False,
             },
@@ -5654,6 +5667,29 @@ class Daemon:
                     pass
         except ImportError:
             pass
+        # Phase B Bloom-init availability + advertisement.
+        try:
+            from one_link import bloom_init as _bi
+            from one_link.capabilities import BLOOM_INIT_V1, LOCAL_CAPABILITIES
+
+            out["bloom_init"]["available"] = _bi.HAS_NATIVE
+            out["bloom_init"]["advertised"] = BLOOM_INIT_V1 in LOCAL_CAPABILITIES
+        except ImportError:
+            pass
+        # Phase A2 QUIC transport availability + endpoint status.
+        try:
+            from one_link import peer_quic as _pq
+            from one_link.capabilities import LOCAL_CAPABILITIES, QUIC_TRANSPORT_V1
+
+            out["quic_transport"]["available"] = _pq.HAS_NATIVE
+            out["quic_transport"]["advertised"] = (
+                QUIC_TRANSPORT_V1 in LOCAL_CAPABILITIES
+            )
+            out["quic_transport"]["endpoint_up"] = (
+                getattr(self, "_quic_endpoint", None) is not None
+            )
+        except ImportError:
+            pass
         # NATIVE_TRANSFER_V1 is advertised whenever it's in
         # LOCAL_CAPABILITIES — see capabilities.py for the source.
         try:
@@ -5670,6 +5706,104 @@ class Daemon:
                 self._last_minted_macaroon
             )
         return out
+
+    # ── Phase A2 QUIC dual-stack transport wiring ──────────────────
+
+    def _ensure_quic_endpoint(self):
+        """Lazily build the local QUIC endpoint. Returns ``None``
+        when the native crate isn't installed; daemon then keeps
+        using WebRTC for every peer. Idempotent."""
+        existing = getattr(self, "_quic_endpoint", None)
+        if existing is not None:
+            return existing
+        try:
+            from one_link import peer_quic
+
+            ep = peer_quic.make_endpoint()
+            self._quic_endpoint = ep
+            return ep
+        except Exception as e:  # pragma: no cover
+            log.warning("QUIC endpoint init failed (%s); WebRTC-only", e)
+            self._quic_endpoint = None
+            return None
+
+    def transport_choice_for_peer(self, peer) -> str:
+        """Decide which transport to use for ``peer`` based on
+        capability advertisement. Returns ``"quic"`` or ``"webrtc"``.
+
+        Per [PHASE_A2_QUIC_CUTOVER_PLAN.md](../../docs/PHASE_A2_QUIC_CUTOVER_PLAN.md):
+        QUIC requires (a) both peers advertise ``QUIC_TRANSPORT_V1``,
+        (b) the local endpoint is up, (c) the peer has a dial-able
+        address. Browser peers always get WebRTC; v0.20.x peers
+        always get WebRTC (no cap → no QUIC). New v0.22+ daemons
+        will negotiate QUIC when both ends advertise the cap.
+        """
+        try:
+            from one_link import peer_quic
+            from one_link.capabilities import (
+                LOCAL_CAPABILITIES,
+                QUIC_TRANSPORT_V1,
+            )
+        except ImportError:  # pragma: no cover
+            return "webrtc"
+        if not peer_quic.HAS_NATIVE:
+            return "webrtc"
+        if self._ensure_quic_endpoint() is None:
+            return "webrtc"
+        peer_caps = getattr(peer, "capabilities", None) or getattr(
+            peer, "advertised_caps", None
+        )
+        if peer_caps is None:
+            return "webrtc"
+        if peer_quic.should_prefer_quic_for_peer(
+            tuple(LOCAL_CAPABILITIES), tuple(peer_caps)
+        ):
+            return "quic"
+        return "webrtc"
+
+    # ── Phase B Bloom-init handshake wiring ────────────────────────
+
+    def build_local_bloom_advertisement(
+        self, known_chunk_ids: list[bytes]
+    ) -> bytes | None:
+        """Build the receiver-side Bloom filter advertising which
+        chunks this daemon already holds. Returned as the wire-encoded
+        bytes ready to send in a BLOOM_INIT frame.
+
+        Returns ``None`` when the native bloom crate isn't installed —
+        callers fall back to full manifest exchange.
+        """
+        try:
+            from one_link import bloom_init
+
+            if not bloom_init.HAS_NATIVE:
+                return None
+            return bloom_init.build_receiver_bloom(known_chunk_ids)
+        except Exception as e:  # pragma: no cover
+            log.debug("Bloom-init advertisement failed (%s)", e)
+            return None
+
+    def filter_manifest_with_receiver_bloom(
+        self,
+        manifest_chunk_ids: list[bytes],
+        receiver_bloom_wire: bytes,
+    ) -> list[bytes] | None:
+        """Decode the receiver's Bloom advertisement and return the
+        manifest subset the receiver appears to be missing. Returns
+        ``None`` on decode error or native-crate absence — callers
+        then ship the full manifest."""
+        try:
+            from one_link import bloom_init
+
+            if not bloom_init.HAS_NATIVE:
+                return None
+            bf = bloom_init.decode_receiver_bloom(receiver_bloom_wire)
+            return bloom_init.filter_manifest_against_bloom(
+                manifest_chunk_ids, bf
+            )
+        except Exception as e:  # pragma: no cover
+            log.debug("Bloom-init receiver-bloom decode failed (%s)", e)
+            return None
 
     # ── Phase E field-snapshot manager wiring ──────────────────────
 
@@ -10200,6 +10334,11 @@ class Daemon:
         # only does work when both are present.
         self._ensure_field_snapshot()
 
+        # Phase A2: bring up the local QUIC endpoint (no-op if the
+        # native crate isn't installed). Dual-stack with WebRTC; the
+        # daemon's transport_choice_for_peer() selects per-peer.
+        self._ensure_quic_endpoint()
+
         # Start UI server if available. Import lazily so CLI/status paths do
         # not pay aiohttp's Windows platform/WMI import cost before the daemon
         # has even published its control socket.
@@ -10303,6 +10442,15 @@ class Daemon:
                 self._field_snapshot.stop(join_timeout=2.0)
             except Exception:  # pragma: no cover
                 pass
+        # Phase A2: close the local QUIC endpoint. Active QUIC peer
+        # connections close as part of their own session teardown.
+        quic_ep = getattr(self, "_quic_endpoint", None)
+        if quic_ep is not None:
+            try:
+                quic_ep.close()
+            except Exception:  # pragma: no cover
+                pass
+            self._quic_endpoint = None
         # v0.5.1: revoke rendezvous registration first so peers learn
         # we're going offline before we tear down anything else.
         if self.rendezvous is not None:

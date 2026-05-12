@@ -35,6 +35,18 @@ DOUBLE_RATCHET_V1 = "double_ratchet_v1"
 # (no NATIVE_TRANSFER_V1 in caps) keep using FILE_CHUNK /
 # FILE_BIN_CHUNK transparently.
 NATIVE_TRANSFER_V1 = "native_transfer_v1"
+# Phase B Bloom-init handshake (ADR-pending): when both peers advertise
+# this, the receiver sends a Bloom filter of its locally-held chunk_ids
+# at transfer-offer time; the sender XORs it against the manifest and
+# sends only the missing chunks. Reduces bytes-on-wire by 75-93% in the
+# steady-state resume regime. Falls back transparently to the legacy
+# manifest-then-chunks flow when either peer lacks this cap.
+BLOOM_INIT_V1 = "bloom_init_v1"
+# Phase A2 QUIC transport (PHASE_A2_QUIC_CUTOVER_PLAN.md): when both
+# peers advertise this, daemon↔daemon traffic flows over QUIC instead
+# of WebRTC/DTLS-SRTP. Browser-as-peer paths stay on WebRTC; v0.20.x
+# daemons interop on WebRTC because they don't advertise this cap.
+QUIC_TRANSPORT_V1 = "quic_transport_v1"
 
 LOCAL_CAPABILITIES = (
     CHAT,
@@ -50,6 +62,8 @@ LOCAL_CAPABILITIES = (
     FUTURE_TRANSPORTS,
     DOUBLE_RATCHET_V1,
     NATIVE_TRANSFER_V1,
+    BLOOM_INIT_V1,
+    QUIC_TRANSPORT_V1,
 )
 
 # v0.7.1 deny-by-default capability split. The audit doc
@@ -74,6 +88,8 @@ TRANSPORT_LAYER_CAPS = (
     FILE_CDC_BINARY_FRAME,
     DOUBLE_RATCHET_V1,
     NATIVE_TRANSFER_V1,
+    BLOOM_INIT_V1,
+    QUIC_TRANSPORT_V1,
 )
 
 
