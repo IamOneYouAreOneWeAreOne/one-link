@@ -59,6 +59,7 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
 
+pub mod dht_node;
 pub mod lookup;
 pub mod node_id;
 pub mod record;
@@ -82,6 +83,10 @@ pub use rpc::{
     Header, Nonce, Request, Response, RpcEnvelope, RpcError,
     FindValueOutcome, StoreOutcome,
     MAX_CLOCK_SKEW_SECS, MAX_FIND_RESULTS,
+};
+pub use dht_node::{
+    DhtError, DhtNode, DEFAULT_BUCKET_REFRESH_INTERVAL_SECS,
+    DEFAULT_REPUBLISH_INTERVAL_SECS,
 };
 pub use udp_transport::{
     EndpointResolver, RequestHandler, UdpTransport, DEFAULT_QUERY_TIMEOUT_MS,
