@@ -9591,6 +9591,21 @@ class Daemon:
             size=size,
             peer_features=peer_features,
         )
+        # Phase E #3 — τ_c-coupled ratchet rotation cadence.
+        # When the coherence field reports a low τ_c for this peer
+        # (high partition risk / lossy edge), we shrink the chunk
+        # size so the per-chunk ratchet rotates faster per byte
+        # transferred. Forward secrecy scales with network physics.
+        # Floor at 64 KiB so the network framing overhead never
+        # dominates. cadence_for_peer honours the env kill-switch
+        # internally, so no extra guard needed here.
+        peer_short_id = peer_fp[:8]
+        try:
+            field_cadence = self.cadence_for_peer(peer_short_id)
+        except Exception:  # pragma: no cover
+            field_cadence = None
+        if field_cadence is not None and field_cadence < fixed_chunk_size:
+            fixed_chunk_size = max(field_cadence, 64 * 1024)
         if (
             cached_file_index is not None
             and cached_file_index.chunks
