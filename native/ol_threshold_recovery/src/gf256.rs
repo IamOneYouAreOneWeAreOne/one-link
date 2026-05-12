@@ -89,6 +89,54 @@ pub const fn gf_div(a: u32, b: u32) -> u32 {
     }
 }
 
+// ── Optimized table-based multiplication ────────────────────────────
+//
+// The constant-time `gf_mul` above runs an 8-iter masked loop per
+// multiply. For NON-SECURITY-CRITICAL paths (e.g., Lagrange basis
+// evaluation, where operand values are derived from public share
+// x-coordinates), a 64KB precomputed table gives ~5-10x speedup with
+// a single load.
+//
+// Use `gf_mul_fast` ONLY when:
+//   - The operands are public (share x-values, not secret bytes)
+//   - The 64KB LUT fits in L1/L2 cache (modern CPUs comfortably)
+//
+// `gf_mul` (the constant-time default) is what `share_byte` and other
+// code that handles secret bytes should call. `gf_mul_fast` is for
+// reconstruction where x-values are public.
+
+/// Precomputed 256x256 GF(2^8) multiplication table. ~64KB of static
+/// memory; built at first access via `OnceLock` so non-fast callers
+/// pay no cost.
+fn gf_mul_table() -> &'static [[u8; 256]; 256] {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<Box<[[u8; 256]; 256]>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = Box::new([[0u8; 256]; 256]);
+        for a in 0..256usize {
+            for b in 0..256usize {
+                table[a][b] = gf_mul(a as u32, b as u32) as u8;
+            }
+        }
+        table
+    })
+}
+
+/// Fast non-constant-time GF(2^8) multiplication via precomputed
+/// table. ~5-10x faster than `gf_mul`. Use ONLY with public-value
+/// operands (e.g., share x-coordinates during Lagrange basis eval).
+///
+/// # Side-channel warning
+/// Table-based multiplication is NOT constant-time wrt cache state.
+/// A precise attacker measuring L1 cache eviction patterns can
+/// recover operand bits. This function is safe ONLY when operand
+/// values are public.
+#[inline]
+#[must_use]
+pub fn gf_mul_fast(a: u8, b: u8) -> u8 {
+    gf_mul_table()[a as usize][b as usize]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +190,20 @@ mod tests {
             for b in 1u32..256 {
                 let q = gf_div(a, b);
                 assert_eq!(gf_mul(q, b), a, "a={a} b={b}");
+            }
+        }
+    }
+
+    #[test]
+    fn gf_mul_fast_matches_constant_time() {
+        // The optimized table-based gf_mul_fast must produce
+        // bit-identical output to the constant-time gf_mul across
+        // every (a, b) pair. This is the safety property.
+        for a in 0u32..256 {
+            for b in 0u32..256 {
+                let slow = gf_mul(a, b) as u8;
+                let fast = gf_mul_fast(a as u8, b as u8);
+                assert_eq!(slow, fast, "mismatch at a=0x{a:02X} b=0x{b:02X}");
             }
         }
     }

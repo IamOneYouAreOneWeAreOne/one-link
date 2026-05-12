@@ -1,10 +1,11 @@
 //! Property tests for ol_threshold_recovery.
 //!
-//! The gate: ≥1M random round-trips for plain Shamir + ≥100k random
-//! round-trips for the field-bound layer (the field layer is more
-//! expensive per iter so the lower count balances total wall time).
-//! Default proptest configs are way smaller; we crank them up via
-//! ProptestConfig.
+//! Gate ladder (matches Phase C / D conventions):
+//!   - Default CI cadence: 100k plain-Shamir + 20k field-bound +
+//!     10k wrong-witness — ~few seconds wall time.
+//!   - Nightly gate: set `ONE_LINK_F1_GATE=1` to crank to 1M / 200k /
+//!     100k. Matches the Phase C macaroon "1M random delegation
+//!     chains" cadence.
 
 use proptest::prelude::*;
 
@@ -16,12 +17,30 @@ use ol_threshold_recovery::shamir::{
     reconstruct_bytes, share_bytes,
 };
 
+fn nightly_gate() -> bool {
+    std::env::var("ONE_LINK_F1_GATE")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
+}
+
+fn plain_cases() -> u32 {
+    if nightly_gate() { 1_000_000 } else { 100_000 }
+}
+
+fn field_cases() -> u32 {
+    if nightly_gate() { 200_000 } else { 20_000 }
+}
+
+fn wrong_witness_cases() -> u32 {
+    if nightly_gate() { 100_000 } else { 10_000 }
+}
+
 // Plain Shamir round-trip: split (K, N) on a random secret, reconstruct
 // from a random K-sized subset of the shares.
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 5000,
-        max_global_rejects: 100_000,
+        cases: plain_cases(),
+        max_global_rejects: plain_cases() * 4,
         .. ProptestConfig::default()
     })]
 
@@ -52,8 +71,8 @@ proptest! {
 // extra work.
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 1000,
-        max_global_rejects: 50_000,
+        cases: field_cases(),
+        max_global_rejects: field_cases() * 4,
         .. ProptestConfig::default()
     })]
 
@@ -98,7 +117,7 @@ proptest! {
 // probability. This is the alien-tech security gate.
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 500,
+        cases: wrong_witness_cases(),
         .. ProptestConfig::default()
     })]
 

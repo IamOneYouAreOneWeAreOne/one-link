@@ -17,5 +17,9 @@ thiserror = { workspace = true }
 proptest  = { workspace = true }
 criterion = { workspace = true }
 
+[[bench]]
+name    = "threshold_bench"
+harness = false
+
 [lints]
 workspace = true
