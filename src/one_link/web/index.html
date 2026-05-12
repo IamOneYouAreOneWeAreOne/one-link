@@ -13444,6 +13444,27 @@
   });
 
   init();
+
+  // TEMP DIAGNOSTIC: write window/viewport measurements to the page
+  // title so we can see in the Edge --app= title bar whether the
+  // visible gap is Edge's reserved chrome (outer >> inner) or our
+  // own DOM. Remove once we know.
+  (() => {
+    function _diagTitle() {
+      const t = document.querySelector(".top");
+      const tRect = t ? t.getBoundingClientRect() : { top: -1, height: -1 };
+      const reserved = window.outerHeight - window.innerHeight;
+      document.title =
+        `One Link [vp ${window.innerWidth}x${window.innerHeight}] ` +
+        `[win ${window.outerWidth}x${window.outerHeight}] ` +
+        `[chrome-px ${reserved}] ` +
+        `[.top y=${Math.round(tRect.top)} h=${Math.round(tRect.height)}]`;
+    }
+    _diagTitle();
+    window.addEventListener("resize", _diagTitle);
+    setTimeout(_diagTitle, 500);
+    setTimeout(_diagTitle, 2000);
+  })();
 })();
 </script>
 </body>
