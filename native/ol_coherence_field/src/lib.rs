@@ -71,8 +71,8 @@ pub use pde::{
     SolveResult, SolveResultF32,
 };
 pub use source::{
-    identity_dual_source, identity_dual_source_with_phase, linear_source,
-    support_phase_kernel, SourceError,
+    align_source, alignment_scalars, identity_dual_source,
+    identity_dual_source_with_phase, linear_source, support_phase_kernel, SourceError,
 };
 
 /// Crate version embedded for diagnostics.

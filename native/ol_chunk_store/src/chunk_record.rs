@@ -74,12 +74,58 @@ impl ChunkRecordKind {
 /// Whether the `chunk_id_full` is the raw BLAKE3 of the plaintext or
 /// the convergent-encryption derived address. Per
 /// [ADR-0006](../../../docs/decisions/0006-blake3-derive-scheme.md).
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+///
+/// Default is `Raw` for fresh chunks; per-recipient keys for project /
+/// document / non-media content. `Convergent` is opt-in per the Phase B
+/// rollout plan — gated by an explicit caller decision based on the
+/// content type (raw media = safe to converge; project files = not).
+/// See [`convergent_default_for_content_type`] for the production
+/// dispatch helper.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
 pub enum ChunkAddressKind {
-    /// `BLAKE3.hash(plaintext)`.
+    /// `BLAKE3.hash(plaintext)`. The conservative default — per-
+    /// recipient keys; identical plaintext from two senders produces
+    /// different chunk IDs.
+    #[default]
     Raw,
     /// `BLAKE3.derive_key("ol-chunk-addr-convergent-v1", plaintext)`.
+    /// Opt-in for content types whose well-known plaintexts aren't a
+    /// privacy concern (raw media). Enables cross-sender dedup.
     Convergent,
+}
+
+/// Coarse content-type classifier for the convergent-default dispatch.
+/// Returns `Convergent` for content types where two senders sharing
+/// the same file SHOULD produce the same chunk IDs (so the dedup
+/// dividend is realised), and `Raw` for everything else.
+///
+/// Conservative by design: only formats with low correlation between
+/// plaintext + recipient identity get convergent. Project files /
+/// documents / private payloads stay on raw-BLAKE3.
+///
+/// Phase B integration point: the chunk-store ingest path consults
+/// this helper, NOT a hardcoded enum, so the policy can evolve
+/// without re-spinning every call site.
+#[must_use]
+pub fn convergent_default_for_content_type(
+    extension: Option<&str>,
+) -> ChunkAddressKind {
+    let Some(ext) = extension else {
+        return ChunkAddressKind::Raw;
+    };
+    match ext.to_ascii_lowercase().as_str() {
+        // Raw media: the plaintext is the same for every recipient
+        // (a JPEG byte stream is fixed), so convergent IDs enable
+        // cross-sender dedup without leaking anything that isn't
+        // already public.
+        "mp4" | "m4v" | "mov" | "3gp" | "mkv" | "webm" | "avi"
+        | "mp3" | "wav" | "flac" | "ogg" | "opus" | "aac" | "m4a"
+        | "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic"
+        | "h264" | "264" | "avc" => ChunkAddressKind::Convergent,
+        // Everything else: project files, docs, archives, code,
+        // unknown types. Default to raw-BLAKE3.
+        _ => ChunkAddressKind::Raw,
+    }
 }
 
 /// Which AEAD primitive was used to encrypt the ciphertext.
@@ -290,6 +336,32 @@ mod tests {
         );
         let parsed = ChunkRecord::decode(kind, flags, &payload).unwrap();
         assert_eq!(parsed, r);
+    }
+
+    #[test]
+    fn convergent_default_for_raw_media_extensions() {
+        for ext in &["mp4", "MP4", "mov", "h264", "wav", "flac", "jpg", "png"] {
+            assert_eq!(
+                convergent_default_for_content_type(Some(ext)),
+                ChunkAddressKind::Convergent,
+                "extension {ext} should map to Convergent"
+            );
+        }
+    }
+
+    #[test]
+    fn convergent_default_for_non_media_extensions_returns_raw() {
+        for ext in &["docx", "xlsx", "pdf", "zip", "rs", "py", "txt", "json"] {
+            assert_eq!(
+                convergent_default_for_content_type(Some(ext)),
+                ChunkAddressKind::Raw,
+                "extension {ext} should map to Raw"
+            );
+        }
+        assert_eq!(
+            convergent_default_for_content_type(None),
+            ChunkAddressKind::Raw
+        );
     }
 
     #[test]

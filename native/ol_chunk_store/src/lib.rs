@@ -43,7 +43,8 @@ pub mod store;
 pub mod stripe;
 
 pub use chunk_record::{
-    ChunkAddressKind, ChunkAeadKind, ChunkRecord, ChunkRecordKind, CHUNK_RECORD_HEADER_LEN,
+    convergent_default_for_content_type, ChunkAddressKind, ChunkAeadKind, ChunkRecord,
+    ChunkRecordKind, CHUNK_RECORD_HEADER_LEN,
 };
 pub use error::ChunkStoreError;
 pub use location::ChunkLocation;

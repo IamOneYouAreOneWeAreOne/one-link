@@ -47,6 +47,11 @@ pub enum ContainerFormat {
     /// WAV / RIFF audio. `data` chunk start used as a forced cut so
     /// re-tagged audio doesn't shift downstream chunks.
     Wav,
+    /// Raw H.264 elementary stream (Annex B format). NAL unit start
+    /// codes used as forced cuts; IDR-bearing NAL units (keyframes)
+    /// are the highest-priority cuts so re-encoded video preserves
+    /// GOP-aligned chunks.
+    H264AnnexB,
 }
 
 /// ZIP local-file-header signature (`PK\x03\x04`).
@@ -82,6 +87,14 @@ pub fn detect_format(leading: &[u8], path_extension: Option<&str>) -> Option<Con
     {
         return Some(ContainerFormat::Wav);
     }
+    // H.264 Annex B elementary stream: starts with a NAL start code
+    // (0x00 0x00 0x00 0x01) or the shorter 3-byte variant. Detect
+    // either; downstream scanner walks both forms.
+    if leading.len() >= 4
+        && (leading.starts_with(&[0, 0, 0, 1]) || leading.starts_with(&[0, 0, 1]))
+    {
+        return Some(ContainerFormat::H264AnnexB);
+    }
     if let Some(ext) = path_extension {
         match ext.to_ascii_lowercase().as_str() {
             // Anything with the extension but missing magic falls
@@ -96,10 +109,65 @@ pub fn detect_format(leading: &[u8], path_extension: Option<&str>) -> Option<Con
             {
                 return Some(ContainerFormat::Wav);
             }
+            "h264" | "264" | "avc" => return Some(ContainerFormat::H264AnnexB),
             _ => {}
         }
     }
     None
+}
+
+/// Scan an H.264 Annex B elementary stream for **keyframe-bearing
+/// NAL unit boundaries**. Returns the offsets of NAL units of type
+/// IDR (`nal_unit_type == 5`) or SPS (`nal_unit_type == 7`), which
+/// together mark the start of every GOP.
+///
+/// Returns offsets sorted ascending. Includes the start codes (3 or
+/// 4 bytes) so the cut is aligned to the start of the GOP.
+///
+/// Sanity-limits: any NAL with a forbidden zero bit set (highest bit
+/// of the NAL header) is rejected — that's a transport-error signal.
+#[must_use]
+pub fn h264_keyframe_offsets(buffer: &[u8]) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    let mut i = 0usize;
+    while i + 4 < buffer.len() {
+        // Look for the 4-byte start code (0x00 0x00 0x00 0x01) or the
+        // 3-byte one (0x00 0x00 0x01). The 4-byte form is required at
+        // the very start; either is legal mid-stream.
+        let (start_code_len, nal_byte_idx) = if buffer[i] == 0
+            && buffer[i + 1] == 0
+            && buffer[i + 2] == 0
+            && buffer[i + 3] == 1
+        {
+            (4, i + 4)
+        } else if buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 1 {
+            (3, i + 3)
+        } else {
+            i += 1;
+            continue;
+        };
+        if nal_byte_idx >= buffer.len() {
+            break;
+        }
+        let nal_byte = buffer[nal_byte_idx];
+        // forbidden_zero_bit (MSB) must be 0.
+        if nal_byte & 0x80 != 0 {
+            i += start_code_len;
+            continue;
+        }
+        // Low 5 bits are nal_unit_type.
+        let nal_type = nal_byte & 0x1F;
+        // Type 5 = IDR slice (instantaneous decoder refresh = keyframe).
+        // Type 7 = SPS (sequence parameter set, typically right before
+        // an IDR). Type 8 = PPS. Per the plan: GOP keyframe detection
+        // needs IDR-marked cuts. We also include SPS because the
+        // SPS-PPS-IDR triplet is the canonical GOP-start pattern.
+        if matches!(nal_type, 5 | 7) {
+            offsets.push(i);
+        }
+        i += start_code_len + 1;
+    }
+    offsets
 }
 
 /// Helper: does the leading 8 bytes look plausibly like an ISO BMFF
@@ -292,6 +360,13 @@ pub fn scan_format_aware(
             // to be small, so one cut is enough to isolate the
             // audio body.
             wav_data_offset(buffer).into_iter().collect()
+        }
+        Some(ContainerFormat::H264AnnexB) => {
+            // GOP-aligned cuts at IDR + SPS NAL units. A re-encoded
+            // video where only the first few frames changed will
+            // still hit the same IDR boundaries downstream, so dedup
+            // recovers everything past the edit.
+            h264_keyframe_offsets(buffer)
         }
         None => Vec::new(),
     };
@@ -502,6 +577,69 @@ mod tests {
         let buf = b"hello world";
         assert_eq!(detect_format(buf, None), None);
         assert_eq!(detect_format(buf, Some("txt")), None);
+    }
+
+    #[test]
+    fn detect_h264_from_start_code() {
+        // 4-byte start code form.
+        let buf = vec![0u8, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0x96];
+        assert_eq!(detect_format(&buf, None), Some(ContainerFormat::H264AnnexB));
+        // 3-byte start code form.
+        let buf = vec![0u8, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0x96];
+        assert_eq!(detect_format(&buf, None), Some(ContainerFormat::H264AnnexB));
+        // Extension hint without magic.
+        let buf = vec![0xAB; 16];
+        assert_eq!(
+            detect_format(&buf, Some("h264")),
+            Some(ContainerFormat::H264AnnexB)
+        );
+    }
+
+    #[test]
+    fn h264_keyframe_offsets_finds_idr_and_sps() {
+        // Build a synthetic stream:
+        //   [SPS at offset 0]  (NAL type 7)
+        //   [PPS at offset 16] (NAL type 8 — NOT a cut)
+        //   [non-IDR slice at 32] (NAL type 1 — NOT a cut)
+        //   [IDR slice at 48] (NAL type 5)
+        let mut buf = vec![0u8; 64];
+        // SPS at 0: 0x00 0x00 0x00 0x01 0x67 ...
+        buf[0..4].copy_from_slice(&[0, 0, 0, 1]);
+        buf[4] = 0x67; // forbidden_zero=0, ref_idc=11, type=7 (SPS)
+        // PPS at 16: 0x00 0x00 0x00 0x01 0x68
+        buf[16..20].copy_from_slice(&[0, 0, 0, 1]);
+        buf[20] = 0x68; // type=8 (PPS)
+        // Non-IDR slice at 32: 0x00 0x00 0x00 0x01 0x41
+        buf[32..36].copy_from_slice(&[0, 0, 0, 1]);
+        buf[36] = 0x41; // type=1 (slice, non-IDR)
+        // IDR slice at 48: 0x00 0x00 0x00 0x01 0x65
+        buf[48..52].copy_from_slice(&[0, 0, 0, 1]);
+        buf[52] = 0x65; // type=5 (IDR slice)
+        let offsets = h264_keyframe_offsets(&buf);
+        // Must find the SPS (offset 0) and IDR (offset 48), skip PPS
+        // (16) and non-IDR slice (32).
+        assert_eq!(offsets, vec![0, 48]);
+    }
+
+    #[test]
+    fn h264_keyframe_offsets_rejects_forbidden_zero_bit() {
+        // NAL byte 0xC5 has forbidden_zero_bit set (MSB=1) AND type=5;
+        // must be rejected.
+        let mut buf = vec![0u8; 16];
+        buf[0..4].copy_from_slice(&[0, 0, 0, 1]);
+        buf[4] = 0xC5;
+        let offsets = h264_keyframe_offsets(&buf);
+        assert!(offsets.is_empty());
+    }
+
+    #[test]
+    fn h264_keyframe_offsets_handles_three_byte_start_code() {
+        // 3-byte start code variant: 0x00 0x00 0x01 followed by IDR byte.
+        let buf = vec![0, 0, 1, 0x65, 0, 0, 0, 1, 0x67];
+        let offsets = h264_keyframe_offsets(&buf);
+        // IDR at offset 0 (3-byte form), SPS at offset 4 (4-byte form).
+        assert!(offsets.contains(&0));
+        assert!(offsets.contains(&4));
     }
 
     #[test]

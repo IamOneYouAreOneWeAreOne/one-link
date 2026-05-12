@@ -16,9 +16,12 @@
 //!    that the inner ~80% of support behaves "core-like" before the
 //!    outer regime kicks in.
 
+mod alignment;
 mod dual;
 mod linear;
 mod support_phase;
+
+pub use alignment::{align_source, alignment_scalars};
 
 use thiserror::Error;
 
