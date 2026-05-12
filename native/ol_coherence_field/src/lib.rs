@@ -51,6 +51,7 @@
 
 pub mod anchor;
 pub mod calibration;
+pub mod couplings;
 pub mod green;
 pub mod interpolation;
 pub mod pde;
@@ -58,6 +59,10 @@ pub mod source;
 
 pub use anchor::{apparent_horizon_anchor, screening_length, ScreeningRegime};
 pub use calibration::{Calibration, Domain};
+pub use couplings::{
+    inject_fragility_events, prefetch_priorities, rotation_cadence_multiplier,
+    FragilityEvent, PrefetchPriority, RotationCadence,
+};
 pub use green::{green_function, GreenError};
 pub use interpolation::{be_rar, BeRarError};
 pub use pde::{

@@ -48,6 +48,7 @@ mod bandit;
 mod bloom;
 mod capability;
 mod chunk;
+mod coherence_field;
 mod crdt;
 mod erasure;
 mod errors;
@@ -209,6 +210,16 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.homology", homology_mod)?;
+
+    // Phase E pyo3 bindings — coherence-field substrate (S_One canonical
+    // theorem stack). One Rust crate, three calibrations (One Link /
+    // OneField / BioMesh) — the unified-field claim made operational.
+    let coherence_field_mod = PyModule::new_bound(py, "coherence_field")?;
+    coherence_field::register(py, &coherence_field_mod)?;
+    m.add_submodule(&coherence_field_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.coherence_field", coherence_field_mod)?;
 
     Ok(())
 }

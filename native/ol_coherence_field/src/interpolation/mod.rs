@@ -6,6 +6,7 @@ mod be_rar_impl;
 
 use thiserror::Error;
 
+pub use alpha_constraint::low_y_log_slope;
 pub use be_rar_impl::be_rar;
 
 /// Errors the interpolation layer can surface.
