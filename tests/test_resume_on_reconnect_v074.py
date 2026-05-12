@@ -391,6 +391,88 @@ def test_retry_pump_does_not_resume_in_flight_planning_row(tmp_path: Path):
     state.close()
 
 
+def test_control_resolves_pinned_peer_when_offline(tmp_path: Path):
+    """Durable queued sends must work even when discovery has not found
+    the device yet. Users should be able to send to the trusted device name;
+    One Link waits quietly and drains it when the route appears.
+    """
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+        hostname="Computer 2",
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    assert daemon._resolve_pinned_peer_fp(them.short_id) == them.fingerprint
+    assert daemon._resolve_pinned_peer_fp("computer") == them.fingerprint
+    assert daemon._resolve_pinned_peer_fp(them.fingerprint) == them.fingerprint
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_control_queue_file_transfer_creates_auto_resume_intent(tmp_path: Path):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+        hostname="Computer 2",
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    src = tmp_path / "queued.bin"
+    src.write_bytes(b"queued durable intent")
+    scheduled: list[str] = []
+    daemon._schedule_resume_paused = scheduled.append  # type: ignore[method-assign]
+
+    reader = asyncio.StreamReader()
+    reader.feed_data(json.dumps({
+        "cmd": "queue_file_transfer",
+        "peer": "Computer 2",
+        "path": str(src),
+    }).encode("utf-8") + b"\n")
+    reader.feed_eof()
+
+    class _Writer:
+        def __init__(self):
+            self.buf = b""
+            self.closed = False
+
+        def write(self, data):
+            self.buf += data
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            return None
+
+    writer = _Writer()
+    await daemon._handle_control(reader, writer)  # type: ignore[arg-type]
+    payload = json.loads(writer.buf.decode("utf-8"))
+
+    assert payload["ok"] is True
+    assert payload["transfer"]["status"] == "paused"
+    assert payload["transfer"]["metadata"]["delivery_state"] == "waiting_for_device"
+    assert scheduled == [them.fingerprint]
+    rows = state.list_transfers(peer_fp=them.fingerprint, limit=10)
+    assert len(rows) == 1
+    assert rows[0].metadata["path"] == str(src)
+    state.close()
+
+
 @pytest.mark.asyncio
 async def test_resume_reuses_existing_transfer_id(tmp_path: Path):
     """A resumed transfer updates the durable intent row instead of
