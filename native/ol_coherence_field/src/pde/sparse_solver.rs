@@ -64,17 +64,25 @@ where
     debug_assert_eq!(b.len(), n);
     debug_assert_eq!(diag.len(), n);
 
-    let mut x = vec![0.0; n];
+    // All buffers pre-allocated. CG body does ZERO heap allocs.
+    let mut x = vec![0.0_f64; n];
     let mut r = b.to_vec(); // r = b - A · x; x = 0 so r = b
-    let mut z = apply_preconditioner(diag, &r);
-    let mut p = z.clone();
-    let mut ap = vec![0.0; n];
+    let mut z = vec![0.0_f64; n];
+    let mut p = vec![0.0_f64; n];
+    let mut ap = vec![0.0_f64; n];
+
+    apply_preconditioner_into(diag, &r, &mut z);
+    p.copy_from_slice(&z);
+
     let mut r_dot_z = dot(&r, &z);
-    let bnorm = norm2(b).max(1.0e-30);
+    let bnorm_sq = dot(b, b).max(1.0e-60);
+    let tol_sq = config.tolerance * config.tolerance;
 
     let mut iterations = 0;
-    let mut residual = norm2(&r) / bnorm;
-    let mut converged = residual <= config.tolerance;
+    let mut r_norm_sq = dot(&r, &r);
+    let mut residual = (r_norm_sq / bnorm_sq).sqrt();
+    let mut converged = r_norm_sq <= tol_sq * bnorm_sq;
+
     while !converged && iterations < config.max_iter {
         apply_a(&p, &mut ap);
         let p_ap = dot(&p, &ap);
@@ -83,20 +91,30 @@ where
             break;
         }
         let alpha = r_dot_z / p_ap;
+        // Fused x += α·p and r -= α·ap with running r·r accumulation in
+        // the same pass — one walk of memory instead of three (the
+        // separate axpy / axpy / norm2 sequence). Lets the optimizer
+        // emit a single vectorized loop.
+        let mut new_r_norm_sq = 0.0_f64;
         for i in 0..n {
             x[i] += alpha * p[i];
-            r[i] -= alpha * ap[i];
+            let ri = r[i] - alpha * ap[i];
+            r[i] = ri;
+            new_r_norm_sq += ri * ri;
         }
-        z = apply_preconditioner(diag, &r);
+        r_norm_sq = new_r_norm_sq;
+
+        apply_preconditioner_into(diag, &r, &mut z);
         let r_dot_z_new = dot(&r, &z);
         let beta = r_dot_z_new / r_dot_z.max(1.0e-30);
+        // p = z + β·p (in-place, one pass).
         for i in 0..n {
             p[i] = z[i] + beta * p[i];
         }
         r_dot_z = r_dot_z_new;
         iterations += 1;
-        residual = norm2(&r) / bnorm;
-        converged = residual <= config.tolerance;
+        residual = (r_norm_sq / bnorm_sq).sqrt();
+        converged = r_norm_sq <= tol_sq * bnorm_sq;
     }
 
     CgResult {
@@ -109,19 +127,37 @@ where
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     debug_assert_eq!(a.len(), b.len());
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+    // Manual unroll of 4 lanes; auto-vec picks this up as 2× f64x4
+    // (AVX2) or 1× f64x8 (AVX-512). Without the unroll the iterator
+    // fold defeats vectorization on some target features.
+    let n = a.len();
+    let chunk = 4;
+    let mut s0 = 0.0_f64;
+    let mut s1 = 0.0_f64;
+    let mut s2 = 0.0_f64;
+    let mut s3 = 0.0_f64;
+    let blocks = n / chunk;
+    for k in 0..blocks {
+        let i = k * chunk;
+        s0 += a[i] * b[i];
+        s1 += a[i + 1] * b[i + 1];
+        s2 += a[i + 2] * b[i + 2];
+        s3 += a[i + 3] * b[i + 3];
+    }
+    let mut tail = (s0 + s1) + (s2 + s3);
+    for i in (blocks * chunk)..n {
+        tail += a[i] * b[i];
+    }
+    tail
 }
 
-fn norm2(v: &[f64]) -> f64 {
-    dot(v, v).sqrt()
-}
-
-fn apply_preconditioner(diag: &[f64], r: &[f64]) -> Vec<f64> {
+fn apply_preconditioner_into(diag: &[f64], r: &[f64], z: &mut [f64]) {
     debug_assert_eq!(diag.len(), r.len());
-    r.iter()
-        .zip(diag.iter())
-        .map(|(ri, di)| if di.abs() > 1e-30 { ri / di } else { *ri })
-        .collect()
+    debug_assert_eq!(z.len(), r.len());
+    for i in 0..r.len() {
+        let di = diag[i];
+        z[i] = if di.abs() > 1e-30 { r[i] / di } else { r[i] };
+    }
 }
 
 #[cfg(test)]
