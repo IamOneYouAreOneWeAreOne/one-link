@@ -129,6 +129,7 @@ pub mod hop;
 pub mod keyderiv;
 pub mod packet;
 pub mod peel;
+pub mod sphinx;
 
 pub use build::build_onion;
 pub use circuit::Circuit;

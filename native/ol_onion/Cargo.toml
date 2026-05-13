@@ -15,15 +15,13 @@ thiserror        = { workspace = true }
 blake3           = { workspace = true }
 x25519-dalek     = { version = "2.0", features = ["static_secrets"] }
 chacha20poly1305 = { workspace = true }
+chacha20         = "0.9"
+# Sphinx point-blinding needs Edwards/Ristretto-form scalar mult.
+curve25519-dalek = { version = "4", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
 aead             = { workspace = true }
 rand_core        = { workspace = true }
 zeroize          = { workspace = true }
 subtle           = { workspace = true }
-# curve25519-dalek + chacha20 are reserved for the F3-polish v3 Sphinx
-# implementation (see docs/SPHINX_DESIGN.md). Listed but commented out
-# in this ship — uncomment when the Sphinx module lands.
-# curve25519-dalek = { version = "4", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
-# chacha20         = "0.9"
 
 [dev-dependencies]
 proptest         = { workspace = true }
