@@ -276,3 +276,10 @@ path = "fuzz_targets/fuzz_device_mesh_state.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_device_mesh_dfs"
+path = "fuzz_targets/fuzz_device_mesh_dfs.rs"
+test = false
+doc = false
+bench = false

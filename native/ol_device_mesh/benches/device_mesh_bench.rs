@@ -4,6 +4,10 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rand::rngs::OsRng;
 
 use ol_device_mesh::derivation::derive_field_bound_subkey_seed;
+use ol_device_mesh::distributed_fs::{
+    repair_plan, sign_storage_attestation, ChunkHash, ChunkPlacement,
+    ErasurePolicy, FileManifest,
+};
 use ol_device_mesh::mesh_state::{
     AuthenticatedOp, Delta, MeshState, SubtreePolicyKind, SyncState,
 };
@@ -11,6 +15,7 @@ use ol_device_mesh::quorum::{
     mint_policy, propose_operation, sign_approval, QuorumCertificate,
 };
 use ol_pqsig::HybridVerifyingKey;
+use std::collections::BTreeSet;
 use ol_device_mesh::{
     derive_subkey_seed, master_pin_handle, mint_subkey, ratchet_one_day,
     sibling_witness, state_root, verify_liveness, DeviceClass, HardwareWrapper,
@@ -337,6 +342,100 @@ fn bench_mesh_state_sync_ingest(c: &mut Criterion) {
     });
 }
 
+fn bench_dfs_manifest_canonical_bytes(c: &mut Criterion) {
+    let policy = ErasurePolicy::new(10, 4, 2).unwrap();
+    let chunks: Vec<ChunkHash> = (0..140u8)
+        .map(|i| {
+            let mut h = [0u8; 32];
+            h[0] = i;
+            h
+        })
+        .collect();
+    let m = FileManifest {
+        file_size: 1_000_000,
+        chunk_size: 8192,
+        chunks,
+        mime: b"application/octet-stream".to_vec(),
+        created_unix: 1_700_000_000,
+        policy,
+    };
+    c.bench_function("device_mesh::dfs_manifest_canonical_bytes_140", |b| {
+        b.iter(|| {
+            let v = m.canonical_bytes();
+            black_box(v);
+        });
+    });
+    c.bench_function("device_mesh::dfs_file_id_140", |b| {
+        b.iter(|| {
+            let id = m.file_id();
+            black_box(id);
+        });
+    });
+}
+
+fn bench_dfs_storage_attest_sign(c: &mut Criterion) {
+    let master = MasterIdentity::generate(&mut OsRng);
+    let (sk, _att) =
+        mint_subkey(&master, DeviceClass::Phone, [0x55; DEVICE_ID_LEN], 0, 365).unwrap();
+    let chunks: Vec<ChunkHash> = (0..256u32)
+        .map(|i| {
+            let mut h = [0u8; 32];
+            h[..4].copy_from_slice(&i.to_be_bytes());
+            h
+        })
+        .collect();
+    c.bench_function("device_mesh::dfs_storage_attest_sign_256", |b| {
+        b.iter(|| {
+            let att = sign_storage_attestation(
+                black_box(&sk),
+                1,
+                black_box(chunks.clone()),
+            )
+            .unwrap();
+            black_box(att);
+        });
+    });
+}
+
+fn bench_dfs_storage_attest_verify(c: &mut Criterion) {
+    let master = MasterIdentity::generate(&mut OsRng);
+    let (sk, att_l1) =
+        mint_subkey(&master, DeviceClass::Phone, [0x55; DEVICE_ID_LEN], 0, 365).unwrap();
+    let vk = HybridVerifyingKey::from_bytes(&att_l1.subkey_vk_bytes).unwrap();
+    let chunks: Vec<ChunkHash> = (0..256u32)
+        .map(|i| {
+            let mut h = [0u8; 32];
+            h[..4].copy_from_slice(&i.to_be_bytes());
+            h
+        })
+        .collect();
+    let att = sign_storage_attestation(&sk, 1, chunks).unwrap();
+    c.bench_function("device_mesh::dfs_storage_attest_verify_256", |b| {
+        b.iter(|| {
+            att.verify(black_box(&vk)).unwrap();
+        });
+    });
+}
+
+fn bench_dfs_repair_plan(c: &mut Criterion) {
+    let policy = ErasurePolicy::new(10, 4, 2).unwrap();
+    let mesh: BTreeSet<[u8; DEVICE_ID_LEN]> =
+        (1u8..=4).map(|i| [i; DEVICE_ID_LEN]).collect();
+    let placements: Vec<ChunkPlacement> = (0u8..64)
+        .map(|i| {
+            let mut h = [0u8; 32];
+            h[0] = i;
+            ChunkPlacement::empty(h)
+        })
+        .collect();
+    c.bench_function("device_mesh::dfs_repair_plan_64_chunks_4_devices", |b| {
+        b.iter(|| {
+            let plan = repair_plan(placements.iter(), black_box(&mesh), &policy);
+            black_box(plan);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_derive_subkey_seed,
@@ -354,5 +453,9 @@ criterion_group!(
     bench_mesh_state_auth_op_verify,
     bench_mesh_state_root,
     bench_mesh_state_sync_ingest,
+    bench_dfs_manifest_canonical_bytes,
+    bench_dfs_storage_attest_sign,
+    bench_dfs_storage_attest_verify,
+    bench_dfs_repair_plan,
 );
 criterion_main!(benches);

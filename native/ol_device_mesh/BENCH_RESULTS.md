@@ -1,4 +1,4 @@
-# ol_device_mesh (Row 8 Layers 1 + 2) microbenchmark results
+# ol_device_mesh (Row 8 Layers 1 + 2 + 3 + 4) microbenchmark results
 
 Captured against `0.21.0-alpha.0` on Windows 11 Intel host, release
 profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
@@ -16,6 +16,16 @@ profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
 | `device_mesh::liveness_proof_verify`            | 53.2 µs  | hybrid signature verify          |
 | `device_mesh::mint_subkey`                      | 433 µs   | derive seed + master signs vk    |
 | `device_mesh::liveness_proof_issue`             | 688 µs   | subkey signs transcript          |
+
+## Layer 4 — distributed filesystem
+
+| Benchmark                                              | Time     | Notes                                       |
+|---                                                     |---       |---                                          |
+| `device_mesh::dfs_manifest_canonical_bytes_140`        | 115 ns   | length-prefixed encoder, 140-chunk manifest |
+| `device_mesh::dfs_file_id_140`                         | 2.55 µs  | BLAKE3 over the manifest bytes              |
+| `device_mesh::dfs_storage_attest_sign_256`             | 380 µs   | subkey signs 256-chunk attestation          |
+| `device_mesh::dfs_storage_attest_verify_256`           | 56.6 µs  | hybrid verify over 256-chunk transcript     |
+| `device_mesh::dfs_repair_plan_64_chunks_4_devices`     | 9.55 µs  | least-loaded planner over 64 chunks         |
 
 ## Layer 3 — mesh state
 

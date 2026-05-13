@@ -196,6 +196,67 @@ pub enum DeviceMeshError {
         /// Highest seq we'd already accepted.
         last_seen: u64,
     },
+    /// Erasure policy supplied k=0.
+    #[error("erasure policy: data shard count k must be ≥ 1")]
+    ErasurePolicyZeroData,
+    /// Erasure policy: k+m exceeds the workspace bound.
+    #[error("erasure policy: k+m = {k}+{m} exceeds the maximum {max}")]
+    ErasurePolicyOversize {
+        /// Data shard count.
+        k: u8,
+        /// Parity shard count.
+        m: u8,
+        /// Maximum allowed sum.
+        max: u8,
+    },
+    /// Erasure policy supplied `min_devices_per_shard = 0`.
+    #[error("erasure policy: min_devices_per_shard must be ≥ 1")]
+    ErasurePolicyZeroMinDevices,
+    /// File manifest has no chunks.
+    #[error("file manifest is empty (no chunks)")]
+    FileManifestEmpty,
+    /// File manifest carries more chunks than allowed.
+    #[error("file manifest has too many chunks: {got} (max {max})")]
+    FileManifestTooManyChunks {
+        /// Actual count.
+        got: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// File manifest mime type exceeds the byte budget.
+    #[error("file manifest mime too long: {got} bytes (max {max})")]
+    FileManifestMimeTooLong {
+        /// Actual length.
+        got: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// File manifest declares zero-size chunks.
+    #[error("file manifest chunk_size must be ≥ 1")]
+    FileManifestZeroChunkSize,
+    /// File manifest's chunk count is not a multiple of the stripe
+    /// width `(k + m)`.
+    #[error("file manifest chunk count {got} is not a multiple of stripe width {stripe}")]
+    FileManifestChunkCountNotStripe {
+        /// Actual chunk count.
+        got: usize,
+        /// Stripe width = k + m.
+        stripe: usize,
+    },
+    /// Storage attestation carries more chunk hashes than allowed.
+    #[error("storage attestation has too many chunks: {got} (max {max})")]
+    AttestationTooManyChunks {
+        /// Actual count.
+        got: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// Storage attestation chunk hashes are not strictly sorted.
+    #[error("storage attestation chunk hashes are not strictly sorted + deduplicated")]
+    AttestationChunksNotSorted,
+    /// Storage attestation signature failed verification.
+    #[error("storage attestation failed cryptographic verification")]
+    StorageAttestVerifyFail,
 }
 
 impl From<ol_pqsig::PqSigError> for DeviceMeshError {
