@@ -28,7 +28,8 @@ use ol_onion::sphinx::core::{
 };
 use ol_onion::sphinx::cover::{
     build_cover_packet as cover_build, is_cover_payload as cover_is_sentinel, CoverScheduler,
-    COVER_DEFAULT_RATE_HZ, COVER_PAYLOAD_MIN, COVER_SENTINEL,
+    RateEqualizer, COVER_DEFAULT_RATE_HZ, COVER_PAYLOAD_MIN, COVER_SENTINEL,
+    RATE_EQ_DEFAULT_HALF_LIFE_SEC,
 };
 use ol_onion::sphinx::pq::{
     build_pq_sphinx_onion as pq_build, generate_pq_keypair as pq_keypair,
@@ -383,6 +384,54 @@ impl PyCoverScheduler {
     }
 }
 
+/// Adaptive rate equalizer: maintains a constant total emission rate
+/// (cover + real) regardless of real-traffic load.
+#[pyclass(name = "RateEqualizer")]
+pub struct PyRateEqualizer {
+    inner: RateEqualizer,
+}
+
+#[pymethods]
+impl PyRateEqualizer {
+    #[new]
+    fn new(target_total_hz: f64) -> PyResult<Self> {
+        if target_total_hz <= 0.0 {
+            return Err(PyValueError::new_err("target_total_hz must be positive"));
+        }
+        Ok(Self {
+            inner: RateEqualizer::new(target_total_hz),
+        })
+    }
+
+    fn observe_real_emission(&mut self, now_ms: u64) {
+        self.inner.observe_real_emission(now_ms);
+    }
+
+    fn observe_idle_tick(&mut self, now_ms: u64) {
+        self.inner.observe_idle_tick(now_ms);
+    }
+
+    fn current_cover_rate(&self) -> f64 {
+        self.inner.current_cover_rate()
+    }
+
+    fn observed_real_rate(&self) -> f64 {
+        self.inner.observed_real_rate()
+    }
+
+    fn target_total_hz(&self) -> f64 {
+        self.inner.target_total_hz()
+    }
+
+    fn set_half_life_sec(&mut self, half_life_sec: f64) -> PyResult<()> {
+        if half_life_sec <= 0.0 {
+            return Err(PyValueError::new_err("half_life_sec must be positive"));
+        }
+        self.inner.set_half_life_sec(half_life_sec);
+        Ok(())
+    }
+}
+
 // ── Registration ─────────────────────────────────────────────────
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -397,9 +446,11 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_cover_packet, m)?)?;
     m.add_function(wrap_pyfunction!(is_cover_payload, m)?)?;
     m.add_class::<PyCoverScheduler>()?;
+    m.add_class::<PyRateEqualizer>()?;
     m.add("COVER_SENTINEL", PyBytes::new_bound(_py, COVER_SENTINEL))?;
     m.add("COVER_PAYLOAD_MIN", COVER_PAYLOAD_MIN)?;
     m.add("COVER_DEFAULT_RATE_HZ", COVER_DEFAULT_RATE_HZ)?;
+    m.add("RATE_EQ_DEFAULT_HALF_LIFE_SEC", RATE_EQ_DEFAULT_HALF_LIFE_SEC)?;
     m.add("HOP_ID_LEN", HOP_ID_LEN)?;
     m.add("MAX_HOPS", MAX_HOPS)?;
     m.add("SPHINX_MAX_USER_PAYLOAD", SPHINX_MAX_USER_PAYLOAD)?;

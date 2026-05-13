@@ -188,6 +188,126 @@ impl CoverScheduler {
     }
 }
 
+/// Adaptive rate equalizer for cover traffic.
+///
+/// Maintains a CONSTANT total emission rate (cover + real) regardless
+/// of the real-traffic load. When real traffic spikes, cover rate
+/// drops; when real traffic is idle, cover rate rises to fill the
+/// gap. An observer sees a uniform-rate output stream and cannot
+/// infer "is there real traffic now?" from packet timing alone.
+///
+/// ## How it differs from plain Poisson cover
+///
+/// - Plain Poisson: cover at fixed λ. Total observed rate = real_rate + λ.
+///   An observer can subtract λ to estimate real_rate.
+/// - Equalized: cover_rate = max(0, target_total - real_rate). Total
+///   observed rate = target_total constant. Observer sees no signal.
+///
+/// ## Usage
+///
+/// ```ignore
+/// let mut eq = RateEqualizer::new(target_total_hz=5.0);
+/// // Daemon updates observed real rate every time it emits a real packet.
+/// eq.observe_real_emission(now_ms);
+/// // Daemon queries current cover rate when scheduling next cover packet.
+/// let cover_rate = eq.current_cover_rate();
+/// scheduler.set_rate_hz(cover_rate.max(0.001)); // floor to avoid stall
+/// ```
+#[derive(Debug, Clone)]
+pub struct RateEqualizer {
+    target_total_hz: f64,
+    /// Sliding-window observed real rate (Hz). Exponentially weighted.
+    observed_real_rate: f64,
+    /// EWMA half-life in seconds. Determines how quickly the equalizer
+    /// reacts to bursts vs steady state.
+    half_life_sec: f64,
+    /// Wall-clock ms of last observed real emission.
+    last_emit_ms: u64,
+}
+
+/// Default EWMA half-life: 30 seconds. Bursts of real traffic
+/// pull cover rate down for ~30 sec, then it recovers.
+pub const RATE_EQ_DEFAULT_HALF_LIFE_SEC: f64 = 30.0;
+
+impl RateEqualizer {
+    /// Construct an equalizer targeting `target_total_hz` packets per
+    /// second on the wire. Cover fills whatever real doesn't supply.
+    pub fn new(target_total_hz: f64) -> Self {
+        assert!(target_total_hz > 0.0, "target rate must be positive");
+        Self {
+            target_total_hz,
+            observed_real_rate: 0.0,
+            half_life_sec: RATE_EQ_DEFAULT_HALF_LIFE_SEC,
+            last_emit_ms: 0,
+        }
+    }
+
+    /// Set the EWMA half-life. Smaller = react faster to bursts;
+    /// larger = smoother but slower to adapt.
+    pub fn set_half_life_sec(&mut self, half_life_sec: f64) {
+        assert!(half_life_sec > 0.0, "half_life must be positive");
+        self.half_life_sec = half_life_sec;
+    }
+
+    /// Notify the equalizer that a real packet was emitted at
+    /// `now_ms` wall-clock milliseconds. Updates the EWMA.
+    pub fn observe_real_emission(&mut self, now_ms: u64) {
+        if self.last_emit_ms == 0 {
+            // First observation; seed with target rate as initial guess.
+            self.observed_real_rate = 1.0;
+            self.last_emit_ms = now_ms;
+            return;
+        }
+        let dt_sec = (now_ms.saturating_sub(self.last_emit_ms)) as f64 / 1000.0;
+        if dt_sec <= 0.0 {
+            return;
+        }
+        // Instantaneous rate from this gap.
+        let instant_rate = 1.0 / dt_sec;
+        // EWMA weight from half-life: alpha = 1 - 0.5^(dt / half_life)
+        let alpha = 1.0 - 0.5f64.powf(dt_sec / self.half_life_sec);
+        let alpha = alpha.clamp(0.0, 1.0);
+        self.observed_real_rate =
+            (1.0 - alpha) * self.observed_real_rate + alpha * instant_rate;
+        self.last_emit_ms = now_ms;
+    }
+
+    /// Notify that wall-clock time has advanced even without real
+    /// emissions. Used to DECAY the observed_real_rate toward zero
+    /// during idle periods so cover rate rises to fill the gap.
+    pub fn observe_idle_tick(&mut self, now_ms: u64) {
+        if self.last_emit_ms == 0 {
+            self.last_emit_ms = now_ms;
+            return;
+        }
+        let dt_sec = (now_ms.saturating_sub(self.last_emit_ms)) as f64 / 1000.0;
+        if dt_sec <= 0.0 {
+            return;
+        }
+        // Decay observed rate toward zero with the same half-life.
+        let decay = 0.5f64.powf(dt_sec / self.half_life_sec);
+        self.observed_real_rate *= decay;
+        self.last_emit_ms = now_ms;
+    }
+
+    /// Current cover rate λ that would maintain target total emission.
+    /// Floored at zero so we never get negative rates when real traffic
+    /// exceeds target.
+    pub fn current_cover_rate(&self) -> f64 {
+        (self.target_total_hz - self.observed_real_rate).max(0.0)
+    }
+
+    /// Read the EWMA-smoothed observed real rate. For diagnostics.
+    pub fn observed_real_rate(&self) -> f64 {
+        self.observed_real_rate
+    }
+
+    /// Read the target total emission rate.
+    pub fn target_total_hz(&self) -> f64 {
+        self.target_total_hz
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +458,68 @@ mod tests {
         let real = build_sphinx_onion(&eph_sk, &[dest], b"real payload", &mut OsRng).unwrap();
         assert_eq!(cover.as_bytes().len(), SPHINX_PACKET_LEN);
         assert_eq!(real.as_bytes().len(), SPHINX_PACKET_LEN);
+    }
+
+    // ── Rate equalizer tests ─────────────────────────────────────
+
+    #[test]
+    fn rate_equalizer_fresh_starts_with_full_cover_rate() {
+        let eq = RateEqualizer::new(5.0);
+        // No observations → observed real rate is 0 → cover fills all.
+        assert_eq!(eq.target_total_hz(), 5.0);
+        assert_eq!(eq.current_cover_rate(), 5.0);
+        assert_eq!(eq.observed_real_rate(), 0.0);
+    }
+
+    #[test]
+    fn rate_equalizer_real_emissions_reduce_cover_rate() {
+        let mut eq = RateEqualizer::new(5.0);
+        // First emission seeds at 1.0.
+        eq.observe_real_emission(1_000);
+        assert!(eq.observed_real_rate() > 0.0);
+        // Subsequent emissions at ~1 Hz (1000 ms gap) keep observed near 1 Hz.
+        for i in 1..20 {
+            eq.observe_real_emission(1_000 + i * 1000);
+        }
+        let real_rate = eq.observed_real_rate();
+        assert!(
+            (real_rate - 1.0).abs() < 0.3,
+            "expected ~1 Hz observed, got {real_rate}"
+        );
+        // Cover rate = target (5) − observed (~1) ≈ 4.
+        let cover_rate = eq.current_cover_rate();
+        assert!(cover_rate > 3.5 && cover_rate < 4.5);
+    }
+
+    #[test]
+    fn rate_equalizer_burst_doesnt_send_cover_negative() {
+        let mut eq = RateEqualizer::new(1.0);
+        eq.set_half_life_sec(5.0);
+        // Burst of real emissions at 10 Hz (100 ms gaps), far exceeding target.
+        for i in 0..20 {
+            eq.observe_real_emission(100 + i * 100);
+        }
+        // Observed real should be near 10 Hz; cover should floor at 0.
+        assert!(eq.observed_real_rate() > 1.0);
+        assert_eq!(eq.current_cover_rate(), 0.0);
+    }
+
+    #[test]
+    fn rate_equalizer_idle_decays_observed_to_zero() {
+        let mut eq = RateEqualizer::new(5.0);
+        eq.set_half_life_sec(1.0);
+        // Push some real emissions.
+        for i in 0..10 {
+            eq.observe_real_emission(i * 500); // 2 Hz
+        }
+        let after_emissions = eq.observed_real_rate();
+        assert!(after_emissions > 0.5);
+        // Now idle for 10 seconds — observed should decay sharply.
+        eq.observe_idle_tick(60_000);
+        let after_idle = eq.observed_real_rate();
+        assert!(after_idle < after_emissions);
+        assert!(after_idle < 0.01, "after long idle, observed = {after_idle}");
+        // Cover fills back to full target.
+        assert!((eq.current_cover_rate() - 5.0).abs() < 0.01);
     }
 }

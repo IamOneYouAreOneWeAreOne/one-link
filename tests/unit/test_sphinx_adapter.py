@@ -461,3 +461,57 @@ def test_cover_scheduler_rate_update():
     assert sched.rate_hz() == 5.0
     with pytest.raises(ValueError):
         sched.set_rate_hz(0.0)
+
+
+# ── RateEqualizer ─────────────────────────────────────────────────
+
+
+def test_rate_equalizer_fresh_starts_at_full_cover():
+    from one_link import sphinx_native as sph
+
+    eq = sph.RateEqualizer(target_total_hz=5.0)
+    assert eq.target_total_hz() == 5.0
+    assert eq.current_cover_rate() == 5.0
+    assert eq.observed_real_rate() == 0.0
+
+
+def test_rate_equalizer_real_emissions_reduce_cover():
+    from one_link import sphinx_native as sph
+
+    eq = sph.RateEqualizer(target_total_hz=5.0)
+    # 1 Hz real (1000 ms gaps).
+    for i in range(20):
+        eq.observe_real_emission(i * 1000)
+    real = eq.observed_real_rate()
+    cover = eq.current_cover_rate()
+    assert real > 0.5  # smoothed toward 1 Hz
+    assert cover < 5.0  # reduced from full
+
+def test_rate_equalizer_burst_clamps_cover_to_zero():
+    from one_link import sphinx_native as sph
+
+    eq = sph.RateEqualizer(target_total_hz=1.0)
+    eq.set_half_life_sec(5.0)
+    # 10 Hz burst — way over target.
+    for i in range(30):
+        eq.observe_real_emission(i * 100)
+    assert eq.observed_real_rate() > 1.0
+    assert eq.current_cover_rate() == 0.0
+
+
+def test_rate_equalizer_validates_target():
+    from one_link import sphinx_native as sph
+
+    with pytest.raises(ValueError, match="positive"):
+        sph.RateEqualizer(target_total_hz=0.0)
+    with pytest.raises(ValueError, match="positive"):
+        sph.RateEqualizer(target_total_hz=-1.0)
+
+
+def test_rate_equalizer_set_half_life_validates():
+    from one_link import sphinx_native as sph
+
+    eq = sph.RateEqualizer(target_total_hz=1.0)
+    eq.set_half_life_sec(10.0)
+    with pytest.raises(ValueError, match="positive"):
+        eq.set_half_life_sec(0.0)

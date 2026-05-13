@@ -70,10 +70,10 @@ try:
     PQ_SPHINX_PACKET_LEN: int = _native_sphinx.PQ_SPHINX_PACKET_LEN
     ML_KEM_CT_LEN: int = _native_sphinx.ML_KEM_CT_LEN
     ML_KEM_EK_LEN: int = _native_sphinx.ML_KEM_EK_LEN
-    COVER_SENTINEL: bytes = bytes(_native_sphinx.COVER_SENTINEL)
-    COVER_PAYLOAD_MIN: int = _native_sphinx.COVER_PAYLOAD_MIN
-    COVER_DEFAULT_RATE_HZ: float = _native_sphinx.COVER_DEFAULT_RATE_HZ
-except ImportError as exc:
+    COVER_SENTINEL: bytes = bytes(getattr(_native_sphinx, "COVER_SENTINEL", b"OL-COVER"))
+    COVER_PAYLOAD_MIN: int = int(getattr(_native_sphinx, "COVER_PAYLOAD_MIN", 64))
+    COVER_DEFAULT_RATE_HZ: float = float(getattr(_native_sphinx, "COVER_DEFAULT_RATE_HZ", 1.0))
+except (ImportError, AttributeError) as exc:
     HAS_NATIVE = False
     _native_sphinx = None  # type: ignore[assignment]
     HOP_ID_LEN = 32
@@ -285,6 +285,64 @@ class CoverScheduler:
         self._native.set_rate_hz(rate_hz)
 
 
+class RateEqualizer:
+    """Adaptive rate equalizer for cover traffic.
+
+    Maintains a CONSTANT total emission rate (cover + real)
+    regardless of real-traffic load. When real traffic spikes, the
+    cover rate drops; when real traffic is idle, the cover rate
+    rises to fill the gap. An observer sees a uniform-rate output
+    stream and cannot infer "is there real traffic now?" from
+    packet timing alone.
+
+    ## Usage
+
+    .. code-block:: python
+
+        eq = RateEqualizer(target_total_hz=5.0)
+        sched = CoverScheduler(rate_hz=5.0, seed=...)
+        while True:
+            # ... real traffic loop also calls eq.observe_real_emission
+            sched.set_rate_hz(max(eq.current_cover_rate(), 0.01))
+            sleep_ms(sched.next_wait_ms())
+            emit_cover_packet()
+            eq.observe_idle_tick(now_ms())
+    """
+
+    def __init__(self, target_total_hz: float) -> None:
+        _require_native()
+        if target_total_hz <= 0:
+            raise ValueError(
+                f"target_total_hz must be positive, got {target_total_hz}"
+            )
+        self._native = _native_sphinx.RateEqualizer(target_total_hz)
+
+    def observe_real_emission(self, now_ms: int) -> None:
+        """Notify that a real packet was emitted at `now_ms`."""
+        self._native.observe_real_emission(int(now_ms))
+
+    def observe_idle_tick(self, now_ms: int) -> None:
+        """Notify wall-clock has advanced without a real emission.
+        Lets the equalizer decay observed-real-rate toward zero."""
+        self._native.observe_idle_tick(int(now_ms))
+
+    def current_cover_rate(self) -> float:
+        """Cover rate that maintains target total emission."""
+        return float(self._native.current_cover_rate())
+
+    def observed_real_rate(self) -> float:
+        """Current EWMA-smoothed real-traffic rate (diagnostic)."""
+        return float(self._native.observed_real_rate())
+
+    def target_total_hz(self) -> float:
+        return float(self._native.target_total_hz())
+
+    def set_half_life_sec(self, half_life_sec: float) -> None:
+        if half_life_sec <= 0:
+            raise ValueError("half_life_sec must be positive")
+        self._native.set_half_life_sec(half_life_sec)
+
+
 __all__ = [
     "HAS_NATIVE",
     "NativeMissingError",
@@ -299,6 +357,7 @@ __all__ = [
     "build_cover_packet",
     "is_cover_payload",
     "CoverScheduler",
+    "RateEqualizer",
     "HOP_ID_LEN",
     "MAX_HOPS",
     "SPHINX_MAX_USER_PAYLOAD",
