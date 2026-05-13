@@ -4235,17 +4235,43 @@ class Daemon:
         for rec in records:
             if rec.fingerprint in (exclude_fp, self.me.fingerprint):
                 continue
-            if rec.trust != "pinned" or not rec.last_address or not rec.last_port:
+            if rec.trust != "pinned":
                 continue
             if not rec.pubkey:
                 continue
-            out.append(Peer(
-                short_id=rec.short_id,
-                hostname=rec.hostname or rec.short_id,
-                address=rec.last_address,
-                port=int(rec.last_port),
-                ed_pub_hex=rec.pubkey.hex(),
-            ))
+            candidates: list[tuple[str, int]] = []
+            seen: set[tuple[str, int]] = set()
+
+            def add_candidate(host: str | None, port: int | None) -> None:
+                if not host or not port:
+                    return
+                try:
+                    key = (str(host), int(port))
+                except Exception:
+                    return
+                if key[1] <= 0 or key[1] > 65535 or key in seen:
+                    return
+                seen.add(key)
+                candidates.append(key)
+
+            add_candidate(rec.last_address, rec.last_port)
+            with contextlib.suppress(Exception):
+                stored = self.state.list_route_candidates(
+                    rec.fingerprint,
+                    verified_only=True,
+                    limit=4,
+                )
+                for candidate in self._rank_route_candidates(rec.fingerprint, stored):
+                    add_candidate(candidate.get("host"), candidate.get("port"))
+
+            for host, port in candidates[:2]:
+                out.append(Peer(
+                    short_id=rec.short_id,
+                    hostname=rec.hostname or rec.short_id,
+                    address=host,
+                    port=port,
+                    ed_pub_hex=rec.pubkey.hex(),
+                ))
         return out[:8]
 
     async def _swarm_assist_file_offer(

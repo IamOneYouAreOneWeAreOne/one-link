@@ -226,6 +226,45 @@ async def test_verify_endpoint_failure_records_durable_candidate(tmp_path, monke
     state.close()
 
 
+def test_trusted_chunk_sources_use_verified_durable_routes(tmp_path):
+    state = State(db_path=tmp_path / "state.db")
+    source = _identity()
+    sender = _identity()
+    state.upsert_peer(
+        fingerprint=source.fingerprint,
+        short_id=source.short_id,
+        pubkey=source.public_bytes,
+        hostname="source",
+    )
+    state.set_peer_trust(source.fingerprint, "pinned")
+    state.upsert_peer(
+        fingerprint=sender.fingerprint,
+        short_id=sender.short_id,
+        pubkey=sender.public_bytes,
+        hostname="sender",
+    )
+    state.set_peer_trust(sender.fingerprint, "pinned")
+    state.upsert_route_candidate(
+        peer_fp=source.fingerprint,
+        route="lan",
+        transport="tcp",
+        host="10.0.0.77",
+        port=17117,
+        source="session_open",
+        verified=True,
+    )
+    daemon = Daemon(_identity())
+    daemon.state = state
+
+    peers = daemon._trusted_chunk_source_peers(exclude_fp=sender.fingerprint)
+
+    assert len(peers) == 1
+    assert peers[0].address == "10.0.0.77"
+    assert peers[0].port == 17117
+    assert peers[0].ed_pub_hex == source.public_bytes.hex()
+    state.close()
+
+
 @pytest.mark.asyncio
 async def test_api_peers_surfaces_live_route_memory(tmp_path):
     state = State(db_path=tmp_path / "state.db")
