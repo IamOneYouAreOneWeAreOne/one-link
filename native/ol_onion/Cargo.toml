@@ -39,5 +39,9 @@ hex              = { workspace = true }
 name    = "onion_bench"
 harness = false
 
+[[bench]]
+name    = "sphinx_bench"
+harness = false
+
 [lints]
 workspace = true

@@ -48,8 +48,8 @@
 //! ```
 
 use crate::sphinx::primitives::{
-    build_filler, chacha20_keystream, header_mac, verify_header_mac, xor_in_place, HopKeys,
-    HEADER_KEYSTREAM_LEN, HEADER_LEN, SLOT_ID_LEN, SLOT_LEN, SLOT_MAC_LEN,
+    build_filler, chacha20_keystream_into, chacha20_xor_in_place, header_mac, verify_header_mac,
+    HopKeys, HEADER_KEYSTREAM_LEN, HEADER_LEN, SLOT_ID_LEN, SLOT_LEN, SLOT_MAC_LEN,
 };
 
 /// Special destination marker: a slot whose hop_id is all zero
@@ -118,7 +118,8 @@ pub fn build_header(
 
     // ── Step 2: destination's encrypted header.
     let dest_keys = hop_keys.last().expect("non-empty");
-    let mut header = vec![0u8; HEADER_LEN];
+    // Stack-array header buffer (HEADER_LEN = 240 bytes).
+    let mut header = [0u8; HEADER_LEN];
     // Marker slot (first SLOT_LEN bytes: all zero hop_id || zero mac).
     // Already zero.
     // Random pad (next pad_len bytes).
@@ -127,36 +128,31 @@ pub fn build_header(
     header[HEADER_LEN - filler_len..].copy_from_slice(&filler);
     // ChaCha20-encrypt ONLY the first (HEADER_LEN - filler_len) bytes
     // with destination's stream key. The trailing filler stays raw.
-    let dest_keystream = chacha20_keystream(&dest_keys.header_stream, HEADER_LEN);
     let visible_end = HEADER_LEN - filler_len;
-    for i in 0..visible_end {
-        header[i] ^= dest_keystream[i];
-    }
+    chacha20_xor_in_place(&dest_keys.header_stream, &mut header[..visible_end]);
     let mut prev_mac = header_mac(&dest_keys.mac_key, &header);
 
     // ── Step 3: wrap upstream relays right-to-left.
-    // For relay at index i in (0..n-1), it forwards to hop at index
-    // i+1. So the slot we prepend at this relay is hop_id of (i+1).
+    let mut pre = [0u8; HEADER_LEN];
     for i in (0..n_relays).rev() {
         let keys = &hop_keys[i];
         let next_hop_id = &next_hop_ids[i];
-        // Build pre-encryption header:
+        // Build pre-encryption header in the stack buffer:
         //   pre[..SLOT_ID_LEN]       = next_hop_id
         //   pre[SLOT_ID_LEN..SLOT_LEN] = prev_mac
         //   pre[SLOT_LEN..]          = header[..HEADER_LEN - SLOT_LEN]
-        let mut pre = vec![0u8; HEADER_LEN];
         pre[..SLOT_ID_LEN].copy_from_slice(next_hop_id);
         pre[SLOT_ID_LEN..SLOT_LEN].copy_from_slice(&prev_mac);
         pre[SLOT_LEN..].copy_from_slice(&header[..HEADER_LEN - SLOT_LEN]);
         // ChaCha20-encrypt the full HEADER_LEN bytes with this hop's stream.
-        let ks = chacha20_keystream(&keys.header_stream, HEADER_LEN);
-        xor_in_place(&mut pre, &ks);
-        header = pre;
+        chacha20_xor_in_place(&keys.header_stream, &mut pre);
+        // Swap pre into header for the next iteration.
+        header.copy_from_slice(&pre);
         prev_mac = header_mac(&keys.mac_key, &header);
     }
 
     BuiltHeader {
-        header,
+        header: header.to_vec(),
         mac: prev_mac,
     }
 }
@@ -192,10 +188,11 @@ pub fn peel_header(
     if !verify_header_mac(&keys.mac_key, received_header, received_mac) {
         return Err(());
     }
-    // 2. Generate extended keystream.
-    let keystream = chacha20_keystream(&keys.header_stream, HEADER_KEYSTREAM_LEN);
-    // 3. Decrypt.
-    let mut decrypted = vec![0u8; HEADER_LEN];
+    // 2. Generate extended keystream into a stack buffer.
+    let mut keystream = [0u8; HEADER_KEYSTREAM_LEN];
+    chacha20_keystream_into(&keys.header_stream, &mut keystream);
+    // 3. Decrypt into a stack buffer.
+    let mut decrypted = [0u8; HEADER_LEN];
     decrypted.copy_from_slice(received_header);
     for i in 0..HEADER_LEN {
         decrypted[i] ^= keystream[i];
@@ -211,7 +208,8 @@ pub fn peel_header(
         return Ok(HeaderPeelOutcome::Deliver);
     }
 
-    // 6. Build forwarded header.
+    // 6. Build forwarded header — only allocates the final Vec at
+    // return time, no intermediate Vecs.
     let mut forwarded = vec![0u8; HEADER_LEN];
     forwarded[..HEADER_LEN - SLOT_LEN].copy_from_slice(&decrypted[SLOT_LEN..]);
     forwarded[HEADER_LEN - SLOT_LEN..]

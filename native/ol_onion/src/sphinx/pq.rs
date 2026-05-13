@@ -51,13 +51,15 @@ use zeroize::Zeroize;
 
 use crate::errors::{OnionError, OnionResult};
 use crate::hop::HopId;
-use crate::sphinx::core::{generate_static_keypair, RISTRETTO_POINT_LEN};
+use crate::sphinx::core::RISTRETTO_POINT_LEN;
+#[cfg(test)]
+use crate::sphinx::core::generate_static_keypair;
 use crate::sphinx::header::{
     build_header, peel_header, HeaderPeelOutcome, DESTINATION_MARKER,
 };
 use crate::sphinx::primitives::{
-    chacha20_keystream, derive_hop_keys, xor_in_place, HopKeys, HEADER_LEN, MAX_HOPS,
-    PAYLOAD_LEN, SLOT_ID_LEN, SLOT_LEN, SLOT_MAC_LEN,
+    chacha20_xor_in_place, derive_hop_keys, HopKeys, HEADER_LEN, MAX_HOPS, PAYLOAD_LEN,
+    SLOT_ID_LEN, SLOT_LEN, SLOT_MAC_LEN,
 };
 use crate::PROTOCOL_DOMAIN;
 
@@ -303,13 +305,12 @@ pub fn build_pq_sphinx_onion<R: RngCore + CryptoRng>(
 
     let built = build_header(&hop_keys, &next_hop_ids, &random_pad);
 
-    // ── Step 4: build encrypted payload.
+    // ── Step 4: build encrypted payload — in-place, no per-hop Vec.
     let mut payload_buf = [0u8; PAYLOAD_LEN];
     payload_buf[..2].copy_from_slice(&(payload.len() as u16).to_be_bytes());
     payload_buf[2..2 + payload.len()].copy_from_slice(payload);
     for keys in hop_keys.iter().rev() {
-        let ks = chacha20_keystream(&keys.payload_stream, PAYLOAD_LEN);
-        xor_in_place(&mut payload_buf, &ks);
+        chacha20_xor_in_place(&keys.payload_stream, &mut payload_buf);
     }
 
     // ── Step 5: assemble outer packet.
@@ -417,8 +418,7 @@ fn finish_peel(
 
     let mut payload = vec![0u8; PAYLOAD_LEN];
     payload.copy_from_slice(packet.payload());
-    let ks = chacha20_keystream(&keys.payload_stream, PAYLOAD_LEN);
-    xor_in_place(&mut payload, &ks);
+    chacha20_xor_in_place(&keys.payload_stream, &mut payload);
 
     match outcome {
         HeaderPeelOutcome::Deliver => {

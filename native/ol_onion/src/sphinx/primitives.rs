@@ -124,12 +124,36 @@ pub fn verify_header_mac(
 /// Generate `len` bytes of ChaCha20 keystream with the given key.
 /// Uses an all-zero nonce — safe because each hop has a unique
 /// stream key per circuit.
+///
+/// Prefer [`chacha20_keystream_into`] on hot paths to avoid the
+/// per-call Vec allocation; this function is kept for callers that
+/// can't pre-size their buffer (and tests).
 pub fn chacha20_keystream(key: &[u8; 32], len: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; len];
+    chacha20_keystream_into(key, &mut buf);
+    buf
+}
+
+/// Generate ChaCha20 keystream directly into a caller-provided
+/// buffer. The buffer MUST start at all zeros — `apply_keystream`
+/// XORs into the buffer, so a zero buffer yields pure keystream.
+/// Hot-path helper used by [`build_filler`] and
+/// [`crate::sphinx::core::build_sphinx_onion`].
+#[inline]
+pub fn chacha20_keystream_into(key: &[u8; 32], out: &mut [u8]) {
     let nonce = [0u8; 12];
     let mut cipher = ChaCha20::new(key.into(), (&nonce).into());
-    let mut buf = vec![0u8; len];
-    cipher.apply_keystream(&mut buf);
-    buf
+    cipher.apply_keystream(out);
+}
+
+/// ChaCha20 XOR-decrypt / encrypt into the buffer in place (no
+/// pre-zero step). Same key + zero nonce semantics as
+/// [`chacha20_keystream`].
+#[inline]
+pub fn chacha20_xor_in_place(key: &[u8; 32], buf: &mut [u8]) {
+    let nonce = [0u8; 12];
+    let mut cipher = ChaCha20::new(key.into(), (&nonce).into());
+    cipher.apply_keystream(buf);
 }
 
 /// XOR `keystream` into `buf` in place. Lengths must match.
@@ -170,20 +194,29 @@ pub fn build_filler(relay_header_streams: &[[u8; 32]]) -> Vec<u8> {
     if n == 0 {
         return Vec::new();
     }
-    let mut filler = Vec::new();
+    // Allocate ONCE at max final size. We XOR-shift in place rather
+    // than allocating per-iteration. Stack-allocate the keystream
+    // buffer (HEADER_KEYSTREAM_LEN = 288 bytes for SLOT_LEN=48,
+    // MAX_HOPS=5; well under 1 KiB).
+    let final_len = n * SLOT_LEN;
+    let mut filler = vec![0u8; final_len];
+    let mut keystream = [0u8; HEADER_KEYSTREAM_LEN];
+    let mut current_len = 0;
     for (i, key) in relay_header_streams.iter().enumerate() {
         let new_len = (i + 1) * SLOT_LEN;
-        let mut extended = vec![0u8; new_len];
-        extended[..filler.len()].copy_from_slice(&filler);
-        // The keystream is HEADER_KEYSTREAM_LEN bytes. We XOR the
-        // last `new_len` bytes into `extended`.
-        let keystream = chacha20_keystream(key, HEADER_KEYSTREAM_LEN);
+        // Zero keystream buffer (apply_keystream XORs into existing
+        // bytes, so a zero buffer is needed for pure keystream).
+        for b in keystream.iter_mut() {
+            *b = 0;
+        }
+        chacha20_keystream_into(key, &mut keystream);
         let tail_start = HEADER_KEYSTREAM_LEN - new_len;
         for j in 0..new_len {
-            extended[j] ^= keystream[tail_start + j];
+            filler[j] ^= keystream[tail_start + j];
         }
-        filler = extended;
+        current_len = new_len;
     }
+    debug_assert_eq!(current_len, final_len);
     filler
 }
 

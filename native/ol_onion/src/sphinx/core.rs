@@ -20,8 +20,8 @@ use crate::sphinx::header::{
     build_header, peel_header, HeaderPeelOutcome, DESTINATION_MARKER,
 };
 use crate::sphinx::primitives::{
-    chacha20_keystream, derive_hop_keys, xor_in_place, HopKeys, HEADER_LEN, MAX_HOPS, PAYLOAD_LEN,
-    SLOT_ID_LEN, SLOT_LEN, SLOT_MAC_LEN,
+    chacha20_xor_in_place, derive_hop_keys, HopKeys, HEADER_LEN, MAX_HOPS, PAYLOAD_LEN, SLOT_ID_LEN,
+    SLOT_LEN, SLOT_MAC_LEN,
 };
 
 /// Sphinx wire protocol version.
@@ -236,10 +236,10 @@ pub fn build_sphinx_onion<R: RngCore + CryptoRng>(
     // Length prefix (2 bytes) + payload.
     payload_buf[..2].copy_from_slice(&(payload.len() as u16).to_be_bytes());
     payload_buf[2..2 + payload.len()].copy_from_slice(payload);
-    // Encrypt with each hop's payload stream, innermost first.
+    // Encrypt in-place with each hop's payload stream, innermost first.
+    // No per-hop Vec allocation — chacha20 XORs directly into payload_buf.
     for keys in hop_keys.iter().rev() {
-        let ks = chacha20_keystream(&keys.payload_stream, PAYLOAD_LEN);
-        xor_in_place(&mut payload_buf, &ks);
+        chacha20_xor_in_place(&keys.payload_stream, &mut payload_buf);
     }
 
     // ── Step 4: assemble outermost packet.
@@ -286,11 +286,10 @@ pub fn peel_sphinx_layer(
     let mac = packet.mac();
     let outcome = peel_header(&keys, packet.header(), &mac).map_err(|_| OnionError::AeadFail)?;
 
-    // Decrypt one payload layer.
+    // Decrypt one payload layer in-place — no separate keystream Vec.
     let mut payload = vec![0u8; PAYLOAD_LEN];
     payload.copy_from_slice(packet.payload());
-    let ks = chacha20_keystream(&keys.payload_stream, PAYLOAD_LEN);
-    xor_in_place(&mut payload, &ks);
+    chacha20_xor_in_place(&keys.payload_stream, &mut payload);
 
     match outcome {
         HeaderPeelOutcome::Deliver => {
