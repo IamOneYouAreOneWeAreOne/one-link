@@ -37,6 +37,26 @@
 //!   3373-byte signature is too heavy + the ML-DSA seed expansion
 //!   costs ~ms per sign. Use Ed25519 alone + Double Ratchet for
 //!   forward secrecy.
+//!
+//! ## Example
+//!
+//! ```
+//! use ol_pqsig::HybridSigningKey;
+//! use rand_core::OsRng;
+//!
+//! // Generate a fresh master identity.
+//! let (sk, vk) = HybridSigningKey::generate(&mut OsRng);
+//!
+//! // Sign a capability commit.
+//! let sig = sk.sign(b"capability:contact:alice").unwrap();
+//! assert_eq!(sig.len(), ol_pqsig::HYBRID_SIG_LEN);
+//!
+//! // Verifier checks the hybrid signature.
+//! vk.verify(b"capability:contact:alice", &sig).unwrap();
+//!
+//! // Tampered message → verify fails.
+//! assert!(vk.verify(b"different message", &sig).is_err());
+//! ```
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -188,6 +208,13 @@ impl HybridVerifyingKey {
     }
 
     /// Verify a hybrid signature. BOTH halves must pass.
+    ///
+    /// **Timing**: this function ALWAYS runs both the Ed25519 and
+    /// ML-DSA-65 verify paths, even if the first half fails. This
+    /// is intentional — short-circuit on Ed25519-fail would leak
+    /// which half failed via wall-clock timing, which we treat as
+    /// a security property worth defending. See
+    /// `tests/constant_time_gate.rs`.
     pub fn verify(&self, message: &[u8], sig: &[u8]) -> PqSigResult<()> {
         if sig.len() != HYBRID_SIG_LEN {
             return Err(PqSigError::BadLength {
@@ -196,27 +223,35 @@ impl HybridVerifyingKey {
             });
         }
         let transcript = transcript(message);
+
         // Ed25519 half.
         let mut ed_sig_bytes = [0u8; ED25519_SIG_LEN];
         ed_sig_bytes.copy_from_slice(&sig[..ED25519_SIG_LEN]);
         let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
-        self.ed25519
-            .verify(&transcript, &ed_sig)
-            .map_err(|_| PqSigError::Ed25519VerifyFail)?;
-        // ML-DSA-65 half.
+        let ed_ok = self.ed25519.verify(&transcript, &ed_sig).is_ok();
+
+        // ML-DSA-65 half — ALWAYS run, no short-circuit.
         let ml_sig_slice: &[u8] = &sig[ED25519_SIG_LEN..];
         let ml_sig_arr = EncodedSignature::<MlDsa65>::try_from(ml_sig_slice)
             .map_err(|_| PqSigError::BadLength {
                 expected: ML_DSA_65_SIG_LEN,
                 got: ml_sig_slice.len(),
             })?;
-        let ml_sig = ml_dsa::Signature::<MlDsa65>::decode(&ml_sig_arr)
-            .ok_or(PqSigError::MlDsaVerifyFail)?;
-        use ml_dsa::signature::Verifier as _;
-        self.ml_dsa
-            .verify(&transcript, &ml_sig)
-            .map_err(|_| PqSigError::MlDsaVerifyFail)?;
-        Ok(())
+        let ml_sig_decoded = ml_dsa::Signature::<MlDsa65>::decode(&ml_sig_arr);
+        let ml_ok = if let Some(ml_sig) = ml_sig_decoded {
+            use ml_dsa::signature::Verifier as _;
+            self.ml_dsa.verify(&transcript, &ml_sig).is_ok()
+        } else {
+            false
+        };
+
+        // Decide which error to return AFTER both verifies finished.
+        // Both bools are evaluated; no early return on Ed25519 fail.
+        match (ed_ok, ml_ok) {
+            (true, true) => Ok(()),
+            (false, _) => Err(PqSigError::Ed25519VerifyFail),
+            (_, false) => Err(PqSigError::MlDsaVerifyFail),
+        }
     }
 }
 

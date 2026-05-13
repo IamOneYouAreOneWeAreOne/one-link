@@ -16,7 +16,7 @@ fn bench_sign(c: &mut Criterion) {
     let (sk, _) = HybridSigningKey::generate(&mut OsRng);
     c.bench_function("pqsig::sign", |b| {
         b.iter(|| {
-            let sig = sk.sign(black_box(b"benchmark message"));
+            let sig = sk.sign(black_box(b"benchmark message")).unwrap();
             black_box(sig);
         });
     });
@@ -25,10 +25,10 @@ fn bench_sign(c: &mut Criterion) {
 fn bench_verify(c: &mut Criterion) {
     let (sk, vk) = HybridSigningKey::generate(&mut OsRng);
     let msg = b"benchmark message";
-    let sig = sk.sign(msg);
+    let sig = sk.sign(msg).unwrap();
     c.bench_function("pqsig::verify", |b| {
         b.iter(|| {
-            vk.verify(black_box(msg), black_box(&sig)).unwrap();
+            vk.verify(black_box(msg), black_box(&sig[..])).unwrap();
         });
     });
 }

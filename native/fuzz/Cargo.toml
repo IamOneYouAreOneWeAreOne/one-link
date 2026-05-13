@@ -31,6 +31,9 @@ ol_discovery       = { path = "../ol_discovery" }
 ol_proximity_pair  = { path = "../ol_proximity_pair" }
 ol_pair_qr         = { path = "../ol_pair_qr" }
 ol_onion           = { path = "../ol_onion" }
+ol_pqsig           = { path = "../ol_pqsig" }
+rand               = "0.8"
+rand_chacha        = "0.3"
 x25519-dalek       = { version = "2.0", features = ["static_secrets"] }
 
 [profile.release]
@@ -212,6 +215,15 @@ bench = false
 [[bin]]
 name = "fuzz_onion_canon_roundtrip"
 path = "fuzz_targets/fuzz_onion_canon_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+# ── Row 1 ol_pqsig fuzz targets ──────────────────────────────────
+
+[[bin]]
+name = "fuzz_pqsig_verify"
+path = "fuzz_targets/fuzz_pqsig_verify.rs"
 test = false
 doc = false
 bench = false
