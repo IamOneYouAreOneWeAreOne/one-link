@@ -103,6 +103,7 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
 
+pub mod active_routing;
 pub mod attestation;
 pub mod compute;
 pub mod derivation;

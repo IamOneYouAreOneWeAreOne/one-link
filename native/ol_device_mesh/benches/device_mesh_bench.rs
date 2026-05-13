@@ -839,6 +839,88 @@ fn bench_compute_pick_executor(c: &mut Criterion) {
     });
 }
 
+fn bench_active_routing_context_hash(c: &mut Criterion) {
+    use ol_device_mesh::active_routing::RoutingContext;
+    let ctx = RoutingContext {
+        contact_pin: [0x42; 32],
+        hour_bucket: 14,
+        day_of_week: 2,
+        message_class: *b"DM  ",
+        urgency: 1,
+    };
+    c.bench_function("device_mesh::active_routing_context_hash", |b| {
+        b.iter(|| {
+            let h = black_box(&ctx).canonical_hash();
+            black_box(h);
+        });
+    });
+}
+
+fn bench_active_routing_pick_device(c: &mut Criterion) {
+    use ol_device_mesh::active_routing::{
+        pick_device_for_context, CohortPrior, RoutingContext, RoutingHistory,
+    };
+    use ol_device_mesh::DeviceClass;
+    let ctx = RoutingContext {
+        contact_pin: [0x42; 32],
+        hour_bucket: 14,
+        day_of_week: 2,
+        message_class: *b"DM  ",
+        urgency: 1,
+    };
+    let candidates: Vec<([u8; DEVICE_ID_LEN], DeviceClass)> = (1u8..=4)
+        .map(|i| ([i; DEVICE_ID_LEN], DeviceClass::Phone))
+        .collect();
+    // Pre-seed history with realistic observations.
+    let mut history = RoutingHistory::empty();
+    let ctx_hash = ctx.canonical_hash();
+    for _ in 0..50 {
+        history.observe(ctx_hash, [0x01; DEVICE_ID_LEN], true, 1, 1, 1);
+        history.observe(ctx_hash, [0x02; DEVICE_ID_LEN], false, 1, 1, 1);
+    }
+    let cohort = CohortPrior::uniform();
+    c.bench_function("device_mesh::active_routing_pick_device_4", |b| {
+        b.iter(|| {
+            let pick = pick_device_for_context(
+                black_box(&ctx),
+                black_box(&candidates),
+                black_box(&history),
+                black_box(&cohort),
+                &mut OsRng,
+            );
+            black_box(pick);
+        });
+    });
+}
+
+fn bench_active_routing_observe(c: &mut Criterion) {
+    use ol_device_mesh::active_routing::{RoutingContext, RoutingHistory};
+    let ctx = RoutingContext {
+        contact_pin: [0x42; 32],
+        hour_bucket: 14,
+        day_of_week: 2,
+        message_class: *b"DM  ",
+        urgency: 1,
+    };
+    let ctx_hash = ctx.canonical_hash();
+    c.bench_function("device_mesh::active_routing_observe", |b| {
+        b.iter_with_setup(
+            || RoutingHistory::empty(),
+            |mut h| {
+                h.observe(
+                    black_box(ctx_hash),
+                    black_box([0x01; DEVICE_ID_LEN]),
+                    true,
+                    1,
+                    1,
+                    1,
+                );
+                h
+            },
+        );
+    });
+}
+
 criterion_group!(
     benches,
     bench_derive_subkey_seed,
@@ -874,5 +956,8 @@ criterion_group!(
     bench_compute_capability_attestation_sign,
     bench_compute_task_request_sign,
     bench_compute_pick_executor,
+    bench_active_routing_context_hash,
+    bench_active_routing_pick_device,
+    bench_active_routing_observe,
 );
 criterion_main!(benches);

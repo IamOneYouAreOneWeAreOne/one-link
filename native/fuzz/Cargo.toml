@@ -318,3 +318,10 @@ path = "fuzz_targets/fuzz_device_mesh_compute.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_device_mesh_active_routing"
+path = "fuzz_targets/fuzz_device_mesh_active_routing.rs"
+test = false
+doc = false
+bench = false

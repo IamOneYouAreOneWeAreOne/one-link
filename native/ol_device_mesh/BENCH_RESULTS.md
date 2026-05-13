@@ -1,4 +1,4 @@
-# ol_device_mesh (Row 8 Layers 1-8 + 10) microbenchmark results
+# ol_device_mesh (Row 8 — ALL 10 LAYERS COMPLETE) microbenchmark results
 
 Captured against `0.21.0-alpha.0` on Windows 11 Intel host, release
 profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
@@ -29,6 +29,17 @@ Argon2id at OWASP-recommended `(m=19,456 KiB, t=2, p=1)` deliberately
 takes ~15 ms per derivation so brute-forcing a captured envelope is
 prohibitive at the duress-code entropy levels users actually pick
 (4-8 character codes typed under stress).
+
+## Layer 9 — active-inference device routing
+
+| Benchmark                                              | Time      | Notes                                       |
+|---                                                     |---        |---                                          |
+| `device_mesh::active_routing_observe`                  | 52.0 ns   | Bayesian update on Beta(α, β) posterior     |
+| `device_mesh::active_routing_context_hash`             | 112 ns    | BLAKE3 over (contact, hour, day, class, urg)|
+| `device_mesh::active_routing_pick_device_4`            | 4.24 µs   | Thompson sampling, 4 candidates             |
+
+Picker is a few microseconds. The daemon can run it on every
+inbound message without breaking a sweat.
 
 ## Layer 8 — cross-device distributed compute
 
