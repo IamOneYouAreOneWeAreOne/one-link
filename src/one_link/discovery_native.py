@@ -165,6 +165,58 @@ def dht_node(
     )
 
 
+# Row 3 maintenance defaults. Kademlia paper recommends 1 hour for
+# both; daemons can tune via DhtNode.tick_maintenance(...).
+BUCKET_REFRESH_INTERVAL_SECS = 3600
+RECORD_REPUBLISH_INTERVAL_SECS = 3600
+
+
+async def run_maintenance_loop(
+    node: Any,
+    *,
+    period_secs: float = 60.0,
+    bucket_max_age_secs: int = BUCKET_REFRESH_INTERVAL_SECS,
+    record_max_age_secs: int = RECORD_REPUBLISH_INTERVAL_SECS,
+    stop_event: Any = None,
+) -> None:
+    """Row 3 — long-running asyncio maintenance loop for a DhtNode.
+
+    Calls ``node.tick_maintenance(...)`` every ``period_secs`` seconds
+    with the configured staleness thresholds. Returns when
+    ``stop_event`` (an asyncio.Event) is set.
+
+    Daemons typically schedule this once at startup:
+
+    .. code-block:: python
+
+        node = disc.dht_node(bind_addr="0.0.0.0:7117", own_id=my_id)
+        stop = asyncio.Event()
+        task = asyncio.create_task(disc.run_maintenance_loop(node, stop_event=stop))
+        # ... at shutdown:
+        stop.set()
+        await task
+    """
+    import asyncio
+    import time
+
+    if stop_event is None:
+        stop_event = asyncio.Event()
+    while not stop_event.is_set():
+        try:
+            now = int(time.time())
+            node.tick_maintenance(
+                now, bucket_max_age_secs, record_max_age_secs
+            )
+        except Exception:
+            # Tick failures are non-fatal — log + continue. Daemons
+            # that want strict semantics catch this themselves.
+            pass
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=period_secs)
+        except asyncio.TimeoutError:
+            continue
+
+
 def _require_native() -> None:
     if not HAS_NATIVE:
         raise RuntimeError(

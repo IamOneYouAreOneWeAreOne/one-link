@@ -437,6 +437,98 @@ impl DhtNode {
         })
     }
 
+    /// Row 3 maintenance: issue a FIND_NODE refresh lookup for every
+    /// bucket whose `last_refresh_unix` is older than `max_age_secs`.
+    ///
+    /// Without this, idle buckets accumulate stale peer info and
+    /// lookups degrade. Standard Kademlia recommendation: 1 hour.
+    ///
+    /// Returns the number of buckets refreshed.
+    pub fn refresh_stale_buckets(&self, now_unix: u64, max_age_secs: u64) -> usize {
+        let stale_indices: Vec<usize> = {
+            let routing = self.inner.routing.lock().unwrap();
+            routing.stale_buckets(now_unix, max_age_secs)
+        };
+        if stale_indices.is_empty() {
+            return 0;
+        }
+        let mut refreshed = 0;
+        for idx in stale_indices {
+            let target_opt = {
+                let routing = self.inner.routing.lock().unwrap();
+                routing.synthetic_id_for_bucket(idx)
+            };
+            let Some(target) = target_opt else {
+                continue;
+            };
+            // Issue the lookup — errors here are non-fatal (e.g.,
+            // NoBootstrap if routing is genuinely empty). Mark the
+            // bucket refreshed regardless so we don't busy-loop.
+            let _ = self.lookup(target);
+            {
+                let mut routing = self.inner.routing.lock().unwrap();
+                routing.mark_bucket_refreshed(idx, now_unix);
+            }
+            refreshed += 1;
+        }
+        refreshed
+    }
+
+    /// Row 3 maintenance: re-publish every record whose stored copy
+    /// is older than `max_age_secs`. Calls `store_at` against the
+    /// K closest peers per record so they don't expire under the
+    /// default record TTL.
+    ///
+    /// Returns the number of records republished.
+    pub fn republish_records(&self, now_unix: u64, max_age_secs: u64) -> usize {
+        let threshold_unix = now_unix.saturating_sub(max_age_secs);
+        // Snapshot eligible records under lock so we don't hold the
+        // mutex during the network calls.
+        let to_republish: Vec<(NodeId, SignedRecord)> = {
+            let records = self.inner.records.lock().unwrap();
+            records
+                .iter()
+                .filter(|(_id, rec)| {
+                    rec.record.publish_time_unix <= threshold_unix
+                })
+                .map(|(id, rec)| (*id, rec.clone()))
+                .collect()
+        };
+        let mut count = 0;
+        for (rec_id, signed) in to_republish {
+            // K closest known peers for this record's id.
+            let closest: Vec<NodeId> = {
+                let routing = self.inner.routing.lock().unwrap();
+                routing
+                    .closest_to(&rec_id)
+                    .into_iter()
+                    .map(|b| b.id)
+                    .collect()
+            };
+            for peer in closest {
+                let _ = self.store_at(peer, signed.clone());
+            }
+            count += 1;
+        }
+        count
+    }
+
+    /// Row 3 maintenance: single-call wrapper that runs BOTH
+    /// stale-bucket refresh AND record republish. Daemons call this
+    /// from a periodic timer (e.g., every 60 seconds).
+    ///
+    /// Returns `(buckets_refreshed, records_republished)`.
+    pub fn tick_maintenance(
+        &self,
+        now_unix: u64,
+        bucket_max_age_secs: u64,
+        record_max_age_secs: u64,
+    ) -> (usize, usize) {
+        let bucket_refreshed = self.refresh_stale_buckets(now_unix, bucket_max_age_secs);
+        let records_republished = self.republish_records(now_unix, record_max_age_secs);
+        (bucket_refreshed, records_republished)
+    }
+
     /// Snapshot of how many records this node currently stores.
     #[must_use]
     pub fn records_len(&self) -> usize {

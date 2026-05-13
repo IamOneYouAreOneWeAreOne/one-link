@@ -130,6 +130,7 @@ pub mod keyderiv;
 pub mod packet;
 pub mod peel;
 pub mod sphinx;
+pub mod transport_obfs;
 
 pub use build::build_onion;
 pub use circuit::Circuit;

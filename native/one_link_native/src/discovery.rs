@@ -452,6 +452,49 @@ impl PyDhtNode {
         Ok(node.records_len())
     }
 
+    /// Row 3 maintenance: refresh buckets that haven't been touched
+    /// in `max_age_secs` seconds. Daemon-side scheduler calls this
+    /// periodically (e.g., every 60s). Returns count of buckets
+    /// refreshed.
+    fn refresh_stale_buckets(
+        &self,
+        now_unix: u64,
+        max_age_secs: u64,
+    ) -> PyResult<usize> {
+        let node = self.require()?;
+        Ok(node.refresh_stale_buckets(now_unix, max_age_secs))
+    }
+
+    /// Row 3 maintenance: re-publish records older than
+    /// `max_age_secs`. Daemons call this periodically so K-closest
+    /// peers don't expire the records. Returns count of records
+    /// republished.
+    fn republish_records(
+        &self,
+        now_unix: u64,
+        max_age_secs: u64,
+    ) -> PyResult<usize> {
+        let node = self.require()?;
+        Ok(node.republish_records(now_unix, max_age_secs))
+    }
+
+    /// Row 3 maintenance: single-call wrapper running BOTH bucket
+    /// refresh AND record republish. Returns
+    /// `(buckets_refreshed, records_republished)`.
+    fn tick_maintenance(
+        &self,
+        now_unix: u64,
+        bucket_max_age_secs: u64,
+        record_max_age_secs: u64,
+    ) -> PyResult<(usize, usize)> {
+        let node = self.require()?;
+        Ok(node.tick_maintenance(
+            now_unix,
+            bucket_max_age_secs,
+            record_max_age_secs,
+        ))
+    }
+
     /// Graceful shutdown. After this call the node is dead and any
     /// further method call returns a RuntimeError.
     fn shutdown(&mut self) {

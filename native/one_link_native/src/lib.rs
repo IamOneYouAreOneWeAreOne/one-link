@@ -57,6 +57,7 @@ mod fec;
 mod fountain;
 mod homology;
 mod hwkey;
+mod obfs;
 mod onion;
 mod pair_qr;
 mod pqkem;
@@ -311,6 +312,17 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.pqsig", pqsig_mod)?;
+
+    // Row 7 — pluggable transport obfuscation primitive.
+    // ChaCha20 stream-cipher wrapper makes One Link traffic
+    // statistically indistinguishable from random bytes, defeating
+    // simple DPI fingerprinting at the foundation layer.
+    let obfs_mod = PyModule::new_bound(py, "obfs")?;
+    obfs::register(py, &obfs_mod)?;
+    m.add_submodule(&obfs_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.obfs", obfs_mod)?;
 
     Ok(())
 }

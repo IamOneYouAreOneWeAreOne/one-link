@@ -289,6 +289,42 @@ impl RoutingTable {
     pub fn bucket_sizes(&self) -> Vec<usize> {
         self.buckets.iter().map(|b| b.entries.len()).collect()
     }
+
+    /// Mark a bucket as just-refreshed. Maintenance loops call this
+    /// after issuing a FIND_NODE refresh lookup against the bucket
+    /// so subsequent `stale_buckets()` queries don't immediately
+    /// re-flag it.
+    pub fn mark_bucket_refreshed(&mut self, bucket_idx: usize, now_unix: u64) {
+        if let Some(b) = self.buckets.get_mut(bucket_idx) {
+            b.last_refresh_unix = now_unix;
+        }
+    }
+
+    /// Generate a NodeId that lives in bucket `bucket_idx` (relative
+    /// to `own_id`). Used by maintenance to issue refresh lookups
+    /// targeting the right distance range.
+    ///
+    /// Returns `None` if `bucket_idx >= NODE_ID_BITS`.
+    #[must_use]
+    pub fn synthetic_id_for_bucket(&self, bucket_idx: usize) -> Option<NodeId> {
+        if bucket_idx >= crate::node_id::NODE_ID_BITS {
+            return None;
+        }
+        // Construct an ID that XOR-differs from own_id in EXACTLY
+        // bit position `bucket_idx`: leading (256-1-bucket_idx) bits
+        // of XOR are zero, then a 1 at position bucket_idx, then
+        // arbitrary trailing bits. NodeId::bucket_index uses
+        // `xor_leading_zeros == bucket_idx` semantics — meaning the
+        // first differing bit is the (NODE_ID_BITS-1-bucket_idx)-th
+        // MSB. Mirror that: flip the (NODE_ID_BITS-1-bucket_idx)-th
+        // MSB of own_id.
+        let bit_from_msb = crate::node_id::NODE_ID_BITS - 1 - bucket_idx;
+        let byte_idx = bit_from_msb / 8;
+        let bit_in_byte = 7 - (bit_from_msb % 8);
+        let mut out = *self.own_id.as_bytes();
+        out[byte_idx] ^= 1u8 << bit_in_byte;
+        Some(NodeId::from_bytes(out))
+    }
 }
 
 /// Sort utility: stable-sort a list of NodeIds by XOR distance to
