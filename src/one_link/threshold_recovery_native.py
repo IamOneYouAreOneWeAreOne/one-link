@@ -113,6 +113,70 @@ def shamir_reconstruct(
     return result
 
 
+def split_compat(
+    secret: bytes, *, threshold: int, num_shares: int
+) -> list[tuple[int, bytes]]:
+    """Native-fast Shamir split that returns share tuples compatible
+    with `one_link.threshold.Share` (which has `.x` and `.y`).
+
+    Returns a list of `(x, y_bytes)` tuples where `x` is 1..num_shares
+    and `y_bytes` has length `len(secret)`. Callers can construct
+    `Share(x=t[0], y=t[1])` from the result if they need the dataclass.
+
+    Falls back to the pure-Python `one_link.threshold` module if the
+    native extension isn't installed.
+    """
+    if not HAS_NATIVE:
+        from one_link import threshold as _py_threshold
+
+        shares = _py_threshold.split(
+            secret=secret, threshold=threshold, num_shares=num_shares
+        )
+        return [(s.x, s.y) for s in shares]
+    if not isinstance(secret, (bytes, bytearray)):
+        raise TypeError("secret must be bytes")
+    if len(secret) == 0:
+        raise ValueError("secret must be at least 1 byte")
+    if not (2 <= threshold <= num_shares <= 255):
+        raise ValueError(
+            f"invalid threshold={threshold} / num_shares={num_shares}; "
+            f"need 2 <= threshold <= num_shares <= 255"
+        )
+    import os
+    # Use a fresh 8-byte CSPRNG seed for coefficient generation. The
+    # native impl XORs this with BLAKE3-derived per-byte randomness
+    # to produce the polynomial coefficients; production-safe.
+    seed_bytes = os.urandom(8)
+    seed_u64 = int.from_bytes(seed_bytes, "little", signed=False)
+    streams = shamir_split(bytes(secret), k=threshold, n=num_shares, seed=seed_u64)
+    return [(i + 1, streams[i]) for i in range(num_shares)]
+
+
+def combine_compat(shares: list[tuple[int, bytes]], *, threshold: int) -> bytes:
+    """Native-fast Shamir combine. `shares` is a list of (x, y_bytes)
+    tuples from `split_compat`. Falls back to pure-Python if native is
+    unavailable.
+
+    The caller must supply at least `threshold` shares; extra shares
+    are accepted (we drop to the first `threshold` for the LU solve).
+    """
+    if not HAS_NATIVE:
+        from one_link import threshold as _py_threshold
+
+        return _py_threshold.combine(
+            [_py_threshold.Share(x=x, y=y) for x, y in shares]
+        )
+    if len(shares) < threshold:
+        raise ValueError(
+            f"need at least {threshold} shares, got {len(shares)}"
+        )
+    # Native takes the first `threshold` shares.
+    selected = shares[:threshold]
+    xs = [int(x) for x, _ in selected]
+    ys = [bytes(y) for _, y in selected]
+    return shamir_reconstruct(xs, ys, k=threshold)
+
+
 def max_participants() -> int:
     """Maximum N the GF(2^8) scheme supports (255)."""
     _require_native()

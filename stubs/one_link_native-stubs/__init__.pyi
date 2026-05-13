@@ -23,6 +23,7 @@ from . import onion as onion
 from . import pair_qr as pair_qr
 from . import sphinx as sphinx
 from . import pqkem as pqkem
+from . import pqsig as pqsig
 from . import ratchet as ratchet
 
 # Top-level exception hierarchy.

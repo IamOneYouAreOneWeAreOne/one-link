@@ -39,6 +39,7 @@ ol_discovery    = { path = "../ol_discovery" }
 ol_proximity_pair = { path = "../ol_proximity_pair" }
 ol_pair_qr        = { path = "../ol_pair_qr" }
 ol_onion          = { path = "../ol_onion" }
+ol_pqsig          = { path = "../ol_pqsig" }
 curve25519-dalek  = { version = "4", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
 ml-kem            = "0.2"
 hybrid-array      = "0.2"

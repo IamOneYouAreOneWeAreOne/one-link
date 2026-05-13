@@ -60,6 +60,7 @@ mod hwkey;
 mod onion;
 mod pair_qr;
 mod pqkem;
+mod pqsig;
 mod prefetch;
 mod proximity_pair;
 mod quic;
@@ -301,6 +302,15 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.sphinx", sphinx_mod)?;
+
+    // Row 1 — Ed25519 + ML-DSA-65 hybrid signatures for the master
+    // identity key. Survives a future cryptanalytic break of Ed25519.
+    let pqsig_mod = PyModule::new_bound(py, "pqsig")?;
+    pqsig::register(py, &pqsig_mod)?;
+    m.add_submodule(&pqsig_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.pqsig", pqsig_mod)?;
 
     Ok(())
 }

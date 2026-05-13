@@ -1,0 +1,38 @@
+[package]
+name = "ol_pqsig"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link Coherence Mesh: PQ-hybrid digital signatures (Ed25519 + ML-DSA-65 per ADR + row 1 of COHERENCE_MESH_PLAN)."
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_pqsig"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror     = { workspace = true }
+blake3        = { workspace = true }
+ed25519-dalek = { workspace = true }
+# NIST FIPS 204 ML-DSA (CRYSTALS-Dilithium). ml-dsa 0.1.0 RC matches
+# the same maintainer line as ml-kem (RustCrypto org). NOTE: ml-dsa
+# 0.1.0-rc.11 uses hybrid-array 0.4 internally, distinct from the
+# 0.2 version ml-kem 0.2 uses — we use ml-dsa's re-export path so
+# array types resolve correctly.
+ml-dsa        = "=0.1.0-rc.11"
+rand_core     = { workspace = true }
+zeroize       = { workspace = true }
+subtle        = { workspace = true }
+
+[dev-dependencies]
+proptest      = { workspace = true }
+criterion     = { workspace = true }
+rand          = "0.8"
+hex           = { workspace = true }
+
+[[bench]]
+name    = "pqsig_bench"
+harness = false
+
+[lints]
+workspace = true

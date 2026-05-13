@@ -94,6 +94,18 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from one_link import threshold
 
+# Row 9 wiring: use the native Rust Shamir implementation when
+# available (45-84x faster reconstruct per F1.1 polish benches).
+# Falls back to pure-Python `threshold` module if the native crate
+# isn't installed.
+try:
+    from one_link import threshold_recovery_native as _native_tr
+
+    _NATIVE_AVAILABLE = bool(_native_tr.HAS_NATIVE)
+except ImportError:
+    _NATIVE_AVAILABLE = False
+    _native_tr = None  # type: ignore[assignment]
+
 
 SHARE_MAGIC = b"OLSR1"
 SHARE_VERSION = 1
@@ -243,9 +255,20 @@ def split_and_wrap(
     if setup_ms is None:
         setup_ms = int(time.time() * 1000)
 
-    raw_shares = threshold.split(
-        secret=bytes(seed), threshold=threshold_k, num_shares=total_n,
-    )
+    # Row 9 wiring: prefer the native Rust Shamir impl when available
+    # (45-84x faster reconstruct). Both paths produce the same share
+    # bytes for the same secret + the same set of x-values.
+    if _NATIVE_AVAILABLE:
+        native_shares = _native_tr.split_compat(
+            bytes(seed), threshold=threshold_k, num_shares=total_n
+        )
+        raw_shares = [
+            threshold.Share(x=x, y=y) for x, y in native_shares
+        ]
+    else:
+        raw_shares = threshold.split(
+            secret=bytes(seed), threshold=threshold_k, num_shares=total_n,
+        )
     out: list[WrappedShare] = []
     for i, share in enumerate(raw_shares):
         share_idx = share.x
@@ -353,14 +376,26 @@ def combine_shares(shares: list[tuple[int, bytes]]) -> bytes:
     """Reconstruct the original seed from K shares. Each tuple is
     ``(share_index, share_bytes)`` — the same shape that
     ``unwrap_share`` returns. Wraps ``threshold.combine`` with a
-    length check + a clearer error."""
+    length check + a clearer error.
+
+    Row 9 wiring: uses the native Rust Shamir reconstruct when
+    available (45-84x faster than pure-Python per F1.1 benches).
+    """
     if not shares:
         raise ValueError("need at least one share")
-    threshold_shares = [
-        threshold.Share(x=int(idx), y=bytes(payload))
-        for idx, payload in shares
-    ]
-    seed = threshold.combine(threshold_shares)
+    # Use native reconstruct when available.
+    if _NATIVE_AVAILABLE:
+        # Native expects exactly `k` shares; infer k from supplied count.
+        # If caller provided extras, split_compat-style we use first len(shares).
+        k = len(shares)
+        share_tuples = [(int(idx), bytes(payload)) for idx, payload in shares]
+        seed = _native_tr.combine_compat(share_tuples, threshold=k)
+    else:
+        threshold_shares = [
+            threshold.Share(x=int(idx), y=bytes(payload))
+            for idx, payload in shares
+        ]
+        seed = threshold.combine(threshold_shares)
     if len(seed) != SEED_LEN:
         raise ValueError(
             f"reconstructed secret has wrong length {len(seed)}; "

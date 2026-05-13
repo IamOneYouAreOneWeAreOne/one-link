@@ -1,0 +1,37 @@
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use rand::rngs::OsRng;
+
+use ol_pqsig::HybridSigningKey;
+
+fn bench_keygen(c: &mut Criterion) {
+    c.bench_function("pqsig::generate_keypair", |b| {
+        b.iter(|| {
+            let (sk, vk) = HybridSigningKey::generate(&mut OsRng);
+            black_box((sk, vk));
+        });
+    });
+}
+
+fn bench_sign(c: &mut Criterion) {
+    let (sk, _) = HybridSigningKey::generate(&mut OsRng);
+    c.bench_function("pqsig::sign", |b| {
+        b.iter(|| {
+            let sig = sk.sign(black_box(b"benchmark message"));
+            black_box(sig);
+        });
+    });
+}
+
+fn bench_verify(c: &mut Criterion) {
+    let (sk, vk) = HybridSigningKey::generate(&mut OsRng);
+    let msg = b"benchmark message";
+    let sig = sk.sign(msg);
+    c.bench_function("pqsig::verify", |b| {
+        b.iter(|| {
+            vk.verify(black_box(msg), black_box(&sig)).unwrap();
+        });
+    });
+}
+
+criterion_group!(benches, bench_keygen, bench_sign, bench_verify);
+criterion_main!(benches);
