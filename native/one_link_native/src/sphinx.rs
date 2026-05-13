@@ -26,6 +26,10 @@ use ol_onion::sphinx::core::{
     peel_sphinx_layer as core_peel, SphinxHop, SphinxPacket, SphinxPeelOutcome,
     SPHINX_MAX_USER_PAYLOAD, SPHINX_PACKET_LEN,
 };
+use ol_onion::sphinx::cover::{
+    build_cover_packet as cover_build, is_cover_payload as cover_is_sentinel, CoverScheduler,
+    COVER_DEFAULT_RATE_HZ, COVER_PAYLOAD_MIN, COVER_SENTINEL,
+};
 use ol_onion::sphinx::pq::{
     build_pq_sphinx_onion as pq_build, generate_pq_keypair as pq_keypair,
     peel_pq_sphinx_entry as pq_peel_entry, peel_pq_sphinx_intermediate as pq_peel_intermediate,
@@ -305,6 +309,80 @@ fn peel_pq_sphinx_intermediate<'py>(
     }
 }
 
+// ── Cover traffic ────────────────────────────────────────────────
+
+/// Build a cover Sphinx packet bound for `circuit`. Indistinguishable
+/// on the wire from a real Sphinx packet (same size, same blinding).
+/// The destination identifies it via [`is_cover_payload`].
+#[pyfunction]
+fn build_cover_packet<'py>(
+    py: Python<'py>,
+    eph_sk_bytes: &[u8],
+    circuit: Vec<(Vec<u8>, Vec<u8>)>,
+    cover_size: usize,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let eph_sk = scalar_from_bytes(eph_sk_bytes)?;
+    let hops = parse_circuit(circuit)?;
+    let packet = cover_build(&eph_sk, &hops, cover_size, &mut OsRng).map_err(map_err)?;
+    Ok(PyBytes::new_bound(py, packet.as_bytes()))
+}
+
+/// True iff `payload` carries the cover-packet sentinel prefix.
+/// Destinations call this on every delivered Sphinx payload; cover
+/// payloads are silently dropped, real ones forwarded to the app.
+#[pyfunction]
+fn is_cover_payload(payload: &[u8]) -> bool {
+    cover_is_sentinel(payload)
+}
+
+/// Stateful Poisson scheduler for cover-traffic emission.
+///
+/// `next_wait_ms()` returns the next inter-arrival sleep in
+/// milliseconds. Pass the result to your event loop's sleep
+/// primitive; on wake, emit a cover packet.
+#[pyclass(name = "CoverScheduler")]
+pub struct PyCoverScheduler {
+    inner: CoverScheduler,
+}
+
+#[pymethods]
+impl PyCoverScheduler {
+    #[new]
+    #[pyo3(signature = (rate_hz, seed))]
+    fn new(rate_hz: f64, seed: &[u8]) -> PyResult<Self> {
+        if seed.len() != 32 {
+            return Err(PyValueError::new_err(format!(
+                "seed must be 32 bytes, got {}",
+                seed.len()
+            )));
+        }
+        if rate_hz <= 0.0 {
+            return Err(PyValueError::new_err("rate_hz must be positive"));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(seed);
+        Ok(Self {
+            inner: CoverScheduler::new(rate_hz, arr),
+        })
+    }
+
+    fn next_wait_ms(&mut self) -> u64 {
+        self.inner.next_wait_ms()
+    }
+
+    fn rate_hz(&self) -> f64 {
+        self.inner.rate_hz()
+    }
+
+    fn set_rate_hz(&mut self, rate_hz: f64) -> PyResult<()> {
+        if rate_hz <= 0.0 {
+            return Err(PyValueError::new_err("rate_hz must be positive"));
+        }
+        self.inner.set_rate_hz(rate_hz);
+        Ok(())
+    }
+}
+
 // ── Registration ─────────────────────────────────────────────────
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -316,6 +394,12 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_pq_sphinx, m)?)?;
     m.add_function(wrap_pyfunction!(peel_pq_sphinx_entry, m)?)?;
     m.add_function(wrap_pyfunction!(peel_pq_sphinx_intermediate, m)?)?;
+    m.add_function(wrap_pyfunction!(build_cover_packet, m)?)?;
+    m.add_function(wrap_pyfunction!(is_cover_payload, m)?)?;
+    m.add_class::<PyCoverScheduler>()?;
+    m.add("COVER_SENTINEL", PyBytes::new_bound(_py, COVER_SENTINEL))?;
+    m.add("COVER_PAYLOAD_MIN", COVER_PAYLOAD_MIN)?;
+    m.add("COVER_DEFAULT_RATE_HZ", COVER_DEFAULT_RATE_HZ)?;
     m.add("HOP_ID_LEN", HOP_ID_LEN)?;
     m.add("MAX_HOPS", MAX_HOPS)?;
     m.add("SPHINX_MAX_USER_PAYLOAD", SPHINX_MAX_USER_PAYLOAD)?;

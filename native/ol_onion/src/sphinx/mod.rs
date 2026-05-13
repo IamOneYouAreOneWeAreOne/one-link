@@ -22,6 +22,7 @@
 #![allow(missing_docs)]
 
 pub mod core;
+pub mod cover;
 pub mod field;
 pub mod header;
 pub mod pq;

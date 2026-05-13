@@ -70,6 +70,9 @@ try:
     PQ_SPHINX_PACKET_LEN: int = _native_sphinx.PQ_SPHINX_PACKET_LEN
     ML_KEM_CT_LEN: int = _native_sphinx.ML_KEM_CT_LEN
     ML_KEM_EK_LEN: int = _native_sphinx.ML_KEM_EK_LEN
+    COVER_SENTINEL: bytes = bytes(_native_sphinx.COVER_SENTINEL)
+    COVER_PAYLOAD_MIN: int = _native_sphinx.COVER_PAYLOAD_MIN
+    COVER_DEFAULT_RATE_HZ: float = _native_sphinx.COVER_DEFAULT_RATE_HZ
 except ImportError as exc:
     HAS_NATIVE = False
     _native_sphinx = None  # type: ignore[assignment]
@@ -80,6 +83,9 @@ except ImportError as exc:
     PQ_SPHINX_PACKET_LEN = 2393
     ML_KEM_CT_LEN = 1088
     ML_KEM_EK_LEN = 1184
+    COVER_SENTINEL = b"OL-COVER"
+    COVER_PAYLOAD_MIN = 64
+    COVER_DEFAULT_RATE_HZ = 1.0
     log.info(
         "one_link_native.sphinx not installed (%s); Sphinx Coherence "
         "routing unavailable. Build via "
@@ -225,6 +231,60 @@ def peel_pq_sphinx_intermediate(
     return str(outcome), bytes(next_hop), bytes(inner)
 
 
+def build_cover_packet(
+    eph_sk: bytes, circuit: List[Tuple[bytes, bytes]], cover_size: int
+) -> bytes:
+    """Build a Sphinx cover packet — indistinguishable on the wire
+    from a real packet (same size, same blinding, same encryption).
+    Destination identifies it via `is_cover_payload`.
+
+    `cover_size`: random-byte padding length after the cover sentinel
+    (≥ `COVER_PAYLOAD_MIN`).
+    """
+    _require_native()
+    if len(eph_sk) != 32:
+        raise ValueError(f"eph_sk must be 32 bytes, got {len(eph_sk)}")
+    if cover_size < COVER_PAYLOAD_MIN:
+        raise ValueError(
+            f"cover_size must be >= {COVER_PAYLOAD_MIN}, got {cover_size}"
+        )
+    return bytes(_native_sphinx.build_cover_packet(eph_sk, circuit, cover_size))
+
+
+def is_cover_payload(payload: bytes) -> bool:
+    """True iff `payload` carries the COVER_SENTINEL prefix."""
+    _require_native()
+    return bool(_native_sphinx.is_cover_payload(payload))
+
+
+class CoverScheduler:
+    """Poisson-rate scheduler for cover-traffic emission.
+
+    Each call to `next_wait_ms()` returns the next inter-arrival
+    sleep in milliseconds. Pass the result to your event loop;
+    on wake, emit a cover packet built via `build_cover_packet`.
+    """
+
+    def __init__(self, rate_hz: float, seed: bytes) -> None:
+        _require_native()
+        if len(seed) != 32:
+            raise ValueError(f"seed must be 32 bytes, got {len(seed)}")
+        if rate_hz <= 0:
+            raise ValueError(f"rate_hz must be positive, got {rate_hz}")
+        self._native = _native_sphinx.CoverScheduler(rate_hz, seed)
+
+    def next_wait_ms(self) -> int:
+        return int(self._native.next_wait_ms())
+
+    def rate_hz(self) -> float:
+        return float(self._native.rate_hz())
+
+    def set_rate_hz(self, rate_hz: float) -> None:
+        if rate_hz <= 0:
+            raise ValueError(f"rate_hz must be positive, got {rate_hz}")
+        self._native.set_rate_hz(rate_hz)
+
+
 __all__ = [
     "HAS_NATIVE",
     "NativeMissingError",
@@ -236,6 +296,9 @@ __all__ = [
     "build_pq_sphinx",
     "peel_pq_sphinx_entry",
     "peel_pq_sphinx_intermediate",
+    "build_cover_packet",
+    "is_cover_payload",
+    "CoverScheduler",
     "HOP_ID_LEN",
     "MAX_HOPS",
     "SPHINX_MAX_USER_PAYLOAD",
@@ -243,4 +306,7 @@ __all__ = [
     "PQ_SPHINX_PACKET_LEN",
     "ML_KEM_CT_LEN",
     "ML_KEM_EK_LEN",
+    "COVER_SENTINEL",
+    "COVER_PAYLOAD_MIN",
+    "COVER_DEFAULT_RATE_HZ",
 ]

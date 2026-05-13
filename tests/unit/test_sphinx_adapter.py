@@ -354,3 +354,110 @@ def test_packet_size_constant_for_all_payload_sizes():
             eph_sk, [(dest_id, dest_pk)], b"\x00" * payload_len
         )
         assert len(packet) == sph.SPHINX_PACKET_LEN
+
+
+# ── Cover traffic (row 6) ─────────────────────────────────────────
+
+
+def test_cover_module_constants():
+    from one_link import sphinx_native as sph
+
+    assert sph.COVER_SENTINEL == b"OL-COVER"
+    assert sph.COVER_PAYLOAD_MIN == 64
+    assert sph.COVER_DEFAULT_RATE_HZ == 1.0
+
+
+def test_build_cover_packet_round_trip():
+    from one_link import sphinx_native as sph
+
+    dest_sk, dest_pk = sph.generate_keypair()
+    dest_id = bytes([0xE1] * sph.HOP_ID_LEN)
+    eph_sk, _ = sph.generate_keypair()
+    packet = sph.build_cover_packet(eph_sk, [(dest_id, dest_pk)], 128)
+    assert len(packet) == sph.SPHINX_PACKET_LEN  # same size as real
+    outcome, _, payload = sph.peel_sphinx(dest_sk, packet)
+    assert outcome == "deliver"
+    assert sph.is_cover_payload(payload)
+    assert len(payload) == len(sph.COVER_SENTINEL) + 128
+
+
+def test_cover_packet_size_indistinguishable_from_real():
+    from one_link import sphinx_native as sph
+
+    _, dest_pk = sph.generate_keypair()
+    eph_sk, _ = sph.generate_keypair()
+    dest_id = bytes([0xE2] * sph.HOP_ID_LEN)
+    cover = sph.build_cover_packet(eph_sk, [(dest_id, dest_pk)], 256)
+    real = sph.build_sphinx(eph_sk, [(dest_id, dest_pk)], b"real payload here")
+    assert len(cover) == len(real) == sph.SPHINX_PACKET_LEN
+
+
+def test_is_cover_payload_detection():
+    from one_link import sphinx_native as sph
+
+    assert sph.is_cover_payload(b"OL-COVER" + b"anything else")
+    assert sph.is_cover_payload(b"OL-COVER")
+    assert not sph.is_cover_payload(b"OL-REAL")
+    assert not sph.is_cover_payload(b"hello world")
+    assert not sph.is_cover_payload(b"")
+
+
+def test_cover_packet_below_min_rejected():
+    from one_link import sphinx_native as sph
+
+    _, dest_pk = sph.generate_keypair()
+    eph_sk, _ = sph.generate_keypair()
+    dest_id = bytes([0xE3] * sph.HOP_ID_LEN)
+    with pytest.raises(ValueError, match=r"cover_size must be >="):
+        sph.build_cover_packet(eph_sk, [(dest_id, dest_pk)], sph.COVER_PAYLOAD_MIN - 1)
+
+
+def test_cover_scheduler_basic():
+    from one_link import sphinx_native as sph
+
+    sched = sph.CoverScheduler(rate_hz=1.0, seed=bytes(32))
+    waits = [sched.next_wait_ms() for _ in range(10)]
+    assert all(w >= 0 for w in waits)
+    assert sched.rate_hz() == 1.0
+
+
+def test_cover_scheduler_deterministic_per_seed():
+    from one_link import sphinx_native as sph
+
+    s1 = sph.CoverScheduler(1.0, bytes([0x42] * 32))
+    s2 = sph.CoverScheduler(1.0, bytes([0x42] * 32))
+    for _ in range(20):
+        assert s1.next_wait_ms() == s2.next_wait_ms()
+
+
+def test_cover_scheduler_rate_validation():
+    from one_link import sphinx_native as sph
+
+    with pytest.raises(ValueError, match="positive"):
+        sph.CoverScheduler(rate_hz=0.0, seed=bytes(32))
+    with pytest.raises(ValueError, match="positive"):
+        sph.CoverScheduler(rate_hz=-1.0, seed=bytes(32))
+    with pytest.raises(ValueError, match="32 bytes"):
+        sph.CoverScheduler(rate_hz=1.0, seed=b"short")
+
+
+def test_cover_scheduler_mean_matches_poisson():
+    """Empirical: mean inter-arrival ≈ 1/λ for Poisson process."""
+    from one_link import sphinx_native as sph
+
+    sched = sph.CoverScheduler(rate_hz=10.0, seed=bytes([0x77] * 32))
+    samples = [sched.next_wait_ms() for _ in range(5000)]
+    mean_ms = sum(samples) / len(samples)
+    # 10 Hz → 100 ms mean.
+    assert 85 < mean_ms < 115, f"mean = {mean_ms} ms (expected ~100)"
+
+
+def test_cover_scheduler_rate_update():
+    from one_link import sphinx_native as sph
+
+    sched = sph.CoverScheduler(1.0, bytes(32))
+    assert sched.rate_hz() == 1.0
+    sched.set_rate_hz(5.0)
+    assert sched.rate_hz() == 5.0
+    with pytest.raises(ValueError):
+        sched.set_rate_hz(0.0)
