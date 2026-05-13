@@ -3338,10 +3338,28 @@ class UIServer:
         f = self.daemon.state.get_folder(name)
         if not f:
             return web.json_response({"error": "no such folder"}, status=404)
+        merkle_root = ""
+        with contextlib.suppress(Exception):
+            merkle_root = self.daemon.folder_engine.manifest_root(name)
+
+        def _sync_result(peer_fp: str, status: str, **extra: object) -> dict[str, object]:
+            out: dict[str, object] = {
+                "peer_fp": peer_fp,
+                "status": status,
+                "ok": bool(extra.get("ok", status == "pushed")),
+                "wants": int(extra.get("wants", 0) or 0),
+                "blobs_sent": int(extra.get("blobs_sent", 0) or 0),
+                "merkle_root": str(extra.get("merkle_root") or merkle_root),
+            }
+            for k, v in extra.items():
+                if k not in out:
+                    out[k] = v
+            return out
+
         results = []
         for peer_fp in f["shared_with"]:
             if not self.daemon._is_pinned(peer_fp):
-                results.append({"peer_fp": peer_fp, "status": "not_pinned"})
+                results.append(_sync_result(peer_fp, "not_pinned", ok=False))
                 continue
             peer = None
             if self.daemon.discovery:
@@ -3351,13 +3369,13 @@ class UIServer:
                         peer = p
                         break
             if peer is None:
-                results.append({"peer_fp": peer_fp, "status": "offline"})
+                results.append(_sync_result(peer_fp, "offline", ok=False))
                 continue
             try:
                 r = await self.daemon.push_folder_to_peer(peer, name)
-                results.append({"peer_fp": peer_fp, "status": "pushed", **r})
+                results.append(_sync_result(peer_fp, "pushed", **r))
             except Exception as e:
-                results.append({"peer_fp": peer_fp, "status": "error", "error": str(e)})
+                results.append(_sync_result(peer_fp, "error", ok=False, error=str(e)))
         return web.json_response({"ok": True, "results": results})
 
     # ─── POST /api/peers/{fp}/trust ───────────────────────────────────

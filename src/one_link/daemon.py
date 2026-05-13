@@ -3691,7 +3691,17 @@ class Daemon:
             from one_link.transport_fabric import UniversalCommsFabric
 
             inventory = collect_hardware_inventory()
-            fabric = UniversalCommsFabric.from_inventory(inventory)
+            route_candidates = []
+            if self.state is not None:
+                with contextlib.suppress(Exception):
+                    route_candidates = self.state.list_route_candidates(
+                        verified_only=True,
+                        limit=24,
+                    )
+            fabric = UniversalCommsFabric.from_inventory_and_candidates(
+                inventory,
+                route_candidates,
+            )
             plan = fabric.plan(
                 size_bytes=64 * 1024 * 1024,
                 supports_cdc=True,
@@ -10577,8 +10587,9 @@ class Daemon:
         try:
             from one_link.hardware_inventory import collect_hardware_inventory
             from one_link.transport_fabric import UniversalCommsFabric
-            fabric = UniversalCommsFabric.from_inventory(
-                collect_hardware_inventory()
+            fabric = UniversalCommsFabric.from_inventory_and_candidates(
+                collect_hardware_inventory(),
+                durable_route_candidates,
             )
             fabric_decision = fabric.plan(
                 size_bytes=size,

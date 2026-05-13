@@ -23,6 +23,7 @@ from .transport_activation import (
     activation_plans_for,
 )
 from .transport_adapters.base import AdapterProbe, RouteScore, TransportAdapter
+from .transport_adapters.route_memory import adapters_from_route_candidates
 from .transport_adapters.static import adapters_from_paths, score_probe
 
 
@@ -94,6 +95,16 @@ class UniversalCommsFabric:
     def from_inventory(cls, inventory: HardwareInventory | None = None) -> "UniversalCommsFabric":
         inventory = inventory or collect_hardware_inventory()
         return cls(adapters_from_paths(inventory.paths))
+
+    @classmethod
+    def from_inventory_and_candidates(
+        cls,
+        inventory: HardwareInventory | None = None,
+        candidates: Iterable[Mapping[str, object]] | None = None,
+    ) -> "UniversalCommsFabric":
+        inventory = inventory or collect_hardware_inventory()
+        remembered = adapters_from_route_candidates(tuple(candidates or ()))
+        return cls((*adapters_from_paths(inventory.paths), *remembered))
 
     def probes(self) -> tuple[AdapterProbe, ...]:
         out: list[AdapterProbe] = []

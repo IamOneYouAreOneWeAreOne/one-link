@@ -158,6 +158,81 @@ def test_fabric_feeds_existing_transfer_brain_with_adapter_observations():
     assert any(o.route == "lan" and o.ok for o in plan.observations)
 
 
+def test_fabric_ranks_verified_remembered_route_as_real_path():
+    inv = HardwareInventory(
+        platform="test",
+        hostname="unit",
+        paths=(
+            HardwarePath(
+                kind="webrtc",
+                adapter_id="webrtc.slow",
+                available=True,
+                bulk_capable=True,
+                estimated_bps=45_000_000,
+                privacy="direct_or_relayed_internet",
+            ),
+        ),
+    )
+    fabric = UniversalCommsFabric.from_inventory_and_candidates(
+        inv,
+        (
+            {
+                "peer_fp": "a" * 64,
+                "route": "lan",
+                "transport": "tcp",
+                "host": "192.168.1.42",
+                "port": 17117,
+                "source": "session_open",
+                "verified": True,
+                "attempts": 3,
+                "successes": 3,
+                "failures": 0,
+                "latency_ms": 4,
+                "bandwidth_bps": 900_000_000,
+            },
+        ),
+    )
+
+    plan = fabric.plan(size_bytes=128 * 1024 * 1024, supports_cdc=True)
+    truth = plan.route_truth()
+
+    assert plan.best_score is not None
+    assert plan.best_score.adapter_id.startswith("remembered.aaaaaaaa.lan.tcp")
+    assert plan.best_score.route_name == "lan"
+    assert truth["kind"] == "Local network"
+    assert truth["estimated_bps"] == 900_000_000
+    assert truth["reason"] == "verified remembered route"
+    assert any(p.adapter_id.startswith("remembered.") and p.available for p in plan.probes)
+
+
+def test_fabric_keeps_unverified_remembered_route_out_of_bulk_path():
+    fabric = UniversalCommsFabric.from_inventory_and_candidates(
+        HardwareInventory(platform="test", hostname="unit", paths=()),
+        (
+            {
+                "peer_fp": "b" * 64,
+                "route": "lan",
+                "transport": "tcp",
+                "host": "192.168.1.55",
+                "port": 17117,
+                "source": "qr_bootstrap",
+                "verified": False,
+                "attempts": 0,
+                "successes": 0,
+                "failures": 0,
+            },
+        ),
+    )
+
+    plan = fabric.plan(size_bytes=1024 * 1024, supports_cdc=False)
+
+    assert plan.best_score is not None
+    assert plan.best_score.score == 0.0
+    assert plan.best_score.reason == "remembered route awaiting verification"
+    assert not plan.best_score.usable_for_bulk
+    assert plan.probes[0].safety_state == "needs_verification"
+
+
 def test_observations_from_scores_penalizes_control_only_routes():
     scores = (
         score_probe(StaticPathAdapter(HardwarePath(
