@@ -109,6 +109,7 @@ pub mod device_class;
 pub mod errors;
 pub mod hardware;
 pub mod master;
+pub mod quorum;
 pub mod ratchet;
 pub mod subkey;
 

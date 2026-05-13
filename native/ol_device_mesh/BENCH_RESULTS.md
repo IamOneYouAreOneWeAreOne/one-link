@@ -1,4 +1,4 @@
-# ol_device_mesh (Row 8 Layer 1) microbenchmark results
+# ol_device_mesh (Row 8 Layers 1 + 2) microbenchmark results
 
 Captured against `0.21.0-alpha.0` on Windows 11 Intel host, release
 profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
@@ -16,6 +16,15 @@ profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
 | `device_mesh::liveness_proof_verify`            | 53.2 µs  | hybrid signature verify          |
 | `device_mesh::mint_subkey`                      | 433 µs   | derive seed + master signs vk    |
 | `device_mesh::liveness_proof_issue`             | 688 µs   | subkey signs transcript          |
+
+## Layer 2 — quorum
+
+| Benchmark                                       | Time     | Notes                            |
+|---                                              |---       |---                               |
+| `device_mesh::quorum_mint_policy_3_of_5`        | 267 µs   | master signs policy transcript   |
+| `device_mesh::quorum_sign_approval`             | 330 µs   | approver signs proposal_id       |
+| `device_mesh::quorum_propose_operation`         | 538 µs   | issuer signs full proposal       |
+| `device_mesh::quorum_certificate_verify_2_of_3` | 559 µs   | end-to-end cert verify           |
 
 ## What this means for the daemon
 
@@ -39,6 +48,13 @@ profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
 - **Liveness issue is ~688 µs**: dominated by the ML-DSA sign cost,
   same as row 1's `pqsig::sign`. Each device pays this once per
   heartbeat interval.
+- **Quorum cert verify is ~559 µs**: one master-signed-policy verify
+  + one master-signed-attestation verify per signer + one subkey
+  verify per signer. For 2-of-3, that's ~6 hybrid-verify calls,
+  bounded by ML-DSA verify (~50 µs) + book-keeping. Sublinear in
+  K for the bounded MAX_APPROVALS=64.
+- **Mint a policy in ~267 µs**: one master sign over a small
+  transcript. The master pays this once per policy version.
 
 ## Repro
 

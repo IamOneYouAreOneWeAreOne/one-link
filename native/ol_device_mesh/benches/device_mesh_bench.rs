@@ -4,6 +4,9 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rand::rngs::OsRng;
 
 use ol_device_mesh::derivation::derive_field_bound_subkey_seed;
+use ol_device_mesh::quorum::{
+    mint_policy, propose_operation, sign_approval, QuorumCertificate,
+};
 use ol_device_mesh::{
     derive_subkey_seed, master_pin_handle, mint_subkey, ratchet_one_day,
     sibling_witness, state_root, verify_liveness, DeviceClass, HardwareWrapper,
@@ -145,6 +148,96 @@ fn bench_master_pin_handle(c: &mut Criterion) {
     });
 }
 
+fn bench_quorum_mint_policy(c: &mut Criterion) {
+    let master = MasterIdentity::generate(&mut OsRng);
+    let devices: Vec<[u8; DEVICE_ID_LEN]> =
+        (0..5).map(|i| [i as u8; DEVICE_ID_LEN]).collect();
+    c.bench_function("device_mesh::quorum_mint_policy_3_of_5", |b| {
+        b.iter(|| {
+            let p = mint_policy(
+                black_box(&master),
+                black_box([0x42; 16]),
+                black_box(b"bench-policy"),
+                black_box(3),
+                black_box(devices.clone()),
+            )
+            .unwrap();
+            black_box(p);
+        });
+    });
+}
+
+fn bench_quorum_propose_and_approve(c: &mut Criterion) {
+    let master = MasterIdentity::generate(&mut OsRng);
+    let id1 = [0x11; DEVICE_ID_LEN];
+    let id2 = [0x22; DEVICE_ID_LEN];
+    let (sk1, _a1) =
+        mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
+    let (sk2, _a2) =
+        mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
+    let policy = mint_policy(&master, [0x42; 16], b"p", 2, vec![id1, id2]).unwrap();
+    let now: u64 = 1_700_000_000;
+    c.bench_function("device_mesh::quorum_propose_operation", |b| {
+        b.iter(|| {
+            let p = propose_operation(
+                black_box(&sk1),
+                black_box(&policy),
+                black_box([0xEE; 32]),
+                black_box([0xDA; 16]),
+                now,
+                now + 3600,
+            )
+            .unwrap();
+            black_box(p);
+        });
+    });
+    let proposal = propose_operation(
+        &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
+    )
+    .unwrap();
+    c.bench_function("device_mesh::quorum_sign_approval", |b| {
+        b.iter(|| {
+            let a = sign_approval(black_box(&sk2), black_box(&proposal), now + 1)
+                .unwrap();
+            black_box(a);
+        });
+    });
+}
+
+fn bench_quorum_certificate_verify_2_of_3(c: &mut Criterion) {
+    let master = MasterIdentity::generate(&mut OsRng);
+    let id1 = [0x11; DEVICE_ID_LEN];
+    let id2 = [0x22; DEVICE_ID_LEN];
+    let id3 = [0x33; DEVICE_ID_LEN];
+    let (sk1, a1) =
+        mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
+    let (sk2, a2) =
+        mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
+    let (sk3, a3) =
+        mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
+    let policy =
+        mint_policy(&master, [0x42; 16], b"p", 2, vec![id1, id2, id3]).unwrap();
+    let now: u64 = 1_700_000_000;
+    let proposal = propose_operation(
+        &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
+    )
+    .unwrap();
+    let ap2 = sign_approval(&sk2, &proposal, now + 1).unwrap();
+    let ap3 = sign_approval(&sk3, &proposal, now + 2).unwrap();
+    let cert = QuorumCertificate {
+        proposal,
+        approvals: vec![ap2, ap3],
+        policy,
+        subkey_attestations: vec![a1, a2, a3],
+    };
+    let vk = master.verifying_key();
+    c.bench_function("device_mesh::quorum_certificate_verify_2_of_3", |b| {
+        b.iter(|| {
+            cert.verify(black_box(&vk), now + 100).unwrap();
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_derive_subkey_seed,
@@ -155,5 +248,8 @@ criterion_group!(
     bench_liveness_verify,
     bench_hardware_wrap,
     bench_master_pin_handle,
+    bench_quorum_mint_policy,
+    bench_quorum_propose_and_approve,
+    bench_quorum_certificate_verify_2_of_3,
 );
 criterion_main!(benches);
