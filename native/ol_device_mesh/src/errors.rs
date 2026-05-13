@@ -158,6 +158,44 @@ pub enum DeviceMeshError {
         /// Day index that needed coverage.
         day_index: u64,
     },
+    /// Mesh-state authenticated op failed cryptographic verification.
+    #[error("mesh-state authenticated op failed cryptographic verification")]
+    AuthOpVerifyFail,
+    /// Op delta kind doesn't match the target subtree's CRDT kind.
+    #[error("op delta kind doesn't match the subtree's CRDT kind")]
+    DeltaKindMismatch,
+    /// Op delta payload exceeds the per-value byte budget.
+    #[error("op delta value too long: {got} bytes (max {max})")]
+    DeltaValueTooLong {
+        /// Actual payload length.
+        got: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// Subtree label exceeds the maximum allowed length.
+    #[error("subtree label too long: {got} bytes (max {max})")]
+    SubtreeLabelTooLong {
+        /// Actual length.
+        got: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// Tried to register the same subtree label with a different CRDT kind.
+    #[error("subtree label is already registered under a different CRDT kind")]
+    SubtreeKindCollision,
+    /// Op targets a subtree label that doesn't exist in the state.
+    #[error("op targets a subtree label that is not registered in the mesh state")]
+    SubtreeMissing,
+    /// Op sequence number regressed for an emitter device.
+    #[error("op seq regression for device {device_id:x?}: got {got}, last seen {last_seen}")]
+    OpSeqNotMonotonic {
+        /// Offending emitter device id.
+        device_id: [u8; 16],
+        /// Sequence number on the rejected op.
+        got: u64,
+        /// Highest seq we'd already accepted.
+        last_seen: u64,
+    },
 }
 
 impl From<ol_pqsig::PqSigError> for DeviceMeshError {

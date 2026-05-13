@@ -17,6 +17,15 @@ profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
 | `device_mesh::mint_subkey`                      | 433 µs   | derive seed + master signs vk    |
 | `device_mesh::liveness_proof_issue`             | 688 µs   | subkey signs transcript          |
 
+## Layer 3 — mesh state
+
+| Benchmark                                              | Time     | Notes                                       |
+|---                                                     |---       |---                                          |
+| `device_mesh::mesh_state_auth_op_sign`                 | 318 µs   | subkey signs canonical transcript           |
+| `device_mesh::mesh_state_auth_op_verify`               | 53.2 µs  | hybrid signature verify                     |
+| `device_mesh::mesh_state_root_16_subtrees_8_keys`      | 8.45 µs  | BLAKE3 over 16 subtrees × 8 entries each    |
+| `device_mesh::mesh_state_ingest_single_op`             | 330 µs   | verify + apply + log + state-root update    |
+
 ## Layer 2 — quorum
 
 | Benchmark                                       | Time     | Notes                            |

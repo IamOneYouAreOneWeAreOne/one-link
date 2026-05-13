@@ -4,9 +4,13 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rand::rngs::OsRng;
 
 use ol_device_mesh::derivation::derive_field_bound_subkey_seed;
+use ol_device_mesh::mesh_state::{
+    AuthenticatedOp, Delta, MeshState, SubtreePolicyKind, SyncState,
+};
 use ol_device_mesh::quorum::{
     mint_policy, propose_operation, sign_approval, QuorumCertificate,
 };
+use ol_pqsig::HybridVerifyingKey;
 use ol_device_mesh::{
     derive_subkey_seed, master_pin_handle, mint_subkey, ratchet_one_day,
     sibling_witness, state_root, verify_liveness, DeviceClass, HardwareWrapper,
@@ -238,6 +242,101 @@ fn bench_quorum_certificate_verify_2_of_3(c: &mut Criterion) {
     });
 }
 
+fn bench_mesh_state_auth_op_sign(c: &mut Criterion) {
+    let master = MasterIdentity::generate(&mut OsRng);
+    let (sk, _att) =
+        mint_subkey(&master, DeviceClass::Phone, [0x55; DEVICE_ID_LEN], 0, 365).unwrap();
+    c.bench_function("device_mesh::mesh_state_auth_op_sign", |b| {
+        b.iter(|| {
+            let op = AuthenticatedOp::sign(
+                black_box(&sk),
+                black_box(b"contacts".to_vec()),
+                black_box(Delta::OrAdd { element: b"alice".to_vec(), tag: [0x77; 16] }),
+                1,
+                1,
+            )
+            .unwrap();
+            black_box(op);
+        });
+    });
+}
+
+fn bench_mesh_state_auth_op_verify(c: &mut Criterion) {
+    let master = MasterIdentity::generate(&mut OsRng);
+    let (sk, att) =
+        mint_subkey(&master, DeviceClass::Phone, [0x55; DEVICE_ID_LEN], 0, 365).unwrap();
+    let vk = HybridVerifyingKey::from_bytes(&att.subkey_vk_bytes).unwrap();
+    let op = AuthenticatedOp::sign(
+        &sk,
+        b"contacts".to_vec(),
+        Delta::OrAdd { element: b"alice".to_vec(), tag: [0x77; 16] },
+        1,
+        1,
+    )
+    .unwrap();
+    c.bench_function("device_mesh::mesh_state_auth_op_verify", |b| {
+        b.iter(|| {
+            op.verify(black_box(&vk)).unwrap();
+        });
+    });
+}
+
+fn bench_mesh_state_root(c: &mut Criterion) {
+    let w = [0x42u8; DEVICE_ID_LEN];
+    let mut state = MeshState::empty();
+    for i in 0..16u8 {
+        let label = vec![b's', i];
+        state.ensure_subtree(label.clone(), SubtreePolicyKind::LwwMap).unwrap();
+        for k in 0..8u8 {
+            state.apply_delta(
+                &label,
+                &Delta::MapPut {
+                    key: vec![k],
+                    value: vec![k, k],
+                    ts: u64::from(k),
+                },
+                &w,
+            )
+            .unwrap();
+        }
+    }
+    c.bench_function("device_mesh::mesh_state_root_16_subtrees_8_keys", |b| {
+        b.iter(|| {
+            let r = state.root();
+            black_box(r);
+        });
+    });
+}
+
+fn bench_mesh_state_sync_ingest(c: &mut Criterion) {
+    let master = MasterIdentity::generate(&mut OsRng);
+    let (sk, att) =
+        mint_subkey(&master, DeviceClass::Phone, [0x55; DEVICE_ID_LEN], 0, 365).unwrap();
+    let vk = HybridVerifyingKey::from_bytes(&att.subkey_vk_bytes).unwrap();
+    c.bench_function("device_mesh::mesh_state_ingest_single_op", |b| {
+        b.iter_with_setup(
+            || {
+                let mut state = MeshState::empty();
+                state.ensure_subtree(b"x".to_vec(), SubtreePolicyKind::LwwRegister).unwrap();
+                let sync = SyncState::empty();
+                (state, sync)
+            },
+            |(mut state, mut sync)| {
+                let op = AuthenticatedOp::sign(
+                    &sk,
+                    b"x".to_vec(),
+                    Delta::LwwSet { value: b"v".to_vec(), ts: 1 },
+                    1,
+                    1,
+                )
+                .unwrap();
+                let _ = sync.ingest(op, &mut state, |_, _| Ok(vk.clone())).unwrap();
+                (state, sync)
+            },
+        );
+    });
+}
+
 criterion_group!(
     benches,
     bench_derive_subkey_seed,
@@ -251,5 +350,9 @@ criterion_group!(
     bench_quorum_mint_policy,
     bench_quorum_propose_and_approve,
     bench_quorum_certificate_verify_2_of_3,
+    bench_mesh_state_auth_op_sign,
+    bench_mesh_state_auth_op_verify,
+    bench_mesh_state_root,
+    bench_mesh_state_sync_ingest,
 );
 criterion_main!(benches);
