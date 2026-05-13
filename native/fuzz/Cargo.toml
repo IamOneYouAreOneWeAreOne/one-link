@@ -227,3 +227,12 @@ path = "fuzz_targets/fuzz_pqsig_verify.rs"
 test = false
 doc = false
 bench = false
+
+# ── Row 6 cover-traffic fuzz targets ─────────────────────────────
+
+[[bin]]
+name = "fuzz_cover_sentinel"
+path = "fuzz_targets/fuzz_cover_sentinel.rs"
+test = false
+doc = false
+bench = false

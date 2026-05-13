@@ -43,5 +43,9 @@ harness = false
 name    = "sphinx_bench"
 harness = false
 
+[[bench]]
+name    = "cover_bench"
+harness = false
+
 [lints]
 workspace = true

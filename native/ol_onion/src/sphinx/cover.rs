@@ -48,6 +48,31 @@
 //!   traffic design using Poisson padding.
 //! - Tor's "Padding Spec" (PROP254): a simpler client-relay cover
 //!   scheme without true mix semantics.
+//!
+//! ## Example: equalized-rate cover scheduling
+//!
+//! ```
+//! use ol_onion::sphinx::cover::{CoverScheduler, RateEqualizer, is_cover_payload, COVER_SENTINEL};
+//!
+//! // Aim for 5 packets/sec on the wire regardless of real traffic.
+//! let mut eq = RateEqualizer::new(5.0);
+//! eq.observe_real_emission(1_000);
+//! eq.observe_real_emission(1_500);
+//! eq.observe_real_emission(2_000);
+//! // Real ≈ 2 Hz, so cover fills ≈ 3 Hz of the budget.
+//! let cover_rate = eq.current_cover_rate();
+//! assert!(cover_rate > 0.0 && cover_rate <= 5.0);
+//!
+//! // Schedule the next cover packet using an Exp(λ) sample.
+//! let mut sched = CoverScheduler::new(cover_rate.max(0.001), [0x42; 32]);
+//! let wait_ms = sched.next_wait_ms();
+//! assert!(wait_ms < 60_000, "wait sample bounded under normal rates");
+//!
+//! // Cover packets carry the sentinel; receivers drop them.
+//! let mut payload = COVER_SENTINEL.to_vec();
+//! payload.extend_from_slice(&[0u8; 64]);
+//! assert!(is_cover_payload(&payload));
+//! ```
 
 use blake3::Hasher;
 use curve25519_dalek::scalar::Scalar;
