@@ -283,3 +283,10 @@ path = "fuzz_targets/fuzz_device_mesh_dfs.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_device_mesh_fan_out"
+path = "fuzz_targets/fuzz_device_mesh_fan_out.rs"
+test = false
+doc = false
+bench = false

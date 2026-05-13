@@ -1,4 +1,4 @@
-# ol_device_mesh (Row 8 Layers 1 + 2 + 3 + 4) microbenchmark results
+# ol_device_mesh (Row 8 Layers 1 + 2 + 3 + 4 + 5) microbenchmark results
 
 Captured against `0.21.0-alpha.0` on Windows 11 Intel host, release
 profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
@@ -16,6 +16,14 @@ profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
 | `device_mesh::liveness_proof_verify`            | 53.2 µs  | hybrid signature verify          |
 | `device_mesh::mint_subkey`                      | 433 µs   | derive seed + master signs vk    |
 | `device_mesh::liveness_proof_issue`             | 688 µs   | subkey signs transcript          |
+
+## Layer 5 — multi-device fan-out
+
+| Benchmark                                              | Time     | Notes                                       |
+|---                                                     |---       |---                                          |
+| `device_mesh::fan_out_plan_112_chunks_4_sources`       | 15.3 µs  | greedy capacity-weighted assignment         |
+| `device_mesh::fan_out_fetch_request_sign_8`            | 525 µs   | receiver-subkey signs 8-chunk request       |
+| `device_mesh::fan_out_chunk_ack_sign`                  | 540 µs   | source-subkey signs delivery receipt        |
 
 ## Layer 4 — distributed filesystem
 

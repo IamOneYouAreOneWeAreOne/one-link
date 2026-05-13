@@ -257,6 +257,48 @@ pub enum DeviceMeshError {
     /// Storage attestation signature failed verification.
     #[error("storage attestation failed cryptographic verification")]
     StorageAttestVerifyFail,
+    /// Fetch request signature failed verification.
+    #[error("fetch request failed cryptographic verification")]
+    FetchRequestVerifyFail,
+    /// Fetch request has no chunks.
+    #[error("fetch request must name at least one chunk")]
+    FetchRequestEmpty,
+    /// Fetch request carries more chunks than allowed.
+    #[error("fetch request has too many chunks: {got} (max {max})")]
+    FetchRequestTooManyChunks {
+        /// Actual count.
+        got: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// Fetch request chunk hashes are not strictly sorted.
+    #[error("fetch request chunk hashes are not strictly sorted + deduplicated")]
+    FetchRequestChunksNotSorted,
+    /// Fetch request deadline is not strictly after issue time.
+    #[error("fetch request deadline_unix={deadline_unix} must be after issued_unix={issued_unix}")]
+    FetchRequestDeadlineNotAfterIssue {
+        /// Issue wall-clock.
+        issued_unix: u64,
+        /// Deadline wall-clock.
+        deadline_unix: u64,
+    },
+    /// Chunk ack signature failed verification.
+    #[error("chunk ack failed cryptographic verification")]
+    ChunkAckVerifyFail,
+    /// Fan-out planner received an empty source list.
+    #[error("fan-out planner needs at least one source")]
+    FanOutNoSources,
+    /// Fan-out planner overrequest_factor below 1.0 or non-finite.
+    /// `got_bits` is `f64::to_bits` of the offending value so the
+    /// error stays `Eq`-friendly.
+    #[error("fan-out overrequest_factor must be >= 1.0 and finite (got bits 0x{got_bits:x})")]
+    FanOutBadOverrequestFactor {
+        /// Bit representation of the bad value supplied.
+        got_bits: u64,
+    },
+    /// Replan invoked with no chunks remaining to fetch.
+    #[error("fan-out replan called with no still-needed chunks")]
+    FanOutNothingToReplan,
 }
 
 impl From<ol_pqsig::PqSigError> for DeviceMeshError {

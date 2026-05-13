@@ -6,7 +6,11 @@ use rand::rngs::OsRng;
 use ol_device_mesh::derivation::derive_field_bound_subkey_seed;
 use ol_device_mesh::distributed_fs::{
     repair_plan, sign_storage_attestation, ChunkHash, ChunkPlacement,
-    ErasurePolicy, FileManifest,
+    ErasurePolicy, FileManifest, FILE_ID_LEN,
+};
+use ol_device_mesh::fan_out::{
+    fan_out_plan, sign_chunk_ack, sign_fetch_request, SourceCapacity,
+    FETCH_NONCE_LEN,
 };
 use ol_device_mesh::mesh_state::{
     AuthenticatedOp, Delta, MeshState, SubtreePolicyKind, SyncState,
@@ -436,6 +440,96 @@ fn bench_dfs_repair_plan(c: &mut Criterion) {
     });
 }
 
+fn bench_fan_out_plan(c: &mut Criterion) {
+    let policy = ErasurePolicy::new(10, 4, 1).unwrap();
+    let n_stripes = 8usize;
+    let stripe = policy.total_shards() as usize;
+    let chunks: Vec<ChunkHash> = (0..(n_stripes * stripe))
+        .map(|i| {
+            let mut h = [0u8; 32];
+            h[..2].copy_from_slice(&(i as u16).to_be_bytes());
+            h
+        })
+        .collect();
+    let m = FileManifest {
+        file_size: chunks.len() as u64,
+        chunk_size: 8192,
+        chunks: chunks.clone(),
+        mime: b"x".to_vec(),
+        created_unix: 0,
+        policy,
+    };
+    let placements: Vec<ChunkPlacement> = chunks
+        .iter()
+        .map(|c| {
+            let mut p = ChunkPlacement::empty(*c);
+            for i in 1u8..=4 {
+                p.add_holder([i; DEVICE_ID_LEN], 1);
+            }
+            p
+        })
+        .collect();
+    let sources: Vec<SourceCapacity> = (1u8..=4)
+        .map(|i| SourceCapacity {
+            device_id: [i; DEVICE_ID_LEN],
+            estimated_bps: 100_000_000 * u64::from(i),
+            current_load_bytes: 0,
+        })
+        .collect();
+    c.bench_function("device_mesh::fan_out_plan_112_chunks_4_sources", |b| {
+        b.iter(|| {
+            let plan = fan_out_plan(&m, &placements, &sources, 1.0).unwrap();
+            black_box(plan);
+        });
+    });
+}
+
+fn bench_fan_out_fetch_request(c: &mut Criterion) {
+    let master = MasterIdentity::generate(&mut OsRng);
+    let (sk, _) = mint_subkey(
+        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
+    )
+    .unwrap();
+    c.bench_function("device_mesh::fan_out_fetch_request_sign_8", |b| {
+        b.iter(|| {
+            let req = sign_fetch_request(
+                black_box(&sk),
+                [0xBB; DEVICE_ID_LEN],
+                [0xCC; FILE_ID_LEN],
+                vec![[1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32], [7; 32], [8; 32]],
+                1_000_000,
+                1,
+                10,
+                [0xDA; FETCH_NONCE_LEN],
+            )
+            .unwrap();
+            black_box(req);
+        });
+    });
+}
+
+fn bench_fan_out_chunk_ack(c: &mut Criterion) {
+    let master = MasterIdentity::generate(&mut OsRng);
+    let (sk, _) = mint_subkey(
+        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
+    )
+    .unwrap();
+    c.bench_function("device_mesh::fan_out_chunk_ack_sign", |b| {
+        b.iter(|| {
+            let ack = sign_chunk_ack(
+                black_box(&sk),
+                [0xCC; FILE_ID_LEN],
+                [0xDD; 32],
+                [0xEE; DEVICE_ID_LEN],
+                1_700_000_000,
+                8192,
+            )
+            .unwrap();
+            black_box(ack);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_derive_subkey_seed,
@@ -457,5 +551,8 @@ criterion_group!(
     bench_dfs_storage_attest_sign,
     bench_dfs_storage_attest_verify,
     bench_dfs_repair_plan,
+    bench_fan_out_plan,
+    bench_fan_out_fetch_request,
+    bench_fan_out_chunk_ack,
 );
 criterion_main!(benches);

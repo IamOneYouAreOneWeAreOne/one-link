@@ -108,6 +108,7 @@ pub mod derivation;
 pub mod device_class;
 pub mod distributed_fs;
 pub mod errors;
+pub mod fan_out;
 pub mod hardware;
 pub mod master;
 pub mod mesh_state;
