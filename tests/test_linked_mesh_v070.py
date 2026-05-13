@@ -151,7 +151,7 @@ async def test_endpoint_update_from_pinned_peer_queues_verified_promotion(tmp_pa
     daemon.state = state
     queued = []
 
-    async def _fake_verify(peer_fp, peer_sid, host, port):
+    async def _fake_verify(peer_fp, peer_sid, host, port, **_kwargs):
         queued.append((peer_fp, peer_sid, host, port))
 
     daemon._verify_and_promote_endpoint = _fake_verify  # type: ignore[method-assign]
@@ -262,7 +262,7 @@ async def test_endpoint_update_caps_at_max_endpoints(tmp_path: Path):
     daemon.state = state
     queued = []
 
-    async def _fake_verify(peer_fp, peer_sid, host, port):
+    async def _fake_verify(peer_fp, peer_sid, host, port, **_kwargs):
         queued.append((host, port))
 
     daemon._verify_and_promote_endpoint = _fake_verify  # type: ignore[method-assign]

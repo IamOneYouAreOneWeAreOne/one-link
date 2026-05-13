@@ -162,6 +162,71 @@ def test_route_memory_loads_after_restart_and_feeds_health(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_collect_dial_candidates_includes_verified_durable_routes(tmp_path):
+    state = State(db_path=tmp_path / "state.db")
+    peer_pub = "11" * 32
+    peer_fp = fingerprint_of(bytes.fromhex(peer_pub))
+    state.upsert_route_candidate(
+        peer_fp=peer_fp,
+        route="lan",
+        transport="tcp",
+        host="10.0.0.44",
+        port=17117,
+        source="endpoint_verify",
+        verified=True,
+    )
+    daemon = Daemon(_identity())
+    daemon.state = state
+    daemon.rendezvous = None
+    peer = SimpleNamespace(
+        short_id="peer1111",
+        hostname="peer",
+        address="10.0.0.2",
+        port=17117,
+        ed_pub_hex=peer_pub,
+    )
+
+    candidates = await daemon._collect_dial_candidates(peer)
+
+    assert candidates[:2] == [("10.0.0.2", 17117), ("10.0.0.44", 17117)]
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_verify_endpoint_failure_records_durable_candidate(tmp_path, monkeypatch):
+    state = State(db_path=tmp_path / "state.db")
+    peer = _identity()
+    state.upsert_peer(
+        fingerprint=peer.fingerprint,
+        short_id=peer.short_id,
+        pubkey=peer.public_bytes,
+        trust_default="pinned",
+    )
+    daemon = Daemon(_identity())
+    daemon.state = state
+
+    async def fail_open(*_args, **_kwargs):
+        raise OSError("dial refused")
+
+    monkeypatch.setattr("asyncio.open_connection", fail_open)
+
+    await daemon._verify_and_promote_endpoint(
+        peer.fingerprint,
+        peer.short_id,
+        "10.0.0.55",
+        17117,
+        source="signed_bootstrap",
+        route="lan",
+    )
+
+    rows = state.list_route_candidates(peer.fingerprint, include_expired=True)
+    assert rows[0]["host"] == "10.0.0.55"
+    assert rows[0]["failures"] == 1
+    assert rows[0]["verified"] is False
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_api_peers_surfaces_live_route_memory(tmp_path):
     state = State(db_path=tmp_path / "state.db")
     pub_hex = "bb" * 32

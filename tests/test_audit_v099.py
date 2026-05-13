@@ -271,7 +271,7 @@ async def test_api_route_bootstrap_import_queues_verified_probe(ctx, monkeypatch
     state.set_peer_trust(peer_identity.fingerprint, "pinned")
     calls = []
 
-    async def fake_verify(fp, sid, host, port):
+    async def fake_verify(fp, sid, host, port, **_kwargs):
         calls.append((fp, sid, host, port))
 
     monkeypatch.setattr(daemon, "_verify_and_promote_endpoint", fake_verify)
@@ -292,6 +292,9 @@ async def test_api_route_bootstrap_import_queues_verified_probe(ctx, monkeypatch
     assert j["queued"] == 1
     await asyncio.sleep(0)
     assert calls == [(peer_identity.fingerprint, peer_identity.short_id, "10.1.2.3", 17117)]
+    candidates = state.list_route_candidates(peer_identity.fingerprint, include_expired=True)
+    assert candidates[0]["source"] == "signed_bootstrap"
+    assert candidates[0]["host"] == "10.1.2.3"
 
 
 @pytest.mark.asyncio
@@ -313,7 +316,7 @@ async def test_api_route_bootstrap_import_rejects_remote_loopback(ctx, monkeypat
     state.set_peer_trust(peer_identity.fingerprint, "pinned")
     calls = []
 
-    async def fake_verify(fp, sid, host, port):
+    async def fake_verify(fp, sid, host, port, **_kwargs):
         calls.append((fp, sid, host, port))
 
     monkeypatch.setattr(daemon, "_verify_and_promote_endpoint", fake_verify)
@@ -388,7 +391,7 @@ async def test_api_route_bootstrap_import_rejects_replay(ctx, monkeypatch):
     state.set_peer_trust(peer_identity.fingerprint, "pinned")
     calls = []
 
-    async def fake_verify(fp, sid, host, port):
+    async def fake_verify(fp, sid, host, port, **_kwargs):
         calls.append((fp, sid, host, port))
 
     monkeypatch.setattr(daemon, "_verify_and_promote_endpoint", fake_verify)

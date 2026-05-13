@@ -267,6 +267,53 @@ def test_route_memory_roundtrips(state: State):
     assert rows[0]["metadata"]["source"] == "test"
 
 
+def test_route_candidates_roundtrip_rank_and_prune(state: State):
+    fp = "ab" * 32
+    state.upsert_route_candidate(
+        peer_fp=fp,
+        route="lan",
+        transport="tcp",
+        host="10.0.0.8",
+        port=17117,
+        source="signed_bootstrap",
+        verified=False,
+        expires_ms=10,
+        metadata={"hint": "qr"},
+    )
+    state.observe_route_candidate(
+        peer_fp=fp,
+        route="lan",
+        transport="tcp",
+        host="10.0.0.8",
+        port=17117,
+        ok=True,
+        source="endpoint_verify",
+        verified=True,
+        latency_ms=4.0,
+        bandwidth_bps=900_000_000.0,
+        expires_ms=9999999999999,
+    )
+    state.observe_route_candidate(
+        peer_fp=fp,
+        route="relay",
+        transport="tcp",
+        host="relay.example",
+        port=443,
+        ok=False,
+        source="runtime",
+        error="timeout",
+    )
+
+    rows = state.list_route_candidates(fp, verified_only=True)
+
+    assert rows[0]["host"] == "10.0.0.8"
+    assert rows[0]["verified"] is True
+    assert rows[0]["successes"] == 1
+    assert rows[0]["metadata"]["hint"] == "qr"
+    assert state.prune_route_candidates(now_ms=11) == 0
+    assert state.prune_route_candidates(now_ms=99999999999999) == 1
+
+
 def test_delete_setting(state: State):
     state.set_setting("k", "v")
     state.delete_setting("k")

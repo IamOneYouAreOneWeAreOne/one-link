@@ -547,6 +547,7 @@ class State:
                     (14, self._migrate_v14_mute_until),
                     (15, self._migrate_v15_file_index_cache),
                     (16, self._migrate_v16_route_memory),
+                    (17, self._migrate_v17_route_candidates),
                 ]
                 for target_version, apply_fn in steps:
                     self._run_atomic_migration(
@@ -621,6 +622,48 @@ class State:
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_route_memory_peer "
             "ON route_memory(peer_fp, updated_ms)"
+        )
+
+    def _migrate_v17_route_candidates(self, c: sqlite3.Cursor) -> None:
+        """Durable concrete route candidates for the universal fabric.
+
+        route_memory scores broad route families. route_candidates remembers
+        actual dial targets learned from verified sessions, endpoint updates,
+        signed QR/audio/BLE route tokens, and future transports. A route
+        candidate is not trusted because it exists; callers still do the
+        normal pinned-key handshake before promotion/use.
+        """
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS route_candidates (
+                peer_fp       TEXT NOT NULL,
+                route         TEXT NOT NULL,
+                transport     TEXT NOT NULL,
+                host          TEXT NOT NULL,
+                port          INTEGER NOT NULL,
+                source        TEXT NOT NULL,
+                verified      INTEGER NOT NULL DEFAULT 0,
+                attempts      INTEGER NOT NULL DEFAULT 0,
+                successes     INTEGER NOT NULL DEFAULT 0,
+                failures      INTEGER NOT NULL DEFAULT 0,
+                latency_ms    REAL,
+                bandwidth_bps REAL,
+                last_error    TEXT,
+                first_seen_ms INTEGER NOT NULL,
+                updated_ms    INTEGER NOT NULL,
+                expires_ms    INTEGER,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY(peer_fp, route, transport, host, port)
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_route_candidates_peer "
+            "ON route_candidates(peer_fp, verified, updated_ms)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_route_candidates_expiry "
+            "ON route_candidates(expires_ms)"
         )
 
     def _migrate_v15_file_index_cache(self, c: sqlite3.Cursor) -> None:
@@ -3095,6 +3138,217 @@ class State:
             })
         return out
 
+    def upsert_route_candidate(
+        self,
+        *,
+        peer_fp: str,
+        route: str,
+        transport: str,
+        host: str,
+        port: int,
+        source: str,
+        verified: bool = False,
+        attempts: int | None = None,
+        successes: int | None = None,
+        failures: int | None = None,
+        latency_ms: float | None = None,
+        bandwidth_bps: float | None = None,
+        last_error: str | None = None,
+        expires_ms: int | None = None,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        if not peer_fp:
+            raise ValueError("peer_fp is required")
+        if not route:
+            raise ValueError("route is required")
+        if not transport:
+            raise ValueError("transport is required")
+        host_s = str(host or "").strip()
+        if not host_s:
+            raise ValueError("host is required")
+        port_i = int(port)
+        if port_i <= 0 or port_i > 65535:
+            raise ValueError("port must be 1..65535")
+        current = self.get_route_candidate(
+            peer_fp=peer_fp,
+            route=str(route),
+            transport=str(transport),
+            host=host_s,
+            port=port_i,
+        )
+        attempts_i = (
+            int((current or {}).get("attempts") or 0)
+            if attempts is None else max(0, int(attempts))
+        )
+        successes_i = (
+            int((current or {}).get("successes") or 0)
+            if successes is None else max(0, int(successes))
+        )
+        failures_i = (
+            int((current or {}).get("failures") or 0)
+            if failures is None else max(0, int(failures))
+        )
+        now = _now_ms()
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO route_candidates(
+                    peer_fp, route, transport, host, port, source, verified,
+                    attempts, successes, failures, latency_ms, bandwidth_bps,
+                    last_error, first_seen_ms, updated_ms, expires_ms, metadata_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(peer_fp, route, transport, host, port) DO UPDATE SET
+                    source = excluded.source,
+                    verified = MAX(route_candidates.verified, excluded.verified),
+                    attempts = CASE
+                        WHEN excluded.attempts IS NULL THEN route_candidates.attempts
+                        ELSE excluded.attempts
+                    END,
+                    successes = CASE
+                        WHEN excluded.successes IS NULL THEN route_candidates.successes
+                        ELSE excluded.successes
+                    END,
+                    failures = CASE
+                        WHEN excluded.failures IS NULL THEN route_candidates.failures
+                        ELSE excluded.failures
+                    END,
+                    latency_ms = COALESCE(excluded.latency_ms, route_candidates.latency_ms),
+                    bandwidth_bps = COALESCE(excluded.bandwidth_bps, route_candidates.bandwidth_bps),
+                    last_error = excluded.last_error,
+                    updated_ms = excluded.updated_ms,
+                    expires_ms = excluded.expires_ms,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    peer_fp,
+                    str(route),
+                    str(transport),
+                    host_s,
+                    port_i,
+                    str(source)[:80],
+                    1 if verified else 0,
+                    attempts_i,
+                    successes_i,
+                    failures_i,
+                    float(latency_ms) if latency_ms is not None else None,
+                    float(bandwidth_bps) if bandwidth_bps is not None else None,
+                    str(last_error)[:240] if last_error else None,
+                    now,
+                    now,
+                    int(expires_ms) if expires_ms else None,
+                    json.dumps(metadata or {}, separators=(",", ":"), sort_keys=True),
+                ),
+            )
+
+    def observe_route_candidate(
+        self,
+        *,
+        peer_fp: str,
+        route: str,
+        transport: str,
+        host: str,
+        port: int,
+        ok: bool,
+        source: str = "runtime",
+        latency_ms: float | None = None,
+        bandwidth_bps: float | None = None,
+        error: str | None = None,
+        verified: bool | None = None,
+        expires_ms: int | None = None,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        current = self.get_route_candidate(
+            peer_fp=peer_fp,
+            route=route,
+            transport=transport,
+            host=host,
+            port=port,
+        )
+        attempts = int((current or {}).get("attempts") or 0) + 1
+        successes = int((current or {}).get("successes") or 0) + (1 if ok else 0)
+        failures = int((current or {}).get("failures") or 0) + (0 if ok else 1)
+        self.upsert_route_candidate(
+            peer_fp=peer_fp,
+            route=route,
+            transport=transport,
+            host=host,
+            port=port,
+            source=source,
+            verified=bool(verified if verified is not None else ok),
+            attempts=attempts,
+            successes=successes,
+            failures=failures,
+            latency_ms=latency_ms,
+            bandwidth_bps=bandwidth_bps,
+            last_error=None if ok else error,
+            expires_ms=expires_ms,
+            metadata={**((current or {}).get("metadata") or {}), **(metadata or {})},
+        )
+
+    def get_route_candidate(
+        self,
+        *,
+        peer_fp: str,
+        route: str,
+        transport: str,
+        host: str,
+        port: int,
+    ) -> Optional[dict]:
+        row = self._conn.execute(
+            """
+            SELECT * FROM route_candidates
+            WHERE peer_fp = ? AND route = ? AND transport = ? AND host = ? AND port = ?
+            """,
+            (peer_fp, route, transport, str(host), int(port)),
+        ).fetchone()
+        return self._row_to_route_candidate(row) if row else None
+
+    def list_route_candidates(
+        self,
+        peer_fp: Optional[str] = None,
+        *,
+        verified_only: bool = False,
+        include_expired: bool = False,
+        limit: int = 64,
+    ) -> list[dict]:
+        now = _now_ms()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if peer_fp:
+            clauses.append("peer_fp = ?")
+            params.append(peer_fp)
+        if verified_only:
+            clauses.append("verified = 1")
+        if not include_expired:
+            clauses.append("(expires_ms IS NULL OR expires_ms > ?)")
+            params.append(now)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM route_candidates
+            {where}
+            ORDER BY
+                verified DESC,
+                successes DESC,
+                failures ASC,
+                COALESCE(bandwidth_bps, 0) DESC,
+                COALESCE(latency_ms, 999999) ASC,
+                updated_ms DESC
+            LIMIT ?
+            """,
+            (*params, max(1, min(512, int(limit)))),
+        ).fetchall()
+        return [self._row_to_route_candidate(r) for r in rows]
+
+    def prune_route_candidates(self, *, now_ms: int | None = None) -> int:
+        now = _now_ms() if now_ms is None else int(now_ms)
+        with self._write_lock:
+            cur = self._conn.execute(
+                "DELETE FROM route_candidates WHERE expires_ms IS NOT NULL AND expires_ms <= ?",
+                (now,),
+            )
+            return int(cur.rowcount)
+
     def enqueue_outbox(
         self,
         *,
@@ -3241,6 +3495,35 @@ class State:
             last_error=row["last_error"],
             delivered_ms=row["delivered_ms"],
         )
+
+    def _row_to_route_candidate(self, row: sqlite3.Row) -> dict:
+        try:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        except Exception:
+            metadata = {}
+        return {
+            "peer_fp": row["peer_fp"],
+            "route": row["route"],
+            "transport": row["transport"],
+            "host": row["host"],
+            "port": int(row["port"]),
+            "source": row["source"],
+            "verified": bool(row["verified"]),
+            "attempts": int(row["attempts"]),
+            "successes": int(row["successes"]),
+            "failures": int(row["failures"]),
+            "latency_ms": (
+                float(row["latency_ms"]) if row["latency_ms"] is not None else None
+            ),
+            "bandwidth_bps": (
+                float(row["bandwidth_bps"]) if row["bandwidth_bps"] is not None else None
+            ),
+            "last_error": row["last_error"],
+            "first_seen_ms": int(row["first_seen_ms"]),
+            "updated_ms": int(row["updated_ms"]),
+            "expires_ms": int(row["expires_ms"]) if row["expires_ms"] is not None else None,
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
 
     def _row_to_transfer(self, row: sqlite3.Row) -> TransferRecord:
         try:

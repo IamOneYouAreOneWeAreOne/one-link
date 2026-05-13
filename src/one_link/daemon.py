@@ -3655,10 +3655,18 @@ class Daemon:
                 "attempts": top.attempts if top is not None else 0,
                 "successes": top.successes if top is not None else 0,
             })
+        durable_candidates = []
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                durable_candidates = self.state.list_route_candidates(
+                    verified_only=True,
+                    limit=24,
+                )
         return {
             "engines": self._transfer_perf.snapshot(),
             "routes": routes[:12],
             "route_count": len(routes),
+            "durable_route_candidates": len(durable_candidates),
         }
 
     def _fabric_snapshot(self, *, max_age_s: float = 30.0) -> dict:
@@ -5743,6 +5751,21 @@ class Daemon:
 
         _add(peer.address, peer.port)
 
+        peer_fp = self._peer_fp_from_peer(peer)
+        if self.state is not None and peer_fp:
+            with contextlib.suppress(Exception):
+                self.state.prune_route_candidates()
+            try:
+                stored = self.state.list_route_candidates(
+                    peer_fp,
+                    verified_only=True,
+                    limit=self.MAX_ENDPOINTS_PER_ANNOUNCEMENT,
+                )
+            except Exception:
+                stored = []
+            for candidate in self._rank_route_candidates(peer_fp, stored):
+                _add(candidate.get("host"), candidate.get("port"))
+
         if self.rendezvous is None or not peer.ed_pub_hex:
             return out
         try:
@@ -5768,6 +5791,41 @@ class Daemon:
             if observed_host and observed_host != e.host:
                 _add(observed_host, e.port)
         return out
+
+    def _rank_route_candidates(
+        self,
+        peer_fp: str,
+        candidates: list[dict],
+    ) -> list[dict]:
+        """Rank durable concrete routes using live route-memory scores.
+
+        Fresh mDNS is already inserted before this list. Within remembered
+        candidates, prefer route families that have actually succeeded, then
+        high-throughput/low-latency candidates, then newer candidates.
+        """
+
+        route_scores: dict[str, float] = {}
+        mem = self._route_memory.get(peer_fp)
+        if mem is not None:
+            route_scores = {c.route: float(c.score) for c in mem.candidates()}
+
+        def key(row: dict) -> tuple[float, int, int, float, float, int]:
+            route = str(row.get("route") or "")
+            successes = int(row.get("successes") or 0)
+            failures = int(row.get("failures") or 0)
+            bw = float(row.get("bandwidth_bps") or 0.0)
+            latency = float(row.get("latency_ms") or 999999.0)
+            updated = int(row.get("updated_ms") or 0)
+            return (
+                route_scores.get(route, 0.0),
+                successes,
+                -failures,
+                bw,
+                -latency,
+                updated,
+            )
+
+        return sorted(candidates, key=key, reverse=True)
 
     async def _dial_first_responsive(
         self,
@@ -5888,10 +5946,12 @@ class Daemon:
                             if timeout is None else float(timeout)
                         ),
                     )
+                    setattr(writer, "_one_link_winning_endpoint", (host, int(port)))
                     return reader, writer, _classify_address_regime(host)
                 reader, writer, winning = await self._dial_first_responsive(
                     candidates, timeout=timeout
                 )
+                setattr(writer, "_one_link_winning_endpoint", (winning[0], int(winning[1])))
                 return reader, writer, _classify_address_regime(winning[0])
             except (OSError, asyncio.TimeoutError) as e:
                 direct_err = e
@@ -7596,6 +7656,21 @@ class Daemon:
                         address=peer.address,
                         port=peer.port,
                     )
+                winning_endpoint = getattr(writer, "_one_link_winning_endpoint", None)
+                if winning_endpoint:
+                    host, port = winning_endpoint
+                    with contextlib.suppress(Exception):
+                        self.state.observe_route_candidate(
+                            peer_fp=peer_fp,
+                            route=regime,
+                            transport="tcp",
+                            host=str(host),
+                            port=int(port),
+                            ok=True,
+                            source="session_open",
+                            verified=True,
+                            metadata={"short_id": peer.short_id},
+                        )
             await channel.send(encode_msg(self._build_my_caps_for_channel(channel)))
             # v0.8.2: half-step toward ratchet activation. The
             # peer's CAPS will arrive on the first recv inside the
@@ -8305,7 +8380,14 @@ class Daemon:
         # the picked one is wrong.
         for host, port in cleaned:
             task = asyncio.create_task(
-                self._verify_and_promote_endpoint(peer_fp, peer_sid, host, port)
+                self._verify_and_promote_endpoint(
+                    peer_fp,
+                    peer_sid,
+                    host,
+                    port,
+                    source="endpoint_update",
+                    route=_classify_address_regime(host),
+                )
             )
             self._endpoint_verify_tasks.add(task)
             task.add_done_callback(self._endpoint_verify_tasks.discard)
@@ -8319,7 +8401,16 @@ class Daemon:
         )))
 
     async def _verify_and_promote_endpoint(
-        self, peer_fp: str, peer_sid: str, host: str, port: int,
+        self,
+        peer_fp: str,
+        peer_sid: str,
+        host: str,
+        port: int,
+        *,
+        source: str = "endpoint_update",
+        route: str | None = None,
+        transport: str = "tcp",
+        expires_ms: int | None = None,
     ) -> None:
         """Promote an announced endpoint only after key-confirmed dial."""
         if self.state is None or not self._is_pinned(peer_fp):
@@ -8332,6 +8423,8 @@ class Daemon:
             return
         writer = None
         channel = None
+        started = time.perf_counter()
+        route_name = route or _classify_address_regime(host)
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=3.0
@@ -8352,6 +8445,7 @@ class Daemon:
                     host, port, peer_fp[:8], got_fp[:8],
                 )
                 return
+            latency_ms = (time.perf_counter() - started) * 1000.0
             self.state.upsert_peer(
                 fingerprint=peer_fp,
                 short_id=rec.short_id,
@@ -8360,11 +8454,39 @@ class Daemon:
                 address=host,
                 port=port,
             )
+            with contextlib.suppress(Exception):
+                self.state.observe_route_candidate(
+                    peer_fp=peer_fp,
+                    route=route_name,
+                    transport=transport,
+                    host=host,
+                    port=port,
+                    ok=True,
+                    source=source,
+                    latency_ms=latency_ms,
+                    verified=True,
+                    expires_ms=expires_ms,
+                    metadata={"short_id": peer_sid},
+                )
             log.info(
                 "ENDPOINT_UPDATE promoted verified route for %s: %s:%d",
                 peer_sid, host, port,
             )
         except Exception as e:
+            with contextlib.suppress(Exception):
+                self.state.observe_route_candidate(
+                    peer_fp=peer_fp,
+                    route=route_name,
+                    transport=transport,
+                    host=host,
+                    port=port,
+                    ok=False,
+                    source=source,
+                    error=str(e),
+                    verified=False,
+                    expires_ms=expires_ms,
+                    metadata={"short_id": peer_sid},
+                )
             log.debug(
                 "ENDPOINT_UPDATE candidate failed verification for %s at %s:%d: %s",
                 peer_fp[:8], host, port, e,
@@ -8445,6 +8567,7 @@ class Daemon:
             host = endpoint.get("address") or endpoint.get("host")
             port = endpoint.get("port")
             route = str(endpoint.get("route") or "").lower()
+            transport = str(endpoint.get("transport") or "tcp").lower()
             if route == "loopback":
                 rejected += 1
                 continue
@@ -8454,9 +8577,32 @@ class Daemon:
             if not isinstance(port, int) or not (0 < port < 65536):
                 rejected += 1
                 continue
+            candidate_route = route or _classify_address_regime(host)
+            with contextlib.suppress(Exception):
+                self.state.upsert_route_candidate(
+                    peer_fp=peer_fp,
+                    route=candidate_route,
+                    transport=transport,
+                    host=host,
+                    port=port,
+                    source="signed_bootstrap",
+                    verified=False,
+                    expires_ms=int(payload.expires_ms),
+                    metadata={
+                        "token_issuer": peer_fp,
+                        "capabilities": list(payload.body.get("capabilities") or [])[:16],
+                    },
+                )
             task = asyncio.create_task(
                 self._verify_and_promote_endpoint(
-                    peer_fp, rec.short_id or peer_fp[:8], host, port,
+                    peer_fp,
+                    rec.short_id or peer_fp[:8],
+                    host,
+                    port,
+                    source="signed_bootstrap",
+                    route=candidate_route,
+                    transport=transport,
+                    expires_ms=int(payload.expires_ms),
                 )
             )
             self._endpoint_verify_tasks.add(task)
@@ -10381,6 +10527,22 @@ class Daemon:
         route_names = tuple(
             c.route for c in self._route_memory_for(peer_fp).candidates()
         ) or (getattr(sess, "regime", None) or "lan",)
+        durable_route_candidates: list[dict] = []
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                durable_route_candidates = self.state.list_route_candidates(
+                    peer_fp,
+                    verified_only=True,
+                    limit=8,
+                )
+        if durable_route_candidates:
+            candidate_routes = tuple(dict.fromkeys(
+                str(c.get("route") or "")
+                for c in durable_route_candidates
+                if str(c.get("route") or "")
+            ))
+            if candidate_routes:
+                route_names = tuple(dict.fromkeys((*candidate_routes, *route_names)))
         native_status = native_cdc_status()
         engine_speeds = self._transfer_perf.speeds(
             native_cdc=bool(native_status.available),
@@ -10475,6 +10637,19 @@ class Daemon:
             "transfer_engine_oracle": self._transfer_perf.snapshot(),
             "prior_hit_rate_estimate": prior_hit_rate,
             "fabric_plan": fabric_plan,
+            "route_candidates": {
+                "verified": len(durable_route_candidates),
+                "top": [
+                    {
+                        "route": c.get("route"),
+                        "transport": c.get("transport"),
+                        "source": c.get("source"),
+                        "successes": c.get("successes"),
+                        "failures": c.get("failures"),
+                    }
+                    for c in durable_route_candidates[:3]
+                ],
+            },
             "transfer_brain": transfer_brain_decision,
             "autopilot_plan": autopilot_plan,
             "verification_head": list(verification_head),
