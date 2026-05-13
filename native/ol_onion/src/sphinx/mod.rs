@@ -22,7 +22,9 @@
 #![allow(missing_docs)]
 
 pub mod core;
+pub mod field;
 pub mod header;
+pub mod pq;
 pub mod primitives;
 
 pub use core::{

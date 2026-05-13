@@ -115,7 +115,7 @@ pub fn build_onion<R: RngCore + CryptoRng>(
 
         let ciphertext = cipher
             .encrypt(
-                aead_nonce.as_ref().into(),
+                (&aead_nonce).into(),
                 Payload {
                     msg: &current_plaintext,
                     aad: &aad_bytes,

@@ -84,7 +84,7 @@ pub fn peel_one_layer(
     let aad = packet.aad();
     let plaintext = cipher
         .decrypt(
-            packet.aead_nonce.as_ref().into(),
+            (&packet.aead_nonce).into(),
             Payload {
                 msg: &packet.ciphertext,
                 aad: &aad,
