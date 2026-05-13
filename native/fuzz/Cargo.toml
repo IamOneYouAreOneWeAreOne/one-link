@@ -236,3 +236,19 @@ path = "fuzz_targets/fuzz_cover_sentinel.rs"
 test = false
 doc = false
 bench = false
+
+# ── Row 7 transport_obfs fuzz targets ─────────────────────────────
+
+[[bin]]
+name = "fuzz_obfs_handshake_accept"
+path = "fuzz_targets/fuzz_obfs_handshake_accept.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_obfs_primitive"
+path = "fuzz_targets/fuzz_obfs_primitive.rs"
+test = false
+doc = false
+bench = false

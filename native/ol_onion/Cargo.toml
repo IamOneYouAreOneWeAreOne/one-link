@@ -47,5 +47,9 @@ harness = false
 name    = "cover_bench"
 harness = false
 
+[[bench]]
+name    = "transport_obfs_bench"
+harness = false
+
 [lints]
 workspace = true
