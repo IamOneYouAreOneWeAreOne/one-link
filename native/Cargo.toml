@@ -44,6 +44,7 @@ members = [
     "ol_pair_qr",
     "ol_onion",
     "ol_pqsig",
+    "ol_device_mesh",
     "ol_fuse",
     "ol_fskit",
     "ol_winfs",

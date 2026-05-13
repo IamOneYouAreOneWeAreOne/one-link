@@ -32,6 +32,7 @@ ol_proximity_pair  = { path = "../ol_proximity_pair" }
 ol_pair_qr         = { path = "../ol_pair_qr" }
 ol_onion           = { path = "../ol_onion" }
 ol_pqsig           = { path = "../ol_pqsig" }
+ol_device_mesh     = { path = "../ol_device_mesh" }
 rand               = "0.8"
 rand_chacha        = "0.3"
 x25519-dalek       = { version = "2.0", features = ["static_secrets"] }
@@ -249,6 +250,15 @@ bench = false
 [[bin]]
 name = "fuzz_obfs_primitive"
 path = "fuzz_targets/fuzz_obfs_primitive.rs"
+test = false
+doc = false
+bench = false
+
+# ── Row 8 Layer 1 device-mesh fuzz targets ───────────────────────
+
+[[bin]]
+name = "fuzz_device_mesh_attestation"
+path = "fuzz_targets/fuzz_device_mesh_attestation.rs"
 test = false
 doc = false
 bench = false

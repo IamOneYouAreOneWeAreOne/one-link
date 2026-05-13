@@ -1,0 +1,42 @@
+[package]
+name = "ol_device_mesh"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link Coherence Mesh: Row 8 Layer 1 — identity stack for the Personal Device Mesh (master + per-device subkeys + field-bind + daily ratchet + cross-witness attestation)."
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_device_mesh"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror     = { workspace = true }
+blake3        = { workspace = true }
+ed25519-dalek = { workspace = true }
+# Reuse the row 1 PQ-hybrid signing primitive. The DEVICE subkey is
+# itself a HybridSigningKey derived deterministically from the master
+# hybrid key + a device-class context tag. Same wire shape; the only
+# new bit is the derivation path.
+ol_pqsig      = { path = "../ol_pqsig" }
+# Reuse the row 9 field-witness machinery. Per-device subkeys are
+# optionally bound to a coherence-field witness at mint, so a captured
+# subkey is useless without the field state.
+ol_threshold_recovery = { path = "../ol_threshold_recovery" }
+rand_core     = { workspace = true }
+zeroize       = { workspace = true }
+subtle        = { workspace = true }
+
+[dev-dependencies]
+proptest      = { workspace = true }
+criterion     = { workspace = true }
+rand          = "0.8"
+rand_chacha   = "0.3"
+hex           = { workspace = true }
+
+[[bench]]
+name    = "device_mesh_bench"
+harness = false
+
+[lints]
+workspace = true
