@@ -63,6 +63,7 @@ mod pqkem;
 mod prefetch;
 mod proximity_pair;
 mod quic;
+mod sphinx;
 mod ratchet;
 mod routing;
 mod store;
@@ -286,6 +287,20 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.onion", onion_mod)?;
+
+    // Phase F3.5 — Sphinx Coherence (row 5 advanced).
+    // Standard Sphinx (Ristretto255 alpha blinding + filler-byte
+    // construction) + PQ-hybrid (ML-KEM-768 at entry hop) + field-
+    // bound binding. Single packet-level ephemeral pubkey blinded
+    // at each hop so a global passive observer sees uncorrelated
+    // random group elements across relays. Quantum-resistant via
+    // ML-KEM-768.
+    let sphinx_mod = PyModule::new_bound(py, "sphinx")?;
+    sphinx::register(py, &sphinx_mod)?;
+    m.add_submodule(&sphinx_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.sphinx", sphinx_mod)?;
 
     Ok(())
 }

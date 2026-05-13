@@ -39,6 +39,9 @@ ol_discovery    = { path = "../ol_discovery" }
 ol_proximity_pair = { path = "../ol_proximity_pair" }
 ol_pair_qr        = { path = "../ol_pair_qr" }
 ol_onion          = { path = "../ol_onion" }
+curve25519-dalek  = { version = "4", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
+ml-kem            = "0.2"
+hybrid-array      = "0.2"
 ed25519-dalek   = { workspace = true }
 x25519-dalek    = { version = "2.0", features = ["static_secrets"] }
 # rand 0.8 pairs with rand_core 0.6 which ml-kem 0.2 and x25519-dalek

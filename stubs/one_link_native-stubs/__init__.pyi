@@ -21,6 +21,7 @@ from . import crdt as crdt
 from . import hwkey as hwkey
 from . import onion as onion
 from . import pair_qr as pair_qr
+from . import sphinx as sphinx
 from . import pqkem as pqkem
 from . import ratchet as ratchet
 
