@@ -114,6 +114,7 @@ GUARDED_GET_ROUTES = [
     "/api/activity?limit=5",
     "/api/fabric",
     "/api/route-bootstrap",
+    "/api/route-bootstrap/qr.svg",
     "/api/folder-conflicts",
     "/api/key-change-events",
     "/api/peers/{fp}/trust-history",
@@ -145,7 +146,21 @@ async def test_api_me_happy(ctx):
 
 @pytest.mark.asyncio
 async def test_api_fabric_returns_route_truth(ctx):
-    client, daemon, _, token, _ = ctx
+    client, daemon, state, token, peer_fp = ctx
+    state.upsert_route_candidate(
+        peer_fp=peer_fp,
+        route="lan",
+        transport="tcp",
+        host="10.0.0.9",
+        port=17117,
+        source="session_open",
+        verified=True,
+        attempts=2,
+        successes=2,
+        failures=0,
+        latency_ms=5.0,
+        bandwidth_bps=420_000_000.0,
+    )
     daemon._fabric_snapshot = lambda: {  # type: ignore[method-assign]
         "ok": True,
         "cache_age_s": 0.0,
@@ -185,6 +200,8 @@ async def test_api_fabric_returns_route_truth(ctx):
     assert j["route_truth"]["kind"] == "Local network"
     assert j["route_truth"]["automatic"] is True
     assert j["activation"][0]["state"] == "active"
+    assert j["route_candidates"]["verified"] == 1
+    assert j["route_candidates"]["top"][0]["route"] == "lan"
 
 
 @pytest.mark.asyncio
@@ -224,6 +241,31 @@ async def test_api_route_bootstrap_returns_signed_token(ctx, monkeypatch):
     decoded = decode_bootstrap(j["token"])
     assert decoded.issuer_fp == daemon.me.fingerprint
     assert decoded.endpoints[0]["address"] == "192.168.1.20"
+
+
+@pytest.mark.asyncio
+async def test_api_route_bootstrap_qr_returns_no_store_svg(ctx, monkeypatch):
+    client, daemon, _, token, _ = ctx
+    daemon._rendezvous_peer_port = 17117
+    from one_link import rendezvous_client
+    from one_link.rendezvous_proto import Endpoint
+
+    monkeypatch.setattr(
+        rendezvous_client,
+        "discover_local_endpoints",
+        lambda *, peer_port, include_loopback=False: [
+            Endpoint(host="192.168.1.20", port=peer_port),
+        ],
+    )
+
+    resp = await client.get("/api/route-bootstrap/qr.svg", headers=_h(token))
+
+    assert resp.status == 200
+    assert "svg" in resp.headers.get("Content-Type", "")
+    assert "no-store" in resp.headers.get("Cache-Control", "")
+    body = await resp.text()
+    assert "<svg" in body
+    assert "<path" in body
 
 
 @pytest.mark.asyncio

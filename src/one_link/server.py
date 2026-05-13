@@ -976,6 +976,7 @@ class UIServer:
         r.add_get("/api/metrics", self._guarded(self.api_metrics))
         r.add_get("/api/fabric", self._guarded(self.api_fabric))
         r.add_get("/api/route-bootstrap", self._guarded(self.api_route_bootstrap))
+        r.add_get("/api/route-bootstrap/qr.svg", self._guarded(self.api_route_bootstrap_qr))
         r.add_post("/api/route-bootstrap/import", self._guarded(self.api_import_route_bootstrap))
         r.add_get("/api/settings", self._guarded(self.api_get_settings))
         r.add_post("/api/settings", self._guarded(self.api_set_settings))
@@ -2074,10 +2075,12 @@ class UIServer:
         })
 
     def _safe_fabric_snapshot(self, *, summary: bool = False) -> dict:
+        route_candidates = self._route_candidate_summary(summary=summary)
         getter = getattr(self.daemon, "_fabric_snapshot", None)
         if not callable(getter):
             return {
                 "ok": False,
+                "route_candidates": route_candidates,
                 "route_truth": {
                     "state": "Waiting for device",
                     "reason": "daemon does not expose fabric snapshot",
@@ -2092,6 +2095,7 @@ class UIServer:
             return {
                 "ok": False,
                 "error": str(exc),
+                "route_candidates": route_candidates,
                 "route_truth": {
                     "state": "Waiting for device",
                     "reason": "fabric snapshot failed",
@@ -2101,11 +2105,14 @@ class UIServer:
                 "probes": [],
             }
         if not summary:
+            snap = dict(snap)
+            snap["route_candidates"] = route_candidates
             return snap
         return {
             "ok": bool(snap.get("ok")),
             "cache_age_s": snap.get("cache_age_s"),
             "route_truth": snap.get("route_truth", {}),
+            "route_candidates": route_candidates,
             "score_count": len(snap.get("scores") or []),
             "activation_count": len(snap.get("activation") or []),
             "ready_paths": sum(
@@ -2116,6 +2123,61 @@ class UIServer:
                 1 for p in (snap.get("probes") or [])
                 if isinstance(p, dict) and p.get("available")
             ),
+        }
+
+    def _route_candidate_summary(self, *, summary: bool) -> dict:
+        state = getattr(self.daemon, "state", None)
+        if state is None or not hasattr(state, "list_route_candidates"):
+            return {
+                "known": 0,
+                "verified": 0,
+                "peers": 0,
+                "routes": [],
+                "top": [],
+            }
+        try:
+            rows = state.list_route_candidates(limit=128)
+        except Exception:
+            return {
+                "known": 0,
+                "verified": 0,
+                "peers": 0,
+                "routes": [],
+                "top": [],
+            }
+        verified = [r for r in rows if r.get("verified")]
+        peers = {str(r.get("peer_fp") or "") for r in rows if r.get("peer_fp")}
+        routes = sorted({
+            str(r.get("route") or "")
+            for r in rows
+            if str(r.get("route") or "")
+        })
+        top_rows = verified or rows
+        top = []
+        for r in top_rows[: 4 if summary else 12]:
+            item = {
+                "peer": str(r.get("peer_fp") or "")[:8],
+                "route": r.get("route"),
+                "transport": r.get("transport"),
+                "source": r.get("source"),
+                "verified": bool(r.get("verified")),
+                "successes": int(r.get("successes") or 0),
+                "failures": int(r.get("failures") or 0),
+                "latency_ms": r.get("latency_ms"),
+                "bandwidth_bps": r.get("bandwidth_bps"),
+            }
+            if not summary:
+                item["host"] = r.get("host")
+                item["port"] = r.get("port")
+                item["updated_ms"] = r.get("updated_ms")
+                item["expires_ms"] = r.get("expires_ms")
+            top.append(item)
+        return {
+            "known": len(rows),
+            "verified": len(verified),
+            "peers": len(peers),
+            "routes": routes,
+            "top": top,
         }
 
     async def api_fabric(self, request: web.Request) -> web.Response:
@@ -2142,51 +2204,7 @@ class UIServer:
         except ValueError:
             ttl_s = 180
         try:
-            from one_link.capabilities import LOCAL_CAPABILITIES
-            from one_link import rendezvous_client
-            from one_link.route_bootstrap import (
-                RouteEndpointHint,
-                encode_bootstrap,
-                make_route_bootstrap,
-            )
-
-            peer_port = int(getattr(self.daemon, "_rendezvous_peer_port", 0) or 0)
-            include_loopback = self.bind_host in ("127.0.0.1", "localhost", "::1")
-            endpoints = []
-            for i, e in enumerate(
-                rendezvous_client.discover_local_endpoints(
-                    peer_port=peer_port,
-                    include_loopback=include_loopback,
-                ),
-                start=1,
-            ):
-                kind, route = _route_hint_for_host(e.host)
-                endpoints.append(
-                    RouteEndpointHint(
-                        kind=kind,
-                        address=e.host,
-                        port=e.port,
-                        priority=i,
-                        route=route,
-                        transport="tcp",
-                    )
-                )
-            endpoints = endpoints[:8]
-            if not endpoints:
-                return web.json_response({
-                    "ok": False,
-                    "error": "no_route_hints",
-                    "message": "One Link is waiting for a reachable peer listener.",
-                }, status=503)
-            fabric = self._safe_fabric_snapshot(summary=True)
-            payload = make_route_bootstrap(
-                identity=self.daemon.me,
-                endpoints=endpoints,
-                capabilities=LOCAL_CAPABILITIES,
-                route_truth=fabric.get("route_truth") if isinstance(fabric, dict) else {},
-                ttl_s=ttl_s,
-            )
-            token = encode_bootstrap(payload)
+            token, payload = self._mint_route_bootstrap_token(ttl_s=ttl_s)
             return web.json_response({
                 "ok": True,
                 "token": token,
@@ -2196,11 +2214,104 @@ class UIServer:
                 "route_truth": payload.body.get("route_truth", {}),
             })
         except Exception as exc:
+            status = 503 if str(exc) == "no_route_hints" else 500
             return web.json_response({
                 "ok": False,
-                "error": "route_bootstrap_failed",
-                "message": str(exc),
-            }, status=500)
+                "error": str(exc) if str(exc) == "no_route_hints" else "route_bootstrap_failed",
+                "message": (
+                    "One Link is waiting for a reachable peer listener."
+                    if str(exc) == "no_route_hints" else str(exc)
+                ),
+            }, status=status)
+
+    def _mint_route_bootstrap_token(self, *, ttl_s: int = 180):
+        from one_link.capabilities import LOCAL_CAPABILITIES
+        from one_link import rendezvous_client
+        from one_link.route_bootstrap import (
+            RouteEndpointHint,
+            encode_bootstrap,
+            make_route_bootstrap,
+        )
+
+        peer_port = int(getattr(self.daemon, "_rendezvous_peer_port", 0) or 0)
+        include_loopback = self.bind_host in ("127.0.0.1", "localhost", "::1")
+        endpoints = []
+        for i, e in enumerate(
+            rendezvous_client.discover_local_endpoints(
+                peer_port=peer_port,
+                include_loopback=include_loopback,
+            ),
+            start=1,
+        ):
+            kind, route = _route_hint_for_host(e.host)
+            endpoints.append(
+                RouteEndpointHint(
+                    kind=kind,
+                    address=e.host,
+                    port=e.port,
+                    priority=i,
+                    route=route,
+                    transport="tcp",
+                )
+            )
+        endpoints = endpoints[:8]
+        if not endpoints:
+            raise RuntimeError("no_route_hints")
+        fabric = self._safe_fabric_snapshot(summary=True)
+        payload = make_route_bootstrap(
+            identity=self.daemon.me,
+            endpoints=endpoints,
+            capabilities=LOCAL_CAPABILITIES,
+            route_truth=fabric.get("route_truth") if isinstance(fabric, dict) else {},
+            ttl_s=ttl_s,
+        )
+        return encode_bootstrap(payload), payload
+
+    def _mint_compact_route_bootstrap_token(self, *, ttl_s: int = 180):
+        token, payload = self._mint_route_bootstrap_token(ttl_s=ttl_s)
+        from one_link.route_bootstrap import encode_bootstrap_compact
+
+        return encode_bootstrap_compact(payload), payload
+
+    async def api_route_bootstrap_qr(self, request: web.Request) -> web.StreamResponse:
+        """Render a signed route-bootstrap token as a no-store QR SVG."""
+
+        try:
+            ttl_s = int(request.query.get("ttl_s") or 180)
+        except ValueError:
+            ttl_s = 180
+        try:
+            import qrcode
+            import qrcode.image.svg
+        except Exception:
+            return web.json_response(
+                {"error": "qrcode_lib_missing", "hint": "pip install qrcode>=7"},
+                status=500,
+            )
+        try:
+            token, _payload = self._mint_compact_route_bootstrap_token(ttl_s=ttl_s)
+        except Exception as exc:
+            status = 503 if str(exc) == "no_route_hints" else 500
+            return web.json_response({
+                "error": str(exc) if str(exc) == "no_route_hints" else "route_bootstrap_qr_failed",
+                "message": (
+                    "One Link is waiting for a reachable peer listener."
+                    if str(exc) == "no_route_hints" else str(exc)
+                ),
+            }, status=status)
+        qr = qrcode.QRCode(border=2, box_size=8)
+        qr.add_data(token)
+        qr.make(fit=True)
+        img = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
+        svg = img.to_string().decode("utf-8")
+        return web.Response(
+            text=svg,
+            content_type="image/svg+xml",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     async def api_import_route_bootstrap(self, request: web.Request) -> web.Response:
         """Accept a signed QR/audio/BLE route-bootstrap token.

@@ -9,6 +9,7 @@ from one_link.route_bootstrap import (
     RouteEndpointHint,
     decode_bootstrap,
     encode_bootstrap,
+    encode_bootstrap_compact,
     make_route_bootstrap,
     verify_bootstrap,
 )
@@ -75,6 +76,36 @@ def test_route_bootstrap_rejects_tampering():
 
     with pytest.raises(ValueError, match="body hash|signature"):
         decode_bootstrap(token, now_ms=1_001_000)
+
+
+def test_route_bootstrap_compact_token_round_trips_for_qr():
+    ident = _identity()
+    payload = make_route_bootstrap(
+        identity=ident,
+        endpoints=[
+            RouteEndpointHint(
+                kind="lan",
+                route="lan",
+                address="192.168.1.20",
+                port=17117,
+            )
+        ],
+        capabilities=[f"capability_{i}" for i in range(24)],
+        route_truth={
+            "kind": "Local network",
+            "state": "Ready",
+            "reason": "route truth that compresses well for QR transport",
+        },
+        now_ms=1_000_000,
+    )
+
+    compact = encode_bootstrap_compact(payload)
+    decoded = decode_bootstrap(compact, now_ms=1_001_000)
+
+    assert compact.startswith("OLRZ1.")
+    assert len(compact) < len(encode_bootstrap(payload))
+    assert decoded.issuer_fp == ident.fingerprint
+    assert decoded.endpoints[0]["address"] == "192.168.1.20"
 
 
 def test_route_bootstrap_rejects_expired_payload():

@@ -55,6 +55,7 @@ EXPECTED_IDS = [
     "transferlist",
     # Universal Comms Fabric truth in Activity panel
     "fabric-truth",
+    "route-bootstrap-qr",
     "route-bootstrap-token",
     "btn-copy-route-bootstrap",
     "btn-import-route-bootstrap",
@@ -107,6 +108,8 @@ EXPECTED_JS_HELPERS = [
     "async function refreshFabricTruth",
     "async function copyRouteBootstrapToken",
     "async function importRouteBootstrapToken",
+    "/api/route-bootstrap/qr.svg",
+    "trusted paths",
     "routeBootstrap()",
     "importRouteBootstrap(token)",
 ]

@@ -3637,6 +3637,7 @@
            tab covers transfer-only views. -->
       <div id="transferlist" style="display:none;"></div>
       <div class="panel-form">
+        <img id="route-bootstrap-qr" alt="Route token QR" style="display:none; width:160px; max-width:100%; border-radius:8px; background:#fff; padding:8px;" />
         <textarea id="route-bootstrap-token" rows="2" placeholder="Route token"></textarea>
         <div class="mini-actions">
           <button id="btn-refresh-mesh">Refresh</button>
@@ -6644,15 +6645,23 @@
     if (!host) return;
     const fabric = state.fabric || state.status?.performance?.fabric || {};
     const truth = fabric.route_truth || {};
+    const routeCandidates = fabric.route_candidates || {};
     const route = truth.kind || transferRouteLabel(truth.route || truth.route_name || "");
     const stateText = truth.state || (fabric.ok === false ? "Path check paused" : "Finding best path");
-    const reason = truth.reason || "One Link is checking every safe communication path this device can use.";
+    const verifiedRoutes = Number(routeCandidates.verified || 0);
+    const knownRoutes = Number(routeCandidates.known || 0);
+    const peerRoutes = Number(routeCandidates.peers || 0);
+    const reason = verifiedRoutes > 0
+      ? `One Link remembers ${verifiedRoutes} verified trusted path${verifiedRoutes === 1 ? "" : "s"}${peerRoutes > 0 ? ` across ${peerRoutes} device${peerRoutes === 1 ? "" : "s"}` : ""} and will try the best one automatically.`
+      : (truth.reason || "One Link is checking every safe communication path this device can use.");
     const available = Number(fabric.available_paths || 0);
     const ready = Number(fabric.ready_paths || 0);
     const scoreCount = Number(fabric.score_count || (Array.isArray(fabric.scores) ? fabric.scores.length : 0));
     const cacheAge = Number(fabric.cache_age_s || 0);
     const chips = [];
     if (route && route !== "Best available") chips.push({ label: "route", value: route });
+    if (verifiedRoutes > 0) chips.push({ label: "trusted paths", value: String(verifiedRoutes) });
+    else if (knownRoutes > 0) chips.push({ label: "candidate paths", value: String(knownRoutes) });
     if (truth.automatic) chips.push({ label: "activation", value: "automatic" });
     else if (truth.needs_user) chips.push({ label: "activation", value: "confirm" });
     if (ready > 0) chips.push({ label: "ready", value: String(ready) });
@@ -8633,6 +8642,12 @@
       if (!r.ok || !r.token) throw new Error(r.message || "No route token available yet");
       const input = $("#route-bootstrap-token");
       if (input) input.value = r.token;
+      const qr = $("#route-bootstrap-qr");
+      if (qr) {
+        qr.src = `/api/route-bootstrap/qr.svg?t=${Date.now()}`;
+        qr.style.display = "block";
+        qr.title = "Scan this from another paired device to share a short-lived route hint.";
+      }
       await copyToClipboard(r.token, "route token");
       toast("Route token ready", "good", 2500);
     } catch (e) {
@@ -8656,6 +8671,11 @@
         3500,
       );
       if (input) input.value = "";
+      const qr = $("#route-bootstrap-qr");
+      if (qr) {
+        qr.removeAttribute("src");
+        qr.style.display = "none";
+      }
       await refreshPeers();
       await refreshFabricTruth();
     } catch (e) {

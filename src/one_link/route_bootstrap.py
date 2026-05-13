@@ -14,6 +14,7 @@ import json
 import re
 import secrets
 import time
+import zlib
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
@@ -23,6 +24,7 @@ from .identity import Identity, fingerprint_of, verify
 
 
 BOOTSTRAP_MAGIC = "OLRB"
+BOOTSTRAP_COMPRESSED_MAGIC = "OLRZ"
 BOOTSTRAP_VERSION = 1
 MAX_ENDPOINTS = 8
 MAX_CAPABILITIES = 64
@@ -173,10 +175,40 @@ def encode_bootstrap(payload: SignedRouteBootstrap) -> str:
     return BOOTSTRAP_MAGIC + "1." + _b64u(raw)
 
 
+def encode_bootstrap_compact(payload: SignedRouteBootstrap) -> str:
+    """Compact token for QR/audio control paths.
+
+    The signed payload is compressed after signing. Verification still checks
+    the original canonical body hash and Ed25519 signature after decoding.
+    """
+
+    raw = _canonical_bytes(payload.to_dict())
+    if len(raw) > MAX_ENCODED_BYTES:
+        raise ValueError(f"bootstrap payload too large: {len(raw)} bytes")
+    compressed = zlib.compress(raw, level=9)
+    if len(compressed) >= len(raw):
+        return encode_bootstrap(payload)
+    return BOOTSTRAP_COMPRESSED_MAGIC + "1." + _b64u(compressed)
+
+
 def decode_bootstrap(token: str, *, now_ms: int | None = None) -> SignedRouteBootstrap:
-    if not token.startswith(BOOTSTRAP_MAGIC + "1."):
+    compressed = False
+    if token.startswith(BOOTSTRAP_MAGIC + "1."):
+        encoded = token.split(".", 1)[1]
+    elif token.startswith(BOOTSTRAP_COMPRESSED_MAGIC + "1."):
+        compressed = True
+        encoded = token.split(".", 1)[1]
+    else:
         raise ValueError("not a One Link route bootstrap token")
-    raw = _b64u_decode(token.split(".", 1)[1])
+    raw = _b64u_decode(encoded)
+    if compressed:
+        try:
+            decomp = zlib.decompressobj()
+            raw = decomp.decompress(raw, MAX_ENCODED_BYTES + 1)
+            if decomp.unconsumed_tail or decomp.unused_data or len(raw) > MAX_ENCODED_BYTES:
+                raise ValueError("compressed bootstrap payload too large")
+        except Exception as exc:
+            raise ValueError("invalid compressed bootstrap payload") from exc
     if len(raw) > MAX_ENCODED_BYTES:
         raise ValueError("bootstrap payload too large")
     try:
