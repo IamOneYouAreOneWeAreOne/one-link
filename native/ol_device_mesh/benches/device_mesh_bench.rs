@@ -747,6 +747,98 @@ fn bench_duress_pair_commitment(c: &mut Criterion) {
     });
 }
 
+fn bench_compute_capability_attestation_sign(c: &mut Criterion) {
+    use ol_device_mesh::compute::{sign_capability_attestation, DeviceCapability};
+    let master = MasterIdentity::generate(&mut OsRng);
+    c.bench_function("device_mesh::compute_cap_attestation_sign", |b| {
+        b.iter(|| {
+            let att = sign_capability_attestation(
+                black_box(&master),
+                [0xAA; DEVICE_ID_LEN],
+                vec![
+                    DeviceCapability::Gpu,
+                    DeviceCapability::CpuHeavy,
+                    DeviceCapability::AlwaysOn,
+                ],
+                0,
+                365,
+            )
+            .unwrap();
+            black_box(att);
+        });
+    });
+}
+
+fn bench_compute_task_request_sign(c: &mut Criterion) {
+    use ol_device_mesh::compute::{sign_task_request, DeviceCapability, TaskClass};
+    use ol_device_mesh::distributed_fs::FILE_ID_LEN;
+    let master = MasterIdentity::generate(&mut OsRng);
+    let (sk, _) = mint_subkey(
+        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
+    )
+    .unwrap();
+    c.bench_function("device_mesh::compute_task_request_sign", |b| {
+        b.iter(|| {
+            let req = sign_task_request(
+                black_box(&sk),
+                TaskClass::new(b"transcribe-audio").unwrap(),
+                [0xCC; FILE_ID_LEN],
+                vec![DeviceCapability::Microphone],
+                300,
+                10_000,
+                1,
+                10_000,
+                [0xDA; 16],
+            )
+            .unwrap();
+            black_box(req);
+        });
+    });
+}
+
+fn bench_compute_pick_executor(c: &mut Criterion) {
+    use ol_device_mesh::compute::{
+        pick_executor, sign_capability_attestation, CapabilityRegistry,
+        DeviceCapability,
+    };
+    use ol_device_mesh::fan_out::SourceCapacity;
+    let master = MasterIdentity::generate(&mut OsRng);
+    let mut reg = CapabilityRegistry::empty();
+    for i in 1u8..=8 {
+        let id = [i; DEVICE_ID_LEN];
+        reg.ingest(
+            sign_capability_attestation(
+                &master,
+                id,
+                vec![DeviceCapability::CpuHeavy, DeviceCapability::AlwaysOn],
+                0,
+                365,
+            )
+            .unwrap(),
+            &master.verifying_key(),
+        )
+        .unwrap();
+    }
+    let caps: Vec<SourceCapacity> = (1u8..=8)
+        .map(|i| SourceCapacity {
+            device_id: [i; DEVICE_ID_LEN],
+            estimated_bps: u64::from(i) * 10_000_000,
+            current_load_bytes: 0,
+        })
+        .collect();
+    c.bench_function("device_mesh::compute_pick_executor_8_devices", |b| {
+        b.iter(|| {
+            let pick = pick_executor(
+                black_box(&[DeviceCapability::CpuHeavy]),
+                black_box(&reg),
+                black_box(&caps),
+                100,
+            );
+            black_box(pick);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_derive_subkey_seed,
@@ -779,5 +871,8 @@ criterion_group!(
     bench_duress_envelope_create,
     bench_duress_envelope_unlock_real,
     bench_duress_pair_commitment,
+    bench_compute_capability_attestation_sign,
+    bench_compute_task_request_sign,
+    bench_compute_pick_executor,
 );
 criterion_main!(benches);

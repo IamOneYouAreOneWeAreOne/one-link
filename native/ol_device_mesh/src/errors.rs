@@ -424,6 +424,64 @@ pub enum DeviceMeshError {
         /// Allowed window.
         window_ms: u64,
     },
+    /// Capability attestation has too many capabilities.
+    #[error("capability attestation has too many capabilities: {got} (max {max})")]
+    CapabilityAttestationTooMany {
+        /// Actual count.
+        got: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// Capability list is not strictly sorted (no duplicates allowed).
+    #[error("capability attestation list must be sorted ascending with no duplicates")]
+    CapabilityAttestationNotSorted,
+    /// Validity window has expiry strictly before mint.
+    #[error("capability attestation expiry day {expiry} is before mint day {mint}")]
+    CapabilityAttestationBadValidityWindow {
+        /// Mint day.
+        mint: u64,
+        /// Expiry day.
+        expiry: u64,
+    },
+    /// Capability attestation signature failed verification.
+    #[error("capability attestation failed cryptographic verification")]
+    CapabilityAttestationVerifyFail,
+    /// Task class empty.
+    #[error("task class must be at least one byte")]
+    TaskClassEmpty,
+    /// Task class string too long.
+    #[error("task class too long: {got} bytes (max {max})")]
+    TaskClassTooLong {
+        /// Actual length.
+        got: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// Task request listed too many required capabilities.
+    #[error("task request requires too many capabilities: {got} (max {max})")]
+    TaskTooManyCapabilities {
+        /// Actual count.
+        got: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// Task request required-capabilities list not strictly sorted.
+    #[error("task request required_capabilities must be sorted ascending with no duplicates")]
+    TaskCapabilitiesNotSorted,
+    /// Task request deadline is not strictly after issue.
+    #[error("task request deadline_unix={deadline_unix} must be after issued_unix={issued_unix}")]
+    TaskDeadlineNotAfterIssue {
+        /// Issue time.
+        issued_unix: u64,
+        /// Deadline.
+        deadline_unix: u64,
+    },
+    /// Task request signature failed verification.
+    #[error("task request failed cryptographic verification")]
+    TaskRequestVerifyFail,
+    /// Task result signature failed verification.
+    #[error("task result failed cryptographic verification")]
+    TaskResultVerifyFail,
 }
 
 impl From<ol_pqsig::PqSigError> for DeviceMeshError {

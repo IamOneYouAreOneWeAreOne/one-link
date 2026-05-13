@@ -1,4 +1,4 @@
-# ol_device_mesh (Row 8 Layers 1-7 + 10) microbenchmark results
+# ol_device_mesh (Row 8 Layers 1-8 + 10) microbenchmark results
 
 Captured against `0.21.0-alpha.0` on Windows 11 Intel host, release
 profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
@@ -29,6 +29,18 @@ Argon2id at OWASP-recommended `(m=19,456 KiB, t=2, p=1)` deliberately
 takes ~15 ms per derivation so brute-forcing a captured envelope is
 prohibitive at the duress-code entropy levels users actually pick
 (4-8 character codes typed under stress).
+
+## Layer 8 — cross-device distributed compute
+
+| Benchmark                                              | Time      | Notes                                       |
+|---                                                     |---        |---                                          |
+| `device_mesh::compute_pick_executor_8_devices`         | 176 ns    | capability-match + capacity-score over 8    |
+| `device_mesh::compute_task_request_sign`               | 265 µs    | requester-subkey signs transcript           |
+| `device_mesh::compute_cap_attestation_sign`            | 1.32 ms   | master signs capability attestation         |
+
+Executor picking is essentially free — under 200 ns to choose
+among 8 devices. The daemon recomputes assignments on every
+heartbeat without noticeable cost.
 
 ## Layer 7 — self-onion
 

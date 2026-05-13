@@ -104,6 +104,7 @@
 #![allow(clippy::cast_sign_loss)]
 
 pub mod attestation;
+pub mod compute;
 pub mod derivation;
 pub mod device_class;
 pub mod distributed_fs;

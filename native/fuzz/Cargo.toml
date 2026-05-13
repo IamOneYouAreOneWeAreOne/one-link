@@ -311,3 +311,10 @@ path = "fuzz_targets/fuzz_device_mesh_duress.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_device_mesh_compute"
+path = "fuzz_targets/fuzz_device_mesh_compute.rs"
+test = false
+doc = false
+bench = false
