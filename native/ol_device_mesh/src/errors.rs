@@ -373,6 +373,57 @@ pub enum DeviceMeshError {
     /// Underlying Sphinx peel failed.
     #[error("self-onion Sphinx peel failed: {0}")]
     SelfOnionSphinxPeelFailed(String),
+    /// Duress code was empty.
+    #[error("duress code must be at least one byte")]
+    DuressCodeEmpty,
+    /// Underlying Argon2 derivation failed.
+    #[error("duress code Argon2 derivation failed: {0}")]
+    DuressArgon2Failed(String),
+    /// Duress envelope plaintext was empty (real or decoy).
+    #[error("duress envelope plaintext (real or decoy) cannot be empty")]
+    DuressEnvelopePlaintextEmpty,
+    /// Duress envelope plaintext exceeded the byte budget.
+    #[error("duress envelope plaintext too long (max {max} bytes)")]
+    DuressEnvelopePlaintextTooLong {
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// Real and decoy codes were the same — refuse to mint a
+    /// deniable envelope under a single password.
+    #[error("real and decoy codes must differ")]
+    DuressCodesIdentical,
+    /// AEAD encrypt / decrypt failed.
+    #[error("duress envelope AEAD failed: {0}")]
+    DuressAeadFailed(String),
+    /// Duress alert signature failed verification.
+    #[error("duress alert failed cryptographic verification")]
+    DuressAlertVerifyFail,
+    /// Pairing commitment didn't match the supplied secret on one
+    /// channel.
+    #[error("pairing commitment on channel {channel:?} doesn't match the supplied secret")]
+    PairChannelCommitmentMismatch {
+        /// The mismatched channel.
+        channel: crate::duress::pair::PairingChannel,
+    },
+    /// One of the required pairing channels (QR / Audio / Motion)
+    /// was missing from the supplied commitment set.
+    #[error("pairing commitment set missing required channel(s): qr={qr} audio={audio} motion={motion}")]
+    PairChannelMissing {
+        /// Whether QR was seen.
+        qr: bool,
+        /// Whether Audio was seen.
+        audio: bool,
+        /// Whether Motion was seen.
+        motion: bool,
+    },
+    /// Pairing commitments spread past the allowed time window.
+    #[error("pairing commitment span {span_ms}ms exceeds window {window_ms}ms")]
+    PairChannelOutOfWindow {
+        /// Span between earliest and latest commitment timestamps.
+        span_ms: u64,
+        /// Allowed window.
+        window_ms: u64,
+    },
 }
 
 impl From<ol_pqsig::PqSigError> for DeviceMeshError {

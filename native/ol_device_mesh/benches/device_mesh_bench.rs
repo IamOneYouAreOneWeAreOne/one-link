@@ -687,6 +687,66 @@ fn bench_self_onion_peel(c: &mut Criterion) {
     });
 }
 
+fn bench_duress_envelope_create(c: &mut Criterion) {
+    use ol_device_mesh::duress::create_duress_envelope;
+    let witness = [0x42; 32];
+    c.bench_function("device_mesh::duress_envelope_create", |b| {
+        b.iter(|| {
+            let env = create_duress_envelope(
+                black_box(b"real plaintext"),
+                black_box(b"decoy plaintext"),
+                black_box(b"real-pass"),
+                black_box(b"duress-code"),
+                black_box(&witness),
+                &mut OsRng,
+            )
+            .unwrap();
+            black_box(env);
+        });
+    });
+}
+
+fn bench_duress_envelope_unlock_real(c: &mut Criterion) {
+    use ol_device_mesh::duress::{create_duress_envelope, unlock_duress_envelope};
+    let witness = [0x42; 32];
+    let env = create_duress_envelope(
+        b"real plaintext",
+        b"decoy plaintext",
+        b"real-pass",
+        b"duress-code",
+        &witness,
+        &mut OsRng,
+    )
+    .unwrap();
+    c.bench_function("device_mesh::duress_envelope_unlock_real", |b| {
+        b.iter(|| {
+            let outcome = unlock_duress_envelope(
+                black_box(&env),
+                black_box(b"real-pass"),
+                Some(black_box(&witness)),
+            )
+            .unwrap();
+            black_box(outcome);
+        });
+    });
+}
+
+fn bench_duress_pair_commitment(c: &mut Criterion) {
+    use ol_device_mesh::duress::{PairingChannel, PairingCommitment};
+    let secret = b"shared-pair-secret";
+    c.bench_function("device_mesh::duress_pair_commitment_build", |b| {
+        b.iter(|| {
+            let pc = PairingCommitment::build(
+                black_box(PairingChannel::Qr),
+                black_box(secret),
+                black_box([0; 16]),
+                black_box(0),
+            );
+            black_box(pc);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_derive_subkey_seed,
@@ -716,5 +776,8 @@ criterion_group!(
     bench_self_onion_derive_identity,
     bench_self_onion_build_2_hop,
     bench_self_onion_peel,
+    bench_duress_envelope_create,
+    bench_duress_envelope_unlock_real,
+    bench_duress_pair_commitment,
 );
 criterion_main!(benches);

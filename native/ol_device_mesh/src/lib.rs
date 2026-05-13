@@ -107,6 +107,7 @@ pub mod attestation;
 pub mod derivation;
 pub mod device_class;
 pub mod distributed_fs;
+pub mod duress;
 pub mod errors;
 pub mod fan_out;
 pub mod hardware;

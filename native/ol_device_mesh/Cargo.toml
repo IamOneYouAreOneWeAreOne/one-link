@@ -31,6 +31,12 @@ subtle        = { workspace = true }
 # version that `ol_onion` uses so types interop directly.
 curve25519-dalek = { version = "4", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
 ol_onion         = { path = "../ol_onion" }
+# Layer 10 duress envelope uses Argon2id to derive AEAD keys from
+# short user-entered codes (the user types a 4-8 char duress code
+# under stress; we need a serious work factor to prevent offline
+# brute force on a captured envelope).
+argon2           = { version = "0.5", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { workspace = true }
 
 [dev-dependencies]
 proptest      = { workspace = true }

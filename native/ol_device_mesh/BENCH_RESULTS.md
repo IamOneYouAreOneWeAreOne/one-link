@@ -1,4 +1,4 @@
-# ol_device_mesh (Row 8 Layers 1 + 2 + 3 + 4 + 5 + 6 + 7) microbenchmark results
+# ol_device_mesh (Row 8 Layers 1-7 + 10) microbenchmark results
 
 Captured against `0.21.0-alpha.0` on Windows 11 Intel host, release
 profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
@@ -16,6 +16,19 @@ profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
 | `device_mesh::liveness_proof_verify`            | 53.2 µs  | hybrid signature verify          |
 | `device_mesh::mint_subkey`                      | 433 µs   | derive seed + master signs vk    |
 | `device_mesh::liveness_proof_issue`             | 688 µs   | subkey signs transcript          |
+
+## Layer 10 — duress + deniable + steg-pair
+
+| Benchmark                                              | Time     | Notes                                       |
+|---                                                     |---       |---                                          |
+| `device_mesh::duress_pair_commitment_build`            | 111 ns   | BLAKE3 over (domain, channel, secret, nonce, ts) |
+| `device_mesh::duress_envelope_create`                  | 29.1 ms  | 2× Argon2id derivation + 2× AEAD encrypt    |
+| `device_mesh::duress_envelope_unlock_real`             | 30.1 ms  | 2× Argon2id (real + decoy paths both run)   |
+
+Argon2id at OWASP-recommended `(m=19,456 KiB, t=2, p=1)` deliberately
+takes ~15 ms per derivation so brute-forcing a captured envelope is
+prohibitive at the duress-code entropy levels users actually pick
+(4-8 character codes typed under stress).
 
 ## Layer 7 — self-onion
 
