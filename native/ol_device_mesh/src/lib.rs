@@ -114,6 +114,7 @@ pub mod master;
 pub mod mesh_state;
 pub mod quorum;
 pub mod ratchet;
+pub mod self_onion;
 pub mod self_routing;
 pub mod subkey;
 

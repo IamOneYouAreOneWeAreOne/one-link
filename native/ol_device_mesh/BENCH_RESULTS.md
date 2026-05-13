@@ -1,4 +1,4 @@
-# ol_device_mesh (Row 8 Layers 1 + 2 + 3 + 4 + 5 + 6) microbenchmark results
+# ol_device_mesh (Row 8 Layers 1 + 2 + 3 + 4 + 5 + 6 + 7) microbenchmark results
 
 Captured against `0.21.0-alpha.0` on Windows 11 Intel host, release
 profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
@@ -16,6 +16,14 @@ profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
 | `device_mesh::liveness_proof_verify`            | 53.2 µs  | hybrid signature verify          |
 | `device_mesh::mint_subkey`                      | 433 µs   | derive seed + master signs vk    |
 | `device_mesh::liveness_proof_issue`             | 688 µs   | subkey signs transcript          |
+
+## Layer 7 — self-onion
+
+| Benchmark                                              | Time     | Notes                                       |
+|---                                                     |---       |---                                          |
+| `device_mesh::self_onion_derive_identity`              | 205 ns   | BLAKE3-XOF + Ristretto255 scalar reduce     |
+| `device_mesh::self_onion_build_circuit_2_hop`          | 72.2 µs  | Sphinx Coherence packet build, 2 hops       |
+| `device_mesh::self_onion_peel_layer`                   | 27.8 µs  | Sphinx peel + DEVICE_ID_LEN slot-id recover |
 
 ## Layer 6 — self-routing
 

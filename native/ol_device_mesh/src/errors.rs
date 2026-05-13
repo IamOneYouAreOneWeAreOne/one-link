@@ -317,6 +317,62 @@ pub enum DeviceMeshError {
     /// itself as one of its peers).
     #[error("route announcement contains a self-loop (announcer is in its own links)")]
     RouteAnnouncementSelfLoop,
+    /// Onion attestation signature failed verification.
+    #[error("onion attestation failed cryptographic verification")]
+    OnionAttestationVerifyFail,
+    /// Onion attestation validity window has expiry before mint.
+    #[error("onion attestation has expiry day {expiry} before mint day {mint}")]
+    OnionAttestationBadValidityWindow {
+        /// Mint day index.
+        mint: u64,
+        /// Expiry day index.
+        expiry: u64,
+    },
+    /// Registry lookup couldn't find an attestation for the device.
+    #[error("onion registry has no attestation for device {device_id:x?}")]
+    OnionRegistryDeviceMissing {
+        /// Device id queried.
+        device_id: [u8; 16],
+    },
+    /// Registry entry exists but the queried day is outside its
+    /// validity window.
+    #[error("onion attestation for device {device_id:x?} doesn't cover day {day} (mint {mint}, expiry {expiry})")]
+    OnionRegistryDayOutOfWindow {
+        /// Device id queried.
+        device_id: [u8; 16],
+        /// Day requested.
+        day: u64,
+        /// Mint day.
+        mint: u64,
+        /// Expiry day.
+        expiry: u64,
+    },
+    /// Self-onion route needs at least 2 hops (source + destination).
+    #[error("self-onion route has too few hops: {got}")]
+    SelfOnionRouteTooShort {
+        /// Actual hop count.
+        got: usize,
+    },
+    /// Self-onion hop pubkey is invalid Ristretto255.
+    #[error("self-onion hop pubkey is not a valid Ristretto255 point for device {device_id:x?}")]
+    SelfOnionBadHopPubkey {
+        /// Device whose pubkey was malformed.
+        device_id: [u8; 16],
+    },
+    /// Self-onion payload exceeds the Sphinx-permitted max.
+    #[error("self-onion payload too large: {got} bytes (max {max})")]
+    SelfOnionPayloadOversize {
+        /// Actual payload length.
+        got: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// Underlying Sphinx build failed.
+    #[error("self-onion Sphinx build failed: {0}")]
+    SelfOnionSphinxBuildFailed(String),
+    /// Underlying Sphinx peel failed.
+    #[error("self-onion Sphinx peel failed: {0}")]
+    SelfOnionSphinxPeelFailed(String),
 }
 
 impl From<ol_pqsig::PqSigError> for DeviceMeshError {

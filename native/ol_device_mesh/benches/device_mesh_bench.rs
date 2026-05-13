@@ -597,6 +597,96 @@ fn bench_self_routing_pick_best_route(c: &mut Criterion) {
     });
 }
 
+fn bench_self_onion_derive_identity(c: &mut Criterion) {
+    use ol_device_mesh::self_onion::derive_onion_identity;
+    let master = MasterIdentity::generate(&mut OsRng);
+    let id = [0xAA; DEVICE_ID_LEN];
+    c.bench_function("device_mesh::self_onion_derive_identity", |b| {
+        b.iter(|| {
+            let identity = derive_onion_identity(black_box(&master), black_box(&id));
+            black_box(identity);
+        });
+    });
+}
+
+fn bench_self_onion_build_2_hop(c: &mut Criterion) {
+    use ol_device_mesh::self_onion::{
+        build_self_onion_circuit, derive_onion_identity, sign_onion_attestation,
+        OnionKeyRegistry,
+    };
+    use ol_device_mesh::self_routing::Route;
+    let master = MasterIdentity::generate(&mut OsRng);
+    let src = [0x11; DEVICE_ID_LEN];
+    let dst = [0x22; DEVICE_ID_LEN];
+    let mut reg = OnionKeyRegistry::empty();
+    for id in &[src, dst] {
+        let identity = derive_onion_identity(&master, id);
+        let att = sign_onion_attestation(
+            &master, *id, identity.public_bytes(), 0, 365,
+        )
+        .unwrap();
+        reg.ingest(att, &master.verifying_key()).unwrap();
+    }
+    let route = Route {
+        hops: vec![src, dst],
+        bottleneck_tau: 100,
+        min_last_seen_unix: 1,
+    };
+    c.bench_function("device_mesh::self_onion_build_circuit_2_hop", |b| {
+        b.iter(|| {
+            let packet = build_self_onion_circuit(
+                black_box(&route),
+                black_box(&reg),
+                0,
+                b"bench payload",
+                &mut OsRng,
+            )
+            .unwrap();
+            black_box(packet);
+        });
+    });
+}
+
+fn bench_self_onion_peel(c: &mut Criterion) {
+    use ol_device_mesh::self_onion::{
+        build_self_onion_circuit, derive_onion_identity, peel_self_onion_layer,
+        sign_onion_attestation, OnionKeyRegistry,
+    };
+    use ol_device_mesh::self_routing::Route;
+    let master = MasterIdentity::generate(&mut OsRng);
+    let src = [0x11; DEVICE_ID_LEN];
+    let dst = [0x22; DEVICE_ID_LEN];
+    let dst_identity = derive_onion_identity(&master, &dst);
+    let mut reg = OnionKeyRegistry::empty();
+    for id in &[src, dst] {
+        let identity = derive_onion_identity(&master, id);
+        let att = sign_onion_attestation(
+            &master, *id, identity.public_bytes(), 0, 365,
+        )
+        .unwrap();
+        reg.ingest(att, &master.verifying_key()).unwrap();
+    }
+    let route = Route {
+        hops: vec![src, dst],
+        bottleneck_tau: 100,
+        min_last_seen_unix: 1,
+    };
+    let packet = build_self_onion_circuit(
+        &route, &reg, 0, b"bench payload", &mut OsRng,
+    )
+    .unwrap();
+    c.bench_function("device_mesh::self_onion_peel_layer", |b| {
+        b.iter(|| {
+            let outcome = peel_self_onion_layer(
+                black_box(&dst_identity),
+                black_box(&packet),
+            )
+            .unwrap();
+            black_box(outcome);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_derive_subkey_seed,
@@ -623,5 +713,8 @@ criterion_group!(
     bench_fan_out_chunk_ack,
     bench_self_routing_announcement_sign,
     bench_self_routing_pick_best_route,
+    bench_self_onion_derive_identity,
+    bench_self_onion_build_2_hop,
+    bench_self_onion_peel,
 );
 criterion_main!(benches);

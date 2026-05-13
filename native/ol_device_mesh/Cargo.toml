@@ -26,6 +26,11 @@ ol_threshold_recovery = { path = "../ol_threshold_recovery" }
 rand_core     = { workspace = true }
 zeroize       = { workspace = true }
 subtle        = { workspace = true }
+# Layer 7 self-onion uses the shipped `ol_onion::sphinx` machinery
+# over Ristretto255 hops. We pin the same `curve25519-dalek`
+# version that `ol_onion` uses so types interop directly.
+curve25519-dalek = { version = "4", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
+ol_onion         = { path = "../ol_onion" }
 
 [dev-dependencies]
 proptest      = { workspace = true }
