@@ -305,22 +305,19 @@ impl RoutingTable {
     /// targeting the right distance range.
     ///
     /// Returns `None` if `bucket_idx >= NODE_ID_BITS`.
+    ///
+    /// `NodeId::bucket_index` uses `xor_leading_zeros == bucket_idx`
+    /// semantics — meaning the first differing bit (counting from MSB)
+    /// must be at position `bucket_idx`. So flip exactly the
+    /// `bucket_idx`-th MSB of `own_id` and the XOR has `bucket_idx`
+    /// leading zeros before its first 1-bit.
     #[must_use]
     pub fn synthetic_id_for_bucket(&self, bucket_idx: usize) -> Option<NodeId> {
         if bucket_idx >= crate::node_id::NODE_ID_BITS {
             return None;
         }
-        // Construct an ID that XOR-differs from own_id in EXACTLY
-        // bit position `bucket_idx`: leading (256-1-bucket_idx) bits
-        // of XOR are zero, then a 1 at position bucket_idx, then
-        // arbitrary trailing bits. NodeId::bucket_index uses
-        // `xor_leading_zeros == bucket_idx` semantics — meaning the
-        // first differing bit is the (NODE_ID_BITS-1-bucket_idx)-th
-        // MSB. Mirror that: flip the (NODE_ID_BITS-1-bucket_idx)-th
-        // MSB of own_id.
-        let bit_from_msb = crate::node_id::NODE_ID_BITS - 1 - bucket_idx;
-        let byte_idx = bit_from_msb / 8;
-        let bit_in_byte = 7 - (bit_from_msb % 8);
+        let byte_idx = bucket_idx / 8;
+        let bit_in_byte = 7 - (bucket_idx % 8);
         let mut out = *self.own_id.as_bytes();
         out[byte_idx] ^= 1u8 << bit_in_byte;
         Some(NodeId::from_bytes(out))

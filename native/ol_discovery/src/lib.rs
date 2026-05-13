@@ -52,6 +52,36 @@
 //! - F1.3 daemon wiring (separate ship): UDP transport binding,
 //!   pyo3 wrapper, Python adapter. The crate's `Transport` trait
 //!   lets the daemon swap any wire (UDP / WebRTC / over-mesh-relay).
+//!
+//! ## Example: signing a self-record + DHT shape
+//!
+//! ```
+//! use ed25519_dalek::SigningKey;
+//! use ol_discovery::{
+//!     NodeId, PeerRecord, SignedRecord, RECORD_DEFAULT_TTL_SECS,
+//!     RoutingTable, K_BUCKET_DEFAULT,
+//! };
+//!
+//! // Each peer's identity is BLAKE3(its Ed25519 master pubkey).
+//! let sk = SigningKey::from_bytes(&[0x42; 32]);
+//! let pk = sk.verifying_key().to_bytes();
+//! let id = NodeId::from_pubkey(&pk);
+//!
+//! // Publish a self-record advertising reachability.
+//! let rec = PeerRecord {
+//!     publisher_pubkey: pk,
+//!     endpoints: vec!["udp://10.0.0.1:7117".to_string()],
+//!     publish_time_unix: 1_700_000_000,
+//!     ttl_secs: RECORD_DEFAULT_TTL_SECS,
+//! };
+//! let signed = SignedRecord::sign(rec, &sk).unwrap();
+//! signed.verify().unwrap();
+//! assert_eq!(signed.node_id(), id);
+//!
+//! // Routing table: K=20 closest-known peers per XOR-distance bucket.
+//! let t = RoutingTable::new(id);
+//! assert_eq!(t.k(), K_BUCKET_DEFAULT);
+//! ```
 
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_possible_truncation)]

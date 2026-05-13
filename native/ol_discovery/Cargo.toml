@@ -17,10 +17,12 @@ blake3        = { workspace = true }
 tokio         = { workspace = true }
 
 [dev-dependencies]
-proptest  = { workspace = true }
-criterion = { workspace = true }
-rand_core = { workspace = true }
-tokio     = { workspace = true, features = ["full"] }
+proptest    = { workspace = true }
+criterion   = { workspace = true }
+rand_core   = { workspace = true }
+rand        = "0.8"
+rand_chacha = "0.3"
+tokio       = { workspace = true, features = ["full"] }
 
 [[bench]]
 name    = "discovery_bench"

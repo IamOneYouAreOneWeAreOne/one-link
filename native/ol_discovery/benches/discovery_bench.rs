@@ -125,6 +125,28 @@ fn bench_canonical_bytes(c: &mut Criterion) {
     });
 }
 
+fn bench_synthetic_id(c: &mut Criterion) {
+    let t = RoutingTable::new(NodeId([0x00; 32]));
+    c.bench_function("routing/synthetic_id_for_bucket_mid", |bch| {
+        bch.iter(|| t.synthetic_id_for_bucket(black_box(128)));
+    });
+}
+
+fn bench_stale_buckets_query(c: &mut Criterion) {
+    // Populate a routing table to a realistic size, then bench the
+    // maintenance hot-path: `stale_buckets(now, max_age)`.
+    let mut t = RoutingTable::new(NodeId([0x00; 32]));
+    for i in 1u16..=512 {
+        let mut id = [0u8; 32];
+        id[0] = (i & 0xFF) as u8;
+        id[1] = ((i >> 8) & 0xFF) as u8;
+        let _ = t.insert(NodeId(id), 1_000 + i as u64);
+    }
+    c.bench_function("routing/stale_buckets_n_512", |bch| {
+        bch.iter(|| t.stale_buckets(black_box(10_000), black_box(3600)));
+    });
+}
+
 criterion_group!(
     benches,
     bench_xor_distance,
@@ -133,5 +155,7 @@ criterion_group!(
     bench_record_sign,
     bench_record_verify,
     bench_canonical_bytes,
+    bench_synthetic_id,
+    bench_stale_buckets_query,
 );
 criterion_main!(benches);
