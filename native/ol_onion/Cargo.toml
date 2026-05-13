@@ -1,0 +1,35 @@
+[package]
+name = "ol_onion"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link Coherence Mesh: nested-AEAD onion circuits (Phase F3, row 5 of COHERENCE_MESH_PLAN)."
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_onion"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror        = { workspace = true }
+blake3           = { workspace = true }
+x25519-dalek     = { version = "2.0", features = ["static_secrets"] }
+chacha20poly1305 = { workspace = true }
+aead             = { workspace = true }
+rand_core        = { workspace = true }
+zeroize          = { workspace = true }
+subtle           = { workspace = true }
+
+[dev-dependencies]
+proptest         = { workspace = true }
+criterion        = { workspace = true }
+rand             = "0.8"
+rand_chacha      = "0.3"
+hex              = { workspace = true }
+
+[[bench]]
+name    = "onion_bench"
+harness = false
+
+[lints]
+workspace = true

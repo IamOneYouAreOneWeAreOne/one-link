@@ -30,6 +30,8 @@ ol_threshold_recovery = { path = "../ol_threshold_recovery" }
 ol_discovery       = { path = "../ol_discovery" }
 ol_proximity_pair  = { path = "../ol_proximity_pair" }
 ol_pair_qr         = { path = "../ol_pair_qr" }
+ol_onion           = { path = "../ol_onion" }
+x25519-dalek       = { version = "2.0", features = ["static_secrets"] }
 
 [profile.release]
 debug = 1
@@ -187,6 +189,29 @@ bench = false
 [[bin]]
 name = "fuzz_pair_qr_canon_roundtrip"
 path = "fuzz_targets/fuzz_pair_qr_canon_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+# ── F3 ol_onion fuzz targets ──────────────────────────────────────
+
+[[bin]]
+name = "fuzz_onion_packet_decode"
+path = "fuzz_targets/fuzz_onion_packet_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_onion_peel_one_layer"
+path = "fuzz_targets/fuzz_onion_peel_one_layer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_onion_canon_roundtrip"
+path = "fuzz_targets/fuzz_onion_canon_roundtrip.rs"
 test = false
 doc = false
 bench = false

@@ -21,6 +21,13 @@ Per [`FILE_ENGINE_V2_PLAN.md`](../FILE_ENGINE_V2_PLAN.md) Phase D item #7:
   response replay cannot be accepted by an inviter.
 - `PairQr.cfg` — TLC config for the pair-by-QR spec (2 inviters,
   2 scanners, 2 invites, AttackerOn = TRUE).
+- `onion.tla` — TLA+ specification of the onion-circuit relay state
+  machine (Phase F3 / Coherence Mesh row 5). Models sender + N
+  relays + destination + active attacker; verifies layer
+  confidentiality, hop blindness, integrity on relay, and delivery
+  fidelity on honest runs.
+- `Onion.cfg` — TLC config for the onion spec (3 relays + dest +
+  2 payloads, AttackerOn = TRUE).
 
 ## Verified safety invariants
 
@@ -34,6 +41,10 @@ Per [`FILE_ENGINE_V2_PLAN.md`](../FILE_ENGINE_V2_PLAN.md) Phase D item #7:
 | `NoCrossInviteReplay` (pair-by-QR) | An Inviter never advances state on a response that wasn't bound to its specific invite. |
 | `SAS_AgreementOnHonestRun` (pair-by-QR) | Two honest peers that both reach Done hold byte-identical chain keys. |
 | `StateTypesOk` (pair-by-QR) | State variables only take values from the declared enums (catches off-by-one Rust enum extensions). |
+| `NoLayerLeakage` (onion) | A payload is delivered to a destination only if the sender actually sent it; attacker cannot inject arbitrary payloads. |
+| `HopBlindness` (onion) | Every relay sees an outcome from the same {None, Forward, Deliver, Failed} set; no label leaks hop position. |
+| `IntegrityOnRelay` (onion) | A Failed peel at one hop does not propagate a successful Delivery downstream from that branch. |
+| `DeliveryFidelity` (onion) | On honest runs (no attacker action), every delivered payload originates from the sender. |
 
 ## Running TLC
 

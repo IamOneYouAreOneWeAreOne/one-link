@@ -57,9 +57,10 @@ mod fec;
 mod fountain;
 mod homology;
 mod hwkey;
+mod onion;
+mod pair_qr;
 mod pqkem;
 mod prefetch;
-mod pair_qr;
 mod proximity_pair;
 mod quic;
 mod ratchet;
@@ -272,6 +273,19 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.pair_qr", pair_qr_mod)?;
+
+    // Phase F3 — onion-circuit relay (row 5).
+    // Nested ChaCha20-Poly1305 encryption with per-layer ephemeral
+    // X25519 keys. Each hop only knows its predecessor + successor.
+    // The build_onion + peel_one_layer primitives let the daemon
+    // act as both sender and relay over multi-hop circuits with no
+    // path or content visible to any single relay.
+    let onion_mod = PyModule::new_bound(py, "onion")?;
+    onion::register(py, &onion_mod)?;
+    m.add_submodule(&onion_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.onion", onion_mod)?;
 
     Ok(())
 }
