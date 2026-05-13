@@ -290,3 +290,10 @@ path = "fuzz_targets/fuzz_device_mesh_fan_out.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_device_mesh_self_routing"
+path = "fuzz_targets/fuzz_device_mesh_self_routing.rs"
+test = false
+doc = false
+bench = false

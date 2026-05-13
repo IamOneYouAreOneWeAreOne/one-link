@@ -530,6 +530,73 @@ fn bench_fan_out_chunk_ack(c: &mut Criterion) {
     });
 }
 
+fn bench_self_routing_announcement_sign(c: &mut Criterion) {
+    use ol_device_mesh::self_routing::{sign_route_announcement, PeerLink};
+    let master = MasterIdentity::generate(&mut OsRng);
+    let (sk, _) =
+        mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
+    let links: Vec<PeerLink> = (1u8..=8)
+        .map(|i| PeerLink {
+            peer_device_id: [i; DEVICE_ID_LEN],
+            tau_score: u32::from(i) * 10,
+            last_seen_unix: u64::from(i),
+            direct: true,
+        })
+        .collect();
+    c.bench_function("device_mesh::self_routing_announcement_sign_8", |b| {
+        b.iter(|| {
+            let ann = sign_route_announcement(
+                black_box(&sk),
+                1_700_000_000,
+                black_box(links.clone()),
+            )
+            .unwrap();
+            black_box(ann);
+        });
+    });
+}
+
+fn bench_self_routing_pick_best_route(c: &mut Criterion) {
+    use ol_device_mesh::self_routing::{
+        pick_best_route, sign_route_announcement, PeerLink, RouteTable,
+    };
+    let master = MasterIdentity::generate(&mut OsRng);
+    let mut ids = Vec::new();
+    let mut sks = Vec::new();
+    let mut atts = Vec::new();
+    for i in 1u8..=6 {
+        let id = [i; DEVICE_ID_LEN];
+        let (sk, a) =
+            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        ids.push(id);
+        sks.push(sk);
+        atts.push(a);
+    }
+    let mut table = RouteTable::empty();
+    for i in 0..ids.len() {
+        let links: Vec<PeerLink> = (0..ids.len())
+            .filter(|j| *j != i)
+            .map(|j| PeerLink {
+                peer_device_id: ids[j],
+                tau_score: (((i + j) as u32) * 13) % 200 + 1,
+                last_seen_unix: 1,
+                direct: true,
+            })
+            .collect();
+        let ann = sign_route_announcement(&sks[i], 1, links).unwrap();
+        let vk = HybridVerifyingKey::from_bytes(&atts[i].subkey_vk_bytes).unwrap();
+        table.ingest(ann, &vk).unwrap();
+    }
+    let src = ids[0];
+    let dst = ids[ids.len() - 1];
+    c.bench_function("device_mesh::self_routing_pick_best_route_6_node_clique", |b| {
+        b.iter(|| {
+            let r = pick_best_route(black_box(&table), black_box(&src), black_box(&dst));
+            black_box(r);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_derive_subkey_seed,
@@ -554,5 +621,7 @@ criterion_group!(
     bench_fan_out_plan,
     bench_fan_out_fetch_request,
     bench_fan_out_chunk_ack,
+    bench_self_routing_announcement_sign,
+    bench_self_routing_pick_best_route,
 );
 criterion_main!(benches);

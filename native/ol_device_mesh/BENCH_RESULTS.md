@@ -1,4 +1,4 @@
-# ol_device_mesh (Row 8 Layers 1 + 2 + 3 + 4 + 5) microbenchmark results
+# ol_device_mesh (Row 8 Layers 1 + 2 + 3 + 4 + 5 + 6) microbenchmark results
 
 Captured against `0.21.0-alpha.0` on Windows 11 Intel host, release
 profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
@@ -16,6 +16,13 @@ profile (`cargo bench -p ol_device_mesh --bench device_mesh_bench`).
 | `device_mesh::liveness_proof_verify`            | 53.2 µs  | hybrid signature verify          |
 | `device_mesh::mint_subkey`                      | 433 µs   | derive seed + master signs vk    |
 | `device_mesh::liveness_proof_issue`             | 688 µs   | subkey signs transcript          |
+
+## Layer 6 — self-routing
+
+| Benchmark                                                  | Time     | Notes                                       |
+|---                                                         |---       |---                                          |
+| `device_mesh::self_routing_announcement_sign_8`            | 355 µs   | subkey signs 8-link transcript              |
+| `device_mesh::self_routing_pick_best_route_6_node_clique`  | 316 ns   | max-min-τ Dijkstra over 6-device clique     |
 
 ## Layer 5 — multi-device fan-out
 

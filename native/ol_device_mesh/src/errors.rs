@@ -299,6 +299,24 @@ pub enum DeviceMeshError {
     /// Replan invoked with no chunks remaining to fetch.
     #[error("fan-out replan called with no still-needed chunks")]
     FanOutNothingToReplan,
+    /// Route announcement signature failed verification.
+    #[error("route announcement failed cryptographic verification")]
+    RouteAnnouncementVerifyFail,
+    /// Route announcement carries more links than allowed.
+    #[error("route announcement has too many links: {got} (max {max})")]
+    RouteAnnouncementTooManyLinks {
+        /// Actual count.
+        got: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// Route announcement links are not strictly sorted by peer id.
+    #[error("route announcement links must be sorted ascending by peer_device_id with no duplicates")]
+    RouteAnnouncementLinksNotSorted,
+    /// Route announcement carries a self-loop (announcer listed
+    /// itself as one of its peers).
+    #[error("route announcement contains a self-loop (announcer is in its own links)")]
+    RouteAnnouncementSelfLoop,
 }
 
 impl From<ol_pqsig::PqSigError> for DeviceMeshError {
