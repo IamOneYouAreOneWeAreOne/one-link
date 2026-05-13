@@ -135,8 +135,9 @@ pub use circuit::Circuit;
 pub use errors::{OnionError, OnionResult};
 pub use hop::{HopDescriptor, HopId, HOP_ID_LEN};
 pub use packet::{
-    OnionPacket, MAX_HOPS, MAX_USER_PAYLOAD, ONION_HEADER_LEN,
-    ONION_PACKET_SIZE, ONION_PACKET_VERSION, TRANSPORT_PAD_HINT,
+    pad_packet_to_transport, unpad_packet_from_transport, OnionPacket, MAX_HOPS,
+    MAX_USER_PAYLOAD, ONION_HEADER_LEN, ONION_PACKET_SIZE, ONION_PACKET_VERSION,
+    TRANSPORT_PAD_HINT,
 };
 pub use peel::{peel_one_layer, PeelOutcome};
 

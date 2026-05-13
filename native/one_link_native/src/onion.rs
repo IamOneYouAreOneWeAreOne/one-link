@@ -12,8 +12,10 @@ use rand_core_06::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use ol_onion::{
-    build_onion as core_build_onion, peel_one_layer as core_peel_one_layer, Circuit,
-    HopDescriptor, OnionError, OnionPacket, PeelOutcome, HOP_ID_LEN, MAX_HOPS, MAX_USER_PAYLOAD,
+    build_onion as core_build_onion, pad_packet_to_transport,
+    peel_one_layer as core_peel_one_layer, unpad_packet_from_transport, Circuit, HopDescriptor,
+    OnionError, OnionPacket, PeelOutcome, HOP_ID_LEN, MAX_HOPS, MAX_USER_PAYLOAD,
+    TRANSPORT_PAD_HINT,
 };
 
 fn map_err(e: OnionError) -> PyErr {
@@ -99,10 +101,7 @@ fn peel_one_layer<'py>(
 /// Compute the public X25519 key for a 32-byte static secret. Helper
 /// for daemons that need to publish their relay pubkey.
 #[pyfunction]
-fn derive_pubkey<'py>(
-    py: Python<'py>,
-    static_sk_bytes: &[u8],
-) -> PyResult<Bound<'py, PyBytes>> {
+fn derive_pubkey<'py>(py: Python<'py>, static_sk_bytes: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     if static_sk_bytes.len() != 32 {
         return Err(PyValueError::new_err(format!(
             "static_sk must be 32 bytes, got {}",
@@ -116,12 +115,47 @@ fn derive_pubkey<'py>(
     Ok(PyBytes::new_bound(py, pk.as_bytes()))
 }
 
+/// Pad a wire-encoded onion packet to TRANSPORT_PAD_HINT bytes.
+/// Trailing pad bytes are key-derived from `pad_seed` (must be 32
+/// bytes; pass a fresh value per packet).
+#[pyfunction]
+fn pad_to_transport<'py>(
+    py: Python<'py>,
+    packet_bytes: &[u8],
+    pad_seed: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    if pad_seed.len() != 32 {
+        return Err(PyValueError::new_err(format!(
+            "pad_seed must be 32 bytes, got {}",
+            pad_seed.len()
+        )));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(pad_seed);
+    let out = pad_packet_to_transport(packet_bytes, &seed).map_err(map_err)?;
+    Ok(PyBytes::new_bound(py, &out))
+}
+
+/// Strip transport padding from a TRANSPORT_PAD_HINT-byte input,
+/// returning the original onion-packet wire bytes.
+#[pyfunction]
+fn unpad_from_transport<'py>(
+    py: Python<'py>,
+    padded_bytes: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    let out = unpad_packet_from_transport(padded_bytes).map_err(map_err)?;
+    Ok(PyBytes::new_bound(py, &out))
+}
+
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_onion, m)?)?;
     m.add_function(wrap_pyfunction!(peel_one_layer, m)?)?;
     m.add_function(wrap_pyfunction!(derive_pubkey, m)?)?;
+    m.add_function(wrap_pyfunction!(pad_to_transport, m)?)?;
+    m.add_function(wrap_pyfunction!(unpad_from_transport, m)?)?;
     m.add("MAX_HOPS", MAX_HOPS)?;
     m.add("MAX_USER_PAYLOAD", MAX_USER_PAYLOAD)?;
     m.add("HOP_ID_LEN", HOP_ID_LEN)?;
+    m.add("TRANSPORT_PAD_HINT", TRANSPORT_PAD_HINT)?;
     Ok(())
 }

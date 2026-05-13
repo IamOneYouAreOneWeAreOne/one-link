@@ -175,6 +175,77 @@ fn adversarial_one_hop_circuit_works() {
 // ── Two independent circuits don't cross-contaminate ─────────────
 
 #[test]
+fn adversarial_truncated_at_every_byte_position_rejected() {
+    // Build a real packet, then try decoding every prefix shorter
+    // than the full packet — must reject every one of them with a
+    // typed error (Truncated, BadFrameSize, etc.).
+    let (_, dest) = make_hop_pair(1);
+    let circuit = Circuit::new(vec![dest]).unwrap();
+    let packet = build_onion(&circuit, b"abc", &mut OsRng).unwrap();
+    let enc = packet.encode();
+    for prefix_len in 0..enc.len() {
+        let result = OnionPacket::decode(&enc[..prefix_len]);
+        assert!(
+            result.is_err(),
+            "truncated decode at len {} unexpectedly succeeded",
+            prefix_len
+        );
+    }
+    // Full-length decode succeeds.
+    let _ = OnionPacket::decode(&enc).unwrap();
+}
+
+#[test]
+fn adversarial_replay_across_circuits_blocked() {
+    // Build two circuits with the SAME destination but different
+    // (ciphertext, nonce, ephem_pubkey) seeds. Cross-feeding fails.
+    let (dest_sk, dest) = make_hop_pair(1);
+    let circuit_a = Circuit::new(vec![dest.clone()]).unwrap();
+    let circuit_b = Circuit::new(vec![dest]).unwrap();
+    let packet_a = build_onion(&circuit_a, b"a", &mut OsRng).unwrap();
+    let packet_b = build_onion(&circuit_b, b"b", &mut OsRng).unwrap();
+    // Each packet decrypts correctly.
+    let oa = peel_one_layer(&dest_sk, &packet_a).unwrap();
+    let ob = peel_one_layer(&dest_sk, &packet_b).unwrap();
+    assert!(matches!(oa, PeelOutcome::Deliver { ref payload } if payload == b"a"));
+    assert!(matches!(ob, PeelOutcome::Deliver { ref payload } if payload == b"b"));
+    // Splicing the ciphertext of one into the other's header fails AEAD.
+    let mut spliced = packet_a.clone();
+    spliced.ciphertext = packet_b.ciphertext.clone();
+    let err = peel_one_layer(&dest_sk, &spliced).unwrap_err();
+    assert_eq!(err, OnionError::AeadFail);
+}
+
+#[test]
+fn adversarial_swapped_ephem_pubkey_rejected() {
+    // Replace the ephem pubkey with one from a different circuit —
+    // AEAD must fail because the derived layer key won't match.
+    let (dest_sk, dest) = make_hop_pair(1);
+    let circuit = Circuit::new(vec![dest]).unwrap();
+    let packet = build_onion(&circuit, b"x", &mut OsRng).unwrap();
+    let other_packet = build_onion(&circuit.clone(), b"y", &mut OsRng).unwrap();
+    let mut tampered = packet.clone();
+    tampered.ephem_pubkey = other_packet.ephem_pubkey;
+    let err = peel_one_layer(&dest_sk, &tampered).unwrap_err();
+    assert_eq!(err, OnionError::AeadFail);
+}
+
+#[test]
+fn adversarial_random_garbage_packet_decode_returns_typed_err() {
+    // Random bytes have astronomical odds of decoding as a valid
+    // OnionPacket. Refusal must be a typed error, not a panic.
+    for seed in 0u32..1000 {
+        let mut bytes = Vec::with_capacity(64);
+        let mut s = seed as u64;
+        for _ in 0..64 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            bytes.push((s >> 33) as u8);
+        }
+        let _ = OnionPacket::decode(&bytes); // must NEVER panic
+    }
+}
+
+#[test]
 fn adversarial_two_circuits_with_shared_keys_dont_collide() {
     let (sk1, r1) = make_hop_pair(1);
     let (sk2, r2) = make_hop_pair(2);

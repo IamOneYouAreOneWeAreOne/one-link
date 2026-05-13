@@ -5,6 +5,25 @@
 //! [`OnionPacket`] that the sender hands to the FIRST hop; each
 //! relay along the path peels exactly one layer via
 //! [`crate::peel_one_layer`] before forwarding.
+//!
+//! # Example
+//!
+//! ```
+//! use rand::rngs::OsRng;
+//! use x25519_dalek::{PublicKey, StaticSecret};
+//! use ol_onion::{
+//!     build_onion, Circuit, HopDescriptor, HopId, HOP_ID_LEN,
+//! };
+//!
+//! let sk = StaticSecret::from([1u8; 32]);
+//! let dest = HopDescriptor {
+//!     id: HopId::from_bytes([1u8; HOP_ID_LEN]),
+//!     pubkey: PublicKey::from(&sk),
+//! };
+//! let circuit = Circuit::new(vec![dest]).unwrap();
+//! let packet = build_onion(&circuit, b"payload", &mut OsRng).unwrap();
+//! assert_eq!(packet.hops_remaining, 0);
+//! ```
 
 use aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};

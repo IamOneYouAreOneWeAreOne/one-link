@@ -51,12 +51,14 @@ try:
     MAX_HOPS: int = _native_onion.MAX_HOPS
     MAX_USER_PAYLOAD: int = _native_onion.MAX_USER_PAYLOAD
     HOP_ID_LEN: int = _native_onion.HOP_ID_LEN
+    TRANSPORT_PAD_HINT: int = _native_onion.TRANSPORT_PAD_HINT
 except ImportError as exc:
     HAS_NATIVE = False
     _native_onion = None  # type: ignore[assignment]
     MAX_HOPS = 5
     MAX_USER_PAYLOAD = 1024
     HOP_ID_LEN = 32
+    TRANSPORT_PAD_HINT = 1280
     log.info(
         "one_link_native.onion not installed (%s); onion-circuit "
         "routing unavailable. Build via "
@@ -127,6 +129,38 @@ def peel_one_layer(
     return str(outcome), bytes(next_hop), bytes(inner)
 
 
+def pad_to_transport(packet_bytes: bytes, pad_seed: bytes) -> bytes:
+    """Pad an onion packet to exactly TRANSPORT_PAD_HINT bytes.
+
+    Trailing pad bytes are BLAKE3-derived from `pad_seed` (must be
+    32 bytes; pass a fresh value per packet, e.g.,
+    BLAKE3(circuit_id || packet_counter)).
+
+    The transport layer (QUIC datagram / UDP) sends the PADDED bytes.
+    The receiving relay calls `unpad_from_transport` to recover the
+    original packet before peeling. Hop count and payload size are
+    invisible to a network observer at the wire level.
+    """
+    _require_native()
+    if len(pad_seed) != 32:
+        raise ValueError(
+            f"pad_seed must be 32 bytes, got {len(pad_seed)}"
+        )
+    return bytes(_native_onion.pad_to_transport(packet_bytes, pad_seed))
+
+
+def unpad_from_transport(padded_bytes: bytes) -> bytes:
+    """Strip transport padding, returning the original onion packet
+    wire bytes. Refuses non-padded-size input."""
+    _require_native()
+    if len(padded_bytes) != TRANSPORT_PAD_HINT:
+        raise ValueError(
+            f"padded_bytes must be {TRANSPORT_PAD_HINT} bytes, got "
+            f"{len(padded_bytes)}"
+        )
+    return bytes(_native_onion.unpad_from_transport(padded_bytes))
+
+
 def derive_pubkey(static_sk: bytes) -> bytes:
     """Compute the X25519 pubkey for a 32-byte static secret. Helper
     for daemons that need to publish their relay pubkey alongside
@@ -145,7 +179,10 @@ __all__ = [
     "build_onion",
     "peel_one_layer",
     "derive_pubkey",
+    "pad_to_transport",
+    "unpad_from_transport",
     "MAX_HOPS",
     "MAX_USER_PAYLOAD",
     "HOP_ID_LEN",
+    "TRANSPORT_PAD_HINT",
 ]

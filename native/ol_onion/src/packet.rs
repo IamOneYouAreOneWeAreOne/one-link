@@ -186,6 +186,82 @@ impl OnionPacket {
     }
 }
 
+/// Pad a wire-encoded `OnionPacket` to exactly [`TRANSPORT_PAD_HINT`]
+/// bytes. The original packet's first 2 bytes hold the
+/// `ciphertext_len` u16 (after the version + hops_remaining + ephem
+/// + nonce header), so the receiver can always extract the
+/// real packet length and strip the trailing padding before
+/// decoding. Pad bytes are random-looking (key-derived) so the
+/// padded packet shows uniform-byte-distribution to a network
+/// observer.
+///
+/// `pad_seed` is a 32-byte sender-side secret that key-derives the
+/// pad bytes via BLAKE3. Pass a fresh value per packet (e.g.,
+/// BLAKE3(circuit_id || packet_counter)). Different packets MUST
+/// use different `pad_seed` values to avoid leaking length
+/// information via repeated identical pad bytes.
+///
+/// Refuses if the input is already larger than [`TRANSPORT_PAD_HINT`].
+pub fn pad_packet_to_transport(
+    encoded: &[u8],
+    pad_seed: &[u8; 32],
+) -> OnionResult<Vec<u8>> {
+    if encoded.len() > TRANSPORT_PAD_HINT {
+        return Err(OnionError::BadFrameSize {
+            got: encoded.len(),
+            expected: TRANSPORT_PAD_HINT,
+        });
+    }
+    let mut out = vec![0u8; TRANSPORT_PAD_HINT];
+    out[..encoded.len()].copy_from_slice(encoded);
+    if encoded.len() < TRANSPORT_PAD_HINT {
+        // Key-derive the pad bytes so they look random.
+        let trailing_len = TRANSPORT_PAD_HINT - encoded.len();
+        let mut h = blake3::Hasher::new();
+        h.update(crate::PROTOCOL_DOMAIN);
+        h.update(b"-pad-v1");
+        h.update(pad_seed);
+        let mut xof = h.finalize_xof();
+        xof.fill(&mut out[encoded.len()..]);
+        let _ = trailing_len;
+    }
+    Ok(out)
+}
+
+/// Strip the transport-level padding from a `pad_packet_to_transport`
+/// output, returning the original encoded packet bytes. Uses the
+/// `ciphertext_len` field inside the packet header to determine the
+/// real packet length.
+///
+/// Refuses if `padded` is not exactly [`TRANSPORT_PAD_HINT`] bytes
+/// or if the embedded length is implausible.
+pub fn unpad_packet_from_transport(padded: &[u8]) -> OnionResult<Vec<u8>> {
+    if padded.len() != TRANSPORT_PAD_HINT {
+        return Err(OnionError::BadFrameSize {
+            got: padded.len(),
+            expected: TRANSPORT_PAD_HINT,
+        });
+    }
+    // The header is: version(1) + hops_remaining(1) + ephem(32) +
+    // nonce(12) + ciphertext_len(u16 BE). Length offset = 46.
+    const LEN_OFFSET: usize = 1 + 1 + EPHEM_PUBKEY_LEN + AEAD_NONCE_LEN;
+    if padded[0] != ONION_PACKET_VERSION {
+        return Err(OnionError::UnsupportedVersion {
+            got: padded[0],
+            supported: ONION_PACKET_VERSION,
+        });
+    }
+    let ct_len = u16::from_be_bytes([padded[LEN_OFFSET], padded[LEN_OFFSET + 1]]) as usize;
+    let total = ONION_HEADER_LEN + ct_len;
+    if total > TRANSPORT_PAD_HINT {
+        return Err(OnionError::BadFrameSize {
+            got: total,
+            expected: TRANSPORT_PAD_HINT,
+        });
+    }
+    Ok(padded[..total].to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +331,78 @@ mod tests {
     fn constants_self_consistent() {
         assert!(MAX_USER_PAYLOAD > 0);
         assert!(TRANSPORT_PAD_HINT >= MAX_HOPS * PER_LAYER_OVERHEAD);
+    }
+
+    #[test]
+    fn pad_unpad_round_trip() {
+        let p = fixture();
+        let enc = p.encode();
+        let pad_seed = [0x77u8; 32];
+        let padded = pad_packet_to_transport(&enc, &pad_seed).unwrap();
+        assert_eq!(padded.len(), TRANSPORT_PAD_HINT);
+        let stripped = unpad_packet_from_transport(&padded).unwrap();
+        assert_eq!(stripped, enc);
+    }
+
+    #[test]
+    fn pad_oversize_rejected() {
+        let too_big = vec![0u8; TRANSPORT_PAD_HINT + 1];
+        let pad_seed = [0u8; 32];
+        let err = pad_packet_to_transport(&too_big, &pad_seed).unwrap_err();
+        assert!(matches!(err, OnionError::BadFrameSize { .. }));
+    }
+
+    #[test]
+    fn pad_uses_different_bytes_per_seed() {
+        let p = fixture();
+        let enc = p.encode();
+        let pad1 = pad_packet_to_transport(&enc, &[0x11u8; 32]).unwrap();
+        let pad2 = pad_packet_to_transport(&enc, &[0x22u8; 32]).unwrap();
+        // The packet prefix matches; the trailing pad must differ.
+        assert_eq!(&pad1[..enc.len()], &pad2[..enc.len()]);
+        assert_ne!(&pad1[enc.len()..], &pad2[enc.len()..]);
+    }
+
+    #[test]
+    fn unpad_wrong_length_rejected() {
+        let bytes = vec![0u8; TRANSPORT_PAD_HINT - 1];
+        let err = unpad_packet_from_transport(&bytes).unwrap_err();
+        assert!(matches!(err, OnionError::BadFrameSize { .. }));
+    }
+
+    #[test]
+    fn unpad_wrong_version_rejected() {
+        let mut bytes = vec![0u8; TRANSPORT_PAD_HINT];
+        bytes[0] = 0xFE;
+        let err = unpad_packet_from_transport(&bytes).unwrap_err();
+        assert!(matches!(err, OnionError::UnsupportedVersion { got: 0xFE, .. }));
+    }
+
+    #[test]
+    fn unpad_oversize_length_field_rejected() {
+        // Craft a "padded packet" whose embedded ciphertext_len is
+        // larger than TRANSPORT_PAD_HINT. Must refuse before slicing.
+        let mut bytes = vec![0u8; TRANSPORT_PAD_HINT];
+        bytes[0] = ONION_PACKET_VERSION;
+        let len_offset = 1 + 1 + EPHEM_PUBKEY_LEN + AEAD_NONCE_LEN;
+        let bogus_len = (TRANSPORT_PAD_HINT as u16).wrapping_add(1);
+        bytes[len_offset..len_offset + 2].copy_from_slice(&bogus_len.to_be_bytes());
+        let err = unpad_packet_from_transport(&bytes).unwrap_err();
+        assert!(matches!(err, OnionError::BadFrameSize { .. }));
+    }
+
+    #[test]
+    fn padded_packet_size_constant() {
+        // Different-sized packets all yield TRANSPORT_PAD_HINT-byte
+        // padded output. Hop count + payload size cannot leak via
+        // padded packet size at the transport layer.
+        let pad_seed = [0xAAu8; 32];
+        for ct_len in [16, 64, 128, 256, 512] {
+            let mut p = fixture();
+            p.ciphertext = vec![0u8; ct_len];
+            let enc = p.encode();
+            let padded = pad_packet_to_transport(&enc, &pad_seed).unwrap();
+            assert_eq!(padded.len(), TRANSPORT_PAD_HINT);
+        }
     }
 }

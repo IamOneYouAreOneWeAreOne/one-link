@@ -202,3 +202,62 @@ def test_derive_pubkey_validates_length():
 
     with pytest.raises(ValueError, match="32 bytes"):
         on.derive_pubkey(b"too short")
+
+
+def test_pad_unpad_round_trip():
+    from one_link import onion_native as on
+
+    _, hop_id, pk = _make_hop(0x91)
+    packet = on.build_onion([(hop_id, pk)], b"pad-test")
+    pad_seed = bytes([0xAB] * 32)
+    padded = on.pad_to_transport(packet, pad_seed)
+    assert len(padded) == on.TRANSPORT_PAD_HINT
+    stripped = on.unpad_from_transport(padded)
+    assert stripped == packet
+
+
+def test_pad_different_seeds_yield_different_trailing_bytes():
+    from one_link import onion_native as on
+
+    _, hop_id, pk = _make_hop(0x92)
+    packet = on.build_onion([(hop_id, pk)], b"x")
+    pad_a = on.pad_to_transport(packet, bytes([0x01] * 32))
+    pad_b = on.pad_to_transport(packet, bytes([0x02] * 32))
+    assert pad_a[: len(packet)] == pad_b[: len(packet)]
+    assert pad_a[len(packet) :] != pad_b[len(packet) :]
+
+
+def test_pad_seed_must_be_32_bytes():
+    from one_link import onion_native as on
+
+    _, hop_id, pk = _make_hop(0x93)
+    packet = on.build_onion([(hop_id, pk)], b"x")
+    with pytest.raises(ValueError, match="32 bytes"):
+        on.pad_to_transport(packet, b"short")
+
+
+def test_unpad_wrong_size_rejected():
+    from one_link import onion_native as on
+
+    with pytest.raises(ValueError, match=str(on.TRANSPORT_PAD_HINT)):
+        on.unpad_from_transport(b"too short")
+
+
+def test_pad_then_peel_round_trip():
+    """End-to-end: build, pad, simulate transport, unpad, peel."""
+    from one_link import onion_native as on
+
+    r1_sk, r1_id, r1_pk = _make_hop(0xA1)
+    dest_sk, dest_id, dest_pk = _make_hop(0xA2)
+    packet = on.build_onion([(r1_id, r1_pk), (dest_id, dest_pk)], b"e2e")
+    padded = on.pad_to_transport(packet, bytes([0xCC] * 32))
+    # Transport sends padded bytes; receiver strips padding.
+    received = on.unpad_from_transport(padded)
+    assert received == packet
+    # Then peel normally.
+    outcome, next_hop, inner = on.peel_one_layer(r1_sk, received)
+    assert outcome == "forward"
+    assert next_hop == dest_id
+    outcome, _, payload = on.peel_one_layer(dest_sk, inner)
+    assert outcome == "deliver"
+    assert payload == b"e2e"

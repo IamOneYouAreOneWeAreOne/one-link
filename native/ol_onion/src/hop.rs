@@ -18,7 +18,23 @@ pub const HOP_ID_LEN: usize = 32;
 
 /// 32-byte routing identifier for a hop. Typically BLAKE3(identity)
 /// from the discovery layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Zeroize)]
+///
+/// [`PartialEq`] is constant-time via `subtle::ConstantTimeEq` to
+/// avoid leaking which hop a packet is bound to by comparing
+/// hop_ids on a hot path (e.g. when the daemon's routing table
+/// dispatches forwarded packets).
+///
+/// # Example
+///
+/// ```
+/// use ol_onion::{HopId, HOP_ID_LEN};
+///
+/// let a = HopId::from_bytes([1u8; HOP_ID_LEN]);
+/// let b = HopId::from_bytes([1u8; HOP_ID_LEN]);
+/// assert_eq!(a, b);
+/// assert_eq!(a.as_bytes(), &[1u8; HOP_ID_LEN]);
+/// ```
+#[derive(Debug, Clone, Copy, Hash, Zeroize)]
 pub struct HopId(pub [u8; HOP_ID_LEN]);
 
 impl HopId {
@@ -32,6 +48,14 @@ impl HopId {
         &self.0
     }
 }
+
+impl PartialEq for HopId {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.ct_eq(&other.0).into()
+    }
+}
+impl Eq for HopId {}
 
 /// Sender-side view of a relay in the circuit.
 ///

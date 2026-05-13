@@ -6,6 +6,7 @@
 use std::time::Instant;
 
 use ol_onion::keyderiv::LayerKey;
+use ol_onion::{HopId, HOP_ID_LEN};
 
 const SAMPLES_PER_BUCKET: usize = 50_000;
 
@@ -22,6 +23,48 @@ fn measure<F: FnMut()>(mut work: F, iterations: usize) -> u128 {
         work();
     }
     start.elapsed().as_nanos()
+}
+
+#[test]
+fn hop_id_eq_constant_time() {
+    let base = HopId::from_bytes([0x42u8; HOP_ID_LEN]);
+    let candidates: Vec<HopId> = vec![
+        HopId::from_bytes([0x42u8; HOP_ID_LEN]),
+        {
+            let mut b = [0x42u8; HOP_ID_LEN];
+            b[0] ^= 0x01;
+            HopId::from_bytes(b)
+        },
+        {
+            let mut b = [0x42u8; HOP_ID_LEN];
+            b[15] ^= 0x01;
+            HopId::from_bytes(b)
+        },
+        {
+            let mut b = [0x42u8; HOP_ID_LEN];
+            b[31] ^= 0x01;
+            HopId::from_bytes(b)
+        },
+        HopId::from_bytes([0xCDu8; HOP_ID_LEN]),
+    ];
+    for c in &candidates {
+        let _ = measure(|| {
+            let _ = base == *c;
+        }, 10_000);
+    }
+    let mut totals: Vec<f64> = Vec::with_capacity(candidates.len());
+    for c in &candidates {
+        let ns = measure(
+            || {
+                std::hint::black_box(base == *std::hint::black_box(c));
+            },
+            SAMPLES_PER_BUCKET,
+        ) as f64;
+        totals.push(ns);
+    }
+    let rel = relative_stddev(&totals);
+    eprintln!("hop_id eq totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
+    assert!(rel < 0.05, "hop_id eq relative stddev {rel:.4} exceeds 5% gate");
 }
 
 #[test]

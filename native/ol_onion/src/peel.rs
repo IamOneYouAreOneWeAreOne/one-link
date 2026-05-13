@@ -8,6 +8,29 @@
 //!   transport to send to the next relay.
 //! - **Delivers**: this relay IS the destination; emits the
 //!   plaintext user payload.
+//!
+//! # Example
+//!
+//! ```
+//! use rand::rngs::OsRng;
+//! use x25519_dalek::{PublicKey, StaticSecret};
+//! use ol_onion::{
+//!     build_onion, peel_one_layer, Circuit, HopDescriptor, HopId,
+//!     PeelOutcome, HOP_ID_LEN,
+//! };
+//!
+//! let sk = StaticSecret::from([7u8; 32]);
+//! let dest = HopDescriptor {
+//!     id: HopId::from_bytes([7u8; HOP_ID_LEN]),
+//!     pubkey: PublicKey::from(&sk),
+//! };
+//! let circuit = Circuit::new(vec![dest]).unwrap();
+//! let packet = build_onion(&circuit, b"payload", &mut OsRng).unwrap();
+//! match peel_one_layer(&sk, &packet).unwrap() {
+//!     PeelOutcome::Deliver { payload } => assert_eq!(payload, b"payload"),
+//!     PeelOutcome::Forward { .. } => panic!("expected Deliver"),
+//! }
+//! ```
 
 use aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
