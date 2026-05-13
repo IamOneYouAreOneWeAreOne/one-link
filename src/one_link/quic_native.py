@@ -185,14 +185,37 @@ class EndpointConfig:
         idle_timeout_ms: Optional[int] = None,
         keepalive_interval_ms: Optional[int] = None,
         max_concurrent_bidi_streams: Optional[int] = None,
+        stream_receive_window_bytes: Optional[int] = None,
+        send_window_bytes: Optional[int] = None,
+        send_fairness: Optional[bool] = None,
     ) -> None:
         _require_native()
-        self._inner = _native_quic.EndpointConfig(
-            bind=bind,
-            idle_timeout_ms=idle_timeout_ms,
-            keepalive_interval_ms=keepalive_interval_ms,
-            max_concurrent_bidi_streams=max_concurrent_bidi_streams,
-        )
+        try:
+            self._inner = _native_quic.EndpointConfig(
+                bind=bind,
+                idle_timeout_ms=idle_timeout_ms,
+                keepalive_interval_ms=keepalive_interval_ms,
+                max_concurrent_bidi_streams=max_concurrent_bidi_streams,
+                stream_receive_window_bytes=stream_receive_window_bytes,
+                send_window_bytes=send_window_bytes,
+                send_fairness=send_fairness,
+            )
+        except TypeError:
+            # Mixed-version dev installs may still have the older native
+            # module loaded. Keep the wrapper usable while the new wheel is
+            # being built; the fast-window knobs activate after reinstall.
+            if (
+                stream_receive_window_bytes is not None
+                or send_window_bytes is not None
+                or send_fairness is not None
+            ):
+                raise
+            self._inner = _native_quic.EndpointConfig(
+                bind=bind,
+                idle_timeout_ms=idle_timeout_ms,
+                keepalive_interval_ms=keepalive_interval_ms,
+                max_concurrent_bidi_streams=max_concurrent_bidi_streams,
+            )
 
     @property
     def bind(self) -> str:
@@ -209,6 +232,18 @@ class EndpointConfig:
     @property
     def max_concurrent_bidi_streams(self) -> int:
         return self._inner.max_concurrent_bidi_streams
+
+    @property
+    def stream_receive_window_bytes(self) -> int:
+        return getattr(self._inner, "stream_receive_window_bytes", 0)
+
+    @property
+    def send_window_bytes(self) -> int:
+        return getattr(self._inner, "send_window_bytes", 0)
+
+    @property
+    def send_fairness(self) -> bool:
+        return bool(getattr(self._inner, "send_fairness", True))
 
     def __repr__(self) -> str:
         return repr(self._inner)
@@ -272,6 +307,59 @@ class Connection:
             )
         )
 
+    def send_frame_stream_round_trips(
+        self, frame_kind: int, payloads: list[bytes]
+    ) -> list[tuple[int, bytes]]:
+        """Bulk-stream request/response helper.
+
+        Sends many request frames over one bidirectional stream and reads the
+        same number of response frames back. This is the fast path for chunk
+        sessions that should not pay one QUIC stream setup per chunk.
+        """
+        return list(self._inner.send_frame_stream_round_trips(frame_kind, payloads))
+
+    def send_frame_stream_round_trips_parallel(
+        self,
+        frame_kind: int,
+        payloads: list[bytes],
+        *,
+        lanes: int | None = None,
+    ) -> list[tuple[int, bytes]]:
+        """Parallel bulk-stream request/response helper."""
+        return list(
+            self._inner.send_frame_stream_round_trips_parallel(
+                frame_kind, payloads, lanes
+            )
+        )
+
+    def send_frame_stream_round_trips_count(
+        self,
+        frame_kind: int,
+        payloads: list[bytes],
+        expected_response_kind: int,
+    ) -> int:
+        """Bulk-stream helper that verifies responses and returns total bytes."""
+        return int(
+            self._inner.send_frame_stream_round_trips_count(
+                frame_kind, payloads, expected_response_kind
+            )
+        )
+
+    def send_frame_stream_round_trips_count_parallel(
+        self,
+        frame_kind: int,
+        payloads: list[bytes],
+        expected_response_kind: int,
+        *,
+        lanes: int | None = None,
+    ) -> int:
+        """Parallel bulk-stream count/verify helper."""
+        return int(
+            self._inner.send_frame_stream_round_trips_count_parallel(
+                frame_kind, payloads, expected_response_kind, lanes
+            )
+        )
+
     def recv_frame_blocking(
         self, timeout_ms: int
     ) -> Optional[tuple[int, int, bytes]]:
@@ -280,13 +368,30 @@ class Connection:
         Returns ``(stream_id, kind, payload)`` or ``None`` on timeout.
         Pass ``stream_id`` to :meth:`send_response_on` to reply.
         """
-        return self._inner.recv_frame_blocking(timeout_ms)
+        try:
+            return self._inner.recv_frame_blocking(timeout_ms)
+        except Exception as exc:
+            # Native QUIC reports an ordinary exception when the peer closes
+            # while a server helper is blocked in recv. Treat that as EOF so
+            # daemon loops and tests can shut down quietly; keep all other
+            # protocol errors loud.
+            if "closed" in str(exc).lower():
+                return None
+            raise
 
     def recv_frames_blocking(
-        self, max_frames: int, timeout_ms: int
+        self, max_frames: int, timeout_ms: int, idle_timeout_us: int | None = None
     ) -> list[tuple[int, int, bytes]]:
         """Server-side: receive a native batch of inbound request streams."""
-        return list(self._inner.recv_frames_blocking(max_frames, timeout_ms))
+        try:
+            return list(
+                self._inner.recv_frames_blocking(
+                    max_frames, timeout_ms, idle_timeout_us
+                )
+            )
+        except TypeError:
+            # Older native extension; keep mixed-version dev installs usable.
+            return list(self._inner.recv_frames_blocking(max_frames, timeout_ms))
 
     def send_response_on(
         self, stream_id: int, frame_kind: int, payload: bytes
@@ -302,6 +407,46 @@ class Connection:
     ) -> None:
         """Server-side: send a native batch of response frames."""
         self._inner.send_responses_on(responses, max_in_flight)
+
+    def serve_fixed_responses_blocking(
+        self,
+        requests: int,
+        response_kind: int,
+        payload: bytes,
+        *,
+        max_in_flight: int | None = None,
+    ) -> int:
+        """Serve fixed request/response streams entirely inside native QUIC.
+
+        This is the clean transport-probe primitive and a stepping stone for
+        native chunk-store serving, where Python should not sit in the inner
+        loop for every chunk request.
+        """
+        return int(
+            self._inner.serve_fixed_responses_blocking(
+                requests, response_kind, payload, max_in_flight
+            )
+        )
+
+    def serve_fixed_stream_responses_blocking(
+        self,
+        streams: int,
+        requests_per_stream: int,
+        response_kind: int,
+        payload: bytes,
+        *,
+        max_in_flight: int | None = None,
+    ) -> int:
+        """Serve fixed responses on native bulk streams."""
+        return int(
+            self._inner.serve_fixed_stream_responses_blocking(
+                streams,
+                requests_per_stream,
+                response_kind,
+                payload,
+                max_in_flight,
+            )
+        )
 
     def close(self, error_code: int = 0, reason: bytes = b"") -> None:
         self._inner.close(error_code, reason)

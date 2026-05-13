@@ -8,13 +8,11 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use ol_threshold_recovery::field_bound::{
-    field_bound_reconstruct, field_bound_split, FieldBindingError,
-    FieldWitness as InnerWitness,
+    field_bound_reconstruct, field_bound_split, FieldBindingError, FieldWitness as InnerWitness,
 };
 use ol_threshold_recovery::prng::PrngState;
 use ol_threshold_recovery::shamir::{
-    max_participants, params_valid, reconstruct_bytes, share_bytes,
-    ShareError,
+    max_participants, params_valid, reconstruct_bytes, share_bytes, ShareError,
 };
 
 // ── Plain Shamir surface ──────────────────────────────────────────
@@ -57,8 +55,7 @@ fn shamir_reconstruct<'py>(
     k: u32,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let refs: Vec<&[u8]> = streams.iter().map(Vec::as_slice).collect();
-    let recovered =
-        reconstruct_bytes(&xs, &refs, k).map_err(map_share_err)?;
+    let recovered = reconstruct_bytes(&xs, &refs, k).map_err(map_share_err)?;
     Ok(PyBytes::new_bound(py, &recovered))
 }
 
@@ -91,11 +88,7 @@ impl PyFieldWitness {
     /// scores (each in [0, 1]) + a mint epoch (ns since arbitrary epoch).
     #[new]
     #[pyo3(signature = (field_seed, holder_scores, epoch_ns))]
-    fn new(
-        field_seed: &[u8],
-        holder_scores: Vec<f64>,
-        epoch_ns: u64,
-    ) -> PyResult<Self> {
+    fn new(field_seed: &[u8], holder_scores: Vec<f64>, epoch_ns: u64) -> PyResult<Self> {
         if field_seed.len() != 32 {
             return Err(PyValueError::new_err(format!(
                 "field_seed must be 32 bytes, got {}",
@@ -178,8 +171,7 @@ fn field_bound_split_py<'py>(
 ) -> PyResult<Vec<Bound<'py, PyBytes>>> {
     let mut state = PrngState::new(seed);
     let masked =
-        field_bound_split(secret, k, n, &mut state, &witness.inner)
-            .map_err(map_field_err)?;
+        field_bound_split(secret, k, n, &mut state, &witness.inner).map_err(map_field_err)?;
     Ok(masked
         .into_iter()
         .map(|s| PyBytes::new_bound(py, &s))
@@ -202,14 +194,8 @@ fn field_bound_reconstruct_py<'py>(
     witness: &PyFieldWitness,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let refs: Vec<&[u8]> = streams.iter().map(Vec::as_slice).collect();
-    let recovered = field_bound_reconstruct(
-        &xs,
-        &refs,
-        &share_indices,
-        k,
-        &witness.inner,
-    )
-    .map_err(map_field_err)?;
+    let recovered = field_bound_reconstruct(&xs, &refs, &share_indices, k, &witness.inner)
+        .map_err(map_field_err)?;
     Ok(PyBytes::new_bound(py, &recovered))
 }
 
@@ -218,9 +204,7 @@ fn field_bound_reconstruct_py<'py>(
 fn map_share_err(e: ShareError) -> PyErr {
     match e {
         ShareError::InvalidParams { .. } => PyValueError::new_err(e.to_string()),
-        ShareError::NotEnoughShares { .. } => {
-            PyValueError::new_err(e.to_string())
-        }
+        ShareError::NotEnoughShares { .. } => PyValueError::new_err(e.to_string()),
         ShareError::DuplicateShareX => PyValueError::new_err(e.to_string()),
         ShareError::InvalidShareX => PyValueError::new_err(e.to_string()),
     }
@@ -229,12 +213,8 @@ fn map_share_err(e: ShareError) -> PyErr {
 fn map_field_err(e: FieldBindingError) -> PyErr {
     match e {
         FieldBindingError::Inner(inner) => map_share_err(inner),
-        FieldBindingError::ScoreCountMismatch { .. } => {
-            PyValueError::new_err(e.to_string())
-        }
-        FieldBindingError::FieldScoreOutOfRange { .. } => {
-            PyValueError::new_err(e.to_string())
-        }
+        FieldBindingError::ScoreCountMismatch { .. } => PyValueError::new_err(e.to_string()),
+        FieldBindingError::FieldScoreOutOfRange { .. } => PyValueError::new_err(e.to_string()),
     }
 }
 

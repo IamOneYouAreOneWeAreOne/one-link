@@ -760,7 +760,7 @@ async def test_send_file_reuses_cached_file_index_without_rehashing(
     assert row.metadata["file_index_cache"] == "hit"
     assert row.metadata["file_index_kind"] == "fixed"
     assert row.metadata["prior_hit_rate_actual"] == 1.0
-    assert row.metadata["pipeline_tuning"]["reason"] == "constrained_backoff"
+    assert row.metadata["pipeline_tuning"]["reason"] == "observing_probe"
     assert row.metadata["pipeline_tuning"]["window_chunks"] >= 1
     assert row.metadata["transfer_report"]["effective_payload_bytes"] == len(payload)
     assert row.metadata["transfer_report"]["wire_bytes_sent"] == 0
@@ -1072,7 +1072,7 @@ async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
         row.metadata["cdc_engine"] == "pipelined_chunks_v2"
     )
     assert row.metadata["cdc_window_chunks"] == 2
-    assert row.metadata["pipeline_tuning"]["reason"] == "constrained_backoff"
+    assert row.metadata["pipeline_tuning"]["reason"] == "observing_probe"
     assert row.metadata["transfer_report"]["wire_efficiency_ratio"] == 1.0
     assert row.metadata["adaptive_scheduler"]["ack_count"] == 5
     assert row.metadata["adaptive_scheduler"]["timeline"][0]["event"] == "start"
@@ -1763,7 +1763,7 @@ async def test_send_file_stream_pipelines_bounded_ack_window(
     assert max(chan.recv_sent_counts) >= 3  # offer + conservative probe window before ACK drain
     assert row.metadata["stream_engine"] == "pipelined_json_v1"
     assert row.metadata["stream_window_chunks"] == 2
-    assert row.metadata["pipeline_tuning"]["reason"] == "constrained_backoff"
+    assert row.metadata["pipeline_tuning"]["reason"] == "observing_probe"
     assert row.metadata["adaptive_scheduler"]["ack_count"] == 5
     assert row.metadata["adaptive_scheduler"]["timeline"][0]["event"] == "start"
     state.close()

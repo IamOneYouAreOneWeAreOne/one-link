@@ -37,7 +37,7 @@ except ImportError as exc:
     NATIVE_VERSION = None
     _native_fountain = None  # type: ignore[assignment]
     PACKET_HEADER_LEN = 44
-    MAX_ENCODED_PER_CHUNK = 1024
+    MAX_ENCODED_PER_CHUNK = 2048
     SOLITON_C = 0.03
     SOLITON_DELTA = 0.05
     log.info(

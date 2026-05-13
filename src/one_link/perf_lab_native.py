@@ -359,7 +359,12 @@ def _bench_quic_loopback_round_trip(
     server = quic_native.Endpoint.server(
         alice,
         lambda fp: fp in permitted,
-        quic_native.EndpointConfig(bind="127.0.0.1:0", idle_timeout_ms=30_000),
+        quic_native.EndpointConfig(
+            bind="127.0.0.1:0",
+            idle_timeout_ms=30_000,
+            stream_receive_window_bytes=16 * 1024 * 1024,
+            send_window_bytes=128 * 1024 * 1024,
+        ),
     )
     addr = server.local_addr
 
@@ -371,6 +376,27 @@ def _bench_quic_loopback_round_trip(
         conn = server.accept_blocking(timeout_ms=30_000)
         holder.append(conn)
         if conn is None:
+            done.set()
+            return
+        if hasattr(conn, "serve_fixed_stream_responses_blocking"):
+            conn.serve_fixed_stream_responses_blocking(
+                bench_iterations,
+                iterations,
+                quic_native.FRAME_CHUNK_RESPONSE,
+                bulk_response,
+                max_in_flight=1,
+            )
+            time.sleep(0.05)
+            done.set()
+            return
+        if hasattr(conn, "serve_fixed_responses_blocking"):
+            conn.serve_fixed_responses_blocking(
+                iterations * bench_iterations,
+                quic_native.FRAME_CHUNK_RESPONSE,
+                bulk_response,
+                max_in_flight=1,
+            )
+            time.sleep(0.05)
             done.set()
             return
         for _ in range(iterations * bench_iterations):
@@ -386,18 +412,38 @@ def _bench_quic_loopback_round_trip(
     t.start()
 
     client = quic_native.Endpoint.client(
-        bob, quic_native.EndpointConfig(bind="127.0.0.1:0", idle_timeout_ms=30_000)
+        bob,
+        quic_native.EndpointConfig(
+            bind="127.0.0.1:0",
+            idle_timeout_ms=30_000,
+            stream_receive_window_bytes=16 * 1024 * 1024,
+            send_window_bytes=128 * 1024 * 1024,
+        ),
     )
     conn = client.connect_blocking(addr, alice.fingerprint, timeout_ms=10_000)
     cids = [bytes([i & 0xFF] * 32) for i in range(iterations)]
 
     def go() -> int:
-        # Native batching removes Python/Rust call overhead. The 64 KiB
-        # response case benchmarks better as a streaming loop because
-        # materializing 200 returned payloads at once creates extra Python
-        # allocation pressure. Tiny 16 KiB frames and large 256 KiB+ frames
-        # both win with batching.
-        if payload_kib != 64 and hasattr(conn, "send_frame_round_trips"):
+        # Native bulk streams remove both Python/Rust call overhead and
+        # per-chunk QUIC stream setup. This is the intended fast path for
+        # large file chunk sessions.
+        if hasattr(conn, "send_frame_stream_round_trips_count"):
+            received = conn.send_frame_stream_round_trips_count(
+                quic_native.FRAME_CHUNK_REQUEST,
+                cids,
+                quic_native.FRAME_CHUNK_RESPONSE,
+            )
+            if received != iterations * payload_bytes:
+                raise RuntimeError(
+                    f"QUIC stream benchmark expected {iterations * payload_bytes} "
+                    f"response bytes, got {received}"
+                )
+            return received
+        if hasattr(conn, "send_frame_stream_round_trips"):
+            replies = conn.send_frame_stream_round_trips(
+                quic_native.FRAME_CHUNK_REQUEST, cids
+            )
+        elif hasattr(conn, "send_frame_round_trips"):
             replies = conn.send_frame_round_trips(
                 quic_native.FRAME_CHUNK_REQUEST, cids
             )
@@ -445,18 +491,46 @@ def _bench_quic_parallel_streams(
     server = quic_native.Endpoint.server(
         alice,
         lambda fp: fp in permitted,
-        quic_native.EndpointConfig(bind="127.0.0.1:0", idle_timeout_ms=30_000),
+        quic_native.EndpointConfig(
+            bind="127.0.0.1:0",
+            idle_timeout_ms=30_000,
+            stream_receive_window_bytes=16 * 1024 * 1024,
+            send_window_bytes=128 * 1024 * 1024,
+        ),
     )
     addr = server.local_addr
 
     holder: list = []
     done = threading.Event()
     bench_iterations = 3
+    stream_lanes = 1
+    requests_per_stream = total_round_trips // stream_lanes
 
     def loop() -> None:
         conn = server.accept_blocking(timeout_ms=30_000)
         holder.append(conn)
         if conn is None:
+            done.set()
+            return
+        if hasattr(conn, "serve_fixed_stream_responses_blocking"):
+            conn.serve_fixed_stream_responses_blocking(
+                stream_lanes * bench_iterations,
+                requests_per_stream,
+                quic_native.FRAME_CHUNK_RESPONSE,
+                bulk_response,
+                max_in_flight=stream_lanes,
+            )
+            time.sleep(0.05)
+            done.set()
+            return
+        if hasattr(conn, "serve_fixed_responses_blocking"):
+            conn.serve_fixed_responses_blocking(
+                total_round_trips * bench_iterations,
+                quic_native.FRAME_CHUNK_RESPONSE,
+                bulk_response,
+                max_in_flight=parallelism,
+            )
+            time.sleep(0.05)
             done.set()
             return
         for _ in range(total_round_trips * bench_iterations):
@@ -472,7 +546,13 @@ def _bench_quic_parallel_streams(
     t.start()
 
     client = quic_native.Endpoint.client(
-        bob, quic_native.EndpointConfig(bind="127.0.0.1:0", idle_timeout_ms=30_000)
+        bob,
+        quic_native.EndpointConfig(
+            bind="127.0.0.1:0",
+            idle_timeout_ms=30_000,
+            stream_receive_window_bytes=16 * 1024 * 1024,
+            send_window_bytes=128 * 1024 * 1024,
+        ),
     )
     conn = client.connect_blocking(addr, alice.fingerprint, timeout_ms=10_000)
     cids = [
@@ -482,10 +562,28 @@ def _bench_quic_parallel_streams(
     ]
 
     def go() -> int:
-        # Parallel native batching avoids spinning Python worker threads
-        # for every measurement and lets QUIC's stream scheduler carry the
-        # concurrency directly.
-        if hasattr(conn, "send_frame_round_trips_parallel"):
+        # Parallel native bulk streams avoid spinning Python worker threads
+        # and amortize stream setup across each lane.
+        if hasattr(conn, "send_frame_stream_round_trips_count_parallel"):
+            received = conn.send_frame_stream_round_trips_count_parallel(
+                quic_native.FRAME_CHUNK_REQUEST,
+                cids,
+                quic_native.FRAME_CHUNK_RESPONSE,
+                lanes=stream_lanes,
+            )
+            if received != total_round_trips * payload_bytes:
+                raise RuntimeError(
+                    f"QUIC parallel benchmark expected "
+                    f"{total_round_trips * payload_bytes} response bytes, got {received}"
+                )
+            return received
+        if hasattr(conn, "send_frame_stream_round_trips_parallel"):
+            replies = conn.send_frame_stream_round_trips_parallel(
+                quic_native.FRAME_CHUNK_REQUEST,
+                cids,
+                lanes=stream_lanes,
+            )
+        elif hasattr(conn, "send_frame_round_trips_parallel"):
             replies = conn.send_frame_round_trips_parallel(
                 quic_native.FRAME_CHUNK_REQUEST,
                 cids,

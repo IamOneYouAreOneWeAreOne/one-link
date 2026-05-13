@@ -40,7 +40,8 @@ pub const CASCADE_PASSES_DEFAULT: usize = 4;
 /// original position of bit i in the permuted view.
 #[must_use]
 pub fn permutation_for_pass(seed: u64, pass_idx: usize, n: usize) -> Vec<usize> {
-    let mut prng = PrngState::new(seed.wrapping_add(pass_idx as u64 * 0x9E37_79B9_7F4A_7C15));
+    let pass_salt = (pass_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut prng = PrngState::new(seed.wrapping_add(pass_salt));
     // Fisher-Yates shuffle.
     let mut perm: Vec<usize> = (0..n).collect();
     for i in (1..n).rev() {

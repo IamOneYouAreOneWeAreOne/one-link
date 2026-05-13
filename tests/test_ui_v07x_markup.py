@@ -53,6 +53,11 @@ EXPECTED_IDS = [
     "input",
     "filelist",
     "transferlist",
+    # Universal Comms Fabric truth in Activity panel
+    "fabric-truth",
+    "route-bootstrap-token",
+    "btn-copy-route-bootstrap",
+    "btn-import-route-bootstrap",
 ]
 
 
@@ -67,6 +72,7 @@ EXPECTED_CLASSES = [
     "shortcuts-list",
     "lat-dot",
     "copyable",
+    "fabric-truth",
 ]
 
 
@@ -97,6 +103,12 @@ EXPECTED_JS_HELPERS = [
     # Structured-error helper used to surface error.code + error.hint
     "function _apiError",
     "function errorToastBody",
+    "function renderFabricTruth",
+    "async function refreshFabricTruth",
+    "async function copyRouteBootstrapToken",
+    "async function importRouteBootstrapToken",
+    "routeBootstrap()",
+    "importRouteBootstrap(token)",
 ]
 
 

@@ -31,6 +31,7 @@ from typing import Optional
 import click
 
 from one_link import daemon as daemon_mod
+from one_link.paths import data_dir
 
 
 def _ts(ms: Optional[int] = None) -> str:
@@ -58,8 +59,11 @@ def _request(port: int, *, timeout: float = 30.0, **req) -> dict:
 def _daemon_alive() -> Optional[int]:
     """If a running daemon is reachable, return its control port. Else None."""
     try:
-        port = daemon_mod.read_control_port()
-    except RuntimeError:
+        port_path = data_dir() / daemon_mod.CONTROL_PORT_FILE
+        if not port_path.is_file():
+            return None
+        port = int(port_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
         return None
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(0.5)

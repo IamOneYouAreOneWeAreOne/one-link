@@ -12,13 +12,11 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use ol_proximity_pair::{
-    block_syndrome, derive_factor2_secret, hamming_reconcile,
-    multi_pass_reconcile, multi_pass_syndromes, parity_bits_for_string,
-    permutation_for_pass, privacy_amplify, quantize_observations,
-    reconcile_with_syndrome, PairError, PipelineConfig, QuantizeConfig,
-    AMPLIFIED_KEY_BYTES, CASCADE_PASSES_DEFAULT, GUARD_BAND_DEFAULT,
-    HAMMING_CODEWORD_BITS, HAMMING_DATA_BITS, HAMMING_PARITY_BITS,
-    OBSERVATION_BYTES_DEFAULT, SYNDROME_BLOCK_BITS_DEFAULT,
+    block_syndrome, derive_factor2_secret, hamming_reconcile, multi_pass_reconcile,
+    multi_pass_syndromes, parity_bits_for_string, permutation_for_pass, privacy_amplify,
+    quantize_observations, reconcile_with_syndrome, PairError, PipelineConfig, QuantizeConfig,
+    AMPLIFIED_KEY_BYTES, CASCADE_PASSES_DEFAULT, GUARD_BAND_DEFAULT, HAMMING_CODEWORD_BITS,
+    HAMMING_DATA_BITS, HAMMING_PARITY_BITS, OBSERVATION_BYTES_DEFAULT, SYNDROME_BLOCK_BITS_DEFAULT,
 };
 
 // ── Stage 1+2: Quantization ───────────────────────────────────────
@@ -49,11 +47,7 @@ fn py_quantize_observations<'py>(
 /// bits from the input.
 #[pyfunction]
 #[pyo3(signature = (bits, block_bits = SYNDROME_BLOCK_BITS_DEFAULT))]
-fn py_block_syndrome<'py>(
-    py: Python<'py>,
-    bits: &[u8],
-    block_bits: usize,
-) -> Bound<'py, PyBytes> {
+fn py_block_syndrome<'py>(py: Python<'py>, bits: &[u8], block_bits: usize) -> Bound<'py, PyBytes> {
     let s = block_syndrome(bits, block_bits);
     PyBytes::new_bound(py, &s)
 }
@@ -103,13 +97,7 @@ fn py_multi_pass_reconcile<'py>(
     permutation_seed: u64,
 ) -> Bound<'py, PyBytes> {
     let syndromes: Vec<Vec<u8>> = peer_syndromes;
-    let r = multi_pass_reconcile(
-        my_bits,
-        &syndromes,
-        block_bits,
-        passes,
-        permutation_seed,
-    );
+    let r = multi_pass_reconcile(my_bits, &syndromes, block_bits, passes, permutation_seed);
     PyBytes::new_bound(py, &r)
 }
 
@@ -128,10 +116,7 @@ fn py_permutation_for_pass(seed: u64, pass_idx: usize, n: usize) -> Vec<usize> {
 /// Block size = 120 data bits; 7 parity bits per block. Last partial
 /// block is zero-padded internally.
 #[pyfunction]
-fn py_hamming_parity<'py>(
-    py: Python<'py>,
-    bits: &[u8],
-) -> Bound<'py, PyBytes> {
+fn py_hamming_parity<'py>(py: Python<'py>, bits: &[u8]) -> Bound<'py, PyBytes> {
     let p = parity_bits_for_string(bits);
     PyBytes::new_bound(py, &p)
 }
@@ -205,8 +190,7 @@ fn py_derive_factor2_secret<'py>(
         syndrome_block_bits: block_bits,
         amplify_salt: salt_arr,
     };
-    let key =
-        derive_factor2_secret(my_observations, peer_syndrome, &cfg).map_err(map_err)?;
+    let key = derive_factor2_secret(my_observations, peer_syndrome, &cfg).map_err(map_err)?;
     Ok(PyBytes::new_bound(py, &key))
 }
 

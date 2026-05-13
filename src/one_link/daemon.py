@@ -1055,6 +1055,14 @@ class Daemon:
         # learns which peer path is good; this learns which local engine
         # is actually fast on this computer right now.
         self._transfer_perf = TransferPerformanceOracle()
+        # Universal Comms Fabric read-only snapshot cache. Hardware/path
+        # probing can touch OS APIs (for example Windows WLAN driver
+        # inventory), so API surfaces read a bounded cache instead of
+        # running probes on every poll. The fabric is route intelligence
+        # only at this stage; it does not start hotspots, scan BLE, or
+        # transmit RF from this cache path.
+        self._fabric_snapshot_cache: dict | None = None
+        self._fabric_snapshot_cache_ts: float = 0.0
         # v0.7.1: dedup table for capability_request WS events.
         # (peer_fp, cap) -> monotonic ts of last UI prompt fired.
         self._capability_request_seen: dict[tuple[str, str], float] = {}
@@ -1067,6 +1075,11 @@ class Daemon:
         # fresh encrypted handshake at that address proves the expected
         # peer fingerprint. Tracks background verification tasks.
         self._endpoint_verify_tasks: set[asyncio.Task] = set()
+        # Route-bootstrap replay defense. QR/audio/BLE tokens are short-lived,
+        # signed route hints, but they can be photographed or retransmitted.
+        # Keep an in-memory issuer+nonce cache for the token TTL so a captured
+        # hint cannot repeatedly trigger route-probe work.
+        self._route_bootstrap_nonces: dict[tuple[str, str], int] = {}
 
     def _build_my_caps(self) -> dict:
         """Build a CAPS frame for THIS daemon. Includes our rendezvous
@@ -3647,6 +3660,62 @@ class Daemon:
             "routes": routes[:12],
             "route_count": len(routes),
         }
+
+    def _fabric_snapshot(self, *, max_age_s: float = 30.0) -> dict:
+        """Read-only Universal Comms Fabric truth.
+
+        This bridges the new hardware/adapter fabric into the existing daemon
+        without altering live transfer behavior. It is intentionally cached:
+        API dashboards can scrape it often, while OS hardware probes run at a
+        controlled cadence. Failures degrade into a structured unavailable
+        snapshot instead of breaking /api/status or /api/metrics.
+        """
+
+        now = time.monotonic()
+        cached = getattr(self, "_fabric_snapshot_cache", None)
+        cache_ts = float(getattr(self, "_fabric_snapshot_cache_ts", 0.0) or 0.0)
+        if cached is not None and (now - cache_ts) <= max(0.0, float(max_age_s)):
+            out = dict(cached)
+            out["cache_age_s"] = round(now - cache_ts, 3)
+            return out
+        try:
+            from one_link.hardware_inventory import collect_hardware_inventory
+            from one_link.transport_fabric import UniversalCommsFabric
+
+            inventory = collect_hardware_inventory()
+            fabric = UniversalCommsFabric.from_inventory(inventory)
+            plan = fabric.plan(
+                size_bytes=64 * 1024 * 1024,
+                supports_cdc=True,
+                supports_swarm=True,
+                prior_hit_rate=0.0,
+            )
+            snapshot = {
+                "ok": True,
+                "cache_age_s": 0.0,
+                "inventory": inventory.to_dict(),
+                "route_truth": plan.route_truth(),
+                "scores": [s.to_dict() for s in plan.scores],
+                "activation": [a.to_dict() for a in plan.activation],
+                "probes": [p.to_dict() for p in plan.probes],
+            }
+        except Exception as exc:
+            snapshot = {
+                "ok": False,
+                "cache_age_s": 0.0,
+                "error": str(exc),
+                "inventory": {"paths": []},
+                "route_truth": {
+                    "state": "Waiting for device",
+                    "reason": "fabric probe unavailable",
+                },
+                "scores": [],
+                "activation": [],
+                "probes": [],
+            }
+        self._fabric_snapshot_cache = dict(snapshot)
+        self._fabric_snapshot_cache_ts = now
+        return snapshot
 
     def _prune_chunk_cache(self, max_bytes: int = CDC_CACHE_MAX_BYTES) -> dict:
         root = self._chunk_cache_dir()
@@ -8309,6 +8378,109 @@ class Daemon:
                     writer.close()
                     await writer.wait_closed()
 
+    async def ingest_route_bootstrap(self, token: str) -> dict:
+        """Verify a signed out-of-band route token and queue route probes.
+
+        QR/audio/BLE bootstrap is deliberately weaker than an encrypted live
+        channel: anyone can show us bytes. Therefore this path only accepts
+        endpoint hints from peers we already have pinned, whose stored pubkey
+        matches the token issuer, and every endpoint is still promoted only
+        after a fresh key-confirmed dial in _verify_and_promote_endpoint.
+        """
+
+        if self.state is None:
+            return {
+                "ok": False,
+                "state": "unavailable",
+                "message": "state store is not ready",
+            }
+        from one_link.route_bootstrap import decode_bootstrap
+
+        payload = decode_bootstrap(str(token or ""))
+        peer_fp = payload.issuer_fp
+        rec = self.state.get_peer(peer_fp)
+        if rec is None:
+            return {
+                "ok": False,
+                "state": "needs_pairing",
+                "peer_fp": peer_fp,
+                "message": "Pair this device before accepting route hints.",
+            }
+        if rec.trust != "pinned":
+            return {
+                "ok": False,
+                "state": "not_trusted",
+                "peer_fp": peer_fp,
+                "message": "Route hints are accepted only from paired devices.",
+            }
+        if not rec.pubkey or rec.pubkey.hex() != payload.issuer_pub_hex:
+            return {
+                "ok": False,
+                "state": "identity_mismatch",
+                "peer_fp": peer_fp,
+                "message": "Route token identity does not match the paired device.",
+            }
+        now_ms = int(time.time() * 1000)
+        self._prune_route_bootstrap_nonces(now_ms)
+        nonce = str(payload.body.get("nonce") or "")
+        replay_key = (peer_fp, nonce)
+        if not nonce:
+            return {
+                "ok": False,
+                "state": "invalid_token",
+                "peer_fp": peer_fp,
+                "message": "Route token is missing replay protection.",
+            }
+        if replay_key in self._route_bootstrap_nonces:
+            return {
+                "ok": False,
+                "state": "replayed",
+                "peer_fp": peer_fp,
+                "message": "This route token was already used.",
+            }
+        self._route_bootstrap_nonces[replay_key] = int(payload.expires_ms)
+        queued = 0
+        rejected = 0
+        for endpoint in payload.endpoints[: self.MAX_ENDPOINTS_PER_ANNOUNCEMENT]:
+            host = endpoint.get("address") or endpoint.get("host")
+            port = endpoint.get("port")
+            route = str(endpoint.get("route") or "").lower()
+            if route == "loopback":
+                rejected += 1
+                continue
+            if not isinstance(host, str) or not host:
+                rejected += 1
+                continue
+            if not isinstance(port, int) or not (0 < port < 65536):
+                rejected += 1
+                continue
+            task = asyncio.create_task(
+                self._verify_and_promote_endpoint(
+                    peer_fp, rec.short_id or peer_fp[:8], host, port,
+                )
+            )
+            self._endpoint_verify_tasks.add(task)
+            task.add_done_callback(self._endpoint_verify_tasks.discard)
+            queued += 1
+        return {
+            "ok": queued > 0,
+            "state": "queued" if queued > 0 else "no_valid_endpoints",
+            "peer_fp": peer_fp,
+            "peer": rec.short_id or peer_fp[:8],
+            "queued": queued,
+            "rejected": rejected,
+            "expires_ms": payload.expires_ms,
+        }
+
+    def _prune_route_bootstrap_nonces(self, now_ms: int | None = None) -> int:
+        now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+        removed = 0
+        for key, expires_ms in list(self._route_bootstrap_nonces.items()):
+            if int(expires_ms) <= now_ms:
+                self._route_bootstrap_nonces.pop(key, None)
+                removed += 1
+        return removed
+
     async def broadcast_endpoint_to_paired(self) -> int:
         """v0.7.0: tell every pinned peer where to find us right now.
 
@@ -10213,6 +10385,45 @@ class Daemon:
         engine_speeds = self._transfer_perf.speeds(
             native_cdc=bool(native_status.available),
         )
+        fabric_plan: dict[str, Any] | None = None
+        try:
+            from one_link.hardware_inventory import collect_hardware_inventory
+            from one_link.transport_fabric import UniversalCommsFabric
+            fabric = UniversalCommsFabric.from_inventory(
+                collect_hardware_inventory()
+            )
+            fabric_decision = fabric.plan(
+                size_bytes=size,
+                supports_cdc=can_offer_cdc,
+                supports_swarm=FILE_SWARM in set(normalize_caps(peer_features)),
+                prior_hit_rate=prior_hit_rate,
+                mesh_nodes=self._mesh_node_signals(
+                    peer_fp,
+                    chunk_hit_rate=prior_hit_rate,
+                ),
+                speeds=engine_speeds,
+            )
+            fabric_plan = fabric_decision.to_dict()
+            fabric_routes = tuple(dict.fromkeys(
+                o.route for o in fabric_decision.observations
+                if o.ok and o.route != "courier"
+            ))
+            if fabric_routes:
+                route_names = tuple(dict.fromkeys((*route_names, *fabric_routes)))
+            if fabric_decision.observations:
+                route_observations = (
+                    *route_observations,
+                    *fabric_decision.observations,
+                )
+        except Exception as e:
+            fabric_plan = {
+                "ok": False,
+                "error": str(e),
+                "route_truth": {
+                    "state": "Measuring route",
+                    "reason": "fabric route probe unavailable for this send",
+                },
+            }
         transfer_brain_decision = decision_from_observations(
             size_bytes=size,
             supports_cdc=can_offer_cdc,
@@ -10263,6 +10474,7 @@ class Daemon:
             "transfer_engine_speeds": engine_speeds,
             "transfer_engine_oracle": self._transfer_perf.snapshot(),
             "prior_hit_rate_estimate": prior_hit_rate,
+            "fabric_plan": fabric_plan,
             "transfer_brain": transfer_brain_decision,
             "autopilot_plan": autopilot_plan,
             "verification_head": list(verification_head),
@@ -10810,7 +11022,9 @@ class Daemon:
                                 # receiver's matched session decrypts
                                 # in lockstep (same derivation, same
                                 # ratchet position).
-                                record = native_session.encrypt_chunk_bytes(data)
+                                record = native_session.encrypt_chunk_bytes(
+                                    data, address_kind=native_address_kind,
+                                )
                                 chunk_msg = make_msg(
                                     "FILE_NATIVE_CHUNK",
                                     self.me.short_id,

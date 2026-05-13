@@ -28,6 +28,7 @@ import base64
 from collections import deque
 import contextlib
 import hmac
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -58,6 +59,18 @@ log = logging.getLogger("one_link.server")
 WEB_DIR = Path(__file__).resolve().parent / "web"
 TOKEN_FILE = "ui.token"
 SERVER_PORT_FILE = "server.port"
+
+
+def _route_hint_for_host(host: str) -> tuple[str, str]:
+    clean = str(host or "").strip().strip("[]").lower()
+    if clean == "localhost":
+        return "loopback", "loopback"
+    try:
+        if ipaddress.ip_address(clean).is_loopback:
+            return "loopback", "loopback"
+    except ValueError:
+        pass
+    return "peer_server", "lan"
 
 
 def _enumerate_sovereign_primitives() -> list[dict]:
@@ -961,6 +974,9 @@ class UIServer:
         r.add_get("/api/me", self._guarded(self.api_me))
         r.add_get("/api/status", self._guarded(self.api_status))
         r.add_get("/api/metrics", self._guarded(self.api_metrics))
+        r.add_get("/api/fabric", self._guarded(self.api_fabric))
+        r.add_get("/api/route-bootstrap", self._guarded(self.api_route_bootstrap))
+        r.add_post("/api/route-bootstrap/import", self._guarded(self.api_import_route_bootstrap))
         r.add_get("/api/settings", self._guarded(self.api_get_settings))
         r.add_post("/api/settings", self._guarded(self.api_set_settings))
         r.add_get("/api/peers", self._guarded(self.api_peers))
@@ -2054,7 +2070,176 @@ class UIServer:
             "field": field_metrics,
             "per_peer_field_advisories": per_peer,
             "relay_metrics_count": relay_count,
+            "fabric": self._safe_fabric_snapshot(summary=True),
         })
+
+    def _safe_fabric_snapshot(self, *, summary: bool = False) -> dict:
+        getter = getattr(self.daemon, "_fabric_snapshot", None)
+        if not callable(getter):
+            return {
+                "ok": False,
+                "route_truth": {
+                    "state": "Waiting for device",
+                    "reason": "daemon does not expose fabric snapshot",
+                },
+                "scores": [],
+                "activation": [],
+                "probes": [],
+            }
+        try:
+            snap = getter()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "route_truth": {
+                    "state": "Waiting for device",
+                    "reason": "fabric snapshot failed",
+                },
+                "scores": [],
+                "activation": [],
+                "probes": [],
+            }
+        if not summary:
+            return snap
+        return {
+            "ok": bool(snap.get("ok")),
+            "cache_age_s": snap.get("cache_age_s"),
+            "route_truth": snap.get("route_truth", {}),
+            "score_count": len(snap.get("scores") or []),
+            "activation_count": len(snap.get("activation") or []),
+            "ready_paths": sum(
+                1 for a in (snap.get("activation") or [])
+                if isinstance(a, dict) and a.get("state") in {"active", "ready"}
+            ),
+            "available_paths": sum(
+                1 for p in (snap.get("probes") or [])
+                if isinstance(p, dict) and p.get("available")
+            ),
+        }
+
+    async def api_fabric(self, request: web.Request) -> web.Response:
+        """Read-only Universal Comms Fabric snapshot.
+
+        Exposes the local hardware/path inventory, adapter scores, and the
+        route-truth bridge into the transfer brain. This endpoint never starts
+        a transport or mutates daemon state beyond the daemon's bounded probe
+        cache.
+        """
+
+        return web.json_response(self._safe_fabric_snapshot())
+
+    async def api_route_bootstrap(self, request: web.Request) -> web.Response:
+        """Mint a signed route-bootstrap token for QR/audio/BLE paths.
+
+        The token carries only short-lived route hints. It is not an auth
+        bypass: peers still need One Link identity verification, capabilities,
+        encrypted session setup, and chunk verification before data moves.
+        """
+
+        try:
+            ttl_s = int(request.query.get("ttl_s") or 180)
+        except ValueError:
+            ttl_s = 180
+        try:
+            from one_link.capabilities import LOCAL_CAPABILITIES
+            from one_link import rendezvous_client
+            from one_link.route_bootstrap import (
+                RouteEndpointHint,
+                encode_bootstrap,
+                make_route_bootstrap,
+            )
+
+            peer_port = int(getattr(self.daemon, "_rendezvous_peer_port", 0) or 0)
+            include_loopback = self.bind_host in ("127.0.0.1", "localhost", "::1")
+            endpoints = []
+            for i, e in enumerate(
+                rendezvous_client.discover_local_endpoints(
+                    peer_port=peer_port,
+                    include_loopback=include_loopback,
+                ),
+                start=1,
+            ):
+                kind, route = _route_hint_for_host(e.host)
+                endpoints.append(
+                    RouteEndpointHint(
+                        kind=kind,
+                        address=e.host,
+                        port=e.port,
+                        priority=i,
+                        route=route,
+                        transport="tcp",
+                    )
+                )
+            endpoints = endpoints[:8]
+            if not endpoints:
+                return web.json_response({
+                    "ok": False,
+                    "error": "no_route_hints",
+                    "message": "One Link is waiting for a reachable peer listener.",
+                }, status=503)
+            fabric = self._safe_fabric_snapshot(summary=True)
+            payload = make_route_bootstrap(
+                identity=self.daemon.me,
+                endpoints=endpoints,
+                capabilities=LOCAL_CAPABILITIES,
+                route_truth=fabric.get("route_truth") if isinstance(fabric, dict) else {},
+                ttl_s=ttl_s,
+            )
+            token = encode_bootstrap(payload)
+            return web.json_response({
+                "ok": True,
+                "token": token,
+                "expires_ms": payload.expires_ms,
+                "issuer_fp": payload.issuer_fp,
+                "endpoints": list(payload.endpoints),
+                "route_truth": payload.body.get("route_truth", {}),
+            })
+        except Exception as exc:
+            return web.json_response({
+                "ok": False,
+                "error": "route_bootstrap_failed",
+                "message": str(exc),
+            }, status=500)
+
+    async def api_import_route_bootstrap(self, request: web.Request) -> web.Response:
+        """Accept a signed QR/audio/BLE route-bootstrap token.
+
+        Import never writes endpoint state directly. It asks the daemon to
+        verify the token, check trust, then queue key-confirmed endpoint probes.
+        """
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Expected JSON with a token field.",
+            }, status=400)
+        token = str(data.get("token") or "").strip() if isinstance(data, dict) else ""
+        if not token:
+            return web.json_response({
+                "ok": False,
+                "error": "missing_token",
+                "message": "Paste or scan a One Link route token first.",
+            }, status=400)
+        try:
+            result = await self.daemon.ingest_route_bootstrap(token)
+        except ValueError as exc:
+            return web.json_response({
+                "ok": False,
+                "error": "invalid_route_bootstrap",
+                "message": str(exc),
+            }, status=400)
+        except Exception as exc:
+            return web.json_response({
+                "ok": False,
+                "error": "route_bootstrap_import_failed",
+                "message": str(exc),
+            }, status=500)
+        status = 200 if result.get("ok") else 409
+        return web.json_response(result, status=status)
 
     async def api_status(self, request: web.Request) -> web.Response:
         state = self.daemon.state
@@ -2100,6 +2285,7 @@ class UIServer:
                 "sessions": self.daemon._session_stats(),
                 "cdc_cache": self.daemon._chunk_cache_stats(),
                 "transfer_autopilot": self.daemon._transfer_autopilot_stats(),
+                "fabric": self._safe_fabric_snapshot(summary=True),
             },
         })
 

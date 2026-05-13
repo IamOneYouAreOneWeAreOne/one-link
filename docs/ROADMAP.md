@@ -63,6 +63,16 @@ Companion docs (the project's plan-of-record at every layer):
   (line-rate CDC, content-addressed LSM with bloom front,
   crash-only WAL, AEAD pipeline, manifest WAL, stripe-layout-
   ready, both-address capable).
+- [`UNIVERSAL_COMMS_FABRIC.md`](./UNIVERSAL_COMMS_FABRIC.md) -
+  implementation-grade doctrine for making every device use every
+  communication surface it has. Covers LAN, Wi-Fi Direct, private
+  hotspot, Bluetooth/BLE, USB, Ethernet, WebRTC, QR, audio,
+  offline courier, OneField/LoRa/SDR, future hardware adapters,
+  hardware inventory, adapter contracts, route scoring,
+  activation safety policy, multi-source pull, store-carry-forward,
+  safety budgets, and phased ship gates. Phase 1 now has code:
+  inventory, route scoring, activation governor, daemon/API fabric
+  truth, transfer metadata, and Activity-panel truth surfacing.
 
 Read order for someone joining cold:
 1. `PRINCIPLES.md` — what gates ships.
@@ -70,7 +80,9 @@ Read order for someone joining cold:
 3. `ARCHITECTURE.md` — how the PWA pivot is built.
 4. `SOVEREIGNTY.md` + `SECURITY.md` — the defenses, paired.
 5. `GOVERNANCE.md` — the structural commitments.
-6. `PHONE_TIER.md` — the phone-specific surface contract.
+6. `UNIVERSAL_COMMS_FABRIC.md` - how One Link reaches people
+   when ordinary networks are missing, weak, or fragmented.
+7. `PHONE_TIER.md` — the phone-specific surface contract.
 
 The reorganization from earlier roadmaps groups remaining work
 under three tracks instead of tiers. Tiers were "what the protocol

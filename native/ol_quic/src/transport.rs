@@ -43,6 +43,20 @@ pub struct EndpointConfig {
     /// Maximum concurrent inbound bidirectional streams per connection.
     /// Default 256 per ADR-0009.
     pub max_concurrent_bidi_streams: u32,
+    /// Optional per-stream receive window in bytes. Large trusted file transfers
+    /// routinely push 256 KiB-1 MiB frames; Quinn's conservative default
+    /// is sized around 100 Mbps and can stall high-throughput LAN paths.
+    /// Set to 0 to keep Quinn's platform-safe default.
+    pub stream_receive_window_bytes: u64,
+    /// Optional total send window in bytes. This caps unacknowledged outgoing data
+    /// and should be large enough to keep Wi-Fi/Ethernet full without
+    /// turning every connection into an unbounded memory promise.
+    /// Set to 0 to keep Quinn's platform-safe default.
+    pub send_window_bytes: u64,
+    /// Whether Quinn should round-robin equal-priority send streams.
+    /// One Link's chunk workload uses many short, same-priority streams;
+    /// disabling fairness reduces fragmentation and scheduler overhead.
+    pub send_fairness: bool,
 }
 
 impl Default for EndpointConfig {
@@ -52,6 +66,9 @@ impl Default for EndpointConfig {
             idle_timeout_ms: 30_000,
             keepalive_interval_ms: 10_000,
             max_concurrent_bidi_streams: 256,
+            stream_receive_window_bytes: 0,
+            send_window_bytes: 0,
+            send_fairness: true,
         }
     }
 }
@@ -67,6 +84,15 @@ impl EndpointConfig {
             self.keepalive_interval_ms,
         )));
         t.max_concurrent_bidi_streams(VarInt::from_u32(self.max_concurrent_bidi_streams));
+        if self.stream_receive_window_bytes > 0 {
+            t.stream_receive_window(
+                VarInt::from_u64(self.stream_receive_window_bytes).expect("window fits varint"),
+            );
+        }
+        if self.send_window_bytes > 0 {
+            t.send_window(self.send_window_bytes);
+        }
+        t.send_fairness(self.send_fairness);
         // Connection migration is on by default in quinn 0.11.
         t
     }

@@ -33,6 +33,7 @@ Coverage matrix (one assertion per row in each suite):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -111,6 +112,8 @@ GUARDED_GET_ROUTES = [
     "/api/peers",
     "/api/palette?q=hi",
     "/api/activity?limit=5",
+    "/api/fabric",
+    "/api/route-bootstrap",
     "/api/folder-conflicts",
     "/api/key-change-events",
     "/api/peers/{fp}/trust-history",
@@ -138,6 +141,281 @@ async def test_api_me_happy(ctx):
     assert "fingerprint" in me
     assert "app_version" in me
     assert "onboarding_completed" in me, "v0.9.4 flag must surface"
+
+
+@pytest.mark.asyncio
+async def test_api_fabric_returns_route_truth(ctx):
+    client, daemon, _, token, _ = ctx
+    daemon._fabric_snapshot = lambda: {  # type: ignore[method-assign]
+        "ok": True,
+        "cache_age_s": 0.0,
+        "inventory": {"paths": []},
+        "route_truth": {
+            "route": "lan",
+            "kind": "Local network",
+            "state": "Sending",
+            "reason": "lan can carry control and bulk data",
+            "activation_state": "active",
+            "activation_risk": "low",
+            "automatic": True,
+        },
+        "scores": [],
+        "activation": [
+            {
+                "adapter_id": "lan.test",
+                "route_name": "lan",
+                "state": "active",
+                "risk": "low",
+                "score": 0.95,
+                "automatic": True,
+                "needs_user": False,
+                "reason": "path ready",
+                "next_action": "open_route",
+                "safeguards": ["all payload chunks are cryptographically verified"],
+            },
+        ],
+        "probes": [],
+    }
+
+    resp = await client.get("/api/fabric", headers=_h(token))
+
+    assert resp.status == 200
+    j = await resp.json()
+    assert j["ok"] is True
+    assert j["route_truth"]["kind"] == "Local network"
+    assert j["route_truth"]["automatic"] is True
+    assert j["activation"][0]["state"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_api_route_bootstrap_returns_signed_token(ctx, monkeypatch):
+    client, daemon, _, token, _ = ctx
+    daemon._rendezvous_peer_port = 17117
+    from one_link import rendezvous_client
+    from one_link.route_bootstrap import decode_bootstrap
+    from one_link.rendezvous_proto import Endpoint
+
+    monkeypatch.setattr(
+        rendezvous_client,
+        "discover_local_endpoints",
+        lambda *, peer_port, include_loopback=False: [
+            Endpoint(host="192.168.1.20", port=peer_port),
+        ],
+    )
+    daemon._fabric_snapshot = lambda: {  # type: ignore[method-assign]
+        "ok": True,
+        "cache_age_s": 0.0,
+        "route_truth": {
+            "route": "lan",
+            "kind": "Local network",
+            "state": "Ready",
+            "reason": "lan can carry control and bulk data",
+        },
+        "scores": [],
+        "activation": [],
+        "probes": [],
+    }
+
+    resp = await client.get("/api/route-bootstrap?ttl_s=60", headers=_h(token))
+
+    assert resp.status == 200
+    j = await resp.json()
+    assert j["ok"] is True
+    decoded = decode_bootstrap(j["token"])
+    assert decoded.issuer_fp == daemon.me.fingerprint
+    assert decoded.endpoints[0]["address"] == "192.168.1.20"
+
+
+@pytest.mark.asyncio
+async def test_api_route_bootstrap_marks_loopback_as_loopback_only(ctx, monkeypatch):
+    client, daemon, _, token, _ = ctx
+    daemon._rendezvous_peer_port = 17117
+    from one_link import rendezvous_client
+    from one_link.route_bootstrap import decode_bootstrap
+    from one_link.rendezvous_proto import Endpoint
+
+    monkeypatch.setattr(
+        rendezvous_client,
+        "discover_local_endpoints",
+        lambda *, peer_port, include_loopback=False: [
+            Endpoint(host="127.0.0.1", port=peer_port),
+        ],
+    )
+
+    resp = await client.get("/api/route-bootstrap?ttl_s=60", headers=_h(token))
+
+    assert resp.status == 200
+    j = await resp.json()
+    decoded = decode_bootstrap(j["token"])
+    assert decoded.endpoints[0]["address"] == "127.0.0.1"
+    assert decoded.endpoints[0]["route"] == "loopback"
+    assert decoded.endpoints[0]["kind"] == "loopback"
+
+
+@pytest.mark.asyncio
+async def test_api_route_bootstrap_import_queues_verified_probe(ctx, monkeypatch):
+    client, daemon, state, token, peer_fp = ctx
+    from one_link.route_bootstrap import (
+        RouteEndpointHint,
+        encode_bootstrap,
+        make_route_bootstrap,
+    )
+
+    peer_identity = _identity()
+    state.upsert_peer(
+        fingerprint=peer_identity.fingerprint,
+        short_id=peer_identity.short_id,
+        pubkey=peer_identity.public_bytes,
+        hostname="route-peer",
+    )
+    state.set_peer_trust(peer_identity.fingerprint, "pinned")
+    calls = []
+
+    async def fake_verify(fp, sid, host, port):
+        calls.append((fp, sid, host, port))
+
+    monkeypatch.setattr(daemon, "_verify_and_promote_endpoint", fake_verify)
+    payload = make_route_bootstrap(
+        identity=peer_identity,
+        endpoints=[RouteEndpointHint(kind="lan", address="10.1.2.3", port=17117)],
+    )
+
+    resp = await client.post(
+        "/api/route-bootstrap/import",
+        headers=_h(token),
+        json={"token": encode_bootstrap(payload)},
+    )
+
+    assert resp.status == 200
+    j = await resp.json()
+    assert j["ok"] is True
+    assert j["queued"] == 1
+    await asyncio.sleep(0)
+    assert calls == [(peer_identity.fingerprint, peer_identity.short_id, "10.1.2.3", 17117)]
+
+
+@pytest.mark.asyncio
+async def test_api_route_bootstrap_import_rejects_remote_loopback(ctx, monkeypatch):
+    client, daemon, state, token, _ = ctx
+    from one_link.route_bootstrap import (
+        RouteEndpointHint,
+        encode_bootstrap,
+        make_route_bootstrap,
+    )
+
+    peer_identity = _identity()
+    state.upsert_peer(
+        fingerprint=peer_identity.fingerprint,
+        short_id=peer_identity.short_id,
+        pubkey=peer_identity.public_bytes,
+        hostname="route-peer",
+    )
+    state.set_peer_trust(peer_identity.fingerprint, "pinned")
+    calls = []
+
+    async def fake_verify(fp, sid, host, port):
+        calls.append((fp, sid, host, port))
+
+    monkeypatch.setattr(daemon, "_verify_and_promote_endpoint", fake_verify)
+    payload = make_route_bootstrap(
+        identity=peer_identity,
+        endpoints=[
+            RouteEndpointHint(
+                kind="loopback",
+                route="loopback",
+                address="127.0.0.1",
+                port=17117,
+            )
+        ],
+    )
+
+    resp = await client.post(
+        "/api/route-bootstrap/import",
+        headers=_h(token),
+        json={"token": encode_bootstrap(payload)},
+    )
+
+    assert resp.status == 409
+    j = await resp.json()
+    assert j["state"] == "no_valid_endpoints"
+    assert j["rejected"] == 1
+    await asyncio.sleep(0)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_api_route_bootstrap_import_rejects_unpaired_issuer(ctx):
+    client, _, _, token, _ = ctx
+    from one_link.route_bootstrap import (
+        RouteEndpointHint,
+        encode_bootstrap,
+        make_route_bootstrap,
+    )
+
+    unknown = _identity()
+    payload = make_route_bootstrap(
+        identity=unknown,
+        endpoints=[RouteEndpointHint(kind="lan", address="10.1.2.3", port=17117)],
+    )
+
+    resp = await client.post(
+        "/api/route-bootstrap/import",
+        headers=_h(token),
+        json={"token": encode_bootstrap(payload)},
+    )
+
+    assert resp.status == 409
+    j = await resp.json()
+    assert j["state"] == "needs_pairing"
+
+
+@pytest.mark.asyncio
+async def test_api_route_bootstrap_import_rejects_replay(ctx, monkeypatch):
+    client, daemon, state, token, _ = ctx
+    from one_link.route_bootstrap import (
+        RouteEndpointHint,
+        encode_bootstrap,
+        make_route_bootstrap,
+    )
+
+    peer_identity = _identity()
+    state.upsert_peer(
+        fingerprint=peer_identity.fingerprint,
+        short_id=peer_identity.short_id,
+        pubkey=peer_identity.public_bytes,
+        hostname="route-peer",
+    )
+    state.set_peer_trust(peer_identity.fingerprint, "pinned")
+    calls = []
+
+    async def fake_verify(fp, sid, host, port):
+        calls.append((fp, sid, host, port))
+
+    monkeypatch.setattr(daemon, "_verify_and_promote_endpoint", fake_verify)
+    payload = make_route_bootstrap(
+        identity=peer_identity,
+        endpoints=[RouteEndpointHint(kind="lan", address="10.1.2.3", port=17117)],
+        nonce_hex="11" * 16,
+    )
+    body = {"token": encode_bootstrap(payload)}
+
+    first = await client.post(
+        "/api/route-bootstrap/import",
+        headers=_h(token),
+        json=body,
+    )
+    second = await client.post(
+        "/api/route-bootstrap/import",
+        headers=_h(token),
+        json=body,
+    )
+
+    assert first.status == 200
+    assert second.status == 409
+    j = await second.json()
+    assert j["state"] == "replayed"
+    await asyncio.sleep(0)
+    assert len(calls) == 1
 
 
 # ───────── /api/peers ─────────────────────────────────────────────────

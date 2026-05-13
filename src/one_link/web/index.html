@@ -1022,12 +1022,14 @@
     border-top: 1px solid var(--line);
     padding: 12px 14px; display: grid; gap: 8px;
   }
-  .panel-form input {
+  .panel-form input,
+  .panel-form textarea {
     width: 100%; background: var(--bg-2); border: 1px solid var(--bg-3);
     color: var(--text); border-radius: 8px; padding: 9px 10px;
-    outline: none; font-size: 12px;
+    outline: none; font-size: 12px; resize: vertical; min-height: 38px;
   }
-  .panel-form input:focus { border-color: var(--accent); }
+  .panel-form input:focus,
+  .panel-form textarea:focus { border-color: var(--accent); }
   .mini-actions { display: flex; gap: 8px; align-items: center; }
   .mini-actions.wrap { flex-wrap: wrap; }
   .mini-actions button, .cap-toggle {
@@ -1072,6 +1074,80 @@
   .metric.clickable:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
+  }
+  .fabric-truth {
+    margin: 0 12px 10px;
+    padding: 10px 11px;
+    border-radius: 8px;
+    border: 1px solid rgba(124,92,255,.20);
+    background: linear-gradient(135deg, rgba(124,92,255,.10), rgba(78,193,255,.045));
+    min-width: 0;
+  }
+  .fabric-truth .ft-top {
+    display: flex; align-items: center; gap: 8px; min-width: 0;
+  }
+  .fabric-truth .ft-state {
+    color: var(--text);
+    font-weight: 800;
+    font-size: 13px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .fabric-truth .ft-pill {
+    margin-left: auto;
+    flex: none;
+    max-width: 48%;
+    padding: 3px 7px;
+    border-radius: 999px;
+    color: var(--accent-2);
+    background: rgba(78,193,255,.10);
+    border: 1px solid rgba(78,193,255,.18);
+    font-size: 10px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: .6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .fabric-truth .ft-reason {
+    margin-top: 6px;
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  .fabric-truth .ft-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .fabric-truth .ft-chip {
+    min-width: 0;
+    border-radius: 7px;
+    border: 1px solid rgba(255,255,255,.055);
+    background: rgba(255,255,255,.035);
+    padding: 6px 7px;
+  }
+  .fabric-truth .ft-chip b {
+    display: block;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.15;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .fabric-truth .ft-chip span {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-dimmer);
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: .55px;
+    text-transform: uppercase;
   }
 
   /* v0.10.6: folder pane controls. Inline Browse button next to
@@ -3534,6 +3610,13 @@
         <div class="metric clickable" id="metric-tile-cache" role="button" tabindex="0" data-mesh-tile="cache" aria-label="Filter activity to file transfers"><div class="num" id="metric-cache">0 B</div><div class="lbl">saved chunks</div></div>
         <div class="metric clickable" id="metric-tile-sessions" role="button" tabindex="0" data-mesh-tile="sessions" aria-label="Filter activity to trust events"><div class="num" id="metric-sessions">0</div><div class="lbl">secure links</div></div>
       </div>
+      <div class="fabric-truth" id="fabric-truth">
+        <div class="ft-top">
+          <div class="ft-state">Finding best path</div>
+          <div class="ft-pill">Autopilot</div>
+        </div>
+        <div class="ft-reason">One Link is checking every safe communication path this device can use.</div>
+      </div>
       <!-- v0.9.1: filter chips for the merged activity feed. -->
       <div class="activity-filters" id="activity-filters">
         <button class="chip active" data-activity-filter="all">All</button>
@@ -3554,8 +3637,11 @@
            tab covers transfer-only views. -->
       <div id="transferlist" style="display:none;"></div>
       <div class="panel-form">
+        <textarea id="route-bootstrap-token" rows="2" placeholder="Route token"></textarea>
         <div class="mini-actions">
           <button id="btn-refresh-mesh">Refresh</button>
+          <button id="btn-copy-route-bootstrap">Copy route token</button>
+          <button id="btn-import-route-bootstrap">Import route token</button>
           <button id="btn-clear-transfers">Clear done</button>
         </div>
       </div>
@@ -5093,6 +5179,7 @@
     transferRates: new Map(),
     folders: [],
     status: null,
+    fabric: null,
     searchQuery: "",
     searchResults: null,
     activePane: "convo",
@@ -5236,7 +5323,7 @@
   // headline and the suggested next step. Server returns
   // {error, hint, code} for translated failures.
   function _apiError(j, status) {
-    const headline = (j && j.error) || `request failed (${status})`;
+    const headline = (j && (j.error || j.message)) || `request failed (${status})`;
     const err = new Error(headline);
     err.status = status;
     err.code = j && j.code || null;
@@ -5310,6 +5397,11 @@
     folders() { return this.get("/api/folders"); },
     transfers() { return this.get("/api/transfers?limit=80"); },
     status() { return this.get("/api/status"); },
+    fabric() { return this.get("/api/fabric"); },
+    routeBootstrap() { return this.get("/api/route-bootstrap"); },
+    importRouteBootstrap(token) {
+      return this.post("/api/route-bootstrap/import", { token });
+    },
   };
 
   function errorToastBody(e) {
@@ -6441,6 +6533,7 @@
     }
     const meta = t.metadata || {};
     const plan = meta.autopilot_plan || {};
+    const fabricTruth = meta.fabric_plan?.route_truth || {};
     const perf = meta.performance_summary || {};
     const assist = meta.swarm_assist || {};
     const facts = [];
@@ -6478,8 +6571,11 @@
       const sourceCount = Number(assist.source_count || Object.keys(assist.sources || {}).length || 1);
       facts.push(`Pulled ${pulled} chunk${pulled === 1 ? "" : "s"} from ${sourceCount} trusted device${sourceCount === 1 ? "" : "s"}`);
     }
-    const route = perf.route || plan.route || meta.route || (assist.strategy === "multi_source_chunk_pull" ? "local_cache" : "");
-    if (route) facts.push(`Route: ${transferRouteLabel(route)}`);
+    const route = fabricTruth.kind || perf.route || plan.route || meta.route || (assist.strategy === "multi_source_chunk_pull" ? "local_cache" : "");
+    if (route) {
+      const renderedRoute = fabricTruth.kind ? route : transferRouteLabel(route);
+      facts.push(`Route: ${renderedRoute}`);
+    }
     if (progressBytes > 0 && totalBytes > 0 && progressBytes < totalBytes && kind !== "sent") {
       facts.push("Resuming automatically");
     }
@@ -6500,6 +6596,7 @@
     const meta = t.metadata || {};
     const perf = meta.performance_summary || {};
     const report = meta.transfer_report || {};
+    const fabricTruth = meta.fabric_plan?.route_truth || {};
     const liveBps = rateForTransfer(t);
     const speedMbps = liveBps > 0
       ? (liveBps * 8) / 1_000_000
@@ -6513,7 +6610,7 @@
     const wireBytes = Number(
       truth.wire_bytes || report.wire_bytes_sent || t.wire_bytes || 0
     );
-    const route = truth.route_label || transferRouteLabel(
+    const route = truth.route_label || fabricTruth.kind || transferRouteLabel(
       truth.route || perf.route || meta.autopilot_plan?.route || meta.route
     );
     const rows = [];
@@ -6541,6 +6638,45 @@
       wrap.appendChild(card);
     }
     return wrap;
+  }
+  function renderFabricTruth() {
+    const host = $("#fabric-truth");
+    if (!host) return;
+    const fabric = state.fabric || state.status?.performance?.fabric || {};
+    const truth = fabric.route_truth || {};
+    const route = truth.kind || transferRouteLabel(truth.route || truth.route_name || "");
+    const stateText = truth.state || (fabric.ok === false ? "Path check paused" : "Finding best path");
+    const reason = truth.reason || "One Link is checking every safe communication path this device can use.";
+    const available = Number(fabric.available_paths || 0);
+    const ready = Number(fabric.ready_paths || 0);
+    const scoreCount = Number(fabric.score_count || (Array.isArray(fabric.scores) ? fabric.scores.length : 0));
+    const cacheAge = Number(fabric.cache_age_s || 0);
+    const chips = [];
+    if (route && route !== "Best available") chips.push({ label: "route", value: route });
+    if (truth.automatic) chips.push({ label: "activation", value: "automatic" });
+    else if (truth.needs_user) chips.push({ label: "activation", value: "confirm" });
+    if (ready > 0) chips.push({ label: "ready", value: String(ready) });
+    if (available > 0) chips.push({ label: "ready paths", value: String(available) });
+    if (scoreCount > 0) chips.push({ label: "ranked paths", value: String(scoreCount) });
+    if (cacheAge > 0) chips.push({ label: "checked", value: cacheAge < 1 ? "now" : `${Math.round(cacheAge)}s ago` });
+
+    host.replaceChildren();
+    const top = el("div", "ft-top");
+    top.appendChild(el("div", "ft-state", stateText));
+    top.appendChild(el("div", "ft-pill", route && route !== "Best available" ? route : "Autopilot"));
+    host.appendChild(top);
+    host.appendChild(el("div", "ft-reason", reason));
+    if (chips.length) {
+      const grid = el("div", "ft-grid");
+      for (const c of chips.slice(0, 4)) {
+        const chip = el("div", "ft-chip");
+        chip.appendChild(el("b", "", c.value));
+        chip.appendChild(el("span", "", c.label));
+        grid.appendChild(chip);
+      }
+      host.appendChild(grid);
+    }
+    host.title = "Universal Comms Fabric: One Link ranks safe local, relay, courier, and future hardware paths before moving data.";
   }
   function aggregateActiveTransferStats() {
     let count = 0, bps = 0, sent = 0, total = 0;
@@ -8453,10 +8589,12 @@
   async function refreshStatus() {
     try {
       state.status = await api.status();
+      if (state.status?.performance?.fabric) state.fabric = state.status.performance.fabric;
       $("#metric-online").textContent = state.status.peers?.online ?? 0;
       $("#metric-active").textContent = state.status.transfers?.active ?? 0;
       $("#metric-cache").textContent = fmtBytes(state.status.performance?.cdc_cache?.bytes || 0);
       $("#metric-sessions").textContent = state.status.performance?.sessions?.open ?? 0;
+      renderFabricTruth();
     } catch (e) { console.warn(e); }
     // v0.5.3: keep rendezvous URLs cached so the empty-state nudge is
     // accurate without waiting for the user to open the settings modal.
@@ -8469,6 +8607,60 @@
         renderPeers();
       }
     } catch (e) { /* ignore — rendezvous is optional */ }
+  }
+
+  async function refreshFabricTruth() {
+    try {
+      state.fabric = await api.fabric();
+      renderFabricTruth();
+    } catch (e) {
+      if (!state.fabric) {
+        state.fabric = {
+          ok: false,
+          route_truth: {
+            state: "Path check paused",
+            reason: "One Link will retry the route check automatically.",
+          },
+        };
+      }
+      renderFabricTruth();
+    }
+  }
+
+  async function copyRouteBootstrapToken() {
+    try {
+      const r = await api.routeBootstrap();
+      if (!r.ok || !r.token) throw new Error(r.message || "No route token available yet");
+      const input = $("#route-bootstrap-token");
+      if (input) input.value = r.token;
+      await copyToClipboard(r.token, "route token");
+      toast("Route token ready", "good", 2500);
+    } catch (e) {
+      toast(`Route token unavailable: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
+  async function importRouteBootstrapToken() {
+    const input = $("#route-bootstrap-token");
+    const token = (input?.value || "").trim();
+    if (!token) {
+      toast("Paste a route token first.", "info", 3000);
+      input?.focus();
+      return;
+    }
+    try {
+      const r = await api.importRouteBootstrap(token);
+      toast(
+        `Route check queued for ${r.peer || "device"} (${r.queued || 0})`,
+        "good",
+        3500,
+      );
+      if (input) input.value = "";
+      await refreshPeers();
+      await refreshFabricTruth();
+    } catch (e) {
+      toast(`Route token refused: ${errorToastBody(e)}`, "bad", 7000);
+    }
   }
 
   // v0.9.1: cross-peer activity feed.
@@ -10493,7 +10685,13 @@
     await refreshFolders();
     await refreshTransfers();
     await refreshStatus();
+    await refreshFabricTruth();
     await refreshGroups();
+    // v0.10.0: load + apply persisted settings before onboarding so the
+    // wizard renders in the user's chosen theme, but keep the pop close to
+    // refreshPeers() so returning paired users are detected immediately.
+    await loadAndApplySettings();
+    maybeShowOnboarding();
     // v0.12.1: pull persisted per-chat prefs (color / wallpaper /
     // archive) from the daemon so they sync across devices.
     await loadChatPrefs();
@@ -10513,19 +10711,13 @@
     setInterval(refreshPeers, 5000);
     setInterval(refreshTransfers, 4000);
     setInterval(refreshStatus, 8000);
+    setInterval(refreshFabricTruth, 30000);
     setInterval(refreshGroups, 12000);
     maybeShowNotifBanner();
     // v0.21.x: check GitHub Releases for a newer version and surface
     // the update banner if one's out. Fire-and-forget — the banner
     // stays hidden if the check fails (offline, rate-limited, etc.).
     checkForUpdate().catch(() => {});
-    // v0.10.0: load + apply persisted settings (theme + DND + sound).
-    // Done BEFORE the onboarding pop so the wizard renders in the
-    // user's chosen theme.
-    await loadAndApplySettings();
-    // v0.9.4: pop the onboarding wizard after everything else is
-    // loaded, so we know whether peers exist before deciding.
-    maybeShowOnboarding();
     // v0.8.0: group buttons.
     $("#open-create-group")?.addEventListener("click", openCreateGroupModal);
     $("#cg-cancel")?.addEventListener("click", closeCreateGroupModal);
@@ -12901,7 +13093,10 @@
   $("#btn-refresh-mesh").onclick = async () => {
     await refreshTransfers();
     await refreshStatus();
+    await refreshFabricTruth();
   };
+  $("#btn-copy-route-bootstrap")?.addEventListener("click", copyRouteBootstrapToken);
+  $("#btn-import-route-bootstrap")?.addEventListener("click", importRouteBootstrapToken);
   $("#btn-clear-transfers").onclick = async () => {
     try {
       const r = await api.post("/api/transfers/prune", { keep_latest: 0 });

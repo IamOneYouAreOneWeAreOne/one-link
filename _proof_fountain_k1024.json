@@ -1,0 +1,13 @@
+{
+  "k_target": 1024,
+  "loss_rate": 0.05,
+  "n_seeds": 1000,
+  "successes": 1000,
+  "success_rate": 1.0,
+  "overhead_median": 1.126953125,
+  "overhead_max": 1.3876953125,
+  "failure_count": 0,
+  "failures_sample": [],
+  "wall_seconds": 13.257,
+  "gate_passed": true
+}

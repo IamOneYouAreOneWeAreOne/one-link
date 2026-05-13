@@ -17,8 +17,8 @@ use std::net::SocketAddr;
 use ol_discovery::dht_node::{DhtError, DhtNode as InnerDhtNode};
 use ol_discovery::node_id::{NodeId as InnerNodeId, NODE_ID_BITS, NODE_ID_BYTES};
 use ol_discovery::record::{
-    PeerRecord as InnerPeerRecord, RecordError,
-    SignedRecord as InnerSignedRecord, RECORD_DEFAULT_TTL_SECS,
+    PeerRecord as InnerPeerRecord, RecordError, SignedRecord as InnerSignedRecord,
+    RECORD_DEFAULT_TTL_SECS,
 };
 use ol_discovery::routing::{
     BucketEntry as InnerBucketEntry, InsertOutcome as InnerInsertOutcome,
@@ -74,11 +74,7 @@ impl PyNodeId {
     }
 
     /// XOR distance to another NodeId, as 32 raw bytes.
-    fn distance<'py>(
-        &self,
-        py: Python<'py>,
-        other: &Self,
-    ) -> Bound<'py, PyBytes> {
+    fn distance<'py>(&self, py: Python<'py>, other: &Self) -> Bound<'py, PyBytes> {
         PyBytes::new_bound(py, &self.inner.distance(&other.inner))
     }
 
@@ -180,10 +176,7 @@ impl PySignedRecord {
     /// signing key's public component must match record.publisher_pubkey
     /// (defensive; prevents accidentally signing for the wrong identity).
     #[staticmethod]
-    fn sign(
-        record: &PyPeerRecord,
-        signing_key_seed: &[u8],
-    ) -> PyResult<Self> {
+    fn sign(record: &PyPeerRecord, signing_key_seed: &[u8]) -> PyResult<Self> {
         if signing_key_seed.len() != 32 {
             return Err(PyValueError::new_err(format!(
                 "signing_key_seed must be 32 bytes, got {}",
@@ -193,17 +186,13 @@ impl PySignedRecord {
         let mut seed = [0u8; 32];
         seed.copy_from_slice(signing_key_seed);
         let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
-        let signed = InnerSignedRecord::sign(record.inner.clone(), &sk)
-            .map_err(map_record_err)?;
+        let signed = InnerSignedRecord::sign(record.inner.clone(), &sk).map_err(map_record_err)?;
         Ok(Self { inner: signed })
     }
 
     /// Construct from explicit components (e.g., received off the wire).
     #[new]
-    fn from_parts(
-        record: &PyPeerRecord,
-        signature: &[u8],
-    ) -> PyResult<Self> {
+    fn from_parts(record: &PyPeerRecord, signature: &[u8]) -> PyResult<Self> {
         if signature.len() != 64 {
             return Err(PyValueError::new_err(format!(
                 "signature must be 64 bytes, got {}",
@@ -308,15 +297,9 @@ impl PyRoutingTable {
         last_seen_unix: u64,
     ) -> (PyInsertOutcome, Option<PyNodeId>) {
         match self.inner.insert(id.inner, last_seen_unix) {
-            InnerInsertOutcome::Inserted => {
-                (PyInsertOutcome::Inserted, None)
-            }
-            InnerInsertOutcome::BumpedToTail => {
-                (PyInsertOutcome::BumpedToTail, None)
-            }
-            InnerInsertOutcome::SelfInsertIgnored => {
-                (PyInsertOutcome::SelfInsertIgnored, None)
-            }
+            InnerInsertOutcome::Inserted => (PyInsertOutcome::Inserted, None),
+            InnerInsertOutcome::BumpedToTail => (PyInsertOutcome::BumpedToTail, None),
+            InnerInsertOutcome::SelfInsertIgnored => (PyInsertOutcome::SelfInsertIgnored, None),
             InnerInsertOutcome::BucketFull { head } => (
                 PyInsertOutcome::BucketFull,
                 Some(PyNodeId { inner: head.id }),
@@ -330,11 +313,8 @@ impl PyRoutingTable {
         new_peer: &PyNodeId,
         last_seen_unix: u64,
     ) -> bool {
-        self.inner.replace_head_on_timeout(
-            timed_out_head.inner,
-            new_peer.inner,
-            last_seen_unix,
-        )
+        self.inner
+            .replace_head_on_timeout(timed_out_head.inner, new_peer.inner, last_seen_unix)
     }
 
     fn closest_to(&self, target: &PyNodeId) -> Vec<PyNodeId> {
@@ -345,11 +325,7 @@ impl PyRoutingTable {
             .collect()
     }
 
-    fn closest_n_to(
-        &self,
-        target: &PyNodeId,
-        n: usize,
-    ) -> Vec<PyNodeId> {
+    fn closest_n_to(&self, target: &PyNodeId, n: usize) -> Vec<PyNodeId> {
         self.inner
             .closest_n_to(&target.inner, n)
             .into_iter()
@@ -357,11 +333,7 @@ impl PyRoutingTable {
             .collect()
     }
 
-    fn stale_buckets(
-        &self,
-        now_unix: u64,
-        max_age_secs: u64,
-    ) -> Vec<usize> {
+    fn stale_buckets(&self, now_unix: u64, max_age_secs: u64) -> Vec<usize> {
         self.inner.stale_buckets(now_unix, max_age_secs)
     }
 
@@ -407,20 +379,15 @@ impl PyDhtNode {
         own_id: &PyNodeId,
         seed_peers: Vec<(PyNodeId, String)>,
     ) -> PyResult<Self> {
-        let addr: SocketAddr = bind_addr.parse().map_err(|e| {
-            PyValueError::new_err(format!("bad bind_addr {bind_addr:?}: {e}"))
-        })?;
+        let addr: SocketAddr = bind_addr
+            .parse()
+            .map_err(|e| PyValueError::new_err(format!("bad bind_addr {bind_addr:?}: {e}")))?;
         let seeds: Result<Vec<(InnerNodeId, SocketAddr)>, _> = seed_peers
             .into_iter()
-            .map(|(id, addr_s)| {
-                addr_s.parse::<SocketAddr>().map(|a| (id.inner, a))
-            })
+            .map(|(id, addr_s)| addr_s.parse::<SocketAddr>().map(|a| (id.inner, a)))
             .collect();
-        let seeds = seeds.map_err(|e| {
-            PyValueError::new_err(format!("bad seed address: {e}"))
-        })?;
-        let node =
-            InnerDhtNode::new(addr, own_id.inner, seeds).map_err(map_dht_err)?;
+        let seeds = seeds.map_err(|e| PyValueError::new_err(format!("bad seed address: {e}")))?;
+        let node = InnerDhtNode::new(addr, own_id.inner, seeds).map_err(map_dht_err)?;
         Ok(Self { inner: Some(node) })
     }
 
@@ -433,14 +400,13 @@ impl PyDhtNode {
     /// The node's own NodeId.
     fn own_id(&self) -> PyResult<PyNodeId> {
         let node = self.require()?;
-        Ok(PyNodeId { inner: node.own_id() })
+        Ok(PyNodeId {
+            inner: node.own_id(),
+        })
     }
 
     /// Publish this node's own self-record.
-    fn publish_self_record(
-        &self,
-        record: &PySignedRecord,
-    ) -> PyResult<()> {
+    fn publish_self_record(&self, record: &PySignedRecord) -> PyResult<()> {
         let node = self.require()?;
         node.publish_self_record(record.inner.clone());
         Ok(())
@@ -448,15 +414,11 @@ impl PyDhtNode {
 
     /// Add a seed peer (NodeId + "host:port" address) to the
     /// resolver + routing table.
-    fn add_seed_peer(
-        &self,
-        id: &PyNodeId,
-        addr: &str,
-    ) -> PyResult<()> {
+    fn add_seed_peer(&self, id: &PyNodeId, addr: &str) -> PyResult<()> {
         let node = self.require()?;
-        let addr: SocketAddr = addr.parse().map_err(|e| {
-            PyValueError::new_err(format!("bad addr {addr:?}: {e}"))
-        })?;
+        let addr: SocketAddr = addr
+            .parse()
+            .map_err(|e| PyValueError::new_err(format!("bad addr {addr:?}: {e}")))?;
         node.add_seed_peer(id.inner, addr);
         Ok(())
     }
@@ -472,10 +434,7 @@ impl PyDhtNode {
     /// Iterative FIND_VALUE lookup. Returns the SignedRecord if the
     /// target's record was found anywhere in the swarm; None if the
     /// search converged without finding it.
-    fn lookup_record(
-        &self,
-        target: &PyNodeId,
-    ) -> PyResult<Option<PySignedRecord>> {
+    fn lookup_record(&self, target: &PyNodeId) -> PyResult<Option<PySignedRecord>> {
         let node = self.require()?;
         let rec = node.lookup_record(target.inner).map_err(map_dht_err)?;
         Ok(rec.map(|r| PySignedRecord { inner: r }))
@@ -506,9 +465,7 @@ impl PyDhtNode {
     fn require(&self) -> PyResult<&InnerDhtNode> {
         self.inner
             .as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                "DhtNode is shut down",
-            ))
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("DhtNode is shut down"))
     }
 }
 

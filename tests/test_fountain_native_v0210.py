@@ -44,7 +44,7 @@ def _det_buf(seed: int, size: int) -> bytes:
 def test_module_metadata() -> None:
     assert fountain_native.NATIVE_VERSION is not None
     assert fountain_native.PACKET_HEADER_LEN == 44
-    assert fountain_native.MAX_ENCODED_PER_CHUNK == 1024
+    assert fountain_native.MAX_ENCODED_PER_CHUNK == 2048
     assert fountain_native.SOLITON_C == pytest.approx(0.03)
     assert fountain_native.SOLITON_DELTA == pytest.approx(0.05)
 
