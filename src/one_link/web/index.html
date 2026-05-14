@@ -1037,6 +1037,29 @@
     padding: 7px 9px; font-size: 12px; border: 1px solid transparent;
   }
   .mini-actions button:hover, .cap-toggle:hover { color: var(--text); background: var(--bg-3); }
+  .panel-advanced {
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: 8px;
+    padding: 8px;
+    background: rgba(255,255,255,.025);
+  }
+  .panel-advanced summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 12px;
+    font-weight: 800;
+    list-style: none;
+  }
+  .panel-advanced summary::-webkit-details-marker { display: none; }
+  .panel-advanced summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 6px;
+    transition: transform .15s ease;
+  }
+  .panel-advanced[open] summary::before { transform: rotate(90deg); }
+  .panel-advanced textarea,
+  .panel-advanced .mini-actions { margin-top: 8px; }
   .cap-toggle.on {
     color: var(--text); border-color: rgba(124,92,255,.4);
     background: rgba(124,92,255,.16);
@@ -1478,6 +1501,28 @@
   .courier-kit .ck-file {
     display: none;
   }
+  .courier-kit .ck-advanced {
+    margin-top: 8px;
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: 8px;
+    padding: 8px;
+    background: rgba(255,255,255,.025);
+  }
+  .courier-kit .ck-advanced summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 12px;
+    font-weight: 800;
+    list-style: none;
+  }
+  .courier-kit .ck-advanced summary::-webkit-details-marker { display: none; }
+  .courier-kit .ck-advanced summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 6px;
+    transition: transform .15s ease;
+  }
+  .courier-kit .ck-advanced[open] summary::before { transform: rotate(90deg); }
   .courier-wizard {
     margin-top: 8px;
     border-top: 1px solid rgba(255,255,255,.06);
@@ -4039,27 +4084,34 @@
         <img id="self-mesh-invite-qr" alt="Self-mesh invite QR" style="display:none; margin-top:8px; width:144px; max-width:100%; border-radius:8px; background:#fff; padding:8px;" />
       </div>
       <div class="courier-kit" id="courier-kit">
-        <div class="ck-title">Courier bundle</div>
-        <div class="ck-copy">Move cached file chunks through any offline carrier.</div>
+        <div class="ck-title">Offline delivery</div>
+        <div class="ck-copy">Move a file when the internet, router, or other device is not reachable.</div>
         <div class="ck-grid">
-          <select id="courier-transfer-select" aria-label="Courier transfer"></select>
-          <select id="courier-drop-select" aria-label="Dropped courier file"></select>
-          <select id="courier-outbox-select" aria-label="Staged courier file"></select>
-          <select id="courier-removable-select" aria-label="Removable target"></select>
-          <select id="courier-removable-file-select" aria-label="Removable courier file"></select>
-          <textarea id="courier-chunks" rows="2" placeholder="Optional chunk hashes"></textarea>
-          <textarea id="courier-key-token" class="ck-token" rows="2" placeholder="Unlock token"></textarea>
+          <select id="courier-transfer-select" aria-label="Offline transfer"></select>
+          <select id="courier-drop-select" aria-label="Received offline bundle"></select>
+          <textarea id="courier-key-token" class="ck-token" rows="2" placeholder="Unlock code"></textarea>
           <input id="courier-file-input" class="ck-file" type="file" accept=".olcb,.json,application/json" />
         </div>
         <div class="ck-actions">
-          <button id="btn-courier-export">Export</button>
-          <button id="btn-courier-stage">Stage</button>
-          <button id="btn-courier-copy-removable">Copy USB</button>
-          <button id="btn-courier-pull-removable">Pull USB</button>
+          <button id="btn-courier-export">Download bundle</button>
           <button id="btn-courier-import-file">Import file</button>
-          <button id="btn-courier-import-drop">Import drop</button>
-          <button id="btn-courier-copy-key">Copy key</button>
+          <button id="btn-courier-import-drop">Import selected</button>
+          <button id="btn-courier-copy-key">Copy unlock code</button>
         </div>
+        <details class="ck-advanced" id="courier-advanced">
+          <summary>Advanced offline options</summary>
+          <div class="ck-grid">
+            <select id="courier-outbox-select" aria-label="Saved offline bundle"></select>
+            <select id="courier-removable-select" aria-label="Removable target"></select>
+            <select id="courier-removable-file-select" aria-label="USB offline bundle"></select>
+            <textarea id="courier-chunks" rows="2" placeholder="Specific cached chunk hashes"></textarea>
+          </div>
+          <div class="ck-actions">
+            <button id="btn-courier-stage">Save bundle</button>
+            <button id="btn-courier-copy-removable">Copy to USB</button>
+            <button id="btn-courier-pull-removable">Pull from USB</button>
+          </div>
+        </details>
         <div class="courier-wizard" id="courier-wizard">
           <div class="cw-head">
             <button id="btn-courier-guide-send" class="active">Send</button>
@@ -4088,14 +4140,19 @@
            tab covers transfer-only views. -->
       <div id="transferlist" style="display:none;"></div>
       <div class="panel-form">
-        <img id="route-bootstrap-qr" alt="Route token QR" style="display:none; width:160px; max-width:100%; border-radius:8px; background:#fff; padding:8px;" />
-        <textarea id="route-bootstrap-token" rows="2" placeholder="Route token"></textarea>
         <div class="mini-actions">
           <button id="btn-refresh-mesh">Refresh</button>
-          <button id="btn-copy-route-bootstrap">Copy route token</button>
-          <button id="btn-import-route-bootstrap">Import route token</button>
           <button id="btn-clear-transfers">Clear done</button>
         </div>
+        <details class="panel-advanced" id="route-bootstrap-advanced">
+          <summary>Advanced path setup</summary>
+          <img id="route-bootstrap-qr" alt="Path setup QR" style="display:none; width:160px; max-width:100%; border-radius:8px; background:#fff; padding:8px;" />
+          <textarea id="route-bootstrap-token" rows="2" placeholder="Path setup code"></textarea>
+          <div class="mini-actions">
+            <button id="btn-copy-route-bootstrap">Copy setup code</button>
+            <button id="btn-import-route-bootstrap">Import setup code</button>
+          </div>
+        </details>
       </div>
     </aside>
 
@@ -7488,7 +7545,7 @@
       route_check_failed: "Route check failed",
       cable_ready: "Cable path visible",
       local_network_ready: "Local path ready",
-      token_ready: "Route token ready",
+      token_ready: "Setup code ready",
       waiting_for_local_path: "Waiting for local path",
       peer_listener_unavailable: "Peer listener starting",
     }[kit.state] || "Local path";
@@ -7610,10 +7667,10 @@
       const removableEvent = removableEvents[0] || null;
       const removableLabel = removableEvent?.target?.label || removableEvent?.target?.path || "";
       copy.textContent = removableEvent
-        ? `Removable media ${String(removableEvent.kind || "changed").replace(/_/g, " ")}${removableLabel ? `: ${removableLabel}` : ""}. Replay guard remembers ${seen}.`
+        ? `USB delivery ${String(removableEvent.kind || "changed").replace(/_/g, " ")}${removableLabel ? `: ${removableLabel}` : ""}. Duplicate protection remembers ${seen}.`
         : recent
-          ? `Last courier ${recent.kind || "event"}: ${recent.chunk_count || 0} chunks. Replay guard remembers ${seen}.`
-          : (outboxCount > 0 ? `${outboxCount} staged courier file${outboxCount === 1 ? "" : "s"} ready in outbox.` : "Move cached file chunks through any offline carrier.");
+          ? `Last offline delivery ${recent.kind || "event"}: ${recent.chunk_count || 0} chunk${recent.chunk_count === 1 ? "" : "s"}. Duplicate protection remembers ${seen}.`
+          : (outboxCount > 0 ? `${outboxCount} saved offline bundle${outboxCount === 1 ? "" : "s"} ready.` : "Move a file when the internet, router, or other device is not reachable.");
     }
     const select = $("#courier-transfer-select");
     if (select) {
@@ -7643,12 +7700,12 @@
       drop.innerHTML = "";
       const blank = document.createElement("option");
       blank.value = "";
-      blank.textContent = files.length ? "Choose dropped courier file" : "No dropped courier files";
+      blank.textContent = files.length ? "Choose received bundle" : "No received bundles";
       drop.appendChild(blank);
       for (const f of files.slice(0, 64)) {
         const opt = document.createElement("option");
         opt.value = f.id || "";
-        opt.textContent = `${f.name || "courier file"} - ${fmtBytes(f.bytes || 0)}`;
+        opt.textContent = `${f.name || "offline bundle"} - ${fmtBytes(f.bytes || 0)}`;
         drop.appendChild(opt);
       }
       if ([...drop.options].some(o => o.value === current)) drop.value = current;
@@ -7660,12 +7717,12 @@
       outbox.innerHTML = "";
       const blank = document.createElement("option");
       blank.value = "";
-      blank.textContent = files.length ? "Choose staged courier file" : "No staged courier files";
+      blank.textContent = files.length ? "Choose saved bundle" : "No saved bundles";
       outbox.appendChild(blank);
       for (const f of files.slice(0, 64)) {
         const opt = document.createElement("option");
         opt.value = f.id || "";
-        opt.textContent = `${f.name || "staged file"} - ${fmtBytes(f.bytes || 0)}`;
+        opt.textContent = `${f.name || "saved bundle"} - ${fmtBytes(f.bytes || 0)}`;
         outbox.appendChild(opt);
       }
       if ([...outbox.options].some(o => o.value === current)) outbox.value = current;
@@ -7677,12 +7734,12 @@
       removable.innerHTML = "";
       const blank = document.createElement("option");
       blank.value = "";
-      blank.textContent = targets.length ? "Choose removable target" : "No removable drive found";
+      blank.textContent = targets.length ? "Choose USB drive" : "No USB drive found";
       removable.appendChild(blank);
       for (const t of targets) {
         const opt = document.createElement("option");
         opt.value = t.id || "";
-        opt.textContent = t.label || t.path || "removable";
+        opt.textContent = t.label || t.path || "USB drive";
         removable.appendChild(opt);
       }
       if ([...removable.options].some(o => o.value === current)) removable.value = current;
@@ -7694,12 +7751,12 @@
       removableFile.innerHTML = "";
       const blank = document.createElement("option");
       blank.value = "";
-      blank.textContent = files.length ? "Choose USB courier file" : "No USB courier files";
+      blank.textContent = files.length ? "Choose USB bundle" : "No USB bundles";
       removableFile.appendChild(blank);
       for (const f of files.slice(0, 64)) {
         const opt = document.createElement("option");
         opt.value = f.id || "";
-        opt.textContent = `${f.name || "courier file"} - ${fmtBytes(f.bytes || 0)}`;
+        opt.textContent = `${f.name || "offline bundle"} - ${fmtBytes(f.bytes || 0)}`;
         removableFile.appendChild(opt);
       }
       if ([...removableFile.options].some(o => o.value === current)) removableFile.value = current;
@@ -7727,16 +7784,16 @@
     const removableFileSelected = !!$("#courier-removable-file-select")?.value;
     const steps = state.courierGuideMode === "receive"
       ? [
-          ["Drop encrypted bundle into courier/drop or choose USB file", dropReady || removableFileSelected],
-          ["Paste the OLC1 unlock token", keyReady],
-          ["Choose the dropped bundle", receiveSelected],
-          ["Import and assemble after hash verification", false],
+          ["Choose or import an offline bundle", dropReady || removableFileSelected],
+          ["Paste the unlock code", keyReady],
+          ["Pick the received bundle", receiveSelected],
+          ["Import it and let One Link verify it", false],
         ]
       : [
-          ["Choose a cached transfer or paste chunk hashes", hasTransfer],
-          ["Stage or download the encrypted bundle", outboxReady],
-          ["Copy the OLC1 unlock token separately", keyReady],
-          ["Copy to a removable drive or carry from outbox", (outboxReady && keyReady) || removableReady],
+          ["Choose a cached transfer", hasTransfer],
+          ["Download or save the offline bundle", outboxReady],
+          ["Share the unlock code separately", keyReady],
+          ["Carry the bundle by USB, cloud drive, or any safe handoff", (outboxReady && keyReady) || removableReady],
         ];
     stepsHost.replaceChildren();
     steps.forEach(([label, ready], idx) => {
@@ -7788,11 +7845,11 @@
       _downloadCourierBundle(r.bundle_b64, r.manifest);
       const keyEl = $("#courier-key-token");
       if (keyEl) keyEl.value = r.key_token || "";
-      await copyToClipboard(r.key_token || "", "courier key");
+      await copyToClipboard(r.key_token || "", "unlock code");
       await refreshCourierStatus();
-      toast(`Courier bundle ready: ${r.chunk_count || 0} chunk${r.chunk_count === 1 ? "" : "s"}`, "good", 4500);
+      toast(`Offline bundle ready: ${r.chunk_count || 0} chunk${r.chunk_count === 1 ? "" : "s"}`, "good", 4500);
     } catch (e) {
-      toast(`Courier export failed: ${errorToastBody(e)}`, "bad", 8000);
+      toast(`Offline bundle failed: ${errorToastBody(e)}`, "bad", 8000);
     }
   }
   async function stageCourierBundle() {
@@ -7801,30 +7858,30 @@
       const r = await api.courierExportFile(body);
       const keyEl = $("#courier-key-token");
       if (keyEl) keyEl.value = r.key_token || "";
-      await copyToClipboard(r.key_token || "", "courier key");
+      await copyToClipboard(r.key_token || "", "unlock code");
       await refreshCourierStatus();
-      toast(`Courier staged: ${r.name || "outbox file"}`, "good", 5500);
+      toast(`Offline bundle saved: ${r.name || "ready"}`, "good", 5500);
     } catch (e) {
-      toast(`Courier stage failed: ${errorToastBody(e)}`, "bad", 8000);
+      toast(`Save failed: ${errorToastBody(e)}`, "bad", 8000);
     }
   }
   async function copyCourierToRemovable() {
     const fileId = $("#courier-outbox-select")?.value || "";
     const targetId = $("#courier-removable-select")?.value || "";
     if (!fileId) {
-      toast("Choose a staged courier file first.", "info", 3500);
+      toast("Choose a saved bundle first.", "info", 3500);
       return;
     }
     if (!targetId) {
-      toast("Choose a removable target first.", "info", 3500);
+      toast("Choose a USB drive first.", "info", 3500);
       return;
     }
     try {
       const r = await api.courierCopyToRemovable({ file_id: fileId, target_id: targetId });
-      toast(`Copied courier bundle to ${r.target_label || "removable drive"}`, "good", 5500);
+      toast(`Copied offline bundle to ${r.target_label || "USB drive"}`, "good", 5500);
       await refreshCourierStatus();
     } catch (e) {
-      toast(`Removable copy failed: ${errorToastBody(e)}`, "bad", 8000);
+      toast(`USB copy failed: ${errorToastBody(e)}`, "bad", 8000);
     }
   }
   async function refreshRemovableCourierFiles() {
@@ -7848,16 +7905,16 @@
     const targetId = $("#courier-removable-select")?.value || "";
     const fileId = $("#courier-removable-file-select")?.value || "";
     if (!targetId) {
-      toast("Choose a removable target first.", "info", 3500);
+      toast("Choose a USB drive first.", "info", 3500);
       return;
     }
     if (!fileId) {
-      toast("Choose a USB courier file first.", "info", 3500);
+      toast("Choose a USB bundle first.", "info", 3500);
       return;
     }
     try {
       const r = await api.courierCopyFromRemovable({ target_id: targetId, file_id: fileId });
-      toast(`Pulled courier bundle into drop folder: ${r.name || "ready"}`, "good", 5500);
+      toast(`Pulled offline bundle: ${r.name || "ready"}`, "good", 5500);
       await refreshCourierStatus();
     } catch (e) {
       toast(`USB pull failed: ${errorToastBody(e)}`, "bad", 8000);
@@ -7867,7 +7924,7 @@
     if (!file) return;
     const keyToken = ($("#courier-key-token")?.value || "").trim();
     if (!keyToken) {
-      toast("Paste the courier unlock token first.", "info", 3500);
+      toast("Paste the unlock code first.", "info", 3500);
       $("#courier-key-token")?.focus();
       return;
     }
@@ -7880,23 +7937,23 @@
       } catch {
         bundleB64 = text.trim();
       }
-      if (!bundleB64) throw new Error("Courier file did not contain bundle_b64");
+      if (!bundleB64) throw new Error("Offline bundle file did not contain bundle data");
       const r = await api.courierImport({ bundle_b64: bundleB64, key_token: keyToken });
       if (r.manifest?.blob_hash) {
         const assembled = await api.courierAssemble({
           blob_hash: r.manifest.blob_hash,
-          name: r.manifest.name || "courier-file.bin",
+          name: r.manifest.name || "offline-file.bin",
         });
-        toast(`Courier file assembled: ${assembled.name || "ready"}`, "good", 6000);
+        toast(`Offline file ready: ${assembled.name || "ready"}`, "good", 6000);
       } else {
-        toast(`Imported ${r.stored_chunks || 0} courier chunk${r.stored_chunks === 1 ? "" : "s"}`, "good", 4500);
+        toast(`Imported ${r.stored_chunks || 0} file chunk${r.stored_chunks === 1 ? "" : "s"}`, "good", 4500);
       }
       await refreshCourierStatus();
       await refreshStatus();
       await refreshTransfers();
       renderCourierKit();
     } catch (e) {
-      toast(`Courier import failed: ${errorToastBody(e)}`, "bad", 8000);
+      toast(`Import failed: ${errorToastBody(e)}`, "bad", 8000);
     }
   }
   async function importDroppedCourierFile() {
@@ -7904,11 +7961,11 @@
     const fileId = drop?.value || "";
     const keyToken = ($("#courier-key-token")?.value || "").trim();
     if (!fileId) {
-      toast("Choose a dropped courier file first.", "info", 3500);
+      toast("Choose a received bundle first.", "info", 3500);
       return;
     }
     if (!keyToken) {
-      toast("Paste the courier unlock token first.", "info", 3500);
+      toast("Paste the unlock code first.", "info", 3500);
       $("#courier-key-token")?.focus();
       return;
     }
@@ -7917,18 +7974,18 @@
       if (r.manifest?.blob_hash) {
         const assembled = await api.courierAssemble({
           blob_hash: r.manifest.blob_hash,
-          name: r.manifest.name || "courier-file.bin",
+          name: r.manifest.name || "offline-file.bin",
         });
-        toast(`Courier file assembled: ${assembled.name || "ready"}`, "good", 6000);
+        toast(`Offline file ready: ${assembled.name || "ready"}`, "good", 6000);
       } else {
-        toast(`Imported ${r.stored_chunks || 0} courier chunk${r.stored_chunks === 1 ? "" : "s"}`, "good", 4500);
+        toast(`Imported ${r.stored_chunks || 0} file chunk${r.stored_chunks === 1 ? "" : "s"}`, "good", 4500);
       }
       await refreshCourierStatus();
       await refreshStatus();
       await refreshTransfers();
       renderCourierKit();
     } catch (e) {
-      toast(`Dropped courier import failed: ${errorToastBody(e)}`, "bad", 8000);
+      toast(`Import failed: ${errorToastBody(e)}`, "bad", 8000);
     }
   }
   async function refreshCourierStatus() {
@@ -9916,21 +9973,21 @@
       state.fabric = state.fabric || {};
       state.fabric.no_router = nr;
       renderFabricTruth();
-      if (!nr.token_ready) throw new Error(nr.message || "Local route token is not ready yet");
+      if (!nr.token_ready) throw new Error(nr.message || "Local setup code is not ready yet");
       const r = await api.routeBootstrap();
-      if (!r.ok || !r.token) throw new Error(r.message || "No route token available yet");
+      if (!r.ok || !r.token) throw new Error(r.message || "No setup code available yet");
       const input = $("#route-bootstrap-token");
       if (input) input.value = r.token;
       const qr = $("#route-bootstrap-qr");
       if (qr) {
         qr.src = `/api/route-bootstrap/qr.svg?t=${Date.now()}`;
         qr.style.display = "block";
-        qr.title = "Scan this from another paired device to share a short-lived route hint.";
+        qr.title = "Scan this from another paired device to share a short-lived path hint.";
       }
-      await copyToClipboard(r.token, "route token");
-      toast("Route token ready", "good", 2500);
+      await copyToClipboard(r.token, "setup code");
+      toast("Setup code ready", "good", 2500);
     } catch (e) {
-      toast(`Route token unavailable: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Setup code unavailable: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
 
@@ -9938,14 +9995,14 @@
     const input = $("#route-bootstrap-token");
     const token = (input?.value || "").trim();
     if (!token) {
-      toast("Paste a route token first.", "info", 3000);
+      toast("Paste a setup code first.", "info", 3000);
       input?.focus();
       return;
     }
     try {
       const r = await api.importRouteBootstrap(token);
       toast(
-        `Route check queued for ${r.peer || "device"} (${r.queued || 0})`,
+        `Path check queued for ${r.peer || "device"} (${r.queued || 0})`,
         "good",
         3500,
       );
@@ -9958,7 +10015,7 @@
       await refreshPeers();
       await refreshFabricTruth();
     } catch (e) {
-      toast(`Route token refused: ${errorToastBody(e)}`, "bad", 7000);
+      toast(`Setup code refused: ${errorToastBody(e)}`, "bad", 7000);
     }
   }
 
@@ -10189,8 +10246,8 @@
         row.appendChild(cancel);
       }
       if (t.blob_hash && (t.chunks_total || t.status === "complete")) {
-        const courier = el("button", null, "Courier");
-        courier.title = "Export this transfer as an encrypted offline courier bundle.";
+        const courier = el("button", null, "Offline");
+        courier.title = "Download this transfer as an encrypted offline bundle.";
         courier.onclick = async () => {
           const select = $("#courier-transfer-select");
           if (select) select.value = t.id || "";
@@ -12598,7 +12655,7 @@
       } else if (m.type === "courier_files") {
         refreshCourierStatus();
         if (state.activePane === "mesh") {
-          toast("Courier folder changed", "info", 2200);
+          toast("Offline delivery folder changed", "info", 2200);
         }
       } else if (m.type === "removable_media") {
         state.courier = state.courier || {};
@@ -14452,7 +14509,7 @@
   $("#courier-chunks")?.addEventListener("input", renderCourierWizard);
   $("#courier-key-token")?.addEventListener("input", renderCourierWizard);
   $("#btn-courier-copy-key")?.addEventListener("click", () => {
-    copyToClipboard(($("#courier-key-token")?.value || "").trim(), "courier key");
+    copyToClipboard(($("#courier-key-token")?.value || "").trim(), "unlock code");
   });
   $("#btn-courier-import-file")?.addEventListener("click", () => $("#courier-file-input")?.click());
   $("#btn-courier-import-drop")?.addEventListener("click", importDroppedCourierFile);
