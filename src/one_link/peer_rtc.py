@@ -413,6 +413,25 @@ class BrowserPeerManager:
         if msg_t == "attest_response":
             await self._handle_attest_response(peer, envelope)
             return
+        # Row 10 — attestation gate. When the daemon requires
+        # attested peers, app-layer messages from peers that haven't
+        # completed the handshake are dropped. Control-plane
+        # messages (ping/pong, attest_challenge, attest_response)
+        # already returned above so the gate only sees app traffic.
+        if getattr(self.daemon, "require_attested_peers", False):
+            if peer.attested_ms is None:
+                cnt = getattr(self.daemon, "_gate_drop_count", 0)
+                try:
+                    self.daemon._gate_drop_count = cnt + 1
+                except Exception:
+                    pass
+                log.info(
+                    "peer-rtc: dropped app-layer %r from un-attested "
+                    "peer %s (require_attested_peers=on, drops=%d)",
+                    msg_t, peer.fingerprint,
+                    getattr(self.daemon, "_gate_drop_count", 0),
+                )
+                return
         # Fan out to registered listeners (chat, files, etc. wire in
         # v0.20.2+).
         for cb in list(self._dc_listeners):

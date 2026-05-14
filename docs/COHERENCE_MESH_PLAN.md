@@ -326,6 +326,12 @@ subkeys + device-presence CRDT + remote-instruct command channel.
 - Recent telemetry is evaluated against production budgets for route probes,
   presence fanout, command verify/replay/execute/total, remote-send dispatch,
   and UI/API polling; the Activity panel exposes the current budget state.
+- `scripts/self_mesh_soak_gate.py` reads the live daemon's self-mesh
+  performance endpoint, evaluates those budgets, and writes a JSON artifact
+  suitable for release gates and 24h soak jobs.
+- Browser-peer app traffic can be hardened behind the Row-10 attestation gate
+  (`ONE_LINK_REQUIRE_ATTESTED_PEERS=required`); control-plane handshake frames
+  bypass the gate, and daemon status reports the drop counter.
 - Presence facts converge by `(sequence, updated_ms)`.
 - Delivery planning rejects revoked/untrusted/offline/storage-starved devices.
 - Self-mesh target choice scores awake/asleep state, network class, battery,
@@ -342,7 +348,9 @@ subkeys + device-presence CRDT + remote-instruct command channel.
 - Native-device OS handoff polish: register/open `one-link://self-mesh/enroll`
   directly into the desktop/mobile shell where the platform supports it.
 - Long-running soak evidence: run 24h+ sessions and persist budget rollups as
-  release-gate artifacts, not just recent in-app samples.
+  release-gate artifacts, not just recent in-app samples. The artifact writer
+  exists; the remaining work is sustained wall-clock collection across real
+  devices and operating systems.
 
 **Phase F5 acceptance gate:**
 - One Ed25519 master derives N device subkeys deterministically

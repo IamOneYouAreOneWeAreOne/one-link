@@ -913,6 +913,24 @@ class Daemon:
         # joined in stop(). None when not running.
         self._cover_traffic = None
         self._cover_emit_count: int = 0
+        # Row 10 — attestation gating policy. When True, the daemon
+        # refuses app-layer DC messages from peers that haven't
+        # completed the attestation handshake. Default False for
+        # backwards compatibility with peers running pre-Row-10
+        # builds. Operators flip this on once their peer set has all
+        # upgraded.
+        # Control-plane messages (ping/pong, attest_challenge,
+        # attest_response, onion_pubkey, cover_packet) bypass the
+        # gate so the handshake itself can run + heartbeats stay
+        # alive.
+        self.require_attested_peers: bool = (
+            os.environ.get("ONE_LINK_REQUIRE_ATTESTED_PEERS", "")
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on", "required"}
+        )
+        # Telemetry: count of messages dropped by the gate.
+        self._gate_drop_count: int = 0
         # TYPE_CHECKING import keeps UIServer (and its aiohttp deps)
         # off the import graph for CLI / status paths — see start()
         # where it's imported on demand. The runtime contract: None
@@ -12541,6 +12559,10 @@ class Daemon:
                 "short_id": self.me.short_id,
                 "fingerprint": self.me.fingerprint,
                 "hostname": self.me.hostname,
+            },
+            "peer_rtc_attestation": {
+                "require_attested_peers": self.require_attested_peers,
+                "gate_drop_count": self._gate_drop_count,
             },
             # Surface the full native-subsystem availability matrix so
             # operators + integration tests can verify Phase E is
