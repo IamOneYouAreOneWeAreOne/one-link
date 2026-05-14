@@ -119,6 +119,7 @@ GUARDED_GET_ROUTES = [
     "/api/self-mesh",
     "/api/self-mesh/performance",
     "/api/self-mesh/allowed-roots",
+    "/api/self-mesh/enrollment-invite/preview?token=bad",
     "/api/courier/status",
     "/api/courier/files",
     "/api/courier/outbox",
@@ -877,7 +878,7 @@ async def test_api_self_mesh_enrollment_mint_revoke_and_remote_instruct(ctx):
 
 @pytest.mark.asyncio
 async def test_api_self_mesh_invite_qr_and_performance(ctx):
-    client, _, _, token, _ = ctx
+    client, _, state, token, _ = ctx
     create = await client.post(
         "/api/self-mesh/root",
         headers=_h(token),
@@ -904,6 +905,25 @@ async def test_api_self_mesh_invite_qr_and_performance(ctx):
     assert qr.headers["Cache-Control"] == "no-store"
     assert "image/svg+xml" in qr.headers["Content-Type"]
     assert "<svg" in await qr.text()
+
+    preview = await client.get(
+        f"/api/self-mesh/enrollment-invite/preview?token={invite['token']}",
+        headers=_h(token),
+    )
+    assert preview.status == 200
+    preview_body = await preview.json()
+    assert preview_body["claimable_here"] is True
+
+    claim = await client.post(
+        "/api/self-mesh/enrollment-invite/claim",
+        headers=_h(token),
+        json={"token": invite["token"], "label": "Audit laptop claimed"},
+    )
+    assert claim.status == 200
+    claimed = await claim.json()
+    assert claimed["trusted"] is True
+    assert claimed["local"] is True
+    assert state.list_self_mesh_audit()[0]["event"] == "enrollment_invite_claimed"
 
     perf = await client.get("/api/self-mesh/performance", headers=_h(token))
     assert perf.status == 200

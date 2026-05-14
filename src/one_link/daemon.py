@@ -1573,6 +1573,7 @@ class Daemon:
 
     async def broadcast_self_mesh_presence(self) -> None:
         """Publish local self-device presence over all live peer channels."""
+        started = time.perf_counter()
         row = self._update_local_self_mesh_presence(route="daemon_broadcast")
         if not row:
             return
@@ -1591,10 +1592,18 @@ class Daemon:
             bandwidth_bps=row.get("bandwidth_bps"),
         )
         payload = encode_msg(msg)
+        sent_count = 0
         for peer_fp, sess in list(self._outbound_sessions.items()):
             with contextlib.suppress(Exception):
                 async with sess.lock:
                     await self._send_via_transport(peer_fp, sess.channel, payload)
+                    sent_count += 1
+        self._record_self_mesh_perf_observation(
+            "presence_fanout",
+            (time.perf_counter() - started) * 1000.0,
+            peer_count=sent_count,
+            route=row.get("route") or "daemon_broadcast",
+        )
 
     async def _handle_self_mesh_presence(
         self,
@@ -1704,8 +1713,18 @@ class Daemon:
         peer: Peer,
         path: Path,
     ) -> None:
+        started = time.perf_counter()
         try:
             result = await self.send_file(peer, path)
+            self._record_self_mesh_perf_observation(
+                "remote_send_dispatch",
+                (time.perf_counter() - started) * 1000.0,
+                status="complete",
+                action=instr.action,
+                command_id=instr.command_id,
+                path=str(path),
+                peer=getattr(peer, "short_id", ""),
+            )
             if self.state is not None:
                 with contextlib.suppress(Exception):
                     self.state.record_self_mesh_audit(
@@ -1726,6 +1745,15 @@ class Daemon:
                 result=result,
             )
         except Exception as e:
+            self._record_self_mesh_perf_observation(
+                "remote_send_dispatch",
+                (time.perf_counter() - started) * 1000.0,
+                status="failed",
+                action=instr.action,
+                command_id=instr.command_id,
+                path=str(path),
+                error=str(e),
+            )
             log.warning(
                 "self-mesh remote send_file failed command=%s: %s",
                 instr.command_id[:16],
@@ -1859,6 +1887,36 @@ class Daemon:
         self._broadcast_self_mesh_changed(reason="allowed_roots_changed")
         return self._self_mesh_allowed_roots()
 
+    def _record_self_mesh_perf_observation(
+        self,
+        metric: str,
+        duration_ms: float,
+        *,
+        status: str = "ready",
+        **metadata: Any,
+    ) -> None:
+        if self.state is None:
+            return
+        sample = {
+            "route_probe_runs": 0,
+            "route_probe_ready": 0,
+            "route_probe_total_ms": 0.0,
+            "route_probe_avg_ms": 0.0,
+            "presence_rows": 0,
+            "device_rows": 0,
+            "recent_audit_rows": 0,
+            "status": status,
+            "metric": str(metric)[:80],
+            "duration_ms": round(max(0.0, float(duration_ms)), 4),
+            **metadata,
+        }
+        with contextlib.suppress(Exception):
+            sample["presence_rows"] = len(self.state.list_self_mesh_presence())
+            sample["device_rows"] = len(self.state.list_self_mesh_devices())
+            sample["recent_audit_rows"] = len(self.state.list_self_mesh_audit(limit=200))
+        with contextlib.suppress(Exception):
+            self.state.record_self_mesh_perf_sample(sample)
+
     def _self_mesh_path_allowed(self, path: Path) -> bool:
         try:
             resolved = path.resolve()
@@ -1880,6 +1938,7 @@ class Daemon:
         msg: dict,
         peer_fp: str,
     ) -> None:
+        total_started = time.perf_counter()
         try:
             if self.state is None:
                 raise ValueError("state unavailable")
@@ -1896,6 +1955,7 @@ class Daemon:
                 raise ValueError("no local self-mesh target for root")
             last_error: Exception | None = None
             instr = None
+            verify_started = time.perf_counter()
             for target in targets:
                 try:
                     instr = verify_remote_instruction(
@@ -1910,6 +1970,13 @@ class Daemon:
                 raise ValueError(
                     f"remote instruction target rejected: {last_error}"
                 )
+            self._record_self_mesh_perf_observation(
+                "command_verify",
+                (time.perf_counter() - verify_started) * 1000.0,
+                action=instr.action,
+                target_count=len(targets),
+                command_id=instr.command_id,
+            )
             required_cap = self._self_mesh_action_capability(instr.action)
             if required_cap is None:
                 raise ValueError(f"unsupported self-mesh action {instr.action!r}")
@@ -1920,12 +1987,20 @@ class Daemon:
                     required_cap,
                 )
                 raise ValueError(f"capability disabled: {required_cap}")
+            replay_started = time.perf_counter()
             first_seen = self.state.mark_remote_instruction_seen(
                 command_id=instr.command_id,
                 expires_ms=instr.expires_ms,
                 action=instr.action,
                 controller_device_pub=instr.controller_device_pub,
                 target_device_pub=instr.target_device_pub,
+            )
+            self._record_self_mesh_perf_observation(
+                "command_replay_check",
+                (time.perf_counter() - replay_started) * 1000.0,
+                status="ready" if first_seen else "replay_blocked",
+                action=instr.action,
+                command_id=instr.command_id,
             )
             if not first_seen:
                 with contextlib.suppress(Exception):
@@ -1940,7 +2015,14 @@ class Daemon:
                         detail="remote instruction replay blocked",
                     )
                 raise ValueError("remote instruction replayed")
+            run_started = time.perf_counter()
             result = await self._run_self_mesh_instruction(instr)
+            self._record_self_mesh_perf_observation(
+                "command_execute",
+                (time.perf_counter() - run_started) * 1000.0,
+                action=instr.action,
+                command_id=instr.command_id,
+            )
             with contextlib.suppress(Exception):
                 self.state.record_self_mesh_audit(
                     event="command_accepted",
@@ -1959,6 +2041,13 @@ class Daemon:
                 action=instr.action,
                 command_id=instr.command_id,
             )
+            self._record_self_mesh_perf_observation(
+                "command_total",
+                (time.perf_counter() - total_started) * 1000.0,
+                status="accepted",
+                action=instr.action,
+                command_id=instr.command_id,
+            )
             await channel.send(encode_msg(make_msg(
                 "ACK",
                 self.me.short_id,
@@ -1969,6 +2058,12 @@ class Daemon:
                 result=result,
             )))
         except Exception as e:
+            self._record_self_mesh_perf_observation(
+                "command_total",
+                (time.perf_counter() - total_started) * 1000.0,
+                status="rejected",
+                error=str(e),
+            )
             log.warning(
                 "self-mesh remote instruction rejected from %s: %s",
                 peer_fp[:8],
@@ -12690,6 +12785,20 @@ class Daemon:
                 sample["sample_id"] = self.state.record_self_mesh_perf_sample(sample)
         return sample
 
+    def record_self_mesh_api_poll(
+        self,
+        *,
+        route: str,
+        duration_ms: float,
+        status: str = "ready",
+    ) -> None:
+        self._record_self_mesh_perf_observation(
+            "api_poll",
+            duration_ms,
+            status=status,
+            route=route,
+        )
+
     def _broadcast_tail(self, msg: dict) -> None:
         line = (json.dumps({"event": "msg", "msg": msg}) + "\n").encode("utf-8")
         dead: list[asyncio.StreamWriter] = []
@@ -12837,24 +12946,84 @@ class Daemon:
 
                     def _emit_cover_real() -> None:
                         # Fresh ephemeral keypair per packet — Sphinx
-                        # design requires this for forward secrecy
-                        # of cover traffic.
+                        # design requires this for forward secrecy.
                         eph_sk, _eph_pk = _native_sphinx.generate_keypair()
+                        # Prefer real wire send to a connected peer
+                        # that has published its onion pubkey via the
+                        # `onion_pubkey` envelope on DC-open. Fall
+                        # back to local loopback when no such peer
+                        # exists — still exercises the full Sphinx
+                        # pipeline, just doesn't hit the network.
+                        target_peer = None
+                        target_pk = None
+                        prtc = getattr(self, "peer_rtc", None)
+                        if prtc is not None:
+                            try:
+                                peers_map = getattr(prtc, "_peers", {})
+                                for p in peers_map.values():
+                                    pk = getattr(p, "onion_pubkey", None)
+                                    dc = getattr(p, "control_dc", None)
+                                    if pk and dc:
+                                        try:
+                                            ready = (
+                                                dc.readyState == "open"
+                                            )
+                                        except Exception:
+                                            ready = False
+                                        if ready:
+                                            target_peer = p
+                                            target_pk = pk
+                                            break
+                            except Exception:
+                                pass
+
+                        if target_peer is not None and target_pk is not None:
+                            # Real wire-level cover packet to a peer.
+                            circuit = [
+                                (self._cover_self_hop_id, target_pk)
+                            ]
+                            packet = _native_sphinx.build_cover_packet(
+                                eph_sk, circuit, _cover_payload_size
+                            )
+                            import base64 as _b64
+                            try:
+                                from one_link.peer_rtc import (
+                                    PEER_DC_PROTOCOL_VERSION,
+                                )
+                                prtc.send_dc(
+                                    target_peer,
+                                    "control",
+                                    {
+                                        "v": PEER_DC_PROTOCOL_VERSION,
+                                        "t": "cover_packet",
+                                        "packet_b64": _b64.b64encode(
+                                            packet
+                                        ).decode("ascii"),
+                                    },
+                                )
+                                self._cover_emit_count += 1
+                                self._cover_wire_sent_count = (
+                                    getattr(self, "_cover_wire_sent_count", 0) + 1
+                                )
+                                return
+                            except Exception:
+                                # Fall through to loopback.
+                                pass
+
+                        # Loopback — still runs real Sphinx build +
+                        # peel, just doesn't hit the wire.
                         circuit = [
                             (
                                 self._cover_self_hop_id,
                                 self._cover_relay_pk,
                             )
                         ]
-                        # Build → real Sphinx cryptography.
                         packet = _native_sphinx.build_cover_packet(
                             eph_sk, circuit, _cover_payload_size
                         )
-                        # Peel → real Sphinx decryption + MAC verify.
                         kind, _next, payload = _native_sphinx.peel_sphinx(
                             self._cover_relay_sk, packet
                         )
-                        # Must deliver (1-hop) + be a cover sentinel.
                         if kind != "deliver":
                             raise RuntimeError(
                                 f"cover-traffic peel: expected "
@@ -12866,6 +13035,9 @@ class Daemon:
                                 "cover sentinel"
                             )
                         self._cover_emit_count += 1
+                        self._cover_loopback_count = (
+                            getattr(self, "_cover_loopback_count", 0) + 1
+                        )
 
                     ct = _CTD(rate_hz=0.5, emit_cover=_emit_cover_real)
                     ct.start()

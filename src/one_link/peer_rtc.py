@@ -253,6 +253,13 @@ class BrowserPeer:
     attestation_challenge: Optional[bytes] = None
     attested_ms: Optional[int] = None
     peer_master_vk: Optional[bytes] = None
+    # Row 6/7 — peer's Sphinx onion public key (Ristretto255 32-byte
+    # compressed point). Each peer publishes theirs on DC-open via
+    # the `onion_pubkey` envelope; we record the other side's so
+    # cover-traffic emission can build real Sphinx packets bound
+    # for them (instead of looping back to self).
+    onion_pubkey: Optional[bytes] = None
+    onion_pubkey_received_ms: Optional[int] = None
 
 
 # ── manager ──────────────────────────────────────────────────────────
@@ -413,6 +420,13 @@ class BrowserPeerManager:
         if msg_t == "attest_response":
             await self._handle_attest_response(peer, envelope)
             return
+        # Row 6/7 — onion-pubkey announce + cover-packet receipt.
+        if msg_t == "onion_pubkey":
+            await self._handle_onion_pubkey(peer, envelope)
+            return
+        if msg_t == "cover_packet":
+            await self._handle_cover_packet(peer, envelope)
+            return
         # Fan out to registered listeners (chat, files, etc. wire in
         # v0.20.2+).
         for cb in list(self._dc_listeners):
@@ -534,6 +548,111 @@ class BrowserPeerManager:
             "peer-rtc: peer %s attested (provider_tag=%d, vk_len=%d)",
             peer.fingerprint, doc.provider_tag, len(doc.master_vk),
         )
+
+    # ── Row 6/7 onion-pubkey announce + cover-packet receipt ────────
+
+    def init_onion_announce(self, peer: BrowserPeer) -> bool:
+        """Announce our Sphinx onion pubkey to the peer. Called from
+        the DC-open handler so cover-traffic emission can bind real
+        Sphinx packets to this peer's identity. Returns ``True`` if
+        we have a pubkey to send (daemon has the cover-relay
+        keypair); ``False`` when the native ext isn't built or
+        cover-traffic wasn't started."""
+        pk = getattr(self.daemon, "_cover_relay_pk", None)
+        if not pk:
+            return False
+        import base64
+        with contextlib.suppress(Exception):
+            self.send_dc(peer, "control", {
+                "v": PEER_DC_PROTOCOL_VERSION,
+                "t": "onion_pubkey",
+                "ts": _now_ms(),
+                "pubkey_b64": base64.b64encode(pk).decode("ascii"),
+            })
+        return True
+
+    async def _handle_onion_pubkey(
+        self, peer: BrowserPeer, envelope: dict
+    ) -> None:
+        """Record the peer's announced Sphinx pubkey on the peer
+        object so cover-traffic emission can build packets bound for
+        them."""
+        try:
+            import base64
+        except ImportError:
+            return
+        pubkey_b64 = str(envelope.get("pubkey_b64") or "")
+        try:
+            pk = base64.b64decode(pubkey_b64)
+        except Exception:
+            return
+        if len(pk) != 32:
+            log.info(
+                "peer-rtc: %s sent onion_pubkey of wrong length %d",
+                peer.fingerprint, len(pk),
+            )
+            return
+        peer.onion_pubkey = pk
+        peer.onion_pubkey_received_ms = _now_ms()
+        log.info(
+            "peer-rtc: recorded onion pubkey for %s",
+            peer.fingerprint,
+        )
+
+    async def _handle_cover_packet(
+        self, peer: BrowserPeer, envelope: dict
+    ) -> None:
+        """A peer sent us a Sphinx cover packet. Peel it with our
+        relay sk, verify the cover sentinel, drop. Real Sphinx
+        decryption + MAC verify happens inside the native peel.
+        Failures are logged at debug — cover traffic is best-effort,
+        a malformed packet must NOT disrupt the rest of the daemon."""
+        relay_sk = getattr(self.daemon, "_cover_relay_sk", None)
+        if relay_sk is None:
+            return
+        try:
+            import base64
+            from one_link_native import sphinx as _native_sphinx
+        except ImportError:
+            return
+        packet_b64 = str(envelope.get("packet_b64") or "")
+        try:
+            packet_bytes = base64.b64decode(packet_b64)
+        except Exception:
+            return
+        try:
+            kind, _next_hop, payload = _native_sphinx.peel_sphinx(
+                relay_sk, packet_bytes
+            )
+        except Exception as e:
+            log.debug(
+                "peer-rtc: cover_packet from %s failed to peel: %s",
+                peer.fingerprint, e,
+            )
+            return
+        if kind != "deliver":
+            log.debug(
+                "peer-rtc: cover_packet from %s peeled to non-deliver "
+                "(kind=%r); dropping",
+                peer.fingerprint, kind,
+            )
+            return
+        if not _native_sphinx.is_cover_payload(payload):
+            log.debug(
+                "peer-rtc: peeled packet from %s lacks cover sentinel; "
+                "dropping (would be an app-layer packet, not handled "
+                "here)",
+                peer.fingerprint,
+            )
+            return
+        # Real cover packet, real sentinel — drop silently. Update
+        # the activity counter so traffic-analysis countermeasures
+        # have telemetry.
+        cnt = getattr(self.daemon, "_cover_recv_count", 0)
+        try:
+            self.daemon._cover_recv_count = cnt + 1
+        except Exception:
+            pass
 
     def send_dc(
         self, peer: BrowserPeer, channel_kind: str, envelope: dict
