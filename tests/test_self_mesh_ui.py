@@ -14,6 +14,8 @@ def test_activity_panel_contains_self_mesh_surface():
     assert 'id="btn-self-mesh-best"' in src
     assert 'id="btn-self-mesh-trust-root"' in src
     assert 'id="btn-self-mesh-send"' in src
+    assert 'id="self-mesh-advanced"' in src
+    assert "Advanced device setup" in src
     assert 'id="self-mesh-invite-qr"' in src
     assert "renderSelfMesh()" in src
     assert "refreshSelfMesh()" in src
@@ -44,6 +46,7 @@ def test_self_mesh_ui_has_enrollment_and_remote_instruction_handlers():
     assert "function revokeSelfMeshDevice()" in src
     assert "function createSelfMeshInvite()" in src
     assert "function chooseBestSelfMeshDevice()" in src
+    assert "function selfMeshActionLabel(action)" in src
     assert "function sendSelfMeshInstruction(action)" in src
     assert 'sendSelfMeshInstruction("pull_file_manifest")' in src
     assert 'sendSelfMeshInstruction("send_file_from_device")' in src

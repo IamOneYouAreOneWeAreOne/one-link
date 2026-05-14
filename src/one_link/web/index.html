@@ -1409,6 +1409,28 @@
     padding: 7px 8px;
     font-size: 10px;
   }
+  .self-mesh-kit .sm-advanced {
+    margin-top: 8px;
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: 8px;
+    padding: 8px;
+    background: rgba(255,255,255,.025);
+  }
+  .self-mesh-kit .sm-advanced summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 12px;
+    font-weight: 800;
+    list-style: none;
+  }
+  .self-mesh-kit .sm-advanced summary::-webkit-details-marker { display: none; }
+  .self-mesh-kit .sm-advanced summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 6px;
+    transition: transform .15s ease;
+  }
+  .self-mesh-kit .sm-advanced[open] summary::before { transform: rotate(90deg); }
   .courier-kit {
     margin: -2px 12px 10px;
     padding: 9px 10px;
@@ -3990,23 +4012,30 @@
           <select id="self-mesh-device-select" aria-label="Self-mesh device"></select>
           <input id="self-mesh-path" type="text" placeholder="Allowed folder or file path" />
           <input id="self-mesh-peer" type="text" placeholder="Recipient or trusted device" />
-          <input id="self-mesh-root-seed" type="text" placeholder="Root recovery seed (optional)" />
-          <input id="self-mesh-device-pub" type="text" placeholder="New device public key" />
-          <input id="self-mesh-device-label" type="text" placeholder="Device name" />
-          <input id="self-mesh-cert" type="text" placeholder="Invite token or device cert" />
+          <input id="self-mesh-cert" type="text" placeholder="Invite code or device cert" />
         </div>
         <div class="sm-actions">
           <button id="btn-self-mesh-root">Set up my devices</button>
-          <button id="btn-self-mesh-mint">Mint cert</button>
-          <button id="btn-self-mesh-enroll">Add cert</button>
           <button id="btn-self-mesh-invite">Show invite QR</button>
           <button id="btn-self-mesh-claim">Join with invite</button>
           <button id="btn-self-mesh-best">Use best device</button>
-          <button id="btn-self-mesh-revoke">Remove device</button>
           <button id="btn-self-mesh-trust-root">Trust folder</button>
           <button id="btn-self-mesh-manifest">Pull file list</button>
           <button id="btn-self-mesh-send">Send file</button>
         </div>
+        <details class="sm-advanced" id="self-mesh-advanced">
+          <summary>Advanced device setup</summary>
+          <div class="sm-controls">
+            <input id="self-mesh-root-seed" type="text" placeholder="Recovery seed" />
+            <input id="self-mesh-device-pub" type="text" placeholder="New device public key" />
+            <input id="self-mesh-device-label" type="text" placeholder="Device name" />
+          </div>
+          <div class="sm-actions">
+            <button id="btn-self-mesh-mint">Create device cert</button>
+            <button id="btn-self-mesh-enroll">Add device cert</button>
+            <button id="btn-self-mesh-revoke">Remove selected device</button>
+          </div>
+        </details>
         <img id="self-mesh-invite-qr" alt="Self-mesh invite QR" style="display:none; margin-top:8px; width:144px; max-width:100%; border-radius:8px; background:#fff; padding:8px;" />
       </div>
       <div class="courier-kit" id="courier-kit">
@@ -7183,7 +7212,7 @@
         ? ` Route choice ${Number(perf.route_probe_avg_ms).toFixed(2)} ms.`
         : "";
       copy.textContent = devices.length
-        ? `${localCount || 1} local device${(localCount || 1) === 1 ? "" : "s"} can receive signed self-mesh commands. Replay protection is ${mesh.remote_instruction_replay_protection ? "on" : "checking"}.${speed}`
+        ? `${localCount || 1} local device${(localCount || 1) === 1 ? "" : "s"} can help move files for you. Duplicate request protection is ${mesh.remote_instruction_replay_protection ? "on" : "checking"}.${speed}`
         : "This device is reporting local presence; add trusted personal devices to form a self-mesh.";
     }
     if (!list) return;
@@ -7254,7 +7283,7 @@
     const timeline = Array.isArray(mesh.timeline) ? mesh.timeline : [];
     for (const item of timeline.slice(0, 3)) {
       const card = el("div", "sm-device");
-      const label = `${item.status || "sent"} ${item.action || "command"}`;
+      const label = `${item.status || "sent"} ${selfMeshActionLabel(item.action)}`;
       const events = Array.isArray(item.events) ? item.events : [];
       const last = events[events.length - 1] || {};
       const detail = last.detail || item.path || item.peer_fp || "recorded";
@@ -7297,6 +7326,12 @@
       toast(`Root setup failed: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
+  function selfMeshActionLabel(action) {
+    return {
+      pull_file_manifest: "file list",
+      send_file_from_device: "file send",
+    }[action] || "request";
+  }
   async function mintSelfMeshDeviceCert() {
     const d = _selectedSelfMeshDevice();
     const devicePub = ($("#self-mesh-device-pub")?.value || "").trim();
@@ -7312,10 +7347,10 @@
       });
       if ($("#self-mesh-cert")) $("#self-mesh-cert").value = res.cert_b64 || "";
       await copyToClipboard(res.cert_b64 || "", "device cert");
-      toast("Device cert ready", "good");
+      toast("Device certificate copied", "good");
       await refreshSelfMesh();
     } catch (e) {
-      toast(`Cert mint failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Certificate failed: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
   async function enrollSelfMeshCert() {
@@ -7423,10 +7458,10 @@
         action,
         scope,
       });
-      toast(action === "pull_file_manifest" ? "Manifest requested" : "Remote send queued", "good");
+      toast(action === "pull_file_manifest" ? "File list requested" : "File send queued", "good");
       await refreshSelfMesh();
     } catch (e) {
-      toast(`Command failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Request failed: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
   async function trustSelfMeshFolder() {
