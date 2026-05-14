@@ -106,3 +106,11 @@ def test_courier_drop_scan_keeps_newest_without_growing_candidate_list(tmp_path:
     assert len(files) == 64
     assert "ordered-0219.olcb.json" in names
     assert "ordered-0000.olcb.json" not in names
+
+
+def test_courier_scan_missing_directory_fails_closed(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    daemon = Daemon(_identity())
+    server = UIServer(daemon)
+
+    assert server._scan_courier_dir(tmp_path / "removed-usb" / "One Link Courier") == []

@@ -1112,8 +1112,14 @@ class UIServer:
 
     def _scan_courier_dir(self, directory: Path) -> list[dict]:
         root = directory.resolve()
+        if not root.is_dir():
+            return []
         newest: list[tuple[int, Path, os.stat_result]] = []
-        for path in root.iterdir():
+        try:
+            iterator = root.iterdir()
+        except OSError:
+            return []
+        for path in iterator:
             try:
                 if path.is_symlink():
                     continue
