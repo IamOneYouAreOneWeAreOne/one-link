@@ -3988,19 +3988,24 @@
         <div class="sm-devices" id="self-mesh-perf"></div>
         <div class="sm-controls">
           <select id="self-mesh-device-select" aria-label="Self-mesh device"></select>
-          <input id="self-mesh-path" type="text" placeholder="Allowed file path" />
-          <input id="self-mesh-peer" type="text" placeholder="Recipient or self-device peer" />
-          <input id="self-mesh-cert" type="text" placeholder="Device cert" />
+          <input id="self-mesh-path" type="text" placeholder="Allowed folder or file path" />
+          <input id="self-mesh-peer" type="text" placeholder="Recipient or trusted device" />
+          <input id="self-mesh-root-seed" type="text" placeholder="Root recovery seed (optional)" />
+          <input id="self-mesh-device-pub" type="text" placeholder="New device public key" />
+          <input id="self-mesh-device-label" type="text" placeholder="Device name" />
+          <input id="self-mesh-cert" type="text" placeholder="Invite token or device cert" />
         </div>
         <div class="sm-actions">
-          <button id="btn-self-mesh-root">Create root</button>
-          <button id="btn-self-mesh-enroll">Enroll cert</button>
-          <button id="btn-self-mesh-invite">Invite QR</button>
-          <button id="btn-self-mesh-claim">Claim invite</button>
-          <button id="btn-self-mesh-revoke">Revoke</button>
+          <button id="btn-self-mesh-root">Set up my devices</button>
+          <button id="btn-self-mesh-mint">Mint cert</button>
+          <button id="btn-self-mesh-enroll">Add cert</button>
+          <button id="btn-self-mesh-invite">Show invite QR</button>
+          <button id="btn-self-mesh-claim">Join with invite</button>
+          <button id="btn-self-mesh-best">Use best device</button>
+          <button id="btn-self-mesh-revoke">Remove device</button>
           <button id="btn-self-mesh-trust-root">Trust folder</button>
-          <button id="btn-self-mesh-manifest">Pull manifest</button>
-          <button id="btn-self-mesh-send">Send from device</button>
+          <button id="btn-self-mesh-manifest">Pull file list</button>
+          <button id="btn-self-mesh-send">Send file</button>
         </div>
         <img id="self-mesh-invite-qr" alt="Self-mesh invite QR" style="display:none; margin-top:8px; width:144px; max-width:100%; border-radius:8px; background:#fff; padding:8px;" />
       </div>
@@ -5822,6 +5827,7 @@
     mobileReach() { return this.get("/api/fabric/mobile-reach"); },
     selfMesh() { return this.get("/api/self-mesh"); },
     selfMeshRoot(body) { return this.post("/api/self-mesh/root", body); },
+    selfMeshMint(body) { return this.post("/api/self-mesh/devices/mint", body); },
     selfMeshEnroll(body) { return this.post("/api/self-mesh/devices/enroll", body); },
     selfMeshRevoke(body) { return this.post("/api/self-mesh/devices/revoke", body); },
     selfMeshRemoteInstruct(body) { return this.post("/api/self-mesh/remote-instruct", body); },
@@ -7273,12 +7279,43 @@
     return (mesh.devices || []).find(d => d.device_pub_b64 === devicePub) || null;
   }
   async function createSelfMeshRoot() {
+    const seed = ($("#self-mesh-root-seed")?.value || "").trim();
+    const label = ($("#self-mesh-device-label")?.value || "").trim();
     try {
-      await api.selfMeshRoot({ label: "My devices" });
-      toast("Personal mesh root ready", "good");
+      const res = await api.selfMeshRoot({
+        label: "My devices",
+        root_seed_b64: seed || undefined,
+        device_label: label || undefined,
+      });
+      if (res?.local_cert_b64 && $("#self-mesh-cert")) {
+        $("#self-mesh-cert").value = res.local_cert_b64;
+      }
+      if (seed && $("#self-mesh-root-seed")) $("#self-mesh-root-seed").value = "";
+      toast(seed ? "Personal mesh restored" : "Personal mesh ready", "good");
       await refreshSelfMesh();
     } catch (e) {
       toast(`Root setup failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+  async function mintSelfMeshDeviceCert() {
+    const d = _selectedSelfMeshDevice();
+    const devicePub = ($("#self-mesh-device-pub")?.value || "").trim();
+    const label = ($("#self-mesh-device-label")?.value || "").trim();
+    if (!d?.root_pub_b64) return toast("Set up your devices first.", "info");
+    if (!devicePub) return toast("Paste the new device public key first.", "info");
+    try {
+      const res = await api.selfMeshMint({
+        root_pub_b64: d.root_pub_b64,
+        device_pub_b64: devicePub,
+        label: label || "Trusted device",
+        device_kind: "personal-device",
+      });
+      if ($("#self-mesh-cert")) $("#self-mesh-cert").value = res.cert_b64 || "";
+      await copyToClipboard(res.cert_b64 || "", "device cert");
+      toast("Device cert ready", "good");
+      await refreshSelfMesh();
+    } catch (e) {
+      toast(`Cert mint failed: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
   async function enrollSelfMeshCert() {
@@ -7306,6 +7343,29 @@
     } catch (e) {
       toast(`Revoke failed: ${errorToastBody(e)}`, "bad", 6000);
     }
+  }
+  function chooseBestSelfMeshDevice() {
+    const mesh = state.selfMesh || {};
+    const select = $("#self-mesh-device-select");
+    const devices = Array.isArray(mesh.devices) ? mesh.devices : [];
+    if (!select || devices.length === 0) return toast("No trusted device yet.", "info");
+    const scored = devices
+      .filter(d => d.device_pub_b64 && !d.revoked)
+      .map(d => {
+        const p = _selfMeshPresenceFor(d);
+        const latency = Number(p?.latency_ms ?? 999999);
+        const awake = p?.state === "awake" ? 1000 : 0;
+        const local = d.local ? 100 : 0;
+        const trusted = d.trusted ? 50 : 0;
+        const recent = Number(p?.updated_ms || d.updated_ms || 0) / 100000000000;
+        return { d, score: awake + local + trusted + recent - Math.min(latency, 999999) / 1000 };
+      })
+      .sort((a, b) => b.score - a.score);
+    const best = scored[0]?.d || null;
+    if (!best) return toast("No usable device to choose yet.", "info");
+    select.value = best.device_pub_b64;
+    toast(`Using ${best.label || best.device_kind || "best device"}`, "good", 2500);
+    renderSelfMesh();
   }
   async function createSelfMeshInvite() {
     const d = _selectedSelfMeshDevice();
@@ -14334,9 +14394,11 @@
   $("#btn-import-route-bootstrap")?.addEventListener("click", importRouteBootstrapToken);
   $("#btn-launch-path-create")?.addEventListener("click", launchBestPathCreate);
   $("#btn-self-mesh-root")?.addEventListener("click", createSelfMeshRoot);
+  $("#btn-self-mesh-mint")?.addEventListener("click", mintSelfMeshDeviceCert);
   $("#btn-self-mesh-enroll")?.addEventListener("click", enrollSelfMeshCert);
   $("#btn-self-mesh-invite")?.addEventListener("click", createSelfMeshInvite);
   $("#btn-self-mesh-claim")?.addEventListener("click", claimSelfMeshInvite);
+  $("#btn-self-mesh-best")?.addEventListener("click", chooseBestSelfMeshDevice);
   $("#btn-self-mesh-revoke")?.addEventListener("click", revokeSelfMeshDevice);
   $("#btn-self-mesh-trust-root")?.addEventListener("click", trustSelfMeshFolder);
   $("#btn-self-mesh-manifest")?.addEventListener("click", () => sendSelfMeshInstruction("pull_file_manifest"));

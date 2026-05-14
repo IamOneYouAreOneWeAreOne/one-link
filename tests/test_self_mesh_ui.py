@@ -8,8 +8,10 @@ def test_activity_panel_contains_self_mesh_surface():
     assert 'id="self-mesh-device-select"' in src
     assert 'id="self-mesh-perf"' in src
     assert 'id="btn-self-mesh-root"' in src
+    assert 'id="btn-self-mesh-mint"' in src
     assert 'id="btn-self-mesh-invite"' in src
     assert 'id="btn-self-mesh-claim"' in src
+    assert 'id="btn-self-mesh-best"' in src
     assert 'id="btn-self-mesh-trust-root"' in src
     assert 'id="btn-self-mesh-send"' in src
     assert 'id="self-mesh-invite-qr"' in src
@@ -21,6 +23,7 @@ def test_self_mesh_ui_fetches_and_listens_for_daemon_events():
     src = Path("src/one_link/web/index.html").read_text(encoding="utf-8")
     assert 'selfMesh() { return this.get("/api/self-mesh"); }' in src
     assert 'selfMeshRoot(body) { return this.post("/api/self-mesh/root", body); }' in src
+    assert 'selfMeshMint(body) { return this.post("/api/self-mesh/devices/mint", body); }' in src
     assert 'selfMeshRemoteInstruct(body) { return this.post("/api/self-mesh/remote-instruct", body); }' in src
     assert 'selfMeshInvite(body) { return this.post("/api/self-mesh/enrollment-invite", body); }' in src
     assert 'selfMeshClaimInvite(body) { return this.post("/api/self-mesh/enrollment-invite/claim", body); }' in src
@@ -36,9 +39,11 @@ def test_self_mesh_ui_fetches_and_listens_for_daemon_events():
 def test_self_mesh_ui_has_enrollment_and_remote_instruction_handlers():
     src = Path("src/one_link/web/index.html").read_text(encoding="utf-8")
     assert "function createSelfMeshRoot()" in src
+    assert "function mintSelfMeshDeviceCert()" in src
     assert "function enrollSelfMeshCert()" in src
     assert "function revokeSelfMeshDevice()" in src
     assert "function createSelfMeshInvite()" in src
+    assert "function chooseBestSelfMeshDevice()" in src
     assert "function sendSelfMeshInstruction(action)" in src
     assert 'sendSelfMeshInstruction("pull_file_manifest")' in src
     assert 'sendSelfMeshInstruction("send_file_from_device")' in src
