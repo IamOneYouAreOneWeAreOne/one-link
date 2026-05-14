@@ -3994,10 +3994,12 @@
         <div class="sm-actions">
           <button id="btn-self-mesh-root">Create root</button>
           <button id="btn-self-mesh-enroll">Enroll cert</button>
+          <button id="btn-self-mesh-invite">Invite QR</button>
           <button id="btn-self-mesh-revoke">Revoke</button>
           <button id="btn-self-mesh-manifest">Pull manifest</button>
           <button id="btn-self-mesh-send">Send from device</button>
         </div>
+        <img id="self-mesh-invite-qr" alt="Self-mesh invite QR" style="display:none; margin-top:8px; width:144px; max-width:100%; border-radius:8px; background:#fff; padding:8px;" />
       </div>
       <div class="courier-kit" id="courier-kit">
         <div class="ck-title">Courier bundle</div>
@@ -5820,6 +5822,8 @@
     selfMeshEnroll(body) { return this.post("/api/self-mesh/devices/enroll", body); },
     selfMeshRevoke(body) { return this.post("/api/self-mesh/devices/revoke", body); },
     selfMeshRemoteInstruct(body) { return this.post("/api/self-mesh/remote-instruct", body); },
+    selfMeshInvite(body) { return this.post("/api/self-mesh/enrollment-invite", body); },
+    selfMeshPerformance() { return this.get("/api/self-mesh/performance"); },
     fabricPathCreate() { return this.get("/api/fabric/path-create"); },
     launchFabricPathCreate(body) { return this.post("/api/fabric/path-create/launch", body); },
     nativeFabricPathCreate(body) { return this.post("/api/fabric/path-create/native", body); },
@@ -7163,8 +7167,12 @@
       pill.textContent = devices.length ? `${awake}/${devices.length} awake` : "ready";
     }
     if (copy) {
+      const perf = mesh.performance || {};
+      const speed = perf.route_probe_avg_ms != null
+        ? ` Route choice ${Number(perf.route_probe_avg_ms).toFixed(2)} ms.`
+        : "";
       copy.textContent = devices.length
-        ? `${localCount || 1} local device${(localCount || 1) === 1 ? "" : "s"} can receive signed self-mesh commands. Replay protection is ${mesh.remote_instruction_replay_protection ? "on" : "checking"}.`
+        ? `${localCount || 1} local device${(localCount || 1) === 1 ? "" : "s"} can receive signed self-mesh commands. Replay protection is ${mesh.remote_instruction_replay_protection ? "on" : "checking"}.${speed}`
         : "This device is reporting local presence; add trusted personal devices to form a self-mesh.";
     }
     if (!list) return;
@@ -7246,6 +7254,27 @@
       await refreshSelfMesh();
     } catch (e) {
       toast(`Revoke failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+  async function createSelfMeshInvite() {
+    const d = _selectedSelfMeshDevice();
+    if (!d) return toast("Choose a device first.", "info");
+    try {
+      const invite = await api.selfMeshInvite({
+        root_pub_b64: d.root_pub_b64,
+        device_pub_b64: d.device_pub_b64,
+        label: d.label || d.device_kind || "One Link device",
+      });
+      const qr = $("#self-mesh-invite-qr");
+      if (qr && invite.qr_url) {
+        qr.src = `${invite.qr_url}&t=${Date.now()}`;
+        qr.style.display = "block";
+      }
+      await copyToClipboard(invite.deep_link || invite.token, "self-mesh invite");
+      toast("Invite ready", "good");
+      await refreshSelfMesh();
+    } catch (e) {
+      toast(`Invite failed: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
   async function sendSelfMeshInstruction(action) {
@@ -14225,6 +14254,7 @@
   $("#btn-launch-path-create")?.addEventListener("click", launchBestPathCreate);
   $("#btn-self-mesh-root")?.addEventListener("click", createSelfMeshRoot);
   $("#btn-self-mesh-enroll")?.addEventListener("click", enrollSelfMeshCert);
+  $("#btn-self-mesh-invite")?.addEventListener("click", createSelfMeshInvite);
   $("#btn-self-mesh-revoke")?.addEventListener("click", revokeSelfMeshDevice);
   $("#btn-self-mesh-manifest")?.addEventListener("click", () => sendSelfMeshInstruction("pull_file_manifest"));
   $("#btn-self-mesh-send")?.addEventListener("click", () => sendSelfMeshInstruction("send_file_from_device"));

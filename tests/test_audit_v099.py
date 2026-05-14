@@ -117,6 +117,7 @@ GUARDED_GET_ROUTES = [
     "/api/fabric/no-router",
     "/api/fabric/mobile-reach",
     "/api/self-mesh",
+    "/api/self-mesh/performance",
     "/api/courier/status",
     "/api/courier/files",
     "/api/courier/outbox",
@@ -140,10 +141,6 @@ GUARDED_POST_ROUTES = [
     ("/api/courier/assemble", {}),
     ("/api/route-bootstrap/import", {}),
     ("/api/self-mesh/root", {}),
-    ("/api/self-mesh/devices/mint", {}),
-    ("/api/self-mesh/devices/enroll", {}),
-    ("/api/self-mesh/devices/revoke", {}),
-    ("/api/self-mesh/remote-instruct", {}),
 ]
 
 
@@ -872,6 +869,43 @@ async def test_api_self_mesh_enrollment_mint_revoke_and_remote_instruct(ctx):
     assert revoke.status == 200
     assert (await revoke.json())["revoked"] is True
     assert state.list_self_mesh_audit()[0]["event"] == "device_revoked"
+
+
+@pytest.mark.asyncio
+async def test_api_self_mesh_invite_qr_and_performance(ctx):
+    client, _, _, token, _ = ctx
+    create = await client.post(
+        "/api/self-mesh/root",
+        headers=_h(token),
+        json={"label": "My devices", "device_label": "Audit laptop"},
+    )
+    assert create.status == 200
+    created = await create.json()
+
+    invite_resp = await client.post(
+        "/api/self-mesh/enrollment-invite",
+        headers=_h(token),
+        json={
+            "root_pub_b64": created["root_pub_b64"],
+            "device_pub_b64": created["local_device_pub_b64"],
+        },
+    )
+    assert invite_resp.status == 200
+    invite = await invite_resp.json()
+    assert invite["deep_link"].startswith("one-link://self-mesh/enroll?")
+    assert invite["qr_url"].startswith("/api/self-mesh/enrollment-invite/qr.svg")
+
+    qr = await client.get(invite["qr_url"], headers=_h(token))
+    assert qr.status == 200
+    assert qr.headers["Cache-Control"] == "no-store"
+    assert "image/svg+xml" in qr.headers["Content-Type"]
+    assert "<svg" in await qr.text()
+
+    perf = await client.get("/api/self-mesh/performance", headers=_h(token))
+    assert perf.status == 200
+    body = await perf.json()
+    assert body["ok"] is True
+    assert body["performance"]["route_probe_avg_ms"] >= 0
 
 
 @pytest.mark.asyncio

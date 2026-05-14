@@ -1308,6 +1308,9 @@ class UIServer:
         r.add_post("/api/self-mesh/devices/enroll", self._guarded(self.api_self_mesh_enroll_device))
         r.add_post("/api/self-mesh/devices/revoke", self._guarded(self.api_self_mesh_revoke_device))
         r.add_post("/api/self-mesh/remote-instruct", self._guarded(self.api_self_mesh_remote_instruct))
+        r.add_post("/api/self-mesh/enrollment-invite", self._guarded(self.api_self_mesh_enrollment_invite))
+        r.add_get("/api/self-mesh/enrollment-invite/qr.svg", self._guarded(self.api_self_mesh_enrollment_invite_qr))
+        r.add_get("/api/self-mesh/performance", self._guarded(self.api_self_mesh_performance))
         r.add_get("/api/courier/status", self._guarded(self.api_courier_status))
         r.add_get("/api/courier/files", self._guarded(self.api_courier_files))
         r.add_get("/api/courier/outbox", self._guarded(self.api_courier_outbox))
@@ -3265,6 +3268,7 @@ class UIServer:
             "audit": audit,
             "allowed_roots": allowed_roots,
             "routing": routing,
+            "performance": self.daemon.self_mesh_performance_snapshot(),
             "remote_instruction_replay_protection": True,
         })
 
@@ -3525,6 +3529,91 @@ class UIServer:
                 "error": "self_mesh_remote_instruct_rejected",
                 "hint": str(exc),
             }, status=400)
+
+    async def api_self_mesh_enrollment_invite(self, request: web.Request) -> web.Response:
+        """Return a mobile-friendly self-mesh enrollment deep link token."""
+        from one_link.self_mesh_enrollment import build_enrollment_invite, b64u_decode
+
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        body = await request.json()
+        try:
+            root_pub = b64u_decode(str(body.get("root_pub_b64") or ""))
+            device_pub = (
+                b64u_decode(str(body.get("device_pub_b64")))
+                if body.get("device_pub_b64") else self.daemon.me.public_bytes
+            )
+            row = state.get_self_mesh_device(root_pub=root_pub, device_pub=device_pub)
+            if row is None or not row.get("cert") or row.get("revoked"):
+                raise ValueError("device cert unavailable or revoked")
+            invite = build_enrollment_invite(
+                cert=row["cert"],
+                label=str(body.get("label") or row.get("label") or "One Link device"),
+            )
+            state.record_self_mesh_audit(
+                event="enrollment_invite_created",
+                severity="info",
+                root_pub=root_pub,
+                device_pub=device_pub,
+                detail=invite["label"],
+            )
+            return web.json_response({
+                "ok": True,
+                **invite,
+                "qr_url": (
+                    "/api/self-mesh/enrollment-invite/qr.svg"
+                    f"?token={invite['token']}"
+                ),
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_invite_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_self_mesh_enrollment_invite_qr(
+        self,
+        request: web.Request,
+    ) -> web.Response:
+        from one_link.self_mesh_enrollment import parse_enrollment_invite
+
+        token = str(request.query.get("token") or "")
+        try:
+            parsed = parse_enrollment_invite(token)
+            import io
+            import qrcode
+            import qrcode.image.svg
+
+            qr = qrcode.QRCode(border=2, box_size=8)
+            qr.add_data(f"one-link://self-mesh/enroll?token={token}")
+            qr.make(fit=True)
+            img = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
+            buf = io.BytesIO()
+            img.save(buf)
+            resp = web.Response(
+                text=buf.getvalue().decode("utf-8"),
+                content_type="image/svg+xml",
+            )
+            resp.headers["Cache-Control"] = "no-store"
+            resp.headers["X-One-Link-Self-Mesh-Device"] = parsed["device_pub_b64"]
+            return resp
+        except ImportError:
+            return web.json_response({
+                "error": "qrcode_lib_missing",
+                "hint": "pip install qrcode>=7",
+            }, status=500)
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_invite_qr_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_self_mesh_performance(self, request: web.Request) -> web.Response:
+        return web.json_response({
+            "ok": True,
+            "performance": self.daemon.self_mesh_performance_snapshot(),
+        })
 
     async def api_courier_status(self, request: web.Request) -> web.Response:
         """Readiness for encrypted offline chunk courier bundles."""

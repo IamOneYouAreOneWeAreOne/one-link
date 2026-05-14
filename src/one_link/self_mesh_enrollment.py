@@ -8,6 +8,7 @@ mint device certificates, and derive safe public summaries.
 from __future__ import annotations
 
 import base64
+import json
 import secrets
 import time
 from dataclasses import dataclass
@@ -89,10 +90,56 @@ def verify_enrollment_cert(
     }
 
 
+def build_enrollment_invite(
+    *,
+    cert: bytes,
+    label: str = "",
+    created_ms: int | None = None,
+) -> dict[str, Any]:
+    parsed = verify_enrollment_cert(cert)
+    if created_ms is None:
+        created_ms = int(time.time() * 1000)
+    body = {
+        "v": 1,
+        "type": "one_link_self_mesh_enrollment",
+        "root_pub_b64": b64u(parsed["root_pub"]),
+        "device_pub_b64": b64u(parsed["device_pub"]),
+        "cert_b64": b64u(cert),
+        "device_kind": parsed["device_kind"],
+        "label": str(label or parsed["device_kind"])[:120],
+        "created_ms": int(created_ms),
+    }
+    token = b64u(json.dumps(
+        body,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8"))
+    return {
+        **body,
+        "token": token,
+        "deep_link": f"one-link://self-mesh/enroll?token={token}",
+    }
+
+
+def parse_enrollment_invite(token: str) -> dict[str, Any]:
+    body = json.loads(b64u_decode(token).decode("utf-8"))
+    if body.get("v") != 1 or body.get("type") != "one_link_self_mesh_enrollment":
+        raise ValueError("not a self-mesh enrollment invite")
+    cert = b64u_decode(str(body.get("cert_b64") or ""))
+    parsed = verify_enrollment_cert(cert)
+    root_pub = b64u_decode(str(body.get("root_pub_b64") or ""))
+    device_pub = b64u_decode(str(body.get("device_pub_b64") or ""))
+    if parsed["root_pub"] != root_pub or parsed["device_pub"] != device_pub:
+        raise ValueError("invite cert does not match public keys")
+    return body
+
+
 __all__ = [
     "MeshRoot",
     "b64u",
     "b64u_decode",
     "mint_device_cert",
+    "build_enrollment_invite",
+    "parse_enrollment_invite",
     "verify_enrollment_cert",
 ]

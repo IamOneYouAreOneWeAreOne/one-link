@@ -84,6 +84,8 @@ from one_link.capabilities import (
     FOLDER_SYNC,
     LOCAL_CAPABILITIES,
     NATIVE_TRANSFER_V1,
+    SELF_MESH_MANIFEST,
+    SELF_MESH_SEND,
     normalize_caps,
 )
 from one_link.cdc import (
@@ -1782,6 +1784,13 @@ class Daemon:
             }
         raise ValueError(f"unsupported self-mesh action {instr.action!r}")
 
+    @staticmethod
+    def _self_mesh_action_capability(action: str) -> str | None:
+        return {
+            "pull_file_manifest": SELF_MESH_MANIFEST,
+            "send_file_from_device": SELF_MESH_SEND,
+        }.get(action)
+
     def _self_mesh_allowed_roots(self) -> list[Path]:
         roots: list[Path] = []
         with contextlib.suppress(Exception):
@@ -1857,6 +1866,16 @@ class Daemon:
                 raise ValueError(
                     f"remote instruction target rejected: {last_error}"
                 )
+            required_cap = self._self_mesh_action_capability(instr.action)
+            if required_cap is None:
+                raise ValueError(f"unsupported self-mesh action {instr.action!r}")
+            if not self._capability_allowed(peer_fp, required_cap):
+                self._emit_capability_request(
+                    peer_fp,
+                    getattr(channel, "peer_short_id", peer_fp[:8]),
+                    required_cap,
+                )
+                raise ValueError(f"capability disabled: {required_cap}")
             first_seen = self.state.mark_remote_instruction_seen(
                 command_id=instr.command_id,
                 expires_ms=instr.expires_ms,
@@ -7866,7 +7885,7 @@ class Daemon:
         # for the next hour) without forcing them through the full
         # SAS pair flow. The grant's signature attests authority;
         # CapStore enforces auto-expiry + replay.
-        if self._cap_store is not None and self.state is not None:
+        if getattr(self, "_cap_store", None) is not None and self.state is not None:
             try:
                 peer_pub = self._peer_pub_for_fp(peer_fp)
                 # Local granter pubkey == this device's identity. A
@@ -12570,6 +12589,45 @@ class Daemon:
         out["ready"] = decision.ready
         out["root_pub_b64"] = self._self_mesh_b64u(root_pub)
         return out
+
+    def self_mesh_performance_snapshot(self) -> dict[str, Any]:
+        """Tiny local benchmark/readiness snapshot for the F5 dashboard."""
+        started = time.perf_counter()
+        route_runs = 0
+        route_ready = 0
+        roots = []
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                roots = self.state.list_self_mesh_roots()
+        for root in roots[:8]:
+            for _ in range(5):
+                route_runs += 1
+                if self.choose_self_mesh_route(
+                    root_pub=root["root_pub"],
+                    kind="perf_probe",
+                ).get("ready"):
+                    route_ready += 1
+        route_ms = (time.perf_counter() - started) * 1000.0
+        presence_count = 0
+        audit_count = 0
+        device_count = 0
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                presence_count = len(self.state.list_self_mesh_presence())
+            with contextlib.suppress(Exception):
+                device_count = len(self.state.list_self_mesh_devices())
+            with contextlib.suppress(Exception):
+                audit_count = len(self.state.list_self_mesh_audit(limit=200))
+        return {
+            "route_probe_runs": route_runs,
+            "route_probe_ready": route_ready,
+            "route_probe_total_ms": round(route_ms, 4),
+            "route_probe_avg_ms": round(route_ms / route_runs, 4) if route_runs else 0.0,
+            "presence_rows": presence_count,
+            "device_rows": device_count,
+            "recent_audit_rows": audit_count,
+            "status": "ready" if route_runs == 0 or route_ms < 50.0 else "slow",
+        }
 
     def _broadcast_tail(self, msg: dict) -> None:
         line = (json.dumps({"event": "msg", "msg": msg}) + "\n").encode("utf-8")

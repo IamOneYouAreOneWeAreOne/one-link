@@ -9,6 +9,12 @@ from one_link.personal_device_mesh import (
     PresenceBook,
     choose_self_mesh_target,
 )
+from one_link.self_mesh_enrollment import (
+    MeshRoot,
+    build_enrollment_invite,
+    mint_device_cert,
+    parse_enrollment_invite,
+)
 
 
 def test_self_mesh_route_selection_stays_sub_millisecond_scale():
@@ -47,3 +53,20 @@ def test_self_mesh_route_selection_stays_sub_millisecond_scale():
         assert decision.ready
     elapsed = time.perf_counter() - started
     assert elapsed < 0.25
+
+
+def test_self_mesh_enrollment_invite_round_trips():
+    root = MeshRoot.create()
+    device_pub = b"d" * 32
+    cert = mint_device_cert(
+        root_seed=root.root_seed,
+        root_pub=root.root_pub,
+        device_pub=device_pub,
+        device_kind="phone",
+    )
+    invite = build_enrollment_invite(cert=cert, label="Phone")
+    parsed = parse_enrollment_invite(invite["token"])
+
+    assert invite["deep_link"].startswith("one-link://self-mesh/enroll?")
+    assert parsed["label"] == "Phone"
+    assert parsed["device_kind"] == "phone"

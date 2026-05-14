@@ -19,6 +19,8 @@ FILE_ACK_BATCH = "file_ack_batch"
 FOLDER_SYNC = "folder_sync"
 MERKLE_SYNC = "merkle_sync"
 FUTURE_TRANSPORTS = "future_transports"
+SELF_MESH_MANIFEST = "self_mesh_manifest"
+SELF_MESH_SEND = "self_mesh_send"
 # v0.7.2: capability advertisement for the Signal-style Double Ratchet.
 # When BOTH peers advertise this in CAPS, post-handshake traffic
 # upgrades to forward-secret + post-compromise-secure encryption.
@@ -62,6 +64,8 @@ LOCAL_CAPABILITIES = (
     FOLDER_SYNC,
     MERKLE_SYNC,
     FUTURE_TRANSPORTS,
+    SELF_MESH_MANIFEST,
+    SELF_MESH_SEND,
     DOUBLE_RATCHET_V1,
     NATIVE_TRANSFER_V1,
     BLOOM_INIT_V1,
@@ -75,7 +79,14 @@ LOCAL_CAPABILITIES = (
 #     user must explicitly grant
 # These tuples are the policy-layer enforcement points.
 DEFAULT_ALLOW_AFTER_PAIRING = (CHAT,)
-PROMPT_REQUIRED = (FILES, FOLDER_SYNC, MERKLE_SYNC, FUTURE_TRANSPORTS)
+PROMPT_REQUIRED = (
+    FILES,
+    FOLDER_SYNC,
+    MERKLE_SYNC,
+    FUTURE_TRANSPORTS,
+    SELF_MESH_MANIFEST,
+    SELF_MESH_SEND,
+)
 # DOUBLE_RATCHET_V1 is a transport-layer capability negotiated
 # between channels; it isn't a user-facing prompt-required cap.
 # Therefore it appears in neither tuple — and the deny-by-default

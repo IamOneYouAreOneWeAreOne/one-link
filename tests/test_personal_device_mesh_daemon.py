@@ -63,6 +63,7 @@ def _make_daemon(tmp_path: Path):
     d._inbound_is_rejected = lambda fp: False
     d._stamp_pair_health = lambda fp, **kw: None
     d._is_pinned = lambda fp: True
+    d._emit_capability_request = lambda fp, sid, cap: None
     d._peer_presence = {}
     return d
 
@@ -277,6 +278,48 @@ async def test_remote_instruction_rejects_paths_outside_allowed_roots(tmp_path: 
     ack = _ack(channel)
     assert "outside allowed self-mesh roots" in ack["rejected"]
     assert d.state.list_self_mesh_audit()[0]["event"] == "command_rejected"
+
+
+@pytest.mark.asyncio
+async def test_remote_instruction_requires_action_capability(tmp_path: Path):
+    from one_link.capabilities import CHAT
+
+    d = _make_daemon(tmp_path)
+    root_priv, root_pub = _ed25519_pair()
+    root_seed = root_priv.private_bytes_raw()
+    _register_self_mesh_target(d, root_seed, root_pub)
+    target = tmp_path / "note.txt"
+    target.write_text("cap gated\n", encoding="utf-8")
+    command = _remote_command(
+        d,
+        root_seed=root_seed,
+        root_pub=root_pub,
+        action="pull_file_manifest",
+        scope={"path": str(target)},
+    )
+    _, peer_pub = _ed25519_pair()
+    peer_fp = fingerprint_of(peer_pub)
+    d.state.upsert_peer(
+        fingerprint=peer_fp,
+        short_id=peer_fp[:8],
+        pubkey=peer_pub,
+        hostname="self-phone",
+    )
+    d.state.set_peer_trust(peer_fp, "pinned")
+    d.state.set_peer_capability_policy(peer_fp, [CHAT])
+    requests = []
+    d._emit_capability_request = lambda fp, sid, cap: requests.append((fp, cap))
+    channel = _FakeChannel(peer_pub)
+
+    await d._on_peer_message(channel, {
+        "t": "SELF_MESH_REMOTE_INSTRUCTION",
+        "id": "cap-denied",
+        "command_b64": _b64u(command),
+    })
+
+    ack = _ack(channel)
+    assert "capability disabled: self_mesh_manifest" in ack["rejected"]
+    assert requests == [(peer_fp, "self_mesh_manifest")]
 
 
 def test_choose_self_mesh_route_selects_best_device(tmp_path: Path):
