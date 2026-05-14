@@ -177,7 +177,9 @@ def test_control_status_and_shutdown_contract():
 def test_launcher_rejects_unknown_or_mismatched_daemon():
     from one_link import __version__
     from one_link.app import RunningDaemon
+    from one_link.build_identity import runtime_build_identity
 
+    _bid = runtime_build_identity()
     good = RunningDaemon(
         control_port=1,
         server_port=2,
@@ -185,6 +187,7 @@ def test_launcher_rejects_unknown_or_mismatched_daemon():
         status={
             "ok": True,
             "app_version": __version__,
+            "source_fingerprint": _bid["source_fingerprint"],
             "protocol_version": "OL1.2",
             "schema_version": 5,
         },
@@ -214,25 +217,31 @@ def test_launcher_rejects_unknown_or_mismatched_daemon():
 def test_launcher_rejects_ui_that_does_not_match_control_identity():
     from one_link import __version__
     from one_link.app import _runtime_matches_control
+    from one_link.build_identity import runtime_build_identity
 
+    _sf = runtime_build_identity()["source_fingerprint"]
     control = {
         "ok": True,
         "app_version": __version__,
+        "source_fingerprint": _sf,
         "me": {"fingerprint": "aa" * 32},
     }
     matching_ui = {
         "ok": True,
         "app_version": __version__,
+        "source_fingerprint": _sf,
         "me": {"fingerprint": "aa" * 32},
     }
     wrong_identity = {
         "ok": True,
         "app_version": __version__,
+        "source_fingerprint": _sf,
         "me": {"fingerprint": "bb" * 32},
     }
     wrong_version = {
         "ok": True,
         "app_version": "0.0.1",
+        "source_fingerprint": _sf,
         "me": {"fingerprint": "aa" * 32},
     }
 
@@ -268,7 +277,9 @@ def test_launcher_uses_native_windows_url_open(monkeypatch):
 def test_launcher_prefers_control_reported_ui_port(monkeypatch):
     from one_link import __version__
     from one_link import app as app_mod
+    from one_link.build_identity import runtime_build_identity
 
+    _sf = runtime_build_identity()["source_fingerprint"]
     monkeypatch.setattr(app_mod.daemon_mod, "read_control_port", lambda: 43210)
     monkeypatch.setattr(app_mod, "_alive", lambda port: port == 43210)
     monkeypatch.setattr(app_mod.server_mod, "read_ui_token", lambda: "token")
@@ -283,6 +294,7 @@ def test_launcher_prefers_control_reported_ui_port(monkeypatch):
         lambda _port, _cmd: {
             "ok": True,
             "app_version": __version__,
+            "source_fingerprint": _sf,
             "protocol_version": "OL1.2",
             "schema_version": 16,
             "ui_server_port": 7999,
@@ -295,6 +307,7 @@ def test_launcher_prefers_control_reported_ui_port(monkeypatch):
         lambda port, token: {
             "ok": port == 7999 and token == "token",
             "app_version": __version__,
+            "source_fingerprint": _sf,
             "me": {"fingerprint": "cc" * 32},
         },
     )
