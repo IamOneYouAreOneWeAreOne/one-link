@@ -49,6 +49,7 @@ mod bloom;
 mod capability;
 mod chunk;
 mod coherence_field;
+mod confidential;
 mod crdt;
 mod discovery;
 mod erasure;
@@ -312,6 +313,16 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.pqsig", pqsig_mod)?;
+
+    // Row 10 — confidential-compute daemon (sealed-op surface +
+    // remote attestation). The daemon's master sign + attest paths
+    // route through here.
+    let confidential_mod = PyModule::new_bound(py, "confidential")?;
+    confidential::register(py, &confidential_mod)?;
+    m.add_submodule(&confidential_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.confidential", confidential_mod)?;
 
     // Row 7 — pluggable transport obfuscation primitive.
     // ChaCha20 stream-cipher wrapper makes One Link traffic
