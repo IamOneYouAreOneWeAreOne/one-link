@@ -1,0 +1,431 @@
+//! Remote attestation doc — peer-verifiable proof that the daemon
+//! is running under a specific [`crate::ConfidentialProvider`] and
+//! that its master identity is fresh-bound to the peer's nonce.
+//!
+//! ## Wire shape
+//!
+//! ```text
+//! AttestationDoc {
+//!     provider_tag       : u8   — which provider produced this
+//!     master_vk          : 1984 — Ed25519 (32) || ML-DSA-65 VK
+//!     peer_nonce         : 32   — peer-supplied nonce (anti-replay)
+//!     issued_unix        : 8    — issue wall-clock
+//!     deadline_unix      : 8    — `<= issued + FRESHNESS_WINDOW`
+//!     field_witness_cmt  : 33   — option<32> BLAKE3 commit on field
+//!     platform_quote_len : u32  — bytes that follow
+//!     platform_quote     : N    — provider-specific (SGX quote, etc.)
+//!     master_sig         : 3357 — hybrid Ed25519 + ML-DSA sig
+//! }
+//! ```
+//!
+//! The master's hybrid signature covers a canonical transcript of
+//! every field except itself, so any wire tamper invalidates the
+//! signature and the verifier rejects.
+//!
+//! ## Replay defense
+//!
+//! - `peer_nonce` MUST be a freshly generated 32-byte value the peer
+//!   sent over a fresh channel; the verifier confirms it matches the
+//!   nonce it sent.
+//! - `deadline_unix` MUST be `<= issued_unix + ATTESTATION_FRESHNESS_WINDOW_SECS`
+//!   (default 30s); the verifier rejects any doc past its deadline.
+//! - `field_witness_commitment` MAY bind the doc to a coherence-field
+//!   witness so the doc is non-transferable across hosts (Row 9
+//!   field-binding extended to attestation).
+
+use blake3::Hasher;
+use ol_pqsig::{HybridVerifyingKey, HYBRID_SIG_LEN, HYBRID_VK_LEN};
+use rand_core::{CryptoRng, RngCore};
+use subtle::ConstantTimeEq;
+
+use crate::errors::{ConfidentialError, ConfidentialResult};
+use crate::provider::ProviderTag;
+
+/// Length of an attestation peer-nonce in bytes.
+pub const ATTESTATION_NONCE_LEN: usize = 32;
+
+/// Per-doc peer-supplied nonce. The peer generates this and sends it
+/// to the prover; the prover binds it into the attestation transcript
+/// so a captured doc can't be replayed against a later peer challenge.
+pub type AttestationNonce = [u8; ATTESTATION_NONCE_LEN];
+
+/// Max allowed `deadline_unix - issued_unix`. Bounds the replay
+/// window — beyond 30s an attacker can record a fresh attestation and
+/// race it against another verifier's challenge. Tighter is safer.
+pub const ATTESTATION_FRESHNESS_WINDOW_SECS: u64 = 30;
+
+/// Domain-separation prefix for the canonical attestation transcript
+/// — distinct from every other transcript-builder in the workspace.
+pub const ATTESTATION_DOMAIN: &[u8] = b"OL-confidential-attestation-v1";
+
+/// Domain prefix for the field-witness commitment leaf inside the doc.
+pub const ATTESTATION_FIELD_WITNESS_DOMAIN: &[u8] =
+    b"OL-confidential-field-witness-commitment-v1";
+
+/// Signed attestation envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttestationDoc {
+    /// Which provider produced this doc.
+    pub provider_tag: ProviderTag,
+    /// Master verifying key — the peer pins this out-of-band.
+    pub master_vk: HybridVerifyingKey,
+    /// The peer's challenge nonce.
+    pub peer_nonce: AttestationNonce,
+    /// Issuance wall-clock (seconds).
+    pub issued_unix: u64,
+    /// Expiry wall-clock (seconds). Must be `> issued_unix` and
+    /// `<= issued_unix + ATTESTATION_FRESHNESS_WINDOW_SECS`.
+    pub deadline_unix: u64,
+    /// Optional BLAKE3 commitment over the local coherence-field
+    /// witness. When present, the verifier checks the commitment
+    /// against its own witness — useful for refusing to accept docs
+    /// that were minted at a different physical location.
+    pub field_witness_commitment: Option<[u8; 32]>,
+    /// Provider-specific platform quote bytes. Empty for the
+    /// software provider; non-empty for hardware providers (SGX
+    /// quote, TPM2 quote, etc.).
+    pub platform_quote: Vec<u8>,
+    /// Hybrid signature over the canonical transcript, by the master.
+    pub master_sig: Vec<u8>,
+}
+
+/// Build the canonical bytes a master signs to issue an
+/// [`AttestationDoc`]. Pure function: identical inputs produce
+/// identical output bytes.
+#[must_use]
+pub fn canonical_attestation_transcript(
+    provider_tag: ProviderTag,
+    master_vk: &HybridVerifyingKey,
+    peer_nonce: &AttestationNonce,
+    issued_unix: u64,
+    deadline_unix: u64,
+    field_witness: Option<&[u8; 32]>,
+    platform_quote: &[u8],
+) -> Vec<u8> {
+    let mut h = Hasher::new();
+    h.update(ATTESTATION_DOMAIN);
+    h.update(&[provider_tag.as_u8()]);
+    h.update(&master_vk.to_bytes());
+    h.update(peer_nonce);
+    h.update(&issued_unix.to_be_bytes());
+    h.update(&deadline_unix.to_be_bytes());
+    match field_witness {
+        None => {
+            h.update(&[0u8]);
+        }
+        Some(witness) => {
+            h.update(&[1u8]);
+            let mut wh = Hasher::new();
+            wh.update(ATTESTATION_FIELD_WITNESS_DOMAIN);
+            wh.update(witness);
+            h.update(wh.finalize().as_bytes());
+        }
+    }
+    let qlen = u32::try_from(platform_quote.len()).unwrap_or(u32::MAX);
+    h.update(&qlen.to_be_bytes());
+    h.update(platform_quote);
+    h.finalize().as_bytes().to_vec()
+}
+
+/// Generate a fresh attestation nonce. Convenience wrapper for peers
+/// constructing a challenge.
+#[must_use]
+pub fn fresh_attestation_nonce<R: RngCore + CryptoRng>(rng: &mut R) -> AttestationNonce {
+    let mut n = [0u8; ATTESTATION_NONCE_LEN];
+    rng.fill_bytes(&mut n);
+    n
+}
+
+/// Convenience helper for callers that hold a [`ol_pqsig::HybridSigningKey`]
+/// directly (e.g., the Phase-2 wired daemon path). Most callers go
+/// through [`crate::ConfidentialProvider::attest`] instead.
+///
+/// # Errors
+/// Returns `AttestationBadFreshnessWindow` if `deadline_unix <= issued_unix`,
+/// `AttestationFreshnessWindowTooWide` if the window exceeds policy,
+/// or `PqSig` if the signing primitive errs.
+pub fn sign_attestation(
+    signing_key: &ol_pqsig::HybridSigningKey,
+    provider_tag: ProviderTag,
+    peer_nonce: AttestationNonce,
+    issued_unix: u64,
+    deadline_unix: u64,
+    field_witness: Option<&[u8; 32]>,
+    platform_quote: Vec<u8>,
+) -> ConfidentialResult<AttestationDoc> {
+    if deadline_unix <= issued_unix {
+        return Err(ConfidentialError::AttestationBadFreshnessWindow {
+            issued_unix,
+            deadline_unix,
+        });
+    }
+    let window = deadline_unix - issued_unix;
+    if window > ATTESTATION_FRESHNESS_WINDOW_SECS {
+        return Err(ConfidentialError::AttestationFreshnessWindowTooWide {
+            got: window,
+            max: ATTESTATION_FRESHNESS_WINDOW_SECS,
+        });
+    }
+    let master_vk = signing_key.verifying_key();
+    let transcript = canonical_attestation_transcript(
+        provider_tag,
+        &master_vk,
+        &peer_nonce,
+        issued_unix,
+        deadline_unix,
+        field_witness,
+        &platform_quote,
+    );
+    let sig = signing_key.sign(&transcript)?;
+    Ok(AttestationDoc {
+        provider_tag,
+        master_vk,
+        peer_nonce,
+        issued_unix,
+        deadline_unix,
+        field_witness_commitment: field_witness.map(|w| {
+            let mut h = Hasher::new();
+            h.update(ATTESTATION_FIELD_WITNESS_DOMAIN);
+            h.update(w);
+            *h.finalize().as_bytes()
+        }),
+        platform_quote,
+        master_sig: sig.to_vec(),
+    })
+}
+
+/// Verify an attestation doc.
+///
+/// - `expected_peer_nonce`: the nonce THIS verifier sent in the
+///   challenge round — MUST match the doc's `peer_nonce`.
+/// - `now_unix`: verifier's wall clock; must be `<= deadline_unix`.
+/// - `expected_field_witness`: if `Some`, the local coherence-field
+///   witness — the doc's commitment must match.
+/// - `expected_provider_floor`: minimum tier the verifier requires.
+///   (Caller-side tier check; the doc's `provider_tag` must map to a
+///   tier `>= floor` via [`crate::tier::ConfidentialTier`].)
+///
+/// # Errors
+/// Returns a typed error if any check fails: peer-nonce mismatch,
+/// expired, freshness window too wide, master-sig invalid, or
+/// field-witness mismatch.
+pub fn verify_attestation(
+    doc: &AttestationDoc,
+    expected_peer_nonce: &AttestationNonce,
+    expected_field_witness: Option<&[u8; 32]>,
+    now_unix: u64,
+) -> ConfidentialResult<()> {
+    // (0) Sanity shape.
+    if doc.master_sig.len() != HYBRID_SIG_LEN {
+        return Err(ConfidentialError::AttestationMasterSigFail);
+    }
+    if doc.deadline_unix <= doc.issued_unix {
+        return Err(ConfidentialError::AttestationBadFreshnessWindow {
+            issued_unix: doc.issued_unix,
+            deadline_unix: doc.deadline_unix,
+        });
+    }
+    let window = doc.deadline_unix - doc.issued_unix;
+    if window > ATTESTATION_FRESHNESS_WINDOW_SECS {
+        return Err(ConfidentialError::AttestationFreshnessWindowTooWide {
+            got: window,
+            max: ATTESTATION_FRESHNESS_WINDOW_SECS,
+        });
+    }
+    // (1) Peer nonce binds the doc to this challenge.
+    if doc.peer_nonce.ct_eq(expected_peer_nonce).unwrap_u8() == 0 {
+        return Err(ConfidentialError::AttestationPeerNonceMismatch);
+    }
+    // (2) Freshness vs verifier clock.
+    if now_unix > doc.deadline_unix {
+        return Err(ConfidentialError::AttestationExpired {
+            deadline_unix: doc.deadline_unix,
+            now_unix,
+        });
+    }
+    // (3) Field-witness binding (if requested by verifier).
+    if let Some(local_witness) = expected_field_witness {
+        let local_commitment = {
+            let mut h = Hasher::new();
+            h.update(ATTESTATION_FIELD_WITNESS_DOMAIN);
+            h.update(local_witness);
+            *h.finalize().as_bytes()
+        };
+        match doc.field_witness_commitment {
+            None => return Err(ConfidentialError::AttestationFieldWitnessMismatch),
+            Some(cmt) => {
+                if cmt.ct_eq(&local_commitment).unwrap_u8() == 0 {
+                    return Err(ConfidentialError::AttestationFieldWitnessMismatch);
+                }
+            }
+        }
+    }
+    // (4) Provider-tag mapping is enforced separately by the caller
+    //     via tier::ConfidentialTier::meets(...).
+    // (5) Master signature.
+    if doc.master_vk.to_bytes().len() != HYBRID_VK_LEN {
+        return Err(ConfidentialError::Internal("master_vk bad length"));
+    }
+    let transcript = canonical_attestation_transcript(
+        doc.provider_tag,
+        &doc.master_vk,
+        &doc.peer_nonce,
+        doc.issued_unix,
+        doc.deadline_unix,
+        // Re-derive the witness from the commitment ONLY by trusting
+        // the commitment field as authoritative; if the verifier
+        // requested witness binding it was checked at step (3).
+        // Pass the witness only if the doc claims one.
+        if doc.field_witness_commitment.is_some() {
+            expected_field_witness
+        } else {
+            None
+        },
+        &doc.platform_quote,
+    );
+    doc.master_vk
+        .verify(&transcript, &doc.master_sig)
+        .map_err(|_| ConfidentialError::AttestationMasterSigFail)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ol_pqsig::HybridSigningKey;
+    use rand::rngs::OsRng;
+
+    fn fresh_key() -> HybridSigningKey {
+        let (sk, _vk) = HybridSigningKey::generate(&mut OsRng);
+        sk
+    }
+
+    #[test]
+    fn round_trip_no_witness() {
+        let sk = fresh_key();
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let doc = sign_attestation(
+            &sk,
+            ProviderTag::Software,
+            nonce,
+            100,
+            120,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        verify_attestation(&doc, &nonce, None, 110).unwrap();
+    }
+
+    #[test]
+    fn round_trip_with_field_witness() {
+        let sk = fresh_key();
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let witness = [0xAB; 32];
+        let doc = sign_attestation(
+            &sk,
+            ProviderTag::Software,
+            nonce,
+            100,
+            120,
+            Some(&witness),
+            Vec::new(),
+        )
+        .unwrap();
+        verify_attestation(&doc, &nonce, Some(&witness), 110).unwrap();
+    }
+
+    #[test]
+    fn wrong_peer_nonce_rejected() {
+        let sk = fresh_key();
+        let nonce_a = fresh_attestation_nonce(&mut OsRng);
+        let nonce_b = fresh_attestation_nonce(&mut OsRng);
+        let doc =
+            sign_attestation(&sk, ProviderTag::Software, nonce_a, 100, 120, None, Vec::new())
+                .unwrap();
+        let r = verify_attestation(&doc, &nonce_b, None, 110);
+        assert!(matches!(r, Err(ConfidentialError::AttestationPeerNonceMismatch)));
+    }
+
+    #[test]
+    fn expired_doc_rejected() {
+        let sk = fresh_key();
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new())
+            .unwrap();
+        let r = verify_attestation(&doc, &nonce, None, 130);
+        assert!(matches!(r, Err(ConfidentialError::AttestationExpired { .. })));
+    }
+
+    #[test]
+    fn too_wide_window_rejected_at_sign() {
+        let sk = fresh_key();
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let r =
+            sign_attestation(&sk, ProviderTag::Software, nonce, 100, 100 + 31, None, Vec::new());
+        assert!(matches!(
+            r,
+            Err(ConfidentialError::AttestationFreshnessWindowTooWide { .. })
+        ));
+    }
+
+    #[test]
+    fn deadline_equal_issue_rejected_at_sign() {
+        let sk = fresh_key();
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let r = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 100, None, Vec::new());
+        assert!(matches!(
+            r,
+            Err(ConfidentialError::AttestationBadFreshnessWindow { .. })
+        ));
+    }
+
+    #[test]
+    fn tampered_master_sig_rejected() {
+        let sk = fresh_key();
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let mut doc =
+            sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new())
+                .unwrap();
+        doc.master_sig[0] ^= 0x01;
+        let r = verify_attestation(&doc, &nonce, None, 110);
+        assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
+    }
+
+    #[test]
+    fn witness_mismatch_rejected() {
+        let sk = fresh_key();
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let witness_a = [0xAA; 32];
+        let witness_b = [0xBB; 32];
+        let doc = sign_attestation(
+            &sk,
+            ProviderTag::Software,
+            nonce,
+            100,
+            120,
+            Some(&witness_a),
+            Vec::new(),
+        )
+        .unwrap();
+        let r = verify_attestation(&doc, &nonce, Some(&witness_b), 110);
+        assert!(matches!(
+            r,
+            Err(ConfidentialError::AttestationFieldWitnessMismatch)
+        ));
+    }
+
+    #[test]
+    fn verifier_demanding_witness_against_witnessless_doc_rejected() {
+        let sk = fresh_key();
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new())
+            .unwrap();
+        let witness = [0xCC; 32];
+        let r = verify_attestation(&doc, &nonce, Some(&witness), 110);
+        assert!(matches!(
+            r,
+            Err(ConfidentialError::AttestationFieldWitnessMismatch)
+        ));
+    }
+}
