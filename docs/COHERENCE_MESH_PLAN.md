@@ -329,6 +329,11 @@ subkeys + device-presence CRDT + remote-instruct command channel.
 - `scripts/self_mesh_soak_gate.py` reads the live daemon's self-mesh
   performance endpoint, evaluates those budgets, and writes a JSON artifact
   suitable for release gates and 24h soak jobs.
+- `scripts/self_mesh_soak_rollup.py` runs repeated budget probes over a
+  configured duration and writes an aggregate pass/fail rollup.
+- Native URL handoff has per-user installers for Windows, macOS, and Linux:
+  `install_url_protocol.ps1`, `install_url_protocol_macos.sh`, and
+  `install_url_protocol_linux.sh`.
 - Browser-peer app traffic can be hardened behind the Row-10 attestation gate
   (`ONE_LINK_REQUIRE_ATTESTED_PEERS=required`); control-plane handshake frames
   bypass the gate, and daemon status reports the drop counter.
@@ -345,15 +350,14 @@ subkeys + device-presence CRDT + remote-instruct command channel.
   reuse a stale backend during alpha iteration.
 
 **Remaining for F5 completion:**
-- Native-device OS handoff polish: Windows registration now has
-  `scripts/install_url_protocol.ps1`, and `one-link open-url` maps
+- Native-device OS handoff polish: `one-link open-url` maps
   `one-link://self-mesh/enroll?token=...` into the local authenticated
-  `/peer?self_mesh_invite=...` flow. Remaining work is equivalent installers
-  for macOS/Linux/mobile packaging.
+  `/peer?self_mesh_invite=...` flow, and desktop OS installers exist.
+  Remaining work is mobile-packaging-specific registration.
 - Long-running soak evidence: run 24h+ sessions and persist budget rollups as
-  release-gate artifacts, not just recent in-app samples. The artifact writer
-  exists; the remaining work is sustained wall-clock collection across real
-  devices and operating systems.
+  release-gate artifacts, not just recent in-app samples. Gate + rollup
+  writers exist; the remaining work is sustained wall-clock collection across
+  real devices and operating systems.
 
 **Phase F5 acceptance gate:**
 - One Ed25519 master derives N device subkeys deterministically
