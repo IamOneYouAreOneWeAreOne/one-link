@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from one_link_native.prefetch import Predictor as _NativePredictor
 
 from one_link import blobstore, channel as ch, foldersync
+from one_link.build_identity import runtime_build_identity
 from one_link.capabilities import (
     CHAT,
     FILE_ACK_BATCH,
@@ -901,6 +902,17 @@ class Daemon:
         self._tail_subs: set[asyncio.StreamWriter] = set()
         self._incoming_files: dict[str, IncomingFile] = {}
         self._incoming_blobs: dict[str, dict] = {}
+        # Row 10 — sealed master under per-process SoftwareProvider.
+        # Populated in start() from master_seed.load_sealed_master.
+        # Stays None if no master seed file exists OR the native
+        # extension isn't built. Code that wants it MUST handle
+        # the None branch.
+        self.sealed_master = None
+        # Row 6 — cover-traffic background scheduler. Spawned in
+        # start() after the daemon's circuits are initialised;
+        # joined in stop(). None when not running.
+        self._cover_traffic = None
+        self._cover_emit_count: int = 0
         # TYPE_CHECKING import keeps UIServer (and its aiohttp deps)
         # off the import graph for CLI / status paths — see start()
         # where it's imported on demand. The runtime contract: None
@@ -1814,6 +1826,38 @@ class Daemon:
                 seen.add(key)
                 deduped.append(root)
         return deduped
+
+    def set_self_mesh_allowed_roots(self, roots: list[str]) -> list[Path]:
+        """Persist operator-approved roots for remote self-mesh actions."""
+        clean: list[Path] = []
+        seen: set[str] = set()
+        for raw in roots:
+            text = str(raw or "").strip().strip('"')
+            if not text:
+                continue
+            path = Path(text).expanduser().resolve()
+            if not path.exists():
+                raise ValueError(f"allowed root does not exist: {path}")
+            if not path.is_dir():
+                raise ValueError(f"allowed root is not a directory: {path}")
+            key = os.path.normcase(str(path))
+            if key not in seen:
+                seen.add(key)
+                clean.append(path)
+        if self.state is None:
+            raise ValueError("state unavailable")
+        self.state.set_setting(
+            "self_mesh_allowed_roots",
+            os.pathsep.join(str(p) for p in clean),
+        )
+        self.state.record_self_mesh_audit(
+            event="allowed_roots_changed",
+            severity="info",
+            detail=f"{len(clean)} configured remote file root(s)",
+            metadata={"configured_roots": [str(p) for p in clean]},
+        )
+        self._broadcast_self_mesh_changed(reason="allowed_roots_changed")
+        return self._self_mesh_allowed_roots()
 
     def _self_mesh_path_allowed(self, path: Path) -> bool:
         try:
@@ -12385,6 +12429,7 @@ class Daemon:
             "ok": True,
             "pid": os.getpid(),
             "app_version": app_version,
+            **runtime_build_identity(),
             "protocol_version": PROTOCOL_VERSION,
             "schema_version": schema_version,
             "python": sys.executable,
@@ -12711,6 +12756,73 @@ class Daemon:
                     "path-pii: failed to initialize (%s); paths in "
                     "chunk_sources / file_index_cache stay cleartext",
                     e,
+                )
+            # Row 10: seal the master seed under a per-process
+            # SoftwareProvider so the plaintext seed only re-
+            # materialises for ~µs per sign / attest inside the Rust
+            # provider. Best-effort: if the native ext isn't built
+            # or no master seed exists yet, daemon proceeds without
+            # the sealed handle and code that wants it logs +
+            # falls back.
+            try:
+                from one_link import master_seed as _ms
+                from one_link.paths import data_dir as _data_dir
+                _sealed = _ms.load_sealed_master(_data_dir())
+                if _sealed is None:
+                    self.sealed_master = None
+                elif _sealed is False:
+                    self.sealed_master = None
+                    log.info(
+                        "row-10: one_link_native.confidential not "
+                        "built; skipping sealed-master at runtime "
+                        "(daemon proceeds with legacy plaintext-in-"
+                        "memory derivation)."
+                    )
+                else:
+                    self.sealed_master = _sealed
+                    log.info(
+                        "row-10: sealed-master under per-process "
+                        "SoftwareProvider active; master plaintext "
+                        "only materialises during sealed_sign / "
+                        "attest inside Rust provider."
+                    )
+            except Exception as e:
+                self.sealed_master = None
+                log.warning(
+                    "row-10: failed to initialize sealed master (%s); "
+                    "daemon proceeds without runtime sealing",
+                    e,
+                )
+            # Row 6 — start the cover-traffic Poisson scheduler.
+            # Default 0.5 Hz (~one cover packet per 2 s). The emit
+            # callback is a counter-only stub for this first
+            # integration; a follow-up wires it to build_cover_packet
+            # over an active self-onion circuit when one exists.
+            try:
+                from one_link.cover_traffic import (
+                    CoverTrafficDaemon as _CTD,
+                    HAS_NATIVE as _COVER_HAS_NATIVE,
+                )
+                if _COVER_HAS_NATIVE:
+                    def _emit_cover_stub() -> None:
+                        self._cover_emit_count += 1
+                    ct = _CTD(rate_hz=0.5, emit_cover=_emit_cover_stub)
+                    ct.start()
+                    self._cover_traffic = ct
+                    log.info(
+                        "row-6: cover-traffic scheduler started "
+                        "(rate=0.5 Hz, counter-only emitter until "
+                        "self-onion circuits available)."
+                    )
+                else:
+                    log.info(
+                        "row-6: one_link_native.sphinx not built; "
+                        "skipping cover-traffic scheduler."
+                    )
+            except Exception as e:
+                log.warning(
+                    "row-6: failed to start cover-traffic scheduler "
+                    "(%s); daemon proceeds without cover traffic", e,
                 )
             # Pin our own identity so it's a known peer.
             self.state.upsert_peer(
@@ -13056,6 +13168,20 @@ class Daemon:
                 raise
 
     async def stop(self) -> None:
+        # Row 6 — drain cover-traffic scheduler first so its worker
+        # thread doesn't try to emit through a half-torn-down state.
+        cover = getattr(self, "_cover_traffic", None)
+        if cover is not None and cover.is_running:
+            try:
+                cover.stop(join_timeout=2.0)
+                log.info(
+                    "row-6: cover-traffic scheduler stopped "
+                    "(emitted=%d errors=%d)",
+                    cover.emitted, cover.errors,
+                )
+            except Exception as e:
+                log.warning("row-6: cover-traffic stop raised: %s", e)
+            self._cover_traffic = None
         # Phase E: stop the field-snapshot topology feeder + the
         # snapshot manager itself. Feeder first so it doesn't observe
         # a half-torn-down peer table mid-tick.

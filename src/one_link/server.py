@@ -49,6 +49,7 @@ install_windows_platform_fastpath()
 
 from aiohttp import WSMsgType, web
 
+from one_link.build_identity import runtime_build_identity
 from one_link.paths import data_dir, inbox_dir
 from one_link.transfer_doctor import enrich_transfer_event
 from one_link.transfer_safety import classify_file_risk
@@ -1295,6 +1296,10 @@ class UIServer:
         r.add_get("/api/connect-info/qr.svg", self._guarded(self.api_connect_info_qr))
         r.add_get("/api/me", self._guarded(self.api_me))
         r.add_get("/api/status", self._guarded(self.api_status))
+        # Row 10 — peer-handshake attestation API.
+        r.add_post("/api/v1/attestation/challenge", self._guarded(self.api_attestation_challenge))
+        r.add_post("/api/v1/attestation/issue", self._guarded(self.api_attestation_issue))
+        r.add_post("/api/v1/attestation/verify", self._guarded(self.api_attestation_verify))
         r.add_get("/api/metrics", self._guarded(self.api_metrics))
         r.add_get("/api/fabric", self._guarded(self.api_fabric))
         r.add_get("/api/fabric/no-router", self._guarded(self.api_fabric_no_router))
@@ -1311,6 +1316,8 @@ class UIServer:
         r.add_post("/api/self-mesh/enrollment-invite", self._guarded(self.api_self_mesh_enrollment_invite))
         r.add_get("/api/self-mesh/enrollment-invite/qr.svg", self._guarded(self.api_self_mesh_enrollment_invite_qr))
         r.add_get("/api/self-mesh/performance", self._guarded(self.api_self_mesh_performance))
+        r.add_get("/api/self-mesh/allowed-roots", self._guarded(self.api_self_mesh_allowed_roots))
+        r.add_post("/api/self-mesh/allowed-roots", self._guarded(self.api_set_self_mesh_allowed_roots))
         r.add_get("/api/courier/status", self._guarded(self.api_courier_status))
         r.add_get("/api/courier/files", self._guarded(self.api_courier_files))
         r.add_get("/api/courier/outbox", self._guarded(self.api_courier_outbox))
@@ -2358,6 +2365,7 @@ class UIServer:
             "hostname": me.hostname,
             "display_name": display_name or me.hostname,
             "app_version": ol_ver,
+            **runtime_build_identity(),
             "protocol_version": PROTOCOL_VERSION,
             "schema_version": schema_version,
             "onboarding_completed": onboarding_completed,
@@ -3622,6 +3630,35 @@ class UIServer:
             "history": history,
         })
 
+    async def api_self_mesh_allowed_roots(self, request: web.Request) -> web.Response:
+        state = getattr(self.daemon, "state", None)
+        configured = []
+        if state is not None:
+            raw = state.get_setting("self_mesh_allowed_roots") or ""
+            configured = [p for p in raw.split(os.pathsep) if p]
+        return web.json_response({
+            "ok": True,
+            "configured_roots": configured,
+            "effective_roots": [str(p) for p in self.daemon._self_mesh_allowed_roots()],
+        })
+
+    async def api_set_self_mesh_allowed_roots(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            roots = body.get("roots") or []
+            if not isinstance(roots, list):
+                raise ValueError("roots must be a list")
+            effective = self.daemon.set_self_mesh_allowed_roots([str(p) for p in roots])
+            return web.json_response({
+                "ok": True,
+                "effective_roots": [str(p) for p in effective],
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_allowed_roots_rejected",
+                "hint": str(exc),
+            }, status=400)
+
     async def api_courier_status(self, request: web.Request) -> web.Response:
         """Readiness for encrypted offline chunk courier bundles."""
 
@@ -4393,6 +4430,66 @@ class UIServer:
         status = 200 if result.get("ok") else 409
         return web.json_response(result, status=status)
 
+    # ── Row 10 attestation API ─────────────────────────────────
+
+    async def api_attestation_challenge(self, request: web.Request) -> web.Response:
+        """Return a fresh 32-byte challenge nonce (base64) the caller
+        should send to a peer + then verify the peer's response
+        against. Used by both sides of a handshake — each peer
+        generates its own challenge."""
+        try:
+            from one_link.handshake_attestation import fresh_challenge_for_peer
+            import base64
+            nonce = fresh_challenge_for_peer()
+            return web.json_response({
+                "ok": True,
+                "challenge_b64": base64.b64encode(nonce).decode("ascii"),
+            })
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=503)
+
+    async def api_attestation_issue(self, request: web.Request) -> web.Response:
+        """Issue an attestation doc binding our sealed master to the
+        peer-supplied challenge. POST body: ``{"challenge_b64": "..."}``.
+        Returns the AttestationWire wire-dict on success."""
+        try:
+            import base64
+            from one_link.handshake_attestation import (
+                AttestationWire,
+                issue_for_challenge,
+            )
+            body = await request.json()
+            challenge = base64.b64decode(body["challenge_b64"])
+            sealed = self.daemon.sealed_master
+            if sealed is None:
+                return web.json_response(
+                    {"ok": False, "error": "row-10 sealed master not available; "
+                     "daemon missing master seed or native ext not built"},
+                    status=503,
+                )
+            doc = issue_for_challenge(sealed, challenge)
+            wire = AttestationWire.from_doc(doc).to_wire_dict()
+            return web.json_response({"ok": True, "doc": wire})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    async def api_attestation_verify(self, request: web.Request) -> web.Response:
+        """Verify a peer-supplied attestation doc against a
+        previously-issued challenge. POST body:
+        ``{"challenge_b64": "...", "doc": {...wire-dict...}}``.
+        Returns ``{"ok": true}`` on pass, error JSON otherwise."""
+        try:
+            import base64
+            from one_link.handshake_attestation import AttestationWire, verify_doc
+            body = await request.json()
+            challenge = base64.b64decode(body["challenge_b64"])
+            wire = AttestationWire.from_wire_dict(body["doc"])
+            doc = wire.to_doc()
+            verify_doc(doc, challenge)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
     async def api_status(self, request: web.Request) -> web.Response:
         state = self.daemon.state
         peers = state.list_peers() if state is not None else []
@@ -4409,6 +4506,7 @@ class UIServer:
             "ok": True,
             "version": __import__("one_link").__version__,
             "app_version": __import__("one_link").__version__,
+            **runtime_build_identity(),
             "protocol_version": __import__("one_link.daemon").daemon.PROTOCOL_VERSION,
             "schema_version": (
                 state.schema_version() if state is not None else 0
