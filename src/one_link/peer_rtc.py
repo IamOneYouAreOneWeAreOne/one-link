@@ -242,6 +242,17 @@ class BrowserPeer:
     paired_ms: Optional[int] = None  # set once pairing token redeemed
                                      # OR pubkey already in roster
     closed: bool = False
+    # Row 10 — peer-handshake attestation state.
+    # `attestation_challenge`: 32-byte nonce we sent the peer.
+    #   Populated when we initiate; checked when their response arrives.
+    # `attested_ms`: monotonic timestamp when verification passed.
+    #   None until the peer's attest_response has verified.
+    # `peer_master_vk`: 1984-byte hybrid VK extracted from a verified
+    #   attestation doc. None until attested. Pin this to detect
+    #   master-key rotation across reconnects.
+    attestation_challenge: Optional[bytes] = None
+    attested_ms: Optional[int] = None
+    peer_master_vk: Optional[bytes] = None
 
 
 # ── manager ──────────────────────────────────────────────────────────
@@ -391,6 +402,17 @@ class BrowserPeerManager:
                     "echo_ts": envelope.get("ts"),
                 })
             return
+        # Row 10 — peer-handshake attestation.
+        # The other side sends `attest_challenge` (their nonce); we
+        # respond with `attest_response` (our doc bound to their
+        # nonce). They send `attest_response` for OUR nonce; we
+        # verify + mark them attested.
+        if msg_t == "attest_challenge":
+            await self._handle_attest_challenge(peer, envelope)
+            return
+        if msg_t == "attest_response":
+            await self._handle_attest_response(peer, envelope)
+            return
         # Fan out to registered listeners (chat, files, etc. wire in
         # v0.20.2+).
         for cb in list(self._dc_listeners):
@@ -398,6 +420,120 @@ class BrowserPeerManager:
                 await cb(peer, channel_kind, msg_t, envelope)
             except Exception as e:
                 log.warning("peer-rtc: dc listener raised: %s", e)
+
+    # ── Row 10 attestation ───────────────────────────────────────────
+
+    def init_attestation(self, peer: BrowserPeer) -> bool:
+        """Generate a fresh challenge nonce + send it to the peer.
+        Callers invoke this once the DC is open. Returns ``True`` if
+        the challenge was sent, ``False`` if the daemon can't attest
+        (no sealed master or native ext not built). Safe to call
+        multiple times — overwrites the previous challenge so a
+        stale one doesn't cause cross-flow confusion."""
+        try:
+            from one_link.handshake_attestation import fresh_challenge_for_peer
+            import base64
+        except ImportError:
+            return False
+        try:
+            nonce = fresh_challenge_for_peer()
+        except Exception as e:
+            log.info("peer-rtc: init_attestation skipped (%s)", e)
+            return False
+        peer.attestation_challenge = nonce
+        with contextlib.suppress(Exception):
+            self.send_dc(peer, "control", {
+                "v": PEER_DC_PROTOCOL_VERSION,
+                "t": "attest_challenge",
+                "ts": _now_ms(),
+                "challenge_b64": base64.b64encode(nonce).decode("ascii"),
+            })
+        return True
+
+    async def _handle_attest_challenge(
+        self, peer: BrowserPeer, envelope: dict
+    ) -> None:
+        """Peer sent us their challenge; we respond with our doc
+        bound to their nonce."""
+        try:
+            import base64
+            from one_link.handshake_attestation import (
+                AttestationWire,
+                issue_for_challenge,
+            )
+        except ImportError:
+            return
+        sealed = getattr(self.daemon, "sealed_master", None)
+        if sealed is None:
+            log.info(
+                "peer-rtc: attest_challenge from %s but no sealed_master; "
+                "skipping response",
+                peer.fingerprint,
+            )
+            return
+        challenge_b64 = str(envelope.get("challenge_b64") or "")
+        try:
+            challenge = base64.b64decode(challenge_b64)
+        except Exception:
+            return
+        if len(challenge) != 32:
+            return
+        try:
+            doc = issue_for_challenge(sealed, challenge)
+            wire = AttestationWire.from_doc(doc).to_wire_dict()
+        except Exception as e:
+            log.info("peer-rtc: issue attestation failed: %s", e)
+            return
+        with contextlib.suppress(Exception):
+            self.send_dc(peer, "control", {
+                "v": PEER_DC_PROTOCOL_VERSION,
+                "t": "attest_response",
+                "ts": _now_ms(),
+                "doc": wire,
+            })
+
+    async def _handle_attest_response(
+        self, peer: BrowserPeer, envelope: dict
+    ) -> None:
+        """Peer sent us their attestation doc bound to OUR challenge.
+        Verify and update peer state on success."""
+        try:
+            from one_link.handshake_attestation import (
+                AttestationWire,
+                verify_doc,
+            )
+        except ImportError:
+            return
+        challenge = peer.attestation_challenge
+        if challenge is None:
+            log.info(
+                "peer-rtc: attest_response from %s without prior "
+                "init_attestation; ignoring",
+                peer.fingerprint,
+            )
+            return
+        wire_d = envelope.get("doc")
+        if not isinstance(wire_d, dict):
+            return
+        try:
+            wire = AttestationWire.from_wire_dict(wire_d)
+            doc = wire.to_doc()
+            verify_doc(doc, challenge)
+        except Exception as e:
+            log.warning(
+                "peer-rtc: attestation from %s failed verify: %s",
+                peer.fingerprint, e,
+            )
+            return
+        # Pin the peer's master VK + mark attested.
+        peer.peer_master_vk = doc.master_vk
+        peer.attested_ms = _now_ms()
+        # Clear the challenge so a stale response doesn't get accepted.
+        peer.attestation_challenge = None
+        log.info(
+            "peer-rtc: peer %s attested (provider_tag=%d, vk_len=%d)",
+            peer.fingerprint, doc.provider_tag, len(doc.master_vk),
+        )
 
     def send_dc(
         self, peer: BrowserPeer, channel_kind: str, envelope: dict
