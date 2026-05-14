@@ -274,21 +274,43 @@ fn fresh_software_provider() -> PySoftwareProvider {
 
 /// Deterministic constructor for KAT vectors and incident-response
 /// replay — `seed` is a 32-byte hex-or-bytes value.
+///
+/// **Audit M7 May 2026 — gated**: gated behind the
+/// `unstable-deterministic-provider` Cargo feature, which is OFF in
+/// the default `maturin develop --release` build. Production wheels
+/// raise a runtime error when callers reach this function. Test
+/// wheels (built with `--features unstable-deterministic-provider`)
+/// get the real constructor. The Python wrapper documents this in
+/// its docstring.
 #[pyfunction]
-fn software_provider_from_seed(seed: &[u8]) -> PyResult<PySoftwareProvider> {
-    if seed.len() != 32 {
-        return Err(PyValueError::new_err(format!(
-            "provider seed must be exactly 32 bytes, got {}",
-            seed.len()
-        )));
+fn software_provider_from_seed(_seed: &[u8]) -> PyResult<PySoftwareProvider> {
+    #[cfg(feature = "unstable-deterministic-provider")]
+    {
+        if _seed.len() != 32 {
+            return Err(PyValueError::new_err(format!(
+                "provider seed must be exactly 32 bytes, got {}",
+                _seed.len()
+            )));
+        }
+        // Zeroize the local seed copy after the provider has taken it
+        // (audit finding M5, May 14 2026).
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(_seed);
+        let provider = SoftwareProvider::from_seed(&arr);
+        arr.zeroize();
+        return Ok(PySoftwareProvider { inner: provider });
     }
-    // Zeroize the local seed copy after the provider has taken it
-    // (audit finding M5, May 14 2026).
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(seed);
-    let provider = SoftwareProvider::from_seed(&arr);
-    arr.zeroize();
-    Ok(PySoftwareProvider { inner: provider })
+    #[cfg(not(feature = "unstable-deterministic-provider"))]
+    {
+        Err(PyValueError::new_err(
+            "software_provider_from_seed is disabled in this build. \
+             It is a deterministic-seed constructor intended for \
+             KAT vectors only and is gated behind the \
+             `unstable-deterministic-provider` Cargo feature \
+             (audit M7 May 2026). Use fresh_software_provider for \
+             production callers.",
+        ))
+    }
 }
 
 /// Generate a fresh 32-byte attestation nonce.

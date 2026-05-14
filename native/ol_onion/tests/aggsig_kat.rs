@@ -20,12 +20,16 @@ const EXPECTED_VK_SEED_01_HEX: &str =
 const EXPECTED_VK_SEED_FF_HEX: &str =
     "265440dc656a614dfa4702b8b1950864043ec4048cf6cef6a5dec35221d83b18";
 
+// Regenerated 2026-05-14 after audit M1 fix (deterministic_nonce
+// now binds the verifying key into the BLAKE3-XOF nonce derivation
+// — `-v1` → `-v2` domain). The verifying-key constants are
+// unchanged; only the nonce-dependent sig bytes shift.
 const EXPECTED_SIG_SEED_00_MSG_EMPTY_HEX: &str =
-    "98a977c006e09de8844edd9702b2de7d8c3945a5531af4718830fa3773f57b12848e43ce3d2760e786cc423c30eae0a627c18b8603e464f1bde214020f782201";
+    "8844f56c02f80f3c4596c3715ff62bb617b3ef41dc83cf801f0ca05a1be2ef0ce9b78f74b29f3500fc1d6ecf9acde0bac757f6f3be4ee78d404615f9b4306c0a";
 const EXPECTED_SIG_SEED_01_MSG_HELLO_HEX: &str =
-    "aa8ac0c6f2058d6b9da15ae6bbe9453651d8197cdf053e6cea4be6c6ecb4eb049111fadf7004db3ac9ee43f05ab0ff02eb17a014ae34826a54823d778f34ea06";
+    "3c03028d675f64ef5d168d77241ccc343b5b08500016beb41f58d8b015b6ff22b8aa38fe080b8ed121031eb3d6b95922609b4f524251cc4b98aff06affcb7d0d";
 const EXPECTED_SIG_SEED_FF_MSG_LONG_HEX: &str =
-    "b4da6653859da0b2f05cf8ef37176eaf04bb3fcca905bd1102b9d218acb8ee57d816a4aba22149571e88682ed034bd62b46b7522dd80825de13732087258280d";
+    "3afcaa2b19b7f812f5c827a56af9533e83741b46aa39a40ba33a9c7494ab192594dab5ee518c03d6a61666aa93ded8f24cd04518b7e68315c79f5f53c246970d";
 
 // ── Helpers ──────────────────────────────────────────────────────
 

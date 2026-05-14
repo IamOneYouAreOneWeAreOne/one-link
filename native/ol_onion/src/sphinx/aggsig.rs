@@ -110,14 +110,18 @@ impl SchnorrSigningKey {
     }
 
     /// Sign `msg` under this key. The nonce is derived
-    /// deterministically from `(sk, msg)` via BLAKE3-XOF so the
-    /// signature is reproducible across runs (matches RFC 6979's
-    /// spirit for ECDSA, applied to Schnorr).
+    /// deterministically from `(sk, vk, msg)` via BLAKE3-XOF so the
+    /// signature is reproducible across runs and the nonce is bound
+    /// to the verifying key (audit M1 May 2026 — closes the
+    /// cross-key-rotation nonce-reuse vector where a signer that
+    /// rotates VK while keeping SK temporarily would produce two
+    /// signatures with the same k under different c, leaking sk
+    /// via `(s_1 - s_2)/(c_1 - c_2)`).
     pub fn sign(&self, msg: &[u8]) -> SchnorrSignature {
-        let nonce_scalar = deterministic_nonce(&self.0, msg);
+        let vk = self.verifying_key();
+        let nonce_scalar = deterministic_nonce(&self.0, &vk.0, msg);
         let r_point = basepoint_mul(&nonce_scalar);
         let r_bytes = r_point.compress().to_bytes();
-        let vk = self.verifying_key();
         let c = challenge_hash(&r_bytes, &vk.0, msg);
         let s = nonce_scalar + c * self.0;
         let mut out = [0u8; 64];
@@ -195,13 +199,16 @@ pub fn verify(
 /// per-sig verify to locate the offending entry).
 ///
 /// # Errors
-/// Returns `Internal` on encoding failures, or
+/// Returns `Internal` on encoding failures or empty input
+/// (audit M3 May 2026 — closes the fail-open vector where a caller
+/// who accidentally filters their entries to zero believed they had
+/// proof-of-N-signers from a `Ok(())` return). Returns
 /// `SignatureInvalid` if any sig is invalid.
 pub fn batch_verify(
     entries: &[(SchnorrVerifyingKey, &[u8], SchnorrSignature)],
 ) -> Result<(), OnionError> {
     if entries.is_empty() {
-        return Ok(());
+        return Err(OnionError::Internal("batch_verify of empty set"));
     }
     // Derive per-entry random weights from BLAKE3 over the full
     // batch transcript so different verifier sessions can't be
@@ -272,53 +279,151 @@ pub fn batch_verify(
 
 // ── Bellare-Neven aggregate signature ─────────────────────────────
 
-/// Bellare-Neven multi-signature aggregate. Combines N independent
-/// `(vk, msg, sig)` triples into a single 64-byte aggregate
-/// `(R, s)` where `R = Σ R_i` and `s = Σ a_i * s_i`. Verifier
-/// reconstructs the per-signer Bellare-Neven coefficients `a_i =
-/// H(pk_i, L)` from the transcript and checks
-/// `s * G == R + Σ a_i * c_i * PK_i`.
+/// Bellare-Neven-style aggregate over N independent Schnorr signatures.
 ///
-/// **Why both [`batch_verify`] AND [`bn_aggregate`] exist:**
-/// - [`batch_verify`] keeps full per-sig info (caller still sends N
-///   sigs) but verifies them faster.
-/// - [`bn_aggregate`] produces a SINGLE short aggregate — wire-size
-///   wins, but caller can no longer recover per-signer sigs.
+/// Wire shape: `32 bytes (s_agg) || N * 32 bytes (R_i in sort order
+/// by pubkey)`. Total `32 * (1 + N)` bytes, versus `64 * N` for a
+/// `batch_verify` payload — ~2× wire saving at large N.
+///
+/// Each signer produces a normal Schnorr signature INDEPENDENTLY
+/// (no nonce coordination). The aggregator sorts entries by pubkey
+/// to fix a canonical order, derives a participant-list digest
+/// `L = H("OL-sphinx-aggsig-participant-list-v1" || sorted_pubkeys)`,
+/// computes per-signer tags `a_i = H("OL-sphinx-aggsig-bn-key-tag-v1"
+/// || pk_i || L)`, and emits `s_agg = Σ a_i · s_i` plus the per-signer
+/// `R_i` values in sort order.
+///
+/// Verifier reconstructs the same `(L, a_i)`, computes per-entry
+/// `c_i = challenge_hash(R_i, pk_i, msg_i)`, and checks the equation
+///
+/// ```text
+///   s_agg · G  ==  Σ a_i · R_i  +  Σ a_i · c_i · PK_i
+/// ```
+///
+/// via a single `vartime_multiscalar_mul`.
+///
+/// **Why both [`batch_verify`] AND BN aggregate ship:**
+/// - [`batch_verify`] keeps full per-sig info (each input is still a
+///   64-byte sig; caller can fall back to per-sig verify to locate
+///   a malformed entry) and is fastest verifier-side.
+/// - [`bn_aggregate`] / [`bn_verify`] win on WIRE size at the cost
+///   of throwing away the ability to recover an individual signer's
+///   sig.
+///
+/// Rogue-key defence is the key-tag construction `a_i = H(pk_i || L)`
+/// from Bellare-Neven 2006 — a participant who registered an
+/// adversarial pubkey can't tune their own contribution to forge
+/// against an honest signer's slot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BnAggregateSignature {
+    /// `Σ a_i · s_i mod q` (32 bytes, canonical encoding).
+    pub s_agg: [u8; 32],
+    /// Per-signer `R_i` values in sort-order by pubkey. Length must
+    /// match the number of `(vk, msg)` entries passed to
+    /// [`bn_verify`]. Each entry is 32 bytes (compressed Ristretto255
+    /// point).
+    pub r_per_signer: Vec<[u8; 32]>,
+}
+
+impl BnAggregateSignature {
+    /// Number of signers this aggregate covers.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.r_per_signer.len()
+    }
+
+    /// True if the aggregate covers zero signers (always invalid).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.r_per_signer.is_empty()
+    }
+
+    /// Encode to a flat byte vector: `s_agg || R_1 || R_2 || … R_N`.
+    /// Total length `32 * (1 + N)`.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 * (1 + self.r_per_signer.len()));
+        out.extend_from_slice(&self.s_agg);
+        for r in &self.r_per_signer {
+            out.extend_from_slice(r);
+        }
+        out
+    }
+
+    /// Decode from a flat byte vector. `expected_signers` is the
+    /// caller's known signer count (the wire format itself doesn't
+    /// carry a count — the caller's `(vk, msg)` list provides it).
+    ///
+    /// # Errors
+    /// Returns `Internal` if `bytes.len() != 32 * (1 + expected_signers)`.
+    pub fn decode(bytes: &[u8], expected_signers: usize) -> Result<Self, OnionError> {
+        let want = 32 * (1 + expected_signers);
+        if bytes.len() != want {
+            return Err(OnionError::Internal(
+                "BnAggregateSignature decode: wire size != 32 * (1 + N)",
+            ));
+        }
+        let mut s_agg = [0u8; 32];
+        s_agg.copy_from_slice(&bytes[..32]);
+        let mut r_per_signer = Vec::with_capacity(expected_signers);
+        for i in 0..expected_signers {
+            let start = 32 * (1 + i);
+            let mut r = [0u8; 32];
+            r.copy_from_slice(&bytes[start..start + 32]);
+            r_per_signer.push(r);
+        }
+        Ok(Self {
+            s_agg,
+            r_per_signer,
+        })
+    }
+}
+
+/// Aggregate N independent `(vk, msg, sig)` triples into a single
+/// [`BnAggregateSignature`]. Sorts by pubkey internally so the
+/// caller can pass entries in any order; the wire output is
+/// canonical regardless of input order.
 ///
 /// # Errors
-/// Returns `Internal` on encoding failures.
+/// - `Internal` for empty input
+/// - `Internal` for duplicate participants (closes the audit H1
+///   "one key controlling N slots" vector)
+/// - `Internal` for any encoding failure (bad R or s in an input sig)
+/// - `Internal` for identity-VK participants (closes the audit H2
+///   forgery-under-identity-VK vector — verify equation collapses
+///   to `s · G == R_aggregate` which any attacker can satisfy)
 pub fn bn_aggregate(
     entries: &[(SchnorrVerifyingKey, &[u8], SchnorrSignature)],
-) -> Result<SchnorrSignature, OnionError> {
+) -> Result<BnAggregateSignature, OnionError> {
     if entries.is_empty() {
         return Err(OnionError::Internal("BN aggregate of empty set"));
     }
-    // Validate each VK decodes AND is non-identity (delegated to
-    // `point()?` below in the per-signer loop), AND that no
-    // duplicate participant slots into the BN tag derivation.
-    // Duplicate participants would collapse the "N distinct
-    // signers" property: one key controlling two entries would
-    // appear in the participant digest as two slots with the same
-    // tag, letting an adversary forge a "two-signer endorsement"
-    // with a single key.
-    let mut pubkeys: Vec<[u8; 32]> = entries.iter().map(|(vk, _, _)| vk.0).collect();
-    pubkeys.sort_unstable();
-    let pre_dedup_len = pubkeys.len();
-    pubkeys.dedup();
-    if pubkeys.len() != pre_dedup_len {
-        return Err(OnionError::Internal(
-            "duplicate participant in BN aggregate",
-        ));
+    // Sort entries by pubkey to produce a canonical wire form. We
+    // index sort *positions* rather than reordering the slice so
+    // the caller's slice stays untouched.
+    let n = entries.len();
+    let mut indices: Vec<usize> = (0..n).collect();
+    indices.sort_unstable_by_key(|&i| entries[i].0 .0);
+    // Reject duplicate pubkeys (audit H1).
+    for w in indices.windows(2) {
+        if entries[w[0]].0 .0 == entries[w[1]].0 .0 {
+            return Err(OnionError::Internal(
+                "duplicate participant in BN aggregate",
+            ));
+        }
     }
-    let participant_l = participant_list_digest(&pubkeys);
-    // participant_l is used inside the per-signer loop via bn_key_tag.
+    // Collect sorted pubkeys for the participant-list digest.
+    let sorted_pubkeys: Vec<[u8; 32]> = indices.iter().map(|&i| entries[i].0 .0).collect();
+    let participant_l = participant_list_digest(&sorted_pubkeys);
 
-    let mut accum_r = RistrettoPoint::identity();
     let mut accum_s = Scalar::ZERO;
-    for (vk, msg, sig) in entries {
+    let mut r_per_signer: Vec<[u8; 32]> = Vec::with_capacity(n);
+    for &i in &indices {
+        let (vk, _msg, sig) = &entries[i];
         let r_bytes: [u8; 32] = sig.0[..32].try_into().unwrap();
         let s_bytes: [u8; 32] = sig.0[32..].try_into().unwrap();
-        let r = CompressedRistretto(r_bytes)
+        // Validate the input R encoding by decompressing once.
+        let _r = CompressedRistretto(r_bytes)
             .decompress()
             .ok_or(OnionError::Internal("bad Schnorr R encoding"))?;
         let s_opt = Scalar::from_canonical_bytes(s_bytes);
@@ -327,91 +432,98 @@ pub fn bn_aggregate(
         } else {
             return Err(OnionError::Internal("non-canonical Schnorr s"));
         };
+        // Validate the input VK (delegates to `point()` which rejects
+        // identity, audit H2).
+        let _pk = vk.point()?;
         let a = bn_key_tag(&vk.0, &participant_l);
-        accum_r += r;
-        // Bind each signer's s into the aggregate via the same
-        // tag the verifier will reconstruct.
-        let _ = msg; // msg participates via c inside verify, not in aggregation step
         accum_s += a * s;
+        r_per_signer.push(r_bytes);
     }
-    let mut out = [0u8; 64];
-    out[..32].copy_from_slice(&accum_r.compress().to_bytes());
-    out[32..].copy_from_slice(accum_s.as_bytes());
-    Ok(SchnorrSignature(out))
+
+    Ok(BnAggregateSignature {
+        s_agg: *accum_s.as_bytes(),
+        r_per_signer,
+    })
 }
 
-/// Verify a Bellare-Neven aggregate produced by [`bn_aggregate`].
+/// Verify a [`BnAggregateSignature`] produced by [`bn_aggregate`].
 ///
-/// `entries` is the `(vk, msg)` list (no per-signer sigs needed —
-/// they're in the aggregate). Order doesn't matter; the
-/// participant-list digest sorts internally.
+/// `entries` is the `(vk, msg)` list — order does NOT matter; this
+/// function sorts internally and the aggregate's `r_per_signer` is
+/// already in sort order from the aggregator. The number of
+/// `entries` MUST match `aggregate.len()` or verification fails.
 ///
 /// # Errors
-/// Returns `Internal` for the documented reason below; full
-/// non-interactive BN multi-sig verification is a research item.
+/// - `Internal` for empty input or signer-count mismatch
+/// - `Internal` for duplicate participants
+/// - `Internal` for identity-VK in entries
+/// - `Internal` for any encoding failure (bad R or s in aggregate)
+/// - [`OnionError::SignatureInvalid`] if the verify equation fails.
 pub fn bn_verify(
     entries: &[(SchnorrVerifyingKey, &[u8])],
-    aggregate: &SchnorrSignature,
+    aggregate: &BnAggregateSignature,
 ) -> Result<(), OnionError> {
     if entries.is_empty() {
         return Err(OnionError::Internal("BN verify of empty set"));
     }
-    let r_bytes: [u8; 32] = aggregate.0[..32].try_into().unwrap();
-    let s_bytes: [u8; 32] = aggregate.0[32..].try_into().unwrap();
-    let r_agg = CompressedRistretto(r_bytes)
-        .decompress()
-        .ok_or(OnionError::Internal("bad aggregate R encoding"))?;
-    let s_opt = Scalar::from_canonical_bytes(s_bytes);
+    if entries.len() != aggregate.r_per_signer.len() {
+        return Err(OnionError::Internal(
+            "BN verify: entry count != aggregate R count",
+        ));
+    }
+    // Sort entry indices by pubkey to align with the aggregator's
+    // canonical order.
+    let n = entries.len();
+    let mut indices: Vec<usize> = (0..n).collect();
+    indices.sort_unstable_by_key(|&i| entries[i].0 .0);
+    for w in indices.windows(2) {
+        if entries[w[0]].0 .0 == entries[w[1]].0 .0 {
+            return Err(OnionError::Internal(
+                "duplicate participant in BN verify",
+            ));
+        }
+    }
+    let sorted_pubkeys: Vec<[u8; 32]> = indices.iter().map(|&i| entries[i].0 .0).collect();
+    let participant_l = participant_list_digest(&sorted_pubkeys);
+
+    // Decode the s-aggregate. Reject non-canonical scalars (audit
+    // defense-in-depth — even though aggregator wrote canonical
+    // bytes, a tampered wire could ship garbage).
+    let s_opt = Scalar::from_canonical_bytes(aggregate.s_agg);
     let s_agg = if s_opt.is_some().into() {
         s_opt.unwrap()
     } else {
         return Err(OnionError::Internal("non-canonical aggregate s"));
     };
 
-    let mut pubkeys: Vec<[u8; 32]> = entries.iter().map(|(vk, _)| vk.0).collect();
-    pubkeys.sort_unstable();
-    // participant_l would feed bn_key_tag once the per-signer R
-    // values are wire-carried (see honest-conclusion comment below).
-    let _participant_l = participant_list_digest(&pubkeys);
-
-    // sum_term = Σ a_i * c_i * PK_i
-    // The aggregate equation is: s_agg * G == R_agg + sum_term.
-    // We compute sum_term by re-deriving c_i from per-entry
-    // (R_individual, vk, msg). But we don't have R_individual after
-    // aggregation. The trick: the aggregator embedded
-    // s_i in the BN-tagged sum, but the R values are summed
-    // unmodified. Verify by checking:
-    //
-    //   Σ a_i * (R_i + c_i * PK_i) == s_agg * G
-    //   R_agg_with_tags + Σ a_i * c_i * PK_i == s_agg * G
-    //
-    // But our aggregate sums plain R_i, not a_i*R_i. So the
-    // aggregator must instead embed a_i into the s-sum exclusively,
-    // and the verify equation becomes:
-    //
-    //   s_agg * G == Σ a_i * R_i + Σ a_i * c_i * PK_i
-    //
-    // We need per-signer R_i to verify. Plain BN aggregate
-    // recovers them by recomputing the original individual sigs —
-    // but we don't have those at verify time.
-    //
-    // Honest conclusion: a fully-non-interactive Bellare-Neven
-    // aggregate over INDEPENDENT signatures (where each signer
-    // chose its own nonce without coordination) requires the
-    // verifier to receive each R_i alongside the s aggregate. So
-    // the wire form must include the R_i values; only the s side
-    // truly aggregates.
-    //
-    // The implementation here returns an error if called — the
-    // primitive ships behind a clearly-flagged future-work tag.
-    let _ = (r_agg, s_agg);
-    Err(OnionError::Internal(
-        "bn_verify: full BN multi-sig aggregation over independent \
-         non-interactive signers requires per-signer R values on \
-         the wire; pure-s aggregate is a research item and not \
-         shipping in this primitive. Use batch_verify for the \
-         verifier-side win.",
-    ))
+    // Build the verify equation as a single multi-scalar mult:
+    //   0  ==  s_agg · G  -  Σ a_i · R_i  -  Σ a_i · c_i · PK_i
+    // We accumulate (scalar, point) pairs and dispatch one MSM.
+    let mut scalars: Vec<Scalar> = Vec::with_capacity(2 * n + 1);
+    let mut points: Vec<RistrettoPoint> = Vec::with_capacity(2 * n + 1);
+    for (sort_pos, &i) in indices.iter().enumerate() {
+        let (vk, msg) = entries[i];
+        // The aggregator stored R_i at sort_pos in r_per_signer.
+        let r_bytes = aggregate.r_per_signer[sort_pos];
+        let r = CompressedRistretto(r_bytes)
+            .decompress()
+            .ok_or(OnionError::Internal("bad aggregate R_i encoding"))?;
+        let pk = vk.point()?;
+        let a = bn_key_tag(&vk.0, &participant_l);
+        let c = challenge_hash(&r_bytes, &vk.0, msg);
+        scalars.push(-a);
+        points.push(r);
+        scalars.push(-(a * c));
+        points.push(pk);
+    }
+    scalars.push(s_agg);
+    points.push(curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT);
+    let residual = RistrettoPoint::vartime_multiscalar_mul(scalars.iter(), points.iter());
+    if residual == RistrettoPoint::identity() {
+        Ok(())
+    } else {
+        Err(OnionError::SignatureInvalid)
+    }
 }
 
 // ── Internal helpers ─────────────────────────────────────────────
@@ -428,10 +540,17 @@ fn challenge_hash(r_bytes: &[u8; 32], vk_bytes: &[u8; 32], msg: &[u8]) -> Scalar
     Scalar::from_bytes_mod_order_wide(&wide)
 }
 
-fn deterministic_nonce(sk: &Scalar, msg: &[u8]) -> Scalar {
+fn deterministic_nonce(sk: &Scalar, vk_bytes: &[u8; 32], msg: &[u8]) -> Scalar {
+    // Audit M1 May 2026: domain bumped `-v1` → `-v2` because the
+    // input shape changed (vk is now mixed in). Old `-v1` signers
+    // and `-v2` signers under the same key produce DIFFERENT
+    // signatures over the same message — but verifiers don't see
+    // the nonce directly so the only observable change is the
+    // KAT vectors regenerated for `-v2`.
     let mut h = Hasher::new();
-    h.update(b"OL-sphinx-aggsig-nonce-v1");
+    h.update(b"OL-sphinx-aggsig-nonce-v2");
     h.update(sk.as_bytes());
+    h.update(vk_bytes);
     h.update(&u32::try_from(msg.len()).unwrap_or(u32::MAX).to_be_bytes());
     h.update(msg);
     let mut wide = [0u8; 64];
@@ -554,9 +673,13 @@ mod tests {
     }
 
     #[test]
-    fn batch_verify_empty_is_ok() {
+    fn batch_verify_rejects_empty_input() {
+        // Regression test for audit M3 (May 14 2026): batch_verify
+        // used to return Ok(()) on empty input, which let a caller
+        // who accidentally filtered to zero entries believe they had
+        // proof-of-N-signers. Now Internal-errors.
         let entries: Vec<(SchnorrVerifyingKey, &[u8], SchnorrSignature)> = Vec::new();
-        batch_verify(&entries).unwrap();
+        assert!(matches!(batch_verify(&entries), Err(OnionError::Internal(_))));
     }
 
     #[test]
@@ -590,5 +713,240 @@ mod tests {
             (sk_b.verifying_key(), b"alpha".as_slice(), sig_b),
         ];
         assert!(batch_verify(&entries).is_err());
+    }
+
+    // ── Bellare-Neven multi-sig round trip ──────────────────────
+
+    fn bn_setup(
+        n: usize,
+    ) -> (
+        Vec<SchnorrSigningKey>,
+        Vec<Vec<u8>>,
+        Vec<(SchnorrVerifyingKey, Vec<u8>, SchnorrSignature)>,
+    ) {
+        let sks: Vec<SchnorrSigningKey> = (0..n)
+            .map(|_| SchnorrSigningKey::generate(&mut OsRng))
+            .collect();
+        let msgs: Vec<Vec<u8>> = (0..n)
+            .map(|i| {
+                let mut v = b"BN-msg-".to_vec();
+                v.push(i as u8);
+                v
+            })
+            .collect();
+        let owned: Vec<(SchnorrVerifyingKey, Vec<u8>, SchnorrSignature)> = sks
+            .iter()
+            .zip(msgs.iter())
+            .map(|(sk, m)| (sk.verifying_key(), m.clone(), sk.sign(m)))
+            .collect();
+        (sks, msgs, owned)
+    }
+
+    fn bn_borrow(
+        owned: &[(SchnorrVerifyingKey, Vec<u8>, SchnorrSignature)],
+    ) -> Vec<(SchnorrVerifyingKey, &[u8], SchnorrSignature)> {
+        owned.iter().map(|(vk, m, s)| (*vk, m.as_slice(), *s)).collect()
+    }
+
+    fn bn_borrow_verify(
+        owned: &[(SchnorrVerifyingKey, Vec<u8>, SchnorrSignature)],
+    ) -> Vec<(SchnorrVerifyingKey, &[u8])> {
+        owned.iter().map(|(vk, m, _)| (*vk, m.as_slice())).collect()
+    }
+
+    #[test]
+    fn bn_round_trip_n_equals_2() {
+        let (_sks, _msgs, owned) = bn_setup(2);
+        let agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        assert_eq!(agg.len(), 2);
+        assert_eq!(agg.encode().len(), 32 * (1 + 2));
+        bn_verify(&bn_borrow_verify(&owned), &agg).unwrap();
+    }
+
+    #[test]
+    fn bn_round_trip_n_equals_3() {
+        let (_sks, _msgs, owned) = bn_setup(3);
+        let agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        bn_verify(&bn_borrow_verify(&owned), &agg).unwrap();
+    }
+
+    #[test]
+    fn bn_round_trip_n_equals_8() {
+        let (_sks, _msgs, owned) = bn_setup(8);
+        let agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        bn_verify(&bn_borrow_verify(&owned), &agg).unwrap();
+    }
+
+    #[test]
+    fn bn_round_trip_n_equals_32_wire_size() {
+        // Confirm the wire-size win at N=32: BN aggregate is
+        // 32*(1+32) = 1056 bytes vs 64*32 = 2048 bytes for the
+        // batch_verify payload — ~1.94× smaller.
+        let (_sks, _msgs, owned) = bn_setup(32);
+        let agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        assert_eq!(agg.encode().len(), 32 * (1 + 32));
+        bn_verify(&bn_borrow_verify(&owned), &agg).unwrap();
+    }
+
+    #[test]
+    fn bn_round_trip_order_independent_at_verify() {
+        // The aggregator sorts by pubkey, so the verifier can pass
+        // entries in ANY order and the result must match.
+        let (_sks, _msgs, owned) = bn_setup(5);
+        let agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        let mut reversed: Vec<(SchnorrVerifyingKey, &[u8])> = bn_borrow_verify(&owned);
+        reversed.reverse();
+        bn_verify(&reversed, &agg).unwrap();
+    }
+
+    #[test]
+    fn bn_round_trip_aggregator_input_order_independent() {
+        // The aggregator should produce an IDENTICAL aggregate
+        // regardless of input order — sort_unstable_by_key is the
+        // canonicalizer.
+        let (_sks, _msgs, owned) = bn_setup(4);
+        let mut shuffled = owned.clone();
+        shuffled.swap(0, 3);
+        shuffled.swap(1, 2);
+        let agg_orig = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        let agg_shuf = bn_aggregate(&bn_borrow(&shuffled)).unwrap();
+        assert_eq!(agg_orig, agg_shuf);
+    }
+
+    #[test]
+    fn bn_rejects_empty_aggregate() {
+        let entries: Vec<(SchnorrVerifyingKey, &[u8], SchnorrSignature)> = Vec::new();
+        assert!(bn_aggregate(&entries).is_err());
+    }
+
+    #[test]
+    fn bn_rejects_empty_verify() {
+        let (_sks, _msgs, owned) = bn_setup(2);
+        let agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        let entries: Vec<(SchnorrVerifyingKey, &[u8])> = Vec::new();
+        assert!(bn_verify(&entries, &agg).is_err());
+    }
+
+    #[test]
+    fn bn_rejects_count_mismatch() {
+        let (_sks, _msgs, owned) = bn_setup(3);
+        let agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        // Pass only the first 2 entries to verify — count mismatch.
+        let truncated = bn_borrow_verify(&owned[..2]);
+        let r = bn_verify(&truncated, &agg);
+        assert!(matches!(r, Err(OnionError::Internal(_))));
+    }
+
+    #[test]
+    fn bn_rejects_tampered_s_agg() {
+        let (_sks, _msgs, owned) = bn_setup(3);
+        let mut agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        agg.s_agg[0] ^= 0x01;
+        let r = bn_verify(&bn_borrow_verify(&owned), &agg);
+        assert!(matches!(r, Err(OnionError::SignatureInvalid)));
+    }
+
+    #[test]
+    fn bn_rejects_tampered_r_i() {
+        let (_sks, _msgs, owned) = bn_setup(3);
+        let mut agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        // Flip a bit in the middle R_i.
+        agg.r_per_signer[1][3] ^= 0x10;
+        let r = bn_verify(&bn_borrow_verify(&owned), &agg);
+        assert!(matches!(r, Err(OnionError::SignatureInvalid) | Err(OnionError::Internal(_))));
+    }
+
+    #[test]
+    fn bn_rejects_swapped_r_i() {
+        let (_sks, _msgs, owned) = bn_setup(3);
+        let mut agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        // Swap two R_i values. Since they bind to DIFFERENT pubkeys
+        // via the sort-order pairing, this MUST reject.
+        agg.r_per_signer.swap(0, 2);
+        let r = bn_verify(&bn_borrow_verify(&owned), &agg);
+        assert!(matches!(r, Err(OnionError::SignatureInvalid)));
+    }
+
+    #[test]
+    fn bn_rejects_swapped_messages() {
+        let (_sks, _msgs, owned) = bn_setup(2);
+        let agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        // Verifier passes swapped messages — c_i derivation breaks.
+        let mut entries = bn_borrow_verify(&owned);
+        let m_a = entries[0].1;
+        let m_b = entries[1].1;
+        entries[0].1 = m_b;
+        entries[1].1 = m_a;
+        let r = bn_verify(&entries, &agg);
+        assert!(matches!(r, Err(OnionError::SignatureInvalid)));
+    }
+
+    #[test]
+    fn bn_rejects_wrong_vk_at_verify() {
+        let (sks, _msgs, owned) = bn_setup(2);
+        // Verifier swaps in an UNRELATED VK for the second slot.
+        let unrelated = SchnorrSigningKey::generate(&mut OsRng).verifying_key();
+        let mut entries = bn_borrow_verify(&owned);
+        entries[1].0 = unrelated;
+        let agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        let r = bn_verify(&entries, &agg);
+        // Could be SignatureInvalid or Internal depending on sort
+        // order — both are acceptable rejections.
+        assert!(matches!(r, Err(OnionError::SignatureInvalid) | Err(OnionError::Internal(_))));
+        let _ = sks;
+    }
+
+    #[test]
+    fn bn_rejects_duplicate_participants_at_aggregate() {
+        let sk_a = SchnorrSigningKey::generate(&mut OsRng);
+        let vk_a = sk_a.verifying_key();
+        let sig_1 = sk_a.sign(b"m1");
+        let sig_2 = sk_a.sign(b"m2");
+        let entries: Vec<(SchnorrVerifyingKey, &[u8], SchnorrSignature)> = vec![
+            (vk_a, b"m1".as_slice(), sig_1),
+            (vk_a, b"m2".as_slice(), sig_2),
+        ];
+        assert!(bn_aggregate(&entries).is_err());
+    }
+
+    #[test]
+    fn bn_rejects_duplicate_participants_at_verify() {
+        let sk_a = SchnorrSigningKey::generate(&mut OsRng);
+        let vk_a = sk_a.verifying_key();
+        // Build a fake aggregate manually to bypass the aggregator's
+        // dedup check, so we can test that bn_verify ALSO catches
+        // duplicates (defense in depth).
+        let agg = BnAggregateSignature {
+            s_agg: [0u8; 32],
+            r_per_signer: vec![[0u8; 32], [0u8; 32]],
+        };
+        let entries: Vec<(SchnorrVerifyingKey, &[u8])> =
+            vec![(vk_a, b"m1".as_slice()), (vk_a, b"m2".as_slice())];
+        let r = bn_verify(&entries, &agg);
+        assert!(matches!(r, Err(OnionError::Internal(_))));
+    }
+
+    #[test]
+    fn bn_aggregate_wire_round_trip() {
+        let (_sks, _msgs, owned) = bn_setup(5);
+        let agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        let bytes = agg.encode();
+        let decoded = BnAggregateSignature::decode(&bytes, 5).unwrap();
+        assert_eq!(decoded, agg);
+        bn_verify(&bn_borrow_verify(&owned), &decoded).unwrap();
+    }
+
+    #[test]
+    fn bn_aggregate_decode_rejects_wrong_size() {
+        let (_sks, _msgs, owned) = bn_setup(3);
+        let agg = bn_aggregate(&bn_borrow(&owned)).unwrap();
+        let mut bytes = agg.encode();
+        bytes.push(0); // too long
+        assert!(BnAggregateSignature::decode(&bytes, 3).is_err());
+        bytes.pop();
+        bytes.pop(); // too short
+        assert!(BnAggregateSignature::decode(&bytes, 3).is_err());
+        // Wrong claimed signer count.
+        assert!(BnAggregateSignature::decode(&agg.encode(), 7).is_err());
     }
 }

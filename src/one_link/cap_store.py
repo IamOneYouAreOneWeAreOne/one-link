@@ -37,6 +37,7 @@ Threat caveats
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -49,14 +50,29 @@ class _StoredGrant:
     accepted_ms: int
 
 
+def _new_seen_nonces() -> "OrderedDict[bytes, None]":
+    """Audit M11 May 2026: replay-defense container. Uses an
+    ``OrderedDict`` so eviction-on-overflow drops the OLDEST nonce
+    via ``popitem(last=False)``. The previous implementation used a
+    plain ``set`` and ``set.pop()`` which evicts a RANDOM element,
+    so an adversary that spam-submits valid grants could purge an
+    honest peer's old nonce and then replay the original grant.
+    The OrderedDict's insertion-order semantics make eviction
+    deterministic and adversary-resistant.
+    """
+    return OrderedDict()
+
+
 @dataclass
 class CapStore:
     """Per-daemon active-grant store. Construct one at boot;
     daemon attaches it to itself + queries it from
     ``_capability_allowed``."""
-    # Replay-defense set: every grant nonce we've ever accepted.
-    # Bounded; oldest evicted when over cap.
-    seen_nonces: set[bytes] = field(default_factory=set)
+    # Replay-defense map: every grant nonce we've ever accepted,
+    # in insertion order. Bounded; OLDEST evicted when over cap
+    # (audit M11). The mapping value is `None` — we only need the
+    # key set with ordered semantics.
+    seen_nonces: "OrderedDict[bytes, None]" = field(default_factory=_new_seen_nonces)
     max_seen_nonces: int = 100_000
     # Active grants keyed by (granter_pub, subject_pub, nonce).
     # Multiple grants can coexist for the same (granter, subject)
@@ -84,13 +100,16 @@ class CapStore:
             now_ms=now_ms,
             seen_nonces=self.seen_nonces,
         )
-        # Bound the seen-nonces set.
+        # Audit M11 May 2026: bound the seen-nonces set with
+        # OLDEST-first eviction (popitem(last=False)) so an
+        # attacker can't grind a flood of legitimate grants to
+        # purge an honest peer's old nonce and then replay it.
         if len(self.seen_nonces) > self.max_seen_nonces:
             # Drop ~10% to amortize.
             drop_n = self.max_seen_nonces // 10
             for _ in range(drop_n):
                 try:
-                    self.seen_nonces.pop()
+                    self.seen_nonces.popitem(last=False)
                 except KeyError:
                     break
         if now_ms is None:

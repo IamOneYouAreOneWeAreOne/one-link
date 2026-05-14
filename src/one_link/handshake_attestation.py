@@ -215,21 +215,93 @@ class AttestationWire:
 
     @classmethod
     def from_wire_dict(cls, d: Dict[str, object]) -> "AttestationWire":
+        """Parse a JSON-wire-dict into an ``AttestationWire``.
+
+        Audit M10 May 2026: strict-schema parse with per-field
+        upper bounds applied BEFORE any base64 decode. Without
+        these bounds an attacker could ship a 250 KB frame whose
+        five base64 fields each maxed out the per-frame budget,
+        forcing ~1 MB of allocations per frame even though native
+        verify would reject afterward. Strict-schema rejection
+        also denies attacker-supplied extra keys from surviving
+        through to higher layers.
+        """
         v = d.get("v")
         if v != 2:
             raise ValueError(f"unsupported attestation wire version: {v!r}")
+
+        # Reject unknown / extra keys so the wire shape is closed
+        # against attacker-supplied metadata that bypasses the
+        # signed transcript.
+        allowed = {
+            "v",
+            "provider_tag",
+            "master_vk",
+            "peer_nonce",
+            "issued_unix",
+            "deadline_unix",
+            "field_witness_commitment",
+            "platform_quote",
+            "issuer_sdp_pubkey",
+            "master_sig",
+        }
+        extras = set(d.keys()) - allowed
+        if extras:
+            raise ValueError(
+                f"unexpected attestation wire keys: {sorted(extras)!r}"
+            )
+        # Required keys.
+        required = {
+            "v",
+            "provider_tag",
+            "master_vk",
+            "peer_nonce",
+            "issued_unix",
+            "deadline_unix",
+            "platform_quote",
+            "issuer_sdp_pubkey",
+            "master_sig",
+        }
+        missing = required - set(d.keys())
+        if missing:
+            raise ValueError(
+                f"missing attestation wire keys: {sorted(missing)!r}"
+            )
+
+        def _b64str(key: str, max_len: int) -> str:
+            raw = d[key]
+            if not isinstance(raw, str):
+                raise ValueError(
+                    f"attestation wire field {key!r} must be a string, "
+                    f"got {type(raw).__name__}"
+                )
+            if len(raw) > max_len:
+                raise ValueError(
+                    f"attestation wire field {key!r} length {len(raw)} "
+                    f"exceeds max {max_len}"
+                )
+            return raw
+
+        # Per-field byte caps. Derived from the native fixed sizes:
+        # - master_vk: 1984 raw → 2648 base64 chars (round up)
+        # - peer_nonce: 32 raw → 44 chars
+        # - master_sig: 3357 raw → 4476 chars
+        # - issuer_sdp_pubkey: 32 raw → 44 chars
+        # - field_witness_commitment: 32 raw → 44 chars
+        # - platform_quote: bounded to 64 KiB raw → ~87382 chars
+        #   (TPM-quote upper bound)
         return cls(
             provider_tag=int(d["provider_tag"]),  # type: ignore[arg-type]
-            master_vk_b64=str(d["master_vk"]),
-            peer_nonce_b64=str(d["peer_nonce"]),
+            master_vk_b64=_b64str("master_vk", 2700),
+            peer_nonce_b64=_b64str("peer_nonce", 60),
             issued_unix=int(d["issued_unix"]),  # type: ignore[arg-type]
             deadline_unix=int(d["deadline_unix"]),  # type: ignore[arg-type]
             field_witness_commitment_b64=(
                 None
                 if d.get("field_witness_commitment") is None
-                else str(d["field_witness_commitment"])
+                else _b64str("field_witness_commitment", 60)
             ),
-            platform_quote_b64=str(d["platform_quote"]),
-            issuer_sdp_pubkey_b64=str(d["issuer_sdp_pubkey"]),
-            master_sig_b64=str(d["master_sig"]),
+            platform_quote_b64=_b64str("platform_quote", 90_000),
+            issuer_sdp_pubkey_b64=_b64str("issuer_sdp_pubkey", 60),
+            master_sig_b64=_b64str("master_sig", 4600),
         )

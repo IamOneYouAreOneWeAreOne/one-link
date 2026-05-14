@@ -63,6 +63,14 @@ def test_webrtc_transport_propagates_send_errors():
 
 def test_quic_transport_sends_through_session():
     from one_link.peer_transport import QuicTransport
+    from one_link.peer_quic import HAS_NATIVE, FRAME_CHUNK_REQUEST
+
+    if not HAS_NATIVE or FRAME_CHUNK_REQUEST is None:
+        pytest.skip(
+            "one_link_native.quic not importable here (likely Smart "
+            "App Control blocked the freshly-built DLL); the QUIC "
+            "send-frame test needs the native frame-type constant"
+        )
 
     captured: list[tuple[int, bytes]] = []
 

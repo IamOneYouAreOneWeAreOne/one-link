@@ -57,5 +57,14 @@ tracing         = { workspace = true }
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 
+[features]
+# Pass-through to ol_confidential: enables
+# SoftwareProvider::from_seed + the pyo3
+# `software_provider_from_seed` binding. OFF by default; production
+# wheels MUST NOT enable this (audit M7 May 2026).
+unstable-deterministic-provider = [
+    "ol_confidential/unstable-deterministic-provider",
+]
+
 [lints]
 workspace = true

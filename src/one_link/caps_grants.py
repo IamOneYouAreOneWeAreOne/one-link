@@ -290,5 +290,13 @@ def verify_grant(
             raise ValueError(
                 f"grant nonce replayed: {parsed.nonce.hex()[:16]}…"
             )
-        seen_nonces.add(parsed.nonce)
+        # Audit M11 May 2026: CapStore upgraded `seen_nonces` from
+        # `set` to `OrderedDict` so eviction-on-overflow drops the
+        # OLDEST nonce, not a random one. Accept both container
+        # shapes — sets via .add(), OrderedDicts via __setitem__.
+        adder = getattr(seen_nonces, "add", None)
+        if adder is not None:
+            adder(parsed.nonce)
+        else:
+            seen_nonces[parsed.nonce] = None  # type: ignore[index]
     return parsed

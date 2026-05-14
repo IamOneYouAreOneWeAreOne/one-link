@@ -87,16 +87,15 @@ impl SoftwareProvider {
     pub fn generate<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
         let mut seed = [0u8; 32];
         rng.fill_bytes(&mut seed);
-        let provider = Self::from_seed(&seed);
+        let provider = Self::from_seed_internal(&seed);
         seed.zeroize();
         provider
     }
 
-    /// Construct deterministically from a 32-byte seed. Useful for
-    /// test KAT vectors and for replays during incident response;
-    /// callers MUST NOT use a static seed in production.
-    #[must_use]
-    pub fn from_seed(seed: &[u8; 32]) -> Self {
+    /// Internal deterministic constructor used by [`Self::generate`].
+    /// Always available because production CSPRNG-based construction
+    /// needs to derive an `aead` from a fresh-random seed.
+    fn from_seed_internal(seed: &[u8; 32]) -> Self {
         let mut h = Hasher::new();
         h.update(SEALING_KEY_DOMAIN);
         h.update(seed);
@@ -104,6 +103,23 @@ impl SoftwareProvider {
         let key = Key::from_slice(key_bytes.as_bytes());
         let aead = ChaCha20Poly1305::new(key);
         Self { aead }
+    }
+
+    /// Construct deterministically from a 32-byte seed. Useful for
+    /// test KAT vectors and for replays during incident response;
+    /// callers MUST NOT use a static seed in production.
+    ///
+    /// **Audit M7 May 2026 — gated**: this constructor is only
+    /// exposed under `#[cfg(any(test, feature =
+    /// "unstable-deterministic-provider"))]` so an accidental
+    /// production call site can't compile. Test fixtures get it
+    /// automatically; production crates must opt in via the
+    /// Cargo feature, which is also off-by-default on the
+    /// pyo3-built wheel.
+    #[cfg(any(test, feature = "unstable-deterministic-provider"))]
+    #[must_use]
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        Self::from_seed_internal(seed)
     }
 
     /// Seal `plaintext` under this provider's ephemeral key with a

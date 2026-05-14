@@ -45,6 +45,12 @@ default = []
 # Adds a TPM-rooted layer to AttestationDoc.platform_quote without
 # changing the public API or wire shape of the software baseline.
 windows-tpm = ["dep:windows"]
+# Exposes `SoftwareProvider::from_seed` — deterministic construction
+# from a 32-byte seed. Intended for KAT vectors / incident replay
+# only. Production wheels MUST NOT enable this feature (audit M7
+# May 2026): an accidental call site under this flag yields a
+# sealing key any holder of the seed can re-derive.
+unstable-deterministic-provider = []
 
 [dependencies.windows]
 version  = "0.59"

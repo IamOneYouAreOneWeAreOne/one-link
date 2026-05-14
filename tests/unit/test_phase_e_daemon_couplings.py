@@ -145,6 +145,15 @@ def test_tick_homology_feeder_clears_events_when_few_chunks():
     any stale fragility events so the field re-equilibrates."""
     from one_link.daemon import Daemon
     from one_link.field_snapshot import FieldSnapshotManager
+    from one_link import homology_native
+
+    if not getattr(homology_native, "HAS_NATIVE", False):
+        pytest.skip(
+            "one_link.homology_native unavailable in this build "
+            "(likely Smart App Control blocking the freshly-built "
+            "DLL); the feeder early-returns before reaching the "
+            "clear-stale-events branch when native homology is absent"
+        )
 
     d = Daemon.__new__(Daemon)
     d._chunk_holders = {"a" * 64: {"only-peer"}}

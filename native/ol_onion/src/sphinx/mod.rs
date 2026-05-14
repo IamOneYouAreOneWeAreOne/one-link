@@ -36,6 +36,6 @@ pub use core::{
 };
 
 pub use aggsig::{
-    batch_verify, bn_aggregate, bn_verify, verify as schnorr_verify, SchnorrSignature,
-    SchnorrSigningKey, SchnorrVerifyingKey,
+    batch_verify, bn_aggregate, bn_verify, verify as schnorr_verify, BnAggregateSignature,
+    SchnorrSignature, SchnorrSigningKey, SchnorrVerifyingKey,
 };

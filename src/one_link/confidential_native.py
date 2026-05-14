@@ -146,7 +146,16 @@ class SoftwareProvider:
     @classmethod
     def from_seed(cls, seed: bytes) -> "SoftwareProvider":
         """Deterministic. KAT-vector + incident-response replay only.
-        DO NOT use a static seed in production."""
+        DO NOT use a static seed in production.
+
+        Audit M7 May 2026: this constructor is gated behind the
+        Rust Cargo feature ``unstable-deterministic-provider`` which
+        is OFF in production wheels. Calling this on a default
+        ``maturin develop --release`` build will raise ``ValueError``
+        from the native side. Test wheels can opt in via
+        ``maturin develop --release --features
+        unstable-deterministic-provider``.
+        """
         _require_native()
         if len(seed) != 32:
             raise ValueError(

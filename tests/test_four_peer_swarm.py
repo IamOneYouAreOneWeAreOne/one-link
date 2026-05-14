@@ -40,6 +40,26 @@ import pytest
 pytestmark = pytest.mark.timeout(180)
 
 
+def _native_loadable_in_subprocess() -> bool:
+    """True iff a fresh subprocess can import the native module. On
+    Windows under Smart App Control the freshly-built ABI3 DLL can
+    be blocked at first load; daemons spawned by these tests would
+    then report `available: False` for every native subsystem
+    through no fault of the daemon code."""
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", "import one_link_native"],
+            capture_output=True,
+            timeout=10,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+_NATIVE_SUBPROC_OK = _native_loadable_in_subprocess()
+
+
 def _spawn_daemon(home: Path, log: Path, label: str) -> tuple[subprocess.Popen, object]:
     """Spawn one daemon subprocess. Modeled on harness._spawn but
     re-implemented inline so this test can later run independently."""
@@ -194,6 +214,12 @@ def test_four_peer_swarm_converges(four_peer_swarm):
 def test_four_peer_swarm_all_advertise_phase_e_caps(four_peer_swarm):
     """Every daemon in the swarm must report Phase D/E + Bloom-init +
     QUIC capabilities as advertised via /api/status.native_status."""
+    if not _NATIVE_SUBPROC_OK:
+        pytest.skip(
+            "one_link_native not importable in a fresh subprocess "
+            "(Smart App Control); daemons would report "
+            "available: False through no fault of the daemon"
+        )
     swarm = four_peer_swarm
     for d in swarm:
         res = _request(d["control_port"], cmd="status")
@@ -245,6 +271,12 @@ def test_four_peer_swarm_field_snapshot_solves_over_time(four_peer_swarm):
     is the live proof that Phase E's full stack (feeder → manager →
     pyo3 → native ol_coherence_field) is operational in production
     daemon processes."""
+    if not _NATIVE_SUBPROC_OK:
+        pytest.skip(
+            "one_link_native not importable in a fresh subprocess "
+            "(Smart App Control); the field-solve loop can't run "
+            "without the native crate"
+        )
     swarm = four_peer_swarm
     sender = swarm[0]
 

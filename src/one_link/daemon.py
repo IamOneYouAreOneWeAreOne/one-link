@@ -8082,6 +8082,15 @@ class Daemon:
         # CapStore enforces auto-expiry + replay.
         if getattr(self, "_cap_store", None) is not None and self.state is not None:
             try:
+                # Audit M12 May 2026: drop any grants whose
+                # not_after_ms has passed before consulting the
+                # store. Without this, expired grants for OTHER
+                # (granter, subject) pairs accumulate indefinitely
+                # — a memory-pressure DoS vector when combined with
+                # H15's caveat-size cap. has_capability's inline
+                # sweep ONLY fires for the queried key; the
+                # explicit prune here is whole-store.
+                self._cap_store.prune_expired()
                 peer_pub = self._peer_pub_for_fp(peer_fp)
                 # Local granter pubkey == this device's identity. A
                 # future bundle adds delegation chains where another
