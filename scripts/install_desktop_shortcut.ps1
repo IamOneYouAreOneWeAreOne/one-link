@@ -74,3 +74,4 @@ $lnk.Save()
 
 Write-Host "Created shortcut: $shortcutPath"
 Write-Host "Double-click it to open One_link."
+Write-Host "Tip: run scripts\install_url_protocol.ps1 to enable one-link:// handoff links."

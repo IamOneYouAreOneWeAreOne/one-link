@@ -345,8 +345,11 @@ subkeys + device-presence CRDT + remote-instruct command channel.
   reuse a stale backend during alpha iteration.
 
 **Remaining for F5 completion:**
-- Native-device OS handoff polish: register/open `one-link://self-mesh/enroll`
-  directly into the desktop/mobile shell where the platform supports it.
+- Native-device OS handoff polish: Windows registration now has
+  `scripts/install_url_protocol.ps1`, and `one-link open-url` maps
+  `one-link://self-mesh/enroll?token=...` into the local authenticated
+  `/peer?self_mesh_invite=...` flow. Remaining work is equivalent installers
+  for macOS/Linux/mobile packaging.
 - Long-running soak evidence: run 24h+ sessions and persist budget rollups as
   release-gate artifacts, not just recent in-app samples. The artifact writer
   exists; the remaining work is sustained wall-clock collection across real

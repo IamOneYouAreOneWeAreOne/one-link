@@ -799,6 +799,31 @@ def app(no_browser, browser_tab, lan):
     ))
 
 
+@cli.command("open-url")
+@click.argument("url")
+def open_url(url: str):
+    """Open a one-link:// URL in the local desktop app."""
+    import webbrowser
+
+    from one_link import server as server_mod
+    from one_link.app import run_app
+    from one_link.protocol_handler import local_ui_url_for_deep_link
+
+    code = run_app(no_browser=True, standalone=True, lan=False)
+    if code != 0:
+        raise SystemExit(code)
+    try:
+        local = local_ui_url_for_deep_link(
+            url,
+            port=server_mod.read_server_port(),
+            token=server_mod.read_ui_token(),
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc))
+    click.echo(f"open: {local}")
+    webbrowser.open(local)
+
+
 @cli.command()
 def chat():
     """Open the interactive terminal REPL. Auto-starts a daemon if none running."""
