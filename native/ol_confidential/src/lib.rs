@@ -63,20 +63,32 @@
 //!   running daemon. That lands as a follow-up commit so this row
 //!   ships atomically.
 
-#![forbid(unsafe_code)]
+// `unsafe` is forbidden everywhere except the platform-specific
+// hardware backends (e.g., `windows_tpm`) where FFI into the OS
+// crypto APIs is unavoidable. Those modules document each unsafe
+// block and justify why the invariant holds.
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 
 pub mod attestation;
 pub mod errors;
+pub mod platform_quote;
 pub mod provider;
 pub mod sealed_key;
 pub mod software;
 pub mod tier;
 
+#[cfg(all(target_os = "windows", feature = "windows-tpm"))]
+pub mod windows_tpm;
+
 pub use attestation::{
     fresh_attestation_nonce, sign_attestation, verify_attestation, AttestationDoc,
     AttestationNonce, ATTESTATION_DOMAIN, ATTESTATION_FRESHNESS_WINDOW_SECS,
     ATTESTATION_NONCE_LEN,
+};
+pub use platform_quote::{
+    canonical_platform_quote_subtranscript, parse_platform_quote, verify_platform_quote,
+    PLATFORM_QUOTE_DOMAIN,
 };
 pub use errors::{ConfidentialError, ConfidentialResult};
 pub use provider::{ConfidentialProvider, ProviderTag};

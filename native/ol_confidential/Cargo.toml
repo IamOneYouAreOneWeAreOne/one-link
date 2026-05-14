@@ -20,6 +20,11 @@ chacha20poly1305 = { workspace = true }
 # Deterministic CSPRNG used to expand the sealed seed into an
 # ol_pqsig HybridSigningKey inside sealed-sign / verifying_key.
 rand_chacha   = "0.3"
+# Cross-platform ECDSA-P256 verification — Windows TPM produces
+# raw r||s signatures over the curve, but peers on macOS / Linux
+# need to verify them. Verify-only is cheap; signing on the TPM
+# stays on Windows.
+p256          = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 # Row 1: PQ-hybrid signing primitive — attestation docs and sealed
 # signing both bind to the master's hybrid key.
 ol_pqsig      = { path = "../ol_pqsig" }
@@ -33,6 +38,22 @@ ol_device_mesh = { path = "../ol_device_mesh" }
 # ol_hwkey::KeyGuarantee model rather than replacing it.
 ol_hwkey      = { path = "../ol_hwkey" }
 
+[features]
+# Default: software baseline only — works on every host.
+default = []
+# Windows TPM-bound attestation key via NCrypt Platform Crypto Provider.
+# Adds a TPM-rooted layer to AttestationDoc.platform_quote without
+# changing the public API or wire shape of the software baseline.
+windows-tpm = ["dep:windows"]
+
+[dependencies.windows]
+version  = "0.59"
+optional = true
+features = [
+    "Win32_Security_Cryptography",
+    "Win32_Foundation",
+]
+
 [dev-dependencies]
 proptest      = { workspace = true }
 criterion     = { workspace = true }
@@ -43,6 +64,11 @@ hex           = { workspace = true }
 [[bench]]
 name    = "confidential_bench"
 harness = false
+
+[[bench]]
+name              = "windows_tpm_bench"
+harness           = false
+required-features = ["windows-tpm"]
 
 [lints]
 workspace = true
