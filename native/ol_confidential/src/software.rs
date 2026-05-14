@@ -288,6 +288,7 @@ impl ConfidentialProvider for SoftwareProvider {
         issued_unix: u64,
         deadline_unix: u64,
         field_witness: Option<&[u8; 32]>,
+        issuer_sdp_pubkey: crate::attestation::IssuerSdpPubkey,
     ) -> ConfidentialResult<AttestationDoc> {
         if deadline_unix <= issued_unix {
             return Err(ConfidentialError::AttestationBadFreshnessWindow {
@@ -322,6 +323,7 @@ impl ConfidentialProvider for SoftwareProvider {
             deadline_unix,
             field_witness,
             &platform_quote,
+            &issuer_sdp_pubkey,
         );
         // Reuse the freshly-derived signing key from the single
         // unseal above — no need to round-trip through sealed_sign
@@ -340,6 +342,7 @@ impl ConfidentialProvider for SoftwareProvider {
                 *h.finalize().as_bytes()
             }),
             platform_quote,
+            issuer_sdp_pubkey,
             master_sig,
         })
     }

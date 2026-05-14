@@ -4742,8 +4742,12 @@ class UIServer:
 
     async def api_attestation_issue(self, request: web.Request) -> web.Response:
         """Issue an attestation doc binding our sealed master to the
-        peer-supplied challenge. POST body: ``{"challenge_b64": "..."}``.
-        Returns the AttestationWire wire-dict on success."""
+        peer-supplied challenge AND our SDP-layer Ed25519 pubkey
+        (audit C1, May 2026). POST body:
+        ``{"challenge_b64": "..."}``. Returns the AttestationWire
+        wire-dict on success — the doc embeds our SDP pubkey so any
+        verifier who routes the doc to a different channel will
+        reject it."""
         try:
             import base64
             from one_link.handshake_attestation import (
@@ -4759,7 +4763,8 @@ class UIServer:
                      "daemon missing master seed or native ext not built"},
                     status=503,
                 )
-            doc = issue_for_challenge(sealed, challenge)
+            my_sdp_pubkey = bytes(self.daemon.me.public_bytes)
+            doc = issue_for_challenge(sealed, challenge, my_sdp_pubkey)
             wire = AttestationWire.from_doc(doc).to_wire_dict()
             return web.json_response({"ok": True, "doc": wire})
         except Exception as e:
@@ -4767,17 +4772,22 @@ class UIServer:
 
     async def api_attestation_verify(self, request: web.Request) -> web.Response:
         """Verify a peer-supplied attestation doc against a
-        previously-issued challenge. POST body:
-        ``{"challenge_b64": "...", "doc": {...wire-dict...}}``.
-        Returns ``{"ok": true}`` on pass, error JSON otherwise."""
+        previously-issued challenge and the SDP-pubkey of the channel
+        we expect the doc to be bound to (audit C1, May 2026). POST
+        body: ``{"challenge_b64": "...", "doc": {...wire-dict...},
+        "expected_issuer_sdp_pubkey_b64": "..."}``. Returns
+        ``{"ok": true}`` on pass, error JSON otherwise."""
         try:
             import base64
             from one_link.handshake_attestation import AttestationWire, verify_doc
             body = await request.json()
             challenge = base64.b64decode(body["challenge_b64"])
+            expected_sdp = base64.b64decode(
+                body["expected_issuer_sdp_pubkey_b64"]
+            )
             wire = AttestationWire.from_wire_dict(body["doc"])
             doc = wire.to_doc()
-            verify_doc(doc, challenge)
+            verify_doc(doc, challenge, expected_sdp)
             return web.json_response({"ok": True})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=400)

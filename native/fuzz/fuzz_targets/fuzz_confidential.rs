@@ -53,8 +53,9 @@ fuzz_target!(|data: &[u8]| {
     let offset = (u64::from(data.get(2).copied().unwrap_or(1)) % 35) + 1;
     let deadline = issued.saturating_add(offset);
     let quote: Vec<u8> = data.iter().skip(3).take(64).copied().collect();
+    let fuzz_sdp = [0u8; ol_confidential::ISSUER_SDP_PUBKEY_LEN];
     if let Ok(doc) = sign_attestation(
-        &sk, provider_tag, nonce, issued, deadline, None, quote,
+        &sk, provider_tag, nonce, issued, deadline, None, quote, fuzz_sdp,
     ) {
         let now = issued.saturating_add(offset / 2);
         let _ = verify_attestation(
@@ -63,6 +64,7 @@ fuzz_target!(|data: &[u8]| {
             None,
             now,
             ol_confidential::ConfidentialTier::Software,
+            &fuzz_sdp,
         );
         let mut other_nonce = nonce;
         other_nonce[0] ^= 0xFF;
@@ -72,6 +74,7 @@ fuzz_target!(|data: &[u8]| {
             None,
             now,
             ol_confidential::ConfidentialTier::Software,
+            &fuzz_sdp,
         );
     }
 
@@ -84,6 +87,7 @@ fuzz_target!(|data: &[u8]| {
         deadline_unix: deadline,
         field_witness_commitment: None,
         platform_quote: data.iter().take(32).copied().collect(),
+        issuer_sdp_pubkey: fuzz_sdp,
         master_sig: data.iter().take(3357).copied().collect(),
     };
     let _ = verify_attestation(
@@ -92,5 +96,6 @@ fuzz_target!(|data: &[u8]| {
         None,
         issued.saturating_add(1),
         ol_confidential::ConfidentialTier::Software,
+        &fuzz_sdp,
     );
 });

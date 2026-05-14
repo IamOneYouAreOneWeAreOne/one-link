@@ -79,6 +79,13 @@ pub enum ConfidentialError {
         /// Minimum tier the verifier requires.
         min: crate::tier::ConfidentialTier,
     },
+    /// Issuer's SDP-layer Ed25519 pubkey embedded in the attestation
+    /// doc does not match the SDP identity the verifier is actually
+    /// talking to over the wire. Closes the identity-confusion attack
+    /// where a peer attests with someone else's master_vk under
+    /// their own SDP identity (audit C1 May 2026).
+    #[error("attestation issuer SDP pubkey does not match channel identity")]
+    AttestationIssuerSdpPubkeyMismatch,
     /// Hybrid-sig under the hood reported a problem.
     #[error("pqsig: {0}")]
     PqSig(String),

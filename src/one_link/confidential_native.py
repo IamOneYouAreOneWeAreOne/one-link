@@ -99,7 +99,15 @@ class SealedKey:
 class AttestationDoc:
     """Wire envelope for a Row 10 remote attestation. The master sig
     transitively commits to every other field (including
-    ``platform_quote``)."""
+    ``platform_quote`` and ``issuer_sdp_pubkey``).
+
+    ``issuer_sdp_pubkey`` is the 32-byte Ed25519 verifying-key of the
+    issuer's SDP-layer identity (the key that signs the WebRTC SDP
+    envelope). The verifier checks this matches the channel identity
+    they're actually talking to — defeats the identity-confusion
+    attack where a peer attests with someone else's master_vk under
+    their own SDP key (audit C1, ``-v2`` domain bump May 2026).
+    """
 
     provider_tag: int
     master_vk: bytes
@@ -108,6 +116,7 @@ class AttestationDoc:
     deadline_unix: int
     field_witness_commitment: Optional[bytes]
     platform_quote: bytes
+    issuer_sdp_pubkey: bytes
     master_sig: bytes
 
 
@@ -192,20 +201,34 @@ class SoftwareProvider:
         peer_nonce: bytes,
         issued_unix: int,
         deadline_unix: int,
+        issuer_sdp_pubkey: bytes,
         field_witness: Optional[bytes] = None,
     ) -> AttestationDoc:
-        """Issue a fresh attestation doc bound to ``peer_nonce``.
+        """Issue a fresh attestation doc bound to ``peer_nonce`` and
+        ``issuer_sdp_pubkey``.
+
+        ``issuer_sdp_pubkey`` MUST be the daemon's own 32-byte Ed25519
+        SDP-layer pubkey (the one that signed the WebRTC offer/answer
+        envelope on the channel where this attestation will be
+        exchanged). The master signature binds to it so a verifier
+        rejects any doc whose embedded SDP pubkey does not match the
+        channel they're actually talking to (audit C1).
 
         The ``deadline_unix - issued_unix`` window must be ≤ 30s
         (``ATTESTATION_FRESHNESS_WINDOW_SECS``); peer rejects
         otherwise.
         """
+        if len(issuer_sdp_pubkey) != 32:
+            raise ValueError(
+                f"issuer_sdp_pubkey must be 32 bytes, got {len(issuer_sdp_pubkey)}"
+            )
         result = self._inner.attest(
             sealed.bytes,
             sealed.tag,
             peer_nonce,
             issued_unix,
             deadline_unix,
+            issuer_sdp_pubkey,
             field_witness,
         )
         (
@@ -216,6 +239,7 @@ class SoftwareProvider:
             dl,
             cmt,
             quote,
+            sdp,
             sig,
         ) = result
         return AttestationDoc(
@@ -226,6 +250,7 @@ class SoftwareProvider:
             deadline_unix=dl,
             field_witness_commitment=cmt,
             platform_quote=quote,
+            issuer_sdp_pubkey=sdp,
             master_sig=sig,
         )
 
@@ -249,12 +274,21 @@ def verify_attestation(
     doc: AttestationDoc,
     expected_peer_nonce: bytes,
     now_unix: int,
+    expected_issuer_sdp_pubkey: bytes,
     expected_field_witness: Optional[bytes] = None,
     min_tier: int = TIER_SOFTWARE,
 ) -> None:
     """Verify an attestation doc. Raises ``ValueError`` on any failure
     (bad master sig, expired, nonce mismatch, witness mismatch,
-    freshness window too wide, provider tier below ``min_tier``).
+    freshness window too wide, provider tier below ``min_tier``,
+    issuer-SDP-pubkey mismatch).
+
+    ``expected_issuer_sdp_pubkey`` (audit C1, May 2026) is the 32-byte
+    Ed25519 SDP-layer pubkey of the channel identity the verifier is
+    actually talking to. The doc's embedded ``issuer_sdp_pubkey`` MUST
+    byte-equal this — defeats the identity-confusion attack where a
+    peer attests with another principal's master_vk under their own
+    SDP key.
 
     ``min_tier`` defaults to ``TIER_SOFTWARE`` (accept any tier). Pass
     ``TIER_HARDWARE_BOUND`` to require the issuer to hold the master
@@ -263,6 +297,10 @@ def verify_attestation(
     closes the silent-TPM-downgrade vector after a peer was pinned at
     a hardware tier.
     """
+    if len(expected_issuer_sdp_pubkey) != 32:
+        raise ValueError(
+            f"expected_issuer_sdp_pubkey must be 32 bytes, got {len(expected_issuer_sdp_pubkey)}"
+        )
     _require_native()
     _native.verify(  # type: ignore[union-attr]
         doc.provider_tag,
@@ -272,9 +310,11 @@ def verify_attestation(
         doc.deadline_unix,
         doc.field_witness_commitment,
         doc.platform_quote,
+        doc.issuer_sdp_pubkey,
         doc.master_sig,
         expected_peer_nonce,
         now_unix,
+        expected_issuer_sdp_pubkey,
         expected_field_witness,
         min_tier,
     )
@@ -371,14 +411,17 @@ class SealedMasterIdentity:
         peer_nonce: bytes,
         issued_unix: int,
         deadline_unix: int,
+        issuer_sdp_pubkey: bytes,
         field_witness: Optional[bytes] = None,
     ) -> AttestationDoc:
         """Issue an attestation doc binding this master to a peer
-        challenge."""
+        challenge AND to the daemon's own SDP-layer Ed25519 pubkey
+        (audit C1, May 2026)."""
         return self._provider.attest(
             self._sealed,
             peer_nonce,
             issued_unix,
             deadline_unix,
+            issuer_sdp_pubkey,
             field_witness,
         )

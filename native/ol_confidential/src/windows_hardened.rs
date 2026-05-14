@@ -145,6 +145,7 @@ impl ConfidentialProvider for WindowsHardenedProvider {
         issued_unix: u64,
         deadline_unix: u64,
         field_witness: Option<&[u8; 32]>,
+        issuer_sdp_pubkey: crate::attestation::IssuerSdpPubkey,
     ) -> ConfidentialResult<AttestationDoc> {
         // Route through windows_tpm::attest_with_tpm so the
         // returned doc carries a TPM-signed platform_quote.
@@ -157,6 +158,7 @@ impl ConfidentialProvider for WindowsHardenedProvider {
             issued_unix,
             deadline_unix,
             field_witness,
+            issuer_sdp_pubkey,
         )
     }
 }
@@ -226,7 +228,16 @@ mod tests {
         let seed = [0x77; 32];
         let sealed = p.seal_master(&seed).expect("seal");
         let nonce = fresh_attestation_nonce(&mut OsRng);
-        let doc = p.attest(&sealed, nonce, 1_000, 1_020, None).expect("attest");
+        let doc = p
+            .attest(
+                &sealed,
+                nonce,
+                1_000,
+                1_020,
+                None,
+                [0u8; crate::attestation::ISSUER_SDP_PUBKEY_LEN],
+            )
+            .expect("attest");
         assert!(!doc.platform_quote.is_empty(), "must carry TPM quote");
         let tpm_pub = verify_attestation_with_tpm(&doc, &nonce, None, 1_010)
             .expect("verify");

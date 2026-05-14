@@ -28,8 +28,9 @@ use zeroize::Zeroize;
 
 use ol_confidential::{
     fresh_attestation_nonce, verify_attestation, AttestationDoc, AttestationNonce,
-    ConfidentialError, ConfidentialProvider, ConfidentialTier, ProviderTag, SealedKey,
-    SoftwareProvider, ATTESTATION_FRESHNESS_WINDOW_SECS, ATTESTATION_NONCE_LEN,
+    ConfidentialError, ConfidentialProvider, ConfidentialTier, IssuerSdpPubkey, ProviderTag,
+    SealedKey, SoftwareProvider, ATTESTATION_FRESHNESS_WINDOW_SECS, ATTESTATION_NONCE_LEN,
+    ISSUER_SDP_PUBKEY_LEN,
 };
 use ol_pqsig::HybridVerifyingKey;
 
@@ -65,6 +66,18 @@ fn field_witness_from_bytes(b: Option<&[u8]>) -> PyResult<Option<[u8; 32]>> {
     let mut out = [0u8; 32];
     out.copy_from_slice(slice);
     Ok(Some(out))
+}
+
+fn issuer_sdp_pubkey_from_bytes(b: &[u8]) -> PyResult<IssuerSdpPubkey> {
+    if b.len() != ISSUER_SDP_PUBKEY_LEN {
+        return Err(PyValueError::new_err(format!(
+            "issuer_sdp_pubkey must be exactly {ISSUER_SDP_PUBKEY_LEN} bytes, got {}",
+            b.len()
+        )));
+    }
+    let mut out = [0u8; ISSUER_SDP_PUBKEY_LEN];
+    out.copy_from_slice(b);
+    Ok(out)
 }
 
 // ── SoftwareProvider opaque handle ────────────────────────────────
@@ -176,8 +189,13 @@ impl PySoftwareProvider {
     /// Issue an attestation doc. Returns the encoded fields as a
     /// tuple `(provider_tag_u8, master_vk_bytes, peer_nonce,
     /// issued_unix, deadline_unix, field_witness_commitment_or_none,
-    /// platform_quote_bytes, master_sig_bytes)` — the Python daemon
-    /// reassembles into its own typed wrapper.
+    /// platform_quote_bytes, issuer_sdp_pubkey_bytes, master_sig_bytes)`
+    /// — the Python daemon reassembles into its own typed wrapper.
+    ///
+    /// `issuer_sdp_pubkey` is the 32-byte Ed25519 SDP-layer pubkey of
+    /// the issuer's channel identity (audit C1). The master signature
+    /// binds to it so a verifier rejects any doc whose embedded SDP
+    /// pubkey does not match the channel they're actually talking to.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::type_complexity)]
     #[pyo3(signature = (
@@ -186,6 +204,7 @@ impl PySoftwareProvider {
         peer_nonce,
         issued_unix,
         deadline_unix,
+        issuer_sdp_pubkey,
         field_witness=None,
     ))]
     fn attest<'py>(
@@ -196,6 +215,7 @@ impl PySoftwareProvider {
         peer_nonce: &[u8],
         issued_unix: u64,
         deadline_unix: u64,
+        issuer_sdp_pubkey: &[u8],
         field_witness: Option<&[u8]>,
     ) -> PyResult<(
         u8,
@@ -206,6 +226,7 @@ impl PySoftwareProvider {
         Option<Bound<'py, PyBytes>>,
         Bound<'py, PyBytes>,
         Bound<'py, PyBytes>,
+        Bound<'py, PyBytes>,
     )> {
         let tag = provider_tag_from_u8(sealed_tag)?;
         let sealed = SealedKey {
@@ -214,9 +235,17 @@ impl PySoftwareProvider {
         };
         let nonce = nonce_from_bytes(peer_nonce)?;
         let witness = field_witness_from_bytes(field_witness)?;
+        let sdp = issuer_sdp_pubkey_from_bytes(issuer_sdp_pubkey)?;
         let doc = self
             .inner
-            .attest(&sealed, nonce, issued_unix, deadline_unix, witness.as_ref())
+            .attest(
+                &sealed,
+                nonce,
+                issued_unix,
+                deadline_unix,
+                witness.as_ref(),
+                sdp,
+            )
             .map_err(map_err)?;
         let cmt = doc.field_witness_commitment.map(|c| PyBytes::new_bound(py, &c));
         Ok((
@@ -227,6 +256,7 @@ impl PySoftwareProvider {
             doc.deadline_unix,
             cmt,
             PyBytes::new_bound(py, &doc.platform_quote),
+            PyBytes::new_bound(py, &doc.issuer_sdp_pubkey),
             PyBytes::new_bound(py, &doc.master_sig),
         ))
     }
@@ -269,12 +299,12 @@ fn attestation_nonce(py: Python<'_>) -> Bound<'_, PyBytes> {
 }
 
 /// Verify a (deconstructed) AttestationDoc. Pass the same field
-/// tuple shape as returned by `attest`.
+/// tuple shape as returned by `attest`, plus the verifier's expected
+/// channel-identity SDP pubkey (audit C1).
 ///
 /// `min_tier_byte` enforces the provider-tier floor (audit H4):
 /// `1` = Software (any tier accepted), `2` = HardwareBound, `3` =
-/// HardwareAttested. Default `1` keeps back-compat callers passing
-/// no explicit tier — peers wanting hardware binding pass `2` or `3`.
+/// HardwareAttested.
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
 #[pyo3(signature = (
@@ -285,9 +315,11 @@ fn attestation_nonce(py: Python<'_>) -> Bound<'_, PyBytes> {
     deadline_unix,
     field_witness_commitment,
     platform_quote,
+    issuer_sdp_pubkey,
     master_sig,
     expected_peer_nonce,
     now_unix,
+    expected_issuer_sdp_pubkey,
     expected_field_witness=None,
     min_tier_byte=1u8,
 ))]
@@ -299,9 +331,11 @@ fn verify(
     deadline_unix: u64,
     field_witness_commitment: Option<&[u8]>,
     platform_quote: &[u8],
+    issuer_sdp_pubkey: &[u8],
     master_sig: &[u8],
     expected_peer_nonce: &[u8],
     now_unix: u64,
+    expected_issuer_sdp_pubkey: &[u8],
     expected_field_witness: Option<&[u8]>,
     min_tier_byte: u8,
 ) -> PyResult<()> {
@@ -324,6 +358,8 @@ fn verify(
         }
     };
     let expected_fw = field_witness_from_bytes(expected_field_witness)?;
+    let doc_sdp = issuer_sdp_pubkey_from_bytes(issuer_sdp_pubkey)?;
+    let expected_sdp = issuer_sdp_pubkey_from_bytes(expected_issuer_sdp_pubkey)?;
     let min_tier = match min_tier_byte {
         1 => ConfidentialTier::Software,
         2 => ConfidentialTier::HardwareBound,
@@ -342,6 +378,7 @@ fn verify(
         deadline_unix,
         field_witness_commitment: fwc,
         platform_quote: platform_quote.to_vec(),
+        issuer_sdp_pubkey: doc_sdp,
         master_sig: master_sig.to_vec(),
     };
     verify_attestation(
@@ -350,6 +387,7 @@ fn verify(
         expected_fw.as_ref(),
         now_unix,
         min_tier,
+        &expected_sdp,
     )
     .map_err(map_err)
 }

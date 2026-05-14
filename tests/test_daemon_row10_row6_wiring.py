@@ -209,16 +209,27 @@ async def test_attestation_round_trip_via_api(daemon_with_seed, monkeypatch):
         body2 = json.loads(resp.body.decode())
         assert body2["ok"] is True, body2
         wire = body2["doc"]
-        assert wire["v"] == 1
+        # Audit C1 May 2026 — wire-format bumped to v2 with
+        # issuer_sdp_pubkey field; old v1 docs are rejected.
+        assert wire["v"] == 2
         assert wire["provider_tag"] == 1  # SOFTWARE
         # Master VK on wire round-trips.
         master_vk = base64.b64decode(wire["master_vk"])
         assert master_vk == daemon.sealed_master.master_vk()
+        # The issuer's SDP pubkey is the daemon's own public_bytes.
+        assert (
+            base64.b64decode(wire["issuer_sdp_pubkey"])
+            == bytes(daemon.me.public_bytes)
+        )
 
-        # Verify.
+        # Verify — verifier MUST supply the expected SDP pubkey, which
+        # in the local-loopback case is the daemon's own.
         verify_body = {
             "challenge_b64": body["challenge_b64"],
             "doc": wire,
+            "expected_issuer_sdp_pubkey_b64": base64.b64encode(
+                bytes(daemon.me.public_bytes)
+            ).decode("ascii"),
         }
         async def _payload2():
             return verify_body
@@ -255,6 +266,9 @@ async def test_attestation_verify_rejects_wrong_challenge(daemon_with_seed):
             return {
                 "challenge_b64": base64.b64encode(challenge_b).decode("ascii"),
                 "doc": wire,
+                "expected_issuer_sdp_pubkey_b64": base64.b64encode(
+                    bytes(daemon.me.public_bytes)
+                ).decode("ascii"),
             }
         req2 = make_mocked_request("POST", "/api/v1/attestation/verify")
         req2.json = _verify_payload  # type: ignore[method-assign]

@@ -22,6 +22,10 @@ pytestmark = pytest.mark.skipif(
     reason="one_link_native.confidential not built; run `maturin develop --release`",
 )
 
+# Fixed test SDP-pubkey for sign/verify round-trips. Real callers pass
+# the daemon's own Ed25519 SDP-layer pubkey (audit C1 May 2026).
+TEST_SDP_PUBKEY = bytes([0x77] * 32)
+
 
 # ── SoftwareProvider lifecycle ────────────────────────────────────
 
@@ -94,8 +98,8 @@ def test_attestation_round_trip_no_witness():
     sealed = p.seal_master(bytes([0x44] * 32))
     nonce = fresh_attestation_nonce()
     assert len(nonce) == 32
-    doc = p.attest(sealed, nonce, 1_000, 1_020)
-    verify_attestation(doc, nonce, now_unix=1_010)
+    doc = p.attest(sealed, nonce, 1_000, 1_020, TEST_SDP_PUBKEY)
+    verify_attestation(doc, nonce, 1_010, TEST_SDP_PUBKEY)
 
 
 def test_attestation_with_field_witness():
@@ -103,8 +107,8 @@ def test_attestation_with_field_witness():
     sealed = p.seal_master(bytes([0xAB] * 32))
     nonce = fresh_attestation_nonce()
     witness = bytes([0xCD] * 32)
-    doc = p.attest(sealed, nonce, 1_000, 1_020, field_witness=witness)
-    verify_attestation(doc, nonce, now_unix=1_010, expected_field_witness=witness)
+    doc = p.attest(sealed, nonce, 1_000, 1_020, TEST_SDP_PUBKEY, field_witness=witness)
+    verify_attestation(doc, nonce, 1_010, TEST_SDP_PUBKEY, expected_field_witness=witness)
 
 
 def test_attestation_wrong_peer_nonce_rejected():
@@ -112,18 +116,18 @@ def test_attestation_wrong_peer_nonce_rejected():
     sealed = p.seal_master(bytes([0xEE] * 32))
     nonce_a = fresh_attestation_nonce()
     nonce_b = fresh_attestation_nonce()
-    doc = p.attest(sealed, nonce_a, 1_000, 1_020)
+    doc = p.attest(sealed, nonce_a, 1_000, 1_020, TEST_SDP_PUBKEY)
     with pytest.raises(ValueError):
-        verify_attestation(doc, nonce_b, now_unix=1_010)
+        verify_attestation(doc, nonce_b, 1_010, TEST_SDP_PUBKEY)
 
 
 def test_attestation_expired_rejected():
     p = SoftwareProvider.fresh()
     sealed = p.seal_master(bytes([0x33] * 32))
     nonce = fresh_attestation_nonce()
-    doc = p.attest(sealed, nonce, 1_000, 1_020)
+    doc = p.attest(sealed, nonce, 1_000, 1_020, TEST_SDP_PUBKEY)
     with pytest.raises(ValueError):
-        verify_attestation(doc, nonce, now_unix=1_100)
+        verify_attestation(doc, nonce, 1_100, TEST_SDP_PUBKEY)
 
 
 def test_attestation_freshness_window_too_wide_rejected_at_issue():
@@ -132,7 +136,7 @@ def test_attestation_freshness_window_too_wide_rejected_at_issue():
     nonce = fresh_attestation_nonce()
     # ATTESTATION_FRESHNESS_WINDOW_SECS = 30; 31 must reject.
     with pytest.raises(ValueError):
-        p.attest(sealed, nonce, 1_000, 1_000 + 31)
+        p.attest(sealed, nonce, 1_000, 1_000 + 31, TEST_SDP_PUBKEY)
 
 
 def test_attestation_deadline_equal_issue_rejected():
@@ -140,14 +144,14 @@ def test_attestation_deadline_equal_issue_rejected():
     sealed = p.seal_master(bytes([0x88] * 32))
     nonce = fresh_attestation_nonce()
     with pytest.raises(ValueError):
-        p.attest(sealed, nonce, 1_000, 1_000)
+        p.attest(sealed, nonce, 1_000, 1_000, TEST_SDP_PUBKEY)
 
 
 def test_attestation_tampered_master_sig_rejected():
     p = SoftwareProvider.fresh()
     sealed = p.seal_master(bytes([0x12] * 32))
     nonce = fresh_attestation_nonce()
-    doc = p.attest(sealed, nonce, 1_000, 1_020)
+    doc = p.attest(sealed, nonce, 1_000, 1_020, TEST_SDP_PUBKEY)
     # Flip a sig byte; build a new doc.
     tampered_sig = bytearray(doc.master_sig)
     tampered_sig[0] ^= 0x01
@@ -159,24 +163,44 @@ def test_attestation_tampered_master_sig_rejected():
         deadline_unix=doc.deadline_unix,
         field_witness_commitment=doc.field_witness_commitment,
         platform_quote=doc.platform_quote,
+        issuer_sdp_pubkey=doc.issuer_sdp_pubkey,
         master_sig=bytes(tampered_sig),
     )
     with pytest.raises(ValueError):
-        verify_attestation(tampered, nonce, now_unix=1_010)
+        verify_attestation(tampered, nonce, 1_010, TEST_SDP_PUBKEY)
 
 
 def test_attestation_field_witness_mismatch_rejected():
     p = SoftwareProvider.fresh()
     sealed = p.seal_master(bytes([0xFE] * 32))
     nonce = fresh_attestation_nonce()
-    doc = p.attest(sealed, nonce, 1_000, 1_020, field_witness=bytes([0xAA] * 32))
+    doc = p.attest(
+        sealed, nonce, 1_000, 1_020, TEST_SDP_PUBKEY, field_witness=bytes([0xAA] * 32),
+    )
     with pytest.raises(ValueError):
         verify_attestation(
             doc,
             nonce,
-            now_unix=1_010,
+            1_010,
+            TEST_SDP_PUBKEY,
             expected_field_witness=bytes([0xBB] * 32),
         )
+
+
+def test_attestation_issuer_sdp_pubkey_mismatch_rejected():
+    """Regression test for audit C1 (May 14 2026): if the verifier
+    is talking to a channel with SDP pubkey BB but the doc embeds
+    AA, the doc must be rejected even though every other field
+    (nonce, sig over the issuer's claimed transcript) is valid.
+    """
+    p = SoftwareProvider.fresh()
+    sealed = p.seal_master(bytes([0x44] * 32))
+    nonce = fresh_attestation_nonce()
+    issuer_sdp = bytes([0xAA] * 32)
+    doc = p.attest(sealed, nonce, 1_000, 1_020, issuer_sdp)
+    verifier_channel_sdp = bytes([0xBB] * 32)
+    with pytest.raises(ValueError):
+        verify_attestation(doc, nonce, 1_010, verifier_channel_sdp)
 
 
 # ── SealedKey opaque round-trip ──────────────────────────────────

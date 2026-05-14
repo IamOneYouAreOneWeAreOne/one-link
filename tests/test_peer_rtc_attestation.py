@@ -45,11 +45,18 @@ class _StubDC:
         self.sent.append(data)
 
 
-def _make_daemon_with_sealed_master() -> object:
-    """Build a minimal daemon-like object with sealed_master set."""
+def _make_daemon_with_sealed_master(
+    me_public_bytes: bytes | None = None,
+) -> object:
+    """Build a minimal daemon-like object with sealed_master AND a
+    fake daemon.me.public_bytes (audit C1 May 2026 — attest binds to
+    the daemon's SDP Ed25519 pubkey)."""
     seed = bytes([0x42] * 32)
     sealed = SealedMasterIdentity.from_seed_bytes(seed)
-    return SimpleNamespace(sealed_master=sealed)
+    if me_public_bytes is None:
+        me_public_bytes = bytes([0x99] * 32)
+    me = SimpleNamespace(public_bytes=me_public_bytes)
+    return SimpleNamespace(sealed_master=sealed, me=me)
 
 
 def _make_peer(fp: str = "sha256:test") -> BrowserPeer:
@@ -127,8 +134,10 @@ async def test_handle_attest_challenge_emits_response():
     assert response["t"] == "attest_response"
     assert response["v"] == PEER_DC_PROTOCOL_VERSION
     assert "doc" in response
-    # The doc is a wire-dict shape with our master_vk.
-    assert response["doc"]["v"] == 1
+    # The doc is a v=2 wire-dict shape (audit C1 May 2026 SDP-binding).
+    assert response["doc"]["v"] == 2
+    # And carries the issuer's SDP pubkey.
+    assert "issuer_sdp_pubkey" in response["doc"]
 
 
 @pytest.mark.asyncio
@@ -154,15 +163,25 @@ async def test_full_handshake_round_trip_two_peers():
     """Simulate both halves of an attestation handshake: peer A
     sends challenge to B, B responds, A verifies + marks B
     attested. Then the reverse direction."""
-    daemon_a = _make_daemon_with_sealed_master()
+    # A's SDP Ed25519 pubkey and B's must each match what their
+    # BrowserPeer record on the OTHER side shows as pubkey_bytes.
+    a_sdp = bytes([0xA1] * 32)
+    b_sdp = bytes([0xB1] * 32)
+    daemon_a = _make_daemon_with_sealed_master(me_public_bytes=a_sdp)
     daemon_b = SimpleNamespace(
-        sealed_master=SealedMasterIdentity.from_seed_bytes(bytes([0x55] * 32))
+        sealed_master=SealedMasterIdentity.from_seed_bytes(bytes([0x55] * 32)),
+        me=SimpleNamespace(public_bytes=b_sdp),
     )
     mgr_a = BrowserPeerManager(daemon_a)
     mgr_b = BrowserPeerManager(daemon_b)
-    # Each side has a BrowserPeer for the other.
-    a_view_of_b = _make_peer("sha256:b")
-    b_view_of_a = _make_peer("sha256:a")
+    # Each side has a BrowserPeer for the other — pubkey_bytes is
+    # what THAT side knows about the OTHER side's SDP identity.
+    a_view_of_b = BrowserPeer(fingerprint="sha256:b", pubkey_bytes=b_sdp)
+    a_view_of_b.control_dc = _StubDC()
+    a_view_of_b.bulk_dc = _StubDC()
+    b_view_of_a = BrowserPeer(fingerprint="sha256:a", pubkey_bytes=a_sdp)
+    b_view_of_a.control_dc = _StubDC()
+    b_view_of_a.bulk_dc = _StubDC()
 
     # 1. A initiates: sends challenge to B.
     mgr_a.init_attestation(a_view_of_b)
@@ -211,7 +230,10 @@ async def test_handle_attest_response_with_wrong_challenge_rejected():
         issue_for_challenge,
     )
     other_challenge = bytes([0xBB] * 32)
-    doc = issue_for_challenge(daemon.sealed_master, other_challenge)
+    # peer.pubkey_bytes is the SDP key the verifier expects; the doc
+    # commits to it so the test still exercises the challenge-only
+    # rejection path.
+    doc = issue_for_challenge(daemon.sealed_master, other_challenge, peer.pubkey_bytes)
     wire = AttestationWire.from_doc(doc).to_wire_dict()
     envelope = {
         "v": PEER_DC_PROTOCOL_VERSION,
@@ -224,3 +246,79 @@ async def test_handle_attest_response_with_wrong_challenge_rejected():
     assert peer.peer_master_vk is None
     # Challenge should still be present (cleared only on success).
     assert peer.attestation_challenge == bytes([0xAA] * 32)
+
+
+@pytest.mark.asyncio
+async def test_attest_response_with_wrong_sdp_pubkey_rejected():
+    """Regression test for audit C1 (May 14 2026): an attestation doc
+    bound to SDP-key X must be REJECTED by a verifier whose channel
+    is talking to SDP-key Y. Closes the identity-confusion attack."""
+    from one_link.handshake_attestation import AttestationWire, issue_for_challenge
+
+    daemon = _make_daemon_with_sealed_master()
+    mgr = BrowserPeerManager(daemon)
+    peer = _make_peer()  # peer.pubkey_bytes = 0xAB * 32
+    challenge = mgr.init_attestation_returns_challenge_for_test(peer) if hasattr(
+        mgr, "init_attestation_returns_challenge_for_test"
+    ) else None
+    if challenge is None:
+        mgr.init_attestation(peer)
+        challenge = peer.attestation_challenge
+    # Issuer (us, but pretend) binds the doc to a DIFFERENT SDP pubkey
+    # than what's on the peer record. Verifier should reject.
+    wrong_sdp = bytes([0xCC] * 32)
+    doc = issue_for_challenge(daemon.sealed_master, challenge, wrong_sdp)
+    wire = AttestationWire.from_doc(doc).to_wire_dict()
+    envelope = {
+        "v": PEER_DC_PROTOCOL_VERSION,
+        "t": "attest_response",
+        "doc": wire,
+    }
+    await mgr._handle_attest_response(peer, envelope)
+    assert peer.attested_ms is None, "doc with wrong SDP pubkey must be rejected"
+    assert peer.peer_master_vk is None
+
+
+@pytest.mark.asyncio
+async def test_attest_response_with_rotated_master_vk_refused():
+    """Regression test for audit C2 (May 14 2026): once we've pinned
+    a peer's master_vk on first attest, a later attestation with a
+    DIFFERENT master_vk under the same SDP identity must be refused
+    (TOFU). Otherwise an attacker who stole the SDP signing key can
+    silently roll forward to a fresh master.
+    """
+    from one_link.handshake_attestation import AttestationWire, issue_for_challenge
+
+    daemon = _make_daemon_with_sealed_master()
+    mgr = BrowserPeerManager(daemon)
+    peer = _make_peer()
+    # First attestation succeeds + pins master_vk.
+    mgr.init_attestation(peer)
+    challenge1 = peer.attestation_challenge
+    doc1 = issue_for_challenge(daemon.sealed_master, challenge1, peer.pubkey_bytes)
+    wire1 = AttestationWire.from_doc(doc1).to_wire_dict()
+    await mgr._handle_attest_response(
+        peer,
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "attest_response", "doc": wire1},
+    )
+    assert peer.attested_ms is not None
+    pinned_vk = peer.peer_master_vk
+    assert pinned_vk is not None
+
+    # Reset the attested_ms to simulate re-attest flow (test fixture);
+    # but leave peer_master_vk pinned. Attempt second attestation under
+    # a DIFFERENT sealed master (different VK).
+    other_master = SealedMasterIdentity.from_seed_bytes(bytes([0xFF] * 32))
+    assert other_master.master_vk() != pinned_vk
+    mgr.init_attestation(peer)
+    challenge2 = peer.attestation_challenge
+    doc2 = issue_for_challenge(other_master, challenge2, peer.pubkey_bytes)
+    wire2 = AttestationWire.from_doc(doc2).to_wire_dict()
+    await mgr._handle_attest_response(
+        peer,
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "attest_response", "doc": wire2},
+    )
+    # Second attestation must NOT replace the pinned master_vk.
+    assert peer.peer_master_vk == pinned_vk, "TOFU pin must be sticky"
+    # And the peer should be torn down (closed flag set by _close_peer).
+    assert peer.closed is True

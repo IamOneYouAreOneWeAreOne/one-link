@@ -56,7 +56,24 @@ pub const ATTESTATION_FRESHNESS_WINDOW_SECS: u64 = 30;
 
 /// Domain-separation prefix for the canonical attestation transcript
 /// — distinct from every other transcript-builder in the workspace.
-pub const ATTESTATION_DOMAIN: &[u8] = b"OL-confidential-attestation-v1";
+///
+/// Bumped to `-v2` on 2026-05-14 (audit C1) when the issuer's SDP
+/// pubkey was added to the transcript. Old `-v1` docs are unforgeable
+/// under the new domain so they cannot be replayed against a `-v2`
+/// verifier; old verifiers will reject `-v2` docs the same way.
+pub const ATTESTATION_DOMAIN: &[u8] = b"OL-confidential-attestation-v2";
+
+/// Length of the issuer's SDP-layer Ed25519 pubkey (raw, no header).
+pub const ISSUER_SDP_PUBKEY_LEN: usize = 32;
+
+/// Type alias for the issuer's SDP-layer Ed25519 pubkey. This is the
+/// 32-byte raw Ed25519 verifying-key the issuer uses to sign the
+/// WebRTC SDP offer/answer envelope (NOT the master VK). The
+/// attestation transcript binds the master signature to THIS
+/// SDP-identity so a peer cannot lift an attestation off one channel
+/// and replay it against another channel that authenticates a
+/// different SDP key (audit C1 May 2026).
+pub type IssuerSdpPubkey = [u8; ISSUER_SDP_PUBKEY_LEN];
 
 /// Domain prefix for the field-witness commitment leaf inside the doc.
 pub const ATTESTATION_FIELD_WITNESS_DOMAIN: &[u8] =
@@ -85,6 +102,13 @@ pub struct AttestationDoc {
     /// software provider; non-empty for hardware providers (SGX
     /// quote, TPM2 quote, etc.).
     pub platform_quote: Vec<u8>,
+    /// The issuer's SDP-layer Ed25519 pubkey (raw 32 bytes). The
+    /// master signature commits to this binding so a verifier can
+    /// confirm the master at the OTHER end is endorsing the very
+    /// channel identity the verifier is talking to — defeats the
+    /// "Alice attests with someone else's master_vk under her own
+    /// SDP identity" identity-confusion attack (audit C1).
+    pub issuer_sdp_pubkey: IssuerSdpPubkey,
     /// Hybrid signature over the canonical transcript, by the master.
     pub master_sig: Vec<u8>,
 }
@@ -92,6 +116,13 @@ pub struct AttestationDoc {
 /// Build the canonical bytes a master signs to issue an
 /// [`AttestationDoc`]. Pure function: identical inputs produce
 /// identical output bytes.
+///
+/// `issuer_sdp_pubkey` is the 32-byte Ed25519 verifying-key of the
+/// issuer's SDP-layer identity (the key that signs the WebRTC
+/// offer/answer envelope). Mixing it into the transcript binds the
+/// master signature to "this SDP identity" so a verifier rejects
+/// any attestation whose embedded SDP pubkey does not match the
+/// channel they are actually talking to (audit C1).
 #[must_use]
 pub fn canonical_attestation_transcript(
     provider_tag: ProviderTag,
@@ -101,6 +132,7 @@ pub fn canonical_attestation_transcript(
     deadline_unix: u64,
     field_witness: Option<&[u8; 32]>,
     platform_quote: &[u8],
+    issuer_sdp_pubkey: &IssuerSdpPubkey,
 ) -> Vec<u8> {
     let mut h = Hasher::new();
     h.update(ATTESTATION_DOMAIN);
@@ -124,6 +156,8 @@ pub fn canonical_attestation_transcript(
     let qlen = u32::try_from(platform_quote.len()).unwrap_or(u32::MAX);
     h.update(&qlen.to_be_bytes());
     h.update(platform_quote);
+    // Issuer-SDP-pubkey leaf. Fixed-length, so no length prefix.
+    h.update(issuer_sdp_pubkey);
     h.finalize().as_bytes().to_vec()
 }
 
@@ -152,6 +186,7 @@ pub fn sign_attestation(
     deadline_unix: u64,
     field_witness: Option<&[u8; 32]>,
     platform_quote: Vec<u8>,
+    issuer_sdp_pubkey: IssuerSdpPubkey,
 ) -> ConfidentialResult<AttestationDoc> {
     if deadline_unix <= issued_unix {
         return Err(ConfidentialError::AttestationBadFreshnessWindow {
@@ -175,6 +210,7 @@ pub fn sign_attestation(
         deadline_unix,
         field_witness,
         &platform_quote,
+        &issuer_sdp_pubkey,
     );
     let sig = signing_key.sign(&transcript)?;
     Ok(AttestationDoc {
@@ -190,6 +226,7 @@ pub fn sign_attestation(
             *h.finalize().as_bytes()
         }),
         platform_quote,
+        issuer_sdp_pubkey,
         master_sig: sig.to_vec(),
     })
 }
@@ -201,20 +238,27 @@ pub fn sign_attestation(
 /// - `now_unix`: verifier's wall clock; must be `<= deadline_unix`.
 /// - `expected_field_witness`: if `Some`, the local coherence-field
 ///   witness — the doc's commitment must match.
-/// - `expected_provider_floor`: minimum tier the verifier requires.
-///   (Caller-side tier check; the doc's `provider_tag` must map to a
-///   tier `>= floor` via [`crate::tier::ConfidentialTier`].)
+/// - `min_tier`: minimum provider tier the verifier requires; the
+///   doc's `provider_tag` must map to a tier `>= min_tier`.
+/// - `expected_issuer_sdp_pubkey`: the SDP-layer Ed25519 pubkey the
+///   verifier is actually talking to on the channel. The doc's
+///   `issuer_sdp_pubkey` MUST byte-equal this — defeats the
+///   "Alice attests with someone else's master under her own SDP
+///   identity" identity-confusion attack (audit C1).
 ///
 /// # Errors
 /// Returns a typed error if any check fails: peer-nonce mismatch,
-/// expired, freshness window too wide, master-sig invalid, or
-/// field-witness mismatch.
+/// expired, freshness window too wide, master-sig invalid,
+/// field-witness mismatch, provider tier too low, or
+/// `AttestationIssuerSdpPubkeyMismatch` if the doc's claimed SDP
+/// pubkey doesn't match the channel identity.
 pub fn verify_attestation(
     doc: &AttestationDoc,
     expected_peer_nonce: &AttestationNonce,
     expected_field_witness: Option<&[u8; 32]>,
     now_unix: u64,
     min_tier: crate::tier::ConfidentialTier,
+    expected_issuer_sdp_pubkey: &IssuerSdpPubkey,
 ) -> ConfidentialResult<()> {
     // (0) Sanity shape.
     if doc.master_sig.len() != HYBRID_SIG_LEN {
@@ -274,7 +318,18 @@ pub fn verify_attestation(
             min: min_tier,
         });
     }
-    // (5) Master signature.
+    // (5) Issuer-SDP-pubkey binding (audit C1). The doc's claimed
+    //     SDP pubkey MUST equal the channel identity the verifier
+    //     is actually talking to. Constant-time compare.
+    if doc
+        .issuer_sdp_pubkey
+        .ct_eq(expected_issuer_sdp_pubkey)
+        .unwrap_u8()
+        == 0
+    {
+        return Err(ConfidentialError::AttestationIssuerSdpPubkeyMismatch);
+    }
+    // (6) Master signature.
     if doc.master_vk.to_bytes().len() != HYBRID_VK_LEN {
         return Err(ConfidentialError::Internal("master_vk bad length"));
     }
@@ -294,6 +349,7 @@ pub fn verify_attestation(
             None
         },
         &doc.platform_quote,
+        &doc.issuer_sdp_pubkey,
     );
     doc.master_vk
         .verify(&transcript, &doc.master_sig)
@@ -310,6 +366,10 @@ mod tests {
 
     /// Default test floor — matches what most tests expect (any tier).
     const TIER_ANY: ConfidentialTier = ConfidentialTier::Software;
+
+    /// Fixed test SDP pubkey for sign/verify round-trips. Real callers
+    /// pass the daemon's own Ed25519 SDP-layer pubkey.
+    const TEST_SDP_PUBKEY: IssuerSdpPubkey = [0x77u8; ISSUER_SDP_PUBKEY_LEN];
 
     fn fresh_key() -> HybridSigningKey {
         let (sk, _vk) = HybridSigningKey::generate(&mut OsRng);
@@ -328,9 +388,10 @@ mod tests {
             120,
             None,
             Vec::new(),
+            TEST_SDP_PUBKEY,
         )
         .unwrap();
-        verify_attestation(&doc, &nonce, None, 110, TIER_ANY).unwrap();
+        verify_attestation(&doc, &nonce, None, 110, TIER_ANY, &TEST_SDP_PUBKEY).unwrap();
     }
 
     #[test]
@@ -346,9 +407,10 @@ mod tests {
             120,
             Some(&witness),
             Vec::new(),
+            TEST_SDP_PUBKEY,
         )
         .unwrap();
-        verify_attestation(&doc, &nonce, Some(&witness), 110, TIER_ANY).unwrap();
+        verify_attestation(&doc, &nonce, Some(&witness), 110, TIER_ANY, &TEST_SDP_PUBKEY).unwrap();
     }
 
     #[test]
@@ -356,10 +418,11 @@ mod tests {
         let sk = fresh_key();
         let nonce_a = fresh_attestation_nonce(&mut OsRng);
         let nonce_b = fresh_attestation_nonce(&mut OsRng);
-        let doc =
-            sign_attestation(&sk, ProviderTag::Software, nonce_a, 100, 120, None, Vec::new())
-                .unwrap();
-        let r = verify_attestation(&doc, &nonce_b, None, 110, TIER_ANY);
+        let doc = sign_attestation(
+            &sk, ProviderTag::Software, nonce_a, 100, 120, None, Vec::new(), TEST_SDP_PUBKEY,
+        )
+        .unwrap();
+        let r = verify_attestation(&doc, &nonce_b, None, 110, TIER_ANY, &TEST_SDP_PUBKEY);
         assert!(matches!(r, Err(ConfidentialError::AttestationPeerNonceMismatch)));
     }
 
@@ -367,9 +430,11 @@ mod tests {
     fn expired_doc_rejected() {
         let sk = fresh_key();
         let nonce = fresh_attestation_nonce(&mut OsRng);
-        let doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new())
-            .unwrap();
-        let r = verify_attestation(&doc, &nonce, None, 130, TIER_ANY);
+        let doc = sign_attestation(
+            &sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new(), TEST_SDP_PUBKEY,
+        )
+        .unwrap();
+        let r = verify_attestation(&doc, &nonce, None, 130, TIER_ANY, &TEST_SDP_PUBKEY);
         assert!(matches!(r, Err(ConfidentialError::AttestationExpired { .. })));
     }
 
@@ -377,8 +442,9 @@ mod tests {
     fn too_wide_window_rejected_at_sign() {
         let sk = fresh_key();
         let nonce = fresh_attestation_nonce(&mut OsRng);
-        let r =
-            sign_attestation(&sk, ProviderTag::Software, nonce, 100, 100 + 31, None, Vec::new());
+        let r = sign_attestation(
+            &sk, ProviderTag::Software, nonce, 100, 100 + 31, None, Vec::new(), TEST_SDP_PUBKEY,
+        );
         assert!(matches!(
             r,
             Err(ConfidentialError::AttestationFreshnessWindowTooWide { .. })
@@ -389,7 +455,9 @@ mod tests {
     fn deadline_equal_issue_rejected_at_sign() {
         let sk = fresh_key();
         let nonce = fresh_attestation_nonce(&mut OsRng);
-        let r = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 100, None, Vec::new());
+        let r = sign_attestation(
+            &sk, ProviderTag::Software, nonce, 100, 100, None, Vec::new(), TEST_SDP_PUBKEY,
+        );
         assert!(matches!(
             r,
             Err(ConfidentialError::AttestationBadFreshnessWindow { .. })
@@ -400,11 +468,12 @@ mod tests {
     fn tampered_master_sig_rejected() {
         let sk = fresh_key();
         let nonce = fresh_attestation_nonce(&mut OsRng);
-        let mut doc =
-            sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new())
-                .unwrap();
+        let mut doc = sign_attestation(
+            &sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new(), TEST_SDP_PUBKEY,
+        )
+        .unwrap();
         doc.master_sig[0] ^= 0x01;
-        let r = verify_attestation(&doc, &nonce, None, 110, TIER_ANY);
+        let r = verify_attestation(&doc, &nonce, None, 110, TIER_ANY, &TEST_SDP_PUBKEY);
         assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
     }
 
@@ -422,9 +491,10 @@ mod tests {
             120,
             Some(&witness_a),
             Vec::new(),
+            TEST_SDP_PUBKEY,
         )
         .unwrap();
-        let r = verify_attestation(&doc, &nonce, Some(&witness_b), 110, TIER_ANY);
+        let r = verify_attestation(&doc, &nonce, Some(&witness_b), 110, TIER_ANY, &TEST_SDP_PUBKEY);
         assert!(matches!(
             r,
             Err(ConfidentialError::AttestationFieldWitnessMismatch)
@@ -435,10 +505,12 @@ mod tests {
     fn verifier_demanding_witness_against_witnessless_doc_rejected() {
         let sk = fresh_key();
         let nonce = fresh_attestation_nonce(&mut OsRng);
-        let doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new())
-            .unwrap();
+        let doc = sign_attestation(
+            &sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new(), TEST_SDP_PUBKEY,
+        )
+        .unwrap();
         let witness = [0xCC; 32];
-        let r = verify_attestation(&doc, &nonce, Some(&witness), 110, TIER_ANY);
+        let r = verify_attestation(&doc, &nonce, Some(&witness), 110, TIER_ANY, &TEST_SDP_PUBKEY);
         assert!(matches!(
             r,
             Err(ConfidentialError::AttestationFieldWitnessMismatch)
@@ -455,14 +527,17 @@ mod tests {
         // peer that previously pinned at HardwareBound.
         let sk = fresh_key();
         let nonce = fresh_attestation_nonce(&mut OsRng);
-        let doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new())
-            .unwrap();
+        let doc = sign_attestation(
+            &sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new(), TEST_SDP_PUBKEY,
+        )
+        .unwrap();
         let r = verify_attestation(
             &doc,
             &nonce,
             None,
             110,
             ConfidentialTier::HardwareBound,
+            &TEST_SDP_PUBKEY,
         );
         assert!(matches!(
             r,
@@ -484,8 +559,84 @@ mod tests {
             120,
             None,
             Vec::new(),
+            TEST_SDP_PUBKEY,
         )
         .unwrap();
-        verify_attestation(&doc, &nonce, None, 110, ConfidentialTier::Software).unwrap();
+        verify_attestation(
+            &doc,
+            &nonce,
+            None,
+            110,
+            ConfidentialTier::Software,
+            &TEST_SDP_PUBKEY,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn issuer_sdp_pubkey_mismatch_rejected() {
+        // Regression test for audit C1 (May 14 2026): if the doc's
+        // embedded issuer_sdp_pubkey doesn't match the channel
+        // identity the verifier is talking to, the doc MUST be
+        // rejected — even if everything else (master_vk, nonce,
+        // master_sig over the issuer-claimed transcript) is valid.
+        let sk = fresh_key();
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let issuer_sdp_pubkey: IssuerSdpPubkey = [0xAAu8; ISSUER_SDP_PUBKEY_LEN];
+        let doc = sign_attestation(
+            &sk,
+            ProviderTag::Software,
+            nonce,
+            100,
+            120,
+            None,
+            Vec::new(),
+            issuer_sdp_pubkey,
+        )
+        .unwrap();
+        // Issuer signed under AA-pubkey, verifier's channel is BB-pubkey
+        let verifier_channel_pubkey: IssuerSdpPubkey = [0xBBu8; ISSUER_SDP_PUBKEY_LEN];
+        let r = verify_attestation(
+            &doc,
+            &nonce,
+            None,
+            110,
+            TIER_ANY,
+            &verifier_channel_pubkey,
+        );
+        assert!(matches!(
+            r,
+            Err(ConfidentialError::AttestationIssuerSdpPubkeyMismatch)
+        ));
+    }
+
+    #[test]
+    fn issuer_sdp_pubkey_in_transcript_tamper_breaks_sig() {
+        // Even more aggressive: confirm the master sig actually
+        // commits to issuer_sdp_pubkey, by post-construction mutation.
+        // If the verifier's channel matches the tampered value, the
+        // SDP-check passes but the sig fails — proving the sig binds
+        // to the pubkey.
+        let sk = fresh_key();
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let original_sdp: IssuerSdpPubkey = [0xAAu8; ISSUER_SDP_PUBKEY_LEN];
+        let mut doc = sign_attestation(
+            &sk,
+            ProviderTag::Software,
+            nonce,
+            100,
+            120,
+            None,
+            Vec::new(),
+            original_sdp,
+        )
+        .unwrap();
+        // Tamper: change both the doc field AND the verifier's
+        // expected channel to a different value. Sig was signed
+        // over original_sdp so it must now fail.
+        let tampered_sdp: IssuerSdpPubkey = [0xBBu8; ISSUER_SDP_PUBKEY_LEN];
+        doc.issuer_sdp_pubkey = tampered_sdp;
+        let r = verify_attestation(&doc, &nonce, None, 110, TIER_ANY, &tampered_sdp);
+        assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
     }
 }

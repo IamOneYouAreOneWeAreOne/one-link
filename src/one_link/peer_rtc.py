@@ -489,7 +489,8 @@ class BrowserPeerManager:
         self, peer: BrowserPeer, envelope: dict
     ) -> None:
         """Peer sent us their challenge; we respond with our doc
-        bound to their nonce."""
+        bound to their nonce AND to our own SDP-layer Ed25519 pubkey
+        (audit C1)."""
         try:
             import base64
             from one_link.handshake_attestation import (
@@ -506,6 +507,24 @@ class BrowserPeerManager:
                 peer.fingerprint,
             )
             return
+        # Our SDP pubkey is the identity that signs the WebRTC offer/answer
+        # envelope on this channel. Peer pins this against our channel ID.
+        try:
+            my_sdp_pubkey = bytes(self.daemon.me.public_bytes)
+        except Exception:
+            log.info(
+                "peer-rtc: attest_challenge from %s but daemon.me.public_bytes "
+                "unavailable; skipping response",
+                peer.fingerprint,
+            )
+            return
+        if len(my_sdp_pubkey) != 32:
+            log.warning(
+                "peer-rtc: attest_challenge from %s — our SDP pubkey is %d bytes "
+                "(expected 32); cannot bind attestation",
+                peer.fingerprint, len(my_sdp_pubkey),
+            )
+            return
         challenge_b64 = str(envelope.get("challenge_b64") or "")
         try:
             challenge = base64.b64decode(challenge_b64)
@@ -514,7 +533,7 @@ class BrowserPeerManager:
         if len(challenge) != 32:
             return
         try:
-            doc = issue_for_challenge(sealed, challenge)
+            doc = issue_for_challenge(sealed, challenge, my_sdp_pubkey)
             wire = AttestationWire.from_doc(doc).to_wire_dict()
         except Exception as e:
             log.info("peer-rtc: issue attestation failed: %s", e)
@@ -530,8 +549,10 @@ class BrowserPeerManager:
     async def _handle_attest_response(
         self, peer: BrowserPeer, envelope: dict
     ) -> None:
-        """Peer sent us their attestation doc bound to OUR challenge.
-        Verify and update peer state on success."""
+        """Peer sent us their attestation doc bound to OUR challenge
+        and their SDP pubkey (audit C1). Verify and update peer state
+        on success. TOFU-pins peer.peer_master_vk on first attest;
+        rejects rotation on subsequent attests (audit C2)."""
         try:
             from one_link.handshake_attestation import (
                 AttestationWire,
@@ -547,18 +568,48 @@ class BrowserPeerManager:
                 peer.fingerprint,
             )
             return
+        # The peer's SDP-layer pubkey is the identity that signed the
+        # WebRTC offer envelope on this channel. The attestation doc
+        # MUST commit to this pubkey.
+        peer_sdp_pubkey = bytes(peer.pubkey_bytes)
+        if len(peer_sdp_pubkey) != 32:
+            log.warning(
+                "peer-rtc: attest_response from %s — peer SDP pubkey is %d bytes "
+                "(expected 32); rejecting",
+                peer.fingerprint, len(peer_sdp_pubkey),
+            )
+            return
         wire_d = envelope.get("doc")
         if not isinstance(wire_d, dict):
             return
         try:
             wire = AttestationWire.from_wire_dict(wire_d)
             doc = wire.to_doc()
-            verify_doc(doc, challenge)
+            verify_doc(doc, challenge, peer_sdp_pubkey)
         except Exception as e:
             log.warning(
                 "peer-rtc: attestation from %s failed verify: %s",
                 peer.fingerprint, e,
             )
+            return
+        # Audit C2 (May 14 2026): TOFU-pin peer_master_vk. If we
+        # previously pinned a different master VK against this peer
+        # fingerprint, refuse the new doc and tear the peer down.
+        # An attacker who stole the SDP signing key but cannot
+        # recover the original master seed would silently roll
+        # forward to a fresh master without this check.
+        prior_vk = peer.peer_master_vk
+        if prior_vk is not None and prior_vk != doc.master_vk:
+            log.warning(
+                "peer-rtc: SECURITY ALERT — peer %s presented master_vk "
+                "%s but previously pinned %s. Refusing and tearing down.",
+                peer.fingerprint,
+                doc.master_vk[:8].hex(),
+                prior_vk[:8].hex(),
+            )
+            peer.attestation_challenge = None
+            with contextlib.suppress(Exception):
+                self._close_peer(peer)
             return
         # Pin the peer's master VK + mark attested.
         peer.peer_master_vk = doc.master_vk

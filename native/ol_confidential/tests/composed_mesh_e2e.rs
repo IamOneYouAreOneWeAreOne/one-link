@@ -187,8 +187,19 @@ fn composed_mesh_walks_all_ten_rows() {
     let cc_seed = [0xAB; 32];
     let sealed = cc.seal_master(&cc_seed).unwrap();
     let peer_nonce = fresh_attestation_nonce(&mut OsRng);
-    let doc = cc.attest(&sealed, peer_nonce, 1_000, 1_020, None).unwrap();
-    verify_attestation(&doc, &peer_nonce, None, 1_010).unwrap();
+    let test_sdp = [0x77u8; ol_confidential::ISSUER_SDP_PUBKEY_LEN];
+    let doc = cc
+        .attest(&sealed, peer_nonce, 1_000, 1_020, None, test_sdp)
+        .unwrap();
+    verify_attestation(
+        &doc,
+        &peer_nonce,
+        None,
+        1_010,
+        ol_confidential::ConfidentialTier::Software,
+        &test_sdp,
+    )
+    .unwrap();
 
     // ── Row 8 layer-10 (duress): wrap the master under a real + decoy code
     let real_pt = b"the truth: this is the real master notes payload";

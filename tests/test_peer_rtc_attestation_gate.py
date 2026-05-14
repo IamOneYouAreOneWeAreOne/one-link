@@ -43,10 +43,14 @@ def _make_daemon(
     require_attested: bool = False,
     sealed_master: SealedMasterIdentity | None = None,
 ) -> object:
+    # daemon.me.public_bytes is required by _handle_attest_challenge
+    # (audit C1 May 2026 — SDP-binding into the attestation transcript).
+    me = SimpleNamespace(public_bytes=bytes([0x99] * 32))
     return SimpleNamespace(
         require_attested_peers=require_attested,
         sealed_master=sealed_master,
         _gate_drop_count=0,
+        me=me,
     )
 
 

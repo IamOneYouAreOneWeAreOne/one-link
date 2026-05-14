@@ -69,13 +69,19 @@ def fresh_challenge_for_peer() -> bytes:
 def issue_for_challenge(
     sealed_master: SealedMasterIdentity,
     peer_challenge: bytes,
+    issuer_sdp_pubkey: bytes,
     field_witness: Optional[bytes] = None,
     now_unix: Optional[int] = None,
     freshness_window_secs: Optional[int] = None,
 ) -> AttestationDoc:
     """Issue an attestation doc binding ``sealed_master`` to the
-    peer's challenge nonce. The window defaults to the
-    crate-level ``ATTESTATION_FRESHNESS_WINDOW_SECS`` (30 s).
+    peer's challenge nonce AND to ``issuer_sdp_pubkey`` (the
+    daemon's own 32-byte Ed25519 SDP-layer pubkey). The window
+    defaults to ``ATTESTATION_FRESHNESS_WINDOW_SECS`` (30 s).
+
+    Audit C1 (May 2026): the SDP-pubkey binding is mandatory and
+    causes the peer's ``verify_doc`` to reject any doc whose
+    embedded SDP pubkey does not match the channel identity.
     """
     _require_native()
     if now_unix is None:
@@ -87,6 +93,7 @@ def issue_for_challenge(
         peer_challenge,
         now_unix,
         deadline_unix,
+        issuer_sdp_pubkey,
         field_witness,
     )
 
@@ -94,17 +101,23 @@ def issue_for_challenge(
 def verify_doc(
     doc: AttestationDoc,
     expected_peer_nonce: bytes,
+    expected_issuer_sdp_pubkey: bytes,
     expected_field_witness: Optional[bytes] = None,
     now_unix: Optional[int] = None,
     min_tier: int = 1,
 ) -> None:
     """Verify a peer's attestation doc against our challenge.
     Raises ``ValueError`` on any failure (bad sig, expired,
-    nonce mismatch, witness mismatch, provider tier below ``min_tier``).
+    nonce mismatch, witness mismatch, tier below ``min_tier``,
+    or SDP-pubkey mismatch).
 
-    ``min_tier`` defaults to ``TIER_SOFTWARE`` (accept any tier). Daemon
-    callers that pin a peer at a hardware tier MUST pass the matching
-    floor to reject silent downgrades (audit H4).
+    ``expected_issuer_sdp_pubkey`` (audit C1, May 2026) is the
+    32-byte Ed25519 pubkey of the channel identity the verifier
+    is actually talking to. The doc's embedded
+    ``issuer_sdp_pubkey`` MUST match — closes the
+    identity-confusion attack.
+
+    ``min_tier`` defaults to ``TIER_SOFTWARE`` (accept any tier).
     """
     _require_native()
     if now_unix is None:
@@ -113,6 +126,7 @@ def verify_doc(
         doc,
         expected_peer_nonce,
         now_unix,
+        expected_issuer_sdp_pubkey,
         expected_field_witness,
         min_tier,
     )
@@ -136,6 +150,7 @@ class AttestationWire:
     deadline_unix: int
     field_witness_commitment_b64: Optional[str]
     platform_quote_b64: str
+    issuer_sdp_pubkey_b64: str
     master_sig_b64: str
 
     @classmethod
@@ -152,6 +167,9 @@ class AttestationWire:
                 else None
             ),
             platform_quote_b64=base64.b64encode(doc.platform_quote).decode("ascii"),
+            issuer_sdp_pubkey_b64=base64.b64encode(doc.issuer_sdp_pubkey).decode(
+                "ascii"
+            ),
             master_sig_b64=base64.b64encode(doc.master_sig).decode("ascii"),
         )
 
@@ -168,14 +186,22 @@ class AttestationWire:
                 else None
             ),
             platform_quote=base64.b64decode(self.platform_quote_b64),
+            issuer_sdp_pubkey=base64.b64decode(self.issuer_sdp_pubkey_b64),
             master_sig=base64.b64decode(self.master_sig_b64),
         )
 
     def to_wire_dict(self) -> Dict[str, object]:
         """Stable JSON shape. Compatible with the daemon's existing
-        message envelope (``{"type": "...", "payload": {...}}``)."""
+        message envelope (``{"type": "...", "payload": {...}}``).
+
+        Wire-format ``v: 2`` (audit C1, May 2026): added
+        ``issuer_sdp_pubkey``. Old ``v: 1`` docs are rejected by
+        ``from_wire_dict``; the underlying transcript-domain bump
+        guarantees a ``v: 1`` doc cannot pass ``-v2`` master-sig
+        verify anyway.
+        """
         return {
-            "v": 1,  # wire-format version
+            "v": 2,
             "provider_tag": self.provider_tag,
             "master_vk": self.master_vk_b64,
             "peer_nonce": self.peer_nonce_b64,
@@ -183,13 +209,14 @@ class AttestationWire:
             "deadline_unix": self.deadline_unix,
             "field_witness_commitment": self.field_witness_commitment_b64,
             "platform_quote": self.platform_quote_b64,
+            "issuer_sdp_pubkey": self.issuer_sdp_pubkey_b64,
             "master_sig": self.master_sig_b64,
         }
 
     @classmethod
     def from_wire_dict(cls, d: Dict[str, object]) -> "AttestationWire":
         v = d.get("v")
-        if v != 1:
+        if v != 2:
             raise ValueError(f"unsupported attestation wire version: {v!r}")
         return cls(
             provider_tag=int(d["provider_tag"]),  # type: ignore[arg-type]
@@ -203,5 +230,6 @@ class AttestationWire:
                 else str(d["field_witness_commitment"])
             ),
             platform_quote_b64=str(d["platform_quote"]),
+            issuer_sdp_pubkey_b64=str(d["issuer_sdp_pubkey"]),
             master_sig_b64=str(d["master_sig"]),
         )

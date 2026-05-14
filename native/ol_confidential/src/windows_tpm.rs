@@ -325,6 +325,7 @@ pub fn attest_with_tpm(
     issued_unix: u64,
     deadline_unix: u64,
     field_witness: Option<&[u8; 32]>,
+    issuer_sdp_pubkey: crate::attestation::IssuerSdpPubkey,
 ) -> ConfidentialResult<crate::AttestationDoc> {
     use crate::attestation::{canonical_attestation_transcript, AttestationDoc};
     use crate::ProviderTag;
@@ -363,6 +364,7 @@ pub fn attest_with_tpm(
         deadline_unix,
         field_witness,
         &platform_quote,
+        &issuer_sdp_pubkey,
     );
     let master_sig = sk.sign(&full_transcript)?.to_vec();
 
@@ -374,6 +376,7 @@ pub fn attest_with_tpm(
         deadline_unix,
         field_witness_commitment,
         platform_quote,
+        issuer_sdp_pubkey,
         master_sig,
     })
 }
@@ -397,14 +400,23 @@ pub fn verify_attestation_with_tpm(
     expected_peer_nonce: &crate::AttestationNonce,
     expected_field_witness: Option<&[u8; 32]>,
     now_unix: u64,
+    min_tier: crate::tier::ConfidentialTier,
+    expected_issuer_sdp_pubkey: &crate::attestation::IssuerSdpPubkey,
 ) -> ConfidentialResult<Vec<u8>> {
     use crate::ProviderTag;
 
     if doc.provider_tag != ProviderTag::WindowsTpm {
         return Err(ConfidentialError::AttestationProviderTagMismatch);
     }
-    // (1) Layered master sig + nonce + freshness + witness.
-    crate::verify_attestation(doc, expected_peer_nonce, expected_field_witness, now_unix)?;
+    // (1) Layered master sig + nonce + freshness + witness + tier + SDP binding.
+    crate::verify_attestation(
+        doc,
+        expected_peer_nonce,
+        expected_field_witness,
+        now_unix,
+        min_tier,
+        expected_issuer_sdp_pubkey,
+    )?;
     // (2) TPM platform_quote chain.
     crate::verify_platform_quote(
         &doc.platform_quote,

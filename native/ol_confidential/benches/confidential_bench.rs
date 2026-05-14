@@ -53,10 +53,11 @@ fn bench_attest_issue(c: &mut Criterion) {
     let seed = [0x42u8; 32];
     let sealed = provider.seal_master(&seed).unwrap();
     let nonce = fresh_attestation_nonce(&mut OsRng);
+    let sdp = [0u8; ol_confidential::ISSUER_SDP_PUBKEY_LEN];
     c.bench_function("confidential::attest_issue", |b| {
         b.iter(|| {
             let doc = provider
-                .attest(black_box(&sealed), black_box(nonce), 100, 120, None)
+                .attest(black_box(&sealed), black_box(nonce), 100, 120, None, sdp)
                 .unwrap();
             black_box(doc);
         });
@@ -68,7 +69,8 @@ fn bench_attest_verify(c: &mut Criterion) {
     let seed = [0x42u8; 32];
     let sealed = provider.seal_master(&seed).unwrap();
     let nonce = fresh_attestation_nonce(&mut OsRng);
-    let doc = provider.attest(&sealed, nonce, 100, 120, None).unwrap();
+    let sdp = [0u8; ol_confidential::ISSUER_SDP_PUBKEY_LEN];
+    let doc = provider.attest(&sealed, nonce, 100, 120, None, sdp).unwrap();
     c.bench_function("confidential::attest_verify", |b| {
         b.iter(|| {
             verify_attestation(
@@ -77,6 +79,7 @@ fn bench_attest_verify(c: &mut Criterion) {
                 None,
                 110,
                 ol_confidential::ConfidentialTier::Software,
+                &[0u8; ol_confidential::ISSUER_SDP_PUBKEY_LEN],
             )
             .unwrap();
         });

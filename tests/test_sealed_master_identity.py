@@ -19,6 +19,8 @@ pytestmark = pytest.mark.skipif(
     reason="one_link_native.confidential not built; run `maturin develop --release`",
 )
 
+TEST_SDP_PUBKEY = bytes([0x77] * 32)
+
 
 def test_from_seed_bytes_rejects_wrong_length():
     with pytest.raises(ValueError):
@@ -42,17 +44,17 @@ def test_sign_round_trips_under_vk():
 def test_attest_and_verify_round_trip():
     m = SealedMasterIdentity.from_seed_bytes(bytes([0x77] * 32))
     nonce = fresh_attestation_nonce()
-    doc = m.attest(nonce, 1_000, 1_020)
-    verify_attestation(doc, nonce, now_unix=1_010)
+    doc = m.attest(nonce, 1_000, 1_020, TEST_SDP_PUBKEY)
+    verify_attestation(doc, nonce, 1_010, TEST_SDP_PUBKEY)
 
 
 def test_attest_with_field_witness():
     m = SealedMasterIdentity.from_seed_bytes(bytes([0x88] * 32))
     nonce = fresh_attestation_nonce()
     witness = bytes([0xAA] * 32)
-    doc = m.attest(nonce, 1_000, 1_020, field_witness=witness)
+    doc = m.attest(nonce, 1_000, 1_020, TEST_SDP_PUBKEY, field_witness=witness)
     verify_attestation(
-        doc, nonce, now_unix=1_010, expected_field_witness=witness
+        doc, nonce, 1_010, TEST_SDP_PUBKEY, expected_field_witness=witness
     )
 
 
@@ -102,8 +104,8 @@ def test_master_seed_load_sealed_full_lifecycle():
         assert sealed is not None and sealed is not False
         # Hot-path operations work on the sealed handle.
         nonce = fresh_attestation_nonce()
-        doc = sealed.attest(nonce, 1_000, 1_020)
-        verify_attestation(doc, nonce, now_unix=1_010)
+        doc = sealed.attest(nonce, 1_000, 1_020, TEST_SDP_PUBKEY)
+        verify_attestation(doc, nonce, 1_010, TEST_SDP_PUBKEY)
         # Second seal-load returns ANOTHER independent provider over
         # the same persisted seed — both have the same master VK
         # because the underlying seed is the same.

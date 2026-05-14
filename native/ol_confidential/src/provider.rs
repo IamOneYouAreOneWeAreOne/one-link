@@ -2,7 +2,7 @@
 
 use ol_pqsig::HybridVerifyingKey;
 
-use crate::attestation::{AttestationDoc, AttestationNonce};
+use crate::attestation::{AttestationDoc, AttestationNonce, IssuerSdpPubkey};
 use crate::errors::ConfidentialResult;
 use crate::sealed_key::SealedKey;
 use crate::tier::ConfidentialTier;
@@ -128,5 +128,6 @@ pub trait ConfidentialProvider: Send + Sync {
         issued_unix: u64,
         deadline_unix: u64,
         field_witness: Option<&[u8; 32]>,
+        issuer_sdp_pubkey: IssuerSdpPubkey,
     ) -> ConfidentialResult<AttestationDoc>;
 }
