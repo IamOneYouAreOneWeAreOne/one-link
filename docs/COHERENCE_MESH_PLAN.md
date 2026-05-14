@@ -337,6 +337,10 @@ subkeys + device-presence CRDT + remote-instruct command channel.
 - Browser-peer app traffic can be hardened behind the Row-10 attestation gate
   (`ONE_LINK_REQUIRE_ATTESTED_PEERS=required`); control-plane handshake frames
   bypass the gate, and daemon status reports the drop counter.
+- Row 6/7 browser-peer cover traffic is now wire-capable: control-channel
+  open announces each side's Sphinx onion pubkey, inbound cover packets are
+  peeled and sentinel-checked before being dropped, and daemon cover emission
+  prefers a real ready peer before falling back to local loopback crypto.
 - Presence facts converge by `(sequence, updated_ms)`.
 - Delivery planning rejects revoked/untrusted/offline/storage-starved devices.
 - Self-mesh target choice scores awake/asleep state, network class, battery,

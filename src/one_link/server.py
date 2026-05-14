@@ -2146,6 +2146,14 @@ class UIServer:
                                         "failed for %s: %s",
                                         peer.fingerprint, e,
                                     )
+                                try:
+                                    self.peer_rtc.init_onion_announce(peer)
+                                except Exception as e:
+                                    log.info(
+                                        "peer-rtc: init_onion_announce "
+                                        "failed for %s: %s",
+                                        peer.fingerprint, e,
+                                    )
 
                         @channel.on("close")
                         def _on_close():

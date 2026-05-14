@@ -12957,6 +12957,37 @@ class Daemon:
                         # design requires this for forward secrecy
                         # of cover traffic.
                         eph_sk, _eph_pk = _native_sphinx.generate_keypair()
+                        target_peer = None
+                        target_pk = None
+                        prtc = getattr(self, "peer_rtc", None)
+                        if prtc is not None:
+                            with contextlib.suppress(Exception):
+                                for p in getattr(prtc, "_peers", {}).values():
+                                    pk = getattr(p, "onion_pubkey", None)
+                                    dc = getattr(p, "control_dc", None)
+                                    if pk and getattr(dc, "readyState", "") == "open":
+                                        target_peer = p
+                                        target_pk = pk
+                                        break
+                        if target_peer is not None and target_pk is not None:
+                            circuit = [(self._cover_self_hop_id, target_pk)]
+                            packet = _native_sphinx.build_cover_packet(
+                                eph_sk, circuit, _cover_payload_size
+                            )
+                            try:
+                                from one_link.peer_rtc import PEER_DC_PROTOCOL_VERSION
+                                prtc.send_dc(target_peer, "control", {
+                                    "v": PEER_DC_PROTOCOL_VERSION,
+                                    "t": "cover_packet",
+                                    "packet_b64": base64.b64encode(packet).decode("ascii"),
+                                })
+                                self._cover_emit_count += 1
+                                self._cover_wire_sent_count = (
+                                    getattr(self, "_cover_wire_sent_count", 0) + 1
+                                )
+                                return
+                            except Exception:
+                                pass
                         circuit = [
                             (
                                 self._cover_self_hop_id,
@@ -12983,6 +13014,9 @@ class Daemon:
                                 "cover sentinel"
                             )
                         self._cover_emit_count += 1
+                        self._cover_loopback_count = (
+                            getattr(self, "_cover_loopback_count", 0) + 1
+                        )
 
                     ct = _CTD(rate_hz=0.5, emit_cover=_emit_cover_real)
                     ct.start()
