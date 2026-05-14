@@ -16,11 +16,11 @@ use zeroize::Zeroize;
 /// Length of a session key (= ChaCha20 key length).
 pub const SESSION_KEY_LEN: usize = OBFS_KEY_LEN;
 
-/// Tag used by `derive_nonce` to distinguish directions; ensures
-/// the client-side packet counter 7 produces a different nonce
-/// than the server-side packet counter 7.
+/// Tag used by `derive_nonce`. Direction is captured by WHICH key
+/// (outbound_key vs inbound_key) is used, so both directions can
+/// use the same tag; (key, nonce) pairs never repeat because the
+/// keys differ.
 const OUTBOUND_DIRECTION_TAG: u32 = 0x4F4C5458; // "OLTX"
-const INBOUND_DIRECTION_TAG: u32 = 0x4F4C5258; // "OLRX"
 
 /// Which direction a packet flows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,45 +71,13 @@ impl Session {
     /// Returns the recovered bytes (this layer has no integrity —
     /// upper layer must MAC).
     pub fn open_inbound(&self, ciphertext: &[u8], counter: u64) -> Result<Vec<u8>, ()> {
-        let nonce = derive_nonce(INBOUND_DIRECTION_TAG, counter);
-        // Symmetric XOR — note: peer's outbound matches our inbound,
-        // so the nonce-tag inversion makes the keystream align with
-        // what the peer produced.
-        // The peer sealed-outbound with their OUTBOUND_DIRECTION_TAG.
-        // From our perspective those bytes are inbound, so we use
-        // INBOUND_DIRECTION_TAG which equals... wait, peer's outbound
-        // is our inbound, so the tags MUST differ across sides. Let
-        // me re-think: both sides need to derive the same nonce for
-        // a given packet. If client OUTBOUND_DIRECTION_TAG = X,
-        // server INBOUND_DIRECTION_TAG must = X too so they match.
-        //
-        // SOLUTION: peer-to-direction nonce tag is FIXED — the
-        // direction tag depends on PACKET DIRECTION, not on which
-        // side processes it. Both sides agree: "packets flowing
-        // client→server use OUTBOUND_DIRECTION_TAG; packets flowing
-        // server→client use INBOUND_DIRECTION_TAG" — but each side
-        // labels these tags inversely. We re-derive the nonce
-        // using OUTBOUND tag here because the peer's seal_outbound
-        // used the outbound tag (from THEIR perspective). That tag
-        // is OUTBOUND_DIRECTION_TAG (same constant). We need to
-        // mirror.
-        //
-        // The cleanest fix: BOTH directions use OUTBOUND_DIRECTION_TAG
-        // for the nonce since the direction is uniquely captured by
-        // which key (outbound_key vs inbound_key) is used.
+        // Both directions derive the nonce with OUTBOUND_DIRECTION_TAG:
+        // direction is captured by WHICH key is used (outbound_key vs
+        // inbound_key), so the tag is fixed and both sides agree.
         let nonce = derive_nonce(OUTBOUND_DIRECTION_TAG, counter);
         Ok(deobfuscate(&self.inbound_key, &nonce, ciphertext))
     }
 
-    /// Borrow the outbound key (for diagnostics; do NOT export).
-    pub(crate) fn outbound_key(&self) -> &[u8; SESSION_KEY_LEN] {
-        &self.outbound_key
-    }
-
-    /// Borrow the inbound key (for diagnostics; do NOT export).
-    pub(crate) fn inbound_key(&self) -> &[u8; SESSION_KEY_LEN] {
-        &self.inbound_key
-    }
 }
 
 impl std::fmt::Debug for Session {

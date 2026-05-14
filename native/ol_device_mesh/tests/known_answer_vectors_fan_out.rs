@@ -1,6 +1,6 @@
 //! Pinned KAT vectors for Row 8 Layer 5 fan-out.
 
-use ol_device_mesh::distributed_fs::{ChunkHash, FILE_ID_LEN};
+use ol_device_mesh::distributed_fs::FILE_ID_LEN;
 use ol_device_mesh::fan_out::{
     ChunkAck, FetchRequest, ACK_DOMAIN, FETCH_NONCE_LEN, FETCH_REQUEST_DOMAIN,
     MAX_CHUNKS_PER_FETCH,

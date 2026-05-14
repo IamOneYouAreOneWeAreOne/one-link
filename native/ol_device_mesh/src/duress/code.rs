@@ -7,7 +7,7 @@
 //!
 //! `m_cost = 19,456 KiB` and `t_cost = 2` are the OWASP-recommended
 //! "balanced" Argon2id defaults that complete in about 50 ms on a
-//! 2025 mobile SoC. The CPU+memory cost for an attacker is ~25 ×
+//! 2025 mobile `SoC`. The CPU+memory cost for an attacker is ~25 ×
 //! that on commodity hardware — sufficient given that a 6-digit
 //! duress code has only 1 M possibilities anyway (the user picks
 //! something memorable). Daemons SHOULD enforce a minimum code
@@ -39,7 +39,7 @@ pub struct DuressCode {
 impl DuressCode {
     /// Borrow the raw key bytes for AEAD use. Do NOT log.
     #[must_use]
-    pub fn key_bytes(&self) -> &[u8; DURESS_KEY_LEN] {
+    pub const fn key_bytes(&self) -> &[u8; DURESS_KEY_LEN] {
         &self.key
     }
 }

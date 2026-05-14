@@ -124,7 +124,8 @@ pub struct SiblingWitness {
 }
 
 /// Build a sibling-witness record from a verified subkey VK.
-pub fn sibling_witness(subkey_vk: HybridVerifyingKey, max_skew_secs: u64) -> SiblingWitness {
+#[must_use] 
+pub const fn sibling_witness(subkey_vk: HybridVerifyingKey, max_skew_secs: u64) -> SiblingWitness {
     SiblingWitness {
         subkey_vk,
         max_skew_secs,
@@ -162,11 +163,7 @@ pub fn verify_liveness(
     // never reaches the timing branch — keeps the verify path
     // constant-time-uniform across "good timestamp / bad signature"
     // vs "bad timestamp / bad signature" cases.
-    let diff = if proof.wall_unix > now_unix {
-        proof.wall_unix - now_unix
-    } else {
-        now_unix - proof.wall_unix
-    };
+    let diff = proof.wall_unix.abs_diff(now_unix);
     if diff > witness.max_skew_secs {
         return Err(DeviceMeshError::LivenessOutOfWindow {
             got_unix: proof.wall_unix,

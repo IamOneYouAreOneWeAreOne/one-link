@@ -2,7 +2,7 @@
 //!
 //! An [`QuorumApproval`] is "I, device X, approve proposal P at
 //! wall-clock T." The approver's subkey signs the canonical bytes;
-//! the proposal_id binds the approval to one specific proposal so
+//! the `proposal_id` binds the approval to one specific proposal so
 //! it can't be replayed against a different operation.
 
 use ol_pqsig::{HybridVerifyingKey, HYBRID_SIG_LEN};
@@ -32,6 +32,7 @@ pub struct QuorumApproval {
 
 impl QuorumApproval {
     /// Canonical bytes the approver signs over.
+    #[must_use] 
     pub fn canonical_transcript(
         proposal_id: &ProposalId,
         approver_device_id: &[u8; DEVICE_ID_LEN],

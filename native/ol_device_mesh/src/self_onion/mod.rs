@@ -38,7 +38,7 @@
 //!   master's hybrid signing key (the same root every other
 //!   personal-mesh primitive trusts).
 //! - **Layer 3 (CRDT mirror)**: the registry can be stored as a
-//!   Layer-3 LWW-Map subtree keyed by device_id so every device
+//!   Layer-3 LWW-Map subtree keyed by `device_id` so every device
 //!   sees the same onion-key view.
 //! - **Layer 6 (self-routing)**: hop selection consumes a
 //!   [`crate::self_routing::Route`] — the routing layer's max-min-τ

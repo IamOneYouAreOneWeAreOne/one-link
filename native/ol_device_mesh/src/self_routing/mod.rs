@@ -1,7 +1,7 @@
 //! Row 8 Layer 6 — τ_c-routed self-mesh + DTN courier.
 //!
 //! Personal-mesh routing: given a source and destination among your
-//! OWN devices, pick the highest-coherence (τ_c) path. The path may
+//! OWN devices, pick the highest-coherence (`τ_c`) path. The path may
 //! be direct (`src → dst` over LAN / cellular / Wi-Fi) or multi-hop
 //! through another device in the mesh (e.g., phone → desktop →
 //! laptop because the phone can't directly reach the laptop on the
@@ -9,7 +9,7 @@
 //!
 //! ## Self-mesh vs friend-mesh
 //!
-//! Friend-mesh routing (the Phase D `ol_routing` τ_c PDE) optimises
+//! Friend-mesh routing (the Phase D `ol_routing` `τ_c` PDE) optimises
 //! a public swarm graph. Self-mesh routing optimises a small graph
 //! of YOUR devices — phone, laptop, tablet, desktop, server — and
 //! has tighter trust assumptions:
@@ -35,7 +35,7 @@
 //! ## What this layer ships
 //!
 //! - [`RouteAnnouncement`] — signed claim "I (announcer) can reach
-//!   peers {P → τ_score, last_seen_unix} as of `announced_at_unix`."
+//!   peers {P → `τ_score`, `last_seen_unix`} as of `announced_at_unix`."
 //!   Includes a `direct` flag per link so the receiver knows
 //!   whether the announcer is offering itself as a relay or just
 //!   reporting another device's reachability.
@@ -59,7 +59,7 @@
 //!
 //! - The actual wire transport (Phase A2 QUIC + the OS networking
 //!   stack underneath).
-//! - The τ_c estimator (Phase D `ol_routing` + Phase E
+//! - The `τ_c` estimator (Phase D `ol_routing` + Phase E
 //!   `ol_coherence_field` provide it; this layer just consumes the
 //!   scalar score).
 //! - The reachability prober (it's a daemon-level concern; this

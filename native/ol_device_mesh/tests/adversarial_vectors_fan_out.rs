@@ -1,7 +1,7 @@
 //! Adversarial vectors for Row 8 Layer 5 fan-out.
 
 use ol_device_mesh::distributed_fs::{
-    ChunkHash, ChunkPlacement, ErasurePolicy, FileManifest, FILE_ID_LEN,
+    ChunkHash, ErasurePolicy, FileManifest, FILE_ID_LEN,
 };
 use ol_device_mesh::fan_out::{
     fan_out_plan, replan_after_source_failure, sign_chunk_ack, sign_fetch_request,

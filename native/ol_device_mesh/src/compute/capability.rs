@@ -10,7 +10,7 @@ pub const MAX_CAPABILITIES_PER_DEVICE: usize = 32;
 /// What a device can DO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DeviceCapability {
-    /// Hardware-accelerated GPU (CUDA / Metal / ROCm / NPU).
+    /// Hardware-accelerated GPU (CUDA / Metal / `ROCm` / NPU).
     Gpu,
     /// Many-core CPU with adequate cooling (≥ 8 cores, mains
     /// power). Suitable for heavy CPU work like video transcoding.
@@ -31,18 +31,18 @@ pub enum DeviceCapability {
     Display,
     /// GPS / geolocation services.
     GpsLocation,
-    /// Hardware security module (TPM / Secure Enclave / StrongBox /
-    /// TrustZone) capable of signing without exposing keys.
+    /// Hardware security module (TPM / Secure Enclave / `StrongBox` /
+    /// `TrustZone`) capable of signing without exposing keys.
     HardwareSecurity,
     /// Trusted execution environment (Intel SGX / AMD SEV-SNP /
-    /// Apple Secure Memory / ARM TrustZone — confidential compute).
+    /// Apple Secure Memory / ARM `TrustZone` — confidential compute).
     Tee,
 }
 
 impl DeviceCapability {
     /// Stable 8-byte tag mixed into the attestation transcript.
     #[must_use]
-    pub fn tag(self) -> [u8; 8] {
+    pub const fn tag(self) -> [u8; 8] {
         match self {
             Self::Gpu => *b"OL-CP-GP",
             Self::CpuHeavy => *b"OL-CP-CH",
@@ -61,7 +61,7 @@ impl DeviceCapability {
     /// Parse a tag back into a capability. Returns `None` on
     /// unknown tag.
     #[must_use]
-    pub fn from_tag(tag: &[u8; 8]) -> Option<Self> {
+    pub const fn from_tag(tag: &[u8; 8]) -> Option<Self> {
         match tag {
             b"OL-CP-GP" => Some(Self::Gpu),
             b"OL-CP-CH" => Some(Self::CpuHeavy),
@@ -80,7 +80,7 @@ impl DeviceCapability {
 
     /// All known capabilities in declaration order.
     #[must_use]
-    pub fn all() -> [Self; 11] {
+    pub const fn all() -> [Self; 11] {
         [
             Self::Gpu,
             Self::CpuHeavy,

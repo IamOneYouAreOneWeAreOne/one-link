@@ -31,12 +31,8 @@ impl CourierObservation {
     /// Time gap between the two reachability sightings. Smaller is
     /// better (less latency in the courier's round trip).
     #[must_use]
-    pub fn gap_secs(&self) -> u64 {
-        if self.src_seen_unix > self.dst_seen_unix {
-            self.src_seen_unix - self.dst_seen_unix
-        } else {
-            self.dst_seen_unix - self.src_seen_unix
-        }
+    pub const fn gap_secs(&self) -> u64 {
+        self.src_seen_unix.abs_diff(self.dst_seen_unix)
     }
 }
 

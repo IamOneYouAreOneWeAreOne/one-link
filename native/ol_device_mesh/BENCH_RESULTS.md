@@ -36,10 +36,13 @@ prohibitive at the duress-code entropy levels users actually pick
 |---                                                     |---        |---                                          |
 | `device_mesh::active_routing_observe`                  | 52.0 ns   | Bayesian update on Beta(α, β) posterior     |
 | `device_mesh::active_routing_context_hash`             | 112 ns    | BLAKE3 over (contact, hour, day, class, urg)|
-| `device_mesh::active_routing_pick_device_4`            | 4.24 µs   | Thompson sampling, 4 candidates             |
+| `device_mesh::active_routing_pick_device_4`            | 642 ns    | Thompson sampling (Marsaglia–Tsang), 4 cand |
 
-Picker is a few microseconds. The daemon can run it on every
-inbound message without breaking a sweat.
+Picker is sub-microsecond now. The earlier sum-of-exponentials
+gamma sampler was O(α + β) so it would have degraded as the
+routing history accumulated thousands of observations; the
+Marsaglia–Tsang upgrade gives constant-time-per-draw regardless
+of posterior depth.
 
 ## Layer 8 — cross-device distributed compute
 

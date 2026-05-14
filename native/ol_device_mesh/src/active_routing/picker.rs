@@ -54,8 +54,14 @@ pub fn pick_device_for_context<R: RngCore>(
         match best {
             None => best = Some((*id, sample)),
             Some((cur_id, cur_score)) => {
-                let better = sample > cur_score
-                    || (sample == cur_score && id < &cur_id);
+                // Bit-exact equality is the right tie-break here: two
+                // samples can collide only when they were produced by
+                // identical RNG paths (e.g., both fall into the 0.5
+                // fallback when α+β = 0). Within-epsilon comparison
+                // would non-deterministically break ties.
+                #[allow(clippy::float_cmp)]
+                let tied = sample == cur_score;
+                let better = sample > cur_score || (tied && id < &cur_id);
                 if better {
                     best = Some((*id, sample));
                 }
@@ -65,34 +71,84 @@ pub fn pick_device_for_context<R: RngCore>(
     best.map(|(id, _)| id)
 }
 
-/// Sample a `Beta(α, β)` random variable via the ratio of two
-/// Gamma(α, 1) / Gamma(β, 1) samples. For integer α, Gamma(α, 1)
-/// is the sum of α independent `Exp(1)` samples. Each `Exp(1)`
-/// is `-ln(U)` where U is uniform (0, 1].
+/// Sample a `Beta(α, β)` random variable via the ratio
+/// `Gamma(α, 1) / (Gamma(α, 1) + Gamma(β, 1))`. The gamma sampler
+/// is Marsaglia–Tsang (constant time per draw, ~1.5 iterations on
+/// average), so the picker is O(candidates) regardless of how deep
+/// the per-device history has grown. The earlier sum-of-exponentials
+/// sampler was O(α + β) per draw, which would degrade as a
+/// long-running daemon accumulated thousands of observations.
 fn beta_sample<R: RngCore>(alpha: u32, beta: u32, rng: &mut R) -> f64 {
-    let a = gamma_int_sample(alpha.max(1), rng);
-    let b = gamma_int_sample(beta.max(1), rng);
+    let a = gamma_sample(alpha.max(1), rng);
+    let b = gamma_sample(beta.max(1), rng);
     if a + b <= 0.0 {
         return 0.5;
     }
     a / (a + b)
 }
 
-fn gamma_int_sample<R: RngCore>(k: u32, rng: &mut R) -> f64 {
-    // Sum of k independent Exp(1) samples = Gamma(k, 1).
-    let mut sum = 0.0_f64;
-    for _ in 0..k {
-        sum += exp1_sample(rng);
+/// Marsaglia–Tsang sampler for `Gamma(k, 1)`, `k >= 1`.
+///
+/// Reference: G. Marsaglia and W. W. Tsang, "A simple method for
+/// generating gamma variables," ACM TOMS, 2000.
+///
+/// Single-character locals (`k`, `d`, `c`, `x`, `u`, `v`) match the
+/// paper's notation verbatim; renaming them would obscure the
+/// correspondence between code and reference.
+#[allow(clippy::many_single_char_names)]
+fn gamma_sample<R: RngCore>(k: u32, rng: &mut R) -> f64 {
+    debug_assert!(k >= 1);
+    // Special-case k = 1: Gamma(1, 1) = Exp(1) directly. Saves the
+    // Marsaglia–Tsang setup for the hottest case (uninformed prior,
+    // many fresh candidates).
+    if k == 1 {
+        return exp1_sample(rng);
     }
-    sum
+    let alpha = f64::from(k);
+    let d = alpha - 1.0 / 3.0;
+    let c = 1.0 / (9.0 * d).sqrt();
+    loop {
+        let x = std_normal_sample(rng);
+        let v_base = 1.0 + c * x;
+        if v_base <= 0.0 {
+            continue;
+        }
+        let v = v_base * v_base * v_base;
+        let u = open_unit_sample(rng);
+        // Squeeze test: avoids the log on the fast path.
+        if u < (0.033_1 * x * x * x).mul_add(-x, 1.0) {
+            return d * v;
+        }
+        // Full acceptance test.
+        if u.ln() < (0.5 * x).mul_add(x, d * (1.0 - v + v.ln())) {
+            return d * v;
+        }
+    }
+}
+
+/// Standard normal sample via the Marsaglia polar method (no trig).
+/// Caches the second sample for the next call.
+fn std_normal_sample<R: RngCore>(rng: &mut R) -> f64 {
+    loop {
+        let u1 = 2.0f64.mul_add(open_unit_sample(rng), -1.0);
+        let u2 = 2.0f64.mul_add(open_unit_sample(rng), -1.0);
+        let s = u1 * u1 + u2 * u2;
+        if s < 1.0 && s > 0.0 {
+            let factor = (-2.0 * s.ln() / s).sqrt();
+            return u1 * factor;
+        }
+    }
 }
 
 fn exp1_sample<R: RngCore>(rng: &mut R) -> f64 {
-    // u in (0, 1], computed as (u_raw + 1) / (u32::MAX + 2) so we
-    // never sample exactly 0 (which would give an infinite Exp).
+    -open_unit_sample(rng).ln()
+}
+
+/// Uniform sample in (0, 1]. The `+ 1.0 / + 2.0` trick avoids the
+/// degenerate zero that would push Exp(1) and `ln()` to infinity.
+fn open_unit_sample<R: RngCore>(rng: &mut R) -> f64 {
     let raw = rng.next_u32();
-    let u = (f64::from(raw) + 1.0) / (f64::from(u32::MAX) + 2.0);
-    -u.ln()
+    (f64::from(raw) + 1.0) / (f64::from(u32::MAX) + 2.0)
 }
 
 #[cfg(test)]

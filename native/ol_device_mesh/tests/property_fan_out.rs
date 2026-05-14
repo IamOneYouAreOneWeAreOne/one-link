@@ -10,9 +10,7 @@ use ol_device_mesh::fan_out::{
     fan_out_plan, replan_after_source_failure, sign_chunk_ack, sign_fetch_request,
     FanOutPlan, SourceCapacity, TransferProgress, FETCH_NONCE_LEN,
 };
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 
 fn cheap_cases() -> u32 {
     if std::env::var("ONE_LINK_F1_GATE").as_deref() == Ok("1") {

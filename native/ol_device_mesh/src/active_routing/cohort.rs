@@ -36,7 +36,7 @@ impl CohortPrior {
     /// Uniform prior (no class-specific bias). Slow to converge
     /// but unbiased.
     #[must_use]
-    pub fn uniform() -> Self {
+    pub const fn uniform() -> Self {
         Self {
             default_alpha: COHORT_DEFAULT_ALPHA,
             default_beta: COHORT_DEFAULT_BETA,
@@ -50,7 +50,7 @@ impl CohortPrior {
     /// land there first); laptop gets a moderate boost for work
     /// stuff; desktop gets a small boost. Daemon-tunable.
     #[must_use]
-    pub fn typical_user() -> Self {
+    pub const fn typical_user() -> Self {
         Self {
             default_alpha: COHORT_DEFAULT_ALPHA,
             default_beta: COHORT_DEFAULT_BETA,
@@ -63,7 +63,7 @@ impl CohortPrior {
     /// `(α, β)` for `class`. Sums the default + class-specific
     /// bonus.
     #[must_use]
-    pub fn for_class(&self, class: DeviceClass) -> (u32, u32) {
+    pub const fn for_class(&self, class: DeviceClass) -> (u32, u32) {
         let bonus = match class {
             DeviceClass::Phone => self.phone_alpha_bonus,
             DeviceClass::Laptop => self.laptop_alpha_bonus,

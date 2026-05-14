@@ -29,6 +29,7 @@ pub struct CapabilityAttestation {
 
 impl CapabilityAttestation {
     /// Canonical bytes the master signs.
+    #[must_use] 
     pub fn canonical_transcript(
         device_id: &[u8; DEVICE_ID_LEN],
         capabilities: &[DeviceCapability],
@@ -103,7 +104,7 @@ impl CapabilityAttestation {
 
     /// Does this attestation cover `day`?
     #[must_use]
-    pub fn covers_day(&self, day: u64) -> bool {
+    pub const fn covers_day(&self, day: u64) -> bool {
         day >= self.mint_day_index && day <= self.expiry_day_index
     }
 

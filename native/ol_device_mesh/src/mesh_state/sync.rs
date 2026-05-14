@@ -9,7 +9,7 @@
 //! 2. Each side replies with the ops the peer is missing, up to
 //!    [`MAX_OPS_PER_SYNC`] per round.
 //! 3. Each side ingests the peer's ops via [`SyncState::ingest`],
-//!    which drops replays (seq ≤ last_seen) and signature failures.
+//!    which drops replays (seq ≤ `last_seen`) and signature failures.
 //!
 //! The protocol is monotonic: a peer that has fallen behind by N ops
 //! catches up in `ceil(N / MAX_OPS_PER_SYNC)` rounds. There is no
@@ -52,6 +52,7 @@ impl SyncState {
     }
 
     /// Borrow the op log in chronological-emit order.
+    #[must_use] 
     pub fn op_log(&self) -> &[AuthenticatedOp] {
         &self.op_log
     }

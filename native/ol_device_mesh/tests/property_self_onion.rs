@@ -5,7 +5,7 @@ use rand::rngs::OsRng;
 
 use ol_device_mesh::self_onion::{
     build_self_onion_circuit, derive_onion_identity, peel_self_onion_layer,
-    sign_onion_attestation, OnionAttestation, OnionIdentity, OnionKeyRegistry,
+    sign_onion_attestation, OnionAttestation, OnionKeyRegistry,
     SelfOnionContext, SelfOnionPeelOutcome,
 };
 use ol_device_mesh::self_routing::Route;

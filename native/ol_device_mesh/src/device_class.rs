@@ -30,7 +30,7 @@ pub enum DeviceClass {
     Server,
     /// Wearable (smartwatch / ring; tiny battery, intermittent BT).
     Wearable,
-    /// Smart-home appliance (TV / hub / IoT bridge).
+    /// Smart-home appliance (TV / hub / `IoT` bridge).
     Appliance,
     /// Generic — anything not better classified.
     Generic,
@@ -44,7 +44,7 @@ impl DeviceClass {
     /// assert_eq!(&DeviceClass::Phone.tag(), b"OL-PHONE");
     /// ```
     #[must_use]
-    pub fn tag(self) -> [u8; DEVICE_CLASS_TAG_LEN] {
+    pub const fn tag(self) -> [u8; DEVICE_CLASS_TAG_LEN] {
         match self {
             Self::Phone => *b"OL-PHONE",
             Self::Laptop => *b"OL-LAPTP",
@@ -59,7 +59,7 @@ impl DeviceClass {
 
     /// Parse a tag back into a class. Returns `None` on unknown tag.
     #[must_use]
-    pub fn from_tag(tag: &[u8; DEVICE_CLASS_TAG_LEN]) -> Option<Self> {
+    pub const fn from_tag(tag: &[u8; DEVICE_CLASS_TAG_LEN]) -> Option<Self> {
         match tag {
             b"OL-PHONE" => Some(Self::Phone),
             b"OL-LAPTP" => Some(Self::Laptop),
@@ -75,7 +75,7 @@ impl DeviceClass {
 
     /// All known classes in declaration order. Used by KAT tests.
     #[must_use]
-    pub fn all() -> [Self; 8] {
+    pub const fn all() -> [Self; 8] {
         [
             Self::Phone,
             Self::Laptop,

@@ -29,6 +29,10 @@ pub const SELF_ONION_DOMAIN_PAYLOAD: &[u8] = b"OL-mesh-self-onion-v1\0";
 
 /// Peel outcome from a self-onion layer. Wraps the underlying
 /// Sphinx outcome with self-mesh-specific semantics.
+///
+/// `SphinxPacket` is ~1.3 KiB, so the `Forward` payload is boxed —
+/// the enum stays cheap on the stack (matches against this enum live
+/// in the per-hop forwarding hot loop).
 #[derive(Debug)]
 pub enum SelfOnionPeelOutcome {
     /// Forward the packet onward to `next_hop_device_id`.
@@ -37,7 +41,7 @@ pub enum SelfOnionPeelOutcome {
         /// header).
         next_hop_device_id: [u8; DEVICE_ID_LEN],
         /// The packet to forward (with one layer removed).
-        next_packet: SphinxPacket,
+        next_packet: Box<SphinxPacket>,
     },
     /// This device is the destination; here's the payload.
     Deliver {
@@ -127,7 +131,7 @@ pub fn peel_self_onion_layer(
             device_id.copy_from_slice(&slot_bytes[16..]);
             Ok(SelfOnionPeelOutcome::Forward {
                 next_hop_device_id: device_id,
-                next_packet,
+                next_packet: Box::new(next_packet),
             })
         }
         SphinxPeelOutcome::Deliver { payload } => {
@@ -143,15 +147,15 @@ pub fn peel_self_onion_layer(
     }
 }
 
-// `CompressedRistretto` is referenced for type-completeness in
-// future tests; suppress unused-import warning in the lib path.
+// `CompressedRistretto` and `HopId` are referenced for type-
+// completeness in future tests; suppress unused-import warnings.
 #[allow(dead_code)]
-fn _ref_compressed_ristretto(_b: [u8; 32]) -> Option<()> {
-    let _ = CompressedRistretto::from_slice(&_b);
+fn ref_compressed_ristretto(b: [u8; 32]) -> Option<()> {
+    let _ = CompressedRistretto::from_slice(&b);
     None
 }
 #[allow(dead_code)]
-fn _hop_id_phantom(_x: HopId) {}
+const fn hop_id_phantom(_x: HopId) {}
 
 #[cfg(test)]
 mod tests {
@@ -202,7 +206,7 @@ mod tests {
             bottleneck_tau: 100,
             min_last_seen_unix: 1,
         };
-        let mut packet = build_self_onion_circuit(
+        let packet = build_self_onion_circuit(
             &route,
             &reg,
             0,
@@ -243,6 +247,7 @@ mod tests {
         let outcome_1 = peel_self_onion_layer(&identities[1], &packet).unwrap();
         let next_packet = match outcome_1 {
             SelfOnionPeelOutcome::Forward { next_hop_device_id, next_packet } => {
+                let next_packet = *next_packet;
                 assert_eq!(next_hop_device_id, ids[2]);
                 next_packet
             }
@@ -251,6 +256,7 @@ mod tests {
         let outcome_2 = peel_self_onion_layer(&identities[2], &next_packet).unwrap();
         let next_packet_2 = match outcome_2 {
             SelfOnionPeelOutcome::Forward { next_hop_device_id, next_packet } => {
+                let next_packet = *next_packet;
                 assert_eq!(next_hop_device_id, ids[3]);
                 next_packet
             }

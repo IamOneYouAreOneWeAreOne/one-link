@@ -62,7 +62,8 @@ pub struct TaskPolicy {
 
 impl TaskPolicy {
     /// Conservative default for general-purpose tasks.
-    pub fn general(class: TaskClass) -> Self {
+    #[must_use] 
+    pub const fn general(class: TaskClass) -> Self {
         Self {
             class,
             min_battery_pct: 20,
@@ -74,7 +75,8 @@ impl TaskPolicy {
 
     /// Hardened policy for high-stakes ops (touches master, dumps
     /// >10 MB, contacts external service). Requires K-of-N + TEE.
-    pub fn high_stakes(class: TaskClass) -> Self {
+    #[must_use] 
+    pub const fn high_stakes(class: TaskClass) -> Self {
         Self {
             class,
             min_battery_pct: 50,

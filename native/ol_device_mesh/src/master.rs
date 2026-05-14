@@ -42,12 +42,13 @@ impl MasterIdentity {
 
     /// Construct from an existing seed. Use this on a paired device
     /// recovering from threshold-recovery shares.
-    pub fn from_seed(seed: [u8; MASTER_SEED_LEN]) -> Self {
+    #[must_use] 
+    pub const fn from_seed(seed: [u8; MASTER_SEED_LEN]) -> Self {
         Self { seed }
     }
 
     /// Parse from wire bytes (length-checked).
-    pub fn from_bytes(bytes: &[u8]) -> DeviceMeshResult<Self> {
+    pub const fn from_bytes(bytes: &[u8]) -> DeviceMeshResult<Self> {
         if bytes.len() != MASTER_SEED_LEN {
             return Err(DeviceMeshError::BadLength {
                 expected: MASTER_SEED_LEN,
@@ -61,19 +62,22 @@ impl MasterIdentity {
 
     /// Borrow the raw seed. Callers who hold this for any non-trivial
     /// duration MUST zeroize it themselves.
-    pub fn seed(&self) -> &[u8; MASTER_SEED_LEN] {
+    #[must_use] 
+    pub const fn seed(&self) -> &[u8; MASTER_SEED_LEN] {
         &self.seed
     }
 
     /// Materialize the underlying [`HybridSigningKey`]. Called rarely
     /// (only when the master itself signs an attestation); per-device
     /// signing always goes through `DeviceSubkey`.
+    #[must_use] 
     pub fn signing_key(&self) -> HybridSigningKey {
         HybridSigningKey::from_bytes(&self.seed)
             .expect("master seed length is invariant-checked")
     }
 
     /// Borrow the public verifying key — the byte string friends pin.
+    #[must_use] 
     pub fn verifying_key(&self) -> HybridVerifyingKey {
         self.signing_key().verifying_key()
     }

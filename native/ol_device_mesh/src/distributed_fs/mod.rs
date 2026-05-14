@@ -15,7 +15,7 @@
 //!   (e.g., revoke a device + redistribute all of its chunks, or
 //!   change the global erasure policy) are tagged for K-of-N
 //!   approval via [`crate::quorum::QuorumCertificate`].
-//! - **Layer 3 (CRDT mirror)**: the file index (FileId → manifest
+//! - **Layer 3 (CRDT mirror)**: the file index (`FileId` → manifest
 //!   bytes) and the placement map (chunk hash → device-id set)
 //!   are CRDT subtrees on the mesh state. Every device sees the
 //!   same logical index without a central coordinator.
@@ -25,7 +25,7 @@
 //! - [`FileManifest`] — ordered chunk-hash list + size +
 //!   mime + erasure policy. The [`FileId`] is BLAKE3 over the
 //!   canonical manifest bytes, so identical content produces
-//!   identical FileIds across all devices (cross-device dedup).
+//!   identical `FileIds` across all devices (cross-device dedup).
 //! - [`ErasurePolicy`] — Reed-Solomon `(k, m)` shard count + the
 //!   minimum number of distinct devices that must hold each shard
 //!   for the file to count as "durable."

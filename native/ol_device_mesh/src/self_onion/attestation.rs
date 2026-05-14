@@ -33,6 +33,7 @@ pub struct OnionAttestation {
 
 impl OnionAttestation {
     /// Canonical bytes the master signs.
+    #[must_use] 
     pub fn canonical_transcript(
         device_id: &[u8; DEVICE_ID_LEN],
         onion_pubkey: &[u8; ONION_PUBKEY_LEN],
@@ -75,7 +76,7 @@ impl OnionAttestation {
 
     /// Is `day` within the validity window?
     #[must_use]
-    pub fn covers_day(&self, day: u64) -> bool {
+    pub const fn covers_day(&self, day: u64) -> bool {
         day >= self.mint_day_index && day <= self.expiry_day_index
     }
 }

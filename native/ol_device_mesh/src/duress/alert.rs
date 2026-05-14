@@ -34,6 +34,7 @@ pub struct DuressAlert {
 
 impl DuressAlert {
     /// Canonical bytes the subkey signs over.
+    #[must_use] 
     pub fn canonical_transcript(
         triggered_device_id: &[u8; DEVICE_ID_LEN],
         triggered_day_index: u64,
@@ -52,7 +53,7 @@ impl DuressAlert {
     }
 
     /// Verify under the seized device's subkey VK (which receivers
-    /// have via the Layer-1 SubkeyAttestation cache).
+    /// have via the Layer-1 `SubkeyAttestation` cache).
     pub fn verify(&self, subkey_vk: &HybridVerifyingKey) -> DeviceMeshResult<()> {
         if self.subkey_sig.len() != HYBRID_SIG_LEN {
             return Err(DeviceMeshError::BadLength {

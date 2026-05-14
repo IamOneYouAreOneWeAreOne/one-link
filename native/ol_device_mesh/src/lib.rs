@@ -32,9 +32,9 @@
 //!   `LivenessProof` over its own state + the wall-clock epoch.  A
 //!   sibling device that fails to produce a fresh proof gets flagged
 //!   for auto-revocation by quorum at Layer 2.
-//! - **HardwareWrapper trait**: opaque interface for wrapping the raw
+//! - **`HardwareWrapper` trait**: opaque interface for wrapping the raw
 //!   subkey bytes under platform key storage (Secure Enclave / TPM /
-//!   StrongBox / TrustZone).  A software-only reference impl is
+//!   `StrongBox` / `TrustZone`).  A software-only reference impl is
 //!   provided; production builds wire platform backends via the trait.
 //!
 //! ## Layer-1 acceptance gate
@@ -44,7 +44,7 @@
 //! - Daily ratchet advances forward only; old seeds zeroize on step.
 //! - Subkey attestations are cross-signed by the master and verify
 //!   under the master's `HybridVerifyingKey`.
-//! - LivenessProof timing variance under the ct-gate ≤ 15 %.
+//! - `LivenessProof` timing variance under the ct-gate ≤ 15 %.
 //! - 1M iters of property-testing on the subkey/ratchet/attestation
 //!   surface pass with no panics.
 //!

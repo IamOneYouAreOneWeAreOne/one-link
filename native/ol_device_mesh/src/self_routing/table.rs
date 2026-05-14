@@ -117,8 +117,7 @@ pub fn multi_path_plan(
         };
         // Find the bottleneck edge along the path and patch the
         // working table to drop it.
-        let bottleneck_edge =
-            find_bottleneck_edge(&r, &working).map(|(a, b)| (a, b));
+        let bottleneck_edge = find_bottleneck_edge(&r, &working);
         paths.push(r);
         if let Some((u, v)) = bottleneck_edge {
             redact_edge(&mut working, &u, &v);
@@ -142,14 +141,12 @@ fn find_bottleneck_edge(
         let v = w[1];
         let edge_tau = table
             .announcement_for(&u)
-            .map(|a| {
+            .map_or(TAU_UNKNOWN, |a| {
                 a.links
                     .iter()
                     .find(|l| l.peer_device_id == v && l.direct)
-                    .map(|l| l.tau_score)
-                    .unwrap_or(TAU_UNKNOWN)
-            })
-            .unwrap_or(TAU_UNKNOWN);
+                    .map_or(TAU_UNKNOWN, |l| l.tau_score)
+            });
         match worst {
             None => worst = Some((edge_tau, u, v)),
             Some((cur, _, _)) if edge_tau < cur => worst = Some((edge_tau, u, v)),

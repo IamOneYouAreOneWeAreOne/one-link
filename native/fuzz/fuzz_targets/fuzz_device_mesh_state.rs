@@ -58,6 +58,7 @@ fuzz_target!(|data: &[u8]| {
             _ if !body.is_empty() => {
                 op.device_id[0] = body[0];
             }
+            _ => {}
         }
     }
     // Verify path: must not panic.

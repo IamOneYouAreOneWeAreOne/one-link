@@ -132,7 +132,12 @@ impl OnionPacket {
         w.write_fixed(&self.ephem_pubkey);
         w.write_fixed(&self.aead_nonce);
         // u16 BE ciphertext length.
-        w.write_u16(self.ciphertext.len() as u16);
+        // ciphertext.len() ≤ TRANSPORT_PAD_HINT = 1280 < u16::MAX,
+        // guaranteed by the decode-time bounds check and by build_onion.
+        debug_assert!(self.ciphertext.len() <= u16::MAX as usize);
+        #[allow(clippy::cast_possible_truncation)]
+        let ct_len_u16 = self.ciphertext.len() as u16;
+        w.write_u16(ct_len_u16);
         w.write_fixed(&self.ciphertext);
         w.into_bytes()
     }
@@ -181,7 +186,12 @@ impl OnionPacket {
         w.write_u8(self.hops_remaining);
         w.write_fixed(&self.ephem_pubkey);
         w.write_fixed(&self.aead_nonce);
-        w.write_u16(self.ciphertext.len() as u16);
+        // ciphertext.len() ≤ TRANSPORT_PAD_HINT = 1280 < u16::MAX,
+        // guaranteed by the decode-time bounds check and by build_onion.
+        debug_assert!(self.ciphertext.len() <= u16::MAX as usize);
+        #[allow(clippy::cast_possible_truncation)]
+        let ct_len_u16 = self.ciphertext.len() as u16;
+        w.write_u16(ct_len_u16);
         w.into_bytes()
     }
 }

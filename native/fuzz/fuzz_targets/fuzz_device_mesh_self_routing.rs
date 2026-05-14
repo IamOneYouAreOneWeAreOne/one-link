@@ -4,7 +4,7 @@
 use libfuzzer_sys::fuzz_target;
 use ol_device_mesh::self_routing::{
     dtn_couriers, multi_path_plan, pick_best_route, sign_route_announcement, PeerLink,
-    RouteTable, TauScore,
+    RouteTable,
 };
 use ol_device_mesh::{
     mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN,

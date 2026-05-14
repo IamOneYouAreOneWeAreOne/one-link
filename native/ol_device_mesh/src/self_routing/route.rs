@@ -1,10 +1,10 @@
-//! Route + τ_c score types.
+//! Route + `τ_c` score types.
 
 use crate::subkey::DEVICE_ID_LEN;
 
 use super::table::RouteTable;
 
-/// Discrete τ_c estimate. Higher = better (lower loss + lower
+/// Discrete `τ_c` estimate. Higher = better (lower loss + lower
 /// latency). Stored as a u32 so the canonical wire format is
 /// deterministic and ordering is total.
 pub type TauScore = u32;
@@ -19,7 +19,7 @@ pub struct Route {
     /// Hops in order: `hops[0] == src`, `hops.last() == dst`. For a
     /// direct route, `hops == [src, dst]` (length 2).
     pub hops: Vec<[u8; DEVICE_ID_LEN]>,
-    /// The minimum τ_c across all hops on this path — the
+    /// The minimum `τ_c` across all hops on this path — the
     /// bottleneck score. Higher = better.
     pub bottleneck_tau: TauScore,
     /// Latest of the per-edge `last_seen_unix` values along the
@@ -30,7 +30,7 @@ pub struct Route {
 impl Route {
     /// Number of hops minus one (the path length).
     #[must_use]
-    pub fn length(&self) -> usize {
+    pub const fn length(&self) -> usize {
         self.hops.len().saturating_sub(1)
     }
     /// `true` iff this is a direct `src → dst` route.

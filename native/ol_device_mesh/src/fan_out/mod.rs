@@ -14,7 +14,7 @@
 //!   master-attested subkey VK from Layer 1.
 //! - **Layer 4 (placement)**: the planner reads the per-chunk
 //!   placement map to know which sources hold which chunks.
-//! - **Layer 6 (τ_c routing, future)**: per-source capacity scores
+//! - **Layer 6 (`τ_c` routing, future)**: per-source capacity scores
 //!   are populated by the daemon's bandit + tau-field measurement;
 //!   the planner is policy-agnostic about how they're computed.
 //! - **Phase B fountain codes (shipped)**: the planner over-requests

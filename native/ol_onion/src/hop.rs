@@ -34,7 +34,7 @@ pub const HOP_ID_LEN: usize = 32;
 /// assert_eq!(a, b);
 /// assert_eq!(a.as_bytes(), &[1u8; HOP_ID_LEN]);
 /// ```
-#[derive(Debug, Clone, Copy, Hash, Zeroize)]
+#[derive(Debug, Clone, Copy, Zeroize)]
 pub struct HopId(pub [u8; HOP_ID_LEN]);
 
 impl HopId {
@@ -56,6 +56,15 @@ impl PartialEq for HopId {
     }
 }
 impl Eq for HopId {}
+
+// Hash is byte-equality on `self.0`, matching the ct_eq PartialEq
+// (which is also byte-equality, just constant-time). The contract
+// `a == b → hash(a) == hash(b)` holds.
+impl std::hash::Hash for HopId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
 
 /// Sender-side view of a relay in the circuit.
 ///

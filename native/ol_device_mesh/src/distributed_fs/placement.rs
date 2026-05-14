@@ -29,7 +29,7 @@ pub struct ChunkPlacement {
 impl ChunkPlacement {
     /// Construct an empty placement for `chunk_hash`.
     #[must_use]
-    pub fn empty(chunk_hash: ChunkHash) -> Self {
+    pub const fn empty(chunk_hash: ChunkHash) -> Self {
         Self {
             chunk_hash,
             device_ids: BTreeSet::new(),

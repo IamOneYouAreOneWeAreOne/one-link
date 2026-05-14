@@ -26,7 +26,7 @@ pub struct ErasurePolicy {
 
 impl ErasurePolicy {
     /// Construct a new policy and validate its shape.
-    pub fn new(k: u8, m: u8, min_devices_per_shard: u8) -> DeviceMeshResult<Self> {
+    pub const fn new(k: u8, m: u8, min_devices_per_shard: u8) -> DeviceMeshResult<Self> {
         if k == 0 {
             return Err(DeviceMeshError::ErasurePolicyZeroData);
         }
@@ -49,7 +49,7 @@ impl ErasurePolicy {
 
     /// Total shard count `k + m`.
     #[must_use]
-    pub fn total_shards(self) -> u16 {
+    pub const fn total_shards(self) -> u16 {
         (self.k as u16) + (self.m as u16)
     }
 
@@ -63,7 +63,7 @@ impl ErasurePolicy {
     /// Number of additional shard-copies needed to satisfy the
     /// `min_devices_per_shard` rule.
     #[must_use]
-    pub fn needed_for_durability(self, current_holders: usize) -> usize {
+    pub const fn needed_for_durability(self, current_holders: usize) -> usize {
         (self.min_devices_per_shard as usize).saturating_sub(current_holders)
     }
 }

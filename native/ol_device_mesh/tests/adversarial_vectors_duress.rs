@@ -2,7 +2,7 @@
 
 use ol_device_mesh::duress::{
     create_duress_envelope, sign_duress_alert, unlock_duress_envelope,
-    verify_pairing_cross_channel, DuressAlert, PairingChannel,
+    verify_pairing_cross_channel, PairingChannel,
     PairingCommitment, UnlockOutcome,
 };
 use ol_device_mesh::{

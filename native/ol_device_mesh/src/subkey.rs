@@ -12,6 +12,7 @@
 //! - the device class + ID,
 //! - the day index at mint,
 //! - an expiry day index (the chain horizon),
+//!
 //! and signs the whole transcript under the master's hybrid signing
 //! key. Friends pin the master pubkey and verify each subkey via the
 //! master's signature on the attestation. From a friend's POV there
@@ -50,7 +51,8 @@ impl DeviceSubkey {
     /// Construct directly from a derived seed. Caller is responsible
     /// for using one of the [`mint_subkey`] / [`mint_subkey_field_bound`]
     /// entry points; this is mostly useful in tests + recovery flows.
-    pub fn from_seed(
+    #[must_use] 
+    pub const fn from_seed(
         seed: [u8; SUBKEY_SEED_LEN],
         class: DeviceClass,
         device_id: [u8; DEVICE_ID_LEN],
@@ -66,30 +68,32 @@ impl DeviceSubkey {
 
     /// Borrow the device class.
     #[must_use]
-    pub fn class(&self) -> DeviceClass {
+    pub const fn class(&self) -> DeviceClass {
         self.class
     }
 
     /// Borrow the device ID.
     #[must_use]
-    pub fn device_id(&self) -> &[u8; DEVICE_ID_LEN] {
+    pub const fn device_id(&self) -> &[u8; DEVICE_ID_LEN] {
         &self.device_id
     }
 
     /// Current day index.
     #[must_use]
-    pub fn day_index(&self) -> u64 {
+    pub const fn day_index(&self) -> u64 {
         self.day_index
     }
 
     /// Materialize the underlying signing key (and zeroize the
     /// scratch buffer on drop).
+    #[must_use] 
     pub fn signing_key(&self) -> HybridSigningKey {
         HybridSigningKey::from_bytes(&self.seed)
             .expect("subkey seed length is invariant-checked")
     }
 
     /// Subkey's verifying key — what the attestation binds.
+    #[must_use] 
     pub fn verifying_key(&self) -> HybridVerifyingKey {
         self.signing_key().verifying_key()
     }
@@ -108,7 +112,8 @@ impl DeviceSubkey {
 
     /// Borrow the raw seed (DANGEROUS — only for serialization to
     /// the hardware wrapper).
-    pub fn raw_seed(&self) -> &[u8; SUBKEY_SEED_LEN] {
+    #[must_use] 
+    pub const fn raw_seed(&self) -> &[u8; SUBKEY_SEED_LEN] {
         &self.seed
     }
 }
@@ -203,7 +208,7 @@ impl SubkeyAttestation {
     /// Returns true if `day` falls within the attestation's validity
     /// window.
     #[must_use]
-    pub fn covers_day(&self, day: u64) -> bool {
+    pub const fn covers_day(&self, day: u64) -> bool {
         day >= self.mint_day_index && day <= self.expiry_day_index
     }
 }
@@ -280,6 +285,7 @@ fn build_attestation(
 ///
 /// This is the master-only path; ordinary device operation uses
 /// `step_one_day` to advance forward.
+#[must_use] 
 pub fn redrive_subkey_at_day(
     master: &MasterIdentity,
     class: DeviceClass,

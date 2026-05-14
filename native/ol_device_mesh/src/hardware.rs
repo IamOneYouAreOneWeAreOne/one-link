@@ -2,8 +2,8 @@
 //!
 //! At rest, the per-device subkey seed should be wrapped under the
 //! platform's hardware key store: Apple Secure Enclave on iOS/macOS,
-//! Android StrongBox on modern Android, Windows TPM2 on PC, ARM
-//! TrustZone on embedded. Loss of the device's RAM (cold-boot,
+//! Android `StrongBox` on modern Android, Windows TPM2 on PC, ARM
+//! `TrustZone` on embedded. Loss of the device's RAM (cold-boot,
 //! sleep with display lock, etc.) means the wrapped seed sits in
 //! cold storage; unwrapping requires the hardware key.
 //!
@@ -11,7 +11,7 @@
 //! a [`SoftwareWrapper`] reference implementation that uses
 //! BLAKE3-keyed AEAD-style XOR + MAC (NOT for production — it's a
 //! testing fixture). Per-platform backends (Secure Enclave / TPM /
-//! StrongBox / TrustZone) implement the same trait against their
+//! `StrongBox` / `TrustZone`) implement the same trait against their
 //! respective KEKs.
 //!
 //! ## Sovereignty contract
@@ -70,7 +70,8 @@ impl std::fmt::Debug for SoftwareWrapper {
 
 impl SoftwareWrapper {
     /// Construct from a raw 32-byte KEK.
-    pub fn new(kek: [u8; 32]) -> Self {
+    #[must_use] 
+    pub const fn new(kek: [u8; 32]) -> Self {
         Self { kek }
     }
 

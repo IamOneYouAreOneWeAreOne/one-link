@@ -1,7 +1,7 @@
 //! Receiver-side signed fetch request.
 //!
 //! A [`FetchRequest`] is "I, device R, want chunks `X` from you,
-//! device S, for FileId `F`, by deadline `D`." The receiver's subkey
+//! device S, for `FileId` `F`, by deadline `D`." The receiver's subkey
 //! signs the canonical bytes; sources verify under the master-
 //! attested subkey VK before serving.
 
@@ -52,6 +52,11 @@ pub struct FetchRequest {
 
 impl FetchRequest {
     /// Canonical bytes the receiver's subkey signs over.
+    ///
+    /// 9 args reflects the wire-format binding; structural, not
+    /// a logical bundle.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn canonical_transcript(
         file_id: &FileId,
         receiver_device_id: &[u8; DEVICE_ID_LEN],
@@ -151,6 +156,9 @@ impl FetchRequest {
 /// Sign a fetch request. Chunk hashes are sorted + de-duplicated at
 /// sign time so two receivers asking for the same set produce
 /// identical transcripts (caches benefit).
+///
+/// 8 args reflects the protocol's signed-field surface.
+#[allow(clippy::too_many_arguments)]
 pub fn sign_fetch_request(
     receiver: &DeviceSubkey,
     source_device_id: [u8; DEVICE_ID_LEN],
@@ -167,7 +175,7 @@ pub fn sign_fetch_request(
             deadline_unix,
         });
     }
-    chunk_hashes.sort();
+    chunk_hashes.sort_unstable();
     chunk_hashes.dedup();
     if chunk_hashes.is_empty() {
         return Err(DeviceMeshError::FetchRequestEmpty);

@@ -4,7 +4,7 @@
 //! distributed FS: ordered list of chunk hashes, total size, mime
 //! type, erasure policy, creation timestamp. The [`FileId`] is
 //! BLAKE3 over the canonical manifest bytes, so two devices that
-//! produce identical manifests get identical FileIds (the dedup
+//! produce identical manifests get identical `FileIds` (the dedup
 //! property).
 
 use blake3::Hasher;
@@ -78,7 +78,7 @@ impl FileManifest {
         // matrix is rectangular: each stripe contributes (k + m)
         // shards.
         let total = self.policy.total_shards() as usize;
-        if self.chunks.len() % total != 0 {
+        if !self.chunks.len().is_multiple_of(total) {
             return Err(DeviceMeshError::FileManifestChunkCountNotStripe {
                 got: self.chunks.len(),
                 stripe: total,
@@ -105,6 +105,7 @@ impl FileManifest {
     /// chunk_count_be     (4  bytes)
     /// chunk_hashes       (CHUNK_HASH_LEN * chunk_count bytes)
     /// ```
+    #[must_use] 
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(
             MANIFEST_DOMAIN.len()

@@ -9,8 +9,7 @@ use rand::rngs::OsRng;
 
 use ol_device_mesh::duress::{
     create_duress_envelope, sign_duress_alert, unlock_duress_envelope,
-    verify_pairing_cross_channel, DuressAlert, PairingChannel, PairingCommitment,
-    UnlockOutcome,
+    PairingChannel, PairingCommitment, UnlockOutcome,
 };
 use ol_device_mesh::{
     mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN,

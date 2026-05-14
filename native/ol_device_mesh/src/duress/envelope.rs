@@ -137,6 +137,7 @@ pub fn create_duress_envelope<R: RngCore + CryptoRng>(
 /// Unlock attempt. Tries the supplied `user_code` against:
 ///   1. The real-ciphertext key (with field witness if supplied).
 ///   2. The decoy-ciphertext key.
+///
 /// Returns the first match, or `WrongCode` if neither succeeds.
 ///
 /// Constant-time-ish: both attempts ALWAYS run regardless of the

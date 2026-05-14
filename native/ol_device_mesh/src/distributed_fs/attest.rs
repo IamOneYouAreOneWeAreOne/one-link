@@ -40,6 +40,7 @@ pub struct StorageAttestation {
 
 impl StorageAttestation {
     /// Canonical bytes the subkey signs over.
+    #[must_use] 
     pub fn canonical_transcript(
         device_id: &[u8; DEVICE_ID_LEN],
         day_index: u64,
@@ -114,13 +115,13 @@ impl StorageAttestation {
 
 /// Sign a fresh attestation. The supplied chunk hashes are sorted
 /// + de-duplicated before signing so two devices that hold the same
-/// set produce byte-identical transcripts (cross-device dedup).
+///   set produce byte-identical transcripts (cross-device dedup).
 pub fn sign_storage_attestation(
     subkey: &DeviceSubkey,
     attest_unix: u64,
     mut chunk_hashes: Vec<ChunkHash>,
 ) -> DeviceMeshResult<StorageAttestation> {
-    chunk_hashes.sort();
+    chunk_hashes.sort_unstable();
     chunk_hashes.dedup();
     if chunk_hashes.len() > MAX_CHUNKS_PER_ATTESTATION {
         return Err(DeviceMeshError::AttestationTooManyChunks {

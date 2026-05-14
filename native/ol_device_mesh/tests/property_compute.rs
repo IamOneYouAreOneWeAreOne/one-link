@@ -6,7 +6,7 @@ use rand::rngs::OsRng;
 use ol_device_mesh::compute::{
     pick_executor, sign_capability_attestation, sign_task_request,
     sign_task_result, CapabilityAttestation, CapabilityRegistry, DeviceCapability,
-    TaskClass, TaskRequest, TaskResult,
+    TaskClass, TaskRequest,
 };
 use ol_device_mesh::distributed_fs::FILE_ID_LEN;
 use ol_device_mesh::fan_out::SourceCapacity;

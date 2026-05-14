@@ -26,7 +26,7 @@ impl RoutingPolicy {
     /// Conservative default: 30-day half-life, 10-observation
     /// warmup, mirror to siblings.
     #[must_use]
-    pub fn conservative() -> Self {
+    pub const fn conservative() -> Self {
         Self {
             history_decay_half_life_secs: ROUTING_HISTORY_DECAY_DEFAULT_SECS,
             min_observations_before_exploit: 10,
@@ -37,7 +37,7 @@ impl RoutingPolicy {
     /// Aggressive preset for high-volume mesh use: 7-day half-life,
     /// 3-observation warmup. Adapts to drift faster, less stable.
     #[must_use]
-    pub fn aggressive() -> Self {
+    pub const fn aggressive() -> Self {
         Self {
             history_decay_half_life_secs: 7 * 24 * 3600,
             min_observations_before_exploit: 3,

@@ -1,7 +1,7 @@
 //! Signed route announcement.
 //!
 //! A [`RouteAnnouncement`] is "I, device A, can reach these peers
-//! with these τ_c scores as of time T." Devices sign their own
+//! with these `τ_c` scores as of time T." Devices sign their own
 //! announcements; replicas verify under the master-attested subkey
 //! VK before merging into the route table.
 
@@ -24,7 +24,7 @@ pub const ROUTE_ANNOUNCEMENT_DOMAIN: &[u8] = b"OL-mesh-route-announcement-v1";
 pub struct PeerLink {
     /// The peer device.
     pub peer_device_id: [u8; DEVICE_ID_LEN],
-    /// τ_c score the announcer estimates for this peer. Higher =
+    /// `τ_c` score the announcer estimates for this peer. Higher =
     /// better. See [`super::route::TauScore`].
     pub tau_score: TauScore,
     /// Wall-clock seconds when the announcer last actually observed
@@ -55,6 +55,7 @@ pub struct RouteAnnouncement {
 
 impl RouteAnnouncement {
     /// Canonical bytes the announcer's subkey signs.
+    #[must_use] 
     pub fn canonical_transcript(
         announcer_device_id: &[u8; DEVICE_ID_LEN],
         announcer_day_index: u64,

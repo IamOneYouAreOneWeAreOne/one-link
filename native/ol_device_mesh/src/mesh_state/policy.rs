@@ -32,19 +32,19 @@ pub struct SubtreePolicy {
 impl SubtreePolicy {
     /// A plain (non-quorum-gated) policy of the given kind.
     #[must_use]
-    pub fn plain(kind: SubtreePolicyKind) -> Self {
+    pub const fn plain(kind: SubtreePolicyKind) -> Self {
         Self { kind, quorum_gated: false }
     }
     /// A quorum-gated policy of the given kind.
     #[must_use]
-    pub fn quorum_gated(kind: SubtreePolicyKind) -> Self {
+    pub const fn quorum_gated(kind: SubtreePolicyKind) -> Self {
         Self { kind, quorum_gated: true }
     }
 }
 
 /// What kind is the given subtree?
 #[must_use]
-pub fn subtree_kind(subtree: &Subtree) -> SubtreePolicyKind {
+pub const fn subtree_kind(subtree: &Subtree) -> SubtreePolicyKind {
     match subtree {
         Subtree::LwwRegister(_) => SubtreePolicyKind::LwwRegister,
         Subtree::OrSet(_) => SubtreePolicyKind::OrSet,

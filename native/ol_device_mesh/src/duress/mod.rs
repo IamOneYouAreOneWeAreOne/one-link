@@ -32,7 +32,7 @@
 //! - [`DuressCode`] — Argon2id-derived 32-byte key from a short
 //!   user-entered code.
 //! - [`DuressEnvelope`] — two ChaCha20-Poly1305 AEAD ciphertexts
-//!   (real_ct + decoy_ct) plus the salts. Structurally
+//!   (`real_ct` + `decoy_ct`) plus the salts. Structurally
 //!   indistinguishable from the outside.
 //! - [`UnlockOutcome`] — `Real(_)`, `Decoy(_)`, or `WrongCode`.
 //!   The daemon flips the duress flag on `Decoy`.

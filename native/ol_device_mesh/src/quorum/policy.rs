@@ -46,6 +46,7 @@ pub struct QuorumPolicy {
 
 impl QuorumPolicy {
     /// Canonical bytes the master signs over.
+    #[must_use] 
     pub fn canonical_transcript(
         policy_id: &QuorumPolicyId,
         label: &[u8],
@@ -136,7 +137,7 @@ impl QuorumPolicy {
         // Reject duplicate device IDs in the roster — otherwise a
         // duplicate could be used to inflate the apparent K.
         let mut sorted = self.eligible_devices.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         let dedup_len = {
             let mut s = sorted.clone();
             s.dedup();

@@ -76,7 +76,7 @@ pub enum Delta {
 impl Delta {
     /// One-byte discriminant used in the canonical transcript.
     #[must_use]
-    pub fn kind_tag(&self) -> u8 {
+    pub const fn kind_tag(&self) -> u8 {
         match self {
             Self::LwwSet { .. } => 1,
             Self::OrAdd { .. } => 2,
@@ -88,17 +88,15 @@ impl Delta {
     }
     /// True iff this delta requires the subtree to be of the kind
     /// implied by `kind_tag`. Used by upstream policy checks.
-    #[must_use]
-    pub fn validate_size(&self) -> DeviceMeshResult<()> {
+    pub const fn validate_size(&self) -> DeviceMeshResult<()> {
         match self {
-            Self::LwwSet { value, .. } | Self::MapPut { value, .. } => {
-                if value.len() > MAX_DELTA_VALUE_LEN {
+            Self::LwwSet { value, .. } | Self::MapPut { value, .. }
+                if value.len() > MAX_DELTA_VALUE_LEN => {
                     return Err(DeviceMeshError::DeltaValueTooLong {
                         got: value.len(),
                         max: MAX_DELTA_VALUE_LEN,
                     });
                 }
-            }
             _ => {}
         }
         Ok(())
@@ -110,11 +108,7 @@ impl Delta {
                 push_bytes(out, value);
                 out.extend_from_slice(&ts.to_be_bytes());
             }
-            Self::OrAdd { element, tag } => {
-                push_bytes(out, element);
-                out.extend_from_slice(tag);
-            }
-            Self::OrRemove { element, tag } => {
+            Self::OrAdd { element, tag } | Self::OrRemove { element, tag } => {
                 push_bytes(out, element);
                 out.extend_from_slice(tag);
             }
@@ -165,6 +159,7 @@ pub struct AuthenticatedOp {
 
 impl AuthenticatedOp {
     /// Canonical bytes the subkey signs over.
+    #[must_use] 
     pub fn canonical_transcript(
         subtree: &[u8],
         delta: &Delta,

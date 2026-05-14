@@ -191,9 +191,13 @@ impl CoverScheduler {
         // Avoid raw == 0 to keep u > 0.
         let raw_nonzero = raw.max(1);
         let u = (raw_nonzero as f64) / (u64::MAX as f64);
-        // Exponential sample: -ln(u) / λ in seconds.
+        // Exponential sample: -ln(u) / λ in seconds. u ∈ (0, 1] →
+        // ln(u) ≤ 0 → wait_sec ≥ 0 by construction, so sign-loss
+        // is impossible. Clamp to u64::MAX as defense-in-depth.
         let wait_sec = -(u.ln()) / self.rate_hz;
-        let wait_ms = (wait_sec * 1000.0) as u64;
+        let wait_ms_f = (wait_sec * 1000.0).clamp(0.0, u64::MAX as f64);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let wait_ms = wait_ms_f as u64;
         self.counter = self.counter.wrapping_add(1);
         wait_ms
     }

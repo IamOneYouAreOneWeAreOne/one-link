@@ -55,6 +55,7 @@ pub struct QuorumProposal {
 
 impl QuorumProposal {
     /// Canonical bytes the issuer signs over.
+    #[must_use] 
     pub fn canonical_transcript(
         policy_id: &QuorumPolicyId,
         operation_digest: &[u8; OPERATION_DIGEST_LEN],
@@ -86,6 +87,7 @@ impl QuorumProposal {
     }
 
     /// Compute the [`ProposalId`] (BLAKE3 over the canonical transcript).
+    #[must_use] 
     pub fn proposal_id(&self) -> ProposalId {
         let transcript = Self::canonical_transcript(
             &self.policy_id,

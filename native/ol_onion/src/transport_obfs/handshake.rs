@@ -267,6 +267,7 @@ impl ClientHandshake {
 
 /// Server-side handshake. The bridge holds [`BridgeKeypair`]; on
 /// receiving a client's first message it produces a reply + a session.
+#[derive(Debug)]
 pub struct ServerHandshake;
 
 impl ServerHandshake {

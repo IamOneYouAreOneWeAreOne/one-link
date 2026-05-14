@@ -307,7 +307,11 @@ pub fn build_pq_sphinx_onion<R: RngCore + CryptoRng>(
 
     // ── Step 4: build encrypted payload — in-place, no per-hop Vec.
     let mut payload_buf = [0u8; PAYLOAD_LEN];
-    payload_buf[..2].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+    // Payload length is bounded above by SPHINX_MAX_USER_PAYLOAD
+    // (≤ u16::MAX) — enforced by the entry-time check. Cast is safe.
+    #[allow(clippy::cast_possible_truncation)]
+    let plen_u16 = payload.len() as u16;
+    payload_buf[..2].copy_from_slice(&plen_u16.to_be_bytes());
     payload_buf[2..2 + payload.len()].copy_from_slice(payload);
     for keys in hop_keys.iter().rev() {
         chacha20_xor_in_place(&keys.payload_stream, &mut payload_buf);

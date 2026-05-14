@@ -1,4 +1,4 @@
-//! TaskRequest + TaskResult signed envelopes.
+//! `TaskRequest` + `TaskResult` signed envelopes.
 
 use blake3::Hasher;
 use ol_pqsig::{HybridVerifyingKey, HYBRID_SIG_LEN};
@@ -36,7 +36,7 @@ pub struct TaskRequest {
     pub requester_device_id: [u8; DEVICE_ID_LEN],
     /// Requester subkey day-index at sign.
     pub requester_day_index: u64,
-    /// Content-addressed FileId of the input bundle.
+    /// Content-addressed `FileId` of the input bundle.
     pub input_file_id: FileId,
     /// Capabilities the executor MUST hold (sorted ascending).
     pub required_capabilities: Vec<DeviceCapability>,
@@ -57,6 +57,11 @@ pub struct TaskRequest {
 
 impl TaskRequest {
     /// Canonical bytes the requester signs.
+    ///
+    /// 10 args reflects the signed-field surface of the protocol;
+    /// the transcript is structural, not a logical bundle.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn canonical_transcript(
         task_class: &TaskClass,
         requester_device_id: &[u8; DEVICE_ID_LEN],
@@ -104,6 +109,7 @@ impl TaskRequest {
     }
 
     /// Compute the content-addressed [`TaskRequestId`].
+    #[must_use] 
     pub fn request_id(&self) -> TaskRequestId {
         task_request_id(&self.canonical_transcript_for_id())
     }
@@ -171,9 +177,13 @@ impl TaskRequest {
     }
 }
 
-/// Sign a task request. Sorts + de-duplicates required_capabilities
+/// Sign a task request. Sorts + de-duplicates `required_capabilities`
 /// at sign so two requesters asking for the same set produce
 /// byte-identical transcripts.
+///
+/// 9 args reflects the protocol's signed-field surface; bundling
+/// them into a builder would obscure the wire-format binding.
+#[allow(clippy::too_many_arguments)]
 pub fn sign_task_request(
     requester: &DeviceSubkey,
     task_class: TaskClass,
@@ -242,7 +252,7 @@ pub struct TaskResult {
     pub executor_device_id: [u8; DEVICE_ID_LEN],
     /// Executor subkey day-index.
     pub executor_day_index: u64,
-    /// Content-addressed FileId of the output bundle.
+    /// Content-addressed `FileId` of the output bundle.
     pub output_file_id: FileId,
     /// Size of the output in bytes.
     pub output_byte_size: u64,
@@ -254,6 +264,7 @@ pub struct TaskResult {
 
 impl TaskResult {
     /// Canonical bytes the executor signs.
+    #[must_use] 
     pub fn canonical_transcript(
         task_request_id: &TaskRequestId,
         executor_device_id: &[u8; DEVICE_ID_LEN],

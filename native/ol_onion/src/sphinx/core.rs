@@ -233,8 +233,12 @@ pub fn build_sphinx_onion<R: RngCore + CryptoRng>(
 
     // ── Step 3: build the encrypted payload (right-to-left).
     let mut payload_buf = [0u8; PAYLOAD_LEN];
-    // Length prefix (2 bytes) + payload.
-    payload_buf[..2].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+    // Length prefix (2 bytes) + payload. The length is bounded above by
+    // SPHINX_MAX_USER_PAYLOAD (= PAYLOAD_LEN - 2 ≤ u16::MAX), enforced
+    // by the early-return check above, so the cast is invariant-safe.
+    #[allow(clippy::cast_possible_truncation)]
+    let plen_u16 = payload.len() as u16;
+    payload_buf[..2].copy_from_slice(&plen_u16.to_be_bytes());
     payload_buf[2..2 + payload.len()].copy_from_slice(payload);
     // Encrypt in-place with each hop's payload stream, innermost first.
     // No per-hop Vec allocation — chacha20 XORs directly into payload_buf.

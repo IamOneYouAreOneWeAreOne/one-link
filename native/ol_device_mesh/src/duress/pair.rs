@@ -43,7 +43,7 @@ pub enum PairingChannel {
 impl PairingChannel {
     /// Canonical 8-byte tag mixed into the commitment.
     #[must_use]
-    pub fn tag(self) -> [u8; 8] {
+    pub const fn tag(self) -> [u8; 8] {
         match self {
             Self::Qr => *b"OL-PR-QR",
             Self::Audio => *b"OL-PR-AU",
@@ -113,7 +113,7 @@ impl PairingCommitment {
 /// Returns `Ok(())` if and only if:
 ///   - the QR, Audio, AND Motion channels are ALL present
 ///   - each commitment matches the secret
-///   - the gap between earliest and latest commitment is ≤ window_ms
+///   - the gap between earliest and latest commitment is ≤ `window_ms`
 pub fn verify_pairing_cross_channel(
     commitments: &[PairingCommitment],
     pairing_secret: &[u8],

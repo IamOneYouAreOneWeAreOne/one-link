@@ -34,7 +34,7 @@ impl DuressPolicy {
     /// Conservative default: alert immediately, quarantine for 24h,
     /// auto-revoke after 1 alert, 1h dedup window.
     #[must_use]
-    pub fn conservative() -> Self {
+    pub const fn conservative() -> Self {
         Self {
             emit_alert_on_decoy_unlock: true,
             quarantine_secs: DURESS_DEFAULT_QUARANTINE_SECS,
@@ -50,7 +50,7 @@ impl DuressPolicy {
     /// power cycles until the user explicitly clears it via the
     /// out-of-band recovery path.
     #[must_use]
-    pub fn hardened() -> Self {
+    pub const fn hardened() -> Self {
         Self {
             emit_alert_on_decoy_unlock: true,
             quarantine_secs: 7 * DURESS_DEFAULT_QUARANTINE_SECS,

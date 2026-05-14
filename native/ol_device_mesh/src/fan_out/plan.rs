@@ -45,7 +45,7 @@ pub struct FanOutAssignment {
     /// Chunk hashes assigned to this source (sorted ascending).
     pub chunk_hashes: Vec<ChunkHash>,
     /// Estimated bytes the source will deliver (= chunks ×
-    /// manifest.chunk_size).
+    /// `manifest.chunk_size`).
     pub estimated_bytes: u64,
 }
 
@@ -110,6 +110,9 @@ pub fn fan_out_plan(
     let stripe = manifest.policy.total_shards() as usize;
     let n_stripes = manifest.chunks.len() / stripe;
     let k_total = n_stripes * (manifest.policy.k as usize);
+    // k_total ≤ chunks.len() ≤ MAX_CHUNKS_PER_FILE = 2^20, well
+    // within f64's 53-bit mantissa.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let target = ((k_total as f64) * overrequest_factor).ceil() as usize;
     let target = target.min(manifest.chunks.len());
     // Per-source bucket of assigned chunks.
@@ -162,7 +165,7 @@ pub fn fan_out_plan(
         .into_iter()
         .filter(|(_, chunks)| !chunks.is_empty())
         .map(|(device_id, mut chunks)| {
-            chunks.sort();
+            chunks.sort_unstable();
             let estimated_bytes =
                 (chunks.len() as u64).saturating_mul(manifest.chunk_size as u64);
             FanOutAssignment {
@@ -218,10 +221,10 @@ pub fn replan_after_source_failure(
     let stripe = manifest.policy.total_shards() as usize;
     let mut chunks = still_needed_chunks.to_vec();
     // Sort + dedup so the planner's lookup hits.
-    chunks.sort();
+    chunks.sort_unstable();
     chunks.dedup();
     // Pad to stripe multiple.
-    while chunks.len() % stripe != 0 {
+    while !chunks.len().is_multiple_of(stripe) {
         chunks.push(*chunks.last().expect("non-empty"));
     }
     let sub_manifest = FileManifest {

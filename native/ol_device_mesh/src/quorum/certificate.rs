@@ -32,7 +32,7 @@ pub struct QuorumCertificate {
     pub approvals: Vec<QuorumApproval>,
     /// The policy that governs this proposal (master-signed).
     pub policy: QuorumPolicy,
-    /// SubkeyAttestation cache for every signer (issuer + approvers).
+    /// `SubkeyAttestation` cache for every signer (issuer + approvers).
     /// Verifier looks up each signer's VK here instead of going off-
     /// network. Order is irrelevant; lookup is by device id.
     pub subkey_attestations: Vec<SubkeyAttestation>,

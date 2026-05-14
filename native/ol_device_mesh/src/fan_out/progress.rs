@@ -31,7 +31,7 @@ pub struct TransferProgress {
     /// Sources that have failed (dropped, timed out, lost connection).
     pub failed_sources: BTreeSet<[u8; DEVICE_ID_LEN]>,
     /// Number of distinct shards needed to reconstruct
-    /// (= n_stripes * policy.k from the manifest).
+    /// (= `n_stripes` * policy.k from the manifest).
     pub completion_threshold: usize,
 }
 

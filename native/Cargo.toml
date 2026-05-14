@@ -144,8 +144,11 @@ unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 # Tighten the default clippy set; engine code must be well-mannered.
-all = "warn"
-pedantic = "warn"
+# Group-level priorities sit below individual-lint priorities (priority 0)
+# so per-lint `allow` overrides take effect — required by clippy's
+# `lint_groups_priority` lint.
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
 # Allow specific pedantic lints that are noisy in our domain:
 module_name_repetitions = "allow"  # we have ol_chunk::chunk, etc.
 must_use_candidate = "allow"

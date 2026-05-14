@@ -9,8 +9,8 @@
 //!
 //! ## What this layer ships
 //!
-//! - [`DeviceCapability`] — what a device CAN do (GPU, CpuHeavy,
-//!   Mic, Camera, LargeDisk, AlwaysOn, etc.).
+//! - [`DeviceCapability`] — what a device CAN do (GPU, `CpuHeavy`,
+//!   Mic, Camera, `LargeDisk`, `AlwaysOn`, etc.).
 //! - [`CapabilityAttestation`] — master-signed binding from
 //!   `device_id` to its capability list. Replicas pin the master VK
 //!   and trust the binding.
@@ -20,7 +20,7 @@
 //!   with these inputs; output goes back to me; here are the
 //!   capabilities the executor must have; deadline is D."
 //! - [`TaskResult`] — executor-signed: "I, device E, completed
-//!   `task_request_id` with output FileId F at time T."
+//!   `task_request_id` with output `FileId` F at time T."
 //! - [`pick_executor`] — capability-matching + capacity-weighted
 //!   picker. Composes the Layer-5 [`SourceCapacity`] type.
 //! - [`TaskPolicy`] — per-task-class policy (allowed executors,

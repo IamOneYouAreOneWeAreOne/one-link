@@ -26,7 +26,7 @@ impl DeviceActionRecord {
     /// Fresh record with neutral counts (`Beta(1, 1)`, the uniform
     /// prior). Caller can pre-seed via the cohort prior instead.
     #[must_use]
-    pub fn empty(context_hash: [u8; 32], device_id: [u8; 16]) -> Self {
+    pub const fn empty(context_hash: [u8; 32], device_id: [u8; 16]) -> Self {
         Self {
             context_hash,
             device_id,

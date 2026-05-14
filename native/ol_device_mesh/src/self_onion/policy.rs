@@ -32,7 +32,7 @@ impl SelfOnionContext {
     /// Sensible defaults for "trusted home network" — no self-onion,
     /// no cover.
     #[must_use]
-    pub fn trusted_home() -> Self {
+    pub const fn trusted_home() -> Self {
         Self {
             min_hops: DEFAULT_MIN_HOPS,
             network_is_hostile: false,
@@ -42,7 +42,7 @@ impl SelfOnionContext {
 
     /// "Hostile network" preset: 3-hop minimum + 100 KB/s cover.
     #[must_use]
-    pub fn hostile_network() -> Self {
+    pub const fn hostile_network() -> Self {
         Self {
             min_hops: 3,
             network_is_hostile: true,
@@ -52,7 +52,7 @@ impl SelfOnionContext {
 
     /// `true` if the current policy says "use self-onion."
     #[must_use]
-    pub fn requires_self_onion(&self) -> bool {
+    pub const fn requires_self_onion(&self) -> bool {
         self.network_is_hostile
     }
 }

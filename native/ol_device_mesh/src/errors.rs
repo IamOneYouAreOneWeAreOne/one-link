@@ -8,7 +8,7 @@ pub type DeviceMeshResult<T> = Result<T, DeviceMeshError>;
 /// Typed error surface for device-mesh operations.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DeviceMeshError {
-    /// Wrong byte length supplied to a parse/from_bytes function.
+    /// Wrong byte length supplied to a `parse/from_bytes` function.
     #[error("wrong length: expected {expected}, got {got}")]
     BadLength {
         /// Required length.
@@ -82,7 +82,7 @@ pub enum DeviceMeshError {
     /// Quorum proposal: issuer signature failed verification.
     #[error("quorum proposal failed cryptographic verification by issuer")]
     ProposalIssuerVerifyFail,
-    /// Quorum proposal: deadline is not strictly after issued_unix.
+    /// Quorum proposal: deadline is not strictly after `issued_unix`.
     #[error("quorum proposal deadline_unix={deadline_unix} must be after issued_unix={issued_unix}")]
     ProposalDeadlineNotAfterIssue {
         /// Issue wall-clock.
@@ -288,7 +288,7 @@ pub enum DeviceMeshError {
     /// Fan-out planner received an empty source list.
     #[error("fan-out planner needs at least one source")]
     FanOutNoSources,
-    /// Fan-out planner overrequest_factor below 1.0 or non-finite.
+    /// Fan-out planner `overrequest_factor` below 1.0 or non-finite.
     /// `got_bits` is `f64::to_bits` of the offending value so the
     /// error stays `Eq`-friendly.
     #[error("fan-out overrequest_factor must be >= 1.0 and finite (got bits 0x{got_bits:x})")]

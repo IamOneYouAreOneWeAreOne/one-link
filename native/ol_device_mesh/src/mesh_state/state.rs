@@ -1,7 +1,7 @@
 //! CRDT lattice types + the canonical [`MeshState`] container.
 
 use blake3::Hasher;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::errors::{DeviceMeshError, DeviceMeshResult};
 
@@ -140,7 +140,7 @@ impl LwwRegister {
     }
     /// Current write timestamp.
     #[must_use]
-    pub fn ts(&self) -> u64 {
+    pub const fn ts(&self) -> u64 {
         self.ts
     }
     /// Apply a write at `(ts, writer)`. Deterministic under arbitrary
@@ -171,8 +171,7 @@ impl LwwRegister {
                 // same-(ts,writer) put.
                 std::cmp::Ordering::Equal => match (value, self.value.as_deref()) {
                     (None, Some(_)) => true,
-                    (None, None) => false,
-                    (Some(_), None) => false,
+                    (None | Some(_), None) => false,
                     (Some(v_new), Some(v_old)) => v_new > v_old,
                 },
             },
@@ -202,8 +201,8 @@ impl LwwRegister {
 /// set. Replays of the same `(element, tag)` are idempotent.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OrSet {
-    adds: BTreeMap<Vec<u8>, BTreeMap<OrSetTag, ()>>,
-    removes: BTreeMap<Vec<u8>, BTreeMap<OrSetTag, ()>>,
+    adds: BTreeMap<Vec<u8>, BTreeSet<OrSetTag>>,
+    removes: BTreeMap<Vec<u8>, BTreeSet<OrSetTag>>,
 }
 
 impl OrSet {
@@ -219,8 +218,8 @@ impl OrSet {
         for (elem, adds) in &self.adds {
             let tomb = self.removes.get(elem);
             let visible = adds
-                .keys()
-                .any(|t| tomb.map(|r| !r.contains_key(t)).unwrap_or(true));
+                .iter()
+                .any(|t| tomb.is_none_or(|r| !r.contains(t)));
             if visible {
                 out.push(elem.as_slice());
             }
@@ -234,21 +233,21 @@ impl OrSet {
             None => false,
             Some(adds) => {
                 let tomb = self.removes.get(element);
-                adds.keys()
-                    .any(|t| tomb.map(|r| !r.contains_key(t)).unwrap_or(true))
+                adds.iter()
+                    .any(|t| tomb.is_none_or(|r| !r.contains(t)))
             }
         }
     }
     /// Tagged add. Replays are idempotent.
     pub fn add(&mut self, element: Vec<u8>, tag: OrSetTag) {
-        self.adds.entry(element).or_default().insert(tag, ());
+        self.adds.entry(element).or_default().insert(tag);
     }
     /// Tagged remove. Idempotent.
     pub fn remove(&mut self, element: &[u8], tag: &OrSetTag) {
         self.removes
             .entry(element.to_vec())
             .or_default()
-            .insert(*tag, ());
+            .insert(*tag);
     }
     fn canonical_into(&self, h: &mut Hasher) {
         let n_adds = u32::try_from(self.adds.len()).unwrap_or(u32::MAX);
@@ -259,7 +258,7 @@ impl OrSet {
             h.update(&k[..kl as usize]);
             let nl = u32::try_from(v.len()).unwrap_or(u32::MAX);
             h.update(&nl.to_be_bytes());
-            for tag in v.keys() {
+            for tag in v {
                 h.update(tag);
             }
         }
@@ -271,7 +270,7 @@ impl OrSet {
             h.update(&k[..kl as usize]);
             let nl = u32::try_from(v.len()).unwrap_or(u32::MAX);
             h.update(&nl.to_be_bytes());
-            for tag in v.keys() {
+            for tag in v {
                 h.update(tag);
             }
         }
@@ -439,7 +438,7 @@ impl MeshState {
                 max: MAX_SUBTREE_LABEL_LEN,
             });
         }
-        let entry = self.subtrees.entry(label.clone());
+        let entry = self.subtrees.entry(label);
         match entry {
             std::collections::btree_map::Entry::Vacant(v) => {
                 v.insert(Subtree::empty_of_kind(kind));
