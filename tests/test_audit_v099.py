@@ -906,6 +906,13 @@ async def test_api_self_mesh_invite_qr_and_performance(ctx):
     body = await perf.json()
     assert body["ok"] is True
     assert body["performance"]["route_probe_avg_ms"] >= 0
+    assert "history" in body
+
+    mesh = await client.get("/api/self-mesh", headers=_h(token))
+    assert mesh.status == 200
+    mesh_body = await mesh.json()
+    assert mesh_body["performance"]["route_probe_avg_ms"] >= 0
+    assert mesh_body["performance_history"]
 
 
 @pytest.mark.asyncio

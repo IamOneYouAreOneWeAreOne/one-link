@@ -550,6 +550,7 @@ class State:
                     (17, self._migrate_v17_route_candidates),
                     (18, self._migrate_v18_personal_device_mesh),
                     (19, self._migrate_v19_self_mesh_enrollment),
+                    (20, self._migrate_v20_self_mesh_performance),
                 ]
                 for target_version, apply_fn in steps:
                     self._run_atomic_migration(
@@ -779,6 +780,30 @@ class State:
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_self_mesh_audit_root "
             "ON self_mesh_audit(root_pub, ts_ms)"
+        )
+
+    def _migrate_v20_self_mesh_performance(self, c: sqlite3.Cursor) -> None:
+        """Phase F5 polish: persisted performance telemetry."""
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS self_mesh_perf_samples (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_ms                 INTEGER NOT NULL,
+                route_probe_runs      INTEGER NOT NULL DEFAULT 0,
+                route_probe_ready     INTEGER NOT NULL DEFAULT 0,
+                route_probe_total_ms  REAL NOT NULL DEFAULT 0,
+                route_probe_avg_ms    REAL NOT NULL DEFAULT 0,
+                presence_rows         INTEGER NOT NULL DEFAULT 0,
+                device_rows           INTEGER NOT NULL DEFAULT 0,
+                recent_audit_rows     INTEGER NOT NULL DEFAULT 0,
+                status                TEXT NOT NULL DEFAULT 'unknown',
+                metadata_json         TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_self_mesh_perf_samples_ts "
+            "ON self_mesh_perf_samples(ts_ms)"
         )
 
     def _migrate_v15_file_index_cache(self, c: sqlite3.Cursor) -> None:
@@ -3903,6 +3928,72 @@ class State:
         ).fetchall()
         return [self._row_to_self_mesh_audit(r) for r in rows]
 
+    def record_self_mesh_perf_sample(
+        self,
+        sample: dict,
+        *,
+        ts_ms: int | None = None,
+    ) -> int:
+        now = _now_ms() if ts_ms is None else int(ts_ms)
+        metadata = {
+            k: v for k, v in dict(sample).items()
+            if k not in {
+                "route_probe_runs",
+                "route_probe_ready",
+                "route_probe_total_ms",
+                "route_probe_avg_ms",
+                "presence_rows",
+                "device_rows",
+                "recent_audit_rows",
+                "status",
+            }
+        }
+        with self._write_lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO self_mesh_perf_samples(
+                    ts_ms, route_probe_runs, route_probe_ready,
+                    route_probe_total_ms, route_probe_avg_ms, presence_rows,
+                    device_rows, recent_audit_rows, status, metadata_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    int(sample.get("route_probe_runs") or 0),
+                    int(sample.get("route_probe_ready") or 0),
+                    float(sample.get("route_probe_total_ms") or 0.0),
+                    float(sample.get("route_probe_avg_ms") or 0.0),
+                    int(sample.get("presence_rows") or 0),
+                    int(sample.get("device_rows") or 0),
+                    int(sample.get("recent_audit_rows") or 0),
+                    str(sample.get("status") or "unknown")[:40],
+                    json.dumps(metadata, separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            # Keep the table bounded without needing a background task.
+            self._conn.execute(
+                """
+                DELETE FROM self_mesh_perf_samples
+                WHERE id NOT IN (
+                    SELECT id FROM self_mesh_perf_samples
+                    ORDER BY ts_ms DESC, id DESC
+                    LIMIT 1000
+                )
+                """
+            )
+            return int(cur.lastrowid)
+
+    def list_self_mesh_perf_samples(self, *, limit: int = 120) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM self_mesh_perf_samples
+            ORDER BY ts_ms DESC, id DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 1000)),),
+        ).fetchall()
+        return [self._row_to_self_mesh_perf_sample(r) for r in rows]
+
     def enqueue_outbox(
         self,
         *,
@@ -4145,6 +4236,25 @@ class State:
             "action": row["action"],
             "path": row["path"],
             "detail": row["detail"],
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+
+    def _row_to_self_mesh_perf_sample(self, row: sqlite3.Row) -> dict:
+        try:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        except Exception:
+            metadata = {}
+        return {
+            "id": int(row["id"]),
+            "ts_ms": int(row["ts_ms"]),
+            "route_probe_runs": int(row["route_probe_runs"]),
+            "route_probe_ready": int(row["route_probe_ready"]),
+            "route_probe_total_ms": float(row["route_probe_total_ms"]),
+            "route_probe_avg_ms": float(row["route_probe_avg_ms"]),
+            "presence_rows": int(row["presence_rows"]),
+            "device_rows": int(row["device_rows"]),
+            "recent_audit_rows": int(row["recent_audit_rows"]),
+            "status": row["status"],
             "metadata": metadata if isinstance(metadata, dict) else {},
         }
 

@@ -3268,7 +3268,8 @@ class UIServer:
             "audit": audit,
             "allowed_roots": allowed_roots,
             "routing": routing,
-            "performance": self.daemon.self_mesh_performance_snapshot(),
+            "performance": self.daemon.self_mesh_performance_snapshot(record=True),
+            "performance_history": state.list_self_mesh_perf_samples(limit=24),
             "remote_instruction_replay_protection": True,
         })
 
@@ -3610,9 +3611,15 @@ class UIServer:
             }, status=400)
 
     async def api_self_mesh_performance(self, request: web.Request) -> web.Response:
+        state = getattr(self.daemon, "state", None)
+        history = []
+        if state is not None:
+            with contextlib.suppress(Exception):
+                history = state.list_self_mesh_perf_samples(limit=120)
         return web.json_response({
             "ok": True,
-            "performance": self.daemon.self_mesh_performance_snapshot(),
+            "performance": self.daemon.self_mesh_performance_snapshot(record=True),
+            "history": history,
         })
 
     async def api_courier_status(self, request: web.Request) -> web.Response:

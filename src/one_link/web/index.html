@@ -3985,6 +3985,7 @@
         </div>
         <div class="sm-copy" id="self-mesh-copy">Checking personal mesh presence.</div>
         <div class="sm-devices" id="self-mesh-devices"></div>
+        <div class="sm-devices" id="self-mesh-perf"></div>
         <div class="sm-controls">
           <select id="self-mesh-device-select" aria-label="Self-mesh device"></select>
           <input id="self-mesh-path" type="text" placeholder="Allowed file path" />
@@ -7177,6 +7178,24 @@
     }
     if (!list) return;
     list.replaceChildren();
+    const perfHost = $("#self-mesh-perf");
+    if (perfHost) {
+      perfHost.replaceChildren();
+      const perf = mesh.performance || {};
+      const hist = Array.isArray(mesh.performance_history) ? mesh.performance_history : [];
+      const latest = hist[0] || perf;
+      const chips = [
+        ["route", `${Number(latest.route_probe_avg_ms || 0).toFixed(2)} ms`],
+        ["ready", `${latest.route_probe_ready || 0}/${latest.route_probe_runs || 0}`],
+        ["devices", String(latest.device_rows ?? devices.length)],
+      ];
+      for (const [label, value] of chips) {
+        const card = el("div", "sm-device");
+        card.appendChild(el("b", "", value));
+        card.appendChild(el("span", "", label));
+        perfHost.appendChild(card);
+      }
+    }
     const select = $("#self-mesh-device-select");
     const selectedBefore = select?.value || "";
     if (select) select.replaceChildren();

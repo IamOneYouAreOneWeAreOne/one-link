@@ -12590,7 +12590,7 @@ class Daemon:
         out["root_pub_b64"] = self._self_mesh_b64u(root_pub)
         return out
 
-    def self_mesh_performance_snapshot(self) -> dict[str, Any]:
+    def self_mesh_performance_snapshot(self, *, record: bool = False) -> dict[str, Any]:
         """Tiny local benchmark/readiness snapshot for the F5 dashboard."""
         started = time.perf_counter()
         route_runs = 0
@@ -12618,7 +12618,7 @@ class Daemon:
                 device_count = len(self.state.list_self_mesh_devices())
             with contextlib.suppress(Exception):
                 audit_count = len(self.state.list_self_mesh_audit(limit=200))
-        return {
+        sample = {
             "route_probe_runs": route_runs,
             "route_probe_ready": route_ready,
             "route_probe_total_ms": round(route_ms, 4),
@@ -12628,6 +12628,10 @@ class Daemon:
             "recent_audit_rows": audit_count,
             "status": "ready" if route_runs == 0 or route_ms < 50.0 else "slow",
         }
+        if record and self.state is not None:
+            with contextlib.suppress(Exception):
+                sample["sample_id"] = self.state.record_self_mesh_perf_sample(sample)
+        return sample
 
     def _broadcast_tail(self, msg: dict) -> None:
         line = (json.dumps({"event": "msg", "msg": msg}) + "\n").encode("utf-8")

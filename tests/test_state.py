@@ -469,6 +469,36 @@ def test_self_mesh_root_revocation_and_audit_persist(tmp_path: Path):
         s2.close()
 
 
+def test_self_mesh_performance_samples_are_bounded_and_persist(tmp_path: Path):
+    db = tmp_path / "state.db"
+    s1 = State(db_path=db)
+    try:
+        for i in range(3):
+            sid = s1.record_self_mesh_perf_sample({
+                "route_probe_runs": 10,
+                "route_probe_ready": i,
+                "route_probe_total_ms": 1.5 + i,
+                "route_probe_avg_ms": 0.15 + i,
+                "presence_rows": 2,
+                "device_rows": 3,
+                "recent_audit_rows": 4,
+                "status": "ready",
+            }, ts_ms=1000 + i)
+            assert sid > 0
+    finally:
+        s1.close()
+
+    s2 = State(db_path=db)
+    try:
+        assert s2.schema_version() >= 20
+        samples = s2.list_self_mesh_perf_samples(limit=2)
+        assert len(samples) == 2
+        assert samples[0]["route_probe_ready"] == 2
+        assert samples[0]["status"] == "ready"
+    finally:
+        s2.close()
+
+
 def test_delete_setting(state: State):
     state.set_setting("k", "v")
     state.delete_setting("k")

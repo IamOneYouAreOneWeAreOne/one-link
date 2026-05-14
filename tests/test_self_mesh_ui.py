@@ -6,6 +6,7 @@ def test_activity_panel_contains_self_mesh_surface():
     assert 'id="self-mesh-kit"' in src
     assert 'id="self-mesh-devices"' in src
     assert 'id="self-mesh-device-select"' in src
+    assert 'id="self-mesh-perf"' in src
     assert 'id="btn-self-mesh-root"' in src
     assert 'id="btn-self-mesh-invite"' in src
     assert 'id="btn-self-mesh-send"' in src
