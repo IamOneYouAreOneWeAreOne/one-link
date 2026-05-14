@@ -857,8 +857,13 @@ Deliverables:
 - `transport_adapters/base.py` - adapter/session/probe contract
 - `transport_adapters/static.py` - deterministic inventory adapter
 - `transport_activation.py` - activation governor and safety policy
+- `transport_path_creation.py` - safety-gated platform path creation plans
 - `transport_fabric.py` - route score + transfer-brain bridge
 - daemon `/api/fabric` snapshot
+- daemon `/api/fabric/no-router` readiness kit
+- daemon `/api/fabric/path-create` read-only creation plan
+- daemon `/api/fabric/path-create/launch` user-visible OS ceremony launcher
+- daemon `/api/fabric/path-create/native` opt-in native execution helper
 - `/api/status.performance.fabric` and `/api/metrics.fabric`
 - Activity-panel fabric truth card
 - file-send metadata field `fabric_plan`
@@ -876,9 +881,16 @@ Current implementation status:
 
 - `complete` for read-only inventory, route scoring, activation policy,
   daemon/API exposure, file-send metadata, and UI truth surfacing.
-- `partial` for active transport opening. No adapter currently starts
-  hotspot/Wi-Fi Direct/BLE/RF on its own; that is deliberate until Phase 2
-  platform helpers pass safety gates.
+- `complete` for active opening of verified durable TCP route candidates
+  through the common adapter/session contract. This covers already-proven
+  LAN, Ethernet/link-local, and signed-bootstrap endpoints after normal
+  key-confirmed promotion.
+- `complete` for safety-gated active path creation contracts: the fabric can
+  open verified durable TCP paths automatically, guide OS-visible hotspot,
+  Wi-Fi Direct, and BLE ceremonies, execute the Windows hostednetwork helper
+  only with explicit opt-in, and delegate future platform helpers through a
+  redacted native bridge. RF/experimental hardware remains blocked from
+  silent transmit until its safety gate is proven.
 
 Activation rules now in force:
 
@@ -898,12 +910,89 @@ Deliverables:
 - hotspot capability detector
 - Wi-Fi Direct capability detector
 - Ethernet link-local detector
+- verified durable TCP route opener for promoted local endpoints
 - BLE control proof-of-concept
 - QR route bootstrap payload
 
 Gate:
 
 - no-router two-device path documented and tested where platform allows
+
+Current implementation status:
+
+- `complete` for Ethernet/link-local inventory detection and for opening
+  verified TCP route candidates through the fabric adapter contract.
+- `complete` for signed QR route bootstrap payloads, QR SVG rendering,
+  import, replay rejection, paired-issuer checks, and queued endpoint
+  verification/promotion. Local bootstrap now opts into Ethernet/link-local
+  endpoint hints while normal internet rendezvous publication keeps those
+  hints private by default.
+- `complete` for a token-gated no-router readiness kit that reports local
+  link state, QR/token readiness, trusted local paths, the next safe action,
+  structured progress steps, and the safeguards that keep route hints from
+  becoming trust bypasses. The Activity panel renders this as a compact local
+  path kit so the normal user sees readiness, not endpoint machinery.
+- `complete` for live no-router probe progress states: imported route hints
+  move through `checking_path`, `trusted_path_ready`, or `route_check_failed`
+  based on durable endpoint verification state.
+- `complete` for the guided no-router operator flow: the token-gated
+  readiness API now returns ranked path options, sender/receiver step guides,
+  route-token status, probe status, and clear recovery actions for cable,
+  same-LAN, private-hotspot, Wi-Fi Direct, and verified local paths. The
+  Activity panel renders those states directly so people see what to do next
+  instead of endpoint machinery.
+- `complete` for safety-gated local path creation planning:
+  `transport_path_creation.py` and `/api/fabric/path-create` describe exactly
+  how Ethernet, private hotspot, Wi-Fi Direct, and BLE control paths may be
+  created or guided on this platform. The endpoint is read-only, labels
+  automatic/user/admin requirements, includes OS settings/command affordances
+  where safe, and repeats the non-negotiable safeguards: no pairing bypass,
+  route tokens carry endpoint hints only, and every promoted endpoint still
+  needs a key-confirmed session.
+- `complete` for safe creation-ceremony launch: `/api/fabric/path-create/launch`
+  can open only the OS-visible settings/ceremony named by an approved plan
+  such as Windows Mobile Hotspot, Wi-Fi settings, or Bluetooth settings. It
+  never toggles radios silently, never publishes hotspot credentials, rejects
+  unsupported/blocked plans, supports dry-run verification, and honors
+  `ONE_LINK_DISABLE_PATH_CREATE_LAUNCH=1` for CI and managed environments.
+- `complete` for the first native execution helper:
+  `/api/fabric/path-create/native` supports dry-run and explicit opt-in
+  Windows legacy hostednetwork command execution for private hotspot setup.
+  It validates SSID/passphrase constraints before building commands, redacts
+  hotspot keys from every API response, requires
+  `ONE_LINK_ALLOW_NATIVE_PATH_CREATE=1` for real execution, honors
+  `ONE_LINK_DISABLE_NATIVE_PATH_CREATE=1`, and returns structured unsupported
+  evidence for Wi-Fi Direct and BLE where the OS does not expose a safe silent
+  public creation API.
+- `complete` for the native helper bridge: `ONE_LINK_NATIVE_PATH_HELPERS`
+  can register explicit platform helper binaries for paths such as
+  `wifi_direct` or `ble_control`. Helpers must be declared by absolute path,
+  are dry-run capable, are still blocked unless native execution is explicitly
+  enabled, receive a small deterministic command contract, and have command
+  secrets redacted from API evidence. This is the production plug-in point for
+  future signed/native Wi-Fi Direct and BLE helpers without weakening the
+  default safety posture.
+- `complete` for route-brain performance telemetry. Fabric plans report
+  adapter count, per-stage timings, total planning time, and a `fast` /
+  `warm` / `slow` health grade; regression tests keep 512 remembered
+  candidate routes comfortably below the interactive budget.
+- `complete` for probe reuse in route scoring. Adapters that can score from
+  an existing probe do so, preventing the route brain from touching hardware
+  or route-memory adapters twice during one plan.
+- `complete` for bounded, fast endpoint verification: route-token endpoint
+  probes are concurrency-limited and use short connect/handshake deadlines so
+  dead local hints surface quickly instead of making people wait.
+- `complete` for fast transfer-path planning: live file sends skip slow OS
+  hardware probes and use only cheap inventory plus durable route candidates;
+  richer hardware discovery remains in cached dashboard snapshots.
+- `complete` for the in-repo automatic no-router creation boundary: direct
+  Ethernet can be represented, guided, verified, and opened after promotion;
+  hotspot, Wi-Fi Direct, and BLE have a safety-gated creation contract plus
+  user-visible OS ceremony launch; Windows private hotspot has an opt-in
+  legacy hostednetwork executor where available; and Wi-Fi Direct/BLE use the
+  explicit native-helper bridge. Platform-specific helper binaries are treated
+  as signed external providers to this bridge, not as a reason for the core
+  fabric to silently mutate radios.
 
 ### Phase 3: Multi-Source Swarm Pull
 
@@ -920,6 +1009,25 @@ Gate:
 
 - test with three local daemons: receiver reconstructs object from two partial sources
 
+Current implementation status:
+
+- `complete` for receiver-led swarm chunk discovery and pull over trusted
+  peers: receivers ask only for missing content-addressed chunks, pull data
+  through the secure session layer, verify each chunk by BLAKE3 before cache
+  commit, and expose per-source assignment telemetry.
+- `complete` for health-aware source planning: candidate sources are indexed
+  by chunk hash, ranked by trust, reliability, latency, bandwidth, and field
+  coherence, then scheduled rarest-first so scarce chunks are assigned before
+  abundant chunks.
+- `complete` for adaptive swarm execution: pull concurrency expands with the
+  number of live sources up to a bounded cap, each source receives a
+  health-derived transfer deadline, and hung or corrupt primary sources are
+  retried from alternate holders without blocking the whole object.
+- `complete` for regression coverage proving large sparse source claims plan
+  quickly, three independent sources reconstruct a file, corrupt primary data
+  heals from backup, and a source that answers discovery but hangs during
+  transfer is bypassed by deadline failover.
+
 ### Phase 4: Store-Carry-Forward
 
 Deliverables:
@@ -933,6 +1041,77 @@ Deliverables:
 Gate:
 
 - offline sender -> USB bundle -> offline receiver completes transfer without plaintext exposure
+
+Current implementation status:
+
+- `complete` for the encrypted courier bundle core format in
+  `src/one_link/courier_bundle.py`: AES-GCM sealed payload, random unlock
+  token with `OLC1.` prefix, expiry, sender/recipient fingerprints, BLAKE3
+  per-chunk verification, duplicate detection, strict size/count limits, and
+  replay rejection when the importer supplies a seen-bundle set.
+- `complete` for daemon UI APIs: `/api/courier/status`,
+  `/api/courier/export`, `/api/courier/import`, and
+  `/api/courier/assemble` are token-gated and wire directly into the existing
+  CDC chunk cache. `/api/courier/files`, `/api/courier/import-file`,
+  `/api/courier/outbox`, and `/api/courier/export-file` add safe local
+  removable-media folders: dropped files are listed by opaque IDs under
+  `data/courier/drop`, staged exports are written atomically under
+  `data/courier/outbox`, and no API accepts arbitrary filesystem paths.
+  Export refuses missing cached chunks; import stores only chunks that decrypt
+  and re-hash correctly; assemble reconstructs a fully cached courier blob
+  into the inbox only when the final BLAKE3 file hash matches.
+- `complete` for durable courier replay and audit metadata:
+  `courier_ledger.json` persists imported bundle IDs across daemon restarts
+  and records bounded export/import events with only public manifest facts
+  (bundle id, fingerprints, chunk count, byte counts, expiry), never chunk
+  plaintext.
+- `complete` for adversarial tests covering round-trip import/export,
+  ciphertext tamper, wrong key, expiry, wrong recipient, duplicate chunks,
+  bad hashes, invalid base64, replay, missing cached chunks, auth-gated
+  readiness, restart-persistent replay, malformed ledger recovery, and real
+  server-to-cache import/export.
+- `complete` for the first people-facing removable-media browser surface:
+  Activity now has a courier kit with transfer selection, optional chunk-hash
+  input, unlock-token handling, file download/upload, and direct "Courier"
+  actions on cached transfer rows. The user path is "export encrypted file,
+  carry it, paste token, import file" instead of internal cache machinery.
+  The kit also surfaces recent courier activity and replay-guard memory, and
+  auto-assembles imported file bundles when the encrypted manifest contains
+  the whole-file blob hash. It can also import files dropped into the local
+  courier folder and stage export files into the local outbox, which maps
+  directly onto USB/removable-drive workflows.
+- `complete` for a cross-platform courier folder monitor: the server watches
+  drop/outbox signatures on a bounded interval, broadcasts `courier_files`
+  changes to connected UIs, exposes monitor evidence in `/api/courier/status`,
+  and shuts the monitor down cleanly with the UI server.
+- `complete` for the first guided two-role courier wizard: the Activity
+  courier kit has Sender/Receiver modes with readiness steps for choosing a
+  cached transfer, staging/downloading the bundle, copying the separate OLC1
+  key, dropping a received bundle, selecting it, and importing/assembling only
+  after verification.
+- `complete` for removable-target discovery and safe copy-out:
+  `/api/courier/removable` discovers Windows removable drives and POSIX
+  media roots, and `/api/courier/copy-to-removable` copies a staged outbox
+  bundle into a `One Link Courier` folder on the selected target. The API
+  uses opaque target/file IDs and never accepts arbitrary destination paths.
+- `complete` for safe copy-in from removable media:
+  `/api/courier/removable-files` lists courier bundles under a selected
+  target's `One Link Courier` folder, and
+  `/api/courier/copy-from-removable` pulls a selected bundle into
+  `data/courier/drop` by opaque file ID. Stale IDs and path tricks fail
+  closed before import/decrypt.
+- `complete` for removable-media event integration: the server now turns the
+  cross-platform removable inventory into a deterministic
+  `native_compatible_inventory_events` stream with attached, removed, and
+  changed events. The courier monitor primes this source, broadcasts
+  `removable_media` events to connected UIs, and exposes event-source evidence
+  plus counters through `/api/courier/status` and `/api/courier/removable`.
+  Platform-specific watcher backends can plug into the same contract, while
+  the portable polling source keeps USB workflows working everywhere.
+- `complete` for an offline two-home courier proof: tests exercise sender
+  cache -> encrypted bundle -> receiver cache, preserve blob context, and
+  verify the receiver can reassemble the original file hash from imported
+  chunks.
 
 ### Phase 5: OneField Adapter
 
@@ -948,6 +1127,23 @@ Gate:
 - encrypted One Link frames pass through OneField fake transport
 - hardware mode cannot transmit unless safety gate passes
 
+Current implementation status:
+
+- `complete` for the OneField software-loopback adapter:
+  `transport_adapters/onefield.py` exposes a OneField-shaped adapter/session
+  that passes encrypted One Link frames through an ordered reliable in-memory
+  transport while recording frame/byte stats.
+- `complete` for OneField route scoring and fabric integration:
+  `ONE_LINK_ENABLE_ONEFIELD_LOOPBACK=1` turns the inventory path into
+  `onefield.loopback`, the route brain scores it as a usable bulk/control
+  path, and the normal activation safeguards still sit above it.
+- `complete` for RF safety gating at this layer: the loopback prepared route
+  carries `rf_transmit=false`, hardware/experimental OneField inventory stays
+  receive-only until a safety gate marks it safe, and adapter open refuses any
+  route that attempts to smuggle RF transmit through loopback metadata.
+- `complete` for regression coverage proving loopback inventory enablement,
+  frame pass-through, stats, and route-brain integration.
+
 ### Phase 6: Phone And Native Reach
 
 Deliverables:
@@ -960,6 +1156,24 @@ Deliverables:
 Gate:
 
 - phone can help two computers exchange route hints or chunks without cloud
+
+Current implementation status:
+
+- `complete` for phone/native reach planning:
+  `mobile_reach.py` turns connected browser/native peers into explicit
+  phone-helper plans covering route-token exchange, browser-peer bulk
+  DataChannel chunk help, encrypted courier bundle staging, background
+  resume readiness, and mobile storage budgets.
+- `complete` for daemon exposure: `/api/fabric/mobile-reach` is token-gated
+  and reports connected/paired phone counts, control bridges, chunk bridges,
+  couriers, background-resume candidates, storage budget, and safeguards.
+- `complete` for storage-budget safety: `ONE_LINK_PHONE_STORAGE_BUDGET_BYTES`
+  bounds mobile helper modes, validates bad operator input, and prevents
+  courier/chunk helper modes when the budget is too small.
+- `complete` for regression coverage proving paired phones can become route
+  bridges, chunk helpers, and couriers; low budget blocks bulk helper modes
+  without breaking pairing; unpaired phones surface pairing actions; and the
+  API remains auth-gated.
 
 ---
 

@@ -159,13 +159,17 @@ def plan_swarm_sources(
     }
     usable = [s for s in sources if s.available]
     source_load_bytes: dict[str, int] = {s.peer_fp: 0 for s in usable}
-    candidates_by_hash = {
-        c.hash: [s for s in usable if c.hash in s.chunk_hashes]
-        for c in manifest.chunks
-        if c.index in needed
+    needed_chunks = [c for c in manifest.chunks if c.index in needed]
+    needed_hashes = {c.hash for c in needed_chunks}
+    candidates_by_hash: dict[str, list[ChunkSource]] = {
+        h: [] for h in needed_hashes
     }
+    for source in usable:
+        for chunk_hash in source.chunk_hashes:
+            if chunk_hash in candidates_by_hash:
+                candidates_by_hash[chunk_hash].append(source)
     chunks = sorted(
-        (c for c in manifest.chunks if c.index in needed),
+        needed_chunks,
         key=lambda c: (len(candidates_by_hash.get(c.hash, ())), c.index),
     )
 

@@ -60,6 +60,15 @@ class StaticPathAdapter:
         probe = self.probe()
         return score_probe(probe, intent=intent, peer=peer)
 
+    def score_from_probe(
+        self,
+        probe: AdapterProbe,
+        *,
+        intent: object | None = None,
+        peer: object | None = None,
+    ) -> RouteScore:
+        return score_probe(probe, intent=intent, peer=peer)
+
     async def prepare(
         self,
         *,
@@ -158,4 +167,3 @@ def _score_reason(probe: AdapterProbe) -> str:
     if probe.control_capable:
         return f"{probe.kind} is control-plane only"
     return f"{probe.kind} is visible but not usable yet"
-

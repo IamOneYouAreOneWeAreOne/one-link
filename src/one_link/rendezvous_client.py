@@ -356,11 +356,12 @@ def discover_local_endpoints(
     *,
     peer_port: int,
     include_loopback: bool = False,
+    include_link_local: bool = False,
 ) -> list[Endpoint]:
     """Best-effort enumeration of local IPv4 addresses we can advertise.
 
-    Skips 169.254.x.x link-local, 127.0.0.0/8 (unless `include_loopback`),
-    and 0.0.0.0. The result is what we publish to the rendezvous as our
+    Skips 169.254.x.x link-local (unless `include_link_local`), 127.0.0.0/8
+    (unless `include_loopback`), and 0.0.0.0. The default result is what we
     `advertised_endpoints` — peers on the same NAT might be able to use
     these directly without needing the rendezvous-observed public IP.
     """
@@ -383,7 +384,7 @@ def discover_local_endpoints(
             if not addr or addr in seen:
                 continue
             seen.add(addr)
-            if addr.startswith("169.254."):
+            if addr.startswith("169.254.") and not include_link_local:
                 continue
             if addr == "0.0.0.0":
                 continue
@@ -401,7 +402,7 @@ def discover_local_endpoints(
             ip = s.getsockname()[0]
         finally:
             s.close()
-        if ip and ip not in seen and not ip.startswith("169.254."):
+        if ip and ip not in seen and (include_link_local or not ip.startswith("169.254.")):
             out.append(Endpoint(host=ip, port=int(peer_port)))
     except OSError:
         pass

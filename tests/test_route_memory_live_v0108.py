@@ -61,6 +61,15 @@ def test_live_route_observations_surface_best_route_and_scores():
     assert health["route_scores"][0]["route"] == "lan"
 
 
+def test_endpoint_verifier_is_bounded_for_fast_route_bootstrap():
+    daemon = Daemon(_identity())
+
+    assert daemon.MAX_ENDPOINTS_PER_ANNOUNCEMENT == 8
+    assert daemon.ENDPOINT_VERIFY_CONNECT_DEADLINE_S <= 1.25
+    assert daemon.ENDPOINT_VERIFY_HANDSHAKE_DEADLINE_S <= 2.0
+    assert daemon._endpoint_verify_sem is not None
+
+
 def test_live_route_memory_feeds_swarm_health_fields():
     daemon = Daemon(_identity())
     fp = "bb" * 32

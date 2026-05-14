@@ -8,6 +8,7 @@ Higher layers can decide whether to ask the user or call a platform helper.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import platform
 import shutil
@@ -126,6 +127,7 @@ def _lan_paths() -> tuple[HardwarePath, ...]:
     out: list[HardwarePath] = []
     addrs = _local_ip_addresses()
     has_non_loopback = any(not _is_loopback_ip(ip) for ip in addrs)
+    link_local = tuple(ip for ip in addrs if _is_link_local_ip(ip))
     out.append(HardwarePath(
         kind="lan",
         adapter_id="lan.ip",
@@ -136,6 +138,21 @@ def _lan_paths() -> tuple[HardwarePath, ...]:
         privacy="direct_local",
         range_hint="local_network",
         notes=tuple(addrs[:8]) if addrs else ("no local addresses detected",),
+    ))
+    out.append(HardwarePath(
+        kind="ethernet",
+        adapter_id="ethernet.link_local",
+        available=bool(link_local),
+        bulk_capable=bool(link_local),
+        control_capable=True,
+        estimated_bps=1_000_000_000.0 if link_local else 0.0,
+        privacy="direct_local",
+        range_hint="direct_cable_or_switch",
+        notes=(
+            tuple(f"link-local address {ip}" for ip in link_local[:8])
+            if link_local else
+            ("no IPv4/IPv6 link-local address detected",)
+        ),
     ))
     out.append(HardwarePath(
         kind="loopback",
@@ -321,7 +338,22 @@ def _audio_path(env: Mapping[str, str]) -> HardwarePath:
 
 def _onefield_path(env: Mapping[str, str]) -> HardwarePath:
     root = env.get("ONEFIELD_MESH_ROOT") or r"$HOME\Projects\OneField Mesh"
+    loopback = _env_bool(env, "ONE_LINK_ENABLE_ONEFIELD_LOOPBACK")
     available = os.path.exists(root)
+    if loopback:
+        return HardwarePath(
+            kind="onefield",
+            adapter_id="onefield.loopback",
+            available=True,
+            bulk_capable=True,
+            control_capable=True,
+            estimated_bps=5_000_000.0,
+            privacy="same_machine",
+            range_hint="software_loopback",
+            requires_user_action=False,
+            safety_state="ok",
+            notes=("software loopback; RF transmit disabled", root),
+        )
     return HardwarePath(
         kind="onefield",
         adapter_id="onefield.optional",
@@ -359,7 +391,17 @@ def _local_ip_addresses() -> tuple[str, ...]:
 
 
 def _is_loopback_ip(ip: str) -> bool:
-    return ip.startswith("127.") or ip == "::1" or ip.lower() == "localhost"
+    try:
+        return ipaddress.ip_address(ip.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return ip.startswith("127.") or ip == "::1" or ip.lower() == "localhost"
+
+
+def _is_link_local_ip(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip.split("%", 1)[0]).is_link_local
+    except ValueError:
+        return False
 
 
 def _dedupe_paths(paths: Iterable[HardwarePath]) -> tuple[HardwarePath, ...]:
@@ -385,4 +427,3 @@ def _run_command(argv: list[str], timeout_s: float) -> tuple[int, str, str]:
     except Exception as exc:
         return 127, "", str(exc)
     return int(r.returncode), r.stdout or "", r.stderr or ""
-

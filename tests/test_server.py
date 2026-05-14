@@ -848,6 +848,49 @@ async def test_api_send_file_online_creates_durable_intent_before_send(
 
 
 @pytest.mark.asyncio
+async def test_api_send_file_retries_wire_version_mismatch_once(tmp_path: Path, monkeypatch):
+    """A stale secure session can surface as InvalidTag/wire mismatch.
+
+    Browser uploads should retry once after a fresh resolve instead of making
+    the user retry manually.
+    """
+    from cryptography.exceptions import InvalidTag
+
+    from one_link.server import UIServer
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    sends: list[str] = []
+    resolves: list[str] = []
+
+    class _Daemon:
+        state = None
+        me = SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa")
+
+        async def resolve_for_send(self, needle):
+            resolves.append(str(needle))
+            return SimpleNamespace(short_id=str(needle))
+
+        async def send_file(self, peer, path, *, transfer_id=None):
+            sends.append(peer.short_id)
+            if len(sends) == 1:
+                raise InvalidTag()
+            return {"ok": True, "path_exists": Path(path).is_file()}
+
+    server = UIServer(_Daemon())
+    resp = await server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text="bbbbbbbb"),
+        _FakePart("file", data=b"retry me", filename="retry.bin"),
+    ]))
+    body = json.loads(resp.text)
+
+    assert resp.status == 200
+    assert body["ok"] is True
+    assert body["result"]["path_exists"] is True
+    assert sends == ["bbbbbbbb", "bbbbbbbb"]
+    assert resolves == ["bbbbbbbb", "bbbbbbbb"]
+
+
+@pytest.mark.asyncio
 async def test_api_send_file_offline_paired_peer_queues_staged_upload(
     tmp_path: Path, monkeypatch,
 ):

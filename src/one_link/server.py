@@ -27,6 +27,8 @@ import asyncio
 import base64
 from collections import deque
 import contextlib
+import hashlib
+import heapq
 import hmac
 import ipaddress
 import json
@@ -59,6 +61,9 @@ log = logging.getLogger("one_link.server")
 WEB_DIR = Path(__file__).resolve().parent / "web"
 TOKEN_FILE = "ui.token"
 SERVER_PORT_FILE = "server.port"
+COURIER_LEDGER_FILE = "courier_ledger.json"
+COURIER_LEDGER_MAX_EVENTS = 512
+COURIER_FILE_MAX_BYTES = 768 * 1024 * 1024
 
 
 def _route_hint_for_host(host: str) -> tuple[str, str]:
@@ -66,8 +71,11 @@ def _route_hint_for_host(host: str) -> tuple[str, str]:
     if clean == "localhost":
         return "loopback", "loopback"
     try:
-        if ipaddress.ip_address(clean).is_loopback:
+        ip = ipaddress.ip_address(clean.split("%", 1)[0])
+        if ip.is_loopback:
             return "loopback", "loopback"
+        if ip.is_link_local:
+            return "ethernet", "ethernet"
     except ValueError:
         pass
     return "peer_server", "lan"
@@ -679,6 +687,18 @@ class UIServer:
         self.bind_host: str = "127.0.0.1"
         self._ws_clients: set[web.WebSocketResponse] = set()
         self._rate_buckets: dict[tuple[str, str], deque[float]] = {}
+        self._courier_seen_bundle_ids: set[str] = set()
+        self._courier_events: list[dict] = []
+        self._load_courier_ledger()
+        self._courier_monitor_task: asyncio.Task | None = None
+        self._courier_monitor_interval_s = 2.0
+        self._courier_drop_signature: tuple[str, ...] = ()
+        self._courier_outbox_signature: tuple[str, ...] = ()
+        self._courier_monitor_last_ms = 0
+        self._courier_monitor_events = 0
+        self._removable_event_detector = None
+        self._removable_monitor_last_ms = 0
+        self._removable_monitor_events = 0
         # v0.20.0: WebRTC peer manager for browser-as-peer connections.
         # Lazy-imported so daemons that don't ship aiortc still load
         # this module (the manager itself works fine; only the actual
@@ -747,14 +767,16 @@ class UIServer:
                 {"error": "cross-origin request rejected"}, status=403
             )
         content_type = (request.content_type or "").lower()
-        if (
-            request.method in ("POST", "PUT", "PATCH", "DELETE")
-            and (
+        large_json_paths = {"/api/courier/import"}
+        if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.path not in large_json_paths:
+            is_json_like = (
                 content_type == "application/json"
                 or content_type.endswith("+json")
                 or request.path not in ("/api/send-file",)
             )
-        ):
+        else:
+            is_json_like = False
+        if is_json_like:
             size = request.content_length
             if size is not None and size > MAX_JSON_REQUEST_BYTES:
                 return web.json_response({"error": "json body too large"}, status=413)
@@ -906,6 +928,288 @@ class UIServer:
             pass
         return secrets.token_urlsafe(32)
 
+    def _courier_ledger_path(self) -> Path:
+        return data_dir() / COURIER_LEDGER_FILE
+
+    @staticmethod
+    def _valid_courier_bundle_id(value: object) -> bool:
+        text = str(value or "").strip().lower()
+        if len(text) != 32:
+            return False
+        try:
+            int(text, 16)
+            return True
+        except ValueError:
+            return False
+
+    def _load_courier_ledger(self) -> None:
+        path = self._courier_ledger_path()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            self._courier_seen_bundle_ids = set()
+            self._courier_events = []
+            return
+        seen = raw.get("seen_bundle_ids", []) if isinstance(raw, dict) else []
+        events = raw.get("events", []) if isinstance(raw, dict) else []
+        self._courier_seen_bundle_ids = {
+            str(x).strip().lower()
+            for x in seen
+            if self._valid_courier_bundle_id(x)
+        }
+        self._courier_events = [
+            e for e in events[-COURIER_LEDGER_MAX_EVENTS:]
+            if isinstance(e, dict) and self._valid_courier_bundle_id(e.get("bundle_id"))
+        ]
+
+    def _save_courier_ledger(self) -> None:
+        path = self._courier_ledger_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "seen_bundle_ids": sorted(self._courier_seen_bundle_ids),
+            "events": self._courier_events[-COURIER_LEDGER_MAX_EVENTS:],
+        }
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+
+    def _record_courier_event(
+        self,
+        kind: str,
+        manifest: dict,
+        *,
+        bundle_bytes: int | None = None,
+        stored_chunks: int | None = None,
+    ) -> None:
+        bundle_id = str(manifest.get("bundle_id") or "").strip().lower()
+        if not self._valid_courier_bundle_id(bundle_id):
+            return
+        event = {
+            "kind": kind,
+            "bundle_id": bundle_id,
+            "ts_ms": int(time.time() * 1000),
+            "sender_fp": manifest.get("sender_fp"),
+            "recipient_fp": manifest.get("recipient_fp"),
+            "chunk_count": manifest.get("chunk_count"),
+            "total_bytes": manifest.get("total_bytes"),
+            "expires_ms": manifest.get("expires_ms"),
+        }
+        if bundle_bytes is not None:
+            event["bundle_bytes"] = int(bundle_bytes)
+        if stored_chunks is not None:
+            event["stored_chunks"] = int(stored_chunks)
+        self._courier_events.append(event)
+        self._courier_events = self._courier_events[-COURIER_LEDGER_MAX_EVENTS:]
+        self._save_courier_ledger()
+
+    def _mark_courier_imported(self, manifest: dict) -> None:
+        bundle_id = str(manifest.get("bundle_id") or "").strip().lower()
+        if not self._valid_courier_bundle_id(bundle_id):
+            raise ValueError("invalid courier bundle id")
+        self._courier_seen_bundle_ids.add(bundle_id)
+        self._save_courier_ledger()
+
+    def _courier_dir(self) -> Path:
+        path = data_dir() / "courier"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _courier_drop_dir(self) -> Path:
+        path = self._courier_dir() / "drop"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _courier_outbox_dir(self) -> Path:
+        path = self._courier_dir() / "outbox"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _courier_file_id(self, path: Path) -> str:
+        st = path.stat()
+        return self._courier_file_id_from_stat(path.name, int(st.st_size), int(st.st_mtime_ns))
+
+    @staticmethod
+    def _courier_file_id_from_stat(name: str, size: int, mtime_ns: int) -> str:
+        seed = f"{name}\0{int(size)}\0{int(mtime_ns)}".encode("utf-8", "surrogatepass")
+        return hashlib.sha256(seed).hexdigest()[:24]
+
+    def _scan_courier_files(self) -> list[dict]:
+        return self._scan_courier_dir(self._courier_drop_dir())
+
+    def _scan_courier_outbox(self) -> list[dict]:
+        return self._scan_courier_dir(self._courier_outbox_dir())
+
+    @staticmethod
+    def _courier_signature(files: list[dict]) -> tuple[str, ...]:
+        return tuple(
+            f"{f.get('id')}:{f.get('bytes')}:{f.get('mtime_ms')}"
+            for f in files
+        )
+
+    def _courier_monitor_tick(self, *, broadcast: bool = True) -> dict:
+        drop_files = self._scan_courier_files()
+        outbox_files = self._scan_courier_outbox()
+        drop_sig = self._courier_signature(drop_files)
+        outbox_sig = self._courier_signature(outbox_files)
+        changed = (
+            drop_sig != self._courier_drop_signature
+            or outbox_sig != self._courier_outbox_signature
+        )
+        self._courier_drop_signature = drop_sig
+        self._courier_outbox_signature = outbox_sig
+        self._courier_monitor_last_ms = int(time.time() * 1000)
+        if changed:
+            self._courier_monitor_events += 1
+            if broadcast:
+                self.broadcast({
+                    "type": "courier_files",
+                    "drop_files": len(drop_files),
+                    "outbox_files": len(outbox_files),
+                    "drop_dir": str(self._courier_drop_dir()),
+                    "outbox_dir": str(self._courier_outbox_dir()),
+                })
+        return {
+            "changed": changed,
+            "drop_files": drop_files,
+            "outbox_files": outbox_files,
+        }
+
+    def _removable_monitor_tick(self, *, broadcast: bool = True) -> dict:
+        from one_link.removable_media import RemovableEventDetector
+
+        if self._removable_event_detector is None:
+            self._removable_event_detector = RemovableEventDetector()
+        result = self._removable_event_detector.poll()
+        self._removable_monitor_last_ms = int(result.get("last_scan_ms") or int(time.time() * 1000))
+        events = result.get("events") or []
+        if events:
+            self._removable_monitor_events += len(events)
+            if broadcast:
+                self.broadcast({
+                    "type": "removable_media",
+                    "events": events,
+                    "targets": result.get("targets") or [],
+                    "mode": result.get("mode"),
+                })
+        return result
+
+    async def _courier_monitor_loop(self) -> None:
+        try:
+            self._courier_monitor_tick(broadcast=False)
+            self._removable_monitor_tick(broadcast=False)
+            while True:
+                await asyncio.sleep(self._courier_monitor_interval_s)
+                self._courier_monitor_tick(broadcast=True)
+                self._removable_monitor_tick(broadcast=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("courier monitor stopped unexpectedly")
+
+    def _scan_courier_dir(self, directory: Path) -> list[dict]:
+        root = directory.resolve()
+        candidates: list[tuple[int, Path, os.stat_result]] = []
+        for path in root.iterdir():
+            try:
+                if path.is_symlink():
+                    continue
+                resolved = path.resolve()
+                if not resolved.is_file() or resolved.parent != root:
+                    continue
+                if resolved.suffix.lower() not in {".json", ".olcb"} and not resolved.name.lower().endswith(".olcb.json"):
+                    continue
+                st = resolved.stat()
+                if st.st_size <= 0 or st.st_size > COURIER_FILE_MAX_BYTES:
+                    continue
+                candidates.append((int(st.st_mtime_ns), resolved, st))
+            except OSError:
+                continue
+        newest = heapq.nlargest(64, candidates, key=lambda item: item[0])
+        out: list[dict] = []
+        for _mtime_ns, resolved, st in newest:
+            try:
+                out.append({
+                    "id": self._courier_file_id_from_stat(
+                        resolved.name,
+                        int(st.st_size),
+                        int(st.st_mtime_ns),
+                    ),
+                    "name": resolved.name,
+                    "bytes": int(st.st_size),
+                    "mtime_ms": int(st.st_mtime * 1000),
+                })
+            except OSError:
+                continue
+        return out
+
+    def _resolve_courier_file_id(self, file_id: str) -> Path | None:
+        want = str(file_id or "").strip().lower()
+        if len(want) != 24:
+            return None
+        for item in self._scan_courier_files():
+            if item.get("id") == want:
+                path = (self._courier_drop_dir() / str(item["name"])).resolve()
+                root = self._courier_drop_dir().resolve()
+                if path.parent == root and path.is_file():
+                    return path
+        return None
+
+    def _resolve_courier_outbox_file_id(self, file_id: str) -> Path | None:
+        want = str(file_id or "").strip().lower()
+        if len(want) != 24:
+            return None
+        root = self._courier_outbox_dir().resolve()
+        for item in self._scan_courier_outbox():
+            if item.get("id") == want:
+                path = (root / str(item["name"])).resolve()
+                if path.parent == root and path.is_file():
+                    return path
+        return None
+
+    def _removable_courier_dir(self, target_path: Path) -> Path:
+        return (target_path / "One Link Courier").resolve()
+
+    def _scan_removable_courier_files(self, target_path: Path) -> list[dict]:
+        root = self._removable_courier_dir(target_path)
+        target_root = target_path.resolve()
+        if target_root not in {root, *root.parents} or not root.is_dir():
+            return []
+        return self._scan_courier_dir(root)
+
+    def _resolve_removable_courier_file_id(self, target_path: Path, file_id: str) -> Path | None:
+        want = str(file_id or "").strip().lower()
+        if len(want) != 24:
+            return None
+        root = self._removable_courier_dir(target_path)
+        target_root = target_path.resolve()
+        if target_root not in {root, *root.parents}:
+            return None
+        for item in self._scan_removable_courier_files(target_path):
+            if item.get("id") == want:
+                path = (root / str(item["name"])).resolve()
+                if path.parent == root and path.is_file():
+                    return path
+        return None
+
+    @staticmethod
+    def _extract_courier_bundle_text(text: str) -> str:
+        stripped = text.strip()
+        if not stripped:
+            raise ValueError("courier file is empty")
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict):
+                bundle = parsed.get("bundle_b64") or parsed.get("bundle")
+                if bundle:
+                    return str(bundle).strip()
+        except json.JSONDecodeError:
+            pass
+        return stripped
+
     # ─── routes ───────────────────────────────────────────────────────
     def _setup_routes(self) -> None:
         r = self.app.router
@@ -975,6 +1279,23 @@ class UIServer:
         r.add_get("/api/status", self._guarded(self.api_status))
         r.add_get("/api/metrics", self._guarded(self.api_metrics))
         r.add_get("/api/fabric", self._guarded(self.api_fabric))
+        r.add_get("/api/fabric/no-router", self._guarded(self.api_fabric_no_router))
+        r.add_get("/api/fabric/path-create", self._guarded(self.api_fabric_path_create))
+        r.add_post("/api/fabric/path-create/launch", self._guarded(self.api_fabric_path_create_launch))
+        r.add_post("/api/fabric/path-create/native", self._guarded(self.api_fabric_path_create_native))
+        r.add_get("/api/fabric/mobile-reach", self._guarded(self.api_fabric_mobile_reach))
+        r.add_get("/api/courier/status", self._guarded(self.api_courier_status))
+        r.add_get("/api/courier/files", self._guarded(self.api_courier_files))
+        r.add_get("/api/courier/outbox", self._guarded(self.api_courier_outbox))
+        r.add_get("/api/courier/removable", self._guarded(self.api_courier_removable))
+        r.add_get("/api/courier/removable-files", self._guarded(self.api_courier_removable_files))
+        r.add_post("/api/courier/export", self._guarded(self.api_courier_export))
+        r.add_post("/api/courier/export-file", self._guarded(self.api_courier_export_file))
+        r.add_post("/api/courier/copy-to-removable", self._guarded(self.api_courier_copy_to_removable))
+        r.add_post("/api/courier/copy-from-removable", self._guarded(self.api_courier_copy_from_removable))
+        r.add_post("/api/courier/import", self._guarded(self.api_courier_import))
+        r.add_post("/api/courier/import-file", self._guarded(self.api_courier_import_file))
+        r.add_post("/api/courier/assemble", self._guarded(self.api_courier_assemble))
         r.add_get("/api/route-bootstrap", self._guarded(self.api_route_bootstrap))
         r.add_get("/api/route-bootstrap/qr.svg", self._guarded(self.api_route_bootstrap_qr))
         r.add_post("/api/route-bootstrap/import", self._guarded(self.api_import_route_bootstrap))
@@ -2107,12 +2428,14 @@ class UIServer:
         if not summary:
             snap = dict(snap)
             snap["route_candidates"] = route_candidates
+            snap["no_router"] = self._no_router_summary(snap, route_candidates=route_candidates)
             return snap
-        return {
+        summary_snap = {
             "ok": bool(snap.get("ok")),
             "cache_age_s": snap.get("cache_age_s"),
             "route_truth": snap.get("route_truth", {}),
             "route_candidates": route_candidates,
+            "performance": snap.get("performance", {}),
             "score_count": len(snap.get("scores") or []),
             "activation_count": len(snap.get("activation") or []),
             "ready_paths": sum(
@@ -2124,6 +2447,446 @@ class UIServer:
                 if isinstance(p, dict) and p.get("available")
             ),
         }
+        summary_snap["no_router"] = self._no_router_summary(
+            snap,
+            route_candidates=route_candidates,
+        )
+        return summary_snap
+
+    def _no_router_summary(self, snap: dict, *, route_candidates: dict | None = None) -> dict:
+        """Machine-readable local path guidance for the no-router case.
+
+        This keeps the "We are One" promise concrete: when infrastructure is
+        missing, the app can still say whether a cable/local path is ready,
+        whether a route token can be exchanged, and what safe action comes
+        next. It never opens a path and never exposes secrets.
+        """
+
+        route_candidates = route_candidates or self._route_candidate_summary(summary=True)
+        probes = [p for p in (snap.get("probes") or []) if isinstance(p, dict)]
+        scores = [s for s in (snap.get("scores") or []) if isinstance(s, dict)]
+        activation = [a for a in (snap.get("activation") or []) if isinstance(a, dict)]
+        ethernet_ready = any(
+            p.get("kind") == "ethernet" and p.get("available")
+            for p in probes
+        )
+        local_bulk_ready = any(
+            p.get("available") and p.get("bulk_capable") and p.get("kind") in {
+                "ethernet",
+                "lan",
+                "loopback",
+                "private_hotspot",
+                "wifi_direct",
+            }
+            for p in probes
+        )
+        verified_local = [
+            r for r in (route_candidates.get("top") or [])
+            if isinstance(r, dict)
+            and r.get("verified")
+            and str(r.get("route") or "") in {
+                "ethernet",
+                "lan",
+                "peer_server",
+                "wifi_direct",
+                "private_hotspot",
+            }
+        ]
+        pending_local_paths = int(route_candidates.get("pending_local") or 0)
+        failed_local_paths = int(route_candidates.get("failed_local") or 0)
+        token_ready = int(getattr(self.daemon, "_rendezvous_peer_port", 0) or 0) > 0
+        qr_ready = any(
+            p.get("kind") == "qr_control" and p.get("available")
+            for p in probes
+        )
+        if verified_local:
+            state = "trusted_path_ready"
+            next_action = "send"
+            message = "A trusted local path is ready."
+        elif pending_local_paths > 0:
+            state = "checking_path"
+            next_action = "verify_local_endpoint"
+            message = "Checking the local route with a key-confirmed probe."
+        elif failed_local_paths > 0 and token_ready:
+            state = "route_check_failed"
+            next_action = "show_or_import_route_token"
+            message = "That route did not answer. Try the token again after the devices are on the same local path."
+        elif ethernet_ready:
+            state = "cable_ready"
+            next_action = "exchange_route_token"
+            message = "A direct local link is visible."
+        elif local_bulk_ready and token_ready:
+            state = "local_network_ready"
+            next_action = "exchange_route_token"
+            message = "A local path is available."
+        elif token_ready and qr_ready:
+            state = "token_ready"
+            next_action = "show_or_import_route_token"
+            message = "Exchange a route token to create a local path."
+        elif token_ready:
+            state = "waiting_for_local_path"
+            next_action = "connect_cable_or_same_network"
+            message = "Connect the devices locally, then exchange a route token."
+        else:
+            state = "peer_listener_unavailable"
+            next_action = "start_daemon_peer_listener"
+            message = "The local peer listener is not ready yet."
+        steps = self._no_router_steps(
+            token_ready=token_ready,
+            qr_ready=qr_ready,
+            ethernet_ready=ethernet_ready,
+            local_bulk_ready=local_bulk_ready,
+            trusted_local_paths=len(verified_local),
+            pending_local_paths=pending_local_paths,
+            failed_local_paths=failed_local_paths,
+            next_action=next_action,
+        )
+        path_options = self._no_router_path_options(
+            probes=probes,
+            trusted_local_paths=len(verified_local),
+            pending_local_paths=pending_local_paths,
+            failed_local_paths=failed_local_paths,
+            token_ready=token_ready,
+            qr_ready=qr_ready,
+            ethernet_ready=ethernet_ready,
+            local_bulk_ready=local_bulk_ready,
+            next_action=next_action,
+        )
+        operator_guide = self._no_router_operator_guide(
+            state=state,
+            next_action=next_action,
+            steps=steps,
+            path_options=path_options,
+        )
+        creation = self._path_creation_summary_for_probes(probes)
+        return {
+            "state": state,
+            "next_action": next_action,
+            "message": message,
+            "token_ready": token_ready,
+            "qr_ready": qr_ready,
+            "ethernet_ready": ethernet_ready,
+            "local_bulk_ready": local_bulk_ready,
+            "trusted_local_paths": len(verified_local),
+            "pending_local_paths": pending_local_paths,
+            "failed_local_paths": failed_local_paths,
+            "steps": steps,
+            "path_options": path_options,
+            "operator_guide": operator_guide,
+            "creation": creation,
+            "route_token_url": "/api/route-bootstrap" if token_ready else None,
+            "qr_url": "/api/route-bootstrap/qr.svg" if token_ready and qr_ready else None,
+            "import_url": "/api/route-bootstrap/import",
+            "safeguards": [
+                "route tokens carry endpoint hints only",
+                "paired identity must match before endpoint probes run",
+                "promoted endpoints still require a key-confirmed session",
+            ],
+            "top_scores": [
+                {
+                    "route": s.get("route_name"),
+                    "adapter_id": s.get("adapter_id"),
+                    "usable_for_bulk": bool(s.get("usable_for_bulk")),
+                    "reason": s.get("reason"),
+                }
+                for s in scores[:4]
+            ],
+            "activation": [
+                {
+                    "route": a.get("route_name"),
+                    "state": a.get("state"),
+                    "next_action": a.get("next_action"),
+                    "automatic": bool(a.get("automatic")),
+                }
+                for a in activation[:4]
+            ],
+        }
+
+    def _no_router_path_options(
+        self,
+        *,
+        probes: list[dict],
+        trusted_local_paths: int,
+        pending_local_paths: int,
+        failed_local_paths: int,
+        token_ready: bool,
+        qr_ready: bool,
+        ethernet_ready: bool,
+        local_bulk_ready: bool,
+        next_action: str,
+    ) -> list[dict[str, object]]:
+        def probe_for(kind: str) -> dict:
+            return next(
+                (
+                    p for p in probes
+                    if p.get("kind") == kind and bool(p.get("available"))
+                ),
+                {},
+            )
+
+        def option(
+            option_id: str,
+            label: str,
+            *,
+            status: str,
+            next_step: str,
+            reason: str,
+            probe: dict | None = None,
+            priority: int,
+        ) -> dict[str, object]:
+            probe = probe or {}
+            return {
+                "id": option_id,
+                "label": label,
+                "status": status,
+                "next_step": next_step,
+                "reason": reason,
+                "priority": priority,
+                "bulk_capable": bool(probe.get("bulk_capable")),
+                "control_capable": bool(probe.get("control_capable", True)),
+                "requires_user_action": bool(probe.get("requires_user_action")),
+                "requires_admin": bool(probe.get("requires_admin")),
+                "estimated_bps": float(probe.get("estimated_bps") or 0.0),
+            }
+
+        trusted_status = "ready" if trusted_local_paths > 0 else "pending"
+        if pending_local_paths > 0:
+            trusted_status = "current"
+        elif failed_local_paths > 0:
+            trusted_status = "blocked"
+
+        ethernet_probe = probe_for("ethernet")
+        lan_probe = probe_for("lan")
+        hotspot_probe = probe_for("private_hotspot")
+        wifi_direct_probe = probe_for("wifi_direct")
+        qr_probe = probe_for("qr_control")
+
+        options = [
+            option(
+                "trusted_verified_path",
+                "trusted path",
+                status=trusted_status,
+                next_step="send" if trusted_local_paths > 0 else "wait_for_key_confirmed_probe",
+                reason=(
+                    "a verified local endpoint can carry transfers"
+                    if trusted_local_paths > 0 else
+                    "route-token endpoints must pass a key-confirmed probe"
+                ),
+                probe=ethernet_probe or lan_probe,
+                priority=0 if trusted_local_paths > 0 else 30,
+            ),
+            option(
+                "direct_ethernet",
+                "direct cable",
+                status=(
+                    "ready" if ethernet_ready else
+                    "current" if next_action == "connect_cable_or_same_network" else
+                    "pending"
+                ),
+                next_step="exchange_route_token" if token_ready else "start_peer_listener",
+                reason=(
+                    "link-local Ethernet is visible"
+                    if ethernet_ready else
+                    "connect both devices with Ethernet or the same unmanaged switch"
+                ),
+                probe=ethernet_probe,
+                priority=10 if ethernet_ready else 40,
+            ),
+            option(
+                "same_local_network",
+                "same network",
+                status=(
+                    "ready" if local_bulk_ready else
+                    "current" if next_action == "connect_cable_or_same_network" else
+                    "pending"
+                ),
+                next_step="exchange_route_token" if token_ready else "start_peer_listener",
+                reason=(
+                    "a bulk-capable local network path is visible"
+                    if local_bulk_ready else
+                    "put both devices on the same trusted LAN or hotspot"
+                ),
+                probe=lan_probe,
+                priority=20 if local_bulk_ready else 45,
+            ),
+            option(
+                "route_token_exchange",
+                "route token",
+                status=(
+                    "ready" if token_ready and qr_ready else
+                    "current" if token_ready else
+                    "blocked"
+                ),
+                next_step="show_or_import_route_token" if token_ready else "start_peer_listener",
+                reason=(
+                    "QR/token exchange is ready"
+                    if token_ready and qr_ready else
+                    "local peer listener must be ready before tokens can be minted"
+                ),
+                probe=qr_probe,
+                priority=15 if token_ready else 80,
+            ),
+        ]
+        if hotspot_probe:
+            options.append(option(
+                "private_hotspot",
+                "private hotspot",
+                status="current" if not local_bulk_ready else "ready",
+                next_step="open_os_hotspot_then_exchange_token",
+                reason="use the OS hotspot ceremony, then exchange a route token",
+                probe=hotspot_probe,
+                priority=25,
+            ))
+        if wifi_direct_probe:
+            options.append(option(
+                "wifi_direct",
+                "Wi-Fi Direct",
+                status="current" if not local_bulk_ready else "ready",
+                next_step="open_os_wifi_direct_then_exchange_token",
+                reason="use the platform Wi-Fi Direct ceremony, then exchange a route token",
+                probe=wifi_direct_probe,
+                priority=26,
+            ))
+        return sorted(
+            options,
+            key=lambda o: (
+                {"ready": 0, "current": 1, "pending": 2, "blocked": 3}.get(str(o["status"]), 4),
+                int(o["priority"]),
+                str(o["id"]),
+            ),
+        )
+
+    @staticmethod
+    def _no_router_operator_guide(
+        *,
+        state: str,
+        next_action: str,
+        steps: list[dict[str, object]],
+        path_options: list[dict[str, object]],
+    ) -> dict[str, list[dict[str, object]]]:
+        step_status = {str(s.get("id")): str(s.get("status") or "pending") for s in steps}
+        best_path = next(
+            (
+                p for p in path_options
+                if str(p.get("id")) not in {"trusted_verified_path", "route_token_exchange"}
+                and str(p.get("status")) in {"ready", "current"}
+            ),
+            path_options[0] if path_options else {},
+        )
+
+        def guide_step(
+            step_id: str,
+            label: str,
+            detail: str,
+            *,
+            status: str | None = None,
+        ) -> dict[str, object]:
+            return {
+                "id": step_id,
+                "label": label,
+                "detail": detail,
+                "status": status or step_status.get(step_id, "pending"),
+            }
+
+        local_detail = str(best_path.get("reason") or "create or join a local path")
+        token_detail = (
+            "show this device's route token or scan/import the other device's token"
+            if next_action != "start_daemon_peer_listener" else
+            "wait for the local peer listener before minting a route token"
+        )
+        verify_detail = (
+            "probe is checking the endpoint now"
+            if state == "checking_path" else
+            "endpoint must prove the pinned peer key before use"
+        )
+        send_status = "ready" if state == "trusted_path_ready" else "pending"
+        return {
+            "send": [
+                guide_step("connect_cable_or_same_network", "choose path", local_detail),
+                guide_step("show_or_import_route_token", "share token", token_detail),
+                guide_step("verify_local_endpoint", "verify", verify_detail),
+                guide_step("send", "send", "One Link will use the trusted local path automatically", status=send_status),
+            ],
+            "receive": [
+                guide_step("connect_cable_or_same_network", "join path", local_detail),
+                guide_step("show_or_import_route_token", "import token", token_detail),
+                guide_step("verify_local_endpoint", "verify", verify_detail),
+                guide_step("send", "receive", "incoming transfers can arrive over the verified path", status=send_status),
+            ],
+        }
+
+    @staticmethod
+    def _path_creation_summary_for_probes(probes: list[dict]) -> dict[str, object]:
+        try:
+            from one_link.transport_path_creation import (
+                creation_summary,
+                plans_from_probe_dicts,
+            )
+
+            plans = plans_from_probe_dicts(probes)
+            return creation_summary(plans)
+        except Exception as exc:
+            return {
+                "ready": 0,
+                "needs_user": 0,
+                "blocked": 0,
+                "unsupported": 0,
+                "next_action": "path_creation_unavailable",
+                "plans": [],
+                "error": str(exc),
+            }
+
+    def _no_router_steps(
+        self,
+        *,
+        token_ready: bool,
+        qr_ready: bool,
+        ethernet_ready: bool,
+        local_bulk_ready: bool,
+        trusted_local_paths: int,
+        pending_local_paths: int = 0,
+        failed_local_paths: int = 0,
+        next_action: str,
+    ) -> list[dict[str, object]]:
+        def status(step_id: str, ready: bool, *, failed: bool = False) -> str:
+            if ready:
+                return "ready"
+            if failed:
+                return "blocked"
+            if next_action == step_id:
+                return "current"
+            return "pending"
+
+        local_ready = bool(ethernet_ready or local_bulk_ready)
+        token_step_ready = bool(token_ready and qr_ready)
+        verified_ready = int(trusted_local_paths) > 0
+        probe_pending = int(pending_local_paths) > 0
+        probe_failed = int(failed_local_paths) > 0 and not verified_ready
+        return [
+            {
+                "id": "connect_cable_or_same_network",
+                "label": "local link",
+                "status": status("connect_cable_or_same_network", local_ready),
+            },
+            {
+                "id": "show_or_import_route_token",
+                "label": "route token",
+                "status": status("show_or_import_route_token", token_step_ready),
+            },
+            {
+                "id": "verify_local_endpoint",
+                "label": "verified path",
+                "status": (
+                    "current" if probe_pending else
+                    status("verify_local_endpoint", verified_ready, failed=probe_failed)
+                ),
+            },
+            {
+                "id": "send",
+                "label": "send",
+                "status": status("send", verified_ready),
+            },
+        ]
 
     def _route_candidate_summary(self, *, summary: bool) -> dict:
         state = getattr(self.daemon, "state", None)
@@ -2146,6 +2909,26 @@ class UIServer:
                 "top": [],
             }
         verified = [r for r in rows if r.get("verified")]
+        local_route_names = {
+            "ethernet",
+            "lan",
+            "peer_server",
+            "wifi_direct",
+            "private_hotspot",
+        }
+        local_rows = [
+            r for r in rows
+            if str(r.get("route") or "") in local_route_names
+        ]
+        local_verified = [r for r in local_rows if r.get("verified")]
+        pending_local = [
+            r for r in local_rows
+            if not r.get("verified") and int(r.get("failures") or 0) == 0
+        ]
+        failed_local = [
+            r for r in local_rows
+            if not r.get("verified") and int(r.get("failures") or 0) > 0
+        ]
         peers = {str(r.get("peer_fp") or "") for r in rows if r.get("peer_fp")}
         routes = sorted({
             str(r.get("route") or "")
@@ -2175,6 +2958,9 @@ class UIServer:
         return {
             "known": len(rows),
             "verified": len(verified),
+            "local_verified": len(local_verified),
+            "pending_local": len(pending_local),
+            "failed_local": len(failed_local),
             "peers": len(peers),
             "routes": routes,
             "top": top,
@@ -2190,6 +2976,786 @@ class UIServer:
         """
 
         return web.json_response(self._safe_fabric_snapshot())
+
+    async def api_fabric_no_router(self, request: web.Request) -> web.Response:
+        """No-router local path readiness.
+
+        This is the small "just works" surface for generated local paths:
+        cable/link-local readiness, QR route-token readiness, trusted local
+        route count, and the next safe action. It is read-only and token-gated.
+        """
+
+        fabric = self._safe_fabric_snapshot()
+        no_router = fabric.get("no_router") if isinstance(fabric, dict) else None
+        if not isinstance(no_router, dict):
+            no_router = self._no_router_summary(fabric if isinstance(fabric, dict) else {})
+        return web.json_response({
+            "ok": bool(fabric.get("ok")) if isinstance(fabric, dict) else False,
+            **no_router,
+        })
+
+    async def api_fabric_path_create(self, request: web.Request) -> web.Response:
+        """Safety-gated local path creation plans.
+
+        This endpoint is read-only. It does not create a hotspot, start BLE,
+        or mutate network state; it returns the exact platform ceremony a UI
+        or future native helper may offer under the fabric safety contract.
+        """
+
+        fabric = self._safe_fabric_snapshot()
+        probes = [
+            p for p in ((fabric or {}).get("probes") or [])
+            if isinstance(p, dict)
+        ]
+        creation = self._path_creation_summary_for_probes(probes)
+        return web.json_response({
+            "ok": bool(fabric.get("ok")) if isinstance(fabric, dict) else False,
+            "read_only": True,
+            "mode": "safety_gated_path_creation_plan",
+            **creation,
+        })
+
+    async def api_fabric_path_create_launch(self, request: web.Request) -> web.Response:
+        """Launch a user-visible OS ceremony from a path creation plan.
+
+        The launcher is intentionally narrow: no silent network mutation, no
+        credential generation, and no automatic radio toggles. Test and CI
+        runs may set ONE_LINK_DISABLE_PATH_CREATE_LAUNCH=1 to prove the API
+        contract without opening a settings window.
+        """
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        path_id = str(body.get("path_id") or "").strip()
+        if not path_id:
+            return web.json_response({
+                "error": "missing path_id",
+                "hint": "choose one creation plan path_id",
+            }, status=400)
+        fabric = self._safe_fabric_snapshot()
+        probes = [
+            p for p in ((fabric or {}).get("probes") or [])
+            if isinstance(p, dict)
+        ]
+        try:
+            from one_link.transport_path_creation import (
+                launch_creation_plan,
+                plans_from_probe_dicts,
+            )
+
+            plans = plans_from_probe_dicts(probes)
+            dry_run = bool(body.get("dry_run"))
+            disabled = os.environ.get("ONE_LINK_DISABLE_PATH_CREATE_LAUNCH") == "1"
+            result = launch_creation_plan(
+                path_id,
+                plans,
+                dry_run=dry_run or disabled,
+            )
+            if disabled:
+                result["disabled"] = True
+                result["launched"] = False
+            return web.json_response(result)
+        except ValueError as exc:
+            return web.json_response({
+                "error": "path_creation_launch_rejected",
+                "hint": str(exc),
+            }, status=409)
+        except Exception as exc:
+            return web.json_response({
+                "error": "path_creation_launch_failed",
+                "hint": str(exc),
+            }, status=500)
+
+    async def api_fabric_path_create_native(self, request: web.Request) -> web.Response:
+        """Execute a supported native path creation helper.
+
+        This is deliberately stricter than the settings launcher. It requires
+        either dry_run=true or ONE_LINK_ALLOW_NATIVE_PATH_CREATE=1, redacts
+        credentials from every response, and returns structured unsupported
+        evidence for OS surfaces without safe public command APIs.
+        """
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        path_id = str(body.get("path_id") or "").strip()
+        if not path_id:
+            return web.json_response({
+                "error": "missing path_id",
+                "hint": "choose one creation plan path_id",
+            }, status=400)
+        fabric = self._safe_fabric_snapshot()
+        probes = [
+            p for p in ((fabric or {}).get("probes") or [])
+            if isinstance(p, dict)
+        ]
+        try:
+            from one_link.transport_path_creation import (
+                execute_native_creation_plan,
+                native_helpers_from_env,
+                plans_from_probe_dicts,
+            )
+
+            plans = plans_from_probe_dicts(probes)
+            helper_specs = native_helpers_from_env()
+            dry_run = bool(body.get("dry_run"))
+            disabled = os.environ.get("ONE_LINK_DISABLE_NATIVE_PATH_CREATE") == "1"
+            allow_native = (
+                os.environ.get("ONE_LINK_ALLOW_NATIVE_PATH_CREATE") == "1"
+                and not disabled
+            )
+            result = execute_native_creation_plan(
+                path_id,
+                plans,
+                dry_run=dry_run or disabled,
+                allow_native=allow_native,
+                ssid=str(body.get("ssid") or ""),
+                passphrase=str(body.get("passphrase") or ""),
+                helper_specs=helper_specs,
+            )
+            if disabled:
+                result["disabled"] = True
+                result["state"] = "dry_run"
+            status = 200 if bool(result.get("ok")) else 409
+            return web.json_response(result, status=status)
+        except ValueError as exc:
+            return web.json_response({
+                "error": "native_path_creation_rejected",
+                "hint": str(exc),
+            }, status=409)
+        except Exception as exc:
+            return web.json_response({
+                "error": "native_path_creation_failed",
+                "hint": str(exc),
+            }, status=500)
+
+    async def api_fabric_mobile_reach(self, request: web.Request) -> web.Response:
+        """Report phone/native helper readiness for the comms fabric."""
+
+        from one_link.mobile_reach import mobile_storage_budget_from_env, plan_mobile_reach
+
+        peers = self.peer_rtc.list_peers() if getattr(self, "peer_rtc", None) is not None else []
+        try:
+            budget = mobile_storage_budget_from_env()
+        except ValueError as exc:
+            return web.json_response({
+                "ok": False,
+                "error": "invalid_mobile_storage_budget",
+                "message": str(exc),
+            }, status=400)
+        return web.json_response(plan_mobile_reach(peers, storage_budget_bytes=budget))
+
+    async def api_courier_status(self, request: web.Request) -> web.Response:
+        """Readiness for encrypted offline chunk courier bundles."""
+
+        from one_link.courier_bundle import (
+            DEFAULT_MAX_BUNDLE_BYTES,
+            DEFAULT_MAX_CHUNKS,
+            DEFAULT_MAX_PLAINTEXT_BYTES,
+            DEFAULT_TTL_S,
+            MAX_TTL_S,
+        )
+
+        stats = {}
+        if hasattr(self.daemon, "_chunk_cache_stats"):
+            with contextlib.suppress(Exception):
+                stats = self.daemon._chunk_cache_stats()
+        return web.json_response({
+            "ok": True,
+            "enabled": True,
+            "mode": "encrypted_offline_chunk_courier",
+            "key_token_prefix": "OLC1.",
+            "default_ttl_s": DEFAULT_TTL_S,
+            "max_ttl_s": MAX_TTL_S,
+            "max_chunks": DEFAULT_MAX_CHUNKS,
+            "max_plaintext_bytes": DEFAULT_MAX_PLAINTEXT_BYTES,
+            "max_bundle_bytes": DEFAULT_MAX_BUNDLE_BYTES,
+            "chunk_cache": stats,
+            "drop_dir": str(self._courier_drop_dir()),
+            "drop_files": len(self._scan_courier_files()),
+            "outbox_dir": str(self._courier_outbox_dir()),
+            "outbox_files": len(self._scan_courier_outbox()),
+            "monitor": {
+                "active": self._courier_monitor_task is not None and not self._courier_monitor_task.done(),
+                "interval_s": self._courier_monitor_interval_s,
+                "last_scan_ms": self._courier_monitor_last_ms,
+                "events": self._courier_monitor_events,
+                "removable": {
+                    "mode": "native_compatible_inventory_events",
+                    "last_scan_ms": self._removable_monitor_last_ms,
+                    "events": self._removable_monitor_events,
+                },
+            },
+            "ledger": {
+                "seen_bundle_ids": len(self._courier_seen_bundle_ids),
+                "events": len(self._courier_events),
+                "recent": self._courier_events[-8:],
+            },
+            "safeguards": [
+                "bundle bytes are AES-GCM ciphertext until unlocked",
+                "unlock token is never embedded in the courier file",
+                "each imported chunk is BLAKE3-verified before cache admission",
+                "recipient fingerprints are enforced when present",
+                "bundle replay is rejected across daemon restarts",
+            ],
+        })
+
+    async def api_courier_files(self, request: web.Request) -> web.Response:
+        """List encrypted courier files dropped into One Link's courier dir."""
+
+        return web.json_response({
+            "ok": True,
+            "drop_dir": str(self._courier_drop_dir()),
+            "files": self._scan_courier_files(),
+        })
+
+    async def api_courier_outbox(self, request: web.Request) -> web.Response:
+        """List encrypted courier files staged by One Link for removable media."""
+
+        return web.json_response({
+            "ok": True,
+            "outbox_dir": str(self._courier_outbox_dir()),
+            "files": self._scan_courier_outbox(),
+        })
+
+    async def api_courier_removable(self, request: web.Request) -> web.Response:
+        """List removable media targets for courier copy operations."""
+
+        from one_link.removable_media import list_removable_targets, removable_event_source_status
+
+        targets = [t.to_dict() for t in list_removable_targets()]
+        return web.json_response({
+            "ok": True,
+            "targets": targets,
+            "event_source": removable_event_source_status(),
+            "monitor": {
+                "active": self._courier_monitor_task is not None and not self._courier_monitor_task.done(),
+                "last_scan_ms": self._removable_monitor_last_ms,
+                "events": self._removable_monitor_events,
+            },
+        })
+
+    async def api_courier_removable_files(self, request: web.Request) -> web.Response:
+        """List courier bundle files on a selected removable target."""
+
+        from one_link.removable_media import find_removable_target
+
+        target = find_removable_target(str(request.query.get("target_id") or ""))
+        if target is None:
+            return web.json_response({
+                "ok": False,
+                "error": "removable_target_not_found",
+                "message": "That removable target is not available.",
+            }, status=404)
+        return web.json_response({
+            "ok": True,
+            "target_id": target.id,
+            "target_label": target.label,
+            "files": self._scan_removable_courier_files(target.path),
+        })
+
+    async def api_courier_export(self, request: web.Request) -> web.Response:
+        """Export cached CDC chunks into an encrypted offline courier bundle."""
+
+        from one_link.courier_bundle import (
+            CourierBundleError,
+            encode_bundle_b64,
+            export_courier_bundle,
+        )
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Expected JSON with a chunks array.",
+            }, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Courier export expects a JSON object.",
+            }, status=400)
+        raw_chunks = data.get("chunks")
+        export_blob_hash = str(data.get("blob_hash") or "").strip().lower()
+        export_name = str(data.get("name") or "").strip() or None
+        if (not isinstance(raw_chunks, list) or not raw_chunks) and self.daemon.state is not None:
+            blob_hash = export_blob_hash
+            transfer_id = str(data.get("transfer_id") or "").strip()
+            if transfer_id:
+                rec = self.daemon.state.get_transfer(transfer_id)
+                if rec is not None:
+                    blob_hash = str(rec.blob_hash or "").strip().lower()
+                    export_name = rec.name or export_name
+            if blob_hash and getattr(self.daemon, "_valid_blob_hex")(blob_hash):
+                export_blob_hash = blob_hash
+                raw_chunks = [
+                    str(c.get("chunk_hash") or "")
+                    for c in self.daemon.state.list_chunks_for_blob(blob_hash)
+                ]
+        if not isinstance(raw_chunks, list) or not raw_chunks:
+            return web.json_response({
+                "ok": False,
+                "error": "missing_chunks",
+                "message": "Choose a cached transfer or at least one cached chunk to courier.",
+            }, status=400)
+        chunks: list[tuple[str, bytes]] = []
+        missing: list[str] = []
+        for raw_hash in raw_chunks:
+            h = str(raw_hash or "").strip().lower()
+            if not getattr(self.daemon, "_valid_blob_hex")(h):
+                return web.json_response({
+                    "ok": False,
+                    "error": "invalid_chunk_hash",
+                    "message": "Courier export received a malformed chunk hash.",
+                }, status=400)
+            data_bytes = self.daemon._read_chunk_cache(h)
+            if data_bytes is None:
+                missing.append(h)
+            else:
+                chunks.append((h, data_bytes))
+        if missing:
+            return web.json_response({
+                "ok": False,
+                "error": "missing_cached_chunks",
+                "message": "One Link has not cached every requested chunk yet.",
+                "missing": missing[:64],
+                "missing_count": len(missing),
+            }, status=409)
+        try:
+            ttl_s = int(data.get("ttl_s") or 24 * 60 * 60)
+        except (TypeError, ValueError, OverflowError):
+            ttl_s = 24 * 60 * 60
+        try:
+            export = export_courier_bundle(
+                chunks,
+                sender_fp=self.daemon.me.fingerprint,
+                recipient_fp=data.get("recipient_fp") or None,
+                blob_hash=export_blob_hash if export_blob_hash else None,
+                name=export_name,
+                ttl_s=ttl_s,
+            )
+        except CourierBundleError as exc:
+            return web.json_response({
+                "ok": False,
+                "error": "courier_export_rejected",
+                "message": str(exc),
+            }, status=400)
+        except Exception as exc:
+            return web.json_response({
+                "ok": False,
+                "error": "courier_export_failed",
+                "message": str(exc),
+            }, status=500)
+        with contextlib.suppress(Exception):
+            self._record_courier_event(
+                "export",
+                dict(export.manifest),
+                bundle_bytes=len(export.bundle),
+            )
+        return web.json_response({
+            "ok": True,
+            "bundle_b64": encode_bundle_b64(export.bundle),
+            "key_token": export.key_token,
+            "manifest": export.manifest,
+            "bundle_bytes": len(export.bundle),
+            "chunk_count": export.manifest.get("chunk_count"),
+            "total_bytes": export.manifest.get("total_bytes"),
+        })
+
+    async def api_courier_export_file(self, request: web.Request) -> web.Response:
+        """Stage an encrypted courier bundle into the local courier outbox."""
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Expected JSON with export options.",
+            }, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Courier export-file expects a JSON object.",
+            }, status=400)
+        class _MemoryRequest:
+            async def json(self_nonlocal):
+                return data
+        response = await self.api_courier_export(_MemoryRequest())  # type: ignore[arg-type]
+        if response.status != 200:
+            return response
+        try:
+            payload = json.loads(response.text or "{}")
+            bundle_b64 = str(payload["bundle_b64"])
+            manifest = payload.get("manifest") if isinstance(payload.get("manifest"), dict) else {}
+        except Exception as exc:
+            return web.json_response({
+                "ok": False,
+                "error": "courier_export_file_failed",
+                "message": str(exc),
+            }, status=500)
+        bundle_id = str(manifest.get("bundle_id") or secrets.token_hex(16))
+        name = self.daemon._safe_transfer_name(manifest.get("name") or f"{bundle_id}.olcb.json")
+        if not name.lower().endswith(".olcb.json"):
+            name = f"{Path(name).stem or bundle_id}.olcb.json"
+        out_dir = self._courier_outbox_dir()
+        out_path = (out_dir / name).resolve()
+        if out_path.parent != out_dir.resolve():
+            out_path = out_dir / f"{bundle_id}.olcb.json"
+        if out_path.exists():
+            out_path = out_dir / f"{Path(out_path.name).stem}.{bundle_id[:8]}.olcb.json"
+        body = json.dumps({
+            "type": "one-link-courier-bundle",
+            "version": 1,
+            "bundle_b64": bundle_b64,
+            "manifest": manifest,
+        }, ensure_ascii=False, indent=2)
+        tmp = out_path.with_name(f".{out_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, out_path)
+        return web.json_response({
+            "ok": True,
+            "path": str(out_path),
+            "name": out_path.name,
+            "outbox_dir": str(out_dir),
+            "key_token": payload.get("key_token"),
+            "manifest": manifest,
+            "bundle_bytes": payload.get("bundle_bytes"),
+        })
+
+    async def api_courier_copy_to_removable(self, request: web.Request) -> web.Response:
+        """Copy a staged courier outbox file to a selected removable target."""
+
+        import shutil
+        from one_link.removable_media import find_removable_target
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Expected JSON with file_id and target_id.",
+            }, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Courier removable copy expects a JSON object.",
+            }, status=400)
+        src = self._resolve_courier_outbox_file_id(str(data.get("file_id") or ""))
+        if src is None:
+            return web.json_response({
+                "ok": False,
+                "error": "courier_outbox_file_not_found",
+                "message": "That staged courier file is not in the outbox anymore.",
+            }, status=404)
+        target = find_removable_target(str(data.get("target_id") or ""))
+        if target is None:
+            return web.json_response({
+                "ok": False,
+                "error": "removable_target_not_found",
+                "message": "That removable target is not available.",
+            }, status=404)
+        try:
+            dest_root = (target.path / "One Link Courier").resolve()
+            target_root = target.path.resolve()
+            if target_root not in {dest_root, *dest_root.parents}:
+                return web.json_response({
+                    "ok": False,
+                    "error": "removable_target_rejected",
+                    "message": "Courier target resolved outside the removable drive.",
+                }, status=400)
+            dest_root.mkdir(parents=True, exist_ok=True)
+            dest = (dest_root / src.name).resolve()
+            if dest.parent != dest_root:
+                raise ValueError("destination escaped courier folder")
+            if dest.exists():
+                dest = dest_root / f"{src.stem}.{secrets.token_hex(4)}{src.suffix}"
+            tmp = dest.with_name(f".{dest.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dest)
+        except Exception as exc:
+            return web.json_response({
+                "ok": False,
+                "error": "courier_removable_copy_failed",
+                "message": str(exc),
+            }, status=500)
+        return web.json_response({
+            "ok": True,
+            "path": str(dest),
+            "name": dest.name,
+            "target_id": target.id,
+            "target_label": target.label,
+            "bytes": int(dest.stat().st_size),
+        })
+
+    async def api_courier_copy_from_removable(self, request: web.Request) -> web.Response:
+        """Copy a courier bundle from removable media into the local drop folder."""
+
+        import shutil
+        from one_link.removable_media import find_removable_target
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Expected JSON with target_id and file_id.",
+            }, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Courier removable copy expects a JSON object.",
+            }, status=400)
+        target = find_removable_target(str(data.get("target_id") or ""))
+        if target is None:
+            return web.json_response({
+                "ok": False,
+                "error": "removable_target_not_found",
+                "message": "That removable target is not available.",
+            }, status=404)
+        src = self._resolve_removable_courier_file_id(target.path, str(data.get("file_id") or ""))
+        if src is None:
+            return web.json_response({
+                "ok": False,
+                "error": "removable_courier_file_not_found",
+                "message": "That courier file is not available on the removable target.",
+            }, status=404)
+        try:
+            drop = self._courier_drop_dir().resolve()
+            dest = (drop / src.name).resolve()
+            if dest.parent != drop:
+                raise ValueError("destination escaped courier drop folder")
+            if dest.exists():
+                dest = drop / f"{src.stem}.{secrets.token_hex(4)}{src.suffix}"
+            tmp = dest.with_name(f".{dest.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dest)
+            self._courier_monitor_tick(broadcast=True)
+        except Exception as exc:
+            return web.json_response({
+                "ok": False,
+                "error": "courier_removable_copy_failed",
+                "message": str(exc),
+            }, status=500)
+        return web.json_response({
+            "ok": True,
+            "path": str(dest),
+            "name": dest.name,
+            "target_id": target.id,
+            "target_label": target.label,
+            "bytes": int(dest.stat().st_size),
+        })
+
+    async def api_courier_import(self, request: web.Request) -> web.Response:
+        """Import an encrypted offline courier bundle into the chunk cache."""
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Expected JSON with bundle_b64 and key_token.",
+            }, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Courier import expects a JSON object.",
+            }, status=400)
+        return self._import_courier_payload(data)
+
+    def _import_courier_payload(self, data: dict) -> web.Response:
+        from one_link.courier_bundle import (
+            CourierBundleError,
+            decode_bundle_b64,
+            import_courier_bundle,
+        )
+
+        bundle_text = data.get("bundle_b64") or data.get("bundle")
+        key_token = str(data.get("key_token") or "").strip()
+        if not bundle_text or not key_token:
+            return web.json_response({
+                "ok": False,
+                "error": "missing_courier_fields",
+                "message": "Courier import needs both the encrypted bundle and its unlock token.",
+            }, status=400)
+        expected_recipient = data.get("expected_recipient_fp")
+        if expected_recipient is None and data.get("enforce_recipient", True):
+            expected_recipient = self.daemon.me.fingerprint
+        try:
+            bundle = decode_bundle_b64(str(bundle_text))
+            imported = import_courier_bundle(
+                bundle,
+                key_token,
+                expected_recipient_fp=expected_recipient,
+            )
+            bundle_id = str(imported.manifest.get("bundle_id") or "").strip().lower()
+            if bundle_id in self._courier_seen_bundle_ids:
+                raise CourierBundleError("courier bundle was already imported")
+            stored = 0
+            import_blob_hash = imported.manifest.get("blob_hash")
+            for chunk_hash, chunk_data in imported.chunks:
+                self.daemon._store_chunk_cache(
+                    chunk_hash,
+                    chunk_data,
+                    blob_hash=import_blob_hash if isinstance(import_blob_hash, str) else None,
+                    chunk_index=stored if isinstance(import_blob_hash, str) else None,
+                )
+                stored += 1
+            self._mark_courier_imported(dict(imported.manifest))
+            self._record_courier_event(
+                "import",
+                dict(imported.manifest),
+                bundle_bytes=len(bundle),
+                stored_chunks=stored,
+            )
+        except CourierBundleError as exc:
+            return web.json_response({
+                "ok": False,
+                "error": "courier_import_rejected",
+                "message": str(exc),
+            }, status=400)
+        except Exception as exc:
+            return web.json_response({
+                "ok": False,
+                "error": "courier_import_failed",
+                "message": str(exc),
+            }, status=500)
+        return web.json_response({
+            "ok": True,
+            "manifest": imported.manifest,
+            "stored_chunks": stored,
+            "chunk_count": imported.manifest.get("chunk_count"),
+            "total_bytes": imported.manifest.get("total_bytes"),
+        })
+
+    async def api_courier_import_file(self, request: web.Request) -> web.Response:
+        """Import a courier bundle from the local courier drop directory."""
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Expected JSON with file_id and key_token.",
+            }, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Courier file import expects a JSON object.",
+            }, status=400)
+        path = self._resolve_courier_file_id(str(data.get("file_id") or ""))
+        if path is None:
+            return web.json_response({
+                "ok": False,
+                "error": "courier_file_not_found",
+                "message": "That courier file is not in the drop folder anymore.",
+            }, status=404)
+        try:
+            if path.stat().st_size > COURIER_FILE_MAX_BYTES:
+                raise ValueError("courier file exceeds the size limit")
+            bundle_b64 = self._extract_courier_bundle_text(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            return web.json_response({
+                "ok": False,
+                "error": "courier_file_unreadable",
+                "message": str(exc),
+            }, status=400)
+        return self._import_courier_payload({
+            "bundle_b64": bundle_b64,
+            "key_token": data.get("key_token"),
+            "expected_recipient_fp": data.get("expected_recipient_fp"),
+            "enforce_recipient": data.get("enforce_recipient", True),
+        })
+
+    async def api_courier_assemble(self, request: web.Request) -> web.Response:
+        """Assemble a fully cached courier-imported blob into the inbox."""
+
+        try:
+            import blake3
+            data = await request.json()
+        except Exception:
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Expected JSON with a blob_hash field.",
+            }, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({
+                "ok": False,
+                "error": "bad_json",
+                "message": "Courier assemble expects a JSON object.",
+            }, status=400)
+        blob_hash = str(data.get("blob_hash") or "").strip().lower()
+        if not getattr(self.daemon, "_valid_blob_hex")(blob_hash):
+            return web.json_response({
+                "ok": False,
+                "error": "invalid_blob_hash",
+                "message": "Courier assemble received a malformed blob hash.",
+            }, status=400)
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return web.json_response({
+                "ok": False,
+                "error": "state_unavailable",
+                "message": "Chunk index is not available yet.",
+            }, status=503)
+        rows = state.list_chunks_for_blob(blob_hash)
+        if not rows:
+            return web.json_response({
+                "ok": False,
+                "error": "missing_chunk_index",
+                "message": "No chunk index is known for this courier blob.",
+            }, status=404)
+        missing: list[str] = []
+        parts: list[bytes] = []
+        for row in rows:
+            chunk_hash = str(row.get("chunk_hash") or "").strip().lower()
+            chunk_data = self.daemon._read_chunk_cache(chunk_hash)
+            if chunk_data is None:
+                missing.append(chunk_hash)
+            else:
+                parts.append(chunk_data)
+        if missing:
+            return web.json_response({
+                "ok": False,
+                "error": "missing_cached_chunks",
+                "message": "Courier import has not received every chunk for this file yet.",
+                "missing_count": len(missing),
+                "missing": missing[:64],
+            }, status=409)
+        assembled = b"".join(parts)
+        if blake3.blake3(assembled).hexdigest() != blob_hash:
+            return web.json_response({
+                "ok": False,
+                "error": "blob_hash_mismatch",
+                "message": "Cached chunks do not assemble to the expected file hash.",
+            }, status=409)
+        name = self.daemon._safe_transfer_name(data.get("name") or f"{blob_hash[:12]}.bin")
+        out_path = self.daemon._unique_inbox_path(blob_hash, name)
+        with open(out_path, "xb") as fh:
+            fh.write(assembled)
+        return web.json_response({
+            "ok": True,
+            "path": str(out_path),
+            "name": out_path.name,
+            "blob_hash": blob_hash,
+            "bytes": len(assembled),
+            "chunks": len(rows),
+        })
 
     async def api_route_bootstrap(self, request: web.Request) -> web.Response:
         """Mint a signed route-bootstrap token for QR/audio/BLE paths.
@@ -2240,6 +3806,7 @@ class UIServer:
             rendezvous_client.discover_local_endpoints(
                 peer_port=peer_port,
                 include_loopback=include_loopback,
+                include_link_local=True,
             ),
             start=1,
         ):
@@ -3481,7 +5048,7 @@ class UIServer:
             return web.json_response({"error": f"bad json: {e}"}, status=400)
         cap = data.get("cap") or data.get("capability")
         note = data.get("note") if isinstance(data.get("note"), str) else None
-        from one_link.capabilities import LOCAL_CAPABILITIES, normalize_caps
+        from one_link.capabilities import LOCAL_CAPABILITIES
         if not isinstance(cap, str) or cap not in LOCAL_CAPABILITIES:
             return web.json_response(
                 {"error": f"unknown capability: {cap!r}"}, status=400
@@ -5858,7 +7425,7 @@ class UIServer:
                     upload_path,
                     transfer_id=durable_transfer_id,
                 )
-            except (RuntimeError, OSError) as first_err:
+            except Exception as first_err:
                 transfer_id_attr = getattr(first_err, "transfer_id", None)
                 if transfer_id_attr:
                     keep_upload_for_resume = True
@@ -5872,6 +7439,16 @@ class UIServer:
                         },
                         status=202,
                     )
+                translated_first = _translate_send_error(first_err)
+                retryable_codes = {
+                    "wire_version_mismatch",
+                    "secure_session_desync",
+                    "handshake_failed",
+                    "send_timeout",
+                    "network_unavailable",
+                }
+                if str(translated_first.get("code") or "") not in retryable_codes:
+                    raise first_err
                 log.warning(
                     "send_file first attempt failed (%s) - retrying with "
                     "fresh resolve", first_err,
@@ -6743,6 +8320,7 @@ class UIServer:
         self.https_port = None
         self.https_cert_fp_sha256 = None
         await self._start_https_listener(bind_host)
+        self._courier_monitor_task = asyncio.create_task(self._courier_monitor_loop())
 
         return self.port
 
@@ -6797,6 +8375,11 @@ class UIServer:
         )
 
     async def stop(self) -> None:
+        if self._courier_monitor_task is not None:
+            self._courier_monitor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._courier_monitor_task
+            self._courier_monitor_task = None
         for ws in list(self._ws_clients):
             try:
                 await ws.close()

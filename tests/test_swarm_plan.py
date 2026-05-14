@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import random
+import time
 from pathlib import Path
 
 from one_link.swarm_plan import plan_swarm_sources, source_from_hashes, source_index_from_claims
-from one_link.transfer_intent import build_file_manifest
+from one_link.transfer_intent import FileChunkManifest, FileManifest, build_file_manifest
 
 
 def _manifest(tmp_path: Path):
@@ -189,3 +190,52 @@ def test_swarm_plan_uses_coherence_after_trust(tmp_path: Path):
     )
 
     assert plan.assignments[0].source_peer_fp == "bb" * 32
+
+
+def test_swarm_plan_handles_large_sparse_claims_quickly(tmp_path: Path):
+    chunks = [
+        FileChunkManifest(
+            index=i,
+            start=i * 2048,
+            end=(i + 1) * 2048,
+            size=2048,
+            hash=f"{i:064x}",
+        )
+        for i in range(4096)
+    ]
+    manifest = FileManifest(
+        name="large-sparse.bin",
+        size=sum(c.size for c in chunks),
+        blob_hash="f" * 64,
+        chunks=tuple(chunks),
+    )
+    sources = []
+    for source_idx in range(16):
+        owned = [
+            chunk.hash for chunk in chunks
+            if chunk.index % 16 == source_idx or chunk.index % 97 == source_idx
+        ]
+        sources.append(
+            source_from_hashes(
+                f"{source_idx:064x}",
+                owned,
+                trust_score=1.0,
+                latency_ms=2.0 + source_idx,
+                bandwidth_bps=900_000_000 - source_idx * 10_000_000,
+                reliability=0.99,
+            )
+        )
+
+    start = time.perf_counter()
+    plan = plan_swarm_sources(
+        manifest=manifest,
+        needed_indexes=[chunk.index for chunk in chunks],
+        sources=sources,
+    )
+    elapsed = time.perf_counter() - start
+
+    assert plan.complete
+    assert len(plan.assignments) == manifest.chunk_count
+    assert sum(plan.per_source_counts().values()) == manifest.chunk_count
+    assert len(plan.sources) > 8
+    assert elapsed < 1.0

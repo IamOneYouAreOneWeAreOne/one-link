@@ -7,6 +7,7 @@ produces deterministic route truth that the daemon can opt into.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 
@@ -23,6 +24,7 @@ from .transport_activation import (
     activation_plans_for,
 )
 from .transport_adapters.base import AdapterProbe, RouteScore, TransportAdapter
+from .transport_adapters.onefield import onefield_adapters_from_paths
 from .transport_adapters.route_memory import adapters_from_route_candidates
 from .transport_adapters.static import adapters_from_paths, score_probe
 
@@ -34,6 +36,7 @@ class FabricPlan:
     activation: tuple[ActivationPlan, ...]
     observations: tuple[TransferRouteObservation, ...]
     transfer_decision: TransferBrainDecision
+    timing_ms: Mapping[str, object] | None = None
 
     @property
     def best_score(self) -> RouteScore | None:
@@ -82,6 +85,7 @@ class FabricPlan:
                 for o in self.observations
             ],
             "route_truth": self.route_truth(),
+            "performance": dict(self.timing_ms or {}),
         }
 
 
@@ -94,7 +98,7 @@ class UniversalCommsFabric:
     @classmethod
     def from_inventory(cls, inventory: HardwareInventory | None = None) -> "UniversalCommsFabric":
         inventory = inventory or collect_hardware_inventory()
-        return cls(adapters_from_paths(inventory.paths))
+        return cls(_adapters_from_inventory_paths(inventory.paths))
 
     @classmethod
     def from_inventory_and_candidates(
@@ -104,7 +108,7 @@ class UniversalCommsFabric:
     ) -> "UniversalCommsFabric":
         inventory = inventory or collect_hardware_inventory()
         remembered = adapters_from_route_candidates(tuple(candidates or ()))
-        return cls((*adapters_from_paths(inventory.paths), *remembered))
+        return cls((*_adapters_from_inventory_paths(inventory.paths), *remembered))
 
     def probes(self) -> tuple[AdapterProbe, ...]:
         out: list[AdapterProbe] = []
@@ -127,14 +131,23 @@ class UniversalCommsFabric:
         *,
         intent: object | None = None,
         peer: object | None = None,
+        probes: Iterable[AdapterProbe] | None = None,
     ) -> tuple[RouteScore, ...]:
         scored: list[RouteScore] = []
+        probes_by_id = {p.adapter_id: p for p in tuple(probes or ())}
         for adapter in self._adapters:
             try:
-                scored.append(adapter.score(intent=intent, peer=peer))
+                adapter_id = str(getattr(adapter, "adapter_id", ""))
+                probe = probes_by_id.get(adapter_id)
+                score_from_probe = getattr(adapter, "score_from_probe", None)
+                if probe is not None and callable(score_from_probe):
+                    scored.append(score_from_probe(probe, intent=intent, peer=peer))
+                else:
+                    scored.append(adapter.score(intent=intent, peer=peer))
             except Exception:
                 try:
-                    scored.append(score_probe(adapter.probe(), intent=intent, peer=peer))
+                    probe = probes_by_id.get(str(getattr(adapter, "adapter_id", ""))) or adapter.probe()
+                    scored.append(score_probe(probe, intent=intent, peer=peer))
                 except Exception as exc:
                     adapter_id = getattr(adapter, "adapter_id", adapter.__class__.__name__)
                     kind = getattr(adapter, "kind", "unknown")
@@ -171,15 +184,20 @@ class UniversalCommsFabric:
         intent: object | None = None,
         peer: object | None = None,
     ) -> FabricPlan:
+        t0 = time.perf_counter_ns()
         probes = self.probes()
-        scores = self.scores(intent=intent, peer=peer)
+        t_probes = time.perf_counter_ns()
+        scores = self.scores(intent=intent, peer=peer, probes=probes)
+        t_scores = time.perf_counter_ns()
         activation = activation_plans_for(
             scores,
             probes,
             intent=activation_intent,
             peer=peer,
         )
+        t_activation = time.perf_counter_ns()
         observations = observations_from_scores(scores)
+        t_observations = time.perf_counter_ns()
         live_bulk_routes = tuple(dict.fromkeys(
             s.route_name
             for s in scores
@@ -197,12 +215,24 @@ class UniversalCommsFabric:
             mesh_nodes=mesh_nodes,
             speeds=speeds,
         )
+        t_decision = time.perf_counter_ns()
+        timing_ms = {
+            "adapter_count": float(len(self._adapters)),
+            "probe_ms": _elapsed_ms(t0, t_probes),
+            "score_ms": _elapsed_ms(t_probes, t_scores),
+            "activation_ms": _elapsed_ms(t_scores, t_activation),
+            "observation_ms": _elapsed_ms(t_activation, t_observations),
+            "decision_ms": _elapsed_ms(t_observations, t_decision),
+            "total_ms": _elapsed_ms(t0, t_decision),
+        }
+        timing_ms["health"] = _timing_health(timing_ms["total_ms"], len(self._adapters))
         return FabricPlan(
             probes=probes,
             scores=scores,
             activation=activation,
             observations=observations,
             transfer_decision=decision,
+            timing_ms=timing_ms,
         )
 
 
@@ -233,6 +263,12 @@ def observations_from_scores(scores: Iterable[RouteScore]) -> tuple[TransferRout
     return tuple(out)
 
 
+def _adapters_from_inventory_paths(paths: tuple | list) -> tuple[TransportAdapter, ...]:
+    static_paths = tuple(p for p in paths if getattr(p, "kind", "") != "onefield")
+    onefield = onefield_adapters_from_paths(paths)
+    return (*adapters_from_paths(static_paths), *onefield)
+
+
 def _user_route_kind(score: RouteScore | None) -> str:
     if score is None:
         return "Waiting for device"
@@ -259,3 +295,19 @@ def _state_from_decision(decision: Mapping[str, object]) -> str:
     if action == "collect_more_route_evidence":
         return "Measuring route"
     return "Ready"
+
+
+def _elapsed_ms(start_ns: int, end_ns: int) -> float:
+    return round(max(0, end_ns - start_ns) / 1_000_000.0, 3)
+
+
+def _timing_health(total_ms: float, adapter_count: int) -> str:
+    # A route brain that scans hundreds of candidates should still feel
+    # instant. Scale the budget gently with adapter count so large trusted
+    # meshes are judged fairly without hiding pathological slowness.
+    budget_ms = 8.0 + min(92.0, max(0, adapter_count) * 0.18)
+    if total_ms <= budget_ms:
+        return "fast"
+    if total_ms <= budget_ms * 2.5:
+        return "warm"
+    return "slow"

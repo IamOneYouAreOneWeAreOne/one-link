@@ -103,7 +103,7 @@ from one_link.paths import (
     inbox_dir,
 )
 from one_link.state import State
-from one_link.swarm_plan import plan_swarm_sources, source_from_hashes
+from one_link.swarm_plan import ChunkSource, plan_swarm_sources, source_from_hashes
 from one_link.transfer_brain import (
     AdaptiveTransferScheduler,
     MeshNodeSignal,
@@ -211,6 +211,9 @@ TRANSFER_RETRY_MAX_S = 5 * 60.0
 SWARM_ASSIST_DEADLINE_S = 2.0
 SWARM_QUERY_BATCH_HASHES = 2048
 SWARM_QUERY_MAX_HASHES = 262_144
+SWARM_PULL_MAX_CONCURRENCY = 16
+SWARM_PULL_MIN_DEADLINE_S = 1.5
+SWARM_PULL_MAX_DEADLINE_S = 8.0
 PRIOR_ASSIST_MAX_FILES = 96
 PRIOR_ASSIST_MAX_SCAN_BYTES = 2 * 1024 * 1024 * 1024
 PRIOR_ASSIST_MAX_MATCHES_PER_SCAN = 4096
@@ -1075,6 +1078,8 @@ class Daemon:
         # fresh encrypted handshake at that address proves the expected
         # peer fingerprint. Tracks background verification tasks.
         self._endpoint_verify_tasks: set[asyncio.Task] = set()
+        self._endpoint_verify_sem = asyncio.Semaphore(8)
+        self._endpoint_announcement_signature: tuple[str, ...] = ()
         # Route-bootstrap replay defense. QR/audio/BLE tokens are short-lived,
         # signed route hints, but they can be photographed or retransmitted.
         # Keep an in-memory issuer+nonce cache for the token TTL so a captured
@@ -3716,6 +3721,7 @@ class Daemon:
                 "scores": [s.to_dict() for s in plan.scores],
                 "activation": [a.to_dict() for a in plan.activation],
                 "probes": [p.to_dict() for p in plan.probes],
+                "performance": dict(plan.timing_ms or {}),
             }
         except Exception as exc:
             snapshot = {
@@ -3730,6 +3736,7 @@ class Daemon:
                 "scores": [],
                 "activation": [],
                 "probes": [],
+                "performance": {},
             }
         self._fabric_snapshot_cache = dict(snapshot)
         self._fabric_snapshot_cache_ts = now
@@ -3854,30 +3861,53 @@ class Daemon:
         if peer_fp and not self._capability_allowed(peer_fp, FILES):
             raise RuntimeError(f"files capability disabled for peer {peer.short_id}")
         clean = [h for h in hashes[:2048] if self._valid_blob_hex(str(h))]
-        sess = await self._get_outbound_session(peer)
-        async with sess.lock:
-            q = make_msg("CHUNK_QUERY", self.me.short_id, hashes=clean)
-            # Phase A2: routed through PeerTransport facade (CHUNK_QUERY
-            # is the third message-type migration after PING + send_to).
-            await self._send_via_transport(
-                sess.peer_fp, sess.channel, encode_msg(q)
-            )
-            while True:
-                reply = await self._recv_chunk_protocol_reply(
-                    sess=sess,
-                    request_id=str(q.get("id")),
-                    expected_types={"CHUNK_HAVE"},
-                    timeout_s=FILE_ACK_DEADLINE_S,
+        last_error: BaseException | None = None
+        for attempt in range(2):
+            sess = await self._get_outbound_session(peer)
+            try:
+                async with sess.lock:
+                    q = make_msg("CHUNK_QUERY", self.me.short_id, hashes=clean)
+                    # Phase A2: routed through PeerTransport facade (CHUNK_QUERY
+                    # is the third message-type migration after PING + send_to).
+                    await self._send_via_transport(
+                        sess.peer_fp, sess.channel, encode_msg(q)
+                    )
+                    while True:
+                        reply = await self._recv_chunk_protocol_reply(
+                            sess=sess,
+                            request_id=str(q.get("id")),
+                            expected_types={"CHUNK_HAVE"},
+                            timeout_s=FILE_ACK_DEADLINE_S,
+                        )
+                        have = [
+                            str(h) for h in (reply.get("hashes") or [])
+                            if self._valid_blob_hex(str(h))
+                        ]
+                        self._record_route_observation(
+                            sess.peer_fp,
+                            route=sess.regime,
+                            ok=not bool(reply.get("rejected")),
+                        )
+                        return {
+                            "ok": not reply.get("rejected"),
+                            "hashes": have,
+                            "rejected": reply.get("rejected"),
+                        }
+            except Exception as exc:
+                last_error = exc
+                if not _is_transient_send_error(exc) or attempt >= 1:
+                    raise
+                self._record_route_observation(
+                    sess.peer_fp,
+                    route=sess.regime,
+                    ok=False,
+                    error_code=type(exc).__name__,
                 )
-                have = [
-                    str(h) for h in (reply.get("hashes") or [])
-                    if self._valid_blob_hex(str(h))
-                ]
-                return {
-                    "ok": not reply.get("rejected"),
-                    "hashes": have,
-                    "rejected": reply.get("rejected"),
-                }
+                await self._drop_outbound_session(sess.peer_fp)
+                continue
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("chunk query failed without an error")
 
     async def pull_peer_chunk(self, peer: Peer, chunk_hash: str) -> dict:
         block = self._check_outbound_trust(peer)
@@ -3888,38 +3918,74 @@ class Daemon:
             raise RuntimeError(f"files capability disabled for peer {peer.short_id}")
         if not self._valid_blob_hex(str(chunk_hash)):
             raise RuntimeError("bad chunk hash")
-        sess = await self._get_outbound_session(peer)
-        async with sess.lock:
-            q = make_msg("CHUNK_PULL", self.me.short_id, hash=str(chunk_hash))
-            # Phase A2: routed through PeerTransport facade.
-            await self._send_via_transport(
-                sess.peer_fp, sess.channel, encode_msg(q)
-            )
-            while True:
-                reply = await self._recv_chunk_protocol_reply(
-                    sess=sess,
-                    request_id=str(q.get("id")),
-                    expected_types={"CHUNK_DATA"},
-                    timeout_s=FILE_ACK_DEADLINE_S,
-                    accept_rejected_ack=True,
+        last_error: BaseException | None = None
+        for attempt in range(2):
+            sess = await self._get_outbound_session(peer)
+            try:
+                async with sess.lock:
+                    q = make_msg("CHUNK_PULL", self.me.short_id, hash=str(chunk_hash))
+                    # Phase A2: routed through PeerTransport facade.
+                    await self._send_via_transport(
+                        sess.peer_fp, sess.channel, encode_msg(q)
+                    )
+                    while True:
+                        reply = await self._recv_chunk_protocol_reply(
+                            sess=sess,
+                            request_id=str(q.get("id")),
+                            expected_types={"CHUNK_DATA"},
+                            timeout_s=FILE_ACK_DEADLINE_S,
+                            accept_rejected_ack=True,
+                        )
+                        if reply.get("t") == "ACK" and reply.get("rejected"):
+                            self._record_route_observation(
+                                sess.peer_fp,
+                                route=sess.regime,
+                                ok=False,
+                                error_code=str(reply.get("rejected")),
+                            )
+                            return {"ok": False, "rejected": reply.get("rejected")}
+                        data = base64.b64decode(reply.get("data", ""), validate=True)
+                        data = self._decode_payload(
+                            str(reply.get("enc", "raw")),
+                            data,
+                            max_bytes=CDC_MAX_CHUNK_BYTES + 64,
+                        )
+                        if blake3.blake3(data).hexdigest() != chunk_hash:
+                            self._record_route_observation(
+                                sess.peer_fp,
+                                route=sess.regime,
+                                ok=False,
+                                error_code="chunk_integrity_failure",
+                            )
+                            raise RuntimeError("CHUNK_DATA integrity failure")
+                        self._store_chunk_cache(chunk_hash, data)
+                        self._record_route_observation(
+                            sess.peer_fp,
+                            route=sess.regime,
+                            ok=True,
+                            bandwidth_bps=max(1.0, float(len(data) * 8)),
+                        )
+                        return {
+                            "ok": True,
+                            "hash": chunk_hash,
+                            "size": len(data),
+                            "wire_size": int(reply.get("wire_size") or len(data)),
+                        }
+            except Exception as exc:
+                last_error = exc
+                if not _is_transient_send_error(exc) or attempt >= 1:
+                    raise
+                self._record_route_observation(
+                    sess.peer_fp,
+                    route=sess.regime,
+                    ok=False,
+                    error_code=type(exc).__name__,
                 )
-                if reply.get("t") == "ACK" and reply.get("rejected"):
-                    return {"ok": False, "rejected": reply.get("rejected")}
-                data = base64.b64decode(reply.get("data", ""), validate=True)
-                data = self._decode_payload(
-                    str(reply.get("enc", "raw")),
-                    data,
-                    max_bytes=CDC_MAX_CHUNK_BYTES + 64,
-                )
-                if blake3.blake3(data).hexdigest() != chunk_hash:
-                    raise RuntimeError("CHUNK_DATA integrity failure")
-                self._store_chunk_cache(chunk_hash, data)
-                return {
-                    "ok": True,
-                    "hash": chunk_hash,
-                    "size": len(data),
-                    "wire_size": int(reply.get("wire_size") or len(data)),
-                }
+                await self._drop_outbound_session(sess.peer_fp)
+                continue
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("chunk pull failed without an error")
 
     async def _recv_chunk_protocol_reply(
         self,
@@ -4075,6 +4141,7 @@ class Daemon:
                 "pulled": 0,
                 "missing_indexes": [],
                 "sources": {},
+                "concurrency": 0,
             }
         claims = await self.query_swarm_chunk_sources(
             peers,
@@ -4132,29 +4199,61 @@ class Daemon:
             )
             for fp, hashes in claims.items()
         ]
+        sources_by_hash: dict[str, list[ChunkSource]] = {h: [] for h in needed_hashes}
+        for source in source_objects:
+            if source.peer_fp not in peer_by_fp:
+                continue
+            for chunk_hash in source.chunk_hashes:
+                bucket = sources_by_hash.get(chunk_hash)
+                if bucket is not None:
+                    bucket.append(source)
         candidate_fps_by_hash: dict[str, list[str]] = {}
         for chunk_hash in needed_hashes:
-            candidates = [
-                s for s in source_objects
-                if chunk_hash in s.chunk_hashes and s.peer_fp in peer_by_fp
-            ]
+            candidates = list(sources_by_hash.get(chunk_hash, ()))
             candidates.sort(
                 key=lambda s: (*s.route_score_without_tiebreaker(), s.peer_fp),
                 reverse=True,
             )
             candidate_fps_by_hash[chunk_hash] = [s.peer_fp for s in candidates]
         chunk_by_index = {c.index: c for c in manifest.chunks}
+        chunk_size_by_hash = {c.hash: c.size for c in manifest.chunks}
         plan = plan_swarm_sources(
             manifest=manifest,
             needed_indexes=needed,
             sources=source_objects,
         )
-        sem = asyncio.Semaphore(max(1, int(concurrency)))
+        base_concurrency = max(1, int(concurrency))
+        live_sources = {
+            s.peer_fp
+            for s in source_objects
+            if s.peer_fp in peer_by_fp
+            and any(h in sources_by_hash for h in s.chunk_hashes)
+        }
+        effective_concurrency = min(
+            SWARM_PULL_MAX_CONCURRENCY,
+            max(
+                base_concurrency,
+                min(len(needed_hashes), max(1, len(live_sources) * 2)),
+            ),
+        )
+        sem = asyncio.Semaphore(effective_concurrency)
         pulled = 0
         retried = 0
         healed = 0
         failed: set[int] = set()
         succeeded: set[int] = set()
+
+        def _pull_deadline_s(fp: str, chunk_hash: str) -> float:
+            size = chunk_size_by_hash.get(chunk_hash, 0)
+            latency_s = max(0.0, health_latency.get(fp, 100.0)) / 1000.0
+            bandwidth_bps = max(1.0, health_bandwidth.get(fp, 8_000_000.0))
+            reliability = max(0.05, health_reliability.get(fp, 1.0))
+            transfer_s = (max(1, size) * 8.0) / max(1.0, bandwidth_bps * reliability)
+            budget = 0.75 + (latency_s * 4.0) + (transfer_s * 8.0)
+            return min(
+                SWARM_PULL_MAX_DEADLINE_S,
+                max(SWARM_PULL_MIN_DEADLINE_S, budget),
+            )
 
         async def _pull_from(index: int, fp: str, chunk_hash: str) -> bool:
             nonlocal pulled
@@ -4166,7 +4265,10 @@ class Daemon:
                 return False
             async with sem:
                 try:
-                    res = await self.pull_peer_chunk(peer, chunk_hash)
+                    res = await asyncio.wait_for(
+                        self.pull_peer_chunk(peer, chunk_hash),
+                        timeout=_pull_deadline_s(fp, chunk_hash),
+                    )
                 except Exception as e:
                     log.debug("swarm chunk pull failed %s from %s: %s", chunk_hash[:8], fp[:8], e)
                     return False
@@ -4227,6 +4329,7 @@ class Daemon:
             "source_bytes": plan.per_source_bytes(),
             "assigned_bytes": plan.assigned_bytes,
             "missing_bytes": plan.missing_bytes,
+            "concurrency": effective_concurrency,
             "schedule": list(plan.rarest_first_indexes),
             "candidate_sources": {
                 h: fps for h, fps in candidate_fps_by_hash.items() if len(fps) > 1
@@ -8024,6 +8127,8 @@ class Daemon:
     # ─── v0.7.0: Linked Mesh ──────────────────────────────────────
 
     MAX_ENDPOINTS_PER_ANNOUNCEMENT = 8
+    ENDPOINT_VERIFY_CONNECT_DEADLINE_S = 1.25
+    ENDPOINT_VERIFY_HANDSHAKE_DEADLINE_S = 2.0
 
     def _stamp_pair_health(
         self,
@@ -8462,18 +8567,20 @@ class Daemon:
         started = time.perf_counter()
         route_name = route or _classify_address_regime(host)
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=3.0
-            )
-            # v0.20.7 (M1): rec.pubkey is the canonical pubkey we
-            # already trust for this peer; bind it into HELLO.
-            channel = await asyncio.wait_for(
-                ch.initiate(
-                    reader, writer, self.me,
-                    expected_responder_ed_pub=rec.pubkey,
-                ),
-                timeout=3.0,
-            )
+            async with self._endpoint_verify_sem:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port),
+                    timeout=self.ENDPOINT_VERIFY_CONNECT_DEADLINE_S,
+                )
+                # v0.20.7 (M1): rec.pubkey is the canonical pubkey we
+                # already trust for this peer; bind it into HELLO.
+                channel = await asyncio.wait_for(
+                    ch.initiate(
+                        reader, writer, self.me,
+                        expected_responder_ed_pub=rec.pubkey,
+                    ),
+                    timeout=self.ENDPOINT_VERIFY_HANDSHAKE_DEADLINE_S,
+                )
             got_fp = fingerprint_of(channel.peer_ed_pub)
             if got_fp != peer_fp:
                 log.warning(
@@ -8667,7 +8774,7 @@ class Daemon:
         """v0.7.0: tell every pinned peer where to find us right now.
 
         Called on daemon start (so peers learn our potentially-new
-        port immediately) and live-on-changes (TODO: hook into Wi-Fi
+        port immediately) and live-on-network-signature changes (Wi-Fi
         change events in v0.7.x). Best-effort — peers we can't
         currently reach are skipped; they'll learn on next
         re-pair-time inheritance or by mDNS / rendezvous when they
@@ -8737,6 +8844,37 @@ class Daemon:
                 delivered, sum(1 for r in peers if r.trust == "pinned"),
             )
         return delivered
+
+    def _local_endpoint_announcement_signature(self) -> tuple[str, ...]:
+        from one_link import rendezvous_client
+
+        peer_port = getattr(self, "_rendezvous_peer_port", 0)
+        if peer_port <= 0:
+            return ()
+        endpoints = rendezvous_client.discover_local_endpoints(peer_port=peer_port)
+        return tuple(sorted(f"{e.host}:{int(e.port)}" for e in endpoints))
+
+    async def broadcast_endpoint_to_paired_if_changed(self) -> dict[str, object]:
+        """Announce local endpoint changes caused by Wi-Fi/LAN movement."""
+
+        try:
+            signature = self._local_endpoint_announcement_signature()
+        except Exception as exc:
+            log.debug("could not build endpoint signature: %s", exc)
+            return {"changed": False, "delivered": 0, "reason": "signature_failed"}
+        if not signature:
+            return {"changed": False, "delivered": 0, "reason": "no_endpoints"}
+        if signature == self._endpoint_announcement_signature:
+            return {"changed": False, "delivered": 0, "reason": "unchanged"}
+        previous = self._endpoint_announcement_signature
+        self._endpoint_announcement_signature = signature
+        delivered = await self.broadcast_endpoint_to_paired()
+        return {
+            "changed": True,
+            "delivered": delivered,
+            "previous": list(previous),
+            "current": list(signature),
+        }
 
     async def _handle_group_key_offer(
         self, channel: ch.Channel, msg: dict, peer_fp: str,
@@ -9026,31 +9164,58 @@ class Daemon:
         Ed25519 pubkey. Uses send_to which reuses the persistent
         encrypted session with each peer. Best-effort — peers we
         can't reach now will catch up on next reconnect via outbox-
-        style distribution (TODO v0.8.1 — for now, missed events
-        require a fresh send when peer is online)."""
+        style distribution; missed events are queued durably for pinned
+        recipients and retried by the normal reconnect outbox flush."""
         if self.state is None:
-            return {"delivered": 0, "failures": []}
+            return {"delivered": 0, "queued": 0, "failures": []}
         delivered = 0
+        queued = 0
         failures: list[str] = []
         for pub in recipients:
             if pub == self.me.public_bytes:
                 continue
             fp = fingerprint_of(pub)
+            msg = make_msg("GROUP_EVENT", self.me.short_id, event=event_wire)
+            outbox_msg_id = str(event_wire.get("event_id") or msg.get("id") or "")
             peer_obj = await self.resolve_for_send(fp)
             if peer_obj is None:
+                rec = self.state.get_peer(fp)
+                if rec is not None and rec.trust == "pinned":
+                    try:
+                        self.state.enqueue_outbox(
+                            peer_fp=fp,
+                            msg_id=f"group-event:{outbox_msg_id}",
+                            msg_body=msg,
+                            msg_kind="GROUP_EVENT",
+                        )
+                        queued += 1
+                    except Exception as exc:
+                        failures.append(f"{fp[:8]}: outbox {exc}")
+                        continue
                 failures.append(f"{fp[:8]}: offline")
                 continue
             try:
-                await self.send_to(peer_obj, [
-                    make_msg("GROUP_EVENT", self.me.short_id, event=event_wire),
-                ])
+                await self.send_to(peer_obj, [msg])
                 delivered += 1
             except Exception as e:
                 log.info(
                     "GROUP_EVENT fan-out to %s failed: %s", fp[:8], e,
                 )
+                rec = self.state.get_peer(fp)
+                if rec is not None and rec.trust == "pinned":
+                    try:
+                        self.state.enqueue_outbox(
+                            peer_fp=fp,
+                            msg_id=f"group-event:{outbox_msg_id}",
+                            msg_body=msg,
+                            msg_kind="GROUP_EVENT",
+                        )
+                        queued += 1
+                    except Exception as exc:
+                        failures.append(f"{fp[:8]}: outbox {exc}")
+                        continue
                 failures.append(f"{fp[:8]}: {e}")
-        return {"delivered": delivered, "failures": failures}
+        return {"delivered": delivered, "queued": queued, "failures": failures}
 
     async def create_group(
         self, *, name: str, member_pubkeys: list[bytes],
@@ -10587,8 +10752,12 @@ class Daemon:
         try:
             from one_link.hardware_inventory import collect_hardware_inventory
             from one_link.transport_fabric import UniversalCommsFabric
+
+            def _send_path_probe_runner(argv: list[str], timeout: float) -> tuple[int, str, str]:
+                return 127, "", "send path skips slow OS hardware probes"
+
             fabric = UniversalCommsFabric.from_inventory_and_candidates(
-                collect_hardware_inventory(),
+                collect_hardware_inventory(runner=_send_path_probe_runner),
                 durable_route_candidates,
             )
             fabric_decision = fabric.plan(
@@ -12065,6 +12234,8 @@ class Daemon:
                         self._reap_stuck_transfers()
                     with contextlib.suppress(Exception):
                         self._schedule_due_transfer_retries()
+                    with contextlib.suppress(Exception):
+                        await self.broadcast_endpoint_to_paired_if_changed()
             except asyncio.CancelledError:
                 pass
 
@@ -12081,6 +12252,10 @@ class Daemon:
                 # broadcast empty endpoints.
                 await asyncio.sleep(2.0)
                 await self.broadcast_endpoint_to_paired()
+                with contextlib.suppress(Exception):
+                    self._endpoint_announcement_signature = (
+                        self._local_endpoint_announcement_signature()
+                    )
             except asyncio.CancelledError:
                 pass
             except Exception as e:

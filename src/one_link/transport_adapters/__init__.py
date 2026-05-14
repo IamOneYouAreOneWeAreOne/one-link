@@ -9,6 +9,7 @@ from .base import (
     TransportAdapter,
     TransportSession,
 )
+from .onefield import OneFieldLoopbackAdapter, OneFieldLoopbackSession
 
 __all__ = [
     "AdapterProbe",
@@ -18,5 +19,6 @@ __all__ = [
     "SessionStats",
     "TransportAdapter",
     "TransportSession",
+    "OneFieldLoopbackAdapter",
+    "OneFieldLoopbackSession",
 ]
-

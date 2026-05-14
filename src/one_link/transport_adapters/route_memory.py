@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-from .base import AdapterProbe, PreparedRoute, RouteScore
+from .base import AdapterProbe, PreparedRoute, RouteScore, TransportSession
 from .static import score_probe
 
 
@@ -73,6 +73,15 @@ class DurableRouteCandidateAdapter:
 
     def score(self, *, intent: object | None = None, peer: object | None = None) -> RouteScore:
         probe = self.probe()
+        return self.score_from_probe(probe, intent=intent, peer=peer)
+
+    def score_from_probe(
+        self,
+        probe: AdapterProbe,
+        *,
+        intent: object | None = None,
+        peer: object | None = None,
+    ) -> RouteScore:
         score = score_probe(probe, intent=intent, peer=peer)
         verified_bonus = 0.10 if bool(self.candidate.get("verified")) else 0.0
         success_bonus = min(0.10, 0.025 * int(self.candidate.get("successes") or 0))
@@ -114,6 +123,13 @@ class DurableRouteCandidateAdapter:
                 }
             },
         )
+
+    async def open(self, route: PreparedRoute) -> TransportSession:
+        if str(self.candidate.get("transport") or "tcp").lower() != "tcp":
+            raise RuntimeError("only tcp remembered routes can be opened today")
+        from .tcp import open_tcp_route
+
+        return await open_tcp_route(route)
 
 
 def adapters_from_route_candidates(

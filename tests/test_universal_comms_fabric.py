@@ -1,9 +1,17 @@
+import asyncio
+import time
+
+import pytest
+
 from one_link.hardware_inventory import (
     HardwareInventory,
     HardwarePath,
     collect_hardware_inventory,
 )
 from one_link.transport_adapters.static import StaticPathAdapter, adapters_from_paths, score_probe
+from one_link.transport_adapters.route_memory import DurableRouteCandidateAdapter
+from one_link.transport_adapters.onefield import OneFieldLoopbackAdapter
+from one_link.wire import read_frame, write_frame
 from one_link.transport_activation import (
     ActivationIntent,
     ActivationState,
@@ -11,6 +19,48 @@ from one_link.transport_activation import (
     activation_plans_for,
 )
 from one_link.transport_fabric import UniversalCommsFabric, observations_from_scores
+from one_link.transport_adapters.base import AdapterProbe, RouteScore
+
+
+class CountingAdapter:
+    adapter_id = "counting.fast"
+    kind = "lan"
+
+    def __init__(self):
+        self.probe_calls = 0
+        self.score_from_probe_calls = 0
+        self.score_calls = 0
+
+    def probe(self):
+        self.probe_calls += 1
+        return AdapterProbe(
+            adapter_id=self.adapter_id,
+            kind=self.kind,
+            available=True,
+            bulk_capable=True,
+            control_capable=True,
+            estimated_bps=100_000_000,
+            privacy="direct_local",
+        )
+
+    def score_from_probe(self, probe, *, intent=None, peer=None):
+        self.score_from_probe_calls += 1
+        return RouteScore(
+            adapter_id=probe.adapter_id,
+            route_name=probe.route_name,
+            score=0.8,
+            estimated_bps=probe.estimated_bps,
+            latency_ms=probe.latency_ms,
+            reliability=1.0,
+            privacy=probe.privacy,
+            reason="counted without re-probe",
+            usable_for_bulk=True,
+            usable_for_control=True,
+        )
+
+    def score(self, *, intent=None, peer=None):
+        self.score_calls += 1
+        raise AssertionError("plan should reuse probes for score_from_probe adapters")
 
 
 def test_hardware_inventory_can_be_collected_with_deterministic_runner():
@@ -34,6 +84,37 @@ def test_hardware_inventory_can_be_collected_with_deterministic_runner():
     assert "ble_control" in kinds
     assert "qr_control" in kinds
     assert any(p.kind == "storage_courier" and p.available for p in inv.paths)
+
+
+def test_hardware_inventory_can_enable_onefield_loopback():
+    inv = collect_hardware_inventory(
+        env={
+            "ONE_LINK_ENABLE_ONEFIELD_LOOPBACK": "1",
+            "ONEFIELD_MESH_ROOT": "Z:\\does-not-need-to-exist-for-loopback",
+        },
+        runner=lambda _argv, _timeout: (1, "", ""),
+    )
+
+    onefield = next(p for p in inv.paths if p.kind == "onefield")
+    assert onefield.available
+    assert onefield.bulk_capable
+    assert onefield.safety_state == "ok"
+    assert "RF transmit disabled" in " ".join(onefield.notes)
+
+
+def test_hardware_inventory_reports_ethernet_link_local(monkeypatch):
+    monkeypatch.setattr(
+        "one_link.hardware_inventory._local_ip_addresses",
+        lambda: ("169.254.10.20", "fe80::abcd%12", "127.0.0.1"),
+    )
+
+    inv = collect_hardware_inventory(env={}, runner=lambda _argv, _timeout: (1, "", ""))
+    ethernet = next(p for p in inv.paths if p.kind == "ethernet")
+
+    assert ethernet.available
+    assert ethernet.bulk_capable
+    assert ethernet.range_hint == "direct_cable_or_switch"
+    assert "169.254.10.20" in " ".join(ethernet.notes)
 
 
 def test_strongest_bulk_path_prefers_fast_available_direct_path():
@@ -156,6 +237,81 @@ def test_fabric_feeds_existing_transfer_brain_with_adapter_observations():
     assert truth["transfer"]["route"] == "lan"
     assert truth["activation_state"] in {"ready", "ask_user"}
     assert any(o.route == "lan" and o.ok for o in plan.observations)
+    assert plan.timing_ms is not None
+    assert plan.timing_ms["total_ms"] >= 0.0
+    assert plan.timing_ms["health"] == "fast"
+    assert plan.to_dict()["performance"]["adapter_count"] == 3.0
+
+
+@pytest.mark.asyncio
+async def test_onefield_loopback_adapter_passes_frames_without_rf_transmit():
+    adapter = OneFieldLoopbackAdapter(HardwarePath(
+        kind="onefield",
+        adapter_id="onefield.loopback",
+        available=True,
+        bulk_capable=True,
+        control_capable=True,
+        estimated_bps=5_000_000,
+        privacy="same_machine",
+        range_hint="software_loopback",
+        safety_state="ok",
+        notes=("software loopback; RF transmit disabled",),
+    ))
+
+    probe = adapter.probe()
+    assert probe.available
+    assert probe.bulk_capable
+    assert probe.safety_state == "ok"
+
+    route = await adapter.prepare()
+    assert route.metadata["rf_transmit"] is False
+    session = await adapter.open(route)
+    await session.send_frame(b"encrypted-one-link-frame")
+    assert await session.recv_frame() == b"encrypted-one-link-frame"
+    stats = await session.stats()
+    assert stats.frames_sent == 1
+    assert stats.frames_received == 1
+
+
+def test_fabric_uses_onefield_loopback_as_real_adapter():
+    inv = HardwareInventory(
+        platform="test",
+        hostname="unit",
+        paths=(
+            HardwarePath(
+                kind="onefield",
+                adapter_id="onefield.loopback",
+                available=True,
+                bulk_capable=True,
+                control_capable=True,
+                estimated_bps=5_000_000,
+                privacy="same_machine",
+                range_hint="software_loopback",
+                safety_state="ok",
+                notes=("software loopback; RF transmit disabled",),
+            ),
+        ),
+    )
+
+    plan = UniversalCommsFabric.from_inventory(inv).plan(size_bytes=4096, supports_cdc=True)
+
+    assert plan.best_score is not None
+    assert plan.best_score.adapter_id == "onefield.loopback"
+    assert plan.best_score.route_name == "onefield"
+    assert plan.best_score.usable_for_bulk is True
+    assert plan.to_dict()["performance"]["adapter_count"] == 1.0
+
+
+def test_fabric_plan_reuses_probe_results_for_scoring():
+    adapter = CountingAdapter()
+    fabric = UniversalCommsFabric((adapter,))
+
+    plan = fabric.plan(size_bytes=1024, supports_cdc=False)
+
+    assert plan.best_score is not None
+    assert adapter.probe_calls == 1
+    assert adapter.score_from_probe_calls == 1
+    assert adapter.score_calls == 0
 
 
 def test_fabric_ranks_verified_remembered_route_as_real_path():
@@ -205,6 +361,52 @@ def test_fabric_ranks_verified_remembered_route_as_real_path():
     assert any(p.adapter_id.startswith("remembered.") and p.available for p in plan.probes)
 
 
+def test_fabric_plan_stays_fast_with_many_remembered_routes():
+    candidates = tuple(
+        {
+            "peer_fp": f"{i:064x}",
+            "route": "lan" if i % 3 else "ethernet",
+            "transport": "tcp",
+            "host": f"10.0.{i // 255}.{i % 255}",
+            "port": 17117,
+            "source": "session_open",
+            "verified": True,
+            "attempts": 4,
+            "successes": 4,
+            "failures": 0,
+            "latency_ms": float(1 + (i % 20)),
+            "bandwidth_bps": float(100_000_000 + i),
+        }
+        for i in range(512)
+    )
+    inv = HardwareInventory(
+        platform="test",
+        hostname="unit",
+        paths=(
+            HardwarePath(
+                kind="lan",
+                adapter_id="lan.test",
+                available=True,
+                bulk_capable=True,
+                estimated_bps=900_000_000,
+                privacy="direct_local",
+            ),
+        ),
+    )
+    fabric = UniversalCommsFabric.from_inventory_and_candidates(inv, candidates)
+
+    started = time.perf_counter()
+    plan = fabric.plan(size_bytes=256 * 1024 * 1024, supports_cdc=True, supports_swarm=True)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+    assert plan.best_score is not None
+    assert plan.timing_ms is not None
+    assert plan.timing_ms["adapter_count"] == 513.0
+    assert elapsed_ms < 250.0
+    assert plan.timing_ms["total_ms"] < 250.0
+    assert plan.timing_ms["health"] in {"fast", "warm"}
+
+
 def test_fabric_keeps_unverified_remembered_route_out_of_bulk_path():
     fabric = UniversalCommsFabric.from_inventory_and_candidates(
         HardwareInventory(platform="test", hostname="unit", paths=()),
@@ -231,6 +433,49 @@ def test_fabric_keeps_unverified_remembered_route_out_of_bulk_path():
     assert plan.best_score.reason == "remembered route awaiting verification"
     assert not plan.best_score.usable_for_bulk
     assert plan.probes[0].safety_state == "needs_verification"
+
+
+@pytest.mark.asyncio
+async def test_verified_remembered_tcp_route_opens_framed_session():
+    async def handle(reader, writer):
+        try:
+            frame = await read_frame(reader)
+            await write_frame(writer, b"echo:" + frame)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    adapter = DurableRouteCandidateAdapter({
+        "peer_fp": "c" * 64,
+        "route": "ethernet",
+        "transport": "tcp",
+        "host": "127.0.0.1",
+        "port": port,
+        "source": "endpoint_verify",
+        "verified": True,
+        "attempts": 1,
+        "successes": 1,
+        "failures": 0,
+    })
+
+    try:
+        route = await adapter.prepare()
+        session = await adapter.open(route)
+        await session.send_frame(b"hello")
+        assert await session.recv_frame() == b"echo:hello"
+        stats = await session.stats()
+        assert stats.frames_sent == 1
+        assert stats.frames_received == 1
+        assert stats.bytes_sent == 5
+        assert stats.bytes_received == 10
+        repair = await session.repair("test")
+        assert repair.action == "reopen_route"
+        await session.close()
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
 def test_observations_from_scores_penalizes_control_only_routes():

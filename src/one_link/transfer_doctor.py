@@ -460,6 +460,11 @@ def transfer_autopilot_truth(
             f"Pulled {pulled} chunk{'s' if pulled != 1 else ''} from "
             f"{source_count} trusted device{'s' if source_count != 1 else ''}"
         )
+    healed = _as_int(assist.get("healed"))
+    if healed > 0:
+        facts.append(
+            f"Healed {healed} chunk{'s' if healed != 1 else ''} by switching source"
+        )
     facts.append(f"Route: {route_label}")
 
     seen: set[str] = set()

@@ -142,6 +142,25 @@ def test_autopilot_truth_explains_prior_knowledge_and_swarm_assist():
     assert "Pulled 12 chunks from 3 trusted devices" in truth["facts"]
 
 
+def test_autopilot_truth_explains_swarm_source_healing():
+    truth = transfer_autopilot_truth({
+        "id": "t",
+        "status": "active",
+        "direction": "in",
+        "metadata": {
+            "swarm_assist": {
+                "strategy": "multi_source_chunk_pull",
+                "pulled": 4,
+                "source_count": 2,
+                "healed": 1,
+            },
+        },
+    })
+
+    assert "Pulled 4 chunks from 2 trusted devices" in truth["facts"]
+    assert "Healed 1 chunk by switching source" in truth["facts"]
+
+
 def test_route_memory_prefers_reliable_fast_route():
     mem = RouteMemory()
     mem.observe(RouteObservation("relay", ok=True, latency_ms=100, bandwidth_bps=20_000_000))
