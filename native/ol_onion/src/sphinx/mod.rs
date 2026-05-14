@@ -21,6 +21,7 @@
 
 #![allow(missing_docs)]
 
+pub mod aggsig;
 pub mod core;
 pub mod cover;
 pub mod field;
@@ -32,4 +33,9 @@ pub use core::{
     build_sphinx_onion, generate_static_keypair, peel_sphinx_layer, SphinxHop, SphinxPacket,
     SphinxPeelOutcome, RISTRETTO_POINT_LEN, SPHINX_MAX_USER_PAYLOAD, SPHINX_PACKET_LEN,
     SPHINX_VERSION,
+};
+
+pub use aggsig::{
+    batch_verify, bn_aggregate, bn_verify, verify as schnorr_verify, SchnorrSignature,
+    SchnorrSigningKey, SchnorrVerifyingKey,
 };

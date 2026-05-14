@@ -70,6 +70,12 @@ pub enum OnionError {
     /// Internal invariant violation. Indicates a bug, not an attack.
     #[error("internal invariant violated: {0}")]
     Internal(&'static str),
+
+    /// A Schnorr (or aggregate) signature did not verify mathematically.
+    /// Distinct from `AeadFail` so callers can tell which primitive
+    /// rejected the input.
+    #[error("schnorr signature did not verify")]
+    SignatureInvalid,
 }
 
 /// Result alias for crate operations.
