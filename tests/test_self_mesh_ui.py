@@ -5,6 +5,9 @@ def test_activity_panel_contains_self_mesh_surface():
     src = Path("src/one_link/web/index.html").read_text(encoding="utf-8")
     assert 'id="self-mesh-kit"' in src
     assert 'id="self-mesh-devices"' in src
+    assert 'id="self-mesh-device-select"' in src
+    assert 'id="btn-self-mesh-root"' in src
+    assert 'id="btn-self-mesh-send"' in src
     assert "renderSelfMesh()" in src
     assert "refreshSelfMesh()" in src
 
@@ -12,5 +15,17 @@ def test_activity_panel_contains_self_mesh_surface():
 def test_self_mesh_ui_fetches_and_listens_for_daemon_events():
     src = Path("src/one_link/web/index.html").read_text(encoding="utf-8")
     assert 'selfMesh() { return this.get("/api/self-mesh"); }' in src
+    assert 'selfMeshRoot(body) { return this.post("/api/self-mesh/root", body); }' in src
+    assert 'selfMeshRemoteInstruct(body) { return this.post("/api/self-mesh/remote-instruct", body); }' in src
     assert 'm.type === "self_mesh_changed"' in src
     assert "state.selfMesh = await api.selfMesh()" in src
+
+
+def test_self_mesh_ui_has_enrollment_and_remote_instruction_handlers():
+    src = Path("src/one_link/web/index.html").read_text(encoding="utf-8")
+    assert "function createSelfMeshRoot()" in src
+    assert "function enrollSelfMeshCert()" in src
+    assert "function revokeSelfMeshDevice()" in src
+    assert "function sendSelfMeshInstruction(action)" in src
+    assert 'sendSelfMeshInstruction("pull_file_manifest")' in src
+    assert 'sendSelfMeshInstruction("send_file_from_device")' in src

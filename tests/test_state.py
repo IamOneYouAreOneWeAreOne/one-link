@@ -409,6 +409,66 @@ def test_self_mesh_device_presence_and_replay_persist(tmp_path: Path):
         s2.close()
 
 
+def test_self_mesh_root_revocation_and_audit_persist(tmp_path: Path):
+    db = tmp_path / "state.db"
+    root_seed, root_pub = _ed25519_pair()
+    _, device_pub = _ed25519_pair()
+    cert = idag.encode_device_cert(
+        root_priv_seed=root_seed,
+        root_pub=root_pub,
+        device_pub=device_pub,
+        device_kind="tablet",
+    )
+
+    s1 = State(db_path=db)
+    try:
+        root = s1.upsert_self_mesh_root(
+            root_pub=root_pub,
+            root_seed=root_seed,
+            label="My devices",
+        )
+        assert root["has_root_seed"] is True
+        with_seed = s1.get_self_mesh_root(root_pub, include_seed=True)
+        assert with_seed["root_seed"] == root_seed
+        s1.upsert_self_mesh_device(
+            root_pub=root_pub,
+            device_pub=device_pub,
+            cert=cert,
+            device_kind="tablet",
+            label="Tablet",
+            local=False,
+            trusted=True,
+        )
+        revoked = s1.revoke_self_mesh_device(
+            root_pub=root_pub,
+            device_pub=device_pub,
+        )
+        assert revoked["revoked"] is True
+        assert revoked["trusted"] is False
+        audit_id = s1.record_self_mesh_audit(
+            event="device_revoked",
+            severity="warn",
+            root_pub=root_pub,
+            device_pub=device_pub,
+            detail="Tablet",
+        )
+        assert audit_id > 0
+    finally:
+        s1.close()
+
+    s2 = State(db_path=db)
+    try:
+        assert s2.schema_version() >= 19
+        assert s2.list_self_mesh_roots()[0]["label"] == "My devices"
+        assert s2.list_self_mesh_devices(root_pub=root_pub)[0]["revoked"] is True
+        assert s2.list_self_mesh_audit()[0]["event"] == "device_revoked"
+        feed = s2.activity_feed(kinds=["self_mesh"])
+        assert feed[0]["kind"] == "self_mesh"
+        assert feed[0]["subkind"] == "device_revoked"
+    finally:
+        s2.close()
+
+
 def test_delete_setting(state: State):
     state.set_setting("k", "v")
     state.delete_setting("k")

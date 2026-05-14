@@ -172,6 +172,10 @@ def _enumerate_sovereign_primitives() -> list[dict]:
                       "and signed remote-instruct commands for "
                       "phone-to-laptop style self traffic",
          "Phase F5 foundation"),
+        ("one_link.self_mesh_enrollment", "Personal Device Mesh enrollment",
+         "live", "Root create/import, local device cert minting, device "
+                 "enroll/revoke ceremony helpers",
+         "Phase F5"),
         ("one_link.vrf", "Verifiable Random Function (VRF)",
          "primitive", "Unbiased pseudorandom output with publicly-"
                       "verifiable proof; defeats eclipse attacks "
@@ -1299,6 +1303,11 @@ class UIServer:
         r.add_post("/api/fabric/path-create/native", self._guarded(self.api_fabric_path_create_native))
         r.add_get("/api/fabric/mobile-reach", self._guarded(self.api_fabric_mobile_reach))
         r.add_get("/api/self-mesh", self._guarded(self.api_self_mesh))
+        r.add_post("/api/self-mesh/root", self._guarded(self.api_self_mesh_root))
+        r.add_post("/api/self-mesh/devices/mint", self._guarded(self.api_self_mesh_mint_device))
+        r.add_post("/api/self-mesh/devices/enroll", self._guarded(self.api_self_mesh_enroll_device))
+        r.add_post("/api/self-mesh/devices/revoke", self._guarded(self.api_self_mesh_revoke_device))
+        r.add_post("/api/self-mesh/remote-instruct", self._guarded(self.api_self_mesh_remote_instruct))
         r.add_get("/api/courier/status", self._guarded(self.api_courier_status))
         r.add_get("/api/courier/files", self._guarded(self.api_courier_files))
         r.add_get("/api/courier/outbox", self._guarded(self.api_courier_outbox))
@@ -3167,12 +3176,23 @@ class UIServer:
         """Phase F5 foundation: persisted owner-device mesh state."""
         state = getattr(self.daemon, "state", None)
         if state is None:
-            return web.json_response({"devices": [], "presence": []})
+            return web.json_response({"roots": [], "devices": [], "presence": []})
 
         def b64u(raw: bytes | None) -> str | None:
             if raw is None:
                 return None
             return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+        roots = []
+        for row in state.list_self_mesh_roots():
+            roots.append({
+                "root_pub_b64": b64u(row.get("root_pub")),
+                "label": row.get("label"),
+                "has_root_seed": bool(row.get("has_root_seed")),
+                "created_ms": row.get("created_ms"),
+                "updated_ms": row.get("updated_ms"),
+                "metadata": row.get("metadata") or {},
+            })
 
         devices = []
         for row in state.list_self_mesh_devices():
@@ -3206,13 +3226,305 @@ class UIServer:
                 "metadata": row.get("metadata") or {},
             })
 
+        audit = []
+        for row in state.list_self_mesh_audit(limit=100):
+            audit.append({
+                "id": row.get("id"),
+                "ts_ms": row.get("ts_ms"),
+                "event": row.get("event"),
+                "severity": row.get("severity"),
+                "root_pub_b64": b64u(row.get("root_pub")),
+                "device_pub_b64": b64u(row.get("device_pub")),
+                "peer_fp": row.get("peer_fp"),
+                "command_id": row.get("command_id"),
+                "action": row.get("action"),
+                "path": row.get("path"),
+                "detail": row.get("detail"),
+                "metadata": row.get("metadata") or {},
+            })
+
+        allowed_roots = []
+        with contextlib.suppress(Exception):
+            allowed_roots = [
+                str(p) for p in self.daemon._self_mesh_allowed_roots()
+            ]
+        routing = []
+        for root in roots:
+            with contextlib.suppress(Exception):
+                routing.append(self.daemon.choose_self_mesh_route(
+                    root_pub_b64=root["root_pub_b64"],
+                    kind="status",
+                ))
+
         return web.json_response({
             "version": 1,
             "status": "in_progress",
+            "roots": roots,
             "devices": devices,
             "presence": presence,
+            "audit": audit,
+            "allowed_roots": allowed_roots,
+            "routing": routing,
             "remote_instruction_replay_protection": True,
         })
+
+    async def api_self_mesh_root(self, request: web.Request) -> web.Response:
+        """Create/import a personal mesh root and mint this device cert."""
+        from one_link import device_info as _device_info
+        from one_link.self_mesh_enrollment import MeshRoot, b64u, b64u_decode, mint_device_cert
+
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        body = await request.json()
+        label = str(body.get("label") or "My devices")[:120]
+        seed_b64 = str(body.get("root_seed_b64") or "")
+        try:
+            root = MeshRoot.from_seed(b64u_decode(seed_b64)) if seed_b64 else MeshRoot.create()
+            state.upsert_self_mesh_root(
+                root_pub=root.root_pub,
+                root_seed=root.root_seed,
+                label=label,
+                metadata={"source": "api_import" if seed_b64 else "api_create"},
+            )
+            di = getattr(self.daemon, "_device_info", None)
+            if di is None:
+                with contextlib.suppress(Exception):
+                    di = _device_info.detect()
+            kind = di.compact() if di is not None else "local-device"
+            cert = mint_device_cert(
+                root_seed=root.root_seed,
+                root_pub=root.root_pub,
+                device_pub=self.daemon.me.public_bytes,
+                device_kind=kind or "local-device",
+            )
+            row = state.upsert_self_mesh_device(
+                root_pub=root.root_pub,
+                device_pub=self.daemon.me.public_bytes,
+                cert=cert,
+                device_kind=kind or "local-device",
+                label=str(body.get("device_label") or self.daemon.me.hostname),
+                local=True,
+                trusted=True,
+                metadata={"source": "local_root_enrollment"},
+            )
+            state.record_self_mesh_audit(
+                event="root_enrolled",
+                severity="good",
+                root_pub=root.root_pub,
+                device_pub=self.daemon.me.public_bytes,
+                detail=label,
+            )
+            with contextlib.suppress(Exception):
+                self.daemon._update_local_self_mesh_presence(route="enrollment")
+            return web.json_response({
+                "ok": True,
+                "root_pub_b64": b64u(root.root_pub),
+                "local_device_pub_b64": b64u(self.daemon.me.public_bytes),
+                "local_cert_b64": b64u(cert),
+                "device": {
+                    "device_pub_b64": b64u(row["device_pub"]),
+                    "device_kind": row["device_kind"],
+                    "label": row["label"],
+                    "local": row["local"],
+                    "trusted": row["trusted"],
+                    "revoked": row["revoked"],
+                },
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_root_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_self_mesh_mint_device(self, request: web.Request) -> web.Response:
+        """Mint a cert for another self-device pubkey."""
+        from one_link.self_mesh_enrollment import b64u, b64u_decode, mint_device_cert
+
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        body = await request.json()
+        try:
+            root_pub = b64u_decode(str(body.get("root_pub_b64") or ""))
+            device_pub = b64u_decode(str(body.get("device_pub_b64") or ""))
+            root = state.get_self_mesh_root(root_pub, include_seed=True)
+            if root is None or not root.get("root_seed"):
+                raise ValueError("root seed unavailable for minting")
+            kind = str(body.get("device_kind") or "remote-device")
+            cert = mint_device_cert(
+                root_seed=root["root_seed"],
+                root_pub=root_pub,
+                device_pub=device_pub,
+                device_kind=kind,
+            )
+            row = state.upsert_self_mesh_device(
+                root_pub=root_pub,
+                device_pub=device_pub,
+                cert=cert,
+                device_kind=kind,
+                label=str(body.get("label") or kind),
+                local=False,
+                trusted=True,
+                metadata={"source": "api_mint"},
+            )
+            state.record_self_mesh_audit(
+                event="device_cert_minted",
+                severity="good",
+                root_pub=root_pub,
+                device_pub=device_pub,
+                detail=row["label"],
+            )
+            return web.json_response({
+                "ok": True,
+                "cert_b64": b64u(cert),
+                "root_pub_b64": b64u(root_pub),
+                "device_pub_b64": b64u(device_pub),
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_mint_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_self_mesh_enroll_device(self, request: web.Request) -> web.Response:
+        """Enroll a device cert minted by this or another local UI."""
+        from one_link.self_mesh_enrollment import b64u, b64u_decode, verify_enrollment_cert
+
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        body = await request.json()
+        try:
+            cert = b64u_decode(str(body.get("cert_b64") or ""))
+            expected_root = (
+                b64u_decode(str(body.get("root_pub_b64")))
+                if body.get("root_pub_b64") else None
+            )
+            parsed = verify_enrollment_cert(cert, expected_root_pub=expected_root)
+            row = state.upsert_self_mesh_device(
+                root_pub=parsed["root_pub"],
+                device_pub=parsed["device_pub"],
+                cert=cert,
+                device_kind=str(body.get("device_kind") or parsed["device_kind"]),
+                label=str(body.get("label") or parsed["device_kind"]),
+                local=bool(body.get("local", False)),
+                trusted=bool(body.get("trusted", True)),
+                metadata={"source": "api_enroll"},
+            )
+            state.record_self_mesh_audit(
+                event="device_enrolled",
+                severity="good",
+                root_pub=parsed["root_pub"],
+                device_pub=parsed["device_pub"],
+                detail=row["label"],
+            )
+            return web.json_response({
+                "ok": True,
+                "root_pub_b64": b64u(parsed["root_pub"]),
+                "device_pub_b64": b64u(parsed["device_pub"]),
+                "device_kind": row["device_kind"],
+                "label": row["label"],
+                "trusted": row["trusted"],
+                "revoked": row["revoked"],
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_enroll_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_self_mesh_revoke_device(self, request: web.Request) -> web.Response:
+        from one_link.self_mesh_enrollment import b64u, b64u_decode
+
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        body = await request.json()
+        try:
+            root_pub = b64u_decode(str(body.get("root_pub_b64") or ""))
+            device_pub = b64u_decode(str(body.get("device_pub_b64") or ""))
+            row = state.revoke_self_mesh_device(
+                root_pub=root_pub,
+                device_pub=device_pub,
+            )
+            if row is None:
+                raise ValueError("device is not enrolled")
+            state.record_self_mesh_audit(
+                event="device_revoked",
+                severity="warn",
+                root_pub=root_pub,
+                device_pub=device_pub,
+                detail=row["label"],
+            )
+            return web.json_response({
+                "ok": True,
+                "root_pub_b64": b64u(root_pub),
+                "device_pub_b64": b64u(device_pub),
+                "revoked": True,
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_revoke_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_self_mesh_remote_instruct(self, request: web.Request) -> web.Response:
+        """Sign and send a scoped remote instruction to another self-device."""
+        from one_link.self_mesh_enrollment import b64u, b64u_decode
+        from one_link.personal_device_mesh import sign_remote_instruction
+
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        body = await request.json()
+        try:
+            root_pub = b64u_decode(str(body.get("root_pub_b64") or ""))
+            target_pub = b64u_decode(str(body.get("target_device_pub_b64") or ""))
+            action = str(body.get("action") or "")
+            scope = body.get("scope") or {}
+            if not isinstance(scope, dict):
+                raise ValueError("scope must be an object")
+            local = state.get_self_mesh_device(
+                root_pub=root_pub,
+                device_pub=self.daemon.me.public_bytes,
+            )
+            if local is None or not local.get("cert") or local.get("revoked"):
+                raise ValueError("local device cert unavailable for this root")
+            command = sign_remote_instruction(
+                controller_device_seed=self.daemon.me.private.private_bytes_raw(),
+                controller_cert=local["cert"],
+                target_device_pub=target_pub,
+                action=action,
+                scope=scope,
+            )
+            peer_needle = str(body.get("peer") or body.get("peer_fp") or "")
+            if not peer_needle:
+                raise ValueError("peer or peer_fp required")
+            peer = await self.daemon.resolve_for_send(peer_needle)
+            if peer is None:
+                raise ValueError("target peer is not reachable or not pinned")
+            result = await self.daemon.send_self_mesh_remote_instruction(peer, command)
+            state.record_self_mesh_audit(
+                event="command_sent",
+                severity="info",
+                root_pub=root_pub,
+                device_pub=target_pub,
+                peer_fp=peer_needle,
+                action=action,
+                path=str(scope.get("path") or ""),
+                detail=f"sent {action}",
+            )
+            return web.json_response({
+                "ok": True,
+                "command_b64": b64u(command),
+                "result": result,
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_remote_instruct_rejected",
+                "hint": str(exc),
+            }, status=400)
 
     async def api_courier_status(self, request: web.Request) -> web.Response:
         """Readiness for encrypted offline chunk courier bundles."""

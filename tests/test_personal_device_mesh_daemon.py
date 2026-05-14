@@ -58,6 +58,7 @@ def _make_daemon(tmp_path: Path):
     d = Daemon.__new__(Daemon)
     d.me = _make_identity()
     d.state = State(db_path=tmp_path / "state.db")
+    d.state.set_setting("self_mesh_allowed_roots", str(tmp_path))
     d.ui_server = SimpleNamespace(broadcast=lambda evt: None)
     d._inbound_is_rejected = lambda fp: False
     d._stamp_pair_health = lambda fp, **kw: None
@@ -246,6 +247,58 @@ async def test_remote_instruction_send_file_queues_live_send(tmp_path: Path):
     assert _ack(channel)["ok"] is True
     await asyncio.sleep(0.01)
     assert calls == [("peer1", "photo.bin", None)]
+
+
+@pytest.mark.asyncio
+async def test_remote_instruction_rejects_paths_outside_allowed_roots(tmp_path: Path):
+    d = _make_daemon(tmp_path)
+    d.state.set_setting("self_mesh_allowed_roots", str(tmp_path / "allowed"))
+    root_priv, root_pub = _ed25519_pair()
+    root_seed = root_priv.private_bytes_raw()
+    _register_self_mesh_target(d, root_seed, root_pub)
+    target = tmp_path / "blocked.txt"
+    target.write_text("not in allowed root\n", encoding="utf-8")
+    command = _remote_command(
+        d,
+        root_seed=root_seed,
+        root_pub=root_pub,
+        action="pull_file_manifest",
+        scope={"path": str(target)},
+    )
+    _, peer_pub = _ed25519_pair()
+    channel = _FakeChannel(peer_pub)
+
+    await d._on_peer_message(channel, {
+        "t": "SELF_MESH_REMOTE_INSTRUCTION",
+        "id": "blocked-path",
+        "command_b64": _b64u(command),
+    })
+
+    ack = _ack(channel)
+    assert "outside allowed self-mesh roots" in ack["rejected"]
+    assert d.state.list_self_mesh_audit()[0]["event"] == "command_rejected"
+
+
+def test_choose_self_mesh_route_selects_best_device(tmp_path: Path):
+    d = _make_daemon(tmp_path)
+    root_priv, root_pub = _ed25519_pair()
+    root_seed = root_priv.private_bytes_raw()
+    _register_self_mesh_target(d, root_seed, root_pub)
+    d.state.upsert_self_mesh_presence(
+        device_pub=d.me.public_bytes,
+        state="awake",
+        sequence=10,
+        updated_ms=10_000,
+        network="ethernet",
+        free_bytes=1_000_000,
+        route="self_lan",
+    )
+
+    decision = d.choose_self_mesh_route(root_pub=root_pub, kind="send")
+
+    assert decision["ready"] is True
+    assert decision["target"]["fingerprint"] == d.me.fingerprint
+    assert decision["route"] == "self_lan"
 
 
 def test_send_self_mesh_remote_instruction_uses_wire_frame(tmp_path: Path):

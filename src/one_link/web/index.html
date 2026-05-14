@@ -1379,6 +1379,36 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .self-mesh-kit .sm-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .self-mesh-kit .sm-controls input,
+  .self-mesh-kit .sm-controls select {
+    min-width: 0;
+    width: 100%;
+    border-radius: 7px;
+    border: 1px solid rgba(255,255,255,.07);
+    background: rgba(0,0,0,.18);
+    color: var(--text);
+    font-size: 11px;
+    padding: 7px 8px;
+  }
+  .self-mesh-kit .sm-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 7px;
+  }
+  .self-mesh-kit .sm-actions button {
+    flex: 1 1 86px;
+    min-width: 0;
+    border-radius: 7px;
+    padding: 7px 8px;
+    font-size: 10px;
+  }
   .courier-kit {
     margin: -2px 12px 10px;
     padding: 9px 10px;
@@ -3955,6 +3985,19 @@
         </div>
         <div class="sm-copy" id="self-mesh-copy">Checking personal mesh presence.</div>
         <div class="sm-devices" id="self-mesh-devices"></div>
+        <div class="sm-controls">
+          <select id="self-mesh-device-select" aria-label="Self-mesh device"></select>
+          <input id="self-mesh-path" type="text" placeholder="Allowed file path" />
+          <input id="self-mesh-peer" type="text" placeholder="Recipient or self-device peer" />
+          <input id="self-mesh-cert" type="text" placeholder="Device cert" />
+        </div>
+        <div class="sm-actions">
+          <button id="btn-self-mesh-root">Create root</button>
+          <button id="btn-self-mesh-enroll">Enroll cert</button>
+          <button id="btn-self-mesh-revoke">Revoke</button>
+          <button id="btn-self-mesh-manifest">Pull manifest</button>
+          <button id="btn-self-mesh-send">Send from device</button>
+        </div>
       </div>
       <div class="courier-kit" id="courier-kit">
         <div class="ck-title">Courier bundle</div>
@@ -5773,6 +5816,10 @@
     noRouter() { return this.get("/api/fabric/no-router"); },
     mobileReach() { return this.get("/api/fabric/mobile-reach"); },
     selfMesh() { return this.get("/api/self-mesh"); },
+    selfMeshRoot(body) { return this.post("/api/self-mesh/root", body); },
+    selfMeshEnroll(body) { return this.post("/api/self-mesh/devices/enroll", body); },
+    selfMeshRevoke(body) { return this.post("/api/self-mesh/devices/revoke", body); },
+    selfMeshRemoteInstruct(body) { return this.post("/api/self-mesh/remote-instruct", body); },
     fabricPathCreate() { return this.get("/api/fabric/path-create"); },
     launchFabricPathCreate(body) { return this.post("/api/fabric/path-create/launch", body); },
     nativeFabricPathCreate(body) { return this.post("/api/fabric/path-create/native", body); },
@@ -7122,6 +7169,9 @@
     }
     if (!list) return;
     list.replaceChildren();
+    const select = $("#self-mesh-device-select");
+    const selectedBefore = select?.value || "";
+    if (select) select.replaceChildren();
     const rows = devices.length ? devices : [{
       label: state.me?.hostname || "This device",
       device_kind: "local",
@@ -7138,7 +7188,16 @@
       card.appendChild(el("b", "", label));
       card.appendChild(el("span", "", `${stateLabel}${d.local ? " local" : ""}${route}`));
       list.appendChild(card);
+      if (select && d.device_pub_b64) {
+        const opt = document.createElement("option");
+        opt.value = d.device_pub_b64;
+        opt.textContent = `${label}${d.revoked ? " revoked" : ""}`;
+        opt.dataset.root = d.root_pub_b64 || "";
+        opt.disabled = !!d.revoked;
+        select.appendChild(opt);
+      }
     }
+    if (select && selectedBefore) select.value = selectedBefore;
   }
   async function refreshSelfMesh() {
     try {
@@ -7146,6 +7205,72 @@
       renderSelfMesh();
     } catch (_e) {
       renderSelfMesh();
+    }
+  }
+  function _selectedSelfMeshDevice() {
+    const mesh = state.selfMesh || {};
+    const select = $("#self-mesh-device-select");
+    const devicePub = select?.value || "";
+    return (mesh.devices || []).find(d => d.device_pub_b64 === devicePub) || null;
+  }
+  async function createSelfMeshRoot() {
+    try {
+      await api.selfMeshRoot({ label: "My devices" });
+      toast("Personal mesh root ready", "good");
+      await refreshSelfMesh();
+    } catch (e) {
+      toast(`Root setup failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+  async function enrollSelfMeshCert() {
+    const cert = ($("#self-mesh-cert")?.value || "").trim();
+    if (!cert) return toast("Paste a device cert first.", "info");
+    try {
+      await api.selfMeshEnroll({ cert_b64: cert, trusted: true });
+      $("#self-mesh-cert").value = "";
+      toast("Device enrolled", "good");
+      await refreshSelfMesh();
+    } catch (e) {
+      toast(`Enroll failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+  async function revokeSelfMeshDevice() {
+    const d = _selectedSelfMeshDevice();
+    if (!d) return toast("Choose a device first.", "info");
+    try {
+      await api.selfMeshRevoke({
+        root_pub_b64: d.root_pub_b64,
+        device_pub_b64: d.device_pub_b64,
+      });
+      toast("Device revoked", "warn");
+      await refreshSelfMesh();
+    } catch (e) {
+      toast(`Revoke failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+  async function sendSelfMeshInstruction(action) {
+    const d = _selectedSelfMeshDevice();
+    const path = ($("#self-mesh-path")?.value || "").trim();
+    const peer = ($("#self-mesh-peer")?.value || "").trim();
+    if (!d) return toast("Choose a device first.", "info");
+    if (!path) return toast("Enter an allowed file path.", "info");
+    if (!peer) return toast("Enter a peer or device target.", "info");
+    const scope = { path };
+    if (action === "send_file_from_device") {
+      scope.recipient_fp = peer;
+    }
+    try {
+      await api.selfMeshRemoteInstruct({
+        root_pub_b64: d.root_pub_b64,
+        target_device_pub_b64: d.device_pub_b64,
+        peer,
+        action,
+        scope,
+      });
+      toast(action === "pull_file_manifest" ? "Manifest requested" : "Remote send queued", "good");
+      await refreshSelfMesh();
+    } catch (e) {
+      toast(`Command failed: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
   function renderNoRouterKit(noRouter) {
@@ -14098,6 +14223,11 @@
   $("#btn-copy-route-bootstrap")?.addEventListener("click", copyRouteBootstrapToken);
   $("#btn-import-route-bootstrap")?.addEventListener("click", importRouteBootstrapToken);
   $("#btn-launch-path-create")?.addEventListener("click", launchBestPathCreate);
+  $("#btn-self-mesh-root")?.addEventListener("click", createSelfMeshRoot);
+  $("#btn-self-mesh-enroll")?.addEventListener("click", enrollSelfMeshCert);
+  $("#btn-self-mesh-revoke")?.addEventListener("click", revokeSelfMeshDevice);
+  $("#btn-self-mesh-manifest")?.addEventListener("click", () => sendSelfMeshInstruction("pull_file_manifest"));
+  $("#btn-self-mesh-send")?.addEventListener("click", () => sendSelfMeshInstruction("send_file_from_device"));
   $("#btn-courier-export")?.addEventListener("click", exportCourierBundle);
   $("#btn-courier-stage")?.addEventListener("click", stageCourierBundle);
   $("#btn-courier-copy-removable")?.addEventListener("click", copyCourierToRemovable);

@@ -549,6 +549,7 @@ class State:
                     (16, self._migrate_v16_route_memory),
                     (17, self._migrate_v17_route_candidates),
                     (18, self._migrate_v18_personal_device_mesh),
+                    (19, self._migrate_v19_self_mesh_enrollment),
                 ]
                 for target_version, apply_fn in steps:
                     self._run_atomic_migration(
@@ -733,6 +734,51 @@ class State:
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_remote_instruction_expiry "
             "ON remote_instruction_seen(expires_ms)"
+        )
+
+    def _migrate_v19_self_mesh_enrollment(self, c: sqlite3.Cursor) -> None:
+        """Phase F5 continuation: enrollment roots + audit trail."""
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS self_mesh_roots (
+                root_pub      BLOB PRIMARY KEY,
+                label         TEXT NOT NULL DEFAULT '',
+                root_seed     BLOB,
+                created_ms    INTEGER NOT NULL,
+                updated_ms    INTEGER NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_self_mesh_roots_updated "
+            "ON self_mesh_roots(updated_ms)"
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS self_mesh_audit (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_ms                 INTEGER NOT NULL,
+                event                 TEXT NOT NULL,
+                severity              TEXT NOT NULL DEFAULT 'info',
+                root_pub              BLOB,
+                device_pub            BLOB,
+                peer_fp               TEXT,
+                command_id            TEXT,
+                action                TEXT,
+                path                  TEXT,
+                detail                TEXT NOT NULL DEFAULT '',
+                metadata_json         TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_self_mesh_audit_ts "
+            "ON self_mesh_audit(ts_ms)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_self_mesh_audit_root "
+            "ON self_mesh_audit(root_pub, ts_ms)"
         )
 
     def _migrate_v15_file_index_cache(self, c: sqlite3.Cursor) -> None:
@@ -1552,6 +1598,34 @@ class State:
                 })
 
         # 4. manifest_conflicts → conflict kind
+        if kinds_set is None or "self_mesh" in kinds_set:
+            sql = "SELECT * FROM self_mesh_audit"
+            wclauses = []
+            params = []
+            if since_ms is not None:
+                wclauses.append("ts_ms >= ?"); params.append(int(since_ms))
+            if peer_fp is not None:
+                wclauses.append("peer_fp = ?"); params.append(peer_fp)
+            if wclauses:
+                sql += " WHERE " + " AND ".join(wclauses)
+            sql += " ORDER BY ts_ms DESC LIMIT ?"
+            params.append(limit)
+            for r in self._conn.execute(sql, tuple(params)).fetchall():
+                ev = r["event"]
+                action = r["action"] or ""
+                detail = r["detail"] or action.replace("_", " ")
+                events.append({
+                    "ts_ms": r["ts_ms"],
+                    "kind": "self_mesh",
+                    "subkind": ev,
+                    "severity": r["severity"] or "info",
+                    "label": f"My devices · {ev.replace('_', ' ')}",
+                    "detail": detail,
+                    "peer_fp": r["peer_fp"],
+                    "peer_display_name": _peer_label(r["peer_fp"]),
+                    "source": "self_mesh_audit",
+                })
+
         if kinds_set is None or "conflict" in kinds_set:
             sql = (
                 "SELECT id, folder_name, file_path, peer_fp,"
@@ -3478,6 +3552,118 @@ class State:
         ).fetchone()
         return self._row_to_self_mesh_device(row)
 
+    def upsert_self_mesh_root(
+        self,
+        *,
+        root_pub: bytes,
+        label: str = "",
+        root_seed: bytes | None = None,
+        metadata: Optional[dict] = None,
+    ) -> dict:
+        """Create/update a personal mesh root identity.
+
+        ``root_seed`` is optional. When present, it is wrapped with the
+        daemon LockBox if one is configured, matching other high-value
+        state secrets.
+        """
+        self._validate_self_mesh_pub(root_pub, "root_pub")
+        if root_seed is not None and len(bytes(root_seed)) != 32:
+            raise ValueError("root_seed must be 32 bytes")
+        from one_link.lockbox import maybe_wrap as _lb_wrap
+
+        now = _now_ms()
+        seed_at_rest = (
+            _lb_wrap(bytes(root_seed), self._lockbox)
+            if root_seed is not None else None
+        )
+        meta_json = json.dumps(metadata or {}, separators=(",", ":"), sort_keys=True)
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO self_mesh_roots(
+                    root_pub, label, root_seed, created_ms, updated_ms,
+                    metadata_json
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(root_pub) DO UPDATE SET
+                    label = excluded.label,
+                    root_seed = COALESCE(excluded.root_seed, self_mesh_roots.root_seed),
+                    updated_ms = excluded.updated_ms,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    bytes(root_pub),
+                    str(label or "")[:120],
+                    seed_at_rest,
+                    now,
+                    now,
+                    meta_json,
+                ),
+            )
+        row = self._conn.execute(
+            "SELECT * FROM self_mesh_roots WHERE root_pub = ?",
+            (bytes(root_pub),),
+        ).fetchone()
+        return self._row_to_self_mesh_root(row, include_seed=False)
+
+    def list_self_mesh_roots(self, *, include_seed: bool = False) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM self_mesh_roots ORDER BY updated_ms DESC, label ASC"
+        ).fetchall()
+        return [
+            self._row_to_self_mesh_root(r, include_seed=include_seed)
+            for r in rows
+        ]
+
+    def get_self_mesh_root(
+        self,
+        root_pub: bytes,
+        *,
+        include_seed: bool = False,
+    ) -> dict | None:
+        self._validate_self_mesh_pub(root_pub, "root_pub")
+        row = self._conn.execute(
+            "SELECT * FROM self_mesh_roots WHERE root_pub = ?",
+            (bytes(root_pub),),
+        ).fetchone()
+        return (
+            self._row_to_self_mesh_root(row, include_seed=include_seed)
+            if row else None
+        )
+
+    def get_self_mesh_device(
+        self,
+        *,
+        root_pub: bytes,
+        device_pub: bytes,
+    ) -> dict | None:
+        self._validate_self_mesh_pub(root_pub, "root_pub")
+        self._validate_self_mesh_pub(device_pub, "device_pub")
+        row = self._conn.execute(
+            "SELECT * FROM self_mesh_devices WHERE root_pub = ? AND device_pub = ?",
+            (bytes(root_pub), bytes(device_pub)),
+        ).fetchone()
+        return self._row_to_self_mesh_device(row) if row else None
+
+    def revoke_self_mesh_device(
+        self,
+        *,
+        root_pub: bytes,
+        device_pub: bytes,
+    ) -> dict | None:
+        self._validate_self_mesh_pub(root_pub, "root_pub")
+        self._validate_self_mesh_pub(device_pub, "device_pub")
+        now = _now_ms()
+        with self._write_lock:
+            self._conn.execute(
+                """
+                UPDATE self_mesh_devices
+                SET revoked = 1, trusted = 0, updated_ms = ?
+                WHERE root_pub = ? AND device_pub = ?
+                """,
+                (now, bytes(root_pub), bytes(device_pub)),
+            )
+        return self.get_self_mesh_device(root_pub=root_pub, device_pub=device_pub)
+
     def list_self_mesh_devices(
         self,
         *,
@@ -3636,6 +3822,86 @@ class State:
                 ),
             )
             return int(cur.rowcount) == 1
+
+    def record_self_mesh_audit(
+        self,
+        *,
+        event: str,
+        severity: str = "info",
+        root_pub: bytes | None = None,
+        device_pub: bytes | None = None,
+        peer_fp: str | None = None,
+        command_id: str | None = None,
+        action: str | None = None,
+        path: str | None = None,
+        detail: str = "",
+        metadata: Optional[dict] = None,
+        ts_ms: int | None = None,
+    ) -> int:
+        ev = str(event or "").strip()
+        if not ev:
+            raise ValueError("event is required")
+        sev = str(severity or "info")
+        if sev not in {"good", "info", "warn", "bad"}:
+            raise ValueError("invalid self-mesh audit severity")
+        if root_pub is not None:
+            self._validate_self_mesh_pub(root_pub, "root_pub")
+        if device_pub is not None:
+            self._validate_self_mesh_pub(device_pub, "device_pub")
+        now = _now_ms() if ts_ms is None else int(ts_ms)
+        meta_json = json.dumps(metadata or {}, separators=(",", ":"), sort_keys=True)
+        with self._write_lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO self_mesh_audit(
+                    ts_ms, event, severity, root_pub, device_pub, peer_fp,
+                    command_id, action, path, detail, metadata_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    ev[:80],
+                    sev,
+                    bytes(root_pub) if root_pub is not None else None,
+                    bytes(device_pub) if device_pub is not None else None,
+                    str(peer_fp or "")[:128] if peer_fp else None,
+                    str(command_id or "")[:128] if command_id else None,
+                    str(action or "")[:80] if action else None,
+                    str(path or "")[:1000] if path else None,
+                    str(detail or "")[:500],
+                    meta_json,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def list_self_mesh_audit(
+        self,
+        *,
+        since_ms: int | None = None,
+        root_pub: bytes | None = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if since_ms is not None:
+            clauses.append("ts_ms >= ?")
+            params.append(int(since_ms))
+        if root_pub is not None:
+            self._validate_self_mesh_pub(root_pub, "root_pub")
+            clauses.append("root_pub = ?")
+            params.append(bytes(root_pub))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(max(1, min(int(limit), 2000)))
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM self_mesh_audit
+            {where}
+            ORDER BY ts_ms DESC, id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [self._row_to_self_mesh_audit(r) for r in rows]
 
     def enqueue_outbox(
         self,
@@ -3818,6 +4084,29 @@ class State:
         if not isinstance(value, (bytes, bytearray)) or len(value) != 32:
             raise ValueError(f"{name} must be 32 bytes")
 
+    def _row_to_self_mesh_root(
+        self,
+        row: sqlite3.Row,
+        *,
+        include_seed: bool = False,
+    ) -> dict:
+        try:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        except Exception:
+            metadata = {}
+        out = {
+            "root_pub": bytes(row["root_pub"]),
+            "label": row["label"],
+            "has_root_seed": row["root_seed"] is not None,
+            "created_ms": int(row["created_ms"]),
+            "updated_ms": int(row["updated_ms"]),
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+        if include_seed and row["root_seed"] is not None:
+            from one_link.lockbox import maybe_unwrap as _lb_unwrap
+            out["root_seed"] = _lb_unwrap(bytes(row["root_seed"]), self._lockbox)
+        return out
+
     def _row_to_self_mesh_device(self, row: sqlite3.Row) -> dict:
         try:
             metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
@@ -3834,6 +4123,28 @@ class State:
             "revoked": bool(row["revoked"]),
             "added_ms": int(row["added_ms"]),
             "updated_ms": int(row["updated_ms"]),
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+
+    def _row_to_self_mesh_audit(self, row: sqlite3.Row) -> dict:
+        try:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        except Exception:
+            metadata = {}
+        return {
+            "id": int(row["id"]),
+            "ts_ms": int(row["ts_ms"]),
+            "event": row["event"],
+            "severity": row["severity"],
+            "root_pub": bytes(row["root_pub"]) if row["root_pub"] is not None else None,
+            "device_pub": (
+                bytes(row["device_pub"]) if row["device_pub"] is not None else None
+            ),
+            "peer_fp": row["peer_fp"],
+            "command_id": row["command_id"],
+            "action": row["action"],
+            "path": row["path"],
+            "detail": row["detail"],
             "metadata": metadata if isinstance(metadata, dict) else {},
         }
 

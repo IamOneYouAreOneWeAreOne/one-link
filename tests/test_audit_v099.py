@@ -139,6 +139,11 @@ GUARDED_POST_ROUTES = [
     ("/api/courier/import-file", {}),
     ("/api/courier/assemble", {}),
     ("/api/route-bootstrap/import", {}),
+    ("/api/self-mesh/root", {}),
+    ("/api/self-mesh/devices/mint", {}),
+    ("/api/self-mesh/devices/enroll", {}),
+    ("/api/self-mesh/devices/revoke", {}),
+    ("/api/self-mesh/remote-instruct", {}),
 ]
 
 
@@ -788,6 +793,85 @@ async def test_api_self_mesh_reports_persisted_devices(ctx):
     assert body["devices"][0]["label"] == "Phone"
     assert body["presence"][0]["state"] == "awake"
     assert body["presence"][0]["route"] == "self_wifi"
+
+
+@pytest.mark.asyncio
+async def test_api_self_mesh_enrollment_mint_revoke_and_remote_instruct(ctx):
+    client, daemon, state, token, peer_fp = ctx
+
+    create = await client.post(
+        "/api/self-mesh/root",
+        headers=_h(token),
+        json={"label": "My devices", "device_label": "Audit laptop"},
+    )
+    assert create.status == 200
+    created = await create.json()
+    assert created["ok"] is True
+    assert created["root_pub_b64"]
+    assert created["local_cert_b64"]
+
+    remote = Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+    remote_b64 = base64.urlsafe_b64encode(remote).rstrip(b"=").decode("ascii")
+    mint = await client.post(
+        "/api/self-mesh/devices/mint",
+        headers=_h(token),
+        json={
+            "root_pub_b64": created["root_pub_b64"],
+            "device_pub_b64": remote_b64,
+            "device_kind": "phone-ios",
+            "label": "Phone",
+        },
+    )
+    assert mint.status == 200
+    minted = await mint.json()
+    assert minted["cert_b64"]
+
+    enroll = await client.post(
+        "/api/self-mesh/devices/enroll",
+        headers=_h(token),
+        json={"cert_b64": minted["cert_b64"], "label": "Phone copy"},
+    )
+    assert enroll.status == 200
+    enrolled = await enroll.json()
+    assert enrolled["label"] == "Phone copy"
+
+    sent = []
+
+    async def fake_resolve(needle):
+        assert needle == peer_fp
+        return object()
+
+    async def fake_send(peer, command):
+        sent.append(command)
+        return {"ack": {"ok": True}}
+
+    daemon.resolve_for_send = fake_resolve
+    daemon.send_self_mesh_remote_instruction = fake_send
+    remote_cmd = await client.post(
+        "/api/self-mesh/remote-instruct",
+        headers=_h(token),
+        json={
+            "root_pub_b64": created["root_pub_b64"],
+            "target_device_pub_b64": remote_b64,
+            "peer_fp": peer_fp,
+            "action": "pull_file_manifest",
+            "scope": {"path": "$HOME/Documents/example.txt"},
+        },
+    )
+    assert remote_cmd.status == 200
+    assert sent
+
+    revoke = await client.post(
+        "/api/self-mesh/devices/revoke",
+        headers=_h(token),
+        json={
+            "root_pub_b64": created["root_pub_b64"],
+            "device_pub_b64": remote_b64,
+        },
+    )
+    assert revoke.status == 200
+    assert (await revoke.json())["revoked"] is True
+    assert state.list_self_mesh_audit()[0]["event"] == "device_revoked"
 
 
 @pytest.mark.asyncio
