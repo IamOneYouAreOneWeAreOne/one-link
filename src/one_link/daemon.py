@@ -12807,6 +12807,20 @@ class Daemon:
                 sample["sample_id"] = self.state.record_self_mesh_perf_sample(sample)
         return sample
 
+    def record_self_mesh_api_poll(
+        self,
+        *,
+        route: str,
+        duration_ms: float,
+        status: str = "ready",
+    ) -> None:
+        self._record_self_mesh_perf_observation(
+            "api_poll",
+            duration_ms,
+            status=status,
+            route=route,
+        )
+
     def _broadcast_tail(self, msg: dict) -> None:
         line = (json.dumps({"event": "msg", "msg": msg}) + "\n").encode("utf-8")
         dead: list[asyncio.StreamWriter] = []
@@ -12954,8 +12968,7 @@ class Daemon:
 
                     def _emit_cover_real() -> None:
                         # Fresh ephemeral keypair per packet — Sphinx
-                        # design requires this for forward secrecy
-                        # of cover traffic.
+                        # design requires this for forward secrecy.
                         eph_sk, _eph_pk = _native_sphinx.generate_keypair()
                         target_peer = None
                         target_pk = None
@@ -12994,15 +13007,12 @@ class Daemon:
                                 self._cover_relay_pk,
                             )
                         ]
-                        # Build → real Sphinx cryptography.
                         packet = _native_sphinx.build_cover_packet(
                             eph_sk, circuit, _cover_payload_size
                         )
-                        # Peel → real Sphinx decryption + MAC verify.
                         kind, _next, payload = _native_sphinx.peel_sphinx(
                             self._cover_relay_sk, packet
                         )
-                        # Must deliver (1-hop) + be a cover sentinel.
                         if kind != "deliver":
                             raise RuntimeError(
                                 f"cover-traffic peel: expected "

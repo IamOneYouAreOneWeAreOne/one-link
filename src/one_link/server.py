@@ -2130,13 +2130,15 @@ class UIServer:
 
                         @channel.on("open")
                         def _on_open():
-                            # Row 10 — kick off the attestation
-                            # handshake the moment the control DC
-                            # opens. The peer is expected to do the
-                            # same on its side, so each peer ends up
-                            # with the other's verified master_vk +
-                            # an attested_ms timestamp. No-op when
-                            # the native ext isn't built.
+                            # Row 10 — kick off attestation the
+                            # moment the control DC opens.
+                            # Row 6/7 — announce our Sphinx onion
+                            # pubkey so the peer can bind real cover
+                            # packets to our identity. Both sides
+                            # do the same on their side; once each
+                            # has recorded the other's pubkey,
+                            # cover-traffic emission picks the peer
+                            # and sends a real wire-level packet.
                             if label == DAEMON_CONTROL_LABEL and peer is not None:
                                 try:
                                     self.peer_rtc.init_attestation(peer)
