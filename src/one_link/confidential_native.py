@@ -267,3 +267,100 @@ def attestation_freshness_window_secs() -> int:
     Issuers MUST set ``deadline_unix - issued_unix ≤`` this."""
     _require_native()
     return int(_native.ATTESTATION_FRESHNESS_WINDOW_SECS)  # type: ignore[union-attr]
+
+
+class SealedMasterIdentity:
+    """High-level daemon-side wrapper holding a sealed master.
+
+    Lifecycle:
+        # Boot: read the at-rest seed (DPAPI on Windows, raw on POSIX
+        # under `master_seed.load_or_create_seed`), seal it, then
+        # wipe the plaintext from process memory.
+        sealed = SealedMasterIdentity.from_seed_bytes(seed_bytes)
+        seed_bytes = None  # caller should also `del` or bytearray-zero
+
+        # Hot path: sign / attest / verifying_key all go through the
+        # sealed handle. The 32-byte plaintext only re-materializes
+        # briefly inside the Rust provider during each sign.
+        sig = sealed.sign(b"transcript")
+        vk = sealed.master_vk()
+        doc = sealed.attest(peer_nonce, issued_unix, deadline_unix)
+
+    Compared to holding the plaintext seed in a module-level variable
+    for the daemon's lifetime, the sealed handle:
+
+    - Keeps the master seed in plaintext for ~microseconds per sign
+      instead of hours.
+    - Re-zeroizes the unsealed buffer on every sign exit (Rust
+      ``Zeroize`` impl on drop of the temporary buffer).
+    - Refuses to expose the plaintext to Python at all — there's no
+      ``.seed()`` accessor. Daemon code can sign / verify / attest
+      but cannot leak the raw bytes back to a log line.
+
+    NOT a replacement for the on-disk DPAPI / passphrase / hardware
+    backup — those still gate WHO can construct this object at boot.
+    This wrapper closes the *runtime* gap.
+    """
+
+    __slots__ = ("_provider", "_sealed")
+
+    def __init__(
+        self,
+        provider: SoftwareProvider,
+        sealed: SealedKey,
+    ) -> None:
+        self._provider = provider
+        self._sealed = sealed
+
+    @classmethod
+    def from_seed_bytes(cls, seed: bytes) -> "SealedMasterIdentity":
+        """Construct from a fresh 32-byte master seed. The caller is
+        responsible for zeroizing the input buffer after this call —
+        Python ``bytes`` are immutable so the buffer pattern is
+        usually ``bytearray`` + ``bytes_view[:] = b"\\x00" * 32``.
+        """
+        if len(seed) != 32:
+            raise ValueError(f"master seed must be 32 bytes, got {len(seed)}")
+        provider = SoftwareProvider.fresh()
+        sealed = provider.seal_master(bytes(seed))
+        return cls(provider, sealed)
+
+    @property
+    def provider_tier(self) -> int:
+        return self._provider.tier
+
+    @property
+    def provider_tag(self) -> int:
+        return self._provider.tag
+
+    def master_vk(self) -> bytes:
+        """Return the 1984-byte hybrid verifying key for this master."""
+        return self._provider.verifying_key(self._sealed)
+
+    def sign(self, transcript: bytes) -> bytes:
+        """Sign ``transcript`` under the sealed master."""
+        return self._provider.sealed_sign(self._sealed, transcript)
+
+    def derive_child(self, context_tag: bytes) -> "SealedMasterIdentity":
+        """Derive a new ``SealedMasterIdentity`` under a context tag.
+        Used for per-day / per-channel / per-purpose subkeys without
+        exposing the master."""
+        child = self._provider.derive_child(self._sealed, context_tag)
+        return SealedMasterIdentity(self._provider, child)
+
+    def attest(
+        self,
+        peer_nonce: bytes,
+        issued_unix: int,
+        deadline_unix: int,
+        field_witness: Optional[bytes] = None,
+    ) -> AttestationDoc:
+        """Issue an attestation doc binding this master to a peer
+        challenge."""
+        return self._provider.attest(
+            self._sealed,
+            peer_nonce,
+            issued_unix,
+            deadline_unix,
+            field_witness,
+        )

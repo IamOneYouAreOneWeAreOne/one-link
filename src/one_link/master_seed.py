@@ -204,3 +204,49 @@ def derive_cluster_seed(seed: bytes) -> bytes:
         salt=None,
         info=_INFO_CLUSTER_SEED,
     ).derive(bytes(seed))
+
+
+# ── Row 10: sealed runtime ───────────────────────────────────────
+
+
+def load_sealed_master(data_dir: Path):
+    """Boot-time helper: load the master seed from disk, seal it
+    under a per-process ``SoftwareProvider``, wipe the plaintext, and
+    return a ``SealedMasterIdentity`` the daemon can keep in memory
+    for its lifetime.
+
+    Returns ``None`` if no seed exists on disk (caller decides
+    whether to mint one + show the BIP-39 mnemonic).
+
+    Returns ``False`` (specifically the bool) if the
+    ``one_link_native.confidential`` extension isn't built — caller
+    falls back to plaintext-in-memory legacy flow.
+
+    The sealed handle exposes ``.sign(transcript)``,
+    ``.master_vk()``, ``.attest(...)``, and ``.derive_child(...)``.
+    It does NOT expose the raw seed; daemons that need legacy
+    HKDF-derived material can still call the module-level
+    ``derive_drk / derive_identity_priv / derive_backup_key /
+    derive_cluster_seed`` from the plaintext seed before sealing.
+    """
+    seed = load_seed(data_dir)
+    if seed is None:
+        return None
+    try:
+        from one_link.confidential_native import (
+            HAS_NATIVE,
+            SealedMasterIdentity,
+        )
+    except ImportError:
+        return False
+    if not HAS_NATIVE:
+        return False
+    sealed = SealedMasterIdentity.from_seed_bytes(seed)
+    # Best-effort plaintext wipe. Python `bytes` are immutable, so
+    # this only catches buffer-style holders; the real protection
+    # comes from the seal — once the sealed handle is constructed,
+    # the plaintext is only re-materialised microseconds per sign
+    # inside the Rust provider.
+    seed = b"\x00" * SEED_LEN_BYTES
+    del seed
+    return sealed
