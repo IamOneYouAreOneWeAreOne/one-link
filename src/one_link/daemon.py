@@ -12807,24 +12807,74 @@ class Daemon:
                 )
             # Row 6 — start the cover-traffic Poisson scheduler.
             # Default 0.5 Hz (~one cover packet per 2 s). The emit
-            # callback is a counter-only stub for this first
-            # integration; a follow-up wires it to build_cover_packet
-            # over an active self-onion circuit when one exists.
+            # callback runs the FULL Sphinx cover-packet pipeline
+            # locally every tick: fresh ephemeral Ristretto255
+            # keypair, 1-hop circuit to self, build_cover_packet,
+            # immediately peel + verify the cover sentinel. Real
+            # cryptography end-to-end — Ristretto255 ECDH,
+            # ChaCha20-Poly1305 per-layer encrypt, BLAKE3 MAC. No
+            # stubs: a regression in any Sphinx primitive stops
+            # the counter immediately because peel/sentinel asserts
+            # raise. Wire-level peer-to-peer cover emission needs
+            # the Row 7 daemon-side onion-key exchange and lands
+            # as a focused follow-up commit.
             try:
                 from one_link.cover_traffic import (
                     CoverTrafficDaemon as _CTD,
                     HAS_NATIVE as _COVER_HAS_NATIVE,
                 )
                 if _COVER_HAS_NATIVE:
-                    def _emit_cover_stub() -> None:
+                    from one_link_native import sphinx as _native_sphinx
+                    # Long-term self-relay keypair — created once at
+                    # daemon start; successive cover packets reuse it.
+                    self._cover_relay_sk, self._cover_relay_pk = (
+                        _native_sphinx.generate_keypair()
+                    )
+                    self._cover_self_hop_id = bytes(32)
+                    _cover_payload_size = max(
+                        int(_native_sphinx.COVER_PAYLOAD_MIN), 512
+                    )
+
+                    def _emit_cover_real() -> None:
+                        # Fresh ephemeral keypair per packet — Sphinx
+                        # design requires this for forward secrecy
+                        # of cover traffic.
+                        eph_sk, _eph_pk = _native_sphinx.generate_keypair()
+                        circuit = [
+                            (
+                                self._cover_self_hop_id,
+                                self._cover_relay_pk,
+                            )
+                        ]
+                        # Build → real Sphinx cryptography.
+                        packet = _native_sphinx.build_cover_packet(
+                            eph_sk, circuit, _cover_payload_size
+                        )
+                        # Peel → real Sphinx decryption + MAC verify.
+                        kind, _next, payload = _native_sphinx.peel_sphinx(
+                            self._cover_relay_sk, packet
+                        )
+                        # Must deliver (1-hop) + be a cover sentinel.
+                        if kind != "deliver":
+                            raise RuntimeError(
+                                f"cover-traffic peel: expected "
+                                f"deliver, got {kind!r}"
+                            )
+                        if not _native_sphinx.is_cover_payload(payload):
+                            raise RuntimeError(
+                                "cover-traffic peel: payload missing "
+                                "cover sentinel"
+                            )
                         self._cover_emit_count += 1
-                    ct = _CTD(rate_hz=0.5, emit_cover=_emit_cover_stub)
+
+                    ct = _CTD(rate_hz=0.5, emit_cover=_emit_cover_real)
                     ct.start()
                     self._cover_traffic = ct
                     log.info(
                         "row-6: cover-traffic scheduler started "
-                        "(rate=0.5 Hz, counter-only emitter until "
-                        "self-onion circuits available)."
+                        "(rate=0.5 Hz, real Sphinx round-trip per "
+                        "tick — Ristretto255 + ChaCha20-Poly1305 + "
+                        "BLAKE3 MAC end-to-end)."
                     )
                 else:
                     log.info(

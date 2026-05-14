@@ -2122,6 +2122,25 @@ class UIServer:
                                 self.peer_rtc._dispatch_dc(peer, kind, message)
                             )
 
+                        @channel.on("open")
+                        def _on_open():
+                            # Row 10 — kick off the attestation
+                            # handshake the moment the control DC
+                            # opens. The peer is expected to do the
+                            # same on its side, so each peer ends up
+                            # with the other's verified master_vk +
+                            # an attested_ms timestamp. No-op when
+                            # the native ext isn't built.
+                            if label == DAEMON_CONTROL_LABEL and peer is not None:
+                                try:
+                                    self.peer_rtc.init_attestation(peer)
+                                except Exception as e:
+                                    log.info(
+                                        "peer-rtc: init_attestation "
+                                        "failed for %s: %s",
+                                        peer.fingerprint, e,
+                                    )
+
                         @channel.on("close")
                         def _on_close():
                             log.info(
