@@ -2455,6 +2455,57 @@ async def test_revoke_peer_unknown_fp_is_noop(tmp_path: Path):
     state.close()
 
 
+@pytest.mark.asyncio
+async def test_revoke_peer_flushes_cap_store(tmp_path: Path):
+    """Regression test for audit C3 (May 14 2026): revoke_peer MUST
+    drop every capability grant involving the revoked peer. Otherwise
+    a reconnecting "rejected" peer still passes _capability_allowed
+    via the stale grant — bypassing the entire revocation UX until
+    the grant's TTL elapses.
+    """
+    from one_link import caps_grants
+
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    # Mint a grant from me to them and stash it in _cap_store.
+    base_now = int(time.time() * 1000)
+    blob = caps_grants.encode_grant(
+        granter_priv_seed=me.private.private_bytes_raw(),
+        granter_pub=me.public_bytes,
+        subject_pub=them.public_bytes,
+        capabilities=["files:read"],
+        not_before_ms=base_now,
+        not_after_ms=base_now + 3_600_000,  # 1 hour
+        scope=b"",
+    )
+    daemon._cap_store.accept(blob, expected_subject_pub=them.public_bytes)
+    assert daemon._cap_store.has_capability(
+        granter_pub=me.public_bytes,
+        subject_pub=them.public_bytes,
+        capability="files:read",
+    ), "pre-revoke grant must be recognized"
+
+    # Revoke.
+    await daemon.revoke_peer(them.fingerprint, actor="test", note="audit-c3")
+
+    # The grant must no longer be honoured.
+    assert not daemon._cap_store.has_capability(
+        granter_pub=me.public_bytes,
+        subject_pub=them.public_bytes,
+        capability="files:read",
+    ), "C3 regression: revoke_peer left a stale grant in _cap_store"
+    state.close()
+
+
 # ─── per-pairing health metrics ────────────────────────────────────
 
 def test_stamp_pair_health_creates_entry_with_nan_latency():

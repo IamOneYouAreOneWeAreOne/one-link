@@ -24,11 +24,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use rand_core_06::OsRng;
+use zeroize::Zeroize;
 
 use ol_confidential::{
     fresh_attestation_nonce, verify_attestation, AttestationDoc, AttestationNonce,
-    ConfidentialError, ConfidentialProvider, ProviderTag, SealedKey, SoftwareProvider,
-    ATTESTATION_FRESHNESS_WINDOW_SECS, ATTESTATION_NONCE_LEN,
+    ConfidentialError, ConfidentialProvider, ConfidentialTier, ProviderTag, SealedKey,
+    SoftwareProvider, ATTESTATION_FRESHNESS_WINDOW_SECS, ATTESTATION_NONCE_LEN,
 };
 use ol_pqsig::HybridVerifyingKey;
 
@@ -99,9 +100,15 @@ impl PySoftwareProvider {
                 seed.len()
             )));
         }
+        // Zeroize the local copy of the master seed before returning.
+        // Without this, a core dump captured between this fn's return
+        // and the next stack write recovers the seed bytes verbatim
+        // (audit finding M5, May 14 2026).
         let mut arr = [0u8; 32];
         arr.copy_from_slice(seed);
-        let sealed = self.inner.seal_master(&arr).map_err(map_err)?;
+        let sealed_result = self.inner.seal_master(&arr);
+        arr.zeroize();
+        let sealed = sealed_result.map_err(map_err)?;
         Ok((
             PyBytes::new_bound(py, &sealed.bytes),
             sealed.provider_tag.as_u8(),
@@ -245,11 +252,13 @@ fn software_provider_from_seed(seed: &[u8]) -> PyResult<PySoftwareProvider> {
             seed.len()
         )));
     }
+    // Zeroize the local seed copy after the provider has taken it
+    // (audit finding M5, May 14 2026).
     let mut arr = [0u8; 32];
     arr.copy_from_slice(seed);
-    Ok(PySoftwareProvider {
-        inner: SoftwareProvider::from_seed(&arr),
-    })
+    let provider = SoftwareProvider::from_seed(&arr);
+    arr.zeroize();
+    Ok(PySoftwareProvider { inner: provider })
 }
 
 /// Generate a fresh 32-byte attestation nonce.
@@ -261,6 +270,11 @@ fn attestation_nonce(py: Python<'_>) -> Bound<'_, PyBytes> {
 
 /// Verify a (deconstructed) AttestationDoc. Pass the same field
 /// tuple shape as returned by `attest`.
+///
+/// `min_tier_byte` enforces the provider-tier floor (audit H4):
+/// `1` = Software (any tier accepted), `2` = HardwareBound, `3` =
+/// HardwareAttested. Default `1` keeps back-compat callers passing
+/// no explicit tier — peers wanting hardware binding pass `2` or `3`.
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
 #[pyo3(signature = (
@@ -275,6 +289,7 @@ fn attestation_nonce(py: Python<'_>) -> Bound<'_, PyBytes> {
     expected_peer_nonce,
     now_unix,
     expected_field_witness=None,
+    min_tier_byte=1u8,
 ))]
 fn verify(
     provider_tag: u8,
@@ -288,6 +303,7 @@ fn verify(
     expected_peer_nonce: &[u8],
     now_unix: u64,
     expected_field_witness: Option<&[u8]>,
+    min_tier_byte: u8,
 ) -> PyResult<()> {
     let tag = provider_tag_from_u8(provider_tag)?;
     let vk = HybridVerifyingKey::from_bytes(master_vk)
@@ -308,6 +324,16 @@ fn verify(
         }
     };
     let expected_fw = field_witness_from_bytes(expected_field_witness)?;
+    let min_tier = match min_tier_byte {
+        1 => ConfidentialTier::Software,
+        2 => ConfidentialTier::HardwareBound,
+        3 => ConfidentialTier::HardwareAttested,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown ConfidentialTier byte: {other}"
+            )));
+        }
+    };
     let doc = AttestationDoc {
         provider_tag: tag,
         master_vk: vk,
@@ -318,8 +344,14 @@ fn verify(
         platform_quote: platform_quote.to_vec(),
         master_sig: master_sig.to_vec(),
     };
-    verify_attestation(&doc, &expected_nonce, expected_fw.as_ref(), now_unix)
-        .map_err(map_err)
+    verify_attestation(
+        &doc,
+        &expected_nonce,
+        expected_fw.as_ref(),
+        now_unix,
+        min_tier,
+    )
+    .map_err(map_err)
 }
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {

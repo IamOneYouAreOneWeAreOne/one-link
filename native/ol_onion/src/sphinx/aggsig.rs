@@ -128,11 +128,24 @@ impl SchnorrSigningKey {
 }
 
 impl SchnorrVerifyingKey {
-    /// Decode bytes into a point. Validates the encoding.
+    /// Decode bytes into a point. Validates the encoding AND rejects
+    /// the identity element.
+    ///
+    /// Identity-VK rejection is load-bearing: with `vk = O`,
+    /// the verify equation `s*G == R + c*PK` collapses to
+    /// `s*G == R` (the `c*PK` term is the identity), so ANY
+    /// `(R, s)` with `s = nonce, R = nonce*G` would verify under
+    /// the identity VK — trivially forging signatures without
+    /// knowing any signing key. Rejecting at decode closes the
+    /// forgery, in line with BIP-340 §3.2 group-element validation.
     fn point(&self) -> Result<RistrettoPoint, OnionError> {
-        CompressedRistretto(self.0)
+        let p = CompressedRistretto(self.0)
             .decompress()
-            .ok_or(OnionError::Internal("bad Schnorr VK encoding"))
+            .ok_or(OnionError::Internal("bad Schnorr VK encoding"))?;
+        if p == RistrettoPoint::identity() {
+            return Err(OnionError::Internal("identity Schnorr VK rejected"));
+        }
+        Ok(p)
     }
 }
 
@@ -280,11 +293,23 @@ pub fn bn_aggregate(
     if entries.is_empty() {
         return Err(OnionError::Internal("BN aggregate of empty set"));
     }
-    // Build the participant-list digest L. Sorts pubkeys lex so
-    // ordering doesn't change the aggregate (key-tag commitment
-    // is symmetric).
+    // Validate each VK decodes AND is non-identity (delegated to
+    // `point()?` below in the per-signer loop), AND that no
+    // duplicate participant slots into the BN tag derivation.
+    // Duplicate participants would collapse the "N distinct
+    // signers" property: one key controlling two entries would
+    // appear in the participant digest as two slots with the same
+    // tag, letting an adversary forge a "two-signer endorsement"
+    // with a single key.
     let mut pubkeys: Vec<[u8; 32]> = entries.iter().map(|(vk, _, _)| vk.0).collect();
     pubkeys.sort_unstable();
+    let pre_dedup_len = pubkeys.len();
+    pubkeys.dedup();
+    if pubkeys.len() != pre_dedup_len {
+        return Err(OnionError::Internal(
+            "duplicate participant in BN aggregate",
+        ));
+    }
     let participant_l = participant_list_digest(&pubkeys);
     // participant_l is used inside the per-signer loop via bn_key_tag.
 

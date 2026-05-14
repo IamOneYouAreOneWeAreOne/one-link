@@ -72,12 +72,15 @@
 
 pub mod attestation;
 pub mod errors;
+pub mod heartbeat;
 pub mod platform_quote;
 pub mod provider;
 pub mod sealed_key;
 pub mod software;
 pub mod tier;
 
+#[cfg(all(target_os = "windows", feature = "windows-tpm"))]
+pub mod windows_hardened;
 #[cfg(all(target_os = "windows", feature = "windows-tpm"))]
 pub mod windows_tpm;
 

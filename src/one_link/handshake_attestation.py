@@ -96,10 +96,16 @@ def verify_doc(
     expected_peer_nonce: bytes,
     expected_field_witness: Optional[bytes] = None,
     now_unix: Optional[int] = None,
+    min_tier: int = 1,
 ) -> None:
     """Verify a peer's attestation doc against our challenge.
     Raises ``ValueError`` on any failure (bad sig, expired,
-    nonce mismatch, witness mismatch)."""
+    nonce mismatch, witness mismatch, provider tier below ``min_tier``).
+
+    ``min_tier`` defaults to ``TIER_SOFTWARE`` (accept any tier). Daemon
+    callers that pin a peer at a hardware tier MUST pass the matching
+    floor to reject silent downgrades (audit H4).
+    """
     _require_native()
     if now_unix is None:
         now_unix = int(time.time())
@@ -108,6 +114,7 @@ def verify_doc(
         expected_peer_nonce,
         now_unix,
         expected_field_witness,
+        min_tier,
     )
 
 

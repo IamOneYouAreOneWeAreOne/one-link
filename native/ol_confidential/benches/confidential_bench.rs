@@ -71,7 +71,14 @@ fn bench_attest_verify(c: &mut Criterion) {
     let doc = provider.attest(&sealed, nonce, 100, 120, None).unwrap();
     c.bench_function("confidential::attest_verify", |b| {
         b.iter(|| {
-            verify_attestation(black_box(&doc), black_box(&nonce), None, 110).unwrap();
+            verify_attestation(
+                black_box(&doc),
+                black_box(&nonce),
+                None,
+                110,
+                ol_confidential::ConfidentialTier::Software,
+            )
+            .unwrap();
         });
     });
 }

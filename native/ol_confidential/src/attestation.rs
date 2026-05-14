@@ -214,6 +214,7 @@ pub fn verify_attestation(
     expected_peer_nonce: &AttestationNonce,
     expected_field_witness: Option<&[u8; 32]>,
     now_unix: u64,
+    min_tier: crate::tier::ConfidentialTier,
 ) -> ConfidentialResult<()> {
     // (0) Sanity shape.
     if doc.master_sig.len() != HYBRID_SIG_LEN {
@@ -260,8 +261,19 @@ pub fn verify_attestation(
             }
         }
     }
-    // (4) Provider-tag mapping is enforced separately by the caller
-    //     via tier::ConfidentialTier::meets(...).
+    // (4) Provider-tier floor — enforced HERE, not by callers (audit
+    //     finding H4 May 2026). A doc with provider_tag mapping to a
+    //     tier below the verifier's required floor is rejected. This
+    //     closes the silent-TPM-downgrade vector where a peer pins
+    //     master_vk after a HardwareBound attestation and a later
+    //     Software-tier doc would otherwise replace it.
+    let doc_tier = crate::tier::ConfidentialTier::from_provider_tag(doc.provider_tag);
+    if !doc_tier.meets(min_tier) {
+        return Err(ConfidentialError::AttestationProviderTierTooLow {
+            got: doc_tier,
+            min: min_tier,
+        });
+    }
     // (5) Master signature.
     if doc.master_vk.to_bytes().len() != HYBRID_VK_LEN {
         return Err(ConfidentialError::Internal("master_vk bad length"));
@@ -292,8 +304,12 @@ pub fn verify_attestation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tier::ConfidentialTier;
     use ol_pqsig::HybridSigningKey;
     use rand::rngs::OsRng;
+
+    /// Default test floor — matches what most tests expect (any tier).
+    const TIER_ANY: ConfidentialTier = ConfidentialTier::Software;
 
     fn fresh_key() -> HybridSigningKey {
         let (sk, _vk) = HybridSigningKey::generate(&mut OsRng);
@@ -314,7 +330,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        verify_attestation(&doc, &nonce, None, 110).unwrap();
+        verify_attestation(&doc, &nonce, None, 110, TIER_ANY).unwrap();
     }
 
     #[test]
@@ -332,7 +348,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        verify_attestation(&doc, &nonce, Some(&witness), 110).unwrap();
+        verify_attestation(&doc, &nonce, Some(&witness), 110, TIER_ANY).unwrap();
     }
 
     #[test]
@@ -343,7 +359,7 @@ mod tests {
         let doc =
             sign_attestation(&sk, ProviderTag::Software, nonce_a, 100, 120, None, Vec::new())
                 .unwrap();
-        let r = verify_attestation(&doc, &nonce_b, None, 110);
+        let r = verify_attestation(&doc, &nonce_b, None, 110, TIER_ANY);
         assert!(matches!(r, Err(ConfidentialError::AttestationPeerNonceMismatch)));
     }
 
@@ -353,7 +369,7 @@ mod tests {
         let nonce = fresh_attestation_nonce(&mut OsRng);
         let doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new())
             .unwrap();
-        let r = verify_attestation(&doc, &nonce, None, 130);
+        let r = verify_attestation(&doc, &nonce, None, 130, TIER_ANY);
         assert!(matches!(r, Err(ConfidentialError::AttestationExpired { .. })));
     }
 
@@ -388,7 +404,7 @@ mod tests {
             sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new())
                 .unwrap();
         doc.master_sig[0] ^= 0x01;
-        let r = verify_attestation(&doc, &nonce, None, 110);
+        let r = verify_attestation(&doc, &nonce, None, 110, TIER_ANY);
         assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
     }
 
@@ -408,7 +424,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        let r = verify_attestation(&doc, &nonce, Some(&witness_b), 110);
+        let r = verify_attestation(&doc, &nonce, Some(&witness_b), 110, TIER_ANY);
         assert!(matches!(
             r,
             Err(ConfidentialError::AttestationFieldWitnessMismatch)
@@ -422,10 +438,54 @@ mod tests {
         let doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new())
             .unwrap();
         let witness = [0xCC; 32];
-        let r = verify_attestation(&doc, &nonce, Some(&witness), 110);
+        let r = verify_attestation(&doc, &nonce, Some(&witness), 110, TIER_ANY);
         assert!(matches!(
             r,
             Err(ConfidentialError::AttestationFieldWitnessMismatch)
         ));
+    }
+
+    #[test]
+    fn software_tier_doc_rejected_against_hardware_bound_floor() {
+        // Regression test for audit finding H4 (May 14 2026): a
+        // Software-tier doc must be rejected when the verifier
+        // requires HardwareBound. Otherwise an attacker who can
+        // produce Software-tier docs (e.g., after a backup restore
+        // on a machine without TPM) can silently impersonate a
+        // peer that previously pinned at HardwareBound.
+        let sk = fresh_key();
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new())
+            .unwrap();
+        let r = verify_attestation(
+            &doc,
+            &nonce,
+            None,
+            110,
+            ConfidentialTier::HardwareBound,
+        );
+        assert!(matches!(
+            r,
+            Err(ConfidentialError::AttestationProviderTierTooLow { .. })
+        ));
+    }
+
+    #[test]
+    fn hardware_tier_doc_accepted_at_software_floor() {
+        // Defense-in-depth: HardwareBound docs MUST still pass the
+        // Software floor. Floor semantics are "≥ min", not "==".
+        let sk = fresh_key();
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let doc = sign_attestation(
+            &sk,
+            ProviderTag::WindowsTpm,
+            nonce,
+            100,
+            120,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        verify_attestation(&doc, &nonce, None, 110, ConfidentialTier::Software).unwrap();
     }
 }

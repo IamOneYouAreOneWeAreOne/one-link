@@ -236,15 +236,32 @@ def fresh_attestation_nonce() -> bytes:
     return _native.attestation_nonce()  # type: ignore[union-attr]
 
 
+#: Provider-tier floor bytes — match Rust ``ConfidentialTier`` ordering.
+#: ``Software`` accepts any tier; higher floors reject docs from
+#: weaker providers (audit H4: enforced inside ``verify_attestation``
+#: rather than left to callers).
+TIER_SOFTWARE: int = 1
+TIER_HARDWARE_BOUND: int = 2
+TIER_HARDWARE_ATTESTED: int = 3
+
+
 def verify_attestation(
     doc: AttestationDoc,
     expected_peer_nonce: bytes,
     now_unix: int,
     expected_field_witness: Optional[bytes] = None,
+    min_tier: int = TIER_SOFTWARE,
 ) -> None:
     """Verify an attestation doc. Raises ``ValueError`` on any failure
     (bad master sig, expired, nonce mismatch, witness mismatch,
-    freshness window too wide).
+    freshness window too wide, provider tier below ``min_tier``).
+
+    ``min_tier`` defaults to ``TIER_SOFTWARE`` (accept any tier). Pass
+    ``TIER_HARDWARE_BOUND`` to require the issuer to hold the master
+    inside a hardware secure element (Apple Secure Enclave / Android
+    StrongBox / Windows TPM / Intel SGX / AMD SEV-SNP / TrustZone) —
+    closes the silent-TPM-downgrade vector after a peer was pinned at
+    a hardware tier.
     """
     _require_native()
     _native.verify(  # type: ignore[union-attr]
@@ -259,6 +276,7 @@ def verify_attestation(
         expected_peer_nonce,
         now_unix,
         expected_field_witness,
+        min_tier,
     )
 
 

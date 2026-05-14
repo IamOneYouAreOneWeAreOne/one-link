@@ -9069,6 +9069,22 @@ class Daemon:
                     )
             except Exception as e:
                 log.debug("clearing group chains for revoked peer failed: %s", e)
+        # Audit C3 (May 14 2026): drop any capability grants involving
+        # this peer. Without this, the revoked peer's stored grants
+        # remain valid in `_cap_store` until their TTL expires, so a
+        # reconnecting "rejected" peer can still pass `_capability_allowed`
+        # via the saved grant — defeating the whole revocation UX. We
+        # drop both directions: grants this peer holds FROM us
+        # (`revoke_subject`) and grants this peer issued TO us
+        # (`revoke_granter`).
+        if rec.pubkey:
+            try:
+                # PeerRecord.pubkey is already raw bytes (see state.PeerRecord);
+                # cap_store keys grants by raw pubkey bytes.
+                self._cap_store.revoke_subject(rec.pubkey)
+                self._cap_store.revoke_granter(rec.pubkey)
+            except Exception as e:
+                log.debug("clearing cap store for revoked peer failed: %s", e)
         # v0.7.1: drop any queued outbox messages for the revoked
         # peer. We're not delivering messages to a peer the user
         # no longer trusts.

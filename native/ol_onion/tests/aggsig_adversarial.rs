@@ -40,6 +40,52 @@ fn identity_pk_rejected_at_decode_or_verify() {
 }
 
 #[test]
+fn identity_pk_forgery_attempt_rejected() {
+    // Regression test for H2 (post-audit fix May 14 2026): with
+    // vk = O the equation `s*G == R + c*PK` reduces to `s*G == R`,
+    // which any attacker can satisfy with (R = nonce*G, s = nonce).
+    // Audit found: verify() previously accepted this. Fix rejects
+    // identity-VK at decode time.
+    let evil_vk = SchnorrVerifyingKey([0u8; 32]);
+    // Construct a forgery that satisfies s*G == R with no signing key.
+    // s = 7 (arbitrary), R = 7*G compressed.
+    use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
+    use curve25519_dalek::scalar::Scalar;
+    let s = Scalar::from(7u64);
+    let r_point = RISTRETTO_BASEPOINT_TABLE * &s;
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(&r_point.compress().to_bytes());
+    sig_bytes[32..].copy_from_slice(s.as_bytes());
+    let forgery = ol_onion::sphinx::aggsig::SchnorrSignature(sig_bytes);
+    // This forgery would verify under vk = identity if the decoder
+    // didn't reject. Confirm it's rejected.
+    assert!(
+        verify(&evil_vk, b"forge-target", &forgery).is_err(),
+        "identity-VK signature forgery must be rejected at decode"
+    );
+}
+
+#[test]
+fn bn_aggregate_rejects_duplicate_participants() {
+    // Regression test for H1 (post-audit fix May 14 2026): one key
+    // owning two entries previously aggregated into a "two-signer"
+    // proof. Fix dedups + rejects on collision.
+    use ol_onion::sphinx::aggsig::bn_aggregate;
+    let sk_a = sk(17);
+    let vk_a = sk_a.verifying_key();
+    let sig_1 = sk_a.sign(b"m1");
+    let sig_2 = sk_a.sign(b"m2");
+    let entries = vec![
+        (vk_a, b"m1".as_slice(), sig_1),
+        (vk_a, b"m2".as_slice(), sig_2),
+    ];
+    assert!(
+        bn_aggregate(&entries).is_err(),
+        "BN aggregate over duplicate participants must be rejected"
+    );
+}
+
+#[test]
 fn swapped_messages_in_batch_rejected() {
     let sk_a = sk(3);
     let sk_b = sk(4);

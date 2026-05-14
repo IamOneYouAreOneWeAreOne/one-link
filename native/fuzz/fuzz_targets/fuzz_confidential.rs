@@ -57,10 +57,22 @@ fuzz_target!(|data: &[u8]| {
         &sk, provider_tag, nonce, issued, deadline, None, quote,
     ) {
         let now = issued.saturating_add(offset / 2);
-        let _ = verify_attestation(&doc, &nonce, None, now);
+        let _ = verify_attestation(
+            &doc,
+            &nonce,
+            None,
+            now,
+            ol_confidential::ConfidentialTier::Software,
+        );
         let mut other_nonce = nonce;
         other_nonce[0] ^= 0xFF;
-        let _ = verify_attestation(&doc, &other_nonce, None, now);
+        let _ = verify_attestation(
+            &doc,
+            &other_nonce,
+            None,
+            now,
+            ol_confidential::ConfidentialTier::Software,
+        );
     }
 
     // 4. Construct a bogus AttestationDoc from fuzz bytes directly.
@@ -74,5 +86,11 @@ fuzz_target!(|data: &[u8]| {
         platform_quote: data.iter().take(32).copied().collect(),
         master_sig: data.iter().take(3357).copied().collect(),
     };
-    let _ = verify_attestation(&bogus, &nonce, None, issued.saturating_add(1));
+    let _ = verify_attestation(
+        &bogus,
+        &nonce,
+        None,
+        issued.saturating_add(1),
+        ol_confidential::ConfidentialTier::Software,
+    );
 });

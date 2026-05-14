@@ -30,6 +30,24 @@ impl ConfidentialTier {
     pub const fn meets(self, required: Self) -> bool {
         (self as u8) >= (required as u8)
     }
+
+    /// Map a [`crate::provider::ProviderTag`] (the byte that flows over
+    /// the wire in [`crate::attestation::AttestationDoc`]) onto its
+    /// best-effort tier. Used by `verify_attestation` to enforce the
+    /// `min_tier` floor without callers having to bridge the two enums.
+    #[must_use]
+    pub const fn from_provider_tag(tag: crate::provider::ProviderTag) -> Self {
+        use crate::provider::ProviderTag;
+        match tag {
+            ProviderTag::Software => Self::Software,
+            ProviderTag::WindowsTpm
+            | ProviderTag::AppleSecureEnclave
+            | ProviderTag::AndroidStrongBox
+            | ProviderTag::IntelSgx
+            | ProviderTag::AmdSevSnp
+            | ProviderTag::ArmTrustZone => Self::HardwareBound,
+        }
+    }
 }
 
 impl From<ol_hwkey::KeyGuarantee> for ConfidentialTier {

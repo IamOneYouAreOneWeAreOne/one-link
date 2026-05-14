@@ -47,8 +47,18 @@ pub const HEARTBEAT_TRANSCRIPT_DOMAIN: &[u8] =
 /// form.
 pub type HeartbeatId = [u8; 32];
 
-/// Compute the heartbeat-id over a fully-signed [`AttestationDoc`].
-/// Used by peers as the `prev_heartbeat_id` for the next doc.
+/// Compute the heartbeat-id over an [`AttestationDoc`]'s
+/// **transcript-equivalent fields**. Used by peers as the
+/// `prev_heartbeat_id` for the next doc.
+///
+/// Deliberately EXCLUDES `master_sig`: ML-DSA-65 signatures are
+/// randomized, so re-signing identical metadata yields different
+/// `master_sig` bytes. Hashing the sig into the chain id would
+/// make an honest issuer's mid-chain restart look like a fork
+/// (audit finding H6 May 2026). The rest of the chain's security
+/// is unaffected: `verify_attestation` still requires `master_sig`
+/// to validate over the full transcript, and tampering with any
+/// transcript-bound field still breaks the chain id.
 #[must_use]
 pub fn heartbeat_id(doc: &AttestationDoc) -> HeartbeatId {
     let mut h = Hasher::new();
@@ -59,16 +69,21 @@ pub fn heartbeat_id(doc: &AttestationDoc) -> HeartbeatId {
     h.update(&doc.issued_unix.to_be_bytes());
     h.update(&doc.deadline_unix.to_be_bytes());
     match doc.field_witness_commitment {
-        None => h.update(&[0u8]),
+        None => {
+            h.update(&[0u8]);
+        }
         Some(c) => {
             h.update(&[1u8]);
             h.update(&c);
-            &mut h
         }
-    };
-    h.update(&u32::try_from(doc.platform_quote.len()).unwrap_or(u32::MAX).to_be_bytes());
+    }
+    h.update(
+        &u32::try_from(doc.platform_quote.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
     h.update(&doc.platform_quote);
-    h.update(&doc.master_sig);
+    // NOTE: `doc.master_sig` is intentionally NOT mixed in.
     *h.finalize().as_bytes()
 }
 
@@ -125,6 +140,7 @@ impl HeartbeatVerifierState {
         expected_peer_nonce: &AttestationNonce,
         expected_field_witness: Option<&[u8; 32]>,
         now_unix: u64,
+        min_tier: crate::tier::ConfidentialTier,
     ) -> ConfidentialResult<()> {
         if !self.initialised {
             if hb.prev_heartbeat_id != [0u8; 32] {
@@ -148,6 +164,7 @@ impl HeartbeatVerifierState {
             expected_peer_nonce,
             expected_field_witness,
             now_unix,
+            min_tier,
         )?;
         // Accept: update state.
         self.last_counter = hb.monotonic_counter;
@@ -203,8 +220,8 @@ mod tests {
         };
 
         let mut state = HeartbeatVerifierState::fresh();
-        state.ingest(&hb_a, &nonce_a, None, 110).unwrap();
-        state.ingest(&hb_b, &nonce_b, None, 210).unwrap();
+        state.ingest(&hb_a, &nonce_a, None, 110, crate::tier::ConfidentialTier::Software).unwrap();
+        state.ingest(&hb_b, &nonce_b, None, 210, crate::tier::ConfidentialTier::Software).unwrap();
         assert!(state.initialised);
         assert_eq!(state.last_counter, 2);
     }
@@ -220,7 +237,7 @@ mod tests {
             prev_heartbeat_id: [0u8; 32],
         };
         let mut state = HeartbeatVerifierState::fresh();
-        state.ingest(&hb_a, &nonce, None, 110).unwrap();
+        state.ingest(&hb_a, &nonce, None, 110, crate::tier::ConfidentialTier::Software).unwrap();
 
         // Same counter again — must reject.
         let hb_replay = HeartbeatAttestation {
@@ -228,7 +245,7 @@ mod tests {
             monotonic_counter: 5,
             prev_heartbeat_id: heartbeat_id(&doc),
         };
-        let r = state.ingest(&hb_replay, &nonce, None, 110);
+        let r = state.ingest(&hb_replay, &nonce, None, 110, crate::tier::ConfidentialTier::Software);
         assert!(r.is_err());
     }
 
@@ -254,8 +271,8 @@ mod tests {
         };
 
         let mut state = HeartbeatVerifierState::fresh();
-        state.ingest(&hb_a, &nonce_a, None, 110).unwrap();
-        let r = state.ingest(&hb_b, &nonce_b, None, 210);
+        state.ingest(&hb_a, &nonce_a, None, 110, crate::tier::ConfidentialTier::Software).unwrap();
+        let r = state.ingest(&hb_b, &nonce_b, None, 210, crate::tier::ConfidentialTier::Software);
         assert!(r.is_err(), "chain break must be detected");
     }
 
@@ -294,9 +311,36 @@ mod tests {
         };
 
         let mut state = HeartbeatVerifierState::fresh();
-        state.ingest(&hb_a, &nonce_a, None, 110).unwrap();
-        state.ingest(&hb_b1, &nonce_b, None, 210).unwrap();
-        let r = state.ingest(&hb_b2, &hb_b2.attestation.peer_nonce, None, 210);
+        state.ingest(&hb_a, &nonce_a, None, 110, crate::tier::ConfidentialTier::Software).unwrap();
+        state.ingest(&hb_b1, &nonce_b, None, 210, crate::tier::ConfidentialTier::Software).unwrap();
+        let r = state.ingest(&hb_b2, &hb_b2.attestation.peer_nonce, None, 210, crate::tier::ConfidentialTier::Software);
         assert!(r.is_err(), "second branch of the fork must be rejected");
+    }
+
+    #[test]
+    fn heartbeat_id_independent_of_master_sig() {
+        // Regression test for audit finding H6 (May 14 2026): the
+        // heartbeat_id MUST be a function of the doc's transcript
+        // bytes only, NOT the embedded master signature. Otherwise
+        // any signature variation across re-issues with identical
+        // metadata would make an honest restart look like a fork
+        // and break chain continuity.
+        let (sk, _vk) = HybridSigningKey::generate(&mut OsRng);
+        let nonce = fresh_attestation_nonce(&mut OsRng);
+        let doc = make_doc(&sk, nonce, 100);
+        let id_with_real_sig = heartbeat_id(&doc);
+        // Mutate the master_sig bytes to a totally different value
+        // (the doc would now fail `verify_attestation`, but
+        // heartbeat_id MUST still be the same — chain continuity
+        // depends only on the bound metadata).
+        let mut doc_with_other_sig = doc.clone();
+        for b in doc_with_other_sig.master_sig.iter_mut() {
+            *b ^= 0xFFu8;
+        }
+        let id_with_other_sig = heartbeat_id(&doc_with_other_sig);
+        assert_eq!(
+            id_with_real_sig, id_with_other_sig,
+            "heartbeat_id must be invariant under master_sig changes (H6 regression)"
+        );
     }
 }

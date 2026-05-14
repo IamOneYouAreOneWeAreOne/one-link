@@ -68,6 +68,17 @@ pub enum ConfidentialError {
     /// claims to run.
     #[error("attestation provider tag mismatch")]
     AttestationProviderTagMismatch,
+    /// Provider tier carried in the doc is below the verifier's
+    /// required floor. Closes the silent-TPM-downgrade vector: a
+    /// peer that previously pinned a HardwareBound master_vk
+    /// refuses a later Software-tier doc.
+    #[error("attestation provider tier {got:?} below required min {min:?}")]
+    AttestationProviderTierTooLow {
+        /// Doc-asserted tier (mapped from `doc.provider_tag`).
+        got: crate::tier::ConfidentialTier,
+        /// Minimum tier the verifier requires.
+        min: crate::tier::ConfidentialTier,
+    },
     /// Hybrid-sig under the hood reported a problem.
     #[error("pqsig: {0}")]
     PqSig(String),
