@@ -135,20 +135,24 @@ impl SoftwareProvider {
 
     /// Open a sealed blob into its plaintext. The caller's buffer
     /// receives the plaintext; the caller is responsible for
-    /// [`Zeroize`]-ing it. Returns `SealedKeyAuthFail` on tag
-    /// mismatch (constant-time via the AEAD).
+    /// [`Zeroize`]-ing it.
+    ///
+    /// **Audit H5 May 2026 — error-collapsing**: every failure mode
+    /// returns the same external `SealedKeyAuthFail` so an attacker
+    /// who corrupts only the tag byte (or only the length) cannot
+    /// distinguish "wrong provider tag" / "wrong length" / "AEAD
+    /// reject" via the returned error variant — closes the typed-
+    /// error oracle that lets an attacker probe the layout of a
+    /// sealed-blob storage record. The granular variants
+    /// (`SealedKeyWrongProvider`, `SealedKeyBadLength`) remain in
+    /// the enum for ergonomic internal diagnostics but `unseal`
+    /// never returns them externally.
     fn unseal(&self, sealed: &SealedKey, expected_pt_len: usize) -> ConfidentialResult<Vec<u8>> {
         if sealed.provider_tag != ProviderTag::Software {
-            return Err(ConfidentialError::SealedKeyWrongProvider {
-                expected: ProviderTag::Software,
-                got: sealed.provider_tag,
-            });
+            return Err(ConfidentialError::SealedKeyAuthFail);
         }
         if sealed.bytes.len() != NONCE_LEN + expected_pt_len + TAG_LEN {
-            return Err(ConfidentialError::SealedKeyBadLength {
-                expected: NONCE_LEN + expected_pt_len + TAG_LEN,
-                got: sealed.bytes.len(),
-            });
+            return Err(ConfidentialError::SealedKeyAuthFail);
         }
         let nonce = Nonce::from_slice(&sealed.bytes[..NONCE_LEN]);
         let ct = &sealed.bytes[NONCE_LEN..];
@@ -366,12 +370,32 @@ mod tests {
 
     #[test]
     fn unseal_rejects_wrong_provider_tag() {
+        // Audit H5 May 2026: this used to assert
+        // SealedKeyWrongProvider, but unseal now collapses every
+        // failure mode to SealedKeyAuthFail externally so an
+        // attacker cannot use the error variant as a typed oracle
+        // for "tag byte was corrupted" vs "ciphertext was tampered".
         let provider = SoftwareProvider::generate(&mut OsRng);
         let seed = [0x42u8; 32];
         let mut sealed = provider.seal_master(&seed).unwrap();
         sealed.provider_tag = ProviderTag::WindowsTpm;
         let r = provider.unseal(&sealed, 32);
-        assert!(matches!(r, Err(ConfidentialError::SealedKeyWrongProvider { .. })));
+        assert!(matches!(r, Err(ConfidentialError::SealedKeyAuthFail)));
+    }
+
+    #[test]
+    fn unseal_rejects_wrong_length_with_same_variant() {
+        // H5 regression: a sealed blob with the right tag but
+        // truncated/extended must produce SealedKeyAuthFail —
+        // indistinguishable from a wrong-tag or tampered-ciphertext
+        // failure at the API surface.
+        let provider = SoftwareProvider::generate(&mut OsRng);
+        let seed = [0x42u8; 32];
+        let mut sealed = provider.seal_master(&seed).unwrap();
+        // Truncate the sealed bytes by one.
+        sealed.bytes.pop();
+        let r = provider.unseal(&sealed, 32);
+        assert!(matches!(r, Err(ConfidentialError::SealedKeyAuthFail)));
     }
 
     #[test]

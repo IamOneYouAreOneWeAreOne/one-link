@@ -13023,6 +13023,18 @@ class Daemon:
                     _cover_payload_size = max(
                         int(_native_sphinx.COVER_PAYLOAD_MIN), 512
                     )
+                    # Audit H11 May 2026: capture the event loop so
+                    # the emit callback (which runs on the
+                    # CoverTrafficDaemon background thread) can
+                    # marshal aiortc DataChannel sends back onto it.
+                    # `aiortc.RTCDataChannel.send` is not documented
+                    # thread-safe; calling it from the cover thread
+                    # races with the async loop's reads. Snapshotting
+                    # the peer list inside the emit prevents the
+                    # `RuntimeError: dictionary changed size during
+                    # iteration` that was previously silenced by a
+                    # broad `contextlib.suppress(Exception)`.
+                    _cover_event_loop = asyncio.get_running_loop()
 
                     def _emit_cover_real() -> None:
                         # Fresh ephemeral keypair per packet — Sphinx
@@ -13032,14 +13044,25 @@ class Daemon:
                         target_pk = None
                         prtc = getattr(self, "peer_rtc", None)
                         if prtc is not None:
-                            with contextlib.suppress(Exception):
-                                for p in getattr(prtc, "_peers", {}).values():
-                                    pk = getattr(p, "onion_pubkey", None)
-                                    dc = getattr(p, "control_dc", None)
-                                    if pk and getattr(dc, "readyState", "") == "open":
-                                        target_peer = p
-                                        target_pk = pk
-                                        break
+                            # H11: list() copy snapshots the dict
+                            # so a concurrent mutation in
+                            # register_peer / _close_peer doesn't
+                            # raise. We accept that the snapshot
+                            # may be stale by one tick — cover
+                            # traffic is best-effort.
+                            try:
+                                peers_snapshot = list(
+                                    getattr(prtc, "_peers", {}).values()
+                                )
+                            except Exception:
+                                peers_snapshot = []
+                            for p in peers_snapshot:
+                                pk = getattr(p, "onion_pubkey", None)
+                                dc = getattr(p, "control_dc", None)
+                                if pk and getattr(dc, "readyState", "") == "open":
+                                    target_peer = p
+                                    target_pk = pk
+                                    break
                         if target_peer is not None and target_pk is not None:
                             circuit = [(self._cover_self_hop_id, target_pk)]
                             packet = _native_sphinx.build_cover_packet(
@@ -13047,11 +13070,20 @@ class Daemon:
                             )
                             try:
                                 from one_link.peer_rtc import PEER_DC_PROTOCOL_VERSION
-                                prtc.send_dc(target_peer, "control", {
+                                envelope = {
                                     "v": PEER_DC_PROTOCOL_VERSION,
                                     "t": "cover_packet",
                                     "packet_b64": base64.b64encode(packet).decode("ascii"),
-                                })
+                                }
+                                # H11: marshal the actual aiortc
+                                # send_dc onto the event loop so
+                                # aiortc only sees calls from its
+                                # own thread. Background-thread
+                                # call_soon_threadsafe is the
+                                # supported bridge.
+                                _cover_event_loop.call_soon_threadsafe(
+                                    prtc.send_dc, target_peer, "control", envelope,
+                                )
                                 self._cover_emit_count += 1
                                 self._cover_wire_sent_count = (
                                     getattr(self, "_cover_wire_sent_count", 0) + 1
