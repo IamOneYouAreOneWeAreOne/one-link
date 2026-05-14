@@ -7226,6 +7226,17 @@
         select.appendChild(opt);
       }
     }
+    const receipts = (Array.isArray(mesh.audit) ? mesh.audit : [])
+      .filter(a => /command_|remote_send_|allowed_roots/.test(a.event || ""))
+      .slice(0, 3);
+    for (const a of receipts) {
+      const card = el("div", "sm-device");
+      const label = (a.event || "self_mesh").replaceAll("_", " ");
+      const detail = a.detail || a.path || a.action || "recorded";
+      card.appendChild(el("b", "", label));
+      card.appendChild(el("span", "", detail));
+      list.appendChild(card);
+    }
     if (select && selectedBefore) select.value = selectedBefore;
   }
   async function refreshSelfMesh() {

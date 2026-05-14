@@ -12534,6 +12534,18 @@ class Daemon:
         if peer is not None:
             return peer
 
+        if self.discovery is not None and len(str(needle)) == 64:
+            for candidate in self.discovery.registry.list():
+                try:
+                    if (
+                        candidate.ed_pub_hex
+                        and fingerprint_of(bytes.fromhex(candidate.ed_pub_hex))
+                        == needle
+                    ):
+                        return candidate
+                except ValueError:
+                    continue
+
         # Fingerprint or short_id lookup against the persistent peer DB —
         # only for peers we've explicitly trusted (pinned).
         if self.state is None:

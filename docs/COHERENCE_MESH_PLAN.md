@@ -43,7 +43,7 @@ secure" and "insanely fast" compatible.
 | 5 | **Onion circuits** | ✓ SHIPPED 2026-05-12 (Phase F3) | `ol_onion` crate: nested ChaCha20-Poly1305 AEAD with per-layer ephemeral X25519 keys. Each hop only knows predecessor + successor. 1-hop, 3-hop, and up to 5-hop circuits supported. `build_onion` + `peel_one_layer` primitives wired into daemon via `onion_native.{build_onion,peel_one_layer,derive_pubkey}`. Sphinx-style single-pubkey blinding deferred to F3-polish v2; transport-layer padding addresses hop-count leak. |
 | 6 | **Cover traffic** | 🟡 PRIMITIVE SHIPPED 2026-05-12 (`afd3478`) | `ol_onion::sphinx::cover`: build_cover_packet (sentinel + random pad, indistinguishable size from real Sphinx) + CoverScheduler (Poisson-rate emission, BLAKE3-seeded for determinism). Daemon-side timer wiring + active-inference adaptive rate (Tier 2) deferred. |
 | 7 | **Hardware-attested transport** | ✓ SHIPPED 2026-05-13 | QUIC over TLS 1.3 (Phase A2) + `ol_onion::transport_obfs` complete: primitive byte XOR + obfs4-style handshake (BridgeKeypair + ClientHandshake + ServerHandshake with epoch-bound HMAC binding + 1-epoch skew tolerance) + bidirectional Session with per-direction keys. JA3-perfect TLS-fingerprint mimicry on top is a separate ship (the keys + nonces are here). |
-| 8 | **Personal Device Mesh** | 🟡 IN PROGRESS 2026-05-14 (F5 control + polish slice) | Core planner, State schema v18/v19/v20, `/api/self-mesh`, root create/import, cert mint/enroll/revoke, invite deep-link/QR, daemon self-mesh presence, live secure-channel remote-instruct, per-action capabilities, replay protection, scoped path policy, audit/activity events, Activity-panel controls, self-route resolution (`self:<root>`), persisted performance telemetry, and in-process two-daemon E2E are wired. Next: richer native/mobile handoff and native multi-process E2E. |
+| 8 | **Personal Device Mesh** | 🟡 IN PROGRESS 2026-05-14 (F5 real-daemon proof slice) | Core planner, State schema v18/v19/v20, `/api/self-mesh`, root create/import, cert mint/enroll/revoke, invite deep-link/QR, daemon self-mesh presence, live secure-channel remote-instruct, per-action capabilities, replay protection, scoped path policy, audit/activity events, Activity-panel controls, trusted-folder management, self-route resolution (`self:<root>`), persisted performance telemetry, launcher/backend build-fingerprint binding, in-process two-daemon E2E, and real subprocess daemon E2E are wired. Next: richer native/mobile handoff and long-run production telemetry. |
 | 9 | **Threshold recovery** | ✓ SHIPPED 2026-05-13 | `ol_threshold_recovery` Shamir(K,N) over GF(2^8) + field-bound layer + WIRED into daemon's `social_recovery.py` via `split_compat`/`combine_compat` helpers. Pure-Python `threshold.py` stays as fallback. |
 | 10 | **Confidential-compute daemon** | ❌ NEW BUILD | Where hardware supports (Intel SGX, AMD SEV-SNP, Apple Secure Memory, ARM TrustZone), daemon runs in an enclave so even local malware can't extract keys. Beyond Signal. Beyond what any consumer messenger ships. |
 
@@ -288,6 +288,8 @@ subkeys + device-presence CRDT + remote-instruct command channel.
   before normal send resolution.
 - Remote file actions are constrained to allowed self-mesh roots: inbox,
   configured `self_mesh_allowed_roots`, and synced folder roots.
+- `/api/self-mesh/allowed-roots` plus the Activity-panel "Trust folder"
+  control make remote file scopes user-visible and auditable.
 - Per-action prompt-required capabilities are defined for
   `self_mesh_manifest` and `self_mesh_send`; remote-instruct receive rejects
   actions that the peer policy has not granted.
@@ -299,6 +301,11 @@ subkeys + device-presence CRDT + remote-instruct command channel.
 - In-process two-daemon E2E proves an enrolled phone can sign a scoped
   command, an enrolled laptop can receive it through the live handler, enforce
   `self_mesh_send`, and queue/complete the delegated file send.
+- Real subprocess E2E (`tests/test_self_mesh_subprocess.py`) proves two daemon
+  processes can enroll under one root, send a signed remote instruction over
+  the encrypted live transport, route a fingerprint-addressed recipient through
+  the live endpoint instead of stale persisted LAN state, transfer the requested
+  file, and write command/remote-send audit receipts.
 - Activity panel renders the token-guarded "My devices" self-mesh surface and
   refreshes on `self_mesh_changed` WebSocket events; compact controls can
   create roots, enroll certs, revoke devices, pull manifests, and request
@@ -311,11 +318,11 @@ subkeys + device-presence CRDT + remote-instruct command channel.
   root-bound, target-bound, expiry-bound, nonce-bearing, and replay-checkable.
 - Runtime remote-instruct requires a trusted local device-cert row for the
   command root, so arbitrary roots cannot address this daemon by raw pubkey.
+- `one-link app` now compares launcher/UI/daemon source fingerprints in
+  addition to semantic version and schema, so desktop launch cannot silently
+  reuse a stale backend during alpha iteration.
 
 **Remaining for F5 completion:**
-- Native multi-process/network E2E: enrolled devices under one root, real
-  socket/channel transport, and file transfer completion across process
-  boundaries.
 - Richer mobile handoff ceremony: use the QR/deep-link exchange as the first
   step of a full browser/native mobile enrollment flow, not just cert import.
 - Production telemetry expansion beyond route-choice history: presence fanout,

@@ -26,6 +26,7 @@ def test_self_mesh_ui_fetches_and_listens_for_daemon_events():
     assert 'selfMeshAllowedRoots(body) { return this.post("/api/self-mesh/allowed-roots", body); }' in src
     assert 'm.type === "self_mesh_changed"' in src
     assert "state.selfMesh = await api.selfMesh()" in src
+    assert "/command_|remote_send_|allowed_roots/" in src
 
 
 def test_self_mesh_ui_has_enrollment_and_remote_instruction_handlers():

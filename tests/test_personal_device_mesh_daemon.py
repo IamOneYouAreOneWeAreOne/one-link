@@ -364,3 +364,38 @@ def test_send_self_mesh_remote_instruction_uses_wire_frame(tmp_path: Path):
     assert result["ack"] == {"ok": True}
     assert sent[0]["t"] == "SELF_MESH_REMOTE_INSTRUCTION"
     assert base64.urlsafe_b64decode(sent[0]["command_b64"] + "==") == b'{"command":true}'
+
+
+def test_resolve_for_send_prefers_live_fingerprint_endpoint(tmp_path: Path):
+    from one_link.discovery import Peer
+
+    d = _make_daemon(tmp_path)
+    peer_priv, peer_pub = _ed25519_pair()
+    peer_fp = fingerprint_of(peer_pub)
+    d.state.upsert_peer(
+        fingerprint=peer_fp,
+        short_id=peer_fp[:8],
+        pubkey=peer_pub,
+        hostname="laptop",
+        address="127.0.0.1",
+        port=1,
+        trust_default="pinned",
+    )
+    live = Peer(
+        short_id=peer_fp[:8],
+        hostname="laptop",
+        address="127.0.0.1",
+        port=54321,
+        ed_pub_hex=peer_pub.hex(),
+    )
+    d.discovery = SimpleNamespace(
+        registry=SimpleNamespace(
+            find=lambda needle: None,
+            list=lambda: [live],
+        ),
+    )
+
+    async def run():
+        return await d.resolve_for_send(peer_fp)
+
+    assert asyncio.run(run()).port == 54321
