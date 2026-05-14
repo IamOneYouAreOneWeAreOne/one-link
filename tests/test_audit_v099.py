@@ -914,6 +914,14 @@ async def test_api_self_mesh_invite_qr_and_performance(ctx):
     preview_body = await preview.json()
     assert preview_body["claimable_here"] is True
 
+    public_preview = await client.get(
+        "/api/v1/self-mesh/enrollment-invite/preview"
+        f"?token={invite['token']}&device_pub_b64={created['local_device_pub_b64']}",
+    )
+    assert public_preview.status == 200
+    public_body = await public_preview.json()
+    assert public_body["claimable_by_device"] is True
+
     claim = await client.post(
         "/api/self-mesh/enrollment-invite/claim",
         headers=_h(token),
@@ -931,12 +939,18 @@ async def test_api_self_mesh_invite_qr_and_performance(ctx):
     assert body["ok"] is True
     assert body["performance"]["route_probe_avg_ms"] >= 0
     assert "history" in body
+    assert body["budgets"]["status"] == "pass"
+    assert any(
+        item["metric"] == "route_probe_avg_ms"
+        for item in body["budgets"]["items"]
+    )
 
     mesh = await client.get("/api/self-mesh", headers=_h(token))
     assert mesh.status == 200
     mesh_body = await mesh.json()
     assert mesh_body["performance"]["route_probe_avg_ms"] >= 0
     assert mesh_body["performance_history"]
+    assert mesh_body["performance_budgets"]["status"] == "pass"
 
 
 @pytest.mark.asyncio

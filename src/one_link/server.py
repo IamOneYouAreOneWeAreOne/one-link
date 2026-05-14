@@ -1290,6 +1290,10 @@ class UIServer:
         # since it's the same self-signed cert anyone on the LAN
         # would see during a TLS handshake anyway.
         r.add_get("/api/v1/peer-rtc/profile.mobileconfig", self._pair_profile)
+        r.add_get(
+            "/api/v1/self-mesh/enrollment-invite/preview",
+            self.api_public_self_mesh_enrollment_invite_preview,
+        )
         # v0.15.4: connect-info + QR for the phone-pairing flow.
         # Both auth-gated — they expose the LAN URL with the token.
         r.add_get("/api/connect-info", self._guarded(self.api_connect_info))
@@ -3356,6 +3360,7 @@ class UIServer:
                     "status": sample.get("status"),
                     "metadata": meta,
                 })
+        performance = self.daemon.self_mesh_performance_snapshot(record=True)
         response = {
             "version": 1,
             "status": "in_progress",
@@ -3366,7 +3371,11 @@ class UIServer:
             "timeline": timeline,
             "allowed_roots": allowed_roots,
             "routing": routing,
-            "performance": self.daemon.self_mesh_performance_snapshot(record=True),
+            "performance": performance,
+            "performance_budgets": self._self_mesh_performance_budgets(
+                history,
+                performance,
+            ),
             "performance_history": history[:24],
             "performance_observations": observations[:24],
             "remote_instruction_replay_protection": True,
@@ -3683,29 +3692,66 @@ class UIServer:
         request: web.Request,
     ) -> web.Response:
         """Parse a self-mesh invite before the user claims it."""
-        from one_link.self_mesh_enrollment import parse_enrollment_invite
-
         token = str(request.query.get("token") or "")
         try:
-            parsed = parse_enrollment_invite(token)
-            return web.json_response({
-                "ok": True,
-                "root_pub_b64": parsed["root_pub_b64"],
-                "device_pub_b64": parsed["device_pub_b64"],
-                "device_kind": parsed["device_kind"],
-                "label": parsed.get("label") or parsed["device_kind"],
-                "created_ms": parsed.get("created_ms"),
-                "claimable_here": parsed["device_pub_b64"] == (
-                    base64.urlsafe_b64encode(
-                        self.daemon.me.public_bytes
-                    ).rstrip(b"=").decode("ascii")
-                ),
-            })
+            local_pub = base64.urlsafe_b64encode(
+                self.daemon.me.public_bytes
+            ).rstrip(b"=").decode("ascii")
+            return web.json_response(
+                self._self_mesh_enrollment_invite_preview_payload(
+                    token,
+                    device_pub_b64=local_pub,
+                    claim_key="claimable_here",
+                )
+            )
         except Exception as exc:
             return web.json_response({
                 "error": "self_mesh_invite_preview_rejected",
                 "hint": str(exc),
             }, status=400)
+
+    async def api_public_self_mesh_enrollment_invite_preview(
+        self,
+        request: web.Request,
+    ) -> web.Response:
+        """Verify a self-mesh invite for the browser-peer phone shell."""
+        token = str(request.query.get("token") or "")
+        device_pub = str(request.query.get("device_pub_b64") or "")
+        try:
+            return web.json_response(
+                self._self_mesh_enrollment_invite_preview_payload(
+                    token,
+                    device_pub_b64=device_pub or None,
+                    claim_key="claimable_by_device",
+                )
+            )
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_invite_preview_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    def _self_mesh_enrollment_invite_preview_payload(
+        self,
+        token: str,
+        *,
+        device_pub_b64: str | None,
+        claim_key: str,
+    ) -> dict[str, Any]:
+        from one_link.self_mesh_enrollment import parse_enrollment_invite
+
+        parsed = parse_enrollment_invite(token)
+        payload: dict[str, Any] = {
+            "ok": True,
+            "root_pub_b64": parsed["root_pub_b64"],
+            "device_pub_b64": parsed["device_pub_b64"],
+            "device_kind": parsed["device_kind"],
+            "label": parsed.get("label") or parsed["device_kind"],
+            "created_ms": parsed.get("created_ms"),
+        }
+        if device_pub_b64 is not None:
+            payload[claim_key] = parsed["device_pub_b64"] == device_pub_b64
+        return payload
 
     async def api_self_mesh_enrollment_invite_claim(
         self,
@@ -3811,11 +3857,60 @@ class UIServer:
         if state is not None:
             with contextlib.suppress(Exception):
                 history = state.list_self_mesh_perf_samples(limit=120)
+        performance = self.daemon.self_mesh_performance_snapshot(record=True)
         return web.json_response({
             "ok": True,
-            "performance": self.daemon.self_mesh_performance_snapshot(record=True),
+            "performance": performance,
             "history": history,
+            "budgets": self._self_mesh_performance_budgets(history, performance),
         })
+
+    def _self_mesh_performance_budgets(
+        self,
+        history: list[dict],
+        performance: dict[str, Any],
+    ) -> dict[str, Any]:
+        limits = {
+            "route_probe_avg_ms": 50.0,
+            "presence_fanout": 25.0,
+            "command_verify": 5.0,
+            "command_replay_check": 5.0,
+            "command_execute": 250.0,
+            "command_total": 300.0,
+            "remote_send_dispatch": 1000.0,
+            "api_poll": 25.0,
+        }
+        metrics: dict[str, list[float]] = {
+            "route_probe_avg_ms": [
+                float(performance.get("route_probe_avg_ms") or 0.0)
+            ]
+        }
+        for sample in history:
+            meta = sample.get("metadata") or {}
+            metric = str(meta.get("metric") or "")
+            if not metric:
+                continue
+            try:
+                duration = float(meta.get("duration_ms") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            metrics.setdefault(metric, []).append(max(0.0, duration))
+        items = []
+        overall = "pass"
+        for metric, limit in limits.items():
+            values = metrics.get(metric) or []
+            worst = max(values) if values else 0.0
+            status = "pass" if worst <= limit else "warn"
+            if status != "pass":
+                overall = "warn"
+            items.append({
+                "metric": metric,
+                "limit_ms": limit,
+                "worst_ms": round(worst, 4),
+                "sample_count": len(values),
+                "status": status,
+            })
+        return {"status": overall, "window": "recent_samples", "items": items}
 
     async def api_self_mesh_allowed_roots(self, request: web.Request) -> web.Response:
         state = getattr(self.daemon, "state", None)

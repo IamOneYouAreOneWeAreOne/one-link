@@ -43,7 +43,7 @@ secure" and "insanely fast" compatible.
 | 5 | **Onion circuits** | ✓ SHIPPED 2026-05-12 (Phase F3) | `ol_onion` crate: nested ChaCha20-Poly1305 AEAD with per-layer ephemeral X25519 keys. Each hop only knows predecessor + successor. 1-hop, 3-hop, and up to 5-hop circuits supported. `build_onion` + `peel_one_layer` primitives wired into daemon via `onion_native.{build_onion,peel_one_layer,derive_pubkey}`. Sphinx-style single-pubkey blinding deferred to F3-polish v2; transport-layer padding addresses hop-count leak. |
 | 6 | **Cover traffic** | 🟡 PRIMITIVE SHIPPED 2026-05-12 (`afd3478`) | `ol_onion::sphinx::cover`: build_cover_packet (sentinel + random pad, indistinguishable size from real Sphinx) + CoverScheduler (Poisson-rate emission, BLAKE3-seeded for determinism). Daemon-side timer wiring + active-inference adaptive rate (Tier 2) deferred. |
 | 7 | **Hardware-attested transport** | ✓ SHIPPED 2026-05-13 | QUIC over TLS 1.3 (Phase A2) + `ol_onion::transport_obfs` complete: primitive byte XOR + obfs4-style handshake (BridgeKeypair + ClientHandshake + ServerHandshake with epoch-bound HMAC binding + 1-epoch skew tolerance) + bidirectional Session with per-direction keys. JA3-perfect TLS-fingerprint mimicry on top is a separate ship (the keys + nonces are here). |
-| 8 | **Personal Device Mesh** | 🟡 IN PROGRESS 2026-05-14 (F5 real-daemon proof slice) | Core planner, State schema v18/v19/v20, `/api/self-mesh`, root create/import, cert mint/enroll/revoke, invite deep-link/QR, daemon self-mesh presence, live secure-channel remote-instruct, per-action capabilities, replay protection, scoped path policy, audit/activity events, Activity-panel controls, trusted-folder management, self-route resolution (`self:<root>`), persisted performance telemetry, launcher/backend build-fingerprint binding, in-process two-daemon E2E, and real subprocess daemon E2E are wired. Next: richer native/mobile handoff and long-run production telemetry. |
+| 8 | **Personal Device Mesh** | 🟡 IN PROGRESS 2026-05-14 (F5 mobile handoff + telemetry budget slice) | Core planner, State schema v18/v19/v20, `/api/self-mesh`, root create/import, cert mint/enroll/revoke, invite deep-link/QR, daemon self-mesh presence, live secure-channel remote-instruct, per-action capabilities, replay protection, scoped path policy, audit/activity events, Activity-panel controls, trusted-folder management, self-route resolution (`self:<root>`), persisted performance telemetry, launcher/backend build-fingerprint binding, phone-first `/peer` self-mesh invite preview/claim shell, in-process two-daemon E2E, and real subprocess daemon E2E are wired. Next: native-device OS handoff polish and long-run soak evidence. |
 | 9 | **Threshold recovery** | ✓ SHIPPED 2026-05-13 | `ol_threshold_recovery` Shamir(K,N) over GF(2^8) + field-bound layer + WIRED into daemon's `social_recovery.py` via `split_compat`/`combine_compat` helpers. Pure-Python `threshold.py` stays as fallback. |
 | 10 | **Confidential-compute daemon** | ❌ NEW BUILD | Where hardware supports (Intel SGX, AMD SEV-SNP, Apple Secure Memory, ARM TrustZone), daemon runs in an enclave so even local malware can't extract keys. Beyond Signal. Beyond what any consumer messenger ships. |
 
@@ -319,6 +319,13 @@ subkeys + device-presence CRDT + remote-instruct command channel.
 - Activity panel also renders recent action receipts/timeline state and the
   latest measured perf observations so remote actions are visible as
   sent/accepted/queued/completed/failed.
+- `/peer` now recognizes self-mesh invite query tokens, verifies them through
+  a public parse-only endpoint, checks the certificate against the browser
+  device public key, and stores a claimed local certificate record for the
+  phone-first flow.
+- Recent telemetry is evaluated against production budgets for route probes,
+  presence fanout, command verify/replay/execute/total, remote-send dispatch,
+  and UI/API polling; the Activity panel exposes the current budget state.
 - Presence facts converge by `(sequence, updated_ms)`.
 - Delivery planning rejects revoked/untrusted/offline/storage-starved devices.
 - Self-mesh target choice scores awake/asleep state, network class, battery,
@@ -332,11 +339,10 @@ subkeys + device-presence CRDT + remote-instruct command channel.
   reuse a stale backend during alpha iteration.
 
 **Remaining for F5 completion:**
-- Native/browser mobile handoff shell: wire the preview/claim API into the
-  phone-first `/peer` surface so scanned self-mesh links can complete without
-  returning to the desktop Activity panel.
-- Long-running soak thresholds: convert the new telemetry observations into
-  production alert budgets over 24h sessions.
+- Native-device OS handoff polish: register/open `one-link://self-mesh/enroll`
+  directly into the desktop/mobile shell where the platform supports it.
+- Long-running soak evidence: run 24h+ sessions and persist budget rollups as
+  release-gate artifacts, not just recent in-app samples.
 
 **Phase F5 acceptance gate:**
 - One Ed25519 master derives N device subkeys deterministically

@@ -211,6 +211,23 @@
        exposing identity / rendezvous / signaling cards. The
        Advanced toggle flips html.show-advanced and reveals the
        technical surfaces to power users. -->
+  <div class="card" id="selfmesh-enroll-card" hidden>
+    <h2>Join my devices</h2>
+    <div class="body">
+      <p class="help" id="selfmesh-enroll-status">Checking invite...</p>
+      <div class="row" style="margin-top:10px;">
+        <span class="pill dim" id="selfmesh-enroll-pill">starting</span>
+      </div>
+      <div style="margin-top:14px;" id="selfmesh-enroll-details" hidden>
+        <p class="help" style="margin-bottom:6px;">Device certificate</p>
+        <div class="mono dim" id="selfmesh-enroll-root"></div>
+      </div>
+      <div class="row" style="margin-top:14px;" id="selfmesh-enroll-actions" hidden>
+        <button class="btn" id="btn-selfmesh-claim">Claim this device</button>
+      </div>
+    </div>
+  </div>
+
   <div class="card" id="welcome-card" hidden>
     <h2>Pair this device</h2>
     <div class="body">
@@ -2822,6 +2839,7 @@
   function _autopairHideManualCards() {
     for (const id of [
       "#welcome-card",
+      "#selfmesh-enroll-card",
       "#identity-card",
       "#status-card",
       "#actions-card",
@@ -2834,6 +2852,117 @@
     ]) {
       hide($(id));
     }
+  }
+
+  const SELF_MESH_CERT_KEY = "ol_peer.self_mesh_cert.v1";
+
+  function _detectSelfMeshInviteQuery() {
+    const params = new URLSearchParams(window.location.search);
+    const token = (
+      params.get("self_mesh_invite") ||
+      params.get("selfMeshInvite") ||
+      params.get("mesh") ||
+      params.get("token")
+    );
+    if (!token) return null;
+    return { token };
+  }
+
+  function _selfMeshEnrollSetState(pillKind, pillLabel, statusLine) {
+    const pill = $("#selfmesh-enroll-pill");
+    if (pill) {
+      pill.classList.remove("good", "warn", "bad", "dim");
+      pill.classList.add(pillKind);
+      pill.textContent = pillLabel;
+    }
+    text($("#selfmesh-enroll-status"), statusLine);
+  }
+
+  async function _previewSelfMeshInvite(query) {
+    const params = new URLSearchParams();
+    params.set("token", query.token);
+    if (state.rec && state.rec.public_key_b64u) {
+      params.set("device_pub_b64", state.rec.public_key_b64u);
+    }
+    const resp = await fetch(
+      `/api/v1/self-mesh/enrollment-invite/preview?${params.toString()}`,
+      { cache: "no-store" },
+    );
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(body.hint || body.error || `HTTP ${resp.status}`);
+    }
+    return body;
+  }
+
+  async function _storeSelfMeshInvite(query, preview) {
+    if (!state.rec || !state.rec.public_key_b64u) {
+      throw new Error("device identity is not loaded");
+    }
+    if (preview.device_pub_b64 !== state.rec.public_key_b64u) {
+      throw new Error("this invite was minted for a different device key");
+    }
+    const record = {
+      v: 1,
+      claimed_ms: Date.now(),
+      token: query.token,
+      root_pub_b64: preview.root_pub_b64,
+      device_pub_b64: preview.device_pub_b64,
+      device_kind: preview.device_kind,
+      label: preview.label || preview.device_kind || "This device",
+      fingerprint: state.rec.fingerprint,
+    };
+    localStorage.setItem(SELF_MESH_CERT_KEY, JSON.stringify(record));
+    return record;
+  }
+
+  async function _runSelfMeshInviteFlow(query) {
+    _autopairHideManualCards();
+    show($("#selfmesh-enroll-card"));
+    _selfMeshEnrollSetState("dim", "checking", "Verifying signed invite...");
+    let preview;
+    try {
+      preview = await _previewSelfMeshInvite(query);
+    } catch (e) {
+      _selfMeshEnrollSetState(
+        "bad",
+        "rejected",
+        `Invite rejected: ${e && e.message ? e.message : e}`,
+      );
+      return;
+    }
+    text(
+      $("#selfmesh-enroll-root"),
+      `${preview.label || preview.device_kind} · ${preview.root_pub_b64}`,
+    );
+    show($("#selfmesh-enroll-details"));
+    if (preview.device_pub_b64 === (state.rec && state.rec.public_key_b64u)) {
+      _selfMeshEnrollSetState("good", "ready", "This invite matches this device.");
+      show($("#selfmesh-enroll-actions"));
+    } else {
+      _selfMeshEnrollSetState(
+        "warn",
+        "wrong device",
+        "This invite is valid, but it was minted for a different device key.",
+      );
+    }
+    $("#btn-selfmesh-claim")?.addEventListener("click", async () => {
+      try {
+        const rec = await _storeSelfMeshInvite(query, preview);
+        _selfMeshEnrollSetState(
+          "good",
+          "claimed",
+          `${rec.label} is now trusted under this root identity.`,
+        );
+        hide($("#selfmesh-enroll-actions"));
+      } catch (e) {
+        _selfMeshEnrollSetState(
+          "bad",
+          "failed",
+          `Couldn't claim invite: ${e && e.message ? e.message : e}`,
+        );
+      }
+    }, { once: true });
   }
 
   async function _waitForIdentity(maxMs) {
@@ -3520,6 +3649,8 @@
     sendChatMessage,
     _detectPairQuery,
     _runAutoPairFlow,
+    _detectSelfMeshInviteQuery,
+    _runSelfMeshInviteFlow,
     fetchDaemonPeers,
     fetchDaemonMessages,
     _daemonRequest,
@@ -3554,10 +3685,15 @@
   // visible. Run identity boot in either mode (we always need an
   // identity); the pair flow consumes it as soon as it's ready.
   const _pairQuery = _detectPairQuery();
+  const _selfMeshQuery = _detectSelfMeshInviteQuery();
   if (_pairQuery) {
     _autopairHideManualCards();
     show($("#autopair-card"));
     _autopairSetState("dim", "starting", "Setting up your phone's identity…");
+  } else if (_selfMeshQuery) {
+    _autopairHideManualCards();
+    show($("#selfmesh-enroll-card"));
+    _selfMeshEnrollSetState("dim", "starting", "Loading this device...");
   } else {
     // v0.20.3 — default landing. No pair query → show the welcome
     // card explaining how to scan a QR. Identity provisioning still
@@ -3572,6 +3708,14 @@
         _autopairSetState(
           "bad", "failed",
           `Pair flow crashed: ${e && e.message ? e.message : e}`,
+        );
+      });
+    } else if (_selfMeshQuery) {
+      _runSelfMeshInviteFlow(_selfMeshQuery).catch((e) => {
+        console.error("self-mesh invite failed", e);
+        _selfMeshEnrollSetState(
+          "bad", "failed",
+          `Invite flow crashed: ${e && e.message ? e.message : e}`,
         );
       });
     }

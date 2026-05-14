@@ -30,6 +30,7 @@ def test_self_mesh_ui_fetches_and_listens_for_daemon_events():
     assert "state.selfMesh = await api.selfMesh()" in src
     assert "mesh.timeline" in src
     assert "performance_observations" in src
+    assert "performance_budgets" in src
 
 
 def test_self_mesh_ui_has_enrollment_and_remote_instruction_handlers():
@@ -41,3 +42,13 @@ def test_self_mesh_ui_has_enrollment_and_remote_instruction_handlers():
     assert "function sendSelfMeshInstruction(action)" in src
     assert 'sendSelfMeshInstruction("pull_file_manifest")' in src
     assert 'sendSelfMeshInstruction("send_file_from_device")' in src
+
+
+def test_peer_shell_has_phone_first_self_mesh_enrollment():
+    src = Path("src/one_link/web/peer.html").read_text(encoding="utf-8")
+    assert 'id="selfmesh-enroll-card"' in src
+    assert 'id="btn-selfmesh-claim"' in src
+    assert "_detectSelfMeshInviteQuery()" in src
+    assert "_runSelfMeshInviteFlow" in src
+    assert "/api/v1/self-mesh/enrollment-invite/preview" in src
+    assert "ol_peer.self_mesh_cert.v1" in src

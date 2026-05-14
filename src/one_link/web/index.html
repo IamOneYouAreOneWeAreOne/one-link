@@ -7200,6 +7200,16 @@
         const name = String(sample.metric || "").replaceAll("_", " ");
         chips.push([name, `${Number(sample.duration_ms || 0).toFixed(2)} ms`]);
       }
+      const budgets = Array.isArray(mesh.performance_budgets?.items)
+        ? mesh.performance_budgets.items
+        : [];
+      const warnBudget = budgets.find((b) => b.status !== "pass");
+      chips.push([
+        "budget",
+        warnBudget
+          ? `${String(warnBudget.metric || "metric").replaceAll("_", " ")} warn`
+          : `${mesh.performance_budgets?.status || "pass"}`,
+      ]);
       for (const [label, value] of chips) {
         const card = el("div", "sm-device");
         card.appendChild(el("b", "", value));
