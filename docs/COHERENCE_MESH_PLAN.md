@@ -279,6 +279,9 @@ subkeys + device-presence CRDT + remote-instruct command channel.
   revoke device, and send a signed remote instruction.
 - Enrollment invite controls: tokenized deep link and no-store QR SVG carrying
   a root-signed device cert for mobile/self-device handoff.
+- Enrollment handoff now has preview + claim endpoints, so a self-device can
+  parse the QR/deep-link token, confirm it is for its local key, enroll the
+  root/cert locally, and publish presence immediately.
 - Daemon publishes local self-mesh presence at startup and presence changes.
 - Daemon accepts `SELF_MESH_PRESENCE` over pinned live channels.
 - Daemon accepts signed `SELF_MESH_REMOTE_INSTRUCTION` over pinned live
@@ -298,6 +301,9 @@ subkeys + device-presence CRDT + remote-instruct command channel.
 - `/api/self-mesh/performance` records and reports route-choice probe cost,
   live row counts, and recent telemetry history; the Activity panel surfaces
   latency/ready/device chips inline.
+- Production telemetry observations now record presence fanout, command
+  verify/replay/execute/total timing, remote-send dispatch, and UI/API polling
+  budgets into the bounded perf history.
 - In-process two-daemon E2E proves an enrolled phone can sign a scoped
   command, an enrolled laptop can receive it through the live handler, enforce
   `self_mesh_send`, and queue/complete the delegated file send.
@@ -310,6 +316,9 @@ subkeys + device-presence CRDT + remote-instruct command channel.
   refreshes on `self_mesh_changed` WebSocket events; compact controls can
   create roots, enroll certs, revoke devices, pull manifests, and request
   remote sends.
+- Activity panel also renders recent action receipts/timeline state and the
+  latest measured perf observations so remote actions are visible as
+  sent/accepted/queued/completed/failed.
 - Presence facts converge by `(sequence, updated_ms)`.
 - Delivery planning rejects revoked/untrusted/offline/storage-starved devices.
 - Self-mesh target choice scores awake/asleep state, network class, battery,
@@ -323,11 +332,11 @@ subkeys + device-presence CRDT + remote-instruct command channel.
   reuse a stale backend during alpha iteration.
 
 **Remaining for F5 completion:**
-- Richer mobile handoff ceremony: use the QR/deep-link exchange as the first
-  step of a full browser/native mobile enrollment flow, not just cert import.
-- Production telemetry expansion beyond route-choice history: presence fanout,
-  command verify/replay, remote-send dispatch, and UI/API polling budgets over
-  long-running sessions.
+- Native/browser mobile handoff shell: wire the preview/claim API into the
+  phone-first `/peer` surface so scanned self-mesh links can complete without
+  returning to the desktop Activity panel.
+- Long-running soak thresholds: convert the new telemetry observations into
+  production alert budgets over 24h sessions.
 
 **Phase F5 acceptance gate:**
 - One Ed25519 master derives N device subkeys deterministically

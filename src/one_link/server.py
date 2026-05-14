@@ -1314,6 +1314,8 @@ class UIServer:
         r.add_post("/api/self-mesh/devices/revoke", self._guarded(self.api_self_mesh_revoke_device))
         r.add_post("/api/self-mesh/remote-instruct", self._guarded(self.api_self_mesh_remote_instruct))
         r.add_post("/api/self-mesh/enrollment-invite", self._guarded(self.api_self_mesh_enrollment_invite))
+        r.add_get("/api/self-mesh/enrollment-invite/preview", self._guarded(self.api_self_mesh_enrollment_invite_preview))
+        r.add_post("/api/self-mesh/enrollment-invite/claim", self._guarded(self.api_self_mesh_enrollment_invite_claim))
         r.add_get("/api/self-mesh/enrollment-invite/qr.svg", self._guarded(self.api_self_mesh_enrollment_invite_qr))
         r.add_get("/api/self-mesh/performance", self._guarded(self.api_self_mesh_performance))
         r.add_get("/api/self-mesh/allowed-roots", self._guarded(self.api_self_mesh_allowed_roots))
@@ -3204,6 +3206,7 @@ class UIServer:
 
     async def api_self_mesh(self, request: web.Request) -> web.Response:
         """Phase F5 foundation: persisted owner-device mesh state."""
+        started = time.perf_counter()
         state = getattr(self.daemon, "state", None)
         if state is None:
             return web.json_response({"roots": [], "devices": [], "presence": []})
@@ -3273,6 +3276,61 @@ class UIServer:
                 "metadata": row.get("metadata") or {},
             })
 
+        timeline_by_command: dict[str, dict] = {}
+        order = {
+            "command_sent": 1,
+            "command_accepted": 2,
+            "remote_send_queued": 3,
+            "remote_send_complete": 4,
+            "remote_send_failed": 4,
+            "command_rejected": 4,
+            "command_replay_blocked": 4,
+        }
+        for item in sorted(audit, key=lambda a: (a.get("ts_ms") or 0, a.get("id") or 0)):
+            event = str(item.get("event") or "")
+            if event not in order:
+                continue
+            key = str(item.get("command_id") or item.get("id") or "")
+            if not key:
+                continue
+            entry = timeline_by_command.setdefault(key, {
+                "command_id": item.get("command_id"),
+                "action": item.get("action"),
+                "path": item.get("path"),
+                "peer_fp": item.get("peer_fp"),
+                "device_pub_b64": item.get("device_pub_b64"),
+                "status": "pending",
+                "updated_ms": item.get("ts_ms"),
+                "events": [],
+            })
+            entry["action"] = entry.get("action") or item.get("action")
+            entry["path"] = entry.get("path") or item.get("path")
+            entry["peer_fp"] = entry.get("peer_fp") or item.get("peer_fp")
+            entry["updated_ms"] = item.get("ts_ms")
+            entry["events"].append({
+                "event": event,
+                "severity": item.get("severity"),
+                "ts_ms": item.get("ts_ms"),
+                "detail": item.get("detail"),
+                "path": item.get("path"),
+                "metadata": item.get("metadata") or {},
+            })
+            if event == "remote_send_complete":
+                entry["status"] = "complete"
+            elif event in {"remote_send_failed", "command_rejected", "command_replay_blocked"}:
+                entry["status"] = "failed"
+            elif event == "remote_send_queued":
+                entry["status"] = "queued"
+            elif event == "command_accepted":
+                entry["status"] = "accepted"
+            elif event == "command_sent":
+                entry["status"] = "sent"
+        timeline = sorted(
+            timeline_by_command.values(),
+            key=lambda e: int(e.get("updated_ms") or 0),
+            reverse=True,
+        )[:20]
+
         allowed_roots = []
         with contextlib.suppress(Exception):
             allowed_roots = [
@@ -3286,19 +3344,39 @@ class UIServer:
                     kind="status",
                 ))
 
-        return web.json_response({
+        history = state.list_self_mesh_perf_samples(limit=48)
+        observations = []
+        for sample in history:
+            meta = sample.get("metadata") or {}
+            if meta.get("metric"):
+                observations.append({
+                    "ts_ms": sample.get("ts_ms"),
+                    "metric": meta.get("metric"),
+                    "duration_ms": meta.get("duration_ms"),
+                    "status": sample.get("status"),
+                    "metadata": meta,
+                })
+        response = {
             "version": 1,
             "status": "in_progress",
             "roots": roots,
             "devices": devices,
             "presence": presence,
             "audit": audit,
+            "timeline": timeline,
             "allowed_roots": allowed_roots,
             "routing": routing,
             "performance": self.daemon.self_mesh_performance_snapshot(record=True),
-            "performance_history": state.list_self_mesh_perf_samples(limit=24),
+            "performance_history": history[:24],
+            "performance_observations": observations[:24],
             "remote_instruction_replay_protection": True,
-        })
+        }
+        with contextlib.suppress(Exception):
+            self.daemon.record_self_mesh_api_poll(
+                route="/api/self-mesh",
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+            )
+        return web.json_response(response)
 
     async def api_self_mesh_root(self, request: web.Request) -> web.Response:
         """Create/import a personal mesh root and mint this device cert."""
@@ -3597,6 +3675,96 @@ class UIServer:
         except Exception as exc:
             return web.json_response({
                 "error": "self_mesh_invite_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_self_mesh_enrollment_invite_preview(
+        self,
+        request: web.Request,
+    ) -> web.Response:
+        """Parse a self-mesh invite before the user claims it."""
+        from one_link.self_mesh_enrollment import parse_enrollment_invite
+
+        token = str(request.query.get("token") or "")
+        try:
+            parsed = parse_enrollment_invite(token)
+            return web.json_response({
+                "ok": True,
+                "root_pub_b64": parsed["root_pub_b64"],
+                "device_pub_b64": parsed["device_pub_b64"],
+                "device_kind": parsed["device_kind"],
+                "label": parsed.get("label") or parsed["device_kind"],
+                "created_ms": parsed.get("created_ms"),
+                "claimable_here": parsed["device_pub_b64"] == (
+                    base64.urlsafe_b64encode(
+                        self.daemon.me.public_bytes
+                    ).rstrip(b"=").decode("ascii")
+                ),
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_invite_preview_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_self_mesh_enrollment_invite_claim(
+        self,
+        request: web.Request,
+    ) -> web.Response:
+        """Claim a QR/deep-link invite as this local device."""
+        from one_link.self_mesh_enrollment import b64u, b64u_decode, parse_enrollment_invite
+
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        body = await request.json()
+        try:
+            parsed = parse_enrollment_invite(str(body.get("token") or ""))
+            root_pub = b64u_decode(parsed["root_pub_b64"])
+            device_pub = b64u_decode(parsed["device_pub_b64"])
+            if device_pub != self.daemon.me.public_bytes:
+                raise ValueError("invite is for a different device key")
+            label = str(body.get("label") or parsed.get("label") or self.daemon.me.hostname)[:120]
+            kind = str(body.get("device_kind") or parsed.get("device_kind") or "local-device")[:80]
+            if state.get_self_mesh_root(root_pub, include_seed=False) is None:
+                state.upsert_self_mesh_root(
+                    root_pub=root_pub,
+                    root_seed=None,
+                    label=str(body.get("root_label") or "My devices")[:120],
+                    metadata={"source": "invite_claim"},
+                )
+            row = state.upsert_self_mesh_device(
+                root_pub=root_pub,
+                device_pub=device_pub,
+                cert=b64u_decode(parsed["cert_b64"]),
+                device_kind=kind,
+                label=label,
+                local=True,
+                trusted=True,
+                metadata={"source": "invite_claim", "created_ms": parsed.get("created_ms")},
+            )
+            state.record_self_mesh_audit(
+                event="enrollment_invite_claimed",
+                severity="good",
+                root_pub=root_pub,
+                device_pub=device_pub,
+                detail=label,
+                metadata={"device_kind": kind},
+            )
+            with contextlib.suppress(Exception):
+                self.daemon._update_local_self_mesh_presence(route="invite_claim")
+            return web.json_response({
+                "ok": True,
+                "root_pub_b64": b64u(root_pub),
+                "device_pub_b64": b64u(device_pub),
+                "device_kind": row["device_kind"],
+                "label": row["label"],
+                "trusted": row["trusted"],
+                "local": row["local"],
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_invite_claim_rejected",
                 "hint": str(exc),
             }, status=400)
 

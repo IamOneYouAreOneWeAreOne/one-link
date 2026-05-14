@@ -177,3 +177,11 @@ def test_self_mesh_remote_send_crosses_real_daemon_transport(tmp_path: Path):
         assert got.read_text(encoding="utf-8") == payload.read_text(encoding="utf-8")
         assert _wait_self_mesh_event(p.b.home, "command_accepted")["severity"] == "good"
         assert _wait_self_mesh_event(p.b.home, "remote_send_complete")["severity"] == "good"
+        mesh = _api(p.b.home, "GET", "/api/self-mesh")
+        assert any(item["status"] == "complete" for item in mesh["timeline"])
+        metrics = {
+            item["metric"]
+            for item in mesh.get("performance_observations", [])
+        }
+        assert "command_verify" in metrics
+        assert "remote_send_dispatch" in metrics

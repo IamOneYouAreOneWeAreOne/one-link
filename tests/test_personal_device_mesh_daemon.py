@@ -177,6 +177,13 @@ async def test_remote_instruction_manifest_executes_once_and_replay_rejects(
     })
     replay = _ack(channel)
     assert "replayed" in replay["rejected"]
+    metrics = [
+        (row["metadata"] or {}).get("metric")
+        for row in d.state.list_self_mesh_perf_samples(limit=20)
+    ]
+    assert "command_verify" in metrics
+    assert "command_replay_check" in metrics
+    assert "command_total" in metrics
 
 
 @pytest.mark.asyncio
