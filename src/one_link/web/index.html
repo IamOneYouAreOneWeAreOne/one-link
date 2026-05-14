@@ -3997,6 +3997,7 @@
           <button id="btn-self-mesh-enroll">Enroll cert</button>
           <button id="btn-self-mesh-invite">Invite QR</button>
           <button id="btn-self-mesh-revoke">Revoke</button>
+          <button id="btn-self-mesh-trust-root">Trust folder</button>
           <button id="btn-self-mesh-manifest">Pull manifest</button>
           <button id="btn-self-mesh-send">Send from device</button>
         </div>
@@ -5825,6 +5826,7 @@
     selfMeshRemoteInstruct(body) { return this.post("/api/self-mesh/remote-instruct", body); },
     selfMeshInvite(body) { return this.post("/api/self-mesh/enrollment-invite", body); },
     selfMeshPerformance() { return this.get("/api/self-mesh/performance"); },
+    selfMeshAllowedRoots(body) { return this.post("/api/self-mesh/allowed-roots", body); },
     fabricPathCreate() { return this.get("/api/fabric/path-create"); },
     launchFabricPathCreate(body) { return this.post("/api/fabric/path-create/launch", body); },
     nativeFabricPathCreate(body) { return this.post("/api/fabric/path-create/native", body); },
@@ -7319,6 +7321,20 @@
       await refreshSelfMesh();
     } catch (e) {
       toast(`Command failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+  async function trustSelfMeshFolder() {
+    const path = ($("#self-mesh-path")?.value || "").trim();
+    if (!path) return toast("Enter a folder path to trust.", "info");
+    const current = Array.isArray(state.selfMesh?.allowed_roots)
+      ? state.selfMesh.allowed_roots
+      : [];
+    try {
+      await api.selfMeshAllowedRoots({ roots: Array.from(new Set([...current, path])) });
+      toast("Trusted folder added", "good");
+      await refreshSelfMesh();
+    } catch (e) {
+      toast(`Trust update failed: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
   function renderNoRouterKit(noRouter) {
@@ -14275,6 +14291,7 @@
   $("#btn-self-mesh-enroll")?.addEventListener("click", enrollSelfMeshCert);
   $("#btn-self-mesh-invite")?.addEventListener("click", createSelfMeshInvite);
   $("#btn-self-mesh-revoke")?.addEventListener("click", revokeSelfMeshDevice);
+  $("#btn-self-mesh-trust-root")?.addEventListener("click", trustSelfMeshFolder);
   $("#btn-self-mesh-manifest")?.addEventListener("click", () => sendSelfMeshInstruction("pull_file_manifest"));
   $("#btn-self-mesh-send")?.addEventListener("click", () => sendSelfMeshInstruction("send_file_from_device"));
   $("#btn-courier-export")?.addEventListener("click", exportCourierBundle);

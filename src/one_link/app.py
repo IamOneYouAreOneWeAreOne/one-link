@@ -31,6 +31,7 @@ import click
 from one_link import __version__
 from one_link import daemon as daemon_mod
 from one_link import server as server_mod
+from one_link.build_identity import runtime_build_identity
 from one_link.paths import data_dir
 
 
@@ -43,9 +44,12 @@ class RunningDaemon:
 
     @property
     def compatible(self) -> bool:
+        build = runtime_build_identity()
         return (
             self.status.get("ok") is True
             and self.status.get("app_version") == __version__
+            and self.status.get("source_fingerprint")
+            == build["source_fingerprint"]
             and bool(self.status.get("protocol_version"))
             and int(self.status.get("schema_version") or 0) > 0
         )
@@ -114,7 +118,14 @@ def _runtime_matches_control(control_status: dict, ui_status: dict) -> bool:
     ui_fp = ui_me.get("fingerprint")
     if control_fp and ui_fp and control_fp != ui_fp:
         return False
-    return ui_status.get("app_version") == control_status.get("app_version")
+    build = runtime_build_identity()
+    return (
+        ui_status.get("app_version") == control_status.get("app_version")
+        and control_status.get("source_fingerprint")
+        == build["source_fingerprint"]
+        and ui_status.get("source_fingerprint")
+        == build["source_fingerprint"]
+    )
 
 
 def _resolve_running_daemon() -> Optional[RunningDaemon]:

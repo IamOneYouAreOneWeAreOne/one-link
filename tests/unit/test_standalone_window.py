@@ -212,3 +212,31 @@ def test_run_app_signature_accepts_standalone_kwarg():
     assert "standalone" in sig.parameters
     # Default should be True (app-mode is the default UX).
     assert sig.parameters["standalone"].default is True
+
+
+def test_running_daemon_compatibility_requires_source_fingerprint():
+    from one_link import __version__
+    from one_link.app import RunningDaemon
+    from one_link.build_identity import source_fingerprint
+
+    good = RunningDaemon(
+        control_port=1,
+        server_port=2,
+        token="t",
+        status={
+            "ok": True,
+            "app_version": __version__,
+            "source_fingerprint": source_fingerprint(),
+            "protocol_version": "OL1.2",
+            "schema_version": 20,
+        },
+    )
+    stale = RunningDaemon(
+        control_port=1,
+        server_port=2,
+        token="t",
+        status={**good.status, "source_fingerprint": "stale"},
+    )
+
+    assert good.compatible is True
+    assert stale.compatible is False

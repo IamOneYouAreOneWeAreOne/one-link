@@ -118,6 +118,7 @@ GUARDED_GET_ROUTES = [
     "/api/fabric/mobile-reach",
     "/api/self-mesh",
     "/api/self-mesh/performance",
+    "/api/self-mesh/allowed-roots",
     "/api/courier/status",
     "/api/courier/files",
     "/api/courier/outbox",
@@ -141,6 +142,7 @@ GUARDED_POST_ROUTES = [
     ("/api/courier/assemble", {}),
     ("/api/route-bootstrap/import", {}),
     ("/api/self-mesh/root", {}),
+    ("/api/self-mesh/allowed-roots", {}),
 ]
 
 
@@ -167,6 +169,8 @@ async def test_api_me_happy(ctx):
     me = await resp.json()
     assert "fingerprint" in me
     assert "app_version" in me
+    assert "source_fingerprint" in me
+    assert "package_root" in me
     assert "onboarding_completed" in me, "v0.9.4 flag must surface"
 
 
@@ -913,6 +917,38 @@ async def test_api_self_mesh_invite_qr_and_performance(ctx):
     mesh_body = await mesh.json()
     assert mesh_body["performance"]["route_probe_avg_ms"] >= 0
     assert mesh_body["performance_history"]
+
+
+@pytest.mark.asyncio
+async def test_api_self_mesh_allowed_roots_are_validated_and_audited(ctx, tmp_path):
+    client, _, state, token, _ = ctx
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+
+    resp = await client.post(
+        "/api/self-mesh/allowed-roots",
+        headers=_h(token),
+        json={"roots": [str(trusted)]},
+    )
+
+    assert resp.status == 200
+    body = await resp.json()
+    assert str(trusted.resolve()) in body["effective_roots"]
+    assert state.get_setting("self_mesh_allowed_roots") == str(trusted.resolve())
+    assert state.list_self_mesh_audit()[0]["event"] == "allowed_roots_changed"
+
+    bad = await client.post(
+        "/api/self-mesh/allowed-roots",
+        headers=_h(token),
+        json={"roots": [str(tmp_path / "missing")]},
+    )
+    assert bad.status == 400
+
+    listed = await client.get("/api/self-mesh/allowed-roots", headers=_h(token))
+    assert listed.status == 200
+    listed_body = await listed.json()
+    assert str(trusted.resolve()) in listed_body["configured_roots"]
+    assert str(trusted.resolve()) in listed_body["effective_roots"]
 
 
 @pytest.mark.asyncio
