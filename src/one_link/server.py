@@ -1112,7 +1112,7 @@ class UIServer:
 
     def _scan_courier_dir(self, directory: Path) -> list[dict]:
         root = directory.resolve()
-        candidates: list[tuple[int, Path, os.stat_result]] = []
+        newest: list[tuple[int, Path, os.stat_result]] = []
         for path in root.iterdir():
             try:
                 if path.is_symlink():
@@ -1125,12 +1125,15 @@ class UIServer:
                 st = resolved.stat()
                 if st.st_size <= 0 or st.st_size > COURIER_FILE_MAX_BYTES:
                     continue
-                candidates.append((int(st.st_mtime_ns), resolved, st))
+                item = (int(st.st_mtime_ns), resolved, st)
+                if len(newest) < 64:
+                    heapq.heappush(newest, item)
+                elif item[0] > newest[0][0]:
+                    heapq.heapreplace(newest, item)
             except OSError:
                 continue
-        newest = heapq.nlargest(64, candidates, key=lambda item: item[0])
         out: list[dict] = []
-        for _mtime_ns, resolved, st in newest:
+        for _mtime_ns, resolved, st in sorted(newest, key=lambda item: item[0], reverse=True):
             try:
                 out.append({
                     "id": self._courier_file_id_from_stat(

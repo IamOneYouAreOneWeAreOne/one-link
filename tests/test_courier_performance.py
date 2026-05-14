@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import os
 from pathlib import Path
 
 import blake3
@@ -86,3 +87,22 @@ def test_courier_drop_scan_large_directory_stays_bounded(tmp_path: Path, monkeyp
 
     assert len(files) == 64
     assert elapsed_ms < 1500
+
+
+def test_courier_drop_scan_keeps_newest_without_growing_candidate_list(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    daemon = Daemon(_identity())
+    server = UIServer(daemon)
+    drop = server._courier_drop_dir()
+    for i in range(220):
+        path = drop / f"ordered-{i:04d}.olcb.json"
+        path.write_text('{"bundle_b64":"AA=="}', encoding="utf-8")
+        ts = 1_700_000_000 + i
+        os.utime(path, (ts, ts))
+
+    files = server._scan_courier_files()
+    names = {f["name"] for f in files}
+
+    assert len(files) == 64
+    assert "ordered-0219.olcb.json" in names
+    assert "ordered-0000.olcb.json" not in names

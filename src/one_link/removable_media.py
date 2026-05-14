@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+MAX_REMOVABLE_TARGETS = 128
+MAX_REMOVABLE_ROOT_CHILDREN = 512
+
+
 @dataclass(frozen=True)
 class RemovableTarget:
     id: str
@@ -130,6 +134,8 @@ def removable_event_source_status() -> dict:
     return {
         "mode": "native_compatible_inventory_events",
         "source": "list_removable_targets",
+        "max_targets": MAX_REMOVABLE_TARGETS,
+        "max_root_children": MAX_REMOVABLE_ROOT_CHILDREN,
         "semantics": [
             "attached",
             "removed",
@@ -153,6 +159,8 @@ def list_removable_targets() -> list[RemovableTarget]:
             continue
         seen.add(key)
         deduped.append(target)
+        if len(deduped) >= MAX_REMOVABLE_TARGETS:
+            break
     return deduped
 
 
@@ -205,7 +213,7 @@ def _list_posix_removable() -> list[RemovableTarget]:
     for root in roots:
         if not root.is_dir():
             continue
-        for child in root.iterdir():
+        for child in _iter_dir_limited(root):
             try:
                 resolved = child.resolve()
                 if resolved in seen or not _usable_dir(resolved):
@@ -217,6 +225,8 @@ def _list_posix_removable() -> list[RemovableTarget]:
                     path=resolved,
                     kind="removable",
                 ))
+                if len(out) >= MAX_REMOVABLE_TARGETS:
+                    return out
             except OSError:
                 continue
     return out
@@ -231,7 +241,7 @@ def _list_env_removable() -> list[RemovableTarget]:
         root = Path(raw.strip()).expanduser()
         if not root.is_dir():
             continue
-        for child in root.iterdir():
+        for child in _iter_dir_limited(root):
             try:
                 resolved = child.resolve()
                 if not _usable_dir(resolved):
@@ -242,6 +252,8 @@ def _list_env_removable() -> list[RemovableTarget]:
                     path=resolved,
                     kind="removable-dev",
                 ))
+                if len(out) >= MAX_REMOVABLE_TARGETS:
+                    return out
             except OSError:
                 continue
     return out
@@ -252,6 +264,17 @@ def _usable_dir(path: Path) -> bool:
         return path.is_dir() and os.access(path, os.R_OK | os.W_OK)
     except OSError:
         return False
+
+
+def _iter_dir_limited(root: Path):
+    try:
+        iterator = root.iterdir()
+        for idx, child in enumerate(iterator):
+            if idx >= MAX_REMOVABLE_ROOT_CHILDREN:
+                break
+            yield child
+    except OSError:
+        return
 
 
 def _target_signature(target: RemovableTarget) -> tuple[str, str, str, str]:

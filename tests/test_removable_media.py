@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from one_link.removable_media import (
+    MAX_REMOVABLE_ROOT_CHILDREN,
+    MAX_REMOVABLE_TARGETS,
     RemovableEventDetector,
     find_removable_target,
     list_removable_targets,
@@ -67,4 +69,18 @@ def test_removable_event_source_status_describes_event_contract():
     status = removable_event_source_status()
 
     assert status["mode"] == "native_compatible_inventory_events"
+    assert status["max_targets"] == MAX_REMOVABLE_TARGETS
     assert set(status["semantics"]) == {"attached", "removed", "changed"}
+
+
+def test_removable_targets_are_bounded_for_large_media_roots(tmp_path: Path, monkeypatch):
+    root = tmp_path / "media"
+    root.mkdir()
+    for i in range(MAX_REMOVABLE_ROOT_CHILDREN + 64):
+        (root / f"USB-{i:04d}").mkdir()
+    monkeypatch.setenv("ONE_LINK_COURIER_MEDIA_ROOTS", str(root))
+
+    targets = list_removable_targets()
+
+    assert len(targets) == MAX_REMOVABLE_TARGETS
+    assert all(t.label.startswith("USB-") for t in targets)
