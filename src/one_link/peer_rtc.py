@@ -148,6 +148,16 @@ MAX_DC_TEXT_BYTES = 256 * 1024
 MAX_PENDING_PAIRING_TOKENS = 64
 _B64URL_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
+# Audit H8/H9 May 2026 — per-peer rate-limit caps for the two
+# control-DC frame types that drive expensive native work. Tuned so
+# legitimate burst handshakes (a few attestations on reconnect, the
+# scheduled cover-traffic cadence) pass without throttling while
+# unauthenticated floods get capped.
+ATTEST_CHALLENGE_WINDOW_SECS = 10
+ATTEST_CHALLENGE_MAX_PER_WINDOW = 3
+COVER_PACKET_WINDOW_SECS = 1
+COVER_PACKET_MAX_PER_WINDOW = 20
+
 
 # ── helpers (b64url no padding, canonical JSON) ──────────────────────
 
@@ -253,6 +263,23 @@ class BrowserPeer:
     attestation_challenge: Optional[bytes] = None
     attested_ms: Optional[int] = None
     peer_master_vk: Optional[bytes] = None
+    # Wall-clock unix seconds when the accepted attestation doc
+    # expires. Stored so the gate can re-check freshness on every
+    # dispatched message — without this, an attacker who succeeds
+    # ONCE within the 30s window can ride that "attested" state
+    # indefinitely (audit H7 May 2026).
+    attestation_deadline_unix: Optional[int] = None
+    # Per-peer rate-limit state for expensive control-DC frames
+    # (audit H9 May 2026: attest_challenge invokes the hybrid
+    # signing path which holds a process-wide GIL/native lock; an
+    # unauthenticated peer flooding challenges can stall every
+    # legitimate sign). Tracks (window_start_sec, count_in_window).
+    _attest_challenge_window_start: int = 0
+    _attest_challenge_count: int = 0
+    # H8 May 2026: cover_packet handler runs Sphinx peel (~100µs
+    # per packet); flood-protect on the same model.
+    _cover_packet_window_start: int = 0
+    _cover_packet_count: int = 0
     # Row 6/7 — peer's Sphinx onion public key (Ristretto255 32-byte
     # compressed point). Each peer publishes theirs on DC-open via
     # the `onion_pubkey` envelope; we record the other side's so
@@ -378,6 +405,79 @@ class BrowserPeerManager:
         JSON envelope minus the version + type."""
         self._dc_listeners.append(cb)
 
+    # ── Gate helpers (audit H7/H8/H9 May 2026) ─────────────────────
+
+    def _gate_app_or_attested(
+        self, peer: BrowserPeer, msg_t: str
+    ) -> bool:
+        """Audit H7 + the attestation gate. Returns True if the
+        message should be processed, False if it must be dropped.
+
+        Two combined checks:
+        - If ``require_attested_peers=True`` and peer hasn't yet
+          attested, drop.
+        - If peer HAS attested but the stored
+          ``attestation_deadline_unix`` has passed, drop AND clear
+          the attested state so a fresh attestation is required.
+
+        H7 closes the gap where a peer that attested once within
+        the 30 s freshness window could ride that "attested" state
+        forever. The 30 s window from the attestation doc is the
+        peer's freshness promise; treating it as a one-shot opens
+        a forever-impersonation window after a single capture of
+        an attestation round.
+        """
+        # H7 — even when require_attested_peers is OFF, expire stale
+        # attestation state so onion/cover-packet handlers don't
+        # ride a long-dead doc.
+        now_unix = int(time.time())
+        dl = peer.attestation_deadline_unix
+        if peer.attested_ms is not None and dl is not None and now_unix > dl:
+            log.info(
+                "peer-rtc: attestation for %s expired (deadline=%d, "
+                "now=%d); clearing attested state",
+                peer.fingerprint, dl, now_unix,
+            )
+            peer.attested_ms = None
+            peer.attestation_deadline_unix = None
+            # peer_master_vk stays pinned (audit C2 TOFU); a
+            # re-attestation must match it.
+        if getattr(self.daemon, "require_attested_peers", False):
+            if peer.attested_ms is None:
+                cnt = getattr(self.daemon, "_gate_drop_count", 0)
+                try:
+                    self.daemon._gate_drop_count = cnt + 1
+                except Exception:
+                    pass
+                log.info(
+                    "peer-rtc: dropped %r from un-attested peer %s "
+                    "(require_attested_peers=on, drops=%d)",
+                    msg_t, peer.fingerprint,
+                    getattr(self.daemon, "_gate_drop_count", 0),
+                )
+                return False
+        return True
+
+    def _allow_attest_challenge(self, peer: BrowserPeer) -> bool:
+        """H9 May 2026: per-peer rate-limit on attest_challenge so a
+        flood can't pin the native signing lock."""
+        now = int(time.time())
+        if now - peer._attest_challenge_window_start >= ATTEST_CHALLENGE_WINDOW_SECS:
+            peer._attest_challenge_window_start = now
+            peer._attest_challenge_count = 0
+        peer._attest_challenge_count += 1
+        return peer._attest_challenge_count <= ATTEST_CHALLENGE_MAX_PER_WINDOW
+
+    def _allow_cover_packet(self, peer: BrowserPeer) -> bool:
+        """H8 May 2026: per-peer rate-limit on cover_packet so a
+        flood can't saturate Sphinx-peel CPU."""
+        now = int(time.time())
+        if now - peer._cover_packet_window_start >= COVER_PACKET_WINDOW_SECS:
+            peer._cover_packet_window_start = now
+            peer._cover_packet_count = 0
+        peer._cover_packet_count += 1
+        return peer._cover_packet_count <= COVER_PACKET_MAX_PER_WINDOW
+
     async def _dispatch_dc(
         self, peer: BrowserPeer, channel_kind: str, raw: Any
     ) -> None:
@@ -414,19 +514,44 @@ class BrowserPeerManager:
         # respond with `attest_response` (our doc bound to their
         # nonce). They send `attest_response` for OUR nonce; we
         # verify + mark them attested.
+        #
+        # H9 (audit May 2026): attest_challenge invokes the hybrid
+        # signing path (Ed25519 + ML-DSA-65, ~1–5 ms wall) under a
+        # process-wide native lock. An unauthenticated peer flooding
+        # challenges stalls every legit signer in the daemon. Apply a
+        # per-peer token bucket: ATTEST_CHALLENGE_MAX_PER_WINDOW per
+        # ATTEST_CHALLENGE_WINDOW_SECS, drop the rest.
         if msg_t == "attest_challenge":
+            if not self._allow_attest_challenge(peer):
+                log.info(
+                    "peer-rtc: rate-limited attest_challenge from %s",
+                    peer.fingerprint,
+                )
+                return
             await self._handle_attest_challenge(peer, envelope)
             return
         if msg_t == "attest_response":
             await self._handle_attest_response(peer, envelope)
             return
-        # Row 6/7 — onion-pubkey announce + cover-packet receipt.
-        # Bypass the attestation gate: onion_pubkey is part of the
-        # handshake, cover_packet is best-effort cover traffic.
+        # H8 + H10 (audit May 2026): onion_pubkey + cover_packet are
+        # NOT control-plane bootstrap — they are part of the running
+        # mesh state. Require attestation before accepting either,
+        # AND rate-limit cover_packet (Sphinx peel is ~100 µs/packet,
+        # an unauthenticated flood saturates a core).
         if msg_t == "onion_pubkey":
+            if not self._gate_app_or_attested(peer, msg_t):
+                return
             await self._handle_onion_pubkey(peer, envelope)
             return
         if msg_t == "cover_packet":
+            if not self._gate_app_or_attested(peer, msg_t):
+                return
+            if not self._allow_cover_packet(peer):
+                log.info(
+                    "peer-rtc: rate-limited cover_packet from %s",
+                    peer.fingerprint,
+                )
+                return
             await self._handle_cover_packet(peer, envelope)
             return
         # Row 10 — attestation gate. When the daemon requires
@@ -434,20 +559,8 @@ class BrowserPeerManager:
         # completed the handshake are dropped. Control-plane
         # messages (ping/pong, attest_challenge, attest_response)
         # already returned above so the gate only sees app traffic.
-        if getattr(self.daemon, "require_attested_peers", False):
-            if peer.attested_ms is None:
-                cnt = getattr(self.daemon, "_gate_drop_count", 0)
-                try:
-                    self.daemon._gate_drop_count = cnt + 1
-                except Exception:
-                    pass
-                log.info(
-                    "peer-rtc: dropped app-layer %r from un-attested "
-                    "peer %s (require_attested_peers=on, drops=%d)",
-                    msg_t, peer.fingerprint,
-                    getattr(self.daemon, "_gate_drop_count", 0),
-                )
-                return
+        if not self._gate_app_or_attested(peer, msg_t):
+            return
         # Fan out to registered listeners (chat, files, etc. wire in
         # v0.20.2+).
         for cb in list(self._dc_listeners):
@@ -614,11 +727,18 @@ class BrowserPeerManager:
         # Pin the peer's master VK + mark attested.
         peer.peer_master_vk = doc.master_vk
         peer.attested_ms = _now_ms()
+        # Record the doc's deadline so the gate can re-check freshness
+        # on every dispatched frame (audit H7 May 2026). Without this,
+        # a single successful 30 s round-trip grants the peer an
+        # indefinitely-attested state.
+        peer.attestation_deadline_unix = int(doc.deadline_unix)
         # Clear the challenge so a stale response doesn't get accepted.
         peer.attestation_challenge = None
         log.info(
-            "peer-rtc: peer %s attested (provider_tag=%d, vk_len=%d)",
+            "peer-rtc: peer %s attested (provider_tag=%d, vk_len=%d, "
+            "deadline_unix=%d)",
             peer.fingerprint, doc.provider_tag, len(doc.master_vk),
+            peer.attestation_deadline_unix,
         )
 
     def init_onion_announce(self, peer: BrowserPeer) -> bool:
@@ -654,6 +774,23 @@ class BrowserPeerManager:
             log.info(
                 "peer-rtc: %s sent onion_pubkey of wrong length %d",
                 peer.fingerprint, len(pk),
+            )
+            return
+        # Audit H10 May 2026 — TOFU pin onion_pubkey. Without this,
+        # a peer that has already announced K1 can later send K2 and
+        # silently redirect our cover-traffic emitter (which picks
+        # the first peer with onion_pubkey + open DC) to a key the
+        # attacker holds. The attacker would then have a free
+        # decryption oracle for our cover packets — including the
+        # COVER_SENTINEL plaintext as a known-plaintext crib against
+        # the channel.
+        if peer.onion_pubkey is not None and peer.onion_pubkey != pk:
+            log.warning(
+                "peer-rtc: SECURITY ALERT — peer %s rotated onion_pubkey "
+                "(prior=%s, new=%s); refusing.",
+                peer.fingerprint,
+                peer.onion_pubkey[:8].hex(),
+                pk[:8].hex(),
             )
             return
         peer.onion_pubkey = pk

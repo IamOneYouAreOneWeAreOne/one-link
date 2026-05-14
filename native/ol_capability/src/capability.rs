@@ -14,6 +14,18 @@ pub const CAP_ID_LEN: usize = 32;
 /// Length of the HMAC chain signature in bytes.
 pub const SIGNATURE_LEN: usize = 32;
 
+/// Maximum number of caveats accepted by [`Capability::decode`].
+/// `verify` re-derives the HMAC chain in O(n caveats), so allowing
+/// an attacker-controlled count enables a DoS (audit H15 May 2026).
+/// 32 is well above any legitimate delegation chain depth.
+pub const MAX_CAVEATS: usize = 32;
+
+/// Maximum total wire bytes accepted by [`Capability::decode`]. Acts
+/// as a belt-and-suspenders cap for the per-caveat parser plus the
+/// `MAX_CAVEATS` count check (audit H15). 8 KiB is comfortable for
+/// 32 caveats with reasonable payload sizes.
+pub const MAX_WIRE_BYTES: usize = 8 * 1024;
+
 /// BLAKE3 derive_key context for the root → initial-signature derivation.
 const ROOT_HMAC_CONTEXT: &str = "ol-capability-root-v1";
 /// BLAKE3 derive_key context for each caveat-step in the chain.
@@ -163,11 +175,22 @@ impl Capability {
     /// Decode from wire bytes. Does NOT verify the signature — caller
     /// must invoke `verify` separately.
     ///
+    /// Bounded on both the caveat count (`MAX_CAVEATS`) and the wire
+    /// size (`MAX_WIRE_BYTES`) so an attacker can't ship a malicious
+    /// capability that costs O(N) HMAC steps to validate against an
+    /// attacker-supplied N (audit H15 May 2026).
+    ///
     /// # Errors
     ///
     /// [`CapError::Malformed`] / [`CapError::UnknownCaveat`] on
-    /// structural failures.
+    /// structural failures, or [`CapError::Malformed`] with a
+    /// resource-bound reason if the wire is over-budget.
     pub fn decode(bytes: &[u8]) -> Result<Self, CapError> {
+        if bytes.len() > MAX_WIRE_BYTES {
+            return Err(CapError::Malformed {
+                reason: "wire bytes exceed MAX_WIRE_BYTES",
+            });
+        }
         if bytes.len() < CAP_ID_LEN + 4 + SIGNATURE_LEN {
             return Err(CapError::Malformed {
                 reason: "wire bytes shorter than minimum header + footer",
@@ -177,6 +200,11 @@ impl Capability {
         id.copy_from_slice(&bytes[..CAP_ID_LEN]);
         let count_bytes = &bytes[CAP_ID_LEN..CAP_ID_LEN + 4];
         let count = u32::from_le_bytes(count_bytes.try_into().expect("4 bytes")) as usize;
+        if count > MAX_CAVEATS {
+            return Err(CapError::Malformed {
+                reason: "caveat count exceeds MAX_CAVEATS",
+            });
+        }
 
         let mut caveats = Vec::with_capacity(count);
         let mut cursor = CAP_ID_LEN + 4;
@@ -324,5 +352,37 @@ mod tests {
         // ExpiresAt caveat but Context has no `now_unix_ms`.
         let cap = Capability::root(fixed_id(), &root).attenuate(Caveat::ExpiresAt(1000));
         assert!(cap.verify(&root, &Context::new()).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_max_wire_bytes_overflow() {
+        // Regression test for audit H15 (May 14 2026): an attacker
+        // can't ship a 10 MiB blob and force us to verify it.
+        let oversized = vec![0u8; MAX_WIRE_BYTES + 1];
+        match Capability::decode(&oversized) {
+            Err(CapError::Malformed { reason }) => {
+                assert!(reason.contains("MAX_WIRE_BYTES"), "{}", reason);
+            }
+            Ok(_) => panic!("oversized wire bytes must be rejected"),
+            Err(e) => panic!("expected Malformed, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn decode_rejects_max_caveats_overflow() {
+        // Regression test for audit H15: forged count=1_000_000 must
+        // be rejected before we walk the (claimed) caveat list.
+        let mut bytes = vec![0u8; CAP_ID_LEN];
+        bytes.extend_from_slice(&u32::to_le_bytes(1_000_000));
+        // Pad with enough trailing bytes to satisfy the min-length
+        // check; the count-check fires first.
+        bytes.extend_from_slice(&[0u8; SIGNATURE_LEN]);
+        match Capability::decode(&bytes) {
+            Err(CapError::Malformed { reason }) => {
+                assert!(reason.contains("MAX_CAVEATS"), "{}", reason);
+            }
+            Ok(_) => panic!("MAX_CAVEATS overflow must be rejected"),
+            Err(e) => panic!("expected Malformed, got {:?}", e),
+        }
     }
 }

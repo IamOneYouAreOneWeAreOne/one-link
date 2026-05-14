@@ -920,9 +920,17 @@ class Daemon:
         # builds. Operators flip this on once their peer set has all
         # upgraded.
         # Control-plane messages (ping/pong, attest_challenge,
-        # attest_response, onion_pubkey, cover_packet) bypass the
-        # gate so the handshake itself can run + heartbeats stay
-        # alive.
+        # attest_response) bypass the gate so the handshake itself
+        # can run; onion_pubkey + cover_packet are now also gated
+        # (audit H8/H10 May 2026 closures).
+        #
+        # SCOPE NOTE (audit I5 May 2026): this env var ONLY gates
+        # the WebRTC DataChannel dispatch path. Legacy TCP
+        # peer_transport messages (FILE_OFFER, FILE_CHUNK, the native
+        # transfer pipeline, GROUP_EVENT, etc.) are still subject
+        # only to their existing pinning + capability checks. The
+        # /control/status response advertises the gate's scope
+        # explicitly under `peer_rtc_attestation.scope`.
         self.require_attested_peers: bool = (
             os.environ.get("ONE_LINK_REQUIRE_ATTESTED_PEERS", "")
             .strip()
@@ -2960,6 +2968,16 @@ class Daemon:
                 grant_b64 = msg.get("grant_b64", "")
                 if not isinstance(grant_b64, str) or not grant_b64:
                     raise ValueError("grant_b64 missing or wrong type")
+                # Audit H15 May 2026: bound the base64 string length
+                # BEFORE decode so an attacker can't flood us with
+                # large blobs to verify. 8 KiB encoded → ~6 KiB
+                # decoded; caps_grants.parse_grant has its own
+                # MAX_CAPS_LEN=4096 inside, plus the underlying
+                # Capability::decode caps caveats + wire bytes.
+                if len(grant_b64) > 12_000:
+                    raise ValueError(
+                        f"grant_b64 too long: {len(grant_b64)} > 12000"
+                    )
                 # Local-name distinct from the FILE_OFFER ``blob``
                 # below so mypy's type inference for the outer scope
                 # doesn't collide.
@@ -3709,11 +3727,31 @@ class Daemon:
                 return
             await self._handle_manifest_push(channel, msg, peer_fp)
         elif t == "MANIFEST_WANTS":
-            # Peer is asking for specific blobs that they don't have.
+            # Audit H13 May 2026: gate ON the FOLDER_SYNC cap too.
+            # Without this, a peer with the FOLDER_SYNC cap revoked
+            # could still pull blobs out of the folder by asking for
+            # them directly via MANIFEST_WANTS, bypassing the
+            # MANIFEST_PUSH cap-check above. Cap-policy + share-list
+            # are AND-composed, not OR.
+            if not self._capability_allowed(peer_fp, FOLDER_SYNC):
+                self._emit_capability_request(peer_fp, peer_sid, FOLDER_SYNC)
+                return
             await self._handle_manifest_wants(channel, msg, peer_fp)
         elif t == "BLOB_OFFER":
+            # Audit H13 May 2026: same gate. BLOB_OFFER is the inbound
+            # half of MANIFEST_WANTS; either end of the pull path must
+            # honour cap revocation.
+            if not self._capability_allowed(peer_fp, FOLDER_SYNC):
+                self._emit_capability_request(peer_fp, peer_sid, FOLDER_SYNC)
+                return
             await self._handle_blob_offer(channel, msg, peer_fp)
         elif t == "BLOB_CHUNK":
+            # Audit H13 May 2026: BLOB_CHUNK is the streaming body of
+            # a folder-sync transfer. Cap revocation must take
+            # mid-stream, not just at handshake.
+            if not self._capability_allowed(peer_fp, FOLDER_SYNC):
+                self._emit_capability_request(peer_fp, peer_sid, FOLDER_SYNC)
+                return
             await self._handle_blob_chunk(channel, msg, peer_fp)
 
     # ─── CDC file-transfer helpers ─────────────────────────────────────
@@ -12579,6 +12617,10 @@ class Daemon:
             "peer_rtc_attestation": {
                 "require_attested_peers": self.require_attested_peers,
                 "gate_drop_count": self._gate_drop_count,
+                # Audit I5 May 2026: be explicit that the env-var gate
+                # covers the WebRTC DC path only, not legacy TCP
+                # peer_transport.
+                "scope": "webrtc-dc",
             },
             # Surface the full native-subsystem availability matrix so
             # operators + integration tests can verify Phase E is
