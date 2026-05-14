@@ -49,6 +49,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -96,6 +97,10 @@ from one_link.cdc import (
 )
 from one_link.discovery import Discovery, Peer
 from one_link.identity import Identity, fingerprint_of, load_or_create
+from one_link.personal_device_mesh import (
+    DevicePresence,
+    verify_remote_instruction,
+)
 from one_link.native_cdc import native_cdc_status
 from one_link.pairing import PairingTracker, PairState, compute_sas
 from one_link.paths import (
@@ -1439,6 +1444,16 @@ class Daemon:
                             presence=wire_value,
                         )),
                     )
+        with contextlib.suppress(Exception):
+            self._update_local_self_mesh_presence(
+                state={
+                    "online": "awake",
+                    "away": "asleep",
+                    "dnd": "asleep",
+                    "invisible": "offline",
+                }.get(s, "awake"),
+                route="presence_change",
+            )
         return s
 
     def record_peer_presence(
@@ -1464,6 +1479,328 @@ class Daemon:
                     "fingerprint": peer_fp,
                     "presence": s,
                 })
+
+    @staticmethod
+    def _self_mesh_b64u(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+    @staticmethod
+    def _self_mesh_b64u_decode(text: str) -> bytes:
+        pad = "=" * (-len(text) % 4)
+        return base64.urlsafe_b64decode((text + pad).encode("ascii"))
+
+    def _broadcast_self_mesh_changed(self, **extra: Any) -> None:
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                evt = {"type": "self_mesh_changed"}
+                evt.update(extra)
+                self.ui_server.broadcast(evt)
+
+    def _local_self_mesh_devices(self) -> list[dict]:
+        if self.state is None:
+            return []
+        try:
+            rows = self.state.list_self_mesh_devices(include_revoked=False)
+        except Exception:
+            return []
+        return [
+            row for row in rows
+            if bool(row.get("local")) and bool(row.get("trusted", True))
+        ]
+
+    def _update_local_self_mesh_presence(
+        self,
+        *,
+        state: str | None = None,
+        network: str = "unknown",
+        route: str = "daemon",
+    ) -> dict | None:
+        if self.state is None:
+            return None
+        presence_state = state or {
+            "online": "awake",
+            "away": "asleep",
+            "dnd": "asleep",
+            "invisible": "offline",
+        }.get(self.get_my_presence(), "awake")
+        now = int(time.time() * 1000)
+        free_bytes: int | None = None
+        with contextlib.suppress(Exception):
+            free_bytes = int(shutil.disk_usage(inbox_dir()).free)
+        device_info: dict[str, str] = {}
+        di = getattr(self, "_device_info", None)
+        if di is not None:
+            with contextlib.suppress(Exception):
+                device_info = di.to_dict()
+        row = self.state.upsert_self_mesh_presence(
+            device_pub=self.me.public_bytes,
+            state=presence_state,
+            updated_ms=now,
+            sequence=now,
+            network=network,
+            free_bytes=free_bytes,
+            route=route,
+            metadata={
+                "source": "daemon",
+                "device_info": device_info,
+                "fingerprint": self.me.fingerprint,
+                "short_id": self.me.short_id,
+            },
+        )
+        self._broadcast_self_mesh_changed(
+            reason="local_presence",
+            device_pub_b64=self._self_mesh_b64u(self.me.public_bytes),
+        )
+        return row
+
+    async def broadcast_self_mesh_presence(self) -> None:
+        """Publish local self-device presence over all live peer channels."""
+        row = self._update_local_self_mesh_presence(route="daemon_broadcast")
+        if not row:
+            return
+        msg = make_msg(
+            "SELF_MESH_PRESENCE",
+            self.me.short_id,
+            device_pub_b64=self._self_mesh_b64u(self.me.public_bytes),
+            state=row["state"],
+            sequence=row["sequence"],
+            updated_ms=row["updated_ms"],
+            battery_pct=row.get("battery_pct"),
+            network=row.get("network") or "unknown",
+            free_bytes=row.get("free_bytes"),
+            route=row.get("route") or "daemon_broadcast",
+            latency_ms=row.get("latency_ms"),
+            bandwidth_bps=row.get("bandwidth_bps"),
+        )
+        payload = encode_msg(msg)
+        for peer_fp, sess in list(self._outbound_sessions.items()):
+            with contextlib.suppress(Exception):
+                async with sess.lock:
+                    await self._send_via_transport(peer_fp, sess.channel, payload)
+
+    async def _handle_self_mesh_presence(
+        self,
+        channel: ch.Channel,
+        msg: dict,
+        peer_fp: str,
+    ) -> None:
+        if self.state is None:
+            return
+        try:
+            if not self._is_pinned(peer_fp):
+                raise ValueError("peer_not_pinned")
+            device_pub = self._self_mesh_b64u_decode(str(msg.get("device_pub_b64", "")))
+            fact = DevicePresence(
+                device_pub=device_pub,
+                state=str(msg.get("state") or "offline"),
+                updated_ms=int(msg.get("updated_ms", 0)),
+                sequence=int(msg.get("sequence", 0)),
+                battery_pct=(
+                    int(msg["battery_pct"])
+                    if msg.get("battery_pct") is not None else None
+                ),
+                network=str(msg.get("network") or "unknown"),
+                free_bytes=(
+                    int(msg["free_bytes"])
+                    if msg.get("free_bytes") is not None else None
+                ),
+                route=str(msg.get("route") or "peer_channel"),
+                latency_ms=(
+                    float(msg["latency_ms"])
+                    if msg.get("latency_ms") is not None else None
+                ),
+                bandwidth_bps=(
+                    float(msg["bandwidth_bps"])
+                    if msg.get("bandwidth_bps") is not None else None
+                ),
+            )
+            self.state.upsert_self_mesh_presence(
+                device_pub=fact.device_pub,
+                state=fact.state,
+                updated_ms=fact.updated_ms,
+                sequence=fact.sequence,
+                battery_pct=fact.battery_pct,
+                network=fact.network,
+                free_bytes=fact.free_bytes,
+                route=fact.route,
+                latency_ms=fact.latency_ms,
+                bandwidth_bps=fact.bandwidth_bps,
+                metadata={"source": "peer_channel", "peer_fp": peer_fp},
+            )
+            self._broadcast_self_mesh_changed(
+                reason="peer_presence",
+                peer_fp=peer_fp,
+                device_pub_b64=self._self_mesh_b64u(fact.device_pub),
+            )
+            if msg.get("id"):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"), ok=True,
+                )))
+        except Exception as e:
+            if msg.get("id"):
+                with contextlib.suppress(Exception):
+                    await channel.send(encode_msg(make_msg(
+                        "ACK", self.me.short_id, of=msg.get("id"),
+                        rejected=f"self_mesh_presence_rejected: {e}",
+                    )))
+
+    def _self_mesh_command_contexts(self, root_pub: bytes) -> list[bytes]:
+        contexts: list[bytes] = []
+        for row in self._local_self_mesh_devices():
+            if row.get("root_pub") == root_pub:
+                pub = row.get("device_pub")
+                if isinstance(pub, bytes) and pub not in contexts:
+                    contexts.append(pub)
+        return contexts
+
+    def _self_mesh_file_manifest(self, raw_path: str) -> dict[str, Any]:
+        path = Path(raw_path).expanduser()
+        resolved = path.resolve()
+        if not resolved.is_file():
+            raise ValueError("path is not a file")
+        size = resolved.stat().st_size
+        h = hashlib.sha256()
+        with resolved.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return {
+            "name": resolved.name,
+            "path": str(resolved),
+            "size": int(size),
+            "sha256": h.hexdigest(),
+        }
+
+    async def _execute_self_mesh_send_file_instruction(
+        self,
+        instr,
+        peer: Peer,
+        path: Path,
+    ) -> None:
+        try:
+            result = await self.send_file(peer, path)
+            self._broadcast_self_mesh_changed(
+                reason="remote_instruction_complete",
+                action=instr.action,
+                command_id=instr.command_id,
+                result=result,
+            )
+        except Exception as e:
+            log.warning(
+                "self-mesh remote send_file failed command=%s: %s",
+                instr.command_id[:16],
+                e,
+            )
+            self._broadcast_self_mesh_changed(
+                reason="remote_instruction_failed",
+                action=instr.action,
+                command_id=instr.command_id,
+                error=str(e),
+            )
+
+    async def _run_self_mesh_instruction(self, instr) -> dict[str, Any]:
+        if instr.action == "pull_file_manifest":
+            path = str(instr.scope.get("path") or "")
+            if not path:
+                raise ValueError("scope.path required")
+            return {"manifest": self._self_mesh_file_manifest(path)}
+        if instr.action == "send_file_from_device":
+            path = Path(str(instr.scope.get("path") or "")).expanduser().resolve()
+            if not path.is_file():
+                raise ValueError("scope.path is not a file")
+            max_bytes = int(instr.scope.get("max_bytes") or 0)
+            size = path.stat().st_size
+            if max_bytes > 0 and size > max_bytes:
+                raise ValueError("file exceeds scoped max_bytes")
+            recipient = str(instr.scope.get("recipient_fp") or "")
+            if not recipient:
+                raise ValueError("scope.recipient_fp required")
+            peer = await self.resolve_for_send(recipient)
+            if peer is None:
+                raise ValueError("recipient is not reachable or not pinned")
+            asyncio.create_task(
+                self._execute_self_mesh_send_file_instruction(instr, peer, path)
+            )
+            return {
+                "queued": True,
+                "recipient": recipient,
+                "path": str(path),
+                "size": int(size),
+            }
+        raise ValueError(f"unsupported self-mesh action {instr.action!r}")
+
+    async def _handle_self_mesh_remote_instruction(
+        self,
+        channel: ch.Channel,
+        msg: dict,
+        peer_fp: str,
+    ) -> None:
+        try:
+            if self.state is None:
+                raise ValueError("state unavailable")
+            if not self._is_pinned(peer_fp):
+                raise ValueError("peer_not_pinned")
+            command_b64 = str(msg.get("command_b64") or "")
+            if not command_b64:
+                raise ValueError("command_b64 required")
+            command = self._self_mesh_b64u_decode(command_b64)
+            body = json.loads(command.decode("utf-8"))
+            root_pub = self._self_mesh_b64u_decode(str(body.get("root_pub_b64", "")))
+            targets = self._self_mesh_command_contexts(root_pub)
+            if not targets:
+                raise ValueError("no local self-mesh target for root")
+            last_error: Exception | None = None
+            instr = None
+            for target in targets:
+                try:
+                    instr = verify_remote_instruction(
+                        command,
+                        expected_root_pub=root_pub,
+                        expected_target_device_pub=target,
+                    )
+                    break
+                except Exception as e:
+                    last_error = e
+            if instr is None:
+                raise ValueError(
+                    f"remote instruction target rejected: {last_error}"
+                )
+            first_seen = self.state.mark_remote_instruction_seen(
+                command_id=instr.command_id,
+                expires_ms=instr.expires_ms,
+                action=instr.action,
+                controller_device_pub=instr.controller_device_pub,
+                target_device_pub=instr.target_device_pub,
+            )
+            if not first_seen:
+                raise ValueError("remote instruction replayed")
+            result = await self._run_self_mesh_instruction(instr)
+            self._broadcast_self_mesh_changed(
+                reason="remote_instruction_accepted",
+                action=instr.action,
+                command_id=instr.command_id,
+            )
+            await channel.send(encode_msg(make_msg(
+                "ACK",
+                self.me.short_id,
+                of=msg.get("id"),
+                ok=True,
+                action=instr.action,
+                command_id=instr.command_id,
+                result=result,
+            )))
+        except Exception as e:
+            log.warning(
+                "self-mesh remote instruction rejected from %s: %s",
+                peer_fp[:8],
+                e,
+            )
+            with contextlib.suppress(Exception):
+                await channel.send(encode_msg(make_msg(
+                    "ACK",
+                    self.me.short_id,
+                    of=msg.get("id"),
+                    rejected=f"self_mesh_instruction_rejected: {e}",
+                )))
 
     def _apply_settings_at_boot(self) -> None:
         """v0.10.0: read settings that affect global daemon state +
@@ -2349,6 +2686,12 @@ class Daemon:
                         "ACK", self.me.short_id, of=msg.get("id"),
                         rejected=f"grant_rejected: {e}",
                     )))
+            return
+        if t == "SELF_MESH_PRESENCE":
+            await self._handle_self_mesh_presence(channel, msg, peer_fp)
+            return
+        if t == "SELF_MESH_REMOTE_INSTRUCTION":
+            await self._handle_self_mesh_remote_instruction(channel, msg, peer_fp)
             return
         if t == "TEXT":
             if not self._capability_allowed(peer_fp, CHAT):
@@ -9745,6 +10088,25 @@ class Daemon:
         acks = await self.send_to(peer, [m])
         return {"sent": m, "ack": acks[0] if acks else None}
 
+    async def send_self_mesh_remote_instruction(
+        self,
+        peer: Peer,
+        command: bytes,
+    ) -> dict:
+        """Send a signed self-mesh remote instruction over a live channel."""
+        if not isinstance(command, (bytes, bytearray)) or not command:
+            raise ValueError("command bytes required")
+        command_b64 = base64.urlsafe_b64encode(bytes(command)).rstrip(
+            b"="
+        ).decode("ascii")
+        m = make_msg(
+            "SELF_MESH_REMOTE_INSTRUCTION",
+            self.me.short_id,
+            command_b64=command_b64,
+        )
+        acks = await self.send_to(peer, [m])
+        return {"sent": m, "ack": acks[0] if acks else None}
+
     async def send_edit(
         self, peer: Peer, *, target_msg_id: str, new_body: str,
     ) -> dict:
@@ -12143,6 +12505,8 @@ class Daemon:
         except Exception:
             kind_tag = ""
             self._device_info = _device_info.DeviceInfo()
+        with contextlib.suppress(Exception):
+            self._update_local_self_mesh_presence(route="daemon_start")
 
         self.discovery = Discovery(
             short_id=self.me.short_id,

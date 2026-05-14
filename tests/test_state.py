@@ -6,7 +6,9 @@ import time
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from one_link import identity_dag as idag
 from one_link.state import State
 
 
@@ -312,6 +314,99 @@ def test_route_candidates_roundtrip_rank_and_prune(state: State):
     assert rows[0]["metadata"]["hint"] == "qr"
     assert state.prune_route_candidates(now_ms=11) == 0
     assert state.prune_route_candidates(now_ms=99999999999999) == 1
+
+
+def _ed25519_pair():
+    priv = Ed25519PrivateKey.generate()
+    return priv.private_bytes_raw(), priv.public_key().public_bytes_raw()
+
+
+def test_self_mesh_device_presence_and_replay_persist(tmp_path: Path):
+    db = tmp_path / "state.db"
+    root_seed, root_pub = _ed25519_pair()
+    _, phone_pub = _ed25519_pair()
+    _, laptop_pub = _ed25519_pair()
+    cert = idag.encode_device_cert(
+        root_priv_seed=root_seed,
+        root_pub=root_pub,
+        device_pub=phone_pub,
+        device_kind="phone-ios",
+        added_ms=1000,
+    )
+
+    s1 = State(db_path=db)
+    try:
+        row = s1.upsert_self_mesh_device(
+            root_pub=root_pub,
+            device_pub=phone_pub,
+            device_kind="phone-ios",
+            cert=cert,
+            label="Phone",
+            local=True,
+            metadata={"source": "test"},
+            added_ms=1000,
+        )
+        assert row["label"] == "Phone"
+        assert row["local"] is True
+        assert row["metadata"]["source"] == "test"
+
+        s1.upsert_self_mesh_device(
+            root_pub=root_pub,
+            device_pub=laptop_pub,
+            device_kind="laptop-windows",
+            label="Laptop",
+            revoked=True,
+            added_ms=1000,
+        )
+        active = s1.list_self_mesh_devices(root_pub=root_pub, include_revoked=False)
+        assert [d["device_pub"] for d in active] == [phone_pub]
+
+        older = s1.upsert_self_mesh_presence(
+            device_pub=phone_pub,
+            state="awake",
+            sequence=4,
+            updated_ms=2000,
+            network="wifi",
+            battery_pct=90,
+            free_bytes=123,
+            route="self_wifi",
+        )
+        assert older["state"] == "awake"
+        stale = s1.upsert_self_mesh_presence(
+            device_pub=phone_pub,
+            state="offline",
+            sequence=3,
+            updated_ms=9999,
+            network="offline",
+        )
+        assert stale["state"] == "awake"
+
+        assert s1.mark_remote_instruction_seen(
+            command_id="cmd1",
+            expires_ms=9000,
+            action="pull_file_manifest",
+            controller_device_pub=phone_pub,
+            target_device_pub=laptop_pub,
+            now_ms=3000,
+        ) is True
+        assert s1.mark_remote_instruction_seen(
+            command_id="cmd1",
+            expires_ms=9000,
+            now_ms=3001,
+        ) is False
+    finally:
+        s1.close()
+
+    s2 = State(db_path=db)
+    try:
+        assert s2.schema_version() >= 18
+        devices = s2.list_self_mesh_devices(root_pub=root_pub)
+        assert {d["label"] for d in devices} == {"Phone", "Laptop"}
+        presence = s2.list_self_mesh_presence()
+        assert presence[0]["device_pub"] == phone_pub
+        assert presence[0]["state"] == "awake"
+    finally:
+        s2.close()
 
 
 def test_delete_setting(state: State):

@@ -548,6 +548,7 @@ class State:
                     (15, self._migrate_v15_file_index_cache),
                     (16, self._migrate_v16_route_memory),
                     (17, self._migrate_v17_route_candidates),
+                    (18, self._migrate_v18_personal_device_mesh),
                 ]
                 for target_version, apply_fn in steps:
                     self._run_atomic_migration(
@@ -664,6 +665,74 @@ class State:
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_route_candidates_expiry "
             "ON route_candidates(expires_ms)"
+        )
+
+    def _migrate_v18_personal_device_mesh(self, c: sqlite3.Cursor) -> None:
+        """Phase F5: Personal Device Mesh persistence.
+
+        self_mesh_devices stores separately addressable devices under a
+        shared root identity. self_mesh_presence stores LWW presence
+        facts. remote_instruction_seen is the replay wall for signed
+        phone-to-laptop command envelopes.
+        """
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS self_mesh_devices (
+                root_pub      BLOB NOT NULL,
+                device_pub    BLOB NOT NULL,
+                cert          BLOB,
+                device_kind   TEXT NOT NULL,
+                label         TEXT NOT NULL DEFAULT '',
+                local         INTEGER NOT NULL DEFAULT 0,
+                trusted       INTEGER NOT NULL DEFAULT 1,
+                revoked       INTEGER NOT NULL DEFAULT 0,
+                added_ms      INTEGER NOT NULL,
+                updated_ms    INTEGER NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY(root_pub, device_pub)
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_self_mesh_devices_root "
+            "ON self_mesh_devices(root_pub, revoked, updated_ms)"
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS self_mesh_presence (
+                device_pub     BLOB PRIMARY KEY,
+                state          TEXT NOT NULL,
+                sequence       INTEGER NOT NULL,
+                updated_ms     INTEGER NOT NULL,
+                battery_pct    INTEGER,
+                network        TEXT NOT NULL DEFAULT 'unknown',
+                free_bytes     INTEGER,
+                route          TEXT,
+                latency_ms     REAL,
+                bandwidth_bps  REAL,
+                metadata_json  TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_self_mesh_presence_state "
+            "ON self_mesh_presence(state, updated_ms)"
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS remote_instruction_seen (
+                command_id            TEXT PRIMARY KEY,
+                first_seen_ms         INTEGER NOT NULL,
+                expires_ms            INTEGER NOT NULL,
+                action                TEXT NOT NULL DEFAULT '',
+                controller_device_pub BLOB,
+                target_device_pub     BLOB
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_remote_instruction_expiry "
+            "ON remote_instruction_seen(expires_ms)"
         )
 
     def _migrate_v15_file_index_cache(self, c: sqlite3.Cursor) -> None:
@@ -3349,6 +3418,225 @@ class State:
             )
             return int(cur.rowcount)
 
+    def upsert_self_mesh_device(
+        self,
+        *,
+        root_pub: bytes,
+        device_pub: bytes,
+        device_kind: str,
+        cert: bytes | None = None,
+        label: str = "",
+        local: bool = False,
+        trusted: bool = True,
+        revoked: bool = False,
+        metadata: Optional[dict] = None,
+        added_ms: int | None = None,
+    ) -> dict:
+        """Record one separately addressable device under a root identity."""
+        self._validate_self_mesh_pub(root_pub, "root_pub")
+        self._validate_self_mesh_pub(device_pub, "device_pub")
+        kind = str(device_kind or "").strip()
+        if not kind:
+            raise ValueError("device_kind is required")
+        now = _now_ms()
+        added = now if added_ms is None else int(added_ms)
+        meta_json = json.dumps(metadata or {}, separators=(",", ":"), sort_keys=True)
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO self_mesh_devices(
+                    root_pub, device_pub, cert, device_kind, label, local,
+                    trusted, revoked, added_ms, updated_ms, metadata_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(root_pub, device_pub) DO UPDATE SET
+                    cert = COALESCE(excluded.cert, self_mesh_devices.cert),
+                    device_kind = excluded.device_kind,
+                    label = excluded.label,
+                    local = excluded.local,
+                    trusted = excluded.trusted,
+                    revoked = excluded.revoked,
+                    updated_ms = excluded.updated_ms,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    bytes(root_pub),
+                    bytes(device_pub),
+                    bytes(cert) if cert is not None else None,
+                    kind[:64],
+                    str(label or "")[:120],
+                    1 if local else 0,
+                    1 if trusted else 0,
+                    1 if revoked else 0,
+                    added,
+                    now,
+                    meta_json,
+                ),
+            )
+        row = self._conn.execute(
+            "SELECT * FROM self_mesh_devices WHERE root_pub = ? AND device_pub = ?",
+            (bytes(root_pub), bytes(device_pub)),
+        ).fetchone()
+        return self._row_to_self_mesh_device(row)
+
+    def list_self_mesh_devices(
+        self,
+        *,
+        root_pub: bytes | None = None,
+        include_revoked: bool = True,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if root_pub is not None:
+            self._validate_self_mesh_pub(root_pub, "root_pub")
+            clauses.append("root_pub = ?")
+            params.append(bytes(root_pub))
+        if not include_revoked:
+            clauses.append("revoked = 0")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM self_mesh_devices
+            {where}
+            ORDER BY local DESC, revoked ASC, updated_ms DESC, label ASC
+            """,
+            params,
+        ).fetchall()
+        return [self._row_to_self_mesh_device(r) for r in rows]
+
+    def upsert_self_mesh_presence(
+        self,
+        *,
+        device_pub: bytes,
+        state: str,
+        updated_ms: int,
+        sequence: int = 0,
+        battery_pct: int | None = None,
+        network: str = "unknown",
+        free_bytes: int | None = None,
+        route: str | None = None,
+        latency_ms: float | None = None,
+        bandwidth_bps: float | None = None,
+        metadata: Optional[dict] = None,
+    ) -> dict:
+        """Merge a self-mesh presence fact using (sequence, updated_ms)."""
+        self._validate_self_mesh_pub(device_pub, "device_pub")
+        if state not in {"awake", "asleep", "dormant", "offline"}:
+            raise ValueError("invalid self-mesh presence state")
+        if network not in {"ethernet", "wifi", "cellular", "bluetooth", "offline", "unknown"}:
+            raise ValueError("invalid self-mesh network")
+        if battery_pct is not None and not (0 <= int(battery_pct) <= 100):
+            raise ValueError("battery_pct must be 0..100")
+        if free_bytes is not None and int(free_bytes) < 0:
+            raise ValueError("free_bytes must be non-negative")
+        seq = max(0, int(sequence))
+        updated = int(updated_ms)
+        meta_json = json.dumps(metadata or {}, separators=(",", ":"), sort_keys=True)
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO self_mesh_presence(
+                    device_pub, state, sequence, updated_ms, battery_pct,
+                    network, free_bytes, route, latency_ms, bandwidth_bps,
+                    metadata_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(device_pub) DO UPDATE SET
+                    state = excluded.state,
+                    sequence = excluded.sequence,
+                    updated_ms = excluded.updated_ms,
+                    battery_pct = excluded.battery_pct,
+                    network = excluded.network,
+                    free_bytes = excluded.free_bytes,
+                    route = excluded.route,
+                    latency_ms = excluded.latency_ms,
+                    bandwidth_bps = excluded.bandwidth_bps,
+                    metadata_json = excluded.metadata_json
+                WHERE
+                    excluded.sequence > self_mesh_presence.sequence
+                    OR (
+                        excluded.sequence = self_mesh_presence.sequence
+                        AND excluded.updated_ms >= self_mesh_presence.updated_ms
+                    )
+                """,
+                (
+                    bytes(device_pub),
+                    state,
+                    seq,
+                    updated,
+                    int(battery_pct) if battery_pct is not None else None,
+                    network,
+                    int(free_bytes) if free_bytes is not None else None,
+                    str(route)[:80] if route else None,
+                    float(latency_ms) if latency_ms is not None else None,
+                    float(bandwidth_bps) if bandwidth_bps is not None else None,
+                    meta_json,
+                ),
+            )
+        row = self._conn.execute(
+            "SELECT * FROM self_mesh_presence WHERE device_pub = ?",
+            (bytes(device_pub),),
+        ).fetchone()
+        return self._row_to_self_mesh_presence(row)
+
+    def list_self_mesh_presence(self) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM self_mesh_presence
+            ORDER BY updated_ms DESC, sequence DESC
+            """
+        ).fetchall()
+        return [self._row_to_self_mesh_presence(r) for r in rows]
+
+    def mark_remote_instruction_seen(
+        self,
+        *,
+        command_id: str,
+        expires_ms: int,
+        action: str = "",
+        controller_device_pub: bytes | None = None,
+        target_device_pub: bytes | None = None,
+        now_ms: int | None = None,
+    ) -> bool:
+        """Remember a remote-instruct command id.
+
+        Returns True on first sight and False for a replay. Expired rows
+        are pruned before insertion so the table stays bounded.
+        """
+        cid = str(command_id or "").strip()
+        if not cid:
+            raise ValueError("command_id is required")
+        if len(cid) > 128:
+            raise ValueError("command_id is too long")
+        now = _now_ms() if now_ms is None else int(now_ms)
+        exp = int(expires_ms)
+        if exp <= now:
+            raise ValueError("expires_ms must be in the future")
+        if controller_device_pub is not None:
+            self._validate_self_mesh_pub(controller_device_pub, "controller_device_pub")
+        if target_device_pub is not None:
+            self._validate_self_mesh_pub(target_device_pub, "target_device_pub")
+        with self._write_lock:
+            self._conn.execute(
+                "DELETE FROM remote_instruction_seen WHERE expires_ms <= ?",
+                (now,),
+            )
+            cur = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO remote_instruction_seen(
+                    command_id, first_seen_ms, expires_ms, action,
+                    controller_device_pub, target_device_pub
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cid,
+                    now,
+                    exp,
+                    str(action or "")[:80],
+                    bytes(controller_device_pub) if controller_device_pub is not None else None,
+                    bytes(target_device_pub) if target_device_pub is not None else None,
+                ),
+            )
+            return int(cur.rowcount) == 1
+
     def enqueue_outbox(
         self,
         *,
@@ -3522,6 +3810,57 @@ class State:
             "first_seen_ms": int(row["first_seen_ms"]),
             "updated_ms": int(row["updated_ms"]),
             "expires_ms": int(row["expires_ms"]) if row["expires_ms"] is not None else None,
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+
+    @staticmethod
+    def _validate_self_mesh_pub(value: bytes, name: str) -> None:
+        if not isinstance(value, (bytes, bytearray)) or len(value) != 32:
+            raise ValueError(f"{name} must be 32 bytes")
+
+    def _row_to_self_mesh_device(self, row: sqlite3.Row) -> dict:
+        try:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        except Exception:
+            metadata = {}
+        return {
+            "root_pub": bytes(row["root_pub"]),
+            "device_pub": bytes(row["device_pub"]),
+            "cert": bytes(row["cert"]) if row["cert"] is not None else None,
+            "device_kind": row["device_kind"],
+            "label": row["label"],
+            "local": bool(row["local"]),
+            "trusted": bool(row["trusted"]),
+            "revoked": bool(row["revoked"]),
+            "added_ms": int(row["added_ms"]),
+            "updated_ms": int(row["updated_ms"]),
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+
+    def _row_to_self_mesh_presence(self, row: sqlite3.Row) -> dict:
+        try:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        except Exception:
+            metadata = {}
+        return {
+            "device_pub": bytes(row["device_pub"]),
+            "state": row["state"],
+            "sequence": int(row["sequence"]),
+            "updated_ms": int(row["updated_ms"]),
+            "battery_pct": (
+                int(row["battery_pct"]) if row["battery_pct"] is not None else None
+            ),
+            "network": row["network"],
+            "free_bytes": (
+                int(row["free_bytes"]) if row["free_bytes"] is not None else None
+            ),
+            "route": row["route"],
+            "latency_ms": (
+                float(row["latency_ms"]) if row["latency_ms"] is not None else None
+            ),
+            "bandwidth_bps": (
+                float(row["bandwidth_bps"]) if row["bandwidth_bps"] is not None else None
+            ),
             "metadata": metadata if isinstance(metadata, dict) else {},
         }
 

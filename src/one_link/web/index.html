@@ -1304,6 +1304,81 @@
     display: block;
     margin-top: 1px;
   }
+  .self-mesh-kit {
+    margin: -2px 12px 10px;
+    padding: 9px 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(76,209,117,.16);
+    background: rgba(76,209,117,.045);
+  }
+  .self-mesh-kit .sm-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .self-mesh-kit .sm-title {
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 800;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .self-mesh-kit .sm-pill {
+    margin-left: auto;
+    flex: none;
+    color: var(--good);
+    border: 1px solid rgba(76,209,117,.22);
+    background: rgba(76,209,117,.10);
+    border-radius: 999px;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: .45px;
+    line-height: 1;
+    padding: 5px 7px;
+    text-transform: uppercase;
+  }
+  .self-mesh-kit .sm-copy {
+    margin-top: 4px;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .self-mesh-kit .sm-devices {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .self-mesh-kit .sm-device {
+    min-width: 0;
+    border-radius: 7px;
+    border: 1px solid rgba(255,255,255,.055);
+    background: rgba(255,255,255,.035);
+    padding: 6px 7px;
+  }
+  .self-mesh-kit .sm-device b {
+    display: block;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.15;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .self-mesh-kit .sm-device span {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-dimmer);
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: .55px;
+    text-transform: uppercase;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .courier-kit {
     margin: -2px 12px 10px;
     padding: 9px 10px;
@@ -3873,6 +3948,14 @@
         <div class="nr-guide" id="no-router-guide"></div>
         <button id="btn-launch-path-create" style="display:none; margin-top:8px; width:100%;">Open path settings</button>
       </div>
+      <div class="self-mesh-kit" id="self-mesh-kit">
+        <div class="sm-head">
+          <div class="sm-title">My devices</div>
+          <div class="sm-pill" id="self-mesh-pill">syncing</div>
+        </div>
+        <div class="sm-copy" id="self-mesh-copy">Checking personal mesh presence.</div>
+        <div class="sm-devices" id="self-mesh-devices"></div>
+      </div>
       <div class="courier-kit" id="courier-kit">
         <div class="ck-title">Courier bundle</div>
         <div class="ck-copy">Move cached file chunks through any offline carrier.</div>
@@ -5467,6 +5550,7 @@
     folders: [],
     status: null,
     fabric: null,
+    selfMesh: null,
     searchQuery: "",
     searchResults: null,
     activePane: "convo",
@@ -5688,6 +5772,7 @@
     fabric() { return this.get("/api/fabric"); },
     noRouter() { return this.get("/api/fabric/no-router"); },
     mobileReach() { return this.get("/api/fabric/mobile-reach"); },
+    selfMesh() { return this.get("/api/self-mesh"); },
     fabricPathCreate() { return this.get("/api/fabric/path-create"); },
     launchFabricPathCreate(body) { return this.post("/api/fabric/path-create/launch", body); },
     nativeFabricPathCreate(body) { return this.post("/api/fabric/path-create/native", body); },
@@ -7005,6 +7090,63 @@
     }
     host.title = "Universal Comms Fabric: One Link ranks safe local, relay, courier, and future hardware paths before moving data.";
     renderNoRouterKit(noRouter);
+    renderSelfMesh();
+  }
+  function _selfMeshPubKey(row) {
+    return row?.device_pub_b64 || row?.device_pub || row?.fingerprint || "";
+  }
+  function _selfMeshPresenceFor(device) {
+    const mesh = state.selfMesh || {};
+    const facts = Array.isArray(mesh.presence) ? mesh.presence : [];
+    const key = _selfMeshPubKey(device);
+    return facts.find(p => _selfMeshPubKey(p) === key) || null;
+  }
+  function renderSelfMesh() {
+    const host = $("#self-mesh-kit");
+    if (!host) return;
+    const mesh = state.selfMesh || {};
+    const devices = Array.isArray(mesh.devices) ? mesh.devices : [];
+    const facts = Array.isArray(mesh.presence) ? mesh.presence : [];
+    const localCount = devices.filter(d => d.local && !d.revoked).length;
+    const awake = facts.filter(p => p.state === "awake").length;
+    const pill = $("#self-mesh-pill");
+    const copy = $("#self-mesh-copy");
+    const list = $("#self-mesh-devices");
+    if (pill) {
+      pill.textContent = devices.length ? `${awake}/${devices.length} awake` : "ready";
+    }
+    if (copy) {
+      copy.textContent = devices.length
+        ? `${localCount || 1} local device${(localCount || 1) === 1 ? "" : "s"} can receive signed self-mesh commands. Replay protection is ${mesh.remote_instruction_replay_protection ? "on" : "checking"}.`
+        : "This device is reporting local presence; add trusted personal devices to form a self-mesh.";
+    }
+    if (!list) return;
+    list.replaceChildren();
+    const rows = devices.length ? devices : [{
+      label: state.me?.hostname || "This device",
+      device_kind: "local",
+      local: true,
+      trusted: true,
+      device_pub_b64: "",
+    }];
+    for (const d of rows.slice(0, 6)) {
+      const p = _selfMeshPresenceFor(d);
+      const card = el("div", "sm-device");
+      const label = d.label || d.device_kind || d.fingerprint || "Device";
+      const stateLabel = p?.state || (d.local ? "awake" : "unknown");
+      const route = p?.route ? ` via ${p.route}` : "";
+      card.appendChild(el("b", "", label));
+      card.appendChild(el("span", "", `${stateLabel}${d.local ? " local" : ""}${route}`));
+      list.appendChild(card);
+    }
+  }
+  async function refreshSelfMesh() {
+    try {
+      state.selfMesh = await api.selfMesh();
+      renderSelfMesh();
+    } catch (_e) {
+      renderSelfMesh();
+    }
   }
   function renderNoRouterKit(noRouter) {
     const host = $("#no-router-kit");
@@ -9398,6 +9540,7 @@
       $("#metric-sessions").textContent = state.status.performance?.sessions?.open ?? 0;
       renderFabricTruth();
     } catch (e) { console.warn(e); }
+    await refreshSelfMesh();
     // v0.5.3: keep rendezvous URLs cached so the empty-state nudge is
     // accurate without waiting for the user to open the settings modal.
     try {
@@ -12025,6 +12168,9 @@
           peer.presence = m.presence;
           renderPeers();
         }
+      } else if (m.type === "self_mesh_changed") {
+        refreshSelfMesh();
+        scheduleActivityRefresh();
       } else if (m.type === "peer_verified") {
         scheduleActivityRefresh();  // v0.9.1: surface in activity feed
         // v0.7.7: side-channel SAS confirm flipped on/off. Patch the

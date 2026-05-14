@@ -34,6 +34,7 @@ Coverage matrix (one assertion per row in each suite):
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from pathlib import Path
 
@@ -115,6 +116,7 @@ GUARDED_GET_ROUTES = [
     "/api/fabric",
     "/api/fabric/no-router",
     "/api/fabric/mobile-reach",
+    "/api/self-mesh",
     "/api/courier/status",
     "/api/courier/files",
     "/api/courier/outbox",
@@ -736,6 +738,56 @@ async def test_api_fabric_mobile_reach_reports_shape(ctx, monkeypatch):
     assert body["storage_budget_bytes"] == 32 * 1024 * 1024
     assert "plans" in body
     assert "phones do not bypass pairing or peer verification" in body["safeguards"]
+
+
+@pytest.mark.asyncio
+async def test_api_self_mesh_reports_persisted_devices(ctx):
+    client, _, state, token, _ = ctx
+    from one_link import identity_dag as idag
+
+    root = Ed25519PrivateKey.generate()
+    device = Ed25519PrivateKey.generate()
+    root_seed = root.private_bytes_raw()
+    root_pub = root.public_key().public_bytes_raw()
+    device_pub = device.public_key().public_bytes_raw()
+    cert = idag.encode_device_cert(
+        root_priv_seed=root_seed,
+        root_pub=root_pub,
+        device_pub=device_pub,
+        device_kind="phone-ios",
+        added_ms=1000,
+    )
+    state.upsert_self_mesh_device(
+        root_pub=root_pub,
+        device_pub=device_pub,
+        device_kind="phone-ios",
+        cert=cert,
+        label="Phone",
+        local=True,
+        added_ms=1000,
+    )
+    state.upsert_self_mesh_presence(
+        device_pub=device_pub,
+        state="awake",
+        sequence=7,
+        updated_ms=2000,
+        battery_pct=88,
+        network="wifi",
+        free_bytes=123456,
+        route="self_wifi",
+    )
+
+    resp = await client.get("/api/self-mesh", headers=_h(token))
+
+    assert resp.status == 200
+    body = await resp.json()
+    expected_pub = base64.urlsafe_b64encode(device_pub).rstrip(b"=").decode("ascii")
+    assert body["status"] == "in_progress"
+    assert body["remote_instruction_replay_protection"] is True
+    assert body["devices"][0]["device_pub_b64"] == expected_pub
+    assert body["devices"][0]["label"] == "Phone"
+    assert body["presence"][0]["state"] == "awake"
+    assert body["presence"][0]["route"] == "self_wifi"
 
 
 @pytest.mark.asyncio

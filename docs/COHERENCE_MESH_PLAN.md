@@ -43,7 +43,7 @@ secure" and "insanely fast" compatible.
 | 5 | **Onion circuits** | ✓ SHIPPED 2026-05-12 (Phase F3) | `ol_onion` crate: nested ChaCha20-Poly1305 AEAD with per-layer ephemeral X25519 keys. Each hop only knows predecessor + successor. 1-hop, 3-hop, and up to 5-hop circuits supported. `build_onion` + `peel_one_layer` primitives wired into daemon via `onion_native.{build_onion,peel_one_layer,derive_pubkey}`. Sphinx-style single-pubkey blinding deferred to F3-polish v2; transport-layer padding addresses hop-count leak. |
 | 6 | **Cover traffic** | 🟡 PRIMITIVE SHIPPED 2026-05-12 (`afd3478`) | `ol_onion::sphinx::cover`: build_cover_packet (sentinel + random pad, indistinguishable size from real Sphinx) + CoverScheduler (Poisson-rate emission, BLAKE3-seeded for determinism). Daemon-side timer wiring + active-inference adaptive rate (Tier 2) deferred. |
 | 7 | **Hardware-attested transport** | ✓ SHIPPED 2026-05-13 | QUIC over TLS 1.3 (Phase A2) + `ol_onion::transport_obfs` complete: primitive byte XOR + obfs4-style handshake (BridgeKeypair + ClientHandshake + ServerHandshake with epoch-bound HMAC binding + 1-epoch skew tolerance) + bidirectional Session with per-direction keys. JA3-perfect TLS-fingerprint mimicry on top is a separate ship (the keys + nonces are here). |
-| 8 | **Personal Device Mesh** | ❌ NEW BUILD (this plan's killer capability) | Your phone, laptop, tablet, desktop are ONE identity to friends but SEPARATELY addressable to you. Phone in TX can grab a file from laptop in CA over self-mesh (no onion overhead). Messages buffer to whichever device wakes first. See "Personal Device Mesh" section below. |
+| 8 | **Personal Device Mesh** | 🟡 IN PROGRESS 2026-05-14 (F5 live-channel slice) | `personal_device_mesh.py`, State schema v18, `/api/self-mesh`, daemon self-mesh presence, live secure-channel remote-instruct, replay protection, and Activity-panel "My devices" visibility are wired. Next: device enrollment/revocation UX, automatic self-routing through normal send flows, remote-instruct UI/API actions, stricter path scopes, multi-daemon E2E, and performance/observability polish. |
 | 9 | **Threshold recovery** | ✓ SHIPPED 2026-05-13 | `ol_threshold_recovery` Shamir(K,N) over GF(2^8) + field-bound layer + WIRED into daemon's `social_recovery.py` via `split_compat`/`combine_compat` helpers. Pure-Python `threshold.py` stays as fallback. |
 | 10 | **Confidential-compute daemon** | ❌ NEW BUILD | Where hardware supports (Intel SGX, AMD SEV-SNP, Apple Secure Memory, ARM TrustZone), daemon runs in an enclave so even local malware can't extract keys. Beyond Signal. Beyond what any consumer messenger ships. |
 
@@ -261,6 +261,48 @@ between pinned contacts.
 
 The multi-device-per-identity capability. Master identity + per-device
 subkeys + device-presence CRDT + remote-instruct command channel.
+
+**2026-05-14 foundation + live-channel slice landed:**
+- `src/one_link/personal_device_mesh.py`
+- `tests/test_personal_device_mesh.py`
+- `tests/test_personal_device_mesh_daemon.py`
+- `tests/test_self_mesh_ui.py`
+- `State` schema v18: `self_mesh_devices`, `self_mesh_presence`,
+  `remote_instruction_seen`
+- `/api/self-mesh` read model for persisted device/presence state
+- Daemon publishes local self-mesh presence at startup and presence changes.
+- Daemon accepts `SELF_MESH_PRESENCE` over pinned live channels.
+- Daemon accepts signed `SELF_MESH_REMOTE_INSTRUCTION` over pinned live
+  channels and executes scoped `pull_file_manifest` / `send_file_from_device`
+  actions.
+- Activity panel renders the token-guarded "My devices" self-mesh surface and
+  refreshes on `self_mesh_changed` WebSocket events.
+- Presence facts converge by `(sequence, updated_ms)`.
+- Delivery planning rejects revoked/untrusted/offline/storage-starved devices.
+- Self-mesh target choice scores awake/asleep state, network class, battery,
+  storage headroom, freshness, bandwidth, and latency.
+- Remote-instruct commands are signed by a certified controller device,
+  root-bound, target-bound, expiry-bound, nonce-bearing, and replay-checkable.
+- Runtime remote-instruct requires a trusted local device-cert row for the
+  command root, so arbitrary roots cannot address this daemon by raw pubkey.
+
+**Remaining for F5 completion:**
+- Device enrollment/revocation ceremony: create/import root identity, mint
+  local device cert, pair a self-device, revoke a self-device, and show
+  trust/revocation state clearly.
+- Automatic self-routing: normal send/file flows should choose a best
+  self-device via `choose_self_mesh_target` when the recipient is a personal
+  mesh identity.
+- Remote-instruct API/UI: expose safe controls for "pull manifest",
+  "send from device", "use this device as source", and "use best device".
+- Scope hardening: allowlisted roots/directories, capability checks per
+  remote action, and user-visible audit/activity entries for every accepted,
+  rejected, replayed, queued, completed, or failed instruction.
+- Multi-daemon end-to-end tests: enrolled devices under one root, live channel
+  command delivery, and file transfer completion.
+- Performance gates: route selection latency, presence fanout cost, command
+  verify/replay overhead, remote-send dispatch latency, and UI/API polling
+  budget.
 
 **Phase F5 acceptance gate:**
 - One Ed25519 master derives N device subkeys deterministically

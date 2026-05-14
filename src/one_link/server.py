@@ -167,6 +167,11 @@ def _enumerate_sovereign_primitives() -> list[dict]:
          "primitive", "Root keypair signs device certs; per-device "
                       "Ed25519 priv never leaves the device",
          "Bundle 45"),
+        ("one_link.personal_device_mesh", "Personal Device Mesh core",
+         "primitive", "Revocation-aware self-device presence planner "
+                      "and signed remote-instruct commands for "
+                      "phone-to-laptop style self traffic",
+         "Phase F5 foundation"),
         ("one_link.vrf", "Verifiable Random Function (VRF)",
          "primitive", "Unbiased pseudorandom output with publicly-"
                       "verifiable proof; defeats eclipse attacks "
@@ -1293,6 +1298,7 @@ class UIServer:
         r.add_post("/api/fabric/path-create/launch", self._guarded(self.api_fabric_path_create_launch))
         r.add_post("/api/fabric/path-create/native", self._guarded(self.api_fabric_path_create_native))
         r.add_get("/api/fabric/mobile-reach", self._guarded(self.api_fabric_mobile_reach))
+        r.add_get("/api/self-mesh", self._guarded(self.api_self_mesh))
         r.add_get("/api/courier/status", self._guarded(self.api_courier_status))
         r.add_get("/api/courier/files", self._guarded(self.api_courier_files))
         r.add_get("/api/courier/outbox", self._guarded(self.api_courier_outbox))
@@ -3156,6 +3162,57 @@ class UIServer:
                 "message": str(exc),
             }, status=400)
         return web.json_response(plan_mobile_reach(peers, storage_budget_bytes=budget))
+
+    async def api_self_mesh(self, request: web.Request) -> web.Response:
+        """Phase F5 foundation: persisted owner-device mesh state."""
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return web.json_response({"devices": [], "presence": []})
+
+        def b64u(raw: bytes | None) -> str | None:
+            if raw is None:
+                return None
+            return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+        devices = []
+        for row in state.list_self_mesh_devices():
+            devices.append({
+                "root_pub_b64": b64u(row.get("root_pub")),
+                "device_pub_b64": b64u(row.get("device_pub")),
+                "cert_b64": b64u(row.get("cert")),
+                "device_kind": row.get("device_kind"),
+                "label": row.get("label"),
+                "local": bool(row.get("local")),
+                "trusted": bool(row.get("trusted")),
+                "revoked": bool(row.get("revoked")),
+                "added_ms": row.get("added_ms"),
+                "updated_ms": row.get("updated_ms"),
+                "metadata": row.get("metadata") or {},
+            })
+
+        presence = []
+        for row in state.list_self_mesh_presence():
+            presence.append({
+                "device_pub_b64": b64u(row.get("device_pub")),
+                "state": row.get("state"),
+                "sequence": row.get("sequence"),
+                "updated_ms": row.get("updated_ms"),
+                "battery_pct": row.get("battery_pct"),
+                "network": row.get("network"),
+                "free_bytes": row.get("free_bytes"),
+                "route": row.get("route"),
+                "latency_ms": row.get("latency_ms"),
+                "bandwidth_bps": row.get("bandwidth_bps"),
+                "metadata": row.get("metadata") or {},
+            })
+
+        return web.json_response({
+            "version": 1,
+            "status": "in_progress",
+            "devices": devices,
+            "presence": presence,
+            "remote_instruction_replay_protection": True,
+        })
 
     async def api_courier_status(self, request: web.Request) -> web.Response:
         """Readiness for encrypted offline chunk courier bundles."""
