@@ -72,6 +72,56 @@ pub struct PyShard {
 
 #[pymethods]
 impl PyShard {
+    /// Reconstruct a [`Shard`] from its components — used by the
+    /// `one_link.durability` adapter to round-trip shards from
+    /// on-disk bytes back into `decode_stripe`-callable form.
+    ///
+    /// Required so a daemon can:
+    ///
+    /// 1. Encode → write shard bytes + manifest to disk.
+    /// 2. Forget the plaintext (the whole point of erasure storage).
+    /// 3. Read shard bytes back from disk later + reconstruct
+    ///    `Shard` objects via this constructor.
+    /// 4. Pass them to `decode_stripe` for recovery.
+    ///
+    /// Without this constructor, step 3 is impossible — `Shard` is
+    /// otherwise opaque to Python.
+    #[new]
+    #[pyo3(signature = (stripe_id, index, role, plaintext_len, bytes))]
+    fn new(
+        stripe_id: &[u8],
+        index: u8,
+        role: &str,
+        plaintext_len: u64,
+        bytes: &[u8],
+    ) -> PyResult<Self> {
+        if stripe_id.len() != 32 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("stripe_id must be 32 bytes; got {}", stripe_id.len()),
+            ));
+        }
+        let mut sid = [0u8; 32];
+        sid.copy_from_slice(stripe_id);
+        let role = match role {
+            "data" => ShardRole::Data,
+            "parity" => ShardRole::Parity,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    format!("role must be 'data' or 'parity'; got {other:?}"),
+                ))
+            }
+        };
+        Ok(Self {
+            inner: RustShard {
+                bytes: bytes.to_vec(),
+                role,
+                index,
+                plaintext_len,
+                stripe_id: sid,
+            },
+        })
+    }
+
     #[getter]
     fn bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new_bound(py, &self.inner.bytes)

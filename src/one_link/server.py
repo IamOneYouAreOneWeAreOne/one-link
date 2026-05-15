@@ -1361,6 +1361,7 @@ class UIServer:
         r.add_post(r"/api/folders/{name}/sync", self._guarded(self.api_sync_folder_now))
         r.add_post(r"/api/folders/{name}/policy", self._guarded(self.api_set_folder_policy))
         r.add_get(r"/api/folders/{name}/audit", self._guarded(self.api_folder_audit))
+        r.add_get(r"/api/folders/{name}/tree", self._guarded(self.api_folder_tree))
         r.add_post(r"/api/peers/{fp}/trust", self._guarded(self.api_set_trust))
         r.add_get(r"/api/peers/{fp}/capabilities", self._guarded(self.api_get_peer_capabilities))
         r.add_post(r"/api/peers/{fp}/capabilities", self._guarded(self.api_set_peer_capabilities))
@@ -6258,6 +6259,105 @@ class UIServer:
         return web.json_response({
             "folder": name, "root_id": f.get("root_id"),
             "events": events,
+        })
+
+    async def api_folder_tree(self, request: web.Request) -> web.Response:
+        """File-engine v2 Phase B layer 9 substrate — expose the
+        folder's content tree as a JSON file tree. Foundation for
+        any future filesystem-mount integration (FUSE / Dokan /
+        FSKit) and also useful directly for UI file browsers + the
+        CLI's ``ol folder ls`` surface.
+
+        Query params:
+          - ``prefix=<path>``: scope the listing to entries under
+            ``<path>`` (no trailing slash). Default is the folder
+            root (lists everything).
+          - ``depth=<int>``: maximum tree depth to include. Default 0
+            (unlimited). Use ``depth=1`` for a single-level
+            directory listing.
+
+        Response shape::
+
+            {
+              "folder": "<name>",
+              "root_id": "<hex>",
+              "prefix": "<prefix>",
+              "entries": [
+                {
+                  "path": "subdir/file.txt",
+                  "size": 1234,
+                  "mtime_ms": 1715000000000,
+                  "blob_hash": "<hex|null>",
+                  "local": <bool>,        # is the blob in our local store?
+                },
+                ...
+              ],
+              "total_entries": N,
+              "total_bytes": N,
+              "local_bytes": N,           # bytes whose blob is locally stored
+            }
+        """
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        name = request.match_info["name"]
+        folder = self.daemon.state.get_folder(name)
+        if not folder:
+            return web.json_response({"error": "no such folder"}, status=404)
+        prefix = (request.query.get("prefix") or "").strip("/")
+        try:
+            depth = int(request.query.get("depth", "0"))
+        except ValueError:
+            depth = 0
+        entries_raw = self.daemon.state.list_manifest(name)
+        # Filter by prefix.
+        if prefix:
+            prefix_with_slash = prefix + "/"
+            entries_raw = [
+                e for e in entries_raw
+                if e["file_path"] == prefix
+                or e["file_path"].startswith(prefix_with_slash)
+            ]
+        # Filter by depth (relative to prefix, not absolute path).
+        if depth > 0:
+            def _at_or_above_depth(path: str) -> bool:
+                rel = path
+                if prefix and path.startswith(prefix + "/"):
+                    rel = path[len(prefix) + 1:]
+                return rel.count("/") < depth
+            entries_raw = [
+                e for e in entries_raw if _at_or_above_depth(e["file_path"])
+            ]
+        # Annotate with local-presence.
+        out = []
+        total_bytes = 0
+        local_bytes = 0
+        for e in entries_raw:
+            size = int(e.get("size") or 0)
+            blob_hash = e.get("blob_hash")
+            in_store = (
+                blob_hash is not None
+                and self.daemon.blob_store is not None
+                and bool(self.daemon.blob_store.has(blob_hash))
+            )
+            out.append({
+                "path": e["file_path"],
+                "size": size,
+                "mtime_ms": int(e.get("mtime_ms") or 0),
+                "blob_hash": blob_hash,
+                "local": in_store,
+            })
+            total_bytes += size
+            if in_store:
+                local_bytes += size
+        return web.json_response({
+            "folder": name,
+            "root_id": folder.get("root_id"),
+            "prefix": prefix,
+            "depth": depth,
+            "entries": out,
+            "total_entries": len(out),
+            "total_bytes": total_bytes,
+            "local_bytes": local_bytes,
         })
 
     async def api_sync_folder_now(self, request: web.Request) -> web.Response:
