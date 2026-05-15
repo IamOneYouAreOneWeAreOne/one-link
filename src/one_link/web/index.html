@@ -16212,35 +16212,112 @@
   }
 
   function setupRtcPeerConnection() {
-    // Stub — wired to real signaling in the next push. The
-    // RTCPeerConnection here is what the BROWSER-as-peer flow uses
-    // (peer_rtc.py on the daemon side already handles SDP exchange).
-    // For Tier α we surface the API; the actual SDP transport hooks
-    // are the same envelope path that already carries DataChannel
-    // offers.
+    // Build the RTCPeerConnection + wire signaling transport.
+    //
+    // SDP + ICE exchange flows through the daemon's /api/v1/calls
+    // surface (action: send_sdp_offer / send_sdp_answer /
+    // send_ice_candidate). Inbound SDP / ICE arrives as
+    // ``call_event`` tail messages over the existing WebSocket.
     if (!window.RTCPeerConnection) return null;
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     });
     pc.ontrack = (ev) => {
-      // First track arrival creates the remote stream. Subsequent
-      // tracks join the same stream.
       let stream = media.remoteStream;
       if (!stream || (ev.streams && ev.streams[0] && stream !== ev.streams[0])) {
         stream = (ev.streams && ev.streams[0]) || new MediaStream();
         attachRemoteStream(stream);
       }
-      // Some browsers don't deliver via ev.streams — attach the track.
       try { stream.addTrack(ev.track); } catch (_) {}
     };
+    pc.onicecandidate = (ev) => {
+      // Trickle each candidate to the daemon as it's gathered.
+      // ev.candidate === null signals end-of-gathering.
+      if (!callUI.activeCallId) return;
+      if (ev.candidate === null) {
+        callApiPost({
+          action: "send_ice_candidate",
+          call_id: callUI.activeCallId,
+          candidate: "",
+          sdp_mid: null,
+          sdp_m_line_index: null,
+          end_of_candidates: true,
+        });
+        return;
+      }
+      callApiPost({
+        action: "send_ice_candidate",
+        call_id: callUI.activeCallId,
+        candidate: ev.candidate.candidate,
+        sdp_mid: ev.candidate.sdpMid,
+        sdp_m_line_index: ev.candidate.sdpMLineIndex,
+        end_of_candidates: false,
+      });
+    };
     pc.oniceconnectionstatechange = () => {
-      // The Immune System reads connection state via vitals; the
-      // browser emits a metrics ping to the daemon over the existing
-      // events WebSocket. (Hook reserved for the next push — placeholder
-      // here so the FSM doesn't have to be modified later.)
+      // The Immune System reads connection state via vitals; emitted
+      // as a metrics ping on the events WebSocket.
     };
     media.pc = pc;
     return pc;
+  }
+
+  async function sendLocalSdpOffer() {
+    if (!media.pc || !callUI.activeCallId) return;
+    try {
+      const offer = await media.pc.createOffer();
+      await media.pc.setLocalDescription(offer);
+      await callApiPost({
+        action: "send_sdp_offer",
+        call_id: callUI.activeCallId,
+        sdp: offer.sdp,
+      });
+    } catch (_) { /* fall through — peer may already have an offer */ }
+  }
+
+  async function sendLocalSdpAnswer() {
+    if (!media.pc || !callUI.activeCallId) return;
+    try {
+      const answer = await media.pc.createAnswer();
+      await media.pc.setLocalDescription(answer);
+      await callApiPost({
+        action: "send_sdp_answer",
+        call_id: callUI.activeCallId,
+        sdp: answer.sdp,
+      });
+    } catch (_) { /* fall through */ }
+  }
+
+  async function applyRemoteSdpOffer(sdp) {
+    if (!sdp) return;
+    if (!media.pc) setupRtcPeerConnection();
+    try {
+      await media.pc.setRemoteDescription({ type: "offer", sdp });
+      await sendLocalSdpAnswer();
+    } catch (_) { /* fall through */ }
+  }
+
+  async function applyRemoteSdpAnswer(sdp) {
+    if (!sdp || !media.pc) return;
+    try {
+      await media.pc.setRemoteDescription({ type: "answer", sdp });
+    } catch (_) { /* fall through */ }
+  }
+
+  async function applyRemoteIceCandidate(data) {
+    if (!media.pc) return;
+    // end_of_candidates → addIceCandidate(null) signals completion.
+    if (data && data.end_of_candidates) {
+      try { await media.pc.addIceCandidate(null); } catch (_) {}
+      return;
+    }
+    try {
+      await media.pc.addIceCandidate({
+        candidate: data.candidate,
+        sdpMid: data.sdp_mid,
+        sdpMLineIndex: data.sdp_m_line_index,
+      });
+    } catch (_) { /* candidate may arrive before remote description */ }
   }
 
   function syncMuteCameraButtons() {
@@ -16279,6 +16356,9 @@
         try { media.pc.addTrack(t, stream); } catch (_) {}
       });
     }
+    // Originator creates the SDP offer + sends it now. The peer
+    // will respond with an SDP answer once they accept.
+    await sendLocalSdpOffer();
   };
 
   function showOutgoingOverlay(peerLabel) {
@@ -16358,6 +16438,14 @@
           try { media.pc.addTrack(t, stream); } catch (_) {}
         });
       }
+      // If the originator's SDP offer arrived before we accepted,
+      // it's been parked in pendingRemoteOffer. Apply it now and
+      // emit our answer.
+      if (callUI.pendingRemoteOffer) {
+        const offerSdp = callUI.pendingRemoteOffer;
+        callUI.pendingRemoteOffer = null;
+        await applyRemoteSdpOffer(offerSdp);
+      }
     }
     callUI.inboundCallId = null;
   });
@@ -16392,6 +16480,40 @@
     media.cameraOff = !media.cameraOff;
     media.localStream.getVideoTracks().forEach((t) => { t.enabled = !media.cameraOff; });
     syncMuteCameraButtons();
+  });
+  // SAS confirmation pane — shown when the daemon's TrustLedger
+  // reports first-contact (UNVERIFIED) OR a rotated key (CHAIN_OK).
+  // Yes = user confirms the words match → daemon pins this peer.
+  // No  = user reports a mismatch → daemon refuses + warns.
+  function hideSasPane() {
+    const pane = $$("#call-sas-pane");
+    if (pane) pane.style.display = "none";
+    const words = $$("#call-sas-words");
+    if (words) words.textContent = "";
+  }
+  const sasYesBtn = $$("#btn-sas-yes");
+  if (sasYesBtn) sasYesBtn.addEventListener("click", async () => {
+    if (callUI.activeCallId) {
+      await callApiPost({
+        action: "confirm_sas", call_id: callUI.activeCallId,
+      });
+    }
+    hideSasPane();
+  });
+  const sasNoBtn = $$("#btn-sas-no");
+  if (sasNoBtn) sasNoBtn.addEventListener("click", async () => {
+    if (callUI.activeCallId) {
+      await callApiPost({
+        action: "decline_sas", call_id: callUI.activeCallId,
+      });
+      await callApiPost({
+        action: "hangup", call_id: callUI.activeCallId,
+      });
+      hideActiveSurface();
+      stopAllMedia();
+      callUI.activeCallId = null;
+    }
+    hideSasPane();
   });
 
   // ── WebSocket call_event router ──
@@ -16440,6 +16562,44 @@
       if (typeof toast === "function") {
         toast("Voice note saved. You can pick up where you left off.", "info", 4000);
       }
+      return true;
+    }
+    if (tail === "sdp_offer") {
+      // Recipient side: peer's SDP offer arrived. Track it so we
+      // setRemoteDescription + createAnswer once we accept.
+      callUI.pendingRemoteOffer = m.sdp || "";
+      if (callUI.activeCallId === callId && media.pc) {
+        applyRemoteSdpOffer(m.sdp);
+      }
+      return true;
+    }
+    if (tail === "sdp_answer") {
+      applyRemoteSdpAnswer(m.sdp);
+      return true;
+    }
+    if (tail === "ice_candidate") {
+      applyRemoteIceCandidate(m);
+      return true;
+    }
+    if (tail === "call_refused") {
+      hideIncomingRing();
+      hideOutgoingOverlay();
+      hideActiveSurface();
+      stopAllMedia();
+      if (callUI.activeCallId === callId) callUI.activeCallId = null;
+      if (callUI.inboundCallId === callId) callUI.inboundCallId = null;
+      if (typeof toast === "function") {
+        toast(m.user_message || "Call refused.", "warn", 6000);
+      }
+      return true;
+    }
+    if (tail === "sas_verification_required") {
+      const pane = $$("#call-sas-pane");
+      const words = $$("#call-sas-words");
+      if (words && typeof m.sas_words === "string") {
+        words.textContent = m.sas_words;
+      }
+      if (pane) pane.style.display = "block";
       return true;
     }
     return false;

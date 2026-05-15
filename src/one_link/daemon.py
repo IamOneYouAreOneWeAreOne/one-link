@@ -553,6 +553,23 @@ CAPS_FEATURES: list[str] = [
 MAX_SHARED_RENDEZVOUS_URLS = 16
 PRESENCE_STATES = frozenset({"online", "away", "dnd", "invisible", "offline"})
 
+# Living Presence wire-message vocabulary. The receive-loop dispatch
+# branches on these strings to route into _dispatch_living_presence_message.
+_LIVING_PRESENCE_WIRE_TYPES = frozenset({
+    "CALL_INVITE",
+    "CALL_ACCEPT",
+    "CALL_DECLINE",
+    "CALL_END",
+    "CALL_RESUME_OFFER",
+    "CALL_ICE",
+    "CALL_SDP_OFFER",
+    "CALL_SDP_ANSWER",
+    "RECORDING_REQUEST",
+    "RECORDING_GRANT",
+    "RECORDING_DECLINE",
+    "RECORDING_STOP",
+})
+
 
 def _build_caps(
     short_id: str,
@@ -3901,6 +3918,533 @@ class Daemon:
                 self._emit_capability_request(peer_fp, peer_sid, FOLDER_SYNC)
                 return
             await self._handle_blob_chunk(channel, msg, peer_fp)
+
+        # ─── FILE_PROVENANCE — inbound Reality-dot evidence ─────────────
+        elif t == "FILE_PROVENANCE":
+            self._handle_file_provenance(msg=msg, channel=channel, peer_fp=peer_fp)
+
+        # ─── Living Presence wire dispatch ──────────────────────────────
+        elif t in _LIVING_PRESENCE_WIRE_TYPES:
+            await self._dispatch_living_presence_message(
+                channel=channel, msg=msg, peer_fp=peer_fp, peer_sid=peer_sid,
+            )
+
+    # ─── Living Presence wire dispatch helpers ─────────────────────────
+
+    def _handle_file_provenance(self, *, msg: dict, channel, peer_fp: str) -> None:
+        """Dispatch hook for FILE_PROVENANCE wire messages.
+
+        Verifies the inbound provenance against the sender's Ed25519
+        pubkey (peer_ed_pub from the established channel), records
+        the result in ``self._provenance_store``, and broadcasts a
+        ``frame_provenance`` tail event so the UI can render the
+        Reality dot. Never raises — malformed input is logged + dropped.
+
+        Drop silently (no record, no broadcast) when:
+          - ``self.state`` is None (race during startup / test shim)
+          - the sending peer isn't in the daemon's peer roster
+            (verification key is not available)
+        """
+        try:
+            from one_link.provenance_wiring import (
+                handle_inbound_provenance,
+                to_ui_dict,
+            )
+        except Exception:
+            return
+        try:
+            state = self.state
+        except Exception:
+            state = None
+        if state is None:
+            return
+        try:
+            peer_record = state.get_peer(peer_fp)
+        except Exception:
+            peer_record = None
+        if peer_record is None:
+            return
+        try:
+            sender_pub_bytes = channel.peer_ed_pub
+        except Exception:
+            return
+        try:
+            parsed, verified = handle_inbound_provenance(
+                msg=msg,
+                peer_fp=peer_fp,
+                sender_public_bytes=sender_pub_bytes,
+                store=self._provenance_store,
+            )
+        except Exception as exc:
+            log.warning("FILE_PROVENANCE dispatch raised: %s", exc)
+            return
+        if parsed is None:
+            return
+        try:
+            ui_dict = to_ui_dict(parsed.provenance, verified=verified)
+        except Exception:
+            return
+        try:
+            self._broadcast_tail({
+                "type": "frame_provenance",
+                "blob": parsed.blob_hex,
+                "peer": peer_fp,
+                **ui_dict,
+            })
+        except Exception:
+            pass
+
+    async def _dispatch_living_presence_message(
+        self,
+        *,
+        channel,
+        msg: dict,
+        peer_fp: str,
+        peer_sid: str,
+    ) -> None:
+        """Route a CALL_/RECORDING_/CAPSULE_/CALL_ICE wire message into
+        the per-call CallManager + emit any UI tail events.
+
+        Pure dispatch: heavy lifting lives in the engine modules. The
+        daemon's job here is to translate wire → ManagerEvent, flush
+        the response through ``flush_call_api_response``, and forward
+        SDP / ICE payloads to the local browser via the WebSocket tail
+        so ``RTCPeerConnection`` on the UI side can act on them.
+
+        Defensive: every failure path returns without raising — the
+        recv loop must keep running.
+        """
+        from one_link.call_manager import ManagerEvent, ManagerEventKind
+        from one_link.call_sdp_signaling import (
+            extract_answer,
+            extract_offer,
+            parse_ice_message,
+        )
+
+        t = msg.get("t")
+        call_id = msg.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            log.warning(
+                "living-presence: %s from %s missing call_id; dropping",
+                t, peer_fp[:8],
+            )
+            return
+
+        now_ms_ = int(time.time() * 1000)
+
+        # CALL_INVITE opens a new manager. Every other type looks up
+        # an existing one.
+        if t == "CALL_INVITE":
+            # Audit C2 — route the inbound master_vk through the
+            # TrustLedger BEFORE opening the manager. A
+            # CHAIN_BROKEN decision refuses the call with a
+            # plain-language reason; we never instantiate the
+            # CallManager in that case.
+            decision = self._trust_ledger_check_inbound(peer_fp)
+            if decision is not None and not decision.allow_call:
+                self._broadcast_tail({
+                    "type": "call_event",
+                    "tail_kind": "call_refused",
+                    "call_id": call_id,
+                    "peer_master_vk_hex": peer_fp,
+                    "user_message": decision.explanation,
+                })
+                log.info(
+                    "CALL_INVITE refused by trust ledger from %s: %s",
+                    peer_fp[:8], decision.new_state.name,
+                )
+                return
+            mgr = self._call_registry.open(
+                call_id=call_id,
+                peer_master_vk_hex=peer_fp,
+                local_role="recipient",
+                local_master_vk_hex=self.me.fingerprint,
+                started_at_ms=now_ms_,
+            )
+            event = ManagerEvent(
+                kind=ManagerEventKind.WIRE_CALL_INVITE,
+                occurred_at_ms=now_ms_,
+                data={"peer_master_vk_hex": peer_fp},
+            )
+            try:
+                sdp_offer = extract_offer(msg) if isinstance(msg, dict) else None
+            except Exception as exc:
+                log.warning(
+                    "living-presence: CALL_INVITE %s: bad SDP offer: %s",
+                    call_id[:8], exc,
+                )
+                sdp_offer = None
+            self._forward_sdp_to_ui(
+                call_id=call_id,
+                peer_master_vk_hex=peer_fp,
+                kind="sdp_offer",
+                sdp_payload=sdp_offer,
+            )
+            # If decision allows but is first-contact, surface the
+            # SAS-required tail so the UI can prompt the user.
+            if decision is not None and decision.needs_reverify:
+                self._broadcast_tail({
+                    "type": "call_event",
+                    "tail_kind": "sas_verification_required",
+                    "call_id": call_id,
+                    "peer_master_vk_hex": peer_fp,
+                    "user_message": decision.explanation,
+                })
+            await self._handle_call_manager_output(mgr, event)
+            return
+
+        # All other messages require an existing manager.
+        mgr = self._call_registry.get(call_id)
+        if mgr is None:
+            log.info(
+                "living-presence: %s for unknown call_id %s from %s; dropping",
+                t, call_id[:8], peer_fp[:8],
+            )
+            return
+
+        if t == "CALL_ACCEPT":
+            event = ManagerEvent(
+                kind=ManagerEventKind.WIRE_CALL_ACCEPT,
+                occurred_at_ms=now_ms_,
+                data={"peer_master_vk_hex": peer_fp},
+            )
+            try:
+                sdp_answer = extract_answer(msg)
+            except Exception as exc:
+                log.warning(
+                    "living-presence: CALL_ACCEPT %s: bad SDP answer: %s",
+                    call_id[:8], exc,
+                )
+                sdp_answer = None
+            self._forward_sdp_to_ui(
+                call_id=call_id,
+                peer_master_vk_hex=peer_fp,
+                kind="sdp_answer",
+                sdp_payload=sdp_answer,
+            )
+            await self._handle_call_manager_output(mgr, event)
+            return
+
+        if t == "CALL_DECLINE":
+            event = ManagerEvent(
+                kind=ManagerEventKind.WIRE_CALL_DECLINE,
+                occurred_at_ms=now_ms_,
+                data={"peer_master_vk_hex": peer_fp},
+            )
+            await self._handle_call_manager_output(mgr, event)
+            return
+
+        if t == "CALL_END":
+            event = ManagerEvent(
+                kind=ManagerEventKind.WIRE_CALL_END,
+                occurred_at_ms=now_ms_,
+                data={"peer_master_vk_hex": peer_fp},
+            )
+            await self._handle_call_manager_output(mgr, event)
+            return
+
+        if t == "CALL_RESUME_OFFER":
+            event = ManagerEvent(
+                kind=ManagerEventKind.WIRE_RESUME_OFFER,
+                occurred_at_ms=now_ms_,
+                data={"peer_master_vk_hex": peer_fp},
+            )
+            await self._handle_call_manager_output(mgr, event)
+            return
+
+        if t == "CALL_SDP_OFFER":
+            # Standalone SDP-offer message — does not advance the
+            # CallManager FSM (lifecycle is already running). Just
+            # extract the SDP and forward to the local browser so
+            # RTCPeerConnection can setRemoteDescription.
+            try:
+                sdp_offer = extract_offer(msg)
+            except Exception as exc:
+                log.warning(
+                    "living-presence: CALL_SDP_OFFER %s: %s",
+                    call_id[:8], exc,
+                )
+                return
+            self._forward_sdp_to_ui(
+                call_id=call_id,
+                peer_master_vk_hex=peer_fp,
+                kind="sdp_offer",
+                sdp_payload=sdp_offer,
+            )
+            return
+
+        if t == "CALL_SDP_ANSWER":
+            try:
+                sdp_answer = extract_answer(msg)
+            except Exception as exc:
+                log.warning(
+                    "living-presence: CALL_SDP_ANSWER %s: %s",
+                    call_id[:8], exc,
+                )
+                return
+            self._forward_sdp_to_ui(
+                call_id=call_id,
+                peer_master_vk_hex=peer_fp,
+                kind="sdp_answer",
+                sdp_payload=sdp_answer,
+            )
+            return
+
+        if t == "CALL_ICE":
+            # ICE is a media-layer concern; the browser is the only
+            # entity that can call addIceCandidate. CallManager has
+            # no state for ICE — we just forward to the UI tail.
+            try:
+                _cid, cand = parse_ice_message(msg)
+            except Exception as exc:
+                log.warning(
+                    "living-presence: CALL_ICE %s: malformed: %s",
+                    call_id[:8], exc,
+                )
+                return
+            self._broadcast_tail({
+                "type": "call_event",
+                "tail_kind": "ice_candidate",
+                "call_id": call_id,
+                "peer_master_vk_hex": peer_fp,
+                "candidate": cand.candidate,
+                "sdp_mid": cand.sdp_mid,
+                "sdp_m_line_index": cand.sdp_m_line_index,
+                "end_of_candidates": cand.end_of_candidates,
+            })
+            return
+
+        if t == "RECORDING_REQUEST":
+            event = ManagerEvent(
+                kind=ManagerEventKind.WIRE_RECORDING_REQUEST,
+                occurred_at_ms=now_ms_,
+                data={"peer_master_vk_hex": peer_fp},
+            )
+            await self._handle_call_manager_output(mgr, event)
+            return
+
+        if t == "RECORDING_GRANT":
+            event = ManagerEvent(
+                kind=ManagerEventKind.WIRE_RECORDING_GRANT,
+                occurred_at_ms=now_ms_,
+                data={"peer_master_vk_hex": peer_fp},
+            )
+            await self._handle_call_manager_output(mgr, event)
+            return
+
+        if t == "RECORDING_DECLINE":
+            event = ManagerEvent(
+                kind=ManagerEventKind.WIRE_RECORDING_DECLINE,
+                occurred_at_ms=now_ms_,
+                data={"peer_master_vk_hex": peer_fp},
+            )
+            await self._handle_call_manager_output(mgr, event)
+            return
+
+        if t == "RECORDING_STOP":
+            event = ManagerEvent(
+                kind=ManagerEventKind.WIRE_RECORDING_STOP,
+                occurred_at_ms=now_ms_,
+                data={"peer_master_vk_hex": peer_fp},
+            )
+            await self._handle_call_manager_output(mgr, event)
+            return
+
+    async def _handle_call_manager_output(self, mgr, event) -> None:
+        """Run one event through a CallManager + flush the result."""
+        try:
+            output = mgr.handle(event)
+        except Exception as exc:
+            log.warning(
+                "CallManager.handle raised on %s: %s",
+                event.kind.name, exc,
+            )
+            return
+        # ManagerOutput shape differs from ApiResponse but the flush
+        # helper handles both via duck-typing (outbound + tail_events).
+        try:
+            await self._flush_manager_output(mgr, output)
+        except Exception as exc:
+            log.warning(
+                "flush_manager_output raised for %s: %s",
+                event.kind.name, exc,
+            )
+
+    async def _flush_manager_output(self, mgr, output) -> None:
+        """Side-effect step for a CallManager ManagerOutput.
+
+        Mirrors :meth:`flush_call_api_response` but reads
+        ``outbound_msgs`` (ManagerOutput's field name) rather than
+        ``outbound`` (ApiResponse's). Both shapes share semantics."""
+        outbound = getattr(output, "outbound_msgs", ()) or ()
+        if outbound:
+            by_peer: dict[str, list[dict]] = {}
+            for m in outbound:
+                try:
+                    peer_fp = m.peer_master_vk_hex
+                    msg_type = m.type
+                    payload = dict(m.payload or {})
+                except Exception as exc:
+                    log.warning(
+                        "flush_manager_output: malformed outbound: %s", exc,
+                    )
+                    continue
+                try:
+                    wire_msg = make_msg(
+                        msg_type, self.me.short_id, **payload,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "flush_manager_output: make_msg failed for %s: %s",
+                        msg_type, exc,
+                    )
+                    continue
+                by_peer.setdefault(peer_fp, []).append(wire_msg)
+            for peer_fp, msgs in by_peer.items():
+                peer = self._resolve_peer_for_outbound(peer_fp)
+                if peer is None:
+                    continue
+                try:
+                    await self.send_to(peer, msgs)
+                except Exception:
+                    continue
+
+        # Consent-channel messages (RECORDING_*) ride the same path.
+        consent = getattr(output, "consent_msgs", ()) or ()
+        if consent:
+            by_peer = {}
+            for m in consent:
+                try:
+                    peer_fp = m.peer_master_vk_hex
+                    msg_type = m.type
+                    payload = dict(m.payload or {})
+                except Exception:
+                    continue
+                try:
+                    wire_msg = make_msg(
+                        msg_type, self.me.short_id, **payload,
+                    )
+                except Exception:
+                    continue
+                by_peer.setdefault(peer_fp, []).append(wire_msg)
+            for peer_fp, msgs in by_peer.items():
+                peer = self._resolve_peer_for_outbound(peer_fp)
+                if peer is None:
+                    continue
+                try:
+                    await self.send_to(peer, msgs)
+                except Exception:
+                    continue
+
+        # Tail events → broadcast to the WebSocket-subscribed UIs.
+        for ev in getattr(output, "tail_events", ()) or ():
+            try:
+                payload = dict(ev.payload or {})
+                payload.setdefault("call_id", getattr(mgr, "call_id", ""))
+                self._broadcast_tail({
+                    "type": "call_event",
+                    "tail_kind": ev.kind.name.lower(),
+                    **payload,
+                })
+            except Exception:
+                pass
+
+        # Reap if the manager declared itself complete.
+        if getattr(output, "call_complete", False):
+            try:
+                self._call_registry.close(getattr(mgr, "call_id", ""))
+            except Exception:
+                pass
+
+    def _forward_sdp_to_ui(
+        self,
+        *,
+        call_id: str,
+        peer_master_vk_hex: str,
+        kind: str,
+        sdp_payload,
+    ) -> None:
+        """Push an SDP offer or answer to the local browser via the
+        WebSocket tail. The browser's RTCPeerConnection driver picks
+        it up and calls ``setRemoteDescription``."""
+        if sdp_payload is None:
+            return
+        try:
+            self._broadcast_tail({
+                "type": "call_event",
+                "tail_kind": kind,
+                "call_id": call_id,
+                "peer_master_vk_hex": peer_master_vk_hex,
+                "sdp": sdp_payload.sdp,
+                "sdp_kind": sdp_payload.kind.to_str(),
+            })
+        except Exception:
+            pass
+
+    def _trust_ledger_check_inbound(self, peer_fp: str):
+        """Audit C2 — route an inbound CALL_INVITE through the
+        TrustLedger. Returns a RotationDecision (or None if the
+        ledger is unavailable, in which case we fall back to the
+        existing pinning checks)."""
+        try:
+            ledger = self._get_trust_ledger()
+        except Exception:
+            return None
+        if ledger is None:
+            return None
+        try:
+            return ledger.check_inbound(
+                inbound_master_vk_hex=peer_fp,
+                inbound_signature_from_prior=None,
+                previous_pin_hex=None,
+            )
+        except Exception as exc:
+            log.warning("trust_ledger.check_inbound raised: %s", exc)
+            return None
+
+    def _get_trust_ledger(self):
+        """Lazy-construct the per-daemon TrustLedger. The actual
+        Ed25519 signature-verification callback hooks into the
+        daemon's identity layer; for now we use a default-reject
+        verifier so the only allow paths are TOFU first-contact +
+        same-key."""
+        ledger = getattr(self, "_trust_ledger_instance", None)
+        if ledger is not None:
+            return ledger
+        try:
+            from one_link.trust_ledger import TrustLedger
+        except Exception:
+            return None
+
+        def _verify_prior_signature(
+            _prior_vk_hex: str,
+            _new_vk_hex: str,
+            _sig: bytes,
+        ) -> bool:
+            # Until the identity layer wires the Ed25519
+            # cross-signature verifier, every rotation chain is
+            # treated as broken — the only allow paths are first
+            # contact (TOFU) and same-key.
+            return False
+
+        ledger = TrustLedger(verify_prior_signature=_verify_prior_signature)
+        # Seed the ledger with already-pinned peers from state so
+        # they fast-path as TRUSTED.
+        try:
+            state = self.state
+            if state is not None:
+                for peer_fp_h in getattr(state, "all_pinned_peer_fingerprints", lambda: ())():
+                    try:
+                        ledger.record_pinned(
+                            peer_master_vk_hex=peer_fp_h,
+                            verified_at_ms=int(time.time() * 1000),
+                        )
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        self._trust_ledger_instance = ledger
+        return ledger
 
     # ─── CDC file-transfer helpers ─────────────────────────────────────
     def _chunk_cache_dir(self) -> Path:

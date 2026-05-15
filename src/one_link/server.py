@@ -2393,9 +2393,20 @@ class UIServer:
 
     async def api_call_action(self, request: web.Request) -> web.Response:
         """POST /api/v1/calls — dispatch one action.
+
         Body shape: ``{"action": "initiate", "peer_master_vk_hex": ...,
         "negotiated_capabilities": [...]}`` or ``{"action": "hangup",
-        "call_id": "..."}``. Returns the structured CallAPI response."""
+        "call_id": "..."}``. Returns the structured CallAPI response.
+
+        Also handles the SDP / ICE actions that bypass CallManager:
+          - ``send_sdp_offer`` / ``send_sdp_answer``: forward the
+            browser's SDP to the peer via a ``CALL_SDP_OFFER`` /
+            ``CALL_SDP_ANSWER`` wire message.
+          - ``send_ice_candidate``: forward a trickled ICE candidate
+            via ``CALL_ICE``.
+        These don't touch CallManager — they sit on the media-layer
+        rail next to the lifecycle FSM.
+        """
         try:
             body = await request.json()
         except Exception:
@@ -2406,8 +2417,26 @@ class UIServer:
                 },
                 status=400,
             )
+        if not isinstance(body, dict):
+            return web.json_response(
+                {"ok": False, "user_message": "Request shape was unexpected."},
+                status=400,
+            )
+
+        action_name = (body.get("action") or "").lower()
+
+        # Media-layer actions — bypass CallManager.
+        if action_name in {"send_sdp_offer", "send_sdp_answer", "send_ice_candidate"}:
+            return await self._handle_media_layer_action(action_name, body)
+
         api = self._call_api()
         result = api.handle_json(body)
+        # Flush the response so outbound wire messages actually reach
+        # the peer + tail events broadcast to the WebSocket UIs.
+        try:
+            await self.daemon.flush_call_api_response(result)
+        except Exception as exc:
+            log.warning("flush_call_api_response failed: %s", exc)
         # Translate the result back to JSON. We omit the binary-ish
         # tail-events (those flow via the WebSocket separately) so
         # this response is small + UI-friendly.
@@ -2423,6 +2452,110 @@ class UIServer:
                 for m in result.outbound
             ],
         })
+
+    async def _handle_media_layer_action(
+        self, action_name: str, body: dict,
+    ) -> web.Response:
+        """SDP + ICE actions bypass CallManager and emit standalone
+        wire messages to the peer. Returns the same shape as the
+        CallManager dispatch for browser uniformity."""
+        from one_link.call_sdp_signaling import (
+            CALL_ICE,
+            CALL_INVITE_SDP_V1,
+            IceCandidatePayload,
+            SdpKind,
+            SdpPayload,
+            build_ice_message,
+            looks_like_sdp,
+        )
+        from one_link.wire import make_msg
+
+        call_id = body.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return web.json_response(
+                {"ok": False, "user_message": "Call is no longer active."},
+            )
+        # Look up the call manager to discover the peer master_vk.
+        mgr = self.daemon._call_registry.get(call_id)
+        if mgr is None:
+            return web.json_response(
+                {"ok": False, "user_message": "This call is no longer active."},
+            )
+        peer_master_vk_hex = mgr.state.peer_master_vk_hex
+        peer = self.daemon._resolve_peer_for_outbound(peer_master_vk_hex)
+        if peer is None:
+            return web.json_response(
+                {"ok": False, "user_message": "Couldn't reach that contact."},
+            )
+
+        if action_name in {"send_sdp_offer", "send_sdp_answer"}:
+            sdp_text = body.get("sdp")
+            if not isinstance(sdp_text, str) or not looks_like_sdp(sdp_text):
+                return web.json_response(
+                    {"ok": False, "user_message": "Couldn't send that audio/video setup."},
+                )
+            kind = SdpKind.OFFER if action_name == "send_sdp_offer" else SdpKind.ANSWER
+            payload = SdpPayload(
+                schema=CALL_INVITE_SDP_V1, kind=kind, sdp=sdp_text,
+            ).to_wire()
+            wire_t = (
+                "CALL_SDP_OFFER" if action_name == "send_sdp_offer"
+                else "CALL_SDP_ANSWER"
+            )
+            wire_msg = make_msg(
+                wire_t, self.daemon.me.short_id,
+                call_id=call_id,
+                sdp_offer=payload if kind == SdpKind.OFFER else None,
+                sdp_answer=payload if kind == SdpKind.ANSWER else None,
+            )
+            # Strip the unused-direction key so the wire message stays compact.
+            if kind == SdpKind.OFFER:
+                wire_msg.pop("sdp_answer", None)
+            else:
+                wire_msg.pop("sdp_offer", None)
+            try:
+                await self.daemon.send_to(peer, [wire_msg])
+            except Exception as exc:
+                log.warning("send_sdp failed: %s", exc)
+                return web.json_response(
+                    {"ok": False, "user_message": "Couldn't reach that contact."},
+                )
+            return web.json_response({"ok": True, "call_id": call_id})
+
+        # send_ice_candidate
+        cand_str = body.get("candidate")
+        if not isinstance(cand_str, str):
+            cand_str = ""
+        sdp_mid = body.get("sdp_mid")
+        sdp_m_line_index = body.get("sdp_m_line_index")
+        end_of_cand = bool(body.get("end_of_candidates"))
+        try:
+            cand = IceCandidatePayload(
+                schema=CALL_INVITE_SDP_V1,
+                candidate=cand_str,
+                sdp_mid=sdp_mid if isinstance(sdp_mid, str) else None,
+                sdp_m_line_index=(
+                    int(sdp_m_line_index)
+                    if isinstance(sdp_m_line_index, (int, str))
+                    and str(sdp_m_line_index).lstrip("-").isdigit()
+                    else None
+                ),
+                end_of_candidates=end_of_cand,
+            )
+        except Exception:
+            return web.json_response(
+                {"ok": False, "user_message": "Couldn't send that connection detail."},
+            )
+        body_msg = build_ice_message(call_id=call_id, candidate=cand)
+        wire_msg = make_msg(CALL_ICE, self.daemon.me.short_id, **body_msg)
+        try:
+            await self.daemon.send_to(peer, [wire_msg])
+        except Exception as exc:
+            log.warning("send_ice failed: %s", exc)
+            return web.json_response(
+                {"ok": False, "user_message": "Couldn't reach that contact."},
+            )
+        return web.json_response({"ok": True, "call_id": call_id})
 
     async def api_calls_list(self, request: web.Request) -> web.Response:
         """GET /api/v1/calls — list active call snapshots."""
