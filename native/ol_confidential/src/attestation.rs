@@ -288,7 +288,15 @@ pub fn verify_attestation(
             now_unix,
         });
     }
-    // (3) Field-witness binding (if requested by verifier).
+    // (3) Field-witness binding. Default-deny semantics (audit L5
+    //     May 2026): if the doc CARRIES a field_witness_commitment
+    //     but the verifier passes `expected_field_witness=None`,
+    //     REJECT. Previously a doc that advertised binding could be
+    //     accepted by a verifier that didn't actually check it —
+    //     cross-host replay slipped through silently. Callers that
+    //     genuinely want to accept an unbound view of a bound doc
+    //     must pass a sentinel witness AND consciously evaluate the
+    //     mismatch themselves (or just don't issue with binding).
     if let Some(local_witness) = expected_field_witness {
         let local_commitment = {
             let mut h = Hasher::new();
@@ -304,6 +312,10 @@ pub fn verify_attestation(
                 }
             }
         }
+    } else if doc.field_witness_commitment.is_some() {
+        // Doc claims a field-witness binding but verifier didn't
+        // provide a witness to check it. Default deny (audit L5).
+        return Err(ConfidentialError::AttestationFieldWitnessMismatch);
     }
     // (4) Provider-tier floor — enforced HERE, not by callers (audit
     //     finding H4 May 2026). A doc with provider_tag mapping to a

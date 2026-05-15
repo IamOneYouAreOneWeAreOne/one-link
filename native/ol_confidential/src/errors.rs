@@ -90,9 +90,18 @@ pub enum ConfidentialError {
     #[error("pqsig: {0}")]
     PqSig(String),
     /// Internal invariant violated. Should never happen at runtime;
-    /// indicates a logic bug.
+    /// indicates a logic bug. Carries a static string for the
+    /// hot-path checks where allocating an error message would be
+    /// inappropriate.
     #[error("internal: {0}")]
     Internal(&'static str),
+    /// Internal invariant violated with run-time context. Used by
+    /// the platform-specific hardware backends (e.g. `windows_tpm`)
+    /// whose underlying FFI returns dynamic error strings that we
+    /// can't statify. Audit L6 May 2026: replaces a `Box::leak`
+    /// shim that leaked one boxed-str per TPM error.
+    #[error("internal: {0}")]
+    InternalOwned(String),
 }
 
 impl From<ol_pqsig::PqSigError> for ConfidentialError {

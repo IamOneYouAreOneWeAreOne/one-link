@@ -46,7 +46,8 @@ pub mod error;
 pub mod skipped;
 
 pub use chain::{
-    derive_root_chain_key, Chain, ChainKey, MessageKey, CHAIN_KEY_LEN, MESSAGE_KEY_LEN,
+    derive_root_chain_key, Chain, ChainKey, MessageKey, CHAIN_KEY_LEN, MAX_SKIP_STEPS,
+    MESSAGE_KEY_LEN,
 };
 pub use error::RatchetError;
 pub use skipped::{SkippedKeyStore, DEFAULT_SKIPPED_CAP};

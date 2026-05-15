@@ -63,10 +63,13 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 fn internal(msg: String) -> ConfidentialError {
-    // Pin the formatted string for the `'static` slot in
-    // `ConfidentialError::Internal`. Leaks ≤ one message per error
-    // path; in practice never hits during steady-state operation.
-    ConfidentialError::Internal(Box::leak(msg.into_boxed_str()))
+    // Audit L6 May 2026: was previously
+    // `ConfidentialError::Internal(Box::leak(msg.into_boxed_str()))`,
+    // which leaked one boxed-str per error path. Hardware TPM
+    // errors are rare in steady state but can still pile up under
+    // device-state churn or repeated probe failures. Use the new
+    // `InternalOwned(String)` variant — same Display output, no leak.
+    ConfidentialError::InternalOwned(msg)
 }
 
 /// A TPM-resident ECDSA-P256 signing key, looked up by per-user key
@@ -275,29 +278,14 @@ pub fn produce_platform_quote(
     Ok(out)
 }
 
-/// Parse a `platform_quote` produced by [`produce_platform_quote`].
-/// Returns `(pub_blob, sig)`.
-///
-/// # Errors
-/// Returns `Internal` on malformed length prefixes or truncated
-/// buffers.
-pub fn parse_platform_quote(quote: &[u8]) -> ConfidentialResult<(Vec<u8>, Vec<u8>)> {
-    if quote.len() < 4 {
-        return Err(internal("platform_quote too short".into()));
-    }
-    let pub_len = u16::from_be_bytes([quote[0], quote[1]]) as usize;
-    if quote.len() < 2 + pub_len + 2 {
-        return Err(internal("platform_quote truncated at pub_blob".into()));
-    }
-    let pub_blob = quote[2..2 + pub_len].to_vec();
-    let after_pub = 2 + pub_len;
-    let sig_len = u16::from_be_bytes([quote[after_pub], quote[after_pub + 1]]) as usize;
-    if quote.len() < after_pub + 2 + sig_len {
-        return Err(internal("platform_quote truncated at sig".into()));
-    }
-    let sig = quote[after_pub + 2..after_pub + 2 + sig_len].to_vec();
-    Ok((pub_blob, sig))
-}
+/// Audit L6 May 2026: deleted duplicate `parse_platform_quote`
+/// implementation. The canonical parser lives in
+/// [`crate::platform_quote::parse_platform_quote`]; this module
+/// re-exports it for back-compat with callers that imported through
+/// `windows_tpm`. The duplicate also held a `Box::leak`-based
+/// `internal()` helper that leaked per-error allocations; that's
+/// gone too.
+pub use crate::platform_quote::parse_platform_quote;
 
 /// Produce a fully TPM-rooted [`crate::AttestationDoc`].
 ///

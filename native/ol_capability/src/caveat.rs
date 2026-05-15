@@ -175,7 +175,14 @@ impl Caveat {
         match self {
             Self::ExpiresAt(ms) => {
                 if let Some(now) = ctx.now_unix_ms {
-                    if now > *ms {
+                    // Audit L9 May 2026: tightened to `>=`. A cap with
+                    // `not_after_ms == now` was previously still
+                    // valid for the exact millisecond it expired;
+                    // inconsistent with `not_before_ms`'s strict `<`
+                    // and with caps_grants.py's `>= not_after_ms`
+                    // semantics. Symmetric strict-boundary handling
+                    // is least-surprise.
+                    if now >= *ms {
                         return Err("ExpiresAt: cap expired");
                     }
                 } else {

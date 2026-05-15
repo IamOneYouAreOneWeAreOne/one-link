@@ -9,6 +9,15 @@ pub const CHAIN_KEY_LEN: usize = 32;
 /// Length of a per-chunk message key in bytes (matches `ol_aead`).
 pub const MESSAGE_KEY_LEN: usize = 32;
 
+/// Maximum number of chain steps a single `fast_forward` /
+/// `peek_message_key` call may traverse. Audit L11 (May 2026):
+/// without a cap a malicious peer could ship `seq = u64::MAX` and
+/// force the receiver into an indefinite BLAKE3 derive loop. 65 536
+/// is well past any legitimate skip distance for a real multi-chunk
+/// transfer (chunk sizes are 64 KiB+; 65 536 steps = ~4 GiB of
+/// dropped chunks before the chain would naturally re-key anyway).
+pub const MAX_SKIP_STEPS: u64 = 65_536;
+
 /// 32-byte chain key, zeroized on drop.
 pub type ChainKey = Zeroizing<[u8; CHAIN_KEY_LEN]>;
 /// 32-byte per-chunk AEAD key, zeroized on drop.
@@ -97,12 +106,24 @@ impl Chain {
     ///
     /// # Errors
     ///
-    /// [`RatchetError::Rewind`] if `target_step < self.step`.
+    /// - [`RatchetError::Rewind`] if `target_step < self.step`.
+    /// - [`RatchetError::SkipTooLarge`] if `target_step - self.step
+    ///   > MAX_SKIP_STEPS` (audit L11 May 2026 — closes the
+    ///   `seq = u64::MAX` indefinite-derive DoS).
     pub fn fast_forward(&mut self, target_step: u64) -> Result<(), RatchetError> {
         if target_step < self.step {
             return Err(RatchetError::Rewind {
                 requested: target_step,
                 current: self.step,
+            });
+        }
+        let delta = target_step - self.step;
+        if delta > MAX_SKIP_STEPS {
+            return Err(RatchetError::SkipTooLarge {
+                from: self.step,
+                target: target_step,
+                delta,
+                max: MAX_SKIP_STEPS,
             });
         }
         while self.step < target_step {
@@ -117,12 +138,23 @@ impl Chain {
     ///
     /// # Errors
     ///
-    /// [`RatchetError::Rewind`] if `target_step < self.step`.
+    /// - [`RatchetError::Rewind`] if `target_step < self.step`.
+    /// - [`RatchetError::SkipTooLarge`] if `target_step - self.step
+    ///   > MAX_SKIP_STEPS` (audit L11 May 2026).
     pub fn peek_message_key(&self, target_step: u64) -> Result<MessageKey, RatchetError> {
         if target_step < self.step {
             return Err(RatchetError::Rewind {
                 requested: target_step,
                 current: self.step,
+            });
+        }
+        let delta = target_step - self.step;
+        if delta > MAX_SKIP_STEPS {
+            return Err(RatchetError::SkipTooLarge {
+                from: self.step,
+                target: target_step,
+                delta,
+                max: MAX_SKIP_STEPS,
             });
         }
         let mut tmp = self.chain_key.clone();
@@ -272,5 +304,41 @@ mod tests {
         // Their internal chain-key bytes MUST differ (a has advanced;
         // b is fresh).
         assert_ne!(*a.chain_key, *b.chain_key);
+    }
+
+    // ── Audit L11 May 2026 — skip-cap regression ───────────────
+
+    #[test]
+    fn fast_forward_rejects_huge_skip() {
+        // Regression test for audit L11: an attacker who can place a
+        // u64::MAX seq value on the wire previously forced the
+        // receiver into an indefinite BLAKE3 derive loop. The cap
+        // rejects skips beyond MAX_SKIP_STEPS.
+        let mut c = Chain::from_shared_secret(&fixed_secret());
+        let r = c.fast_forward(u64::MAX);
+        assert!(matches!(r, Err(RatchetError::SkipTooLarge { .. })));
+        // Chain unchanged after rejection.
+        assert_eq!(c.step(), 0);
+    }
+
+    #[test]
+    fn peek_message_key_rejects_huge_skip() {
+        let c = Chain::from_shared_secret(&fixed_secret());
+        let r = c.peek_message_key(u64::MAX);
+        assert!(matches!(r, Err(RatchetError::SkipTooLarge { .. })));
+    }
+
+    #[test]
+    fn fast_forward_at_exact_max_skip_succeeds() {
+        // The cap is INCLUSIVE: delta == MAX_SKIP_STEPS is allowed,
+        // delta == MAX_SKIP_STEPS + 1 is not. Boundary check.
+        // (Using a smaller-than-max value for test speed; the
+        // exact-boundary case would do ~65 K BLAKE3 derives.)
+        let mut c = Chain::from_shared_secret(&fixed_secret());
+        c.fast_forward(MAX_SKIP_STEPS / 64).unwrap();
+        assert_eq!(c.step(), MAX_SKIP_STEPS / 64);
+        // One more big jump that lands past the cap from THIS position.
+        let r = c.fast_forward(MAX_SKIP_STEPS / 64 + MAX_SKIP_STEPS + 1);
+        assert!(matches!(r, Err(RatchetError::SkipTooLarge { .. })));
     }
 }

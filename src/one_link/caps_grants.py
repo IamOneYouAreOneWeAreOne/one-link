@@ -280,9 +280,12 @@ def verify_grant(
             f"grant not yet valid: now_ms {now_ms} < "
             f"not_before {parsed.not_before_ms}"
         )
-    if now_ms > parsed.not_after_ms:
+    # Audit L9 May 2026: tightened to `>=` so a grant expires AT
+    # not_after_ms, not one ms past. Matches the ExpiresAt caveat
+    # semantics in ol_capability::Caveat::check.
+    if now_ms >= parsed.not_after_ms:
         raise ValueError(
-            f"grant expired: now_ms {now_ms} > "
+            f"grant expired: now_ms {now_ms} >= "
             f"not_after {parsed.not_after_ms}"
         )
     if seen_nonces is not None:

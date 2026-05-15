@@ -261,6 +261,13 @@ class BrowserPeer:
     #   attestation doc. None until attested. Pin this to detect
     #   master-key rotation across reconnects.
     attestation_challenge: Optional[bytes] = None
+    # Audit M9 May 2026: bind the in-flight challenge to the
+    # specific control DC instance it was sent on (the `id()` of the
+    # DC object at issue time). A peer reconnecting mid-handshake
+    # creates a NEW DC instance; binding to it prevents the new DC
+    # from accidentally accepting a response signed against the old
+    # DC's challenge (cross-DC confusion).
+    attestation_challenge_dc_id: Optional[int] = None
     attested_ms: Optional[int] = None
     peer_master_vk: Optional[bytes] = None
     # Wall-clock unix seconds when the accepted attestation doc
@@ -287,6 +294,10 @@ class BrowserPeer:
     # for them (instead of looping back to self).
     onion_pubkey: Optional[bytes] = None
     onion_pubkey_received_ms: Optional[int] = None
+    # Audit L7 May 2026: timestamp (unix seconds) of the last
+    # protocol-skew log we emitted for this peer. Rate-limits log
+    # spam if a peer floods bad-version frames.
+    _last_protocol_skew_log_s: int = 0
 
 
 # ── manager ──────────────────────────────────────────────────────────
@@ -444,11 +455,23 @@ class BrowserPeerManager:
             # re-attestation must match it.
         if getattr(self.daemon, "require_attested_peers", False):
             if peer.attested_ms is None:
-                cnt = getattr(self.daemon, "_gate_drop_count", 0)
-                try:
-                    self.daemon._gate_drop_count = cnt + 1
-                except Exception:
-                    pass
+                # Audit L8 May 2026: take the daemon's telemetry
+                # lock to serialize the read-modify-write across
+                # asyncio + cover background thread.
+                lock = getattr(self.daemon, "_telemetry_lock", None)
+                if lock is not None:
+                    with lock:
+                        cnt = getattr(self.daemon, "_gate_drop_count", 0)
+                        try:
+                            self.daemon._gate_drop_count = cnt + 1
+                        except Exception:
+                            pass
+                else:
+                    cnt = getattr(self.daemon, "_gate_drop_count", 0)
+                    try:
+                        self.daemon._gate_drop_count = cnt + 1
+                    except Exception:
+                        pass
                 log.info(
                     "peer-rtc: dropped %r from un-attested peer %s "
                     "(require_attested_peers=on, drops=%d)",
@@ -493,7 +516,23 @@ class BrowserPeerManager:
             return
         if not isinstance(envelope, dict):
             return
-        if envelope.get("v") != PEER_DC_PROTOCOL_VERSION:
+        wire_v = envelope.get("v")
+        if wire_v != PEER_DC_PROTOCOL_VERSION:
+            # Audit L7 May 2026: surface protocol-skew rather than
+            # silently drop. A future-version peer (v=OL-PEER-2)
+            # otherwise vanishes from the operator's view. Per-peer
+            # rate-limited log so a hostile flood of bad-version
+            # frames can't flood the log either.
+            now = int(time.time())
+            last = getattr(peer, "_last_protocol_skew_log_s", 0)
+            if now - last >= 60:
+                log.info(
+                    "peer-rtc: dropping DC frame from %s with "
+                    "unsupported protocol version %r (we speak %s); "
+                    "peer may need an upgrade or downgrade",
+                    peer.fingerprint, wire_v, PEER_DC_PROTOCOL_VERSION,
+                )
+                peer._last_protocol_skew_log_s = now
             return
         msg_t = str(envelope.get("t") or "")
         if not msg_t:
@@ -589,6 +628,12 @@ class BrowserPeerManager:
             log.info("peer-rtc: init_attestation skipped (%s)", e)
             return False
         peer.attestation_challenge = nonce
+        # Audit M9 May 2026: record which DC instance the challenge
+        # was issued on so a response on a NEW DC (e.g. after
+        # reconnect) is treated as cross-flow and rejected.
+        peer.attestation_challenge_dc_id = (
+            id(peer.control_dc) if peer.control_dc is not None else None
+        )
         with contextlib.suppress(Exception):
             self.send_dc(peer, "control", {
                 "v": PEER_DC_PROTOCOL_VERSION,
@@ -681,6 +726,21 @@ class BrowserPeerManager:
                 peer.fingerprint,
             )
             return
+        # Audit M9 May 2026: reject the response if the DC the
+        # response arrived on is NOT the same DC instance the
+        # challenge was issued on. Covers the reconnect race where
+        # an old DC's response could be accepted on a fresh DC.
+        challenge_dc_id = getattr(peer, "attestation_challenge_dc_id", None)
+        current_dc_id = id(peer.control_dc) if peer.control_dc is not None else None
+        if challenge_dc_id is not None and challenge_dc_id != current_dc_id:
+            log.info(
+                "peer-rtc: dropping attest_response from %s — challenge "
+                "was issued on a different DC instance (reconnect race)",
+                peer.fingerprint,
+            )
+            peer.attestation_challenge = None
+            peer.attestation_challenge_dc_id = None
+            return
         # The peer's SDP-layer pubkey is the identity that signed the
         # WebRTC offer envelope on this channel. The attestation doc
         # MUST commit to this pubkey.
@@ -721,6 +781,7 @@ class BrowserPeerManager:
                 prior_vk[:8].hex(),
             )
             peer.attestation_challenge = None
+            peer.attestation_challenge_dc_id = None
             with contextlib.suppress(Exception):
                 self._close_peer(peer)
             return
@@ -734,6 +795,7 @@ class BrowserPeerManager:
         peer.attestation_deadline_unix = int(doc.deadline_unix)
         # Clear the challenge so a stale response doesn't get accepted.
         peer.attestation_challenge = None
+        peer.attestation_challenge_dc_id = None
         log.info(
             "peer-rtc: peer %s attested (provider_tag=%d, vk_len=%d, "
             "deadline_unix=%d)",
@@ -841,10 +903,21 @@ class BrowserPeerManager:
                 peer.fingerprint,
             )
             return
+        # Audit L8 May 2026: lock the read-modify-write so the cover
+        # background thread's increment of _cover_emit_count and this
+        # path's increment of _cover_recv_count don't tear under
+        # concurrent access.
+        lock = getattr(self.daemon, "_telemetry_lock", None)
         try:
-            self.daemon._cover_recv_count = (
-                getattr(self.daemon, "_cover_recv_count", 0) + 1
-            )
+            if lock is not None:
+                with lock:
+                    self.daemon._cover_recv_count = (
+                        getattr(self.daemon, "_cover_recv_count", 0) + 1
+                    )
+            else:
+                self.daemon._cover_recv_count = (
+                    getattr(self.daemon, "_cover_recv_count", 0) + 1
+                )
         except Exception:
             pass
 

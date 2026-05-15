@@ -913,6 +913,16 @@ class Daemon:
         # joined in stop(). None when not running.
         self._cover_traffic = None
         self._cover_emit_count: int = 0
+        # Audit L8 May 2026 — telemetry counter lock. The cover-emit
+        # background thread + the asyncio dispatch path both mutate
+        # _cover_emit_count / _cover_recv_count / _cover_wire_sent_count
+        # / _cover_loopback_count / _gate_drop_count. Without this
+        # lock, the `x = x + 1` read-modify-write under CPython's GIL
+        # can lose increments across thread boundaries. Single lock
+        # for all telemetry — contention is negligible at sub-Hz
+        # cover-emit rates.
+        import threading as _threading_mod
+        self._telemetry_lock: _threading_mod.Lock = _threading_mod.Lock()
         # Row 10 — attestation gating policy. When True, the daemon
         # refuses app-layer DC messages from peers that haven't
         # completed the attestation handshake. Default False for
@@ -6943,6 +6953,35 @@ class Daemon:
         except Exception:
             return []
 
+    def detect_seed_file_tamper(self) -> bool:
+        """Audit L12 May 2026 — check whether the on-disk master
+        seed file has been replaced since this daemon process loaded
+        its identity. Returns True if tamper IS detected (caller
+        should log a security alert + refuse further operations or
+        force restart). Returns False if the fingerprint matches OR
+        if no seed file is recorded (a daemon without a seed has
+        nothing to compare against).
+
+        Operators wanting strong tamper-evidence should call this
+        on a periodic timer (e.g. once per minute) and/or before
+        any high-stakes capability operation. _capability_allowed
+        calls this on its hot path.
+        """
+        try:
+            from one_link import master_seed as _ms
+            from one_link.paths import data_dir as _data_dir
+        except Exception:
+            return False
+        recorded = getattr(self, "_seed_file_fingerprint_at_boot", None)
+        if recorded is None:
+            # No baseline; daemon was started without a seed file.
+            return False
+        current = _ms.seed_file_fingerprint(_data_dir())
+        if current is None:
+            # Seed file disappeared since boot — that's a tamper signal too.
+            return True
+        return current != recorded
+
     def native_diagnostics(self) -> dict:
         """Phase D operator diagnostics — current state of the native
         primitives wired into this daemon.
@@ -8073,6 +8112,26 @@ class Daemon:
         return None
 
     def _capability_allowed(self, peer_fp: str, cap: str) -> bool:
+        # Audit L12 May 2026 — refuse to honor capabilities when the
+        # on-disk master seed has been replaced since boot. A brief-
+        # FS-access attacker swapping the seed could otherwise have
+        # the daemon ride a stale in-memory identity while issuing
+        # new grants under a different pubkey. Logs once per process
+        # to avoid log spam; subsequent calls fall through to the
+        # standard deny.
+        try:
+            if self.detect_seed_file_tamper():
+                if not getattr(self, "_seed_tamper_logged", False):
+                    log.warning(
+                        "SECURITY ALERT — master seed file fingerprint "
+                        "differs from boot; refusing all capability "
+                        "operations. Restart the daemon to re-anchor "
+                        "identity OR investigate the FS-tamper origin."
+                    )
+                    self._seed_tamper_logged = True
+                return False
+        except Exception:
+            pass
         # Bundle 56: a peer with a valid signed capability grant
         # (Bundle 44) for this exact (cap) is allowed regardless of
         # the binary pinned-policy state. Useful for one-shot
@@ -12996,6 +13055,14 @@ class Daemon:
                         "only materialises during sealed_sign / "
                         "attest inside Rust provider."
                     )
+                # Audit L12 May 2026: record the on-disk seed file
+                # fingerprint at boot so detect_seed_file_tamper()
+                # can detect on-disk replacement (a brief-FS-access
+                # attacker swapping the seed). Checked from
+                # _capability_allowed on the hot path.
+                self._seed_file_fingerprint_at_boot = _ms.seed_file_fingerprint(
+                    _data_dir()
+                )
             except Exception as e:
                 self.sealed_master = None
                 log.warning(
@@ -13093,10 +13160,14 @@ class Daemon:
                                 _cover_event_loop.call_soon_threadsafe(
                                     prtc.send_dc, target_peer, "control", envelope,
                                 )
-                                self._cover_emit_count += 1
-                                self._cover_wire_sent_count = (
-                                    getattr(self, "_cover_wire_sent_count", 0) + 1
-                                )
+                                # Audit L8 May 2026: serialize all
+                                # telemetry mutations against the
+                                # asyncio handlers via _telemetry_lock.
+                                with self._telemetry_lock:
+                                    self._cover_emit_count += 1
+                                    self._cover_wire_sent_count = (
+                                        getattr(self, "_cover_wire_sent_count", 0) + 1
+                                    )
                                 return
                             except Exception:
                                 pass
@@ -13122,10 +13193,12 @@ class Daemon:
                                 "cover-traffic peel: payload missing "
                                 "cover sentinel"
                             )
-                        self._cover_emit_count += 1
-                        self._cover_loopback_count = (
-                            getattr(self, "_cover_loopback_count", 0) + 1
-                        )
+                        # Audit L8: locked counter mutation.
+                        with self._telemetry_lock:
+                            self._cover_emit_count += 1
+                            self._cover_loopback_count = (
+                                getattr(self, "_cover_loopback_count", 0) + 1
+                            )
 
                     ct = _CTD(rate_hz=0.5, emit_cover=_emit_cover_real)
                     ct.start()

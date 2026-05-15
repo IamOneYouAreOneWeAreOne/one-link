@@ -75,7 +75,26 @@ def test_distinct_context_tags_yield_distinct_children():
     assert p.verifying_key(c1) != p.verifying_key(c2)
 
 
+def _from_seed_feature_enabled() -> bool:
+    """Audit M7 May 2026: SoftwareProvider.from_seed is gated behind
+    the Rust Cargo feature `unstable-deterministic-provider`. Default
+    `maturin develop --release` builds omit it. Detect by probing."""
+    try:
+        SoftwareProvider.from_seed(bytes([0x10] * 32))
+        return True
+    except ValueError as e:
+        if "unstable-deterministic-provider" in str(e):
+            return False
+        # Other ValueError (wrong length, etc.) — feature is enabled.
+        return True
+
+
 def test_from_seed_deterministic_across_providers():
+    if not _from_seed_feature_enabled():
+        pytest.skip(
+            "SoftwareProvider.from_seed gated behind "
+            "unstable-deterministic-provider Cargo feature (M7)"
+        )
     # Two providers from the same seed can open each other's blobs.
     p1 = SoftwareProvider.from_seed(bytes([0x10] * 32))
     p2 = SoftwareProvider.from_seed(bytes([0x10] * 32))
@@ -86,8 +105,24 @@ def test_from_seed_deterministic_across_providers():
 
 
 def test_from_seed_rejects_wrong_length():
+    if not _from_seed_feature_enabled():
+        pytest.skip(
+            "SoftwareProvider.from_seed gated behind "
+            "unstable-deterministic-provider Cargo feature (M7)"
+        )
     with pytest.raises(ValueError):
         SoftwareProvider.from_seed(bytes([0x10] * 31))
+
+
+def test_from_seed_disabled_in_production_build():
+    """M7 regression: production wheel must raise on from_seed."""
+    if _from_seed_feature_enabled():
+        pytest.skip(
+            "feature `unstable-deterministic-provider` is enabled; "
+            "this test verifies the gated-off path"
+        )
+    with pytest.raises(ValueError, match="unstable-deterministic-provider"):
+        SoftwareProvider.from_seed(bytes([0x10] * 32))
 
 
 # ── Attestation issue + verify ───────────────────────────────────

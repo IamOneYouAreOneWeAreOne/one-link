@@ -328,7 +328,43 @@ class FolderEngine:
             "reconcile_disagreements": getattr(
                 self, "_native_reconcile_disagreements", 0
             ),
+            # Audit M15 May 2026: surface the ACK gate so operators
+            # can see at a glance whether the authoritative-flip
+            # precondition is satisfied (env-var ack count matches
+            # observed disagreement count).
+            "authoritative_flip_allowed": self.reconcile_authoritative_flip_allowed(),
         }
+
+    def reconcile_authoritative_flip_allowed(self) -> bool:
+        """Audit M15 May 2026 — gate that any future code wanting to
+        flip the folder-sync authoritative bit from legacy to native
+        MUST consult. Returns True ONLY when the operator has set
+        ``ONE_LINK_RECONCILE_DISAGREEMENTS_ACKED=<count>`` to a
+        value equal to the currently-observed
+        ``_native_reconcile_disagreements`` counter — i.e. the
+        operator has explicitly looked at the disagreement count
+        and accepted it.
+
+        Without this gate, the cutover criterion was operator-
+        eyeball-only; a CI pipeline or runtime auto-flip with
+        non-zero disagreements would silently corrupt folder state.
+
+        Pattern at the flip site:
+            if not foldersync.reconcile_authoritative_flip_allowed():
+                # refuse to flip; legacy stays authoritative
+                ...
+        """
+        import os
+
+        observed = getattr(self, "_native_reconcile_disagreements", 0)
+        raw = os.environ.get("ONE_LINK_RECONCILE_DISAGREEMENTS_ACKED")
+        if raw is None:
+            return False
+        try:
+            acked = int(raw.strip())
+        except ValueError:
+            return False
+        return acked == int(observed)
 
     def _native_reconcile_check(
         self,

@@ -68,6 +68,27 @@ def has_seed(data_dir: Path) -> bool:
     return _seed_path(data_dir).is_file()
 
 
+def seed_file_fingerprint(data_dir: Path) -> Optional[tuple[int, int]]:
+    """Return a stable (mtime_ns, size) tuple for the seed file, or
+    None if no seed file exists or stat fails.
+
+    Audit L12 May 2026: the daemon records this at boot and can
+    periodically re-check to detect on-disk replacement of the
+    seed file by an attacker with brief FS access. Without this
+    check, a daemon that loaded its identity at startup would
+    silently re-derive from a swapped seed on next restart with
+    no operator alarm. Operators wanting strong tamper-evidence
+    should also pair this with a sealed master VK + refuse-to-start
+    on fingerprint change (a separate hardening step).
+    """
+    p = _seed_path(data_dir)
+    try:
+        st = p.stat()
+    except (OSError, FileNotFoundError):
+        return None
+    return (int(st.st_mtime_ns), int(st.st_size))
+
+
 def load_seed(data_dir: Path) -> Optional[bytes]:
     """Read the master seed off disk + DPAPI-unwrap on Windows.
     Returns None if no seed file exists or unwrap fails."""
