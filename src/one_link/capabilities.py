@@ -67,6 +67,20 @@ FRAME_PROVENANCE_V1 = "frame_provenance_v1"
 # to the AUDIO_ONLY rung (Opus 16 kbps).
 SEMANTIC_VOICE_V1 = "semantic_voice_v1"
 
+# Living Presence Tier η — neural predictive extrapolator. Peers
+# advertising this run a trained next-frame predictor on the
+# receive path so missing audio frames are filled by a model-
+# generated continuation rather than a hold-last placeholder.
+# Tier η AUTOPILOT prerequisite per LIVING_PRESENCE_ARCHITECTURE
+# §4.7.
+PREDICTIVE_CONTINUITY_V1 = "predictive_continuity_v1"
+
+# Living Presence Tier θ — semantic scene codec. Peers advertising
+# this can negotiate scene-feature compression at ~1.5 kbps for
+# the video plane. Receiver renders the scene representation as
+# moving boxes / face stand-ins / icons per doctrine §3.6.c.
+SEMANTIC_SCENE_V1 = "semantic_scene_v1"
+
 LOCAL_CAPABILITIES = (
     CHAT,
     FILES,
@@ -88,6 +102,8 @@ LOCAL_CAPABILITIES = (
     QUIC_TRANSPORT_V1,
     FRAME_PROVENANCE_V1,
     SEMANTIC_VOICE_V1,
+    PREDICTIVE_CONTINUITY_V1,
+    SEMANTIC_SCENE_V1,
 )
 
 # v0.7.1 deny-by-default capability split. The audit doc

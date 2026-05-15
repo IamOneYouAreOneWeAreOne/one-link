@@ -1,0 +1,29 @@
+{
+  "model": {
+    "feature_dim": 38,
+    "hidden_dim": 256,
+    "n_layers": 2,
+    "dropout": 0.1,
+    "n_regimes": 5
+  },
+  "training": {
+    "corpus": "data/scene_corpus_v1",
+    "out": "models/scene_predictor_v1",
+    "epochs": 15,
+    "batch_size": 32,
+    "lr": 0.001,
+    "hidden_dim": 256,
+    "n_layers": 2,
+    "dropout": 0.1,
+    "seed": 2026,
+    "device": "cuda"
+  },
+  "feature_dim": 38,
+  "regime_names": [
+    "static",
+    "object_translate",
+    "camera_pan",
+    "object_appear_disappear",
+    "scene_cut"
+  ]
+}
