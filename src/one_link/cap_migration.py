@@ -54,10 +54,25 @@ CAP_MIGRATION_ROOT_CONTEXT = b"ol-cap-migration-root-v1"
 
 
 def derive_root_key(granter_priv_seed: bytes) -> bytes:
-    """Derive a stable per-granter root HMAC key. ``granter_priv_seed``
-    is the same 32-byte Ed25519 seed the legacy grant code uses; we
-    BLAKE3-keyed-hash it under a fixed migration context so a key
-    leak doesn't compromise either system independently."""
+    """Derive a stable per-granter root HMAC key from the granter's
+    long-term Ed25519 seed.
+
+    **Audit M14 May 2026 — DEPRECATED:** this derivation shares
+    entropy with the identity-signing path. A side-channel on the
+    macaroon HMAC root key would leak bits of the Ed25519 seed
+    (domain-separation prevents direct reuse but doesn't eliminate
+    correlated-information leaks under fault injection or carefully
+    crafted ciphertext).
+
+    **New callers should use :func:`derive_root_key_from_cap_root`**
+    which takes a separate ``cap_root_key`` (32 bytes, persisted via
+    :mod:`one_link.cap_root_key`) so the macaroon and identity
+    systems share no key material.
+
+    The legacy ``derive_root_key`` stays in place for back-compat
+    with any in-flight macaroon issued before M14 shipped; new
+    macaroons MUST go through the cap-root-key path.
+    """
     if len(granter_priv_seed) != 32:
         raise ValueError("granter_priv_seed must be 32 bytes")
     # Use BLAKE3 via the native helper since cryptography doesn't
@@ -71,6 +86,27 @@ def derive_root_key(granter_priv_seed: bytes) -> bytes:
         return hashlib.sha256(
             CAP_MIGRATION_ROOT_CONTEXT + granter_priv_seed
         ).digest()
+
+
+CAP_ROOT_KEY_CONTEXT = b"ol-cap-root-key-v1"
+
+
+def derive_root_key_from_cap_root(cap_root_key: bytes) -> bytes:
+    """Audit M14 May 2026 — derive the macaroon HMAC root key from a
+    separate 32-byte ``cap_root_key`` that's distinct from the
+    identity Ed25519 seed. Daemons mint + persist the cap_root_key
+    at first boot via :mod:`one_link.cap_root_key`; a leak of this
+    derivation reveals no information about the identity seed.
+    """
+    if len(cap_root_key) != 32:
+        raise ValueError("cap_root_key must be 32 bytes")
+    try:
+        import blake3  # type: ignore[import-not-found]
+
+        h = blake3.blake3(CAP_ROOT_KEY_CONTEXT + cap_root_key)
+        return h.digest()
+    except ImportError:
+        return hashlib.sha256(CAP_ROOT_KEY_CONTEXT + cap_root_key).digest()
 
 
 def _peer_fingerprint(subject_pub: bytes) -> bytes:
@@ -126,6 +162,69 @@ def mint_share_capability(
         raise ValueError("nonce must be 16 bytes")
 
     root_key = derive_root_key(granter_priv_seed)
+    return _build_share_capability(
+        root_key=root_key,
+        granter_pub=granter_pub,
+        subject_pub=subject_pub,
+        capabilities=capabilities,
+        not_after_ms=not_after_ms,
+        scope=scope,
+        nonce=nonce,
+    )
+
+
+def mint_share_capability_from_root(
+    *,
+    cap_root_key: bytes,
+    granter_pub: bytes,
+    subject_pub: bytes,
+    capabilities: Iterable[str],
+    not_after_ms: int,
+    scope: bytes = b"",
+    nonce: Optional[bytes] = None,
+):
+    """Audit M14 May 2026 — mint a macaroon using the daemon's
+    SEPARATE ``cap_root_key`` (32 random bytes, persisted via
+    :mod:`one_link.cap_root_key`) instead of the identity Ed25519
+    seed. Mac HMAC root key now shares no entropy with the
+    identity-signing path.
+    """
+    if len(cap_root_key) != 32:
+        raise ValueError("cap_root_key must be 32 bytes")
+    if len(granter_pub) != 32:
+        raise ValueError("granter_pub must be 32 bytes")
+    if len(subject_pub) != 32:
+        raise ValueError("subject_pub must be 32 bytes")
+    if nonce is None:
+        nonce = os.urandom(16)
+    elif len(nonce) != 16:
+        raise ValueError("nonce must be 16 bytes")
+
+    root_key = derive_root_key_from_cap_root(cap_root_key)
+    return _build_share_capability(
+        root_key=root_key,
+        granter_pub=granter_pub,
+        subject_pub=subject_pub,
+        capabilities=capabilities,
+        not_after_ms=not_after_ms,
+        scope=scope,
+        nonce=nonce,
+    )
+
+
+def _build_share_capability(
+    *,
+    root_key: bytes,
+    granter_pub: bytes,
+    subject_pub: bytes,
+    capabilities: Iterable[str],
+    not_after_ms: int,
+    scope: bytes,
+    nonce: bytes,
+):
+    """Common builder for ``mint_share_capability`` (legacy seed-
+    derived root) and ``mint_share_capability_from_root`` (audit
+    M14 cap_root_key path)."""
     cap_id = _derive_cap_id(granter_pub, nonce)
     cap = capability_native.root_capability(cap_id, root_key)
 

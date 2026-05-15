@@ -8972,14 +8972,36 @@ class Daemon:
         try:
             from one_link import cap_migration as _cap_migration
 
-            macaroon = _cap_migration.mint_share_capability(
-                granter_priv_seed=priv_seed,
-                granter_pub=self.me.public_bytes,
-                subject_pub=peer_pub,
-                capabilities=capabilities,
-                not_after_ms=now + duration_ms,
-                scope=scope if isinstance(scope, (bytes, bytearray)) else bytes(scope or b""),
-            )
+            # Audit M14 May 2026: the macaroon path consumes the
+            # daemon's separate cap_root_key (minted at first boot
+            # via cap_root_key.load_or_create_cap_root_key) so the
+            # macaroon HMAC root never shares entropy with the
+            # identity Ed25519 seed. Falls back to seed-derivation
+            # only if cap_root_key load fails (legacy daemons
+            # mid-migration).
+            cap_root = getattr(self, "_cap_root_key", None)
+            if cap_root is not None:
+                # New path: mint via cap_root_key.
+                macaroon = _cap_migration.mint_share_capability_from_root(
+                    cap_root_key=cap_root,
+                    granter_pub=self.me.public_bytes,
+                    subject_pub=peer_pub,
+                    capabilities=capabilities,
+                    not_after_ms=now + duration_ms,
+                    scope=scope if isinstance(scope, (bytes, bytearray))
+                          else bytes(scope or b""),
+                )
+            else:
+                # Legacy fallback (audit M14 mid-migration only).
+                macaroon = _cap_migration.mint_share_capability(
+                    granter_priv_seed=priv_seed,
+                    granter_pub=self.me.public_bytes,
+                    subject_pub=peer_pub,
+                    capabilities=capabilities,
+                    not_after_ms=now + duration_ms,
+                    scope=scope if isinstance(scope, (bytes, bytearray))
+                          else bytes(scope or b""),
+                )
             self._last_minted_macaroon = macaroon.encode()
         except Exception as exc:  # native module missing or transient failure
             self._last_minted_macaroon = None
@@ -13834,6 +13856,31 @@ class Daemon:
                 self._seed_file_fingerprint_at_boot = _ms.seed_file_fingerprint(
                     _data_dir()
                 )
+                # Audit M14 May 2026: load (or mint) the per-daemon
+                # cap_root_key — a separate 32-byte secret used
+                # exclusively for macaroon HMAC root derivation.
+                # Without this, the macaroon root shared entropy
+                # with the identity Ed25519 seed and a side-channel
+                # on the macaroon HMAC could leak bits of the
+                # identity seed.
+                try:
+                    from one_link import cap_root_key as _crk
+                    self._cap_root_key, _created = (
+                        _crk.load_or_create_cap_root_key(_data_dir())
+                    )
+                    if _created:
+                        log.info(
+                            "row-3/audit-M14: minted fresh cap_root_key "
+                            "(macaroon HMAC root key, separate from "
+                            "identity seed entropy)"
+                        )
+                except Exception as exc:
+                    self._cap_root_key = None
+                    log.warning(
+                        "audit-M14: failed to load/mint cap_root_key (%s); "
+                        "macaroons fall back to seed-derivation (legacy path)",
+                        exc,
+                    )
             except Exception as e:
                 self.sealed_master = None
                 log.warning(
