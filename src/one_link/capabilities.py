@@ -120,6 +120,13 @@ PROMPT_REQUIRED = (
     FUTURE_TRANSPORTS,
     SELF_MESH_MANIFEST,
     SELF_MESH_SEND,
+    # Advanced presence/media capabilities are user-facing powers.
+    # They may use model packs, predictive continuity, or semantic
+    # rendering, so they stay deny-by-default until the user grants
+    # them to a trusted peer.
+    SEMANTIC_VOICE_V1,
+    PREDICTIVE_CONTINUITY_V1,
+    SEMANTIC_SCENE_V1,
 )
 # DOUBLE_RATCHET_V1 is a transport-layer capability negotiated
 # between channels; it isn't a user-facing prompt-required cap.

@@ -214,9 +214,22 @@ class SemanticVoiceEncoder:
     RESIDUAL_K = 4            # top-K MFCC dims sent
 
     def __init__(self, ckpt_path: Path, device: str = "cpu") -> None:
+        """Construct an encoder. ``ckpt_path`` may be either:
+          - the legacy .pt PyTorch checkpoint (loads via torch)
+          - the .onnx export (loads via onnxruntime — no torch dep)
+          - the model directory (auto-prefers .onnx if present)
+        """
+        from one_link.ml.onnx_oracles import load_voice_oracle
         from one_link.ml.trained_voice_oracle import TrainedVoiceOracle
         self._lock = threading.Lock()
-        self._oracle = TrainedVoiceOracle(ckpt_path, device=device)
+        ckpt_path = Path(ckpt_path)
+        if ckpt_path.is_dir():
+            self._oracle = load_voice_oracle(ckpt_path)
+        elif ckpt_path.suffix == ".onnx":
+            self._oracle = load_voice_oracle(ckpt_path.parent)
+        else:
+            # Explicit .pt path → use torch oracle directly.
+            self._oracle = TrainedVoiceOracle(ckpt_path, device=device)
         self._mfcc_buffer: list[np.ndarray] = []
         self._frame_counter = 0
         self._mfcc_carry = np.zeros(0, dtype=np.float32)
@@ -285,13 +298,26 @@ class SemanticVoiceEncoder:
 
     def _classify_phoneme(self, mfcc_frame: np.ndarray) -> int:
         """Hand off to the predictor head — phoneme posterior is part
-        of the model's output. Returns the argmax in [0, 19)."""
-        import torch
-        x = torch.from_numpy(mfcc_frame.astype(np.float32))
-        x = x.view(1, 1, -1).to(self._oracle.device)
-        with torch.no_grad():
-            _, phone_logits, _ = self._oracle.model(x)
-        cls = int(torch.argmax(phone_logits, dim=-1).cpu().item())
+        of the model's output. Returns the argmax in [0, 19).
+
+        Works against both the torch oracle (real ``torch.Tensor``
+        outputs) and the ONNX oracle (numpy arrays wrapped in a
+        torch-like shim). We coerce defensively in both directions."""
+        x_np = mfcc_frame.astype(np.float32).reshape(1, 1, -1)
+        # Try torch path first if the oracle is torch-backed.
+        try:
+            import torch
+            if getattr(self._oracle, "device", "cpu") != "cpu" or hasattr(self._oracle, "_extrap"):
+                pass
+            x = torch.from_numpy(x_np).to(getattr(self._oracle, "device", "cpu"))
+            with torch.no_grad():
+                _, phone_logits, _ = self._oracle.model(x)
+            arr = phone_logits.cpu().numpy() if hasattr(phone_logits, "cpu") else np.asarray(phone_logits)
+        except Exception:
+            # ONNX fallback: oracle.model accepts numpy directly.
+            _, phone_logits, _ = self._oracle.model(x_np)
+            arr = phone_logits.numpy() if hasattr(phone_logits, "numpy") else np.asarray(phone_logits)
+        cls = int(np.argmax(arr, axis=-1).item())
         return max(0, min(18, cls))
 
     def _estimate_f0(self, mfcc_frame: np.ndarray, phoneme_id: int) -> float:

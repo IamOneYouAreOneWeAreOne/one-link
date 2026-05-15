@@ -161,9 +161,17 @@ class SemanticSceneEncoder:
     FEATURE_DIM = 38
 
     def __init__(self, ckpt_path: Path, device: str = "cpu") -> None:
+        from one_link.ml.onnx_oracles import load_scene_oracle
         from one_link.ml.trained_scene_oracle import TrainedSceneOracle
         self._lock = threading.Lock()
-        self._oracle = TrainedSceneOracle(ckpt_path, device=device)
+        ckpt_path = Path(ckpt_path)
+        if ckpt_path.is_dir():
+            self._oracle = load_scene_oracle(ckpt_path)
+        elif ckpt_path.suffix == ".onnx":
+            self._oracle = load_scene_oracle(ckpt_path.parent)
+        else:
+            self._oracle = TrainedSceneOracle(ckpt_path, device=device)
+        self._is_torch_backed = type(self._oracle).__name__ == "TrainedSceneOracle"
         self._prev_features: Optional[np.ndarray] = None
 
     def reset(self) -> None:
@@ -171,11 +179,35 @@ class SemanticSceneEncoder:
             self._oracle._hidden = None
             self._prev_features = None
 
+    def _call_oracle(self, x_np: np.ndarray):
+        """Invoke the predictor against either backend with the right
+        input shape. Returns (pred, regime, hn) as numpy arrays."""
+        if self._is_torch_backed:
+            import torch
+            x = torch.from_numpy(x_np.astype(np.float32))
+            with torch.no_grad():
+                pred, regime, hn = self._oracle.model(
+                    x, h0=self._oracle._hidden,
+                )
+                self._oracle._hidden = hn.detach()
+            return (
+                pred.cpu().numpy(),
+                regime.cpu().numpy(),
+                hn.detach(),
+            )
+        # ONNX backend
+        pred, regime, hn = self._oracle.model(
+            x_np, h0=self._oracle._hidden,
+        )
+        self._oracle._hidden = hn.numpy() if hasattr(hn, "numpy") else hn
+        return (
+            pred.numpy() if hasattr(pred, "numpy") else pred,
+            regime.numpy() if hasattr(regime, "numpy") else regime,
+            self._oracle._hidden,
+        )
+
     def encode_features(self, features: np.ndarray) -> list[SceneFrame]:
-        """Encode an (n_frames, 38) scene feature array. The caller's
-        feature extraction is upstream (object detector / face
-        tracker)."""
-        import torch
+        """Encode an (n_frames, 38) scene feature array."""
         with self._lock:
             features = features.astype(np.float32)
             if features.ndim == 1:
@@ -184,21 +216,15 @@ class SemanticSceneEncoder:
             frames: list[SceneFrame] = []
             for t in range(features.shape[0]):
                 actual = features[t]
-                # Run predictor to get expected next frame.
-                x = torch.from_numpy(actual.astype(np.float32))
-                x = x.view(1, 1, -1).to(self._oracle.device)
-                with torch.no_grad():
-                    scene_pred, regime_logits, h = self._oracle.model(
-                        x, h0=self._oracle._hidden,
-                    )
-                    self._oracle._hidden = h.detach()
+                x_np = actual.astype(np.float32).reshape(1, 1, -1)
+                pred_np, regime_np, _ = self._call_oracle(x_np)
                 if self._prev_features is None:
                     # First frame — no prior prediction; send everything
                     # as residual against zero.
                     predicted = np.zeros_like(actual)
                 else:
-                    predicted = scene_pred.cpu().numpy()[0, 0]
-                regime_id = int(torch.argmax(regime_logits, dim=-1).cpu().item())
+                    predicted = pred_np[0, 0]
+                regime_id = int(np.argmax(regime_np, axis=-1).item())
                 indices, values = _top_k_scene_residual(
                     actual, predicted, k=self.RESIDUAL_K,
                 )
@@ -226,9 +252,17 @@ class SemanticSceneDecoder:
     FEATURE_DIM = 38
 
     def __init__(self, ckpt_path: Path, device: str = "cpu") -> None:
+        from one_link.ml.onnx_oracles import load_scene_oracle
         from one_link.ml.trained_scene_oracle import TrainedSceneOracle
         self._lock = threading.Lock()
-        self._oracle = TrainedSceneOracle(ckpt_path, device=device)
+        ckpt_path = Path(ckpt_path)
+        if ckpt_path.is_dir():
+            self._oracle = load_scene_oracle(ckpt_path)
+        elif ckpt_path.suffix == ".onnx":
+            self._oracle = load_scene_oracle(ckpt_path.parent)
+        else:
+            self._oracle = TrainedSceneOracle(ckpt_path, device=device)
+        self._is_torch_backed = type(self._oracle).__name__ == "TrainedSceneOracle"
         self._reconstructed: Optional[np.ndarray] = None
 
     def reset(self) -> None:
@@ -236,10 +270,24 @@ class SemanticSceneDecoder:
             self._oracle._hidden = None
             self._reconstructed = None
 
+    def _call_oracle(self, x_np: np.ndarray):
+        """Run the predictor against either backend; return pred_np."""
+        if self._is_torch_backed:
+            import torch
+            x = torch.from_numpy(x_np.astype(np.float32))
+            with torch.no_grad():
+                pred, _, hn = self._oracle.model(
+                    x, h0=self._oracle._hidden,
+                )
+                self._oracle._hidden = hn.detach()
+            return pred.cpu().numpy()
+        pred, _, hn = self._oracle.model(x_np, h0=self._oracle._hidden)
+        self._oracle._hidden = hn.numpy() if hasattr(hn, "numpy") else hn
+        return pred.numpy() if hasattr(pred, "numpy") else pred
+
     def decode_frames(self, frames: list[SceneFrame]) -> tuple[np.ndarray, list[int]]:
         """Decode wire frames into (features, regime_ids). features is
         (T, 38) float32."""
-        import torch
         with self._lock:
             out_features = np.zeros((len(frames), self.FEATURE_DIM), dtype=np.float32)
             regime_ids: list[int] = []
@@ -247,16 +295,8 @@ class SemanticSceneDecoder:
                 if self._reconstructed is None:
                     predicted = np.zeros(self.FEATURE_DIM, dtype=np.float32)
                 else:
-                    x = torch.from_numpy(
-                        self._reconstructed.astype(np.float32),
-                    )
-                    x = x.view(1, 1, -1).to(self._oracle.device)
-                    with torch.no_grad():
-                        scene_pred, _, h = self._oracle.model(
-                            x, h0=self._oracle._hidden,
-                        )
-                        self._oracle._hidden = h.detach()
-                    predicted = scene_pred.cpu().numpy()[0, 0]
+                    x_np = self._reconstructed.astype(np.float32).reshape(1, 1, -1)
+                    predicted = self._call_oracle(x_np)[0, 0]
                 # Apply residual to the prediction.
                 reconstructed = predicted.copy()
                 for idx, val_q in zip(f.residual_indices, f.residual_values_q):

@@ -14523,6 +14523,14 @@ class Daemon:
 
             self.ui_server = UIServer(self)
             ui_port = await self.ui_server.start()
+            # Write the bound port to data_dir/ui_port.txt so the CLI's
+            # auto-open-browser hook can target the right port even when
+            # the daemon is on a dynamic / fallback port.
+            try:
+                from one_link.paths import data_dir as _dd
+                (_dd() / "ui_port.txt").write_text(str(ui_port), encoding="utf-8")
+            except Exception:
+                pass
         except Exception as e:
             log.warning("UI server failed to start: %s", e)
             self.ui_server = None

@@ -77,12 +77,20 @@ def cli() -> None:
 @click.option("-v", "--verbose", is_flag=True)
 @click.option("--tray/--no-tray", default=True,
               help="Run a system tray icon alongside the daemon (default: on).")
-def daemon(verbose: bool, tray: bool) -> None:
+@click.option("--open/--no-open", "open_browser", default=False,
+              help="Auto-open the web UI in the default browser after "
+                   "the local server is ready (default: off). Set ONE_LINK_AUTO_OPEN=1 to enable.")
+def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
     """Run the One Link daemon (leave this in a terminal/service)."""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Auto-open is on either via --open OR ONE_LINK_AUTO_OPEN=1 in env
+    # (PyInstaller-built GUI binary sets the env var so end users get
+    # the browser the moment the daemon binds the local port).
+    if not open_browser and os.environ.get("ONE_LINK_AUTO_OPEN") == "1":
+        open_browser = True
     # v0.10.5/v0.12.2: optional tray icon. Start it off the critical daemon
     # boot path so slow Windows/Pillow/pystray initialization cannot delay
     # discovery, the control socket, or the local web UI coming online.
@@ -116,6 +124,42 @@ def daemon(verbose: bool, tray: bool) -> None:
             daemon=True,
             name="one-link-tray-loader",
         ).start()
+
+    if open_browser:
+        # Open the UI ~2.5 s after daemon boot starts. Long enough for
+        # the local HTTP server to bind, short enough that the user
+        # doesn't wait. The UI itself handles "daemon not ready yet"
+        # with a small splash that auto-retries.
+        def _open_when_ready() -> None:
+            import time as _t
+            import webbrowser as _wb
+            from one_link.paths import data_dir as _data_dir
+            _t.sleep(2.5)
+            # Read the local port from the daemon's pidfile-style URL
+            # marker if it exists; otherwise default to 8765 (the
+            # current bind port used by the UI server).
+            port_file = _data_dir() / "ui_port.txt"
+            url = "http://127.0.0.1:8765/"
+            try:
+                if port_file.exists():
+                    port = int(port_file.read_text(encoding="utf-8").strip())
+                    url = f"http://127.0.0.1:{port}/"
+            except Exception:
+                pass
+            try:
+                _wb.open(url)
+                logging.getLogger("one_link.cli").info("opened browser at %s", url)
+            except Exception as e:
+                logging.getLogger("one_link.cli").info(
+                    "could not auto-open browser: %s; visit the URL manually", e,
+                )
+
+        threading.Thread(
+            target=_open_when_ready,
+            daemon=True,
+            name="one-link-open-browser",
+        ).start()
+
     try:
         asyncio.run(daemon_mod.run())
     except RuntimeError as e:

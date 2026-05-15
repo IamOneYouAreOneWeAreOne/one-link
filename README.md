@@ -1,58 +1,66 @@
-# One_link
+# One Link
 
-Peer-to-peer LAN chat + file sync. No accounts, no servers, no cloud.
-Your computers find each other on your network and talk directly,
+**Peer-to-peer chat, file sync, and live voice + video.** No accounts.
+No servers. No cloud. Your devices find each other and talk directly,
 end-to-end encrypted, mutually authenticated.
 
 Built on the Coherence Language ecosystem (CRDT runtime, identity primitives,
-effect tracking) with Python as the host harness while LLVM/WASM backends mature.
+effect tracking) with a Python host harness and a Rust native fast path.
 
 ---
 
-## Status
+## Download
 
-**v0.2.15** — black desktop/app icon with a fresh Windows shortcut icon path, automatic same-computer ghost hiding, no manual cleanup UI, obvious file sending from the Files panel, clearer people-facing labels, activity/folder guidance, and persistent transfer tracking.
+Pick the artifact for your platform from the
+[latest release](https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest).
 
-- Native-feeling browser app: dark theme, peer sidebar with online dots,
-  message bubbles, drag-drop file send, live updates over WebSocket
-- 235 passing tests across identity, wire, channel, discovery, paths, CLI,
-  integration, raw-protocol attacks, resilience, tail subscription,
-  chat REPL, and the new HTTP/WS server
-- Full path-traversal defense at both the wire-protocol and HTTP layers
-- LAN mDNS discovery, X25519 + ChaCha20-Poly1305 channel, Ed25519 identity
+| Platform | File | What you do |
+|---|---|---|
+| Windows | `one-link-windows.exe` | Double-click. The first run may need "More info → Run anyway" until code-signing lands. |
+| macOS | `one-link-macos` | Double-click. The first run may need a right-click → Open to bypass Gatekeeper. |
+| Linux | `one-link-linux-x86_64` | `chmod +x one-link-linux-x86_64 && ./one-link-linux-x86_64` |
+
+The binary opens your browser to a local URL. That's the whole install.
+No Python, no Rust, no `pip`. Roughly 120-150 MB after install.
 
 ---
 
-## Install
+## What it does
 
-### Windows (single binary)
+- **Chat.** Direct messages, group threads. Edit, react, delete.
+- **Files & folders.** Drag-drop send. Synced folders that update both ways.
+- **Voice & video calls.** Living Presence: a call that survives bad
+  networks — when the WiFi drops, it becomes a voice note and resumes
+  when you reconnect. Optional Tier ζ semantic codec compresses voice
+  to ~640 bps (25× smaller than Opus) using a trained predictor that
+  ships in the binary.
+- **Identity that's yours.** One private key on your device. No login.
+  Pair with people by QR or a five-word safety string.
+- **Cryptographic provenance** on every frame and file — you can see
+  exactly what came from whom, without surfacing jargon.
 
-Download `one-link.exe` from the [latest release](https://github.com/IamOneYouAreOneWeAreOne/one-link/releases) and run:
+---
 
-```cmd
-one-link.exe app
-```
+## Run from source
 
-The first time you launch, Windows Defender / SmartScreen may flag the
-unsigned exe — click "More info → Run anyway." (EV code-signing is
-on the v0.2 roadmap.)
-
-### Windows / macOS / Linux (from source)
+For developers, or to run the daemon as a service:
 
 ```bash
 git clone https://github.com/IamOneYouAreOneWeAreOne/one-link
 cd one-link
 pip install -e .
-one-link app
+one-link daemon --open
 ```
 
-On Windows, you can also drop a Desktop shortcut:
+`--open` auto-launches your browser to the local UI when the daemon's
+ready. Drop `--open` if you're running on a server. The UI is at
+`http://127.0.0.1:8765` by default.
+
+On Windows you can drop a Desktop shortcut:
 
 ```powershell
 PowerShell -ExecutionPolicy Bypass -File scripts\install_desktop_shortcut.ps1
 ```
-
-Now there's a `One_link` icon on your Desktop. Double-click → app opens.
 
 ---
 

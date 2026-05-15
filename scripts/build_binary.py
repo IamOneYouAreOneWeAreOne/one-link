@@ -8,8 +8,18 @@ Requires PyInstaller in the active environment:
 Usage:
 
     python scripts/build_binary.py
+    python scripts/build_binary.py --gui          # windowed (no console)
+    python scripts/build_binary.py --no-ml        # skip ONNX/scipy
+                                                  # for a tiny binary
 
 Output goes to dist/one-link[.exe] at the repo root.
+
+ML model bundling:
+
+This script auto-detects ``assets/models/*/checkpoint.onnx`` files and
+bundles them into the exe. Combined with onnxruntime (autocollected
+when installed), the bundled binary runs the Tier ζ/η/θ semantic
+codecs without a separate ``pip install torch`` (~200 MB savings).
 
 Native (Rust) module bundling:
 
@@ -34,6 +44,7 @@ OS to GitHub Releases (Phase 1 of the production-install plan).
 
 from __future__ import annotations
 
+import argparse
 import platform
 import shutil
 import subprocess
@@ -42,6 +53,18 @@ from pathlib import Path
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--gui", action="store_true",
+        help="Build a windowed binary (no console). For end-user installs.",
+    )
+    parser.add_argument(
+        "--no-ml", action="store_true",
+        help="Skip bundling ONNX models + onnxruntime. Produces a much "
+             "smaller binary; Tier ζ/η/θ codecs won't work in the result.",
+    )
+    args = parser.parse_args()
+
     repo = Path(__file__).resolve().parent.parent
     entry = repo / "src" / "one_link" / "__main__.py"
 
@@ -92,6 +115,36 @@ def main() -> int:
     if native_dir.is_dir() and any(p.is_file() for p in native_dir.rglob("*")):
         add_native = ["--add-binary", f"{native_dir}{sep}one_link/native"]
 
+    # Tier ζ/η/θ ML models — bundle every ONNX checkpoint + its
+    # config. Torch .pt files are skipped to keep the binary lean;
+    # the ONNX oracle factory falls back to torch only when ONNX is
+    # missing, which won't happen in the bundled distribution.
+    add_models: list[str] = []
+    models_dir = repo / "assets" / "models"
+    if not args.no_ml and models_dir.is_dir():
+        for ckpt in models_dir.rglob("checkpoint.onnx"):
+            rel = ckpt.parent.relative_to(repo).as_posix()
+            add_models.extend([
+                "--add-data", f"{ckpt}{sep}{rel}",
+            ])
+        for cfg in models_dir.rglob("config.json"):
+            rel = cfg.parent.relative_to(repo).as_posix()
+            add_models.extend([
+                "--add-data", f"{cfg}{sep}{rel}",
+            ])
+        if add_models:
+            print(f"[build] bundling {len(add_models) // 2} model file(s) from {models_dir}")
+
+    onnx_collect: list[str] = []
+    if not args.no_ml:
+        try:
+            import onnxruntime  # noqa: F401
+            onnx_collect = ["--collect-all", "onnxruntime"]
+            print("[build] onnxruntime detected — bundling for ONNX codecs")
+        except ImportError:
+            print("[build] onnxruntime not installed — ML codecs will not "
+                  "work in the bundled binary. pip install onnxruntime first.")
+
     icon_arg: list[str] = []
     if platform.system() == "Windows":
         ico = web_dir / "assets" / "one-glyph.ico"
@@ -121,6 +174,9 @@ def main() -> int:
             "https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest`"
         )
 
+    # GUI mode = no console window. Use --windowed on Mac/Win, no-op on Linux.
+    console_flag = "--windowed" if args.gui and platform.system() != "Linux" else "--console"
+
     cmd = [
         sys.executable,
         "-m",
@@ -128,7 +184,7 @@ def main() -> int:
         "--name",
         name,
         "--onefile",
-        "--console",
+        console_flag,
         "--clean",
         "--noconfirm",
         # Hidden imports zeroconf/cryptography/blake3 sometimes need:
@@ -138,10 +194,12 @@ def main() -> int:
         "cryptography",
         "--collect-submodules",
         "aiohttp",
+        *onnx_collect,
         *native_collect,
         # Bundle the web UI (HTML/CSS/JS/assets) into the exe:
         "--add-data",
         add_data_web,
+        *add_models,
         *add_native,
         *icon_arg,
         # Entry point:

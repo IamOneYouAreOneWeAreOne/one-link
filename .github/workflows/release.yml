@@ -187,6 +187,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install -e .
+          # ML stack: onnxruntime (~20 MB) + numpy + scipy for the
+          # Tier ζ/η/θ semantic codecs. torch is INSTALLED here only
+          # to export the .onnx weights from the .pt checkpoints
+          # below; it is NOT bundled into the binary.
+          pip install onnxruntime onnx onnxscript torch --index-url https://download.pytorch.org/whl/cpu
 
       # Pull the native wheel built earlier in the same workflow
       # and install it so PyInstaller's --collect-all picks up the
@@ -200,6 +205,16 @@ jobs:
         shell: bash
         run: |
           pip install --force-reinstall --no-deps native-wheel/*.whl
+
+      # Export .pt → .onnx so PyInstaller bundles the small ONNX
+      # checkpoints rather than the larger .pt ones. The bundled
+      # binary loads via onnxruntime; torch never ships.
+      - name: export models to ONNX
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python scripts/export_ml_to_onnx.py
 
       - name: build standalone binary
         shell: bash
