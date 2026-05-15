@@ -16182,6 +16182,7 @@
   }
 
   function stopAllMedia() {
+    stopAttestStream();
     if (media.localStream) {
       media.localStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
       media.localStream = null;
@@ -16209,6 +16210,90 @@
     media.muted = false;
     media.cameraOff = false;
     syncMuteCameraButtons();
+  }
+
+  // Tier β — Reality Engine browser bridge.
+  //
+  // Every ATTEST_WINDOW_MS (default 1000) the browser hashes the
+  // captured audio since the last attestation and POSTs the SHA-256
+  // to the daemon as ``action: attest_frame``. The daemon signs the
+  // hash with the device's Ed25519 identity key and ships a
+  // CALL_FRAME_ATTEST to the peer. The peer's UI sees a fresh
+  // Reality dot state every second.
+  const ATTEST_WINDOW_MS = 1000;
+  const attest = {
+    recorder: null,         // MediaRecorder for outbound audio
+    pendingChunks: [],      // accumulated Blob chunks for current window
+    windowStartMs: 0,
+    timer: null,
+  };
+
+  async function sha256HexFromBlobs(blobs) {
+    // Concatenate the array of Blobs into one ArrayBuffer and SHA-256 it.
+    const merged = new Blob(blobs);
+    const buf = await merged.arrayBuffer();
+    const digest = await crypto.subtle.digest("SHA-256", buf);
+    const bytes = new Uint8Array(digest);
+    let hex = "";
+    for (let i = 0; i < bytes.length; i++) {
+      hex += bytes[i].toString(16).padStart(2, "0");
+    }
+    return hex;
+  }
+
+  async function closeAttestWindow() {
+    if (!callUI.activeCallId) return;
+    if (!attest.pendingChunks.length) return;
+    const chunks = attest.pendingChunks;
+    attest.pendingChunks = [];
+    try {
+      const hex = await sha256HexFromBlobs(chunks);
+      const tsUs = Date.now() * 1000;
+      await callApiPost({
+        action: "attest_frame",
+        call_id: callUI.activeCallId,
+        segment_hash_hex: hex,
+        timestamp_us: tsUs,
+        path_class: "lan",
+        recording_state: "none",
+      });
+    } catch (_) {
+      // Failure is non-fatal — the call continues, dot just stays grey.
+    }
+  }
+
+  function startAttestStream(stream) {
+    // MediaRecorder is the most browser-friendly way to get a stream
+    // of opaque opus chunks we can hash. It uses ondataavailable
+    // to emit Blobs at the timeslice cadence we pass.
+    if (!window.MediaRecorder || !stream) return;
+    try {
+      attest.recorder = new MediaRecorder(stream, {
+        mimeType: "audio/webm; codecs=opus",
+      });
+    } catch (_) {
+      // Browser doesn't support that mimeType — fall back to defaults.
+      try { attest.recorder = new MediaRecorder(stream); }
+      catch (_) { return; }
+    }
+    attest.recorder.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size > 0) attest.pendingChunks.push(ev.data);
+    };
+    attest.recorder.start(200);  // emit a chunk every 200ms
+    attest.windowStartMs = Date.now();
+    attest.timer = setInterval(closeAttestWindow, ATTEST_WINDOW_MS);
+  }
+
+  function stopAttestStream() {
+    if (attest.recorder) {
+      try { attest.recorder.stop(); } catch (_) {}
+      attest.recorder = null;
+    }
+    if (attest.timer) {
+      clearInterval(attest.timer);
+      attest.timer = null;
+    }
+    attest.pendingChunks = [];
   }
 
   function setupRtcPeerConnection() {
@@ -16355,6 +16440,8 @@
       stream.getTracks().forEach((t) => {
         try { media.pc.addTrack(t, stream); } catch (_) {}
       });
+      // Tier β — start per-window frame attestation.
+      startAttestStream(stream);
     }
     // Originator creates the SDP offer + sends it now. The peer
     // will respond with an SDP answer once they accept.
@@ -16437,6 +16524,8 @@
         stream.getTracks().forEach((t) => {
           try { media.pc.addTrack(t, stream); } catch (_) {}
         });
+        // Tier β — start per-window frame attestation.
+        startAttestStream(stream);
       }
       // If the originator's SDP offer arrived before we accepted,
       // it's been parked in pendingRemoteOffer. Apply it now and
@@ -16600,6 +16689,20 @@
         words.textContent = m.sas_words;
       }
       if (pane) pane.style.display = "block";
+      return true;
+    }
+    if (tail === "frame_attestation") {
+      // Tier β — Reality dot live update.
+      // m.verified: bool. m.kind: "Real" | "Repaired" | etc. (UI words).
+      if (typeof window.updateRealityDot === "function") {
+        window.updateRealityDot({
+          callId,
+          verified: m.verified,
+          kind: m.kind,
+          path: m.path,
+          recording: m.recording,
+        });
+      }
       return true;
     }
     return false;

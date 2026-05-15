@@ -2426,8 +2426,14 @@ class UIServer:
         action_name = (body.get("action") or "").lower()
 
         # Media-layer actions — bypass CallManager.
-        if action_name in {"send_sdp_offer", "send_sdp_answer", "send_ice_candidate"}:
+        if action_name in {
+            "send_sdp_offer", "send_sdp_answer", "send_ice_candidate",
+        }:
             return await self._handle_media_layer_action(action_name, body)
+
+        # Tier β — per-window provenance attestation from the browser.
+        if action_name == "attest_frame":
+            return await self._handle_attest_frame_action(body)
 
         api = self._call_api()
         result = api.handle_json(body)
@@ -2552,6 +2558,111 @@ class UIServer:
             await self.daemon.send_to(peer, [wire_msg])
         except Exception as exc:
             log.warning("send_ice failed: %s", exc)
+            return web.json_response(
+                {"ok": False, "user_message": "Couldn't reach that contact."},
+            )
+        return web.json_response({"ok": True, "call_id": call_id})
+
+    async def _handle_attest_frame_action(self, body: dict) -> web.Response:
+        """Tier β — accept a browser-computed SHA-256 window hash,
+        wrap it in a signed FrameProvenance, and ship to the peer
+        as CALL_FRAME_ATTEST.
+
+        Body shape:
+          {"action": "attest_frame", "call_id": ...,
+           "segment_hash_hex": "<64-hex>",  # SHA-256 of audio chunk
+           "timestamp_us": <int>,
+           "path_class": "lan"|"direct"|"relay"|"onion"|"local",
+           "recording_state": "none"|"local"|"remote"|"mutual"}
+        """
+        from one_link.frame_provenance import PathClass, RecordingState
+        from one_link.live_frame_provenance import (
+            LIVE_SCHEMA_V2,
+            sign_browser_window,
+        )
+        from one_link.wire import make_msg
+
+        call_id = body.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return web.json_response(
+                {"ok": False, "user_message": "Call is no longer active."},
+            )
+        mgr = self.daemon._call_registry.get(call_id)
+        if mgr is None:
+            return web.json_response(
+                {"ok": False, "user_message": "This call is no longer active."},
+            )
+
+        seg_hex = body.get("segment_hash_hex")
+        if not isinstance(seg_hex, str) or len(seg_hex) != 64:
+            return web.json_response(
+                {"ok": False, "user_message": "Couldn't attest that audio."},
+            )
+        try:
+            seg_bytes = bytes.fromhex(seg_hex)
+        except ValueError:
+            return web.json_response(
+                {"ok": False, "user_message": "Couldn't attest that audio."},
+            )
+        try:
+            ts_us = int(body.get("timestamp_us", 0))
+        except (TypeError, ValueError):
+            return web.json_response(
+                {"ok": False, "user_message": "Couldn't attest that audio."},
+            )
+
+        path_class_map = {
+            "local": PathClass.LOCAL, "lan": PathClass.LAN,
+            "direct": PathClass.DIRECT, "relay": PathClass.RELAY,
+            "onion": PathClass.ONION, "mesh": PathClass.MESH,
+        }
+        rec_map = {
+            "none": RecordingState.NOT_RECORDING,
+            "local": RecordingState.RECORDING_LOCAL,
+            "remote": RecordingState.RECORDING_REMOTE,
+            "mutual": RecordingState.RECORDING_MUTUAL,
+        }
+        path_class = path_class_map.get(
+            (body.get("path_class") or "lan").lower(), PathClass.LAN,
+        )
+        recording_state = rec_map.get(
+            (body.get("recording_state") or "none").lower(),
+            RecordingState.NOT_RECORDING,
+        )
+        device_id = self.daemon.me.fingerprint[:8]
+        try:
+            signed = sign_browser_window(
+                signing_key=self.daemon.me.private,
+                device_id=device_id,
+                path_class=path_class,
+                recording_state=recording_state,
+                segment_hash=seg_bytes,
+                timestamp_us=ts_us,
+            )
+        except Exception as exc:
+            log.warning("attest_frame sign failed: %s", exc)
+            return web.json_response(
+                {"ok": False, "user_message": "Couldn't attest that audio."},
+            )
+
+        peer_master_vk_hex = mgr.state.peer_master_vk_hex
+        peer = self.daemon._resolve_peer_for_outbound(peer_master_vk_hex)
+        if peer is None:
+            return web.json_response(
+                {"ok": False, "user_message": "Couldn't reach that contact."},
+            )
+        # Wire-encode the signed attestation.
+        from one_link.frame_provenance import to_wire_dict
+        wire_msg = make_msg(
+            "CALL_FRAME_ATTEST",
+            self.daemon.me.short_id,
+            call_id=call_id,
+            attestation=to_wire_dict(signed),
+        )
+        try:
+            await self.daemon.send_to(peer, [wire_msg])
+        except Exception as exc:
+            log.warning("attest_frame send failed: %s", exc)
             return web.json_response(
                 {"ok": False, "user_message": "Couldn't reach that contact."},
             )

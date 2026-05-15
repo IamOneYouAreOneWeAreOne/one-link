@@ -564,6 +564,7 @@ _LIVING_PRESENCE_WIRE_TYPES = frozenset({
     "CALL_ICE",
     "CALL_SDP_OFFER",
     "CALL_SDP_ANSWER",
+    "CALL_FRAME_ATTEST",
     "RECORDING_REQUEST",
     "RECORDING_GRANT",
     "RECORDING_DECLINE",
@@ -3931,6 +3932,54 @@ class Daemon:
 
     # ─── Living Presence wire dispatch helpers ─────────────────────────
 
+    def _handle_call_frame_attest(
+        self, *, msg: dict, peer_fp: str, channel, call_id: str,
+    ) -> None:
+        """Tier β — inbound rolling-window FrameProvenance.
+
+        Verifies the sender's signature, then broadcasts a
+        ``frame_provenance`` tail event so the UI can update the
+        Reality dot for the active call. Hash-matching against the
+        locally-aggregated audio stream happens in the browser (it's
+        the only side that sees the raw audio); the daemon just
+        forwards the signed attestation + verification verdict.
+        """
+        try:
+            from one_link.frame_provenance import from_wire_dict, to_ui_dict
+            from one_link.live_frame_provenance import _verify_live_signature
+        except Exception:
+            return
+        raw = msg.get("attestation")
+        if not isinstance(raw, dict):
+            return
+        try:
+            attestation = from_wire_dict(raw)
+        except Exception as exc:
+            log.warning(
+                "CALL_FRAME_ATTEST %s: malformed: %s", call_id[:8], exc,
+            )
+            return
+        try:
+            sender_pub_bytes = channel.peer_ed_pub
+        except Exception:
+            return
+        verified = _verify_live_signature(attestation, sender_pub_bytes)
+        try:
+            ui_dict = to_ui_dict(attestation, verified=verified)
+        except Exception:
+            return
+        try:
+            self._broadcast_tail({
+                "type": "call_event",
+                "tail_kind": "frame_attestation",
+                "call_id": call_id,
+                "peer_master_vk_hex": peer_fp,
+                "verified": verified,
+                **ui_dict,
+            })
+        except Exception:
+            pass
+
     def _handle_file_provenance(self, *, msg: dict, channel, peer_fp: str) -> None:
         """Dispatch hook for FILE_PROVENANCE wire messages.
 
@@ -4187,6 +4236,12 @@ class Daemon:
                 peer_master_vk_hex=peer_fp,
                 kind="sdp_answer",
                 sdp_payload=sdp_answer,
+            )
+            return
+
+        if t == "CALL_FRAME_ATTEST":
+            self._handle_call_frame_attest(
+                msg=msg, peer_fp=peer_fp, channel=channel, call_id=call_id,
             )
             return
 
