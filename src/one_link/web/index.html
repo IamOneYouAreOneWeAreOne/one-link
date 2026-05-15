@@ -16705,6 +16705,67 @@
       }
       return true;
     }
+    // ── Tier δ — Immune System actions ───────────────────────────
+    if (tail === "immune_lower_fidelity") {
+      // Drop the outbound video bitrate. RTCRtpSender.setParameters
+      // takes a few hundred ms to negotiate, but the codec ramp is
+      // smooth — no visible glitch.
+      const targetKbps = m.target_video_bitrate_kbps || 200;
+      if (media.pc) {
+        media.pc.getSenders().forEach((sender) => {
+          if (!sender.track || sender.track.kind !== "video") return;
+          try {
+            const params = sender.getParameters();
+            if (!params.encodings) params.encodings = [{}];
+            params.encodings[0].maxBitrate = targetKbps * 1000;
+            sender.setParameters(params);
+          } catch (_) { /* older browser */ }
+        });
+      }
+      return true;
+    }
+    if (tail === "immune_voice_only") {
+      // Disable the video track entirely. Track stays connected
+      // (DTLS-SRTP doesn't churn) but emits black frames.
+      if (media.localStream) {
+        media.localStream.getVideoTracks().forEach((t) => {
+          t.enabled = false;
+        });
+      }
+      if (typeof toast === "function" && m.user_message) {
+        toast(m.user_message, "info", 5000);
+      }
+      return true;
+    }
+    if (tail === "immune_convert_to_async") {
+      // The call is converting to a voice-note. Browser stops sending
+      // RTC packets + starts capsule MediaRecorder; daemon's lifecycle
+      // has already advanced to ASYNC_CAPTURE.
+      if (typeof toast === "function" && m.user_message) {
+        toast(m.user_message, "info", 8000);
+      }
+      // Stop ICE / RTC sends — voice-note ride only happens via
+      // the daemon's CALL_CAPSULE_CHUNK / capsule_transport path,
+      // which the attest stream Blobs already feed.
+      // We keep the MediaRecorder running so capsule_transport
+      // can pick up the chunks.
+      return true;
+    }
+    if (tail === "immune_prewarm_route") {
+      // Tier ε — no UI yet; the Route Brain owns this. The hook is
+      // here so the next tier doesn't need an additional dispatch.
+      return true;
+    }
+    if (tail === "immune_suggest_handoff") {
+      if (typeof toast === "function" && m.user_message) {
+        toast(m.user_message, "info", 8000);
+      }
+      return true;
+    }
+    if (tail === "immune_switch_route" || tail === "immune_rekey") {
+      // Quiet acks — the underlying switch happens daemon-side.
+      return true;
+    }
     return false;
   };
 })();
