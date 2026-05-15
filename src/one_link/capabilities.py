@@ -60,6 +60,13 @@ QUIC_TRANSPORT_V1 = "quic_transport_v1"
 # cryptography in one_link.frame_provenance.
 FRAME_PROVENANCE_V1 = "frame_provenance_v1"
 
+# Living Presence Tier ζ — semantic voice codec. Peers advertising
+# this feature can negotiate the SEMANTIC_DELTA_AV rung on the
+# Presence Compiler ladder. The model_pack_hash field on CAPS
+# pins the exact trained checkpoint; mismatched packs fall back
+# to the AUDIO_ONLY rung (Opus 16 kbps).
+SEMANTIC_VOICE_V1 = "semantic_voice_v1"
+
 LOCAL_CAPABILITIES = (
     CHAT,
     FILES,
@@ -80,6 +87,7 @@ LOCAL_CAPABILITIES = (
     BLOOM_INIT_V1,
     QUIC_TRANSPORT_V1,
     FRAME_PROVENANCE_V1,
+    SEMANTIC_VOICE_V1,
 )
 
 # v0.7.1 deny-by-default capability split. The audit doc

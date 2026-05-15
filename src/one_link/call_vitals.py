@@ -225,7 +225,12 @@ def _capability_snapshot(
 ) -> CapabilitySnapshot:
     fs = set(features)
     return CapabilitySnapshot(
-        semantic_media_v1=("semantic_media_v1" in fs),
+        # Tier ζ — semantic media. Both legacy ``semantic_media_v1``
+        # (umbrella) and the targeted ``semantic_voice_v1`` (voice
+        # only, the trained-checkpoint codec) flip this bit on.
+        semantic_media_v1=(
+            "semantic_media_v1" in fs or "semantic_voice_v1" in fs
+        ),
         predictive_continuity_v1=("predictive_continuity_v1" in fs),
         frame_provenance_v1=("frame_provenance_v1" in fs),
         onefield_radio_v1=("onefield_radio_v1" in fs),
