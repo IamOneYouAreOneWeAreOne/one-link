@@ -951,6 +951,39 @@ class Daemon:
         # (or open) managers here. See src/one_link/call_manager.py.
         from one_link.call_manager import CallManagerRegistry as _CMR
         self._call_registry: _CMR = _CMR()
+        # Living Presence Tier β/γ/δ/ε/η runtime adapters. These
+        # are the live-system glue between the pure engine modules
+        # and the daemon's tick loop + HTTP surface.
+        from one_link.call_immune import (
+            GraduationMode as _GradMode,
+            ImmuneSystem as _ImmuneSystem,
+        )
+        from one_link.call_immune_runtime import (
+            AuditLogger as _AuditLogger,
+            BrowserMetricsCache as _BMC,
+            _TickCounter as _TC,
+        )
+        from one_link.handoff_orchestrator import (
+            HandoffOrchestrator as _Handoff,
+        )
+        from one_link.predictive_continuity_runtime import (
+            PredictiveContinuityRuntime as _PCR,
+        )
+        from one_link.transport_priority import (
+            TransportPrioritizer as _TP,
+        )
+        self._immune_system: _ImmuneSystem = _ImmuneSystem(
+            mode=_GradMode.SHADOW,
+        )
+        self._immune_metrics: _BMC = _BMC()
+        self._immune_tick_counter: _TC = _TC()
+        self._immune_audit: Optional[_AuditLogger] = None  # populated in start()
+        self._predictive: _PCR = _PCR()
+        self._handoff: _Handoff = _Handoff()
+        self._transport_priority: _TP = _TP()
+        # Tracks which calls have an active Immune tick in flight so
+        # the loop knows what to sample.
+        self._immune_active_calls: dict[str, str] = {}  # call_id → peer_master_vk_hex
         # Row 10 — sealed master under per-process SoftwareProvider.
         # Populated in start() from master_seed.load_sealed_master.
         # Stays None if no master seed file exists OR the native
@@ -1412,6 +1445,66 @@ class Daemon:
             self.ui_server.broadcast({"type": "transfer", "transfer": self._transfer_event(rec)})
 
     DM_REAPER_INTERVAL_S = 30
+
+    IMMUNE_TICK_INTERVAL_S = 0.1   # 100 ms — matches doc §4.1
+
+    async def _immune_tick_loop(self) -> None:
+        """Tick the Immune System for every active call every 100 ms.
+
+        Pulls vitals via :func:`read_call_vitals`, overlays browser-
+        reported RTC metrics, decides + emits actions through
+        :func:`call_immune_actions.plan_for_decision`. Errors per-
+        call are logged + swallowed so one bad call can't kill the
+        loop for others.
+        """
+        from one_link.call_immune_actions import execute_plan, plan_for_decision
+        from one_link.call_immune_runtime import drive_immune_tick_for_call
+
+        while True:
+            try:
+                await asyncio.sleep(self.IMMUNE_TICK_INTERVAL_S)
+            except asyncio.CancelledError:
+                raise
+
+            try:
+                active_ids = self._call_registry.active_call_ids()
+            except Exception:
+                continue
+
+            for call_id in active_ids:
+                try:
+                    mgr = self._call_registry.get(call_id)
+                    if mgr is None:
+                        continue
+                    if mgr.phase.name not in (
+                        "INVITING", "RINGING", "ACTIVE", "ASYNC_CAPTURE",
+                    ):
+                        continue
+                    peer_fp = mgr.state.peer_master_vk_hex
+                    now_ms = int(time.time() * 1000)
+                    decision = drive_immune_tick_for_call(
+                        daemon=self,
+                        immune=self._immune_system,
+                        metrics=self._immune_metrics,
+                        tick_counter=self._immune_tick_counter,
+                        audit=self._immune_audit,
+                        call_id=call_id,
+                        peer_master_vk_hex=peer_fp,
+                    )
+                    plan = plan_for_decision(
+                        decision=decision, call_id=call_id, now_ms=now_ms,
+                    )
+                    if plan.browser_actions or plan.manager_events:
+                        execute_plan(
+                            plan=plan, manager=mgr,
+                            broadcast_tail=self._broadcast_tail,
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.warning(
+                        "immune tick for %s raised: %s", call_id[:8], e,
+                    )
 
     async def _dm_reaper_loop(self) -> None:
         """v0.10.2: tombstone expired disappearing messages every
@@ -4110,6 +4203,13 @@ class Daemon:
                 local_master_vk_hex=self.me.fingerprint,
                 started_at_ms=now_ms_,
             )
+            # Open the predictive-continuity engine for this call so
+            # the receive path can immediately start tracking confirm-
+            # ratios. Idempotent.
+            try:
+                self._predictive.open_call(call_id)
+            except Exception:
+                pass
             event = ManagerEvent(
                 kind=ManagerEventKind.WIRE_CALL_INVITE,
                 occurred_at_ms=now_ms_,
@@ -14196,6 +14296,21 @@ class Daemon:
                 pass
 
         self._prune_task = asyncio.create_task(_prune_loop())
+
+        # Living Presence — Immune-System tick loop (Tier γ SHADOW
+        # → ASSIST → AUTOPILOT). One tick per 100 ms across every
+        # active call. Best-effort: errors fold into the audit log
+        # but the loop keeps running.
+        try:
+            from one_link.call_immune_runtime import AuditLogger as _AL
+            from one_link.paths import data_dir as _data_dir
+            self._immune_audit = _AL(
+                path=_data_dir() / "logs" / "immune_audit.jsonl",
+            )
+        except Exception as e:
+            log.debug("immune audit log init failed: %s", e)
+            self._immune_audit = None
+        self._immune_tick_task = asyncio.create_task(self._immune_tick_loop())
 
         # v0.7.0: kick off endpoint announcement to all pinned peers
         # shortly after startup. Detached task — failures don't

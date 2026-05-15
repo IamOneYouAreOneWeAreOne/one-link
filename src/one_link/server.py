@@ -2435,6 +2435,20 @@ class UIServer:
         if action_name == "attest_frame":
             return await self._handle_attest_frame_action(body)
 
+        # Tier γ — browser pushes per-window WebRTC stats.
+        if action_name == "report_metrics":
+            return self._handle_report_metrics_action(body)
+
+        # Tier η — browser-driven Predictive Continuity API.
+        if action_name == "observe_frame":
+            return self._handle_observe_frame_action(body)
+        if action_name == "predict_frame":
+            return self._handle_predict_frame_action(body)
+
+        # Tier ε — browser/Body confirms handoff secondary is ready.
+        if action_name == "mark_handoff_prewarmed":
+            return self._handle_mark_handoff_prewarmed_action(body)
+
         api = self._call_api()
         result = api.handle_json(body)
         # Flush the response so outbound wire messages actually reach
@@ -2561,6 +2575,121 @@ class UIServer:
             return web.json_response(
                 {"ok": False, "user_message": "Couldn't reach that contact."},
             )
+        return web.json_response({"ok": True, "call_id": call_id})
+
+    def _handle_report_metrics_action(self, body: dict) -> web.Response:
+        """Tier γ — browser POSTs per-window RTC stats.
+
+        Body: {"action": "report_metrics", "call_id": ...,
+               "rtt_ms": <f>, "loss_rate": <f∈[0,1]>,
+               "jitter_ms": <f>, "confirm_ratio_voice": <f∈[0,1]>,
+               "bandwidth_estimate_kbps": <f>}
+        """
+        call_id = body.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return web.json_response(
+                {"ok": False, "user_message": "Call is no longer active."},
+            )
+
+        def _opt_float(k: str):
+            v = body.get(k)
+            if v is None:
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        self.daemon._immune_metrics.update(
+            call_id=call_id,
+            rtt_ms=_opt_float("rtt_ms"),
+            loss_rate=_opt_float("loss_rate"),
+            jitter_ms=_opt_float("jitter_ms"),
+            confirm_ratio_voice=_opt_float("confirm_ratio_voice"),
+            bandwidth_estimate_kbps=_opt_float("bandwidth_estimate_kbps"),
+        )
+        return web.json_response({"ok": True, "call_id": call_id})
+
+    def _handle_observe_frame_action(self, body: dict) -> web.Response:
+        """Tier η — browser reports an arriving real audio/video frame.
+
+        Body: {"action": "observe_frame", "call_id": ...,
+               "media_kind": "audio"|"video", "seq": <int>,
+               "timestamp_us": <int>}
+        Content is NOT shipped to the daemon — only metadata. The
+        runtime tracks confirm-ratios; content stays in the browser.
+        """
+        from one_link.predictive_continuity import MediaKind
+        call_id = body.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return web.json_response(
+                {"ok": False, "user_message": "Call is no longer active."},
+            )
+        kind_str = (body.get("media_kind") or "audio").lower()
+        kind = MediaKind.AUDIO if kind_str == "audio" else MediaKind.VIDEO
+        try:
+            seq = int(body.get("seq", 0))
+            ts_us = int(body.get("timestamp_us", 0))
+        except (TypeError, ValueError):
+            return web.json_response(
+                {"ok": False, "user_message": "Couldn't read that frame."},
+            )
+        # The runtime hashes content for novelty matching but doesn't
+        # need it on the daemon — pass a stable placeholder.
+        placeholder = seq.to_bytes(8, "big", signed=False)
+        self.daemon._predictive.observe_real_frame(
+            call_id=call_id, media_kind=kind,
+            seq=seq, timestamp_us=ts_us, content=placeholder,
+        )
+        return web.json_response({"ok": True, "call_id": call_id})
+
+    def _handle_predict_frame_action(self, body: dict) -> web.Response:
+        """Tier η — browser missed a frame slot; runtime returns
+        a prediction descriptor (the actual sample synthesis happens
+        in the browser via the Extrapolator)."""
+        from one_link.predictive_continuity import MediaKind
+        call_id = body.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return web.json_response(
+                {"ok": False, "user_message": "Call is no longer active."},
+            )
+        kind_str = (body.get("media_kind") or "audio").lower()
+        kind = MediaKind.AUDIO if kind_str == "audio" else MediaKind.VIDEO
+        try:
+            due_seq = int(body.get("due_seq", 0))
+            now_us = int(body.get("now_us", 0))
+        except (TypeError, ValueError):
+            return web.json_response(
+                {"ok": False, "user_message": "Couldn't compute prediction."},
+            )
+        result = self.daemon._predictive.request_prediction(
+            call_id=call_id, media_kind=kind,
+            due_seq=due_seq, now_us=now_us,
+        )
+        if result is None or result.frame is None:
+            return web.json_response({
+                "ok": True, "call_id": call_id,
+                "predicted": False,
+                "reason": result.reason_code if result else "unknown",
+            })
+        return web.json_response({
+            "ok": True, "call_id": call_id,
+            "predicted": True,
+            "frame_kind": result.frame.frame_kind.name,
+            "reason": result.reason_code,
+        })
+
+    def _handle_mark_handoff_prewarmed_action(
+        self, body: dict,
+    ) -> web.Response:
+        """Tier ε — caller signals that the handoff secondary is
+        ready. Orchestrator transitions to MIXING on next tick."""
+        call_id = body.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return web.json_response(
+                {"ok": False, "user_message": "Call is no longer active."},
+            )
+        self.daemon._handoff.mark_prewarmed(call_id)
         return web.json_response({"ok": True, "call_id": call_id})
 
     async def _handle_attest_frame_action(self, body: dict) -> web.Response:
