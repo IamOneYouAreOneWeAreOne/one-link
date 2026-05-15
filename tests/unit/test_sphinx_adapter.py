@@ -368,6 +368,10 @@ def test_cover_module_constants():
 
 
 def test_build_cover_packet_round_trip():
+    """Audit M4 May 2026 — `peel_sphinx` now returns kind=="cover"
+    directly when the destination's MAC over the cover-trailer
+    verifies. The legacy "deliver"+plaintext-sentinel path is gone
+    (forgeable; replaced by the authenticated trailer)."""
     from one_link import sphinx_native as sph
 
     dest_sk, dest_pk = sph.generate_keypair()
@@ -376,9 +380,12 @@ def test_build_cover_packet_round_trip():
     packet = sph.build_cover_packet(eph_sk, [(dest_id, dest_pk)], 128)
     assert len(packet) == sph.SPHINX_PACKET_LEN  # same size as real
     outcome, _, payload = sph.peel_sphinx(dest_sk, packet)
-    assert outcome == "deliver"
-    assert sph.is_cover_payload(payload)
-    assert len(payload) == len(sph.COVER_SENTINEL) + 128
+    assert outcome == "cover", (
+        f"expected M4-authenticated cover peel outcome, got {outcome!r}"
+    )
+    # Cover variant returns an empty payload — the destination
+    # silently drops without exposing trailer bytes to callers.
+    assert payload == b""
 
 
 def test_cover_packet_size_indistinguishable_from_real():

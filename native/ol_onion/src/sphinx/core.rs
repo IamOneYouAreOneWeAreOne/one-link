@@ -68,12 +68,32 @@ impl SphinxHop {
 }
 
 /// Generate a fresh Sphinx static secret + corresponding public key.
+///
+/// Audit I1 May 2026 (defense-in-depth): rejects the scalar-zero
+/// case so the returned pubkey is never the Ristretto255 identity
+/// point. Probability of hitting this naturally is ~2^-252 — an
+/// adversary cannot grind it — but the trivial early-exit costs
+/// nothing and removes the "identity scalar leaks every shared
+/// secret as zero" footgun. Re-rolls on the astronomically rare
+/// hit; bounded retry count keeps the function total.
 pub fn generate_static_keypair<R: RngCore + CryptoRng>(rng: &mut R) -> (Scalar, RistrettoPoint) {
-    let mut bytes = [0u8; 64];
-    rng.fill_bytes(&mut bytes);
-    let scalar = Scalar::from_bytes_mod_order_wide(&bytes);
-    let point = &scalar * RISTRETTO_BASEPOINT_TABLE;
-    (scalar, point)
+    // 64 retries gives 2^-(252*64) probability of failure — beyond
+    // any thermodynamic bound. The loop is purely structural.
+    for _ in 0..64 {
+        let mut bytes = [0u8; 64];
+        rng.fill_bytes(&mut bytes);
+        let scalar = Scalar::from_bytes_mod_order_wide(&bytes);
+        if scalar == Scalar::ZERO {
+            continue;
+        }
+        let point = &scalar * RISTRETTO_BASEPOINT_TABLE;
+        return (scalar, point);
+    }
+    // Unreachable in any universe with a working RNG. If the RNG is
+    // broken (all-zeros), the daemon should fail loudly rather than
+    // silently return a zero-scalar keypair — panic preserves the
+    // invariant that callers never observe a zero scalar.
+    panic!("generate_static_keypair: RNG returned 64 consecutive zero scalars (broken RNG)")
 }
 
 /// Sphinx Coherence wire packet (fixed [`SPHINX_PACKET_LEN`] bytes).

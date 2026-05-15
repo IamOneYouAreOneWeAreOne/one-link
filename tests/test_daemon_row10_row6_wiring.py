@@ -136,14 +136,19 @@ async def test_cover_traffic_runs_real_sphinx_round_trip(daemon_with_seed):
         from one_link_native import sphinx as _native_sphinx
         ticks = [0]
         def _emit_real() -> None:
+            # Audit M4 May 2026 — `peel_sphinx` now returns kind=="cover"
+            # directly when the destination's per-circuit shared key
+            # verifies the cover-trailer MAC. The legacy
+            # "deliver"+plaintext-sentinel handshake is gone.
             eph_sk, _eph_pk = _native_sphinx.generate_keypair()
             circuit = [(daemon._cover_self_hop_id, daemon._cover_relay_pk)]
             packet = _native_sphinx.build_cover_packet(eph_sk, circuit, 512)
-            kind, _next, payload = _native_sphinx.peel_sphinx(
+            kind, _next, _payload = _native_sphinx.peel_sphinx(
                 daemon._cover_relay_sk, packet
             )
-            assert kind == "deliver"
-            assert _native_sphinx.is_cover_payload(payload)
+            assert kind == "cover", (
+                f"expected M4-authenticated cover outcome, got {kind!r}"
+            )
             ticks[0] += 1
 
         fast = _CTD(rate_hz=20.0, emit_cover=_emit_real)

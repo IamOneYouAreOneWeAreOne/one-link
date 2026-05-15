@@ -54,6 +54,24 @@ pub type AttestationNonce = [u8; ATTESTATION_NONCE_LEN];
 /// race it against another verifier's challenge. Tighter is safer.
 pub const ATTESTATION_FRESHNESS_WINDOW_SECS: u64 = 30;
 
+/// Audit I3 May 2026 — maximum tolerated clock skew between issuer
+/// and verifier. If `doc.issued_unix > now_unix + MAX_CLOCK_SKEW_SECS`,
+/// the doc is rejected — a forward-skewed issuer clock could
+/// otherwise issue docs that won't appear "expired" to a verifier with
+/// a backward-skewed clock until much later. Bounding the issuer's
+/// future-projection keeps the freshness window honest in absolute
+/// wall-clock terms.
+pub const ATTESTATION_MAX_CLOCK_SKEW_SECS: u64 = 5;
+
+/// Audit I3 May 2026 — hard floor on how stale a doc may be at
+/// verify time, independent of `deadline_unix`. A doc whose
+/// `issued_unix` is more than this many seconds before `now_unix`
+/// is rejected even if its deadline somehow lies in the future
+/// (clock-skew adversary). Set to 24 hours to absorb daylight-
+/// savings and zone-config errors while still rejecting ancient
+/// replays.
+pub const ATTESTATION_MAX_AGE_SECS: u64 = 24 * 3600;
+
 /// Domain-separation prefix for the canonical attestation transcript
 /// — distinct from every other transcript-builder in the workspace.
 ///
@@ -286,6 +304,34 @@ pub fn verify_attestation(
         return Err(ConfidentialError::AttestationExpired {
             deadline_unix: doc.deadline_unix,
             now_unix,
+        });
+    }
+    // (2a) Audit I3 May 2026 — issuer-clock skew bound. Reject docs
+    //      whose `issued_unix` lies more than MAX_CLOCK_SKEW_SECS
+    //      in the future relative to the verifier. Without this, a
+    //      forward-skewed issuer could mint a doc claiming
+    //      issued=now+1day, deadline=issued+30s, and the verifier
+    //      would refuse to reject for ~24h.
+    if doc.issued_unix > now_unix
+        && doc.issued_unix - now_unix > ATTESTATION_MAX_CLOCK_SKEW_SECS
+    {
+        return Err(ConfidentialError::AttestationIssuerClockSkew {
+            issued_unix: doc.issued_unix,
+            now_unix,
+            max_skew_secs: ATTESTATION_MAX_CLOCK_SKEW_SECS,
+        });
+    }
+    // (2b) Audit I3 May 2026 — hard floor on doc age independent of
+    //      `deadline_unix`. Defends against an adversary who crafts a
+    //      backward-issued / forward-deadlined doc that survives the
+    //      window check but is actually weeks old.
+    if doc.issued_unix < now_unix
+        && now_unix - doc.issued_unix > ATTESTATION_MAX_AGE_SECS
+    {
+        return Err(ConfidentialError::AttestationTooOld {
+            issued_unix: doc.issued_unix,
+            now_unix,
+            max_age_secs: ATTESTATION_MAX_AGE_SECS,
         });
     }
     // (3) Field-witness binding. Default-deny semantics (audit L5

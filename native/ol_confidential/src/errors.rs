@@ -40,6 +40,34 @@ pub enum ConfidentialError {
         /// Verifier's wall clock.
         now_unix: u64,
     },
+    /// Audit I3 May 2026 — issuer's claimed `issued_unix` is farther
+    /// in the future than `ATTESTATION_MAX_CLOCK_SKEW_SECS` allows.
+    /// Detects a forward-skewed issuer who could otherwise mint a
+    /// doc whose deadline lies past the verifier's clock for far
+    /// longer than the freshness window would allow.
+    #[error("attestation issuer clock skew: issued_unix={issued_unix} now_unix={now_unix} max_skew={max_skew_secs}")]
+    AttestationIssuerClockSkew {
+        /// `doc.issued_unix`.
+        issued_unix: u64,
+        /// Verifier's wall clock.
+        now_unix: u64,
+        /// Policy maximum.
+        max_skew_secs: u64,
+    },
+    /// Audit I3 May 2026 — doc is ancient relative to verifier wall
+    /// clock (issued > `ATTESTATION_MAX_AGE_SECS` ago). Independent
+    /// from `AttestationExpired` because a clock-skew adversary
+    /// could otherwise craft a deadline that hasn't passed despite
+    /// the doc being weeks old.
+    #[error("attestation too old: issued_unix={issued_unix} now_unix={now_unix} max_age={max_age_secs}")]
+    AttestationTooOld {
+        /// `doc.issued_unix`.
+        issued_unix: u64,
+        /// Verifier's wall clock.
+        now_unix: u64,
+        /// Policy maximum.
+        max_age_secs: u64,
+    },
     /// Attestation doc's deadline is not strictly after `issued_unix`.
     #[error("attestation deadline_unix={deadline_unix} not after issued_unix={issued_unix}")]
     AttestationBadFreshnessWindow {

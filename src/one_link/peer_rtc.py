@@ -332,6 +332,81 @@ class BrowserPeerManager:
         # happen on browser restart. Hard rejection lives upstream
         # at the envelope-signature + pubkey-roster gates.
         self._dtls_fingerprints: dict[str, str] = {}
+        # Audit I4 May 2026 — explicit replay cache for accepted
+        # attestation docs. Keyed by BLAKE3(master_sig) — collisions
+        # are vanishingly unlikely (2^-256). Each entry stores the
+        # acceptance wall-clock-ms so the cache self-prunes against
+        # ``ATTESTATION_REPLAY_CACHE_TTL_MS``. Without this, the sole
+        # defense against in-flight replay was the per-peer
+        # `attestation_challenge = None` clear (peer_rtc.py:807) —
+        # if a future refactor forgot that line, the 30-second
+        # challenge window would re-open silently. The cache is
+        # belt-and-suspenders.
+        self._seen_doc_ids: "dict[bytes, int]" = {}
+        # Audit I6 May 2026 — per-master-vk monotonic-issued-unix
+        # fork detection. A legitimate single-daemon issuer's docs
+        # produce non-decreasing `issued_unix` (modulo small clock
+        # skew). Two daemons claiming the same master_vk (a fork or
+        # cloned identity) will eventually produce a doc with an
+        # `issued_unix` that regresses below what we've already
+        # observed for that vk. Rejecting on regression detects
+        # forks without a wire-format change. Tolerates up to
+        # MAX_CLOCK_SKEW_SECS (5s, matches the I3 issuer-skew
+        # bound) of natural NTP wobble before flagging.
+        self._master_vk_last_issued_unix: "dict[bytes, int]" = {}
+
+    # Audit I4 May 2026 — replay-cache TTL (ms). Comfortably exceeds
+    # the 30s ATTESTATION_FRESHNESS_WINDOW_SECS so the cache strictly
+    # outlives the validity window of any doc it remembers.
+    ATTESTATION_REPLAY_CACHE_TTL_MS: int = 5 * 60 * 1000
+    # Hard cap on cache size — flood-defense companion to the TTL
+    # sweep. Drops oldest-first when exceeded.
+    ATTESTATION_REPLAY_CACHE_MAX_ENTRIES: int = 16_384
+    # Audit I6 May 2026 — tolerance for natural NTP wobble in the
+    # monotonic-issued-unix fork-detection check. Matches the I3
+    # issuer-clock-skew bound exactly so the two checks share a
+    # consistent tolerance.
+    ATTESTATION_FORK_MAX_BACKWARDS_SECS: int = 5
+
+    def _attestation_doc_id(self, master_sig: bytes) -> bytes:
+        """Audit I4 — SHA-256 over a domain-tagged copy of
+        ``master_sig``. Used purely as an internal map key; the
+        security property is collision-resistance (so distinct sigs
+        can't collide) + preimage-resistance (so cache contents
+        don't directly leak sigs). SHA-256 is stdlib so the cache
+        works even when the native module is absent."""
+        import hashlib
+        return hashlib.sha256(
+            b"ol-attest-replay-cache-v1" + master_sig
+        ).digest()
+
+    def _attestation_replay_check_and_record(self, master_sig: bytes) -> bool:
+        """Returns True iff this doc has NOT been seen before.
+
+        Side-effect: on a fresh doc, records the id with the current
+        wall-clock; on a repeat, leaves the cache untouched. Sweeps
+        expired entries opportunistically (no background timer)."""
+        doc_id = self._attestation_doc_id(master_sig)
+        now_ms = _now_ms()
+        # Sweep expired entries first (bounded work: at most one
+        # full traversal every ATTESTATION_REPLAY_CACHE_TTL_MS).
+        if self._seen_doc_ids:
+            cutoff = now_ms - self.ATTESTATION_REPLAY_CACHE_TTL_MS
+            dead = [k for k, t in self._seen_doc_ids.items() if t < cutoff]
+            for k in dead:
+                self._seen_doc_ids.pop(k, None)
+        if doc_id in self._seen_doc_ids:
+            return False
+        # Bound the cache size with oldest-first eviction (matches
+        # the M11 OrderedDict pattern in cap_store; here we use a
+        # plain dict ordered by insertion since Python 3.7+ preserves
+        # it).
+        if len(self._seen_doc_ids) >= self.ATTESTATION_REPLAY_CACHE_MAX_ENTRIES:
+            drop_n = self.ATTESTATION_REPLAY_CACHE_MAX_ENTRIES // 10
+            for k in list(self._seen_doc_ids.keys())[:drop_n]:
+                self._seen_doc_ids.pop(k, None)
+        self._seen_doc_ids[doc_id] = now_ms
+        return True
 
     # ── pairing tokens ──────────────────────────────────────────────
 
@@ -775,6 +850,52 @@ class BrowserPeerManager:
                 peer.fingerprint, e,
             )
             return
+        # Audit I4 May 2026 — explicit replay-cache check. A doc that
+        # already passed verify in the recent past is rejected here
+        # before we update any peer state. The per-peer
+        # `attestation_challenge = None` clear (below) still removes
+        # the primary replay window; this is belt-and-suspenders so a
+        # future refactor that drops that clear doesn't open a 30s
+        # replay vector.
+        if not self._attestation_replay_check_and_record(doc.master_sig):
+            log.warning(
+                "peer-rtc: attestation from %s rejected — doc replay "
+                "(BLAKE3(master_sig) already seen in recent cache window)",
+                peer.fingerprint,
+            )
+            return
+        # Audit I6 May 2026 — per-master-vk fork detection. If we've
+        # previously seen ANY doc from this master_vk (across any
+        # peer fingerprint), require the new doc's `issued_unix` to
+        # be NOT meaningfully earlier than the previous one. A
+        # cloned-identity attacker on a second host that produces an
+        # earlier-issued doc with the same master_vk gets caught
+        # here. Tolerates ATTESTATION_FORK_MAX_BACKWARDS_SECS of
+        # natural clock wobble before flagging.
+        prev_issued_unix = self._master_vk_last_issued_unix.get(doc.master_vk)
+        if (
+            prev_issued_unix is not None
+            and doc.issued_unix + self.ATTESTATION_FORK_MAX_BACKWARDS_SECS
+            < prev_issued_unix
+        ):
+            log.warning(
+                "peer-rtc: SECURITY ALERT — peer %s presented attestation "
+                "with master_vk=%s and issued_unix=%d, but previously "
+                "observed issued_unix=%d for the same master_vk. Possible "
+                "fork / cloned identity. Refusing.",
+                peer.fingerprint,
+                doc.master_vk[:8].hex(),
+                doc.issued_unix,
+                prev_issued_unix,
+            )
+            with contextlib.suppress(Exception):
+                self._close_peer(peer)
+            return
+        # Record the high-water-mark for this master_vk.
+        self._master_vk_last_issued_unix[doc.master_vk] = max(
+            prev_issued_unix if prev_issued_unix is not None else 0,
+            doc.issued_unix,
+        )
         # Audit C2 (May 14 2026): TOFU-pin peer_master_vk. If we
         # previously pinned a different master VK against this peer
         # fingerprint, refuse the new doc and tear the peer down.
@@ -874,6 +995,30 @@ class BrowserPeerManager:
         peer: BrowserPeer,
         envelope: dict,
     ) -> None:
+        """Audit M8 May 2026 — constant-time response across the
+        success / failure split.
+
+        The pre-M8 implementation emitted distinguishing debug log
+        lines for ``failed to peel`` vs ``non-deliver`` vs ``lacks
+        cover sentinel`` — three different code paths that an
+        adversary with DC access could probe (by varying the inbound
+        bytes and watching which log shape they produced indirectly
+        via timing or controlled log scrape). Combined with the M4
+        plaintext sentinel, this was a format-reverse-engineering
+        oracle.
+
+        New shape:
+          - All non-success peel outcomes collapse to a single
+            silent-drop branch with NO log emission (debug or
+            otherwise).
+          - Success is identified by the M4 authenticated peel
+            returning kind=="cover" (the destination's per-circuit
+            shared key has verified the trailer MAC). Plaintext
+            sentinel inspection is no longer involved.
+          - The telemetry counter increment is the ONLY observable
+            side effect of success, and it lives in private daemon
+            state never echoed to any peer.
+        """
         relay_sk = getattr(self.daemon, "_cover_relay_sk", None)
         if relay_sk is None:
             return
@@ -881,37 +1026,28 @@ class BrowserPeerManager:
             from one_link_native import sphinx as _native_sphinx
         except ImportError:
             return
+        # Decode + peel are wrapped in a single try; any failure
+        # silently drops with NO log emission so adversarial probing
+        # cannot distinguish failure modes from outside.
         try:
             packet = base64.b64decode(
                 str(envelope.get("packet_b64") or ""),
                 validate=True,
             )
-        except Exception:
-            return
-        try:
-            kind, _next_hop, payload = _native_sphinx.peel_sphinx(
+            kind, _next_hop, _payload = _native_sphinx.peel_sphinx(
                 relay_sk,
                 packet,
             )
-        except Exception as e:
-            log.debug(
-                "peer-rtc: cover_packet from %s failed to peel: %s",
-                peer.fingerprint, e,
-            )
+        except Exception:
             return
-        if kind != "deliver":
-            log.debug(
-                "peer-rtc: cover_packet from %s peeled to non-deliver "
-                "(kind=%r); dropping",
-                peer.fingerprint, kind,
-            )
-            return
-        if not _native_sphinx.is_cover_payload(payload):
-            log.debug(
-                "peer-rtc: peeled packet from %s lacks cover sentinel; "
-                "dropping",
-                peer.fingerprint,
-            )
+        # Audit M4: the authenticated peel returns kind=="cover" iff
+        # the trailer MAC verifies under the destination's per-
+        # circuit shared key. We do NOT fall back to inspecting the
+        # plaintext sentinel — that path is forgeable and was the
+        # M8 oracle. kind=="deliver" with a cover-shaped payload but
+        # an invalid MAC is treated as a REAL packet (delivered
+        # normally elsewhere), not a cover-drop here.
+        if kind != "cover":
             return
         # Audit L8 May 2026: lock the read-modify-write so the cover
         # background thread's increment of _cover_emit_count and this
