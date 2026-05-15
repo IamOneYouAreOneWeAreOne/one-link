@@ -160,6 +160,25 @@ def _is_benign_windows_transport_reset(exc: BaseException | None) -> bool:
     )
 
 
+def _folder_scope_from_msg(msg: dict) -> bytes:
+    """Audit H12 May 2026 — extract the per-folder cap scope from a
+    folder-sync wire message. Returns the folder name encoded as
+    UTF-8 bytes, or ``b""`` if no folder identifier is present (in
+    which case the check falls back to global-cap semantics — the
+    older un-scoped grants still work).
+
+    All four folder-sync message types (MANIFEST_PUSH /
+    MANIFEST_WANTS / BLOB_OFFER / BLOB_CHUNK) carry the folder name
+    in the ``folder`` field; both peers agreed on the canonical
+    share name during the pairing-add flow so the same string maps
+    to the same scope on both sides.
+    """
+    name = msg.get("folder")
+    if not isinstance(name, str) or not name:
+        return b""
+    return name.encode("utf-8", errors="strict")
+
+
 def _install_asyncio_exception_handler(loop: asyncio.AbstractEventLoop) -> None:
     """Suppress Windows Proactor teardown noise for already-closed sockets.
 
@@ -8111,7 +8130,25 @@ class Daemon:
             return f"peer {peer.short_id} is marked as rejected; cannot send"
         return None
 
-    def _capability_allowed(self, peer_fp: str, cap: str) -> bool:
+    def _capability_allowed(
+        self,
+        peer_fp: str,
+        cap: str,
+        scope: bytes = b"",
+    ) -> bool:
+        """Audit H12 May 2026 — `scope` parameter threads the
+        per-resource constraint through to ``CapStore.has_capability``.
+
+        Default ``scope=b""`` preserves legacy global-cap behavior
+        for call sites that haven't yet adopted resource-bound caps.
+        Folder-related callers (MANIFEST_*, BLOB_*, anything tied to
+        a specific folder) pass the folder name so a grant minted
+        for one folder can't authorize access to another. The
+        strict exact-match rule lives in
+        ``cap_store.has_capability``: a scoped grant is INVISIBLE
+        to unscoped callers, and a global grant is INVISIBLE to
+        scoped queries.
+        """
         # Audit L12 May 2026 — refuse to honor capabilities when the
         # on-disk master seed has been replaced since boot. A brief-
         # FS-access attacker swapping the seed could otherwise have
@@ -8159,6 +8196,7 @@ class Daemon:
                     granter_pub=self.me.public_bytes,
                     subject_pub=peer_pub,
                     capability=cap,
+                    scope=scope if scope else None,
                 ):
                     return True
             except Exception:

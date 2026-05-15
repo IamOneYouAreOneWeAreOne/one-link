@@ -111,6 +111,65 @@ def test_has_capability_missing_returns_false():
         granter_pub=granter_pub, subject_pub=subject_pub,
         capability="files:read", scope=b"different",
     )
+
+
+def test_h12_scoped_grant_invisible_to_unscoped_query():
+    """Regression test for audit H12 (May 14 2026): a grant minted
+    for folder-A must NOT satisfy a query that didn't ask for any
+    scope. Previously the unscoped query matched any grant
+    including scoped ones, so a folder-A grant could authorize
+    operations against folder-B."""
+    granter_seed, granter_pub = _gen_ed25519()
+    _, subject_pub = _gen_ed25519()
+    store = cap_store.CapStore()
+    blob = _make_grant(
+        granter_seed=granter_seed, granter_pub=granter_pub,
+        subject_pub=subject_pub, capabilities=["files:read"],
+        scope=b"folder-A",
+    )
+    store.accept(blob, expected_subject_pub=subject_pub)
+    # Scoped grant satisfies its exact scope query.
+    assert store.has_capability(
+        granter_pub=granter_pub, subject_pub=subject_pub,
+        capability="files:read", scope=b"folder-A",
+    )
+    # Scoped grant must NOT satisfy a different scope query.
+    assert not store.has_capability(
+        granter_pub=granter_pub, subject_pub=subject_pub,
+        capability="files:read", scope=b"folder-B",
+    )
+    # Scoped grant must NOT satisfy an unscoped query.
+    assert not store.has_capability(
+        granter_pub=granter_pub, subject_pub=subject_pub,
+        capability="files:read",
+    )
+
+
+def test_h12_unscoped_grant_invisible_to_scoped_query():
+    """Inverse: an unscoped grant (g.scope == b"") must NOT satisfy
+    a query that DOES specify a scope. Otherwise a global cap could
+    be used wherever the caller pretends they have a specific scope
+    in mind — which doesn't change the security boundary but blurs
+    audit semantics. Strict exact-match keeps it clean."""
+    granter_seed, granter_pub = _gen_ed25519()
+    _, subject_pub = _gen_ed25519()
+    store = cap_store.CapStore()
+    blob = _make_grant(
+        granter_seed=granter_seed, granter_pub=granter_pub,
+        subject_pub=subject_pub, capabilities=["files:read"],
+        scope=b"",
+    )
+    store.accept(blob, expected_subject_pub=subject_pub)
+    # Unscoped query matches (legacy global-cap behavior).
+    assert store.has_capability(
+        granter_pub=granter_pub, subject_pub=subject_pub,
+        capability="files:read",
+    )
+    # Scoped query does NOT match an unscoped grant.
+    assert not store.has_capability(
+        granter_pub=granter_pub, subject_pub=subject_pub,
+        capability="files:read", scope=b"folder-A",
+    )
     # Wrong granter.
     _, other_granter_pub = _gen_ed25519()
     assert not store.has_capability(

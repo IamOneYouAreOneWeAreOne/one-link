@@ -163,9 +163,27 @@ class CapStore:
     ) -> bool:
         """Return True iff the store has an active grant from
         ``granter_pub`` to ``subject_pub`` covering ``capability``
-        within ``scope`` (when supplied) and not yet expired."""
+        within ``scope`` and not yet expired.
+
+        Audit H12 May 2026 — strict exact-match scope semantics:
+          - Query ``scope=None`` (caller didn't specify): match
+            ONLY grants whose ``g.scope == b""`` (unrestricted).
+          - Query ``scope=b"X"``: match ONLY grants whose
+            ``g.scope == b"X"`` exactly.
+
+        Previously a scope-restricted grant satisfied unscoped
+        queries: a grant minted for ``b"folder-A"`` could authorize
+        a request that never specified its scope (e.g. ``files:read``
+        on folder-B). Now: a scoped grant is INVISIBLE to callers
+        that don't pass its specific scope, and an unscoped query
+        is invisible to scoped grants.
+        """
         if now_ms is None:
             now_ms = int(time.time() * 1000)
+        # Compute the effective query scope. ``None`` is mapped to
+        # ``b""`` so the comparison below is a single exact-equality
+        # check regardless of which way the caller passes "no scope".
+        query_scope: bytes = b"" if scope is None else scope
         for k, sg in list(self._grants.items()):
             if k[0] != granter_pub or k[1] != subject_pub:
                 continue
@@ -178,7 +196,8 @@ class CapStore:
                 continue
             if capability not in g.capabilities:
                 continue
-            if scope is not None and g.scope != scope:
+            # Strict-scope rule (audit H12): scopes must match exactly.
+            if g.scope != query_scope:
                 continue
             return True
         return False
