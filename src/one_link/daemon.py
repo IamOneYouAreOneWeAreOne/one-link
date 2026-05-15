@@ -921,6 +921,18 @@ class Daemon:
         self._tail_subs: set[asyncio.StreamWriter] = set()
         self._incoming_files: dict[str, IncomingFile] = {}
         self._incoming_blobs: dict[str, dict] = {}
+        # Living Presence Tier α-pre — Cryptographic Reality Engine
+        # store. Holds verified FrameProvenance state per blob_hex
+        # so the UI can render the Reality dot. See
+        # docs/LIVING_PRESENCE_ARCHITECTURE.md §4.5 +
+        # src/one_link/provenance_wiring.py for the model.
+        from one_link.provenance_wiring import ProvenanceStore as _PvStore
+        self._provenance_store: _PvStore = _PvStore()
+        # Living Presence — call manager registry. One CallManager
+        # per active call. Daemon dispatch + HTTP routes look up
+        # (or open) managers here. See src/one_link/call_manager.py.
+        from one_link.call_manager import CallManagerRegistry as _CMR
+        self._call_registry: _CMR = _CMR()
         # Row 10 — sealed master under per-process SoftwareProvider.
         # Populated in start() from master_seed.load_sealed_master.
         # Stays None if no master seed file exists OR the native
@@ -1659,6 +1671,113 @@ class Daemon:
             peer_count=sent_count,
             route=row.get("route") or "daemon_broadcast",
         )
+
+    # ── Living Presence Tier α-pre — CallAPI bridge ─────────────────
+
+    def _resolve_peer_for_outbound(self, peer_master_vk_hex: str):
+        """Look up a peer record for a Living-Presence outbound
+        message. Returns the peer struct that ``send_to`` accepts,
+        or None if the peer isn't in our roster.
+
+        Never raises — missing state, unknown peer, or any other
+        lookup failure returns None so callers can log + drop."""
+        try:
+            state = self.state
+        except Exception:
+            return None
+        if state is None:
+            return None
+        try:
+            return state.get_peer(peer_master_vk_hex)
+        except Exception:
+            return None
+
+    async def flush_call_api_response(self, response):
+        """Side-effect step for a CallAPI / CallManager output.
+
+        Takes an :class:`one_link.call_api.ApiResponse`, groups the
+        outbound messages by peer, builds wire dicts via ``make_msg``,
+        dispatches through ``send_to``. Broadcasts each tail event
+        through ``_broadcast_tail`` with a normalised "call_event"
+        envelope.
+
+        Defensive against:
+          - Unknown peers (no record in self.state) → log + skip
+          - send_to raising → log + skip
+          - Malformed payloads in make_msg → log + skip
+          - Empty / None response → no-op
+
+        Returns: tuple of peer_fp_hex values that were successfully
+        passed to send_to (one entry per peer, deduped). Tests
+        + callers can confirm delivery from this set.
+        """
+        if response is None:
+            return ()
+        delivered: list[str] = []
+
+        # Group outbound messages by peer (one send_to call per peer
+        # with a batched message list).
+        outbound = getattr(response, "outbound", ()) or ()
+        if outbound:
+            by_peer: dict[str, list[dict]] = {}
+            for m in outbound:
+                try:
+                    peer_fp = m.peer_master_vk_hex
+                    msg_type = m.type
+                    payload = dict(m.payload or {})
+                except Exception as exc:
+                    log.warning(
+                        "flush_call_api: malformed outbound message: %s", exc,
+                    )
+                    continue
+                try:
+                    wire_msg = make_msg(
+                        msg_type, self.me.short_id, **payload,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "flush_call_api: make_msg failed for %s: %s",
+                        msg_type, exc,
+                    )
+                    continue
+                by_peer.setdefault(peer_fp, []).append(wire_msg)
+
+            for peer_fp, msgs in by_peer.items():
+                peer = self._resolve_peer_for_outbound(peer_fp)
+                if peer is None:
+                    log.warning(
+                        "flush_call_api: no peer record for %s; "
+                        "dropping %d outbound msg(s)",
+                        peer_fp[:16], len(msgs),
+                    )
+                    continue
+                try:
+                    await self.send_to(peer, msgs)
+                except Exception as exc:
+                    log.warning(
+                        "flush_call_api: send_to raised for %s: %s",
+                        peer_fp[:16], exc,
+                    )
+                    continue
+                delivered.append(peer_fp)
+
+        # Tail events go to the WebSocket-subscribed UIs.
+        tail_events = getattr(response, "tail_events", ()) or ()
+        for ev in tail_events:
+            try:
+                payload = dict(ev.payload or {})
+                payload.setdefault("call_id", response.call_id)
+                self._broadcast_tail({
+                    "type": "call_event",
+                    "tail_kind": ev.kind.name.lower(),
+                    **payload,
+                })
+            except Exception as exc:
+                log.warning(
+                    "flush_call_api: broadcast_tail failed: %s", exc,
+                )
+
+        return tuple(delivered)
 
     async def _handle_self_mesh_presence(
         self,
@@ -12021,6 +12140,21 @@ class Daemon:
                         for c in cdc_chunks:
                             if c.index not in wanted_indexes:
                                 continue
+                            # Audit M13 May 2026 — mid-stream cap
+                            # re-check. Without this, a user who
+                            # toggles FILES off mid-send keeps
+                            # leaking chunks until the transfer
+                            # completes; the receiver re-checks per
+                            # chunk but the sender doesn't. Bounded
+                            # leak: at most one CHUNK_SIZE window
+                            # past the revocation event.
+                            if peer_fp_for_policy and not self._capability_allowed(
+                                peer_fp_for_policy, FILES
+                            ):
+                                raise RuntimeError(
+                                    f"files capability revoked mid-transfer "
+                                    f"for peer {peer.short_id}; aborting send"
+                                )
                             wanted_sent_index += 1
                             f.seek(c.start)
                             data = f.read(c.size)

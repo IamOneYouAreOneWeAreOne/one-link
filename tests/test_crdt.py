@@ -104,25 +104,58 @@ def test_merge_strict_dominance_local_wins():
     assert merge_manifest_entries(a, b).blob_hash == "aa"
 
 
-def test_merge_concurrent_uses_mtime_tiebreak():
+def test_merge_concurrent_uses_content_hash_tiebreak():
+    """Audit H14 May 2026: tie-break is content-hash, NOT wall-clock
+    mtime. A peer with a future-skewed clock previously won every
+    concurrent edit by virtue of higher mtime_ms; content-hash
+    comparison is adversary-immune (preimage-hard to grind a higher
+    hash than honest content).
+
+    The merged entry preserves the later mtime for UI display but
+    the winner is decided by hash."""
     a = _entry("f", "aa", mtime=2000,
                clock=VectorClock.from_dict({"X": 1}))
     b = _entry("f", "bb", mtime=1000,
                clock=VectorClock.from_dict({"Y": 1}))
     out = merge_manifest_entries(a, b)
-    assert out.blob_hash == "aa"  # later mtime
+    # "bb" > "aa" lexically — content-hash wins regardless of mtime
+    assert out.blob_hash == "bb"
     # Merged clock observed both
     assert out.vclock.get("X") == 1
     assert out.vclock.get("Y") == 1
+    # Wall-clock mtime preserved as max for UI display.
+    assert out.mtime_ms == 2000
 
 
-def test_merge_concurrent_same_mtime_uses_hash_tiebreak():
-    a = _entry("f", "aa", mtime=1000,
+def test_merge_concurrent_clock_skew_adversary_cant_win():
+    """Audit H14 May 2026 regression — explicit attacker scenario:
+    malicious peer sets future-skewed mtime (year 9999) but ships
+    content with LOWER hash. Honest peer wins on content-hash even
+    though its mtime is much smaller."""
+    honest = _entry("f", "zz", mtime=1_000_000,  # 1970
+                    clock=VectorClock.from_dict({"H": 1}))
+    attacker = _entry("f", "aa",
+                      mtime=999_999_999_999,  # year ~33658
+                      clock=VectorClock.from_dict({"A": 1}))
+    out = merge_manifest_entries(honest, attacker)
+    # Honest "zz" > attacker "aa"; clock skew didn't help the attacker.
+    assert out.blob_hash == "zz"
+
+
+def test_merge_concurrent_same_hash_falls_back_to_mtime():
+    """If two concurrent versions happen to have IDENTICAL content
+    hash (extremely unlikely under BLAKE3), pick the one with the
+    later mtime for stability — choice is arbitrary but must be
+    deterministic across replicas."""
+    a = _entry("f", "aa", mtime=2000,
                clock=VectorClock.from_dict({"X": 1}))
-    b = _entry("f", "bb", mtime=1000,
+    b = _entry("f", "aa", mtime=1000,
                clock=VectorClock.from_dict({"Y": 1}))
     out = merge_manifest_entries(a, b)
-    assert out.blob_hash == "bb"  # lexicographically larger
+    # Same hash either way.
+    assert out.blob_hash == "aa"
+    # Later mtime preserved.
+    assert out.mtime_ms == 2000
 
 
 def test_merge_concurrent_delete_loses_to_edit():

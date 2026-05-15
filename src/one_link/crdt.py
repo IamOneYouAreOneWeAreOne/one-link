@@ -179,19 +179,36 @@ def merge_manifest_entries(
             vclock=merged_clock,
         )
 
-    # Both live. Tie-break by mtime, then by hash for determinism.
-    l_mt = local.mtime_ms or 0
-    r_mt = remote.mtime_ms or 0
-    if l_mt != r_mt:
-        winner = local if l_mt > r_mt else remote
-    elif (local.blob_hash or "") >= (remote.blob_hash or ""):
-        winner = local
+    # Both live and concurrent (incomparable vector clocks).
+    #
+    # Audit H14 May 2026 — tie-break by CONTENT-HASH, not by
+    # wall-clock mtime. A malicious peer that sets its system
+    # clock far into the future previously won every concurrent
+    # edit by virtue of the higher mtime_ms. Content-hash
+    # comparison (lexically larger blob_hash wins) is
+    # adversary-immune: an attacker has to find a SHA/BLAKE3
+    # preimage with a higher hash than the honest content,
+    # which is preimage-hard. Wall-clock mtime is preserved on
+    # the winner for UI display purposes but never enters the
+    # tie-break decision.
+    #
+    # Determinism: blob_hash is the BLAKE3 of the file content,
+    # so a string compare on the hex form gives a stable result
+    # across replicas. Same value across both sides → fall
+    # through to a meaningless local-wins (the contents are
+    # identical, so the choice doesn't matter).
+    l_h = local.blob_hash or ""
+    r_h = remote.blob_hash or ""
+    if l_h != r_h:
+        winner = local if l_h > r_h else remote
     else:
-        winner = remote
+        # Identical content; choice is arbitrary but stable.
+        # Preserve the later wall-clock mtime for the UI.
+        winner = local if (local.mtime_ms or 0) >= (remote.mtime_ms or 0) else remote
     return ManifestEntry(
         file_path=winner.file_path,
         blob_hash=winner.blob_hash,
         size=winner.size,
-        mtime_ms=winner.mtime_ms,
+        mtime_ms=max(local.mtime_ms or 0, remote.mtime_ms or 0),
         vclock=merged_clock,
     )

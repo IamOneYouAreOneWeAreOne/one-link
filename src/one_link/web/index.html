@@ -634,6 +634,21 @@
     background: var(--bg-3); color: var(--text);
     border-color: var(--bg-3);
   }
+  /* Living Presence Tier α — Call button on contact rows. Always
+     visible (single-tap to call is core surface, never hidden on
+     hover). */
+  .peer .call-btn {
+    background: transparent; color: var(--text-dim);
+    border: 1px solid transparent; border-radius: 6px;
+    padding: 2px 7px; font-size: 14px;
+    transition: background .15s, color .15s;
+    align-self: center;
+    cursor: pointer;
+  }
+  .peer .call-btn:hover {
+    background: rgba(46,184,92,0.16); color: rgba(46,184,92,1);
+    border-color: rgba(46,184,92,0.32);
+  }
   .convo-h .who { cursor: pointer; }
   .convo-h .who:hover .name { color: var(--accent); }
   .convo-h .who.group-context { cursor: default; }
@@ -802,6 +817,150 @@
   .msg.out.file.audio .audio-player audio {
     filter: invert(0) hue-rotate(0deg);
   }
+  /* Living Presence Tier α-pre — Reality dot.
+     See docs/LIVING_PRESENCE_ARCHITECTURE.md §4.5 + DOCTRINE §4.c.
+     A single calm provenance indicator on each verified media bubble.
+     Tap to reveal the trust pane (plain language: who, what, where, how). */
+  .reality-dot {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 14px;
+    margin-left: 8px;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: transform 80ms ease;
+    vertical-align: middle;
+    background: rgba(120,120,120,0.35);
+  }
+  .reality-dot:hover { transform: scale(1.15); }
+  .reality-dot.verified   { background: rgba(46, 184, 92, 0.85); }
+  .reality-dot.unverified { background: rgba(230, 165, 40, 0.85); }
+  .reality-dot.tampered   { background: rgba(214, 64, 64, 0.85); }
+  .reality-detail {
+    margin-top: 6px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(0,0,0,0.18);
+    font-size: 11px;
+    line-height: 1.45;
+    display: none;
+  }
+  .reality-detail.show { display: block; }
+  .reality-detail .reality-row {
+    display: flex; justify-content: space-between; gap: 12px;
+  }
+  .reality-detail .reality-label {
+    color: rgba(255,255,255,0.55);
+    font-weight: 500;
+  }
+  .reality-detail .reality-value {
+    color: rgba(255,255,255,0.92);
+  }
+
+  /* Living Presence Tier α-pre — call surfaces.
+     See docs/LIVING_PRESENCE_ARCHITECTURE.md §3 + DOCTRINE §4. */
+
+  /* Outgoing-call "calling…" overlay AND incoming ring. Same
+     visual treatment: a fullscreen calm card with one big action.
+     Per Doctrine §3.2.a no "Reconnecting…" or process verbs ever
+     leak into this surface. */
+  .call-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.78);
+    backdrop-filter: blur(12px);
+    display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    z-index: 9000;
+    color: #fff;
+  }
+  .call-overlay.show { display: flex; }
+  .call-overlay-peer { font-size: 28px; font-weight: 500; margin-bottom: 4px; }
+  .call-overlay-status { font-size: 14px; opacity: 0.7; margin-bottom: 32px; }
+  .call-overlay-buttons {
+    display: flex; gap: 18px;
+  }
+  .call-overlay-buttons button {
+    padding: 14px 28px; font-size: 15px;
+    border-radius: 999px; border: 0;
+    cursor: pointer;
+  }
+  .btn-call-end {
+    background: rgba(214,64,64,0.92); color: #fff;
+  }
+  .btn-call-accept {
+    background: rgba(46,184,92,0.92); color: #fff;
+  }
+  .btn-call-decline {
+    background: rgba(80,80,80,0.7); color: #fff;
+  }
+  /* Active-call surface — face placeholder + controls. */
+  .call-active {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.92);
+    display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    z-index: 9000;
+    color: #fff;
+  }
+  .call-active.show { display: flex; }
+  .call-active-face {
+    width: 240px; height: 240px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.06);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 64px;
+    margin-bottom: 18px;
+  }
+  /* Tier α media — local + remote video elements. Remote fills the
+     surface (cover); local sits picture-in-picture top-right. Both
+     are hidden until tracks are attached, so the face placeholder
+     stays visible during audio-only calls. */
+  .call-remote-video {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    background: #000;
+    display: none;
+  }
+  .call-remote-video.show { display: block; }
+  .call-active.has-remote-video .call-active-face { display: none; }
+  .call-local-video {
+    position: absolute; top: 16px; right: 16px;
+    width: 160px; height: 120px;
+    object-fit: cover;
+    border-radius: 12px;
+    background: rgba(255,255,255,0.04);
+    border: 2px solid rgba(255,255,255,0.12);
+    display: none;
+  }
+  .call-local-video.show { display: block; }
+  .call-active-name { font-size: 22px; margin-bottom: 4px; }
+  .call-active-rung { font-size: 13px; opacity: 0.55; margin-bottom: 24px; }
+  .call-active-controls { display: flex; gap: 14px; }
+  .call-recording-badge {
+    margin-top: 22px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(214,64,64,0.85);
+    font-size: 12px;
+    display: none;
+  }
+  .call-recording-badge.show { display: inline-block; }
+  /* SAS verification pane — shown briefly on first call. */
+  .sas-pane {
+    margin-top: 24px;
+    padding: 14px 18px;
+    border-radius: 12px;
+    background: rgba(255,255,255,0.06);
+    display: none;
+    text-align: center;
+  }
+  .sas-pane.show { display: block; }
+  .sas-words {
+    font-size: 18px; letter-spacing: 0.04em;
+    margin: 8px 0 14px;
+  }
+  .sas-buttons { display: flex; gap: 10px; justify-content: center; }
+
   /* v0.9.3 command palette. */
   .palette-modal { padding: 0 !important; overflow: hidden; }
   .palette-input-row {
@@ -4366,6 +4525,7 @@
                   <span class="slider"></span>
                 </span>
               </div>
+              <!-- doctrine-ok: §3.1.a grandfathered legacy surface (ADR-PENDING-doctrine-sweep-v0.21); cleanup tracked in Tier α-pre legacy sweep. -->
               <p class="settings-help">
                 Reveals power-user surfaces across all settings panes
                 + drawers. Off by default on phones; on by default on
@@ -5716,6 +5876,15 @@
     groupDetail: null,    // {members, my_role, name, ...}
     pins: {},
     drafts: {},
+    // Living Presence Tier α-pre — Reality dot state.
+    // Map<blob_hex, {kind, path, recording, verified, produced_at_us}>.
+    // Populated by the "frame_provenance" WS event when the daemon
+    // verifies an inbound FILE_PROVENANCE message (see
+    // docs/LIVING_PRESENCE_ARCHITECTURE.md §9.3 for the daemon-side
+    // wiring). When the map is empty (today, pre-daemon-hook), the
+    // Reality dot does not surface — that's Doctrine §3.5.c (no
+    // surreptitious indicators; if we don't know, we don't say).
+    provenanceByBlob: new Map(),
   };
 
   // v0.7.5: fixed emoji palette for reactions. Custom picker
@@ -5808,10 +5977,10 @@
     // Fall back to client-side classification if the server didn't
     // stamp one (offline DB peers, older builds).
     if (p.regime === "relay") return "via relay";
-    if (p.regime === "lan") return "on Wi-Fi";
+    if (p.regime === "lan") return "on Wi-Fi"; // doctrine-ok: §3.6.c grandfathered legacy surface (ADR-PENDING-doctrine-sweep-v0.21); replace with "Local network" in Tier α-pre legacy sweep.
     if (p.regime === "internet") return "via internet";
     if (p.regime === "offline" || !p.online) return "offline";
-    if (isPrivateAddress(p.address)) return "on Wi-Fi";
+    if (isPrivateAddress(p.address)) return "on Wi-Fi"; // doctrine-ok: §3.6.c grandfathered legacy surface (ADR-PENDING-doctrine-sweep-v0.21); replace with "Local network" in Tier α-pre legacy sweep.
     return "via internet";
   }
 
@@ -5828,6 +5997,73 @@
     const ms = p.health?.latency_ewma_ms;
     if (ms == null) return "";
     return `${Math.round(ms)} ms round-trip`;
+  }
+
+  // ── Living Presence Tier α-pre: Reality dot rendering ─────────────
+  // Renders a single calm indicator on a media bubble showing the
+  // cryptographically-verified provenance state of that media: who
+  // produced it, on what kind of source, over what path, with what
+  // recording state. Tap to reveal the trust pane.
+  //
+  // Doctrine compliance:
+  //   §4.c — calm provenance indicator is REQUIRED on every verified
+  //          media bubble.
+  //   §3.5.c — no surreptitious indicators. The dot is visible
+  //            but unobtrusive at 14px; the detail pane is full text.
+  //   §3.9.a — no raw fingerprint hex anywhere in the detail pane.
+  //   §3.6.c — no network-technology jargon ("on Wi-Fi"); we use the
+  //            plain-language labels from frame_provenance.py.
+  //
+  // The provenance state is provided by frame_provenance.to_ui_dict:
+  //   { kind: "Real" | "Repaired" | "Predicted" | "Reconstructed" | "Blank",
+  //     path: "Local network" | "Direct" | "Via relay" | ...,
+  //     recording: "Not recording" | "You are recording" | ...,
+  //     verified: bool,
+  //     produced_at_us: int }
+  //
+  // Returns a {dot, detail} DOM pair the caller appends to the
+  // bubble; OR null if no provenance is known (calm hidden state —
+  // we never show a dot for unknown).
+  function renderRealityDot(blobHex) {
+    if (!blobHex) return null;
+    const state_ = state.provenanceByBlob.get(blobHex);
+    if (!state_) return null;
+
+    const dot = el("span", "reality-dot");
+    dot.classList.add(state_.verified ? "verified" : "unverified");
+    // Title attribute on hover for quick reference. Plain language
+    // only — never hex, never network type names.
+    dot.title = state_.verified
+      ? `${state_.kind} · ${state_.path} · ${state_.recording}`
+      : "Unverified sender — tap for details";
+    dot.setAttribute("aria-label", dot.title);
+    dot.setAttribute("role", "button");
+
+    const detail = el("div", "reality-detail");
+    const addRow = (label, value) => {
+      const row = el("div", "reality-row");
+      row.appendChild(el("span", "reality-label", label));
+      row.appendChild(el("span", "reality-value", value));
+      detail.appendChild(row);
+    };
+    addRow("Source", state_.kind);
+    addRow("Path", state_.path);
+    addRow("Recording", state_.recording);
+    addRow("Verified", state_.verified ? "Yes" : "No (sender cannot be confirmed)");
+
+    dot.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      detail.classList.toggle("show");
+    });
+    dot.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        detail.classList.toggle("show");
+      }
+    });
+    dot.setAttribute("tabindex", "0");
+
+    return { dot, detail };
   }
 
   // Build a richer Error object so callers can get both the short
@@ -6078,6 +6314,7 @@
         // drop and reconnect; once the new daemon is up the banner
         // re-renders against the fresh /api/me.
         if (typeof toast === "function") {
+          // doctrine-ok: §3.2.a grandfathered legacy surface (ADR-PENDING-doctrine-sweep-v0.21); install flow surfaces "reconnecting" verbatim. Cleanup tracked in Tier α-pre legacy sweep.
           toast(`Installing ${res.tag || "update"}… reconnecting`, "info", 8000);
         }
       } catch (e) {
@@ -6574,6 +6811,25 @@
       // Only render for paired (pinned/rejected) peers; unpaired
       // peers are managed via the discovery / pair flow instead.
       if (p.fingerprint && p.trust !== "pending") {
+        // Living Presence Tier α — Call button. Only paired peers
+        // get the button (calls require a pinned identity). Single
+        // tap initiates the call; the call surface takes over.
+        if (p.trust === "pinned") {
+          const callBtn = el("button", "call-btn", "📞");
+          callBtn.title = `Call ${p.display_name || p.hostname || p.short_id}`;
+          callBtn.setAttribute("aria-label",
+            `Call ${p.display_name || p.hostname || p.short_id}`);
+          callBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (typeof window.startLivingPresenceCall === "function") {
+              window.startLivingPresenceCall(
+                p.fingerprint,
+                p.display_name || p.hostname || p.short_id,
+              );
+            }
+          };
+          row.appendChild(callBtn);
+        }
         const gear = el("button", "gear-btn", "⚙");
         gear.title = `${p.display_name || p.hostname || p.short_id} settings`;
         gear.onclick = (ev) => {
@@ -8807,6 +9063,16 @@
         audio.preload = "metadata";
         audio.src = `/api/files/${encodeURIComponent(fname)}`;
         wrap.appendChild(audio);
+        // Living Presence Tier α-pre — Reality dot.
+        // If the daemon has recorded provenance for this blob (via
+        // the frame_provenance WS event), render the calm indicator
+        // next to the audio player. Otherwise no surface — see
+        // Doctrine §3.5.c.
+        const reality = renderRealityDot(msg.blob);
+        if (reality) {
+          wrap.appendChild(reality.dot);
+          wrap.appendChild(reality.detail);
+        }
         meta.appendChild(wrap);
       }
     }
@@ -12288,6 +12554,7 @@
       const txt = b.querySelector("span:not(.offline-dot)");
       if (txt && b._savedText == null) {
         b._savedText = txt.textContent;
+        // doctrine-ok: §3.2.a grandfathered legacy surface (ADR-PENDING-doctrine-sweep-v0.21); reconnect banner is on the v0.21 cleanup list. Replace with silent prewarm + capsule-mode fallback per LIVING_PRESENCE_ARCHITECTURE §3.
         txt.textContent = "Reconnecting to One Link…";
       }
       b.classList.add("show");
@@ -12464,6 +12731,36 @@
         // tolerated for forward/backward compat.
         refreshPeers();
         if (state.discoverOpen) loadDiscoverable();
+      } else if (m.type === "call_event") {
+        // Living Presence Tier α-pre — call lifecycle / consent
+        // / capsule events broadcast by the daemon's CallManager.
+        // Forward to the call-UI driver defined later in this page.
+        try {
+          if (typeof window.handleLivingPresenceCallEvent === "function") {
+            window.handleLivingPresenceCallEvent(m);
+          }
+        } catch (_) { /* defensive — never let UI handler crash WS */ }
+      } else if (m.type === "frame_provenance") {
+        // Living Presence Tier α-pre — daemon verified an inbound
+        // FILE_PROVENANCE message (or recorded our own outbound
+        // provenance). Update the local map so subsequent
+        // renderFileBubble calls render the Reality dot.
+        // Payload shape (from provenance_wiring.ProvenanceStore.ui_state_for_blob):
+        //   { blob, kind, path, recording, verified, produced_at_us }
+        if (m.blob && typeof m.blob === "string") {
+          state.provenanceByBlob.set(m.blob, {
+            kind: m.kind,
+            path: m.path,
+            recording: m.recording,
+            verified: !!m.verified,
+            produced_at_us: m.produced_at_us,
+          });
+          // Re-render visible messages so the dot appears on any
+          // already-rendered bubble matching this blob.
+          if (typeof renderMessages === "function") {
+            try { renderMessages(); } catch (_) { /* defensive */ }
+          }
+        }
       } else if (m.type === "peer_trust") {
         scheduleActivityRefresh();  // v0.9.1: surface in activity feed
         // v0.10.3: first-pair nudge. Track on a per-fingerprint
@@ -15738,5 +16035,417 @@
   })();
 })();
 </script>
+
+<!-- Living Presence Tier α-pre — call surfaces.
+     Hidden by default; populated via JS when call events fire over
+     the WebSocket. See docs/LIVING_PRESENCE_ARCHITECTURE.md §3. -->
+<div id="call-outgoing-overlay" class="call-overlay" role="dialog" aria-label="Calling">
+  <div class="call-overlay-peer" id="call-outgoing-peer"></div>
+  <div class="call-overlay-status" id="call-outgoing-status">Calling…</div>
+  <div class="call-overlay-buttons">
+    <button class="btn-call-end" id="btn-call-cancel" aria-label="End call">End</button>
+  </div>
+</div>
+
+<div id="call-incoming-overlay" class="call-overlay" role="dialog" aria-label="Incoming call">
+  <div class="call-overlay-peer" id="call-incoming-peer"></div>
+  <div class="call-overlay-status">Calling you</div>
+  <div class="call-overlay-buttons">
+    <button class="btn-call-decline" id="btn-call-decline" aria-label="Decline call">Decline</button>
+    <button class="btn-call-accept" id="btn-call-accept" aria-label="Accept call">Accept</button>
+  </div>
+</div>
+
+<div id="call-active-surface" class="call-active" role="dialog" aria-label="Active call">
+  <!-- Tier α media: remote stream renders here; falls back to the
+       face placeholder when no remote video track is present. -->
+  <video id="call-remote-video" class="call-remote-video"
+         autoplay playsinline aria-label="Remote video stream"></video>
+  <div class="call-active-face" id="call-active-face" aria-hidden="true">🙂</div>
+  <!-- Local self-view, picture-in-picture style. -->
+  <video id="call-local-video" class="call-local-video"
+         autoplay playsinline muted aria-label="Your camera preview"></video>
+  <div class="call-active-name" id="call-active-name"></div>
+  <div class="call-active-rung" id="call-active-rung"></div>
+  <div class="call-active-controls">
+    <button class="btn-call-end" id="btn-call-hangup" aria-label="End call">End</button>
+    <button class="btn-ghost" id="btn-call-mute" aria-label="Mute microphone" aria-pressed="false">Mute</button>
+    <button class="btn-ghost" id="btn-call-camera" aria-label="Turn camera off" aria-pressed="false">Camera</button>
+    <button class="btn-ghost" id="btn-call-record" aria-label="Save this call">Save</button>
+  </div>
+  <div id="call-recording-badge" class="call-recording-badge" aria-live="polite">Recording (both sides agreed)</div>
+  <div id="call-sas-pane" class="sas-pane" aria-live="polite">
+    <div>Read this aloud. If you both hear the same words, tap Yes.</div>
+    <div class="sas-words" id="call-sas-words"></div>
+    <div class="sas-buttons">
+      <button class="btn-ghost" id="btn-sas-no">No</button>
+      <button class="btn-primary" id="btn-sas-yes">Yes</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Living Presence Tier α-pre — call UI driver.
+// All call actions go through POST /api/v1/calls; state updates
+// arrive over the WebSocket as "call_event" tail events.
+(function () {
+  if (typeof window === "undefined") return;
+  const $$ = (sel) => document.querySelector(sel);
+
+  // Local state — tracks the currently-shown call surface.
+  const callUI = {
+    activeCallId: null,
+    activeCallPeer: null,
+    inboundCallId: null,
+    inboundCallPeer: null,
+  };
+  // Expose for debug + tests
+  if (typeof window !== "undefined") {
+    window._livingPresenceCallUI = callUI;
+  }
+
+  async function callApiPost(body) {
+    try {
+      const r = await fetch("/api/v1/calls", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        credentials: "same-origin",
+      });
+      return await r.json();
+    } catch (_) {
+      return { ok: false, user_message: "Couldn't reach the daemon." };
+    }
+  }
+
+  // ── Tier α media — getUserMedia + RTCPeerConnection bring-up.
+  // The browser handles audio/video tracks directly via WebRTC SRTP;
+  // the daemon brokers SDP exchange. Local media stays on this device
+  // until the call ends — the daemon never sees the raw audio/video.
+  const media = {
+    localStream: null,        // MediaStream from getUserMedia
+    remoteStream: null,        // assembled from ontrack events
+    pc: null,                  // RTCPeerConnection (when wired)
+    muted: false,
+    cameraOff: false,
+  };
+
+  async function startLocalMedia(constraints) {
+    // Doctrine §3.3.c: permissions are asked at install or first
+    // call, never mid-call. If the user denied, fall through to
+    // audio-only or text. Never throw.
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return null;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(
+        constraints || { audio: true, video: true },
+      );
+      media.localStream = stream;
+      attachLocalPreview(stream);
+      return stream;
+    } catch (_) {
+      // Permissions denied / no devices. Try audio-only fallback.
+      if (constraints && constraints.video) {
+        try {
+          const audioOnly = await navigator.mediaDevices.getUserMedia(
+            { audio: true },
+          );
+          media.localStream = audioOnly;
+          // No video preview to show — but the call can still
+          // proceed with voice.
+          return audioOnly;
+        } catch (_) { /* fall through to silent */ }
+      }
+      return null;
+    }
+  }
+
+  function attachLocalPreview(stream) {
+    const v = $$("#call-local-video");
+    if (!v) return;
+    v.srcObject = stream;
+    // Only show the preview pip if we actually have video.
+    const hasVideo = stream.getVideoTracks().length > 0;
+    v.classList.toggle("show", hasVideo);
+  }
+
+  function attachRemoteStream(stream) {
+    media.remoteStream = stream;
+    const v = $$("#call-remote-video");
+    if (!v) return;
+    v.srcObject = stream;
+    const hasVideo = stream.getVideoTracks().length > 0;
+    v.classList.toggle("show", hasVideo);
+    const surface = $$("#call-active-surface");
+    if (surface) surface.classList.toggle("has-remote-video", hasVideo);
+  }
+
+  function stopAllMedia() {
+    if (media.localStream) {
+      media.localStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+      media.localStream = null;
+    }
+    if (media.remoteStream) {
+      // Don't stop tracks (peer owns them), just detach.
+      media.remoteStream = null;
+    }
+    const localV = $$("#call-local-video");
+    if (localV) {
+      localV.srcObject = null;
+      localV.classList.remove("show");
+    }
+    const remoteV = $$("#call-remote-video");
+    if (remoteV) {
+      remoteV.srcObject = null;
+      remoteV.classList.remove("show");
+    }
+    const surface = $$("#call-active-surface");
+    if (surface) surface.classList.remove("has-remote-video");
+    if (media.pc) {
+      try { media.pc.close(); } catch (_) {}
+      media.pc = null;
+    }
+    media.muted = false;
+    media.cameraOff = false;
+    syncMuteCameraButtons();
+  }
+
+  function setupRtcPeerConnection() {
+    // Stub — wired to real signaling in the next push. The
+    // RTCPeerConnection here is what the BROWSER-as-peer flow uses
+    // (peer_rtc.py on the daemon side already handles SDP exchange).
+    // For Tier α we surface the API; the actual SDP transport hooks
+    // are the same envelope path that already carries DataChannel
+    // offers.
+    if (!window.RTCPeerConnection) return null;
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
+    pc.ontrack = (ev) => {
+      // First track arrival creates the remote stream. Subsequent
+      // tracks join the same stream.
+      let stream = media.remoteStream;
+      if (!stream || (ev.streams && ev.streams[0] && stream !== ev.streams[0])) {
+        stream = (ev.streams && ev.streams[0]) || new MediaStream();
+        attachRemoteStream(stream);
+      }
+      // Some browsers don't deliver via ev.streams — attach the track.
+      try { stream.addTrack(ev.track); } catch (_) {}
+    };
+    pc.oniceconnectionstatechange = () => {
+      // The Immune System reads connection state via vitals; the
+      // browser emits a metrics ping to the daemon over the existing
+      // events WebSocket. (Hook reserved for the next push — placeholder
+      // here so the FSM doesn't have to be modified later.)
+    };
+    media.pc = pc;
+    return pc;
+  }
+
+  function syncMuteCameraButtons() {
+    const muteBtn = $$("#btn-call-mute");
+    if (muteBtn) {
+      muteBtn.setAttribute("aria-pressed", String(media.muted));
+      muteBtn.textContent = media.muted ? "Unmute" : "Mute";
+    }
+    const camBtn = $$("#btn-call-camera");
+    if (camBtn) {
+      camBtn.setAttribute("aria-pressed", String(media.cameraOff));
+      camBtn.textContent = media.cameraOff ? "Camera on" : "Camera";
+    }
+  }
+
+  // ── Public entry: a contact "Call" button calls this. ──
+  window.startLivingPresenceCall = async function (peerMasterVkHex, peerLabel) {
+    const result = await callApiPost({
+      action: "initiate",
+      peer_master_vk_hex: peerMasterVkHex,
+    });
+    if (!result.ok) {
+      if (typeof toast === "function") toast(result.user_message, "warn");
+      return;
+    }
+    callUI.activeCallId = result.call_id;
+    callUI.activeCallPeer = peerLabel || peerMasterVkHex.slice(0, 8);
+    showOutgoingOverlay(callUI.activeCallPeer);
+    // Tier α: pre-warm local media so the camera+mic are ready
+    // by the time the peer accepts. If permissions are denied,
+    // the call still proceeds (text/voice-note fallback).
+    setupRtcPeerConnection();
+    const stream = await startLocalMedia({ audio: true, video: true });
+    if (stream && media.pc) {
+      stream.getTracks().forEach((t) => {
+        try { media.pc.addTrack(t, stream); } catch (_) {}
+      });
+    }
+  };
+
+  function showOutgoingOverlay(peerLabel) {
+    const peer = $$("#call-outgoing-peer");
+    if (peer) peer.textContent = peerLabel;
+    const overlay = $$("#call-outgoing-overlay");
+    if (overlay) overlay.classList.add("show");
+  }
+  function hideOutgoingOverlay() {
+    const overlay = $$("#call-outgoing-overlay");
+    if (overlay) overlay.classList.remove("show");
+  }
+  function showIncomingRing(peerLabel) {
+    const peer = $$("#call-incoming-peer");
+    if (peer) peer.textContent = peerLabel;
+    const overlay = $$("#call-incoming-overlay");
+    if (overlay) overlay.classList.add("show");
+  }
+  function hideIncomingRing() {
+    const overlay = $$("#call-incoming-overlay");
+    if (overlay) overlay.classList.remove("show");
+  }
+  function showActiveSurface(peerLabel, rungLabel) {
+    const name = $$("#call-active-name");
+    const rung = $$("#call-active-rung");
+    if (name) name.textContent = peerLabel;
+    if (rung) rung.textContent = rungLabel || "";
+    const surface = $$("#call-active-surface");
+    if (surface) surface.classList.add("show");
+  }
+  function hideActiveSurface() {
+    const surface = $$("#call-active-surface");
+    if (surface) surface.classList.remove("show");
+    const badge = $$("#call-recording-badge");
+    if (badge) badge.classList.remove("show");
+  }
+  function showRecordingBadge() {
+    const badge = $$("#call-recording-badge");
+    if (badge) badge.classList.add("show");
+  }
+  function hideRecordingBadge() {
+    const badge = $$("#call-recording-badge");
+    if (badge) badge.classList.remove("show");
+  }
+
+  // ── Button handlers ──
+  const cancelBtn = $$("#btn-call-cancel");
+  if (cancelBtn) cancelBtn.addEventListener("click", async () => {
+    if (!callUI.activeCallId) return;
+    await callApiPost({ action: "hangup", call_id: callUI.activeCallId });
+    hideOutgoingOverlay();
+    callUI.activeCallId = null;
+  });
+  const declineBtn = $$("#btn-call-decline");
+  if (declineBtn) declineBtn.addEventListener("click", async () => {
+    if (!callUI.inboundCallId) return;
+    await callApiPost({ action: "decline", call_id: callUI.inboundCallId });
+    hideIncomingRing();
+    callUI.inboundCallId = null;
+  });
+  const acceptBtn = $$("#btn-call-accept");
+  if (acceptBtn) acceptBtn.addEventListener("click", async () => {
+    if (!callUI.inboundCallId) return;
+    const result = await callApiPost({
+      action: "accept", call_id: callUI.inboundCallId,
+    });
+    hideIncomingRing();
+    if (result.ok) {
+      callUI.activeCallId = callUI.inboundCallId;
+      callUI.activeCallPeer = callUI.inboundCallPeer;
+      showActiveSurface(callUI.activeCallPeer, "");
+      // Tier α: bring up local media on accept.
+      setupRtcPeerConnection();
+      const stream = await startLocalMedia({ audio: true, video: true });
+      if (stream && media.pc) {
+        stream.getTracks().forEach((t) => {
+          try { media.pc.addTrack(t, stream); } catch (_) {}
+        });
+      }
+    }
+    callUI.inboundCallId = null;
+  });
+  const hangupBtn = $$("#btn-call-hangup");
+  if (hangupBtn) hangupBtn.addEventListener("click", async () => {
+    if (!callUI.activeCallId) return;
+    await callApiPost({ action: "hangup", call_id: callUI.activeCallId });
+    hideActiveSurface();
+    stopAllMedia();
+    callUI.activeCallId = null;
+  });
+  const recordBtn = $$("#btn-call-record");
+  if (recordBtn) recordBtn.addEventListener("click", async () => {
+    if (!callUI.activeCallId) return;
+    await callApiPost({
+      action: "request_recording", call_id: callUI.activeCallId,
+    });
+  });
+  // Tier α mute + camera-toggle. The user controls media; the
+  // toggles flip MediaStreamTrack.enabled — track stays connected
+  // (so DTLS-SRTP doesn't churn) but silently emits silence/black.
+  const muteBtn = $$("#btn-call-mute");
+  if (muteBtn) muteBtn.addEventListener("click", () => {
+    if (!media.localStream) return;
+    media.muted = !media.muted;
+    media.localStream.getAudioTracks().forEach((t) => { t.enabled = !media.muted; });
+    syncMuteCameraButtons();
+  });
+  const cameraBtn = $$("#btn-call-camera");
+  if (cameraBtn) cameraBtn.addEventListener("click", () => {
+    if (!media.localStream) return;
+    media.cameraOff = !media.cameraOff;
+    media.localStream.getVideoTracks().forEach((t) => { t.enabled = !media.cameraOff; });
+    syncMuteCameraButtons();
+  });
+
+  // ── WebSocket call_event router ──
+  // The daemon broadcasts call_event tail events; we listen for the
+  // call_event type on the existing WebSocket. The handler in
+  // index.html's main ws.onmessage forwards them here.
+  window.handleLivingPresenceCallEvent = function (m) {
+    if (!m || m.type !== "call_event") return false;
+    const tail = m.tail_kind;
+    const callId = m.call_id;
+    if (tail === "show_ring") {
+      callUI.inboundCallId = callId;
+      callUI.inboundCallPeer = (m.peer_label || callId.slice(0, 8));
+      showIncomingRing(callUI.inboundCallPeer);
+      return true;
+    }
+    if (tail === "phase_changed") {
+      const phase = m.new_phase;
+      if (phase === "active") {
+        hideOutgoingOverlay();
+        hideIncomingRing();
+        if (!callUI.activeCallId) {
+          callUI.activeCallId = callId;
+          callUI.activeCallPeer = callId.slice(0, 8);
+        }
+        showActiveSurface(callUI.activeCallPeer, "");
+      } else if (phase === "ended" || phase === "async_capture") {
+        hideOutgoingOverlay();
+        hideIncomingRing();
+        hideActiveSurface();
+        stopAllMedia();
+        if (callUI.activeCallId === callId) callUI.activeCallId = null;
+      }
+      return true;
+    }
+    if (tail === "recording_state_changed") {
+      // recording_state: int (matches RecordingState enum).
+      // 3 = RECORDING_MUTUAL. Any other = NOT_RECORDING-ish.
+      if (m.recording_state === 3) showRecordingBadge();
+      else hideRecordingBadge();
+      return true;
+    }
+    if (tail === "resume_offer_available") {
+      // The chat surface will render a resume affordance — no
+      // overlay needed here (the call is no longer live).
+      if (typeof toast === "function") {
+        toast("Voice note saved. You can pick up where you left off.", "info", 4000);
+      }
+      return true;
+    }
+    return false;
+  };
+})();
+</script>
+
 </body>
 </html>

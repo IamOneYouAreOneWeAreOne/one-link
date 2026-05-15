@@ -50,6 +50,15 @@ BLOOM_INIT_V1 = "bloom_init_v1"
 # of WebRTC/DTLS-SRTP. Browser-as-peer paths stay on WebRTC; v0.20.x
 # daemons interop on WebRTC because they don't advertise this cap.
 QUIC_TRANSPORT_V1 = "quic_transport_v1"
+# Living Presence Tier α-pre (LIVING_PRESENCE_ARCHITECTURE.md §4.5):
+# when both peers advertise this, the sender attaches a signed
+# FrameProvenance tag to every file (and later, every media frame).
+# The receiver verifies against the sender's pinned master_vk and
+# surfaces the Reality dot in the UI. Older peers ignore the unknown
+# FILE_PROVENANCE wire type (graceful degradation per wire.py:18).
+# The wiring module lives in one_link.provenance_wiring; the
+# cryptography in one_link.frame_provenance.
+FRAME_PROVENANCE_V1 = "frame_provenance_v1"
 
 LOCAL_CAPABILITIES = (
     CHAT,
@@ -70,6 +79,7 @@ LOCAL_CAPABILITIES = (
     NATIVE_TRANSFER_V1,
     BLOOM_INIT_V1,
     QUIC_TRANSPORT_V1,
+    FRAME_PROVENANCE_V1,
 )
 
 # v0.7.1 deny-by-default capability split. The audit doc
@@ -104,6 +114,11 @@ TRANSPORT_LAYER_CAPS = (
     NATIVE_TRANSFER_V1,
     BLOOM_INIT_V1,
     QUIC_TRANSPORT_V1,
+    # FRAME_PROVENANCE_V1 is automatic safety metadata. It does not
+    # grant a peer any new access; it attaches verifiable provenance
+    # to what's already being sent. No user prompt; always on when
+    # both peers support it.
+    FRAME_PROVENANCE_V1,
 )
 
 

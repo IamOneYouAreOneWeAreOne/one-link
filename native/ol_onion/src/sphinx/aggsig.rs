@@ -412,9 +412,14 @@ pub fn bn_aggregate(
             ));
         }
     }
-    // Collect sorted pubkeys for the participant-list digest.
+    // Collect sorted pubkeys for the participant-list digest, and
+    // co-indexed per-signer message hashes (audit L4 May 2026 — bind
+    // msg_i into L so a swap of (vk_i, msg_i) pairs breaks the BN
+    // tags as well as the c_i challenges).
     let sorted_pubkeys: Vec<[u8; 32]> = indices.iter().map(|&i| entries[i].0 .0).collect();
-    let participant_l = participant_list_digest(&sorted_pubkeys);
+    let sorted_msg_hashes: Vec<[u8; 32]> =
+        indices.iter().map(|&i| msg_digest(entries[i].1)).collect();
+    let participant_l = participant_list_digest(&sorted_pubkeys, &sorted_msg_hashes);
 
     let mut accum_s = Scalar::ZERO;
     let mut r_per_signer: Vec<[u8; 32]> = Vec::with_capacity(n);
@@ -484,7 +489,12 @@ pub fn bn_verify(
         }
     }
     let sorted_pubkeys: Vec<[u8; 32]> = indices.iter().map(|&i| entries[i].0 .0).collect();
-    let participant_l = participant_list_digest(&sorted_pubkeys);
+    // Audit L4 May 2026: verifier mirrors aggregator's per-signer
+    // msg-hash mixin into L. Must use the same sort + the same
+    // domain-tagged msg_digest as bn_aggregate.
+    let sorted_msg_hashes: Vec<[u8; 32]> =
+        indices.iter().map(|&i| msg_digest(entries[i].1)).collect();
+    let participant_l = participant_list_digest(&sorted_pubkeys, &sorted_msg_hashes);
 
     // Decode the s-aggregate. Reject non-canonical scalars (audit
     // defense-in-depth — even though aggregator wrote canonical
@@ -560,13 +570,44 @@ fn deterministic_nonce(sk: &Scalar, vk_bytes: &[u8; 32], msg: &[u8]) -> Scalar {
     s
 }
 
-fn participant_list_digest(pubkeys: &[[u8; 32]]) -> [u8; 32] {
+fn participant_list_digest(
+    pubkeys: &[[u8; 32]],
+    msg_hashes: &[[u8; 32]],
+) -> [u8; 32] {
+    // Audit L4 May 2026 — additionally bind per-entry message
+    // digests into the participant list. Without this, two BN
+    // aggregates with the SAME signer set but DIFFERENT per-signer
+    // messages share the same `a_i = H(pk_i || L)` tags; the
+    // sig-binding via `c_i = challenge_hash(R_i, vk_i, msg_i)`
+    // still rejects a swap, but binding messages into L is
+    // defense-in-depth (a future protocol mistake that loses
+    // `msg_i` in `c_i` derivation still gets caught).
+    //
+    // Domain bumped `-v1` -> `-v2`. BN multi-sig only shipped
+    // working `bn_verify` in e5f58f7 (May 14 2026) so no aggregates
+    // have made it past the dev tree under `-v1`.
+    debug_assert_eq!(
+        pubkeys.len(),
+        msg_hashes.len(),
+        "participant_list_digest invariant: pubkeys and msg_hashes co-indexed",
+    );
     let mut h = Hasher::new();
-    h.update(b"OL-sphinx-aggsig-participant-list-v1");
+    h.update(b"OL-sphinx-aggsig-participant-list-v2");
     h.update(&u32::try_from(pubkeys.len()).unwrap_or(u32::MAX).to_be_bytes());
-    for pk in pubkeys {
+    for (pk, mh) in pubkeys.iter().zip(msg_hashes.iter()) {
         h.update(pk);
+        h.update(mh);
     }
+    *h.finalize().as_bytes()
+}
+
+fn msg_digest(msg: &[u8]) -> [u8; 32] {
+    // Domain-tagged BLAKE3 digest of a single per-entry message. Used
+    // to bind per-signer messages into participant_list_digest (L4).
+    let mut h = Hasher::new();
+    h.update(b"OL-sphinx-aggsig-msg-digest-v1");
+    h.update(&u32::try_from(msg.len()).unwrap_or(u32::MAX).to_be_bytes());
+    h.update(msg);
     *h.finalize().as_bytes()
 }
 

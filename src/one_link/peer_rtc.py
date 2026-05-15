@@ -322,6 +322,16 @@ class BrowserPeerManager:
         # to disk is wired in v0.20.2 — for v0.20.0 we keep in-memory
         # only.
         self._paired_pubkeys: set[str] = set()
+        # Audit C1 defense-in-depth: track the DTLS-SRTP fingerprint
+        # extracted from each peer's most-recent SDP offer. The
+        # envelope signature already binds the SDP to the peer's
+        # Ed25519 pubkey, so any silent change here would itself
+        # carry the same Ed25519 sig. The check is belt-and-suspenders
+        # — log + record on first observation; warn (but don't refuse)
+        # on subsequent changes since legitimate cert rotations DO
+        # happen on browser restart. Hard rejection lives upstream
+        # at the envelope-signature + pubkey-roster gates.
+        self._dtls_fingerprints: dict[str, str] = {}
 
     # ── pairing tokens ──────────────────────────────────────────────
 
@@ -1008,3 +1018,46 @@ class BrowserPeerManager:
             if expected != fingerprint:
                 raise ValueError("fingerprint does not match pubkey (sha256)")
         return pubkey, fingerprint
+
+    # ── DTLS fingerprint cross-check (audit C1 defense-in-depth) ──
+
+    def record_dtls_fingerprint(
+        self,
+        *,
+        pubkey: bytes,
+        sdp: str,
+    ) -> tuple[str, bool]:
+        """Extract the SDP's DTLS-SRTP fingerprint, store it against
+        this peer's Ed25519 pubkey, and check it against the
+        previously-observed value.
+
+        Returns ``(current_dtls_fp, matches_or_first_seen)``.
+        - ``("", True)`` if the SDP has no a=fingerprint line (no
+          cross-check possible).
+        - ``(fp, True)`` on first observation or matching observation.
+        - ``(fp, False)`` if the fingerprint changed — recorded as a
+          structured WARNING in the daemon log. Not a hard reject;
+          the envelope-signature path already does that.
+        """
+        dtls_fp = _extract_dtls_fingerprint(sdp)
+        if not dtls_fp:
+            return "", True
+        pubkey_hex = pubkey.hex()
+        previous = self._dtls_fingerprints.get(pubkey_hex)
+        if previous is not None and previous != dtls_fp:
+            log.warning(
+                "peer-rtc: DTLS fingerprint changed for browser peer "
+                "(pubkey=%s...): %s -> %s",
+                pubkey_hex[:16],
+                previous[:24] + "...",
+                dtls_fp[:24] + "...",
+            )
+            self._dtls_fingerprints[pubkey_hex] = dtls_fp
+            return dtls_fp, False
+        self._dtls_fingerprints[pubkey_hex] = dtls_fp
+        return dtls_fp, True
+
+    def get_recorded_dtls_fingerprint(self, pubkey: bytes) -> Optional[str]:
+        """For tests + diagnostics: read the recorded DTLS
+        fingerprint for a pubkey (or None if never observed)."""
+        return self._dtls_fingerprints.get(pubkey.hex())

@@ -1300,6 +1300,16 @@ class UIServer:
         r.add_get("/api/connect-info/qr.svg", self._guarded(self.api_connect_info_qr))
         r.add_get("/api/me", self._guarded(self.api_me))
         r.add_get("/api/status", self._guarded(self.api_status))
+        # ── Living Presence Tier α-pre — Call API ────────────────
+        # Browser hits these to drive the per-call state machines.
+        # POST /api/v1/calls dispatches an action (initiate / accept /
+        # decline / hangup / resume / recording start-approve-decline-
+        # stop). GET /api/v1/calls lists active calls; GET .../{id}
+        # returns one call's snapshot. See call_api.py for action
+        # vocabulary + response shape.
+        r.add_post("/api/v1/calls", self._guarded(self.api_call_action))
+        r.add_get("/api/v1/calls", self._guarded(self.api_calls_list))
+        r.add_get("/api/v1/calls/{call_id}", self._guarded(self.api_call_state))
         # Row 10 — peer-handshake attestation API.
         r.add_post("/api/v1/attestation/challenge", self._guarded(self.api_attestation_challenge))
         r.add_post("/api/v1/attestation/issue", self._guarded(self.api_attestation_issue))
@@ -2087,6 +2097,16 @@ class UIServer:
                         await _send_error("bad_offer", str(e))
                         await ws.close(code=4001, message=b"bad offer")
                         return ws
+                    # Audit C1 defense-in-depth: record + cross-check
+                    # the DTLS-SRTP fingerprint inside the SDP against
+                    # the per-pubkey history. Doesn't reject — the
+                    # envelope-signature path already does — but logs a
+                    # structured WARN if it changed.
+                    sdp_for_check = envelope.get("sdp", "")
+                    if isinstance(sdp_for_check, str):
+                        self.peer_rtc.record_dtls_fingerprint(
+                            pubkey=pubkey, sdp=sdp_for_check,
+                        )
                     # Trust check: pair_token OR known pubkey.
                     pair_token = envelope.get("pair_token") or ""
                     redeemed = self.peer_rtc.redeem_pairing_token(pair_token) if pair_token else None
@@ -2355,6 +2375,104 @@ class UIServer:
         # frames.
 
     # ─── /api/me ──────────────────────────────────────────────────────
+    # ── Living Presence Call API handlers ────────────────────
+
+    def _call_api(self):
+        """Lazy CallAPI accessor. Constructed on first use so the
+        daemon's _call_registry is guaranteed to exist (it's
+        initialised in Daemon.__init__)."""
+        from one_link.call_api import CallAPI
+        api = getattr(self, "_lp_call_api_cached", None)
+        if api is None:
+            api = CallAPI(
+                registry=self.daemon._call_registry,
+                local_master_vk_hex=self.daemon.me.fingerprint,
+            )
+            self._lp_call_api_cached = api
+        return api
+
+    async def api_call_action(self, request: web.Request) -> web.Response:
+        """POST /api/v1/calls — dispatch one action.
+        Body shape: ``{"action": "initiate", "peer_master_vk_hex": ...,
+        "negotiated_capabilities": [...]}`` or ``{"action": "hangup",
+        "call_id": "..."}``. Returns the structured CallAPI response."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "user_message": "Request shape was unexpected.",
+                },
+                status=400,
+            )
+        api = self._call_api()
+        result = api.handle_json(body)
+        # Translate the result back to JSON. We omit the binary-ish
+        # tail-events (those flow via the WebSocket separately) so
+        # this response is small + UI-friendly.
+        return web.json_response({
+            "ok": result.ok,
+            "call_id": result.call_id,
+            "phase": result.phase,
+            "consent_phase": result.consent_phase,
+            "user_message": result.user_message,
+            "call_complete": result.call_complete,
+            "outbound": [
+                {"type": m.type, "peer": m.peer_master_vk_hex}
+                for m in result.outbound
+            ],
+        })
+
+    async def api_calls_list(self, request: web.Request) -> web.Response:
+        """GET /api/v1/calls — list active call snapshots."""
+        registry = self.daemon._call_registry
+        out = []
+        for cid in registry.active_call_ids():
+            mgr = registry.get(cid)
+            if mgr is None:
+                continue
+            out.append({
+                "call_id": cid,
+                "phase": mgr.phase.name.lower(),
+                "consent_phase": mgr.consent_phase.name.lower(),
+                "is_active": mgr.is_active,
+                "is_capturing": mgr.is_capturing,
+                "is_resumable": mgr.is_resumable,
+                "is_complete": mgr.is_complete,
+            })
+        return web.json_response({"calls": out})
+
+    async def api_call_state(self, request: web.Request) -> web.Response:
+        """GET /api/v1/calls/{call_id} — one call's snapshot."""
+        call_id = request.match_info.get("call_id", "")
+        mgr = self.daemon._call_registry.get(call_id)
+        if mgr is None:
+            # Doctrine §3.2.f: no "not found" error code. Plain
+            # language instead.
+            return web.json_response(
+                {
+                    "ok": False,
+                    "user_message": "This call is no longer active.",
+                },
+                status=404,
+            )
+        s = mgr.session_snapshot()
+        rec_value = s.recording_state.value if s.recording_state.value is not None else 0
+        return web.json_response({
+            "ok": True,
+            "call_id": call_id,
+            "phase": mgr.phase.name.lower(),
+            "consent_phase": mgr.consent_phase.name.lower(),
+            "intensity": s.current_intensity.name.lower(),
+            "current_rung": s.current_rung_value.name.lower(),
+            "recording_state": int(rec_value),
+            "is_active": mgr.is_active,
+            "is_capturing": mgr.is_capturing,
+            "is_resumable": mgr.is_resumable,
+            "is_complete": mgr.is_complete,
+        })
+
     async def api_me(self, request: web.Request) -> web.Response:
         me = self.daemon.me
         display_name = None
