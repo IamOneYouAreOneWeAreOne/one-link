@@ -7,6 +7,13 @@
 //! Gate ladder: CI default 1M iters (matches F1.x bar); nightly 5M
 //! via `ONE_LINK_F1_GATE=1`.
 
+// Audit M4: these property tests intentionally exercise the
+// deprecated plaintext-prefix detector to verify FAST-PATH semantics
+// (it must never panic, and prefix-equality must be consistent).
+// Cover-detection SECURITY is exercised separately via
+// is_cover_payload_authenticated in unit/integration tests.
+#![allow(deprecated)]
+
 use proptest::prelude::*;
 
 use ol_onion::sphinx::cover::{

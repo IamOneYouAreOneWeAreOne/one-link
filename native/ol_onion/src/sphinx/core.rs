@@ -156,6 +156,17 @@ pub enum SphinxPeelOutcome {
     },
     /// This relay is the destination — deliver the payload.
     Deliver { payload: Vec<u8> },
+    /// Audit M4: authenticated cover-traffic packet. The destination's
+    /// cryptographic check matched the per-circuit cover-trailer MAC,
+    /// so this is a Row-6 cover packet — drop silently without
+    /// surfacing the payload to the application.
+    ///
+    /// Replaces the pre-M4 plaintext-sentinel detection, which was
+    /// forgeable: a network attacker could bit-flip the first 8 bytes
+    /// of any real payload to look like the sentinel and cause the
+    /// destination to drop a legitimate packet. The MAC binding makes
+    /// the cover claim unforgeable without the per-hop shared key.
+    Cover,
 }
 
 /// Build a Sphinx Coherence onion packet for delivery along the
@@ -204,8 +215,9 @@ pub fn build_sphinx_onion<R: RngCore + CryptoRng>(
             return Err(OnionError::SmallOrderPubkey);
         }
         let keys = derive_hop_keys(&shared_bytes, &alpha_bytes);
-        // Compute blinding scalar for next hop.
-        let b_i = Scalar::from_bytes_mod_order(keys.blinding_seed);
+        // Compute blinding scalar for next hop. Audit L1 May 2026:
+        // wide reduction from 64-byte seed → bias-free scalar.
+        let b_i = Scalar::from_bytes_mod_order_wide(&keys.blinding_seed);
         hop_keys.push(keys);
         // Update for next iter.
         cumulative_blind *= b_i;
@@ -266,7 +278,80 @@ pub fn build_sphinx_onion<R: RngCore + CryptoRng>(
     Ok(SphinxPacket { bytes })
 }
 
+/// Walk the Sphinx blinding chain to compute the FINAL-HOP shared
+/// secret without building the full packet.
+///
+/// Used by the cover-traffic builder (audit M4) to derive the
+/// destination's per-circuit shared key, which seeds the
+/// authenticated cover trailer that replaces the pre-M4 plaintext
+/// sentinel. Returning only the final-hop key (not the intermediates)
+/// keeps callers from accidentally accessing a relay's session
+/// material — they only see what the destination would derive itself.
+pub fn compute_final_hop_shared_key(
+    sender_eph_sk: &Scalar,
+    circuit: &[SphinxHop],
+) -> OnionResult<[u8; 32]> {
+    if circuit.is_empty() {
+        return Err(OnionError::EmptyCircuit);
+    }
+    if circuit.len() > MAX_HOPS {
+        return Err(OnionError::TooManyHops {
+            got: circuit.len(),
+            max: MAX_HOPS,
+        });
+    }
+    let mut cumulative_blind = Scalar::ONE;
+    let mut alpha_i = sender_eph_sk * RISTRETTO_BASEPOINT_TABLE;
+    let last_idx = circuit.len() - 1;
+    for (idx, hop) in circuit.iter().enumerate() {
+        let alpha_bytes = alpha_i.compress().to_bytes();
+        let shared_point = (sender_eph_sk * cumulative_blind) * hop.static_pk;
+        let shared_bytes = shared_point.compress().to_bytes();
+        if shared_bytes.iter().all(|&b| b == 0) {
+            return Err(OnionError::SmallOrderPubkey);
+        }
+        if idx == last_idx {
+            return Ok(shared_bytes);
+        }
+        let keys = derive_hop_keys(&shared_bytes, &alpha_bytes);
+        // Wide reduction (audit L1) — must match build_sphinx_onion.
+        let b_i = Scalar::from_bytes_mod_order_wide(&keys.blinding_seed);
+        cumulative_blind *= b_i;
+        alpha_i = b_i * alpha_i;
+    }
+    // Unreachable: empty-circuit caught above; last_idx always reached.
+    Err(OnionError::Internal("compute_final_hop_shared_key: chain walk did not terminate"))
+}
+
 /// Peel one layer of a Sphinx Coherence packet at this relay.
+///
+/// # Replay defense (audit L2 May 2026)
+///
+/// **This function does NOT provide replay protection by itself.**
+/// A passive observer who captured an old packet can re-inject it
+/// here, and `peel_sphinx_layer` will happily process it again and
+/// produce the same `SphinxPeelOutcome::Forward` (or `Deliver`)
+/// result. This is standard Sphinx behavior — replay detection is
+/// the daemon's responsibility, not the packet primitive's.
+///
+/// Daemons that route this primitive MUST maintain a recently-seen
+/// bloom filter (or set) keyed on the per-packet `shared_secret`
+/// digest (or equivalently the encrypted MAC field) and drop any
+/// packet whose digest is already in the filter. Tor and Loopix
+/// both apply this same defense at the relay level.
+///
+/// A practical recipe:
+/// 1. Compute `tag = BLAKE3("ol-sphinx-replay-tag-v1" || shared_secret)`
+///    after the relay decapsulates `alpha`.
+/// 2. Check `tag` against a circular bloom filter sized for the
+///    relay's expected packets-per-window (e.g. 1M slots, 1% FPR,
+///    rotate every 10 min).
+/// 3. If tag is present → drop the packet, return without
+///    forwarding. Otherwise → insert `tag` and proceed.
+///
+/// The relay's drop on replay is silent — replaying a known-good
+/// packet does not yield any usable oracle signal because the bloom
+/// check happens before any wire-visible side-effect.
 pub fn peel_sphinx_layer(
     relay_sk: &Scalar,
     packet: &SphinxPacket,
@@ -302,10 +387,25 @@ pub fn peel_sphinx_layer(
             if plen > SPHINX_MAX_USER_PAYLOAD {
                 return Err(OnionError::Internal("destination payload length oversize"));
             }
-            let mut user_payload = vec![0u8; plen];
-            user_payload.copy_from_slice(&payload[2..2 + plen]);
+            let user_payload = &payload[2..2 + plen];
+            // Audit M4: authenticated cover-traffic detection. The
+            // sender, knowing its own ephemeral key and this hop's
+            // static key, can derive the same shared_bytes we just
+            // derived above — and only the sender can produce the
+            // matching MAC trailer. A network attacker bit-flipping
+            // the payload to forge cover status can't compute a valid
+            // tag without the shared key, so a forged "cover" status
+            // is rejected at probability 1 - 2^-128.
+            if crate::sphinx::cover::is_cover_payload_authenticated(
+                &shared_bytes,
+                user_payload,
+            ) {
+                return Ok(SphinxPeelOutcome::Cover);
+            }
+            let mut user_payload_owned = vec![0u8; plen];
+            user_payload_owned.copy_from_slice(user_payload);
             Ok(SphinxPeelOutcome::Deliver {
-                payload: user_payload,
+                payload: user_payload_owned,
             })
         }
         HeaderPeelOutcome::Forward {
@@ -313,8 +413,8 @@ pub fn peel_sphinx_layer(
             next_header,
             next_mac,
         } => {
-            // Blind alpha for the next hop.
-            let b_scalar = Scalar::from_bytes_mod_order(keys.blinding_seed);
+            // Blind alpha for the next hop. Audit L1: wide reduction.
+            let b_scalar = Scalar::from_bytes_mod_order_wide(&keys.blinding_seed);
             let next_alpha = b_scalar * alpha_point;
             let next_alpha_bytes = next_alpha.compress().to_bytes();
 
@@ -449,6 +549,9 @@ mod tests {
                     assert_eq!(payload, b"max-hops");
                     assert_eq!(i, pairs.len() - 1);
                     return;
+                }
+                SphinxPeelOutcome::Cover => {
+                    panic!("real packet mis-classified as cover");
                 }
             }
         }

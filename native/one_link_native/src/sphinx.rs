@@ -26,10 +26,16 @@ use ol_onion::sphinx::core::{
     peel_sphinx_layer as core_peel, SphinxHop, SphinxPacket, SphinxPeelOutcome,
     SPHINX_MAX_USER_PAYLOAD, SPHINX_PACKET_LEN,
 };
+// Audit M4: `is_cover_payload` (plaintext-prefix check) is deprecated
+// in favor of the authenticated trailer check. We keep exporting it
+// to Python as a fast-path / backwards-compat probe but the
+// authenticated variant is the production-correct API.
+#[allow(deprecated)]
+use ol_onion::sphinx::cover::is_cover_payload as cover_is_sentinel;
 use ol_onion::sphinx::cover::{
-    build_cover_packet as cover_build, is_cover_payload as cover_is_sentinel, CoverScheduler,
-    RateEqualizer, COVER_DEFAULT_RATE_HZ, COVER_PAYLOAD_MIN, COVER_SENTINEL,
-    RATE_EQ_DEFAULT_HALF_LIFE_SEC,
+    build_cover_packet as cover_build, is_cover_payload_authenticated as cover_is_auth,
+    CoverScheduler, RateEqualizer, COVER_DEFAULT_RATE_HZ, COVER_PAYLOAD_MIN, COVER_SENTINEL,
+    COVER_TRAILER_LEN, RATE_EQ_DEFAULT_HALF_LIFE_SEC,
 };
 use ol_onion::sphinx::pq::{
     build_pq_sphinx_onion as pq_build, generate_pq_keypair as pq_keypair,
@@ -187,9 +193,14 @@ fn build_sphinx<'py>(
 
 /// Peel one Sphinx layer.
 ///
-/// Returns `("forward", next_hop_id_32, inner_packet_bytes)` if the
-/// caller should forward, or `("deliver", b"", payload)` if this
-/// relay is the destination.
+/// Returns:
+///   - `("forward", next_hop_id_32, inner_packet_bytes)` — forward
+///     to next relay.
+///   - `("deliver", b"", payload)` — this relay is the destination;
+///     deliver the payload to the app.
+///   - `("cover", b"", b"")` — audit M4: this relay is the
+///     destination AND the payload's authenticated cover trailer
+///     verified. Drop silently without surfacing to the app.
 #[pyfunction]
 fn peel_sphinx<'py>(
     py: Python<'py>,
@@ -212,6 +223,11 @@ fn peel_sphinx<'py>(
             "deliver".to_string(),
             PyBytes::new_bound(py, &[]),
             PyBytes::new_bound(py, &payload),
+        )),
+        SphinxPeelOutcome::Cover => Ok((
+            "cover".to_string(),
+            PyBytes::new_bound(py, &[]),
+            PyBytes::new_bound(py, &[]),
         )),
     }
 }
@@ -328,12 +344,40 @@ fn build_cover_packet<'py>(
     Ok(PyBytes::new_bound(py, packet.as_bytes()))
 }
 
-/// True iff `payload` carries the cover-packet sentinel prefix.
-/// Destinations call this on every delivered Sphinx payload; cover
-/// payloads are silently dropped, real ones forwarded to the app.
+/// **Deprecated (audit M4):** plaintext-prefix sentinel check. A
+/// network attacker who flips the first 8 bytes of any real Sphinx
+/// payload can spoof cover status. Production receive paths use the
+/// authenticated `peel_sphinx` ("cover" return code) instead, which
+/// verifies a MAC bound to the per-circuit shared key.
+///
+/// Retained as a fast-path / backwards-compat probe.
 #[pyfunction]
 fn is_cover_payload(payload: &[u8]) -> bool {
+    #[allow(deprecated)]
     cover_is_sentinel(payload)
+}
+
+/// Audit M4: authenticated cover-payload check.
+///
+/// Returns true iff `payload` (the cleartext after Sphinx peel)
+/// carries a valid MAC trailer for `shared_key`. The sender is
+/// expected to have derived the trailer with the same shared key
+/// the destination computes locally during `peel_sphinx` —
+/// unforgeable without that key.
+///
+/// Daemon code that bypasses `peel_sphinx`'s built-in "cover"
+/// return path can use this to verify cover status directly.
+#[pyfunction]
+fn is_cover_payload_authenticated(shared_key: &[u8], payload: &[u8]) -> PyResult<bool> {
+    if shared_key.len() != 32 {
+        return Err(PyValueError::new_err(format!(
+            "shared_key must be 32 bytes, got {}",
+            shared_key.len()
+        )));
+    }
+    let mut k = [0u8; 32];
+    k.copy_from_slice(shared_key);
+    Ok(cover_is_auth(&k, payload))
 }
 
 /// Stateful Poisson scheduler for cover-traffic emission.
@@ -445,10 +489,12 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(peel_pq_sphinx_intermediate, m)?)?;
     m.add_function(wrap_pyfunction!(build_cover_packet, m)?)?;
     m.add_function(wrap_pyfunction!(is_cover_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(is_cover_payload_authenticated, m)?)?;
     m.add_class::<PyCoverScheduler>()?;
     m.add_class::<PyRateEqualizer>()?;
     m.add("COVER_SENTINEL", PyBytes::new_bound(_py, COVER_SENTINEL))?;
     m.add("COVER_PAYLOAD_MIN", COVER_PAYLOAD_MIN)?;
+    m.add("COVER_TRAILER_LEN", COVER_TRAILER_LEN)?;
     m.add("COVER_DEFAULT_RATE_HZ", COVER_DEFAULT_RATE_HZ)?;
     m.add("RATE_EQ_DEFAULT_HALF_LIFE_SEC", RATE_EQ_DEFAULT_HALF_LIFE_SEC)?;
     m.add("HOP_ID_LEN", HOP_ID_LEN)?;

@@ -186,6 +186,9 @@ fn kat_sphinx_three_hop_round_trip() {
                 assert_eq!(i, 2);
                 return;
             }
+            SphinxPeelOutcome::Cover => {
+                panic!("kat real payload mis-classified as cover");
+            }
         }
     }
 }

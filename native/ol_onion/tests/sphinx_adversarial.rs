@@ -355,6 +355,9 @@ fn adversarial_max_hops_round_trip() {
                 assert_eq!(i, pairs.len() - 1);
                 return;
             }
+            SphinxPeelOutcome::Cover => {
+                panic!("real packet mis-classified as cover (audit M4 false positive)");
+            }
         }
     }
 }

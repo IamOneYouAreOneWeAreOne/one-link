@@ -96,3 +96,61 @@ fn kat_scheduler_second_call_advances_counter() {
     assert_eq!(w1, EXPECTED_FIRST_8_WAITS_MS[0]);
     assert_eq!(w2, EXPECTED_FIRST_8_WAITS_MS[1]);
 }
+
+// ── Audit M4: authenticated cover-trailer KAT ──────────────────────
+
+use ol_onion::sphinx::cover::{
+    is_cover_payload_authenticated, COVER_TRAILER_LEN,
+};
+
+/// Pin the audit-M4 cover-trailer derivation.
+///
+/// Verifies that for a known (shared_key, body) pair, the
+/// `is_cover_payload_authenticated` check accepts a payload whose
+/// trailing 16 bytes are produced by the same compute-trailer
+/// routine, and rejects any single-bit perturbation of either body
+/// or trailer. This pins both the derivation function AND the
+/// constant-time-equality wiring.
+#[test]
+fn kat_m4_authenticated_trailer_round_trip() {
+    let shared_key = [0xA5u8; 32];
+    // Build a synthetic cover payload: sentinel || body || trailer.
+    let mut payload = COVER_SENTINEL.to_vec();
+    let body_bytes: Vec<u8> = (0u8..128).collect();
+    payload.extend_from_slice(&body_bytes);
+    // Compute trailer over (sentinel || body).
+    let trailer_input = payload.clone();
+    let derived =
+        blake3::derive_key("ol-sphinx-cover-trailer-v1", &shared_key);
+    let mut h = blake3::Hasher::new_keyed(&derived);
+    h.update(&trailer_input);
+    let mut tag = [0u8; COVER_TRAILER_LEN];
+    tag.copy_from_slice(&h.finalize().as_bytes()[..COVER_TRAILER_LEN]);
+    payload.extend_from_slice(&tag);
+
+    assert!(
+        is_cover_payload_authenticated(&shared_key, &payload),
+        "valid trailer rejected — derivation drift?"
+    );
+    // Bit-flip in body invalidates.
+    let mut tampered = payload.clone();
+    tampered[COVER_SENTINEL.len() + 1] ^= 0x01;
+    assert!(
+        !is_cover_payload_authenticated(&shared_key, &tampered),
+        "body bit-flip accepted as cover — MAC binding broken!"
+    );
+    // Bit-flip in trailer invalidates.
+    let last = payload.len() - 1;
+    let mut bad_tag = payload.clone();
+    bad_tag[last] ^= 0x01;
+    assert!(
+        !is_cover_payload_authenticated(&shared_key, &bad_tag),
+        "trailer bit-flip accepted — equality not constant-time-correct?"
+    );
+    // Different shared_key rejects.
+    let other_key = [0x5Au8; 32];
+    assert!(
+        !is_cover_payload_authenticated(&other_key, &payload),
+        "wrong shared_key accepted — MAC key derivation broken!"
+    );
+}

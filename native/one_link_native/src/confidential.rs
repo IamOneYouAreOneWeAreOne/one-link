@@ -414,12 +414,231 @@ fn verify(
     .map_err(map_err)
 }
 
+// ── Audit M6: Windows TPM-hardened provider pyo3 surface ───────────
+//
+// The hardened provider operates IDENTICALLY to PySoftwareProvider
+// from the daemon's perspective — same `seal_master` / `derive_child`
+// / `sealed_sign` / `verifying_key` / `attest` shape — but with
+// `tier_byte()` reporting HardwareBound (= 2) and the returned
+// attestation doc carrying a TPM-signed `platform_quote`. The peer
+// verifier uses the same `verify()` free function with
+// `min_tier_byte=2` to enforce the upgrade.
+//
+// Gated behind the `windows-tpm` Cargo feature so non-Windows hosts
+// can build the rest of `one_link_native` without pulling in the
+// Microsoft `windows` crate. A runtime caller on a wheel that wasn't
+// built with the feature gets a friendly `PyValueError` from the
+// fallback `fresh_windows_hardened_provider` stub.
+
+#[cfg(feature = "windows-tpm")]
+#[pyclass(module = "one_link_native.confidential")]
+struct PyWindowsHardenedProvider {
+    inner: ol_confidential::WindowsHardenedProvider,
+}
+
+#[cfg(feature = "windows-tpm")]
+#[pymethods]
+impl PyWindowsHardenedProvider {
+    /// Tier code. `2` = HardwareBound.
+    fn tier_byte(&self) -> u8 {
+        self.inner.tier() as u8
+    }
+
+    /// Wire tag byte. `4` = WindowsTpm.
+    fn tag_byte(&self) -> u8 {
+        self.inner.tag().as_u8()
+    }
+
+    /// Seal a 32-byte master seed. Returns `(sealed_bytes, tag_byte)`
+    /// with tag = WindowsTpm so future round-trips bind to this
+    /// provider class.
+    fn seal_master<'py>(
+        &self,
+        py: Python<'py>,
+        seed: &[u8],
+    ) -> PyResult<(Bound<'py, PyBytes>, u8)> {
+        if seed.len() != 32 {
+            return Err(PyValueError::new_err(format!(
+                "seed must be exactly 32 bytes, got {}",
+                seed.len()
+            )));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(seed);
+        let sealed_result = self.inner.seal_master(&arr);
+        arr.zeroize();
+        let sealed = sealed_result.map_err(map_err)?;
+        Ok((
+            PyBytes::new_bound(py, &sealed.bytes),
+            sealed.provider_tag.as_u8(),
+        ))
+    }
+
+    fn derive_child<'py>(
+        &self,
+        py: Python<'py>,
+        sealed_master_bytes: &[u8],
+        sealed_master_tag: u8,
+        context_tag: &[u8],
+    ) -> PyResult<(Bound<'py, PyBytes>, u8)> {
+        let tag = provider_tag_from_u8(sealed_master_tag)?;
+        let sealed_master = SealedKey {
+            provider_tag: tag,
+            bytes: sealed_master_bytes.to_vec(),
+        };
+        let child = self
+            .inner
+            .derive_child(&sealed_master, context_tag)
+            .map_err(map_err)?;
+        Ok((
+            PyBytes::new_bound(py, &child.bytes),
+            child.provider_tag.as_u8(),
+        ))
+    }
+
+    fn sealed_sign<'py>(
+        &self,
+        py: Python<'py>,
+        sealed_bytes: &[u8],
+        sealed_tag: u8,
+        transcript: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let tag = provider_tag_from_u8(sealed_tag)?;
+        let sealed = SealedKey {
+            provider_tag: tag,
+            bytes: sealed_bytes.to_vec(),
+        };
+        let sig = self.inner.sealed_sign(&sealed, transcript).map_err(map_err)?;
+        Ok(PyBytes::new_bound(py, &sig))
+    }
+
+    fn verifying_key<'py>(
+        &self,
+        py: Python<'py>,
+        sealed_bytes: &[u8],
+        sealed_tag: u8,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let tag = provider_tag_from_u8(sealed_tag)?;
+        let sealed = SealedKey {
+            provider_tag: tag,
+            bytes: sealed_bytes.to_vec(),
+        };
+        let vk = self.inner.verifying_key(&sealed).map_err(map_err)?;
+        Ok(PyBytes::new_bound(py, &vk.to_bytes()))
+    }
+
+    /// Issue a TPM-rooted attestation doc. Same return tuple as
+    /// PySoftwareProvider.attest, but the `platform_quote` field
+    /// carries the ECDSA-P256 signature produced by the TPM-resident
+    /// attestation key.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
+    #[pyo3(signature = (
+        sealed_bytes,
+        sealed_tag,
+        peer_nonce,
+        issued_unix,
+        deadline_unix,
+        issuer_sdp_pubkey,
+        field_witness=None,
+    ))]
+    fn attest<'py>(
+        &self,
+        py: Python<'py>,
+        sealed_bytes: &[u8],
+        sealed_tag: u8,
+        peer_nonce: &[u8],
+        issued_unix: u64,
+        deadline_unix: u64,
+        issuer_sdp_pubkey: &[u8],
+        field_witness: Option<&[u8]>,
+    ) -> PyResult<(
+        u8,
+        Bound<'py, PyBytes>,
+        Bound<'py, PyBytes>,
+        u64,
+        u64,
+        Option<Bound<'py, PyBytes>>,
+        Bound<'py, PyBytes>,
+        Bound<'py, PyBytes>,
+        Bound<'py, PyBytes>,
+    )> {
+        let tag = provider_tag_from_u8(sealed_tag)?;
+        let sealed = SealedKey {
+            provider_tag: tag,
+            bytes: sealed_bytes.to_vec(),
+        };
+        let nonce = nonce_from_bytes(peer_nonce)?;
+        let witness = field_witness_from_bytes(field_witness)?;
+        let sdp = issuer_sdp_pubkey_from_bytes(issuer_sdp_pubkey)?;
+        let doc = self
+            .inner
+            .attest(
+                &sealed,
+                nonce,
+                issued_unix,
+                deadline_unix,
+                witness.as_ref(),
+                sdp,
+            )
+            .map_err(map_err)?;
+        let cmt = doc
+            .field_witness_commitment
+            .map(|c| PyBytes::new_bound(py, &c));
+        Ok((
+            doc.provider_tag.as_u8(),
+            PyBytes::new_bound(py, &doc.master_vk.to_bytes()),
+            PyBytes::new_bound(py, &doc.peer_nonce),
+            doc.issued_unix,
+            doc.deadline_unix,
+            cmt,
+            PyBytes::new_bound(py, &doc.platform_quote),
+            PyBytes::new_bound(py, &doc.issuer_sdp_pubkey),
+            PyBytes::new_bound(py, &doc.master_sig),
+        ))
+    }
+}
+
+/// Construct a fresh `WindowsHardenedProvider`. Generates a per-
+/// process software AEAD sealing key + acquires (or creates) the
+/// TPM-resident ECDSA-P256 attestation key under `tpm_key_name`.
+///
+/// `tpm_key_name` is the NCrypt key handle name; daemons should use
+/// a stable per-install identifier (e.g. `"OL-confidential-attest-v1"`)
+/// so the same TPM key survives across daemon restarts.
+#[cfg(feature = "windows-tpm")]
+#[pyfunction]
+fn fresh_windows_hardened_provider(tpm_key_name: &str) -> PyResult<PyWindowsHardenedProvider> {
+    let provider =
+        ol_confidential::WindowsHardenedProvider::create(&mut OsRng, tpm_key_name)
+            .map_err(map_err)?;
+    Ok(PyWindowsHardenedProvider { inner: provider })
+}
+
+/// Fallback when the wheel wasn't built with `--features windows-tpm`.
+/// Surfaces a friendly error rather than a NameError on import.
+#[cfg(not(feature = "windows-tpm"))]
+#[pyfunction]
+fn fresh_windows_hardened_provider(_tpm_key_name: &str) -> PyResult<PyObject> {
+    Err(PyValueError::new_err(
+        "WindowsHardenedProvider is disabled in this build. \
+         Build the native wheel with `--features windows-tpm` on a \
+         Windows host with TPM 2.0 (audit M6 May 2026).",
+    ))
+}
+
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySoftwareProvider>()?;
+    #[cfg(feature = "windows-tpm")]
+    m.add_class::<PyWindowsHardenedProvider>()?;
     m.add_function(wrap_pyfunction!(fresh_software_provider, m)?)?;
     m.add_function(wrap_pyfunction!(software_provider_from_seed, m)?)?;
+    m.add_function(wrap_pyfunction!(fresh_windows_hardened_provider, m)?)?;
     m.add_function(wrap_pyfunction!(attestation_nonce, m)?)?;
     m.add_function(wrap_pyfunction!(verify, m)?)?;
+    // Surface the build-time feature gate so Python callers can
+    // check capability availability without trying-and-catching.
+    m.add("HAS_WINDOWS_TPM_PROVIDER", cfg!(feature = "windows-tpm"))?;
     m.add("ATTESTATION_NONCE_LEN", ATTESTATION_NONCE_LEN)?;
     m.add(
         "ATTESTATION_FRESHNESS_WINDOW_SECS",

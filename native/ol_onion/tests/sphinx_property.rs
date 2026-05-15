@@ -55,7 +55,8 @@ proptest! {
         // Sub-keys distinct (domain-separated).
         prop_assert_ne!(k1.header_stream, k1.mac_key);
         prop_assert_ne!(k1.header_stream, k1.payload_stream);
-        prop_assert_ne!(k1.mac_key, k1.blinding_seed);
+        // blinding_seed is 64 bytes (wide-reduction); compare on slices.
+        prop_assert_ne!(&k1.mac_key[..], &k1.blinding_seed[..32]);
     }
 
     /// One-bit flip in `shared` produces fully-different keys
@@ -184,6 +185,9 @@ proptest! {
                     prop_assert_eq!(out, payload);
                     return Ok(());
                 }
+                SphinxPeelOutcome::Cover => {
+                    prop_assert!(false, "real payload mis-classified as cover");
+                }
             }
         }
         // Should have returned above.
@@ -209,6 +213,9 @@ proptest! {
                 SphinxPeelOutcome::Deliver { .. } => {
                     prop_assert_eq!(i, pairs.len() - 1);
                     return Ok(());
+                }
+                SphinxPeelOutcome::Cover => {
+                    prop_assert!(false, "real payload mis-classified as cover");
                 }
             }
         }

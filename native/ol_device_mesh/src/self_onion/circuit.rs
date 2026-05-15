@@ -144,6 +144,11 @@ pub fn peel_self_onion_layer(
             let body = payload[SELF_ONION_DOMAIN_PAYLOAD.len()..].to_vec();
             Ok(SelfOnionPeelOutcome::Deliver { payload: body })
         }
+        // Audit M4: a Sphinx-level authenticated cover packet that
+        // happened to be addressed to this device. Self-onion sees
+        // it as "not a self-onion delivery" so the dispatcher drops
+        // it without surfacing a payload.
+        SphinxPeelOutcome::Cover => Ok(SelfOnionPeelOutcome::NotSelfOnion),
     }
 }
 

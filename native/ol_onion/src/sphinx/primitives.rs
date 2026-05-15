@@ -57,10 +57,12 @@ pub struct HopKeys {
     pub payload_stream: [u8; 32],
     /// 32-byte BLAKE3-keyed-MAC key for the per-hop header MAC.
     pub mac_key: [u8; 32],
-    /// 32-byte raw bytes used (clamped) as the per-hop blinding
-    /// scalar for the next alpha derivation. The Ristretto255 layer
-    /// converts these bytes into a scalar.
-    pub blinding_seed: [u8; 32],
+    /// 64-byte raw bytes used as the per-hop blinding scalar for the
+    /// next alpha derivation. The Ristretto255 layer reduces these
+    /// 64 bytes via `Scalar::from_bytes_mod_order_wide` to eliminate
+    /// the ~2^-124 modular bias that the legacy 32-byte
+    /// `from_bytes_mod_order` reduction carries (audit L1 May 2026).
+    pub blinding_seed: [u8; 64],
 }
 
 impl std::fmt::Debug for HopKeys {
@@ -79,7 +81,12 @@ pub fn derive_hop_keys(shared: &[u8; 32], alpha: &[u8; 32]) -> HopKeys {
         header_stream: derive_subkey(shared, alpha, b"sphinx-header-stream-v1"),
         payload_stream: derive_subkey(shared, alpha, b"sphinx-payload-stream-v1"),
         mac_key: derive_subkey(shared, alpha, b"sphinx-mac-v1"),
-        blinding_seed: derive_subkey(shared, alpha, b"sphinx-blind-v1"),
+        // Audit L1 May 2026: domain bumped `-v1` → `-v2` since the
+        // output width grew 32 → 64 bytes. The new XOF-based
+        // derivation feeds 64 bytes into `from_bytes_mod_order_wide`
+        // at the call site, eliminating the ~2^-124 modular bias
+        // the legacy 32-byte reduction carried.
+        blinding_seed: derive_subkey_wide(shared, alpha, b"sphinx-blind-v2"),
     }
 }
 
@@ -93,6 +100,22 @@ fn derive_subkey(shared: &[u8; 32], alpha: &[u8; 32], tag: &[u8]) -> [u8; 32] {
     let d = h.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(d.as_bytes());
+    out
+}
+
+fn derive_subkey_wide(shared: &[u8; 32], alpha: &[u8; 32], tag: &[u8]) -> [u8; 64] {
+    // Audit L1 May 2026: 64-byte XOF output for unbiased scalar
+    // reduction via `from_bytes_mod_order_wide`. Same input shape
+    // as `derive_subkey` so the rest of the protocol stays
+    // structurally identical — only the output width differs.
+    let mut h = Hasher::new();
+    h.update(PROTOCOL_DOMAIN);
+    h.update(b"-");
+    h.update(tag);
+    h.update(shared);
+    h.update(alpha);
+    let mut out = [0u8; 64];
+    h.finalize_xof().fill(&mut out);
     out
 }
 
@@ -139,6 +162,23 @@ pub fn chacha20_keystream(key: &[u8; 32], len: usize) -> Vec<u8> {
 /// XORs into the buffer, so a zero buffer yields pure keystream.
 /// Hot-path helper used by [`build_filler`] and
 /// [`crate::sphinx::core::build_sphinx_onion`].
+///
+/// # SAFETY — zero-nonce key reuse (audit L3 May 2026)
+///
+/// The all-zero nonce is SOUND ONLY because each `key` passed in
+/// here is unique-per-circuit-and-direction: it's a `derive_subkey`
+/// output keyed on `(shared_secret, alpha, role_tag)`. Different
+/// circuits produce different `shared_secret` values; different
+/// alphas inside the same circuit produce different per-hop keys;
+/// and the role tags (`sphinx-header-stream-v1` etc.) prevent role
+/// confusion within the same hop. So no two `apply_keystream` calls
+/// on this codepath ever share BOTH key and nonce.
+///
+/// **Do NOT reuse this primitive for SURB reply blocks, multi-pass
+/// re-encryption, or any context where the SAME key encrypts more
+/// than one (key, nonce, message) tuple.** A future SURB or
+/// reply-block design MUST introduce a per-direction nonce
+/// (e.g. `[0u8; 11] || direction_byte`) before calling this.
 #[inline]
 pub fn chacha20_keystream_into(key: &[u8; 32], out: &mut [u8]) {
     let nonce = [0u8; 12];
@@ -149,6 +189,14 @@ pub fn chacha20_keystream_into(key: &[u8; 32], out: &mut [u8]) {
 /// ChaCha20 XOR-decrypt / encrypt into the buffer in place (no
 /// pre-zero step). Same key + zero nonce semantics as
 /// [`chacha20_keystream`].
+///
+/// # SAFETY — zero-nonce key reuse (audit L3 May 2026)
+///
+/// Same invariant as [`chacha20_keystream_into`]: the all-zero
+/// nonce is sound only because `key` is unique-per-(circuit,
+/// alpha, role). See that function's SAFETY section for the
+/// detailed argument and the future-work caveat about SURB
+/// reply blocks.
 #[inline]
 pub fn chacha20_xor_in_place(key: &[u8; 32], buf: &mut [u8]) {
     let nonce = [0u8; 12];
@@ -245,10 +293,12 @@ mod tests {
         let k = derive_hop_keys(&shared, &alpha);
         assert_ne!(k.header_stream, k.payload_stream);
         assert_ne!(k.header_stream, k.mac_key);
-        assert_ne!(k.header_stream, k.blinding_seed);
+        // blinding_seed is 64 bytes (wide-reduction); compare on slices to
+        // satisfy PartialEq across different fixed widths.
+        assert_ne!(&k.header_stream[..], &k.blinding_seed[..32]);
         assert_ne!(k.payload_stream, k.mac_key);
-        assert_ne!(k.payload_stream, k.blinding_seed);
-        assert_ne!(k.mac_key, k.blinding_seed);
+        assert_ne!(&k.payload_stream[..], &k.blinding_seed[..32]);
+        assert_ne!(&k.mac_key[..], &k.blinding_seed[..32]);
     }
 
     #[test]

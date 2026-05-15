@@ -52,7 +52,7 @@
 //! ## Example: equalized-rate cover scheduling
 //!
 //! ```
-//! use ol_onion::sphinx::cover::{CoverScheduler, RateEqualizer, is_cover_payload, COVER_SENTINEL};
+//! use ol_onion::sphinx::cover::{CoverScheduler, RateEqualizer};
 //!
 //! // Aim for 5 packets/sec on the wire regardless of real traffic.
 //! let mut eq = RateEqualizer::new(5.0);
@@ -67,24 +67,38 @@
 //! let mut sched = CoverScheduler::new(cover_rate.max(0.001), [0x42; 32]);
 //! let wait_ms = sched.next_wait_ms();
 //! assert!(wait_ms < 60_000, "wait sample bounded under normal rates");
-//!
-//! // Cover packets carry the sentinel; receivers drop them.
-//! let mut payload = COVER_SENTINEL.to_vec();
-//! payload.extend_from_slice(&[0u8; 64]);
-//! assert!(is_cover_payload(&payload));
 //! ```
 
 use blake3::Hasher;
 use curve25519_dalek::scalar::Scalar;
 use rand_core::{CryptoRng, RngCore};
+use subtle::ConstantTimeEq;
 
 use crate::errors::{OnionError, OnionResult};
-use crate::sphinx::core::{build_sphinx_onion, SphinxHop, SphinxPacket};
+use crate::sphinx::core::{
+    build_sphinx_onion, compute_final_hop_shared_key, SphinxHop, SphinxPacket,
+};
 
-/// Cover-packet sentinel that the destination uses to identify
-/// cover traffic. Inside the Sphinx onion this looks identical to
-/// any other payload byte; only the destination sees it.
+/// Cover-packet sentinel prefix. Provides a fast-path filter on
+/// receive so the BLAKE3 verification only runs on packets that
+/// could plausibly be cover (probability 2^-64 of a random payload
+/// passing the prefix gate). The sentinel is INSIDE the encrypted
+/// Sphinx onion, so a network observer cannot detect it; only the
+/// final destination sees the cleartext payload.
+///
+/// **Audit M4 hardening note:** the sentinel alone is NOT
+/// sufficient to authenticate cover status — a network attacker
+/// who can bit-flip the encrypted payload at any relay could
+/// transform a real packet's first 8 bytes to look like the
+/// sentinel and cause the destination to drop a legitimate packet.
+/// The authenticated trailer ([`COVER_TRAILER_LEN`] bytes) appended
+/// after the random body cryptographically binds cover status to
+/// the per-hop shared key — unforgeable without that key.
 pub const COVER_SENTINEL: &[u8; 8] = b"OL-COVER";
+
+/// Length of the authenticated cover-trailer MAC. 128 bits gives
+/// 2^-128 forgery probability — way below practical concern. Audit M4.
+pub const COVER_TRAILER_LEN: usize = 16;
 
 /// Minimum payload size for cover packets (after the sentinel
 /// prefix). Cover packets pad up to a configurable size so they
@@ -97,8 +111,84 @@ pub const COVER_PAYLOAD_MIN: usize = 64;
 /// down based on bandwidth budget.
 pub const COVER_DEFAULT_RATE_HZ: f64 = 1.0;
 
-/// Identify whether a delivered payload is a cover sentinel and
-/// should be dropped rather than delivered to the application.
+/// BLAKE3 domain separator for the cover-trailer MAC derivation.
+/// Bumping the suffix invalidates all pre-existing cover packets
+/// in flight — useful if the spec changes.
+const COVER_TRAILER_DOMAIN: &str = "ol-sphinx-cover-trailer-v1";
+
+/// Compute the authenticated cover trailer over `cover_body` keyed
+/// by the destination's per-circuit shared key. Audit M4.
+///
+/// Implementation: BLAKE3 `derive_key(domain, shared_key)` produces
+/// a context-bound MAC key, fed into a keyed BLAKE3 hash over the
+/// body. Truncated to 16 bytes — sufficient since BLAKE3 outputs are
+/// pseudorandom and the trailer's role is unforgeability-of-status,
+/// not collision resistance over an enumerable space.
+pub(crate) fn compute_cover_trailer(
+    shared_key: &[u8; 32],
+    cover_body: &[u8],
+) -> [u8; COVER_TRAILER_LEN] {
+    let mac_key = blake3::derive_key(COVER_TRAILER_DOMAIN, shared_key);
+    let mut h = Hasher::new_keyed(&mac_key);
+    h.update(cover_body);
+    let digest = h.finalize();
+    let mut tag = [0u8; COVER_TRAILER_LEN];
+    tag.copy_from_slice(&digest.as_bytes()[..COVER_TRAILER_LEN]);
+    tag
+}
+
+/// Constant-time test: does `payload` carry a valid authenticated
+/// cover trailer keyed by `shared_key`? Audit M4.
+///
+/// Returns true iff:
+///   1. `payload.len() >= COVER_SENTINEL.len() + COVER_TRAILER_LEN`,
+///   2. `payload[..COVER_SENTINEL.len()] == COVER_SENTINEL`,
+///   3. The trailing 16 bytes equal the BLAKE3-keyed MAC over
+///      `payload[..len - COVER_TRAILER_LEN]`.
+///
+/// The body fed to the MAC INCLUDES the sentinel — binding the
+/// sentinel prefix into the tag so an attacker can't append a
+/// pre-computed valid trailer onto a random payload that happens
+/// to start with a forged sentinel.
+///
+/// The prefix check is non-constant-time (sentinel is public), but
+/// the trailer compare uses `subtle::ConstantTimeEq` so leaking
+/// fine-grained body content via tag comparison timing is not
+/// possible.
+pub fn is_cover_payload_authenticated(
+    shared_key: &[u8; 32],
+    payload: &[u8],
+) -> bool {
+    if payload.len() < COVER_SENTINEL.len() + COVER_TRAILER_LEN {
+        return false;
+    }
+    if &payload[..COVER_SENTINEL.len()] != COVER_SENTINEL {
+        return false;
+    }
+    let body_end = payload.len() - COVER_TRAILER_LEN;
+    let body = &payload[..body_end];
+    let actual_tag = &payload[body_end..];
+    let expected = compute_cover_trailer(shared_key, body);
+    bool::from(expected.ct_eq(actual_tag))
+}
+
+/// Identify whether a delivered payload carries the COVER_SENTINEL
+/// prefix (FAST PATH; does NOT authenticate).
+///
+/// **Pre-M4 callers using this for cover detection are insecure** —
+/// the sentinel-alone gate is forgeable by a network attacker who
+/// bit-flips a real payload's first 8 bytes. Use
+/// [`is_cover_payload_authenticated`] instead, which the Sphinx
+/// peel layer now invokes internally before returning
+/// [`crate::sphinx::core::SphinxPeelOutcome::Cover`].
+///
+/// Retained ONLY as a quick-rejection helper for benchmarks +
+/// fast-path tests. Production receive paths MUST go through
+/// the authenticated check.
+#[deprecated(
+    since = "0.21.0-alpha",
+    note = "audit M4 — use is_cover_payload_authenticated; the plaintext-prefix check is forgeable"
+)]
 pub fn is_cover_payload(payload: &[u8]) -> bool {
     payload.len() >= COVER_SENTINEL.len()
         && &payload[..COVER_SENTINEL.len()] == COVER_SENTINEL
@@ -108,9 +198,21 @@ pub fn is_cover_payload(payload: &[u8]) -> bool {
 /// self-mesh destination — the sender's own pubkey — or a trusted
 /// cover-pool relay).
 ///
-/// The payload is the [`COVER_SENTINEL`] prefix + a random-bytes
-/// fill of size `cover_size` (must be ≥ [`COVER_PAYLOAD_MIN`]). The
-/// destination sees `is_cover_payload(payload) == true` and drops.
+/// Audit M4 wire format:
+///
+/// ```text
+///   payload = COVER_SENTINEL (8 bytes)
+///           || random body  (cover_size bytes, ≥ COVER_PAYLOAD_MIN)
+///           || MAC trailer  (COVER_TRAILER_LEN bytes, BLAKE3-keyed
+///                            by the destination's per-circuit shared key)
+/// ```
+///
+/// The destination derives the same shared key from its own static
+/// secret + the incoming alpha, recomputes the MAC, and
+/// constant-time-compares against the trailer. Only a packet from a
+/// sender who knows the destination's static pubkey (and chose this
+/// circuit) can produce a valid trailer — the MAC binds cover
+/// status to the circuit's secret session material.
 pub fn build_cover_packet<R: RngCore + CryptoRng>(
     sender_eph_sk: &Scalar,
     circuit: &[SphinxHop],
@@ -122,10 +224,22 @@ pub fn build_cover_packet<R: RngCore + CryptoRng>(
             "cover payload below minimum size",
         ));
     }
-    let total_payload_len = COVER_SENTINEL.len() + cover_size;
-    let mut payload = vec![0u8; total_payload_len];
+    if circuit.is_empty() {
+        return Err(OnionError::EmptyCircuit);
+    }
+    // Walk the blinding chain to derive what the destination will
+    // see as its shared key. Failing here surfaces small-order or
+    // empty-circuit errors before we spend cycles on the packet build.
+    let dest_shared_key = compute_final_hop_shared_key(sender_eph_sk, circuit)?;
+    // Layout: sentinel (8) || random body (cover_size) || MAC (16).
+    let total_len = COVER_SENTINEL.len() + cover_size + COVER_TRAILER_LEN;
+    let mut payload = vec![0u8; total_len];
     payload[..COVER_SENTINEL.len()].copy_from_slice(COVER_SENTINEL);
-    rng.fill_bytes(&mut payload[COVER_SENTINEL.len()..]);
+    let body_start = COVER_SENTINEL.len();
+    let body_end = body_start + cover_size;
+    rng.fill_bytes(&mut payload[body_start..body_end]);
+    let trailer = compute_cover_trailer(&dest_shared_key, &payload[..body_end]);
+    payload[body_end..].copy_from_slice(&trailer);
     build_sphinx_onion(sender_eph_sk, circuit, &payload, rng)
 }
 
@@ -359,16 +473,41 @@ mod tests {
     }
 
     #[test]
-    fn cover_sentinel_detection() {
-        assert!(is_cover_payload(COVER_SENTINEL));
-        let mut padded = COVER_SENTINEL.to_vec();
-        padded.extend_from_slice(b"random garbage");
-        assert!(is_cover_payload(&padded));
+    fn cover_trailer_authenticated_check() {
+        // Two distinct shared-keys produce distinct, non-matching
+        // trailers for the same body — replay/swap is detectable.
+        let k1 = [0x11u8; 32];
+        let k2 = [0x22u8; 32];
+        let body = [0xAAu8; 32];
+        let t1 = compute_cover_trailer(&k1, &body);
+        let t2 = compute_cover_trailer(&k2, &body);
+        assert_ne!(t1, t2);
 
-        assert!(!is_cover_payload(b"OL-REAL"));
-        assert!(!is_cover_payload(b"hello world"));
-        assert!(!is_cover_payload(&[]));
-        assert!(!is_cover_payload(&[0u8; 4]));
+        // Build a synthetic cover payload and check the verify path.
+        let mut payload = COVER_SENTINEL.to_vec();
+        payload.extend_from_slice(&body);
+        let trailer = compute_cover_trailer(&k1, &payload);
+        payload.extend_from_slice(&trailer);
+        assert!(is_cover_payload_authenticated(&k1, &payload));
+        // Wrong key fails.
+        assert!(!is_cover_payload_authenticated(&k2, &payload));
+        // Bit-flip in body invalidates the trailer.
+        let mut tampered = payload.clone();
+        tampered[20] ^= 1;
+        assert!(!is_cover_payload_authenticated(&k1, &tampered));
+        // Bit-flip in trailer invalidates.
+        let mut bad_tag = payload.clone();
+        let last = bad_tag.len() - 1;
+        bad_tag[last] ^= 1;
+        assert!(!is_cover_payload_authenticated(&k1, &bad_tag));
+        // Real-looking payloads (no sentinel) reject immediately.
+        assert!(!is_cover_payload_authenticated(&k1, b"hello world"));
+        assert!(!is_cover_payload_authenticated(&k1, &[]));
+        // A payload that's mostly cover-shaped but with a flipped
+        // sentinel byte fails the prefix gate.
+        let mut wrong_prefix = payload.clone();
+        wrong_prefix[0] ^= 1;
+        assert!(!is_cover_payload_authenticated(&k1, &wrong_prefix));
     }
 
     #[test]
@@ -378,13 +517,11 @@ mod tests {
         let packet =
             build_cover_packet(&eph_sk, &[dest.clone()], 128, &mut OsRng).unwrap();
         let outcome = peel_sphinx_layer(&dest_sk, &packet).unwrap();
-        match outcome {
-            SphinxPeelOutcome::Deliver { payload } => {
-                assert!(is_cover_payload(&payload));
-                assert_eq!(payload.len(), COVER_SENTINEL.len() + 128);
-            }
-            _ => panic!("expected Deliver"),
-        }
+        // Audit M4: peel returns the authenticated Cover variant for
+        // a packet built via the cover-traffic path. The payload is
+        // not surfaced to the caller (no plaintext leak via
+        // mis-classified delivery).
+        assert!(matches!(outcome, SphinxPeelOutcome::Cover));
     }
 
     #[test]
@@ -397,15 +534,40 @@ mod tests {
             build_cover_packet(&eph_sk, &[r1, r2, dest], 256, &mut OsRng).unwrap();
 
         // Cover packets are indistinguishable from real packets at
-        // every hop (same size, same blinding, same peel result).
+        // every relay (same size, same blinding, Forward at intermediates).
+        // The destination's peel returns Cover (audit M4).
         for sk in [&r1_sk, &r2_sk, &dest_sk] {
             match peel_sphinx_layer(sk, &packet).unwrap() {
                 SphinxPeelOutcome::Forward { next_packet, .. } => packet = next_packet,
-                SphinxPeelOutcome::Deliver { payload } => {
-                    assert!(is_cover_payload(&payload));
-                    return;
+                SphinxPeelOutcome::Cover => return,
+                SphinxPeelOutcome::Deliver { .. } => {
+                    panic!("cover packet leaked as Deliver — MAC binding broken");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn real_payload_doesnt_mis_classify_as_cover() {
+        use crate::sphinx::core::build_sphinx_onion;
+        // A real payload starting with the SENTINEL bytes but with a
+        // random tail (no authenticated trailer) must NOT classify
+        // as cover. This is the audit-M4 protection: a network
+        // attacker can't forge cover status by flipping bytes.
+        let (dest_sk, dest) = make_relay();
+        let (eph_sk, _) = generate_static_keypair(&mut OsRng);
+        let mut fake_cover = COVER_SENTINEL.to_vec();
+        fake_cover.extend_from_slice(&[0xCCu8; 128]); // body
+        fake_cover.extend_from_slice(&[0xDDu8; COVER_TRAILER_LEN]); // bogus tag
+        let packet = build_sphinx_onion(&eph_sk, &[dest], &fake_cover, &mut OsRng).unwrap();
+        match peel_sphinx_layer(&dest_sk, &packet).unwrap() {
+            SphinxPeelOutcome::Deliver { payload } => {
+                assert_eq!(payload, fake_cover);
+            }
+            SphinxPeelOutcome::Cover => {
+                panic!("forged cover status accepted — MAC binding broken!");
+            }
+            SphinxPeelOutcome::Forward { .. } => panic!("expected Deliver"),
         }
     }
 

@@ -283,7 +283,8 @@ pub fn build_pq_sphinx_onion<R: RngCore + CryptoRng>(
             classical_shared
         };
         let keys = derive_hop_keys(&derive_input, &alpha_bytes);
-        let b_i = Scalar::from_bytes_mod_order(keys.blinding_seed);
+        // Audit L1 May 2026: wide reduction from 64-byte seed.
+        let b_i = Scalar::from_bytes_mod_order_wide(&keys.blinding_seed);
         hop_keys.push(keys);
         cumulative_blind *= b_i;
         alpha_i = b_i * alpha_i;
@@ -441,7 +442,8 @@ fn finish_peel(
             next_header,
             next_mac,
         } => {
-            let b_scalar = Scalar::from_bytes_mod_order(keys.blinding_seed);
+            // Audit L1 May 2026: wide reduction.
+            let b_scalar = Scalar::from_bytes_mod_order_wide(&keys.blinding_seed);
             let next_alpha = b_scalar * alpha_point;
             let next_alpha_bytes = next_alpha.compress().to_bytes();
 

@@ -65,6 +65,12 @@ tracing-subscriber = { workspace = true }
 unstable-deterministic-provider = [
     "ol_confidential/unstable-deterministic-provider",
 ]
+# Audit M6 May 2026: enable the WindowsHardenedProvider pyo3 surface.
+# Composes the SoftwareProvider with a TPM-resident ECDSA-P256
+# attestation key so docs minted on this host carry a TPM-rooted
+# `platform_quote`. Build with `maturin develop --release --features
+# windows-tpm` on a Windows host with a functional TPM 2.0.
+windows-tpm = ["ol_confidential/windows-tpm"]
 
 [lints]
 workspace = true

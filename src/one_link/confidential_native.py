@@ -264,6 +264,150 @@ class SoftwareProvider:
         )
 
 
+class WindowsHardenedProvider:
+    """Audit M6 — TPM-rooted hardened provider on Windows.
+
+    Wraps the native ``WindowsHardenedProvider`` (composition of
+    ``SoftwareProvider`` for the seal/sign/verify primitives PLUS a
+    TPM-resident ECDSA-P256 attestation key). The public surface is
+    intentionally identical to :class:`SoftwareProvider` so callers
+    can swap providers behind a feature gate without changing call
+    sites. The TPM key root binds every attestation doc to this
+    physical TPM via the ``platform_quote`` field — a peer who pins
+    the master_vk also gets cross-host non-transferability.
+
+    Available only when the native wheel is built with
+    ``maturin develop --release --features windows-tpm`` on a Windows
+    host with a functional TPM 2.0. On any other platform / wheel,
+    :py:meth:`fresh` raises :class:`ConfidentialNotInstalled`.
+
+    Lifecycle:
+        provider = WindowsHardenedProvider.fresh("OL-daemon-attest-v1")
+        sealed = provider.seal_master(master_seed_32_bytes)
+        doc = provider.attest(sealed, peer_nonce, t_issue, t_deadline,
+                              issuer_sdp_pubkey)
+        # `doc.platform_quote` is the TPM-signed ECDSA-P256 commitment;
+        # any cross-platform peer can verify via verify_attestation()
+        # with min_tier=TIER_HARDWARE_BOUND.
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    @classmethod
+    def fresh(cls, tpm_key_name: str) -> "WindowsHardenedProvider":
+        """Acquire or create the TPM-resident attestation key under
+        ``tpm_key_name``. Use a stable per-install identifier so the
+        same TPM key survives daemon restarts.
+
+        Raises :class:`ConfidentialNotInstalled` if the native wheel
+        wasn't built with the ``windows-tpm`` feature, or
+        ``ValueError`` if the TPM call fails (TPM 2.0 not present,
+        ACL denial, etc.).
+        """
+        _require_native()
+        if not isinstance(tpm_key_name, str) or not tpm_key_name:
+            raise ValueError("tpm_key_name must be a non-empty string")
+        if not has_windows_tpm_provider():
+            raise ConfidentialNotInstalled(
+                "WindowsHardenedProvider requires the native wheel "
+                "to be built with `--features windows-tpm` "
+                "(audit M6 May 2026). The current wheel was built "
+                "WITHOUT that feature so the TPM surface is "
+                "unavailable."
+            )
+        return cls(
+            _native.fresh_windows_hardened_provider(tpm_key_name)  # type: ignore[union-attr]
+        )
+
+    @property
+    def tier(self) -> int:
+        """Returns ``TIER_HARDWARE_BOUND`` (= 2)."""
+        return self._inner.tier_byte()
+
+    @property
+    def tag(self) -> int:
+        """Returns ``PROVIDER_TAG_WINDOWS_TPM`` (= 4)."""
+        return self._inner.tag_byte()
+
+    def seal_master(self, master_seed: bytes) -> SealedKey:
+        """Seal a 32-byte master seed; tag is bound to WindowsTpm."""
+        if len(master_seed) != 32:
+            raise ValueError(
+                f"master_seed must be 32 bytes, got {len(master_seed)}"
+            )
+        sealed_bytes, tag = self._inner.seal_master(master_seed)
+        return SealedKey(bytes=sealed_bytes, tag=tag)
+
+    def derive_child(self, sealed_master: SealedKey, context_tag: bytes) -> SealedKey:
+        child_bytes, tag = self._inner.derive_child(
+            sealed_master.bytes,
+            sealed_master.tag,
+            context_tag,
+        )
+        return SealedKey(bytes=child_bytes, tag=tag)
+
+    def sealed_sign(self, sealed: SealedKey, transcript: bytes) -> bytes:
+        return self._inner.sealed_sign(sealed.bytes, sealed.tag, transcript)
+
+    def verifying_key(self, sealed: SealedKey) -> bytes:
+        return self._inner.verifying_key(sealed.bytes, sealed.tag)
+
+    def attest(
+        self,
+        sealed: SealedKey,
+        peer_nonce: bytes,
+        issued_unix: int,
+        deadline_unix: int,
+        issuer_sdp_pubkey: bytes,
+        field_witness: Optional[bytes] = None,
+    ) -> AttestationDoc:
+        """Issue a TPM-rooted attestation doc. Same shape as
+        :py:meth:`SoftwareProvider.attest` but the resulting
+        ``platform_quote`` carries the ECDSA-P256 signature produced
+        by the TPM-resident attestation key — peers can cross-platform
+        verify the TPM root via the pure-Rust verifier in
+        ``ol_confidential::platform_quote``.
+        """
+        if len(issuer_sdp_pubkey) != 32:
+            raise ValueError(
+                f"issuer_sdp_pubkey must be 32 bytes, got {len(issuer_sdp_pubkey)}"
+            )
+        result = self._inner.attest(
+            sealed.bytes,
+            sealed.tag,
+            peer_nonce,
+            issued_unix,
+            deadline_unix,
+            issuer_sdp_pubkey,
+            field_witness,
+        )
+        (tag, master_vk, nonce, iss, dl, cmt, quote, sdp, sig) = result
+        return AttestationDoc(
+            provider_tag=tag,
+            master_vk=master_vk,
+            peer_nonce=nonce,
+            issued_unix=iss,
+            deadline_unix=dl,
+            field_witness_commitment=cmt,
+            platform_quote=quote,
+            issuer_sdp_pubkey=sdp,
+            master_sig=sig,
+        )
+
+
+def has_windows_tpm_provider() -> bool:
+    """Return True iff the native wheel was built with ``--features
+    windows-tpm`` and the :class:`WindowsHardenedProvider` Python
+    class is therefore usable. Callers should check this at daemon
+    boot and fall back to :class:`SoftwareProvider` otherwise."""
+    if not HAS_NATIVE:
+        return False
+    return bool(getattr(_native, "HAS_WINDOWS_TPM_PROVIDER", False))
+
+
 def fresh_attestation_nonce() -> bytes:
     """Generate a fresh 32-byte attestation peer-challenge nonce."""
     _require_native()

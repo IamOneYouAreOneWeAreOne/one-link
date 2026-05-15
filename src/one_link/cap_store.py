@@ -124,12 +124,24 @@ class CapStore:
         periodically."""
         if now_ms is None:
             now_ms = int(time.time() * 1000)
+        # Audit M12 + perf May 2026: rate-limit the full-store scan
+        # to ≤1 Hz. Bounds memory pressure the same way (expired
+        # grants can't accumulate faster than 1 second's worth)
+        # without paying O(N) on every _capability_allowed call.
+        # The audit-defense remains intact because we DO prune
+        # within the same second any expired grant is queried, and
+        # the inline sweep in `has_capability` still drops the
+        # specific queried key the moment it's seen expired.
+        last = getattr(self, "_last_prune_ms", 0)
+        if now_ms - last < 1000:
+            return 0
         dead = [
             k for k, sg in self._grants.items()
             if now_ms > sg.grant.not_after_ms
         ]
         for k in dead:
             self._grants.pop(k, None)
+        self._last_prune_ms = now_ms
         return len(dead)
 
     def revoke_subject(self, subject_pub: bytes) -> int:

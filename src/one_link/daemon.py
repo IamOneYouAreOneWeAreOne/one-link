@@ -9006,15 +9006,21 @@ class Daemon:
                 # explicit prune here is whole-store.
                 self._cap_store.prune_expired()
                 peer_pub = self._peer_pub_for_fp(peer_fp)
-                # Local granter pubkey == this device's identity. A
-                # future bundle adds delegation chains where another
-                # paired peer can act as granter; for now self-grant
-                # is the only authority recognized.
-                if peer_pub is not None and self._cap_store.has_capability(
-                    granter_pub=self.me.public_bytes,
+                # Audit L13 May 2026 — delegation-chain enforcement.
+                # Walks the cap_store from THIS daemon's identity as
+                # the chain root toward ``peer_pub``, hopping through
+                # paired peers who themselves hold the cap. Bounded
+                # to depth 2 so a chain can be at most:
+                #   self → delegator → peer
+                # which is the realistic delegation pattern (a paired
+                # colleague handing limited access to a co-worker)
+                # without opening unbounded transitive trust.
+                if peer_pub is not None and self._cap_authorized_via_chain(
+                    root_granter_pub=self.me.public_bytes,
                     subject_pub=peer_pub,
                     capability=cap,
-                    scope=scope if scope else None,
+                    scope=scope,
+                    max_depth=2,
                 ):
                     return True
             except Exception:
@@ -9023,6 +9029,114 @@ class Daemon:
             return True
         policy = self.state.get_peer_capability_policy(peer_fp)
         return policy is None or cap in policy
+
+    def _cap_authorized_via_chain(
+        self,
+        *,
+        root_granter_pub: bytes,
+        subject_pub: bytes,
+        capability: str,
+        scope: bytes = b"",
+        max_depth: int = 2,
+    ) -> bool:
+        """Audit L13 May 2026 — walk delegation chains in the local
+        cap_store from ``root_granter_pub`` toward ``subject_pub``.
+
+        A grant authorizes ``subject_pub`` for ``capability`` under
+        ``scope`` iff there exists a chain
+        ``root → x_1 → x_2 → … → subject_pub`` of length ≤ ``max_depth``
+        such that every link is a stored, non-expired grant matching
+        the requested (cap, scope).
+
+        Why this matters
+        ----------------
+        Before this method, ``_capability_allowed`` queried the store
+        with the daemon's own pubkey as granter — so any sub-grant a
+        paired peer issued was invisible, even though the peer holds
+        legitimate authority. Real delegation flows (a colleague
+        granted "files:read" delegates to a co-worker for an
+        afternoon) require the daemon to honor sub-grants whose
+        granter is itself authorized by us.
+
+        Security
+        --------
+        - ``max_depth`` caps transitive trust. Default 2 keeps the
+          realistic pattern (self → delegator → end-subject) and
+          forbids deep chains that amplify a single compromise.
+        - The ``visited`` set prevents cycles (no key may appear
+          twice on the path).
+        - Strict scope semantics inherited from
+          :py:meth:`CapStore.has_capability` (audit H12): a grant
+          minted for one scope is invisible to queries on another.
+        - The walker only sees grants the daemon explicitly stored
+          via the CAPABILITY_GRANT wire path (which is authenticated
+          + replay-bounded), so an adversary can't seed arbitrary
+          delegation edges.
+        """
+        if self._cap_store is None:
+            return False
+
+        def walk(
+            target: bytes,
+            edges_left: int,
+            visited_intermediates: frozenset[bytes],
+        ) -> bool:
+            """Is there a chain from ``root_granter_pub`` to ``target``
+            of ≤ ``edges_left`` edges? Each call consumes 1 edge for
+            the inbound (intermediate → target) link; recursion
+            handles the remaining root → intermediate prefix.
+
+            ``visited_intermediates`` tracks the chain of hops we've
+            already used to detect cycles. The root and final
+            target are NOT in the visited set (they're the chain
+            endpoints).
+            """
+            if edges_left < 1:
+                return False
+            # Direct edge: root → target (single-edge chain).
+            if self._cap_store.has_capability(
+                granter_pub=root_granter_pub,
+                subject_pub=target,
+                capability=capability,
+                scope=scope if scope else None,
+            ):
+                return True
+            # Need ≥ 2 edges to slot an intermediate in.
+            if edges_left < 2:
+                return False
+            try:
+                inbound = self._cap_store.list_grants_for(
+                    subject_pub=target,
+                )
+            except Exception:
+                return False
+            for sub in inbound:
+                if capability not in sub.capabilities:
+                    continue
+                # Exact-scope match (audit H12).
+                sub_scope = sub.scope or b""
+                if sub_scope != (scope or b""):
+                    continue
+                intermediate = sub.granter_pub
+                # Skip the root (would have matched direct check
+                # above) and any peer already on this path (cycle).
+                if intermediate == root_granter_pub:
+                    continue
+                if intermediate == target:
+                    continue
+                if intermediate in visited_intermediates:
+                    continue
+                # Recurse with one fewer edge available, looking for
+                # a root → … → intermediate prefix.
+                if walk(
+                    intermediate,
+                    edges_left - 1,
+                    visited_intermediates | {intermediate},
+                ):
+                    return True
+            return False
+
+        return walk(subject_pub, max_depth, frozenset())
 
     async def issue_capability_grant(
         self,
