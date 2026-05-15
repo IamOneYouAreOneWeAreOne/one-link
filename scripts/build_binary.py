@@ -52,7 +52,20 @@ import sys
 from pathlib import Path
 
 
-def main() -> int:
+def _remove_tree_best_effort(path: Path) -> None:
+    """Remove a build directory, but do not crash on Windows file locks.
+
+    PyInstaller/Defender can briefly hold ``*.pkg`` files after a build.
+    A locked stale build directory should not prevent the next invocation
+    from reaching PyInstaller's own ``--clean`` path.
+    """
+    try:
+        shutil.rmtree(path)
+    except PermissionError as exc:
+        print(f"[build] warning: could not fully remove {path}: {exc}")
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--gui", action="store_true",
@@ -63,7 +76,7 @@ def main() -> int:
         help="Skip bundling ONNX models + onnxruntime. Produces a much "
              "smaller binary; Tier ζ/η/θ codecs won't work in the result.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(list(argv or ()))
 
     repo = Path(__file__).resolve().parent.parent
     entry = repo / "src" / "one_link" / "__main__.py"
@@ -94,9 +107,14 @@ def main() -> int:
 
     for p in (build, dist):
         if p.exists():
-            shutil.rmtree(p)
+            _remove_tree_best_effort(p)
     if spec.exists():
         spec.unlink()
+    # PyInstaller 6.x on Python 3.14 has a race where it tries to
+    # open build/<name>/base_library.zip for writing without first
+    # creating the parent directory. Pre-create it so we never hit
+    # that path.
+    (build / name).mkdir(parents=True, exist_ok=True)
 
     native_build = subprocess.run(
         [sys.executable, str(repo / "scripts" / "build_native_cdc.py")],
@@ -177,6 +195,29 @@ def main() -> int:
     # GUI mode = no console window. Use --windowed on Mac/Win, no-op on Linux.
     console_flag = "--windowed" if args.gui and platform.system() != "Linux" else "--console"
 
+    # NOTE: --clean is intentionally NOT passed. We've already wiped
+    # build/ + dist/ above, and PyInstaller's own --clean step has a
+    # known bug on Python 3.14 where it deletes base_library.zip's
+    # parent directory mid-write. Pre-wiping has the same effect.
+    #
+    # The runtime does NOT need torch — ONNX Runtime is the inference
+    # engine in the bundle. torch is only used in scripts/export_ml_to_onnx.py
+    # to produce the .onnx files from .pt at build time. Exclude
+    # explicitly to avoid pulling ~2 GB of CUDA libs into the
+    # release artifact.
+    exclude_modules = [
+        "torch", "torchvision", "torchaudio",
+        "tensorflow", "tensorflow_intel",
+        "jax", "jaxlib",
+        "matplotlib", "pandas", "sympy",
+        "PIL", "Pillow",  # tray uses pystray but not PIL for our icon path
+        "IPython", "jupyter", "notebook",
+        "test", "tests", "pytest",
+    ]
+    excludes = []
+    for m in exclude_modules:
+        excludes.extend(["--exclude-module", m])
+
     cmd = [
         sys.executable,
         "-m",
@@ -185,8 +226,8 @@ def main() -> int:
         name,
         "--onefile",
         console_flag,
-        "--clean",
         "--noconfirm",
+        *excludes,
         # Hidden imports zeroconf/cryptography/blake3 sometimes need:
         "--collect-submodules",
         "zeroconf",
@@ -243,4 +284,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
