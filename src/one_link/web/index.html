@@ -15363,10 +15363,29 @@
     }
   }
 
-  function oneSetupSendFile() {
-    const filesBtn = document.querySelector('[data-pane="files"]');
-    if (filesBtn && !_phoneCannotShow(filesBtn)) filesBtn.click();
-    $("#btn-send-file-panel")?.click();
+  async function oneSetupSendFile() {
+    const peer = state.selectedPeer || Array.from(state.peers.keys())[0];
+    if (!peer) {
+      toast("Add or select a trusted device first.", "info", 3500);
+      showOnboardingStep(4);
+      return;
+    }
+    try {
+      const file = new File(
+        ["This moved through your private One Link fabric.\n"],
+        "hello-from-one-link.txt",
+        { type: "text/plain" },
+      );
+      await api.upload(peer, file);
+      await api.setupAction("first_file_sent").catch(() => {});
+      $("#one-setup-first-success-state").textContent = "File sent privately";
+      $("#one-setup-first-success-detail").textContent = "One Link sent a tiny proof file through the real transfer path.";
+      await refreshTransfers();
+      await refreshOneSetup();
+      showOnboardingStep(6);
+    } catch (e) {
+      toast(`Test file failed: ${e.message || e}`, "bad");
+    }
   }
 
   // Wire onboarding interactions.

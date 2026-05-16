@@ -103,6 +103,10 @@ def test_one_setup_ui_contract_markers_present_after_build() -> None:
         "async function skipOneSetup()",
         "async function createOneSetupIdentity()",
         "async function oneSetupSendTest()",
+        "async function oneSetupSendFile()",
+        "hello-from-one-link.txt",
+        "This moved through your private One Link fabric.",
+        'api.setupAction("first_file_sent")',
         'api.setupAction("complete")',
         'api.setupAction("skip")',
     ):
