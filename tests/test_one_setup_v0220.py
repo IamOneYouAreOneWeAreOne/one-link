@@ -25,6 +25,9 @@ def test_setup_api_routes_exist() -> None:
     src = _server_src()
     assert 'r.add_get("/api/setup", self._guarded(self.api_setup_status))' in src
     assert 'r.add_post("/api/setup", self._guarded(self.api_update_setup))' in src
+    assert 'r.add_post("/api/setup/device-invite", self._guarded(self.api_setup_device_invite))' in src
+    assert 'r.add_post("/api/setup/device-invite/claim", self._guarded(self.api_setup_device_invite_claim))' in src
+    assert 'r.add_get("/api/setup/device-invite/qr.svg", self._guarded(self.api_setup_device_invite_qr))' in src
 
 
 def test_setup_snapshot_is_state_derived_and_human_first() -> None:
@@ -73,6 +76,19 @@ def test_setup_post_actions_cover_skip_complete_and_real_milestones() -> None:
     assert "unsupported setup action" in snippet
 
 
+def test_setup_device_invite_mints_cert_for_claiming_device() -> None:
+    src = _server_src()
+    idx = src.find("async def api_setup_device_invite_claim(")
+    assert idx > 0
+    snippet = src[idx:idx + 5000]
+    assert "device_pub_b64" in snippet
+    assert "mint_device_cert" in snippet
+    assert "upsert_self_mesh_device" in snippet
+    assert '"source": "one_setup_invite_claim"' in snippet
+    assert "setup_device_invite_claimed" in snippet
+    assert "invite expired or not found" in snippet
+
+
 def test_me_surfaces_one_setup_compatibility_flags() -> None:
     src = _server_src()
     idx = src.find("async def api_me(")
@@ -99,6 +115,9 @@ def test_one_setup_ui_contract_markers_present_after_build() -> None:
         'id="one-setup-panel-technical"',
         'id="one-setup-safety-panel"',
         'id="one-setup-review-safety"',
+        'id="one-setup-invite-qr"',
+        'id="one-setup-invite-token"',
+        'id="one-setup-copy-invite"',
         "Technical verification",
         "function refreshOneSetup()",
         "function renderOneSetup()",
@@ -107,6 +126,10 @@ def test_one_setup_ui_contract_markers_present_after_build() -> None:
         "async function oneSetupSendTest()",
         "async function oneSetupSendFile()",
         "async function oneSetupReviewSafety()",
+        "async function oneSetupAddDevice()",
+        'setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); }',
+        'claimSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/claim", body); }',
+        "Invite ready and copied.",
         "hello-from-one-link.txt",
         "This moved through your private One Link fabric.",
         'api.setupAction("first_file_sent")',

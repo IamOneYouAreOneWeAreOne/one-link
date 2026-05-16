@@ -1429,6 +1429,28 @@
     letter-spacing: 2px;
     margin: 14px 0;
   }
+  .setup-qr {
+    display: none;
+    width: 172px;
+    max-width: 70vw;
+    margin: 12px auto 8px;
+    border-radius: 8px;
+    background: #fff;
+    padding: 8px;
+  }
+  .setup-token {
+    display: none;
+    width: 100%;
+    min-height: 46px;
+    margin-top: 8px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(255,255,255,.04);
+    color: var(--text-dim);
+    font: 10px ui-monospace, "SF Mono", Menlo, monospace;
+    resize: vertical;
+    padding: 8px;
+  }
   .setup-checklist {
     display: grid;
     gap: 7px;
@@ -6372,9 +6394,12 @@
           <div class="setup-device-card"><strong id="one-setup-right-device">Your next device</strong><span id="one-setup-right-state">Waiting</span></div>
         </div>
         <p class="onboarding-tip" id="one-setup-invite-hint">Use Activity > My devices to show a secure invite QR.</p>
+        <img class="setup-qr" id="one-setup-invite-qr" alt="One Setup device invite QR" />
+        <textarea class="setup-token" id="one-setup-invite-token" readonly aria-label="One Setup invite token"></textarea>
         <div class="onboarding-actions">
           <button class="btn-ghost" data-onboarding-go="3">Back</button>
-          <button class="btn-primary" id="one-setup-add-device">Show invite QR</button>
+          <button class="btn-primary" id="one-setup-add-device">Create invite QR</button>
+          <button class="btn-ghost" id="one-setup-copy-invite">Copy code</button>
           <button class="btn-ghost" data-onboarding-go="5">Pair later</button>
         </div>
       </div>
@@ -7088,6 +7113,8 @@
     status() { return this.get("/api/status"); },
     setup() { return this.get("/api/setup"); },
     setupAction(action) { return this.post("/api/setup", { action }); },
+    setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); },
+    claimSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/claim", body); },
     fabric() { return this.get("/api/fabric"); },
     noRouter() { return this.get("/api/fabric/no-router"); },
     mobileReach() { return this.get("/api/fabric/mobile-reach"); },
@@ -15338,12 +15365,30 @@
     }
   }
 
-  function oneSetupAddDevice() {
-    const meshBtn = document.querySelector('[data-pane="mesh"]');
-    if (meshBtn) meshBtn.click();
-    $("#onboarding-backdrop").style.display = "none";
-    $("#btn-self-mesh-invite")?.click();
-    toast("Use the invite QR to add your phone or laptop.", "info", 4500);
+  async function oneSetupAddDevice() {
+    try {
+      const invite = await api.setupDeviceInvite({
+        label: state.me?.display_name || state.me?.hostname || "Add device",
+      });
+      const qr = $("#one-setup-invite-qr");
+      const token = $("#one-setup-invite-token");
+      if (qr && invite.qr_url) {
+        qr.src = `${invite.qr_url}&t=${Date.now()}`;
+        qr.style.display = "block";
+      }
+      if (token) {
+        token.value = invite.deep_link || invite.token || "";
+        token.style.display = "block";
+      }
+      const ttl = Math.max(1, Math.round((invite.expires_in_seconds || 300) / 60));
+      $("#one-setup-invite-hint").textContent =
+        `Scan this with the device you want to add. The invite expires in ${ttl} minutes.`;
+      await copyToClipboard(invite.deep_link || invite.token, "One Setup invite");
+      await refreshOneSetup();
+      toast("Invite ready and copied.", "good", 3500);
+    } catch (e) {
+      toast(`Invite failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
   }
 
   async function oneSetupReviewSafety() {
@@ -15423,6 +15468,11 @@
   });
   $("#one-setup-create-identity")?.addEventListener("click", createOneSetupIdentity);
   $("#one-setup-add-device")?.addEventListener("click", oneSetupAddDevice);
+  $("#one-setup-copy-invite")?.addEventListener("click", () => {
+    const token = $("#one-setup-invite-token")?.value || "";
+    if (!token) return oneSetupAddDevice();
+    copyToClipboard(token, "One Setup invite");
+  });
   $("#one-setup-send-test")?.addEventListener("click", oneSetupSendTest);
   $("#one-setup-send-file")?.addEventListener("click", oneSetupSendFile);
   $("#one-setup-review-safety")?.addEventListener("click", oneSetupReviewSafety);
@@ -15440,7 +15490,12 @@
     showOnboardingStep(stepFor[setup.current_step] || 1);
     $("#onboarding-backdrop").style.display = "flex";
   });
-  $("#one-setup-add-device-panel")?.addEventListener("click", oneSetupAddDevice);
+  $("#one-setup-add-device-panel")?.addEventListener("click", async () => {
+    await refreshOneSetup();
+    showOnboardingStep(4);
+    $("#onboarding-backdrop").style.display = "flex";
+    await oneSetupAddDevice();
+  });
   $("#one-setup-privacy-panel")?.addEventListener("click", async () => {
     await api.setupAction("privacy_proof_viewed").catch(() => {});
     $("#btn-privacy")?.click();

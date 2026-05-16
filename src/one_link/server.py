@@ -838,6 +838,7 @@ class UIServer:
         self._courier_outbox_signature: tuple[str, ...] = ()
         self._courier_monitor_last_ms = 0
         self._courier_monitor_events = 0
+        self._setup_device_invites: dict[str, dict[str, Any]] = {}
         self._removable_event_detector = None
         self._removable_monitor_last_ms = 0
         self._removable_monitor_events = 0
@@ -1495,6 +1496,9 @@ class UIServer:
         r.add_get("/api/me", self._guarded(self.api_me))
         r.add_get("/api/setup", self._guarded(self.api_setup_status))
         r.add_post("/api/setup", self._guarded(self.api_update_setup))
+        r.add_post("/api/setup/device-invite", self._guarded(self.api_setup_device_invite))
+        r.add_post("/api/setup/device-invite/claim", self._guarded(self.api_setup_device_invite_claim))
+        r.add_get("/api/setup/device-invite/qr.svg", self._guarded(self.api_setup_device_invite_qr))
         r.add_get("/api/status", self._guarded(self.api_status))
         # ── Living Presence Tier α-pre — Call API ────────────────
         # Browser hits these to drive the per-call state machines.
@@ -4015,6 +4019,184 @@ class UIServer:
                 status=400,
             )
         return web.json_response(self._one_setup_snapshot())
+
+    def _sweep_setup_device_invites(self) -> None:
+        now = int(time.time() * 1000)
+        for token, rec in list(self._setup_device_invites.items()):
+            if int(rec.get("expires_ms") or 0) <= now or rec.get("claimed"):
+                self._setup_device_invites.pop(token, None)
+
+    def _setup_invite_deep_link(self, token: str) -> str:
+        return f"one-link://setup/add-device?token={token}"
+
+    async def api_setup_device_invite(self, request: web.Request) -> web.Response:
+        """Create a short-lived One Setup invite for a new device.
+
+        Unlike the older self-mesh enrollment invite, this is not bound
+        to the current device's public key. The claiming device submits
+        its own public key, then this daemon mints the device cert from
+        the local root seed. That is the right first-run shape for
+        "add my phone/laptop" without fake success.
+        """
+        from one_link.self_mesh_enrollment import MeshRoot, b64u, b64u_decode
+
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            roots = state.list_self_mesh_roots(include_seed=True)
+            root = next((r for r in roots if r.get("root_seed")), None)
+            if root is None:
+                created = MeshRoot.create()
+                root = state.upsert_self_mesh_root(
+                    root_pub=created.root_pub,
+                    root_seed=created.root_seed,
+                    label=str(body.get("root_label") or "My devices")[:120],
+                    metadata={"source": "one_setup_device_invite"},
+                )
+                root = state.get_self_mesh_root(created.root_pub, include_seed=True)
+            if root is None or not root.get("root_seed"):
+                raise ValueError("root seed unavailable for setup invite")
+            token = secrets.token_urlsafe(32)
+            now = int(time.time() * 1000)
+            expires_ms = now + 5 * 60 * 1000
+            label = str(body.get("label") or "Add device")[:120]
+            self._sweep_setup_device_invites()
+            self._setup_device_invites[token] = {
+                "root_pub": bytes(root["root_pub"]),
+                "root_seed": bytes(root["root_seed"]),
+                "label": label,
+                "created_ms": now,
+                "expires_ms": expires_ms,
+                "claimed": False,
+            }
+            state.record_self_mesh_audit(
+                event="setup_device_invite_created",
+                severity="info",
+                root_pub=bytes(root["root_pub"]),
+                detail=label,
+                metadata={"expires_ms": expires_ms},
+            )
+            return web.json_response({
+                "ok": True,
+                "token": token,
+                "deep_link": self._setup_invite_deep_link(token),
+                "qr_url": f"/api/setup/device-invite/qr.svg?token={token}",
+                "root_pub_b64": b64u(bytes(root["root_pub"])),
+                "label": label,
+                "created_ms": now,
+                "expires_ms": expires_ms,
+                "expires_in_seconds": 300,
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "setup_device_invite_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_setup_device_invite_claim(self, request: web.Request) -> web.Response:
+        from one_link.self_mesh_enrollment import b64u, b64u_decode, mint_device_cert
+
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        body = await request.json()
+        try:
+            token = str(body.get("token") or "")
+            self._sweep_setup_device_invites()
+            invite = self._setup_device_invites.get(token)
+            if invite is None:
+                raise ValueError("invite expired or not found")
+            device_pub = b64u_decode(str(body.get("device_pub_b64") or ""))
+            if len(device_pub) != 32:
+                raise ValueError("device public key must be 32 bytes")
+            kind = str(body.get("device_kind") or "remote-device")[:80]
+            label = str(body.get("label") or kind or "One Link device")[:120]
+            cert = mint_device_cert(
+                root_seed=bytes(invite["root_seed"]),
+                root_pub=bytes(invite["root_pub"]),
+                device_pub=device_pub,
+                device_kind=kind,
+            )
+            row = state.upsert_self_mesh_device(
+                root_pub=bytes(invite["root_pub"]),
+                device_pub=device_pub,
+                cert=cert,
+                device_kind=kind,
+                label=label,
+                local=False,
+                trusted=True,
+                metadata={"source": "one_setup_invite_claim"},
+            )
+            invite["claimed"] = True
+            self._setup_device_invites.pop(token, None)
+            state.record_self_mesh_audit(
+                event="setup_device_invite_claimed",
+                severity="good",
+                root_pub=bytes(invite["root_pub"]),
+                device_pub=device_pub,
+                detail=label,
+                metadata={"device_kind": kind},
+            )
+            with contextlib.suppress(Exception):
+                self.daemon._broadcast_self_mesh_changed(
+                    event="setup_device_invite_claimed",
+                    root_pub=bytes(invite["root_pub"]),
+                    device_pub=device_pub,
+                    label=label,
+                )
+            return web.json_response({
+                "ok": True,
+                "root_pub_b64": b64u(bytes(invite["root_pub"])),
+                "device_pub_b64": b64u(device_pub),
+                "cert_b64": b64u(cert),
+                "device_kind": row["device_kind"],
+                "label": row["label"],
+                "trusted": row["trusted"],
+                "revoked": row["revoked"],
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "setup_device_invite_claim_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_setup_device_invite_qr(self, request: web.Request) -> web.Response:
+        token = str(request.query.get("token") or "")
+        try:
+            self._sweep_setup_device_invites()
+            if token not in self._setup_device_invites:
+                raise ValueError("invite expired or not found")
+            import io
+            import qrcode
+            import qrcode.image.svg
+
+            qr = qrcode.QRCode(border=2, box_size=8)
+            qr.add_data(self._setup_invite_deep_link(token))
+            qr.make(fit=True)
+            img = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
+            buf = io.BytesIO()
+            img.save(buf)
+            resp = web.Response(
+                text=buf.getvalue().decode("utf-8"),
+                content_type="image/svg+xml",
+            )
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
+        except ImportError:
+            return web.json_response({
+                "error": "qrcode_lib_missing",
+                "hint": "pip install qrcode>=7",
+            }, status=500)
+        except Exception as exc:
+            return web.json_response({
+                "error": "setup_device_invite_qr_rejected",
+                "hint": str(exc),
+            }, status=400)
 
     async def api_metrics(self, request: web.Request) -> web.Response:
         """Production telemetry surface. Returns JSON with:
