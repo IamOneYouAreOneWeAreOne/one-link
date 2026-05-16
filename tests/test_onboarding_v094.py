@@ -71,9 +71,9 @@ def test_onboarding_overlay_exists(index_html: str):
     assert 'id="onboarding-backdrop"' in index_html
 
 
-def test_four_step_progression(index_html: str):
-    """Pin all 4 steps so a future refactor can't silently drop one."""
-    for n in (1, 2, 3, 4):
+def test_one_setup_progression(index_html: str):
+    """Pin the One Setup steps so a future refactor can't silently drop one."""
+    for n in (1, 2, 3, 4, 5, 6):
         assert f'data-step="{n}"' in index_html
 
 
@@ -87,12 +87,12 @@ def test_helpers_present(index_html: str):
         assert f"function {fn}(" in index_html, fn
 
 
-def test_skip_persists_flag(index_html: str):
-    """Skip must persist completion (both local + remote) so the
-    wizard doesn't keep popping every time the user reloads."""
+def test_skip_persists_skip_state(index_html: str):
+    """Skip must record skip state without pretending setup completed."""
     idx = index_html.find('"#onboarding-skip"')
     snippet = index_html[idx:idx + 400]
-    assert "_markOnboardingComplete" in snippet
+    assert "skipOneSetup" in snippet
+    assert 'api.setupAction("skip")' in index_html
 
 
 def test_finish_saves_display_name(index_html: str):
@@ -150,12 +150,12 @@ def test_progress_dots_present(index_html: str):
     """Visual progress indicator ties the steps together — pin it
     so a CSS refactor doesn't drop it silently."""
     assert 'id="onboarding-progress"' in index_html
-    # Four dots, one per step
+    # Six dots, one per One Setup step.
     progress_block = index_html[
         index_html.find('id="onboarding-progress"'):
         index_html.find('id="onboarding-progress"') + 500
     ]
-    assert progress_block.count('<span class="dot') >= 4
+    assert progress_block.count('<span class="dot') >= 6
 
 
 def test_page_version_bumped(index_html: str):

@@ -1709,6 +1709,82 @@
     color: var(--text);
     background: rgba(255,255,255,.085);
   }
+  .one-setup-panel {
+    margin: 0 12px 10px;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,.07);
+    background: rgba(255,255,255,.025);
+  }
+  .one-setup-panel .setup-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: space-between;
+  }
+  .one-setup-panel .setup-title {
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 900;
+  }
+  .one-setup-panel .setup-sub {
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.35;
+    margin-top: 4px;
+  }
+  .one-setup-panel .setup-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .one-setup-panel .setup-actions button {
+    border-radius: 7px;
+    padding: 6px 8px;
+    color: var(--text-dim);
+    background: rgba(255,255,255,.055);
+    font-size: 10px;
+    font-weight: 800;
+  }
+  .one-setup-panel .setup-mini-list {
+    display: grid;
+    gap: 5px;
+    margin-top: 8px;
+  }
+  .one-setup-panel .setup-mini-row {
+    display: grid;
+    grid-template-columns: 16px minmax(0,1fr) auto;
+    gap: 6px;
+    align-items: center;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .one-setup-panel .setup-mini-row.done { color: var(--text); }
+  .one-setup-panel .setup-mini-row .dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: rgba(255,255,255,.06);
+    display: grid;
+    place-items: center;
+    font-size: 9px;
+  }
+  .one-setup-panel .setup-mini-row.done .dot {
+    background: rgba(70,211,154,.16);
+    color: var(--good);
+  }
+  .one-setup-panel details {
+    margin-top: 8px;
+    border-top: 1px solid rgba(255,255,255,.06);
+    padding-top: 8px;
+  }
+  .one-setup-panel summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 800;
+  }
   .metric {
     background: var(--bg-2); border: 1px solid rgba(255,255,255,.04);
     border-radius: 8px; padding: 9px 10px; min-width: 0;
@@ -4785,6 +4861,24 @@
           <button id="one-now-privacy" title="Show privacy proof">Privacy</button>
         </div>
       </div>
+      <div class="one-setup-panel" id="one-setup-panel">
+        <div class="setup-head">
+          <div>
+            <div class="setup-title" id="one-setup-panel-title">One Setup</div>
+            <div class="setup-sub" id="one-setup-panel-sub">Checking what is ready.</div>
+          </div>
+        </div>
+        <div class="setup-actions">
+          <button id="one-setup-resume">Resume setup</button>
+          <button id="one-setup-add-device-panel">Add device</button>
+          <button id="one-setup-privacy-panel">Privacy proof</button>
+        </div>
+        <div class="setup-mini-list" id="one-setup-panel-list"></div>
+        <details id="one-setup-panel-technical">
+          <summary>Technical verification</summary>
+          <div class="setup-technical-list" id="one-setup-panel-technical-list"></div>
+        </details>
+      </div>
       <div class="fabric-truth" id="fabric-truth">
         <div class="ft-top">
           <div class="ft-state">Finding best path</div>
@@ -6223,71 +6317,92 @@
     <div class="onboarding-card">
       <button class="onboarding-skip" id="onboarding-skip" title="Skip onboarding">×</button>
       <div class="onboarding-progress" id="onboarding-progress">
-        <span class="dot active"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="dot active"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>
       </div>
       <div class="onboarding-step" data-step="1">
         <div class="onboarding-glyph"><img src="/static/one-glyph.png" alt="" /></div>
-        <h1>Welcome to One Link</h1>
-        <p>
-          Direct, end-to-end encrypted chat and file sync between
-          your own devices. Everything runs locally. No cloud, no
-          servers, no logins, no telemetry. Just identities you pair.
-        </p>
+        <h1>You are One</h1>
+        <p>Your devices can talk directly, privately, and without an account.</p>
+        <div class="setup-proof-row">
+          <span>No account</span><span>Encrypted</span><span>Works nearby</span>
+        </div>
         <div class="onboarding-actions">
-          <button class="btn-primary" data-onboarding-go="2">Get started →</button>
+          <button class="btn-primary" data-onboarding-go="2">Set up One Link</button>
+          <button class="btn-ghost" id="one-setup-skip-welcome">Skip for now</button>
         </div>
       </div>
       <div class="onboarding-step" data-step="2" style="display:none;">
         <div class="onboarding-glyph">📛</div>
-        <h1>Pick a display name</h1>
-        <p>
-          This is how other devices see this one in their device
-          list. Anything works. "Alex's Mac", "Living Room PC",
-          "Hot Toaster". We don't judge.
-        </p>
+        <h1>Name this device</h1>
+        <p>This name appears only to devices you trust.</p>
         <input type="text" id="onboarding-name" maxlength="64"
                aria-label="Name for this device"
-               placeholder="e.g. Alex's Mac" autocomplete="off" />
+               placeholder="Alex's laptop" autocomplete="off" />
+        <div class="setup-device-card">
+          <strong id="one-setup-current-device">This device</strong>
+          <span>Ready to become part of your One identity.</span>
+        </div>
         <div class="onboarding-actions">
           <button class="btn-ghost" data-onboarding-go="1">Back</button>
-          <button class="btn-primary" id="onboarding-name-save">Continue →</button>
+          <button class="btn-primary" id="onboarding-name-save">Continue</button>
         </div>
       </div>
       <div class="onboarding-step" data-step="3" style="display:none;">
         <div class="onboarding-glyph">🔢</div>
-        <h1>How pairing works</h1>
-        <p>
-          When you pair a device, both screens show the SAME 6-digit
-          code (a SAS). If they match, the connection is authenticated
-          and end-to-end encrypted from that moment on. If they
-          don't match, somebody's intercepting. Say no.
-        </p>
-        <p class="onboarding-tip">
-          <strong>Tip:</strong> tap the speaker icon to read the SAS
-          digits aloud. Handy when you're confirming over a phone call
-          and don't trust your typing.
-        </p>
+        <h1>Create your One identity</h1>
+        <p>This lets your phone, laptop, and desktop belong to you without an account.</p>
+        <div class="setup-receipt">
+          <strong id="one-setup-identity-state">Identity check</strong>
+          <span id="one-setup-identity-detail">One Link will use the real self-mesh identity system when you continue.</span>
+        </div>
         <div class="onboarding-actions">
           <button class="btn-ghost" data-onboarding-go="2">Back</button>
-          <button class="btn-primary" data-onboarding-go="4">Got it →</button>
+          <button class="btn-primary" id="one-setup-create-identity">Create identity</button>
+          <button class="btn-ghost" data-onboarding-go="4">I already have one</button>
         </div>
       </div>
       <div class="onboarding-step" data-step="4" style="display:none;">
         <div class="onboarding-glyph">🚀</div>
-        <h1>You're ready</h1>
-        <p>
-          Open One Link on another computer or phone. Click
-          <strong>Pair a new device</strong> in the sidebar
-          (or hit <kbd>Ctrl+N</kbd>) to add it. Then drag a file
-          at it. It feels good.
-        </p>
-        <p class="onboarding-tip">
-          <strong>Press <kbd>?</kbd></strong> any time to see all
-          keyboard shortcuts. <strong>Ctrl+K</strong> opens the
-          search palette.
-        </p>
+        <h1>Add your phone or laptop</h1>
+        <p>Open One Link on the other device and scan the invite. You can also pair later.</p>
+        <div class="setup-device-line">
+          <div class="setup-device-card"><strong id="one-setup-left-device">This device</strong><span>Trusted local device</span></div>
+          <div class="setup-connection"></div>
+          <div class="setup-device-card"><strong id="one-setup-right-device">Your next device</strong><span id="one-setup-right-state">Waiting</span></div>
+        </div>
+        <p class="onboarding-tip" id="one-setup-invite-hint">Use Activity > My devices to show a secure invite QR.</p>
         <div class="onboarding-actions">
           <button class="btn-ghost" data-onboarding-go="3">Back</button>
+          <button class="btn-primary" id="one-setup-add-device">Show invite QR</button>
+          <button class="btn-ghost" data-onboarding-go="5">Pair later</button>
+        </div>
+      </div>
+      <div class="onboarding-step" data-step="5" style="display:none;">
+        <div class="onboarding-glyph">GO</div>
+        <h1>Send something to yourself</h1>
+        <p>One Link will choose the best private path.</p>
+        <div class="setup-receipt">
+          <strong id="one-setup-first-success-state">First success</strong>
+          <span id="one-setup-first-success-detail">Send a test message now, or skip and do it from Chat or Files later.</span>
+        </div>
+        <div class="onboarding-actions">
+          <button class="btn-ghost" data-onboarding-go="4">Back</button>
+          <button class="btn-primary" id="one-setup-send-test">Send test message</button>
+          <button class="btn-ghost" id="one-setup-send-file">Send a file</button>
+          <button class="btn-ghost" data-onboarding-go="6">Do this later</button>
+        </div>
+      </div>
+      <div class="onboarding-step" data-step="6" style="display:none;">
+        <div class="onboarding-glyph">OK</div>
+        <h1>One Link is ready</h1>
+        <p>Your devices can now act as one private fabric.</p>
+        <div class="setup-checklist" id="one-setup-checklist"></div>
+        <details class="setup-technical" id="one-setup-technical">
+          <summary>Technical setup details</summary>
+          <div class="setup-technical-list" id="one-setup-technical-list"></div>
+        </details>
+        <div class="onboarding-actions">
+          <button class="btn-ghost" data-onboarding-go="5">Back</button>
           <button class="btn-primary" id="onboarding-finish">Start using One Link</button>
         </div>
       </div>
@@ -6571,6 +6686,7 @@
     status: null,
     fabric: null,
     selfMesh: null,
+    oneSetup: null,
     searchQuery: "",
     searchResults: null,
     activePane: "convo",
@@ -6968,6 +7084,8 @@
     folders() { return this.get("/api/folders"); },
     transfers() { return this.get("/api/transfers?limit=80"); },
     status() { return this.get("/api/status"); },
+    setup() { return this.get("/api/setup"); },
+    setupAction(action) { return this.post("/api/setup", { action }); },
     fabric() { return this.get("/api/fabric"); },
     noRouter() { return this.get("/api/fabric/no-router"); },
     mobileReach() { return this.get("/api/fabric/mobile-reach"); },
@@ -13634,7 +13752,7 @@
     // wizard renders in the user's chosen theme, but keep the pop close to
     // refreshPeers() so returning paired users are detected immediately.
     await loadAndApplySettings();
-    maybeShowOnboarding();
+    await maybeShowOnboarding();
     // v0.12.1: pull persisted per-chat prefs (color / wallpaper /
     // archive) from the daemon so they sync across devices.
     await loadChatPrefs();
@@ -15027,10 +15145,98 @@
   // doesn't re-pop the wizard.
   const ONBOARDING_STORAGE_KEY = "one_link.onboarding_completed";
 
-  function maybeShowOnboarding() {
+  async function refreshOneSetup() {
+    try {
+      state.oneSetup = await api.setup();
+      renderOneSetup();
+    } catch (e) {
+      console.warn("setup status failed", e);
+    }
+    return state.oneSetup;
+  }
+
+  function renderOneSetup() {
+    const setup = state.oneSetup || {};
+    const name = $("#onboarding-name")?.value || state.me?.display_name || state.me?.hostname || "This device";
+    const current = $("#one-setup-current-device");
+    if (current) current.textContent = name;
+    const left = $("#one-setup-left-device");
+    if (left) left.textContent = name;
+    const counts = setup.counts || {};
+    const identityState = $("#one-setup-identity-state");
+    const identityDetail = $("#one-setup-identity-detail");
+    if (identityState) identityState.textContent = counts.roots > 0 ? "Identity ready" : "Identity not created yet";
+    if (identityDetail) identityDetail.textContent = counts.roots > 0
+      ? "Your One identity is already available on this device."
+      : "Create your One identity so your devices can belong to you without an account.";
+    const rightState = $("#one-setup-right-state");
+    if (rightState) rightState.textContent = counts.remote_devices > 0
+      ? `${counts.remote_devices} trusted device${counts.remote_devices === 1 ? "" : "s"}`
+      : "Waiting";
+    const list = $("#one-setup-checklist");
+    if (list) {
+      list.innerHTML = "";
+      for (const item of (setup.checklist || []).slice(0, 8)) {
+        const row = el("div", `setup-check-item ${item.status === "done" ? "done" : ""}`);
+        row.appendChild(el("span", "status", item.status === "done" ? "✓" : "·"));
+        const text = el("div", null);
+        text.appendChild(el("strong", null, item.label || ""));
+        text.appendChild(el("div", "size", item.human || ""));
+        row.appendChild(text);
+        row.appendChild(el("span", "tag", item.status || ""));
+        list.appendChild(row);
+      }
+    }
+    const panelTitle = $("#one-setup-panel-title");
+    const panelSub = $("#one-setup-panel-sub");
+    if (panelTitle) panelTitle.textContent = setup.completed ? "One Setup complete" : "One Setup";
+    if (panelSub) {
+      panelSub.textContent = setup.next_action?.detail
+        || "Pair devices, send once, and see privacy proof when you are ready.";
+    }
+    const panelList = $("#one-setup-panel-list");
+    if (panelList) {
+      panelList.innerHTML = "";
+      for (const item of (setup.checklist || []).slice(0, 5)) {
+        const row = el("div", `setup-mini-row ${item.status === "done" ? "done" : ""}`);
+        row.appendChild(el("span", "dot", item.status === "done" ? "✓" : ""));
+        row.appendChild(el("span", null, item.label || ""));
+        row.appendChild(el("span", "tag", item.status || ""));
+        panelList.appendChild(row);
+      }
+    }
+    const tech = $("#one-setup-technical-list");
+    if (tech) {
+      tech.innerHTML = "";
+      for (const d of (setup.technical?.diagnostics || []).slice(0, 8)) {
+        const row = el("div", null);
+        row.appendChild(el("b", null, d.status || ""));
+        row.appendChild(el("span", null, `${d.label || ""}: ${d.detail || ""}`));
+        tech.appendChild(row);
+      }
+    }
+    const panelTech = $("#one-setup-panel-technical-list");
+    if (panelTech) {
+      panelTech.innerHTML = "";
+      for (const d of (setup.technical?.diagnostics || []).slice(0, 8)) {
+        const row = el("div", null);
+        row.appendChild(el("b", null, d.status || ""));
+        row.appendChild(el("span", null, `${d.label || ""}: ${d.detail || ""}`));
+        panelTech.appendChild(row);
+      }
+    }
+  }
+
+  async function maybeShowOnboarding() {
+    const setup = await refreshOneSetup();
     try {
       if (localStorage.getItem(ONBOARDING_STORAGE_KEY) === "1") return;
     } catch { /* localStorage may be blocked — fall through */ }
+    if (setup?.completed) {
+      _markOnboardingComplete(/* persistRemote */ false);
+      return;
+    }
+    if (setup?.skipped) return;
     // v0.9.4: also honor the daemon-persisted flag so a fresh
     // browser tab on a paired daemon doesn't re-pop the wizard
     // (no localStorage in that tab yet).
@@ -15051,12 +15257,20 @@
     } else if (nameInput && state.me?.hostname) {
       nameInput.value = state.me.hostname;
     }
-    showOnboardingStep(1);
+    const stepFor = {
+      identity: 3,
+      add_device: 4,
+      first_success: 5,
+      privacy_proof: 6,
+      safety: 6,
+      finish: 6,
+    };
+    showOnboardingStep(stepFor[setup?.current_step] || 1);
     $("#onboarding-backdrop").style.display = "flex";
   }
 
   function showOnboardingStep(n) {
-    const N = 4;
+    const N = 6;
     document.querySelectorAll(".onboarding-step").forEach((step) => {
       const isThis = parseInt(step.dataset.step || "0", 10) === n;
       step.style.display = isThis ? "" : "none";
@@ -15082,6 +15296,12 @@
     }
   }
 
+  async function skipOneSetup() {
+    try { await api.setupAction("skip"); } catch {}
+    $("#onboarding-backdrop").style.display = "none";
+    toast("Setup is waiting in Activity whenever you want it.", "info", 3500);
+  }
+
   async function finishOnboarding() {
     const nameInput = $("#onboarding-name");
     const newName = (nameInput?.value || "").trim();
@@ -15095,7 +15315,58 @@
         // Don't bail — let the user finish onboarding anyway.
       }
     }
+    try { await api.setupAction("complete"); } catch {}
     _markOnboardingComplete(/* persistRemote */ true);
+  }
+
+  async function createOneSetupIdentity() {
+    const nameInput = $("#onboarding-name");
+    const label = (nameInput?.value || state.me?.display_name || "My devices").trim();
+    try {
+      const result = await api.selfMeshRoot({ label });
+      $("#one-setup-identity-state").textContent = "Identity ready";
+      $("#one-setup-identity-detail").textContent = "Your One identity is ready. Now add your phone or laptop.";
+      toast("One identity ready.", "good", 3000);
+      await refreshSelfMesh();
+      await refreshOneSetup();
+      showOnboardingStep(4);
+      return result;
+    } catch (e) {
+      toast(`Identity setup failed: ${e.message || e}`, "bad");
+    }
+  }
+
+  function oneSetupAddDevice() {
+    const meshBtn = document.querySelector('[data-pane="mesh"]');
+    if (meshBtn) meshBtn.click();
+    $("#onboarding-backdrop").style.display = "none";
+    $("#btn-self-mesh-invite")?.click();
+    toast("Use the invite QR to add your phone or laptop.", "info", 4500);
+  }
+
+  async function oneSetupSendTest() {
+    const peer = state.selectedPeer || Array.from(state.peers.keys())[0];
+    if (!peer) {
+      toast("Add or select a trusted device first.", "info", 3500);
+      showOnboardingStep(4);
+      return;
+    }
+    try {
+      await api.send(peer, "Hello from One Link. This moved through your private fabric.");
+      await api.setupAction("first_message_sent").catch(() => {});
+      $("#one-setup-first-success-state").textContent = "Sent privately";
+      $("#one-setup-first-success-detail").textContent = "Your test message was sent to a trusted device.";
+      await refreshOneSetup();
+      showOnboardingStep(6);
+    } catch (e) {
+      toast(`Test message failed: ${e.message || e}`, "bad");
+    }
+  }
+
+  function oneSetupSendFile() {
+    const filesBtn = document.querySelector('[data-pane="files"]');
+    if (filesBtn && !_phoneCannotShow(filesBtn)) filesBtn.click();
+    $("#btn-send-file-panel")?.click();
   }
 
   // Wire onboarding interactions.
@@ -15106,13 +15377,40 @@
     });
   });
   $("#onboarding-skip")?.addEventListener("click", () => {
-    _markOnboardingComplete(/* persistRemote */ true);
+    skipOneSetup();
+  });
+  $("#one-setup-skip-welcome")?.addEventListener("click", () => {
+    skipOneSetup();
   });
   $("#onboarding-name-save")?.addEventListener("click", () => {
     showOnboardingStep(3);
   });
   $("#onboarding-finish")?.addEventListener("click", () => {
     finishOnboarding();
+  });
+  $("#one-setup-create-identity")?.addEventListener("click", createOneSetupIdentity);
+  $("#one-setup-add-device")?.addEventListener("click", oneSetupAddDevice);
+  $("#one-setup-send-test")?.addEventListener("click", oneSetupSendTest);
+  $("#one-setup-send-file")?.addEventListener("click", oneSetupSendFile);
+  $("#one-setup-resume")?.addEventListener("click", async () => {
+    await refreshOneSetup();
+    const setup = state.oneSetup || {};
+    const stepFor = {
+      identity: 3,
+      add_device: 4,
+      first_success: 5,
+      privacy_proof: 6,
+      safety: 6,
+      finish: 6,
+    };
+    showOnboardingStep(stepFor[setup.current_step] || 1);
+    $("#onboarding-backdrop").style.display = "flex";
+  });
+  $("#one-setup-add-device-panel")?.addEventListener("click", oneSetupAddDevice);
+  $("#one-setup-privacy-panel")?.addEventListener("click", async () => {
+    await api.setupAction("privacy_proof_viewed").catch(() => {});
+    $("#btn-privacy")?.click();
+    await refreshOneSetup();
   });
   // Enter on the name input → next step.
   $("#onboarding-name")?.addEventListener("keydown", (e) => {
