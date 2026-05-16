@@ -207,6 +207,10 @@ def test_fetch_latest_returns_serializable_dict():
 async def test_api_update_check_returns_check_result(monkeypatch):
     """End-to-end: mock fetch_latest, hit the handler, assert the
     response shape the UI consumes."""
+    # May 15 2026 — the update check is now opt-IN for sovereignty
+    # (no calls to GitHub by default). Tests that exercise the
+    # check path explicitly enable it.
+    monkeypatch.setenv("ONE_LINK_UPDATE_CHECK", "1")
     from one_link.server import UIServer
     from one_link import update_check as uc_mod
 
@@ -251,6 +255,8 @@ async def test_api_update_check_returns_check_result(monkeypatch):
 async def test_api_update_check_caches_within_ttl(monkeypatch):
     """Two back-to-back calls must hit the cache the second time so
     we don't hammer the GitHub API on every UI reload."""
+    # See test_api_update_check_returns_check_result — opt in.
+    monkeypatch.setenv("ONE_LINK_UPDATE_CHECK", "1")
     from one_link.server import UIServer
     from one_link import update_check as uc_mod
 
@@ -286,6 +292,8 @@ async def test_api_update_check_caches_within_ttl(monkeypatch):
 @pytest.mark.asyncio
 async def test_api_update_check_fresh_bypasses_cache(monkeypatch):
     """?fresh=1 (the Settings 'Check now' button) skips the cache."""
+    # See test_api_update_check_returns_check_result — opt in.
+    monkeypatch.setenv("ONE_LINK_UPDATE_CHECK", "1")
     from one_link.server import UIServer
     from one_link import update_check as uc_mod
 
@@ -311,6 +319,67 @@ async def test_api_update_check_fresh_bypasses_cache(monkeypatch):
     # Forced refresh re-fetches.
     await server.api_update_check(SimpleNamespace(query={"fresh": "1"}))
     assert call_count["n"] == 2
+
+
+# ─── Sovereignty default (May 15 2026) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_api_update_check_disabled_by_default(monkeypatch):
+    """With NO opt-in (no env var, no setting), the endpoint must
+    return status='disabled' without touching the network. This is
+    One Link's "no calls home" promise — the GitHub Releases poll
+    is the ONLY external call surface in the daemon and it is now
+    opt-in."""
+    monkeypatch.delenv("ONE_LINK_UPDATE_CHECK", raising=False)
+    from one_link.server import UIServer
+    from one_link import update_check as uc_mod
+
+    network_calls = {"n": 0}
+    def should_never_be_called(*a, **kw):
+        network_calls["n"] += 1
+        raise AssertionError("update-check disabled — must not poll GitHub")
+    monkeypatch.setattr(uc_mod, "fetch_latest", should_never_be_called)
+
+    daemon = SimpleNamespace(
+        state=None,
+        discovery=None,
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa", hostname="me"),
+    )
+    server = UIServer(daemon)
+    server._update_cache = None
+
+    resp = await server.api_update_check(SimpleNamespace(query={}))
+    assert resp.status == 200
+    body = json.loads(resp.text)
+    assert body["status"] == "disabled"
+    assert "sovereignty" in body.get("reason", "").lower()
+    assert network_calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_api_update_check_enabled_via_env_var(monkeypatch):
+    """ONE_LINK_UPDATE_CHECK=1 opts in."""
+    monkeypatch.setenv("ONE_LINK_UPDATE_CHECK", "1")
+    from one_link.server import UIServer
+    from one_link import update_check as uc_mod
+
+    monkeypatch.setattr(
+        uc_mod, "fetch_latest",
+        lambda v, **kw: uc_mod.CheckResult(
+            status="same", local_version=v, latest_version=v,
+        ),
+    )
+    daemon = SimpleNamespace(
+        state=None,
+        discovery=None,
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa", hostname="me"),
+    )
+    server = UIServer(daemon)
+    server._update_cache = None
+    resp = await server.api_update_check(SimpleNamespace(query={}))
+    body = json.loads(resp.text)
+    assert body["status"] == "same"
 
 
 # ─── UI markup contract ────────────────────────────────────────────────

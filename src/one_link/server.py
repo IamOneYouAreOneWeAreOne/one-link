@@ -4168,7 +4168,9 @@ class UIServer:
                 "root_pub_b64": b64u(root_pub),
                 "device_pub_b64": b64u(device_pub),
                 "device": {
-                    "device_pub_b64": b64u(device.get("device_pub")),
+                    "device_pub_b64": b64u(
+                        device.get("device_pub") or device_pub
+                    ),
                     "label": device.get("label"),
                     "trusted": device.get("trusted"),
                     "revoked": device.get("revoked"),
@@ -9611,8 +9613,34 @@ class UIServer:
 
     async def api_update_check(self, request: web.Request) -> web.Response:
         import time as _time
+        import os as _os
         from one_link import __version__ as _local_ver
         from one_link.update_check import fetch_latest
+
+        # May 15 2026 — sovereignty default. /api/update/check is the
+        # path the UI's Settings panel and footer banner poll on
+        # tab-load. Honor the same opt-in gate the boot-time loop
+        # uses: env ONE_LINK_UPDATE_CHECK=1 OR setting
+        # update_check_enabled=1. Otherwise return status=disabled
+        # without touching the network.
+        env_on = _os.environ.get(
+            "ONE_LINK_UPDATE_CHECK", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
+        setting_on = False
+        if self.daemon.state is not None:
+            with contextlib.suppress(Exception):
+                setting_on = (self.daemon.state.get_setting(
+                    "update_check_enabled"
+                ) or "").strip().lower() in ("1", "true", "yes", "on")
+        if not (env_on or setting_on):
+            return web.json_response({
+                "status": "disabled",
+                "local_version": _local_ver,
+                "reason": (
+                    "update-check disabled by default for sovereignty. "
+                    "Enable in Settings or set ONE_LINK_UPDATE_CHECK=1."
+                ),
+            })
 
         force_fresh = request.query.get("fresh") in ("1", "true", "yes")
         now = _time.monotonic()

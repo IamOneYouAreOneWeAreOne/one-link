@@ -2067,10 +2067,10 @@ class Daemon:
 
     async def _run_self_mesh_instruction(self, instr) -> dict[str, Any]:
         if instr.action == "pull_file_manifest":
-            path = str(instr.scope.get("path") or "")
-            if not path:
+            manifest_path = str(instr.scope.get("path") or "")
+            if not manifest_path:
                 raise ValueError("scope.path required")
-            return {"manifest": self._self_mesh_file_manifest(path)}
+            return {"manifest": self._self_mesh_file_manifest(manifest_path)}
         if instr.action == "send_file_from_device":
             path = Path(str(instr.scope.get("path") or "")).expanduser().resolve()
             if not self._self_mesh_path_allowed(path):
@@ -14562,9 +14562,46 @@ class Daemon:
         # The UI listens and refreshes its banner without needing a
         # page reload. Errors swallowed silently — the loop never
         # raises in a way that takes down the daemon.
-        self._update_check_task = asyncio.create_task(
-            self._update_check_loop()
+        #
+        # May 15 2026 — SOVEREIGNTY DEFAULT: the update-check poll
+        # is the ONLY external network call this daemon makes
+        # (GitHub is Microsoft-owned). One Link's promise is "no
+        # corp dependencies, no calls home." So the poll is now
+        # opt-IN, not opt-out.
+        #
+        # Enable via either:
+        #   - Env var:  ONE_LINK_UPDATE_CHECK=1
+        #   - Setting:  state.set_setting("update_check_enabled", "1")
+        #               (Settings panel surfaces this checkbox)
+        #
+        # When disabled, the daemon never reaches api.github.com.
+        # The /api/update/check HTTP endpoint also short-circuits
+        # to status=disabled so a UI tab refresh doesn't quietly
+        # poke GitHub anyway.
+        update_check_env = os.environ.get(
+            "ONE_LINK_UPDATE_CHECK", ""
+        ).strip().lower()
+        update_check_setting = ""
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                update_check_setting = (
+                    self.state.get_setting("update_check_enabled") or ""
+                ).strip().lower()
+        update_check_on = (
+            update_check_env in ("1", "true", "yes", "on")
+            or update_check_setting in ("1", "true", "yes", "on")
         )
+        if update_check_on:
+            self._update_check_task = asyncio.create_task(
+                self._update_check_loop()
+            )
+        else:
+            log.info(
+                "update-check: disabled (sovereignty default). "
+                "Set ONE_LINK_UPDATE_CHECK=1 or toggle "
+                "settings.update_check_enabled to enable."
+            )
+            self._update_check_task = None
 
         # Phase E: spin up the coherence-field snapshot manager. The
         # manager idles harmlessly when no peers / no native crate; it
