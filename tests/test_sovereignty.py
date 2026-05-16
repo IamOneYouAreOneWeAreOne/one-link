@@ -557,7 +557,7 @@ def test_html_renders_peer_version_hint_section():
     a banner when a paired peer is on a newer version."""
     html = WEB_INDEX.read_text(encoding="utf-8")
     assert "peer_version_hint" in html
-    assert "Update available (from peer)" in html
-    # Asserts the messaging stays corp-free.
-    assert "no call to" in html.lower()
-
+    assert "A paired device has a newer version" in html
+    # Asserts the messaging stays plain-English and corp-free.
+    assert "No call to" in html
+    assert "outside server" in html

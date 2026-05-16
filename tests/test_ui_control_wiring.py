@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +33,30 @@ class _ControlCollector(HTMLParser):
                 self.controls.append((tag, data))
 
 
+class _LabelCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.label_for: set[str] = set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "label":
+            return
+        data = {k: v or "" for k, v in attrs}
+        target = data.get("for")
+        if target:
+            self.label_for.add(target)
+
+
+class _LinkCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[dict[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a":
+            self.links.append({k: v or "" for k, v in attrs})
+
+
 def _camel_data_attr(name: str) -> str:
     parts = name[5:].split("-")
     return parts[0] + "".join(p[:1].upper() + p[1:] for p in parts[1:])
@@ -36,6 +65,14 @@ def _camel_data_attr(name: str) -> str:
 def _script_blocks(html: str) -> str:
     return "\n".join(
         re.findall(r"<script[^>]*>([\s\S]*?)</script>", html, flags=re.I)
+    )
+
+
+def _inline_script_blocks(html: str) -> list[str]:
+    return re.findall(
+        r"<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)</script>",
+        html,
+        flags=re.I,
     )
 
 
@@ -91,3 +128,99 @@ def test_static_ui_controls_have_event_wiring() -> None:
                 failures.append(f"{path.relative_to(ROOT)}: <{tag}> {label}")
 
     assert not failures, "Unwired UI controls:\n" + "\n".join(failures)
+
+
+def test_static_ui_inputs_have_accessible_names() -> None:
+    """Inputs/selects/textareas need a visible label or explicit assistive name."""
+    failures: list[str] = []
+    for path in UI_FILES:
+        html = path.read_text(encoding="utf-8")
+        labels = _LabelCollector()
+        labels.feed(html)
+        parser = _ControlCollector()
+        parser.feed(html)
+        for tag, control in parser.controls:
+            control_id = control.get("id")
+            # Buttons are covered by their visible text and separate wiring tests.
+            if tag == "button":
+                continue
+            if control.get("type") == "hidden":
+                continue
+            if (
+                control.get("aria-label")
+                or control.get("aria-labelledby")
+                or control.get("placeholder")
+                or control.get("title")
+                or (control_id and control_id in labels.label_for)
+            ):
+                continue
+            label = control_id or control.get("name") or str(control)
+            failures.append(f"{path.relative_to(ROOT)}: <{tag}> {label}")
+
+    assert not failures, "Controls without accessible names:\n" + "\n".join(failures)
+
+
+def test_static_ui_links_have_real_targets() -> None:
+    """Links should navigate somewhere meaningful, not depend on a bare '#'."""
+    failures: list[str] = []
+    for path in UI_FILES:
+        parser = _LinkCollector()
+        parser.feed(path.read_text(encoding="utf-8"))
+        for link in parser.links:
+            href = link.get("href", "")
+            if href and href != "#" and not href.lower().startswith("javascript:"):
+                continue
+            label = link.get("id") or link.get("class") or str(link)
+            failures.append(f"{path.relative_to(ROOT)}: <a> {label}")
+
+    assert not failures, "Links without real targets:\n" + "\n".join(failures)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_static_ui_javascript_parses() -> None:
+    """Node syntax-checks inline and standalone browser JS assets."""
+    failures: list[str] = []
+    standalone = [
+        ROOT / "src" / "one_link" / "web" / "sw.js",
+        ROOT / "src" / "one_link" / "web" / "dr.js",
+    ]
+    for path in standalone:
+        proc = subprocess.run(
+            ["node", "--check", str(path)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode:
+            failures.append(f"{path.relative_to(ROOT)}:\n{proc.stderr or proc.stdout}")
+
+    for path in UI_FILES + [ROOT / "src" / "one_link" / "web" / "dr_test.html"]:
+        html = path.read_text(encoding="utf-8")
+        for idx, block in enumerate(_inline_script_blocks(html), start=1):
+            js = block.strip()
+            if not js:
+                continue
+            with tempfile.NamedTemporaryFile(
+                "w",
+                suffix=f"-{path.stem}-{idx}.js",
+                delete=False,
+                encoding="utf-8",
+            ) as tmp:
+                tmp.write(js)
+                tmp_path = Path(tmp.name)
+            try:
+                proc = subprocess.run(
+                    ["node", "--check", str(tmp_path)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+            finally:
+                tmp_path.unlink(missing_ok=True)
+            if proc.returncode:
+                failures.append(
+                    f"{path.relative_to(ROOT)} inline script {idx}:\n"
+                    f"{proc.stderr or proc.stdout}"
+                )
+
+    assert not failures, "JavaScript syntax failures:\n" + "\n".join(failures)

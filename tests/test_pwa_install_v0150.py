@@ -275,7 +275,7 @@ def test_standalone_mode_hides_affordance(index_html: str):
 def test_sw_cache_name_bumped(sw_js: str):
     """Bumping the cache name forces the activate handler to evict
     the v1 cache — without the bump, users keep stale shell HTML."""
-    assert 'CACHE_NAME = "one-link-shell-v2"' in sw_js
+    assert 'CACHE_NAME = "one-link-shell-v3"' in sw_js
 
 
 def test_sw_shell_files_include_manifest(sw_js: str):

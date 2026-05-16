@@ -209,9 +209,9 @@ def test_session_expired_banner_has_relaunch_guidance(index_html: str):
     a problem."""
     idx = index_html.find("function showSessionExpiredBanner()")
     snippet = index_html[idx:idx + 1500]
-    # The relaunch instruction is the load-bearing UX: without it
+    # The restart instruction is the load-bearing UX: without it
     # the user is stuck staring at a banner that says "expired".
-    assert "Relaunch" in snippet or "relaunch" in snippet
+    assert "restart One Link" in snippet
     assert "Reload" in snippet
 
 
