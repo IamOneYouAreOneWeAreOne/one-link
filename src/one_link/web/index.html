@@ -883,8 +883,98 @@
     color: #fff;
   }
   .call-overlay.show { display: flex; }
+
+  /* May 15 2026 — richer outgoing-call surface. Avatar circle with
+     peer initials, animated pulse ring (only while ringing), call
+     kind badge (Voice/Video) under name, elapsed-seconds counter,
+     connection-route line, and a pre-call control row so the caller
+     can pre-mute or pre-cam-off before the peer picks up. */
+  .call-overlay-avatar {
+    position: relative;
+    width: 128px; height: 128px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #7e60ff, #4e9bff);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 42px; font-weight: 600; color: #fff;
+    margin-bottom: 20px;
+    flex-shrink: 0;
+  }
+  .call-overlay-avatar::before {
+    content: ""; position: absolute; inset: -10px;
+    border-radius: 50%;
+    border: 2px solid rgba(126, 96, 255, 0.6);
+    animation: callPulse 1.6s ease-out infinite;
+    pointer-events: none;
+  }
+  .call-overlay-avatar::after {
+    content: ""; position: absolute; inset: -10px;
+    border-radius: 50%;
+    border: 2px solid rgba(126, 96, 255, 0.4);
+    animation: callPulse 1.6s ease-out 0.8s infinite;
+    pointer-events: none;
+  }
+  @keyframes callPulse {
+    0%   { transform: scale(0.96); opacity: 0.95; }
+    100% { transform: scale(1.35); opacity: 0;   }
+  }
   .call-overlay-peer { font-size: 28px; font-weight: 500; margin-bottom: 4px; }
-  .call-overlay-status { font-size: 14px; opacity: 0.7; margin-bottom: 32px; }
+  .call-overlay-kind-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 11px; border-radius: 999px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    font-size: 12px; font-weight: 500;
+    margin-bottom: 10px; opacity: 0.85;
+  }
+  .call-overlay-kind-badge[data-kind="video"] {
+    border-color: rgba(64,156,255,0.5);
+    background: rgba(64,156,255,0.12);
+  }
+  .call-overlay-kind-badge[data-kind="voice"] {
+    border-color: rgba(46,184,92,0.5);
+    background: rgba(46,184,92,0.12);
+  }
+  .call-overlay-status {
+    font-size: 14px; opacity: 0.7; margin-bottom: 6px;
+  }
+  .call-overlay-status .call-elapsed { opacity: 0.55; margin-left: 5px; }
+  .call-overlay-route {
+    font-size: 12px; opacity: 0.5; margin-bottom: 22px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+  }
+  .call-overlay-precontrols {
+    display: flex; gap: 12px; margin-bottom: 22px;
+  }
+  .call-overlay-precontrols .precontrol {
+    width: 48px; height: 48px; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.06);
+    color: #fff; font-size: 18px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: background .15s, border-color .15s;
+  }
+  .call-overlay-precontrols .precontrol:hover {
+    background: rgba(255,255,255,0.12);
+    border-color: rgba(255,255,255,0.3);
+  }
+  .call-overlay-precontrols .precontrol[aria-pressed="true"] {
+    background: rgba(214,64,64,0.32);
+    border-color: rgba(214,64,64,0.6);
+  }
+  /* Picture-in-picture self-preview for video calls (hidden for
+     voice-only). Sits above the End button, top-right of overlay. */
+  .call-overlay-selfpreview {
+    position: absolute;
+    top: 24px; right: 24px;
+    width: 160px; height: 120px;
+    border-radius: 10px;
+    background: #111;
+    border: 1px solid rgba(255,255,255,0.16);
+    object-fit: cover;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+    display: none;
+  }
+  .call-overlay.show.has-video .call-overlay-selfpreview { display: block; }
   .call-overlay-buttons {
     display: flex; gap: 18px;
   }
@@ -902,6 +992,22 @@
   .btn-call-decline {
     background: rgba(80,80,80,0.7); color: #fff;
   }
+  /* "Send a message instead" link below the End button — surfaces
+     after a delay so the user has a graceful escape if the peer is
+     slow to pick up. */
+  .call-overlay-fallback {
+    margin-top: 22px;
+    opacity: 0;
+    transition: opacity .4s ease-in;
+    font-size: 13px;
+  }
+  .call-overlay-fallback.show { opacity: 0.75; }
+  .call-overlay-fallback button {
+    background: none; border: 0; color: rgba(180,200,255,0.85);
+    text-decoration: underline; cursor: pointer;
+    font: inherit; padding: 0;
+  }
+  .call-overlay-fallback button:hover { color: rgba(220,235,255,1); }
   /* Active-call surface — face placeholder + controls. */
   .call-active {
     position: fixed; inset: 0;
@@ -4234,6 +4340,8 @@
           <button id="btn-self-mesh-invite">Show invite QR</button>
           <button id="btn-self-mesh-claim">Join with invite</button>
           <button id="btn-self-mesh-best">Use best device</button>
+          <button id="btn-self-mesh-freeze">Freeze device</button>
+          <button id="btn-self-mesh-recover">Recover device</button>
           <button id="btn-self-mesh-trust-root">Trust folder</button>
           <button id="btn-self-mesh-manifest">Pull file list</button>
           <button id="btn-self-mesh-send">Send file</button>
@@ -4248,7 +4356,7 @@
           <div class="sm-actions">
             <button id="btn-self-mesh-mint">Create device cert</button>
             <button id="btn-self-mesh-enroll">Add device cert</button>
-            <button id="btn-self-mesh-revoke">Remove selected device</button>
+            <button id="btn-self-mesh-revoke">Hard revoke selected device</button>
           </div>
         </details>
         <img id="self-mesh-invite-qr" alt="Self-mesh invite QR" style="display:none; margin-top:8px; width:144px; max-width:100%; border-radius:8px; background:#fff; padding:8px;" />
@@ -16070,10 +16178,38 @@
      Hidden by default; populated via JS when call events fire over
      the WebSocket. See docs/LIVING_PRESENCE_ARCHITECTURE.md §3. -->
 <div id="call-outgoing-overlay" class="call-overlay" role="dialog" aria-label="Calling">
+  <!-- Self-preview tile (video calls only). Hidden when the overlay's
+       parent has no .has-video class, set when wantVideo=true. -->
+  <video id="call-outgoing-selfpreview" class="call-overlay-selfpreview"
+         autoplay playsinline muted aria-label="Your camera preview"></video>
+  <!-- Avatar circle with initials + animated pulse rings. -->
+  <div class="call-overlay-avatar" id="call-outgoing-avatar" aria-hidden="true">C2</div>
   <div class="call-overlay-peer" id="call-outgoing-peer"></div>
-  <div class="call-overlay-status" id="call-outgoing-status">Calling…</div>
+  <div class="call-overlay-kind-badge" id="call-outgoing-kind" data-kind="video">
+    <span id="call-outgoing-kind-icon">📹</span>
+    <span id="call-outgoing-kind-text">Video call</span>
+  </div>
+  <div class="call-overlay-status" id="call-outgoing-status">
+    Calling… <span class="call-elapsed" id="call-outgoing-elapsed"></span>
+  </div>
+  <div class="call-overlay-route" id="call-outgoing-route">connecting…</div>
+  <!-- Pre-call controls: pre-mute and pre-camera-off so the user can
+       choose how they enter the call before the peer picks up. The
+       Camera button only shows for video calls. -->
+  <div class="call-overlay-precontrols" id="call-outgoing-precontrols">
+    <button class="precontrol" id="btn-call-precmute"
+            aria-label="Mute microphone" aria-pressed="false"
+            title="Mute before peer picks up">🎙️</button>
+    <button class="precontrol" id="btn-call-precam"
+            aria-label="Turn camera off" aria-pressed="false"
+            title="Turn camera off before peer picks up">📹</button>
+  </div>
   <div class="call-overlay-buttons">
     <button class="btn-call-end" id="btn-call-cancel" aria-label="End call">End</button>
+  </div>
+  <!-- "Send a message instead" — appears after 8s with no answer. -->
+  <div class="call-overlay-fallback" id="call-outgoing-fallback">
+    <button id="btn-call-send-msg-instead">Send a message instead</button>
   </div>
 </div>
 
@@ -16469,8 +16605,11 @@
     }
     callUI.activeCallId = result.call_id;
     callUI.activeCallPeer = peerLabel || peerMasterVkHex.slice(0, 8);
+    callUI.activeCallPeerFp = peerMasterVkHex;
     callUI.activeCallKind = wantVideo ? "video" : "voice";
-    showOutgoingOverlay(callUI.activeCallPeer);
+    showOutgoingOverlay(callUI.activeCallPeer, {
+      kind: wantVideo ? "video" : "voice",
+    });
     // Tier α: pre-warm local media so the mic (and optionally the
     // camera) are ready by the time the peer accepts. If
     // permissions are denied, the call still proceeds (text/voice-
@@ -16485,22 +16624,266 @@
       // Tier β — start per-window frame attestation (video only;
       // voice-only calls have no video frames to attest).
       if (wantVideo) startAttestStream(stream);
+      // Wire the self-preview tile (video only). Lets the caller
+      // see exactly what the peer will see when they pick up —
+      // catches "wrong camera selected" / "lens cover on" before
+      // they answer.
+      if (wantVideo) {
+        const selfPrev = $$("#call-outgoing-selfpreview");
+        if (selfPrev) {
+          try { selfPrev.srcObject = stream; } catch (_) {}
+        }
+      }
+      // Apply any pre-call mute / pre-call camera-off the user
+      // already chose on the overlay (handlers above only flip
+      // the flag; the stream may not have existed yet).
+      if (_outgoingState.preMuted) {
+        stream.getAudioTracks().forEach((t) => { t.enabled = false; });
+      }
+      if (_outgoingState.preCamOff) {
+        stream.getVideoTracks().forEach((t) => { t.enabled = false; });
+      }
     }
     // Originator creates the SDP offer + sends it now. The peer
     // will respond with an SDP answer once they accept.
     await sendLocalSdpOffer();
   };
 
-  function showOutgoingOverlay(peerLabel) {
-    const peer = $$("#call-outgoing-peer");
-    if (peer) peer.textContent = peerLabel;
-    const overlay = $$("#call-outgoing-overlay");
-    if (overlay) overlay.classList.add("show");
+  /**
+   * Compute peer initials for the avatar circle.
+   * "Computer 2" -> "C2"; "Alice" -> "A"; "fc9f0a5f" -> "fc"
+   */
+  function _peerInitials(label) {
+    if (!label) return "?";
+    const parts = String(label).trim().split(/\s+/);
+    if (parts.length >= 2) {
+      return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    }
+    return label.length >= 2
+      ? (label[0] + label[1]).toUpperCase()
+      : label[0].toUpperCase();
   }
+
+  /**
+   * Format elapsed seconds as M:SS for the ringing timer.
+   */
+  function _fmtElapsed(secs) {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${s < 10 ? "0" : ""}${s}`;
+  }
+
+  // State for the outgoing overlay's per-call timers + handlers.
+  const _outgoingState = {
+    startedMs: 0,
+    timerId: null,
+    fallbackTimerId: null,
+    preMuted: false,
+    preCamOff: false,
+  };
+
+  function _resetOutgoingState() {
+    if (_outgoingState.timerId) {
+      clearInterval(_outgoingState.timerId);
+      _outgoingState.timerId = null;
+    }
+    if (_outgoingState.fallbackTimerId) {
+      clearTimeout(_outgoingState.fallbackTimerId);
+      _outgoingState.fallbackTimerId = null;
+    }
+    if (_outgoingState.routeTimerId) {
+      clearInterval(_outgoingState.routeTimerId);
+      _outgoingState.routeTimerId = null;
+    }
+    _outgoingState.preMuted = false;
+    _outgoingState.preCamOff = false;
+    const elapsed = $$("#call-outgoing-elapsed");
+    if (elapsed) elapsed.textContent = "";
+    const fallback = $$("#call-outgoing-fallback");
+    if (fallback) fallback.classList.remove("show");
+    const preMute = $$("#btn-call-precmute");
+    if (preMute) preMute.setAttribute("aria-pressed", "false");
+    const preCam = $$("#btn-call-precam");
+    if (preCam) preCam.setAttribute("aria-pressed", "false");
+    const route = $$("#call-outgoing-route");
+    if (route) route.textContent = "connecting…";
+  }
+
+  function showOutgoingOverlay(peerLabel, opts) {
+    // opts: { kind: "voice"|"video" }
+    const isVideo = !opts || opts.kind !== "voice";
+    const overlay = $$("#call-outgoing-overlay");
+    const peer = $$("#call-outgoing-peer");
+    const avatar = $$("#call-outgoing-avatar");
+    const kindBadge = $$("#call-outgoing-kind");
+    const kindIcon = $$("#call-outgoing-kind-icon");
+    const kindText = $$("#call-outgoing-kind-text");
+    const preCamBtn = $$("#btn-call-precam");
+
+    if (peer) peer.textContent = peerLabel;
+    if (avatar) avatar.textContent = _peerInitials(peerLabel);
+    if (kindBadge) kindBadge.setAttribute("data-kind", isVideo ? "video" : "voice");
+    if (kindIcon) kindIcon.textContent = isVideo ? "📹" : "📞";
+    if (kindText) kindText.textContent = isVideo ? "Video call" : "Voice call";
+    // Hide the pre-camera toggle for voice-only calls.
+    if (preCamBtn) preCamBtn.style.display = isVideo ? "" : "none";
+
+    _resetOutgoingState();
+    if (overlay) {
+      overlay.classList.add("show");
+      overlay.classList.toggle("has-video", isVideo);
+    }
+
+    // Kick off the elapsed-seconds counter (ticks every 1s).
+    _outgoingState.startedMs = Date.now();
+    const tick = () => {
+      const secs = Math.floor((Date.now() - _outgoingState.startedMs) / 1000);
+      const elapsed = $$("#call-outgoing-elapsed");
+      if (elapsed) elapsed.textContent = _fmtElapsed(secs);
+    };
+    tick();
+    _outgoingState.timerId = setInterval(tick, 1000);
+
+    // After 8 seconds with no answer, surface the "send a message
+    // instead" fallback so the user can downgrade gracefully.
+    _outgoingState.fallbackTimerId = setTimeout(() => {
+      const fallback = $$("#call-outgoing-fallback");
+      if (fallback) fallback.classList.add("show");
+    }, 8000);
+
+    // Probe the daemon's connection-status endpoint to label the
+    // route. Refresh every 2.5s while the overlay is up — the
+    // detected regime may sharpen as the dial progresses.
+    _refreshOutgoingRoute().catch(() => { /* non-fatal */ });
+    _outgoingState.routeTimerId = setInterval(() => {
+      _refreshOutgoingRoute().catch(() => {});
+    }, 2500);
+  }
+
+  /**
+   * Best-effort: pull per-peer regime + latency from /api/peers
+   * (the same data the sidebar surfaces) and write a one-liner
+   * route label under the status. Silent on failure — the call
+   * surface must never block on a network probe.
+   */
+  async function _refreshOutgoingRoute() {
+    try {
+      const peerFp = callUI.activeCallPeerFp;
+      if (!peerFp) return;
+      const r = await fetch("/api/peers", {
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+      });
+      if (!r.ok) return;
+      const body = await r.json();
+      const peer = (body.peers || []).find(
+        (p) => p.fingerprint === peerFp || p.short_id === peerFp,
+      );
+      const route = $$("#call-outgoing-route");
+      if (!route) return;
+      if (!peer) {
+        route.textContent = "no route";
+        return;
+      }
+      // Translate the regime code into something a normal user
+      // can read at a glance.
+      const regimeLabel = (() => {
+        const r = peer.regime;
+        if (!r) return peer.online ? "connecting…" : "offline";
+        if (r === "lan-fast") return "Wi-Fi (LAN)";
+        if (r === "lan-medium") return "Wi-Fi";
+        if (r === "wan-fast") return "Internet (fast)";
+        if (r === "wan-slow") return "Internet (slow)";
+        if (r === "relay") return "via relay";
+        return r;
+      })();
+      const latency = peer.latency_ms != null
+        ? ` · ${Math.round(peer.latency_ms)} ms`
+        : "";
+      route.textContent = `${regimeLabel}${latency}`;
+    } catch (_) { /* silent — never block the call surface */ }
+  }
+
   function hideOutgoingOverlay() {
     const overlay = $$("#call-outgoing-overlay");
     if (overlay) overlay.classList.remove("show");
+    _resetOutgoingState();
+    // Stop the self-preview video stream.
+    const selfPrev = $$("#call-outgoing-selfpreview");
+    if (selfPrev) {
+      try {
+        if (selfPrev.srcObject) {
+          selfPrev.srcObject.getTracks().forEach((t) => {
+            try { t.stop(); } catch (_) {}
+          });
+        }
+        selfPrev.srcObject = null;
+      } catch (_) {}
+    }
   }
+
+  // Pre-call control handlers: toggle local-media tracks before the
+  // peer picks up. The state propagates to startLocalMedia /
+  // setupRtcPeerConnection so the call lands in the chosen state.
+  document.addEventListener("DOMContentLoaded", () => {
+    const preMute = $$("#btn-call-precmute");
+    const preCam = $$("#btn-call-precam");
+    const sendMsg = $$("#btn-call-send-msg-instead");
+    if (preMute) {
+      preMute.addEventListener("click", () => {
+        _outgoingState.preMuted = !_outgoingState.preMuted;
+        preMute.setAttribute("aria-pressed",
+          _outgoingState.preMuted ? "true" : "false");
+        preMute.title = _outgoingState.preMuted
+          ? "Microphone muted — peer will hear nothing on pickup"
+          : "Mute before peer picks up";
+        // If local media already started, mute the audio track live.
+        if (media && media.localStream) {
+          media.localStream.getAudioTracks().forEach((t) => {
+            t.enabled = !_outgoingState.preMuted;
+          });
+        }
+      });
+    }
+    if (preCam) {
+      preCam.addEventListener("click", () => {
+        _outgoingState.preCamOff = !_outgoingState.preCamOff;
+        preCam.setAttribute("aria-pressed",
+          _outgoingState.preCamOff ? "true" : "false");
+        preCam.title = _outgoingState.preCamOff
+          ? "Camera off — peer will see your avatar on pickup"
+          : "Turn camera off before peer picks up";
+        if (media && media.localStream) {
+          media.localStream.getVideoTracks().forEach((t) => {
+            t.enabled = !_outgoingState.preCamOff;
+          });
+        }
+      });
+    }
+    if (sendMsg) {
+      sendMsg.addEventListener("click", async () => {
+        // Cancel the outgoing call + focus the chat composer for
+        // this peer. Lets the user gracefully downgrade.
+        const peerFp = callUI.activeCallPeerFp;
+        try {
+          if (callUI.activeCallId) {
+            await callApiPost({
+              action: "cancel",
+              call_id: callUI.activeCallId,
+              reason: "downgraded_to_message",
+            });
+          }
+        } catch (_) {}
+        hideOutgoingOverlay();
+        if (peerFp && typeof selectPeer === "function") {
+          selectPeer(peerFp);
+          // Best-effort: focus the message composer.
+          const composer = $$("#msg-input");
+          if (composer) composer.focus();
+        }
+      });
+    }
+  });
   function showIncomingRing(peerLabel) {
     const peer = $$("#call-incoming-peer");
     if (peer) peer.textContent = peerLabel;
