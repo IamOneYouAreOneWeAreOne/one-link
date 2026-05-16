@@ -3252,6 +3252,63 @@
     white-space: nowrap;
   }
   .file-row .transfer-facts { max-width: 100%; }
+  .file-row .file-group-details,
+  .file-row .transfer-details {
+    grid-column: 2 / -1;
+    margin-top: 2px;
+  }
+  .file-row details summary {
+    cursor: pointer;
+    width: fit-content;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 700;
+    list-style: none;
+    border-radius: 999px;
+    padding: 4px 8px;
+    background: rgba(255,255,255,.045);
+  }
+  .file-row details summary::-webkit-details-marker { display: none; }
+  .file-row details[open] summary,
+  .file-row details summary:hover {
+    color: var(--text);
+    background: rgba(255,255,255,.075);
+  }
+  .duplicate-list {
+    margin-top: 6px;
+    max-height: 220px;
+    overflow: auto;
+    display: grid;
+    gap: 4px;
+  }
+  .duplicate-file {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(255,255,255,.03);
+  }
+  .duplicate-file .dup-name {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .duplicate-file .dup-time {
+    color: var(--text-dimmer);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .duplicate-file .dup-open {
+    color: var(--text-dim);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .duplicate-file .dup-open:hover { color: var(--text); }
   .msg.out.file .transfer-fact {
     background: rgba(255,255,255,.16);
     border-color: rgba(255,255,255,.22);
@@ -3847,9 +3904,9 @@
   .file-row .badge.paused   { background: rgba(78,193,255,.13); color: var(--accent-2, #4ec1ff); }
   .transfer-command {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
     gap: 6px;
-    margin-top: 8px;
+    margin-top: 6px;
   }
   .transfer-command .tc-metric {
     min-width: 0;
@@ -3874,6 +3931,21 @@
     font-weight: 800;
     text-transform: uppercase;
     letter-spacing: .7px;
+  }
+  .file-row .transfer-command {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .sent-summary {
+    margin-top: 3px;
+    color: var(--text-dim);
+    font-size: 11px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .sent-summary strong {
+    color: var(--text);
+    font-weight: 800;
   }
 
   /* v0.7.5: reply quote inside a message bubble */
@@ -4449,12 +4521,12 @@
       </div>
       <div class="panel-form">
         <div class="mini-actions">
-          <button id="btn-send-file-panel">Send file</button>
-          <button id="btn-open-inbox">Open inbox folder</button>
-          <button id="btn-refresh-files">Refresh</button>
+          <button id="btn-send-file-panel" title="Send a file">Send</button>
+          <button id="btn-open-inbox" title="Open the One Link inbox folder">Inbox</button>
+          <button id="btn-refresh-files" title="Refresh file history">Refresh</button>
           <button id="btn-clear-file-traces" class="btn-danger"
                   title="Clear One Link file records without deleting files from disk">
-            Clear list
+            Clear
           </button>
         </div>
       </div>
@@ -7537,7 +7609,7 @@
     return {
       phone: "📱", tablet: "📱", laptop: "💻", desktop: "🖥️",
       watch: "⌚", tv: "📺", speaker: "🔊", printer: "🖨️",
-      router: "📡", iot: "🔌", unknown: "❓",
+      router: "📡", iot: "🔌", console: "🎮", unknown: "❓",
     }[kind] || "❓";
   }
 
@@ -7546,7 +7618,8 @@
       phone: "Phone", tablet: "Tablet", laptop: "Laptop",
       desktop: "Desktop", watch: "Watch", tv: "TV",
       speaker: "Speaker", printer: "Printer", router: "Router",
-      iot: "Smart device", unknown: "Unknown device",
+      iot: "Smart device", console: "Game console",
+      unknown: "Unknown device",
     }[kind] || "Device";
   }
 
@@ -8218,6 +8291,38 @@
       wrap.appendChild(card);
     }
     return wrap;
+  }
+  function renderPrimaryTransferSummary(t) {
+    const metrics = transferCommandMetrics(t);
+    const facts = transferAutopilotFacts(t, statusKind(t));
+    const speed = metrics.find(m => m.label === "effective")?.value || "";
+    const known = metrics.find(m => m.label === "already known")?.value || "";
+    const route = metrics.find(m => m.label === "route")?.value || "";
+    const bits = [];
+    if (speed) bits.push({ text: speed, strong: true });
+    if (known) bits.push({ text: `${known} already known` });
+    if (route) bits.push({ text: route });
+    if (!bits.length && facts.length) bits.push({ text: facts[0] });
+    if (!bits.length) return null;
+    const out = el("div", "sent-summary");
+    bits.forEach((bit, idx) => {
+      if (idx) out.appendChild(document.createTextNode(" - "));
+      out.appendChild(el(bit.strong ? "strong" : "span", null, bit.text));
+    });
+    return out;
+  }
+  function renderTransferDetails(t) {
+    const command = renderTransferCommandCenter(t);
+    const facts = renderTransferFacts(t, statusKind(t));
+    if (!command && !facts) return null;
+    const details = document.createElement("details");
+    details.className = "transfer-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "Details";
+    details.appendChild(summary);
+    if (command) details.appendChild(command);
+    if (facts) details.appendChild(facts);
+    return details;
   }
   function renderFabricTruth() {
     const host = $("#fabric-truth");
@@ -10031,6 +10136,7 @@
 
   // ── Render: files panel (Received | Sent toggle) ──────────────────
   let _receivedFilesCache = [];
+  const _expandedInboxGroups = new Set();
   function canonicalInboxFileFamily(name) {
     const raw = String(name || "");
     const dot = raw.lastIndexOf(".");
@@ -10062,10 +10168,12 @@
         const prev = byKey.get(key);
         if (!prev) {
           const rec = { ...f, display_name: family || f.name || "file", copies: 1, newest_ms: f.mtime_ms || 0 };
+          rec.members = [f];
           byKey.set(key, rec);
           grouped.push(rec);
         } else {
           prev.copies += 1;
+          prev.members.push(f);
           if ((f.mtime_ms || 0) > (prev.newest_ms || 0)) {
             prev.name = f.name;
             prev.size = f.size;
@@ -10077,9 +10185,14 @@
         }
       }
       grouped.sort((a, b) => (b.newest_ms || 0) - (a.newest_ms || 0));
+      for (const g of grouped) {
+        if (Array.isArray(g.members)) {
+          g.members.sort((a, b) => (b.mtime_ms || 0) - (a.mtime_ms || 0));
+        }
+      }
       $("#files-count").textContent = files.length === grouped.length
-        ? files.length
-        : `${grouped.length}/${files.length}`;
+        ? `${files.length}`
+        : `${grouped.length} groups / ${files.length} files`;
       if (files.length === 0) {
         list.appendChild(richEmpty(
           "📥", "Inbox is quiet",
@@ -10102,7 +10215,7 @@
         }
         meta.appendChild(name);
         const sizeText = f.copies > 1
-          ? `${fmtBytes(f.size)} · ${f.copies} copies`
+          ? `Latest ${fmtBytes(f.size)} · ${f.copies} copies`
           : `${fmtBytes(f.size)}`;
         meta.appendChild(el("div", "size", sizeText));
         if (f.mtime_ms) {
@@ -10131,6 +10244,39 @@
         };
         fileActions.appendChild(reveal);
         row.appendChild(fileActions);
+        if (f.copies > 1 && Array.isArray(f.members) && f.members.length) {
+          const details = document.createElement("details");
+          details.className = "file-group-details";
+          details.open = _expandedInboxGroups.has(f.display_name);
+          details.ontoggle = () => {
+            if (details.open) _expandedInboxGroups.add(f.display_name);
+            else _expandedInboxGroups.delete(f.display_name);
+          };
+          const summary = document.createElement("summary");
+          summary.textContent = details.open ? "Hide copies" : `Show all ${f.copies} copies`;
+          details.appendChild(summary);
+          details.addEventListener("toggle", () => {
+            summary.textContent = details.open ? "Hide copies" : `Show all ${f.copies} copies`;
+          });
+          const dupList = el("div", "duplicate-list");
+          for (const m of f.members) {
+            const dup = el("div", "duplicate-file");
+            const dupName = el("div", "dup-name", m.name || "file");
+            dupName.title = m.name || "";
+            dup.appendChild(dupName);
+            const dupMeta = el("div", "dup-time", m.mtime_ms ? new Date(m.mtime_ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "");
+            const dupOpen = el("a", "dup-open", "Open");
+            const _dupNm = encodeURIComponent(m.name || "");
+            dupOpen.href = `/api/files/${_dupNm}`;
+            dupOpen.target = "_blank";
+            dupMeta.appendChild(document.createTextNode(" "));
+            dupMeta.appendChild(dupOpen);
+            dup.appendChild(dupMeta);
+            dupList.appendChild(dup);
+          }
+          details.appendChild(dupList);
+          row.appendChild(details);
+        }
         list.appendChild(row);
       }
     } else {
@@ -10174,10 +10320,10 @@
         } else {
           meta.appendChild(el("div", "size", fmtBytes(t.size)));
         }
-        const command = renderTransferCommandCenter(t);
-        if (command) meta.appendChild(command);
-        const facts = renderTransferFacts(t, statusKind(t));
-        if (facts) meta.appendChild(facts);
+        const summary = renderPrimaryTransferSummary(t);
+        if (summary) meta.appendChild(summary);
+        const details = renderTransferDetails(t);
+        if (details) meta.appendChild(details);
         if (t.updated_ms) meta.appendChild(el("div", "when", new Date(t.updated_ms).toLocaleString()));
         row.appendChild(meta);
         list.appendChild(row);

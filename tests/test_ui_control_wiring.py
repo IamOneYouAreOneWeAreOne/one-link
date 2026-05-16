@@ -251,8 +251,30 @@ def test_received_files_are_collapsed_by_identity() -> None:
         encoding="utf-8",
     )
     idx = html.find('if (state.filesMode === "received")')
-    snippet = html[idx:idx + 2500]
+    snippet = html[idx:idx + 4200]
     assert "const grouped = []" in snippet
     assert "byKey" in snippet
+    assert "canonicalInboxFileFamily" in html
+    assert r"\s+\(\d+\)$" in html
+    assert "display_name" in snippet
+    assert "members" in snippet
     assert "copies" in snippet
-    assert "matching inbox entries are collapsed" in snippet
+    assert "duplicate inbox entries are collapsed" in snippet
+    assert "file-actions" in snippet
+    assert "Show all ${f.copies} copies" in html
+    assert "duplicate-list" in html
+    assert "dup-open" in html
+    assert "Latest ${fmtBytes(f.size)}" in snippet
+
+
+def test_sent_files_default_to_compact_details() -> None:
+    html = (ROOT / "src" / "one_link" / "web" / "index.html").read_text(
+        encoding="utf-8",
+    )
+    idx = html.find('const sent = state.transfers')
+    snippet = html[idx:idx + 2600]
+    assert "renderPrimaryTransferSummary" in html
+    assert "renderTransferDetails" in html
+    assert 'el("div", "sent-summary")' in html
+    assert "renderTransferDetails(t)" in snippet
+    assert "transfer-details" in html

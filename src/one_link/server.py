@@ -2481,6 +2481,15 @@ class UIServer:
         devices = await _lan.full_scan(
             timeout_s=timeout_s, one_link_peers=one_link_peers,
         )
+        # Backstop: if a fresh scan returned NOTHING (AP isolation
+        # flipped on, captive portal, scanner failure) re-surface
+        # what we've seen in the last 24h from the persistent
+        # device-memory cache. UI never goes empty after first run.
+        if not devices:
+            try:
+                devices = _lan.load_recent_cached_devices()
+            except Exception:
+                devices = []
         health = _lan.assess_network_health(devices)
 
         # Bucket the results.
