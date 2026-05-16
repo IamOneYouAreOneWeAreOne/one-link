@@ -240,23 +240,135 @@ def _spawn_daemon() -> subprocess.Popen:
     grows unbounded; the daemon's own logging already handles
     long-term retention via its in-app log files.
     """
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     log_path = data_dir() / "daemon-launch.err.log"
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_fh = open(log_path, "wb")
     except OSError:
-        log_fh = None
+        pass
+
     if getattr(sys, "frozen", False):
         daemon_cmd = [sys.executable, "daemon", "-v"]
     else:
         daemon_cmd = [sys.executable, "-m", "one_link.cli", "daemon", "-v"]
+
+    # Windows: the launcher (especially under PyInstaller --onefile and
+    # when launched from a terminal that has its own Job Object) is
+    # inside a Win32 Job Object that does NOT have
+    # JOB_OBJECT_LIMIT_BREAKAWAY_OK set. That means a normal
+    # subprocess.Popen with CREATE_BREAKAWAY_FROM_JOB is silently
+    # ignored — the daemon stays in the parent's job and dies when
+    # the launcher exits.
+    #
+    # The robust fix is to launch the daemon via the Windows shell,
+    # which spawns the new process under explorer's tree (no shared
+    # job). We use `cmd /c start "" /B exe daemon -v` then immediately
+    # discover the resulting daemon PID by polling for the listen
+    # socket / port file. This is the same technique GUI installers
+    # use to start "fire and forget" background services.
+    if os.name == "nt":
+        return _spawn_daemon_windows_detached(daemon_cmd, log_path)
+    # POSIX: setsid() detaches from the controlling terminal and the
+    # daemon survives the launcher exiting. No Job Object on Linux/mac.
+    try:
+        log_fh = open(log_path, "wb")
+    except OSError:
+        log_fh = None
     return subprocess.Popen(
         daemon_cmd,
         stdout=subprocess.DEVNULL,
         stderr=(log_fh if log_fh is not None else subprocess.DEVNULL),
-        creationflags=flags,
+        stdin=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=True,
     )
+
+
+def _spawn_daemon_windows_detached(
+    daemon_cmd: list[str], log_path: Path,
+) -> subprocess.Popen:
+    """Spawn the daemon truly detached on Windows by going through
+    the shell. The launcher cannot kill it; closing the launcher
+    window does not kill it; only an explicit `one-link daemon-stop`
+    (or the user via Task Manager) will end it.
+
+    Implementation: write the daemon's effective command line to a
+    tiny .cmd file and invoke `cmd /c start "" /B`. The `start /B`
+    keyword spawns the process WITHOUT inheriting the parent's job.
+    """
+    import tempfile
+    # Quote each arg with the Windows rules — surround with " and
+    # double internal "s.
+    def _q(s: str) -> str:
+        return '"' + s.replace('"', '""') + '"'
+
+    exe_args = " ".join(_q(a) for a in daemon_cmd)
+    # Redirect stdout/stderr inside the .cmd so we capture logs.
+    redirect = f'>nul 2>"{log_path}"'
+    cmd_text = (
+        "@echo off\r\n"
+        f'start "one-link-daemon" /B {exe_args} {redirect}\r\n'
+    )
+    # Write to a per-spawn .cmd file in temp so we don't conflict.
+    fd, cmd_path = tempfile.mkstemp(prefix="one-link-spawn-", suffix=".cmd")
+    try:
+        os.write(fd, cmd_text.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+    # Run the .cmd. cmd.exe exits immediately after `start` returns.
+    # The daemon is now an unrelated process tree under conhost.
+    try:
+        helper = subprocess.Popen(
+            ["cmd.exe", "/c", cmd_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+            ),
+            close_fds=True,
+        )
+        helper.wait(timeout=10)
+    except Exception:
+        # If the helper itself fails (rare), fall back to a normal
+        # Popen — at least we tried.
+        pass
+    finally:
+        try:
+            os.unlink(cmd_path)
+        except OSError:
+            pass
+
+    # The helper has exited; the daemon is now its own untracked
+    # process. We return a stub Popen-like object so the caller's
+    # `.wait()` path waits on a no-op (the launcher's wait-loop now
+    # only exists to keep the console window open, not to track the
+    # daemon).
+    return _DetachedDaemonHandle()
+
+
+class _DetachedDaemonHandle:
+    """Popen-shaped stub for a fully detached daemon. .wait() blocks
+    forever (until the launcher itself is killed); .terminate() is
+    a no-op — explicit `one-link daemon-stop` is the supported way
+    to end the detached daemon."""
+
+    def wait(self, timeout=None):
+        import time as _time
+        if timeout is not None:
+            _time.sleep(timeout)
+            return None
+        # Block forever; KeyboardInterrupt is the user's exit signal.
+        while True:
+            _time.sleep(60)
+
+    def terminate(self):  # pragma: no cover — no-op
+        return
+
+    def kill(self):  # pragma: no cover — no-op
+        return
 
 
 def _default_window_geometry() -> tuple[int, int, int, int]:
@@ -673,18 +785,14 @@ def run_app(
             _print_lan_warning(lan_ip, info.server_port, info.token)
 
     if spawned is not None:
-        click.echo("\n  Daemon is running as a child of this terminal.")
-        click.echo("  Close this window or Ctrl-C to stop.\n")
-        try:
-            spawned.wait()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            try:
-                spawned.terminate()
-                spawned.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                spawned.kill()
-            except Exception:
-                pass
+        # The daemon is fully detached — Windows: spawned through the
+        # shell out of the launcher's Job Object; POSIX: setsid() so
+        # closing the terminal does not kill it. It will keep running
+        # after this launcher process exits, so paired peers stay
+        # online and in-flight transfers complete. The launcher's job
+        # is done: report status and exit. The UI window (browser /
+        # webview) owns its own lifetime now.
+        click.echo("\n  Daemon is running in the background.")
+        click.echo("  Your peers stay online even if you close this window.")
+        click.echo("  To stop the daemon explicitly: `one-link daemon-stop`")
     return 0

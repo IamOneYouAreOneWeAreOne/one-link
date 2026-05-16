@@ -1160,6 +1160,52 @@ def folder_sync(name):
             click.echo(f"  {peer}  {r['status']}")
 
 
+@cli.command("daemon-stop")
+def daemon_stop():
+    """Stop the background daemon.
+
+    The daemon is detached from the launcher (so closing the desktop
+    window does NOT stop it — paired peers stay online, in-flight
+    transfers complete). Use this command when you actually want to
+    shut down: One Link will no longer be reachable until you
+    re-launch it.
+    """
+    try:
+        port = daemon_mod.read_control_port()
+    except RuntimeError:
+        click.echo("daemon is not running.")
+        return
+    # Tell the daemon to shut down cleanly via the control port.
+    try:
+        sock, _ = _connect_control(timeout=3.0)
+        sock.sendall(json.dumps({"cmd": "shutdown"}).encode() + b"\n")
+        try:
+            sock.recv(256)
+        except Exception:
+            pass
+        sock.close()
+        click.echo("daemon shutdown requested.")
+    except Exception as e:
+        # Fall back to PID-file termination.
+        try:
+            from one_link.paths import data_dir as _dd
+            pid_path = _dd() / "daemon.pid"
+            if pid_path.is_file():
+                pid = int(pid_path.read_text().strip())
+                if os.name == "nt":
+                    os.system(f'taskkill /F /PID {pid} >nul 2>&1')
+                else:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                click.echo(f"daemon terminated (pid {pid}).")
+                return
+        except Exception:
+            pass
+        raise click.ClickException(f"could not stop daemon: {e}")
+
+
 def main():
     cli()
 

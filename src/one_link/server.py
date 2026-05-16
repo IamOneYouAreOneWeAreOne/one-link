@@ -1493,6 +1493,8 @@ class UIServer:
         r.add_get("/api/connect-info", self._guarded(self.api_connect_info))
         r.add_get("/api/connect-info/qr.svg", self._guarded(self.api_connect_info_qr))
         r.add_get("/api/me", self._guarded(self.api_me))
+        r.add_get("/api/setup", self._guarded(self.api_setup_status))
+        r.add_post("/api/setup", self._guarded(self.api_update_setup))
         r.add_get("/api/status", self._guarded(self.api_status))
         # ── Living Presence Tier α-pre — Call API ────────────────
         # Browser hits these to drive the per-call state machines.
@@ -3647,6 +3649,10 @@ class UIServer:
         me = self.daemon.me
         display_name = None
         onboarding_completed = False
+        # Response keys include "onboarding_completed": for the legacy
+        # first-run gate and "one_setup_completed": for One Setup.
+        one_setup_completed = False
+        one_setup_skipped_at_ms = 0
         if self.daemon.state is not None:
             display_name = self.daemon.state.get_setting("display_name")
             # v0.9.4: surface the persisted onboarding flag so a
@@ -3655,6 +3661,14 @@ class UIServer:
             onboarding_completed = (
                 self.daemon.state.get_setting("onboarding_completed") == "true"
             )
+            one_setup_completed = (
+                self.daemon.state.get_setting("one_setup_completed") == "true"
+                or onboarding_completed
+            )
+            with contextlib.suppress(Exception):
+                one_setup_skipped_at_ms = int(
+                    self.daemon.state.get_setting("one_setup_skipped_at_ms") or 0
+                )
         try:
             from one_link import __version__ as ol_ver
         except Exception:
@@ -3692,12 +3706,315 @@ class UIServer:
             "protocol_version": PROTOCOL_VERSION,
             "schema_version": schema_version,
             "onboarding_completed": onboarding_completed,
+            "one_setup_completed": one_setup_completed,
+            "one_setup_skipped_at_ms": one_setup_skipped_at_ms,
             # v0.10.4: surface user's chosen presence so the UI's
             # status pill renders correctly on every load.
             "presence": self.daemon.get_my_presence(),
             "suggested_folder": suggested_folder,
             "autoinstall_enabled": autoinstall_enabled,
         })
+
+    def _one_setup_snapshot(self) -> dict[str, Any]:
+        state = self.daemon.state
+        me = self.daemon.me
+        now = int(time.time() * 1000)
+        if state is None:
+            return {
+                "ok": False,
+                "user_message": "Setup is waiting for local state.",
+                "mode": "human",
+                "completed": False,
+                "skipped": False,
+                "current_step": "welcome",
+                "checklist": [],
+                "technical": {"diagnostics": []},
+                "next_action": {
+                    "id": "retry",
+                    "label": "Try again",
+                    "detail": "Local state is not available yet.",
+                },
+            }
+
+        def setting_bool(key: str) -> bool:
+            return state.get_setting(key) == "true"
+
+        def setting_int(key: str) -> int:
+            with contextlib.suppress(Exception):
+                return int(state.get_setting(key) or 0)
+            return 0
+
+        roots = state.list_self_mesh_roots()
+        devices = state.list_self_mesh_devices()
+        trusted_devices = [
+            d for d in devices
+            if not d.get("revoked")
+            and str(d.get("safety_state") or "trusted") not in {
+                "maybe_lost", "frozen", "revoked", "quarantined",
+            }
+        ]
+        local_devices = [d for d in trusted_devices if d.get("local")]
+        remote_devices = [d for d in trusted_devices if not d.get("local")]
+        presence = state.list_self_mesh_presence()
+        awake = [
+            p for p in presence
+            if str(p.get("state") or "").lower() == "awake"
+        ]
+        display_name = state.get_setting("display_name") or me.hostname
+        completed = (
+            setting_bool("one_setup_completed")
+            or setting_bool("onboarding_completed")
+        )
+        skipped_at = setting_int("one_setup_skipped_at_ms")
+        privacy_viewed = setting_int("one_setup_privacy_proof_viewed_at_ms") > 0
+        safety_reviewed = setting_int("one_setup_safety_reviewed_at_ms") > 0
+        first_message = setting_int("one_setup_first_message_at_ms") > 0
+        first_file = setting_int("one_setup_first_file_at_ms") > 0
+        recovery_ready = setting_int("one_setup_recovery_configured_at_ms") > 0
+
+        items = [
+            {
+                "id": "identity",
+                "label": "One identity",
+                "status": "done" if roots else "recommended",
+                "human": (
+                    "Your One identity is ready."
+                    if roots else
+                    "Create your One identity so your devices can belong to you without an account."
+                ),
+                "action": "Create identity" if not roots else "View proof",
+            },
+            {
+                "id": "device_name",
+                "label": "This device",
+                "status": "done" if display_name else "recommended",
+                "human": f"This device is called {display_name}.",
+                "action": "Rename" if display_name else "Name device",
+            },
+            {
+                "id": "add_device",
+                "label": "Add phone or laptop",
+                "status": "done" if remote_devices else "recommended",
+                "human": (
+                    f"{len(remote_devices)} trusted device"
+                    f"{'' if len(remote_devices) == 1 else 's'} added."
+                    if remote_devices else
+                    "Add one more device so One Link can protect and move with you."
+                ),
+                "action": "Add device" if not remote_devices else "Manage devices",
+            },
+            {
+                "id": "first_message",
+                "label": "First message",
+                "status": "done" if first_message else "optional",
+                "human": (
+                    "A first message has been sent."
+                    if first_message else
+                    "Send a test message to feel the private channel work."
+                ),
+                "action": "Send test message",
+            },
+            {
+                "id": "first_file",
+                "label": "First file",
+                "status": "done" if first_file else "optional",
+                "human": (
+                    "A first file has been sent."
+                    if first_file else
+                    "Send a tiny test file when you are ready."
+                ),
+                "action": "Send test file",
+            },
+            {
+                "id": "privacy_proof",
+                "label": "Privacy proof",
+                "status": "done" if privacy_viewed else "recommended",
+                "human": (
+                    "Privacy proof has been viewed."
+                    if privacy_viewed else
+                    "See what One Link did and which account-free path it used."
+                ),
+                "action": "View proof",
+            },
+            {
+                "id": "device_safety",
+                "label": "Device safety",
+                "status": "done" if safety_reviewed else "recommended",
+                "human": (
+                    "Device safety has been reviewed."
+                    if safety_reviewed else
+                    "Learn how to freeze a lost device without deleting your computer files."
+                ),
+                "action": "Review safety",
+            },
+            {
+                "id": "recovery",
+                "label": "Recovery",
+                "status": "done" if recovery_ready else "optional",
+                "human": (
+                    "Recovery is configured."
+                    if recovery_ready else
+                    "Choose a trusted way back in later."
+                ),
+                "action": "Set recovery",
+            },
+        ]
+
+        if not roots:
+            current_step = "identity"
+        elif not remote_devices:
+            current_step = "add_device"
+        elif not first_message and not first_file:
+            current_step = "first_success"
+        elif not privacy_viewed:
+            current_step = "privacy_proof"
+        elif not safety_reviewed:
+            current_step = "safety"
+        else:
+            current_step = "finish"
+
+        next_map = {
+            "identity": ("create_identity", "Create identity",
+                         "Make this device ready to add your other devices."),
+            "add_device": ("add_device", "Add a device",
+                           "Pair your phone or laptop under your One identity."),
+            "first_success": ("send_test_message", "Send test message",
+                              "Send a tiny private message to your trusted device."),
+            "privacy_proof": ("view_privacy_proof", "View privacy proof",
+                              "See what happened in plain language."),
+            "safety": ("review_safety", "Review safety",
+                       "Learn how to freeze a lost device safely."),
+            "finish": ("finish", "Start using One Link",
+                       "Your core setup is ready."),
+        }
+        action_id, label, detail = next_map[current_step]
+
+        diagnostics = [
+            {
+                "id": "root_identity",
+                "label": "Root identity",
+                "status": "pass" if roots else "missing",
+                "detail": f"{len(roots)} root identity record(s)",
+            },
+            {
+                "id": "local_device_cert",
+                "label": "Local device certificate",
+                "status": "pass" if local_devices else "missing",
+                "detail": f"{len(local_devices)} local trusted device cert(s)",
+            },
+            {
+                "id": "trusted_remote_device",
+                "label": "Trusted remote device",
+                "status": "pass" if remote_devices else "missing",
+                "detail": f"{len(remote_devices)} remote trusted device(s)",
+            },
+            {
+                "id": "self_mesh_presence",
+                "label": "Self-mesh presence",
+                "status": "pass" if awake else "idle",
+                "detail": f"{len(awake)} awake device presence record(s)",
+            },
+            {
+                "id": "privacy_proof",
+                "label": "Privacy proof viewed",
+                "status": "pass" if privacy_viewed else "missing",
+                "detail": "User viewed setup privacy proof" if privacy_viewed else "No setup proof viewed yet",
+            },
+            {
+                "id": "safety_review",
+                "label": "Safety reviewed",
+                "status": "pass" if safety_reviewed else "missing",
+                "detail": "Device safety reviewed" if safety_reviewed else "Safety review still recommended",
+            },
+        ]
+
+        return {
+            "ok": True,
+            "mode": "human",
+            "completed": completed,
+            "skipped": skipped_at > 0 and not completed,
+            "skipped_at_ms": skipped_at,
+            "current_step": current_step,
+            "display_name": display_name,
+            "counts": {
+                "roots": len(roots),
+                "devices": len(devices),
+                "trusted_devices": len(trusted_devices),
+                "remote_devices": len(remote_devices),
+                "awake_devices": len(awake),
+            },
+            "checklist": items,
+            "next_action": {
+                "id": action_id,
+                "label": label,
+                "detail": detail,
+            },
+            "technical": {
+                "enabled_by_default": False,
+                "diagnostics": diagnostics,
+                "receipt_redacted": True,
+                "generated_at_ms": now,
+            },
+        }
+
+    async def api_setup_status(self, request: web.Request) -> web.Response:
+        return web.json_response(self._one_setup_snapshot())
+
+    async def api_update_setup(self, request: web.Request) -> web.Response:
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        now = int(time.time() * 1000)
+        action = str(data.get("action") or "").strip()
+        if action == "skip":
+            state.set_setting("one_setup_skipped_at_ms", str(now))
+            state.set_setting("one_setup_last_prompted_at_ms", str(now))
+        elif action == "complete":
+            state.set_setting("one_setup_completed", "true")
+            state.set_setting("onboarding_completed", "true")
+            state.set_setting("one_setup_completed_at_ms", str(now))
+        elif action == "privacy_proof_viewed":
+            state.set_setting("one_setup_privacy_proof_viewed_at_ms", str(now))
+        elif action == "safety_reviewed":
+            state.set_setting("one_setup_safety_reviewed_at_ms", str(now))
+        elif action == "first_message_sent":
+            state.set_setting("one_setup_first_message_at_ms", str(now))
+        elif action == "first_file_sent":
+            state.set_setting("one_setup_first_file_at_ms", str(now))
+        elif action == "recovery_configured":
+            state.set_setting("one_setup_recovery_configured_at_ms", str(now))
+        elif action == "reset":
+            for key in (
+                "one_setup_completed",
+                "one_setup_completed_at_ms",
+                "one_setup_skipped_at_ms",
+                "one_setup_last_prompted_at_ms",
+                "one_setup_current_step",
+                "one_setup_first_message_at_ms",
+                "one_setup_first_file_at_ms",
+                "one_setup_privacy_proof_viewed_at_ms",
+                "one_setup_safety_reviewed_at_ms",
+                "one_setup_recovery_configured_at_ms",
+                "onboarding_completed",
+            ):
+                state.delete_setting(key)
+        else:
+            return web.json_response(
+                {
+                    "error": "unsupported setup action",
+                    "allowed": [
+                        "skip", "complete", "privacy_proof_viewed",
+                        "safety_reviewed", "first_message_sent",
+                        "first_file_sent", "recovery_configured", "reset",
+                    ],
+                },
+                status=400,
+            )
+        return web.json_response(self._one_setup_snapshot())
 
     async def api_metrics(self, request: web.Request) -> web.Response:
         """Production telemetry surface. Returns JSON with:

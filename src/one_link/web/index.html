@@ -1314,22 +1314,24 @@
     flex-shrink: 0; padding: 2px 6px;
     border-radius: 999px; border: 1px solid var(--bg-3);
   }
-  /* v0.9.4 onboarding overlay. */
+  /* One Setup: first-run setup that does real work, not a tour. */
   .onboarding-backdrop {
     position: fixed; inset: 0; z-index: 600;
-    background: linear-gradient(135deg, rgba(8,10,16,.92), rgba(20,16,40,.95));
+    background: rgba(8,10,16,.92);
     backdrop-filter: blur(12px);
     display: flex; align-items: center; justify-content: center;
     animation: fade .25s ease-out;
   }
   .onboarding-card {
     position: relative;
-    background: linear-gradient(180deg, var(--bg-1), var(--bg-elev));
+    background: var(--bg-1);
     border: 1px solid rgba(255,255,255,.08);
-    border-radius: 22px;
-    padding: 40px 44px;
-    max-width: 540px; width: calc(100% - 32px);
-    box-shadow: 0 40px 100px rgba(0,0,0,.7), 0 0 0 1px rgba(124,92,255,.12);
+    border-radius: 12px;
+    padding: 28px;
+    max-width: 760px; width: calc(100% - 32px);
+    max-height: calc(100vh - 32px);
+    overflow: auto;
+    box-shadow: 0 40px 100px rgba(0,0,0,.7);
     animation: pop-in .25s ease-out;
   }
   .onboarding-skip {
@@ -1344,7 +1346,7 @@
   .onboarding-skip:hover { background: var(--bg-3); color: var(--text); }
   .onboarding-progress {
     display: flex; gap: 8px; justify-content: center;
-    margin-bottom: 22px;
+    margin-bottom: 18px;
   }
   .onboarding-progress .dot {
     width: 8px; height: 8px; border-radius: 50%;
@@ -1356,13 +1358,14 @@
   .onboarding-progress .dot.done { background: var(--accent-2); }
   .onboarding-step { text-align: center; }
   .onboarding-glyph {
-    width: 72px; height: 72px;
-    margin: 0 auto 18px;
-    border-radius: 18px;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    width: 64px; height: 64px;
+    margin: 0 auto 16px;
+    border-radius: 16px;
+    background: rgba(124,92,255,.18);
+    border: 1px solid rgba(124,92,255,.28);
     display: grid; place-items: center;
-    font-size: 36px;
-    box-shadow: 0 12px 30px rgba(124,92,255,.35);
+    color: var(--text);
+    font-size: 26px;
   }
   .onboarding-glyph img { width: 48px; height: 48px; }
   .onboarding-step h1 {
@@ -1373,6 +1376,117 @@
     color: var(--text-dim); line-height: 1.55;
     margin-bottom: 12px; font-size: 14px;
   }
+  .setup-proof-row {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;
+    margin-top: 14px;
+  }
+  .setup-proof-row span {
+    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(255,255,255,.04);
+    color: var(--text-dim);
+    border-radius: 999px;
+    padding: 5px 9px;
+    font-size: 11px;
+    font-weight: 800;
+  }
+  .setup-device-line {
+    display: grid;
+    grid-template-columns: minmax(0,1fr) 72px minmax(0,1fr);
+    gap: 10px;
+    align-items: center;
+    margin: 16px 0;
+  }
+  .setup-device-card,
+  .setup-receipt,
+  .setup-checklist {
+    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(255,255,255,.035);
+    border-radius: 8px;
+    padding: 12px;
+    text-align: left;
+  }
+  .setup-device-card strong,
+  .setup-receipt strong {
+    display: block;
+    color: var(--text);
+    font-size: 13px;
+    margin-bottom: 3px;
+  }
+  .setup-device-card span,
+  .setup-receipt span {
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .setup-connection {
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent-2), transparent);
+    border-radius: 999px;
+  }
+  .setup-code {
+    color: var(--text);
+    font-size: 30px;
+    font-weight: 900;
+    letter-spacing: 2px;
+    margin: 14px 0;
+  }
+  .setup-checklist {
+    display: grid;
+    gap: 7px;
+    margin-top: 14px;
+  }
+  .setup-check-item {
+    display: grid;
+    grid-template-columns: 18px minmax(0,1fr) auto;
+    gap: 8px;
+    align-items: center;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .setup-check-item.done { color: var(--text); }
+  .setup-check-item .status {
+    width: 16px; height: 16px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: rgba(255,255,255,.06);
+    color: var(--text-dim);
+    font-size: 10px;
+  }
+  .setup-check-item.done .status {
+    background: rgba(70,211,154,.16);
+    color: var(--good);
+  }
+  .setup-check-item .tag {
+    color: var(--text-dimmer);
+    font-size: 10px;
+    text-transform: uppercase;
+    font-weight: 900;
+  }
+  .setup-technical {
+    margin-top: 12px;
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 8px;
+    padding: 10px;
+    text-align: left;
+    background: rgba(255,255,255,.025);
+  }
+  .setup-technical summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 12px;
+    font-weight: 800;
+  }
+  .setup-technical-list {
+    display: grid;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .setup-technical-list div {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr);
+    gap: 8px;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .setup-technical-list b { color: var(--text); }
   .onboarding-tip {
     background: rgba(124,92,255,.10);
     border: 1px solid rgba(124,92,255,.22);
@@ -1396,6 +1510,7 @@
   .onboarding-actions {
     display: flex; gap: 10px; justify-content: center;
     margin-top: 22px;
+    flex-wrap: wrap;
   }
   .onboarding-actions button { padding: 10px 20px; }
 
