@@ -261,10 +261,29 @@ def test_spawn_daemon_uses_python_module_in_source_mode(tmp_path):
 
         return _FakeProc()
 
+    def fake_detached(args, log_path):
+        captured["args"] = list(args)
+        captured["log_path"] = log_path
+
+        class _FakeProc:
+            pass
+
+        return _FakeProc()
+
     with mock.patch.object(app_mod, "data_dir", return_value=tmp_path):
         with mock.patch.object(app_mod.subprocess, "Popen", side_effect=fake_popen):
-            with mock.patch.object(sys, "frozen", False, create=True):
-                app_mod._spawn_daemon()
+            detached_patch = (
+                mock.patch.object(
+                    app_mod,
+                    "_spawn_daemon_windows_detached",
+                    side_effect=fake_detached,
+                )
+                if os.name == "nt"
+                else mock.patch.object(app_mod, "_spawn_daemon_windows_detached")
+            )
+            with detached_patch:
+                with mock.patch.object(sys, "frozen", False, create=True):
+                    app_mod._spawn_daemon()
 
     assert captured["args"][:3] == [sys.executable, "-m", "one_link.cli"]
     assert captured["args"][3:] == ["daemon", "-v"]
@@ -283,10 +302,29 @@ def test_spawn_daemon_uses_cli_args_inside_frozen_binary(tmp_path):
 
         return _FakeProc()
 
+    def fake_detached(args, log_path):
+        captured["args"] = list(args)
+        captured["log_path"] = log_path
+
+        class _FakeProc:
+            pass
+
+        return _FakeProc()
+
     with mock.patch.object(app_mod, "data_dir", return_value=tmp_path):
         with mock.patch.object(app_mod.subprocess, "Popen", side_effect=fake_popen):
-            with mock.patch.object(sys, "frozen", True, create=True):
-                app_mod._spawn_daemon()
+            detached_patch = (
+                mock.patch.object(
+                    app_mod,
+                    "_spawn_daemon_windows_detached",
+                    side_effect=fake_detached,
+                )
+                if os.name == "nt"
+                else mock.patch.object(app_mod, "_spawn_daemon_windows_detached")
+            )
+            with detached_patch:
+                with mock.patch.object(sys, "frozen", True, create=True):
+                    app_mod._spawn_daemon()
 
     assert captured["args"] == [sys.executable, "daemon", "-v"]
 

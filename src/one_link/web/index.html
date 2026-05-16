@@ -1451,6 +1451,30 @@
     resize: vertical;
     padding: 8px;
   }
+  .setup-receipt-list {
+    display: grid;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .setup-receipt-row {
+    display: grid;
+    grid-template-columns: 98px minmax(0,1fr) auto;
+    gap: 8px;
+    align-items: center;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .setup-receipt-row b { color: var(--text); }
+  .setup-receipt-row .tag {
+    color: var(--text-dimmer);
+    font-size: 9px;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+  .setup-expired {
+    border-color: rgba(255,202,87,.35) !important;
+    color: var(--warn) !important;
+  }
   .setup-checklist {
     display: grid;
     gap: 7px;
@@ -1806,6 +1830,37 @@
     color: var(--text-dim);
     font-size: 11px;
     font-weight: 800;
+  }
+  .settings-pane .setup-mini-list,
+  .settings-pane .setup-technical-list {
+    margin-top: 10px;
+  }
+  .settings-pane .setup-mini-row {
+    display: grid;
+    grid-template-columns: 18px minmax(0,1fr) auto;
+    gap: 8px;
+    align-items: center;
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 7px 0;
+    border-bottom: 1px solid rgba(255,255,255,.05);
+  }
+  .settings-pane .setup-mini-row.done { color: var(--text); }
+  .settings-pane .setup-mini-row .dot {
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: rgba(255,255,255,.06);
+    color: var(--good);
+    font-size: 10px;
+  }
+  .settings-pane .setup-mini-row .tag {
+    color: var(--text-dimmer);
+    font-size: 10px;
+    text-transform: uppercase;
+    font-weight: 900;
   }
   .metric {
     background: var(--bg-2); border: 1px solid rgba(255,255,255,.04);
@@ -5243,6 +5298,9 @@
           <button class="settings-nav-item active" data-settings-pane="profile">
             <span class="settings-nav-glyph">👤</span> Profile
           </button>
+          <button class="settings-nav-item" data-settings-pane="setup">
+            <span class="settings-nav-glyph">1</span> Setup
+          </button>
           <button class="settings-nav-item" data-settings-pane="privacy">
             <span class="settings-nav-glyph">🛡</span> Privacy
           </button>
@@ -5338,6 +5396,36 @@
           </section>
 
           <!-- ── Privacy ────────────────────────────────────────── -->
+          <section class="settings-pane" data-settings-pane="setup">
+            <h3>Setup</h3>
+            <p class="settings-pane-lede">
+              Finish the account-free setup, add your devices, review the receipt,
+              and keep the plain-language checklist one click away.
+            </p>
+            <div class="settings-section">
+              <div class="settings-section-h"><span>One Setup</span></div>
+              <div class="setup-mini-list" id="settings-one-setup-list"></div>
+              <div class="mini-actions" style="margin-top:10px; flex-wrap:wrap;">
+                <button id="settings-one-setup-resume">Resume</button>
+                <button id="settings-one-setup-add-device">Add device</button>
+                <button id="settings-one-setup-privacy">Privacy proof</button>
+                <button id="settings-one-setup-recovery">Set recovery</button>
+              </div>
+            </div>
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Privacy receipt</span></div>
+              <p class="settings-help" id="settings-one-setup-proof-copy">
+                One Link keeps a redacted setup receipt here so normal users get
+                plain proof and technical users can inspect the same evidence.
+              </p>
+              <div class="setup-receipt-list" id="settings-one-setup-proof-list"></div>
+            </div>
+            <details class="settings-section" id="settings-one-setup-technical">
+              <summary class="settings-section-h"><span>Technical verification</span></summary>
+              <div class="setup-technical-list" id="settings-one-setup-technical-list"></div>
+            </details>
+          </section>
+
           <section class="settings-pane" data-settings-pane="privacy">
             <h3>Privacy</h3>
             <div class="settings-row">
@@ -15184,6 +15272,8 @@
   // settings table so a fresh browser tab on a paired daemon
   // doesn't re-pop the wizard.
   const ONBOARDING_STORAGE_KEY = "one_link.onboarding_completed";
+  let _oneSetupInvite = null;
+  let _oneSetupInviteTimer = null;
 
   async function refreshOneSetup() {
     try {
@@ -15255,6 +15345,40 @@
         panelList.appendChild(row);
       }
     }
+    const settingsList = $("#settings-one-setup-list");
+    if (settingsList) {
+      settingsList.innerHTML = "";
+      for (const item of (setup.checklist || []).slice(0, 8)) {
+        const row = el("div", `setup-mini-row ${item.status === "done" ? "done" : ""}`);
+        row.appendChild(el("span", "dot", item.status === "done" ? "âœ“" : ""));
+        const text = el("span", null, item.label || "");
+        text.title = item.human || "";
+        row.appendChild(text);
+        row.appendChild(el("span", "tag", item.status || ""));
+        settingsList.appendChild(row);
+      }
+    }
+    const proof = setup.privacy_proof || {};
+    const proofCopy = $("#settings-one-setup-proof-copy");
+    if (proofCopy && proof.human) proofCopy.textContent = proof.human;
+    const proofList = $("#settings-one-setup-proof-list");
+    if (proofList) {
+      proofList.innerHTML = "";
+      for (const rowData of (proof.rows || []).slice(0, 8)) {
+        const row = el("div", "setup-receipt-row");
+        row.appendChild(el("b", null, rowData.label || ""));
+        row.appendChild(el("span", null, rowData.value || ""));
+        row.appendChild(el("span", "tag", rowData.status || ""));
+        proofList.appendChild(row);
+      }
+      for (const event of (proof.audit_events || []).slice(0, 4)) {
+        const row = el("div", "setup-receipt-row");
+        row.appendChild(el("b", null, event.severity || "info"));
+        row.appendChild(el("span", null, `${event.event || ""}${event.detail ? `: ${event.detail}` : ""}`));
+        row.appendChild(el("span", "tag", "audit"));
+        proofList.appendChild(row);
+      }
+    }
     const tech = $("#one-setup-technical-list");
     if (tech) {
       tech.innerHTML = "";
@@ -15273,6 +15397,16 @@
         row.appendChild(el("b", null, d.status || ""));
         row.appendChild(el("span", null, `${d.label || ""}: ${d.detail || ""}`));
         panelTech.appendChild(row);
+      }
+    }
+    const settingsTech = $("#settings-one-setup-technical-list");
+    if (settingsTech) {
+      settingsTech.innerHTML = "";
+      for (const d of (setup.technical?.diagnostics || []).slice(0, 8)) {
+        const row = el("div", null);
+        row.appendChild(el("b", null, d.status || ""));
+        row.appendChild(el("span", null, `${d.label || ""}: ${d.detail || ""}`));
+        settingsTech.appendChild(row);
       }
     }
   }
@@ -15386,11 +15520,41 @@
     }
   }
 
+  function renderOneSetupInviteCountdown() {
+    const hint = $("#one-setup-invite-hint");
+    const btn = $("#one-setup-add-device");
+    if (!_oneSetupInvite || !hint) return;
+    const expiresMs = Number(_oneSetupInvite.expires_ms || 0);
+    const remaining = Math.max(0, expiresMs - Date.now());
+    const qr = $("#one-setup-invite-qr");
+    const token = $("#one-setup-invite-token");
+    if (remaining <= 0) {
+      hint.textContent = "Invite expired. Create a fresh QR before adding another device.";
+      hint.classList.add("setup-expired");
+      if (btn) btn.textContent = "Refresh invite QR";
+      if (qr) qr.style.opacity = ".45";
+      if (token) token.classList.add("setup-expired");
+      clearInterval(_oneSetupInviteTimer);
+      _oneSetupInviteTimer = null;
+      return;
+    }
+    const minutes = Math.floor(remaining / 60000);
+    const seconds = Math.floor((remaining % 60000) / 1000);
+    hint.textContent =
+      `Scan this with the device you want to add. Expires in ${minutes}:${String(seconds).padStart(2, "0")}.`;
+    hint.classList.remove("setup-expired");
+    if (btn) btn.textContent = "Refresh invite QR";
+    if (qr) qr.style.opacity = "1";
+    if (token) token.classList.remove("setup-expired");
+  }
+
   async function oneSetupAddDevice() {
     try {
       const invite = await api.setupDeviceInvite({
         label: state.me?.display_name || state.me?.hostname || "Add device",
       });
+      _oneSetupInvite = invite;
+      if (_oneSetupInviteTimer) clearInterval(_oneSetupInviteTimer);
       const qr = $("#one-setup-invite-qr");
       const token = $("#one-setup-invite-token");
       if (qr && invite.qr_url) {
@@ -15401,15 +15565,39 @@
         token.value = invite.peer_url || invite.deep_link || invite.token || "";
         token.style.display = "block";
       }
-      const ttl = Math.max(1, Math.round((invite.expires_in_seconds || 300) / 60));
-      $("#one-setup-invite-hint").textContent =
-        `Scan this with the device you want to add. The invite expires in ${ttl} minutes.`;
+      renderOneSetupInviteCountdown();
+      _oneSetupInviteTimer = setInterval(renderOneSetupInviteCountdown, 1000);
       await copyToClipboard(invite.peer_url || invite.deep_link || invite.token, "One Setup invite");
       await refreshOneSetup();
       toast("Invite ready and copied.", "good", 3500);
     } catch (e) {
       toast(`Invite failed: ${errorToastBody(e)}`, "bad", 6000);
     }
+  }
+
+  async function oneSetupMarkRecoveryConfigured() {
+    try {
+      await api.setupAction("recovery_configured");
+      toast("Recovery marked ready for this setup.", "good", 3500);
+      await refreshOneSetup();
+    } catch (e) {
+      toast(`Recovery update failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
+  async function openOneSetupFromState() {
+    await refreshOneSetup();
+    const setup = state.oneSetup || {};
+    const stepFor = {
+      identity: 3,
+      add_device: 4,
+      first_success: 5,
+      privacy_proof: 6,
+      safety: 6,
+      finish: 6,
+    };
+    showOnboardingStep(stepFor[setup.current_step] || 1);
+    $("#onboarding-backdrop").style.display = "flex";
   }
 
   async function oneSetupConfirmPendingDevice() {
@@ -15498,7 +15686,7 @@
   document.querySelectorAll("[data-onboarding-go]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const step = parseInt(btn.dataset.onboardingGo, 10);
-      if (step >= 1 && step <= 4) showOnboardingStep(step);
+      if (step >= 1 && step <= 6) showOnboardingStep(step);
     });
   });
   $("#onboarding-skip")?.addEventListener("click", () => {
@@ -15525,20 +15713,7 @@
   $("#one-setup-send-test")?.addEventListener("click", oneSetupSendTest);
   $("#one-setup-send-file")?.addEventListener("click", oneSetupSendFile);
   $("#one-setup-review-safety")?.addEventListener("click", oneSetupReviewSafety);
-  $("#one-setup-resume")?.addEventListener("click", async () => {
-    await refreshOneSetup();
-    const setup = state.oneSetup || {};
-    const stepFor = {
-      identity: 3,
-      add_device: 4,
-      first_success: 5,
-      privacy_proof: 6,
-      safety: 6,
-      finish: 6,
-    };
-    showOnboardingStep(stepFor[setup.current_step] || 1);
-    $("#onboarding-backdrop").style.display = "flex";
-  });
+  $("#one-setup-resume")?.addEventListener("click", openOneSetupFromState);
   $("#one-setup-add-device-panel")?.addEventListener("click", async () => {
     await refreshOneSetup();
     showOnboardingStep(4);
@@ -15551,6 +15726,20 @@
     await refreshOneSetup();
   });
   $("#one-setup-safety-panel")?.addEventListener("click", oneSetupReviewSafety);
+  $("#settings-one-setup-resume")?.addEventListener("click", openOneSetupFromState);
+  $("#settings-one-setup-add-device")?.addEventListener("click", async () => {
+    await refreshOneSetup();
+    showOnboardingStep(4);
+    $("#onboarding-backdrop").style.display = "flex";
+    await oneSetupAddDevice();
+  });
+  $("#settings-one-setup-privacy")?.addEventListener("click", async () => {
+    await api.setupAction("privacy_proof_viewed").catch(() => {});
+    await refreshOneSetup();
+    switchSettingsPane("setup");
+    $("#settings-one-setup-proof-list")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  });
+  $("#settings-one-setup-recovery")?.addEventListener("click", oneSetupMarkRecoveryConfigured);
   // Enter on the name input → next step.
   $("#onboarding-name")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {

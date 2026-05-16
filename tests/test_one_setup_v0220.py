@@ -43,6 +43,8 @@ def test_setup_snapshot_is_state_derived_and_human_first() -> None:
     assert '"mode": "human"' in snippet
     assert '"technical": {' in snippet
     assert '"diagnostics": diagnostics' in snippet
+    assert '"privacy_proof": privacy_proof' in snippet
+    assert '"audit_events": proof_events' in snippet
     assert '"receipt_redacted": True' in snippet
     assert '"next_action"' in snippet
     for item in (
@@ -144,6 +146,11 @@ def test_one_setup_ui_contract_markers_present_after_build() -> None:
         'id="one-setup-panel"',
         'id="one-setup-resume"',
         'id="one-setup-panel-technical"',
+        'data-settings-pane="setup"',
+        'id="settings-one-setup-list"',
+        'id="settings-one-setup-proof-list"',
+        'id="settings-one-setup-technical-list"',
+        'id="settings-one-setup-recovery"',
         'id="one-setup-safety-panel"',
         'id="one-setup-review-safety"',
         'id="one-setup-invite-qr"',
@@ -162,6 +169,9 @@ def test_one_setup_ui_contract_markers_present_after_build() -> None:
         "async function oneSetupSendFile()",
         "async function oneSetupReviewSafety()",
         "async function oneSetupAddDevice()",
+        "function renderOneSetupInviteCountdown()",
+        "async function oneSetupMarkRecoveryConfigured()",
+        "async function openOneSetupFromState()",
         "async function oneSetupConfirmPendingDevice()",
         "async function oneSetupRejectPendingDevice()",
         'setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); }',
@@ -169,6 +179,8 @@ def test_one_setup_ui_contract_markers_present_after_build() -> None:
         'confirmSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/confirm", body); }',
         'rejectSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/reject", body); }',
         "Invite ready and copied.",
+        "Invite expired. Create a fresh QR before adding another device.",
+        'api.setupAction("recovery_configured")',
         "invite.peer_url",
         "hello-from-one-link.txt",
         "This moved through your private One Link fabric.",
@@ -176,5 +188,19 @@ def test_one_setup_ui_contract_markers_present_after_build() -> None:
         'api.setupAction("safety_reviewed")',
         'api.setupAction("complete")',
         'api.setupAction("skip")',
+    ):
+        assert marker in html
+
+
+def test_one_setup_walkthrough_can_reach_all_six_steps() -> None:
+    html = _index_html()
+    assert "const N = 6;" in html
+    assert "if (step >= 1 && step <= 6) showOnboardingStep(step);" in html
+    for marker in (
+        'data-onboarding-go="5"',
+        'data-onboarding-go="6"',
+        'id="one-setup-send-test"',
+        'id="one-setup-send-file"',
+        'id="onboarding-finish"',
     ):
         assert marker in html

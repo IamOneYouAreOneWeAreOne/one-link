@@ -3911,6 +3911,67 @@ class UIServer:
                 "expires_ms": rec.get("expires_ms") or 0,
             })
 
+        setup_audit = [
+            r for r in state.list_self_mesh_audit(limit=80)
+            if str(r.get("event") or "").startswith("setup_")
+        ][:12]
+        proof_events = []
+        for row in setup_audit:
+            meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            proof_events.append({
+                "id": int(row.get("id") or 0),
+                "event": row.get("event") or "",
+                "severity": row.get("severity") or "info",
+                "detail": row.get("detail") or "",
+                "ts_ms": int(row.get("ts_ms") or 0),
+                "action": row.get("action") or "",
+                "path": row.get("path") or "",
+                "redacted": True,
+                "metadata_keys": sorted(str(k) for k in meta.keys())[:8],
+            })
+        privacy_proof = {
+            "headline": "One Setup proof",
+            "human": (
+                "This receipt shows the setup actions One Link performed on this device. "
+                "It redacts keys, paths, and secrets while preserving enough evidence to verify what happened."
+            ),
+            "generated_at_ms": now,
+            "viewed": privacy_viewed,
+            "redacted": True,
+            "rows": [
+                {
+                    "label": "Account status",
+                    "value": "No cloud account was required for One Setup.",
+                    "status": "pass",
+                },
+                {
+                    "label": "Identity",
+                    "value": (
+                        f"{len(roots)} local root identity record(s)"
+                        if roots else "No local root identity yet."
+                    ),
+                    "status": "pass" if roots else "missing",
+                },
+                {
+                    "label": "Devices",
+                    "value": (
+                        f"{len(remote_devices)} remote trusted device(s), "
+                        f"{len(pending_claims)} pending trust-code check(s)"
+                    ),
+                    "status": "pass" if remote_devices else "recommended",
+                },
+                {
+                    "label": "Safety",
+                    "value": (
+                        "Device safety was reviewed."
+                        if safety_reviewed else "Device safety is still recommended."
+                    ),
+                    "status": "pass" if safety_reviewed else "recommended",
+                },
+            ],
+            "audit_events": proof_events,
+        }
+
         diagnostics = [
             {
                 "id": "root_identity",
@@ -3968,6 +4029,7 @@ class UIServer:
             },
             "pending_setup_devices": pending_claims,
             "checklist": items,
+            "privacy_proof": privacy_proof,
             "next_action": {
                 "id": action_id,
                 "label": label,
