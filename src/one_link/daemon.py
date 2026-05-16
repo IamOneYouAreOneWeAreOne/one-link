@@ -1635,16 +1635,18 @@ class Daemon:
             (POST /api/sovereignty/preset name=quiet) actually stops
             the poll within one cycle instead of waiting for daemon
             restart. The cost of the per-iteration probe is
-            negligible — it's three dict lookups."""
+            negligible — it's three dict lookups.
+
+            getattr fallback is intentional: unit-test fixtures pass
+            SimpleNamespace mocks that don't always carry .state."""
             setting_val: str | None = None
             preset: str | None = None
-            if self.state is not None:
+            state = getattr(self, "state", None)
+            if state is not None:
                 with contextlib.suppress(Exception):
-                    setting_val = self.state.get_setting(
-                        "update_check_enabled"
-                    )
+                    setting_val = state.get_setting("update_check_enabled")
                 with contextlib.suppress(Exception):
-                    preset = self.state.get_setting("sovereignty_preset")
+                    preset = state.get_setting("sovereignty_preset")
             return _sov.resolve_update_check_enabled(
                 state_setting=setting_val,
                 env_var=os.environ.get("ONE_LINK_UPDATE_CHECK"),
