@@ -20,6 +20,7 @@ migration at a time is idempotent.
 from __future__ import annotations
 
 import json
+import contextlib
 import sqlite3
 import threading
 import time
@@ -1542,6 +1543,11 @@ class State:
           - limit: cap final list (default 200, hard max 2000)"""
         limit = max(1, min(int(limit), 2000))
         kinds_set = set(kinds) if kinds else None
+        cutoff_raw = self.get_setting("activity_cleared_before_ms")
+        if cutoff_raw:
+            with contextlib.suppress(ValueError, TypeError):
+                cutoff_ms = int(cutoff_raw)
+                since_ms = max(int(since_ms or 0), cutoff_ms)
 
         events: list[dict] = []
         peer_cache: dict[str, str] = {}
@@ -2992,6 +2998,103 @@ class State:
                 return cur.rowcount or 0
             except Exception:
                 return 0
+
+    def _delete_all_locked(self, table: str, where: str = "", params: tuple = ()) -> int:
+        sql = f"DELETE FROM {table}" + (f" WHERE {where}" if where else "")  # nosec B608
+        try:
+            cur = self._conn.execute(sql, params)
+            return int(cur.rowcount or 0)
+        except sqlite3.Error:
+            return 0
+
+    def clear_chat_traces(self) -> dict[str, int]:
+        """Hard-delete local chat traces without removing peers/groups."""
+        with self._write_lock:
+            counts = {
+                "messages": self._delete_all_locked("messages"),
+                "group_messages": self._delete_all_locked("group_messages"),
+                "message_reactions": self._delete_all_locked("message_reactions"),
+                "outbox": self._delete_all_locked("outbox"),
+            }
+            return counts
+
+    def clear_file_traces(self) -> dict[str, int]:
+        """Clear file-transfer records and file metadata caches only.
+
+        This intentionally does not delete inbox files or source files
+        from the user's filesystem.
+        """
+        with self._write_lock:
+            counts = {
+                "file_messages": self._delete_all_locked(
+                    "messages",
+                    "LOWER(msg_type) IN ('file', 'file_done', 'file_offer')",
+                ),
+                "transfers": self._delete_all_locked(
+                    "transfers", "LOWER(kind) = 'file'",
+                ),
+                "file_index_cache": self._delete_all_locked("file_index_cache"),
+                "chunk_sources": self._delete_all_locked("chunk_sources"),
+                "chunk_availability": self._delete_all_locked("chunk_availability"),
+            }
+            return counts
+
+    def clear_folder_traces(self) -> dict[str, int]:
+        """Remove folder-sync metadata without deleting watched folders."""
+        with self._write_lock:
+            counts = {
+                "folders": self._delete_all_locked("folders"),
+                "folder_manifest": self._delete_all_locked("folder_manifest"),
+                "folder_audit": self._delete_all_locked("folder_audit"),
+                "manifest_conflicts": self._delete_all_locked("manifest_conflicts"),
+                "folder_permissions": self._delete_all_locked(
+                    "settings", "key LIKE 'folder_permission:%'",
+                ),
+            }
+            return counts
+
+    def clear_activity_traces(self) -> dict[str, int]:
+        """Clear local audit/activity rows. Peer identities are preserved."""
+        with self._write_lock:
+            self._conn.execute(
+                "INSERT INTO settings(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("activity_cleared_before_ms", str(_now_ms())),
+            )
+            counts = {
+                "transfers": self._delete_all_locked("transfers"),
+                "capability_audit": self._delete_all_locked("capability_audit"),
+                "key_change_events": self._delete_all_locked("key_change_events"),
+                "folder_audit": self._delete_all_locked("folder_audit"),
+                "self_mesh_audit": self._delete_all_locked("self_mesh_audit"),
+                "self_mesh_perf_samples": self._delete_all_locked("self_mesh_perf_samples"),
+                "device_guardian_events": self._delete_all_locked("device_guardian_events"),
+                "remote_instruction_seen": self._delete_all_locked("remote_instruction_seen"),
+            }
+            return counts
+
+    def clear_all_app_traces(self) -> dict[str, dict[str, int] | int]:
+        """Clear local app traces while preserving identity, peers, and trust.
+
+        The wipe removes local records/caches that reveal app activity.
+        It does not delete user files from the filesystem and does not
+        revoke device identity or pairing/trust state.
+        """
+        with self._write_lock:
+            result: dict[str, dict[str, int] | int] = {
+                "chat": self.clear_chat_traces(),
+                "files": self.clear_file_traces(),
+                "folders": self.clear_folder_traces(),
+                "activity": self.clear_activity_traces(),
+            }
+            result["route_memory"] = self._delete_all_locked("route_memory")
+            result["route_candidates"] = self._delete_all_locked("route_candidates")
+            result["courier_outbox"] = self._delete_all_locked("courier_outbox")
+            result["settings_trace_keys"] = self._delete_all_locked(
+                "settings",
+                "key LIKE 'chatpref:%'",
+            )
+            return result
 
     def storage_usage_by_peer(self) -> list[dict]:
         """v0.11.6: per-peer usage rollup for the Storage pane.

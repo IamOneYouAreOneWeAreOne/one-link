@@ -65,6 +65,8 @@ SERVER_PORT_FILE = "server.port"
 COURIER_LEDGER_FILE = "courier_ledger.json"
 COURIER_LEDGER_MAX_EVENTS = 512
 COURIER_FILE_MAX_BYTES = 768 * 1024 * 1024
+HIDDEN_INBOX_FILES_SETTING = "hidden_inbox_files_json"
+WIPE_LOCAL_TRACES_CONFIRM = "wipe local traces"
 
 
 def _route_hint_for_host(host: str) -> tuple[str, str]:
@@ -1423,6 +1425,11 @@ class UIServer:
         r.add_get(r"/api/peers/{fp}/media", self._guarded(self.api_peer_media))
         # v0.11.6 storage breakdown.
         r.add_get("/api/storage/usage", self._guarded(self.api_storage_usage))
+        r.add_delete("/api/traces/chat", self._guarded(self.api_clear_chat_traces))
+        r.add_delete("/api/traces/files", self._guarded(self.api_clear_file_traces))
+        r.add_delete("/api/traces/folders", self._guarded(self.api_clear_folder_traces))
+        r.add_delete("/api/traces/activity", self._guarded(self.api_clear_activity_traces))
+        r.add_post("/api/traces/wipe", self._guarded(self.api_wipe_local_traces))
         # v0.12.1 server-persisted per-chat cosmetic state.
         # Single GET returns a snapshot of everything; PATCH-like
         # POST sets one field at a time. Keys are scope-prefixed to
@@ -7682,6 +7689,66 @@ class UIServer:
             },
         })
 
+    def _broadcast_traces_cleared(
+        self, *, scope: str, counts: dict[str, Any],
+    ) -> None:
+        self.broadcast({
+            "type": "traces_cleared",
+            "scope": scope,
+            "counts": counts,
+        })
+
+    async def api_clear_chat_traces(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        counts = self.daemon.state.clear_chat_traces()
+        self._broadcast_traces_cleared(scope="chat", counts=counts)
+        return web.json_response({"ok": True, "scope": "chat", "counts": counts})
+
+    async def api_clear_file_traces(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        hidden = self._hide_current_inbox_files()
+        counts = self.daemon.state.clear_file_traces()
+        counts["inbox_files_hidden"] = hidden
+        self._broadcast_traces_cleared(scope="files", counts=counts)
+        return web.json_response({"ok": True, "scope": "files", "counts": counts})
+
+    async def api_clear_folder_traces(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        counts = self.daemon.state.clear_folder_traces()
+        self._broadcast_traces_cleared(scope="folders", counts=counts)
+        return web.json_response({"ok": True, "scope": "folders", "counts": counts})
+
+    async def api_clear_activity_traces(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        counts = self.daemon.state.clear_activity_traces()
+        self._broadcast_traces_cleared(scope="activity", counts=counts)
+        return web.json_response({"ok": True, "scope": "activity", "counts": counts})
+
+    async def api_wipe_local_traces(self, request: web.Request) -> web.Response:
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        phrase = str(data.get("confirm") or "").strip().lower()
+        if phrase != WIPE_LOCAL_TRACES_CONFIRM:
+            return web.json_response({
+                "error": (
+                    "confirmation required: type "
+                    f"{WIPE_LOCAL_TRACES_CONFIRM!r}"
+                )
+            }, status=400)
+        hidden = self._hide_current_inbox_files()
+        counts = self.daemon.state.clear_all_app_traces()
+        counts["inbox_files_hidden"] = hidden
+        self._broadcast_traces_cleared(scope="all", counts=counts)
+        return web.json_response({"ok": True, "scope": "all", "counts": counts})
+
     # ─── v0.12.1 chat preferences (sync across user's devices) ─────────
 
     _CHAT_PREF_KINDS = ("color", "wallpaper", "archived")
@@ -9519,12 +9586,50 @@ class UIServer:
             except OSError:
                 pass
 
+    def _inbox_file_signature(self, path: Path) -> str:
+        try:
+            stat = path.stat()
+        except OSError:
+            return path.name
+        return f"{path.name}|{stat.st_size}|{int(stat.st_mtime * 1000)}"
+
+    def _hidden_inbox_files(self) -> set[str]:
+        if self.daemon.state is None:
+            return set()
+        raw = self.daemon.state.get_setting(HIDDEN_INBOX_FILES_SETTING, "[]")
+        try:
+            data = json.loads(raw or "[]")
+        except json.JSONDecodeError:
+            return set()
+        if not isinstance(data, list):
+            return set()
+        return {str(v) for v in data if isinstance(v, str) and v}
+
+    def _set_hidden_inbox_files(self, hidden: set[str]) -> None:
+        if self.daemon.state is None:
+            return
+        self.daemon.state.set_setting(
+            HIDDEN_INBOX_FILES_SETTING,
+            json.dumps(sorted(hidden)),
+        )
+
+    def _hide_current_inbox_files(self) -> int:
+        hidden = self._hidden_inbox_files()
+        before = len(hidden)
+        inbox = inbox_dir()
+        for f in inbox.iterdir():
+            if f.is_file():
+                hidden.add(self._inbox_file_signature(f))
+        self._set_hidden_inbox_files(hidden)
+        return len(hidden) - before
+
     # ─── /api/files ───────────────────────────────────────────────────
     async def api_files(self, request: web.Request) -> web.Response:
         inbox = inbox_dir()
+        hidden = self._hidden_inbox_files()
         files = []
         for f in inbox.iterdir():
-            if f.is_file():
+            if f.is_file() and self._inbox_file_signature(f) not in hidden:
                 stat = f.stat()
                 files.append(
                     {

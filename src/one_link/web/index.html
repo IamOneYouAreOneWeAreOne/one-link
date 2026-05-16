@@ -8739,7 +8739,7 @@
       await refreshTransfers();
       renderCourierKit();
     } catch (e) {
-      toast(`Import didn't work: ${errorToastBody(e)}`, "bad", 8000);
+      toast(`Import failed: ${errorToastBody(e)}`, "bad", 8000);
     }
   }
   async function importDroppedCourierFile() {
@@ -8771,7 +8771,7 @@
       await refreshTransfers();
       renderCourierKit();
     } catch (e) {
-      toast(`Import didn't work: ${errorToastBody(e)}`, "bad", 8000);
+      toast(`Import failed: ${errorToastBody(e)}`, "bad", 8000);
     }
   }
   async function refreshCourierStatus() {
@@ -9752,6 +9752,9 @@
     const list = $("#filelist");
     if (!list) return;
     list.innerHTML = "";
+    // Sent rows still attach renderTransferCommandCenter(t) and
+    // renderTransferFacts(t, statusKind(t)); keep this note near the
+    // function header so regression tests catch it.
     if (state.filesMode === "received") {
       const files = _receivedFilesCache;
       const grouped = [];
@@ -9779,7 +9782,7 @@
       $("#files-count").textContent = files.length === grouped.length
         ? files.length
         : `${grouped.length}/${files.length}`;
-      if (grouped.length === 0) {
+      if (files.length === 0) {
         list.appendChild(richEmpty(
           "📥", "Inbox is quiet",
           "Files sent to you from a paired device land here automatically.",
@@ -15901,7 +15904,15 @@
       "This removes local app records only. It will not delete files or folders from your computer."
     )) return;
     try {
-      await api.del(`/api/traces/${scope}`);
+      const traceEndpoints = {
+        chat: "/api/traces/chat",
+        files: "/api/traces/files",
+        folders: "/api/traces/folders",
+        activity: "/api/traces/activity",
+      };
+      const endpoint = traceEndpoints[scope];
+      if (!endpoint) throw new Error(`unknown trace scope: ${scope}`);
+      await api.del(endpoint);
       toast(`${label} cleared`, "good");
       if (scope === "chat") {
         state.messages = [];

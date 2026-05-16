@@ -224,3 +224,35 @@ def test_static_ui_javascript_parses() -> None:
                 )
 
     assert not failures, "JavaScript syntax failures:\n" + "\n".join(failures)
+
+
+def test_trace_clearing_controls_are_exposed() -> None:
+    html = (ROOT / "src" / "one_link" / "web" / "index.html").read_text(
+        encoding="utf-8",
+    )
+    for needle in [
+        'id="btn-clear-file-traces"',
+        'id="btn-clear-folder-traces"',
+        'id="btn-clear-activity-traces"',
+        'id="storage-clear-chat"',
+        'id="storage-clear-files"',
+        'id="storage-clear-folders"',
+        'id="storage-clear-activity"',
+        'id="storage-wipe-local"',
+        "/api/traces/",
+        "/api/traces/wipe",
+        "wipe local traces",
+    ]:
+        assert needle in html
+
+
+def test_received_files_are_collapsed_by_identity() -> None:
+    html = (ROOT / "src" / "one_link" / "web" / "index.html").read_text(
+        encoding="utf-8",
+    )
+    idx = html.find('if (state.filesMode === "received")')
+    snippet = html[idx:idx + 2500]
+    assert "const grouped = []" in snippet
+    assert "byKey" in snippet
+    assert "copies" in snippet
+    assert "matching inbox entries are collapsed" in snippet
