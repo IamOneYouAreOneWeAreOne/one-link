@@ -110,12 +110,14 @@ def test_build_binary_includes_collect_all_when_native_installed(tmp_path, monke
         f"PyInstaller never invoked. Captured: {captured_cmds}"
     )
     pyinst_cmd = pyinst_cmds[0]
-    # The contract: --collect-all one_link_native appears as a pair
-    # in the argv. PyInstaller's flag form is two separate args.
+    # The contract: the generated spec bundles the native crate via
+    # collect_all. The CLI invocation points at that spec so we can
+    # post-filter heavy transient DLLs after Analysis.
     joined = " ".join(pyinst_cmd)
-    assert "--collect-all one_link_native" in joined, (
-        f"PyInstaller invocation does NOT bundle the native crate. "
-        f"argv: {pyinst_cmd}"
+    assert "build" in joined and "one-link.spec" in joined
+    spec_text = (repo / "build" / "one-link.spec").read_text(encoding="utf-8")
+    assert "collect_all('one_link_native')" in spec_text, (
+        "Generated PyInstaller spec does NOT bundle the native crate."
     )
 
 
@@ -174,7 +176,9 @@ def test_build_binary_skips_native_collect_when_missing(tmp_path, monkeypatch):
     ]
     assert pyinst_cmds
     joined = " ".join(pyinst_cmds[0])
-    assert "--collect-all one_link_native" not in joined, (
-        "build proceeded to add --collect-all even though the import "
-        "raised — the auto-detection logic is broken"
+    assert "build" in joined and "one-link.spec" in joined
+    spec_text = (repo / "build" / "one-link.spec").read_text(encoding="utf-8")
+    assert "collect_all('one_link_native')" not in spec_text, (
+        "build proceeded to collect one_link_native even though the "
+        "import raised — the auto-detection logic is broken"
     )

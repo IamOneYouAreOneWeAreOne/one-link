@@ -278,3 +278,21 @@ def test_sent_files_default_to_compact_details() -> None:
     assert 'el("div", "sent-summary")' in html
     assert "renderTransferDetails(t)" in snippet
     assert "transfer-details" in html
+
+
+def test_activity_surface_uses_progressive_disclosure() -> None:
+    html = (ROOT / "src" / "one_link" / "web" / "index.html").read_text(
+        encoding="utf-8",
+    )
+    assert 'id="one-now"' in html
+    assert "function renderOneNow()" in html
+    assert 'id="one-now-send"' in html
+    assert 'id="one-now-devices"' in html
+    assert 'id="one-now-privacy"' in html
+    assert 'id="self-mesh-remote-actions"' in html
+    assert 'id="self-mesh-join-actions"' in html
+    assert 'id="self-mesh-safety-actions"' in html
+    assert "Send or pull from another device" in html
+    assert "Add this device with an invite" in html
+    assert "Device safety" in html
+    assert 'class="sm-actions sm-primary-actions"' in html

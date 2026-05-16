@@ -1548,6 +1548,52 @@
     display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
     padding: 10px 12px; border-bottom: 1px solid var(--line);
   }
+  .one-now {
+    margin: 8px 12px 10px;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,.07);
+    background: rgba(255,255,255,.035);
+  }
+  .one-now .one-kicker {
+    color: var(--text-dimmer);
+    font-size: 9px;
+    font-weight: 900;
+    letter-spacing: .7px;
+    text-transform: uppercase;
+  }
+  .one-now .one-title {
+    margin-top: 3px;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 850;
+    line-height: 1.2;
+  }
+  .one-now .one-detail {
+    margin-top: 4px;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .one-now .one-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .one-now .one-actions button {
+    min-width: 0;
+    border-radius: 7px;
+    padding: 7px 8px;
+    color: var(--text-dim);
+    background: rgba(255,255,255,.055);
+    font-size: 10px;
+    font-weight: 800;
+  }
+  .one-now .one-actions button:hover {
+    color: var(--text);
+    background: rgba(255,255,255,.085);
+  }
   .metric {
     background: var(--bg-2); border: 1px solid rgba(255,255,255,.04);
     border-radius: 8px; padding: 9px 10px; min-width: 0;
@@ -1880,6 +1926,9 @@
     gap: 6px;
     margin-top: 8px;
   }
+  .self-mesh-kit .sm-controls.sm-device-picker {
+    grid-template-columns: 1fr;
+  }
   .self-mesh-kit .sm-controls input,
   .self-mesh-kit .sm-controls select {
     min-width: 0;
@@ -1903,6 +1952,12 @@
     border-radius: 7px;
     padding: 7px 8px;
     font-size: 10px;
+  }
+  .self-mesh-kit .sm-actions.sm-primary-actions button {
+    flex-basis: 112px;
+  }
+  .self-mesh-kit .sm-actions button.danger-action {
+    color: var(--bad);
   }
   .self-mesh-kit .sm-advanced {
     margin-top: 8px;
@@ -4605,6 +4660,16 @@
         <div class="metric clickable" id="metric-tile-cache" role="button" tabindex="0" data-mesh-tile="cache" aria-label="Filter activity to file transfers"><div class="num" id="metric-cache">0 B</div><div class="lbl">saved chunks</div></div>
         <div class="metric clickable" id="metric-tile-sessions" role="button" tabindex="0" data-mesh-tile="sessions" aria-label="Filter activity to trust events"><div class="num" id="metric-sessions">0</div><div class="lbl">secure links</div></div>
       </div>
+      <div class="one-now" id="one-now">
+        <div class="one-kicker">One now</div>
+        <div class="one-title" id="one-now-title">Everything is quiet</div>
+        <div class="one-detail" id="one-now-detail">One Link will surface the next useful action here.</div>
+        <div class="one-actions">
+          <button id="one-now-send" title="Open the fastest send path">Send</button>
+          <button id="one-now-devices" title="Use the best trusted device">Devices</button>
+          <button id="one-now-privacy" title="Show privacy proof">Privacy</button>
+        </div>
+      </div>
       <div class="fabric-truth" id="fabric-truth">
         <div class="ft-top">
           <div class="ft-state">Finding best path</div>
@@ -4626,23 +4691,42 @@
         <div class="sm-copy" id="self-mesh-copy">Checking personal mesh presence.</div>
         <div class="sm-devices" id="self-mesh-devices"></div>
         <div class="sm-devices" id="self-mesh-perf"></div>
-        <div class="sm-controls">
+        <div class="sm-controls sm-device-picker">
           <select id="self-mesh-device-select" aria-label="Self-mesh device"></select>
-          <input id="self-mesh-path" type="text" placeholder="Allowed folder or file path" />
-          <input id="self-mesh-peer" type="text" placeholder="Recipient or trusted device" />
-          <input id="self-mesh-cert" type="text" placeholder="Invite code or device cert" />
         </div>
-        <div class="sm-actions">
+        <div class="sm-actions sm-primary-actions">
           <button id="btn-self-mesh-root">Set up my devices</button>
           <button id="btn-self-mesh-invite">Show invite QR</button>
-          <button id="btn-self-mesh-claim">Join with invite</button>
           <button id="btn-self-mesh-best">Use best device</button>
-          <button id="btn-self-mesh-freeze">Freeze device</button>
-          <button id="btn-self-mesh-recover">Recover device</button>
+        </div>
+        <details class="sm-advanced" id="self-mesh-remote-actions">
+          <summary>Send or pull from another device</summary>
+          <div class="sm-controls">
+            <input id="self-mesh-path" type="text" placeholder="Allowed folder or file path" />
+            <input id="self-mesh-peer" type="text" placeholder="Recipient or trusted device" />
+          </div>
+          <div class="sm-actions">
           <button id="btn-self-mesh-trust-root">Trust folder</button>
           <button id="btn-self-mesh-manifest">Pull file list</button>
           <button id="btn-self-mesh-send">Send file</button>
-        </div>
+          </div>
+        </details>
+        <details class="sm-advanced" id="self-mesh-join-actions">
+          <summary>Add this device with an invite</summary>
+          <div class="sm-controls sm-device-picker">
+            <input id="self-mesh-cert" type="text" placeholder="Invite code or device cert" />
+          </div>
+          <div class="sm-actions">
+            <button id="btn-self-mesh-claim">Join with invite</button>
+          </div>
+        </details>
+        <details class="sm-advanced" id="self-mesh-safety-actions">
+          <summary>Device safety</summary>
+          <div class="sm-actions">
+            <button id="btn-self-mesh-freeze">Freeze device</button>
+            <button id="btn-self-mesh-recover">Recover device</button>
+          </div>
+        </details>
         <details class="sm-advanced" id="self-mesh-advanced">
           <summary>Advanced device setup</summary>
           <div class="sm-controls">
@@ -4653,7 +4737,7 @@
           <div class="sm-actions">
             <button id="btn-self-mesh-mint">Create device cert</button>
             <button id="btn-self-mesh-enroll">Add device cert</button>
-            <button id="btn-self-mesh-revoke">Hard revoke selected device</button>
+            <button id="btn-self-mesh-revoke" class="danger-action">Hard revoke selected device</button>
           </div>
         </details>
         <img id="self-mesh-invite-qr" alt="Self-mesh invite QR" style="display:none; margin-top:8px; width:144px; max-width:100%; border-radius:8px; background:#fff; padding:8px;" />
@@ -9071,6 +9155,7 @@
     if (!targetId) {
       state.courier.removable_files = [];
       renderCourierKit();
+      renderOneNow();
       return;
     }
     try {
@@ -11225,6 +11310,36 @@
     }
   }
 
+  function renderOneNow() {
+    const title = $("#one-now-title");
+    const detail = $("#one-now-detail");
+    if (!title || !detail) return;
+    const status = state.status || {};
+    const mesh = state.selfMesh || {};
+    const online = Number(status.peers?.online || 0);
+    const moving = Number(status.transfers?.active || 0);
+    const sessions = Number(status.performance?.sessions?.open || 0);
+    const devices = Array.isArray(mesh.devices) ? mesh.devices.filter(d => !d.revoked) : [];
+    const awake = Array.isArray(mesh.presence)
+      ? mesh.presence.filter(p => p.state === "awake").length
+      : 0;
+    if (moving > 0) {
+      title.textContent = `${moving} transfer${moving === 1 ? "" : "s"} moving`;
+      detail.textContent = "Autopilot is choosing the safest fast path. Open Files only if you want the details.";
+    } else if (online > 0) {
+      title.textContent = `${online} trusted device${online === 1 ? "" : "s"} nearby`;
+      detail.textContent = sessions > 0
+        ? `${sessions} secure link${sessions === 1 ? "" : "s"} open. Chat, files, and folders are ready.`
+        : "Chat, files, and folders are ready when you are.";
+    } else if (devices.length > 1) {
+      title.textContent = "Your personal mesh is ready";
+      detail.textContent = `${awake}/${devices.length} device${devices.length === 1 ? "" : "s"} awake. One Link can pick the best device for you.`;
+    } else {
+      title.textContent = "Everything is quiet";
+      detail.textContent = "Pair a device, send a file, or open Privacy to see exactly what One Link is doing.";
+    }
+  }
+
   async function refreshStatus() {
     try {
       state.status = await api.status();
@@ -11233,9 +11348,11 @@
       $("#metric-active").textContent = state.status.transfers?.active ?? 0;
       $("#metric-cache").textContent = fmtBytes(state.status.performance?.cdc_cache?.bytes || 0);
       $("#metric-sessions").textContent = state.status.performance?.sessions?.open ?? 0;
+      renderOneNow();
       renderFabricTruth();
     } catch (e) { console.warn(e); }
     await refreshSelfMesh();
+    renderOneNow();
     // v0.5.3: keep rendezvous URLs cached so the empty-state nudge is
     // accurate without waiting for the user to open the settings modal.
     try {
@@ -11448,6 +11565,25 @@
   });
 
   // Schedule a refresh — coalesce many WS events per frame.
+  $("#one-now-send")?.addEventListener("click", () => {
+    const filesBtn = document.querySelector('[data-pane="files"]');
+    if (filesBtn && !_phoneCannotShow(filesBtn)) {
+      filesBtn.click();
+      $("#btn-send-file-panel")?.click();
+      return;
+    }
+    $("#btn-attach")?.click();
+  });
+  $("#one-now-devices")?.addEventListener("click", () => {
+    const meshBtn = document.querySelector('[data-pane="mesh"]');
+    if (meshBtn) meshBtn.click();
+    chooseBestSelfMeshDevice();
+    $("#self-mesh-kit")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  });
+  $("#one-now-privacy")?.addEventListener("click", () => {
+    $("#btn-privacy")?.click();
+  });
+
   let _activityRefreshScheduled = false;
   function scheduleActivityRefresh() {
     if (_activityRefreshScheduled) return;
