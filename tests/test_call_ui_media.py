@@ -186,37 +186,57 @@ def test_phase_ended_stops_media(index_html: str) -> None:
 # ---------------------------------------------------------------------------
 
 def test_call_button_on_pinned_peers(index_html: str) -> None:
-    """A call button (📞) appears on each pinned peer row in the
-    sidebar."""
-    assert 'el("button", "call-btn", "📞")' in index_html
+    """May 15 2026 — the single 📞 call button was split into two
+    distinct buttons (📞 voice / 📹 video) so the user can pick the
+    call kind explicitly. Both render only on pinned-trust peers."""
+    assert 'el("button", "call-btn-voice", "📞")' in index_html
+    assert 'el("button", "call-btn-video", "📹")' in index_html
 
 
 def test_call_button_only_for_pinned_trust(index_html: str) -> None:
     """Calls require pinned identity. Pending / rejected peers
-    don't get the button."""
-    idx = index_html.find('el("button", "call-btn"')
+    don't get either call button."""
+    idx = index_html.find('el("button", "call-btn-voice"')
     # Search backwards for the conditional.
     pre = index_html[max(0, idx - 800):idx]
     assert 'p.trust === "pinned"' in pre
 
 
 def test_call_button_calls_startlivingpresencecall(index_html: str) -> None:
-    """Click handler routes to startLivingPresenceCall with the
-    peer's fingerprint + display name."""
-    idx = index_html.find('el("button", "call-btn"')
-    snippet = index_html[idx:idx + 1200]
-    assert "startLivingPresenceCall(" in snippet
-    assert "p.fingerprint" in snippet
+    """Both buttons route to startLivingPresenceCall with the peer's
+    fingerprint, display name, AND an explicit {video:bool} opts so
+    the camera state matches the icon clicked."""
+    idx_v = index_html.find('el("button", "call-btn-voice"')
+    voice_snippet = index_html[idx_v:idx_v + 1200]
+    assert "startLivingPresenceCall(" in voice_snippet
+    assert "p.fingerprint" in voice_snippet
+    assert "{ video: false }" in voice_snippet
+    idx_V = index_html.find('el("button", "call-btn-video"')
+    video_snippet = index_html[idx_V:idx_V + 1200]
+    assert "startLivingPresenceCall(" in video_snippet
+    assert "p.fingerprint" in video_snippet
+    assert "{ video: true }" in video_snippet
 
 
 def test_call_button_has_aria_label(index_html: str) -> None:
-    """Doctrine §5.b — every button is screen-reader accessible."""
-    idx = index_html.find('el("button", "call-btn"')
-    snippet = index_html[idx:idx + 800]
-    assert 'setAttribute("aria-label"' in snippet
+    """Doctrine §5.b — every button is screen-reader accessible.
+    Both voice + video buttons set aria-label distinctly."""
+    idx_v = index_html.find('el("button", "call-btn-voice"')
+    voice_snippet = index_html[idx_v:idx_v + 800]
+    assert 'setAttribute("aria-label"' in voice_snippet
+    assert 'Voice call' in voice_snippet
+    idx_V = index_html.find('el("button", "call-btn-video"')
+    video_snippet = index_html[idx_V:idx_V + 800]
+    assert 'setAttribute("aria-label"' in video_snippet
+    assert 'Video call' in video_snippet
 
 
 def test_call_button_styled(index_html: str) -> None:
+    """Both call buttons inherit the base .peer .call-btn style + each
+    has its own hover-tint (green for voice, blue for video) so they're
+    visually distinct."""
     assert ".peer .call-btn" in index_html
-    # The button has a hover style — visible affordance.
-    assert ".peer .call-btn:hover" in index_html
+    assert ".peer .call-btn-voice" in index_html
+    assert ".peer .call-btn-video" in index_html
+    assert ".peer .call-btn-voice:hover" in index_html
+    assert ".peer .call-btn-video:hover" in index_html

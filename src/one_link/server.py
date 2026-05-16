@@ -1326,6 +1326,7 @@ class UIServer:
         r.add_post("/api/self-mesh/devices/mint", self._guarded(self.api_self_mesh_mint_device))
         r.add_post("/api/self-mesh/devices/enroll", self._guarded(self.api_self_mesh_enroll_device))
         r.add_post("/api/self-mesh/devices/revoke", self._guarded(self.api_self_mesh_revoke_device))
+        r.add_post("/api/self-mesh/devices/safety", self._guarded(self.api_self_mesh_device_safety))
         r.add_post("/api/self-mesh/remote-instruct", self._guarded(self.api_self_mesh_remote_instruct))
         r.add_post("/api/self-mesh/enrollment-invite", self._guarded(self.api_self_mesh_enrollment_invite))
         r.add_get("/api/self-mesh/enrollment-invite/preview", self._guarded(self.api_self_mesh_enrollment_invite_preview))
@@ -3744,6 +3745,10 @@ class UIServer:
                 "local": bool(row.get("local")),
                 "trusted": bool(row.get("trusted")),
                 "revoked": bool(row.get("revoked")),
+                "safety_state": row.get("safety_state") or "trusted",
+                "safety_updated_ms": row.get("safety_updated_ms"),
+                "guardian_epoch": row.get("guardian_epoch"),
+                "safety_reason": row.get("safety_reason") or "",
                 "added_ms": row.get("added_ms"),
                 "updated_ms": row.get("updated_ms"),
                 "metadata": row.get("metadata") or {},
@@ -3781,6 +3786,26 @@ class UIServer:
                 "detail": row.get("detail"),
                 "metadata": row.get("metadata") or {},
             })
+
+        guardian = []
+        with contextlib.suppress(Exception):
+            for row in state.list_device_guardian_events(limit=100):
+                guardian.append({
+                    "id": row.get("id"),
+                    "ts_ms": row.get("ts_ms"),
+                    "root_pub_b64": b64u(row.get("root_pub")),
+                    "device_pub_b64": b64u(row.get("device_pub")),
+                    "actor_device_pub_b64": b64u(row.get("actor_device_pub")),
+                    "from_state": row.get("from_state"),
+                    "to_state": row.get("to_state"),
+                    "decision": row.get("decision"),
+                    "reason": row.get("reason"),
+                    "proofs": row.get("proofs") or [],
+                    "effects": row.get("effects") or [],
+                    "event_hash": row.get("event_hash"),
+                    "prev_hash": row.get("prev_hash"),
+                    "metadata": row.get("metadata") or {},
+                })
 
         timeline_by_command: dict[str, dict] = {}
         order = {
@@ -3870,6 +3895,7 @@ class UIServer:
             "devices": devices,
             "presence": presence,
             "audit": audit,
+            "guardian": guardian,
             "timeline": timeline,
             "allowed_roots": allowed_roots,
             "routing": routing,
@@ -4090,6 +4116,76 @@ class UIServer:
                 "hint": str(exc),
             }, status=400)
 
+    async def api_self_mesh_device_safety(self, request: web.Request) -> web.Response:
+        """Device Guardian safety-state transition endpoint."""
+        from one_link.self_mesh_enrollment import b64u, b64u_decode
+
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        body = await request.json()
+        try:
+            root_pub = b64u_decode(str(body.get("root_pub_b64") or ""))
+            device_pub = b64u_decode(str(body.get("device_pub_b64") or ""))
+            requested = str(body.get("state") or body.get("safety_state") or "")
+            proofs = body.get("proofs") or []
+            reason = str(body.get("reason") or "")
+            active_suspicion = bool(body.get("active_suspicion", False))
+            result = state.set_self_mesh_device_safety(
+                root_pub=root_pub,
+                device_pub=device_pub,
+                requested_state=requested,
+                actor_device_pub=self.daemon.me.public_bytes,
+                proofs=proofs,
+                reason=reason,
+                actor_is_local=True,
+                active_suspicion=active_suspicion,
+                metadata={"source": "api", "ui": True},
+            )
+            device = result.get("device") or {}
+            decision = result.get("decision") or {}
+            state.record_self_mesh_audit(
+                event=decision.get("event") or "guardian_state_changed",
+                severity=decision.get("severity") or ("good" if result.get("ok") else "warn"),
+                root_pub=root_pub,
+                device_pub=device_pub,
+                detail=decision.get("detail") or reason,
+                metadata={
+                    "decision": decision,
+                    "event_hash": result.get("event_hash"),
+                    "proofs": proofs,
+                },
+            )
+            with contextlib.suppress(Exception):
+                self.daemon._broadcast_self_mesh_changed(
+                    reason="guardian_state_changed",
+                    device_pub_b64=b64u(device_pub),
+                    safety_state=device.get("safety_state"),
+                )
+            status = 200 if result.get("ok") else 409
+            return web.json_response({
+                "ok": bool(result.get("ok")),
+                "root_pub_b64": b64u(root_pub),
+                "device_pub_b64": b64u(device_pub),
+                "device": {
+                    "device_pub_b64": b64u(device.get("device_pub")),
+                    "label": device.get("label"),
+                    "trusted": device.get("trusted"),
+                    "revoked": device.get("revoked"),
+                    "safety_state": device.get("safety_state"),
+                    "guardian_epoch": device.get("guardian_epoch"),
+                    "safety_reason": device.get("safety_reason"),
+                },
+                "decision": decision,
+                "event_hash": result.get("event_hash"),
+                "previous_hash": result.get("previous_hash"),
+            }, status=status)
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_guardian_rejected",
+                "hint": str(exc),
+            }, status=400)
+
     async def api_self_mesh_remote_instruct(self, request: web.Request) -> web.Response:
         """Sign and send a scoped remote instruction to another self-device."""
         from one_link.self_mesh_enrollment import b64u, b64u_decode
@@ -4112,6 +4208,20 @@ class UIServer:
             )
             if local is None or not local.get("cert") or local.get("revoked"):
                 raise ValueError("local device cert unavailable for this root")
+            if str(local.get("safety_state") or "trusted") in {
+                "maybe_lost", "frozen", "revoked", "quarantined",
+            }:
+                raise ValueError("local device blocked by Guardian")
+            target_row = state.get_self_mesh_device(
+                root_pub=root_pub,
+                device_pub=target_pub,
+            )
+            if target_row is None:
+                raise ValueError("target device is not enrolled")
+            if target_row.get("revoked") or str(target_row.get("safety_state") or "trusted") in {
+                "maybe_lost", "frozen", "revoked", "quarantined",
+            }:
+                raise ValueError("target device blocked by Guardian")
             command = sign_remote_instruction(
                 controller_device_seed=self.daemon.me.private.private_bytes_raw(),
                 controller_cert=local["cert"],
@@ -5759,8 +5869,12 @@ class UIServer:
         # Merge persistent state
         if self.daemon.state is not None:
             try:
-                self_pubkey = self.daemon.me.public_bytes
-                self_hostname = self.daemon.me.hostname
+                # getattr fallbacks: SimpleNamespace test mocks
+                # sometimes don't carry every Identity field. Daemon-
+                # path always has both (Identity is dataclass-frozen);
+                # this just makes the unit-test surface tolerant.
+                self_pubkey = getattr(self.daemon.me, "public_bytes", None)
+                self_hostname = getattr(self.daemon.me, "hostname", None)
                 for rec in self.daemon.state.list_peers():
                     # Skip ourselves — by current fingerprint, by pubkey
                     # (defends against stale rows from past identities that
@@ -5770,7 +5884,7 @@ class UIServer:
                     # peer that happens to share our hostname).
                     if rec.fingerprint == self.daemon.me.fingerprint:
                         continue
-                    if rec.pubkey and rec.pubkey == self_pubkey:
+                    if self_pubkey is not None and rec.pubkey and rec.pubkey == self_pubkey:
                         # MAY 15 2026 — defensive filter for self-rows
                         # left over from versions that self-pinned. The
                         # daemon no longer creates these (see daemon.py
@@ -5778,7 +5892,8 @@ class UIServer:
                         # state.db files still carry them.
                         continue
                     if (
-                        rec.hostname
+                        self_hostname is not None
+                        and rec.hostname
                         and rec.hostname == self_hostname
                         and not rec.last_address
                         and rec.last_port in (None, 0)
