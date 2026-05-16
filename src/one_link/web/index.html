@@ -151,6 +151,7 @@
 
   .main { display: grid; grid-template-columns: 280px 1fr 0fr; min-height: 0; }
   .main.with-files { grid-template-columns: 280px 1fr 320px; }
+  .mobile-scrim { display: none; }
 
   /* ── Sidebar (peers + rooms) ───────────────────────────────────────── */
   .side { background: var(--bg-1); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
@@ -634,10 +635,14 @@
     background: var(--bg-3); color: var(--text);
     border-color: var(--bg-3);
   }
-  /* Living Presence Tier α — Call button on contact rows. Always
-     visible (single-tap to call is core surface, never hidden on
-     hover). */
-  .peer .call-btn {
+  /* Living Presence Tier α — Call buttons on contact rows.
+     Always visible (single-tap to call is core surface). May 15 2026:
+     split into voice-only (.call-btn-voice) and video (.call-btn-video).
+     Hover tint differs by intent — green for voice, blue for video —
+     so a glance distinguishes them. */
+  .peer .call-btn,
+  .peer .call-btn-voice,
+  .peer .call-btn-video {
     background: transparent; color: var(--text-dim);
     border: 1px solid transparent; border-radius: 6px;
     padding: 2px 7px; font-size: 14px;
@@ -645,9 +650,14 @@
     align-self: center;
     cursor: pointer;
   }
-  .peer .call-btn:hover {
+  .peer .call-btn:hover,
+  .peer .call-btn-voice:hover {
     background: rgba(46,184,92,0.16); color: rgba(46,184,92,1);
     border-color: rgba(46,184,92,0.32);
+  }
+  .peer .call-btn-video:hover {
+    background: rgba(64,156,255,0.18); color: rgba(64,156,255,1);
+    border-color: rgba(64,156,255,0.36);
   }
   .convo-h .who { cursor: pointer; }
   .convo-h .who:hover .name { color: var(--accent); }
@@ -2434,6 +2444,7 @@
 
     /* Scrim behind the open drawer so taps outside dismiss it. */
     .mobile-scrim {
+      display: block;
       position: fixed; inset: 56px 0 0 0;
       background: rgba(0, 0, 0, .5);
       backdrop-filter: blur(4px);
@@ -5286,17 +5297,22 @@
           </span>
         </div>
         <p class="settings-help">
-          Default for paired devices is allow all (chat + files +
-          folders). Toggle off if you want to grant capabilities
-          individually below.
+          Default for paired devices is allow all (chat, files, folders,
+          voice calls, video calls). Toggle off if you want to grant
+          capabilities individually below.
         </p>
         <!-- v0.14.5: per-capability toggles are advanced. The
              "Allow all" master toggle above is the daily-use
-             surface; granular per-capability tuning is power-user. -->
+             surface; granular per-capability tuning is power-user.
+             May 15 2026: added Voice + Video. They're separate caps
+             so a user can grant a colleague Voice without Video,
+             or vice versa — independent of the chat/files set. -->
         <div class="mini-actions wrap" id="dev-cap-row" data-tier="advanced">
           <button class="cap-toggle" data-cap="chat">Chat</button>
           <button class="cap-toggle" data-cap="files">Files</button>
           <button class="cap-toggle" data-cap="folder_sync">Folders</button>
+          <button class="cap-toggle" data-cap="voice_call">Voice</button>
+          <button class="cap-toggle" data-cap="video_call">Video</button>
         </div>
       </div>
 
@@ -6811,24 +6827,50 @@
       // Only render for paired (pinned/rejected) peers; unpaired
       // peers are managed via the discovery / pair flow instead.
       if (p.fingerprint && p.trust !== "pending") {
-        // Living Presence Tier α — Call button. Only paired peers
-        // get the button (calls require a pinned identity). Single
-        // tap initiates the call; the call surface takes over.
+        // Living Presence Tier α — Call buttons. May 15 2026: split
+        // the single 📞 button into TWO buttons so the user can pick
+        // audio-only OR video at call time. The icons read like
+        // standard phone-app affordances: phone glyph = voice, video-
+        // camera glyph = video. Hover colors differ (green/blue) so
+        // a quick visual scan distinguishes them at a glance. Each
+        // honors its own capability (voice_call / video_call) — a
+        // peer who's only been granted Voice has the video button
+        // hidden.
         if (p.trust === "pinned") {
-          const callBtn = el("button", "call-btn", "📞");
-          callBtn.title = `Call ${p.display_name || p.hostname || p.short_id}`;
-          callBtn.setAttribute("aria-label",
-            `Call ${p.display_name || p.hostname || p.short_id}`);
-          callBtn.onclick = (ev) => {
-            ev.stopPropagation();
-            if (typeof window.startLivingPresenceCall === "function") {
-              window.startLivingPresenceCall(
-                p.fingerprint,
-                p.display_name || p.hostname || p.short_id,
-              );
-            }
-          };
-          row.appendChild(callBtn);
+          const peerLabel = p.display_name || p.hostname || p.short_id;
+          const allowedCaps = Array.isArray(p.allowed_capabilities)
+            ? p.allowed_capabilities : null;
+          const voiceAllowed = !allowedCaps || allowedCaps.indexOf("voice_call") >= 0;
+          const videoAllowed = !allowedCaps || allowedCaps.indexOf("video_call") >= 0;
+
+          if (voiceAllowed) {
+            const voiceBtn = el("button", "call-btn-voice", "📞");
+            voiceBtn.title = `Voice call ${peerLabel}`;
+            voiceBtn.setAttribute("aria-label", `Voice call ${peerLabel}`);
+            voiceBtn.onclick = (ev) => {
+              ev.stopPropagation();
+              if (typeof window.startLivingPresenceCall === "function") {
+                window.startLivingPresenceCall(
+                  p.fingerprint, peerLabel, { video: false },
+                );
+              }
+            };
+            row.appendChild(voiceBtn);
+          }
+          if (videoAllowed) {
+            const videoBtn = el("button", "call-btn-video", "📹");
+            videoBtn.title = `Video call ${peerLabel}`;
+            videoBtn.setAttribute("aria-label", `Video call ${peerLabel}`);
+            videoBtn.onclick = (ev) => {
+              ev.stopPropagation();
+              if (typeof window.startLivingPresenceCall === "function") {
+                window.startLivingPresenceCall(
+                  p.fingerprint, peerLabel, { video: true },
+                );
+              }
+            };
+            row.appendChild(videoBtn);
+          }
         }
         const gear = el("button", "gear-btn", "⚙");
         gear.title = `${p.display_name || p.hostname || p.short_id} settings`;
@@ -16407,10 +16449,19 @@
   }
 
   // ── Public entry: a contact "Call" button calls this. ──
-  window.startLivingPresenceCall = async function (peerMasterVkHex, peerLabel) {
+  window.startLivingPresenceCall = async function (
+    peerMasterVkHex, peerLabel, opts,
+  ) {
+    // May 15 2026 — `opts` is an optional `{ video: boolean }`.
+    //   { video: true }  → voice + video call (camera on)
+    //   { video: false } → voice-only call (camera off)
+    // Default (no opts) preserves the legacy video-on behaviour so
+    // older callers don't break.
+    const wantVideo = !opts || opts.video !== false;
     const result = await callApiPost({
       action: "initiate",
       peer_master_vk_hex: peerMasterVkHex,
+      kind: wantVideo ? "video" : "voice",
     });
     if (!result.ok) {
       if (typeof toast === "function") toast(result.user_message, "warn");
@@ -16418,18 +16469,22 @@
     }
     callUI.activeCallId = result.call_id;
     callUI.activeCallPeer = peerLabel || peerMasterVkHex.slice(0, 8);
+    callUI.activeCallKind = wantVideo ? "video" : "voice";
     showOutgoingOverlay(callUI.activeCallPeer);
-    // Tier α: pre-warm local media so the camera+mic are ready
-    // by the time the peer accepts. If permissions are denied,
-    // the call still proceeds (text/voice-note fallback).
+    // Tier α: pre-warm local media so the mic (and optionally the
+    // camera) are ready by the time the peer accepts. If
+    // permissions are denied, the call still proceeds (text/voice-
+    // note fallback). For a voice-only call we skip camera capture
+    // entirely so the indicator light doesn't come on.
     setupRtcPeerConnection();
-    const stream = await startLocalMedia({ audio: true, video: true });
+    const stream = await startLocalMedia({ audio: true, video: wantVideo });
     if (stream && media.pc) {
       stream.getTracks().forEach((t) => {
         try { media.pc.addTrack(t, stream); } catch (_) {}
       });
-      // Tier β — start per-window frame attestation.
-      startAttestStream(stream);
+      // Tier β — start per-window frame attestation (video only;
+      // voice-only calls have no video frames to attest).
+      if (wantVideo) startAttestStream(stream);
     }
     // Originator creates the SDP offer + sends it now. The peer
     // will respond with an SDP answer once they accept.

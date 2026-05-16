@@ -81,6 +81,19 @@ PREDICTIVE_CONTINUITY_V1 = "predictive_continuity_v1"
 # moving boxes / face stand-ins / icons per doctrine §3.6.c.
 SEMANTIC_SCENE_V1 = "semantic_scene_v1"
 
+# May 15 2026 — base user-facing call capabilities. Distinct from the
+# advanced presence tiers (SEMANTIC_VOICE_V1 / SEMANTIC_SCENE_V1 /
+# PREDICTIVE_CONTINUITY_V1) which are *codec/tier* negotiations;
+# these two are the plain-English permissions a user grants:
+#   - VOICE_CALL: "this peer may initiate / accept an audio call with me"
+#   - VIDEO_CALL: "this peer may initiate / accept a video call with me"
+# The UI renders them as distinct buttons (phone + video) and as
+# separate Permissions pills (Voice + Video) so a user can grant one
+# without the other (e.g., a colleague allowed audio but not video,
+# or a family member with both).
+VOICE_CALL = "voice_call"
+VIDEO_CALL = "video_call"
+
 LOCAL_CAPABILITIES = (
     CHAT,
     FILES,
@@ -104,6 +117,8 @@ LOCAL_CAPABILITIES = (
     SEMANTIC_VOICE_V1,
     PREDICTIVE_CONTINUITY_V1,
     SEMANTIC_SCENE_V1,
+    VOICE_CALL,
+    VIDEO_CALL,
 )
 
 # v0.7.1 deny-by-default capability split. The audit doc
@@ -127,6 +142,11 @@ PROMPT_REQUIRED = (
     SEMANTIC_VOICE_V1,
     PREDICTIVE_CONTINUITY_V1,
     SEMANTIC_SCENE_V1,
+    # Voice + Video calls are user-facing powers — each peer must be
+    # explicitly granted each one. Granting Voice doesn't imply Video
+    # and vice versa.
+    VOICE_CALL,
+    VIDEO_CALL,
 )
 # DOUBLE_RATCHET_V1 is a transport-layer capability negotiated
 # between channels; it isn't a user-facing prompt-required cap.
