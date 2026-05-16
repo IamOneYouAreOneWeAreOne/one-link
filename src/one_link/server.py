@@ -1298,6 +1298,28 @@ class UIServer:
             "/api/peer-rtc/ice-config",
             self._guarded(self.api_peer_rtc_ice_config),
         )
+        # May 15 2026 — sovereignty surface. Three endpoints power
+        # the UI Privacy panel:
+        #   GET  /api/sovereignty/status     — preset + per-feature state
+        #   GET  /api/sovereignty/preset     — list available presets
+        #   POST /api/sovereignty/preset     — set active preset
+        #   GET  /api/sovereignty/outbound   — recent outbound calls
+        r.add_get(
+            "/api/sovereignty/status",
+            self._guarded(self.api_sovereignty_status),
+        )
+        r.add_get(
+            "/api/sovereignty/preset",
+            self._guarded(self.api_sovereignty_preset_list),
+        )
+        r.add_post(
+            "/api/sovereignty/preset",
+            self._guarded(self.api_sovereignty_preset_set),
+        )
+        r.add_get(
+            "/api/sovereignty/outbound",
+            self._guarded(self.api_sovereignty_outbound_log),
+        )
         # peer.html runs from the public root (no auth token), so
         # it needs an unguarded variant. Returning user-configured
         # public STUN URLs is not a credential leak — STUN URLs are
@@ -1936,36 +1958,232 @@ class UIServer:
         })
 
     def _resolved_stun_servers(self) -> list[str]:
-        """May 15 2026 — read the user-configured STUN servers from
-        either ONE_LINK_STUN_SERVERS env var or
-        ``state.settings.stun_servers``. Both accept a comma-separated
-        list of ``stun:host:port`` / ``stuns:host:port`` / ``turn:...``
-        URLs. Returns [] if the user has configured nothing — the
-        sovereignty default. WebRTC degrades to host-only ICE
-        (LAN-only pairing) when this is empty."""
-        out: list[str] = []
-        seen: set[str] = set()
-        env_val = os.environ.get("ONE_LINK_STUN_SERVERS", "").strip()
-        if env_val:
-            for u in env_val.split(","):
-                u = u.strip()
-                if u and u not in seen:
-                    out.append(u)
-                    seen.add(u)
+        """Resolve STUN servers through the sovereignty preset layer.
+
+        Read order:
+          1. Explicit ``state.settings.stun_servers`` (empty string =
+             explicit opt-out of even the preset default).
+          2. Env var ``ONE_LINK_STUN_SERVERS`` (same shape).
+          3. The active preset's default list.
+
+        Returns the list. WebRTC degrades to host-only ICE
+        (LAN-only pairing) when this is empty.
+        """
+        from one_link import sovereignty as _sov
+
+        # state_setting=None means "no override"; "" means "empty list"
+        state_setting: str | None = None
+        preset_name: str | None = None
         if self.daemon is not None and self.daemon.state is not None:
             try:
-                setting = (self.daemon.state.get_setting(
-                    "stun_servers"
-                ) or "").strip()
-                if setting:
-                    for u in setting.split(","):
-                        u = u.strip()
-                        if u and u not in seen:
-                            out.append(u)
-                            seen.add(u)
+                raw = self.daemon.state.get_setting("stun_servers")
+                if raw is not None:
+                    state_setting = raw
             except Exception:
                 pass
-        return out
+            try:
+                preset_name = self.daemon.state.get_setting(
+                    "sovereignty_preset"
+                )
+            except Exception:
+                pass
+        env_val = os.environ.get("ONE_LINK_STUN_SERVERS")
+        return list(_sov.resolve_stun_servers(
+            state_setting=state_setting,
+            env_var=env_val,
+            preset_name=preset_name,
+        ))
+
+    # ── Sovereignty API (May 15 2026) ──────────────────────────────
+    #
+    # The Privacy panel UI consumes these. The contract is:
+    # everything the daemon could possibly talk to is visible here +
+    # the user can flip the active preset without restarting.
+
+    async def api_sovereignty_status(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Return the live sovereignty configuration:
+
+          - active preset name + label + description
+          - per-feature resolved state (update_check, stun_servers,
+            mdns, rendezvous), with the source of each value
+            (preset / setting / env var)
+          - outbound-log session start time + total entries
+        """
+        from one_link import sovereignty as _sov
+
+        preset_name = _sov.current_preset_name(
+            self.daemon.state if self.daemon else None
+        )
+        preset = _sov.get_preset(preset_name)
+
+        # Resolved values + their source.
+        def _source(setting_key: str, env_key: str | None = None) -> str:
+            if self.daemon and self.daemon.state is not None:
+                try:
+                    raw = self.daemon.state.get_setting(setting_key)
+                    if raw is not None and str(raw).strip() != "":
+                        return "setting"
+                except Exception:
+                    pass
+            if env_key and os.environ.get(env_key, "").strip():
+                return "env"
+            return "preset"
+
+        # Update check.
+        update_check_setting = None
+        if self.daemon and self.daemon.state is not None:
+            with contextlib.suppress(Exception):
+                update_check_setting = self.daemon.state.get_setting(
+                    "update_check_enabled"
+                )
+        update_check_on = _sov.resolve_update_check_enabled(
+            state_setting=update_check_setting,
+            env_var=os.environ.get("ONE_LINK_UPDATE_CHECK"),
+            preset_name=preset_name,
+        )
+
+        outbound_log = list(getattr(self.daemon, "_outbound_log", []) or [])
+        outbound_started_ms = int(getattr(
+            self.daemon, "_outbound_log_started_ms", 0,
+        ) or 0)
+
+        return web.json_response({
+            "preset": {
+                "name": preset.name,
+                "label": preset.label,
+                "description": preset.description,
+                "outbound_summary": preset.outbound_summary,
+            },
+            "features": {
+                "update_check": {
+                    "enabled": update_check_on,
+                    "source": _source(
+                        "update_check_enabled", "ONE_LINK_UPDATE_CHECK",
+                    ),
+                },
+                "stun_servers": {
+                    "list": self._resolved_stun_servers(),
+                    "source": _source(
+                        "stun_servers", "ONE_LINK_STUN_SERVERS",
+                    ),
+                },
+                "mdns_discovery": {
+                    "enabled": preset.mdns_discovery_enabled,
+                    "source": "preset",
+                },
+                "rendezvous": {
+                    "enabled": preset.rendezvous_enabled,
+                    "source": "preset",
+                },
+            },
+            "outbound": {
+                "session_started_ms": outbound_started_ms,
+                "total_logged": len(outbound_log),
+                "recent_count_24h": sum(
+                    1 for e in outbound_log
+                    if e.get("ts_ms", 0)
+                    >= (
+                        outbound_started_ms
+                        if outbound_started_ms
+                        else 0
+                    )
+                ),
+            },
+        })
+
+    async def api_sovereignty_preset_list(
+        self, request: web.Request,
+    ) -> web.Response:
+        """List the available presets so the UI's chooser can render
+        them with labels + descriptions."""
+        from one_link import sovereignty as _sov
+        return web.json_response({
+            "presets": [
+                {
+                    "name": p.name,
+                    "label": p.label,
+                    "description": p.description,
+                    "outbound_summary": p.outbound_summary,
+                    "update_check_enabled": p.update_check_enabled,
+                    "stun_servers": list(p.stun_servers),
+                    "mdns_discovery_enabled": p.mdns_discovery_enabled,
+                    "rendezvous_enabled": p.rendezvous_enabled,
+                }
+                for p in _sov.ALL_PRESETS.values()
+            ],
+            "default": _sov.DEFAULT_PRESET_NAME,
+        })
+
+    async def api_sovereignty_preset_set(
+        self, request: web.Request,
+    ) -> web.Response:
+        """POST { "name": "just_works" | "quiet" | "off_grid" }
+        — flip the active preset. Stored in
+        state.settings.sovereignty_preset. Restart not required —
+        subsystems re-read the value at runtime."""
+        from one_link import sovereignty as _sov
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "expected JSON body"}, status=400,
+            )
+        name = str(data.get("name", "")).strip().lower()
+        if name not in _sov.ALL_PRESETS:
+            return web.json_response(
+                {
+                    "error": "unknown preset",
+                    "valid": list(_sov.ALL_PRESETS.keys()),
+                },
+                status=400,
+            )
+        if self.daemon is None or self.daemon.state is None:
+            return web.json_response(
+                {"error": "state not available"}, status=503,
+            )
+        try:
+            self.daemon.state.set_setting("sovereignty_preset", name)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+        return web.json_response({
+            "ok": True,
+            "preset": name,
+        })
+
+    async def api_sovereignty_outbound_log(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Return the recent outbound-call audit log. The Privacy
+        panel uses this to surface "what is this device talking to."
+
+        Query param ``limit=<N>`` caps the response size (default 50,
+        max 200 — same as the daemon's ring-buffer cap)."""
+        try:
+            limit = int(request.query.get("limit", "50"))
+        except ValueError:
+            limit = 50
+        limit = max(1, min(limit, 200))
+        log_entries = list(
+            getattr(self.daemon, "_outbound_log", []) or []
+        )
+        # Most-recent first.
+        log_entries.reverse()
+        return web.json_response({
+            "entries": log_entries[:limit],
+            "total": len(log_entries),
+            "session_started_ms": int(
+                getattr(self.daemon, "_outbound_log_started_ms", 0) or 0
+            ),
+            "promise": (
+                "If this list is empty, the daemon has made zero "
+                "outbound calls to anything beyond your LAN since it "
+                "booted. Verified by an in-process ring buffer; not a "
+                "marketing claim."
+            ),
+        })
 
     async def api_peer_rtc_ice_config(
         self, request: web.Request,

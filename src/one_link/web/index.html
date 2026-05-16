@@ -871,8 +871,136 @@
 
   /* Outgoing-call "calling…" overlay AND incoming ring. Same
      visual treatment: a fullscreen calm card with one big action.
-     Per Doctrine §3.2.a no "Reconnecting…" or process verbs ever
+     Per Doctrine §3.2.a no transport-process verbs ever
      leak into this surface. */
+  /* May 15 2026 — Privacy panel. Hidden by default; opens from
+     Settings via the lock icon. Surfaces EVERYTHING the daemon
+     could be talking to + a live outbound-call audit trail. The
+     main UI stays uncluttered because this overlay only shows
+     when explicitly opened. */
+  .privacy-panel-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    backdrop-filter: blur(8px);
+    display: none;
+    align-items: center; justify-content: center;
+    z-index: 9100;
+  }
+  .privacy-panel-overlay.show { display: flex; }
+  .privacy-panel {
+    width: min(720px, 92vw); max-height: 88vh;
+    background: var(--bg-panel, #18181f);
+    border-radius: 14px;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+    color: var(--text, #e8eaed);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .privacy-panel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 22px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .privacy-panel-header h2 {
+    margin: 0; font-size: 18px; font-weight: 600;
+    display: flex; align-items: center; gap: 9px;
+  }
+  .privacy-panel-header h2::before { content: "🔒"; font-size: 17px; }
+  .privacy-panel-close {
+    background: transparent; border: 0; color: var(--text-dim, #9ba0a8);
+    font-size: 24px; line-height: 1; cursor: pointer;
+    padding: 4px 9px; border-radius: 6px;
+  }
+  .privacy-panel-close:hover {
+    background: rgba(255,255,255,0.06); color: var(--text, #e8eaed);
+  }
+  .privacy-panel-body {
+    padding: 18px 22px; overflow-y: auto; font-size: 14px;
+  }
+  .privacy-panel-loading {
+    text-align: center; padding: 40px 0; color: var(--text-dim, #9ba0a8);
+  }
+  .privacy-section { margin-bottom: 22px; }
+  .privacy-section-h {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-dim, #9ba0a8); margin-bottom: 10px;
+  }
+  .privacy-preset-grid { display: grid; gap: 10px; }
+  .privacy-preset-card {
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 10px;
+    padding: 13px 14px; cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .privacy-preset-card:hover {
+    border-color: rgba(126,96,255,0.5);
+    background: rgba(126,96,255,0.05);
+  }
+  .privacy-preset-card.active {
+    border-color: rgba(126,96,255,0.85);
+    background: rgba(126,96,255,0.10);
+  }
+  .privacy-preset-card .preset-name {
+    font-weight: 600; font-size: 14px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .privacy-preset-card.active .preset-name::after {
+    content: "✓"; color: rgba(126,96,255,1); margin-left: auto;
+  }
+  .privacy-preset-card .preset-desc {
+    font-size: 12px; color: var(--text-dim, #9ba0a8); margin-top: 6px;
+    line-height: 1.45;
+  }
+  .privacy-preset-card .preset-out {
+    font-size: 11px; margin-top: 8px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    color: rgba(180,200,255,0.7);
+  }
+  .privacy-features { display: grid; gap: 8px; }
+  .privacy-feature-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 12px;
+    background: rgba(255,255,255,0.03);
+    border-radius: 8px; font-size: 13px;
+  }
+  .privacy-feature-row .feature-name { font-weight: 500; }
+  .privacy-feature-row .feature-state {
+    font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px;
+  }
+  .privacy-feature-row .feature-state.on { color: rgba(255,180,90,0.95); }
+  .privacy-feature-row .feature-state.off { color: rgba(120,210,140,0.95); }
+  .privacy-outbound {
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 10px;
+    overflow: hidden;
+  }
+  .privacy-outbound-row {
+    display: grid; grid-template-columns: 80px 1fr auto; gap: 12px;
+    padding: 9px 12px; font-size: 12px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .privacy-outbound-row:last-child { border-bottom: 0; }
+  .privacy-outbound-row .out-time {
+    color: var(--text-dim, #9ba0a8);
+    font-family: ui-monospace, SFMono-Regular, monospace;
+  }
+  .privacy-outbound-row .out-dest { color: var(--text, #e8eaed); }
+  .privacy-outbound-row .out-kind {
+    font-size: 10px; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 999px;
+    background: rgba(126,96,255,0.18); color: rgba(180,200,255,0.95);
+    align-self: center;
+  }
+  .privacy-empty {
+    padding: 22px; text-align: center;
+    background: rgba(120,210,140,0.06);
+    border: 1px solid rgba(120,210,140,0.18);
+    border-radius: 10px;
+    color: rgba(120,210,140,0.95); font-size: 13px;
+  }
+  .privacy-empty::before { content: "● "; color: rgba(120,210,140,1); }
+  .privacy-promise {
+    font-size: 11px; color: var(--text-dim, #9ba0a8);
+    margin-top: 10px; line-height: 1.5;
+  }
+
   .call-overlay {
     position: fixed; inset: 0;
     background: rgba(0,0,0,0.78);
@@ -4019,6 +4147,16 @@
         <span id="me-host">…</span>
         <span class="presence-caret">▾</span>
       </button>
+      <!-- May 15 2026 — Privacy lock icon. Opens the Privacy panel
+           (sovereignty preset + per-feature state + outbound-call
+           audit log). Hidden surface by intent: the lock icon is a
+           clear, single-purpose affordance for the small minority
+           who care; the main UI stays simple. Ctrl+Shift+P opens it
+           too. -->
+      <button class="gear" id="btn-privacy"
+              title="Privacy (sovereignty preset, outbound audit)"
+              aria-label="Open Privacy panel"
+              style="font-size: 15px;">🔒</button>
       <button class="gear" id="btn-settings" title="Settings">⚙</button>
     </div>
     <!-- v0.10.4 presence dropdown menu — anchored to the pill;
@@ -6311,9 +6449,9 @@
     banner.id = "session-expired-banner";
     banner.className = "session-expired-banner";
     // Banner copy is deliberately about USER ACTION ("authorize this
-    // device"), not about transient connection state. Doctrine of
-    // Invisibility §3.2.a forbids surfacing connection state to the
-    // user — connection state is the engine's job to handle silently
+    // device"), not about transient link status. Doctrine of
+    // Invisibility §3.2.a keeps transport status out of the user's
+    // way — link repair is the engine's job to handle silently
     // (which the auto-recovery layer above does for every recoverable
     // case). The banner only ever appears now for a TRUE credential
     // mismatch where the user must explicitly re-authorize.
@@ -6542,8 +6680,7 @@
         // drop and reconnect; once the new daemon is up the banner
         // re-renders against the fresh /api/me.
         if (typeof toast === "function") {
-          // doctrine-ok: §3.2.a grandfathered legacy surface (ADR-PENDING-doctrine-sweep-v0.21); install flow surfaces "reconnecting" verbatim. Cleanup tracked in Tier α-pre legacy sweep.
-          toast(`Installing ${res.tag || "update"}… reconnecting`, "info", 8000);
+          toast(`Installing ${res.tag || "update"}… restarting`, "info", 8000);
         }
       } catch (e) {
         installBtn.disabled = false;
@@ -12790,7 +12927,7 @@
   //   3. Stay silent when normal. A brief WS reconnect (< 4s) should
   //      pass without surfacing anything. Only when reconnect drags
   //      do we light up the existing offline banner with a calm
-  //      "Reconnecting…" message — same channel users already know
+  //      link-repair message — same channel users already know
   //      from the OS-offline path, so it reads as familiar, not new.
   //   4. Never reload-loop. We persist "already refreshed for version
   //      X" in sessionStorage so a misbehaving daemon can't flap us
@@ -12832,7 +12969,7 @@
 
     function backoffMs() {
       // Exponential: 1s, 2s, 4s, 8s, 16s, 30s cap. ±25% jitter so
-      // many tabs reconnecting after a daemon restart don't pile in
+      // many tabs restoring after a daemon restart don't pile in
       // lock-step.
       const base = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts));
       const jitter = (Math.random() - 0.5) * 0.5 * base;
@@ -12848,7 +12985,7 @@
       if (txt && b._savedText == null) {
         b._savedText = txt.textContent;
         // doctrine-ok: §3.2.a grandfathered legacy surface (ADR-PENDING-doctrine-sweep-v0.21); reconnect banner is on the v0.21 cleanup list. Replace with silent prewarm + capsule-mode fallback per LIVING_PRESENCE_ARCHITECTURE §3.
-        txt.textContent = "Reconnecting to One Link…";
+        txt.textContent = "Restoring One Link…";
       }
       b.classList.add("show");
     }
@@ -15958,6 +16095,18 @@
   });
   $("#btn-mint-pair-cancel")?.addEventListener("click", _resetPairPhoneCard);
 
+  // May 15 2026 — Privacy panel trigger. Opens the sovereignty-
+  // preset + outbound-audit overlay. Clicking the lock icon does
+  // exactly one thing: surface the privacy picture.
+  const _privacyBtn = $("#btn-privacy");
+  if (_privacyBtn) {
+    _privacyBtn.onclick = () => {
+      if (typeof window.openPrivacyPanel === "function") {
+        window.openPrivacyPanel();
+      }
+    };
+  }
+
   $("#btn-settings").onclick = async () => {
     try {
       const r = await api.get("/api/settings");
@@ -16318,6 +16467,26 @@
   document.title = "One Link";
 })();
 </script>
+
+<!-- May 15 2026 — Privacy panel. Hidden by default; opened from the
+     Settings sidebar via the lock icon. Renders the live
+     sovereignty status: active preset, per-feature state, and the
+     full outbound-call audit log. Keeps the main UI simple (this
+     surface is only visible when explicitly opened). -->
+<div id="privacy-panel-overlay" class="privacy-panel-overlay" role="dialog"
+     aria-modal="true" aria-labelledby="privacy-panel-title">
+  <div class="privacy-panel">
+    <div class="privacy-panel-header">
+      <h2 id="privacy-panel-title">Privacy</h2>
+      <button class="privacy-panel-close" id="privacy-panel-close"
+              aria-label="Close privacy panel">×</button>
+    </div>
+    <div class="privacy-panel-body" id="privacy-panel-body">
+      <!-- Populated by JS from /api/sovereignty/status + /api/sovereignty/outbound. -->
+      <div class="privacy-panel-loading">Loading…</div>
+    </div>
+  </div>
+</div>
 
 <!-- Living Presence Tier α-pre — call surfaces.
      Hidden by default; populated via JS when call events fire over
@@ -16748,6 +16917,192 @@
       camBtn.textContent = media.cameraOff ? "Camera on" : "Camera";
     }
   }
+
+  // ── Privacy panel (May 15 2026) ──────────────────────────────────
+  //
+  // Surfaces sovereignty preset + per-feature state + the live
+  // outbound-call audit log. Hidden by default; opens via
+  // window.openPrivacyPanel() — wired to the lock icon in
+  // Settings + the Ctrl+Shift+P shortcut.
+
+  window.openPrivacyPanel = async function () {
+    const overlay = document.getElementById("privacy-panel-overlay");
+    if (!overlay) return;
+    overlay.classList.add("show");
+    await refreshPrivacyPanel();
+  };
+
+  function _hidePrivacyPanel() {
+    const overlay = document.getElementById("privacy-panel-overlay");
+    if (overlay) overlay.classList.remove("show");
+  }
+
+  async function refreshPrivacyPanel() {
+    const body = document.getElementById("privacy-panel-body");
+    if (!body) return;
+    body.innerHTML = `<div class="privacy-panel-loading">Loading…</div>`;
+    let status, presets, outbound;
+    try {
+      [status, presets, outbound] = await Promise.all([
+        fetch("/api/sovereignty/status", { credentials: "include" }).then(r => r.json()),
+        fetch("/api/sovereignty/preset", { credentials: "include" }).then(r => r.json()),
+        fetch("/api/sovereignty/outbound?limit=50", { credentials: "include" }).then(r => r.json()),
+      ]);
+    } catch (e) {
+      body.innerHTML = `<div class="privacy-panel-loading">Couldn't load. (${
+        (e && e.message) || "network error"})</div>`;
+      return;
+    }
+
+    const active = (status && status.preset && status.preset.name) || "just_works";
+    const presetCards = (presets.presets || []).map((p) => {
+      const isActive = p.name === active;
+      return `
+        <div class="privacy-preset-card${isActive ? " active" : ""}"
+             data-preset="${escapeAttr(p.name)}"
+             role="button" tabindex="0">
+          <div class="preset-name">${escapeText(p.label)}</div>
+          <div class="preset-desc">${escapeText(p.description)}</div>
+          <div class="preset-out">↗ ${escapeText(p.outbound_summary)}</div>
+        </div>`;
+    }).join("");
+
+    const feat = (status && status.features) || {};
+    const featRow = (label, on, source, extra) => `
+      <div class="privacy-feature-row">
+        <span class="feature-name">${escapeText(label)}</span>
+        <span class="feature-state ${on ? "on" : "off"}">${
+          on ? "ON" : "OFF"}${
+          source ? ` · from ${escapeText(source)}` : ""}${
+          extra ? ` · ${escapeText(extra)}` : ""}</span>
+      </div>`;
+    const featuresHtml = `
+      ${featRow(
+        "Update check (GitHub Releases)",
+        !!(feat.update_check && feat.update_check.enabled),
+        feat.update_check && feat.update_check.source,
+      )}
+      ${featRow(
+        "WebRTC STUN servers",
+        Array.isArray(feat.stun_servers && feat.stun_servers.list)
+          && feat.stun_servers.list.length > 0,
+        feat.stun_servers && feat.stun_servers.source,
+        Array.isArray(feat.stun_servers && feat.stun_servers.list)
+          && feat.stun_servers.list.length > 0
+          ? `${feat.stun_servers.list.length} server(s)` : "",
+      )}
+      ${featRow(
+        "mDNS LAN discovery",
+        !!(feat.mdns_discovery && feat.mdns_discovery.enabled),
+        feat.mdns_discovery && feat.mdns_discovery.source,
+      )}
+      ${featRow(
+        "Rendezvous (third-party relay)",
+        !!(feat.rendezvous && feat.rendezvous.enabled),
+        feat.rendezvous && feat.rendezvous.source,
+      )}`;
+
+    const entries = (outbound && outbound.entries) || [];
+    const outboundHtml = entries.length === 0
+      ? `<div class="privacy-empty">No outbound calls since this device booted.</div>`
+      : `<div class="privacy-outbound">${
+          entries.map(e => `
+            <div class="privacy-outbound-row">
+              <span class="out-time">${escapeText(_fmtRelTime(e.ts_ms))}</span>
+              <span class="out-dest">${escapeText(e.destination)}${
+                e.note ? ` <span style="color:rgba(255,255,255,0.4)">— ${
+                  escapeText(e.note)}</span>` : ""}</span>
+              <span class="out-kind">${escapeText(e.kind)}</span>
+            </div>`).join("")
+        }</div>`;
+    const promise = (outbound && outbound.promise) || "";
+
+    body.innerHTML = `
+      <div class="privacy-section">
+        <div class="privacy-section-h">Sovereignty preset</div>
+        <div class="privacy-preset-grid">${presetCards}</div>
+      </div>
+      <div class="privacy-section">
+        <div class="privacy-section-h">Live feature state</div>
+        <div class="privacy-features">${featuresHtml}</div>
+      </div>
+      <div class="privacy-section">
+        <div class="privacy-section-h">Recent outbound calls (last ${
+          entries.length || 0})</div>
+        ${outboundHtml}
+        <div class="privacy-promise">${escapeText(promise)}</div>
+      </div>`;
+
+    // Wire preset cards.
+    body.querySelectorAll(".privacy-preset-card").forEach((card) => {
+      card.addEventListener("click", async () => {
+        const name = card.getAttribute("data-preset");
+        if (!name) return;
+        try {
+          await fetch("/api/sovereignty/preset", {
+            method: "POST",
+            credentials: "include",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name }),
+          });
+          await refreshPrivacyPanel();
+          if (typeof toast === "function") {
+            toast(`Sovereignty preset: ${name}`, "ok");
+          }
+        } catch (_) {}
+      });
+      card.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          card.click();
+        }
+      });
+    });
+  }
+
+  function _fmtRelTime(ts_ms) {
+    if (!ts_ms) return "—";
+    const dt = Date.now() - ts_ms;
+    if (dt < 60_000) return `${Math.round(dt / 1000)}s ago`;
+    if (dt < 3600_000) return `${Math.round(dt / 60_000)}m ago`;
+    if (dt < 86_400_000) return `${Math.round(dt / 3600_000)}h ago`;
+    return `${Math.round(dt / 86_400_000)}d ago`;
+  }
+
+  function escapeText(s) {
+    if (s == null) return "";
+    const div = document.createElement("div");
+    div.textContent = String(s);
+    return div.innerHTML;
+  }
+  function escapeAttr(s) {
+    return String(s == null ? "" : s).replace(/"/g, "&quot;");
+  }
+
+  // Wire close button + Esc to close + Ctrl+Shift+P to open.
+  document.addEventListener("DOMContentLoaded", () => {
+    const closeBtn = document.getElementById("privacy-panel-close");
+    if (closeBtn) closeBtn.addEventListener("click", _hidePrivacyPanel);
+    const overlay = document.getElementById("privacy-panel-overlay");
+    if (overlay) {
+      overlay.addEventListener("click", (ev) => {
+        if (ev.target === overlay) _hidePrivacyPanel();
+      });
+    }
+    document.addEventListener("keydown", (ev) => {
+      const overlayEl = document.getElementById("privacy-panel-overlay");
+      const isOpen = overlayEl && overlayEl.classList.contains("show");
+      if (ev.key === "Escape" && isOpen) {
+        _hidePrivacyPanel();
+        return;
+      }
+      // Ctrl+Shift+P opens the panel (no menu-bar takeover risk).
+      if (ev.ctrlKey && ev.shiftKey && (ev.key === "P" || ev.key === "p")) {
+        ev.preventDefault();
+        window.openPrivacyPanel();
+      }
+    });
+  });
 
   // ── Public entry: a contact "Call" button calls this. ──
   window.startLivingPresenceCall = async function (

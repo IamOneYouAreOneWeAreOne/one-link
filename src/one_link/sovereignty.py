@@ -1,0 +1,237 @@
+"""Sovereignty presets — three named tiers + the resolver layer.
+
+May 15 2026.
+
+One Link's promise is "no corps, no calls home, for the people." The
+strict no-defaults posture (no STUN, no update-check, etc.) is
+technically correct but makes cross-network pairing silently fail
+for normal users. The 3-tier model below gives users a usable
+default that's still corp-free, plus tighter modes for those who
+want them.
+
+Presets:
+
+  - just_works: the default for fresh installs. Update-check ON.
+    STUN ON via INDEPENDENT community-run servers (Nextcloud,
+    Sipgate — never Google/Cloudflare/Twilio). LAN discovery ON.
+    No corp accounts, no analytics, no cloud. Cross-network
+    pairing works out of the box.
+
+  - quiet: zero outbound to anything non-LAN. Update-check OFF.
+    STUN OFF. LAN discovery ON. For users who'd rather pair
+    manually or run their own STUN.
+
+  - off_grid: the activist / high-threat profile. Adds: mDNS OFF
+    (no broadcast peer discovery), manual pair only via paste-
+    connection-string. Pure paranoia mode.
+
+Each preset is defined as a dict of feature flags that the
+respective subsystems read at runtime. Individual settings can
+override the preset for power users — e.g. you can be on
+just_works but blank out the STUN list, and the runtime honors
+that override.
+
+Read order:
+  1. Explicit setting (state.settings.<key>) — always wins
+  2. Env var override (where one is defined) — second priority
+  3. Preset default — fallback
+
+The audit endpoint surfaces which preset is active + which features
+are overridden, so the user always knows what's happening.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional
+
+
+# ── Independent community STUN servers ─────────────────────────────
+#
+# We deliberately exclude the Big-3 (Google/Cloudflare/Twilio). The
+# servers below are operated by community / privacy-focused orgs:
+#
+#   - Nextcloud  : private-cloud open-source project. Their STUN is
+#                  a free community service; no logging policy posted
+#                  publicly but the org's stated values align.
+#   - Sipgate    : German VoIP telco. GDPR-strict, EU-jurisdiction.
+#                  Their STUN is part of their public infrastructure
+#                  for SIP clients.
+#   - Antisip    : independent SIP operator.
+#
+# Operators who want to swap these for their own STUN can override
+# via env var ONE_LINK_STUN_SERVERS or the ``stun_servers`` setting.
+COMMUNITY_STUN_SERVERS = (
+    "stun:stun.nextcloud.com:443",
+    "stun:stun.sipgate.net:3478",
+    "stun:stun.antisip.com:3478",
+)
+
+
+@dataclass(frozen=True)
+class SovereigntyPreset:
+    """Frozen feature-flag bundle for one preset tier."""
+
+    name: str
+    label: str
+    description: str
+    # Subsystems read these.
+    update_check_enabled: bool
+    stun_servers: tuple[str, ...]
+    mdns_discovery_enabled: bool
+    rendezvous_enabled: bool
+    # UI hint — the chooser surfaces this as a one-line "what flows
+    # outbound" summary so the user understands the trade.
+    outbound_summary: str
+
+
+JUST_WORKS = SovereigntyPreset(
+    name="just_works",
+    label="Just Works",
+    description=(
+        "Best for most people. Pair across the internet works out "
+        "of the box. Update notifications surface in the UI. No "
+        "corporate accounts, no analytics, no cloud — just the bare "
+        "minimum infrastructure (community-run STUN, GitHub Releases) "
+        "needed to make the engine usable everywhere."
+    ),
+    update_check_enabled=True,
+    stun_servers=COMMUNITY_STUN_SERVERS,
+    mdns_discovery_enabled=True,
+    rendezvous_enabled=False,
+    outbound_summary=(
+        "Community STUN (Nextcloud + Sipgate + Antisip) for NAT "
+        "traversal · GitHub Releases poll every 6h for updates · "
+        "mDNS multicast on LAN"
+    ),
+)
+
+QUIET = SovereigntyPreset(
+    name="quiet",
+    label="Quiet",
+    description=(
+        "Zero outbound to anything beyond your LAN. Cross-network "
+        "pairing requires you to configure your own STUN (or pair "
+        "in-person first). Update notifications disabled. Pick this "
+        "if you want a strict floor and you're OK setting up the "
+        "rest yourself."
+    ),
+    update_check_enabled=False,
+    stun_servers=(),
+    mdns_discovery_enabled=True,
+    rendezvous_enabled=False,
+    outbound_summary="mDNS multicast on LAN only · no other outbound",
+)
+
+OFF_GRID = SovereigntyPreset(
+    name="off_grid",
+    label="Off-grid",
+    description=(
+        "Activist / high-threat profile. No mDNS broadcast — your "
+        "device does not announce itself on the network. Pairing "
+        "is manual only (paste a connection string face-to-face). "
+        "Absolutely zero outbound and zero LAN advertisement."
+    ),
+    update_check_enabled=False,
+    stun_servers=(),
+    mdns_discovery_enabled=False,
+    rendezvous_enabled=False,
+    outbound_summary="No outbound, no LAN advertisement",
+)
+
+
+ALL_PRESETS: dict[str, SovereigntyPreset] = {
+    "just_works": JUST_WORKS,
+    "quiet": QUIET,
+    "off_grid": OFF_GRID,
+}
+
+# The default for a fresh install. Picked so that "install and use"
+# matches normal-person expectations. Strict modes are an opt-in.
+DEFAULT_PRESET_NAME = "just_works"
+
+
+def get_preset(name: Optional[str]) -> SovereigntyPreset:
+    """Resolve a preset name to its definition. Unknown names fall
+    back to the default — the only thing that matters is that the
+    daemon NEVER crashes on a malformed setting."""
+    if not name:
+        return ALL_PRESETS[DEFAULT_PRESET_NAME]
+    return ALL_PRESETS.get(name.strip().lower(), ALL_PRESETS[DEFAULT_PRESET_NAME])
+
+
+def resolve_update_check_enabled(
+    *,
+    state_setting: Optional[str],
+    env_var: Optional[str],
+    preset_name: Optional[str],
+) -> bool:
+    """Read order for the update-check flag.
+
+    1. ``state_setting`` (explicit user setting) wins if not None / not empty.
+    2. ``env_var`` (operator override) wins if set.
+    3. Preset default.
+    """
+    # 1. Explicit setting wins. Strings "0"/"false"/"no"/"off" are
+    #    explicit OFF; "1"/"true"/"yes"/"on" are explicit ON.
+    s = (state_setting or "").strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    # 2. Env var.
+    e = (env_var or "").strip().lower()
+    if e in ("1", "true", "yes", "on"):
+        return True
+    if e in ("0", "false", "no", "off"):
+        return False
+    # 3. Preset default.
+    return get_preset(preset_name).update_check_enabled
+
+
+def resolve_stun_servers(
+    *,
+    state_setting: Optional[str],
+    env_var: Optional[str],
+    preset_name: Optional[str],
+) -> tuple[str, ...]:
+    """Read order for the STUN server list.
+
+    Setting + env var are comma-separated lists of stun:host:port
+    URLs. Explicit empty string means "user wants NO stun even on a
+    preset that defaults to community STUN" — honored.
+
+    1. ``state_setting`` (if not None) wins — empty string = []
+    2. ``env_var`` (if not None) wins next — empty string = []
+    3. Preset default.
+    """
+    def _parse(raw: str) -> tuple[str, ...]:
+        out = []
+        seen: set[str] = set()
+        for u in raw.split(","):
+            u = u.strip()
+            if u and u not in seen:
+                out.append(u)
+                seen.add(u)
+        return tuple(out)
+
+    # state_setting=None means "no override". Empty string means
+    # "explicit opt-out of even the preset default."
+    if state_setting is not None:
+        return _parse(state_setting)
+    if env_var is not None:
+        return _parse(env_var)
+    return get_preset(preset_name).stun_servers
+
+
+def current_preset_name(state) -> str:
+    """Reads the current preset name from state. Returns the
+    default if unset."""
+    if state is None:
+        return DEFAULT_PRESET_NAME
+    try:
+        v = (state.get_setting("sovereignty_preset") or "").strip().lower()
+    except Exception:
+        return DEFAULT_PRESET_NAME
+    if v not in ALL_PRESETS:
+        return DEFAULT_PRESET_NAME
+    return v

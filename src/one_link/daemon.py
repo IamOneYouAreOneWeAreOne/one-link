@@ -1068,6 +1068,20 @@ class Daemon:
         self._prune_task: asyncio.Task | None = None
         self._dm_reaper_task: asyncio.Task | None = None
         self._prior_index_task: asyncio.Task | None = None
+        # May 15 2026 — outbound-call ring buffer. Every external
+        # call (non-LAN, non-loopback) the daemon makes is logged
+        # here so the Privacy panel can render a live "what is this
+        # app talking to" view. The promise we surface to users:
+        # if this buffer is empty, the daemon has not phoned home
+        # since it booted. Capped at 200 entries (the panel only
+        # shows recent activity; older calls drop oldest-first).
+        # Each entry is a dict: ts_ms, destination, kind, bytes_sent,
+        # bytes_recv, ok.
+        self._outbound_log: list[dict] = []
+        self._outbound_log_max: int = 200
+        # Boot ms so the panel can show "Tracked since: <time>" and
+        # users know the empty buffer reflects the full session.
+        self._outbound_log_started_ms: int = int(time.time() * 1000)
         # Opened in ``_acquire_pid_lock`` after start. ``IO[bytes]``
         # covers both the msvcrt + fcntl branches — both eventually
         # bind the same builtins.open(..., "wb+") result before
@@ -1536,6 +1550,50 @@ class Daemon:
             except Exception as e:
                 log.warning("dm reaper loop error: %s", e)
 
+    # ── Outbound-call audit log ─────────────────────────────────────
+    #
+    # The Privacy panel reads this so the user can see what their
+    # device has talked to. Helper appends to the ring buffer +
+    # caps size. Designed for low-frequency events (update-check
+    # = 1 per 6h, STUN = a handful per pair flow, rendezvous =
+    # rare); not for hot-path traffic.
+
+    def log_outbound_call(
+        self,
+        *,
+        destination: str,
+        kind: str,
+        ok: bool = True,
+        bytes_sent: int = 0,
+        bytes_recv: int = 0,
+        note: str = "",
+    ) -> None:
+        """Record one external (non-LAN, non-loopback) call.
+
+        ``destination`` is the human-readable URL or host:port.
+        ``kind`` is one of: 'update_check', 'stun', 'rendezvous',
+        'external' (catch-all). Callers MUST NOT pass loopback or
+        LAN destinations; this is the public-internet audit trail.
+        """
+        try:
+            entry = {
+                "ts_ms": int(time.time() * 1000),
+                "destination": str(destination),
+                "kind": str(kind),
+                "ok": bool(ok),
+                "bytes_sent": int(bytes_sent),
+                "bytes_recv": int(bytes_recv),
+            }
+            if note:
+                entry["note"] = str(note)
+            self._outbound_log.append(entry)
+            # Cap the buffer — drop oldest if over.
+            overflow = len(self._outbound_log) - self._outbound_log_max
+            if overflow > 0:
+                del self._outbound_log[:overflow]
+        except Exception:
+            pass
+
     # v0.21.x update-check poll
     UPDATE_CHECK_INTERVAL_S = 6 * 60 * 60  # 6 hours
 
@@ -1577,6 +1635,16 @@ class Daemon:
                 )
                 status = result.status
                 version = result.latest_version
+                # Privacy panel audit trail — record this outbound
+                # GitHub Releases call so the user can see the daemon
+                # is calling who they expected.
+                with contextlib.suppress(Exception):
+                    self.log_outbound_call(
+                        destination="api.github.com (Releases)",
+                        kind="update_check",
+                        ok=status != "unknown",
+                        note=f"local={_local_ver} latest={version or '?'}",
+                    )
                 # Only broadcast when something interesting changed so
                 # we don't spam every connected UI tab every 6h.
                 changed = (status != last_status) or (version != last_version)
@@ -14578,18 +14646,24 @@ class Daemon:
         # The /api/update/check HTTP endpoint also short-circuits
         # to status=disabled so a UI tab refresh doesn't quietly
         # poke GitHub anyway.
-        update_check_env = os.environ.get(
-            "ONE_LINK_UPDATE_CHECK", ""
-        ).strip().lower()
-        update_check_setting = ""
+        # May 15 2026 — read through the sovereignty preset layer so a
+        # fresh install (preset="just_works") gets update notifications
+        # by default while strict modes ("quiet", "off_grid") stay
+        # silent. Explicit settings still win over the preset default.
+        from one_link import sovereignty as _sov
+        update_check_setting: str | None = None
+        preset_name: str | None = None
         if self.state is not None:
             with contextlib.suppress(Exception):
-                update_check_setting = (
-                    self.state.get_setting("update_check_enabled") or ""
-                ).strip().lower()
-        update_check_on = (
-            update_check_env in ("1", "true", "yes", "on")
-            or update_check_setting in ("1", "true", "yes", "on")
+                update_check_setting = self.state.get_setting(
+                    "update_check_enabled"
+                )
+            with contextlib.suppress(Exception):
+                preset_name = self.state.get_setting("sovereignty_preset")
+        update_check_on = _sov.resolve_update_check_enabled(
+            state_setting=update_check_setting,
+            env_var=os.environ.get("ONE_LINK_UPDATE_CHECK"),
+            preset_name=preset_name,
         )
         if update_check_on:
             self._update_check_task = asyncio.create_task(
@@ -14597,9 +14671,10 @@ class Daemon:
             )
         else:
             log.info(
-                "update-check: disabled (sovereignty default). "
-                "Set ONE_LINK_UPDATE_CHECK=1 or toggle "
-                "settings.update_check_enabled to enable."
+                "update-check: disabled (sovereignty preset=%s). "
+                "Set ONE_LINK_UPDATE_CHECK=1 or "
+                "settings.update_check_enabled=1 to enable.",
+                preset_name or _sov.DEFAULT_PRESET_NAME,
             )
             self._update_check_task = None
 
