@@ -4872,6 +4872,7 @@
           <button id="one-setup-resume">Resume setup</button>
           <button id="one-setup-add-device-panel">Add device</button>
           <button id="one-setup-privacy-panel">Privacy proof</button>
+          <button id="one-setup-safety-panel">Safety</button>
         </div>
         <div class="setup-mini-list" id="one-setup-panel-list"></div>
         <details id="one-setup-panel-technical">
@@ -6403,6 +6404,7 @@
         </details>
         <div class="onboarding-actions">
           <button class="btn-ghost" data-onboarding-go="5">Back</button>
+          <button class="btn-ghost" id="one-setup-review-safety">Review safety</button>
           <button class="btn-primary" id="onboarding-finish">Start using One Link</button>
         </div>
       </div>
@@ -15344,6 +15346,18 @@
     toast("Use the invite QR to add your phone or laptop.", "info", 4500);
   }
 
+  async function oneSetupReviewSafety() {
+    await api.setupAction("safety_reviewed").catch(() => {});
+    const meshBtn = document.querySelector('[data-pane="mesh"]');
+    if (meshBtn) meshBtn.click();
+    const safety = $("#self-mesh-safety-actions");
+    if (safety) safety.open = true;
+    $("#onboarding-backdrop").style.display = "none";
+    $("#self-mesh-kit")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    toast("Device safety is open. Freeze is reversible; hard revoke is permanent.", "info", 5500);
+    await refreshOneSetup();
+  }
+
   async function oneSetupSendTest() {
     const peer = state.selectedPeer || Array.from(state.peers.keys())[0];
     if (!peer) {
@@ -15411,6 +15425,7 @@
   $("#one-setup-add-device")?.addEventListener("click", oneSetupAddDevice);
   $("#one-setup-send-test")?.addEventListener("click", oneSetupSendTest);
   $("#one-setup-send-file")?.addEventListener("click", oneSetupSendFile);
+  $("#one-setup-review-safety")?.addEventListener("click", oneSetupReviewSafety);
   $("#one-setup-resume")?.addEventListener("click", async () => {
     await refreshOneSetup();
     const setup = state.oneSetup || {};
@@ -15431,6 +15446,7 @@
     $("#btn-privacy")?.click();
     await refreshOneSetup();
   });
+  $("#one-setup-safety-panel")?.addEventListener("click", oneSetupReviewSafety);
   // Enter on the name input → next step.
   $("#onboarding-name")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
