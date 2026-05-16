@@ -14251,15 +14251,26 @@ class Daemon:
                     "row-6: failed to start cover-traffic scheduler "
                     "(%s); daemon proceeds without cover traffic", e,
                 )
-            # Pin our own identity so it's a known peer.
-            self.state.upsert_peer(
-                fingerprint=self.me.fingerprint,
-                short_id=self.me.short_id,
-                pubkey=self.me.public_bytes,
-                hostname=self.me.hostname,
-                trust_default="pinned",
-            )
-            self.state.set_peer_trust(self.me.fingerprint, "pinned", actor="self")
+            # MAY 15 2026 — REMOVED self-pinning into the peers table.
+            #
+            # The previous code did `upsert_peer(fingerprint=self.me.fingerprint, ...)`
+            # at every boot. That caused a real user-visible bug: each time the
+            # daemon booted with a fresh seed (recovery, re-bootstrap, dev-loop
+            # restart), a NEW peer row got pinned. Old rows stayed in the DB
+            # because they had different fingerprints. Over many restarts the
+            # sidebar accumulated "WeareOne offline / WeareOne offline / …"
+            # ghost duplicates, all pinned, all stale.
+            #
+            # The daemon's own identity is already authoritative via `self.me`
+            # — every code path that previously read it from the peers table
+            # can read it from `self.me` instead. The peers table is for
+            # PEERS, not self. The API layer also filters self by
+            # fingerprint AND by pubkey at line 5764 / 5853 of server.py as
+            # belt-and-suspenders.
+            #
+            # If you find a code path that ASSUMES self appears in the peers
+            # table, the right fix is to update that code path to read from
+            # `self.me` directly — NOT to re-introduce self-pinning here.
             # v0.10.0: apply persisted settings that affect global
             # daemon behavior (custom download folder, log level).
             self._apply_settings_at_boot()

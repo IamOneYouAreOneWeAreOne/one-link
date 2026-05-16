@@ -5759,9 +5759,36 @@ class UIServer:
         # Merge persistent state
         if self.daemon.state is not None:
             try:
+                self_pubkey = self.daemon.me.public_bytes
+                self_hostname = self.daemon.me.hostname
                 for rec in self.daemon.state.list_peers():
-                    # Skip ourselves
+                    # Skip ourselves — by current fingerprint, by pubkey
+                    # (defends against stale rows from past identities that
+                    # still match our pubkey somehow), AND by hostname
+                    # collision when the row was never actually paired by
+                    # any party (rec.pubkey check excludes a real remote
+                    # peer that happens to share our hostname).
                     if rec.fingerprint == self.daemon.me.fingerprint:
+                        continue
+                    if rec.pubkey and rec.pubkey == self_pubkey:
+                        # MAY 15 2026 — defensive filter for self-rows
+                        # left over from versions that self-pinned. The
+                        # daemon no longer creates these (see daemon.py
+                        # line 14254 — removed self-pinning), but old
+                        # state.db files still carry them.
+                        continue
+                    if (
+                        rec.hostname
+                        and rec.hostname == self_hostname
+                        and not rec.last_address
+                        and rec.last_port in (None, 0)
+                    ):
+                        # No address/port + matching hostname = a stale
+                        # self-discovery from a past identity rotation
+                        # that never completed a handshake. Hide it.
+                        # (A real remote peer named the same as us would
+                        # have a recorded last_address from at least one
+                        # successful handshake.)
                         continue
                     if rec.fingerprint in live:
                         live[rec.fingerprint]["trust"] = rec.trust

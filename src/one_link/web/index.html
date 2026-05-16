@@ -16013,26 +16013,14 @@
 
   init();
 
-  // TEMP DIAGNOSTIC: write window/viewport measurements to the page
-  // title so we can see in the Edge --app= title bar whether the
-  // visible gap is Edge's reserved chrome (outer >> inner) or our
-  // own DOM. Remove once we know.
-  (() => {
-    function _diagTitle() {
-      const t = document.querySelector(".top");
-      const tRect = t ? t.getBoundingClientRect() : { top: -1, height: -1 };
-      const reserved = window.outerHeight - window.innerHeight;
-      document.title =
-        `One Link [vp ${window.innerWidth}x${window.innerHeight}] ` +
-        `[win ${window.outerWidth}x${window.outerHeight}] ` +
-        `[chrome-px ${reserved}] ` +
-        `[.top y=${Math.round(tRect.top)} h=${Math.round(tRect.height)}]`;
-    }
-    _diagTitle();
-    window.addEventListener("resize", _diagTitle);
-    setTimeout(_diagTitle, 500);
-    setTimeout(_diagTitle, 2000);
-  })();
+  // MAY 15 2026 — removed the diagnostic title-bar overlay that
+  // previously surfaced viewport measurements like
+  // "One Link [vp 1707x996] [win 1707x1019] [chrome-px 23]
+  // [.top y=56 h=34]" into the visible title bar. That string was
+  // temporary instrumentation for a 2026-05 layout investigation;
+  // the gap it was measuring was Edge's reserved chrome height
+  // (now known + handled). The title now reads simply "One Link".
+  document.title = "One Link";
 })();
 </script>
 
