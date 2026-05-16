@@ -3034,10 +3034,12 @@
         token: query.token,
         root_pub_b64: body.root_pub_b64,
         device_pub_b64: body.device_pub_b64,
-        cert_b64: body.cert_b64,
+        cert_b64: body.cert_b64 || "",
         device_kind: body.device_kind,
         label: body.label || "This device",
         fingerprint: rec.fingerprint,
+        pending: !!body.pending,
+        trust_code: body.trust_code || "",
       };
       localStorage.setItem(SELF_MESH_CERT_KEY, JSON.stringify(record));
       text(
@@ -3048,8 +3050,10 @@
       hide($("#selfmesh-enroll-actions"));
       _selfMeshEnrollSetState(
         "good",
-        "trusted",
-        `${record.label} is now part of your One identity.`,
+        body.pending ? "check code" : "trusted",
+        body.pending
+          ? `Check this code on the other device: ${body.trust_code || ""}`
+          : `${record.label} is now part of your One identity.`,
       );
     } catch (e) {
       _selfMeshEnrollSetState(

@@ -27,6 +27,8 @@ def test_setup_api_routes_exist() -> None:
     assert 'r.add_post("/api/setup", self._guarded(self.api_update_setup))' in src
     assert 'r.add_post("/api/setup/device-invite", self._guarded(self.api_setup_device_invite))' in src
     assert 'r.add_post("/api/setup/device-invite/claim", self._guarded(self.api_setup_device_invite_claim))' in src
+    assert 'r.add_post("/api/setup/device-invite/confirm", self._guarded(self.api_setup_device_invite_confirm))' in src
+    assert 'r.add_post("/api/setup/device-invite/reject", self._guarded(self.api_setup_device_invite_reject))' in src
     assert 'r.add_get("/api/setup/device-invite/qr.svg", self._guarded(self.api_setup_device_invite_qr))' in src
 
 
@@ -76,17 +78,35 @@ def test_setup_post_actions_cover_skip_complete_and_real_milestones() -> None:
     assert "unsupported setup action" in snippet
 
 
-def test_setup_device_invite_mints_cert_for_claiming_device() -> None:
+def test_setup_device_invite_claim_requires_host_confirmation() -> None:
     src = _server_src()
     idx = src.find("async def api_setup_device_invite_claim(")
     assert idx > 0
     snippet = src[idx:idx + 5000]
     assert "device_pub_b64" in snippet
-    assert "mint_device_cert" in snippet
-    assert "upsert_self_mesh_device" in snippet
-    assert '"source": "one_setup_invite_claim"' in snippet
-    assert "setup_device_invite_claimed" in snippet
+    assert "pending_claim" in snippet
+    assert "compute_sas" in snippet
+    assert "format_sas" in snippet
+    assert "setup_device_invite_pending" in snippet
+    assert '"pending": True' in snippet
     assert "invite expired or not found" in snippet
+
+
+def test_setup_device_invite_confirm_mints_cert_and_reject_blocks() -> None:
+    src = _server_src()
+    confirm_idx = src.find("async def api_setup_device_invite_confirm(")
+    reject_idx = src.find("async def api_setup_device_invite_reject(")
+    assert confirm_idx > 0
+    assert reject_idx > 0
+    confirm = src[confirm_idx:confirm_idx + 5000]
+    reject = src[reject_idx:reject_idx + 2500]
+    assert "pending_claim" in confirm
+    assert "mint_device_cert" in confirm
+    assert "upsert_self_mesh_device" in confirm
+    assert '"source": "one_setup_invite_confirmed"' in confirm
+    assert "setup_device_invite_confirmed" in confirm
+    assert "setup_device_invite_rejected" in reject
+    assert "codes did not match" in reject
 
 
 def test_setup_device_invite_qr_opens_peer_shell() -> None:
@@ -129,6 +149,10 @@ def test_one_setup_ui_contract_markers_present_after_build() -> None:
         'id="one-setup-invite-qr"',
         'id="one-setup-invite-token"',
         'id="one-setup-copy-invite"',
+        'id="one-setup-pending-device"',
+        'id="one-setup-trust-code"',
+        'id="one-setup-codes-yes"',
+        'id="one-setup-codes-no"',
         "Technical verification",
         "function refreshOneSetup()",
         "function renderOneSetup()",
@@ -138,8 +162,12 @@ def test_one_setup_ui_contract_markers_present_after_build() -> None:
         "async function oneSetupSendFile()",
         "async function oneSetupReviewSafety()",
         "async function oneSetupAddDevice()",
+        "async function oneSetupConfirmPendingDevice()",
+        "async function oneSetupRejectPendingDevice()",
         'setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); }',
         'claimSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/claim", body); }',
+        'confirmSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/confirm", body); }',
+        'rejectSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/reject", body); }',
         "Invite ready and copied.",
         "invite.peer_url",
         "hello-from-one-link.txt",

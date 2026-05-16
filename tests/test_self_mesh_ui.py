@@ -74,4 +74,7 @@ def test_peer_shell_can_claim_one_setup_device_invite():
     assert "setup_device_invite" in src
     assert '"/api/setup/device-invite/claim"' in src
     assert "device_pub_b64: rec.public_key_b64u" in src
-    assert "cert_b64: body.cert_b64" in src
+    assert "cert_b64: body.cert_b64 ||" in src
+    assert "pending: !!body.pending" in src
+    assert "trust_code: body.trust_code" in src
+    assert "Check this code on the other device" in src

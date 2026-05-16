@@ -6396,6 +6396,15 @@
         <p class="onboarding-tip" id="one-setup-invite-hint">Use Activity > My devices to show a secure invite QR.</p>
         <img class="setup-qr" id="one-setup-invite-qr" alt="One Setup device invite QR" />
         <textarea class="setup-token" id="one-setup-invite-token" readonly aria-label="One Setup invite token"></textarea>
+        <div class="setup-receipt" id="one-setup-pending-device" style="display:none;">
+          <strong id="one-setup-pending-label">New device waiting</strong>
+          <span>Check this code on both devices before trusting it.</span>
+          <div class="setup-code" id="one-setup-trust-code">000 000</div>
+          <div class="onboarding-actions">
+            <button class="btn-danger" id="one-setup-codes-no">Codes do not match</button>
+            <button class="btn-primary" id="one-setup-codes-yes">Codes match</button>
+          </div>
+        </div>
         <div class="onboarding-actions">
           <button class="btn-ghost" data-onboarding-go="3">Back</button>
           <button class="btn-primary" id="one-setup-add-device">Create invite QR</button>
@@ -7115,6 +7124,8 @@
     setupAction(action) { return this.post("/api/setup", { action }); },
     setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); },
     claimSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/claim", body); },
+    confirmSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/confirm", body); },
+    rejectSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/reject", body); },
     fabric() { return this.get("/api/fabric"); },
     noRouter() { return this.get("/api/fabric/no-router"); },
     mobileReach() { return this.get("/api/fabric/mobile-reach"); },
@@ -15202,6 +15213,16 @@
     if (rightState) rightState.textContent = counts.remote_devices > 0
       ? `${counts.remote_devices} trusted device${counts.remote_devices === 1 ? "" : "s"}`
       : "Waiting";
+    const pending = Array.isArray(setup.pending_setup_devices)
+      ? setup.pending_setup_devices[0]
+      : null;
+    const pendingBox = $("#one-setup-pending-device");
+    if (pendingBox) pendingBox.style.display = pending ? "block" : "none";
+    if (pending) {
+      $("#one-setup-pending-label").textContent = `${pending.label || "New device"} is waiting`;
+      $("#one-setup-trust-code").textContent = pending.trust_code || "000 000";
+      if (rightState) rightState.textContent = "Waiting for code match";
+    }
     const list = $("#one-setup-checklist");
     if (list) {
       list.innerHTML = "";
@@ -15391,6 +15412,32 @@
     }
   }
 
+  async function oneSetupConfirmPendingDevice() {
+    const pending = state.oneSetup?.pending_setup_devices?.[0];
+    if (!pending?.token) return toast("No pending device is waiting.", "info", 3000);
+    try {
+      await api.confirmSetupDeviceInvite({ token: pending.token });
+      toast(`${pending.label || "Device"} is trusted.`, "good", 3500);
+      await refreshSelfMesh();
+      await refreshOneSetup();
+      showOnboardingStep(5);
+    } catch (e) {
+      toast(`Couldn't trust device: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
+  async function oneSetupRejectPendingDevice() {
+    const pending = state.oneSetup?.pending_setup_devices?.[0];
+    if (!pending?.token) return toast("No pending device is waiting.", "info", 3000);
+    try {
+      await api.rejectSetupDeviceInvite({ token: pending.token, reason: "codes did not match" });
+      toast("Stopped before trusting that device.", "warn", 4000);
+      await refreshOneSetup();
+    } catch (e) {
+      toast(`Couldn't reject device: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
   async function oneSetupReviewSafety() {
     await api.setupAction("safety_reviewed").catch(() => {});
     const meshBtn = document.querySelector('[data-pane="mesh"]');
@@ -15473,6 +15520,8 @@
     if (!token) return oneSetupAddDevice();
     copyToClipboard(token, "One Setup invite");
   });
+  $("#one-setup-codes-yes")?.addEventListener("click", oneSetupConfirmPendingDevice);
+  $("#one-setup-codes-no")?.addEventListener("click", oneSetupRejectPendingDevice);
   $("#one-setup-send-test")?.addEventListener("click", oneSetupSendTest);
   $("#one-setup-send-file")?.addEventListener("click", oneSetupSendFile);
   $("#one-setup-review-safety")?.addEventListener("click", oneSetupReviewSafety);

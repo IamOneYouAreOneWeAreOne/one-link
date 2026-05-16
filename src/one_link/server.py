@@ -1498,6 +1498,8 @@ class UIServer:
         r.add_post("/api/setup", self._guarded(self.api_update_setup))
         r.add_post("/api/setup/device-invite", self._guarded(self.api_setup_device_invite))
         r.add_post("/api/setup/device-invite/claim", self._guarded(self.api_setup_device_invite_claim))
+        r.add_post("/api/setup/device-invite/confirm", self._guarded(self.api_setup_device_invite_confirm))
+        r.add_post("/api/setup/device-invite/reject", self._guarded(self.api_setup_device_invite_reject))
         r.add_get("/api/setup/device-invite/qr.svg", self._guarded(self.api_setup_device_invite_qr))
         r.add_get("/api/status", self._guarded(self.api_status))
         # ── Living Presence Tier α-pre — Call API ────────────────
@@ -3893,6 +3895,22 @@ class UIServer:
         }
         action_id, label, detail = next_map[current_step]
 
+        pending_claims = []
+        self._sweep_setup_device_invites()
+        for token, rec in self._setup_device_invites.items():
+            pending = rec.get("pending_claim")
+            if not isinstance(pending, dict):
+                continue
+            pending_claims.append({
+                "token": token,
+                "label": pending.get("label") or rec.get("label") or "New device",
+                "device_kind": pending.get("device_kind") or "remote-device",
+                "device_pub_b64": pending.get("device_pub_b64") or "",
+                "trust_code": pending.get("trust_code") or "",
+                "claimed_ms": pending.get("claimed_ms") or 0,
+                "expires_ms": rec.get("expires_ms") or 0,
+            })
+
         diagnostics = [
             {
                 "id": "root_identity",
@@ -3946,7 +3964,9 @@ class UIServer:
                 "trusted_devices": len(trusted_devices),
                 "remote_devices": len(remote_devices),
                 "awake_devices": len(awake),
+                "pending_setup_devices": len(pending_claims),
             },
+            "pending_setup_devices": pending_claims,
             "checklist": items,
             "next_action": {
                 "id": action_id,
@@ -4103,7 +4123,8 @@ class UIServer:
             }, status=400)
 
     async def api_setup_device_invite_claim(self, request: web.Request) -> web.Response:
-        from one_link.self_mesh_enrollment import b64u, b64u_decode, mint_device_cert
+        from one_link.pairing import compute_sas, format_sas
+        from one_link.self_mesh_enrollment import b64u, b64u_decode
 
         state = self.daemon.state
         if state is None:
@@ -4120,6 +4141,63 @@ class UIServer:
                 raise ValueError("device public key must be 32 bytes")
             kind = str(body.get("device_kind") or "remote-device")[:80]
             label = str(body.get("label") or kind or "One Link device")[:120]
+            sas = compute_sas(self.daemon.me.public_bytes, device_pub)
+            invite["pending_claim"] = {
+                "device_pub": device_pub,
+                "device_pub_b64": b64u(device_pub),
+                "device_kind": kind,
+                "label": label,
+                "trust_code": format_sas(sas),
+                "claimed_ms": int(time.time() * 1000),
+            }
+            state.record_self_mesh_audit(
+                event="setup_device_invite_pending",
+                severity="info",
+                root_pub=bytes(invite["root_pub"]),
+                device_pub=device_pub,
+                detail=label,
+                metadata={"device_kind": kind},
+            )
+            with contextlib.suppress(Exception):
+                self.daemon._broadcast_self_mesh_changed(
+                    event="setup_device_invite_pending",
+                    root_pub=bytes(invite["root_pub"]),
+                    device_pub=device_pub,
+                    label=label,
+                )
+            return web.json_response({
+                "ok": True,
+                "pending": True,
+                "root_pub_b64": b64u(bytes(invite["root_pub"])),
+                "device_pub_b64": b64u(device_pub),
+                "device_kind": kind,
+                "label": label,
+                "trust_code": format_sas(sas),
+                "trusted": False,
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "setup_device_invite_claim_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_setup_device_invite_confirm(self, request: web.Request) -> web.Response:
+        from one_link.self_mesh_enrollment import b64u, mint_device_cert
+
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        body = await request.json()
+        try:
+            token = str(body.get("token") or "")
+            self._sweep_setup_device_invites()
+            invite = self._setup_device_invites.get(token)
+            pending = invite.get("pending_claim") if isinstance(invite, dict) else None
+            if not isinstance(pending, dict):
+                raise ValueError("no pending device claim for this invite")
+            device_pub = bytes(pending["device_pub"])
+            kind = str(pending.get("device_kind") or "remote-device")
+            label = str(pending.get("label") or kind)
             cert = mint_device_cert(
                 root_seed=bytes(invite["root_seed"]),
                 root_pub=bytes(invite["root_pub"]),
@@ -4134,21 +4212,21 @@ class UIServer:
                 label=label,
                 local=False,
                 trusted=True,
-                metadata={"source": "one_setup_invite_claim"},
+                metadata={"source": "one_setup_invite_confirmed"},
             )
             invite["claimed"] = True
             self._setup_device_invites.pop(token, None)
             state.record_self_mesh_audit(
-                event="setup_device_invite_claimed",
+                event="setup_device_invite_confirmed",
                 severity="good",
                 root_pub=bytes(invite["root_pub"]),
                 device_pub=device_pub,
                 detail=label,
-                metadata={"device_kind": kind},
+                metadata={"device_kind": kind, "trust_code": pending.get("trust_code")},
             )
             with contextlib.suppress(Exception):
                 self.daemon._broadcast_self_mesh_changed(
-                    event="setup_device_invite_claimed",
+                    event="setup_device_invite_confirmed",
                     root_pub=bytes(invite["root_pub"]),
                     device_pub=device_pub,
                     label=label,
@@ -4165,7 +4243,34 @@ class UIServer:
             })
         except Exception as exc:
             return web.json_response({
-                "error": "setup_device_invite_claim_rejected",
+                "error": "setup_device_invite_confirm_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_setup_device_invite_reject(self, request: web.Request) -> web.Response:
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        body = await request.json()
+        try:
+            token = str(body.get("token") or "")
+            invite = self._setup_device_invites.pop(token, None)
+            if invite is None:
+                raise ValueError("invite expired or not found")
+            pending = invite.get("pending_claim") or {}
+            device_pub = pending.get("device_pub") if isinstance(pending, dict) else None
+            state.record_self_mesh_audit(
+                event="setup_device_invite_rejected",
+                severity="warn",
+                root_pub=bytes(invite["root_pub"]),
+                device_pub=bytes(device_pub) if isinstance(device_pub, (bytes, bytearray)) else None,
+                detail=str(pending.get("label") or invite.get("label") or "rejected") if isinstance(pending, dict) else "rejected",
+                metadata={"reason": str(body.get("reason") or "codes did not match")},
+            )
+            return web.json_response({"ok": True, "rejected": True})
+        except Exception as exc:
+            return web.json_response({
+                "error": "setup_device_invite_reject_failed",
                 "hint": str(exc),
             }, status=400)
 
