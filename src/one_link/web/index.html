@@ -4113,7 +4113,9 @@
     </span>
     <div class="ub-actions">
       <button class="dismiss" id="update-banner-dismiss" type="button">Dismiss</button>
-      <a id="update-banner-link" href="#" target="_blank" rel="noopener noreferrer">View release</a>
+      <a id="update-banner-link"
+         href="https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest"
+         target="_blank" rel="noopener noreferrer">View release</a>
       <!-- Hidden by default. JS unhides this only when /api/me reports
            autoinstall_enabled=true (the experimental gate). -->
       <button id="update-banner-install" type="button" style="display:none">Update now</button>
@@ -4132,7 +4134,16 @@
          drawer. CSS hides it on desktop. -->
     <button class="mobile-hamburger" id="mobile-hamburger-top" aria-label="Open peers">☰</button>
     <div class="brand">
-      <div class="logo"><img src="/static/one-glyph.png" alt="" /></div>
+      <!-- May 16 2026: the source one-glyph.png is 923x923; rendering
+           it at 32x32 was a ~29x downscale, producing the granulated
+           look the user saw. New small-size variants (128 / 256)
+           were pre-rendered via Lanczos + light unsharp-mask for
+           crisp text-edge contrast. srcset lets the browser pick
+           the right one for the display's device-pixel-ratio. -->
+      <div class="logo"><img
+        src="/static/one-glyph-128.png"
+        srcset="/static/one-glyph-128.png 1x, /static/one-glyph-256.png 2x"
+        alt="" /></div>
       <span class="wm">One Link</span>
     </div>
     <!-- v0.9.8: pane-switcher tabs moved from the bottom-left
@@ -5036,7 +5047,7 @@
                 One Link finds devices on your Wi-Fi by itself. To reach
                 devices on different networks, add one or more rendezvous
                 URLs. (Yes, the word means what you hope it means.)
-                <a href="#" id="rdz-help-link" class="learn-more">What's a rendezvous?</a>
+                <a href="#rdz-help" id="rdz-help-link" class="learn-more">What's a rendezvous?</a>
               </p>
               <textarea id="set-rendezvous" rows="3"
                         placeholder="https://your-rendezvous.example.com&#10;https://backup-rendezvous.example.com"></textarea>
