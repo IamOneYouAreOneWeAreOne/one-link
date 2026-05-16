@@ -611,6 +611,15 @@
     color: var(--text); width: 0; opacity: 0; transition: width .2s ease, opacity .2s, padding .2s;
     outline: none;
   }
+  /* UX audit P1-8 — keyboard-focus indicator. The plain `:focus`
+     border swap above is invisible to keyboard-only users when
+     the input is already styled; `:focus-visible` guarantees a
+     visible focus ring without disturbing mouse-click styling. */
+  .convo-h .search.open input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-color: var(--accent);
+  }
   .convo-h .search.open input { width: 200px; opacity: 1; }
   .convo-h .search.open input:focus { border-color: var(--accent); }
   .convo-h .search .icon-trigger {
@@ -772,6 +781,11 @@
     transition: border-color .12s ease;
   }
   .composer textarea:focus { border-color: var(--accent); }
+  /* UX audit P1-8 — keyboard-focus indicator. */
+  .composer textarea:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
   .composer .send {
     background: var(--accent); color: white;
     padding: 0 16px; height: 38px; border-radius: var(--radius-sm);
@@ -1227,6 +1241,12 @@
     background: transparent; border: 0; outline: none;
     color: var(--text); font-size: 15px;
     padding: 4px 0;
+  }
+  /* UX audit P1-8 — keyboard-focus indicator. Input has no border;
+     show a clear outline on keyboard focus. */
+  .palette-input-row input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .palette-input-row input::placeholder { color: var(--text-dimmer); }
   .palette-input-row .palette-kbd {
@@ -4390,6 +4410,10 @@
           <button id="btn-send-file-panel">Send file</button>
           <button id="btn-open-inbox">Open inbox folder</button>
           <button id="btn-refresh-files">Refresh</button>
+          <button id="btn-clear-file-traces" class="btn-danger"
+                  title="Clear One Link file records without deleting files from disk">
+            Clear list
+          </button>
         </div>
       </div>
     </aside>
@@ -4427,6 +4451,10 @@
         </div>
         <div class="mini-actions">
           <button id="btn-add-folder">Add</button>
+          <button id="btn-clear-folder-traces" class="btn-danger"
+                  title="Remove folder records from One Link without deleting folders from disk">
+            Clear folder traces
+          </button>
           <!-- v0.10.6: small icon refresh button (browser-style ↻)
                instead of a wide text button. -->
           <button id="btn-refresh-folders" class="folder-refresh-btn" title="Refresh folder list" aria-label="Refresh folder list">↻</button>
@@ -4578,6 +4606,10 @@
         <div class="mini-actions">
           <button id="btn-refresh-mesh">Refresh</button>
           <button id="btn-clear-transfers">Clear done</button>
+          <button id="btn-clear-activity-traces" class="btn-danger"
+                  title="Clear local activity and audit rows">
+            Clear activity
+          </button>
         </div>
         <details class="panel-advanced" id="route-bootstrap-advanced">
           <summary>Advanced path setup</summary>
@@ -4777,7 +4809,7 @@
             </div>
             <div class="settings-row">
               <label for="set-bio">Bio</label>
-              <input type="text" id="set-bio" maxlength="140" placeholder="Short status — what's up?" />
+              <input type="text" id="set-bio" maxlength="140" placeholder="Short status (what's up?)" />
             </div>
             <p class="settings-help" id="set-bio-counter">0 / 140</p>
             <div class="settings-row">
@@ -5161,6 +5193,30 @@
               <div class="storage-table" id="storage-table">
                 <p class="settings-help">No conversations. Suspicious.</p>
               </div>
+            </div>
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Clear app traces</span></div>
+              <p class="settings-help">
+                These actions erase One Link's local records only. They do not
+                delete files or folders from your computer, and they do not
+                revoke your identity or paired devices.
+              </p>
+              <div class="mini-actions wrap">
+                <button class="btn-ghost" id="storage-clear-chat">Clear chats</button>
+                <button class="btn-ghost" id="storage-clear-files">Clear file traces</button>
+                <button class="btn-ghost" id="storage-clear-folders">Clear folder traces</button>
+                <button class="btn-ghost" id="storage-clear-activity">Clear activity</button>
+              </div>
+              <div class="mini-actions wrap" style="margin-top:8px;">
+                <button class="btn-danger" id="storage-wipe-local">
+                  Wipe all local app traces
+                </button>
+              </div>
+              <p class="settings-help">
+                The wipe clears chats, file-transfer records, folder metadata,
+                activity/audit rows, route memory, and local UI trace settings.
+                Actual files stay where they are.
+              </p>
             </div>
           </section>
 
@@ -5601,7 +5657,7 @@
           <div class="reach-row"><span class="lbl">Short ID</span><span class="val copyable" id="dev-shortid"></span></div>
           <div class="reach-row"><span class="lbl">Fingerprint</span><span class="val copyable mono small" id="dev-fp"></span></div>
           <div class="reach-row">
-            <span class="lbl">SAS</span>
+            <span class="lbl" title="The six-digit code both devices show during pairing to confirm you're talking to the right one.">Pair code</span>
             <span class="val mono" id="dev-sas"></span>
             <!-- v0.7.9: audio readback button + visual SAS-art panel
                  toggle. Multi-modal verification beats reading 6
@@ -5815,6 +5871,7 @@
           "Hot Toaster". We don't judge.
         </p>
         <input type="text" id="onboarding-name" maxlength="64"
+               aria-label="Name for this device"
                placeholder="e.g. Alex's Mac" autocomplete="off" />
         <div class="onboarding-actions">
           <button class="btn-ghost" data-onboarding-go="1">Back</button>
@@ -5866,14 +5923,20 @@
        (or Cmd+K). Searches messages (FTS5), peers, groups, and
        inbox files in one go. Arrow keys navigate; Enter activates
        the highlighted result; Esc closes. -->
-  <div class="modal-backdrop" id="palette-backdrop">
+  <div class="modal-backdrop" id="palette-backdrop"
+       role="dialog" aria-modal="true" aria-label="Search">
     <div class="modal palette-modal" style="max-width:640px; padding: 0;">
       <div class="palette-input-row">
         <span class="palette-icon">⌘</span>
         <input type="text" id="palette-input"
-               placeholder="Search messages, peers, files…"
+               aria-label="Search messages, people, and files"
+               placeholder="Search messages, people, files..."
                autocomplete="off" spellcheck="false" />
         <span class="palette-kbd">Esc</span>
+        <button id="palette-close" class="btn-ghost"
+                aria-label="Close search"
+                data-modal-close
+                style="margin-left:4px; padding:6px 10px;">×</button>
       </div>
       <div class="palette-results" id="palette-results">
         <div class="palette-hint">Type to search across this device's messages, peers, groups, and received files.</div>
@@ -6360,7 +6423,7 @@
     err.hint = j && j.hint || null;
     // v0.7.x: surface the underlying exception text on catch-all
     // 500s so the user (and us) can see what actually failed,
-    // instead of just "Send failed."
+    // instead of just "Send didn't work."
     err.error_detail = j && j.error_detail || null;
     return err;
   }
@@ -6569,8 +6632,8 @@
     const headline = (e && e.message) ? e.message : String(e);
     const hint = e?.hint;
     // v0.7.x: append the error_detail (server-side exception text)
-    // for catch-all "Send failed." errors. Without this the user
-    // just sees "Send failed." and the actual cause is invisible.
+    // for catch-all "Send didn't work." errors. Without this the user
+    // just sees "Send didn't work." and the actual cause is invisible.
     const detail = e?.error_detail;
     let body = hint ? `${headline} — ${hint}` : headline;
     if (detail && (e?.code === "send_failed" || !e?.code)) {
@@ -6723,7 +6786,7 @@
         installBtn.disabled = false;
         installBtn.textContent = "Update now";
         if (typeof toast === "function") {
-          toast(`Update failed: ${e.message || e}`, "bad", 10000);
+          toast(`Update didn't work: ${e.message || e}`, "bad", 10000);
         }
       }
     });
@@ -8092,7 +8155,7 @@
       toast("Device certificate copied", "good");
       await refreshSelfMesh();
     } catch (e) {
-      toast(`Certificate failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Certificate didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
   async function enrollSelfMeshCert() {
@@ -8104,7 +8167,7 @@
       toast("Device enrolled", "good");
       await refreshSelfMesh();
     } catch (e) {
-      toast(`Enroll failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Enroll didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
   async function revokeSelfMeshDevice() {
@@ -8122,7 +8185,7 @@
       toast("Device hard revoked", "warn");
       await refreshSelfMesh();
     } catch (e) {
-      toast(`Revoke failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Revoke didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
   async function setSelfMeshDeviceSafety(safetyState, proofs, reason, label) {
@@ -8140,7 +8203,7 @@
       toast(label, safetyState === "trusted" ? "good" : "warn", 7000);
       await refreshSelfMesh();
     } catch (e) {
-      toast(`Guardian failed: ${errorToastBody(e)}`, "bad", 7000);
+      toast(`Guardian didn't work: ${errorToastBody(e)}`, "bad", 7000);
     }
   }
   function freezeSelfMeshDevice() {
@@ -8200,7 +8263,7 @@
       toast("Invite ready", "good");
       await refreshSelfMesh();
     } catch (e) {
-      toast(`Invite failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Invite didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
   async function claimSelfMeshInvite() {
@@ -8216,7 +8279,7 @@
       toast("Invite claimed", "good");
       await refreshSelfMesh();
     } catch (e) {
-      toast(`Claim failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Claim didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
   async function sendSelfMeshInstruction(action) {
@@ -8241,7 +8304,7 @@
       toast(action === "pull_file_manifest" ? "File list requested" : "File send queued", "good");
       await refreshSelfMesh();
     } catch (e) {
-      toast(`Request failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Request didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
   async function trustSelfMeshFolder() {
@@ -8585,7 +8648,7 @@
       await refreshCourierStatus();
       toast(`Offline bundle saved: ${r.name || "ready"}`, "good", 5500);
     } catch (e) {
-      toast(`Save failed: ${errorToastBody(e)}`, "bad", 8000);
+      toast(`Save didn't work: ${errorToastBody(e)}`, "bad", 8000);
     }
   }
   async function copyCourierToRemovable() {
@@ -8676,7 +8739,7 @@
       await refreshTransfers();
       renderCourierKit();
     } catch (e) {
-      toast(`Import failed: ${errorToastBody(e)}`, "bad", 8000);
+      toast(`Import didn't work: ${errorToastBody(e)}`, "bad", 8000);
     }
   }
   async function importDroppedCourierFile() {
@@ -8708,7 +8771,7 @@
       await refreshTransfers();
       renderCourierKit();
     } catch (e) {
-      toast(`Import failed: ${errorToastBody(e)}`, "bad", 8000);
+      toast(`Import didn't work: ${errorToastBody(e)}`, "bad", 8000);
     }
   }
   async function refreshCourierStatus() {
@@ -8939,7 +9002,20 @@
     if (!state.selectedPeer) {
       if (m._renderSig !== "no-peer") {
         m._renderSig = "no-peer";
-        m.innerHTML = "";
+        // UX audit P1-3 — show an explicit "pick a device" empty
+        // state instead of an empty white pane. The sidebar
+        // already lists every device; this just confirms the
+        // next step. Doctrine of invisibility honored: the copy
+        // describes what to DO, not what's missing.
+        m.innerHTML = `
+          <div class="empty rich" style="margin: auto; max-width: 320px;">
+            <div class="empty-glyph">💬</div>
+            <h3>Pick someone on the left to start</h3>
+            <p>
+              Your messages with each device live here. Choose a
+              device from the sidebar, or pair a new one to begin.
+            </p>
+          </div>`;
       }
       return;
     }
@@ -9288,7 +9364,7 @@
         );
       }
     } catch (e) {
-      toast(`Edit failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Edit didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
 
@@ -9307,7 +9383,7 @@
         );
       }
     } catch (e) {
-      toast(`Delete failed: ${errorToastBody(e)}`, "bad");
+      toast(`Delete didn't work: ${errorToastBody(e)}`, "bad");
     }
   }
 
@@ -9440,7 +9516,7 @@
       if (msg.is_group) renderGroupConversation();
       else scheduleRenderMessages();
     } catch (e) {
-      toast(`Reaction failed: ${errorToastBody(e)}`, "bad");
+      toast(`Reaction didn't work: ${errorToastBody(e)}`, "bad");
     }
   }
 
@@ -9603,7 +9679,7 @@
             } catch (e) {
               host.innerHTML = "";
               host.appendChild(el("div", "preview-error",
-                `Preview failed: ${e.message || e}`));
+                `Preview didn't work: ${e.message || e}`));
             }
           } else {
             host.style.display = "";
@@ -9678,21 +9754,57 @@
     list.innerHTML = "";
     if (state.filesMode === "received") {
       const files = _receivedFilesCache;
-      $("#files-count").textContent = files.length;
-      if (files.length === 0) {
+      const grouped = [];
+      const byKey = new Map();
+      for (const f of files) {
+        const key = `${f.name || ""}|${f.size || 0}`;
+        const prev = byKey.get(key);
+        if (!prev) {
+          const rec = { ...f, copies: 1, newest_ms: f.mtime_ms || 0 };
+          byKey.set(key, rec);
+          grouped.push(rec);
+        } else {
+          prev.copies += 1;
+          if ((f.mtime_ms || 0) > (prev.newest_ms || 0)) {
+            prev.name = f.name;
+            prev.size = f.size;
+            prev.mime = f.mime;
+            prev.risk = f.risk;
+            prev.mtime_ms = f.mtime_ms;
+            prev.newest_ms = f.mtime_ms || 0;
+          }
+        }
+      }
+      grouped.sort((a, b) => (b.newest_ms || 0) - (a.newest_ms || 0));
+      $("#files-count").textContent = files.length === grouped.length
+        ? files.length
+        : `${grouped.length}/${files.length}`;
+      if (grouped.length === 0) {
         list.appendChild(richEmpty(
           "📥", "Inbox is quiet",
           "Files sent to you from a paired device land here automatically.",
         ));
         return;
       }
-      for (const f of files) {
+      for (const f of grouped) {
         const row = el("div", "file-row");
         row.appendChild(el("div", "icon", fileIcon(f.name)));
         const meta = el("div", "meta");
-        meta.appendChild(el("div", "name", f.name));
-        meta.appendChild(el("div", "size", `${fmtBytes(f.size)}`));
-        if (f.mtime_ms) meta.appendChild(el("div", "when", new Date(f.mtime_ms).toLocaleString()));
+        const name = el("div", "name", f.name);
+        name.title = f.name || "";
+        if (f.copies > 1) {
+          const badge = el("span", "badge", ` x${f.copies}`);
+          badge.title = `${f.copies} matching inbox entries are collapsed here`;
+          name.appendChild(badge);
+        }
+        meta.appendChild(name);
+        const sizeText = f.copies > 1
+          ? `${fmtBytes(f.size)} · ${f.copies} copies`
+          : `${fmtBytes(f.size)}`;
+        meta.appendChild(el("div", "size", sizeText));
+        if (f.mtime_ms) {
+          meta.appendChild(el("div", "when", `Latest ${new Date(f.mtime_ms).toLocaleString()}`));
+        }
         row.appendChild(meta);
         const open = el("a", null, "Open");
         open.href = `/api/files/${encodeURIComponent(f.name)}`;
@@ -9723,7 +9835,19 @@
         .sort((a, b) => (b.updated_ms || 0) - (a.updated_ms || 0));
       $("#files-count").textContent = sent.length;
       if (sent.length === 0) {
-        list.appendChild(el("div", "empty", "Nothing sent yet. Files you send will be tracked here."));
+        // UX audit P1-4 — rich empty state matching the Received
+        // tab's style so the two halves of the Files pane feel
+        // consistent. Tells the user how to send their first file.
+        const empty = el("div", "empty rich");
+        empty.innerHTML = `
+          <div class="empty-glyph">📤</div>
+          <h3>No sent files yet</h3>
+          <p>
+            Drag any file onto a device's chat, or hit the paperclip
+            in the chat composer. Files you send appear here with
+            transfer speed and status.
+          </p>`;
+        list.appendChild(empty);
         return;
       }
       for (const t of sent) {
@@ -9855,7 +9979,7 @@
     try {
       state.groupDetail = await api.get(`/api/groups/${gidHex}`);
     } catch (e) {
-      toast(`Failed to load group: ${errorToastBody(e)}`, "bad");
+      toast(`Couldn\'t load group: ${errorToastBody(e)}`, "bad");
       return;
     }
     try {
@@ -9986,7 +10110,7 @@
       await refreshGroups();
       await refreshSelectedGroup();
     } catch (e) {
-      toast(`Rename failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Rename didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
 
@@ -10008,7 +10132,7 @@
       await refreshGroups();
       await refreshSelectedGroup();
     } catch (e) {
-      toast(`Add failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Add didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
 
@@ -10022,7 +10146,7 @@
       await refreshGroups();
       await refreshSelectedGroup();
     } catch (e) {
-      toast(`Remove failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Remove didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
 
@@ -10194,7 +10318,7 @@
         body.duration_ms === null ? "Group unmuted" : "Group muted", "good",
       );
     } catch (e) {
-      toast(`Mute failed: ${errorToastBody(e)}`, "bad");
+      toast(`Mute didn't work: ${errorToastBody(e)}`, "bad");
     }
   }
 
@@ -10206,7 +10330,7 @@
       await navigator.clipboard.writeText(r.url || r.token || "");
       toast("Invite link copied. Spend it wisely.", "good");
     } catch (e) {
-      toast(`Invite failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Invite didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
 
@@ -10225,7 +10349,7 @@
       await refreshGroups();
       toast("You left the group. Walk it off.", "good");
     } catch (e) {
-      toast(`Leave failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Leave didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
 
@@ -10417,7 +10541,7 @@
           "bad", 9000,
         );
       } else {
-        toast(`Create failed: ${errorToastBody(e)}`, "bad");
+        toast(`Create didn't work: ${errorToastBody(e)}`, "bad");
       }
     }
   }
@@ -10459,7 +10583,7 @@
             toast("Folder shared", "good");
             await refreshFolders();
           } catch (e) {
-            toast(`Share failed: ${e.message || e}`, "bad", 6000);
+            toast(`Share didn't work: ${e.message || e}`, "bad", 6000);
           }
         };
         const sync = el("button", null, "Sync");
@@ -10480,7 +10604,7 @@
             toast("Folder removed", "good");
             await refreshFolders();
           } catch (e) {
-            toast(`Remove failed: ${e.message || e}`, "bad", 6000);
+            toast(`Remove didn't work: ${e.message || e}`, "bad", 6000);
           }
         };
         row.appendChild(share);
@@ -10646,7 +10770,7 @@
       await refreshFolderConflictsBanner();
     } catch (e) {
       if (row) row.classList.remove("resolving");
-      toast(`Resolve failed: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Resolve didn't work: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
 
@@ -10782,7 +10906,7 @@
       state.activityEvents = r.events || [];
     } catch (e) {
       list.innerHTML = "";
-      list.appendChild(el("div", "empty", `Failed to load: ${e.message || e}`));
+      list.appendChild(el("div", "empty", `Couldn\'t load: ${e.message || e}`));
       return;
     }
     renderActivityFeed();
@@ -10953,7 +11077,7 @@
             toast(`Retrying ${t.name || "transfer"}`, "info", 3000);
             await refreshTransfers();
           } catch (e) {
-            toast(`Retry failed: ${errorToastBody(e)}`, "bad", 8000);
+            toast(`Retry didn't work: ${errorToastBody(e)}`, "bad", 8000);
             retry.disabled = false;
             retry.textContent = "Retry";
           }
@@ -10972,7 +11096,7 @@
             );
             await refreshTransfers();
           } catch (e) {
-            toast(`Cancel failed: ${errorToastBody(e)}`, "bad");
+            toast(`Cancel didn't work: ${errorToastBody(e)}`, "bad");
             cancel.disabled = false;
           }
         };
@@ -10997,7 +11121,7 @@
             renderTransfers();
             await refreshStatus();
           } catch (e) {
-            toast(`Clear failed: ${e.message || e}`, "bad");
+            toast(`Clear didn't work: ${e.message || e}`, "bad");
           }
         };
         row.appendChild(del);
@@ -11615,7 +11739,7 @@
       }
       toast("Key-change events acknowledged", "good");
     } catch (e) {
-      toast(`Acknowledge failed: ${errorToastBody(e)}`, "bad");
+      toast(`Acknowledge didn't work: ${errorToastBody(e)}`, "bad");
     }
   }
 
@@ -11643,7 +11767,7 @@
     } catch (e) {
       $("#dev-keychange-events").innerHTML = "";
       $("#dev-keychange-summary").textContent =
-        `Failed to load events: ${e.message || e}`;
+        `Couldn\'t load events: ${e.message || e}`;
       return;
     }
     if (state.deviceDrawerFp !== peer.fingerprint) return;
@@ -12090,7 +12214,7 @@
       // Refresh sidebar so the row reflects the change.
       await refreshPeers();
     } catch (e) {
-      toast(`Mute failed: ${errorToastBody(e)}`, "bad");
+      toast(`Mute didn't work: ${errorToastBody(e)}`, "bad");
     }
   });
   document.querySelectorAll("#dev-cap-row .cap-toggle").forEach(btn => {
@@ -12133,7 +12257,7 @@
       toast(wantsAll ? "Allowing all capabilities" : "Permissions cleared", "good");
     } catch (err) {
       syncDrawerCapabilityControls(previous);
-      toast(`Update failed: ${err.message || err}`, "bad");
+      toast(`Update didn't work: ${err.message || err}`, "bad");
     }
   });
   // v0.8.6: render the trust-history timeline inside the device
@@ -12155,7 +12279,7 @@
       events = res.events || [];
     } catch (e) {
       tl.innerHTML = "";
-      tl.appendChild(el("div", "empty", `Failed to load: ${e.message || e}`));
+      tl.appendChild(el("div", "empty", `Couldn\'t load: ${e.message || e}`));
       return;
     }
     // Drawer might have been closed while we waited on the network.
@@ -12236,7 +12360,7 @@
       closeDeviceDrawer();
       toast("Device unpaired", "info");
     } catch (e) {
-      toast(`Unpair failed: ${e.message || e}`, "bad");
+      toast(`Unpair didn't work: ${e.message || e}`, "bad");
     }
   };
   $("#dev-block").onclick = async () => {
@@ -12250,7 +12374,7 @@
       closeDeviceDrawer();
       toast("Device blocked", "info");
     } catch (e) {
-      toast(`Block failed: ${e.message || e}`, "bad");
+      toast(`Block didn't work: ${e.message || e}`, "bad");
     }
   };
 
@@ -12273,7 +12397,7 @@
         }
       }
     } catch (e) {
-      toast(`Clear failed: ${errorToastBody(e)}`, "bad");
+      toast(`Clear didn't work: ${errorToastBody(e)}`, "bad");
     }
   });
   $("#dev-export-md")?.addEventListener("click", () => {
@@ -12427,7 +12551,7 @@
       closeDeviceDrawer();
       await refreshPeers();
     } catch (e) {
-      toast(`Save failed: ${errorToastBody(e)}`, "bad");
+      toast(`Save didn't work: ${errorToastBody(e)}`, "bad");
     }
   };
 
@@ -12477,7 +12601,7 @@
       }
       toast("Verified in person. Hard to fake that.", "good");
     } catch (e) {
-      toast(`Verify failed: ${errorToastBody(e)}`, "bad");
+      toast(`Verify didn't work: ${errorToastBody(e)}`, "bad");
     }
   };
   // v0.7.8: drawer's "Acknowledge" button — clears the red banner +
@@ -12548,7 +12672,7 @@
       }
       toast("Verification revoked", "info");
     } catch (e) {
-      toast(`Revoke failed: ${errorToastBody(e)}`, "bad");
+      toast(`Revoke didn't work: ${errorToastBody(e)}`, "bad");
     }
   };
 
@@ -12866,7 +12990,7 @@
           }
         }
       } catch (e) {
-        toast(`Clear failed: ${errorToastBody(e)}`, "bad");
+        toast(`Clear didn't work: ${errorToastBody(e)}`, "bad");
       }
     });
     $("#group-export-md")?.addEventListener("click", () => {
@@ -13585,6 +13709,22 @@
           refreshFiles();
         }
         if (msg.peer === state.selectedPeer) renderMessages();
+      } else if (m.type === "traces_cleared") {
+        if (m.scope === "chat" || m.scope === "all") {
+          loadHistory();
+        }
+        if (m.scope === "files" || m.scope === "all") {
+          refreshFiles();
+          refreshTransfers();
+        }
+        if (m.scope === "folders" || m.scope === "all") {
+          refreshFolders();
+        }
+        if (m.scope === "activity" || m.scope === "all") {
+          refreshActivityFeed();
+          refreshTransfers();
+        }
+        refreshStorageUsage();
       } else if (m.type === "transfer") {
         const idx = state.transfers.findIndex(t => t.id === m.transfer.id);
         if (idx >= 0) state.transfers.splice(idx, 1, m.transfer);
@@ -13796,7 +13936,7 @@
       toast(`Copied ${lines.length} message${lines.length === 1 ? "" : "s"}`,
             "good", 2000);
     } catch (e) {
-      toast(`Copy failed: ${e.message || e}`, "bad");
+      toast(`Copy didn't work: ${e.message || e}`, "bad");
     }
     exitSelection();
   }
@@ -14155,7 +14295,7 @@
       }
     } catch (e) {
       t?.remove?.();
-      toast(`Open failed: ${e.message || e}`, "bad");
+      toast(`Open didn't work: ${e.message || e}`, "bad");
     }
   });
   document.querySelectorAll(".files-toggle button").forEach(btn => {
@@ -14513,7 +14653,7 @@
       const host = $("#palette-results");
       host.innerHTML = "";
       host.appendChild(el("div", "palette-empty",
-        `Search failed: ${e.message || e}`));
+        `Search didn't work: ${e.message || e}`));
     }
   }
 
@@ -14933,7 +15073,7 @@
       searchBannerText.textContent = `${state.searchResults.length} result${state.searchResults.length === 1 ? "" : "s"} for "${q}"`;
       renderMessages();
     } catch (e) {
-      searchBannerText.textContent = `Search failed: ${e.message || e}`;
+      searchBannerText.textContent = `Search didn't work: ${e.message || e}`;
       searchBanner.style.display = "flex";
     }
   }
@@ -15191,7 +15331,7 @@
       $("#debug-error-count").textContent = "0";
       toast("Debug log wiped. Pretend it never happened.", "good", 2000);
     } catch (e) {
-      toast(`Clear failed: ${errorToastBody(e)}`, "bad");
+      toast(`Clear didn't work: ${errorToastBody(e)}`, "bad");
     }
   });
 
@@ -15262,6 +15402,9 @@
     await refreshStatus();
     await refreshFabricTruth();
   };
+  $("#btn-clear-activity-traces")?.addEventListener("click", () => {
+    clearTraceScope("activity", "activity traces");
+  });
   $("#btn-copy-route-bootstrap")?.addEventListener("click", copyRouteBootstrapToken);
   $("#btn-import-route-bootstrap")?.addEventListener("click", importRouteBootstrapToken);
   $("#btn-launch-path-create")?.addEventListener("click", launchBestPathCreate);
@@ -15306,9 +15449,12 @@
       toast(`Cleared ${r.removed || 0} transfer${r.removed === 1 ? "" : "s"}`, "good");
       await refreshTransfers();
     } catch (e) {
-      toast(`Clear failed: ${e.message || e}`, "bad");
+      toast(`Clear didn't work: ${e.message || e}`, "bad");
     }
   };
+  $("#btn-clear-file-traces")?.addEventListener("click", () => {
+    clearTraceScope("files", "file traces");
+  });
   $("#btn-add-folder").onclick = async () => {
     const name = $("#folder-name").value.trim();
     const local_path = $("#folder-path").value.trim();
@@ -15328,6 +15474,9 @@
       toast(`Folder add failed: ${e.message || e}`, "bad", 6000);
     }
   };
+  $("#btn-clear-folder-traces")?.addEventListener("click", () => {
+    clearTraceScope("folders", "folder traces");
+  });
 
   // ── Pair modal ─────────────────────────────────────────────────────
   const pairBackdrop = $("#pair-backdrop");
@@ -15424,7 +15573,7 @@
     }
     const s = String(sas || "").padStart(6, "0").slice(0, 6);
     if (!s || s === "000000") {
-      toast("SAS isn't ready yet.", "info");
+      toast("Pair code isn't ready yet.", "info");
       return;
     }
     // Cancel any in-flight readback so rapid clicks don't queue.
@@ -15472,6 +15621,10 @@
     showPairStage("compare");  // v0.8.7
     _applyPhonePairFlow();
     pairBackdrop.classList.add("show");
+    // UX audit P0-4: 60s watchdog. If the other device doesn't
+    // respond, surface a clear "didn't confirm yet" message
+    // instead of hanging silently forever.
+    _startPairWatchdog(peer.fingerprint);
     try {
       const res = await api.post(`/api/peers/${peer.fingerprint}/pair`, {});
       state.pairing.sas = res.sas;
@@ -15481,7 +15634,34 @@
       renderSasArt($("#pair-sas-art"), res.sas);
     } catch (e) {
       pairSasEl.textContent = "";
-      toast(`Could not initiate pairing: ${e.message || e}`, "bad");
+      _clearPairWatchdog();
+      toast(`Couldn't start pairing. ${e.message || e}`, "bad");
+    }
+  }
+
+  // UX audit P0-4 helper. Watches the pair flow for inactivity.
+  // After 60s with the modal still open and pairing not complete,
+  // surface a visible "didn't respond" message. closePairModal()
+  // also clears this so a successful pair doesn't trigger it.
+  let _pairWatchdogTimer = null;
+  function _startPairWatchdog(peerFp) {
+    _clearPairWatchdog();
+    _pairWatchdogTimer = setTimeout(() => {
+      if (!state.pairing || state.pairing.peerFp !== peerFp) return;
+      if (!pairBackdrop.classList.contains("show")) return;
+      pairExplain.textContent = (
+        "The other device hasn't confirmed yet. Open One Link on "
+        + "that device and look for a matching code, or close this "
+        + "and try again."
+      );
+      try { toast("The other device hasn't responded. You can wait or close and try again.", "warn", 6000); }
+      catch (_) {}
+    }, 60_000);
+  }
+  function _clearPairWatchdog() {
+    if (_pairWatchdogTimer) {
+      clearTimeout(_pairWatchdogTimer);
+      _pairWatchdogTimer = null;
     }
   }
 
@@ -15502,6 +15682,10 @@
   function closePairModal(succeeded) {
     pairBackdrop.classList.remove("show");
     state.pairing = { peerFp: null, sas: null, weConfirmed: false };
+    // UX audit P0-4: clear watchdog so we don't fire a stale
+    // "the other device didn't respond" message after a successful
+    // pair (or after user cancels).
+    _clearPairWatchdog();
     // v0.7.9: stop any in-flight readback so a closed modal isn't
     // chattering "five six" from the speaker.
     try { window.speechSynthesis?.cancel(); } catch {}
@@ -15560,7 +15744,7 @@
       });
       toast("Verified in person. Hard to fake that.", "good");
     } catch (e) {
-      toast(`Verify failed: ${errorToastBody(e)}`, "bad");
+      toast(`Verify didn't work: ${errorToastBody(e)}`, "bad");
     } finally {
       closePairModal(true);
       // Refresh peers so the green ✓ shows up on the sidebar
@@ -15599,7 +15783,7 @@
   });
   $("#pair-sas-copy")?.addEventListener("click", () => {
     const sas = state.pairing?.sas;
-    if (!sas) { toast("SAS isn't ready yet.", "info"); return; }
+    if (!sas) { toast("Pair code isn't ready yet.", "info"); return; }
     copyToClipboard(String(sas).padStart(6, "0"), "verification code");
   });
 
@@ -15689,7 +15873,7 @@
             toast("Cleared", "good");
             refreshStorageUsage();
           } catch (e) {
-            toast(`Clear failed: ${errorToastBody(e)}`, "bad");
+            toast(`Clear didn't work: ${errorToastBody(e)}`, "bad");
           }
         });
     }
@@ -15705,12 +15889,79 @@
             toast("Cleared", "good");
             refreshStorageUsage();
           } catch (e) {
-            toast(`Clear failed: ${errorToastBody(e)}`, "bad");
+            toast(`Clear didn't work: ${errorToastBody(e)}`, "bad");
           }
         });
     }
   }
+
+  async function clearTraceScope(scope, label) {
+    if (!confirm(
+      `Clear ${label} from One Link?\n\n` +
+      "This removes local app records only. It will not delete files or folders from your computer."
+    )) return;
+    try {
+      await api.del(`/api/traces/${scope}`);
+      toast(`${label} cleared`, "good");
+      if (scope === "chat") {
+        state.messages = [];
+        state.groupMessages = [];
+        await loadHistory();
+      }
+      if (scope === "files") {
+        state.transfers = [];
+        state.transfersById = new Map();
+        await refreshFiles();
+        await refreshTransfers();
+      }
+      if (scope === "folders") {
+        await refreshFolders();
+      }
+      if (scope === "activity") {
+        state.activityEvents = [];
+        await refreshActivityFeed();
+        await refreshTransfers();
+      }
+      refreshStorageUsage();
+    } catch (e) {
+      toast(`Clear didn't work: ${errorToastBody(e)}`, "bad", 8000);
+    }
+  }
+
+  async function wipeLocalAppTraces() {
+    const typed = prompt(
+      "This clears One Link's local app traces: chats, file-transfer records, folder metadata, activity/audit rows, route memory, and local UI trace settings.\n\n" +
+      "It will NOT delete files or folders from your computer, and it will NOT revoke your identity or paired devices.\n\n" +
+      "Type: wipe local traces"
+    );
+    if (typed == null) return;
+    try {
+      await api.post("/api/traces/wipe", { confirm: typed });
+      toast("Local app traces wiped", "good", 5000);
+      state.messages = [];
+      state.groupMessages = [];
+      state.transfers = [];
+      state.transfersById = new Map();
+      state.activityEvents = [];
+      await Promise.allSettled([
+        loadHistory(),
+        refreshFiles(),
+        refreshFolders(),
+        refreshActivityFeed(),
+        refreshTransfers(),
+        refreshStorageUsage(),
+      ]);
+    } catch (e) {
+      toast(`Wipe didn't work: ${errorToastBody(e)}`, "bad", 9000);
+    }
+  }
+
   $("#storage-refresh")?.addEventListener("click", refreshStorageUsage);
+  $("#storage-clear-chat")?.addEventListener("click", () => clearTraceScope("chat", "chat traces"));
+  $("#storage-clear-files")?.addEventListener("click", () => clearTraceScope("files", "file traces"));
+  $("#storage-clear-folders")?.addEventListener("click", () => clearTraceScope("folders", "folder traces"));
+  $("#storage-clear-activity")?.addEventListener("click", () => clearTraceScope("activity", "activity traces"));
+  $("#storage-wipe-local")?.addEventListener("click", wipeLocalAppTraces);
 
   // v0.11.1 Profile helpers — avatar preview + bio counter + color
   // swatches. Local DOM only; persistence is via /api/settings.
@@ -15836,7 +16087,7 @@
           refreshBlockedDevicesList();
           refreshPeers();
         } catch (e) {
-          toast(`Unblock failed: ${errorToastBody(e)}`, "bad");
+          toast(`Unblock didn't work: ${errorToastBody(e)}`, "bad");
         }
       };
       row.appendChild(wrap);
@@ -16322,7 +16573,7 @@
         avatar_color: payload.avatar_color || state.runtimeSettings?.avatar_color,
       };
     } catch (e) {
-      toast(`Save failed: ${errorToastBody(e)}`, "bad");
+      toast(`Save didn't work: ${errorToastBody(e)}`, "bad");
       return;
     }
 
@@ -17181,27 +17432,126 @@
     return String(s == null ? "" : s).replace(/"/g, "&quot;");
   }
 
-  // May 16 2026 — event delegation on document so the wire-up
-  // doesn't depend on DOM-ready timing OR on the elements existing
-  // when this script runs. The previous _onReady-based wiring was
-  // fragile: if the helper ran before the elements were in the DOM
-  // (e.g. when the panel's HTML is below this script tag), the
-  // listeners never bound. Delegation fixes it permanently.
-  document.addEventListener("click", (ev) => {
-    const t = ev.target;
-    if (!t || !(t instanceof Element)) return;
-    // Close button click.
-    if (t.id === "privacy-panel-close" || t.closest("#privacy-panel-close")) {
+  // May 16 2026 — UNIVERSAL MODAL CLOSE LAYER (UX audit P0-1, P0-2,
+  // P1-9). Replaces 18+ ad-hoc bindings with one document-level
+  // pair of handlers that close ANY visible modal via:
+  //   - click on the backdrop element itself (not its children)
+  //   - Escape key (closes the topmost visible modal)
+  //
+  // Recognized overlay shapes:
+  //   .modal-backdrop.show          (most modals)
+  //   .modal-backdrop[style*=flex]  (onboarding uses inline style)
+  //   .discover-overlay.show
+  //   .privacy-panel-overlay.show
+  //   .call-overlay.show            (call ringing / active)
+  //   .voice-overlay[style*=flex]   (voice recording)
+  //
+  // _closeOverlay(el) does the right thing for each shape +
+  // emits a synthetic event so any per-modal cleanup (e.g.
+  // stopping a recording, releasing a camera) can listen.
+  function _isOverlayVisible(el) {
+    if (!el) return false;
+    if (el.classList.contains("show")) return true;
+    // Onboarding + voice overlay use inline style.display.
+    const cs = el.style && el.style.display;
+    if (cs && cs !== "none" && cs !== "") return true;
+    // Fall back to computed style for anything else.
+    try {
+      return getComputedStyle(el).display !== "none";
+    } catch (_) { return false; }
+  }
+  function _closeOverlay(el) {
+    if (!el) return;
+    // Special closers — let the existing code path run if it
+    // exposes a documented close function. This preserves
+    // side-effects (stop recording, release camera, restore focus
+    // to the trigger, etc.).
+    if (el.id === "privacy-panel-overlay"
+        && typeof _hidePrivacyPanel === "function") {
       _hidePrivacyPanel();
       return;
     }
-    // Click on the dark backdrop (the overlay itself, not its inner
-    // panel). closest() returns the overlay only when the click hit
-    // it directly; clicks inside the white modal bubble up THROUGH
-    // it so target is the inner element.
-    if (t.id === "privacy-panel-overlay") {
-      _hidePrivacyPanel();
+    if (el.id === "voice-overlay"
+        && typeof window.cancelVoiceRecord === "function") {
+      window.cancelVoiceRecord();
       return;
+    }
+    if (el.id === "onboarding-backdrop") {
+      el.style.display = "none";
+      return;
+    }
+    // Default: strip the .show class. Works for every other modal.
+    el.classList.remove("show");
+    // Dispatch a synthetic close event so per-modal cleanup that
+    // wants to listen (e.g., stopping a media-gallery slideshow)
+    // can do so without rewriting its close button handler.
+    try { el.dispatchEvent(new CustomEvent("ol-modal-closed", { bubbles: true })); }
+    catch (_) {}
+  }
+  // Backdrop-click delegation — close when the user clicks the
+  // dark area outside the inner panel.
+  document.addEventListener("click", (ev) => {
+    const t = ev.target;
+    if (!t || !(t instanceof Element)) return;
+    // Close-X delegation: any element with id ending in "-close"
+    // (settings-cancel, device-cancel, conflicts-close, shortcuts-
+    // close, debug-close, rdz-help-close, palette-close, privacy-
+    // panel-close, etc.) should close its containing overlay. The
+    // existing per-button handlers already do this; this is a
+    // safety net so a forgotten binding doesn't trap the user.
+    const closeBtn = t.closest("[data-modal-close], #privacy-panel-close, "
+      + "#palette-close, #shortcuts-close, #rdz-help-close, #debug-close, "
+      + "#conflicts-close");
+    if (closeBtn) {
+      const overlay = closeBtn.closest(
+        ".modal-backdrop, .privacy-panel-overlay, .discover-overlay, "
+        + ".onboarding-backdrop, .voice-overlay, .call-overlay"
+      );
+      if (overlay) {
+        _closeOverlay(overlay);
+        return;
+      }
+    }
+    // Backdrop click: target IS the backdrop element itself.
+    if (
+      t.classList.contains("modal-backdrop")
+      || t.classList.contains("privacy-panel-overlay")
+      || t.classList.contains("discover-overlay")
+      || t.classList.contains("onboarding-backdrop")
+    ) {
+      if (_isOverlayVisible(t)) {
+        _closeOverlay(t);
+        return;
+      }
+    }
+  });
+
+  // Single Esc handler closes the TOPMOST visible overlay.
+  // "Topmost" = last visible one in DOM order (highest z-index
+  // stacking-context for our use; we always append overlays at
+  // body level). This makes Esc work everywhere — pair modal,
+  // settings, device drawer, call overlays, every menu —
+  // without each modal needing its own listener. Doctrine of
+  // invisibility honored: the keyboard-shortcuts modal at
+  // L5961 explicitly promises "Esc — close current modal";
+  // before this commit that promise was a lie.
+  function _topmostVisibleOverlay() {
+    const candidates = document.querySelectorAll(
+      ".modal-backdrop, .privacy-panel-overlay, .discover-overlay, "
+      + ".onboarding-backdrop, .voice-overlay, .call-overlay"
+    );
+    let last = null;
+    for (const el of candidates) {
+      if (_isOverlayVisible(el)) last = el;
+    }
+    return last;
+  }
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") return;
+    const top = _topmostVisibleOverlay();
+    if (top) {
+      ev.preventDefault();
+      _closeOverlay(top);
     }
   });
 
