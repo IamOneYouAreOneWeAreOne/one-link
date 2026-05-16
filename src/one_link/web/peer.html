@@ -2892,6 +2892,17 @@
     return { token };
   }
 
+  function _detectSetupDeviceInviteQuery() {
+    const params = new URLSearchParams(window.location.search);
+    const token = (
+      params.get("setup_device_invite") ||
+      params.get("oneSetupInvite") ||
+      params.get("setupInvite")
+    );
+    if (!token) return null;
+    return { token };
+  }
+
   function _selfMeshEnrollSetState(pillKind, pillLabel, statusLine) {
     const pill = $("#selfmesh-enroll-pill");
     if (pill) {
@@ -2987,6 +2998,66 @@
         );
       }
     }, { once: true });
+  }
+
+  async function _runSetupDeviceInviteFlow(query) {
+    _autopairHideManualCards();
+    show($("#selfmesh-enroll-card"));
+    _selfMeshEnrollSetState("dim", "checking", "Preparing this device...");
+    const rec = await _waitForIdentity(8000);
+    if (!rec || !rec.public_key_b64u) {
+      _selfMeshEnrollSetState(
+        "bad",
+        state.boot_error_msg ? "boot failed" : "no identity",
+        state.boot_error_msg
+          ? `Identity boot failed: ${state.boot_error_msg}`
+          : "This browser could not create a device identity.",
+      );
+      return;
+    }
+    try {
+      const resp = await fetch("/api/setup/device-invite/claim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token: query.token,
+          device_pub_b64: rec.public_key_b64u,
+          label: rec.label || "Phone browser",
+          device_kind: "browser-peer",
+        }),
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(body.hint || body.error || `HTTP ${resp.status}`);
+      const record = {
+        v: 2,
+        claimed_ms: Date.now(),
+        token: query.token,
+        root_pub_b64: body.root_pub_b64,
+        device_pub_b64: body.device_pub_b64,
+        cert_b64: body.cert_b64,
+        device_kind: body.device_kind,
+        label: body.label || "This device",
+        fingerprint: rec.fingerprint,
+      };
+      localStorage.setItem(SELF_MESH_CERT_KEY, JSON.stringify(record));
+      text(
+        $("#selfmesh-enroll-root"),
+        `${record.label} · ${record.root_pub_b64}`,
+      );
+      show($("#selfmesh-enroll-details"));
+      hide($("#selfmesh-enroll-actions"));
+      _selfMeshEnrollSetState(
+        "good",
+        "trusted",
+        `${record.label} is now part of your One identity.`,
+      );
+    } catch (e) {
+      _selfMeshEnrollSetState(
+        "bad",
+        "failed",
+        `Couldn't add this device: ${e && e.message ? e.message : e}`,
+      );
+    }
   }
 
   async function _waitForIdentity(maxMs) {
@@ -3706,11 +3777,12 @@
   // identity); the pair flow consumes it as soon as it's ready.
   const _pairQuery = _detectPairQuery();
   const _selfMeshQuery = _detectSelfMeshInviteQuery();
+  const _setupDeviceInviteQuery = _detectSetupDeviceInviteQuery();
   if (_pairQuery) {
     _autopairHideManualCards();
     show($("#autopair-card"));
     _autopairSetState("dim", "starting", "Setting up your phone's identity…");
-  } else if (_selfMeshQuery) {
+  } else if (_selfMeshQuery || _setupDeviceInviteQuery) {
     _autopairHideManualCards();
     show($("#selfmesh-enroll-card"));
     _selfMeshEnrollSetState("dim", "starting", "Loading this device...");
@@ -3728,6 +3800,14 @@
         _autopairSetState(
           "bad", "failed",
           `Pair flow crashed: ${e && e.message ? e.message : e}`,
+        );
+      });
+    } else if (_setupDeviceInviteQuery) {
+      _runSetupDeviceInviteFlow(_setupDeviceInviteQuery).catch((e) => {
+        console.error("setup device invite failed", e);
+        _selfMeshEnrollSetState(
+          "bad", "failed",
+          `Setup invite flow crashed: ${e && e.message ? e.message : e}`,
         );
       });
     } else if (_selfMeshQuery) {

@@ -65,3 +65,13 @@ def test_peer_shell_has_phone_first_self_mesh_enrollment():
     assert "_runSelfMeshInviteFlow" in src
     assert "/api/v1/self-mesh/enrollment-invite/preview" in src
     assert "ol_peer.self_mesh_cert.v1" in src
+
+
+def test_peer_shell_can_claim_one_setup_device_invite():
+    src = Path("src/one_link/web/peer.html").read_text(encoding="utf-8")
+    assert "_detectSetupDeviceInviteQuery()" in src
+    assert "_runSetupDeviceInviteFlow" in src
+    assert "setup_device_invite" in src
+    assert '"/api/setup/device-invite/claim"' in src
+    assert "device_pub_b64: rec.public_key_b64u" in src
+    assert "cert_b64: body.cert_b64" in src

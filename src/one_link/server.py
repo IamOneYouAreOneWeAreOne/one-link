@@ -4029,6 +4029,9 @@ class UIServer:
     def _setup_invite_deep_link(self, token: str) -> str:
         return f"one-link://setup/add-device?token={token}"
 
+    def _setup_invite_peer_url(self, request: web.Request, token: str) -> str:
+        return f"{request.scheme}://{request.host}/peer?setup_device_invite={token}"
+
     async def api_setup_device_invite(self, request: web.Request) -> web.Response:
         """Create a short-lived One Setup invite for a new device.
 
@@ -4085,6 +4088,7 @@ class UIServer:
                 "ok": True,
                 "token": token,
                 "deep_link": self._setup_invite_deep_link(token),
+                "peer_url": self._setup_invite_peer_url(request, token),
                 "qr_url": f"/api/setup/device-invite/qr.svg?token={token}",
                 "root_pub_b64": b64u(bytes(root["root_pub"])),
                 "label": label,
@@ -4176,7 +4180,7 @@ class UIServer:
             import qrcode.image.svg
 
             qr = qrcode.QRCode(border=2, box_size=8)
-            qr.add_data(self._setup_invite_deep_link(token))
+            qr.add_data(self._setup_invite_peer_url(request, token))
             qr.make(fit=True)
             img = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
             buf = io.BytesIO()

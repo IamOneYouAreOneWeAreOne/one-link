@@ -15377,13 +15377,13 @@
         qr.style.display = "block";
       }
       if (token) {
-        token.value = invite.deep_link || invite.token || "";
+        token.value = invite.peer_url || invite.deep_link || invite.token || "";
         token.style.display = "block";
       }
       const ttl = Math.max(1, Math.round((invite.expires_in_seconds || 300) / 60));
       $("#one-setup-invite-hint").textContent =
         `Scan this with the device you want to add. The invite expires in ${ttl} minutes.`;
-      await copyToClipboard(invite.deep_link || invite.token, "One Setup invite");
+      await copyToClipboard(invite.peer_url || invite.deep_link || invite.token, "One Setup invite");
       await refreshOneSetup();
       toast("Invite ready and copied.", "good", 3500);
     } catch (e) {

@@ -89,6 +89,17 @@ def test_setup_device_invite_mints_cert_for_claiming_device() -> None:
     assert "invite expired or not found" in snippet
 
 
+def test_setup_device_invite_qr_opens_peer_shell() -> None:
+    src = _server_src()
+    idx = src.find("async def api_setup_device_invite_qr(")
+    snippet = src[idx:idx + 1600]
+    assert "_setup_invite_peer_url(request, token)" in snippet
+    assert "/peer?setup_device_invite=" in src
+    invite_idx = src.find("async def api_setup_device_invite(")
+    invite_snippet = src[invite_idx:invite_idx + 3500]
+    assert '"peer_url": self._setup_invite_peer_url(request, token)' in invite_snippet
+
+
 def test_me_surfaces_one_setup_compatibility_flags() -> None:
     src = _server_src()
     idx = src.find("async def api_me(")
@@ -130,6 +141,7 @@ def test_one_setup_ui_contract_markers_present_after_build() -> None:
         'setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); }',
         'claimSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/claim", body); }',
         "Invite ready and copied.",
+        "invite.peer_url",
         "hello-from-one-link.txt",
         "This moved through your private One Link fabric.",
         'api.setupAction("first_file_sent")',
