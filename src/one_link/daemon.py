@@ -1620,6 +1620,7 @@ class Daemon:
         except Exception:
             return
         from one_link import __version__ as _local_ver
+        from one_link import sovereignty as _sov
 
         last_status: str | None = None
         last_version: str | None = None
@@ -1627,8 +1628,40 @@ class Daemon:
             await asyncio.sleep(60.0)  # 1 minute warmup
         except asyncio.CancelledError:
             return
+
+        def _check_enabled_live() -> bool:
+            """May 16 2026 — re-read the preset / setting / env on
+            every iteration so a runtime preset switch
+            (POST /api/sovereignty/preset name=quiet) actually stops
+            the poll within one cycle instead of waiting for daemon
+            restart. The cost of the per-iteration probe is
+            negligible — it's three dict lookups."""
+            setting_val: str | None = None
+            preset: str | None = None
+            if self.state is not None:
+                with contextlib.suppress(Exception):
+                    setting_val = self.state.get_setting(
+                        "update_check_enabled"
+                    )
+                with contextlib.suppress(Exception):
+                    preset = self.state.get_setting("sovereignty_preset")
+            return _sov.resolve_update_check_enabled(
+                state_setting=setting_val,
+                env_var=os.environ.get("ONE_LINK_UPDATE_CHECK"),
+                preset_name=preset,
+            )
+
         loop = asyncio.get_running_loop()
         while True:
+            # Live-switch honor: if the user flipped to a quiet preset
+            # while the loop was sleeping, skip the poll silently +
+            # short-sleep so we re-check soon.
+            if not _check_enabled_live():
+                try:
+                    await asyncio.sleep(60.0)
+                except asyncio.CancelledError:
+                    raise
+                continue
             try:
                 result = await loop.run_in_executor(
                     None, lambda: fetch_latest(_local_ver)
@@ -14665,18 +14698,20 @@ class Daemon:
             env_var=os.environ.get("ONE_LINK_UPDATE_CHECK"),
             preset_name=preset_name,
         )
-        if update_check_on:
-            self._update_check_task = asyncio.create_task(
-                self._update_check_loop()
-            )
-        else:
+        # May 16 2026 — always START the loop. The loop itself re-reads
+        # the preset on every iteration and short-circuits when
+        # disabled. This lets a runtime preset switch take effect
+        # within one cycle without needing a daemon restart.
+        self._update_check_task = asyncio.create_task(
+            self._update_check_loop()
+        )
+        if not update_check_on:
             log.info(
-                "update-check: disabled (sovereignty preset=%s). "
-                "Set ONE_LINK_UPDATE_CHECK=1 or "
-                "settings.update_check_enabled=1 to enable.",
+                "update-check: disabled at boot (sovereignty preset=%s). "
+                "Loop is started but will short-circuit until you flip "
+                "the preset or set the env var / setting.",
                 preset_name or _sov.DEFAULT_PRESET_NAME,
             )
-            self._update_check_task = None
 
         # Phase E: spin up the coherence-field snapshot manager. The
         # manager idles harmlessly when no peers / no native crate; it

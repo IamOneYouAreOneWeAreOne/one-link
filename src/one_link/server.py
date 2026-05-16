@@ -2000,6 +2000,89 @@ class UIServer:
     # everything the daemon could possibly talk to is visible here +
     # the user can flip the active preset without restarting.
 
+    def _compute_peer_version_hint(self) -> dict:
+        """P2P version gossip — scan PINNED peers' advertised
+        app_version (from their CAPS handshake) and report the newest
+        one we've seen if it's newer than our local version.
+
+        This is the corp-free alternative to the GitHub Releases poll:
+        the network IS the update channel. When a paired peer upgrades
+        to 0.22 while we're on 0.21, their next handshake includes the
+        new version in their CAPS, our daemon sees it, and we surface
+        "your friend Computer 2 is running 0.22" without ever calling
+        api.github.com.
+
+        Returns a dict shaped:
+            {
+              "newer_available": bool,
+              "newest_version": str or null,
+              "newest_peer": str or null,     # peer display name
+              "local_version": str,
+              "paired_peer_versions": [{"peer", "version"}, ...],
+            }
+        """
+        from one_link import __version__ as _local_ver
+        from one_link.update_check import compare_versions
+
+        if self.daemon is None or self.daemon.state is None:
+            return {
+                "newer_available": False,
+                "newest_version": None,
+                "newest_peer": None,
+                "local_version": _local_ver,
+                "paired_peer_versions": [],
+            }
+
+        sessions = getattr(self.daemon, "_outbound_sessions", {}) or {}
+        per_peer: list[dict] = []
+        for peer_fp, sess in sessions.items():
+            ch = getattr(sess, "channel", None)
+            if ch is None:
+                continue
+            caps = getattr(ch, "peer_caps", None) or {}
+            ver = caps.get("app_version")
+            if not ver:
+                continue
+            # Only count PINNED peers — pending or rejected peers'
+            # version claims shouldn't drive the UI.
+            try:
+                rec = self.daemon.state.get_peer(peer_fp)
+                if rec is None or getattr(rec, "trust", None) != "pinned":
+                    continue
+                display = (
+                    rec.local_alias
+                    or rec.display_name
+                    or rec.hostname
+                    or peer_fp[:8]
+                )
+            except Exception:
+                display = peer_fp[:8]
+            per_peer.append({"peer": display, "version": ver})
+
+        # Find the highest version among the lot.
+        newest_ver: str | None = None
+        newest_peer: str | None = None
+        for entry in per_peer:
+            v = entry["version"]
+            if newest_ver is None:
+                newest_ver, newest_peer = v, entry["peer"]
+                continue
+            if compare_versions(newest_ver, v) == "newer":
+                newest_ver, newest_peer = v, entry["peer"]
+
+        newer = (
+            newest_ver is not None
+            and compare_versions(_local_ver, newest_ver) == "newer"
+        )
+
+        return {
+            "newer_available": bool(newer),
+            "newest_version": newest_ver if newer else None,
+            "newest_peer": newest_peer if newer else None,
+            "local_version": _local_ver,
+            "paired_peer_versions": per_peer,
+        }
+
     async def api_sovereignty_status(
         self, request: web.Request,
     ) -> web.Response:
@@ -2049,6 +2132,14 @@ class UIServer:
             self.daemon, "_outbound_log_started_ms", 0,
         ) or 0)
 
+        # P2P version gossip — scan paired peers' advertised
+        # app_version (already exchanged via CAPS handshake) and find
+        # the newest one. If any paired peer is on a newer build than
+        # us, surface it as a hint so the user can update WITHOUT the
+        # GitHub poll (the network IS the update channel for
+        # sovereignty-preset users).
+        peer_version_hint = self._compute_peer_version_hint()
+
         return web.json_response({
             "preset": {
                 "name": preset.name,
@@ -2056,6 +2147,7 @@ class UIServer:
                 "description": preset.description,
                 "outbound_summary": preset.outbound_summary,
             },
+            "peer_version_hint": peer_version_hint,
             "features": {
                 "update_check": {
                     "enabled": update_check_on,

@@ -17017,11 +17017,38 @@
         }</div>`;
     const promise = (outbound && outbound.promise) || "";
 
+    // May 16 2026 — P2P version gossip hint. When a paired peer is
+    // on a newer build, surface that here. Corp-free update channel:
+    // the network IS the update notification.
+    const hint = (status && status.peer_version_hint) || {};
+    const versionHintHtml = hint.newer_available
+      ? `
+        <div class="privacy-section">
+          <div class="privacy-section-h">Update available (from peer)</div>
+          <div class="privacy-feature-row" style="
+              background:rgba(255,180,90,0.10);
+              border:1px solid rgba(255,180,90,0.32);">
+            <span class="feature-name">
+              A paired peer (${escapeText(hint.newest_peer || "?")}) is running ${
+                escapeText(hint.newest_version || "?")}
+            </span>
+            <span class="feature-state" style="color:rgba(255,180,90,1);">
+              you: ${escapeText(hint.local_version)}
+            </span>
+          </div>
+          <div class="privacy-promise">
+            This hint came from a paired peer's handshake — no call to
+            GitHub or any third party was made to learn this.
+          </div>
+        </div>`
+      : "";
+
     body.innerHTML = `
       <div class="privacy-section">
         <div class="privacy-section-h">Sovereignty preset</div>
         <div class="privacy-preset-grid">${presetCards}</div>
       </div>
+      ${versionHintHtml}
       <div class="privacy-section">
         <div class="privacy-section-h">Live feature state</div>
         <div class="privacy-features">${featuresHtml}</div>

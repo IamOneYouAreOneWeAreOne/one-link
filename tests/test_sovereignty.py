@@ -287,3 +287,277 @@ def test_three_preset_cards_renderable_from_html_template():
     assert "p.label" in html
     assert "p.description" in html
     assert "p.outbound_summary" in html
+
+
+# ── Integration tests: API + live-switch + version gossip (Phase 3) ─
+
+
+@pytest.mark.asyncio
+async def test_api_status_returns_expected_shape(monkeypatch):
+    """/api/sovereignty/status returns the contract the Privacy
+    panel JS consumes."""
+    from one_link.server import UIServer
+    daemon = SimpleNamespace(
+        state=None,
+        discovery=None,
+        me=SimpleNamespace(
+            fingerprint="aa" * 32, short_id="aaaaaaaa", hostname="me",
+        ),
+        _outbound_log=[],
+        _outbound_log_started_ms=1700000000000,
+        _outbound_sessions={},
+    )
+    server = UIServer(daemon)
+    resp = await server.api_sovereignty_status(SimpleNamespace(query={}))
+    body = json.loads(resp.text)
+    # Top-level keys.
+    assert "preset" in body
+    assert "features" in body
+    assert "outbound" in body
+    assert "peer_version_hint" in body
+    # Preset shape.
+    assert body["preset"]["name"] == "just_works"  # default
+    assert "label" in body["preset"]
+    assert "description" in body["preset"]
+    assert "outbound_summary" in body["preset"]
+    # Features shape.
+    for key in (
+        "update_check", "stun_servers", "mdns_discovery", "rendezvous",
+    ):
+        assert key in body["features"]
+
+
+@pytest.mark.asyncio
+async def test_api_preset_set_switches_setting(monkeypatch):
+    """POST /api/sovereignty/preset writes state.settings."""
+    from one_link.server import UIServer
+
+    class _State:
+        def __init__(self):
+            self.settings: dict = {}
+        def get_setting(self, k):
+            return self.settings.get(k)
+        def set_setting(self, k, v):
+            self.settings[k] = v
+
+    state = _State()
+    daemon = SimpleNamespace(
+        state=state,
+        discovery=None,
+        me=SimpleNamespace(
+            fingerprint="aa" * 32, short_id="aaaaaaaa", hostname="me",
+        ),
+        _outbound_log=[],
+        _outbound_log_started_ms=0,
+        _outbound_sessions={},
+    )
+    server = UIServer(daemon)
+
+    class _Req:
+        def __init__(self, body):
+            self._body = body
+        async def json(self):
+            return self._body
+        query: dict = {}
+        match_info: dict = {}
+
+    # Switch to quiet.
+    resp = await server.api_sovereignty_preset_set(
+        _Req({"name": "quiet"})
+    )
+    assert json.loads(resp.text) == {"ok": True, "preset": "quiet"}
+    assert state.settings.get("sovereignty_preset") == "quiet"
+
+    # /status now reflects quiet.
+    s_resp = await server.api_sovereignty_status(SimpleNamespace(query={}))
+    s_body = json.loads(s_resp.text)
+    assert s_body["preset"]["name"] == "quiet"
+    # And the features now show the quiet defaults.
+    assert s_body["features"]["update_check"]["enabled"] is False
+    assert s_body["features"]["stun_servers"]["list"] == []
+
+
+@pytest.mark.asyncio
+async def test_api_preset_set_rejects_unknown(monkeypatch):
+    """Malformed preset names get a 400, never silently accepted."""
+    from one_link.server import UIServer
+
+    class _State:
+        settings: dict = {}
+        def get_setting(self, k):
+            return self.settings.get(k)
+        def set_setting(self, k, v):
+            self.settings[k] = v
+
+    daemon = SimpleNamespace(
+        state=_State(),
+        discovery=None,
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaa", hostname="me"),
+        _outbound_log=[],
+        _outbound_log_started_ms=0,
+        _outbound_sessions={},
+    )
+    server = UIServer(daemon)
+
+    class _Req:
+        def __init__(self, body): self._body = body
+        async def json(self): return self._body
+        query: dict = {}
+
+    resp = await server.api_sovereignty_preset_set(
+        _Req({"name": "garbage_preset"})
+    )
+    assert resp.status == 400
+
+
+def test_p2p_version_gossip_helper_with_no_paired_peers():
+    """No paired peers → empty hint, no false 'update available'."""
+    from one_link.server import UIServer
+    daemon = SimpleNamespace(
+        state=SimpleNamespace(),
+        _outbound_sessions={},
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aa", hostname="me"),
+    )
+    server = UIServer(daemon)
+    hint = server._compute_peer_version_hint()
+    assert hint["newer_available"] is False
+    assert hint["newest_peer"] is None
+    assert hint["paired_peer_versions"] == []
+
+
+def test_p2p_version_gossip_detects_newer_paired_peer():
+    """When a pinned peer's CAPS includes a newer app_version, the
+    hint flips to newer_available=True. THIS is the corp-free
+    update channel — no GitHub poll required to learn 'new release
+    exists'."""
+    from one_link.server import UIServer
+    from one_link import __version__ as _local_ver
+    # Synthesize "newer" — bump the patch.
+    import re
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)", _local_ver)
+    assert m
+    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    newer = f"{major}.{minor}.{patch + 99}"
+
+    class _Ch:
+        peer_caps = {"app_version": newer}
+    class _Sess:
+        channel = _Ch()
+    class _State:
+        def get_peer(self, fp):
+            return SimpleNamespace(
+                trust="pinned",
+                local_alias=None,
+                display_name="Computer 2",
+                hostname="Computer 2",
+            )
+
+    daemon = SimpleNamespace(
+        state=_State(),
+        _outbound_sessions={"fc9f0a5f" * 8: _Sess()},
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aa", hostname="me"),
+    )
+    server = UIServer(daemon)
+    hint = server._compute_peer_version_hint()
+    assert hint["newer_available"] is True
+    assert hint["newest_version"] == newer
+    assert hint["newest_peer"] == "Computer 2"
+
+
+def test_p2p_version_gossip_ignores_unpaired_peers():
+    """A peer reporting a newer version but not pinned must NOT
+    drive the UI — would let any attacker advertise 'hey upgrade
+    to my malicious 99.0.0'."""
+    from one_link.server import UIServer
+
+    class _Ch:
+        peer_caps = {"app_version": "99.0.0"}
+    class _Sess:
+        channel = _Ch()
+    class _State:
+        def get_peer(self, fp):
+            return SimpleNamespace(
+                trust="pending",   # NOT pinned
+                local_alias=None,
+                display_name="Random",
+                hostname="random",
+            )
+
+    daemon = SimpleNamespace(
+        state=_State(),
+        _outbound_sessions={"deadbeef" * 8: _Sess()},
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aa", hostname="me"),
+    )
+    server = UIServer(daemon)
+    hint = server._compute_peer_version_hint()
+    assert hint["newer_available"] is False
+    assert hint["paired_peer_versions"] == []
+
+
+def test_p2p_version_gossip_older_peer_does_not_trigger_hint():
+    """A peer on an OLDER version must NOT trigger 'update
+    available' — we'd be downgrading."""
+    from one_link.server import UIServer
+
+    class _Ch:
+        peer_caps = {"app_version": "0.0.1"}   # ancient
+    class _Sess:
+        channel = _Ch()
+    class _State:
+        def get_peer(self, fp):
+            return SimpleNamespace(
+                trust="pinned", local_alias=None,
+                display_name="Old Box", hostname="oldbox",
+            )
+
+    daemon = SimpleNamespace(
+        state=_State(),
+        _outbound_sessions={"abcd" * 16: _Sess()},
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aa", hostname="me"),
+    )
+    server = UIServer(daemon)
+    hint = server._compute_peer_version_hint()
+    assert hint["newer_available"] is False
+    # But the peer's reported version IS included in the catalog.
+    assert any(
+        e["version"] == "0.0.1" for e in hint["paired_peer_versions"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_api_outbound_log_endpoint_returns_audit_trail():
+    """The Privacy panel's "Recent outbound calls" reads here."""
+    from one_link.server import UIServer
+
+    daemon = SimpleNamespace(
+        state=None,
+        discovery=None,
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aa", hostname="me"),
+        _outbound_log=[
+            {"ts_ms": 1700000000000, "destination": "api.github.com",
+             "kind": "update_check", "ok": True, "bytes_sent": 0, "bytes_recv": 0},
+        ],
+        _outbound_log_started_ms=1699999000000,
+        _outbound_sessions={},
+    )
+    server = UIServer(daemon)
+    resp = await server.api_sovereignty_outbound_log(
+        SimpleNamespace(query={"limit": "20"})
+    )
+    body = json.loads(resp.text)
+    assert "entries" in body
+    assert "promise" in body
+    assert "session_started_ms" in body
+    assert len(body["entries"]) == 1
+    assert body["entries"][0]["destination"] == "api.github.com"
+
+
+def test_html_renders_peer_version_hint_section():
+    """The Privacy panel JS uses status.peer_version_hint to render
+    a banner when a paired peer is on a newer version."""
+    html = WEB_INDEX.read_text(encoding="utf-8")
+    assert "peer_version_hint" in html
+    assert "Update available (from peer)" in html
+    # Asserts the messaging stays corp-free.
+    assert "no call to" in html.lower()
+
