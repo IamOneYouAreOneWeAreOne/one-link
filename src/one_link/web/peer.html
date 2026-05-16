@@ -1630,14 +1630,15 @@
   // ── v0.18.0 — WebRTC DataChannel transport foundation ───────────────
   const WRTC_PROTOCOL_VERSION = "OL-WRTC-1";
   const WRTC_SIGNAL_TTL_MS = 5 * 60 * 1000;
-  const WEBRTC_STUN_SERVERS = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:global.stun.twilio.com:3478" },
-    { urls: "stun:stun.cloudflare.com:3478" },
-    { urls: "stun:stun.nextcloud.com:443" },
-    { urls: "stun:stun.sipgate.net:3478" },
-    { urls: "stun:stun.antisip.com:3478" },
-  ];
+  // May 15 2026 — sovereignty default: NO third-party STUN servers.
+  // Same-LAN pairing works without them (host candidates suffice).
+  // For cross-NAT pairing, the user can supply STUN via the
+  // daemon's /api/peer-rtc/ice-config endpoint (env var
+  // ONE_LINK_STUN_SERVERS or setting `stun_servers`). We fetch
+  // that asynchronously below and wire it into the RTC config.
+  // Empty list = host-only ICE = LAN-only fallback (no calls to
+  // Google / Cloudflare / Twilio / etc.).
+  const WEBRTC_STUN_SERVERS = [];
   const WEBRTC_CONTROL_LABEL = "one-link-control-v1";
   const WEBRTC_BULK_LABEL = "one-link-bulk-v1";
   const WEBRTC_BULK_BUFFER_LOW_BYTES = 1 * 1024 * 1024;
@@ -1715,11 +1716,34 @@
   function createPeerConnection(opts) {
     assertWebRtcAvailable();
     opts = opts || {};
+    // May 15 2026 — sovereignty default. Start with whatever the
+    // top-level WEBRTC_STUN_SERVERS list contains (now [] — empty
+    // by default, no calls to third-party STUN). Asynchronously
+    // pull user-configured STUN from the daemon's
+    // /api/v1/peer-rtc/ice-config endpoint and wire it in if the
+    // user has set any. Silent on failure — LAN-only fallback is
+    // the intended default.
     const pc = new RTCPeerConnection({
       iceServers: WEBRTC_STUN_SERVERS,
       bundlePolicy: "max-bundle",
       rtcpMuxPolicy: "require",
     });
+    (async () => {
+      try {
+        const r = await fetch("/api/v1/peer-rtc/ice-config", {
+          cache: "no-store",
+        });
+        if (!r.ok) return;
+        const cfg = await r.json();
+        if (Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0) {
+          pc.setConfiguration({
+            iceServers: cfg.iceServers,
+            bundlePolicy: "max-bundle",
+            rtcpMuxPolicy: "require",
+          });
+        }
+      } catch (_) { /* LAN-only fallback is intentional */ }
+    })();
     const session = {
       pc,
       control: null,

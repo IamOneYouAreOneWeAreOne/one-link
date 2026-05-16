@@ -43,17 +43,37 @@ def test_webrtc_protocol_constants_pinned(peer_html: str):
     assert "WEBRTC_BULK_LABEL" in peer_html
 
 
-def test_multi_org_stun_list_present(peer_html: str):
+def test_stun_list_empty_by_default_for_sovereignty(peer_html: str):
+    """May 15 2026 — sovereignty default. WEBRTC_STUN_SERVERS is now
+    an empty list out of the box; no third-party STUN servers are
+    contacted unless the user explicitly configures them via env
+    var ONE_LINK_STUN_SERVERS or the daemon setting
+    ``stun_servers``. The daemon's /api/v1/peer-rtc/ice-config
+    endpoint surfaces the user-configured set; peer.html fetches it
+    asynchronously and wires it via setConfiguration(). When the
+    user has configured nothing, ICE degrades to host-only =
+    LAN-only pairing = zero outbound calls to third parties."""
     snippet = _snippet(peer_html, "WEBRTC_STUN_SERVERS", 1200)
+    assert "WEBRTC_STUN_SERVERS = []" in snippet, (
+        "default STUN list must be empty for sovereignty (zero calls "
+        "to Google / Cloudflare / Twilio / Nextcloud / etc.)"
+    )
+    # peer.html must fetch user-configured STUN at runtime for the
+    # opt-in path to work.
+    assert "/api/v1/peer-rtc/ice-config" in peer_html, (
+        "peer.html must fetch the user-configured ICE config from "
+        "the daemon for opt-in STUN to work"
+    )
+    # And NO hardcoded third-party hosts.
     for host in (
         "stun.l.google.com",
         "global.stun.twilio.com",
         "stun.cloudflare.com",
-        "stun.nextcloud.com",
-        "stun.sipgate.net",
-        "stun.antisip.com",
     ):
-        assert host in snippet
+        assert host not in snippet, (
+            f"third-party STUN host {host!r} hardcoded in peer.html — "
+            f"sovereignty default violated"
+        )
 
 
 def test_peer_connection_uses_datachannels(peer_html: str):

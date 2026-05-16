@@ -16608,9 +16608,29 @@
     // send_ice_candidate). Inbound SDP / ICE arrives as
     // ``call_event`` tail messages over the existing WebSocket.
     if (!window.RTCPeerConnection) return null;
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-    });
+    // May 15 2026 — sovereignty default: NO third-party STUN
+    // servers. Same-LAN pairing works without them (host
+    // candidates suffice). Cross-NAT pairing requires the user to
+    // opt in via Settings → stun_servers, or the operator to set
+    // ONE_LINK_STUN_SERVERS on the daemon side. The daemon's
+    // ``/api/peer-rtc/ice-config`` endpoint returns whatever the
+    // user has configured; we fetch it asynchronously and wire it
+    // in. Empty list = host-only ICE = LAN-only fallback.
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    // Best-effort fetch of user-configured STUN. Silent on failure
+    // — we'd rather degrade to LAN-only than reach a third party.
+    (async () => {
+      try {
+        const r = await fetch("/api/peer-rtc/ice-config", {
+          credentials: "include", cache: "no-store",
+        });
+        if (!r.ok) return;
+        const cfg = await r.json();
+        if (Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0) {
+          pc.setConfiguration({ iceServers: cfg.iceServers });
+        }
+      } catch (_) { /* LAN-only fallback is fine */ }
+    })();
     pc.ontrack = (ev) => {
       let stream = media.remoteStream;
       if (!stream || (ev.streams && ev.streams[0] && stream !== ev.streams[0])) {

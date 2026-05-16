@@ -1290,6 +1290,22 @@ class UIServer:
         # since it's the same self-signed cert anyone on the LAN
         # would see during a TLS handshake anyway.
         r.add_get("/api/v1/peer-rtc/profile.mobileconfig", self._pair_profile)
+        # May 15 2026 — sovereignty endpoint. Both index.html and
+        # peer.html start with an empty ICE-server list (no calls
+        # to third-party STUN by default) and ask this endpoint
+        # for the user-configured set. Empty response = LAN-only.
+        r.add_get(
+            "/api/peer-rtc/ice-config",
+            self._guarded(self.api_peer_rtc_ice_config),
+        )
+        # peer.html runs from the public root (no auth token), so
+        # it needs an unguarded variant. Returning user-configured
+        # public STUN URLs is not a credential leak — STUN URLs are
+        # public hostnames anyway — so we expose it openly here.
+        r.add_get(
+            "/api/v1/peer-rtc/ice-config",
+            self.api_peer_rtc_ice_config_public,
+        )
         r.add_get(
             "/api/v1/self-mesh/enrollment-invite/preview",
             self.api_public_self_mesh_enrollment_invite_preview,
@@ -1919,6 +1935,64 @@ class UIServer:
             ),
         })
 
+    def _resolved_stun_servers(self) -> list[str]:
+        """May 15 2026 — read the user-configured STUN servers from
+        either ONE_LINK_STUN_SERVERS env var or
+        ``state.settings.stun_servers``. Both accept a comma-separated
+        list of ``stun:host:port`` / ``stuns:host:port`` / ``turn:...``
+        URLs. Returns [] if the user has configured nothing — the
+        sovereignty default. WebRTC degrades to host-only ICE
+        (LAN-only pairing) when this is empty."""
+        out: list[str] = []
+        seen: set[str] = set()
+        env_val = os.environ.get("ONE_LINK_STUN_SERVERS", "").strip()
+        if env_val:
+            for u in env_val.split(","):
+                u = u.strip()
+                if u and u not in seen:
+                    out.append(u)
+                    seen.add(u)
+        if self.daemon is not None and self.daemon.state is not None:
+            try:
+                setting = (self.daemon.state.get_setting(
+                    "stun_servers"
+                ) or "").strip()
+                if setting:
+                    for u in setting.split(","):
+                        u = u.strip()
+                        if u and u not in seen:
+                            out.append(u)
+                            seen.add(u)
+            except Exception:
+                pass
+        return out
+
+    async def api_peer_rtc_ice_config(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Auth-gated ICE-config endpoint for index.html. Returns a
+        JSON object ``{"iceServers": [...]}`` shaped exactly the way
+        WebRTC's RTCPeerConnection setConfiguration() expects. Empty
+        list = sovereignty default (LAN-only pairing)."""
+        urls = self._resolved_stun_servers()
+        return web.json_response({
+            "iceServers": [{"urls": u} for u in urls],
+            "sovereignty_default": len(urls) == 0,
+        })
+
+    async def api_peer_rtc_ice_config_public(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Unguarded variant of the ICE-config endpoint for
+        peer.html (the browser-as-peer surface) which runs without
+        an auth token. STUN URLs are public hostnames; exposing the
+        user-configured list openly is not a credential leak."""
+        urls = self._resolved_stun_servers()
+        return web.json_response({
+            "iceServers": [{"urls": u} for u in urls],
+            "sovereignty_default": len(urls) == 0,
+        })
+
     async def _pair_profile(self, request: web.Request) -> web.StreamResponse:
         """v0.20.6 — serve the iOS Configuration Profile that trusts
         the daemon's self-signed cert. iOS Safari recognises the
@@ -2060,13 +2134,51 @@ class UIServer:
                 "message": message,
             })
 
-        # Multi-vendor STUN. Same set the browser uses; both sides
-        # converging on the same servers keeps NAT-traversal symmetric.
-        stun_servers = [
-            RTCIceServer(urls="stun:stun.l.google.com:19302"),
-            RTCIceServer(urls="stun:global.stun.twilio.com:3478"),
-            RTCIceServer(urls="stun:stun.cloudflare.com:3478"),
-        ]
+        # May 15 2026 — sovereignty default for WebRTC pairing.
+        #
+        # STUN servers are used by WebRTC for public-IP discovery
+        # behind NAT. They see only:
+        #   - the connecting client's public IP (the server's ISP
+        #     could see this anyway)
+        #   - a 4-byte transaction ID
+        # No traffic, no peer info, no payload. But "data flows to
+        # a corp server" is still "data flows to a corp server,"
+        # which violates One Link's sovereignty floor.
+        #
+        # Decision:
+        #   - DEFAULT: empty ICE-server list. WebRTC pairing works on
+        #     same-LAN networks (host candidates only, no public-IP
+        #     lookup needed). Cross-NAT pairing requires explicit
+        #     opt-in.
+        #   - OPT-IN: env var ONE_LINK_STUN_SERVERS="stun:host:port,
+        #     stun:host:port,..." lets the user supply their OWN
+        #     servers (their employer's, a community-run server,
+        #     or — if they consciously accept the corp dependency —
+        #     Google/Cloudflare).
+        #   - SETTING: state.get_setting("stun_servers") same shape.
+        #
+        # Same-LAN pairing (the dominant One Link use case) is
+        # unaffected; cross-network pairing degrades gracefully to
+        # "needs configuration" instead of silently calling corp
+        # servers.
+        stun_urls: list[str] = []
+        env_stun = os.environ.get("ONE_LINK_STUN_SERVERS", "").strip()
+        if env_stun:
+            stun_urls.extend(
+                u.strip() for u in env_stun.split(",") if u.strip()
+            )
+        if self.daemon is not None and self.daemon.state is not None:
+            try:
+                setting = (self.daemon.state.get_setting(
+                    "stun_servers"
+                ) or "").strip()
+                if setting:
+                    stun_urls.extend(
+                        u.strip() for u in setting.split(",") if u.strip()
+                    )
+            except Exception:
+                pass
+        stun_servers = [RTCIceServer(urls=u) for u in stun_urls]
         config = RTCConfiguration(iceServers=stun_servers)
 
         try:
