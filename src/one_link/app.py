@@ -24,6 +24,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import click
@@ -246,8 +247,12 @@ def _spawn_daemon() -> subprocess.Popen:
         log_fh = open(log_path, "wb")
     except OSError:
         log_fh = None
+    if getattr(sys, "frozen", False):
+        daemon_cmd = [sys.executable, "daemon", "-v"]
+    else:
+        daemon_cmd = [sys.executable, "-m", "one_link.cli", "daemon", "-v"]
     return subprocess.Popen(
-        [sys.executable, "-m", "one_link.cli", "daemon", "-v"],
+        daemon_cmd,
         stdout=subprocess.DEVNULL,
         stderr=(log_fh if log_fh is not None else subprocess.DEVNULL),
         creationflags=flags,
@@ -325,6 +330,45 @@ def _find_chromium_browser_exe() -> Optional[str]:
         if path:
             return path
     return None
+
+
+def _is_existing_app_window_running(profile_dir: Path) -> bool:
+    """Return True if the isolated One Link app-mode profile already owns
+    a visible top-level browser window.
+
+    Double-clicking the exe repeatedly should feel idempotent. Without this
+    guard every launch asks Edge/Chrome for another ``--app`` window, and on
+    Windows that looks like One Link is "popping up" on a timer when a user
+    has clicked more than once or an external launcher retries.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import subprocess as _subprocess
+
+        ps = (
+            "$profile = $args[0]; "
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { "
+            "  $_.Name -match '^(msedge|chrome)\\.exe$' -and "
+            "  $_.CommandLine -like ('*--user-data-dir=' + $profile + '*') -and "
+            "  $_.CommandLine -like '*--app=http://127.0.0.1:*' "
+            "} | Select-Object -First 1 -ExpandProperty ProcessId"
+        )
+        res = _subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps, str(profile_dir)],
+            stdout=_subprocess.PIPE,
+            stderr=_subprocess.DEVNULL,
+            text=True,
+            timeout=2.0,
+            creationflags=(
+                _subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            ),
+            check=False,
+        )
+        return bool(res.stdout.strip())
+    except Exception:
+        return False
 
 
 def _open_browser_url(url: str, *, standalone: bool = True) -> None:
@@ -438,6 +482,8 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                 # compute a window that's 80% of the primary screen
                 # (clamped to 1400x900 max so on huge monitors the
                 # window doesn't dominate) centered on screen.
+                if _is_existing_app_window_running(profile_dir):
+                    return
                 win_w, win_h, win_x, win_y = _default_window_geometry()
                 args = [
                     browser,

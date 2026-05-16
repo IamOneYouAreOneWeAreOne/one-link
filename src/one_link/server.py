@@ -670,6 +670,136 @@ def _detect_lan_ip() -> str:
         s.close()
 
 
+def _render_install_landing(
+    *, os_kind: str, os_label: str, code: str, valid: bool,
+) -> str:
+    """Render the public landing page handed to a device that
+    might not have One Link installed yet.
+
+    Self-contained HTML — no JS framework, no remote assets, no
+    Google Fonts or CDN. Everything inlined so it renders the same
+    on first visit even with strict ad-blockers or air-gapped
+    networks. Sovereignty floor honored.
+    """
+    import html as _html
+    project_url = "https://github.com/IamOneYouAreOneWeAreOne/one-link"
+    if valid:
+        headline = "You've been invited to pair on One Link"
+        code_block = (
+            f'<div class="code-box"><span class="code-label">Pair code</span>'
+            f'<span class="code">{_html.escape(code)}</span></div>'
+            f'<p class="code-hint">This code expires in 5 minutes. '
+            f'Open One Link on this device and enter the code, or '
+            f'install One Link first using the link below.</p>'
+        )
+    else:
+        headline = "This invite has expired"
+        code_block = (
+            '<p class="code-hint expired">Ask the person who sent '
+            'you the link to send a fresh one. Invite codes expire '
+            'after 5 minutes for safety.</p>'
+        )
+    os_blurb = {
+        "ios":
+            "On iPhone or iPad, install One Link from the App Store "
+            "or scan the next QR with your camera.",
+        "android":
+            "On Android, install One Link from the Play Store or "
+            "scan the next QR with your camera.",
+        "macos":
+            "On Mac, download the latest installer and run it. "
+            "Then open One Link and enter the pair code above.",
+        "windows":
+            "On Windows, download the installer and run it. Then "
+            "open One Link and enter the pair code above.",
+        "linux":
+            "On Linux, install One Link from your distro's repo "
+            "or pull the source. Then open One Link and enter the "
+            "pair code above.",
+        "other":
+            "Open the One Link project page below and pick the "
+            "install path for your device.",
+    }[os_kind]
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>One Link — pair invite</title>
+<style>
+  body {{
+    background: #0d0d12; color: #e8eaed; margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 100vh; padding: 20px;
+    box-sizing: border-box;
+  }}
+  .card {{
+    background: #18181f; border-radius: 16px;
+    padding: 28px 24px; max-width: 420px; width: 100%;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+  }}
+  h1 {{ font-size: 22px; margin: 0 0 8px; }}
+  p {{ line-height: 1.5; color: #b8bcc4; margin: 12px 0; }}
+  .code-box {{
+    background: rgba(126,96,255,0.10);
+    border: 1px solid rgba(126,96,255,0.35);
+    border-radius: 12px;
+    padding: 18px 16px; text-align: center; margin: 18px 0;
+  }}
+  .code-label {{
+    display: block; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.1em;
+    color: rgba(180,200,255,0.7); margin-bottom: 6px;
+  }}
+  .code {{
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 36px; font-weight: 700; color: #fff;
+    letter-spacing: 0.18em;
+  }}
+  .code-hint {{ font-size: 13px; color: #9ba0a8; margin: 8px 0 0; }}
+  .code-hint.expired {{
+    color: rgba(255,140,90,0.95); font-weight: 500;
+  }}
+  .os-blurb {{
+    background: rgba(255,255,255,0.04);
+    border-radius: 10px; padding: 14px 14px;
+    margin: 16px 0; font-size: 14px;
+  }}
+  a.btn {{
+    display: inline-block; background: #7e60ff; color: #fff;
+    padding: 12px 18px; border-radius: 8px;
+    text-decoration: none; font-weight: 600;
+    margin-top: 8px;
+  }}
+  a.btn:hover {{ background: #6c4dff; }}
+  .footer {{
+    margin-top: 18px; font-size: 11px; color: #6c7280;
+    text-align: center;
+  }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>{_html.escape(headline)}</h1>
+    {code_block}
+    <div class="os-blurb">
+      <strong>You're on a {_html.escape(os_label)}.</strong>
+      <p style="margin-top:6px;">{_html.escape(os_blurb)}</p>
+    </div>
+    <a class="btn" href="{project_url}" target="_blank" rel="noopener">
+      Get One Link
+    </a>
+    <p class="footer">
+      One Link is a peer-to-peer app. No accounts, no tracking,
+      no cloud. The invite code above lives only on the device
+      that sent it, for 5 minutes.
+    </p>
+  </div>
+</body>
+</html>"""
+
+
 class UIServer:
     """Wraps the aiohttp app + the websocket event broker."""
 
@@ -1322,6 +1452,30 @@ class UIServer:
             "/api/sovereignty/outbound",
             self._guarded(self.api_sovereignty_outbound_log),
         )
+        # May 16 2026 — multi-modal LAN discovery. Runs mDNS
+        # browse-all + ARP + SSDP + NetBIOS in parallel, correlates
+        # by IP/MAC, identifies devices via OUI vendor + service
+        # portfolio. Returns three sections: ready_to_pair (already
+        # running One Link), pairable (phones / laptops / etc.
+        # discovered but not running One Link), and other (TVs /
+        # speakers / printers — visible but not the primary target).
+        r.add_get(
+            "/api/discover/all",
+            self._guarded(self.api_discover_all),
+        )
+        # Smart-invite endpoint. Mints a one-time pair code + URL,
+        # writes it to a short-TTL store, returns QR + landing
+        # page URL the user can SMS / email / show to the target
+        # device. The /install landing handler below redeems it.
+        r.add_post(
+            "/api/discover/invite",
+            self._guarded(self.api_discover_invite),
+        )
+        # Install landing page. UNGUARDED — this is the URL we hand
+        # to a device that doesn't have One Link yet. It detects
+        # the device's OS via User-Agent and offers the right
+        # install path + the pair code to use after install.
+        r.add_get("/install", self._install_landing)
         # peer.html runs from the public root (no auth token), so
         # it needs an unguarded variant. Returning user-configured
         # public STUN URLs is not a credential leak — STUN URLs are
@@ -2283,6 +2437,209 @@ class UIServer:
                 "happen, so this isn't a marketing claim."
             ),
         })
+
+    # ── Multi-modal LAN discovery (May 16 2026) ──────────────────
+    #
+    # The user said "we need to make this extremely smart" — find
+    # every device on the local network, identify it, and offer to
+    # invite it whether or not it has One Link.
+    #
+    # Three sections returned:
+    #   ready_to_pair  — already running One Link (existing mDNS hit)
+    #   pairable       — discovered devices we think a user wants
+    #                    to pair (phones, laptops, tablets, desktops)
+    #   other_gear     — visible but not the primary target (TVs,
+    #                    speakers, printers, IoT, routers)
+    #
+    # Plus a network_health block that tells the user *why* a scan
+    # might be empty (AP isolation, captive portal, etc.).
+
+    async def api_discover_all(
+        self, request: web.Request,
+    ) -> web.Response:
+        from one_link import lan_discovery as _lan
+        # Pull our existing One-Link-specific peer list so we can
+        # cross-flag discovered devices as already-paired.
+        one_link_peers: list[dict] = []
+        if self.daemon is not None and self.daemon.discovery is not None:
+            try:
+                for p in self.daemon.discovery.registry.list():
+                    one_link_peers.append({
+                        "address": p.address,
+                        "short_id": p.short_id,
+                        "hostname": p.hostname,
+                    })
+            except Exception:
+                pass
+        timeout_s = 6.0
+        try:
+            timeout_s = max(2.0, min(15.0, float(
+                request.query.get("timeout", "6.0")
+            )))
+        except ValueError:
+            timeout_s = 6.0
+        devices = await _lan.full_scan(
+            timeout_s=timeout_s, one_link_peers=one_link_peers,
+        )
+        health = _lan.assess_network_health(devices)
+
+        # Bucket the results.
+        ready_to_pair: list[dict] = []
+        pairable: list[dict] = []
+        other_gear: list[dict] = []
+        for d in devices:
+            entry = {
+                "ip": d.ip,
+                "mac": d.mac,
+                "hostname": d.hostname,
+                "vendor": d.vendor,
+                "kind": d.kind,
+                "model": d.model,
+                "mdns_services": d.mdns_services,
+                "open_ports": d.open_ports,
+                "sources": d.sources,
+                "confidence": d.confidence,
+                "is_pairable": _lan._is_pairable_kind(d.kind),
+            }
+            if d.is_one_link_peer:
+                ready_to_pair.append(entry)
+            elif _lan._is_pairable_kind(d.kind):
+                pairable.append(entry)
+            else:
+                other_gear.append(entry)
+        return web.json_response({
+            "ready_to_pair": ready_to_pair,
+            "pairable": pairable,
+            "other_gear": other_gear,
+            "network_health": {
+                "ap_isolation_suspected": health.ap_isolation_suspected,
+                "captive_portal_suspected": health.captive_portal_suspected,
+                "ipv6_only_suspected": health.ipv6_only_suspected,
+                "has_default_gateway": health.has_default_gateway,
+                "gateway_ip": health.gateway_ip,
+                "messages": health.reasons,
+            },
+            "scanned_seconds": timeout_s,
+        })
+
+    # In-memory invite store. Maps short_code -> {created_ms,
+    # expires_ms, target_label}. Restart wipes (intentional — the
+    # invite is one-shot + ephemeral).
+    _invite_store: dict[str, dict] = {}
+    _INVITE_TTL_MS = 5 * 60 * 1000   # 5 minutes
+    _INVITE_CODE_LEN = 6
+
+    def _mint_invite_code(self) -> str:
+        import secrets, string
+        alphabet = string.ascii_uppercase + string.digits
+        # Avoid easily-confused chars.
+        alphabet = "".join(c for c in alphabet if c not in "O0I1")
+        # 6-character invite, random.
+        for _ in range(20):
+            code = "".join(secrets.choice(alphabet) for _ in range(self._INVITE_CODE_LEN))
+            if code not in self._invite_store:
+                return code
+        # Astronomically unlikely; fallback to longer.
+        return "".join(secrets.choice(alphabet) for _ in range(self._INVITE_CODE_LEN + 2))
+
+    async def api_discover_invite(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Mint a one-time pair invite. Returns the short code, the
+        landing URL, and a QR-svg URL that encodes the landing URL.
+
+        Body:
+          { "target_label": "Sarah's iPhone" }  // optional
+        """
+        import time as _time
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        label = str(body.get("target_label", "") or "").strip()[:80]
+        # Prune expired entries opportunistically.
+        now_ms = int(_time.time() * 1000)
+        for c, e in list(self._invite_store.items()):
+            if e.get("expires_ms", 0) < now_ms:
+                self._invite_store.pop(c, None)
+        code = self._mint_invite_code()
+        self._invite_store[code] = {
+            "created_ms": now_ms,
+            "expires_ms": now_ms + self._INVITE_TTL_MS,
+            "target_label": label,
+        }
+        # Landing URL. Encodes the LAN IP so the target device can
+        # actually reach the daemon (loopback won't work).
+        from one_link.lan_discovery import _local_ips
+        lan_ip = next(
+            (ip for ip in _local_ips()
+             if ip != "127.0.0.1"
+             and not ip.startswith("169.254.")),
+            "127.0.0.1",
+        )
+        port = self.port
+        landing = f"http://{lan_ip}:{port}/install?code={code}"
+        return web.json_response({
+            "code": code,
+            "landing_url": landing,
+            "expires_ms": self._invite_store[code]["expires_ms"],
+            "expires_in_seconds": self._INVITE_TTL_MS // 1000,
+        })
+
+    async def _install_landing(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Public landing page handed to a device that may or may
+        not have One Link installed. UA-sniffs the device, offers
+        the right install path + the pair code.
+
+        Query: ?code=ABC123
+        """
+        code = (request.query.get("code") or "").strip().upper()
+        ua = request.headers.get("User-Agent", "")
+        # Validate the code without leaking which codes exist.
+        invite = self._invite_store.get(code) if code else None
+        import time as _time
+        now_ms = int(_time.time() * 1000)
+        if invite and invite.get("expires_ms", 0) < now_ms:
+            self._invite_store.pop(code, None)
+            invite = None
+        # Detect OS from UA.
+        ua_lc = ua.lower()
+        if "iphone" in ua_lc or "ipad" in ua_lc or "ipod" in ua_lc:
+            os_kind = "ios"
+        elif "android" in ua_lc:
+            os_kind = "android"
+        elif "macintosh" in ua_lc or "mac os" in ua_lc:
+            os_kind = "macos"
+        elif "windows" in ua_lc:
+            os_kind = "windows"
+        elif "linux" in ua_lc:
+            os_kind = "linux"
+        else:
+            os_kind = "other"
+        # Per-OS installer hint. We do NOT link to App Store /
+        # Play Store yet (no public listings); instead we point at
+        # the project's GitHub Releases.
+        os_label = {
+            "ios": "iPhone or iPad",
+            "android": "Android phone or tablet",
+            "macos": "Mac",
+            "windows": "Windows PC",
+            "linux": "Linux machine",
+            "other": "device",
+        }[os_kind]
+        valid = invite is not None
+        body = _render_install_landing(
+            os_kind=os_kind, os_label=os_label,
+            code=code if valid else "",
+            valid=valid,
+        )
+        return web.Response(
+            text=body,
+            content_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def api_peer_rtc_ice_config(
         self, request: web.Request,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from unittest import mock
 
 import pytest
@@ -49,10 +50,13 @@ def test_open_browser_url_standalone_invokes_app_mode_when_chrome_found():
     with mock.patch.object(
         app_mod, "_find_chromium_browser_exe", return_value=fake_browser
     ):
-        with mock.patch.object(app_mod.subprocess, "Popen", side_effect=fake_popen):
-            app_mod._open_browser_url(
-                "http://127.0.0.1:7117/?t=abc", standalone=True
-            )
+        with mock.patch.object(
+            app_mod, "_is_existing_app_window_running", return_value=False
+        ):
+            with mock.patch.object(app_mod.subprocess, "Popen", side_effect=fake_popen):
+                app_mod._open_browser_url(
+                    "http://127.0.0.1:7117/?t=abc", standalone=True
+                )
 
     assert len(captured) == 1
     args = captured[0]["args"]
@@ -93,10 +97,13 @@ def test_open_browser_url_standalone_passes_isolation_and_suppression_flags():
     with mock.patch.object(
         app_mod, "_find_chromium_browser_exe", return_value=fake_browser
     ):
-        with mock.patch.object(app_mod.subprocess, "Popen", side_effect=fake_popen):
-            app_mod._open_browser_url(
-                "http://127.0.0.1:7117/?t=abc", standalone=True
-            )
+        with mock.patch.object(
+            app_mod, "_is_existing_app_window_running", return_value=False
+        ):
+            with mock.patch.object(app_mod.subprocess, "Popen", side_effect=fake_popen):
+                app_mod._open_browser_url(
+                    "http://127.0.0.1:7117/?t=abc", standalone=True
+                )
 
     assert len(captured) == 1
     args = captured[0]
@@ -147,6 +154,30 @@ def test_open_browser_url_standalone_false_skips_app_mode():
         assert wb_open.called
 
 
+def test_open_browser_url_is_idempotent_when_app_window_is_already_open():
+    """Repeated launcher invocations must not keep spawning app windows."""
+    from one_link import app as app_mod
+
+    with mock.patch.object(
+        app_mod,
+        "_find_chromium_browser_exe",
+        return_value=r"C:\msedge.exe",
+    ):
+        with mock.patch.object(
+            app_mod, "_is_existing_app_window_running", return_value=True
+        ):
+            with mock.patch.object(app_mod.subprocess, "Popen") as popen:
+                with mock.patch.object(
+                    app_mod.os, "startfile", create=True, return_value=None
+                ) as startfile:
+                    app_mod._open_browser_url(
+                        "http://127.0.0.1:7117/?t=abc", standalone=True
+                    )
+
+    assert not popen.called
+    assert not startfile.called
+
+
 def test_open_browser_url_falls_back_when_no_chromium():
     """If neither Edge nor Chrome is found, fall back to the default
     browser via os.startfile / webbrowser.open."""
@@ -185,16 +216,19 @@ def test_open_browser_url_falls_back_when_chromium_launch_fails():
     with mock.patch.object(
         app_mod, "_find_chromium_browser_exe", return_value=r"C:\msedge.exe"
     ):
-        with mock.patch.object(app_mod.subprocess, "Popen", side_effect=explode):
-            with mock.patch.object(
-                app_mod.os, "startfile", create=True, return_value=None
-            ) as startfile:
+        with mock.patch.object(
+            app_mod, "_is_existing_app_window_running", return_value=False
+        ):
+            with mock.patch.object(app_mod.subprocess, "Popen", side_effect=explode):
                 with mock.patch.object(
-                    app_mod.webbrowser, "open", return_value=True
-                ) as wb_open:
-                    app_mod._open_browser_url(
-                        "http://127.0.0.1:7117/?t=abc", standalone=True
-                    )
+                    app_mod.os, "startfile", create=True, return_value=None
+                ) as startfile:
+                    with mock.patch.object(
+                        app_mod.webbrowser, "open", return_value=True
+                    ) as wb_open:
+                        app_mod._open_browser_url(
+                            "http://127.0.0.1:7117/?t=abc", standalone=True
+                        )
 
     if os.name == "nt":
         assert startfile.called
@@ -212,6 +246,49 @@ def test_run_app_signature_accepts_standalone_kwarg():
     assert "standalone" in sig.parameters
     # Default should be True (app-mode is the default UX).
     assert sig.parameters["standalone"].default is True
+
+
+def test_spawn_daemon_uses_python_module_in_source_mode(tmp_path):
+    from one_link import app as app_mod
+
+    captured = {}
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = list(args)
+
+        class _FakeProc:
+            pass
+
+        return _FakeProc()
+
+    with mock.patch.object(app_mod, "data_dir", return_value=tmp_path):
+        with mock.patch.object(app_mod.subprocess, "Popen", side_effect=fake_popen):
+            with mock.patch.object(sys, "frozen", False, create=True):
+                app_mod._spawn_daemon()
+
+    assert captured["args"][:3] == [sys.executable, "-m", "one_link.cli"]
+    assert captured["args"][3:] == ["daemon", "-v"]
+
+
+def test_spawn_daemon_uses_cli_args_inside_frozen_binary(tmp_path):
+    from one_link import app as app_mod
+
+    captured = {}
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = list(args)
+
+        class _FakeProc:
+            pass
+
+        return _FakeProc()
+
+    with mock.patch.object(app_mod, "data_dir", return_value=tmp_path):
+        with mock.patch.object(app_mod.subprocess, "Popen", side_effect=fake_popen):
+            with mock.patch.object(sys, "frozen", True, create=True):
+                app_mod._spawn_daemon()
+
+    assert captured["args"] == [sys.executable, "daemon", "-v"]
 
 
 def test_running_daemon_compatibility_requires_source_fingerprint():
