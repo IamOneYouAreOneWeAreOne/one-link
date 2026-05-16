@@ -254,6 +254,47 @@ def _spawn_daemon() -> subprocess.Popen:
     )
 
 
+def _default_window_geometry() -> tuple[int, int, int, int]:
+    """Return (width, height, x, y) for the desktop window.
+
+    Compute 80% of the primary monitor size, clamped to a sensible
+    max (1400x900 — bigger feels overwhelming on dense layouts),
+    centered on screen. Falls back to 1280x800 at (120, 80) when
+    the screen size can't be detected.
+    """
+    width, height = 1280, 800
+    screen_w, screen_h = 0, 0
+    if os.name == "nt":
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            # SM_CXSCREEN / SM_CYSCREEN — primary monitor pixels.
+            screen_w = int(user32.GetSystemMetrics(0))
+            screen_h = int(user32.GetSystemMetrics(1))
+        except Exception:
+            pass
+    else:
+        # tkinter is in the stdlib; cheap probe that works on
+        # macOS / Linux without GUI libs.
+        try:
+            import tkinter as _tk
+            root = _tk.Tk()
+            root.withdraw()
+            screen_w = root.winfo_screenwidth()
+            screen_h = root.winfo_screenheight()
+            root.destroy()
+        except Exception:
+            pass
+    if screen_w >= 800 and screen_h >= 600:
+        # 80% of screen, but clamp the max so on 4K monitors the
+        # window stays at a reasonable read width.
+        width = min(int(screen_w * 0.80), 1400)
+        height = min(int(screen_h * 0.80), 900)
+    x = max(0, (screen_w - width) // 2) if screen_w else 120
+    y = max(0, (screen_h - height) // 2) if screen_h else 80
+    return width, height, x, y
+
+
 def _find_chromium_browser_exe() -> Optional[str]:
     """Locate Edge or Chrome on the local machine. Used by the
     standalone-window launcher: both browsers support ``--app=URL``
@@ -389,6 +430,15 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                     "DownloadBubble",
                     "ChromeWebuiRefresh2023",
                 ])
+                # May 16 2026 — sensible default window size + position.
+                # User reported "the app opens at half-view." Edge
+                # --app= mode otherwise restores the LAST window
+                # geometry from the isolated profile dir; on a fresh
+                # profile that defaults to a small/awkward size. We
+                # compute a window that's 80% of the primary screen
+                # (clamped to 1400x900 max so on huge monitors the
+                # window doesn't dominate) centered on screen.
+                win_w, win_h, win_x, win_y = _default_window_geometry()
                 args = [
                     browser,
                     f"--app={url}",
@@ -396,6 +446,8 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                     "--app-auto-launched",
                     f"--user-data-dir={profile_dir}",
                     "--window-name=One Link",
+                    f"--window-size={win_w},{win_h}",
+                    f"--window-position={win_x},{win_y}",
                     "--no-first-run",
                     "--no-default-browser-check",
                     f"--disable-features={disable_features}",
