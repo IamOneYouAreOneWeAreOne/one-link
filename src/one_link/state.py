@@ -551,6 +551,7 @@ class State:
                     (18, self._migrate_v18_personal_device_mesh),
                     (19, self._migrate_v19_self_mesh_enrollment),
                     (20, self._migrate_v20_self_mesh_performance),
+                    (21, self._migrate_v21_device_guardian),
                 ]
                 for target_version, apply_fn in steps:
                     self._run_atomic_migration(
@@ -804,6 +805,73 @@ class State:
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_self_mesh_perf_samples_ts "
             "ON self_mesh_perf_samples(ts_ms)"
+        )
+
+    def _migrate_v21_device_guardian(self, c: sqlite3.Cursor) -> None:
+        """Device Guardian: anti-theft safety state + tamper-evident events."""
+        cols = {r[1] for r in c.execute("PRAGMA table_info(self_mesh_devices)").fetchall()}
+        if "safety_state" not in cols:
+            c.execute(
+                "ALTER TABLE self_mesh_devices "
+                "ADD COLUMN safety_state TEXT NOT NULL DEFAULT 'trusted'"
+            )
+        if "safety_updated_ms" not in cols:
+            c.execute(
+                "ALTER TABLE self_mesh_devices "
+                "ADD COLUMN safety_updated_ms INTEGER NOT NULL DEFAULT 0"
+            )
+        if "guardian_epoch" not in cols:
+            c.execute(
+                "ALTER TABLE self_mesh_devices "
+                "ADD COLUMN guardian_epoch INTEGER NOT NULL DEFAULT 0"
+            )
+        if "safety_reason" not in cols:
+            c.execute(
+                "ALTER TABLE self_mesh_devices "
+                "ADD COLUMN safety_reason TEXT NOT NULL DEFAULT ''"
+            )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_guardian_events (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_ms                 INTEGER NOT NULL,
+                root_pub              BLOB NOT NULL,
+                device_pub            BLOB NOT NULL,
+                actor_device_pub      BLOB,
+                from_state            TEXT NOT NULL,
+                to_state              TEXT NOT NULL,
+                decision              TEXT NOT NULL,
+                reason                TEXT NOT NULL DEFAULT '',
+                proofs_json           TEXT NOT NULL DEFAULT '[]',
+                effects_json          TEXT NOT NULL DEFAULT '[]',
+                event_hash            TEXT NOT NULL,
+                prev_hash             TEXT NOT NULL DEFAULT '',
+                metadata_json         TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_device_guardian_events_device "
+            "ON device_guardian_events(root_pub, device_pub, ts_ms)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_device_guardian_events_hash "
+            "ON device_guardian_events(event_hash)"
+        )
+        c.execute(
+            """
+            UPDATE self_mesh_devices
+            SET safety_state = 'revoked',
+                safety_updated_ms = CASE
+                    WHEN safety_updated_ms = 0 THEN updated_ms
+                    ELSE safety_updated_ms
+                END,
+                safety_reason = CASE
+                    WHEN safety_reason = '' THEN 'backfilled from revoked flag'
+                    ELSE safety_reason
+                END
+            WHERE revoked = 1 AND safety_state != 'revoked'
+            """
         )
 
     def _migrate_v15_file_index_cache(self, c: sqlite3.Cursor) -> None:
@@ -3529,10 +3597,13 @@ class State:
         local: bool = False,
         trusted: bool = True,
         revoked: bool = False,
+        safety_state: str | None = None,
         metadata: Optional[dict] = None,
         added_ms: int | None = None,
     ) -> dict:
         """Record one separately addressable device under a root identity."""
+        from one_link.device_guardian import normalize_safety_state
+
         self._validate_self_mesh_pub(root_pub, "root_pub")
         self._validate_self_mesh_pub(device_pub, "device_pub")
         kind = str(device_kind or "").strip()
@@ -3540,23 +3611,50 @@ class State:
             raise ValueError("device_kind is required")
         now = _now_ms()
         added = now if added_ms is None else int(added_ms)
+        safety = normalize_safety_state(
+            safety_state or ("revoked" if revoked else "trusted")
+        )
         meta_json = json.dumps(metadata or {}, separators=(",", ":"), sort_keys=True)
         with self._write_lock:
             self._conn.execute(
                 """
                 INSERT INTO self_mesh_devices(
                     root_pub, device_pub, cert, device_kind, label, local,
-                    trusted, revoked, added_ms, updated_ms, metadata_json
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    trusted, revoked, added_ms, updated_ms, metadata_json,
+                    safety_state, safety_updated_ms, guardian_epoch, safety_reason
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(root_pub, device_pub) DO UPDATE SET
                     cert = COALESCE(excluded.cert, self_mesh_devices.cert),
                     device_kind = excluded.device_kind,
                     label = excluded.label,
                     local = excluded.local,
-                    trusted = excluded.trusted,
-                    revoked = excluded.revoked,
+                    trusted = CASE
+                        WHEN self_mesh_devices.safety_state IN (
+                            'maybe_lost', 'frozen', 'revoked', 'quarantined'
+                        ) OR excluded.safety_state IN (
+                            'maybe_lost', 'frozen', 'revoked', 'quarantined'
+                        )
+                        THEN 0
+                        ELSE excluded.trusted
+                    END,
+                    revoked = CASE
+                        WHEN self_mesh_devices.safety_state = 'revoked'
+                             OR excluded.safety_state = 'revoked'
+                        THEN 1
+                        ELSE excluded.revoked
+                    END,
                     updated_ms = excluded.updated_ms,
-                    metadata_json = excluded.metadata_json
+                    metadata_json = excluded.metadata_json,
+                    safety_state = CASE
+                        WHEN self_mesh_devices.safety_state = 'trusted'
+                        THEN excluded.safety_state
+                        ELSE self_mesh_devices.safety_state
+                    END,
+                    safety_updated_ms = CASE
+                        WHEN self_mesh_devices.safety_updated_ms = 0
+                        THEN excluded.safety_updated_ms
+                        ELSE self_mesh_devices.safety_updated_ms
+                    END
                 """,
                 (
                     bytes(root_pub),
@@ -3570,6 +3668,10 @@ class State:
                     added,
                     now,
                     meta_json,
+                    safety,
+                    now,
+                    1 if safety == "revoked" else 0,
+                    "enrolled revoked" if safety == "revoked" else "",
                 ),
             )
         row = self._conn.execute(
@@ -3683,12 +3785,139 @@ class State:
             self._conn.execute(
                 """
                 UPDATE self_mesh_devices
-                SET revoked = 1, trusted = 0, updated_ms = ?
+                SET revoked = 1, trusted = 0, safety_state = 'revoked',
+                    guardian_epoch = guardian_epoch + 1,
+                    safety_updated_ms = ?, safety_reason = 'legacy revoke',
+                    updated_ms = ?
                 WHERE root_pub = ? AND device_pub = ?
                 """,
-                (now, bytes(root_pub), bytes(device_pub)),
+                (now, now, bytes(root_pub), bytes(device_pub)),
             )
         return self.get_self_mesh_device(root_pub=root_pub, device_pub=device_pub)
+
+    def set_self_mesh_device_safety(
+        self,
+        *,
+        root_pub: bytes,
+        device_pub: bytes,
+        requested_state: str,
+        actor_device_pub: bytes | None = None,
+        proofs: Any = None,
+        reason: str = "",
+        actor_is_local: bool = True,
+        active_suspicion: bool = False,
+        metadata: Optional[dict] = None,
+        ts_ms: int | None = None,
+    ) -> dict:
+        from one_link.device_guardian import (
+            decide_device_safety_transition,
+            event_hash,
+            normalize_proofs,
+        )
+
+        self._validate_self_mesh_pub(root_pub, "root_pub")
+        self._validate_self_mesh_pub(device_pub, "device_pub")
+        if actor_device_pub is not None:
+            self._validate_self_mesh_pub(actor_device_pub, "actor_device_pub")
+        now = _now_ms() if ts_ms is None else int(ts_ms)
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT * FROM self_mesh_devices WHERE root_pub = ? AND device_pub = ?",
+                (bytes(root_pub), bytes(device_pub)),
+            ).fetchone()
+            if row is None:
+                raise ValueError("device is not enrolled")
+            current = row["safety_state"] if "safety_state" in row.keys() else (
+                "revoked" if row["revoked"] else "trusted"
+            )
+            decision = decide_device_safety_transition(
+                current,
+                requested_state,
+                proofs=proofs,
+                actor_is_local=actor_is_local,
+                active_suspicion=active_suspicion,
+                now=now,
+            )
+            prev = self._conn.execute(
+                """
+                SELECT event_hash FROM device_guardian_events
+                WHERE root_pub = ? AND device_pub = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (bytes(root_pub), bytes(device_pub)),
+            ).fetchone()
+            prev_hash = str(prev["event_hash"]) if prev else ""
+            proof_list = sorted(normalize_proofs(proofs))
+            event_body = {
+                "ts_ms": now,
+                "root_pub": bytes(root_pub).hex(),
+                "device_pub": bytes(device_pub).hex(),
+                "actor_device_pub": bytes(actor_device_pub).hex() if actor_device_pub else "",
+                "from_state": current,
+                "to_state": decision.target_state,
+                "allowed": decision.allowed,
+                "event": decision.event,
+                "reason": str(reason or decision.detail)[:500],
+                "proofs": proof_list,
+                "effects": list(decision.effects),
+            }
+            digest = event_hash(event_body, prev_hash)
+            self._conn.execute(
+                """
+                INSERT INTO device_guardian_events(
+                    ts_ms, root_pub, device_pub, actor_device_pub,
+                    from_state, to_state, decision, reason, proofs_json,
+                    effects_json, event_hash, prev_hash, metadata_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    bytes(root_pub),
+                    bytes(device_pub),
+                    bytes(actor_device_pub) if actor_device_pub is not None else None,
+                    current,
+                    decision.target_state,
+                    "allowed" if decision.allowed else "denied",
+                    str(reason or decision.detail)[:500],
+                    json.dumps(proof_list, separators=(",", ":")),
+                    json.dumps(list(decision.effects), separators=(",", ":")),
+                    digest,
+                    prev_hash,
+                    json.dumps(metadata or {}, separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            if decision.allowed and decision.target_state != current:
+                revoked = decision.target_state == "revoked"
+                trusted = decision.target_state in {"trusted", "recovered", "suspicious"}
+                self._conn.execute(
+                    """
+                    UPDATE self_mesh_devices
+                    SET safety_state = ?, safety_updated_ms = ?,
+                        safety_reason = ?, updated_ms = ?,
+                        revoked = ?, trusted = ?,
+                        guardian_epoch = guardian_epoch + ?
+                    WHERE root_pub = ? AND device_pub = ?
+                    """,
+                    (
+                        decision.target_state,
+                        now,
+                        str(reason or decision.detail)[:500],
+                        now,
+                        1 if revoked else 0,
+                        1 if trusted and not revoked else 0,
+                        1 if decision.target_state in {"frozen", "revoked", "quarantined"} else 0,
+                        bytes(root_pub),
+                        bytes(device_pub),
+                    ),
+                )
+            device = self.get_self_mesh_device(root_pub=root_pub, device_pub=device_pub)
+            return {
+                "ok": bool(decision.allowed),
+                "decision": decision.to_dict(),
+                "device": device,
+                "event_hash": digest,
+                "previous_hash": prev_hash,
+            }
 
     def list_self_mesh_devices(
         self,
@@ -3715,6 +3944,32 @@ class State:
             params,
         ).fetchall()
         return [self._row_to_self_mesh_device(r) for r in rows]
+
+    def list_device_guardian_events(
+        self,
+        *,
+        root_pub: bytes | None = None,
+        device_pub: bytes | None = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if root_pub is not None:
+            self._validate_self_mesh_pub(root_pub, "root_pub")
+            clauses.append("root_pub = ?")
+            params.append(bytes(root_pub))
+        if device_pub is not None:
+            self._validate_self_mesh_pub(device_pub, "device_pub")
+            clauses.append("device_pub = ?")
+            params.append(bytes(device_pub))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(max(1, min(int(limit), 2000)))
+        sql = (
+            "SELECT * FROM device_guardian_events"
+            f"{where} ORDER BY ts_ms DESC, id DESC LIMIT ?"  # nosec B608
+        )
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_device_guardian_event(r) for r in rows]
 
     def upsert_self_mesh_presence(
         self,
@@ -3899,7 +4154,7 @@ class State:
                     meta_json,
                 ),
             )
-            return int(cur.lastrowid)
+            return int(cur.lastrowid or 0)
 
     def list_self_mesh_audit(
         self,
@@ -3984,7 +4239,7 @@ class State:
                 )
                 """
             )
-            return int(cur.lastrowid)
+            return int(cur.lastrowid or 0)
 
     def list_self_mesh_perf_samples(self, *, limit: int = 120) -> list[dict]:
         rows = self._conn.execute(
@@ -4206,6 +4461,7 @@ class State:
             metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
         except Exception:
             metadata = {}
+        cols = row.keys()
         return {
             "root_pub": bytes(row["root_pub"]),
             "device_pub": bytes(row["device_pub"]),
@@ -4217,6 +4473,48 @@ class State:
             "revoked": bool(row["revoked"]),
             "added_ms": int(row["added_ms"]),
             "updated_ms": int(row["updated_ms"]),
+            "safety_state": (
+                row["safety_state"] if "safety_state" in cols
+                else ("revoked" if row["revoked"] else "trusted")
+            ),
+            "safety_updated_ms": (
+                int(row["safety_updated_ms"]) if "safety_updated_ms" in cols else int(row["updated_ms"])
+            ),
+            "guardian_epoch": (
+                int(row["guardian_epoch"]) if "guardian_epoch" in cols else (1 if row["revoked"] else 0)
+            ),
+            "safety_reason": row["safety_reason"] if "safety_reason" in cols else "",
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+
+    def _row_to_device_guardian_event(self, row: sqlite3.Row) -> dict:
+        def _json_list(name: str) -> list:
+            try:
+                value = json.loads(row[name]) if row[name] else []
+            except Exception:
+                value = []
+            return value if isinstance(value, list) else []
+
+        try:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        except Exception:
+            metadata = {}
+        return {
+            "id": int(row["id"]),
+            "ts_ms": int(row["ts_ms"]),
+            "root_pub": bytes(row["root_pub"]),
+            "device_pub": bytes(row["device_pub"]),
+            "actor_device_pub": (
+                bytes(row["actor_device_pub"]) if row["actor_device_pub"] is not None else None
+            ),
+            "from_state": row["from_state"],
+            "to_state": row["to_state"],
+            "decision": row["decision"],
+            "reason": row["reason"],
+            "proofs": _json_list("proofs_json"),
+            "effects": _json_list("effects_json"),
+            "event_hash": row["event_hash"],
+            "prev_hash": row["prev_hash"],
             "metadata": metadata if isinstance(metadata, dict) else {},
         }
 

@@ -153,5 +153,6 @@ async def test_two_enrolled_daemons_remote_send_file_e2e(tmp_path: Path):
     assert ack["action"] == "send_file_from_device"
     assert sent == [(friend.short_id, "clip.mov")]
     events = [row["event"] for row in laptop_daemon.state.list_self_mesh_audit()]
+    assert "controller_cert_learned" in events
     assert "command_accepted" in events
     assert "remote_send_complete" in events

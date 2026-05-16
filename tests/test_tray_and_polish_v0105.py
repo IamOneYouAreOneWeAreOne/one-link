@@ -18,6 +18,7 @@ Bonus polish:
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -61,8 +62,10 @@ def test_tray_status_tint_handles_all_states():
 def test_tray_optional_deps_in_pyproject():
     """The pyproject.toml must declare a 'tray' optional-deps
     extra so users can `pip install one_link[tray]`."""
-    txt = Path("pyproject.toml").read_text(encoding="utf-8")
-    assert 'tray = ["pystray>=0.19", "pillow>=10.0"]' in txt
+    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    tray = data["project"]["optional-dependencies"]["tray"]
+    assert "pystray>=0.19" in tray
+    assert "pillow>=12.2.0" in tray
 
 
 def test_cli_daemon_respects_no_tray_flag():

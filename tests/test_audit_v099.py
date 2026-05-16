@@ -37,6 +37,7 @@ import asyncio
 import base64
 import json
 from pathlib import Path
+from typing import Any
 
 import blake3
 import pytest
@@ -108,7 +109,7 @@ def _h(token: str) -> dict:
 
 # ───────── auth gate (every guarded route returns 401 without a token) ──
 
-GUARDED_GET_ROUTES = [
+GUARDED_GET_ROUTES: list[str] = [
     "/api/me",
     "/api/peers",
     "/api/palette?q=hi",
@@ -133,7 +134,7 @@ GUARDED_GET_ROUTES = [
     "/api/peers/{fp}/key-history",
 ]
 
-GUARDED_POST_ROUTES = [
+GUARDED_POST_ROUTES: list[tuple[str, dict[str, Any]]] = [
     ("/api/courier/export", {}),
     ("/api/courier/export-file", {}),
     ("/api/courier/copy-to-removable", {}),
@@ -874,6 +875,105 @@ async def test_api_self_mesh_enrollment_mint_revoke_and_remote_instruct(ctx):
     assert revoke.status == 200
     assert (await revoke.json())["revoked"] is True
     assert state.list_self_mesh_audit()[0]["event"] == "device_revoked"
+
+
+@pytest.mark.asyncio
+async def test_api_self_mesh_guardian_freeze_recover_and_revoke_proof(ctx):
+    client, daemon, state, token, peer_fp = ctx
+
+    create = await client.post(
+        "/api/self-mesh/root",
+        headers=_h(token),
+        json={"label": "My devices", "device_label": "Guardian laptop"},
+    )
+    created = await create.json()
+    remote = Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+    remote_b64 = base64.urlsafe_b64encode(remote).rstrip(b"=").decode("ascii")
+    mint = await client.post(
+        "/api/self-mesh/devices/mint",
+        headers=_h(token),
+        json={
+            "root_pub_b64": created["root_pub_b64"],
+            "device_pub_b64": remote_b64,
+            "device_kind": "phone-ios",
+            "label": "Phone",
+        },
+    )
+    assert mint.status == 200
+
+    denied = await client.post(
+        "/api/self-mesh/devices/safety",
+        headers=_h(token),
+        json={
+            "root_pub_b64": created["root_pub_b64"],
+            "device_pub_b64": remote_b64,
+            "state": "revoked",
+            "reason": "panic click",
+        },
+    )
+    assert denied.status == 409
+    denied_body = await denied.json()
+    assert denied_body["ok"] is False
+    assert "offer_freeze_first" in denied_body["decision"]["effects"]
+
+    frozen = await client.post(
+        "/api/self-mesh/devices/safety",
+        headers=_h(token),
+        json={
+            "root_pub_b64": created["root_pub_b64"],
+            "device_pub_b64": remote_b64,
+            "state": "frozen",
+            "proofs": ["recent_unlock"],
+            "reason": "phone stolen",
+        },
+    )
+    assert frozen.status == 200
+    frozen_body = await frozen.json()
+    assert frozen_body["device"]["safety_state"] == "frozen"
+
+    sent = []
+
+    async def fake_resolve(needle):
+        assert needle == peer_fp
+        return object()
+
+    async def fake_send(peer, command):
+        sent.append(command)
+        return {"ack": {"ok": True}}
+
+    daemon.resolve_for_send = fake_resolve
+    daemon.send_self_mesh_remote_instruction = fake_send
+    blocked = await client.post(
+        "/api/self-mesh/remote-instruct",
+        headers=_h(token),
+        json={
+            "root_pub_b64": created["root_pub_b64"],
+            "target_device_pub_b64": remote_b64,
+            "peer_fp": peer_fp,
+            "action": "pull_file_manifest",
+            "scope": {"path": "$HOME/Documents/example.txt"},
+        },
+    )
+    assert blocked.status == 400
+    assert not sent
+
+    restored = await client.post(
+        "/api/self-mesh/devices/safety",
+        headers=_h(token),
+        json={
+            "root_pub_b64": created["root_pub_b64"],
+            "device_pub_b64": remote_b64,
+            "state": "trusted",
+            "proofs": ["recent_unlock"],
+            "reason": "found it",
+        },
+    )
+    assert restored.status == 200
+    assert (await restored.json())["device"]["safety_state"] == "trusted"
+    mesh = await client.get("/api/self-mesh", headers=_h(token))
+    body = await mesh.json()
+    assert body["guardian"]
+    assert any(d["safety_state"] == "trusted" for d in body["devices"])
 
 
 @pytest.mark.asyncio

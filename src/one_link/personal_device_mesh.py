@@ -32,6 +32,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from one_link.device_guardian import safety_blocks_routing, safety_score_penalty
 from one_link.identity import fingerprint_of
 from one_link.identity_dag import verify_device_cert
 
@@ -93,6 +94,7 @@ class MeshDevice:
     local: bool = False
     trusted: bool = True
     revoked: bool = False
+    safety_state: str = "trusted"
 
     def __post_init__(self) -> None:
         if len(self.root_pub) != 32:
@@ -195,6 +197,7 @@ class MeshDecision:
                 "device_kind": self.target.device_kind,
                 "label": self.target.display_name,
                 "local": self.target.local,
+                "safety_state": self.target.safety_state,
             }
         return {
             "status": self.status,
@@ -302,6 +305,8 @@ def _device_rejection_reason(
         return "untrusted"
     if device.revoked:
         return "revoked"
+    if safety_blocks_routing(device.safety_state):
+        return f"guardian_{device.safety_state}"
     if intent.target_device_pub is not None and not hmac.compare_digest(
         device.device_pub,
         intent.target_device_pub,
@@ -378,6 +383,10 @@ def _score_device(
 
     if device.local:
         score += 2.0
+    penalty = safety_score_penalty(device.safety_state)
+    if penalty:
+        score -= penalty
+        facts.append(f"Guardian state is {device.safety_state}.")
 
     return score, tuple(facts)
 

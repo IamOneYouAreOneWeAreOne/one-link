@@ -12,6 +12,8 @@ def test_activity_panel_contains_self_mesh_surface():
     assert 'id="btn-self-mesh-invite"' in src
     assert 'id="btn-self-mesh-claim"' in src
     assert 'id="btn-self-mesh-best"' in src
+    assert 'id="btn-self-mesh-freeze"' in src
+    assert 'id="btn-self-mesh-recover"' in src
     assert 'id="btn-self-mesh-trust-root"' in src
     assert 'id="btn-self-mesh-send"' in src
     assert 'id="self-mesh-advanced"' in src
@@ -26,6 +28,7 @@ def test_self_mesh_ui_fetches_and_listens_for_daemon_events():
     assert 'selfMesh() { return this.get("/api/self-mesh"); }' in src
     assert 'selfMeshRoot(body) { return this.post("/api/self-mesh/root", body); }' in src
     assert 'selfMeshMint(body) { return this.post("/api/self-mesh/devices/mint", body); }' in src
+    assert 'selfMeshDeviceSafety(body) { return this.post("/api/self-mesh/devices/safety", body); }' in src
     assert 'selfMeshRemoteInstruct(body) { return this.post("/api/self-mesh/remote-instruct", body); }' in src
     assert 'selfMeshInvite(body) { return this.post("/api/self-mesh/enrollment-invite", body); }' in src
     assert 'selfMeshClaimInvite(body) { return this.post("/api/self-mesh/enrollment-invite/claim", body); }' in src
@@ -44,6 +47,8 @@ def test_self_mesh_ui_has_enrollment_and_remote_instruction_handlers():
     assert "function mintSelfMeshDeviceCert()" in src
     assert "function enrollSelfMeshCert()" in src
     assert "function revokeSelfMeshDevice()" in src
+    assert "function freezeSelfMeshDevice()" in src
+    assert "function recoverSelfMeshDevice()" in src
     assert "function createSelfMeshInvite()" in src
     assert "function chooseBestSelfMeshDevice()" in src
     assert "function selfMeshActionLabel(action)" in src

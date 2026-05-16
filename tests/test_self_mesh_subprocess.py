@@ -125,7 +125,7 @@ def test_self_mesh_remote_send_crosses_real_daemon_transport(tmp_path: Path):
             "/api/self-mesh/root",
             {"label": "My devices", "device_label": "phone-controller"},
         )
-        laptop_pub_b64 = _local_pub_b64(p.b.home, p.b.short_id)
+        laptop_pub_b64 = _local_pub_b64(p.a.home, p.b.short_id)
         minted = _api(
             p.a.home,
             "POST",

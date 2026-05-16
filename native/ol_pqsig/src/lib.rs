@@ -69,6 +69,7 @@ use ml_dsa::{
     SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
 };
 use rand_core::{CryptoRng, RngCore};
+use std::sync::OnceLock;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
@@ -95,6 +96,8 @@ pub const HYBRID_SIG_LEN: usize = ED25519_SIG_LEN + ML_DSA_65_SIG_LEN;
 
 /// Domain-separation tag prepended to every signed message.
 pub const PROTOCOL_DOMAIN: &[u8] = b"OL-pqsig-v1";
+
+static DUMMY_ML_DSA_SIG: OnceLock<[u8; ML_DSA_65_SIG_LEN]> = OnceLock::new();
 
 // (The `signature::Signer` trait's `try_sign` uses default
 // (empty) context internally — our BLAKE3-hashed transcript
@@ -238,10 +241,18 @@ impl HybridVerifyingKey {
                 got: ml_sig_slice.len(),
             })?;
         let ml_sig_decoded = ml_dsa::Signature::<MlDsa65>::decode(&ml_sig_arr);
+        use ml_dsa::signature::Verifier as _;
         let ml_ok = if let Some(ml_sig) = ml_sig_decoded {
-            use ml_dsa::signature::Verifier as _;
             self.ml_dsa.verify(&transcript, &ml_sig).is_ok()
         } else {
+            let dummy = dummy_ml_dsa_signature();
+            let dummy_arr = EncodedSignature::<MlDsa65>::try_from(dummy.as_slice())
+                .expect("dummy ML-DSA signature length is fixed");
+            let dummy_sig = ml_dsa::Signature::<MlDsa65>::decode(&dummy_arr)
+                .expect("dummy ML-DSA signature must decode");
+            let _ = std::hint::black_box(
+                self.ml_dsa.verify(&transcript, &dummy_sig).is_ok(),
+            );
             false
         };
 
@@ -325,6 +336,20 @@ impl HybridSigningKey {
             ml_dsa_seed,
         })
     }
+}
+
+fn dummy_ml_dsa_signature() -> &'static [u8; ML_DSA_65_SIG_LEN] {
+    DUMMY_ML_DSA_SIG.get_or_init(|| {
+        let seed: B32 = [0xA5u8; ML_DSA_65_SEED_LEN].into();
+        let sk = MlDsaSigningKey::<MlDsa65>::from_seed(&seed);
+        let sig = sk
+            .try_sign(b"OL-pqsig-dummy-invalid-decode-workload")
+            .expect("fixed ML-DSA dummy signing input should sign");
+        let encoded: EncodedSignature<MlDsa65> = sig.encode();
+        let mut out = [0u8; ML_DSA_65_SIG_LEN];
+        out.copy_from_slice(&encoded);
+        out
+    })
 }
 
 /// Canonical message transcript = BLAKE3(PROTOCOL_DOMAIN || message).

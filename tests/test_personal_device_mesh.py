@@ -134,6 +134,29 @@ def test_choose_self_mesh_rejects_revoked_and_storage_starved_devices():
     assert reasons["Laptop"] == "insufficient_storage"
 
 
+def test_choose_self_mesh_rejects_guardian_frozen_device():
+    root_seed, root_pub = _gen_ed25519()
+    _, phone = _device(root_seed, root_pub, "phone-ios", "Phone")
+    phone = pdm.MeshDevice(
+        root_pub=phone.root_pub,
+        device_pub=phone.device_pub,
+        device_kind=phone.device_kind,
+        label=phone.label,
+        cert=phone.cert,
+        safety_state="frozen",
+    )
+    now = 2_500_000
+    decision = pdm.choose_self_mesh_target(
+        [phone],
+        [pdm.DevicePresence(phone.device_pub, "awake", updated_ms=now, network="wifi")],
+        pdm.DeliveryIntent(kind="remote_send_file"),
+        now_ms=now,
+    )
+
+    assert not decision.ready
+    assert decision.rejected[0]["reason"] == "guardian_frozen"
+
+
 def test_choose_specific_target_ignores_better_non_target():
     root_seed, root_pub = _gen_ed25519()
     _, phone = _device(root_seed, root_pub, "phone-ios", "Phone")
