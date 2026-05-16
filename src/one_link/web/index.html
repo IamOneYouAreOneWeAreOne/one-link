@@ -6310,10 +6310,17 @@
     banner = document.createElement("div");
     banner.id = "session-expired-banner";
     banner.className = "session-expired-banner";
+    // Banner copy is deliberately about USER ACTION ("authorize this
+    // device"), not about transient connection state. Doctrine of
+    // Invisibility §3.2.a forbids surfacing connection state to the
+    // user — connection state is the engine's job to handle silently
+    // (which the auto-recovery layer above does for every recoverable
+    // case). The banner only ever appears now for a TRUE credential
+    // mismatch where the user must explicitly re-authorize.
     banner.innerHTML = `
-      <strong>Reconnecting…</strong>
-      The background service restarted with a new credential. Click
-      Reload to re-authenticate, or relaunch One Link from the tray.
+      <strong>Authorize this device.</strong>
+      The local credential for this window is no longer valid. Click
+      Reload to re-authorize, or relaunch One Link from the tray.
       <button class="btn-ghost" id="session-expired-reload">Reload</button>
     `;
     document.body.appendChild(banner);
