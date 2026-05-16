@@ -469,6 +469,106 @@ def test_self_mesh_root_revocation_and_audit_persist(tmp_path: Path):
         s2.close()
 
 
+def test_device_guardian_state_and_hash_chain_persist(tmp_path: Path):
+    db = tmp_path / "state.db"
+    root_pub = b"r" * 32
+    device_pub = b"d" * 32
+    actor_pub = b"a" * 32
+    s1 = State(db_path=db)
+    try:
+        s1.upsert_self_mesh_device(
+            root_pub=root_pub,
+            device_pub=device_pub,
+            device_kind="phone",
+            label="Phone",
+            trusted=True,
+        )
+        frozen = s1.set_self_mesh_device_safety(
+            root_pub=root_pub,
+            device_pub=device_pub,
+            requested_state="frozen",
+            actor_device_pub=actor_pub,
+            proofs=["recent_unlock"],
+            reason="phone stolen",
+            ts_ms=10_000,
+        )
+        assert frozen["ok"] is True
+        assert frozen["device"]["safety_state"] == "frozen"
+        assert frozen["device"]["trusted"] is False
+        denied = s1.set_self_mesh_device_safety(
+            root_pub=root_pub,
+            device_pub=device_pub,
+            requested_state="trusted",
+            actor_device_pub=actor_pub,
+            proofs=[],
+            reason="mistake",
+            ts_ms=11_000,
+        )
+        assert denied["ok"] is False
+        assert denied["device"]["safety_state"] == "frozen"
+        restored = s1.set_self_mesh_device_safety(
+            root_pub=root_pub,
+            device_pub=device_pub,
+            requested_state="trusted",
+            actor_device_pub=actor_pub,
+            proofs=["recent_unlock"],
+            reason="device recovered",
+            ts_ms=12_000,
+        )
+        assert restored["ok"] is True
+        assert restored["device"]["safety_state"] == "trusted"
+    finally:
+        s1.close()
+
+    s2 = State(db_path=db)
+    try:
+        device = s2.get_self_mesh_device(root_pub=root_pub, device_pub=device_pub)
+        assert device["safety_state"] == "trusted"
+        events = list(reversed(s2.list_device_guardian_events(limit=10)))
+        assert len(events) == 3
+        assert events[0]["prev_hash"] == ""
+        assert events[1]["prev_hash"] == events[0]["event_hash"]
+        assert events[2]["prev_hash"] == events[1]["event_hash"]
+    finally:
+        s2.close()
+
+
+def test_device_guardian_upsert_cannot_make_frozen_device_trusted(tmp_path: Path):
+    db = tmp_path / "state.db"
+    root_pub = b"r" * 32
+    device_pub = b"d" * 32
+    actor_pub = b"a" * 32
+    state = State(db_path=db)
+    try:
+        state.upsert_self_mesh_device(
+            root_pub=root_pub,
+            device_pub=device_pub,
+            device_kind="phone",
+            label="Phone",
+            trusted=True,
+        )
+        state.set_self_mesh_device_safety(
+            root_pub=root_pub,
+            device_pub=device_pub,
+            requested_state="frozen",
+            actor_device_pub=actor_pub,
+            proofs=["recent_unlock"],
+            reason="stolen",
+        )
+        row = state.upsert_self_mesh_device(
+            root_pub=root_pub,
+            device_pub=device_pub,
+            device_kind="phone",
+            label="Phone",
+            trusted=True,
+        )
+        assert row["safety_state"] == "frozen"
+        assert row["trusted"] is False
+        assert row["revoked"] is False
+    finally:
+        state.close()
+
+
 def test_self_mesh_performance_samples_are_bounded_and_persist(tmp_path: Path):
     db = tmp_path / "state.db"
     s1 = State(db_path=db)

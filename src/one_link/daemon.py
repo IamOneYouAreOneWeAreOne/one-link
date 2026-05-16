@@ -99,7 +99,9 @@ from one_link.cdc import (
     index_path,
 )
 from one_link.discovery import Discovery, Peer
+from one_link.device_guardian import safety_blocks_remote_instruction
 from one_link.identity import Identity, fingerprint_of, load_or_create
+from one_link.identity_dag import verify_device_cert
 from one_link.personal_device_mesh import (
     DeliveryIntent,
     DevicePresence,
@@ -2254,6 +2256,60 @@ class Daemon:
             if instr is None:
                 raise ValueError(
                     f"remote instruction target rejected: {last_error}"
+                )
+            controller_row = self.state.get_self_mesh_device(
+                root_pub=instr.root_pub,
+                device_pub=instr.controller_device_pub,
+            )
+            if controller_row is None:
+                cert = verify_device_cert(
+                    instr.controller_cert,
+                    expected_root_pub=instr.root_pub,
+                )
+                controller_row = self.state.upsert_self_mesh_device(
+                    root_pub=instr.root_pub,
+                    device_pub=instr.controller_device_pub,
+                    cert=instr.controller_cert,
+                    device_kind=cert.device_kind,
+                    label=cert.device_kind,
+                    local=False,
+                    trusted=True,
+                    safety_state="trusted",
+                    metadata={
+                        "source": "remote_instruction_controller_cert",
+                        "peer_fp": peer_fp,
+                    },
+                )
+                with contextlib.suppress(Exception):
+                    self.state.record_self_mesh_audit(
+                        event="controller_cert_learned",
+                        severity="info",
+                        root_pub=instr.root_pub,
+                        device_pub=instr.controller_device_pub,
+                        peer_fp=peer_fp,
+                        command_id=instr.command_id,
+                        action=instr.action,
+                        detail="trusted root-signed controller cert learned",
+                    )
+            if controller_row.get("revoked") or safety_blocks_remote_instruction(
+                controller_row.get("safety_state")
+            ):
+                raise ValueError(
+                    f"controller device blocked by Guardian: "
+                    f"{controller_row.get('safety_state') or 'revoked'}"
+                )
+            target_row = self.state.get_self_mesh_device(
+                root_pub=instr.root_pub,
+                device_pub=instr.target_device_pub,
+            )
+            if target_row is None:
+                raise ValueError("target device is not enrolled")
+            if target_row.get("revoked") or safety_blocks_remote_instruction(
+                target_row.get("safety_state")
+            ):
+                raise ValueError(
+                    f"target device blocked by Guardian: "
+                    f"{target_row.get('safety_state') or 'revoked'}"
                 )
             self._record_self_mesh_perf_observation(
                 "command_verify",
@@ -13866,6 +13922,7 @@ class Daemon:
                     local=row["local"],
                     trusted=row["trusted"],
                     revoked=row["revoked"],
+                    safety_state=row.get("safety_state") or "trusted",
                 ))
         presence = []
         for row in self.state.list_self_mesh_presence():
@@ -14212,18 +14269,23 @@ class Daemon:
                         packet = _native_sphinx.build_cover_packet(
                             eph_sk, circuit, _cover_payload_size
                         )
-                        kind, _next, payload = _native_sphinx.peel_sphinx(
+                        kind, _next, _payload = _native_sphinx.peel_sphinx(
                             self._cover_relay_sk, packet
                         )
-                        if kind != "deliver":
+                        # Audit M4 May 2026 — `peel_sphinx` now returns
+                        # kind == "cover" directly for cover packets
+                        # (the destination's per-circuit MAC over the
+                        # cover-trailer authenticates the cover bit
+                        # cryptographically; no plaintext sentinel
+                        # fallback). The previous code asserted
+                        # kind == "deliver" + checked the plaintext
+                        # sentinel, which was the M8 oracle vector.
+                        # That path is gone; cover packets now peel
+                        # as "cover".
+                        if kind != "cover":
                             raise RuntimeError(
                                 f"cover-traffic peel: expected "
-                                f"deliver, got {kind!r}"
-                            )
-                        if not _native_sphinx.is_cover_payload(payload):
-                            raise RuntimeError(
-                                "cover-traffic peel: payload missing "
-                                "cover sentinel"
+                                f"cover, got {kind!r}"
                             )
                         # Audit L8: locked counter mutation.
                         with self._telemetry_lock:
