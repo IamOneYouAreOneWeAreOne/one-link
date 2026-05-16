@@ -6663,11 +6663,27 @@
     banner.classList.add("show");
   }
 
+  // May 16 2026 — RED-TEAM FIX. This script block runs at end-of-
+  // body, by which point DOMContentLoaded has ALREADY fired.
+  // Registering a listener for it after the fact never fires —
+  // these handlers were silently dead. Replace with an
+  // "either run now or wait for DOMContentLoaded" helper.
+  function _onReady(fn) {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", fn);
+    } else {
+      // DOM already ready; run synchronously. setTimeout(0) defers
+      // to the next tick so any same-block code that constructs
+      // referenced elements still has a chance to run first.
+      setTimeout(fn, 0);
+    }
+  }
+
   // Wire the "Update now" click. Calls POST /api/update/install, shows
   // a "Updating..." spinner, waits for the WebSocket to reconnect.
   // The daemon respawns into the new version; checkForUpdate fires
   // again automatically once the new WS hello arrives.
-  document.addEventListener("DOMContentLoaded", () => {
+  _onReady(() => {
     const installBtn = document.getElementById("update-banner-install");
     if (!installBtn) return;
     installBtn.addEventListener("click", async () => {
@@ -6694,7 +6710,7 @@
 
   // Per-version dismiss; clicked once, hidden until a newer version
   // is published.
-  document.addEventListener("DOMContentLoaded", () => {
+  _onReady(() => {
     const dismiss = document.getElementById("update-banner-dismiss");
     if (!dismiss) return;
     dismiss.addEventListener("click", () => {
@@ -11962,8 +11978,24 @@
     syncA11y();
   }
 
-  ["set-autoaccept", "set-rendezvous", "dev-mute", "dev-allow-all"]
-    .forEach(bindSwitch);
+  // May 16 2026 — RED-TEAM FIX. The Settings panel + device drawer
+  // had 13 visual "toggle" UIs (CSS-styled checkboxes), but only 4
+  // were wired through bindSwitch. The other 9 were dead — clicking
+  // the slider did NOTHING because the underlying <input> never
+  // flipped + no change event ever fired. (The input itself is
+  // hidden via `display: none` so users can't click it directly
+  // either.) Users reported "no toggle works."
+  //
+  // Fix: bindSwitch every checkbox that lives inside a .toggle
+  // wrapper. Plus remove the stale "set-rendezvous" entry (it's a
+  // textarea — bindSwitch silently no-oped for it but it confused
+  // future maintainers).
+  //
+  // We pull the list dynamically from the DOM so a future toggle
+  // added to the HTML is auto-wired without touching this list.
+  document.querySelectorAll(".toggle > input[type='checkbox'][id]").forEach((input) => {
+    bindSwitch(input.id);
+  });
 
   const DRAWER_CAPS = ["chat", "files", "folder_sync"];
 
@@ -17107,7 +17139,7 @@
   }
 
   // Wire close button + Esc to close + Ctrl+Shift+P to open.
-  document.addEventListener("DOMContentLoaded", () => {
+  _onReady(() => {
     const closeBtn = document.getElementById("privacy-panel-close");
     if (closeBtn) closeBtn.addEventListener("click", _hidePrivacyPanel);
     const overlay = document.getElementById("privacy-panel-overlay");
@@ -17372,7 +17404,7 @@
   // Pre-call control handlers: toggle local-media tracks before the
   // peer picks up. The state propagates to startLocalMedia /
   // setupRtcPeerConnection so the call lands in the chosen state.
-  document.addEventListener("DOMContentLoaded", () => {
+  _onReady(() => {
     const preMute = $$("#btn-call-precmute");
     const preCam = $$("#btn-call-precam");
     const sendMsg = $$("#btn-call-send-msg-instead");
