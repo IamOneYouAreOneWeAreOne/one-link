@@ -1385,3 +1385,1186 @@ For the people.
 Just works.
 
 We are One.
+
+---
+
+# Product Design Addendum
+
+This addendum turns One Setup from a product spec into a design and implementation pack.
+
+It covers:
+
+- wireframes
+- final user copy
+- motion and animation rules
+- personalization rules
+- success metrics
+- expanded security/abuse cases
+- families, teams, and shared-computer edge cases
+- accessibility depth
+- implementation tickets mapped to system areas
+- automated walkthrough requirements
+
+## Screen Wireframes
+
+These are layout blueprints, not visual mocks. The actual UI should use the One Link design system and stay quiet, dense, and calm.
+
+### Welcome
+
+```text
+┌──────────────────────────────────────────────┐
+│                                              │
+│                 [One glyph]                  │
+│                                              │
+│                 You are One                  │
+│                                              │
+│  Your devices can talk directly, privately,  │
+│  and without an account.                     │
+│                                              │
+│      [ Set up One Link ]   [ Skip for now ]  │
+│                                              │
+│      No account   Encrypted   Works nearby   │
+│                                              │
+└──────────────────────────────────────────────┘
+```
+
+Rules:
+
+- no carousel
+- no feature list
+- no screenshot gallery
+- no marketing headline
+- the One Link name and promise must be obvious within one second
+
+### Name Device
+
+```text
+┌──────────────────────────────────────────────┐
+│  Step 1 of 6                                 │
+│                                              │
+│  Name this device                            │
+│  This name appears only to devices you trust.│
+│                                              │
+│  ┌────────────────────────────────────────┐  │
+│  │ Alex's laptop                          │  │
+│  └────────────────────────────────────────┘  │
+│                                              │
+│  ┌────────────── Device card ─────────────┐  │
+│  │ Alex's laptop                          │  │
+│  │ This device                            │  │
+│  │ Ready to add your other devices        │  │
+│  └────────────────────────────────────────┘  │
+│                                              │
+│        [ Continue ]     [ Use default ]      │
+└──────────────────────────────────────────────┘
+```
+
+Rules:
+
+- show the result as a device card immediately
+- never ask the user to understand identity keys here
+- duplicate names get a friendly warning, not a hard block
+
+### Identity
+
+```text
+┌──────────────────────────────────────────────┐
+│  Step 2 of 6                                 │
+│                                              │
+│  Create your One identity                    │
+│  This lets your devices belong to you        │
+│  without an account.                         │
+│                                              │
+│  ┌────────────── Proof card ──────────────┐  │
+│  │ Account needed: No                     │  │
+│  │ Stored: On your devices                │  │
+│  │ Used for: Trusting your devices        │  │
+│  └────────────────────────────────────────┘  │
+│                                              │
+│      [ Create identity ]  [ I already have one ] │
+└──────────────────────────────────────────────┘
+```
+
+Rules:
+
+- identity creation should feel like setup, not security ceremony
+- raw recovery material stays hidden
+- import path is available but not dominant
+
+### Add Device
+
+```text
+┌──────────────────────────────────────────────┐
+│  Step 3 of 6                                 │
+│                                              │
+│  Add your phone or laptop                    │
+│  Open One Link on another device and scan.   │
+│                                              │
+│       ┌──────── QR code ────────┐            │
+│       │                         │            │
+│       │                         │            │
+│       └─────────────────────────┘            │
+│                                              │
+│       Code: 482 913     expires in 02:00     │
+│                                              │
+│  [ Use code instead ] [ Pair later ]         │
+└──────────────────────────────────────────────┘
+```
+
+When a device is detected:
+
+```text
+┌──────────────────────────────────────────────┐
+│  Alex's laptop  ─────────────  Alex's phone  │
+│  This device                    Waiting      │
+│                                              │
+│              Check the code next             │
+│                                              │
+│                  [ Continue ]                │
+└──────────────────────────────────────────────┘
+```
+
+Rules:
+
+- the QR is the default
+- code fallback is always visible
+- expiration is visible
+- detected device appears before trust, clearly marked pending
+
+### Verify Trust
+
+```text
+┌──────────────────────────────────────────────┐
+│  Step 4 of 6                                 │
+│                                              │
+│  Check the trust code                        │
+│  Both devices should show this same code.    │
+│                                              │
+│                 482 913                      │
+│                                              │
+│  Alex's laptop                  Alex's phone │
+│  This device                    Pending      │
+│                                              │
+│  [ Codes match ] [ Codes do not match ]      │
+│                                              │
+│  [ Read aloud ] [ Show visual code ]         │
+└──────────────────────────────────────────────┘
+```
+
+Rules:
+
+- "Codes match" must be deliberate
+- mismatch must stop trust immediately
+- never phrase mismatch as user error
+
+### First Success
+
+```text
+┌──────────────────────────────────────────────┐
+│  Step 5 of 6                                 │
+│                                              │
+│  Send something to yourself                  │
+│  One Link will choose the best private path. │
+│                                              │
+│  ┌──────────── Target device ─────────────┐  │
+│  │ Alex's phone                           │  │
+│  │ Trusted and nearby                     │  │
+│  └────────────────────────────────────────┘  │
+│                                              │
+│  [ Send test message ] [ Send a file ]       │
+└──────────────────────────────────────────────┘
+```
+
+Success state:
+
+```text
+┌──────────────────────────────────────────────┐
+│  Sent privately                              │
+│                                              │
+│  Encrypted        Yes                        │
+│  Trusted device   Alex's phone               │
+│  Account used     No                         │
+│  Route            Direct/local when possible │
+│                                              │
+│  [ View privacy proof ] [ Continue ]         │
+└──────────────────────────────────────────────┘
+```
+
+Rules:
+
+- default to test message
+- generated test file is second
+- user file picker is optional
+- proof is compact until expanded
+
+### Safety
+
+```text
+┌──────────────────────────────────────────────┐
+│  Step 6 of 6                                 │
+│                                              │
+│  If a device is lost                         │
+│  You can freeze it from another trusted      │
+│  device.                                    │
+│                                              │
+│  ┌──────────── Safety card ───────────────┐  │
+│  │ Freeze lost device                     │  │
+│  │ Revoke permanently                     │  │
+│  │ Clear app traces here                  │  │
+│  │ Keep original files unless you choose  │  │
+│  └────────────────────────────────────────┘  │
+│                                              │
+│  [ Review safety ] [ Do this later ]         │
+└──────────────────────────────────────────────┘
+```
+
+Rules:
+
+- safety should feel empowering, not scary
+- explain what freeze does and does not do
+- do not bury abuse protection
+
+### Finish
+
+```text
+┌──────────────────────────────────────────────┐
+│                                              │
+│              One Link is ready               │
+│                                              │
+│  ✓ Identity ready                            │
+│  ✓ This device named                         │
+│  ✓ Trusted device paired                     │
+│  ✓ First message sent                        │
+│  ✓ Privacy proof available                   │
+│                                              │
+│              [ Start using One Link ]        │
+└──────────────────────────────────────────────┘
+```
+
+Rules:
+
+- land the user where their success happened
+- Chat if first message
+- Files if first file
+- Activity if setup skipped after safety
+
+## Final Copy Deck
+
+This is the exact plain-language copy target.
+
+### Welcome
+
+Headline:
+
+**You are One**
+
+Body:
+
+Your devices can talk directly, privately, and without an account.
+
+Primary:
+
+**Set up One Link**
+
+Secondary:
+
+**Skip for now**
+
+Proof chips:
+
+- No account
+- Encrypted
+- Works nearby
+
+### Device Name
+
+Headline:
+
+**Name this device**
+
+Body:
+
+This name appears only to devices you trust.
+
+Input label:
+
+Device name
+
+Placeholder:
+
+Alex's laptop
+
+Validation:
+
+Use a name you will recognize later.
+
+Duplicate warning:
+
+You already have a device with this name. You can keep it, but a clearer name may help.
+
+### Identity
+
+Headline:
+
+**Create your One identity**
+
+Body:
+
+This lets your phone, laptop, and desktop belong to you without an account.
+
+Success:
+
+Your One identity is ready.
+
+Import body:
+
+Use this only if you already created a One identity on another device.
+
+### Add Device
+
+Headline:
+
+**Add your phone or laptop**
+
+Body:
+
+Open One Link on the other device and scan this code.
+
+Fallback:
+
+Can’t scan? Enter this code instead.
+
+Waiting:
+
+Waiting for your device...
+
+Detected:
+
+Device found. Check the trust code next.
+
+Expired:
+
+This invite expired. Create a fresh one when both devices are nearby.
+
+### Trust
+
+Headline:
+
+**Check the trust code**
+
+Body:
+
+Both devices should show the same code.
+
+Primary:
+
+**Codes match**
+
+Secondary:
+
+**Codes do not match**
+
+Mismatch:
+
+One Link stopped before trusting anything. Try again when both screens are in front of you.
+
+### First Send
+
+Headline:
+
+**Send something to yourself**
+
+Body:
+
+One Link will choose the best private path.
+
+Primary:
+
+**Send test message**
+
+Secondary:
+
+**Send a file**
+
+Success:
+
+Sent privately.
+
+Failure:
+
+The device is trusted, but the send did not finish. One Link can retry or use another path.
+
+### Privacy Proof
+
+Headline:
+
+**What just happened**
+
+Body:
+
+One Link sent it through your trusted fabric.
+
+Receipt labels:
+
+- Encrypted
+- Trusted device
+- Account used
+- Route
+- App traces
+
+### Safety
+
+Headline:
+
+**If a device is lost**
+
+Body:
+
+You can freeze a trusted device from another trusted device.
+
+Freeze:
+
+Block this device from One Link until you recover it.
+
+Revoke:
+
+Permanently remove trust for this device.
+
+Clear traces:
+
+Clear One Link history on this device without deleting your original computer files.
+
+### Finish
+
+Headline:
+
+**One Link is ready**
+
+Body:
+
+Your devices can now act as one private fabric.
+
+Primary:
+
+**Start using One Link**
+
+## Technical Copy Deck
+
+Technical Mode copy should be precise but still readable.
+
+### Identity
+
+Root identity exists. Local device certificate minted and bound to this device.
+
+Fields:
+
+- root fingerprint
+- local device fingerprint
+- certificate status
+- created at
+- recovery status
+
+### Pairing
+
+Short-lived pairing invite created. Pending device must complete transcript-bound trust-code verification before enrollment.
+
+Fields:
+
+- invite id
+- expires at
+- pending device fingerprint fragment
+- pairing transcript id
+- replay state
+
+### Trust
+
+Trust-code confirmation accepted. Device certificate enrolled under root identity. Audit event recorded.
+
+Fields:
+
+- SAS
+- enrolled device id
+- issuer
+- audit event id
+- revocation state
+
+### Transfer
+
+Transfer dispatched over selected route. Secure channel authenticated. Replay protection active.
+
+Fields:
+
+- transfer id
+- selected target
+- route
+- effective speed
+- wire bytes
+- skipped bytes
+- secure channel id
+- audit event id
+
+### Privacy Proof
+
+Privacy proof generated from actual route truth, secure-channel state, policy decisions, and audit event references.
+
+Fields:
+
+- proof id
+- route truth
+- account/cloud dependency
+- channel authentication
+- capability checks
+- audit event ids
+
+## Motion And Animation Rules
+
+Motion should make One Link feel alive, not busy.
+
+Allowed:
+
+- gentle fade between setup steps
+- device card slides in when a device is detected
+- connection line pulses while pairing is pending
+- trust confirmation completes with a short glow/check
+- transfer progress uses a restrained progress bar
+- success receipt settles into place
+
+Avoid:
+
+- bouncing UI
+- constant loops
+- confetti
+- dramatic warning animations
+- large layout shifts
+- motion tied to reading essential information
+
+Durations:
+
+- step transition: 160-220 ms
+- device detected: 220-280 ms
+- success confirmation: 260-360 ms
+- progress updates: no faster than necessary, coalesced to animation frames
+
+Reduced motion:
+
+- replace movement with opacity changes
+- no pulsing connection line
+- no sliding device cards
+
+Motion principle:
+
+The system should feel responsive, not performative.
+
+## Personalization Rules
+
+One Setup should adapt without becoming creepy.
+
+Signals allowed:
+
+- local device type
+- current OS name
+- existing device names
+- setup completion state
+- paired device count
+- transfer history counts
+- local permission state
+- current network reachability
+- active risks
+
+Signals avoided:
+
+- reading user documents for personalization
+- inferring sensitive identity details
+- uploading behavior
+- cloud analytics
+
+Examples:
+
+- If on Windows desktop: suggest "Alex's PC" or "Desktop".
+- If a phone peer appears: say "Add your phone".
+- If no camera scan is possible: default to code entry.
+- If no network route is available: show local/no-router options.
+- If user already sent a file: skip first file and show privacy proof.
+- If user has many received duplicates: suggest collapsed view, not during first setup.
+
+Priority:
+
+1. safety
+2. active setup task
+3. first success
+4. privacy proof
+5. recovery
+6. optional feature discovery
+
+## Success Metrics
+
+One Setup should be measured locally and privately.
+
+No cloud telemetry is required.
+
+Local metrics:
+
+- setup started
+- setup skipped
+- setup completed
+- time to first paired device
+- time to first message
+- time to first file
+- pairing failed count
+- trust mismatch count
+- first-send failed count
+- privacy proof viewed
+- safety reviewed
+- recovery configured
+- setup resumed after skip
+
+Product targets:
+
+- first action visible in under 1 second
+- full setup path possible in under 60 seconds when two devices are available
+- skip possible in one click
+- first message sent in under 10 seconds after trust
+- QR invite visible in under 500 ms after request
+- setup status endpoint under 100 ms locally
+- no more than one primary action per screen
+- zero dead-end failure states
+
+Privacy:
+
+- metrics stay local by default
+- diagnostics export is user-initiated
+- no hidden product analytics
+
+## Expanded Security And Abuse Cases
+
+### False Lost-Device Claims
+
+Risk:
+
+Someone tries to freeze a device they do not own or should not control.
+
+Requirement:
+
+- freeze requires trusted authority
+- show which trusted device requested freeze
+- allow review from another trusted device
+- record audit event
+- recovery cannot be completed by the frozen device alone
+
+### Coercive Device Revocation
+
+Risk:
+
+An abusive person forces or tricks another person into revoking a device.
+
+Requirement:
+
+- revoke copy must be clear and slow
+- require stronger confirmation
+- explain consequences
+- preserve audit record
+- offer "freeze first" as safer reversible action
+
+### Shared Computer
+
+Risk:
+
+Multiple people use the same OS account or machine.
+
+Requirement:
+
+- make device ownership clear
+- local traces warning must be explicit
+- offer app lock/session lock where available
+- setup should not expose paired device details on locked screen
+
+### Family Device
+
+Risk:
+
+A tablet or laptop belongs to a family, not one person.
+
+Requirement:
+
+- device name can reflect shared ownership
+- trust copy should say "devices you trust", not "devices you own" everywhere
+- technical mode shows exact identity/device owner state
+
+### Team/Work Device
+
+Risk:
+
+Work devices may have policies or multiple admins.
+
+Requirement:
+
+- avoid promising full local control if OS policy can override
+- technical receipt should show local-only proof, not compliance claims
+- allow setup skip and technical export for admin review
+
+### Attacker Nearby During Pairing
+
+Risk:
+
+Malicious device attempts to race pairing.
+
+Requirement:
+
+- pending device card must be visibly pending
+- trust code required
+- device name alone never proves trust
+- expired/replayed invite fails
+
+### QR Screenshot Reuse
+
+Risk:
+
+An invite QR is captured and reused.
+
+Requirement:
+
+- short expiration
+- nonce-bound invite
+- one-time use
+- clear expired state
+
+### User Misunderstands Clear Traces
+
+Risk:
+
+User thinks "clear traces" deletes original files.
+
+Requirement:
+
+- always say "One Link history on this device"
+- always say original computer files are not deleted unless a separate file action says so
+- preview categories before clearing
+
+## Families, Teams, And Shared-Use Design
+
+One Link should support different trust shapes without adding complexity to first-run setup.
+
+### Individual
+
+Default.
+
+Language:
+
+- your phone
+- your laptop
+- your devices
+
+### Family
+
+Detected only if the user names devices that way or chooses shared wording.
+
+Language:
+
+- trusted family device
+- shared tablet
+- this device is shared
+
+### Team
+
+Optional later mode, not part of first-run default.
+
+Language:
+
+- trusted team device
+- workspace device
+- admin review
+
+Rule:
+
+Do not force user-type selection during first setup. Let naming and later settings handle it.
+
+## Accessibility Deep Requirements
+
+Keyboard:
+
+- Tab order follows visual order
+- Enter activates primary action when safe
+- Esc closes only when safe or asks confirmation
+- arrow keys may move within progress dots only if dots are interactive
+
+Screen reader:
+
+- each step announces heading and step count
+- QR code has text fallback announced nearby
+- trust code is read as grouped digits
+- errors use `aria-live`
+- progress state is not color-only
+
+Low vision:
+
+- code size large enough
+- focus visible
+- no tiny critical labels
+- details readable at 200% zoom
+
+Cognitive accessibility:
+
+- one primary task per screen
+- no jargon in Human Mode
+- failure states say what happened and what to do next
+- no countdown-only pressure; expired invite can be renewed
+
+Motor accessibility:
+
+- buttons large enough
+- no drag-only required actions
+- QR alternative code available
+
+## Implementation Tickets
+
+These tickets map the spec to concrete build work.
+
+### Ticket 1: Setup State Model
+
+Area:
+
+- daemon state
+- server settings
+- UI state
+
+Work:
+
+- add setup fields
+- expose setup status endpoint
+- persist skip/complete timestamps
+- derive checklist state from real system state
+
+Tests:
+
+- status derivation
+- skip vs complete
+- returning user
+
+### Ticket 2: Replace Legacy Onboarding Shell
+
+Area:
+
+- `src/one_link/web/index.html`
+- onboarding tests
+
+Work:
+
+- remove old passive four-step onboarding
+- add One Setup shell
+- add step router
+- add skip/resume behavior
+
+Tests:
+
+- markup
+- button wiring
+- keyboard flow
+- skip every step
+
+### Ticket 3: Device Naming
+
+Area:
+
+- settings API
+- current device/profile state
+- UI device card
+
+Work:
+
+- save device name
+- validate name
+- show current device card
+
+Tests:
+
+- empty/duplicate/control characters
+- server persistence
+
+### Ticket 4: Identity Create/Import
+
+Area:
+
+- identity module
+- self-mesh root state
+- setup API
+
+Work:
+
+- create identity action
+- import identity action
+- root/device certificate state
+- technical receipt fields
+
+Tests:
+
+- idempotent create
+- import validation
+- no secret leakage
+
+### Ticket 5: Device Invite And Pairing
+
+Area:
+
+- pairing API
+- QR generation
+- peer/self-mesh enrollment
+
+Work:
+
+- short-lived invite
+- QR/code rendering
+- pairing poll
+- pending device card
+- expiration/replay handling
+
+Tests:
+
+- expiry
+- replay
+- pending state
+- code fallback
+
+### Ticket 6: Trust Verification
+
+Area:
+
+- secure pairing transcript
+- SAS/trust-code UI
+- audit events
+
+Work:
+
+- show trust code
+- accept match
+- reject mismatch
+- enroll only after explicit match
+
+Tests:
+
+- mismatch blocks trust
+- accept enrolls
+- audit written
+
+### Ticket 7: First Message
+
+Area:
+
+- chat send
+- selected target
+- setup step
+
+Work:
+
+- send generated test message
+- select trusted target automatically
+- show success/failure receipt
+
+Tests:
+
+- dispatch path
+- no target fallback
+- failure retry
+
+### Ticket 8: First File
+
+Area:
+
+- file send
+- generated setup file
+- transfer proof
+
+Work:
+
+- generate tiny test file
+- send via real transfer path
+- show progress and receipt
+
+Tests:
+
+- transfer created
+- sent tab updates
+- proof references transfer
+
+### Ticket 9: Privacy Proof
+
+Area:
+
+- activity/audit
+- privacy panel
+- route truth
+
+Work:
+
+- create setup proof receipt
+- human proof
+- technical proof
+- export proof
+
+Tests:
+
+- proof uses real route/audit ids
+- redaction
+- details hidden by default
+
+### Ticket 10: Safety Review
+
+Area:
+
+- device freeze/revoke
+- trace clearing
+- recovery device
+
+Work:
+
+- explain freeze/revoke/clear traces
+- link to real actions
+- configure recovery recommendation
+
+Tests:
+
+- no unauthorized freeze
+- revoke confirmation
+- trace copy accurate
+
+### Ticket 11: Settings Setup Page
+
+Area:
+
+- settings shell
+- technical diagnostics
+
+Work:
+
+- add Setup page
+- human checklist
+- technical toggle
+- run diagnostics
+- export receipt
+
+Tests:
+
+- all controls wired
+- technical mode hidden by default
+- export redacts secrets
+
+### Ticket 12: Empty States And One Now
+
+Area:
+
+- Chat
+- Files
+- Folders
+- Activity
+- Calls
+
+Work:
+
+- route empty-state actions to setup steps
+- One Now setup priorities
+- no nagging after skip
+
+Tests:
+
+- empty states show correct action
+- skipped setup does not auto-popup
+- One Now priority order
+
+### Ticket 13: Automated Walkthrough
+
+Area:
+
+- Playwright or equivalent UI driver
+- desktop app launch
+
+Work:
+
+- clean profile launch
+- complete setup path
+- skip path
+- pairing simulated or multi-daemon
+- screenshot checks
+
+Tests:
+
+- no blank screens
+- no overlapping text
+- all buttons clickable
+- setup completes
+
+## Automated UI Walkthrough Requirements
+
+The app needs a real walkthrough test, not just static markup tests.
+
+Required scenarios:
+
+1. clean first launch, skip immediately
+2. clean first launch, complete setup without second device by choosing pair later
+3. clean first launch, complete setup with simulated second daemon
+4. trust-code mismatch
+5. expired invite
+6. first test message success
+7. first file success
+8. privacy proof details open/close
+9. safety review open/close
+10. settings technical mode on/off
+11. small window layout
+12. mobile/narrow layout where applicable
+13. keyboard-only flow
+14. reduced-motion flow
+
+Visual assertions:
+
+- no text overlap
+- no clipped primary buttons
+- progress visible
+- QR/code fallback visible
+- details hidden by default
+- technical details hidden in Human Mode
+- skip always visible
+- one primary action per step
+
+Functional assertions:
+
+- every visible button has an effect
+- skip persists
+- complete persists
+- setup does not reappear after complete
+- skipped setup does not nag
+- checklist remains accessible
+- audit events are created
+- generated proof references real action
+
+## Quality Gates
+
+Before calling One Setup complete:
+
+- static UI wiring tests pass
+- API setup-state tests pass
+- two-daemon pairing test passes
+- first message integration test passes
+- first file integration test passes
+- privacy proof test passes
+- stolen-device safety policy tests pass
+- trace-clearing copy tests pass
+- Playwright walkthrough screenshots pass
+- desktop packaged build includes the new setup UI
+- desktop smoke test passes
+- no secrets in exported technical receipt
+- no forced tutorial after skip
+
+## Final Product Bar
+
+One Setup is not complete because it exists.
+
+It is complete when a person can open One Link for the first time and feel:
+
+- I know what to do.
+- I can skip if I want.
+- I trust what just happened.
+- I paired a device without confusion.
+- I sent something without thinking about networks.
+- I know how to protect myself if a device is lost.
+- I can see technical proof if I want it.
+- The app did not talk down to me.
+- The app did not trap me.
+- The app worked.
