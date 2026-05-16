@@ -88,20 +88,22 @@ JUST_WORKS = SovereigntyPreset(
     name="just_works",
     label="Just Works",
     description=(
-        "Best for most people. Pair across the internet works out "
-        "of the box. Update notifications surface in the UI. No "
-        "corporate accounts, no analytics, no cloud — just the bare "
-        "minimum infrastructure (community-run STUN, GitHub Releases) "
-        "needed to make the engine usable everywhere."
+        "Best for most people. Connecting your phone, laptop, and "
+        "other computers works out of the box, even across different "
+        "networks. You'll see a small note when a new version of One "
+        "Link is available. No accounts, no profile, no tracking. "
+        "Uses a tiny bit of public internet (small community-run "
+        "servers, not Google or Microsoft) to help two devices find "
+        "each other when they're on different networks."
     ),
     update_check_enabled=True,
     stun_servers=COMMUNITY_STUN_SERVERS,
     mdns_discovery_enabled=True,
     rendezvous_enabled=False,
     outbound_summary=(
-        "Community STUN (Nextcloud + Sipgate + Antisip) for NAT "
-        "traversal · GitHub Releases poll every 6h for updates · "
-        "mDNS multicast on LAN"
+        "Uses small community servers (Nextcloud, Sipgate) only to "
+        "help devices find each other. Checks for updates once every "
+        "6 hours. Local Wi-Fi sharing on."
     ),
 )
 
@@ -109,33 +111,35 @@ QUIET = SovereigntyPreset(
     name="quiet",
     label="Quiet",
     description=(
-        "Zero outbound to anything beyond your LAN. Cross-network "
-        "pairing requires you to configure your own STUN (or pair "
-        "in-person first). Update notifications disabled. Pick this "
-        "if you want a strict floor and you're OK setting up the "
-        "rest yourself."
+        "Only talks to other devices on your local Wi-Fi. Connecting "
+        "across different networks (for example, your phone at a "
+        "coffee shop to your laptop at home) will not work unless you "
+        "set it up yourself. Update notifications are off. Pick this "
+        "for the strictest privacy without going completely offline."
     ),
     update_check_enabled=False,
     stun_servers=(),
     mdns_discovery_enabled=True,
     rendezvous_enabled=False,
-    outbound_summary="mDNS multicast on LAN only · no other outbound",
+    outbound_summary=(
+        "Local Wi-Fi only. No other outside connections."
+    ),
 )
 
 OFF_GRID = SovereigntyPreset(
     name="off_grid",
     label="Off-grid",
     description=(
-        "Activist / high-threat profile. No mDNS broadcast — your "
-        "device does not announce itself on the network. Pairing "
-        "is manual only (paste a connection string face-to-face). "
-        "Absolutely zero outbound and zero LAN advertisement."
+        "Your device makes no announcements and no outside "
+        "connections at all. Pairing is manual only (you copy a code "
+        "from one device to the other, in person). For people who "
+        "need maximum privacy."
     ),
     update_check_enabled=False,
     stun_servers=(),
     mdns_discovery_enabled=False,
     rendezvous_enabled=False,
-    outbound_summary="No outbound, no LAN advertisement",
+    outbound_summary="Nothing. No connections, no broadcast.",
 )
 
 

@@ -906,12 +906,19 @@
   }
   .privacy-panel-header h2::before { content: "🔒"; font-size: 17px; }
   .privacy-panel-close {
-    background: transparent; border: 0; color: var(--text-dim, #9ba0a8);
-    font-size: 24px; line-height: 1; cursor: pointer;
-    padding: 4px 9px; border-radius: 6px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.10);
+    color: var(--text, #e8eaed);
+    font-size: 22px; line-height: 1; cursor: pointer;
+    padding: 6px 13px;
+    border-radius: 8px;
+    min-width: 38px; min-height: 32px;
+    font-weight: 600;
   }
   .privacy-panel-close:hover {
-    background: rgba(255,255,255,0.06); color: var(--text, #e8eaed);
+    background: rgba(255,255,255,0.14);
+    border-color: rgba(255,255,255,0.24);
+    color: #fff;
   }
   .privacy-panel-body {
     padding: 18px 22px; overflow-y: auto; font-size: 14px;
@@ -4147,14 +4154,13 @@
         <span id="me-host">…</span>
         <span class="presence-caret">▾</span>
       </button>
-      <!-- May 15 2026 — Privacy lock icon. Opens the Privacy panel
-           (sovereignty preset + per-feature state + outbound-call
-           audit log). Hidden surface by intent: the lock icon is a
-           clear, single-purpose affordance for the small minority
-           who care; the main UI stays simple. Ctrl+Shift+P opens it
-           too. -->
+      <!-- May 15-16 2026 — Privacy lock icon. Opens the Privacy
+           panel (which mode you're on + what this device is
+           talking to + recent outside connections). Hidden by
+           default to keep the main UI clean. Ctrl+Shift+P opens
+           it too. -->
       <button class="gear" id="btn-privacy"
-              title="Privacy (sovereignty preset, outbound audit)"
+              title="Privacy (what this app talks to)"
               aria-label="Open Privacy panel"
               style="font-size: 15px;">🔒</button>
       <button class="gear" id="btn-settings" title="Settings">⚙</button>
@@ -4506,7 +4512,9 @@
           <select id="courier-transfer-select" aria-label="Offline transfer"></select>
           <select id="courier-drop-select" aria-label="Received offline bundle"></select>
           <textarea id="courier-key-token" class="ck-token" rows="2" placeholder="Unlock code"></textarea>
-          <input id="courier-file-input" class="ck-file" type="file" accept=".olcb,.json,application/json" />
+          <input id="courier-file-input" class="ck-file" type="file"
+                 accept=".olcb,.json,application/json"
+                 aria-label="Offline bundle file" />
         </div>
         <div class="ck-actions">
           <button id="btn-courier-export">Download bundle</button>
@@ -4588,7 +4596,8 @@
   <div class="toast-stack" id="toasts"></div>
 
   <!-- HIDDEN FILE INPUT -->
-  <input type="file" id="file-input" style="display:none" multiple />
+  <input type="file" id="file-input" style="display:none" multiple
+         aria-label="Files to send" />
 
   <!-- v0.4: DISCOVERY MODAL — "Pair a new device" picker -->
   <div class="discover-overlay" id="discover-overlay" role="dialog" aria-modal="true" aria-labelledby="discover-title">
@@ -5420,7 +5429,7 @@
         <div class="settings-section-h"><span>Mute group</span></div>
         <p class="settings-help" id="group-mute-status">Not muted.</p>
         <div class="settings-row">
-          <label>Mute for…</label>
+          <label for="group-mute-duration">Mute for…</label>
           <div class="mute-duration-row" data-mute-target="group">
             <select id="group-mute-duration" class="mute-duration-select">
               <option value="">Choose…</option>
@@ -5515,7 +5524,7 @@
              matching the messaging-app convention (15min / 1h / 8h /
              24h / 1 week / forever / unmute). -->
         <div class="settings-row">
-          <label>Mute for…</label>
+          <label for="dev-mute-duration">Mute for…</label>
           <div class="mute-duration-row" data-mute-target="peer">
             <select id="dev-mute-duration" class="mute-duration-select">
               <option value="">Choose…</option>
@@ -5568,21 +5577,21 @@
       <div class="settings-section" data-tier="advanced">
         <div class="settings-section-h"><span>Reachability</span></div>
         <div class="device-reach" id="dev-reach">
-          <div class="reach-row"><span class="lbl">Connection</span><span class="val" id="dev-regime">—</span></div>
-          <div class="reach-row"><span class="lbl">Latency</span><span class="val" id="dev-latency">—</span></div>
-          <div class="reach-row"><span class="lbl">Last seen</span><span class="val" id="dev-lastalive">—</span></div>
-          <div class="reach-row"><span class="lbl">Address</span><span class="val" id="dev-address">—</span></div>
+          <div class="reach-row"><span class="lbl">Connection</span><span class="val" id="dev-regime"></span></div>
+          <div class="reach-row"><span class="lbl">Latency</span><span class="val" id="dev-latency"></span></div>
+          <div class="reach-row"><span class="lbl">Last seen</span><span class="val" id="dev-lastalive"></span></div>
+          <div class="reach-row"><span class="lbl">Address</span><span class="val" id="dev-address"></span></div>
         </div>
       </div>
 
       <div class="settings-section">
         <div class="settings-section-h"><span>Identity &amp; trust</span></div>
         <div class="device-identity">
-          <div class="reach-row"><span class="lbl">Short ID</span><span class="val copyable" id="dev-shortid">—</span></div>
-          <div class="reach-row"><span class="lbl">Fingerprint</span><span class="val copyable mono small" id="dev-fp">—</span></div>
+          <div class="reach-row"><span class="lbl">Short ID</span><span class="val copyable" id="dev-shortid"></span></div>
+          <div class="reach-row"><span class="lbl">Fingerprint</span><span class="val copyable mono small" id="dev-fp"></span></div>
           <div class="reach-row">
             <span class="lbl">SAS</span>
-            <span class="val mono" id="dev-sas">—</span>
+            <span class="val mono" id="dev-sas"></span>
             <!-- v0.7.9: audio readback button + visual SAS-art panel
                  toggle. Multi-modal verification beats reading 6
                  digits twice. -->
@@ -5632,15 +5641,15 @@
           </p>
           <div class="reach-row" id="dev-verify-when-row" style="display:none;">
             <span class="lbl">Verified</span>
-            <span class="val" id="dev-verify-when">—</span>
+            <span class="val" id="dev-verify-when"></span>
           </div>
           <div class="reach-row" id="dev-verify-method-row" style="display:none;">
             <span class="lbl">Method</span>
-            <span class="val" id="dev-verify-method">—</span>
+            <span class="val" id="dev-verify-method"></span>
           </div>
           <div class="reach-row" id="dev-verify-note-row" style="display:none;">
             <span class="lbl">Note</span>
-            <span class="val" id="dev-verify-note">—</span>
+            <span class="val" id="dev-verify-note"></span>
           </div>
         </div>
         <div class="mini-actions wrap" id="dev-verify-actions">
@@ -5904,7 +5913,8 @@
       <div class="mini-actions wrap" style="gap: 8px; margin-bottom: 8px;">
         <button class="btn-ghost" id="btn-debug-health">Run health check</button>
         <button class="btn-ghost" id="btn-debug-clear">Clear log</button>
-        <select id="debug-severity" style="padding: 6px;">
+        <select id="debug-severity" style="padding: 6px;"
+                aria-label="Diagnostics severity filter">
           <option value="">all severities</option>
           <option value="error">errors only</option>
           <option value="warn">warnings+</option>
@@ -6456,9 +6466,9 @@
     // case). The banner only ever appears now for a TRUE credential
     // mismatch where the user must explicitly re-authorize.
     banner.innerHTML = `
-      <strong>Authorize this device.</strong>
-      The local credential for this window is no longer valid. Click
-      Reload to re-authorize, or relaunch One Link from the tray.
+      <strong>Sign-in needed for this window.</strong>
+      The security key for this window has expired. Click Reload to
+      get a fresh one, or restart One Link from the tray.
       <button class="btn-ghost" id="session-expired-reload">Reload</button>
     `;
     document.body.appendChild(banner);
@@ -15459,7 +15469,7 @@
       // the user toggles it. Pre-rendering avoids a flash on toggle.
       renderSasArt($("#pair-sas-art"), res.sas);
     } catch (e) {
-      pairSasEl.textContent = "—";
+      pairSasEl.textContent = "";
       toast(`Could not initiate pairing: ${e.message || e}`, "bad");
     }
   }
@@ -17008,85 +17018,107 @@
           source ? ` · from ${escapeText(source)}` : ""}${
           extra ? ` · ${escapeText(extra)}` : ""}</span>
       </div>`;
+    // Plain-English labels. Avoid jargon. Each row tells the user
+    // "this thing is on/off, and that came from your mode (or you
+    // explicitly changed it)."
+    const featRowSimple = (label, on, source, extra) => `
+      <div class="privacy-feature-row">
+        <span class="feature-name">${escapeText(label)}</span>
+        <span class="feature-state ${on ? "on" : "off"}">${
+          on ? "ON" : "OFF"}${
+          extra ? `, ${escapeText(extra)}` : ""}</span>
+      </div>`;
     const featuresHtml = `
-      ${featRow(
-        "Update check (GitHub Releases)",
+      ${featRowSimple(
+        "Check for One Link updates",
         !!(feat.update_check && feat.update_check.enabled),
         feat.update_check && feat.update_check.source,
       )}
-      ${featRow(
-        "WebRTC STUN servers",
+      ${featRowSimple(
+        "Helper servers for cross-network connections",
         Array.isArray(feat.stun_servers && feat.stun_servers.list)
           && feat.stun_servers.list.length > 0,
         feat.stun_servers && feat.stun_servers.source,
         Array.isArray(feat.stun_servers && feat.stun_servers.list)
           && feat.stun_servers.list.length > 0
-          ? `${feat.stun_servers.list.length} server(s)` : "",
+          ? `${feat.stun_servers.list.length} server${feat.stun_servers.list.length === 1 ? "" : "s"}`
+          : "",
       )}
-      ${featRow(
-        "mDNS LAN discovery",
+      ${featRowSimple(
+        "Find devices on the same Wi-Fi",
         !!(feat.mdns_discovery && feat.mdns_discovery.enabled),
         feat.mdns_discovery && feat.mdns_discovery.source,
       )}
-      ${featRow(
-        "Rendezvous (third-party relay)",
+      ${featRowSimple(
+        "Outside helper server (relay)",
         !!(feat.rendezvous && feat.rendezvous.enabled),
         feat.rendezvous && feat.rendezvous.source,
       )}`;
 
+    // Plain-English labels for the connection types so the user can
+    // tell at a glance what each row is.
+    const _kindLabel = (k) => {
+      const m = {
+        "update_check": "Update check",
+        "stun": "Network helper",
+        "rendezvous": "Outside relay",
+        "external": "Outside",
+      };
+      return m[k] || k;
+    };
     const entries = (outbound && outbound.entries) || [];
     const outboundHtml = entries.length === 0
-      ? `<div class="privacy-empty">No outbound calls since this device booted.</div>`
+      ? `<div class="privacy-empty">This device hasn't made any outside connections since it started.</div>`
       : `<div class="privacy-outbound">${
           entries.map(e => `
             <div class="privacy-outbound-row">
               <span class="out-time">${escapeText(_fmtRelTime(e.ts_ms))}</span>
               <span class="out-dest">${escapeText(e.destination)}${
-                e.note ? ` <span style="color:rgba(255,255,255,0.4)">— ${
-                  escapeText(e.note)}</span>` : ""}</span>
-              <span class="out-kind">${escapeText(e.kind)}</span>
+                e.note ? ` <span style="color:rgba(255,255,255,0.4)">(${
+                  escapeText(e.note)})</span>` : ""}</span>
+              <span class="out-kind">${escapeText(_kindLabel(e.kind))}</span>
             </div>`).join("")
         }</div>`;
     const promise = (outbound && outbound.promise) || "";
 
-    // May 16 2026 — P2P version gossip hint. When a paired peer is
-    // on a newer build, surface that here. Corp-free update channel:
-    // the network IS the update notification.
+    // May 16 2026 — paired-device update hint. When a paired device
+    // is on a newer version, surface that. No call to any outside
+    // server needed; the device itself told us.
     const hint = (status && status.peer_version_hint) || {};
     const versionHintHtml = hint.newer_available
       ? `
         <div class="privacy-section">
-          <div class="privacy-section-h">Update available (from peer)</div>
+          <div class="privacy-section-h">A paired device has a newer version</div>
           <div class="privacy-feature-row" style="
               background:rgba(255,180,90,0.10);
               border:1px solid rgba(255,180,90,0.32);">
             <span class="feature-name">
-              A paired peer (${escapeText(hint.newest_peer || "?")}) is running ${
+              ${escapeText(hint.newest_peer || "Paired device")} is running version ${
                 escapeText(hint.newest_version || "?")}
             </span>
             <span class="feature-state" style="color:rgba(255,180,90,1);">
-              you: ${escapeText(hint.local_version)}
+              You're on ${escapeText(hint.local_version)}
             </span>
           </div>
           <div class="privacy-promise">
-            This hint came from a paired peer's handshake — no call to
-            GitHub or any third party was made to learn this.
+            We learned this directly from your paired device. No call to
+            any outside server was made.
           </div>
         </div>`
       : "";
 
     body.innerHTML = `
       <div class="privacy-section">
-        <div class="privacy-section-h">Sovereignty preset</div>
+        <div class="privacy-section-h">Privacy mode</div>
         <div class="privacy-preset-grid">${presetCards}</div>
       </div>
       ${versionHintHtml}
       <div class="privacy-section">
-        <div class="privacy-section-h">Live feature state</div>
+        <div class="privacy-section-h">What's turned on right now</div>
         <div class="privacy-features">${featuresHtml}</div>
       </div>
       <div class="privacy-section">
-        <div class="privacy-section-h">Recent outbound calls (last ${
+        <div class="privacy-section-h">Recent outside connections (last ${
           entries.length || 0})</div>
         ${outboundHtml}
         <div class="privacy-promise">${escapeText(promise)}</div>
@@ -17138,29 +17170,44 @@
     return String(s == null ? "" : s).replace(/"/g, "&quot;");
   }
 
-  // Wire close button + Esc to close + Ctrl+Shift+P to open.
-  _onReady(() => {
-    const closeBtn = document.getElementById("privacy-panel-close");
-    if (closeBtn) closeBtn.addEventListener("click", _hidePrivacyPanel);
-    const overlay = document.getElementById("privacy-panel-overlay");
-    if (overlay) {
-      overlay.addEventListener("click", (ev) => {
-        if (ev.target === overlay) _hidePrivacyPanel();
-      });
+  // May 16 2026 — event delegation on document so the wire-up
+  // doesn't depend on DOM-ready timing OR on the elements existing
+  // when this script runs. The previous _onReady-based wiring was
+  // fragile: if the helper ran before the elements were in the DOM
+  // (e.g. when the panel's HTML is below this script tag), the
+  // listeners never bound. Delegation fixes it permanently.
+  document.addEventListener("click", (ev) => {
+    const t = ev.target;
+    if (!t || !(t instanceof Element)) return;
+    // Close button click.
+    if (t.id === "privacy-panel-close" || t.closest("#privacy-panel-close")) {
+      _hidePrivacyPanel();
+      return;
     }
-    document.addEventListener("keydown", (ev) => {
-      const overlayEl = document.getElementById("privacy-panel-overlay");
-      const isOpen = overlayEl && overlayEl.classList.contains("show");
-      if (ev.key === "Escape" && isOpen) {
-        _hidePrivacyPanel();
-        return;
-      }
-      // Ctrl+Shift+P opens the panel (no menu-bar takeover risk).
-      if (ev.ctrlKey && ev.shiftKey && (ev.key === "P" || ev.key === "p")) {
-        ev.preventDefault();
+    // Click on the dark backdrop (the overlay itself, not its inner
+    // panel). closest() returns the overlay only when the click hit
+    // it directly; clicks inside the white modal bubble up THROUGH
+    // it so target is the inner element.
+    if (t.id === "privacy-panel-overlay") {
+      _hidePrivacyPanel();
+      return;
+    }
+  });
+
+  document.addEventListener("keydown", (ev) => {
+    const overlayEl = document.getElementById("privacy-panel-overlay");
+    const isOpen = overlayEl && overlayEl.classList.contains("show");
+    if (ev.key === "Escape" && isOpen) {
+      _hidePrivacyPanel();
+      return;
+    }
+    // Ctrl+Shift+P opens the panel (no menu-bar takeover risk).
+    if (ev.ctrlKey && ev.shiftKey && (ev.key === "P" || ev.key === "p")) {
+      ev.preventDefault();
+      if (typeof window.openPrivacyPanel === "function") {
         window.openPrivacyPanel();
       }
-    });
+    }
   });
 
   // ── Public entry: a contact "Call" button calls this. ──
@@ -17401,48 +17448,47 @@
     }
   }
 
-  // Pre-call control handlers: toggle local-media tracks before the
-  // peer picks up. The state propagates to startLocalMedia /
-  // setupRtcPeerConnection so the call lands in the chosen state.
-  _onReady(() => {
-    const preMute = $$("#btn-call-precmute");
-    const preCam = $$("#btn-call-precam");
-    const sendMsg = $$("#btn-call-send-msg-instead");
+  // Pre-call control handlers via event delegation. Toggle local-
+  // media tracks before the peer picks up. The state propagates to
+  // startLocalMedia / setupRtcPeerConnection so the call lands in
+  // the chosen state. Delegated so the wire-up doesn't depend on
+  // DOM-ready timing or element existence at script time.
+  document.addEventListener("click", (ev) => {
+    const t = ev.target;
+    if (!t || !(t instanceof Element)) return;
+    const preMute = t.closest("#btn-call-precmute");
     if (preMute) {
-      preMute.addEventListener("click", () => {
-        _outgoingState.preMuted = !_outgoingState.preMuted;
-        preMute.setAttribute("aria-pressed",
-          _outgoingState.preMuted ? "true" : "false");
-        preMute.title = _outgoingState.preMuted
-          ? "Microphone muted — peer will hear nothing on pickup"
-          : "Mute before peer picks up";
-        // If local media already started, mute the audio track live.
-        if (media && media.localStream) {
-          media.localStream.getAudioTracks().forEach((t) => {
-            t.enabled = !_outgoingState.preMuted;
-          });
-        }
-      });
+      _outgoingState.preMuted = !_outgoingState.preMuted;
+      preMute.setAttribute("aria-pressed",
+        _outgoingState.preMuted ? "true" : "false");
+      preMute.title = _outgoingState.preMuted
+        ? "Microphone muted. They won't hear you on pickup."
+        : "Mute before they pick up";
+      if (media && media.localStream) {
+        media.localStream.getAudioTracks().forEach((tr) => {
+          tr.enabled = !_outgoingState.preMuted;
+        });
+      }
+      return;
     }
+    const preCam = t.closest("#btn-call-precam");
     if (preCam) {
-      preCam.addEventListener("click", () => {
-        _outgoingState.preCamOff = !_outgoingState.preCamOff;
-        preCam.setAttribute("aria-pressed",
-          _outgoingState.preCamOff ? "true" : "false");
-        preCam.title = _outgoingState.preCamOff
-          ? "Camera off — peer will see your avatar on pickup"
-          : "Turn camera off before peer picks up";
-        if (media && media.localStream) {
-          media.localStream.getVideoTracks().forEach((t) => {
-            t.enabled = !_outgoingState.preCamOff;
-          });
-        }
-      });
+      _outgoingState.preCamOff = !_outgoingState.preCamOff;
+      preCam.setAttribute("aria-pressed",
+        _outgoingState.preCamOff ? "true" : "false");
+      preCam.title = _outgoingState.preCamOff
+        ? "Camera off. They'll see your avatar on pickup."
+        : "Turn camera off before they pick up";
+      if (media && media.localStream) {
+        media.localStream.getVideoTracks().forEach((tr) => {
+          tr.enabled = !_outgoingState.preCamOff;
+        });
+      }
+      return;
     }
+    const sendMsg = t.closest("#btn-call-send-msg-instead");
     if (sendMsg) {
-      sendMsg.addEventListener("click", async () => {
-        // Cancel the outgoing call + focus the chat composer for
-        // this peer. Lets the user gracefully downgrade.
+      (async () => {
         const peerFp = callUI.activeCallPeerFp;
         try {
           if (callUI.activeCallId) {
@@ -17456,11 +17502,11 @@
         hideOutgoingOverlay();
         if (peerFp && typeof selectPeer === "function") {
           selectPeer(peerFp);
-          // Best-effort: focus the message composer.
           const composer = $$("#msg-input");
           if (composer) composer.focus();
         }
-      });
+      })();
+      return;
     }
   });
   function showIncomingRing(peerLabel) {

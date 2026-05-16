@@ -2270,10 +2270,10 @@ class UIServer:
                 getattr(self.daemon, "_outbound_log_started_ms", 0) or 0
             ),
             "promise": (
-                "If this list is empty, the daemon has made zero "
-                "outbound calls to anything beyond your LAN since it "
-                "booted. Verified by an in-process ring buffer; not a "
-                "marketing claim."
+                "If this list is empty, your device has made no "
+                "connections outside your local Wi-Fi since it "
+                "started. We track this in memory as the connections "
+                "happen, so this isn't a marketing claim."
             ),
         })
 
