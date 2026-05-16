@@ -15,10 +15,10 @@ use ol_discovery::node_id::NodeId;
 use ol_discovery::record::{PeerRecord, SignedRecord, RECORD_DEFAULT_TTL_SECS};
 
 struct Peer {
-    sk: SigningKey,
+    _sk: SigningKey,
     id: NodeId,
     node: DhtNode,
-    record: SignedRecord,
+    _record: SignedRecord,
 }
 
 fn make_peer(seed_peers: Vec<(NodeId, std::net::SocketAddr)>) -> Peer {
@@ -39,10 +39,10 @@ fn make_peer(seed_peers: Vec<(NodeId, std::net::SocketAddr)>) -> Peer {
     let signed = SignedRecord::sign(rec, &sk).unwrap();
     node.publish_self_record(signed.clone());
     Peer {
-        sk,
+        _sk: sk,
         id,
         node,
-        record: signed,
+        _record: signed,
     }
 }
 

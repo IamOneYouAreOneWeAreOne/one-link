@@ -43,7 +43,7 @@ class TrainedSceneOracle:
         self.device = device
         self.requested_device = requested_device
         try:
-            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(
                 f"scene checkpoint {ckpt_path} is corrupted or incompatible "

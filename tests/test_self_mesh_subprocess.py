@@ -17,8 +17,23 @@ pytestmark = pytest.mark.timeout(180)
 
 
 def _api(home: Path, method: str, path: str, body: dict | None = None) -> dict:
-    port = int((home / "data" / "server.port").read_text(encoding="ascii").strip())
-    token = (home / "data" / "ui.token").read_text(encoding="ascii").strip()
+    port_path = home / "data" / "server.port"
+    token_path = home / "data" / "ui.token"
+    deadline = time.time() + 20.0
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        try:
+            port = int(port_path.read_text(encoding="ascii").strip())
+            token = token_path.read_text(encoding="ascii").strip()
+            break
+        except (OSError, ValueError) as exc:
+            last_error = exc
+            time.sleep(0.05)
+    else:
+        raise AssertionError(
+            f"daemon HTTP API credentials did not appear under {home}; "
+            f"last_error={last_error!r}"
+        )
     data = None
     headers = {"Authorization": f"Bearer {token}"}
     if body is not None:

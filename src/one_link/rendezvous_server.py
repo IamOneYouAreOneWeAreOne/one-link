@@ -83,7 +83,7 @@ _REQUEST_READ_TIMEOUT_S = 10.0
 
 @dataclass
 class ServerConfig:
-    host: str = "0.0.0.0"
+    host: str = "0.0.0.0"  # nosec B104
     port: int = 7118
     # Hard cap on total registrations the server will hold. Keeps
     # memory bounded even under abuse. Each entry is ~1 KB.
@@ -1216,7 +1216,7 @@ class RendezvousApp:
 
 def _parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
     p = argparse.ArgumentParser(description="One Link rendezvous server")
-    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--host", default="0.0.0.0")  # nosec B104
     p.add_argument("--port", type=int, default=7118)
     p.add_argument("--max-registrations", type=int, default=200_000)
     p.add_argument("--rate-per-ip-per-min", type=int, default=120)

@@ -386,7 +386,7 @@ def discover_local_endpoints(
             seen.add(addr)
             if addr.startswith("169.254.") and not include_link_local:
                 continue
-            if addr == "0.0.0.0":
+            if addr == "0.0.0.0":  # nosec B104
                 continue
             if addr.startswith("127.") and not include_loopback:
                 continue

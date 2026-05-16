@@ -158,11 +158,11 @@ async def start_listener(
                 socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 1,
             )
         else:
-            sock.bind(("0.0.0.0", beacon.BEACON_PORT))
+            sock.bind(("0.0.0.0", beacon.BEACON_PORT))  # nosec B104
             mreq = struct.pack(
                 "4s4s",
                 socket.inet_aton(group),
-                socket.inet_aton("0.0.0.0"),
+                socket.inet_aton("0.0.0.0"),  # nosec B104
             )
             sock.setsockopt(
                 socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq,

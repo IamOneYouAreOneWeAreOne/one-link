@@ -71,6 +71,7 @@ where
 type PendingMap = Arc<Mutex<HashMap<Nonce, oneshot::Sender<RpcEnvelope<Response>>>>>;
 
 /// UDP transport for Kademlia.
+#[allow(missing_debug_implementations)]
 pub struct UdpTransport {
     socket: Arc<UdpSocket>,
     own_id: NodeId,

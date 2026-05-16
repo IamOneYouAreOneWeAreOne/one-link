@@ -18,6 +18,7 @@ import click
 from one_link import __version__
 from one_link import daemon as daemon_mod
 from one_link.identity import load_or_create
+from one_link.safe_http import validated_urlopen
 
 
 def _connect_control(timeout: float = 5.0) -> tuple[socket.socket, int]:
@@ -899,7 +900,7 @@ def audit():
             headers={"Authorization": f"Bearer {token}"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=5) as r:
+            with validated_urlopen(req, timeout=5, allow_loopback_http=True) as r:
                 res = _json.loads(r.read())
         except Exception as e:
             raise click.ClickException(f"audit fetch failed: {e}")
@@ -971,7 +972,7 @@ def search(query, peer, limit):
     url = f"http://127.0.0.1:{ui_port}/api/search?{urllib.parse.urlencode(qs)}"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with validated_urlopen(req, timeout=10, allow_loopback_http=True) as r:
             res = _json.loads(r.read())
     except Exception as e:
         raise click.ClickException(f"search failed: {e}")
@@ -1060,7 +1061,7 @@ def _ui_request(method: str, path: str, *, payload=None) -> dict:
         data=body, headers=headers, method=method,
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with validated_urlopen(req, timeout=30, allow_loopback_http=True) as r:
             return _json.loads(r.read())
     except urllib.error.HTTPError as e:
         try:

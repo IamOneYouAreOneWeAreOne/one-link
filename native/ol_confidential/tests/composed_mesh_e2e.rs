@@ -39,7 +39,7 @@ use ol_device_mesh::self_routing::{
     pick_best_route, sign_route_announcement, PeerLink, RouteTable,
 };
 use ol_device_mesh::subkey::{fresh_device_id, mint_subkey};
-use ol_device_mesh::{DeviceClass, MasterIdentity, DEVICE_ID_LEN};
+use ol_device_mesh::{DeviceClass, MasterIdentity};
 use ol_pqsig::HybridVerifyingKey;
 use ol_threshold_recovery::{reconstruct_bytes, share_bytes, PrngState};
 use rand::rngs::OsRng;

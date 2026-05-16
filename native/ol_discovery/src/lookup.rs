@@ -98,6 +98,7 @@ pub trait Transport: Send + Sync {
 
 /// One iterative lookup driver. Owns the lookup state machine; the
 /// transport provides the actual network.
+#[allow(missing_debug_implementations)]
 pub struct Lookup<'a> {
     target: NodeId,
     want_value: bool,

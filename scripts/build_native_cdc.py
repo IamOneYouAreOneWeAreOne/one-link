@@ -9,6 +9,7 @@ setuptools/PyInstaller can bundle it.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -49,6 +50,11 @@ def main() -> int:
         return 1 if ns.required else 0
 
     size = lib.stat().st_size
+    digest = hashlib.sha256(lib.read_bytes()).hexdigest()
+    lib.with_suffix(lib.suffix + ".sha256").write_text(
+        f"{digest}  {lib.name}\n",
+        encoding="ascii",
+    )
     print(f"[native-cdc] built {lib} ({size:,} bytes) using {compiler}")
     return 0
 

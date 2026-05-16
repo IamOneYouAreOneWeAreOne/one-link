@@ -33,6 +33,7 @@ from one_link import daemon as daemon_mod
 from one_link import server as server_mod
 from one_link.build_identity import runtime_build_identity
 from one_link.paths import data_dir
+from one_link.safe_http import validated_urlopen
 
 
 @dataclass(frozen=True)
@@ -103,7 +104,7 @@ def _ui_status(server_port: int, token: str, timeout: float = 1.5) -> dict:
         headers={"Authorization": f"Bearer {token}"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with validated_urlopen(req, timeout=timeout, allow_loopback_http=True) as r:
             return json.loads(r.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as e:
         return {"ok": False, "error": str(e)}
@@ -464,7 +465,7 @@ def run_app(
     # host. If a 127.0.0.1-bound daemon is already running, we'll
     # stop it and replace; the user explicitly asked for LAN mode.
     if lan:
-        os.environ["ONE_LINK_BIND_HOST"] = "0.0.0.0"
+        os.environ["ONE_LINK_BIND_HOST"] = "0.0.0.0"  # nosec B104
 
     spawned: Optional[subprocess.Popen] = None
     info = _resolve_running_daemon()

@@ -13,7 +13,7 @@ use ol_device_mesh::compute::{
     pick_executor, sign_capability_attestation, CapabilityRegistry, DeviceCapability,
 };
 use ol_device_mesh::distributed_fs::{
-    sign_storage_attestation, ChunkHash, ErasurePolicy, FileManifest,
+    sign_storage_attestation, ErasurePolicy, FileManifest,
 };
 use ol_device_mesh::duress::{
     create_duress_envelope, sign_duress_alert, PairingChannel, PairingCommitment,
@@ -22,7 +22,7 @@ use ol_device_mesh::fan_out::{
     fan_out_plan, sign_fetch_request, SourceCapacity, FETCH_NONCE_LEN,
 };
 use ol_device_mesh::mesh_state::{
-    Delta, LwwRegister, MeshState, OrSet, PnCounter, SubtreePolicyKind,
+    LwwRegister, MeshState, OrSet, PnCounter, SubtreePolicyKind,
 };
 use ol_device_mesh::quorum::{
     mint_policy, propose_operation, sign_approval, QuorumCertificate,

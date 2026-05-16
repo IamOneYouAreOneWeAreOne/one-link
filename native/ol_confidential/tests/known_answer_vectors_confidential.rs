@@ -5,11 +5,14 @@
 
 use ol_confidential::{
     attestation::canonical_attestation_transcript, ConfidentialProvider, ProviderTag,
-    SoftwareProvider,
+    SoftwareProvider, ISSUER_SDP_PUBKEY_LEN,
 };
 use ol_pqsig::HybridSigningKey;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+
+const TEST_SDP_PUBKEY_A: [u8; ISSUER_SDP_PUBKEY_LEN] = [0xA1; ISSUER_SDP_PUBKEY_LEN];
+const TEST_SDP_PUBKEY_B: [u8; ISSUER_SDP_PUBKEY_LEN] = [0xB2; ISSUER_SDP_PUBKEY_LEN];
 
 #[test]
 fn kat_provider_tag_byte_codes_pinned() {
@@ -49,6 +52,7 @@ fn kat_attestation_transcript_pinned_no_witness() {
         120,
         None,
         &[],
+        &TEST_SDP_PUBKEY_A,
     );
     // 32-byte BLAKE3 digest of (domain || tag || vk || nonce || times
     // || witness-presence-flag || qlen || quote). Pin the hex to lock
@@ -71,6 +75,7 @@ fn kat_attestation_transcript_pinned_with_witness() {
         1_000_030,
         Some(&witness),
         b"sgx-mock-quote",
+        &TEST_SDP_PUBKEY_B,
     );
     let hex_now = hex::encode(&bytes);
     insta_eq(&hex_now, &EXPECTED_KAT_TRANSCRIPT_WITH_WITNESS);
@@ -81,8 +86,8 @@ fn kat_software_provider_deterministic_from_seed() {
     // Same provider seed + master seed must produce signatures that
     // verify under the same vk. (This is the "deterministic
     // for incident-response replay" guarantee.)
-    let prov_a = SoftwareProvider::from_seed(&[0x10; 32]);
-    let prov_b = SoftwareProvider::from_seed(&[0x10; 32]);
+    let prov_a = SoftwareProvider::generate(&mut ChaCha20Rng::from_seed([0x10; 32]));
+    let prov_b = SoftwareProvider::generate(&mut ChaCha20Rng::from_seed([0x10; 32]));
     let master = [0x20; 32];
     let sealed_a = prov_a.seal_master(&master).unwrap();
     let vk = prov_a.verifying_key(&sealed_a).unwrap();
@@ -108,6 +113,6 @@ fn insta_eq(actual: &str, expected: &str) {
 // Pinned hex from bootstrap run. Regenerate with
 // `ONE_LINK_KAT_BOOTSTRAP=1 cargo test -p ol_confidential --test known_answer_vectors_confidential`.
 const EXPECTED_KAT_TRANSCRIPT_NO_WITNESS: &str =
-    "d6c12dffc0fd68622bf54a11aa7092b5f4f1ded4786378caaa1029ecb301c2e9";
+    "872c508c35f2d397cfb636ef39f37f139086f1155ded44506bff42f681ae16a2";
 const EXPECTED_KAT_TRANSCRIPT_WITH_WITNESS: &str =
-    "b28304aa1443d0792123cf86213b004842a07a71991abf1a1e5265a9c93700b9";
+    "413256417155ce7053dd45be7ea924211be4a2a59bb201f1a03d094116e983b1";

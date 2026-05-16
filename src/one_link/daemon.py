@@ -801,7 +801,7 @@ def _candidate_local_listen_ports() -> list[int]:
             laddr = getattr(conn, "laddr", None)
             host = str(getattr(laddr, "ip", "") or "")
             port = getattr(laddr, "port", None)
-            if port and host in ("", "0.0.0.0", "::", "127.0.0.1", "::1"):
+            if port and host in ("", "0.0.0.0", "::", "127.0.0.1", "::1"):  # nosec B104
                 ports.add(int(port))
         if ports:
             return sorted(ports)
@@ -14269,7 +14269,7 @@ class Daemon:
             self.state = None
 
         self._peer_server = await asyncio.start_server(
-            self._handle_peer, host="0.0.0.0", port=0
+            self._handle_peer, host="0.0.0.0", port=0  # nosec B104
         )
         peer_port = self._peer_server.sockets[0].getsockname()[1]
         _peer_port_path().write_text(str(peer_port))

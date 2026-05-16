@@ -6,8 +6,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use ol_confidential::{
-    fresh_attestation_nonce, sign_attestation, verify_attestation, ConfidentialProvider,
-    ProviderTag, SoftwareProvider, ATTESTATION_FRESHNESS_WINDOW_SECS,
+    sign_attestation, verify_attestation, ConfidentialProvider, ConfidentialTier, ProviderTag,
+    SoftwareProvider, ATTESTATION_FRESHNESS_WINDOW_SECS, ISSUER_SDP_PUBKEY_LEN,
 };
 use ol_pqsig::HybridSigningKey;
 
@@ -28,6 +28,8 @@ fn heavy_cases() -> u32 {
         5_000
     }
 }
+
+const TEST_SDP_PUBKEY: [u8; ISSUER_SDP_PUBKEY_LEN] = [0xD4; ISSUER_SDP_PUBKEY_LEN];
 
 proptest! {
     #![proptest_config(ProptestConfig {
@@ -56,6 +58,7 @@ proptest! {
             deadline,
             witness_opt.as_ref(),
             &q,
+            &TEST_SDP_PUBKEY,
         );
         let t2 = ol_confidential::attestation::canonical_attestation_transcript(
             ProviderTag::Software,
@@ -65,6 +68,7 @@ proptest! {
             deadline,
             witness_opt.as_ref(),
             &q,
+            &TEST_SDP_PUBKEY,
         );
         prop_assert_eq!(t1, t2);
         let _ = sk;
@@ -80,10 +84,10 @@ proptest! {
         prop_assume!(nonce_a != nonce_b);
         let (_sk, vk) = HybridSigningKey::generate(&mut ChaCha20Rng::from_seed([0xCD; 32]));
         let t1 = ol_confidential::attestation::canonical_attestation_transcript(
-            ProviderTag::Software, &vk, &nonce_a, 100, 120, None, &[],
+            ProviderTag::Software, &vk, &nonce_a, 100, 120, None, &[], &TEST_SDP_PUBKEY,
         );
         let t2 = ol_confidential::attestation::canonical_attestation_transcript(
-            ProviderTag::Software, &vk, &nonce_b, 100, 120, None, &[],
+            ProviderTag::Software, &vk, &nonce_b, 100, 120, None, &[], &TEST_SDP_PUBKEY,
         );
         prop_assert_ne!(t1, t2);
     }
@@ -97,10 +101,10 @@ proptest! {
     ) {
         let (_sk, vk) = HybridSigningKey::generate(&mut ChaCha20Rng::from_seed([0xEF; 32]));
         let t_none = ol_confidential::attestation::canonical_attestation_transcript(
-            ProviderTag::Software, &vk, &nonce, 100, 120, None, &[],
+            ProviderTag::Software, &vk, &nonce, 100, 120, None, &[], &TEST_SDP_PUBKEY,
         );
         let t_some = ol_confidential::attestation::canonical_attestation_transcript(
-            ProviderTag::Software, &vk, &nonce, 100, 120, Some(&witness), &[],
+            ProviderTag::Software, &vk, &nonce, 100, 120, Some(&witness), &[], &TEST_SDP_PUBKEY,
         );
         prop_assert_ne!(t_none, t_some);
     }
@@ -122,8 +126,16 @@ proptest! {
         let (sk, _vk) = HybridSigningKey::generate(&mut OsRng);
         let doc = sign_attestation(
             &sk, ProviderTag::Software, nonce, 1_000_000, 1_000_000 + offset, None, Vec::new(),
+            TEST_SDP_PUBKEY,
         ).unwrap();
-        verify_attestation(&doc, &nonce, None, 1_000_000).unwrap();
+        verify_attestation(
+            &doc,
+            &nonce,
+            None,
+            1_000_000,
+            ConfidentialTier::Software,
+            &TEST_SDP_PUBKEY,
+        ).unwrap();
     }
 
     /// `now_unix > deadline` always rejects.
@@ -138,9 +150,17 @@ proptest! {
         let deadline = issued + offset;
         let doc = sign_attestation(
             &sk, ProviderTag::Software, nonce, issued, deadline, None, Vec::new(),
+            TEST_SDP_PUBKEY,
         ).unwrap();
         let now = deadline + slack;
-        prop_assert!(verify_attestation(&doc, &nonce, None, now).is_err());
+        prop_assert!(verify_attestation(
+            &doc,
+            &nonce,
+            None,
+            now,
+            ConfidentialTier::Software,
+            &TEST_SDP_PUBKEY,
+        ).is_err());
     }
 
     /// Sealed seed round-trips through software provider's seal/sign

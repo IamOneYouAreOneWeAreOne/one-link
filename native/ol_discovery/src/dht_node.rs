@@ -34,16 +34,15 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
 
-use crate::lookup::{Lookup, LookupError, LookupResult, Transport};
+use crate::lookup::{Lookup, LookupError, LookupResult};
 use crate::node_id::NodeId;
 use crate::record::SignedRecord;
-use crate::routing::{InsertOutcome, RoutingTable};
+use crate::routing::RoutingTable;
 use crate::rpc::{
     FindValueOutcome, Header, Nonce, Request, Response, RpcEnvelope,
     StoreOutcome,
@@ -199,6 +198,7 @@ impl RequestHandler for InnerHandler {
 }
 
 /// Top-level DHT node.
+#[allow(missing_debug_implementations)]
 pub struct DhtNode {
     runtime: Runtime,
     inner: Arc<Inner>,

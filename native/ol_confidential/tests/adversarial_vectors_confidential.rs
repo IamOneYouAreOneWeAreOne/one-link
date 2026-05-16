@@ -4,7 +4,8 @@
 
 use ol_confidential::{
     fresh_attestation_nonce, sign_attestation, verify_attestation, ConfidentialError,
-    ConfidentialProvider, ProviderTag, SoftwareProvider, ATTESTATION_FRESHNESS_WINDOW_SECS,
+    ConfidentialProvider, ConfidentialTier, ProviderTag, SoftwareProvider,
+    ATTESTATION_FRESHNESS_WINDOW_SECS, ISSUER_SDP_PUBKEY_LEN,
 };
 use ol_pqsig::HybridSigningKey;
 use rand::rngs::OsRng;
@@ -12,6 +13,44 @@ use rand::rngs::OsRng;
 fn fresh_sk() -> HybridSigningKey {
     let (sk, _vk) = HybridSigningKey::generate(&mut OsRng);
     sk
+}
+
+const TEST_SDP_PUBKEY: [u8; ISSUER_SDP_PUBKEY_LEN] = [0xC1; ISSUER_SDP_PUBKEY_LEN];
+
+fn sign_sw(
+    sk: &HybridSigningKey,
+    nonce: [u8; 32],
+    issued: u64,
+    deadline: u64,
+    witness: Option<&[u8; 32]>,
+    quote: Vec<u8>,
+) -> ol_confidential::ConfidentialResult<ol_confidential::AttestationDoc> {
+    sign_attestation(
+        sk,
+        ProviderTag::Software,
+        nonce,
+        issued,
+        deadline,
+        witness,
+        quote,
+        TEST_SDP_PUBKEY,
+    )
+}
+
+fn verify_sw(
+    doc: &ol_confidential::AttestationDoc,
+    nonce: &[u8; 32],
+    witness: Option<&[u8; 32]>,
+    now: u64,
+) -> ol_confidential::ConfidentialResult<()> {
+    verify_attestation(
+        doc,
+        nonce,
+        witness,
+        now,
+        ConfidentialTier::Software,
+        &TEST_SDP_PUBKEY,
+    )
 }
 
 #[test]
@@ -36,12 +75,10 @@ fn adversarial_attestation_doc_from_one_master_cant_be_signed_by_another() {
     let attacker = fresh_sk();
     let nonce = fresh_attestation_nonce(&mut OsRng);
     // Attacker signs an attestation but claims victim's key.
-    let mut doc =
-        sign_attestation(&attacker, ProviderTag::Software, nonce, 100, 120, None, vec![])
-            .unwrap();
+    let mut doc = sign_sw(&attacker, nonce, 100, 120, None, vec![]).unwrap();
     // Swap the published master_vk to victim's.
     doc.master_vk = victim.verifying_key();
-    let r = verify_attestation(&doc, &nonce, None, 110);
+    let r = verify_sw(&doc, &nonce, None, 110);
     assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
 }
 
@@ -52,10 +89,9 @@ fn adversarial_cross_provider_doc_via_tag_swap_breaks_master_sig() {
     // is in the signed transcript, the swap breaks the master sig.
     let sk = fresh_sk();
     let nonce = fresh_attestation_nonce(&mut OsRng);
-    let mut doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, vec![])
-        .unwrap();
+    let mut doc = sign_sw(&sk, nonce, 100, 120, None, vec![]).unwrap();
     doc.provider_tag = ProviderTag::IntelSgx;
-    let r = verify_attestation(&doc, &nonce, None, 110);
+    let r = verify_sw(&doc, &nonce, None, 110);
     assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
 }
 
@@ -65,15 +101,7 @@ fn adversarial_witness_swap_breaks_master_sig() {
     let nonce = fresh_attestation_nonce(&mut OsRng);
     let witness_a = [0xAA; 32];
     let witness_b = [0xBB; 32];
-    let mut doc = sign_attestation(
-        &sk,
-        ProviderTag::Software,
-        nonce,
-        100,
-        120,
-        Some(&witness_a),
-        vec![],
-    )
+    let mut doc = sign_sw(&sk, nonce, 100, 120, Some(&witness_a), vec![])
     .unwrap();
     // Swap the commitment leaf (attacker re-derives for a different
     // witness B). Sig over the original transcript should now fail.
@@ -84,7 +112,7 @@ fn adversarial_witness_swap_breaks_master_sig() {
         *h.finalize().as_bytes()
     };
     doc.field_witness_commitment = Some(new_cmt);
-    let r = verify_attestation(&doc, &nonce, Some(&witness_b), 110);
+    let r = verify_sw(&doc, &nonce, Some(&witness_b), 110);
     assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
 }
 
@@ -92,12 +120,11 @@ fn adversarial_witness_swap_breaks_master_sig() {
 fn adversarial_deadline_extension_breaks_master_sig() {
     let sk = fresh_sk();
     let nonce = fresh_attestation_nonce(&mut OsRng);
-    let mut doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, vec![])
-        .unwrap();
+    let mut doc = sign_sw(&sk, nonce, 100, 120, None, vec![]).unwrap();
     // Attacker tries to extend the deadline to defeat the freshness
     // check. Sig over the original (deadline=120) bytes won't verify.
     doc.deadline_unix = 100 + ATTESTATION_FRESHNESS_WINDOW_SECS;
-    let r = verify_attestation(&doc, &nonce, None, 100 + ATTESTATION_FRESHNESS_WINDOW_SECS - 1);
+    let r = verify_sw(&doc, &nonce, None, 100 + ATTESTATION_FRESHNESS_WINDOW_SECS - 1);
     assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
 }
 
@@ -106,11 +133,10 @@ fn adversarial_platform_quote_tamper_breaks_master_sig() {
     let sk = fresh_sk();
     let nonce = fresh_attestation_nonce(&mut OsRng);
     // Issue with empty platform_quote (software baseline).
-    let mut doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, vec![])
-        .unwrap();
+    let mut doc = sign_sw(&sk, nonce, 100, 120, None, vec![]).unwrap();
     // Attacker injects fake SGX quote bytes; sig should now fail.
     doc.platform_quote = b"fake SGX quote bytes".to_vec();
-    let r = verify_attestation(&doc, &nonce, None, 110);
+    let r = verify_sw(&doc, &nonce, None, 110);
     assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
 }
 
@@ -118,10 +144,9 @@ fn adversarial_platform_quote_tamper_breaks_master_sig() {
 fn adversarial_replay_after_deadline_rejected() {
     let sk = fresh_sk();
     let nonce = fresh_attestation_nonce(&mut OsRng);
-    let doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, vec![])
-        .unwrap();
+    let doc = sign_sw(&sk, nonce, 100, 120, None, vec![]).unwrap();
     // The peer captured the doc and tries to replay it 100s later.
-    let r = verify_attestation(&doc, &nonce, None, 220);
+    let r = verify_sw(&doc, &nonce, None, 220);
     assert!(matches!(r, Err(ConfidentialError::AttestationExpired { .. })));
 }
 
@@ -130,10 +155,9 @@ fn adversarial_doc_minted_for_peer_a_rejected_by_peer_b() {
     let sk = fresh_sk();
     let nonce_a = fresh_attestation_nonce(&mut OsRng);
     let nonce_b = fresh_attestation_nonce(&mut OsRng);
-    let doc = sign_attestation(&sk, ProviderTag::Software, nonce_a, 100, 120, None, vec![])
-        .unwrap();
+    let doc = sign_sw(&sk, nonce_a, 100, 120, None, vec![]).unwrap();
     // Peer B's verifier sees a doc bound to peer A's nonce; rejects.
-    let r = verify_attestation(&doc, &nonce_b, None, 110);
+    let r = verify_sw(&doc, &nonce_b, None, 110);
     assert!(matches!(r, Err(ConfidentialError::AttestationPeerNonceMismatch)));
 }
 
@@ -141,10 +165,9 @@ fn adversarial_doc_minted_for_peer_a_rejected_by_peer_b() {
 fn adversarial_truncated_sig_rejected() {
     let sk = fresh_sk();
     let nonce = fresh_attestation_nonce(&mut OsRng);
-    let mut doc = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, vec![])
-        .unwrap();
+    let mut doc = sign_sw(&sk, nonce, 100, 120, None, vec![]).unwrap();
     doc.master_sig.truncate(doc.master_sig.len() - 1);
-    let r = verify_attestation(&doc, &nonce, None, 110);
+    let r = verify_sw(&doc, &nonce, None, 110);
     assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
 }
 
@@ -167,7 +190,7 @@ fn adversarial_sealed_blob_truncated_rejected() {
     let mut sealed = provider.seal_master(&seed).unwrap();
     sealed.bytes.truncate(sealed.bytes.len() - 1);
     let r = provider.sealed_sign(&sealed, b"x");
-    assert!(matches!(r, Err(ConfidentialError::SealedKeyBadLength { .. })));
+    assert!(matches!(r, Err(ConfidentialError::SealedKeyAuthFail)));
 }
 
 #[test]

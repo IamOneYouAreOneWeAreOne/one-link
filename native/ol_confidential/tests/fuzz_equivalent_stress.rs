@@ -8,7 +8,8 @@ use rand_chacha::ChaCha20Rng;
 
 use ol_confidential::{
     sign_attestation, verify_attestation, AttestationDoc, ConfidentialProvider,
-    ProviderTag, SoftwareProvider, ATTESTATION_NONCE_LEN,
+    ConfidentialTier, ProviderTag, SoftwareProvider, ATTESTATION_NONCE_LEN,
+    ISSUER_SDP_PUBKEY_LEN,
 };
 use ol_pqsig::HybridSigningKey;
 
@@ -19,6 +20,8 @@ fn cases() -> u32 {
         10_000
     }
 }
+
+const TEST_SDP_PUBKEY: [u8; ISSUER_SDP_PUBKEY_LEN] = [0xE5; ISSUER_SDP_PUBKEY_LEN];
 
 fn fuzz_body(data: &[u8]) {
     let mut rng = ChaCha20Rng::from_seed([0xC0; 32]);
@@ -59,10 +62,26 @@ fn fuzz_body(data: &[u8]) {
     let deadline = issued.saturating_add(offset);
     let quote: Vec<u8> = data.iter().skip(3).take(64).copied().collect();
     if let Ok(doc) =
-        sign_attestation(&sk, provider_tag, nonce, issued, deadline, None, quote)
+        sign_attestation(
+            &sk,
+            provider_tag,
+            nonce,
+            issued,
+            deadline,
+            None,
+            quote,
+            TEST_SDP_PUBKEY,
+        )
     {
         let now = issued.saturating_add(offset / 2);
-        let _ = verify_attestation(&doc, &nonce, None, now);
+        let _ = verify_attestation(
+            &doc,
+            &nonce,
+            None,
+            now,
+            ConfidentialTier::Software,
+            &TEST_SDP_PUBKEY,
+        );
     }
 
     let bogus = AttestationDoc {
@@ -73,9 +92,17 @@ fn fuzz_body(data: &[u8]) {
         deadline_unix: deadline,
         field_witness_commitment: None,
         platform_quote: data.iter().take(32).copied().collect(),
+        issuer_sdp_pubkey: TEST_SDP_PUBKEY,
         master_sig: data.iter().take(3357).copied().collect(),
     };
-    let _ = verify_attestation(&bogus, &nonce, None, issued.saturating_add(1));
+    let _ = verify_attestation(
+        &bogus,
+        &nonce,
+        None,
+        issued.saturating_add(1),
+        ConfidentialTier::Software,
+        &TEST_SDP_PUBKEY,
+    );
 }
 
 proptest! {

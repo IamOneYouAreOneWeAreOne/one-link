@@ -32,6 +32,8 @@ import urllib.request
 from dataclasses import dataclass, field, asdict
 from typing import Callable, Optional
 
+from one_link.safe_http import validated_urlopen
+
 log = logging.getLogger("one_link.update_check")
 
 
@@ -157,7 +159,7 @@ def _default_fetch(url: str, timeout: float) -> dict:
             "Accept": "application/vnd.github+json",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+    with validated_urlopen(req, timeout=timeout, allow_loopback_http=True) as resp:
         if resp.status != 200:
             raise urllib.error.HTTPError(
                 url, resp.status, resp.reason, resp.headers, None

@@ -8,7 +8,7 @@
 
 use ol_confidential::{
     fresh_attestation_nonce, sign_attestation, verify_attestation, ConfidentialProvider,
-    ProviderTag, SoftwareProvider,
+    ConfidentialTier, ProviderTag, SoftwareProvider, ISSUER_SDP_PUBKEY_LEN,
 };
 use ol_pqsig::HybridSigningKey;
 use rand::rngs::OsRng;
@@ -17,6 +17,7 @@ use std::time::Instant;
 const SAMPLES_PER_BUCKET: usize = 2_000;
 const BUCKETS: usize = 4;
 const REL_STDDEV_MAX: f64 = 0.30;
+const TEST_SDP_PUBKEY: [u8; ISSUER_SDP_PUBKEY_LEN] = [0xA5; ISSUER_SDP_PUBKEY_LEN];
 
 fn time_ns<F: FnMut()>(mut f: F) -> u64 {
     let t0 = Instant::now();
@@ -55,8 +56,17 @@ fn ct_attest_verify_uniform_over_invalid_sigs() {
     // shouldn't leak where the byte mismatch lives.
     let (sk, _vk) = HybridSigningKey::generate(&mut OsRng);
     let nonce = fresh_attestation_nonce(&mut OsRng);
-    let good = sign_attestation(&sk, ProviderTag::Software, nonce, 100, 120, None, vec![])
-        .unwrap();
+    let good = sign_attestation(
+        &sk,
+        ProviderTag::Software,
+        nonce,
+        100,
+        120,
+        None,
+        vec![],
+        TEST_SDP_PUBKEY,
+    )
+    .unwrap();
 
     let mut bucket_means: Vec<f64> = Vec::with_capacity(BUCKETS);
     for bucket in 0..BUCKETS {
@@ -68,7 +78,14 @@ fn ct_attest_verify_uniform_over_invalid_sigs() {
                 doc.master_sig[idx] ^= 0x01;
             }
             let t = time_ns(|| {
-                let _ = verify_attestation(&doc, &nonce, None, 110);
+                let _ = verify_attestation(
+                    &doc,
+                    &nonce,
+                    None,
+                    110,
+                    ConfidentialTier::Software,
+                    &TEST_SDP_PUBKEY,
+                );
             });
             samples.push(t);
         }

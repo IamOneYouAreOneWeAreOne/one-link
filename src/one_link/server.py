@@ -858,7 +858,7 @@ class UIServer:
         different token. Before publishing server.port, verify the endpoint
         answers our own token-gated status request.
         """
-        host = "127.0.0.1" if bind_host in ("0.0.0.0", "127.0.0.1") else bind_host
+        host = "127.0.0.1" if bind_host in ("0.0.0.0", "127.0.0.1") else bind_host  # nosec B104
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port),
@@ -1871,7 +1871,7 @@ class UIServer:
         # but phones-over-LAN won't work.
         try:
             host = self.bind_host
-            if host in ("0.0.0.0", "::", ""):
+            if host in ("0.0.0.0", "::", ""):  # nosec B104
                 from one_link.app import _detect_lan_ip
                 host = _detect_lan_ip()
             if self.https_port:

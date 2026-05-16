@@ -47,6 +47,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from one_link.safe_http import validated_urlopen
+
 log = logging.getLogger("one_link.updater")
 
 
@@ -212,7 +214,7 @@ def _default_http_get_bytes(url: str, timeout: float) -> bytes:
         headers={"User-Agent": "one-link-updater/0.21",
                  "Accept": "application/octet-stream"},
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+    with validated_urlopen(req, timeout=timeout, allow_loopback_http=True) as resp:
         if resp.status != 200:
             raise urllib.error.HTTPError(
                 url, resp.status, resp.reason, resp.headers, None

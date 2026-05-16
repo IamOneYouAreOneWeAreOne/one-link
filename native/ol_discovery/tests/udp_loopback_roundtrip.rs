@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use ol_discovery::lookup::Transport;
 use ol_discovery::node_id::NodeId;
 use ol_discovery::rpc::{
-    FindValueOutcome, Header, Request, Response, RpcEnvelope,
+    FindValueOutcome, Request, Response, RpcEnvelope,
 };
 use ol_discovery::udp_transport::{
     EndpointResolver, RequestHandler, UdpTransport,

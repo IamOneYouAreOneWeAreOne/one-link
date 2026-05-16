@@ -2418,7 +2418,7 @@ class State:
         params.append(fingerprint)
         with self._write_lock:
             self._conn.execute(
-                f"UPDATE peers SET {', '.join(sets)} WHERE fingerprint = ?",
+                f"UPDATE peers SET {', '.join(sets)} WHERE fingerprint = ?",  # nosec B608
                 params,
             )
         return self.get_peer(fingerprint)
@@ -2714,7 +2714,7 @@ class State:
         placeholders = ",".join("?" for _ in ids)
         rows = self._conn.execute(
             f"SELECT target_msg_id, peer_fp, emoji FROM message_reactions"
-            f" WHERE target_msg_id IN ({placeholders}) ORDER BY ts_ms ASC",
+            f" WHERE target_msg_id IN ({placeholders}) ORDER BY ts_ms ASC",  # nosec B608
             ids,
         ).fetchall()
         out: dict[str, dict[str, list[str]]] = {}
@@ -2741,7 +2741,7 @@ class State:
             params.append(room_id)
         where = " AND ".join(clauses)
         sql = (
-            f"SELECT * FROM messages WHERE {where} "
+            f"SELECT * FROM messages WHERE {where} "  # nosec B608
             f"ORDER BY ts_ms DESC LIMIT ?"
         )
         params.append(limit)
@@ -2848,7 +2848,7 @@ class State:
             clauses.append("room_id = ?")
             params.append(room_id)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        sql = f"SELECT * FROM messages{where} ORDER BY ts_ms DESC LIMIT ?"
+        sql = f"SELECT * FROM messages{where} ORDER BY ts_ms DESC LIMIT ?"  # nosec B608
         params.append(limit)
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_msg(r) for r in reversed(rows)]
@@ -3209,7 +3209,7 @@ class State:
             params.append(keep_latest)
         with self._write_lock:
             cur = self._conn.execute(
-                f"DELETE FROM transfers WHERE {where}{keep_clause}",
+                f"DELETE FROM transfers WHERE {where}{keep_clause}",  # nosec B608
                 params,
             )
             return int(cur.rowcount)
@@ -3491,8 +3491,7 @@ class State:
             clauses.append("(expires_ms IS NULL OR expires_ms > ?)")
             params.append(now)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        rows = self._conn.execute(
-            f"""
+        sql = f"""
             SELECT * FROM route_candidates
             {where}
             ORDER BY
@@ -3503,7 +3502,9 @@ class State:
                 COALESCE(latency_ms, 999999) ASC,
                 updated_ms DESC
             LIMIT ?
-            """,
+            """  # nosec B608
+        rows = self._conn.execute(
+            sql,
             (*params, max(1, min(512, int(limit)))),
         ).fetchall()
         return [self._row_to_route_candidate(r) for r in rows]
@@ -3704,12 +3705,13 @@ class State:
         if not include_revoked:
             clauses.append("revoked = 0")
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        rows = self._conn.execute(
-            f"""
+        sql = f"""
             SELECT * FROM self_mesh_devices
             {where}
             ORDER BY local DESC, revoked ASC, updated_ms DESC, label ASC
-            """,
+            """  # nosec B608
+        rows = self._conn.execute(
+            sql,
             params,
         ).fetchall()
         return [self._row_to_self_mesh_device(r) for r in rows]
@@ -3917,13 +3919,14 @@ class State:
             params.append(bytes(root_pub))
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(max(1, min(int(limit), 2000)))
-        rows = self._conn.execute(
-            f"""
+        sql = f"""
             SELECT * FROM self_mesh_audit
             {where}
             ORDER BY ts_ms DESC, id DESC
             LIMIT ?
-            """,
+            """  # nosec B608
+        rows = self._conn.execute(
+            sql,
             params,
         ).fetchall()
         return [self._row_to_self_mesh_audit(r) for r in rows]
@@ -4118,7 +4121,7 @@ class State:
             params.append(int(older_than_ms))
         if not clauses:
             return 0
-        sql = "DELETE FROM outbox WHERE " + " AND ".join(clauses)
+        sql = "DELETE FROM outbox WHERE " + " AND ".join(clauses)  # nosec B608
         with self._write_lock:
             cur = self._conn.execute(sql, tuple(params))
             return int(cur.rowcount)
@@ -4980,7 +4983,7 @@ class State:
             batch = clean[i:i + 500]
             rows = self._conn.execute(
                 "SELECT chunk_hash FROM chunk_availability "
-                f"WHERE chunk_hash IN ({','.join('?' for _ in batch)})",
+                f"WHERE chunk_hash IN ({','.join('?' for _ in batch)})",  # nosec B608
                 tuple(batch),
             ).fetchall()
             out.extend(str(r["chunk_hash"]) for r in rows)
@@ -5151,7 +5154,7 @@ class State:
             batch = clean[i:i + 500]
             rows = self._conn.execute(
                 "SELECT DISTINCT chunk_hash FROM chunk_sources "
-                f"WHERE chunk_hash IN ({','.join('?' for _ in batch)})",
+                f"WHERE chunk_hash IN ({','.join('?' for _ in batch)})",  # nosec B608
                 tuple(batch),
             ).fetchall()
             out.extend(str(r["chunk_hash"]) for r in rows)
