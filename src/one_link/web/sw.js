@@ -12,12 +12,19 @@
 // We deliberately do NOT do push notifications here (no remote
 // server to subscribe to) and we do NOT cache encrypted payloads.
 
-// v0.15.0: bump shell cache name so the SW upgrade picks up the
-// manifest + new icon variants. The activate handler below evicts
-// any older `one-link-shell-*` keys.
-const CACHE_NAME = "one-link-shell-v2";
+// May 16 2026 — bump cache name to v3 so existing clients evict the
+// stale shell on first load after this update. The bigger fix is
+// removing "/" from SHELL_FILES + serving the index NETWORK-FIRST
+// in the fetch handler below. Cache-first for the SPA shell was
+// causing users to keep seeing the OLD UI on every reload until
+// they hit Ctrl+Shift+R. The daemon runs locally on 127.0.0.1 so
+// "offline" is never a real state for the index page; cache-first
+// has zero benefit and one large cost (stale UI).
+const CACHE_NAME = "one-link-shell-v3";
 const SHELL_FILES = [
-  "/",
+  // Static-only entries here. The index itself is intentionally
+  // omitted so it always comes from the live daemon — see fetch
+  // handler below.
   "/manifest.json",
   "/static/one-glyph.png",
   "/static/one-glyph-app.png",
@@ -50,19 +57,37 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/")) {
     return; // let the browser handle normally
   }
-  // Cache-first for static shell; falls back to network. v0.15.0
-  // adds /manifest.json so the install prompt works offline (the
-  // browser refetches the manifest before showing the prompt; if
-  // we're offline we still serve from cache).
+  // May 16 2026 — Network-FIRST for the index page itself. The
+  // daemon runs locally; the user is never offline with respect to
+  // it. Serving cached HTML caused the "I only see new UI after
+  // Ctrl+Shift+R" bug. Try network, fall back to cache only when
+  // the network actually fails (which on 127.0.0.1 essentially
+  // means daemon is down).
+  if (url.pathname === "/") {
+    event.respondWith(
+      fetch(event.request).then((res) => {
+        // Refresh the cache copy so a future genuinely-offline
+        // load (rare; only when daemon is down) still has SOMETHING
+        // to render.
+        if (res && res.status === 200) {
+          const copy = res.clone();
+          caches.open(CACHE_NAME).then((c) => c.put(event.request, copy));
+        }
+        return res;
+      }).catch(() => caches.match(event.request)),
+    );
+    return;
+  }
+  // Cache-first for the small static assets (manifest, icons).
+  // These rarely change, and serving them from cache makes the
+  // first paint snappy.
   if (
-    url.pathname === "/" ||
     url.pathname === "/manifest.json" ||
     url.pathname.startsWith("/static/")
   ) {
     event.respondWith(
       caches.match(event.request).then((cached) =>
         cached || fetch(event.request).then((res) => {
-          // Don't cache redirects or errors.
           if (!res || res.status !== 200) return res;
           const copy = res.clone();
           caches.open(CACHE_NAME).then((c) => c.put(event.request, copy));
