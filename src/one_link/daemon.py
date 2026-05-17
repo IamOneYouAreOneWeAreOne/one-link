@@ -14427,6 +14427,10 @@ class Daemon:
         )
 
     def _broadcast_tail(self, msg: dict) -> None:
+        # The control-socket tail-stream path multiplexes many event
+        # types over a single line-oriented socket, so it keeps the
+        # legacy {"event": "msg", "msg": ...} envelope. Subscribers
+        # there demultiplex on ``event``.
         line = (json.dumps({"event": "msg", "msg": msg}) + "\n").encode("utf-8")
         dead: list[asyncio.StreamWriter] = []
         for w in list(self._tail_subs):
@@ -14436,10 +14440,15 @@ class Daemon:
                 dead.append(w)
         for w in dead:
             self._tail_subs.discard(w)
-        # Push to UI subscribers too
+        # The UI-WebSocket path sends already-typed events directly
+        # — every other caller of ui_server.broadcast follows that
+        # convention (e.g. {"type": "peer_trust", ...}). Wrapping
+        # call_event / frame_provenance / etc. as {"type": "msg",
+        # "msg": ...} would hide them from the browser's typed
+        # dispatcher in index.html (it routes on m.type === "...").
         if self.ui_server is not None:
             try:
-                self.ui_server.broadcast({"type": "msg", "msg": msg})
+                self.ui_server.broadcast(msg)
             except Exception:
                 pass
 

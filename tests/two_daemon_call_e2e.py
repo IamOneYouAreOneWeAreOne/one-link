@@ -24,6 +24,7 @@ on failure so we can iterate.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -32,6 +33,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -142,6 +144,106 @@ def _http_get(ui_port: int, token: str, path: str) -> tuple[int, dict]:
 
 def _http_post(ui_port: int, token: str, path: str, body: dict) -> tuple[int, dict]:
     return _http_request(ui_port, token, "POST", path, body)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket tail-event sink — the browser-equivalent
+# ---------------------------------------------------------------------------
+
+class _WSSink:
+    """Connects to /api/events on the daemon's UI port, captures every
+    JSON message, exposes a thread-safe list. This is the real "what
+    the browser sees" verification — any tail event the daemon emits
+    over its WebSocket lands here byte-for-byte. Without this, the
+    test only verifies HTTP state and misses the call_event broadcasts
+    that the browser actually listens to."""
+
+    def __init__(self, ui_port: int, token: str) -> None:
+        self.ui_port = ui_port
+        self.token = token
+        self.events: list[dict] = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name=f"ws-sink-:{self.ui_port}",
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._loop is not None and self._loop.is_running():
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            except RuntimeError:
+                pass
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+
+    def captured(self) -> list[dict]:
+        with self._lock:
+            return list(self.events)
+
+    def wait_for(
+        self,
+        predicate,
+        timeout: float = 5.0,
+    ) -> Optional[dict]:
+        """Poll the captured list for the first event matching ``predicate``."""
+        end = time.time() + timeout
+        while time.time() < end:
+            with self._lock:
+                for ev in self.events:
+                    if predicate(ev):
+                        return ev
+            time.sleep(0.1)
+        return None
+
+    def _run(self) -> None:
+        import websockets
+
+        async def listen() -> None:
+            url = f"ws://127.0.0.1:{self.ui_port}/api/events?token={self.token}"
+            try:
+                async with websockets.connect(
+                    url, additional_headers={"Authorization": f"Bearer {self.token}"},
+                    open_timeout=5,
+                ) as ws:
+                    while not self._stop.is_set():
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=0.5)
+                        except asyncio.TimeoutError:
+                            continue
+                        except websockets.exceptions.ConnectionClosed:
+                            return
+                        try:
+                            ev = json.loads(raw)
+                        except Exception:
+                            continue
+                        with self._lock:
+                            self.events.append(ev)
+            except Exception:
+                # Connection failures are caught silently — the test
+                # will fail at the wait_for assertion if events never
+                # arrive.
+                return
+
+        self._loop = asyncio.new_event_loop()
+        try:
+            self._loop.run_until_complete(listen())
+        except RuntimeError:
+            # "Event loop stopped before Future completed" fires when
+            # stop() interrupts an in-flight recv. Expected on teardown.
+            pass
+        finally:
+            try:
+                self._loop.close()
+            except Exception:
+                pass
+            self._loop = None
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +400,20 @@ def main() -> int:
         # Restart isn't required — daemon reads trust from state.db
         # on each call. (If it caches, we'll find out via the test.)
 
+        # Step 3.5: subscribe a browser-equivalent WebSocket sink to
+        # both daemons' /api/events so we verify tail-event delivery
+        # the same way the browser would receive it. This is the
+        # piece that was missing before — HTTP /api/v1/calls polling
+        # masked a bug where call_event tail messages were wrapped
+        # in a {type:msg, msg:...} envelope the browser never matched.
+        a_ws = _WSSink(a.ui_port, a.ui_token)
+        b_ws = _WSSink(b.ui_port, b.ui_token)
+        a_ws.start()
+        b_ws.start()
+        # Give the sockets a beat to connect before we start
+        # generating events.
+        time.sleep(0.5)
+
         # Step 4: A initiates a call to B
         print("[smoke] A → CALL_INVITE → B")
         status, body = _http_post(
@@ -338,6 +454,28 @@ def main() -> int:
             print("[smoke] FAIL — B never received the call")
             return 1
         print(f"  B sees call — phase={b_call.get('phase')}")
+
+        # CRITICAL: verify B's BROWSER (WebSocket subscriber) got a
+        # call_event tail message. Without this, the daemon-side wire
+        # path could be working while the browser never sees the
+        # incoming ring — which is exactly the regression we just
+        # fixed in _broadcast_tail.
+        ring_event = b_ws.wait_for(
+            lambda ev: ev.get("type") == "call_event"
+            and ev.get("tail_kind") == "show_ring"
+            and ev.get("call_id") == call_id,
+            timeout=4.0,
+        )
+        if ring_event is None:
+            captured = b_ws.captured()
+            print(
+                "[smoke] FAIL — B's WebSocket never received show_ring "
+                "for the incoming call. The HTTP /api/v1/calls path "
+                "may be working but the browser never sees the ring."
+            )
+            print(f"  Captured WS events: {[e.get('type') for e in captured]!r}")
+            return 1
+        print("  ✓ B's WebSocket saw show_ring tail event (browser would ring)")
         if b_call.get("phase") not in {"ringing", "RINGING"}:
             print(
                 f"[smoke] WARNING — B phase is {b_call.get('phase')}, "
@@ -685,6 +823,12 @@ def main() -> int:
         return 1
 
     finally:
+        # Stop the WS sinks first so they don't try to recv against
+        # a closing daemon socket.
+        for sink in (locals().get("a_ws"), locals().get("b_ws")):
+            if sink is not None:
+                try: sink.stop()
+                except Exception: pass
         a.stop()
         b.stop()
         if failed:
