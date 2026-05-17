@@ -111,9 +111,14 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
             tray_icon_holder["icon"] = tray_icon
             if tray_icon.available:
                 tray_icon.start()
-                logging.getLogger("one_link.tray").info(
-                    "tray icon active. Right-click for menu; click to open UI."
-                )
+                if tray_icon.available:
+                    logging.getLogger("one_link.tray").info(
+                        "tray icon active. Right-click for menu; click to open UI."
+                    )
+                else:
+                    logging.getLogger("one_link.tray").info(
+                        "tray icon unavailable; daemon is running without tray controls."
+                    )
         except Exception as e:
             logging.getLogger("one_link.tray").info(
                 "tray init skipped: %s", e,

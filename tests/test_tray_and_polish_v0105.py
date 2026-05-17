@@ -102,6 +102,17 @@ def test_cli_daemon_respects_no_tray_flag():
     assert "tray_icon" in src
 
 
+def test_cli_logs_headless_tray_fallback():
+    """If TrayIcon.start() degrades to headless mode, the daemon log
+    should say that instead of claiming tray controls are active."""
+    src = Path("src/one_link/cli.py").read_text(encoding="utf-8")
+    active_idx = src.find("tray icon active")
+    unavailable_idx = src.find("tray icon unavailable")
+    assert active_idx > 0
+    assert unavailable_idx > active_idx
+    assert src.count("if tray_icon.available:") >= 2
+
+
 def test_tray_quit_signals_daemon_shutdown():
     """The on_quit callback wired by the CLI must trigger an
     actual shutdown signal, not just stop the icon. Pin via the
