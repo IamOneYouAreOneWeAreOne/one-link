@@ -545,6 +545,42 @@
     background: var(--accent); color: white; font-size: 12px; font-weight: 600;
   }
   .discover-row .pair-btn:hover { filter: brightness(1.15); }
+  .discover-phone-help {
+    margin: 8px 0 10px;
+    padding: 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(124,92,255,.22);
+    background: rgba(124,92,255,.08);
+    display: grid;
+    gap: 8px;
+  }
+  .discover-phone-help b {
+    color: var(--text);
+    font-size: 13px;
+  }
+  .discover-phone-help p {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  .discover-phone-help .actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .discover-phone-help button {
+    border-radius: 999px;
+    padding: 7px 11px;
+    color: var(--text);
+    background: rgba(255,255,255,.07);
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .discover-phone-help button.primary {
+    background: var(--accent);
+    color: white;
+  }
   .discover-foot {
     padding: 12px 18px; border-top: 1px solid var(--line);
     display: flex; align-items: center; justify-content: space-between;
@@ -8765,6 +8801,35 @@
     return row;
   }
 
+  function _hasDiscoveredPhone(devices) {
+    return (devices || []).some((d) => {
+      const text = [
+        d.kind, d.hostname, d.vendor, d.model,
+        d.one_link_peer?.hostname, d.one_link_peer?.display_name,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return /\b(phone|iphone|android|pixel|galaxy|oneplus|xiaomi|redmi)\b/.test(text);
+    });
+  }
+
+  function _renderPhoneHelp() {
+    const box = el("div", "discover-phone-help");
+    box.appendChild(el("b", "", "Don't see your phone?"));
+    box.appendChild(el(
+      "p",
+      "",
+      "Phones hide more than laptops: private Wi-Fi addresses, sleep, guest networks, and hotspot modes can stop passive discovery. The reliable path is to send an invite or scan the QR from the phone.",
+    ));
+    const actions = el("div", "actions");
+    const invite = el("button", "primary", "Pair phone by QR");
+    invite.onclick = () => openInviteModal({ kind: "phone", hostname: "Phone" });
+    const scan = el("button", "", "Scan again");
+    scan.onclick = () => loadDiscoverable({ prune: true });
+    actions.appendChild(invite);
+    actions.appendChild(scan);
+    box.appendChild(actions);
+    return box;
+  }
+
   function renderDiscoverable() {
     const body = $("#discover-body");
     if (!body) return;
@@ -8773,6 +8838,7 @@
     const ready = smart.ready_to_pair || [];
     const pairable = smart.pairable || [];
     const other = smart.other_gear || [];
+    const allDiscovered = [...ready, ...pairable, ...other];
     const health = smart.network_health || {};
 
     // Status line under the title.
@@ -8784,7 +8850,7 @@
       } else {
         status.textContent =
           `${total} device${total === 1 ? "" : "s"} on your network · ` +
-          `${ready.length} ready to pair, ${pairable.length} other`;
+          `${ready.length} ready to pair, ${pairable.length} inviteable`;
       }
     }
 
@@ -8813,6 +8879,10 @@
           sending them an invite link.
         </p>`;
       body.appendChild(empty);
+    }
+
+    if (!_hasDiscoveredPhone(allDiscovered)) {
+      body.appendChild(_renderPhoneHelp());
     }
 
     // Section 1: Ready to pair (already running One Link).

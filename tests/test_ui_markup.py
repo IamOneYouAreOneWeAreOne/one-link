@@ -61,6 +61,22 @@ def test_discovery_modal_markup_present(ids):
     assert not missing, f"discovery modal missing IDs: {missing}"
 
 
+def test_discovery_modal_has_phone_fallback(html: str):
+    """Phones can be invisible to passive LAN scans, so discovery must
+    always expose a direct QR/invite path when no phone is detected."""
+    for marker in (
+        "function _hasDiscoveredPhone",
+        "function _renderPhoneHelp",
+        "Don't see your phone?",
+        "Pair phone by QR",
+        "private Wi-Fi addresses",
+        "scan the QR from the phone",
+        'openInviteModal({ kind: "phone", hostname: "Phone" })',
+        "inviteable",
+    ):
+        assert marker in html
+
+
 def test_sidebar_header_says_my_devices(html: str):
     """Old header was 'Nearby devices' — v0.4 changed it to 'My devices'
     to reflect the paired-only filter."""
