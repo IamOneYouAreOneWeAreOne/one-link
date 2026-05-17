@@ -5432,52 +5432,75 @@
 
   <!-- Invite sub-modal. Opens when user clicks "Send an invite..."
        or a per-device "Send invite" button. Shows the pair code +
-       QR + landing URL. -->
+       real QR + ways to share. -->
   <div class="modal-backdrop" id="invite-backdrop"
        role="dialog" aria-modal="true" aria-labelledby="invite-title">
-    <div class="modal" style="max-width:520px;">
+    <div class="modal" style="max-width:480px;">
       <h2 id="invite-title">Invite this device</h2>
-      <p>
-        Have them open the link or scan the code. It works whether
-        or not they already have One Link.
+      <p id="invite-target-line"
+         style="margin:2px 0 14px; color:var(--text-dim); font-size:13px;">
+        Hand them the QR code or send them the link.
       </p>
-      <div id="invite-target-label" style="font-weight:600; margin:8px 0;"></div>
-      <div style="text-align:center; margin: 16px 0;">
-        <div id="invite-qr"
-             style="display:inline-block; padding:14px; background:#fff;
-                    border-radius:12px; min-height: 200px; min-width: 200px;">
+
+      <!-- QR card. White inset so the QR scans cleanly from any
+           camera (high contrast on a phone screen). -->
+      <div style="display:flex; justify-content:center; margin: 6px 0 16px;">
+        <div id="invite-qr-card"
+             style="position:relative; padding:14px; background:#fff;
+                    border-radius:14px; width:240px; height:240px;
+                    box-shadow:0 4px 24px rgba(0,0,0,0.18);
+                    display:flex; align-items:center; justify-content:center;">
+          <div id="invite-qr" style="width:212px; height:212px; display:flex;
+               align-items:center; justify-content:center; color:#888;
+               font-size:12px;">
+            Generating QR...
+          </div>
         </div>
       </div>
-      <div style="background:rgba(126,96,255,0.08);
-                  border:1px solid rgba(126,96,255,0.32);
-                  border-radius:10px; padding:12px 14px; margin:12px 0;">
-        <div style="font-size:11px; text-transform:uppercase;
-                    letter-spacing:0.08em; color:rgba(180,200,255,0.7);">
-          Pair code
+
+      <!-- Pair code card (big, tappable, copy on click). -->
+      <button type="button" id="invite-code-card"
+              aria-label="Tap to copy pair code"
+              style="display:block; width:100%; padding:14px 16px;
+                     background:rgba(126,96,255,0.10);
+                     border:1px solid rgba(126,96,255,0.32);
+                     border-radius:12px; cursor:pointer;
+                     text-align:left; transition: background 120ms;">
+        <div style="display:flex; align-items:center; justify-content:space-between;">
+          <div>
+            <div style="font-size:10px; text-transform:uppercase;
+                        letter-spacing:0.10em; color:rgba(180,200,255,0.78);">
+              Pair code (tap to copy)
+            </div>
+            <div id="invite-code"
+                 style="font-family:ui-monospace,monospace; font-size:28px;
+                        font-weight:700; letter-spacing:0.20em;
+                        margin-top:2px; color:var(--text);">
+              ------
+            </div>
+          </div>
+          <div id="invite-expiry"
+               style="font-size:11px; color:var(--text-dim);
+                      font-variant-numeric:tabular-nums;">
+            5:00
+          </div>
         </div>
-        <div id="invite-code"
-             style="font-family:ui-monospace,monospace; font-size:24px;
-                    font-weight:700; letter-spacing:0.15em; margin-top:4px;">
-          ......
-        </div>
-        <div id="invite-expiry" style="font-size:11px;
-             color:rgba(155,160,168,0.95); margin-top:6px;">
-          Expires in 5 minutes
-        </div>
-      </div>
-      <div style="font-size:12px; color:rgba(155,160,168,0.95); margin-bottom:8px;">
-        Or share this link manually:
-      </div>
-      <div id="invite-url"
-           style="font-family:ui-monospace,monospace; font-size:12px;
-                  word-break:break-all; padding:8px 10px;
-                  background:rgba(255,255,255,0.04);
-                  border-radius:6px; color:#dde0e6;">
-      </div>
-      <div class="actions" style="margin-top:14px;">
+      </button>
+
+      <!-- Action row: share / copy / done. -->
+      <div class="actions" style="margin-top:14px; gap:8px; display:flex;
+                                   align-items:center; flex-wrap:wrap;">
+        <button class="btn-ghost" id="invite-share"
+                style="display:none;">Share...</button>
         <button class="btn-ghost" id="invite-copy">Copy link</button>
-        <button class="btn-primary" id="invite-close">Done</button>
+        <a id="invite-open-tab" href="#" target="_blank" rel="noopener"
+           class="btn-ghost" style="text-decoration:none;">Open landing</a>
+        <button class="btn-primary" id="invite-close"
+                style="margin-left:auto;">Done</button>
       </div>
+
+      <!-- Hidden: the raw landing URL, kept in DOM for Copy/Share -->
+      <div id="invite-url" style="display:none;"></div>
     </div>
   </div>
 
@@ -8455,60 +8478,116 @@
     }
   }
 
-  // Invite sub-modal logic. Mints a pair code via
-  // /api/discover/invite, renders the QR + landing URL.
+  // Invite sub-modal. Mints a pair code, renders a real SVG QR
+  // (from /api/discover/invite/qr.svg), runs a live MM:SS countdown,
+  // and exposes tap-to-copy on the code + native Web Share where
+  // available.
+  let _inviteCountdownTimer = null;
+  let _inviteCurrentCode = null;
+  let _inviteExpiresAtMs = 0;
+
   async function openInviteModal(targetDevice) {
     const overlay = $("#invite-backdrop");
-    const labelEl = $("#invite-target-label");
     const codeEl = $("#invite-code");
     const urlEl = $("#invite-url");
     const expiryEl = $("#invite-expiry");
     const qrHost = $("#invite-qr");
+    const tgtLine = $("#invite-target-line");
+    const openTab = $("#invite-open-tab");
+    const shareBtn = $("#invite-share");
     if (!overlay || !codeEl || !urlEl || !qrHost) return;
     overlay.classList.add("show");
-    if (labelEl) {
-      labelEl.textContent = targetDevice
-        ? `Inviting: ${targetDevice.hostname || targetDevice.vendor || "device"} ${targetDevice.ip ? "("+targetDevice.ip+")" : ""}`
-        : "";
+
+    // Target line copy.
+    if (tgtLine) {
+      if (targetDevice) {
+        const who = targetDevice.hostname || targetDevice.vendor || "this device";
+        const ip = targetDevice.ip ? ` (${targetDevice.ip})` : "";
+        tgtLine.textContent = `Inviting ${who}${ip}. Have them scan the code or open the link.`;
+      } else {
+        tgtLine.textContent = "Hand them the QR code or send them the link.";
+      }
     }
-    codeEl.textContent = "...";
+
+    // Loading state.
+    codeEl.textContent = "------";
     urlEl.textContent = "";
-    qrHost.innerHTML = '<div style="height:200px; display:flex; align-items:center; justify-content:center; color:#888;">Generating...</div>';
+    if (expiryEl) expiryEl.textContent = "...";
+    qrHost.innerHTML = '<div style="color:#888; font-size:12px;">Generating QR...</div>';
+    if (openTab) openTab.style.display = "none";
+    _stopInviteCountdown();
+
     try {
       const body = await api.post("/api/discover/invite", {
         target_label: targetDevice
           ? (targetDevice.hostname || targetDevice.vendor || "")
           : "",
       });
-      codeEl.textContent = body.code || "ERROR";
-      urlEl.textContent = body.landing_url || "";
-      const minsLeft = Math.round((body.expires_in_seconds || 300) / 60);
-      expiryEl.textContent = `Expires in ${minsLeft} minute${minsLeft === 1 ? "" : "s"}`;
-      // Render QR via inline SVG (no external lib).
-      qrHost.innerHTML = await _renderInviteQRSvg(body.landing_url);
+      const code = body.code || "";
+      const landing = body.landing_url || "";
+      _inviteCurrentCode = code;
+      _inviteExpiresAtMs = body.expires_ms || (Date.now() + 300000);
+      codeEl.textContent = code;
+      urlEl.textContent = landing;
+      if (openTab && landing) {
+        openTab.href = landing;
+        openTab.style.display = "";
+      }
+      // Real SVG QR from the daemon, sized to the card. <img src>
+      // automatically sends the session cookie for same-origin
+      // requests, so the auth gate accepts it transparently.
+      const qrUrl = `/api/discover/invite/qr.svg?code=${encodeURIComponent(code)}`;
+      qrHost.innerHTML = `<img src="${qrUrl}" alt="Pair QR code" `
+        + `style="width:100%; height:100%; object-fit:contain;" `
+        + `onerror="this.parentNode.innerHTML='<div style=color:#c33;font-size:12px;>QR generation failed</div>'" />`;
+      // Live MM:SS countdown.
+      _startInviteCountdown();
+      // Show the Share button only on platforms that support Web Share.
+      if (shareBtn) {
+        shareBtn.style.display = (navigator.share ? "" : "none");
+      }
     } catch (e) {
       codeEl.textContent = "ERROR";
       urlEl.textContent = "";
-      qrHost.innerHTML = `<div style="color:#c33;">Couldn't generate invite. ${e.message || e}</div>`;
+      qrHost.innerHTML = `<div style="color:#c33; font-size:12px;">`
+        + `Couldn't generate invite.<br>${escapeText(e.message || String(e))}</div>`;
     }
   }
 
-  async function _renderInviteQRSvg(text) {
-    // Try the daemon-side QR generator first (the existing
-    // /api/v1/peer-rtc/qr.svg endpoint accepts an arbitrary text
-    // via data:; but to keep this simple we just embed the URL in
-    // an <img> that pulls a fresh SVG from a simple QR endpoint
-    // we don't have yet). For now, render the URL as text + a
-    // 200px placeholder so the modal is functional. A future
-    // commit can wire the SVG QR generator end-to-end.
-    return (
-      `<div style="height:200px; width:200px; padding:8px;
-                   display:flex; align-items:center; justify-content:center;
-                   background:#fff; color:#000; font-family:ui-monospace,monospace;
-                   font-size:11px; word-break:break-all; line-height:1.3;">
-         ${(text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;")}
-       </div>`
-    );
+  function _startInviteCountdown() {
+    _stopInviteCountdown();
+    const expiryEl = $("#invite-expiry");
+    if (!expiryEl) return;
+    const tick = () => {
+      const ms = _inviteExpiresAtMs - Date.now();
+      if (ms <= 0) {
+        expiryEl.textContent = "Expired";
+        expiryEl.style.color = "#e36a6a";
+        _stopInviteCountdown();
+        return;
+      }
+      const total = Math.floor(ms / 1000);
+      const mm = Math.floor(total / 60);
+      const ss = total % 60;
+      expiryEl.textContent = `${mm}:${ss.toString().padStart(2, "0")}`;
+      expiryEl.style.color = ms < 60000 ? "#e3a86a" : "";
+    };
+    tick();
+    _inviteCountdownTimer = setInterval(tick, 1000);
+  }
+
+  function _stopInviteCountdown() {
+    if (_inviteCountdownTimer) {
+      clearInterval(_inviteCountdownTimer);
+      _inviteCountdownTimer = null;
+    }
+  }
+
+  function closeInviteModal() {
+    const overlay = $("#invite-backdrop");
+    if (overlay) overlay.classList.remove("show");
+    _stopInviteCountdown();
+    _inviteCurrentCode = null;
   }
 
   // Trust API — kept for power-user paths (right-click menu later); the
@@ -16959,9 +17038,7 @@
   }
   const _inviteClose = $("#invite-close");
   if (_inviteClose) {
-    _inviteClose.addEventListener("click", () => {
-      $("#invite-backdrop").classList.remove("show");
-    });
+    _inviteClose.addEventListener("click", closeInviteModal);
   }
   const _inviteCopy = $("#invite-copy");
   if (_inviteCopy) {
@@ -16976,11 +17053,57 @@
       }
     });
   }
+  // Tap-to-copy on the pair-code card. The whole big code is a
+  // button — single tap copies + flashes feedback.
+  const _inviteCodeCard = $("#invite-code-card");
+  if (_inviteCodeCard) {
+    _inviteCodeCard.addEventListener("click", async () => {
+      const code = ($("#invite-code").textContent || "").trim();
+      if (!code || code === "------") return;
+      try {
+        await navigator.clipboard.writeText(code);
+        // Visual flash
+        _inviteCodeCard.style.background = "rgba(126,96,255,0.28)";
+        setTimeout(() => {
+          _inviteCodeCard.style.background = "rgba(126,96,255,0.10)";
+        }, 280);
+        toast("Pair code copied", "ok");
+      } catch (e) {
+        toast("Couldn't copy code.", "bad");
+      }
+    });
+  }
+  // Native share sheet (mobile + supported desktops). The Share
+  // button is only shown when navigator.share is available.
+  const _inviteShare = $("#invite-share");
+  if (_inviteShare) {
+    _inviteShare.addEventListener("click", async () => {
+      const url = ($("#invite-url").textContent || "").trim();
+      const code = ($("#invite-code").textContent || "").trim();
+      if (!url) return;
+      if (!navigator.share) {
+        toast("Sharing not supported here.", "warn");
+        return;
+      }
+      try {
+        await navigator.share({
+          title: "One Link invite",
+          text: `Join me on One Link. Pair code: ${code}`,
+          url,
+        });
+      } catch (e) {
+        // User cancelled — silent. Other errors get toasted.
+        if (e && e.name !== "AbortError") {
+          toast(`Couldn't share. ${e.message || e}`, "bad");
+        }
+      }
+    });
+  }
   const _inviteBackdrop = $("#invite-backdrop");
   if (_inviteBackdrop) {
     _inviteBackdrop.addEventListener("click", (e) => {
       if (e.target.id === "invite-backdrop") {
-        _inviteBackdrop.classList.remove("show");
+        closeInviteModal();
       }
     });
   }

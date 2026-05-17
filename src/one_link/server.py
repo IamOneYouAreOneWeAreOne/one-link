@@ -1472,6 +1472,12 @@ class UIServer:
             "/api/discover/invite",
             self._guarded(self.api_discover_invite),
         )
+        # Real QR SVG for an existing invite code. Renders the
+        # landing URL into a crisp vector QR for the in-app modal.
+        r.add_get(
+            "/api/discover/invite/qr.svg",
+            self._guarded(self.api_discover_invite_qr),
+        )
         # Install landing page. UNGUARDED — this is the URL we hand
         # to a device that doesn't have One Link yet. It detects
         # the device's OS via User-Agent and offers the right
@@ -2603,6 +2609,55 @@ class UIServer:
             "expires_ms": self._invite_store[code]["expires_ms"],
             "expires_in_seconds": self._INVITE_TTL_MS // 1000,
         })
+
+    async def api_discover_invite_qr(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Render the invite landing URL as an SVG QR code. Looks up
+        `code` in the in-memory invite store so we don't accept
+        arbitrary URLs; reject expired codes with 404."""
+        import time as _time
+        code = (request.query.get("code") or "").strip().upper()
+        invite = self._invite_store.get(code) if code else None
+        now_ms = int(_time.time() * 1000)
+        if invite is None or invite.get("expires_ms", 0) < now_ms:
+            return web.json_response(
+                {"error": "invite_expired_or_unknown"}, status=404,
+            )
+        # Reconstruct the landing URL (same logic as api_discover_invite).
+        from one_link.lan_discovery import _local_ips
+        lan_ip = next(
+            (ip for ip in _local_ips()
+             if ip != "127.0.0.1"
+             and not ip.startswith("169.254.")),
+            "127.0.0.1",
+        )
+        landing = f"http://{lan_ip}:{self.port}/install?code={code}"
+        try:
+            import qrcode
+            import qrcode.image.svg
+        except ImportError:
+            return web.json_response(
+                {"error": "qrcode_lib_missing"}, status=500,
+            )
+        # Higher error correction (H = 30%) so a camera-phone scan
+        # works even at a glance / off-angle / partially covered.
+        qr = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            border=2, box_size=8,
+        )
+        qr.add_data(landing)
+        qr.make(fit=True)
+        img = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
+        import io
+        buf = io.BytesIO()
+        img.save(buf)
+        resp = web.Response(
+            text=buf.getvalue().decode("utf-8"),
+            content_type="image/svg+xml",
+        )
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     async def _install_landing(
         self, request: web.Request,
