@@ -362,9 +362,12 @@ def test_send_with_outbox_used_for_send(index_html: str):
     """The composer's send path must go through _sendWithOutbox so a
     network-failed send queues instead of toasting and disappearing."""
     assert "_sendWithOutbox" in index_html
-    # Pin that sendCurrent uses it.
+    # Pin that sendCurrent uses it. Window is generous because the
+    # v0.21.x bulletproof-send rewrite added an optimistic-bubble
+    # block before the API call — the pin still has to be in the
+    # same function, not anywhere in the file.
     idx = index_html.find("async function sendCurrent()")
-    snippet = index_html[idx:idx + 5000]
+    snippet = index_html[idx:idx + 10000]
     assert "_sendWithOutbox(" in snippet
 
 

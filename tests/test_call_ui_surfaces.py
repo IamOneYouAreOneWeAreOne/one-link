@@ -204,6 +204,33 @@ def test_call_driver_backfills_pending_ice_candidates(index_html: str) -> None:
     assert "appliedIceKeys" in index_html
 
 
+def test_start_call_paints_overlay_before_daemon_roundtrip(index_html: str) -> None:
+    idx = index_html.find("window.startLivingPresenceCall = async function")
+    assert idx > 0
+    snippet = index_html[idx:idx + 2200]
+    overlay_idx = snippet.find("showOutgoingOverlay")
+    api_idx = snippet.find("const result = await callApiPost")
+    assert overlay_idx > 0
+    assert api_idx > 0
+    assert overlay_idx < api_idx
+    assert "const mediaPromise = startLocalMedia" in snippet
+
+
+def test_call_buttons_clear_surfaces_before_network_wait(index_html: str) -> None:
+    accept_idx = index_html.find("async function acceptInboundCall")
+    assert accept_idx > 0
+    accept_snippet = index_html[accept_idx:accept_idx + 1200]
+    assert accept_snippet.find("hideIncomingRing()") < accept_snippet.find("const result = await callApiPost")
+    assert accept_snippet.find("showActiveSurface") < accept_snippet.find("const result = await callApiPost")
+
+    buttons_idx = index_html.find('const cancelBtn = $$("#btn-call-cancel")')
+    assert buttons_idx > 0
+    buttons_snippet = index_html[buttons_idx:buttons_idx + 1800]
+    assert buttons_snippet.find("hideOutgoingOverlay()") < buttons_snippet.find('await callApiPost({ action: "hangup"')
+    assert buttons_snippet.find("hideIncomingRing()") < buttons_snippet.find('await callApiPost({ action: "decline"')
+    assert buttons_snippet.find("hideActiveSurface()") < buttons_snippet.rfind('await callApiPost({ action: "hangup"')
+
+
 def test_call_driver_resolves_simultaneous_calls(index_html: str) -> None:
     idx = index_html.find("async function resolveSimultaneousCallIfNeeded")
     assert idx > 0

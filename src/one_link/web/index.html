@@ -5079,6 +5079,54 @@
     border-radius: 2px;
   }
 
+  /* v0.21.x bulletproof send: per-bubble status pill. Anchored to
+     the message itself instead of a transient toast so the user
+     always knows where a send landed (sending / queued / failed).
+     Inbound bubbles never show it — only outbound. */
+  .msg .send-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    margin-top: 2px;
+    font-size: 11px;
+    line-height: 1.3;
+    opacity: .9;
+  }
+  .msg.in  .send-pill { color: var(--text-dim); }
+  .msg.out .send-pill { color: rgba(255,255,255,.85); }
+  .msg .send-pill-failed { color: #ff8888; opacity: 1; }
+  .msg.out .send-pill-failed { color: #ffd0d0; }
+  .msg .send-pill-queued { font-style: italic; }
+  .msg .send-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor;
+    animation: send-pulse 1.1s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  @keyframes send-pulse {
+    0%, 100% { opacity: .25; transform: scale(.8); }
+    50%      { opacity: 1;   transform: scale(1); }
+  }
+  .msg .send-retry {
+    background: transparent;
+    border: 0;
+    padding: 0 2px;
+    margin: 0;
+    font: inherit;
+    font-weight: 600;
+    color: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .msg .send-retry:hover { opacity: .85; }
+  .msg .send-retry:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+  .msg[data-send-state="sending"] { opacity: .85; }
+  .msg[data-send-state="failed"] {
+    border: 1px solid rgba(255, 80, 80, .35);
+  }
+
   .pin-strip {
     padding: 8px 18px;
     border-bottom: 1px solid var(--line);
@@ -11155,6 +11203,12 @@
         msg.id || "", msg.t || "", msg.dir || "", msg.ts || "",
         msg.body || "", msg.name || "", msg.size || "", blob,
         msg.ok == null ? "" : msg.ok, msg.path || "", transferSig,
+        // v0.21.x: include send-state so optimistic→sent/queued/
+        // failed transitions actually re-render (the bubble's
+        // status pill + Retry button depend on it).
+        msg._sendingState || "",
+        msg._error ? "e1" : "",
+        msg._queueReason || "",
       ].join("|"));
     }
     return parts.join("Â¶");
@@ -11387,7 +11441,18 @@
           whenEl.appendChild(tick);
         }
         b.appendChild(whenEl);
+        // v0.21.x bulletproof send: visible per-bubble send-state.
+        // Replaces the silent disabled-button era — every Send now
+        // produces a bubble that explicitly says where it is.
+        //   "sending" → faint Sending… (animated dots)
+        //   "queued"  → muted Queued · will retry
+        //   "failed"  → red Failed · Retry (inline button)
+        //   "sent"    → no badge; the ✓ / ✓✓ tick above covers it
+        if (msg.dir === "out" && msg._sendingState && msg._sendingState !== "sent") {
+          b.appendChild(renderSendStatePill(msg));
+        }
         b.dataset.msgId = msg.id;
+        if (msg._sendingState) b.dataset.sendState = msg._sendingState;
         // v0.10.2: live "🔥 5m" countdown badge for messages with
         // a TTL. Updated by the per-second tick.
         if (msg.expires_at_ms && !msg.deleted) {
@@ -13795,6 +13860,79 @@
       ...extras,
     };
     if (state.messages[idx].peer === state.selectedPeer) renderMessages();
+  }
+  // v0.21.x: render the per-bubble send-state pill (Sending… /
+  // Queued / Failed · Retry). Lives inline at the bottom of the
+  // bubble so the status is anchored to the message, not to a
+  // toast that disappears in 4s.
+  function renderSendStatePill(msg) {
+    const wrap = el("span", `send-pill send-pill-${msg._sendingState}`);
+    if (msg._sendingState === "sending") {
+      wrap.appendChild(el("span", "send-dot"));
+      wrap.appendChild(document.createTextNode(" Sending…"));
+    } else if (msg._sendingState === "queued") {
+      const reasonHint = (msg._queueReason === "client_timeout")
+        ? "Send took longer than expected"
+        : (msg._queueReason === "peer_offline")
+          ? "Other device is offline"
+          : "Will send when the path is healthy";
+      wrap.appendChild(document.createTextNode(`Queued · ${reasonHint}`));
+    } else if (msg._sendingState === "failed") {
+      const txt = msg._error || "Failed to send";
+      wrap.appendChild(document.createTextNode(`${txt} · `));
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "send-retry";
+      retry.textContent = "Retry";
+      retry.onclick = (ev) => {
+        ev.stopPropagation();
+        retrySend(msg.id);
+      };
+      wrap.appendChild(retry);
+    }
+    return wrap;
+  }
+  // v0.21.x: re-attempt a failed send. Reuses the original body and
+  // peer; resets the bubble back to "sending" state so the user sees
+  // it pick up where it stopped.
+  async function retrySend(msgId) {
+    const idx = state.messages.findIndex(x => x.id === msgId);
+    if (idx < 0) return;
+    const prev = state.messages[idx];
+    if (!prev || prev.t !== "TEXT" || !prev.body) return;
+    const peer = state.peers.get(prev.peer);
+    if (!peer) {
+      toast("That device just dropped off the network. Try again later.", "info", 5000);
+      return;
+    }
+    _markBubbleState(msgId, "sending", {
+      _error: undefined,
+      _attempts: (prev._attempts || 1) + 1,
+    });
+    const sendBody = {
+      peer: prev.peer,
+      body: prev.body,
+      client_msg_id: prev.id,
+    };
+    if (prev.reply_to) sendBody.reply_to = prev.reply_to;
+    try {
+      const result = await _sendWithOutbox(
+        "/api/send", sendBody, { timeoutMs: 25000 },
+      );
+      if (result && result.ok === false) {
+        _markBubbleState(msgId, "failed", {
+          _error: result.user_message || result.error || "Message couldn't be sent.",
+        });
+      } else if (result && result.queued) {
+        _markBubbleState(msgId, "queued", {
+          _queueReason: result.reason || null,
+        });
+      } else {
+        _markBubbleState(msgId, "sent");
+      }
+    } catch (e) {
+      _markBubbleState(msgId, "failed", { _error: errorToastBody(e) });
+    }
   }
   // v0.15.1 - Offline indicator. Reads navigator.onLine at boot
   // + listens for online/offline events. The banner is calm copy
@@ -20972,30 +21110,39 @@
     // Default (no opts) preserves the legacy video-on behaviour so
     // older callers don't break.
     const wantVideo = !opts || opts.video !== false;
+    const label = peerLabel || peerMasterVkHex.slice(0, 8);
+    callUI.activeCallId = null;
+    callUI.activeCallPeer = label;
+    callUI.activeCallPeerFp = peerMasterVkHex;
+    callUI.activeCallKind = wantVideo ? "video" : "voice";
+    showOutgoingOverlay(label, {
+      kind: wantVideo ? "video" : "voice",
+    });
+    addOneCallEvent("Starting secure call path...");
+    setupRtcPeerConnection();
+    const mediaPromise = startLocalMedia({ audio: true, video: wantVideo });
     const result = await callApiPost({
       action: "initiate",
       peer_master_vk_hex: peerMasterVkHex,
-      peer_label: peerLabel || peerMasterVkHex.slice(0, 8),
+      peer_label: label,
       kind: wantVideo ? "video" : "voice",
     });
     if (!result.ok) {
       if (typeof toast === "function") toast(result.user_message, "warn");
+      hideOutgoingOverlay();
+      stopAllMedia();
+      callUI.activeCallId = null;
+      callUI.activeCallPeer = null;
+      callUI.activeCallPeerFp = null;
       return;
     }
     callUI.activeCallId = result.call_id;
-    callUI.activeCallPeer = peerLabel || peerMasterVkHex.slice(0, 8);
-    callUI.activeCallPeerFp = peerMasterVkHex;
-    callUI.activeCallKind = wantVideo ? "video" : "voice";
-    showOutgoingOverlay(callUI.activeCallPeer, {
-      kind: wantVideo ? "video" : "voice",
-    });
     // Tier α: pre-warm local media so the mic (and optionally the
     // camera) are ready by the time the peer accepts. If
     // permissions are denied, the call still proceeds (text/voice-
     // note fallback). For a voice-only call we skip camera capture
     // entirely so the indicator light doesn't come on.
-    setupRtcPeerConnection();
-    const stream = await startLocalMedia({ audio: true, video: wantVideo });
+    const stream = await mediaPromise;
     if (stream && media.pc) {
       stream.getTracks().forEach((t) => {
         try { media.pc.addTrack(t, stream); } catch (_) {}
@@ -21404,17 +21551,21 @@
 
   async function acceptInboundCall() {
     if (!callUI.inboundCallId) return;
-    const result = await callApiPost({
-      action: "accept", call_id: callUI.inboundCallId,
-    });
+    const inboundCallId = callUI.inboundCallId;
+    const inboundPeer = callUI.inboundCallPeer;
+    const inboundPeerFp = callUI.inboundCallPeerFp;
     hideIncomingRing();
+    callUI.activeCallId = inboundCallId;
+    callUI.activeCallPeer = inboundPeer;
+    callUI.activeCallPeerFp = inboundPeerFp;
+    showActiveSurface(inboundPeer, "");
+    setupRtcPeerConnection();
+    const mediaPromise = startLocalMedia({ audio: true, video: true });
+    const result = await callApiPost({
+      action: "accept", call_id: inboundCallId,
+    });
     if (result.ok) {
-      callUI.activeCallId = callUI.inboundCallId;
-      callUI.activeCallPeer = callUI.inboundCallPeer;
-      callUI.activeCallPeerFp = callUI.inboundCallPeerFp;
-      showActiveSurface(callUI.activeCallPeer, "");
-      setupRtcPeerConnection();
-      const stream = await startLocalMedia({ audio: true, video: true });
+      const stream = await mediaPromise;
       if (stream && media.pc) {
         stream.getTracks().forEach((t) => {
           try { media.pc.addTrack(t, stream); } catch (_) {}
@@ -21426,6 +21577,13 @@
         callUI.pendingRemoteOffer = null;
         await applyRemoteSdpOffer(offerSdp);
       }
+    } else {
+      hideActiveSurface();
+      stopAllMedia();
+      callUI.activeCallId = null;
+      callUI.activeCallPeer = null;
+      callUI.activeCallPeerFp = null;
+      if (typeof toast === "function") toast(result.user_message, "warn");
     }
     callUI.inboundCallId = null;
     callUI.inboundCallPeerFp = null;
@@ -21548,16 +21706,18 @@
   const cancelBtn = $$("#btn-call-cancel");
   if (cancelBtn) cancelBtn.addEventListener("click", async () => {
     if (!callUI.activeCallId) return;
-    await callApiPost({ action: "hangup", call_id: callUI.activeCallId });
+    const callId = callUI.activeCallId;
     hideOutgoingOverlay();
     callUI.activeCallId = null;
+    await callApiPost({ action: "hangup", call_id: callId });
   });
   const declineBtn = $$("#btn-call-decline");
   if (declineBtn) declineBtn.addEventListener("click", async () => {
     if (!callUI.inboundCallId) return;
-    await callApiPost({ action: "decline", call_id: callUI.inboundCallId });
+    const callId = callUI.inboundCallId;
     hideIncomingRing();
     callUI.inboundCallId = null;
+    await callApiPost({ action: "decline", call_id: callId });
   });
   const acceptBtn = $$("#btn-call-accept");
   if (acceptBtn) acceptBtn.addEventListener("click", async () => {
@@ -21598,10 +21758,11 @@
   const hangupBtn = $$("#btn-call-hangup");
   if (hangupBtn) hangupBtn.addEventListener("click", async () => {
     if (!callUI.activeCallId) return;
-    await callApiPost({ action: "hangup", call_id: callUI.activeCallId });
+    const callId = callUI.activeCallId;
     hideActiveSurface();
     stopAllMedia();
     callUI.activeCallId = null;
+    await callApiPost({ action: "hangup", call_id: callId });
   });
   const recordBtn = $$("#btn-call-record");
   if (recordBtn) recordBtn.addEventListener("click", async () => {

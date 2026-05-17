@@ -597,11 +597,11 @@ async def test_api_send_queues_on_offline_pinned_peer(tmp_path: Path):
 
     enqueued: list[tuple[str, str]] = []
 
-    def _enqueue(fp, body):
-        enqueued.append((fp, body))
+    def _enqueue(fp, body, *, client_msg_id=None):
+        enqueued.append((fp, body, client_msg_id))
         return {
             "ok": True, "outbox_id": 7,
-            "msg": {"t": "TEXT", "id": "abc", "body": body},
+            "msg": {"t": "TEXT", "id": client_msg_id or "abc", "body": body},
         }
 
     daemon = SimpleNamespace(
@@ -623,7 +623,7 @@ async def test_api_send_queues_on_offline_pinned_peer(tmp_path: Path):
     assert body["queued"] is True
     assert body["outbox_id"] == 7
     assert body["reason"] == "peer_offline"
-    assert enqueued == [(them_fp, "hello sleeper")]
+    assert enqueued == [(them_fp, "hello sleeper", None)]
     state.close()
 
 
@@ -637,7 +637,7 @@ async def test_api_send_unknown_peer_still_404s(tmp_path: Path):
     daemon = SimpleNamespace(
         state=state,
         resolve_for_send=lambda n: _async_returns(None),
-        enqueue_text_outbox=lambda fp, body: None,
+        enqueue_text_outbox=lambda fp, body, *, client_msg_id=None: None,
     )
     server = UIServer(daemon)
     server.broadcast = lambda evt: None
@@ -668,7 +668,7 @@ async def test_api_send_queue_on_failure_opt_out(tmp_path: Path):
     daemon = SimpleNamespace(
         state=state,
         resolve_for_send=lambda n: _async_returns(None),
-        enqueue_text_outbox=lambda fp, body: pytest.fail("should not enqueue"),
+        enqueue_text_outbox=lambda fp, body, *, client_msg_id=None: pytest.fail("should not enqueue"),
     )
     server = UIServer(daemon)
     server.broadcast = lambda evt: None
