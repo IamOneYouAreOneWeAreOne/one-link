@@ -1068,6 +1068,7 @@ class Daemon:
         # counter for the one-key-many-channels case.
         self._inbound_peer_count: int = 0
         self._inbound_per_fp: dict[str, int] = {}
+        self._inbound_live_channels: dict[str, list[ch.Channel]] = {}
         self._transfer_admission_policy = TransferAdmissionPolicy(
             max_declared_bytes=MAX_DECLARED_FILE_OFFER_BYTES,
         )
@@ -2110,32 +2111,10 @@ class Daemon:
                     )
                     continue
                 try:
-                    await asyncio.wait_for(
-                        self.send_to(peer, msgs),
-                        timeout=self.CALL_SIGNAL_SEND_TIMEOUT_S,
-                    )
+                    await self.send_call_signal(peer, msgs)
                 except Exception as exc:
-                    if self._call_signal_retryable(msgs):
-                        log.info(
-                            "flush_call_api: retrying call signal for %s "
-                            "after closed session: %s",
-                            peer_fp[:16], exc,
-                        )
-                        try:
-                            await asyncio.wait_for(
-                                self.send_to(peer, msgs),
-                                timeout=self.CALL_SIGNAL_SEND_TIMEOUT_S,
-                            )
-                        except Exception as retry_exc:
-                            log.warning(
-                                "flush_call_api: send_to raised for %s: %s",
-                                peer_fp[:16], retry_exc,
-                            )
-                            continue
-                        delivered.append(peer_fp)
-                        continue
                     log.warning(
-                        "flush_call_api: send_to raised for %s: %s",
+                        "flush_call_api: call signal delivery failed for %s: %s",
                         peer_fp[:16], exc,
                     )
                     continue
@@ -2198,6 +2177,75 @@ class Daemon:
             "SAS_DECLINE",
         }
         return all(str(m.get("t") or "") in retryable for m in msgs)
+
+    async def send_call_signal(self, peer: Peer, msgs: list[dict]) -> None:
+        """Deliver call signaling over the strongest available path.
+
+        Calls are real-time control traffic. The reusable encrypted session
+        is fastest when it is healthy, but laptops sleep, Wi-Fi roams, and
+        idle sessions can go stale at exactly the moment someone presses
+        Call. If the reusable session fails, send each idempotent call frame
+        over a fresh encrypted control channel before declaring the peer
+        unreachable.
+        """
+        try:
+            await asyncio.wait_for(
+                self.send_to(peer, msgs),
+                timeout=self.CALL_SIGNAL_SEND_TIMEOUT_S,
+            )
+            return
+        except Exception as exc:
+            if not self._call_signal_retryable(msgs):
+                raise
+            log.info(
+                "call_signal: reusable session failed for %s; trying "
+                "reverse/fresh control channel: %s",
+                getattr(peer, "short_id", "?"), exc,
+            )
+        peer_fp = self._peer_fp_from_peer(peer)
+        live_sent = False
+        if peer_fp:
+            live = list(self._inbound_live_channels.get(peer_fp, ()))
+            for channel in reversed(live):
+                try:
+                    for msg in msgs:
+                        await asyncio.wait_for(
+                            channel.send(encode_msg(msg)),
+                            timeout=self.CALL_SIGNAL_SEND_TIMEOUT_S,
+                        )
+                    live_sent = True
+                    log.debug(
+                        "call_signal: sent best-effort reverse frame(s) "
+                        "over existing channel for %s",
+                        peer_fp[:8],
+                    )
+                    break
+                except Exception:
+                    continue
+        last_exc: Exception | None = None
+        if peer_fp:
+            with contextlib.suppress(Exception):
+                fresh = await self.resolve_for_send(peer_fp)
+                if fresh is not None:
+                    peer = fresh
+        for msg in msgs:
+            try:
+                await asyncio.wait_for(
+                    self._send_control(peer, msg),
+                    timeout=self.CALL_SIGNAL_SEND_TIMEOUT_S,
+                )
+            except Exception as exc:
+                last_exc = exc
+                break
+        if last_exc is not None:
+            if live_sent:
+                log.info(
+                    "call_signal: fresh control failed for %s after "
+                    "best-effort reverse send: %s",
+                    getattr(peer, "short_id", "?"), last_exc,
+                )
+                return
+            raise last_exc
 
     async def _handle_self_mesh_presence(
         self,
@@ -3387,6 +3435,7 @@ class Daemon:
         # leak counter slots.
         self._inbound_peer_count += 1
         self._inbound_per_fp[peer_fp] = existing_for_fp + 1
+        self._inbound_live_channels.setdefault(peer_fp, []).append(channel)
         if self.state is not None:
             try:
                 hostname: str | None = None
@@ -3461,6 +3510,12 @@ class Daemon:
                 self._inbound_per_fp.pop(peer_fp, None)
             else:
                 self._inbound_per_fp[peer_fp] = current_fp_count - 1
+            live = self._inbound_live_channels.get(peer_fp)
+            if live is not None:
+                with contextlib.suppress(ValueError):
+                    live.remove(channel)
+                if not live:
+                    self._inbound_live_channels.pop(peer_fp, None)
 
     async def _on_peer_message(self, channel: ch.Channel, msg: dict) -> None:
         peer_fp = fingerprint_of(channel.peer_ed_pub)
@@ -10089,7 +10144,8 @@ class Daemon:
                     )
                     while True:
                         ack = decode_msg(await sess.channel.recv())
-                        if ack.get("t") == "CAPS":
+                        ack_type = str(ack.get("t") or "")
+                        if ack_type == "CAPS":
                             features = list(normalize_caps(ack.get("features", [])))
                             sess.channel.peer_caps = {
                                 "protocol": ack.get("protocol", "?"),
@@ -10112,6 +10168,16 @@ class Daemon:
                             if self.state is not None:
                                 with contextlib.suppress(Exception):
                                     self.state.set_peer_capabilities(sess.peer_fp, features)
+                            continue
+                        if ack_type != "ACK":
+                            try:
+                                await self._on_peer_message(sess.channel, ack)
+                            except Exception as exc:
+                                log.debug(
+                                    "out-of-band peer frame %s failed while "
+                                    "waiting for ACK from %s: %s",
+                                    ack_type, sess.peer_fp[:8], exc,
+                                )
                             continue
                         break
                     if ack.get("rejected"):
@@ -10180,7 +10246,8 @@ class Daemon:
             try:
                 while True:
                     ack = decode_msg(await asyncio.wait_for(channel.recv(), timeout=5.0))
-                    if ack.get("t") == "CAPS":
+                    ack_type = str(ack.get("t") or "")
+                    if ack_type == "CAPS":
                         features = list(normalize_caps(ack.get("features", [])))
                         channel.peer_caps = {
                             "protocol": ack.get("protocol", "?"),
@@ -10194,10 +10261,17 @@ class Daemon:
                                 if fp:
                                     self.state.set_peer_capabilities(fp, features)
                         continue
-                    if ack.get("t") == "ACK":
+                    if ack_type == "ACK":
                         break
-                    # Unknown response type — break, message was sent
-                    break
+                    try:
+                        await self._on_peer_message(channel, ack)
+                    except Exception as exc:
+                        log.debug(
+                            "out-of-band peer frame %s failed while waiting "
+                            "for control ACK from %s: %s",
+                            ack_type, peer.short_id, exc,
+                        )
+                    continue
             except (asyncio.TimeoutError, asyncio.IncompleteReadError):
                 # Peer didn't ACK in time; the message was still transmitted
                 # but the peer may have closed early. Acceptable for control.
@@ -11955,13 +12029,21 @@ class Daemon:
             pass
 
     async def send_text(
-        self, peer: Peer, body: str, *, reply_to: str | None = None,
+        self, peer: Peer, body: str, *,
+        reply_to: str | None = None,
+        client_msg_id: str | None = None,
     ) -> dict:
         # v0.7.5: optional reply_to threads this TEXT under a parent
         # message. The receiver renders an inline quote chip.
         kwargs: dict = {"body": body}
         if reply_to:
             kwargs["reply_to"] = str(reply_to)
+        # v0.21.x: when the browser sends a pre-generated id, honor
+        # it so the outbound bubble it already painted reconciles
+        # cleanly when the persist event echoes back via WS. Pass-
+        # through; server already validated the shape.
+        if client_msg_id:
+            kwargs["id"] = client_msg_id
         # v0.10.2 disappearing messages — attach the peer's TTL so
         # both sides compute the same expires_at_ms = ts_ms + ttl.
         peer_fp = self._peer_fp_from_peer(peer)
@@ -12171,12 +12253,21 @@ class Daemon:
 
     # ─── outbox / store-and-forward (v0.7.1) ──────────────────────────
 
-    def enqueue_text_outbox(self, peer_fp: str, body: str) -> dict:
+    def enqueue_text_outbox(
+        self, peer_fp: str, body: str, *,
+        client_msg_id: str | None = None,
+    ) -> dict:
         """Queue a TEXT message for a paired peer that's currently
         offline. Returns {ok, outbox_id, msg}. The caller wrote the
         send-attempt; this is the durable fallback. Persists the
         wire-shape `make_msg` dict so the eventual send goes out
-        with the same id/ts the user expects."""
+        with the same id/ts the user expects.
+
+        v0.21.x: client_msg_id keeps the browser's optimistic-bubble
+        id and the queued msg id in sync, so reconciliation when the
+        outbox flushes finds the right bubble to flip from
+        ``queued`` → ``sent``.
+        """
         if self.state is None:
             raise RuntimeError("state not available")
         rec = self.state.get_peer(peer_fp)
@@ -12184,7 +12275,10 @@ class Daemon:
             raise RuntimeError(
                 "outbox enqueue requires a pinned peer fingerprint"
             )
-        m = make_msg("TEXT", self.me.short_id, body=body)
+        make_kwargs: dict = {"body": body}
+        if client_msg_id:
+            make_kwargs["id"] = client_msg_id
+        m = make_msg("TEXT", self.me.short_id, **make_kwargs)
         entry_id = self.state.enqueue_outbox(
             peer_fp=peer_fp, msg_id=m["id"], msg_body=m, msg_kind="TEXT",
         )
@@ -14440,15 +14534,23 @@ class Daemon:
                 dead.append(w)
         for w in dead:
             self._tail_subs.discard(w)
-        # The UI-WebSocket path sends already-typed events directly
-        # — every other caller of ui_server.broadcast follows that
-        # convention (e.g. {"type": "peer_trust", ...}). Wrapping
-        # call_event / frame_provenance / etc. as {"type": "msg",
-        # "msg": ...} would hide them from the browser's typed
-        # dispatcher in index.html (it routes on m.type === "...").
+        # UI-WebSocket path. The browser dispatcher in index.html
+        # routes on m.type, so:
+        #   - Events that ALREADY have a "type" field (call_event,
+        #     frame_provenance, transfer, traces_cleared, etc.) are
+        #     sent through verbatim so their typed handlers fire.
+        #   - Events that don't (chat/file _persist outputs, which
+        #     carry "t":"TEXT"/"FILE_OFFER"/... with no "type") are
+        #     wrapped as {"type":"msg","msg":<inner>} so the
+        #     browser's m.type === "msg" branch picks them up. This
+        #     is the only way an incoming chat bubble live-renders
+        #     on the receiver without a manual refresh.
         if self.ui_server is not None:
             try:
-                self.ui_server.broadcast(msg)
+                if "type" in msg:
+                    self.ui_server.broadcast(msg)
+                else:
+                    self.ui_server.broadcast({"type": "msg", "msg": msg})
             except Exception:
                 pass
 

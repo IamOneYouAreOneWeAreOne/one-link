@@ -28,9 +28,11 @@ from one_link.call_api import (
     ApiResponse,
     CallAPI,
 )
+from one_link.call_signaling import CallPhase
 from one_link.call_manager import CallManagerRegistry, TailEvent, TailEventKind
-from one_link.daemon import Daemon
+from one_link.daemon import Daemon, OutboundSession
 from one_link.identity import Identity
+from one_link.wire import decode_msg, encode_msg, make_msg
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +71,9 @@ class _FakeState:
 
     def get_peer(self, peer_fp: str):
         return self._peers.get(peer_fp)
+
+    def get_peer_capability_policy(self, peer_fp: str):
+        return None
 
 
 @pytest.fixture
@@ -346,17 +351,21 @@ def test_flush_retries_call_signal_once_on_closed_session(
     alice_daemon: Daemon, mom: Identity,
 ) -> None:
     """Call signaling is idempotent by call_id, so a stale reusable
-    session should get one fresh-session retry before the UI gives up."""
+    session should fall back to a fresh encrypted control channel."""
 
-    attempts: list[list[dict]] = []
+    send_to_attempts: list[list[dict]] = []
+    control_attempts: list[dict] = []
 
     async def flaky(peer, msgs):
-        attempts.append(list(msgs))
-        if len(attempts) == 1:
-            raise ConnectionError("closed session")
-        return msgs
+        send_to_attempts.append(list(msgs))
+        raise ConnectionError("closed session")
+
+    async def fresh_control(peer, msg):
+        control_attempts.append(dict(msg))
+        return b"transcript"
 
     alice_daemon.send_to = flaky  # type: ignore[assignment]
+    alice_daemon._send_control = fresh_control  # type: ignore[assignment]
 
     resp = ApiResponse(
         ok=True,
@@ -377,7 +386,9 @@ def test_flush_retries_call_signal_once_on_closed_session(
     finally:
         loop.close()
     assert delivered == (mom.fingerprint,)
-    assert len(attempts) == 2
+    assert len(send_to_attempts) == 1
+    assert len(control_attempts) == 1
+    assert control_attempts[0]["t"] == "CALL_INVITE"
 
 
 def test_flush_send_to_timeout_does_not_hang_call_ui(
@@ -412,6 +423,152 @@ def test_flush_send_to_timeout_does_not_hang_call_ui(
     finally:
         loop.close()
     assert delivered == ()
+
+
+def test_call_signal_fallback_sends_each_media_frame_over_control(
+    alice_daemon: Daemon, mom: Identity,
+) -> None:
+    """SDP/ICE batches use the same reliable call channel; if the live
+    session is stale, each frame is resent over one-shot encrypted control."""
+    controls: list[str] = []
+
+    async def stale(peer, msgs):
+        raise TimeoutError("stale session")
+
+    async def control(peer, msg):
+        controls.append(msg["t"])
+        return b"transcript"
+
+    alice_daemon.send_to = stale  # type: ignore[assignment]
+    alice_daemon._send_control = control  # type: ignore[assignment]
+
+    msgs = [
+        {"t": "CALL_SDP_OFFER", "id": "1", "from": alice_daemon.me.short_id, "call_id": "c", "sdp_offer": {}},
+        {"t": "CALL_ICE", "id": "2", "from": alice_daemon.me.short_id, "call_id": "c", "candidate": {}},
+    ]
+    peer = alice_daemon._resolve_peer_for_outbound(mom.fingerprint)
+    assert peer is not None
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(alice_daemon.send_call_signal(peer, msgs))
+    finally:
+        loop.close()
+    assert controls == ["CALL_SDP_OFFER", "CALL_ICE"]
+
+
+def test_call_signal_can_reply_over_existing_inbound_channel(
+    alice_daemon: Daemon, mom: Identity,
+) -> None:
+    """When Alice dialed us first, our best return path may be that same
+    bidirectional encrypted channel. Accept/hangup sends there first, then
+    still confirms through fresh control so an idle caller cannot miss it."""
+
+    class InboundChannel:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send(self, payload: bytes) -> None:
+            from one_link.wire import decode_msg
+            self.sent.append(decode_msg(payload))
+
+    inbound = InboundChannel()
+    alice_daemon._inbound_live_channels[mom.fingerprint] = [inbound]  # type: ignore[list-item]
+
+    async def stale(peer, msgs):
+        raise ConnectionError("outbound route stale")
+
+    controls: list[dict] = []
+
+    async def control(peer, msg):
+        controls.append(msg)
+        return b"transcript"
+
+    alice_daemon.send_to = stale  # type: ignore[assignment]
+    alice_daemon._send_control = control  # type: ignore[assignment]
+    peer = alice_daemon._resolve_peer_for_outbound(mom.fingerprint)
+    assert peer is not None
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(alice_daemon.send_call_signal(
+            peer,
+            [{"t": "CALL_ACCEPT", "id": "accept-1", "from": alice_daemon.me.short_id, "call_id": "c"}],
+        ))
+    finally:
+        loop.close()
+
+    assert inbound.sent == [{
+        "t": "CALL_ACCEPT",
+        "id": "accept-1",
+        "from": alice_daemon.me.short_id,
+        "call_id": "c",
+    }]
+    assert [m["t"] for m in controls] == ["CALL_ACCEPT"]
+
+
+def test_send_to_dispatches_call_reply_that_arrives_before_ack(
+    alice_daemon: Daemon, mom: Identity,
+) -> None:
+    """A peer can accept on the same bidirectional encrypted channel while
+    our outbound send_to is still waiting for the ACK to CALL_INVITE. The
+    ACK waiter must dispatch that CALL_ACCEPT instead of swallowing it."""
+
+    class DuplexChannel:
+        def __init__(self, incoming: list[dict]) -> None:
+            self.peer_ed_pub = mom.public_bytes
+            self.peer_short_id = mom.short_id
+            self.sent: list[dict] = []
+            self._incoming = [encode_msg(m) for m in incoming]
+
+        async def send(self, payload: bytes) -> None:
+            self.sent.append(decode_msg(payload))
+
+        async def recv(self) -> bytes:
+            if not self._incoming:
+                raise asyncio.IncompleteReadError(b"", 1)
+            return self._incoming.pop(0)
+
+    api = CallAPI(
+        registry=alice_daemon._call_registry,
+        local_master_vk_hex=alice_daemon.me.fingerprint,
+    )
+    resp = api.initiate(peer_master_vk_hex=mom.fingerprint)
+    assert resp.ok
+    mgr = alice_daemon._call_registry.get(resp.call_id)
+    assert mgr is not None
+
+    outbound = make_msg(
+        "CALL_INVITE", alice_daemon.me.short_id, call_id=resp.call_id,
+    )
+    inbound_accept = make_msg(
+        "CALL_ACCEPT", mom.short_id, call_id=resp.call_id,
+    )
+    outbound_ack = make_msg(
+        "ACK", mom.short_id, of=outbound["id"], ok=True,
+    )
+    channel = DuplexChannel([inbound_accept, outbound_ack])
+    peer = alice_daemon._resolve_peer_for_outbound(mom.fingerprint)
+    assert peer is not None
+    sess = OutboundSession(
+        peer_fp=mom.fingerprint,
+        peer=peer,
+        channel=channel,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=4_102_444_800.0,
+        regime="lan",
+    )
+    alice_daemon._outbound_sessions[mom.fingerprint] = sess
+    alice_daemon._persist = lambda **_: {"type": "message"}  # type: ignore[method-assign]
+    alice_daemon._broadcast_tail = lambda _event: None  # type: ignore[method-assign]
+
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(alice_daemon.send_to(peer, [outbound]))
+    finally:
+        loop.close()
+
+    assert result == [outbound_ack]
+    assert mgr.phase == CallPhase.ACTIVE
+    assert any(m.get("t") == "ACK" and m.get("of") == inbound_accept["id"] for m in channel.sent)
 
 
 def test_flush_skips_malformed_outbound_payload(

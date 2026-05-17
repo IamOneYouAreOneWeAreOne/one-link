@@ -487,6 +487,19 @@ def _translate_send_error(exc: BaseException) -> dict:
     Returns a dict with at least: {status, code, error, hint}.
     Status is the HTTP status the caller should set.
     """
+    # asyncio.TimeoutError → empty str(exc) on some Pythons, so we
+    # need an explicit isinstance check before the substring match
+    # below (which works for ConnectionTimeoutError / "timed out"
+    # string-shaped errors but misses bare TimeoutError). Falls
+    # through to the existing "timeout" branch via the dict shape so
+    # the queue-on-failure path in api_send picks it up.
+    if isinstance(exc, asyncio.TimeoutError):
+        return {
+            "status": 504,
+            "code": "timeout",
+            "error": "The other device didn't respond in time.",
+            "hint": "Check that One Link is open and on the same network on the other device.",
+        }
     # Crypto-level mismatch: AAD or key derivation diverged between
     # peers. The single most common cause is one device running an
     # older build than the other — the v0.7.0 wire-format change
@@ -3420,10 +3433,7 @@ class UIServer:
             else:
                 wire_msg.pop("sdp_offer", None)
             try:
-                await asyncio.wait_for(
-                    self.daemon.send_to(peer, [wire_msg]),
-                    timeout=getattr(self.daemon, "CALL_SIGNAL_SEND_TIMEOUT_S", 6.0),
-                )
+                await self.daemon.send_call_signal(peer, [wire_msg])
             except Exception as exc:
                 log.warning("send_sdp failed: %s", exc)
                 return web.json_response(
@@ -3458,10 +3468,7 @@ class UIServer:
         body_msg = build_ice_message(call_id=call_id, candidate=cand)
         wire_msg = make_msg(CALL_ICE, self.daemon.me.short_id, **body_msg)
         try:
-            await asyncio.wait_for(
-                self.daemon.send_to(peer, [wire_msg]),
-                timeout=getattr(self.daemon, "CALL_SIGNAL_SEND_TIMEOUT_S", 6.0),
-            )
+            await self.daemon.send_call_signal(peer, [wire_msg])
         except Exception as exc:
             log.warning("send_ice failed: %s", exc)
             return web.json_response(
@@ -10792,6 +10799,21 @@ class UIServer:
         # tolerates anything string-shaped.
         reply_to_raw = data.get("reply_to")
         reply_to = str(reply_to_raw) if isinstance(reply_to_raw, str) and reply_to_raw else None
+        # v0.21.x bulletproof send: optional client-generated msg id.
+        # The browser uses this to paint an optimistic bubble *before*
+        # the round-trip and then reconcile when the daemon's broadcast
+        # echoes back. Sanitised to a hex-shape id; daemon ignores
+        # anything else and assigns its own. Without this thread, the
+        # browser would have to content-match outbound bubbles, which
+        # collapses two identical messages into one on the fast path.
+        client_msg_id_raw = data.get("client_msg_id")
+        client_msg_id: str | None = None
+        if isinstance(client_msg_id_raw, str):
+            stripped = client_msg_id_raw.strip()
+            if 8 <= len(stripped) <= 64 and all(
+                c in "0123456789abcdefABCDEF-" for c in stripped
+            ):
+                client_msg_id = stripped
         if not peer_needle or not body:
             return web.json_response({"error": "peer and body required"}, status=400)
         # v0.5.1: also tries the rendezvous if the peer isn't on mDNS.
@@ -10803,7 +10825,9 @@ class UIServer:
             # fingerprint, queue the message instead of erroring.
             if queue_on_failure and target_fp:
                 try:
-                    entry = self.daemon.enqueue_text_outbox(target_fp, body)
+                    entry = self.daemon.enqueue_text_outbox(
+                        target_fp, body, client_msg_id=client_msg_id,
+                    )
                     return web.json_response({
                         "ok": True, "queued": True,
                         "outbox_id": entry["outbox_id"],
@@ -10814,7 +10838,19 @@ class UIServer:
                     log.warning("offline-enqueue failed: %s", enqueue_err)
             return web.json_response({"error": f"no peer {peer_needle!r}"}, status=404)
         try:
-            result = await self.daemon.send_text(peer, body, reply_to=reply_to)
+            # v0.21.x: hard timeout so a wedged channel can never hang
+            # the HTTP request forever. 20s is well past any healthy
+            # send (typical sub-100ms on LAN, sub-second on relay)
+            # but well under any user's patience threshold. On
+            # TimeoutError the queue-on-failure path below picks up.
+            result = await asyncio.wait_for(
+                self.daemon.send_text(
+                    peer, body,
+                    reply_to=reply_to,
+                    client_msg_id=client_msg_id,
+                ),
+                timeout=20.0,
+            )
             return web.json_response({"ok": True, "result": result})
         except Exception as e:
             log.exception("send failed: %s", e)
@@ -10832,7 +10868,9 @@ class UIServer:
                 and translated.get("code") in queueable_codes
             ):
                 try:
-                    entry = self.daemon.enqueue_text_outbox(target_fp, body)
+                    entry = self.daemon.enqueue_text_outbox(
+                        target_fp, body, client_msg_id=client_msg_id,
+                    )
                     return web.json_response({
                         "ok": True, "queued": True,
                         "outbox_id": entry["outbox_id"],

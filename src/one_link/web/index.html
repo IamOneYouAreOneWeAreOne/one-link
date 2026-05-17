@@ -5041,6 +5041,44 @@
   }
   .msg-toolbar .tb-btn:hover { background: var(--bg-3); color: var(--text); }
 
+  /* Claude-style collapsible long-message bodies. A bubble whose
+     body crosses COLLAPSE_CHARS or COLLAPSE_LINES (see JS) renders
+     wrapped in .msg-body.collapsible — collapsed by default, with
+     a bottom fade-mask cueing more content below. The .body-toggle
+     button under it flips between Show more / Show less. Both
+     inbound and outbound bubbles share the geometry; only the
+     toggle color shifts to stay legible on either background. */
+  .msg .msg-body { display: block; }
+  .msg .msg-body.collapsible { position: relative; }
+  .msg .msg-body.collapsible.collapsed {
+    max-height: 9.6em;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
+            mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
+  }
+  .msg .msg-body.collapsible pre { margin: 6px 0; }
+  .msg .body-toggle {
+    display: inline-block;
+    margin: 4px 0 0;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    color: var(--accent);
+    line-height: 1.4;
+  }
+  .msg.in  .body-toggle { color: var(--accent-2); }
+  .msg.out .body-toggle { color: rgba(255,255,255,.92); }
+  .msg .body-toggle:hover { text-decoration: underline; }
+  .msg .body-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
   .pin-strip {
     padding: 8px 18px;
     border-bottom: 1px solid var(--line);
@@ -8037,18 +8075,51 @@
       });
   }
   const api = {
-    async get(p)  {
-      const r = await fetch(p, { credentials: "include" });
-      _maybe401(r.status);
-      if (!r.ok) throw new Error(`${p} ${r.status}`);
-      return r.json();
+    async get(p, opts = {}) {
+      const ctrl = opts.timeoutMs ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(
+        () => ctrl.abort(),
+        opts.timeoutMs,
+      ) : null;
+      try {
+        const r = await fetch(p, {
+          credentials: "include",
+          signal: ctrl ? ctrl.signal : undefined,
+        });
+        _maybe401(r.status);
+        if (!r.ok) throw new Error(`${p} ${r.status}`);
+        return r.json();
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     },
-    async post(p, body) {
-      const r = await fetch(p, { method: "POST", credentials: "include", headers: {"content-type":"application/json"}, body: JSON.stringify(body) });
-      _maybe401(r.status);
-      const j = await r.json().catch(()=>({}));
-      if (!r.ok) throw _apiError(j, r.status);
-      return j;
+    async post(p, body, opts = {}) {
+      // v0.21.x: optional hard timeout so fetch() can never hang
+      // forever. Critical for /api/send: a wedged channel used to
+      // freeze the Send button silently — no toast, no clear, no
+      // recourse. With timeoutMs set, AbortError raises after the
+      // budget, and _sendWithOutbox falls through to the queue
+      // path (recognising AbortError as network-like).
+      const ctrl = opts.timeoutMs ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(
+        () => ctrl.abort(),
+        opts.timeoutMs,
+      ) : null;
+      try {
+        const r = await fetch(p, {
+          method: "POST",
+          credentials: "include",
+          headers: {"content-type":"application/json"},
+          body: JSON.stringify(body),
+          signal: ctrl ? ctrl.signal : undefined,
+        });
+        _maybe401(r.status);
+        const j = await r.json().catch(()=>({}));
+        if (!r.ok) throw _apiError(j, r.status);
+        return j;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     },
     async del(p) {
       const r = await fetch(p, { method: "DELETE", credentials: "include" });
@@ -9275,6 +9346,45 @@
       }
     }
     return frag;
+  }
+
+  // Long message bodies clutter the chat the way a pasted log or
+  // wall-of-text does in Claude. Collapse anything past the
+  // thresholds below into a preview with a Show more / Show less
+  // toggle so the bubble stays a glance-able height by default.
+  // The text is fully rendered (and selectable) in both states —
+  // collapsed just hides the overflow under a CSS mask. Per-message
+  // ephemeral state; nothing persisted.
+  const COLLAPSE_CHARS = 600;
+  const COLLAPSE_LINES = 8;
+  function appendCollapsibleText(parent, body) {
+    const text = body || "";
+    const lines = text.split("\n").length;
+    const long = text.length > COLLAPSE_CHARS || lines > COLLAPSE_LINES;
+    if (!long) {
+      parent.appendChild(renderInlineText(text));
+      return;
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "msg-body collapsible collapsed";
+    wrap.appendChild(renderInlineText(text));
+    parent.appendChild(wrap);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "body-toggle";
+    toggle.textContent = "Show more";
+    toggle.title = `Message is ${text.length.toLocaleString()} characters`;
+    toggle.onclick = (ev) => {
+      ev.stopPropagation();
+      if (wrap.classList.contains("collapsed")) {
+        wrap.classList.remove("collapsed");
+        toggle.textContent = "Show less";
+      } else {
+        wrap.classList.add("collapsed");
+        toggle.textContent = "Show more";
+      }
+    };
+    parent.appendChild(toggle);
   }
   function renderInlineNonCode(text, frag) {
     const parts = text.split(/`([^`\n]+)`/g);
@@ -11244,7 +11354,7 @@
           }
           b.appendChild(quote);
         }
-        b.appendChild(renderInlineText(msg.body || ""));
+        appendCollapsibleText(b, msg.body || "");
         // v0.7.6: (edited) badge.
         if (msg.edited_at_ms) {
           const ed = el("span", "edited-badge", " (edited)");
@@ -12628,7 +12738,7 @@
         b.appendChild(el("div", "msg-deleted", "[message deleted]"));
       } else {
         renderGroupReplyQuote(msg, b);
-        b.appendChild(renderInlineText(msg.body || ""));
+        appendCollapsibleText(b, msg.body || "");
         if (msg.edited_at_ms) {
           const ed = el("span", "edited-badge", " (edited)");
           ed.title = `edited at ${new Date(msg.edited_at_ms).toLocaleString()}`;
@@ -13613,12 +13723,20 @@
   // for later. Called explicitly from sendCurrent - we don't want to
   // queue arbitrary failed POSTs (that would queue auth refreshes,
   // settings saves, etc.). Outbox is for sends ONLY.
-  async function _sendWithOutbox(path, body) {
+  async function _sendWithOutbox(path, body, opts = {}) {
     try {
-      return await api.post(path, body);
+      return await api.post(path, body, opts);
     } catch (e) {
+      // v0.21.x: AbortError from the new api.post timeoutMs feature
+      // is treated as network-like so the local outbox catches it
+      // instead of bubbling up as a generic "failed" toast. The
+      // user is told their message is queued and will send when
+      // connectivity returns — never a silent disabled button.
+      const errStr = String(e?.message || e);
+      const isAbort = e?.name === "AbortError" || /aborted|AbortError/i.test(errStr);
       const isNetworkLike =
-        /Failed to fetch|NetworkError|TypeError/i.test(String(e?.message || e));
+        isAbort
+        || /Failed to fetch|NetworkError|TypeError/i.test(errStr);
       if (!isNetworkLike) throw e;
       // Network looks broken; queue the payload.
       const queued = await _outboxQueue({
@@ -13630,11 +13748,53 @@
       });
       if (queued) {
         await _outboxRequestSync();
-        toast("No connection. Queued; will send when you're back online.", "info", 4000);
-        return { ok: true, queued: true };
+        if (isAbort) {
+          toast(
+            "Send took too long. Queued; will retry in the background.",
+            "info", 5000,
+          );
+        } else {
+          toast(
+            "No connection. Queued; will send when you're back online.",
+            "info", 4000,
+          );
+        }
+        return { ok: true, queued: true, reason: isAbort ? "client_timeout" : "offline" };
       }
       throw e;
     }
+  }
+
+  // v0.21.x bulletproof send: random 32-char hex id so the browser
+  // can paint an optimistic outbound bubble immediately and the
+  // daemon's echoed event reconciles via id-match. Matches the
+  // daemon's uuid4().hex shape exactly.
+  function _newClientMsgId() {
+    const raw = (typeof crypto !== "undefined" && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : _fallbackUuid4Hyphenated();
+    return raw.replace(/-/g, "");
+  }
+  function _fallbackUuid4Hyphenated() {
+    const b = new Uint8Array(16);
+    (crypto || self.msCrypto).getRandomValues(b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`;
+  }
+  // v0.21.x: update one outbound bubble's send-state. Used by
+  // sendCurrent on resolve and by the inline Retry button. Re-
+  // renders only if the affected message is in the active thread.
+  function _markBubbleState(msgId, sendingState, extras = {}) {
+    const idx = state.messages.findIndex(x => x.id === msgId);
+    if (idx < 0) return;
+    state.messages[idx] = {
+      ...state.messages[idx],
+      _sendingState: sendingState,
+      ...extras,
+    };
+    if (state.messages[idx].peer === state.selectedPeer) renderMessages();
   }
   // v0.15.1 - Offline indicator. Reads navigator.onLine at boot
   // + listens for online/offline events. The banner is calm copy
