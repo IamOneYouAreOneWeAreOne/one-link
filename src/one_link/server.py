@@ -3714,12 +3714,21 @@ class UIServer:
             except Exception:
                 pass
             local_role = mgr.state.local_role
+            sdp_backfill = {}
+            try:
+                sdp_backfill = dict(
+                    getattr(self.daemon, "_call_sdp_backfill", {}).get(cid, {})
+                )
+            except Exception:
+                sdp_backfill = {}
             out.append({
                 "call_id": cid,
                 "peer_master_vk_hex": peer_fp,
                 "peer_label": peer_label,
                 "local_role": local_role,
                 "is_incoming": local_role == "recipient",
+                "pending_sdp_offer": sdp_backfill.get("sdp_offer"),
+                "pending_sdp_answer": sdp_backfill.get("sdp_answer"),
                 "phase": mgr.phase.name.lower(),
                 "consent_phase": mgr.consent_phase.name.lower(),
                 "is_active": mgr.is_active,
@@ -3759,6 +3768,13 @@ class UIServer:
         except Exception:
             pass
         local_role = mgr.state.local_role
+        sdp_backfill = {}
+        try:
+            sdp_backfill = dict(
+                getattr(self.daemon, "_call_sdp_backfill", {}).get(call_id, {})
+            )
+        except Exception:
+            sdp_backfill = {}
         return web.json_response({
             "ok": True,
             "call_id": call_id,
@@ -3766,6 +3782,8 @@ class UIServer:
             "peer_label": peer_label,
             "local_role": local_role,
             "is_incoming": local_role == "recipient",
+            "pending_sdp_offer": sdp_backfill.get("sdp_offer"),
+            "pending_sdp_answer": sdp_backfill.get("sdp_answer"),
             "phase": mgr.phase.name.lower(),
             "consent_phase": mgr.consent_phase.name.lower(),
             "intensity": s.current_intensity.name.lower(),

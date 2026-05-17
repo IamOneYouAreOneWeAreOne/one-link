@@ -224,6 +224,9 @@ async def test_list_surfaces_incoming_ring_context_for_ui_backfill() -> None:
         started_at_ms=2_000,
     )
     mgr.handle(ManagerEvent(ManagerEventKind.WIRE_CALL_INVITE, 2_000))
+    daemon._call_sdp_backfill = {
+        "c-ring": {"sdp_offer": "v=0\r\ns=-\r\n"}
+    }
     resp = await srv.api_calls_list(_FakeRequest())  # type: ignore[arg-type]
     import json
     payload = json.loads(resp._body or b"")
@@ -233,6 +236,7 @@ async def test_list_surfaces_incoming_ring_context_for_ui_backfill() -> None:
     assert call["local_role"] == "recipient"
     assert call["is_incoming"] is True
     assert call["peer_label"] == "Mom's laptop"
+    assert call["pending_sdp_offer"] == "v=0\r\ns=-\r\n"
 
 
 # ---------------------------------------------------------------------------

@@ -155,6 +155,10 @@ def test_call_invite_with_sdp_offer_emits_tail_event(
     assert ev["sdp"] == SAMPLE_OFFER_SDP
     assert ev["sdp_kind"] == "offer"
     assert ev["peer_master_vk_hex"] == alice.fingerprint
+    assert (
+        mom_daemon._call_sdp_backfill["sdp-call-1"]["sdp_offer"]
+        == SAMPLE_OFFER_SDP
+    )
 
 
 def test_call_invite_without_sdp_offer_emits_no_offer_event(
@@ -244,6 +248,10 @@ def test_call_accept_with_sdp_answer_emits_tail_event(
     assert len(answer_events) == 1
     assert answer_events[0]["sdp"] == SAMPLE_ANSWER_SDP
     assert answer_events[0]["sdp_kind"] == "answer"
+    assert (
+        mom_daemon._call_sdp_backfill["sdp-call-4"]["sdp_answer"]
+        == SAMPLE_ANSWER_SDP
+    )
     assert mgr.phase == CallPhase.ACTIVE
 
 

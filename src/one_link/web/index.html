@@ -1203,20 +1203,38 @@
   /* Active-call surface — face placeholder + controls. */
   .call-active {
     position: fixed; inset: 0;
-    background: rgba(0,0,0,0.92);
+    background:
+      radial-gradient(circle at 50% 28%, rgba(123, 93, 246, 0.18), transparent 34%),
+      linear-gradient(180deg, #080a12 0%, #030408 100%);
     display: none;
     flex-direction: column; align-items: center; justify-content: center;
     z-index: 9000;
     color: #fff;
+    overflow: hidden;
   }
   .call-active.show { display: flex; }
+  .call-active::before {
+    content: "";
+    position: absolute; inset: 0;
+    background:
+      linear-gradient(180deg, rgba(0,0,0,0.2), transparent 28%),
+      linear-gradient(0deg, rgba(0,0,0,0.72), transparent 38%);
+    pointer-events: none;
+    z-index: 1;
+  }
   .call-active-face {
-    width: 240px; height: 240px;
+    width: min(28vw, 260px); height: min(28vw, 260px);
+    min-width: 168px; min-height: 168px;
     border-radius: 50%;
-    background: rgba(255,255,255,0.06);
+    background:
+      radial-gradient(circle at 35% 30%, rgba(255,255,255,0.22), transparent 28%),
+      linear-gradient(135deg, rgba(123,93,246,0.92), rgba(51,195,164,0.72));
     display: flex; align-items: center; justify-content: center;
-    font-size: 64px;
-    margin-bottom: 18px;
+    font-size: clamp(42px, 7vw, 82px);
+    font-weight: 900;
+    margin-bottom: 22px;
+    box-shadow: 0 26px 90px rgba(0,0,0,0.55);
+    z-index: 2;
   }
   /* Tier α media — local + remote video elements. Remote fills the
      surface (cover); local sits picture-in-picture top-right. Both
@@ -1232,20 +1250,61 @@
   .call-remote-video.show { display: block; }
   .call-active.has-remote-video .call-active-face { display: none; }
   .call-local-video {
-    position: absolute; top: 16px; right: 16px;
-    width: 160px; height: 120px;
+    position: absolute; top: 24px; right: 24px;
+    width: min(24vw, 280px); height: min(18vw, 180px);
+    min-width: 160px; min-height: 112px;
     object-fit: cover;
-    border-radius: 12px;
-    background: rgba(255,255,255,0.04);
-    border: 2px solid rgba(255,255,255,0.12);
+    border-radius: 18px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.22);
+    box-shadow: 0 18px 60px rgba(0,0,0,0.55);
     display: none;
+    z-index: 3;
   }
   .call-local-video.show { display: block; }
-  .call-active-name { font-size: 22px; margin-bottom: 4px; }
-  .call-active-rung { font-size: 13px; opacity: 0.55; margin-bottom: 24px; }
-  .call-active-controls { display: flex; gap: 14px; }
+  .call-active-name {
+    z-index: 2;
+    font-size: clamp(28px, 4vw, 52px);
+    font-weight: 850;
+    margin-bottom: 8px;
+    text-align: center;
+  }
+  .call-active-rung {
+    z-index: 2;
+    font-size: 15px;
+    color: rgba(232,236,248,0.72);
+    margin-bottom: 24px;
+    text-align: center;
+  }
+  .call-active-controls {
+    position: absolute;
+    left: 50%; bottom: 34px;
+    transform: translateX(-50%);
+    z-index: 3;
+    display: flex;
+    gap: 12px;
+    padding: 10px;
+    border-radius: 999px;
+    background: rgba(14,17,27,0.74);
+    border: 1px solid rgba(255,255,255,0.12);
+    box-shadow: 0 18px 70px rgba(0,0,0,0.42);
+    backdrop-filter: blur(18px);
+  }
+  .call-active-controls button {
+    min-width: 92px;
+    min-height: 46px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.12);
+    font-weight: 800;
+  }
+  .call-active-controls .btn-call-end {
+    min-width: 104px;
+    background: #ef4444;
+  }
   .call-recording-badge {
-    margin-top: 22px;
+    position: absolute;
+    top: 28px; left: 28px;
+    z-index: 3;
     padding: 6px 14px;
     border-radius: 999px;
     background: rgba(214,64,64,0.85);
@@ -1261,6 +1320,8 @@
     background: rgba(255,255,255,0.06);
     display: none;
     text-align: center;
+    position: relative;
+    z-index: 4;
   }
   .sas-pane.show { display: block; }
   .sas-words {
@@ -19735,6 +19796,7 @@
     activeCallPeer: null,
     inboundCallId: null,
     inboundCallPeer: null,
+    pendingIceCandidates: [],
   };
   // Expose for debug + tests
   if (typeof window !== "undefined") {
@@ -20048,6 +20110,7 @@
     if (!media.pc) setupRtcPeerConnection();
     try {
       await media.pc.setRemoteDescription({ type: "offer", sdp });
+      await flushPendingIceCandidates();
       await sendLocalSdpAnswer();
     } catch (_) { /* fall through */ }
   }
@@ -20056,11 +20119,15 @@
     if (!sdp || !media.pc) return;
     try {
       await media.pc.setRemoteDescription({ type: "answer", sdp });
+      await flushPendingIceCandidates();
     } catch (_) { /* fall through */ }
   }
 
   async function applyRemoteIceCandidate(data) {
-    if (!media.pc) return;
+    if (!media.pc || !media.pc.remoteDescription) {
+      callUI.pendingIceCandidates.push(data);
+      return;
+    }
     // end_of_candidates → addIceCandidate(null) signals completion.
     if (data && data.end_of_candidates) {
       try { await media.pc.addIceCandidate(null); } catch (_) {}
@@ -20073,6 +20140,14 @@
         sdpMLineIndex: data.sdp_m_line_index,
       });
     } catch (_) { /* candidate may arrive before remote description */ }
+  }
+
+  async function flushPendingIceCandidates() {
+    if (!media.pc || !media.pc.remoteDescription) return;
+    const queued = callUI.pendingIceCandidates.splice(0);
+    for (const item of queued) {
+      await applyRemoteIceCandidate(item);
+    }
   }
 
   function syncMuteCameraButtons() {
@@ -20752,8 +20827,10 @@
   function showActiveSurface(peerLabel, rungLabel) {
     const name = $$("#call-active-name");
     const rung = $$("#call-active-rung");
+    const face = $$("#call-active-face");
     if (name) name.textContent = peerLabel;
-    if (rung) rung.textContent = rungLabel || "";
+    if (rung) rung.textContent = rungLabel || "Connected privately over One Link";
+    if (face) face.textContent = _peerInitials(peerLabel || "One");
     const surface = $$("#call-active-surface");
     if (surface) surface.classList.add("show");
   }
@@ -20789,6 +20866,12 @@
       if (!call || !call.call_id) continue;
       const phase = String(call.phase || "").toLowerCase();
       const incoming = !!call.is_incoming || call.local_role === "recipient";
+      if (incoming && call.pending_sdp_offer && !callUI.pendingRemoteOffer) {
+        callUI.pendingRemoteOffer = call.pending_sdp_offer;
+      }
+      if (!incoming && call.pending_sdp_answer && media.pc) {
+        applyRemoteSdpAnswer(call.pending_sdp_answer);
+      }
       if (incoming && phase === "ringing") {
         inboundStillRinging = true;
         if (callUI.inboundCallId !== call.call_id) {
@@ -20805,6 +20888,9 @@
           hideOutgoingOverlay();
           hideIncomingRing();
           showActiveSurface(callUI.activeCallPeer, "");
+        }
+        if (incoming && call.pending_sdp_offer && media.pc) {
+          applyRemoteSdpOffer(call.pending_sdp_offer);
         }
         continue;
       }

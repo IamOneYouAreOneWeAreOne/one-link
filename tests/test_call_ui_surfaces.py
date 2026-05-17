@@ -150,8 +150,30 @@ def test_call_driver_backfills_incoming_rings_from_call_list(index_html: str) ->
     assert 'fetch("/api/v1/calls"' in index_html
     assert 'phase === "ringing"' in snippet
     assert "call.local_role === \"recipient\"" in snippet
+    assert "call.pending_sdp_offer" in snippet
+    assert "call.pending_sdp_answer" in snippet
     assert "showIncomingRing" in snippet
     assert "setInterval(backfillLivingPresenceCalls, 1500)" in index_html
+
+
+def test_call_driver_queues_ice_until_remote_description(index_html: str) -> None:
+    idx = index_html.find("async function applyRemoteIceCandidate")
+    assert idx > 0
+    snippet = index_html[idx:idx + 1200]
+    assert "pendingIceCandidates" in index_html
+    assert "!media.pc.remoteDescription" in snippet
+    assert "flushPendingIceCandidates" in index_html
+
+
+def test_active_call_surface_is_polished_full_screen(index_html: str) -> None:
+    idx = index_html.find(".call-active {")
+    assert idx > 0
+    snippet = index_html[idx:idx + 3500]
+    assert "radial-gradient" in snippet
+    assert "backdrop-filter: blur(18px)" in snippet
+    assert "bottom: 34px" in snippet
+    assert "min-width: 160px" in snippet
+    assert "Connected privately over One Link" in index_html
 
 
 # ---------------------------------------------------------------------------

@@ -962,6 +962,11 @@ class Daemon:
         # (or open) managers here. See src/one_link/call_manager.py.
         from one_link.call_manager import CallManagerRegistry as _CMR
         self._call_registry: _CMR = _CMR()
+        # Browser media setup must survive missed WebSocket events. The
+        # receiver can discover an incoming call from /api/v1/calls, so
+        # cache the latest SDP per call and expose it through that same
+        # snapshot as a durable backfill path.
+        self._call_sdp_backfill: dict[str, dict[str, str]] = {}
         # Living Presence Tier β/γ/δ/ε/η runtime adapters. These
         # are the live-system glue between the pure engine modules
         # and the daemon's tick loop + HTTP surface.
@@ -2150,6 +2155,13 @@ class Daemon:
                 log.warning(
                     "flush_call_api: broadcast_tail failed: %s", exc,
                 )
+
+        if getattr(response, "call_complete", False) and response.call_id:
+            try:
+                self._call_sdp_backfill.pop(response.call_id, None)
+                self._call_registry.close(response.call_id)
+            except Exception:
+                pass
 
         return tuple(delivered)
 
@@ -4859,6 +4871,7 @@ class Daemon:
         # Reap if the manager declared itself complete.
         if getattr(output, "call_complete", False):
             try:
+                self._call_sdp_backfill.pop(getattr(mgr, "call_id", ""), None)
                 self._call_registry.close(getattr(mgr, "call_id", ""))
             except Exception:
                 pass
@@ -4877,6 +4890,7 @@ class Daemon:
         if sdp_payload is None:
             return
         try:
+            self._call_sdp_backfill.setdefault(call_id, {})[kind] = sdp_payload.sdp
             self._broadcast_tail({
                 "type": "call_event",
                 "tail_kind": kind,
