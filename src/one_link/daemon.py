@@ -13968,6 +13968,7 @@ class Daemon:
                 me = {
                     "short_id": self.me.short_id,
                     "hostname": self.me.hostname,
+                    "fingerprint": self.me.fingerprint,
                 }
                 await self._reply(writer, {"ok": True, "me": me, "peers": peer_rows})
             elif cmd == "send":

@@ -320,11 +320,25 @@ class CallAPI:
         return self._make_response(mgr, out, call_id=call_id)
 
     def _find_active_call_with_peer(self, peer_vk_hex: str) -> Optional[CallManager]:
+        """Return an existing in-progress call to this peer, if any.
+
+        An "in-progress" call is one in INVITING / RINGING / ACTIVE
+        phase. Calls that have converted to ASYNC_CAPTURE (declined
+        or degraded), RESUMABLE (capsule committed), or ENDED are NOT
+        considered active for dedupe purposes — re-initiating to the
+        same peer should open a fresh call, not silently join the
+        leftover stub. Doctrine §3.2.e: a declined call becoming a
+        voice-note is its own thing; the next live attempt is a
+        separate conversation.
+        """
         for cid in self._registry.active_call_ids():
             mgr = self._registry.get(cid)
             if mgr is None:
                 continue
-            if mgr.is_complete:
+            phase = mgr.phase
+            if phase not in (
+                CallPhase.INVITING, CallPhase.RINGING, CallPhase.ACTIVE,
+            ):
                 continue
             # Peer match comes from the CallManager state.
             with mgr._lock:  # noqa: SLF001 — adapter has friend access
