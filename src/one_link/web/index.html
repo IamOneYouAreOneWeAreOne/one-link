@@ -1586,6 +1586,16 @@
     background: var(--bg-1); border-left: 1px solid var(--line);
     display: flex; flex-direction: column; min-height: 0;
   }
+  #mesh-panel {
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-gutter: stable;
+  }
+  #mesh-panel #activity-list {
+    flex: none !important;
+    min-height: 160px;
+    max-height: 38vh;
+  }
   .files .section-h { padding: 16px 16px 10px; }
   .file-row {
     display: grid;
@@ -1707,10 +1717,11 @@
   .peer-tools .scope { color: var(--text-dim); font-size: 12px; margin-left: auto; }
   .mesh-summary {
     display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
-    padding: 10px 12px; border-bottom: 1px solid var(--line);
+    padding: 8px 12px 10px;
+    border-bottom: 1px solid var(--line);
   }
   .one-now {
-    margin: 8px 12px 10px;
+    margin: 8px 12px;
     padding: 10px;
     border-radius: 8px;
     border: 1px solid rgba(255,255,255,.07);
@@ -1757,25 +1768,25 @@
   }
   .one-health {
     margin: 0 12px 10px;
-    padding: 12px;
+    padding: 10px;
     border-radius: 8px;
     border: 1px solid rgba(70,211,154,.18);
     background: linear-gradient(180deg, rgba(70,211,154,.08), rgba(255,255,255,.025));
   }
   .one-health-head {
     display: grid;
-    grid-template-columns: 58px minmax(0,1fr);
-    gap: 10px;
+    grid-template-columns: 50px minmax(0,1fr);
+    gap: 9px;
     align-items: center;
   }
   .one-health-score {
-    width: 54px;
-    height: 54px;
+    width: 46px;
+    height: 46px;
     border-radius: 50%;
     display: grid;
     place-items: center;
     color: var(--text);
-    font-size: 18px;
+    font-size: 16px;
     font-weight: 950;
     border: 1px solid rgba(70,211,154,.35);
     background: rgba(70,211,154,.12);
@@ -1793,9 +1804,9 @@
   }
   .one-health-grid {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0,1fr));
+    grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));
     gap: 5px;
-    margin-top: 10px;
+    margin-top: 8px;
   }
   .one-health-metric {
     border: 1px solid rgba(255,255,255,.06);
@@ -1814,6 +1825,9 @@
     font-size: 9px;
     font-weight: 900;
     text-transform: uppercase;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .one-health-actions,
   .one-health-people,
@@ -1942,6 +1956,38 @@
     font-weight: 850;
     color: var(--text);
     background: rgba(255,255,255,.055);
+  }
+  .activity-help {
+    margin: 6px 12px 0;
+  }
+  .activity-tools {
+    margin: 0 12px 10px;
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: 8px;
+    background: rgba(255,255,255,.02);
+    overflow: hidden;
+  }
+  .activity-tools > summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 10px 11px;
+    color: var(--text-dim);
+    font-size: 12px;
+    font-weight: 850;
+  }
+  .activity-tools > summary::-webkit-details-marker { display: none; }
+  .activity-tools > summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 7px;
+    transition: transform .15s ease;
+  }
+  .activity-tools[open] > summary::before {
+    transform: rotate(90deg);
+  }
+  .activity-tools > :not(summary) {
+    margin-left: 10px;
+    margin-right: 10px;
   }
   @media (max-width: 1180px) {
     .one-health-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
@@ -5178,11 +5224,13 @@
         <span>Activity</span>
         <span class="count" id="transfers-count">0</span>
       </div>
-      <div class="help-card">
-        Cross-device timeline: pairings, verification, key changes,
-        file transfers, folder conflicts. Filter by kind below.
-        Live; events land the moment they happen.
-      </div>
+      <details class="panel-advanced activity-help">
+        <summary>What shows here?</summary>
+        <p class="settings-help" style="margin-top:8px;">
+          Pairings, verification, key changes, file transfers, folder conflicts,
+          and useful system actions. Live events land here as they happen.
+        </p>
+      </details>
       <div class="mesh-summary" id="mesh-summary">
         <div class="metric clickable" id="metric-tile-online" role="button" tabindex="0" data-mesh-tile="online" aria-label="View peers in Chat"><div class="num" id="metric-online">0</div><div class="lbl">nearby</div></div>
         <div class="metric clickable" id="metric-tile-active" role="button" tabindex="0" data-mesh-tile="active" aria-label="Open Files Sent tab"><div class="num" id="metric-active">0</div><div class="lbl">moving now</div></div>
@@ -5242,117 +5290,120 @@
           <div class="setup-technical-list" id="one-setup-panel-technical-list"></div>
         </details>
       </div>
-      <div class="fabric-truth" id="fabric-truth">
-        <div class="ft-top">
-          <div class="ft-state">Finding best path</div>
-          <div class="ft-pill">Autopilot</div>
-        </div>
-        <div class="ft-reason">One Link is checking every safe communication path this device can use.</div>
-      </div>
-      <div class="no-router-kit" id="no-router-kit">
-        <div class="nr-state">Local path</div>
-        <div class="nr-message">Checking local route readiness.</div>
-        <div class="nr-guide" id="no-router-guide"></div>
-        <button id="btn-launch-path-create" style="display:none; margin-top:8px; width:100%;">Open path settings</button>
-      </div>
-      <div class="self-mesh-kit" id="self-mesh-kit">
-        <div class="sm-head">
-          <div class="sm-title">My devices</div>
-          <div class="sm-pill" id="self-mesh-pill">syncing</div>
-        </div>
-        <div class="sm-copy" id="self-mesh-copy">Checking personal mesh presence.</div>
-        <div class="sm-devices" id="self-mesh-devices"></div>
-        <div class="sm-devices" id="self-mesh-perf"></div>
-        <div class="sm-controls sm-device-picker">
-          <select id="self-mesh-device-select" aria-label="Self-mesh device"></select>
-        </div>
-        <div class="sm-actions sm-primary-actions">
-          <button id="btn-self-mesh-root">Set up my devices</button>
-          <button id="btn-self-mesh-invite">Show invite QR</button>
-          <button id="btn-self-mesh-best">Use best device</button>
-        </div>
-        <details class="sm-advanced" id="self-mesh-remote-actions">
-          <summary>Send or pull from another device</summary>
-          <div class="sm-controls">
-            <input id="self-mesh-path" type="text" placeholder="Allowed folder or file path" />
-            <input id="self-mesh-peer" type="text" placeholder="Recipient or trusted device" />
+      <details class="activity-tools" id="activity-advanced-tools">
+        <summary>Advanced fabric tools</summary>
+        <div class="fabric-truth" id="fabric-truth">
+          <div class="ft-top">
+            <div class="ft-state">Finding best path</div>
+            <div class="ft-pill">Autopilot</div>
           </div>
-          <div class="sm-actions">
-          <button id="btn-self-mesh-trust-root">Trust folder</button>
-          <button id="btn-self-mesh-manifest">Pull file list</button>
-          <button id="btn-self-mesh-send">Send file</button>
+          <div class="ft-reason">One Link is checking every safe communication path this device can use.</div>
+        </div>
+        <div class="no-router-kit" id="no-router-kit">
+          <div class="nr-state">Local path</div>
+          <div class="nr-message">Checking local route readiness.</div>
+          <div class="nr-guide" id="no-router-guide"></div>
+          <button id="btn-launch-path-create" style="display:none; margin-top:8px; width:100%;">Open path settings</button>
+        </div>
+        <div class="self-mesh-kit" id="self-mesh-kit">
+          <div class="sm-head">
+            <div class="sm-title">My devices</div>
+            <div class="sm-pill" id="self-mesh-pill">syncing</div>
           </div>
-        </details>
-        <details class="sm-advanced" id="self-mesh-join-actions">
-          <summary>Add this device with an invite</summary>
+          <div class="sm-copy" id="self-mesh-copy">Checking personal mesh presence.</div>
+          <div class="sm-devices" id="self-mesh-devices"></div>
+          <div class="sm-devices" id="self-mesh-perf"></div>
           <div class="sm-controls sm-device-picker">
-            <input id="self-mesh-cert" type="text" placeholder="Invite code or device cert" />
+            <select id="self-mesh-device-select" aria-label="Self-mesh device"></select>
           </div>
-          <div class="sm-actions">
-            <button id="btn-self-mesh-claim">Join with invite</button>
+          <div class="sm-actions sm-primary-actions">
+            <button id="btn-self-mesh-root">Set up my devices</button>
+            <button id="btn-self-mesh-invite">Show invite QR</button>
+            <button id="btn-self-mesh-best">Use best device</button>
           </div>
-        </details>
-        <details class="sm-advanced" id="self-mesh-safety-actions">
-          <summary>Device safety</summary>
-          <div class="sm-actions">
-            <button id="btn-self-mesh-freeze">Freeze device</button>
-            <button id="btn-self-mesh-recover">Recover device</button>
-          </div>
-        </details>
-        <details class="sm-advanced" id="self-mesh-advanced">
-          <summary>Advanced device setup</summary>
-          <div class="sm-controls">
-            <input id="self-mesh-root-seed" type="text" placeholder="Recovery seed" />
-            <input id="self-mesh-device-pub" type="text" placeholder="New device public key" />
-            <input id="self-mesh-device-label" type="text" placeholder="Device name" />
-          </div>
-          <div class="sm-actions">
-            <button id="btn-self-mesh-mint">Create device cert</button>
-            <button id="btn-self-mesh-enroll">Add device cert</button>
-            <button id="btn-self-mesh-revoke" class="danger-action">Hard revoke selected device</button>
-          </div>
-        </details>
-        <img id="self-mesh-invite-qr" alt="Self-mesh invite QR" style="display:none; margin-top:8px; width:144px; max-width:100%; border-radius:8px; background:#fff; padding:8px;" />
-      </div>
-      <div class="courier-kit" id="courier-kit">
-        <div class="ck-title">Offline delivery</div>
-        <div class="ck-copy">Move a file when the internet, router, or other device is not reachable.</div>
-        <div class="ck-grid">
-          <select id="courier-transfer-select" aria-label="Offline transfer"></select>
-          <select id="courier-drop-select" aria-label="Received offline bundle"></select>
-          <textarea id="courier-key-token" class="ck-token" rows="2" placeholder="Unlock code"></textarea>
-          <input id="courier-file-input" class="ck-file" type="file"
-                 accept=".olcb,.json,application/json"
-                 aria-label="Offline bundle file" />
+          <details class="sm-advanced" id="self-mesh-remote-actions">
+            <summary>Send or pull from another device</summary>
+            <div class="sm-controls">
+              <input id="self-mesh-path" type="text" placeholder="Allowed folder or file path" />
+              <input id="self-mesh-peer" type="text" placeholder="Recipient or trusted device" />
+            </div>
+            <div class="sm-actions">
+            <button id="btn-self-mesh-trust-root">Trust folder</button>
+            <button id="btn-self-mesh-manifest">Pull file list</button>
+            <button id="btn-self-mesh-send">Send file</button>
+            </div>
+          </details>
+          <details class="sm-advanced" id="self-mesh-join-actions">
+            <summary>Add this device with an invite</summary>
+            <div class="sm-controls sm-device-picker">
+              <input id="self-mesh-cert" type="text" placeholder="Invite code or device cert" />
+            </div>
+            <div class="sm-actions">
+              <button id="btn-self-mesh-claim">Join with invite</button>
+            </div>
+          </details>
+          <details class="sm-advanced" id="self-mesh-safety-actions">
+            <summary>Device safety</summary>
+            <div class="sm-actions">
+              <button id="btn-self-mesh-freeze">Freeze device</button>
+              <button id="btn-self-mesh-recover">Recover device</button>
+            </div>
+          </details>
+          <details class="sm-advanced" id="self-mesh-advanced">
+            <summary>Advanced device setup</summary>
+            <div class="sm-controls">
+              <input id="self-mesh-root-seed" type="text" placeholder="Recovery seed" />
+              <input id="self-mesh-device-pub" type="text" placeholder="New device public key" />
+              <input id="self-mesh-device-label" type="text" placeholder="Device name" />
+            </div>
+            <div class="sm-actions">
+              <button id="btn-self-mesh-mint">Create device cert</button>
+              <button id="btn-self-mesh-enroll">Add device cert</button>
+              <button id="btn-self-mesh-revoke" class="danger-action">Hard revoke selected device</button>
+            </div>
+          </details>
+          <img id="self-mesh-invite-qr" alt="Self-mesh invite QR" style="display:none; margin-top:8px; width:144px; max-width:100%; border-radius:8px; background:#fff; padding:8px;" />
         </div>
-        <div class="ck-actions">
-          <button id="btn-courier-export">Download bundle</button>
-          <button id="btn-courier-import-file">Import file</button>
-          <button id="btn-courier-import-drop">Import selected</button>
-          <button id="btn-courier-copy-key">Copy unlock code</button>
-        </div>
-        <details class="ck-advanced" id="courier-advanced">
-          <summary>Advanced offline options</summary>
+        <div class="courier-kit" id="courier-kit">
+          <div class="ck-title">Offline delivery</div>
+          <div class="ck-copy">Move a file when the internet, router, or other device is not reachable.</div>
           <div class="ck-grid">
-            <select id="courier-outbox-select" aria-label="Saved offline bundle"></select>
-            <select id="courier-removable-select" aria-label="Removable target"></select>
-            <select id="courier-removable-file-select" aria-label="USB offline bundle"></select>
-            <textarea id="courier-chunks" rows="2" placeholder="Specific cached chunk hashes"></textarea>
+            <select id="courier-transfer-select" aria-label="Offline transfer"></select>
+            <select id="courier-drop-select" aria-label="Received offline bundle"></select>
+            <textarea id="courier-key-token" class="ck-token" rows="2" placeholder="Unlock code"></textarea>
+            <input id="courier-file-input" class="ck-file" type="file"
+                   accept=".olcb,.json,application/json"
+                   aria-label="Offline bundle file" />
           </div>
           <div class="ck-actions">
-            <button id="btn-courier-stage">Save bundle</button>
-            <button id="btn-courier-copy-removable">Copy to USB</button>
-            <button id="btn-courier-pull-removable">Pull from USB</button>
+            <button id="btn-courier-export">Download bundle</button>
+            <button id="btn-courier-import-file">Import file</button>
+            <button id="btn-courier-import-drop">Import selected</button>
+            <button id="btn-courier-copy-key">Copy unlock code</button>
           </div>
-        </details>
-        <div class="courier-wizard" id="courier-wizard">
-          <div class="cw-head">
-            <button id="btn-courier-guide-send" class="active">Send</button>
-            <button id="btn-courier-guide-receive">Receive</button>
+          <details class="ck-advanced" id="courier-advanced">
+            <summary>Advanced offline options</summary>
+            <div class="ck-grid">
+              <select id="courier-outbox-select" aria-label="Saved offline bundle"></select>
+              <select id="courier-removable-select" aria-label="Removable target"></select>
+              <select id="courier-removable-file-select" aria-label="USB offline bundle"></select>
+              <textarea id="courier-chunks" rows="2" placeholder="Specific cached chunk hashes"></textarea>
+            </div>
+            <div class="ck-actions">
+              <button id="btn-courier-stage">Save bundle</button>
+              <button id="btn-courier-copy-removable">Copy to USB</button>
+              <button id="btn-courier-pull-removable">Pull from USB</button>
+            </div>
+          </details>
+          <div class="courier-wizard" id="courier-wizard">
+            <div class="cw-head">
+              <button id="btn-courier-guide-send" class="active">Send</button>
+              <button id="btn-courier-guide-receive">Receive</button>
+            </div>
+            <div class="cw-steps" id="courier-wizard-steps"></div>
           </div>
-          <div class="cw-steps" id="courier-wizard-steps"></div>
         </div>
-      </div>
+      </details>
       <!-- v0.9.1: filter chips for the merged activity feed. -->
       <div class="activity-filters" id="activity-filters">
         <button class="chip active" data-activity-filter="all">All</button>

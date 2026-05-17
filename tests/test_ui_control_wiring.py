@@ -291,6 +291,11 @@ def test_activity_surface_uses_progressive_disclosure() -> None:
     assert 'id="one-now-privacy"' in html
     assert 'id="activity-nearby-panel"' in html
     assert 'id="activity-nearby-close"' in html
+    assert 'id="activity-advanced-tools"' in html
+    assert "Advanced fabric tools" in html
+    assert "#mesh-panel" in html
+    assert "scrollbar-gutter: stable" in html
+    assert "grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));" in html
     assert "async function loadActivityNearby" in html
     assert "async function toggleActivityNearby()" in html
     assert "function closeActivityNearby()" in html
