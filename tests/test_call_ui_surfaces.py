@@ -176,6 +176,45 @@ def test_active_call_surface_is_polished_full_screen(index_html: str) -> None:
     assert "Connected privately over One Link" in index_html
 
 
+def test_active_call_surface_has_one_assist_rail(index_html: str) -> None:
+    assert 'id="call-one-rail"' in index_html
+    assert 'id="call-one-route"' in index_html
+    assert 'id="call-one-reality"' in index_html
+    assert 'id="btn-call-send-file"' in index_html
+    assert 'id="btn-call-use-best-path"' in index_html
+    assert 'id="call-file-input"' in index_html
+
+
+def test_call_driver_reports_metrics_to_immune_system(index_html: str) -> None:
+    idx = index_html.find("async function reportCallMetricsOnce")
+    assert idx > 0
+    snippet = index_html[idx:idx + 2200]
+    assert "media.pc.getStats()" in snippet
+    assert 'action: "report_metrics"' in snippet
+    assert "bandwidth_estimate_kbps" in snippet
+    assert "setInterval(reportCallMetricsOnce, 2000)" in index_html
+
+
+def test_call_driver_can_send_files_inside_call(index_html: str) -> None:
+    idx = index_html.find('const callFileInput = $$("#call-file-input")')
+    assert idx > 0
+    snippet = index_html[idx:idx + 2200]
+    assert "api.upload(callUI.activeCallPeerFp, file)" in snippet
+    assert "Sending ${file.name} without leaving the call." in snippet
+    assert "trusted file fabric" in snippet
+
+
+def test_call_driver_surfaces_immune_actions_in_one_assist(index_html: str) -> None:
+    idx = index_html.find('if (tail === "immune_lower_fidelity")')
+    assert idx > 0
+    snippet = index_html[idx:idx + 3500]
+    assert "One Link lowered video bitrate" in snippet
+    assert "Camera paused automatically" in snippet
+    assert "resumable voice capsule" in snippet
+    assert "warming a stronger path" in snippet
+    assert "Secure connection refreshed" in snippet
+
+
 # ---------------------------------------------------------------------------
 # All four overlay states the driver handles
 # ---------------------------------------------------------------------------

@@ -1301,6 +1301,121 @@
     min-width: 104px;
     background: #ef4444;
   }
+  .call-one-rail {
+    position: absolute;
+    left: 24px; top: 24px;
+    z-index: 3;
+    width: min(360px, calc(100vw - 48px));
+    display: grid;
+    gap: 10px;
+  }
+  .call-one-card {
+    border-radius: 18px;
+    background: rgba(14,17,27,0.72);
+    border: 1px solid rgba(255,255,255,0.12);
+    box-shadow: 0 18px 70px rgba(0,0,0,0.34);
+    backdrop-filter: blur(18px);
+    padding: 12px;
+  }
+  .call-one-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    font-weight: 900;
+    color: rgba(232,236,248,0.72);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .call-one-score {
+    color: #86efac;
+    font-size: 13px;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .call-one-grid {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .call-one-chip {
+    min-height: 58px;
+    border-radius: 12px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.09);
+    padding: 9px;
+  }
+  .call-one-chip b {
+    display: block;
+    font-size: 15px;
+    line-height: 1.1;
+  }
+  .call-one-chip span {
+    display: block;
+    margin-top: 5px;
+    color: rgba(232,236,248,0.58);
+    font-size: 10px;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+  .call-one-feed {
+    margin-top: 10px;
+    display: grid;
+    gap: 6px;
+  }
+  .call-one-event {
+    border-radius: 12px;
+    background: rgba(255,255,255,0.055);
+    color: rgba(232,236,248,0.82);
+    font-size: 12px;
+    line-height: 1.35;
+    padding: 8px 10px;
+  }
+  .call-one-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .call-one-actions button {
+    min-height: 40px;
+    border-radius: 12px;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.08);
+    color: rgba(255,255,255,0.92);
+    font-weight: 850;
+    cursor: pointer;
+  }
+  .call-one-actions button.primary {
+    background: rgba(123,93,246,0.95);
+  }
+  .call-one-file {
+    display: none;
+    margin-top: 10px;
+    border-radius: 12px;
+    background: rgba(34,197,94,0.12);
+    border: 1px solid rgba(34,197,94,0.24);
+    color: rgba(220,252,231,0.95);
+    font-size: 12px;
+    padding: 8px 10px;
+  }
+  .call-one-file.show { display: block; }
+  @media (max-width: 780px) {
+    .call-one-rail {
+      left: 14px; right: 14px; top: 14px;
+      width: auto;
+    }
+    .call-one-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .call-active-controls {
+      left: 12px; right: 12px; bottom: 16px;
+      transform: none;
+      overflow-x: auto;
+      justify-content: flex-start;
+      border-radius: 18px;
+    }
+  }
   .call-recording-badge {
     position: absolute;
     top: 28px; left: 28px;
@@ -19763,6 +19878,28 @@
   <!-- Local self-view, picture-in-picture style. -->
   <video id="call-local-video" class="call-local-video"
          autoplay playsinline muted aria-label="Your camera preview"></video>
+  <div class="call-one-rail" id="call-one-rail" aria-label="One Link call intelligence">
+    <div class="call-one-card">
+      <div class="call-one-title">
+        <span>One Assist</span>
+        <span class="call-one-score" id="call-one-score">Protected</span>
+      </div>
+      <div class="call-one-grid">
+        <div class="call-one-chip"><b id="call-one-route">Local</b><span>Route</span></div>
+        <div class="call-one-chip"><b id="call-one-rtt">--</b><span>Latency</span></div>
+        <div class="call-one-chip"><b id="call-one-loss">0%</b><span>Loss</span></div>
+        <div class="call-one-chip"><b id="call-one-reality">Real</b><span>Reality</span></div>
+        <div class="call-one-chip"><b id="call-one-privacy">Private</b><span>Privacy</span></div>
+        <div class="call-one-chip"><b id="call-one-engine">Auto</b><span>Engine</span></div>
+      </div>
+      <div class="call-one-feed" id="call-one-feed" aria-live="polite"></div>
+      <div class="call-one-actions">
+        <button class="primary" id="btn-call-send-file" type="button">Send file</button>
+        <button id="btn-call-use-best-path" type="button">Best path</button>
+      </div>
+      <div class="call-one-file" id="call-one-file-status"></div>
+    </div>
+  </div>
   <div class="call-active-name" id="call-active-name"></div>
   <div class="call-active-rung" id="call-active-rung"></div>
   <div class="call-active-controls">
@@ -19772,6 +19909,7 @@
     <button class="btn-ghost" id="btn-call-record" aria-label="Save this call">Save</button>
   </div>
   <div id="call-recording-badge" class="call-recording-badge" aria-live="polite">Recording (both sides agreed)</div>
+  <input type="file" id="call-file-input" style="display:none" multiple />
   <div id="call-sas-pane" class="sas-pane" aria-live="polite">
     <div>Read this aloud. If you both hear the same words, tap Yes.</div>
     <div class="sas-words" id="call-sas-words"></div>
@@ -19794,9 +19932,13 @@
   const callUI = {
     activeCallId: null,
     activeCallPeer: null,
+    activeCallPeerFp: null,
     inboundCallId: null,
     inboundCallPeer: null,
+    inboundCallPeerFp: null,
     pendingIceCandidates: [],
+    metricsTimer: null,
+    oneEvents: [],
   };
   // Expose for debug + tests
   if (typeof window !== "undefined") {
@@ -20833,12 +20975,15 @@
     if (face) face.textContent = _peerInitials(peerLabel || "One");
     const surface = $$("#call-active-surface");
     if (surface) surface.classList.add("show");
+    resetOneCallRail(peerLabel);
+    startCallTelemetry();
   }
   function hideActiveSurface() {
     const surface = $$("#call-active-surface");
     if (surface) surface.classList.remove("show");
     const badge = $$("#call-recording-badge");
     if (badge) badge.classList.remove("show");
+    stopCallTelemetry();
   }
   function showRecordingBadge() {
     const badge = $$("#call-recording-badge");
@@ -20856,6 +21001,99 @@
       (call && call.call_id && call.call_id.slice(0, 8)) ||
       "That device"
     );
+  }
+
+  function updateOneChip(id, value) {
+    const el = $$(id);
+    if (el) el.textContent = value;
+  }
+
+  function addOneCallEvent(text) {
+    if (!text) return;
+    callUI.oneEvents.unshift({ text, at: Date.now() });
+    callUI.oneEvents = callUI.oneEvents.slice(0, 4);
+    const feed = $$("#call-one-feed");
+    if (!feed) return;
+    feed.innerHTML = callUI.oneEvents.map((ev) => (
+      `<div class="call-one-event">${escapeText(ev.text)}</div>`
+    )).join("");
+  }
+
+  function showCallFileStatus(text, kind) {
+    const box = $$("#call-one-file-status");
+    if (!box) return;
+    box.textContent = text || "";
+    box.classList.toggle("show", !!text);
+    box.style.borderColor = kind === "bad"
+      ? "rgba(239,68,68,0.35)"
+      : "rgba(34,197,94,0.24)";
+    box.style.background = kind === "bad"
+      ? "rgba(239,68,68,0.12)"
+      : "rgba(34,197,94,0.12)";
+  }
+
+  function resetOneCallRail(peerLabel) {
+    callUI.oneEvents = [];
+    updateOneChip("#call-one-score", "Protected");
+    updateOneChip("#call-one-route", "Local");
+    updateOneChip("#call-one-rtt", "--");
+    updateOneChip("#call-one-loss", "0%");
+    updateOneChip("#call-one-reality", "Real");
+    updateOneChip("#call-one-privacy", "Private");
+    updateOneChip("#call-one-engine", "Auto");
+    showCallFileStatus("", "");
+    addOneCallEvent(`${peerLabel || "This call"} is protected by One Link.`);
+    addOneCallEvent("Files, voice, video, and routing share the same trusted path.");
+  }
+
+  async function reportCallMetricsOnce() {
+    if (!callUI.activeCallId || !media.pc) return;
+    try {
+      const stats = await media.pc.getStats();
+      let rttMs = null;
+      let jitterMs = null;
+      let loss = null;
+      let kbps = null;
+      stats.forEach((s) => {
+        if (s.type === "candidate-pair" && (s.selected || s.nominated)) {
+          if (typeof s.currentRoundTripTime === "number") {
+            rttMs = Math.round(s.currentRoundTripTime * 1000);
+          }
+          const bytes = Number(s.availableOutgoingBitrate || 0);
+          if (bytes > 0) kbps = Math.round(bytes / 1000);
+        }
+        if (s.type === "inbound-rtp" && !s.isRemote) {
+          if (typeof s.jitter === "number") jitterMs = Math.round(s.jitter * 1000);
+          const lost = Number(s.packetsLost || 0);
+          const received = Number(s.packetsReceived || 0);
+          if (lost + received > 0) loss = lost / (lost + received);
+        }
+      });
+      if (rttMs !== null) updateOneChip("#call-one-rtt", `${rttMs} ms`);
+      if (loss !== null) updateOneChip("#call-one-loss", `${Math.round(loss * 100)}%`);
+      if (kbps !== null) updateOneChip("#call-one-route", kbps > 5000 ? "Fast local" : "Local");
+      await callApiPost({
+        action: "report_metrics",
+        call_id: callUI.activeCallId,
+        rtt_ms: rttMs,
+        jitter_ms: jitterMs,
+        loss_rate: loss,
+        bandwidth_estimate_kbps: kbps,
+      });
+    } catch (_) {}
+  }
+
+  function startCallTelemetry() {
+    if (callUI.metricsTimer) clearInterval(callUI.metricsTimer);
+    reportCallMetricsOnce();
+    callUI.metricsTimer = setInterval(reportCallMetricsOnce, 2000);
+  }
+
+  function stopCallTelemetry() {
+    if (callUI.metricsTimer) {
+      clearInterval(callUI.metricsTimer);
+      callUI.metricsTimer = null;
+    }
   }
 
   async function backfillLivingPresenceCalls() {
@@ -20877,6 +21115,7 @@
         if (callUI.inboundCallId !== call.call_id) {
           callUI.inboundCallId = call.call_id;
           callUI.inboundCallPeer = peerLabelFromCall(call);
+          callUI.inboundCallPeerFp = call.peer_master_vk_hex || null;
         }
         showIncomingRing(callUI.inboundCallPeer || peerLabelFromCall(call));
         continue;
@@ -20885,6 +21124,7 @@
         if (!callUI.activeCallId || callUI.activeCallId === call.call_id) {
           callUI.activeCallId = call.call_id;
           callUI.activeCallPeer = peerLabelFromCall(call);
+          callUI.activeCallPeerFp = call.peer_master_vk_hex || callUI.activeCallPeerFp;
           hideOutgoingOverlay();
           hideIncomingRing();
           showActiveSurface(callUI.activeCallPeer, "");
@@ -20901,6 +21141,7 @@
         hideIncomingRing();
         callUI.inboundCallId = null;
         callUI.inboundCallPeer = null;
+        callUI.inboundCallPeerFp = null;
       }
       if (
         call.call_id === callUI.activeCallId &&
@@ -20909,8 +21150,10 @@
         hideOutgoingOverlay();
         hideActiveSurface();
         stopAllMedia();
+        stopCallTelemetry();
         callUI.activeCallId = null;
         callUI.activeCallPeer = null;
+        callUI.activeCallPeerFp = null;
       }
     }
     if (callUI.inboundCallId && !inboundStillRinging) {
@@ -20919,6 +21162,7 @@
         hideIncomingRing();
         callUI.inboundCallId = null;
         callUI.inboundCallPeer = null;
+        callUI.inboundCallPeerFp = null;
       }
     }
   }
@@ -20949,6 +21193,7 @@
     if (result.ok) {
       callUI.activeCallId = callUI.inboundCallId;
       callUI.activeCallPeer = callUI.inboundCallPeer;
+      callUI.activeCallPeerFp = callUI.inboundCallPeerFp;
       showActiveSurface(callUI.activeCallPeer, "");
       // Tier α: bring up local media on accept.
       setupRtcPeerConnection();
@@ -20970,6 +21215,7 @@
       }
     }
     callUI.inboundCallId = null;
+    callUI.inboundCallPeerFp = null;
   });
   const hangupBtn = $$("#btn-call-hangup");
   if (hangupBtn) hangupBtn.addEventListener("click", async () => {
@@ -21042,6 +21288,45 @@
   // The daemon broadcasts call_event tail events; we listen for the
   // call_event type on the existing WebSocket. The handler in
   // index.html's main ws.onmessage forwards them here.
+  const callFileInput = $$("#call-file-input");
+  const callSendFileBtn = $$("#btn-call-send-file");
+  if (callSendFileBtn) callSendFileBtn.addEventListener("click", () => {
+    if (!callUI.activeCallId || !callUI.activeCallPeerFp) {
+      showCallFileStatus("Pick an active One Link call first.", "bad");
+      return;
+    }
+    if (callFileInput) callFileInput.click();
+  });
+  if (callFileInput) callFileInput.addEventListener("change", async (ev) => {
+    const files = Array.from(ev.target.files || []);
+    ev.target.value = "";
+    if (!files.length || !callUI.activeCallPeerFp) return;
+    for (const file of files) {
+      showCallFileStatus(`Sending ${file.name} through this call's trusted path...`, "info");
+      addOneCallEvent(`Sending ${file.name} without leaving the call.`);
+      try {
+        const result = await api.upload(callUI.activeCallPeerFp, file);
+        if (result && (result.queued || result.paused)) {
+          showCallFileStatus(`${file.name} is queued and will finish automatically.`, "info");
+          addOneCallEvent(`${file.name} will finish when the best path is ready.`);
+        } else {
+          showCallFileStatus(`${file.name} sent through One Link.`, "ok");
+          addOneCallEvent(`${file.name} sent on the trusted file fabric.`);
+        }
+      } catch (e) {
+        showCallFileStatus(`${file.name}: ${errorToastBody(e)}`, "bad");
+      }
+    }
+  });
+
+  const bestPathBtn = $$("#btn-call-use-best-path");
+  if (bestPathBtn) bestPathBtn.addEventListener("click", () => {
+    reportCallMetricsOnce();
+    updateOneChip("#call-one-engine", "Scanning");
+    updateOneChip("#call-one-route", "Best path");
+    addOneCallEvent("One Link is checking local, trusted, and backup paths for this call.");
+  });
+
   window.handleLivingPresenceCallEvent = function (m) {
     if (!m || m.type !== "call_event") return false;
     const tail = m.tail_kind;
@@ -21049,6 +21334,7 @@
     if (tail === "show_ring") {
       callUI.inboundCallId = callId;
       callUI.inboundCallPeer = (m.peer_label || callId.slice(0, 8));
+      callUI.inboundCallPeerFp = m.peer_master_vk_hex || null;
       showIncomingRing(callUI.inboundCallPeer);
       return true;
     }
@@ -21061,6 +21347,7 @@
           callUI.activeCallId = callId;
           callUI.activeCallPeer = callId.slice(0, 8);
         }
+        if (m.peer_master_vk_hex) callUI.activeCallPeerFp = m.peer_master_vk_hex;
         showActiveSurface(callUI.activeCallPeer, "");
       } else if (phase === "ended" || phase === "async_capture") {
         hideOutgoingOverlay();
@@ -21068,6 +21355,7 @@
         hideActiveSurface();
         stopAllMedia();
         if (callUI.activeCallId === callId) callUI.activeCallId = null;
+        if (callUI.activeCallId === null) callUI.activeCallPeerFp = null;
       }
       return true;
     }
@@ -21136,6 +21424,8 @@
           recording: m.recording,
         });
       }
+      updateOneChip("#call-one-reality", m.verified ? "Real" : "Checked");
+      addOneCallEvent(m.verified ? "Reality proof confirmed this media window." : "Reality proof is checking this media.");
       return true;
     }
     // ── Tier δ — Immune System actions ───────────────────────────
@@ -21144,6 +21434,8 @@
       // takes a few hundred ms to negotiate, but the codec ramp is
       // smooth — no visible glitch.
       const targetKbps = m.target_video_bitrate_kbps || 200;
+      updateOneChip("#call-one-engine", "Adaptive");
+      addOneCallEvent("One Link lowered video bitrate to keep the call smooth.");
       if (media.pc) {
         media.pc.getSenders().forEach((sender) => {
           if (!sender.track || sender.track.kind !== "video") return;
@@ -21165,6 +21457,8 @@
           t.enabled = false;
         });
       }
+      updateOneChip("#call-one-engine", "Voice first");
+      addOneCallEvent("Camera paused automatically so the conversation stays clear.");
       if (typeof toast === "function" && m.user_message) {
         toast(m.user_message, "info", 5000);
       }
@@ -21177,6 +21471,8 @@
       if (typeof toast === "function" && m.user_message) {
         toast(m.user_message, "info", 8000);
       }
+      updateOneChip("#call-one-engine", "Capsule");
+      addOneCallEvent("One Link is preserving the conversation as a resumable voice capsule.");
       // Stop ICE / RTC sends — voice-note ride only happens via
       // the daemon's CALL_CAPSULE_CHUNK / capsule_transport path,
       // which the attest stream Blobs already feed.
@@ -21185,17 +21481,25 @@
       return true;
     }
     if (tail === "immune_prewarm_route") {
+      updateOneChip("#call-one-route", "Preparing");
+      addOneCallEvent("One Link is warming a stronger path in the background.");
       // Tier ε — no UI yet; the Route Brain owns this. The hook is
       // here so the next tier doesn't need an additional dispatch.
       return true;
     }
     if (tail === "immune_suggest_handoff") {
+      updateOneChip("#call-one-engine", "Handoff");
+      addOneCallEvent(m.user_message || "One Link found a better device for this call.");
       if (typeof toast === "function" && m.user_message) {
         toast(m.user_message, "info", 8000);
       }
       return true;
     }
     if (tail === "immune_switch_route" || tail === "immune_rekey") {
+      updateOneChip("#call-one-route", tail === "immune_rekey" ? "Refreshed" : "Switched");
+      addOneCallEvent(tail === "immune_rekey"
+        ? "Secure connection refreshed."
+        : "One Link moved the call to a better route.");
       // Quiet acks — the underlying switch happens daemon-side.
       return true;
     }
