@@ -1908,7 +1908,36 @@ class Daemon:
         if state is None:
             return None
         try:
-            return state.get_peer(peer_master_vk_hex)
+            rec = state.get_peer(peer_master_vk_hex)
+        except Exception:
+            return None
+        if rec is None:
+            return None
+        try:
+            # Older call-route tests and a few adapter fakes already
+            # hand back a transport-shaped peer with ed_pub_hex. The
+            # real sqlite PeerRecord does not, so only pass this
+            # through when it is already the send_to-compatible shape.
+            if getattr(rec, "ed_pub_hex", None):
+                return rec
+            pubkey = getattr(rec, "pubkey", b"") or b""
+            if isinstance(pubkey, str):
+                ed_pub_hex = pubkey
+            else:
+                ed_pub_hex = bytes(pubkey).hex()
+            address = getattr(rec, "last_address", None) or getattr(rec, "address", None)
+            port = getattr(rec, "last_port", None) or getattr(rec, "port", None)
+            port_i = int(port)
+            if not ed_pub_hex or not address or port_i <= 0 or port_i > 65535:
+                return None
+            short_id = getattr(rec, "short_id", peer_master_vk_hex[:8])
+            return Peer(
+                short_id=short_id,
+                hostname=getattr(rec, "hostname", None) or short_id,
+                address=str(address),
+                port=port_i,
+                ed_pub_hex=ed_pub_hex,
+            )
         except Exception:
             return None
 

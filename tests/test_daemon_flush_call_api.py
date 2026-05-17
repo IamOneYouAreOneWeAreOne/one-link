@@ -55,9 +55,9 @@ class _FakePeerRecord:
     def __init__(self, *, short_id: str, ed_pub_hex: str) -> None:
         self.short_id = short_id
         self.hostname = "test-host"
-        self.address = "127.0.0.1"
-        self.port = 5000
-        self.ed_pub_hex = ed_pub_hex
+        self.last_address = "127.0.0.1"
+        self.last_port = 5000
+        self.pubkey = bytes.fromhex(ed_pub_hex)
         self.rendezvous_urls: list[str] = []
         self.device_kind = ""
         self.trust = "pinned"
