@@ -159,20 +159,24 @@ def _render_spec(
         "",
         "pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)",
         "",
+        "# --onedir layout: EXE() gets ONLY the script + PYZ, then",
+        "# COLLECT() places binaries + datas alongside in a sibling",
+        "# directory. This eliminates the PyInstaller --onefile",
+        "# self-extracting bootloader (which copied the 110MB bundle",
+        "# to %TEMP%\\_MEI<random>\\ on every launch — 30-60s wait +",
+        "# 'Failed to remove temporary directory' warnings when the",
+        "# detached daemon held files the launcher tried to clean up).",
+        "# Onedir launches in ~2s with zero extraction.",
         "exe = EXE(",
         "    pyz,",
         "    a.scripts,",
-        "    a.binaries,",
-        "    a.zipfiles,",
-        "    a.datas,",
         "    [],",
+        "    exclude_binaries=True,",
         f"    name={name!r},",
         "    debug=False,",
         "    bootloader_ignore_signals=False,",
         "    strip=False,",
         "    upx=False,",
-        "    upx_exclude=[],",
-        "    runtime_tmpdir=None,",
         f"    console={console!r},",
         "    disable_windowed_traceback=False,",
         "    argv_emulation=False,",
@@ -180,6 +184,17 @@ def _render_spec(
         "    codesign_identity=None,",
         "    entitlements_file=None,",
         f"    icon={icon!r}," if icon else "    icon=None,",
+        ")",
+        "",
+        "coll = COLLECT(",
+        "    exe,",
+        "    a.binaries,",
+        "    a.zipfiles,",
+        "    a.datas,",
+        "    strip=False,",
+        "    upx=False,",
+        "    upx_exclude=[],",
+        f"    name={name!r},",
         ")",
         "",
     ])
@@ -438,11 +453,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[build] PyInstaller failed: exit {res.returncode}")
         return res.returncode
 
-    final = dist / out_name
-    if not final.exists():
-        print(f"[build] expected output not found: {final}")
+    # --onedir layout: dist/<name>/<name>.exe (the exe lives INSIDE a
+    # folder named after the project; sibling DLLs + datas live next
+    # to it). Falls back to legacy --onefile location for compatibility
+    # with older specs.
+    final_onedir = dist / name / out_name
+    final_onefile = dist / out_name
+    if final_onedir.exists():
+        final = final_onedir
+    elif final_onefile.exists():
+        final = final_onefile
+    else:
+        print(f"[build] expected output not found at "
+              f"{final_onedir} OR {final_onefile}")
         return 3
-    print(f"[build] OK -> {final}  ({final.stat().st_size:,} bytes)")
+    # Folder-mode: report total size of the bundle directory.
+    if final.parent.is_dir() and final.parent != dist:
+        total = sum(
+            f.stat().st_size
+            for f in final.parent.rglob("*") if f.is_file()
+        )
+        print(
+            f"[build] OK -> {final}  "
+            f"(exe {final.stat().st_size:,} bytes; "
+            f"bundle dir {total:,} bytes, {total // (1024*1024)} MB)"
+        )
+    else:
+        print(f"[build] OK -> {final}  ({final.stat().st_size:,} bytes)")
 
     print("[build] smoke test: one-link --version")
     try:
