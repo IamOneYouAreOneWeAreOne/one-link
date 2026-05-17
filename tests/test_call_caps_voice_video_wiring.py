@@ -193,6 +193,9 @@ def _should_show_icon(allowed_capabilities, cap: str) -> bool:
     Kept here so we can pin its branch coverage in Python."""
     if not isinstance(allowed_capabilities, list):
         return True  # null/None = allow-all default
+    legacy_drawer_all = all(c in allowed_capabilities for c in ("chat", "files", "folder_sync"))
+    if cap in ("voice_call", "video_call") and legacy_drawer_all:
+        return True
     return cap in allowed_capabilities
 
 
@@ -203,11 +206,24 @@ def _should_show_icon(allowed_capabilities, cap: str) -> bool:
     (["video_call"], False, True),                   # video-only
     (["voice_call", "video_call"], True, True),     # both
     (["chat", "files"], False, False),               # neither granted
+    (["chat", "files", "folder_sync"], True, True), # old UI "allow all"
     (["chat", "voice_call"], True, False),           # voice only, alongside chat
 ])
 def test_icon_filter_branch_coverage(allowed, expect_voice, expect_video):
     assert _should_show_icon(allowed, "voice_call") is expect_voice
     assert _should_show_icon(allowed, "video_call") is expect_video
+
+
+def test_drawer_allow_all_includes_voice_and_video(index_html):
+    body = index_html
+    assert 'const DRAWER_CAPS = ["chat", "files", "folder_sync", "voice_call", "video_call"];' in body
+    idx = body.find("function drawerAllowedSet(policy)")
+    snippet = body[idx:idx + 700]
+    assert "if (policy == null) return new Set(DRAWER_CAPS);" in snippet
+    assert "DRAWER_CAPS.every(cap => allowed.has(cap))" in snippet
+    assert 'const LEGACY_DRAWER_ALLOW_ALL_CAPS = ["chat", "files", "folder_sync"];' in body
+    assert 'policyLooksLikeLegacyDrawerAllowAll(policy)' in body
+    assert 'return state.runtimeSettings?.pair_default_allow_all !== false;' in body
 
 
 # ── 5. M4 cover-traffic regression — kind=='cover' not 'deliver' ───

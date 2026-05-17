@@ -97,12 +97,10 @@ def test_default_allow_plus_prompt_covers_user_facing_local_caps():
 
 # ─── _apply_default_capability_policy ──────────────────────────────
 
-def test_apply_default_policy_deny_by_default(tmp_path: Path):
-    """v0.20.7 (security audit C3): with the setting unset (the new
-    default), SAS-pair finalize installs policy=[CHAT]. Files/folders/
-    groups require explicit user grant. Reverses the v0.7.3 silent
-    allow-all flip of the v0.7.2 audit-finding-A deny-by-default
-    ground that the audit doc and capabilities.py still documented."""
+def test_apply_default_policy_allow_all_when_setting_unset(tmp_path: Path):
+    """The product default is allow-all after SAS verification. With
+    pair_default_allow_all unset, pairing leaves policy=None so chat,
+    files, folders, voice, and video Just Work for a verified device."""
     me = _new_identity()
     them = _new_identity()
     state = State(db_path=tmp_path / "s.db")
@@ -116,7 +114,7 @@ def test_apply_default_policy_deny_by_default(tmp_path: Path):
 
     daemon._apply_default_capability_policy(them.fingerprint)
     policy = state.get_peer_capability_policy(them.fingerprint)
-    assert policy == list(DEFAULT_ALLOW_AFTER_PAIRING)
+    assert policy is None
     state.close()
 
 

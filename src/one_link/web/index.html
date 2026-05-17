@@ -7649,6 +7649,7 @@
     dnd_start: "22:00",
     dnd_end: "07:00",
     notification_sound: true,
+    pair_default_allow_all: true,
   };
 
   // v0.10.0: live theme apply. Sets <html data-theme="..."> which
@@ -7673,6 +7674,7 @@
         dnd_start: r.dnd_start || "22:00",
         dnd_end: r.dnd_end || "07:00",
         notification_sound: r.notification_sound !== false,
+        pair_default_allow_all: r.pair_default_allow_all !== false,
         bio: r.bio || "",
         avatar_color: r.avatar_color || "#7c4dff",
         // v0.12.2 read-receipt privacy.
@@ -8098,10 +8100,8 @@
         // hidden.
         if (p.trust === "pinned") {
           const peerLabel = p.display_name || p.hostname || p.short_id;
-          const allowedCaps = Array.isArray(p.allowed_capabilities)
-            ? p.allowed_capabilities : null;
-          const voiceAllowed = !allowedCaps || allowedCaps.indexOf("voice_call") >= 0;
-          const videoAllowed = !allowedCaps || allowedCaps.indexOf("video_call") >= 0;
+          const voiceAllowed = peerCapabilityAllowed(p, "voice_call");
+          const videoAllowed = peerCapabilityAllowed(p, "video_call");
 
           if (voiceAllowed) {
             const voiceBtn = el("button", "call-btn-voice", "📞");
@@ -13376,7 +13376,28 @@
     bindSwitch(input.id);
   });
 
-  const DRAWER_CAPS = ["chat", "files", "folder_sync"];
+  const DRAWER_CAPS = ["chat", "files", "folder_sync", "voice_call", "video_call"];
+  const LEGACY_DRAWER_ALLOW_ALL_CAPS = ["chat", "files", "folder_sync"];
+
+  function pairDefaultAllowAllEnabled() {
+    return state.runtimeSettings?.pair_default_allow_all !== false;
+  }
+
+  function policyLooksLikeLegacyDrawerAllowAll(policy) {
+    if (!Array.isArray(policy) || !pairDefaultAllowAllEnabled()) return false;
+    const allowed = new Set(policy);
+    return LEGACY_DRAWER_ALLOW_ALL_CAPS.every(cap => allowed.has(cap))
+      && !allowed.has("voice_call")
+      && !allowed.has("video_call");
+  }
+
+  function peerCapabilityAllowed(peer, cap) {
+    const policy = peer?.allowed_capabilities;
+    if (!Array.isArray(policy)) return true;
+    if (policy.indexOf(cap) >= 0) return true;
+    return (cap === "voice_call" || cap === "video_call")
+      && policyLooksLikeLegacyDrawerAllowAll(policy);
+  }
 
   function drawerPeerByFp(fp = state.deviceDrawerFp) {
     return [...state.peers.values()].find(p => p.fingerprint === fp) || null;
@@ -13384,7 +13405,12 @@
 
   function drawerAllowedSet(policy) {
     if (policy == null) return new Set(DRAWER_CAPS);
-    return new Set(policy || []);
+    const allowed = new Set(policy || []);
+    if (policyLooksLikeLegacyDrawerAllowAll(policy)) {
+      allowed.add("voice_call");
+      allowed.add("video_call");
+    }
+    return allowed;
   }
 
   function syncDrawerCapabilityControls(policy) {
