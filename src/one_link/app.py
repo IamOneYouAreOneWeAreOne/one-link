@@ -672,6 +672,21 @@ def _detect_lan_ip() -> str:
         s.close()
 
 
+def _safe_echo(*args, **kwargs) -> None:
+    """Best-effort console output for GUI-packaged launchers."""
+    try:
+        click.echo(*args, **kwargs)
+    except OSError:
+        return
+
+
+def _safe_secho(*args, **kwargs) -> None:
+    try:
+        click.secho(*args, **kwargs)
+    except OSError:
+        return
+
+
 def _print_lan_warning(lan_ip: str, port: int, token: str) -> None:
     """v0.15.2 — yellow security warning + LAN URL. Made deliberately
     loud so a user who passed --lan understands the trust boundary
@@ -680,25 +695,25 @@ def _print_lan_warning(lan_ip: str, port: int, token: str) -> None:
     consoles raise UnicodeEncodeError on ⚠ (warning sign) — the
     crash happens AFTER the daemon spawns, leaving the user with a
     running daemon but no printed URL."""
-    click.echo("")
-    click.secho(
+    _safe_echo("")
+    _safe_secho(
         "  ** LAN MODE - One Link UI is now exposed to your local network.",
         fg="yellow",
         bold=True,
     )
-    click.echo(
+    _safe_echo(
         "     Anyone on this Wi-Fi who has the URL + token can access your UI."
     )
-    click.echo(
+    _safe_echo(
         "     The token gates pairing + sending; treat the URL like a password."
     )
-    click.echo("")
-    click.secho(
+    _safe_echo("")
+    _safe_secho(
         f"  Phone/LAN URL: http://{lan_ip}:{port}/?t={token}",
         fg="cyan",
         bold=True,
     )
-    click.echo("")
+    _safe_echo("")
 
 
 def run_app(
@@ -707,7 +722,7 @@ def run_app(
     standalone: bool = True,
     lan: bool = False,
 ) -> int:
-    click.echo("One Link")
+    _safe_echo("One Link")
     # v0.15.2: --lan opt-in. Set BEFORE we try to reuse a running
     # daemon so any spawned-fresh daemon inherits the right bind
     # host. If a 127.0.0.1-bound daemon is already running, we'll
@@ -730,7 +745,7 @@ def run_app(
     # LAN IP — if that succeeds, the daemon is already LAN-bound.
     if lan and info is not None and info.compatible:
         if not _daemon_is_lan_bound(info):
-            click.echo("  switching daemon to LAN mode...")
+            _safe_echo("  switching daemon to LAN mode...")
             _stop_incompatible_daemon(info)
             # Give the OS a moment to release the listening socket so
             # the freshly-spawned daemon can rebind the same port. On
@@ -745,39 +760,39 @@ def run_app(
 
     if info is not None and not info.compatible:
         running = info.status.get("app_version") or "unknown"
-        click.echo(f"  replacing stale daemon ({running} -> {__version__})...")
+        _safe_echo(f"  replacing stale daemon ({running} -> {__version__})...")
         _stop_incompatible_daemon(info)
         info = _wait_for_daemon(timeout=1.0)
         if info is not None and not info.compatible:
             info = None
 
     if info is None:
-        click.echo("  starting daemon...")
+        _safe_echo("  starting daemon...")
         spawned = _spawn_daemon()
         info = _wait_for_daemon()
         if info is None or not info.compatible:
-            click.echo("  ! daemon failed to start cleanly")
+            _safe_echo("  ! daemon failed to start cleanly")
             try:
                 spawned.terminate()
             except Exception:
                 pass
             return 2
-        click.echo("  daemon up.")
+        _safe_echo("  daemon up.")
     else:
-        click.echo("  using running daemon.")
+        _safe_echo("  using running daemon.")
 
     url = f"http://127.0.0.1:{info.server_port}/?t={info.token}"
-    click.echo(f"  open: {url}")
+    _safe_echo(f"  open: {url}")
     if not no_browser:
         try:
             _open_browser_url(url, standalone=standalone)
         except Exception as e:
-            click.echo(f"  (couldn't auto-open browser: {e})")
+            _safe_echo(f"  (couldn't auto-open browser: {e})")
 
     if lan:
         lan_ip = _detect_lan_ip()
         if lan_ip == "127.0.0.1":
-            click.secho(
+            _safe_secho(
                 "  (could not detect a LAN IP — is Wi-Fi/Ethernet up?)",
                 fg="yellow",
             )
@@ -792,7 +807,7 @@ def run_app(
         # online and in-flight transfers complete. The launcher's job
         # is done: report status and exit. The UI window (browser /
         # webview) owns its own lifetime now.
-        click.echo("\n  Daemon is running in the background.")
-        click.echo("  Your peers stay online even if you close this window.")
-        click.echo("  To stop the daemon explicitly: `one-link daemon-stop`")
+        _safe_echo("\n  Daemon is running in the background.")
+        _safe_echo("  Your peers stay online even if you close this window.")
+        _safe_echo("  To stop the daemon explicitly: `one-link daemon-stop`")
     return 0

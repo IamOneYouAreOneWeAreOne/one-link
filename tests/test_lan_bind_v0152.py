@@ -325,6 +325,19 @@ def test_print_lan_warning_is_ascii_only():
 
 # ───────── version pin ──────────────────────────────────────────────
 
+def test_print_lan_warning_ignores_invalid_gui_stdout(monkeypatch):
+    """Windowed PyInstaller launches can have an invalid stdout handle.
+    Startup status printing must never crash the desktop app."""
+    from one_link import app as app_mod
+
+    def bad_echo(*_args, **_kwargs):
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(app_mod.click, "echo", bad_echo)
+    monkeypatch.setattr(app_mod.click, "secho", bad_echo)
+    app_mod._print_lan_warning("192.168.1.42", 7117, "test-token-abc")
+
+
 def test_page_version_matches_package():
     from one_link import __version__
 
