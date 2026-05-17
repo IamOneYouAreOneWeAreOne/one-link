@@ -299,6 +299,9 @@ def test_activity_surface_uses_progressive_disclosure() -> None:
     assert '$("#one-health-guide-grid")?.addEventListener("keydown"' in html
     assert "setOneHealthGuideFocus(card.dataset.oneHealthFocus || \"\")" in html
     assert '$("#one-health-guide-autopilot-button")?.addEventListener("click"' in html
+    assert "openOneHealthGuideDestination(action);" in html
+    assert "returnToOneHealthGuideIfPending();" in html
+    assert "#privacy-panel-overlay.show" in html
     assert 'role", "button"' in html
     assert 'tabindex", "0"' in html
     assert 'id="activity-advanced-tools"' in html

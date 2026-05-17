@@ -9834,6 +9834,7 @@
     }
   }
   function openOneHealthGuide() {
+    state.oneHealthGuideReturnPending = false;
     renderOneHealthGuide();
     const backdrop = $("#one-health-guide-backdrop");
     if (!backdrop) return;
@@ -9847,6 +9848,23 @@
     backdrop.classList.remove("show");
     backdrop.setAttribute("aria-hidden", "true");
     $("#one-health")?.focus();
+  }
+  async function openOneHealthGuideDestination(action) {
+    state.oneHealthGuideReturnPending = true;
+    closeOneHealthGuide();
+    await Promise.resolve(runOneHealthAction(action || bestOneHealthActionId()));
+    setTimeout(() => {
+      const waitingOnOverlay = document.querySelector(
+        "#privacy-panel-overlay.show, #settings-backdrop.show, #onboarding-backdrop[style*='flex'], #discover-overlay.show"
+      );
+      if (!waitingOnOverlay) returnToOneHealthGuideIfPending();
+    }, 120);
+  }
+  function returnToOneHealthGuideIfPending() {
+    if (!state.oneHealthGuideReturnPending) return false;
+    state.oneHealthGuideReturnPending = false;
+    setTimeout(() => openOneHealthGuide(), 90);
+    return true;
   }
   function renderOneHealth() {
     const health = state.oneHealth || {};
@@ -9941,9 +9959,14 @@
       renderOneHealth();
     }
   }
-  function runOneHealthAction(id) {
+  async function runOneHealthAction(id) {
     if (id === "finish_setup") return openOneSetupFromState();
-    if (id === "add_device") return $("#one-setup-add-device-panel")?.click();
+    if (id === "add_device") {
+      await refreshOneSetup();
+      showOnboardingStep(4);
+      $("#onboarding-backdrop").style.display = "flex";
+      return oneSetupAddDevice();
+    }
     if (id === "set_recovery") return oneSetupMarkRecoveryConfigured();
     if (id === "review_speed") {
       closeOneHealthGuide();
@@ -9958,7 +9981,12 @@
       return $("#self-mesh-kit")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
     if (id === "pair_person") return $("#btn-discover")?.click();
-    if (id === "view_privacy_proof") return $("#one-setup-privacy-panel")?.click();
+    if (id === "view_privacy_proof") {
+      await api.setupAction("privacy_proof_viewed").catch(() => {});
+      if (typeof window.openPrivacyPanel === "function") await window.openPrivacyPanel();
+      await refreshOneSetup();
+      return;
+    }
     return toast("That check is already handled.", "info", 2500);
   }
   async function refreshSelfMesh() {
@@ -16678,6 +16706,7 @@
   function _markOnboardingComplete(persistRemote) {
     try { localStorage.setItem(ONBOARDING_STORAGE_KEY, "1"); } catch {}
     $("#onboarding-backdrop").style.display = "none";
+    returnToOneHealthGuideIfPending();
     if (persistRemote) {
       // Best-effort: stash on the daemon so the next browser
       // session also skips. Failure is non-blocking.
@@ -16689,6 +16718,7 @@
   async function skipOneSetup() {
     try { await api.setupAction("skip"); } catch {}
     $("#onboarding-backdrop").style.display = "none";
+    returnToOneHealthGuideIfPending();
     toast("Setup is waiting in Activity whenever you want it.", "info", 3500);
   }
 
@@ -18111,8 +18141,7 @@
   $("#one-health-guide-actions")?.addEventListener("click", (e) => {
     const btn = e.target?.closest?.("[data-one-health-action]");
     if (!btn) return;
-    closeOneHealthGuide();
-    runOneHealthAction(btn.dataset.oneHealthAction || "");
+    openOneHealthGuideDestination(btn.dataset.oneHealthAction || "");
   });
   $("#one-health-guide-grid")?.addEventListener("click", (e) => {
     const card = e.target?.closest?.("[data-one-health-focus]");
@@ -18128,12 +18157,10 @@
   });
   $("#one-health-guide-autopilot-button")?.addEventListener("click", (e) => {
     const action = e.currentTarget?.dataset?.oneHealthAction || bestOneHealthActionId();
-    closeOneHealthGuide();
-    runOneHealthAction(action);
+    openOneHealthGuideDestination(action);
   });
   $("#one-health-guide-setup")?.addEventListener("click", () => {
-    closeOneHealthGuide();
-    openOneSetupFromState();
+    openOneHealthGuideDestination("finish_setup");
   });
   $("#btn-courier-export")?.addEventListener("click", exportCourierBundle);
   $("#btn-courier-stage")?.addEventListener("click", stageCourierBundle);
@@ -19219,7 +19246,10 @@
     switchSettingsPane("profile");
     settingsBackdrop.classList.add("show");
   };
-  $("#settings-cancel").onclick = () => settingsBackdrop.classList.remove("show");
+  $("#settings-cancel").onclick = () => {
+    settingsBackdrop.classList.remove("show");
+    returnToOneHealthGuideIfPending();
+  };
   // v0.10.0: live-preview the chime so the user knows what it
   // sounds like before committing.
   $("#set-sound-test")?.addEventListener("click", () => {
@@ -19330,6 +19360,7 @@
     }
 
     settingsBackdrop.classList.remove("show");
+    returnToOneHealthGuideIfPending();
     refreshPeers();
     // refresh own identity in case display name changed
     try {
@@ -19962,6 +19993,7 @@
   function _hidePrivacyPanel() {
     const overlay = document.getElementById("privacy-panel-overlay");
     if (overlay) overlay.classList.remove("show");
+    returnToOneHealthGuideIfPending();
   }
 
   async function refreshPrivacyPanel() {
@@ -20201,6 +20233,7 @@
     }
     if (el.id === "onboarding-backdrop") {
       el.style.display = "none";
+      returnToOneHealthGuideIfPending();
       return;
     }
     // Default: strip the .show class. Works for every other modal.
