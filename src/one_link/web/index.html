@@ -16295,7 +16295,29 @@
         if (state.discoverOpen) loadDiscoverable();
       } else if (m.type === "msg") {
         const msg = m.msg;
-        state.messages.push(msg);
+        // v0.21.x: if an outbound message comes back with an id we
+        // already painted as an optimistic bubble (client_msg_id was
+        // threaded through the daemon), REPLACE the placeholder
+        // record so we end up with one canonical bubble carrying
+        // the server's authoritative ts / metadata. Without this
+        // we'd render twice on the fast path. Same applies if the
+        // user happens to receive an echo for any id we've already
+        // got — replace, don't duplicate.
+        const dupIdx = state.messages.findIndex(x => x.id === msg.id);
+        if (dupIdx >= 0) {
+          const prev = state.messages[dupIdx];
+          // Keep any local-only fields (_sendingState etc.) if the
+          // event lacks them, but mark sent now that the daemon
+          // confirms it.
+          state.messages[dupIdx] = {
+            ...prev, ...msg,
+            _sendingState: "sent",
+            _error: undefined,
+            _queueReason: undefined,
+          };
+        } else {
+          state.messages.push(msg);
+        }
         if (state.messages.length > 1000) state.messages = state.messages.slice(-800);
         if (msg.t === "TEXT" && msg.dir === "in") {
           const peer = state.peers.get(msg.peer);
@@ -16825,38 +16847,88 @@
     sendBtn.disabled = true;
     try {
       if (body) {
+        // v0.21.x bulletproof send (round 2): paint an optimistic
+        // outbound bubble in the chat pane IMMEDIATELY, clear the
+        // composer IMMEDIATELY, then fire the API in the background
+        // with a hard 25s timeout. Three failure modes that used to
+        // hang the user forever — wedged channel, dead peer, lost
+        // network — now visibly mark the bubble as queued/failed so
+        // they always know what happened and can hit Retry. Never
+        // again "I clicked Send and nothing happened".
+        const clientMsgId = _newClientMsgId();
+        const optimistic = {
+          id: clientMsgId,
+          t: "TEXT",
+          body,
+          ts: Date.now(),
+          dir: "out",
+          peer: state.selectedPeer,
+          peer_fp: peer.fingerprint,
+          _sendingState: "sending",
+          _attempts: 1,
+        };
+        if (state.replyTo && state.replyTo.peer === state.selectedPeer) {
+          optimistic.reply_to = state.replyTo.id;
+        }
+        state.messages.push(optimistic);
+        // Clear composer up-front so the bubble is visible where it
+        // landed — no "did it send?" ambiguity.
+        const replyToId = optimistic.reply_to;
+        input.value = "";
+        input.style.height = "auto";
+        clearActiveDraft();
+        clearReplyTo();
+        renderMessages();
         try {
-          // v0.7.5: thread under reply target if set.
-          const sendBody = { peer: state.selectedPeer, body };
-          if (state.replyTo && state.replyTo.peer === state.selectedPeer) {
-            sendBody.reply_to = state.replyTo.id;
-          }
-          // v0.14.0: outbox-on-fail. Network errors queue the
-          // payload into IDB; the Service Worker drains it when
-          // connectivity returns. Treat queued = success from the
-          // user's perspective (UI clears + draft saved).
-          const result = await _sendWithOutbox("/api/send", sendBody);
-          // Defensive: if the daemon returned a structured failure
-          // (e.g. capability_disabled, peer_rejected) the request
-          // succeeds at the HTTP layer but result.ok is false. The
-          // old code only caught thrown exceptions and let the
-          // input clear on a "soft" rejection - losing the typed
-          // message with no toast. Surface that here.
+          const sendBody = {
+            peer: state.selectedPeer,
+            body,
+            client_msg_id: clientMsgId,
+          };
+          if (replyToId) sendBody.reply_to = replyToId;
+          // v0.14.0: outbox-on-fail. Network errors / client timeouts
+          // queue the payload into IDB; the SW drains when online.
+          // v0.21.x: hard 25s timeout — slightly past the server's
+          // 20s wait_for so a hung server still triggers the queue
+          // path on the client before AbortError bubbles up.
+          const result = await _sendWithOutbox(
+            "/api/send", sendBody, { timeoutMs: 25000 },
+          );
           if (result && result.ok === false) {
+            // Structured soft-failure (capability_disabled, etc).
+            // Mark the bubble failed inline with a Retry button so
+            // the user sees the exact reason on the bubble itself
+            // AND still gets the toast.
+            _markBubbleState(clientMsgId, "failed", {
+              _error: result.user_message || result.error || "Message couldn't be sent.",
+            });
             toast(
               result.user_message
                 || result.error
                 || "Message couldn't be sent. Try again.",
               "bad", 8000,
             );
-            // Keep the input so the user can edit + retry.
-            return;
+          } else if (result && result.queued) {
+            // 202: server queued (peer offline / timeout / transient).
+            _markBubbleState(clientMsgId, "queued", {
+              _queueReason: result.reason || null,
+            });
+          } else {
+            // Success: daemon will broadcast the persisted event via
+            // WS; the m.type === "msg" handler reconciles by id
+            // (replaces the optimistic record with the canonical
+            // one). If for any reason the echo never arrives, the
+            // optimistic bubble stays as a faithful local record.
+            // Either way the user sees their message.
+            _markBubbleState(clientMsgId, "sent");
           }
-          input.value = "";
-          input.style.height = "auto";
-          clearActiveDraft();
-          clearReplyTo();
         } catch (e) {
+          // Truly unexpected (non-network, non-timeout) exception.
+          // Bubble stays as "failed" with Retry; toast surfaces the
+          // detail.
+          _markBubbleState(clientMsgId, "failed", {
+            _error: errorToastBody(e),
+          });
           toast(errorToastBody(e), "bad", 8000);
         }
       }
