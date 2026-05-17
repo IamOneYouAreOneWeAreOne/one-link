@@ -1,7 +1,7 @@
 name: pages
 
 # Deploy docs/site/ to GitHub Pages whenever it changes on master.
-# This is the public landing page at https://Jphilbrick10.github.io/one-link/
+# This is the public landing page at https://IamOneYouAreOneWeAreOne.github.io/one-link/
 # (or whatever Pages URL is enabled in repo settings).
 
 on:

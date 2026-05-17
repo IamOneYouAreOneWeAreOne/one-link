@@ -15,7 +15,7 @@ version         = "0.21.0a0"
 description     = "One Link file engine v2: hot-path Rust crates exposed to Python"
 readme          = "README.md"
 license         = { text = "AGPL-3.0-or-later" }
-authors         = [{ name = "One Link contributor", email = "weareone@oneunity.earth" }]
+authors         = [{ name = "One Link contributors", email = "weareone@oneunity.earth" }]
 requires-python = ">=3.11"
 
 # pyo3-built native module is the one classifier we need.

@@ -81,5 +81,5 @@ contribution will be released under that license. (This is the
 Until the project incorporates as a non-profit foundation,
 contributions go to:
 
-- Maintainer: One Link contributor <weareone@oneunity.earth>
+- Maintainer: One Link contributors <weareone@oneunity.earth>
 - Code: https://github.com/IamOneYouAreOneWeAreOne/one-link

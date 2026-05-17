@@ -92,7 +92,7 @@ def test_landing_page_does_not_call_non_github_hosts():
         "github.com",
         "api.github.com",
         "raw.githubusercontent.com",
-        "Jphilbrick10.github.io",
+        "IamOneYouAreOneWeAreOne.github.io",
         "www.gnu.org",  # GPL license link
     }
     suspicious = {h for h in hosts if h not in allowed}

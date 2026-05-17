@@ -17,7 +17,7 @@ weareone@oneunity.earth
 ```
 
 PGP key (recommended for credible reports): published at
-[https://github.com/Jphilbrick10.gpg](https://github.com/Jphilbrick10.gpg)
+[https://github.com/IamOneYouAreOneWeAreOne.gpg](https://github.com/IamOneYouAreOneWeAreOne.gpg)
 once we set up the multi-maintainer threshold-signing key. Until
 then, reports in plaintext to the address above are accepted and
 acknowledged within 72 hours.

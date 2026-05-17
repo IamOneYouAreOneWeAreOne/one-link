@@ -252,5 +252,5 @@ ONE_LINK_HOME=/tmp/ol-B one-link app    # different port, different identity
 
 ## License
 
-Copyright (c) 2026 One Link contributor (weareone@oneunity.earth).
+Copyright (c) 2026 One Link contributors (weareone@oneunity.earth).
 Released under the MIT License. See [LICENSE](LICENSE).
