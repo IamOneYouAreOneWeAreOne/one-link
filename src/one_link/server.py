@@ -3314,10 +3314,34 @@ class UIServer:
         result = api.handle_json(body)
         # Flush the response so outbound wire messages actually reach
         # the peer + tail events broadcast to the WebSocket UIs.
+        delivered: tuple[str, ...] = ()
         try:
-            await self.daemon.flush_call_api_response(result)
+            delivered = tuple(await self.daemon.flush_call_api_response(result))
         except Exception as exc:
             log.warning("flush_call_api_response failed: %s", exc)
+        if (
+            action_name == "initiate"
+            and result.ok
+            and result.outbound
+            and not delivered
+        ):
+            peer_label = str(body.get("peer_label") or "That device").strip()
+            return web.json_response({
+                "ok": False,
+                "call_id": result.call_id,
+                "phase": result.phase,
+                "consent_phase": result.consent_phase,
+                "user_message": (
+                    f"{peer_label} is not reachable right now. "
+                    "Open One Link on that device, then try again."
+                ),
+                "call_complete": result.call_complete,
+                "outbound": [
+                    {"type": m.type, "peer": m.peer_master_vk_hex}
+                    for m in result.outbound
+                ],
+                "delivered": [],
+            })
         # Translate the result back to JSON. We omit the binary-ish
         # tail-events (those flow via the WebSocket separately) so
         # this response is small + UI-friendly.
@@ -3332,6 +3356,7 @@ class UIServer:
                 {"type": m.type, "peer": m.peer_master_vk_hex}
                 for m in result.outbound
             ],
+            "delivered": list(delivered),
         })
 
     async def _handle_media_layer_action(

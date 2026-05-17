@@ -20439,6 +20439,7 @@
     const result = await callApiPost({
       action: "initiate",
       peer_master_vk_hex: peerMasterVkHex,
+      peer_label: peerLabel || peerMasterVkHex.slice(0, 8),
       kind: wantVideo ? "video" : "voice",
     });
     if (!result.ok) {

@@ -90,6 +90,9 @@ def test_call_api_cached_on_first_access() -> None:
 async def test_initiate_returns_call_id_and_phase() -> None:
     srv, daemon = _server_with_daemon()
     peer = _identity("mom-routes")
+    daemon.flush_call_api_response = AsyncMock(  # type: ignore[method-assign]
+        return_value=(peer.fingerprint,),
+    )
     req = _FakeRequest(body={
         "action": "initiate",
         "peer_master_vk_hex": peer.fingerprint,
@@ -102,6 +105,26 @@ async def test_initiate_returns_call_id_and_phase() -> None:
     assert payload["ok"] is True
     assert payload["call_id"]
     assert payload["phase"] == "inviting"
+    assert payload["delivered"] == [peer.fingerprint]
+
+
+@pytest.mark.asyncio
+async def test_initiate_reports_unreachable_when_invite_not_delivered() -> None:
+    srv, daemon = _server_with_daemon()
+    peer = _identity("mom-unreachable")
+    daemon.flush_call_api_response = AsyncMock(return_value=())  # type: ignore[method-assign]
+    req = _FakeRequest(body={
+        "action": "initiate",
+        "peer_master_vk_hex": peer.fingerprint,
+        "peer_label": "Computer 2",
+    })
+    resp = await srv.api_call_action(req)  # type: ignore[arg-type]
+    import json
+    payload = json.loads(resp._body or b"")
+    assert payload["ok"] is False
+    assert payload["phase"] == "inviting"
+    assert payload["delivered"] == []
+    assert "Computer 2 is not reachable right now" in payload["user_message"]
 
 
 @pytest.mark.asyncio
