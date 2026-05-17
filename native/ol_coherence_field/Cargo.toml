@@ -12,6 +12,11 @@ crate-type = ["lib"]
 
 [dependencies]
 thiserror = { workspace = true }
+
+# rayon is unavailable on wasm32-unknown-unknown (no threads). The two
+# parallel matvec helpers in src/pde/mod.rs are cfg-gated for wasm, and
+# so is this dep. Native targets see no change.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon     = "1.10"
 
 [dev-dependencies]

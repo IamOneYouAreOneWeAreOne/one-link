@@ -288,6 +288,11 @@ impl GraphLaplacian {
     /// tasks are too fine-grained for the rayon scheduler — empirical
     /// crossover where chunked-parallel beats serial is ~16k nodes on
     /// modern desktop CPUs (8+ logical cores).
+    ///
+    /// On `wasm32-unknown-unknown` rayon is unavailable (no threads),
+    /// so the parallel variants are cfg-gated out. Wasm callers use
+    /// `matvec` directly.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn matvec_par(&self, x: &[f64], y: &mut [f64]) {
         self.matvec_par_with_threshold(x, y, 16_000);
     }
@@ -296,6 +301,7 @@ impl GraphLaplacian {
     /// `par_chunks_mut` over fixed-size row blocks (defaults to ~256
     /// rows per task) so the work-per-task is large enough to amortise
     /// rayon's scheduling cost.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn matvec_par_with_threshold(&self, x: &[f64], y: &mut [f64], threshold: usize) {
         debug_assert_eq!(x.len(), self.n);
         debug_assert_eq!(y.len(), self.n);
