@@ -835,9 +835,63 @@ def main() -> int:
         )
         print("[smoke] ── scenario D: ICE candidate wire path ✓ ──\n")
 
-        print("[smoke] PASS — full two-daemon call wire path verified")
+        time.sleep(1.0)
+
+        # =========================================================
+        # Scenario E: long multi-line text send (the user's exact bug)
+        # =========================================================
+        # Verifies that arbitrary TEXT bodies — long, multi-line,
+        # with PowerShell-style $vars, backticks, backslashes,
+        # mixed code-block content — round-trip cleanly daemon-to-
+        # daemon. The wire layer caps at 16 MiB per frame; anything
+        # short of that should "just work."
+        print("[smoke] scenario E: long multi-line TEXT with special chars")
+        long_body = (
+            "Concrete steps to verify\n"
+            "On both computers:\n\n"
+            "1. Kill every running daemon process\n"
+            "PowerShell (Windows):\n\n"
+            "Get-Process | Where-Object { $_.ProcessName -like \"*one-link*\" } "
+            "| Stop-Process -Force\n\n"
+            "2. Pull the latest:\n"
+            "    git pull origin master\n\n"
+            "3. Verify the fix on disk:\n"
+            "Select-String -Path src\\one_link\\daemon.py -Pattern \"_broadcast_tail\"\n\n"
+            "4. Start fresh daemons:\n"
+            "    one-link daemon --open\n\n"
+            "5. Hard-refresh (Ctrl+Shift+R)\n\n"
+            "6. Try the call — backticks ``like this`` should round-trip\n"
+            "   and so should \\n literals + curly braces {} + dollar $signs\n"
+        ) * 3  # ~1.6 KB after triplication
+        status, body = _http_post(
+            a.ui_port, a.ui_token, "/api/send",
+            {"peer": b.fingerprint, "body": long_body},
+        )
+        if status != 200 or not body.get("ok"):
+            print(f"[smoke] FAIL — long text send: {status} {body}")
+            return 1
+        ack = body.get("result", {}).get("ack")
+        if not ack or ack.get("t") != "ACK":
+            print(f"[smoke] FAIL — no ACK from B: {body}")
+            return 1
+        sent = body.get("result", {}).get("sent", {})
+        sent_body = sent.get("body", "")
+        if sent_body != long_body:
+            print(
+                f"[smoke] FAIL — body round-trip mismatch: "
+                f"sent {len(long_body)}, got {len(sent_body)}"
+            )
+            return 1
+        print(
+            f"  ✓ long body ({len(long_body)} chars, multi-line + special "
+            f"chars) round-tripped + ACKed by B"
+        )
+        print("[smoke] ── scenario E: long multi-line TEXT ✓ ──\n")
+
+        print("[smoke] PASS — full two-daemon call + text wire path verified")
         print("[smoke]        (A: INVITE/ACCEPT/HANGUP, B: DECLINE,")
-        print("[smoke]         C: reverse-hangup, D: ICE forwarding)")
+        print("[smoke]         C: reverse-hangup, D: ICE forwarding,")
+        print("[smoke]         E: long multi-line TEXT)")
         failed = False
         return 0
 
