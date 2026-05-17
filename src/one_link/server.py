@@ -8650,12 +8650,17 @@ class UIServer:
             "verified_note": updated.verified_note,
             "is_verified": updated.is_verified,
         })
+        synced = await self.daemon.sync_peer_verification(
+            fp, verified=True, method=updated.verified_method,
+            note=updated.verified_note,
+        )
         return web.json_response({
             "ok": True, "fingerprint": fp,
             "verified_at_ms": updated.verified_at_ms,
             "verified_method": updated.verified_method,
             "verified_note": updated.verified_note,
             "is_verified": updated.is_verified,
+            "synced": synced,
         })
 
     async def api_clear_peer_verified(self, request: web.Request) -> web.Response:
@@ -8689,12 +8694,16 @@ class UIServer:
             "verified_note": None,
             "is_verified": False,
         })
+        synced = await self.daemon.sync_peer_verification(
+            fp, verified=False, note=note,
+        )
         return web.json_response({
             "ok": True, "fingerprint": fp,
             "verified_at_ms": None,
             "verified_method": None,
             "verified_note": None,
             "is_verified": False,
+            "synced": synced,
         })
 
     async def api_set_presence(self, request: web.Request) -> web.Response:

@@ -51,7 +51,17 @@ def _make_identity(name: str) -> Identity:
 class _FakePeerRecord:
     def __init__(self, ed_pub_hex: str) -> None:
         self.ed_pub_hex = ed_pub_hex
+        self.pubkey = bytes.fromhex(ed_pub_hex)
+        self.short_id = blake3.blake3(self.pubkey).hexdigest()[:8]
+        self.hostname = "peer"
+        self.verified_at_ms = None
+        self.verified_method = None
+        self.verified_note = None
         self.trust = "pinned"
+
+    @property
+    def is_verified(self) -> bool:
+        return self.verified_at_ms is not None
 
 
 class _FakeState:
@@ -62,6 +72,26 @@ class _FakeState:
 
     def get_peer(self, peer_fp: str):
         return self._peers.get(peer_fp)
+
+    def set_peer_verified(self, peer_fp: str, *, method: str, note=None, actor=None):
+        rec = self._peers.get(peer_fp)
+        if rec is None:
+            return None
+        if method not in ("sas-digits", "sas-qr", "sas-audio", "manual"):
+            raise ValueError("bad method")
+        rec.verified_at_ms = 1234
+        rec.verified_method = method
+        rec.verified_note = note
+        return rec
+
+    def clear_peer_verified(self, peer_fp: str, *, actor=None, note=None):
+        rec = self._peers.get(peer_fp)
+        if rec is None:
+            return None
+        rec.verified_at_ms = None
+        rec.verified_method = None
+        rec.verified_note = None
+        return rec
 
 
 class _FakeChannel:
@@ -189,6 +219,43 @@ def test_inbound_call_accept_advances_to_active(
         loop.close()
 
     assert mgr.phase == CallPhase.ACTIVE
+
+
+def test_inbound_verify_notice_marks_peer_verified_and_acks(
+    mom_daemon: Daemon, alice: Identity,
+) -> None:
+    msg = {
+        "t": "PEER_VERIFY_NOTICE",
+        "id": "verify-1",
+        "ts": 1_700_000_000_000,
+        "from": alice.short_id,
+        "action": "set",
+        "method": "sas-digits",
+        "note": "same room",
+    }
+    channel = _FakeChannel(
+        peer_ed_pub=alice.public_bytes, peer_short_id=alice.short_id,
+    )
+    tail_events: list[dict] = []
+    mom_daemon.ui_server = type(
+        "_UI", (), {"broadcast": lambda self, ev: tail_events.append(ev)}
+    )()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(mom_daemon._on_peer_message(channel, msg))
+    finally:
+        loop.close()
+
+    rec = mom_daemon.state.get_peer(alice.fingerprint)
+    assert rec.is_verified is True
+    assert rec.verified_method == "sas-digits"
+    assert tail_events[-1]["type"] == "peer_verified"
+    assert tail_events[-1]["is_verified"] is True
+    ack = decode_msg(channel.sent[-1])
+    assert ack["t"] == "ACK"
+    assert ack["of"] == "verify-1"
+    assert ack["ok"] is True
 
 
 def test_inbound_recording_request_routes_to_consent_fsm(

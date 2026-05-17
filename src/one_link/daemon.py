@@ -546,6 +546,7 @@ CAPS_FEATURES: list[str] = [
     "audit",
     "fts",
     "trust",
+    "trust_sync_v1",
     "rdz_inherit",  # advertises that we'll inherit rdz urls from peers
 ]
 # v0.5.4: cap on how many URLs we'll embed in CAPS or accept from a
@@ -572,6 +573,7 @@ _LIVING_PRESENCE_WIRE_TYPES = frozenset({
     "RECORDING_DECLINE",
     "RECORDING_STOP",
 })
+_TRUST_SYNC_WIRE_TYPE = "PEER_VERIFY_NOTICE"
 
 
 def _build_caps(
@@ -938,6 +940,7 @@ class OutboundSession:
 
 class Daemon:
     CALL_SIGNAL_SEND_TIMEOUT_S = 6.0
+    TRUST_SYNC_SEND_TIMEOUT_S = 6.0
 
     def __init__(self, me: Identity):
         self.me = me
@@ -1942,6 +1945,104 @@ class Daemon:
             )
         except Exception:
             return None
+
+    async def sync_peer_verification(
+        self,
+        peer_fp: str,
+        *,
+        verified: bool,
+        method: str | None = None,
+        note: str | None = None,
+    ) -> bool:
+        """Best-effort mutual verify-in-person sync.
+
+        When a user marks a paired device verified here, the other device
+        should see the same plain truth without needing to find and press a
+        second hidden button. The frame only travels over the already
+        authenticated peer channel; receivers still require the sender to be
+        pinned before applying it.
+        """
+        peer = self._resolve_peer_for_outbound(peer_fp)
+        if peer is None:
+            return False
+        payload: dict[str, Any] = {
+            "action": "set" if verified else "clear",
+        }
+        if verified:
+            payload["method"] = method or "sas-digits"
+        if note:
+            payload["note"] = str(note)[:280]
+        msg = make_msg(_TRUST_SYNC_WIRE_TYPE, self.me.short_id, **payload)
+        try:
+            await asyncio.wait_for(
+                self.send_to(peer, [msg]),
+                timeout=self.TRUST_SYNC_SEND_TIMEOUT_S,
+            )
+            return True
+        except Exception as exc:
+            log.info(
+                "peer verify sync to %s deferred: %s",
+                peer_fp[:8], exc,
+            )
+            return False
+
+    async def _handle_peer_verify_notice(
+        self,
+        channel: ch.Channel,
+        msg: dict,
+        peer_fp: str,
+        peer_sid: str,
+    ) -> None:
+        if self.state is None:
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="state_unavailable",
+            )))
+            return
+        if not self._is_pinned(peer_fp):
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="peer_not_pinned",
+            )))
+            return
+        action = str(msg.get("action") or "").strip().lower()
+        note_raw = msg.get("note")
+        note = str(note_raw).strip()[:280] if isinstance(note_raw, str) else None
+        try:
+            if action == "set":
+                method = str(msg.get("method") or "sas-digits")
+                updated = self.state.set_peer_verified(
+                    peer_fp, method=method, note=note, actor="peer-sync",
+                )
+            elif action == "clear":
+                updated = self.state.clear_peer_verified(
+                    peer_fp, actor="peer-sync", note=note,
+                )
+            else:
+                raise ValueError("unknown_verify_sync_action")
+        except Exception as exc:
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected=f"verify_sync_rejected: {exc}",
+            )))
+            return
+        if updated is not None and self.ui_server is not None:
+            self.ui_server.broadcast({
+                "type": "peer_verified",
+                "fingerprint": peer_fp,
+                "verified_at_ms": updated.verified_at_ms,
+                "verified_method": updated.verified_method,
+                "verified_note": updated.verified_note,
+                "is_verified": updated.is_verified,
+                "source": "peer-sync",
+            })
+        log.info(
+            "peer verify sync %s from %s applied=%s",
+            action, peer_sid, bool(updated),
+        )
+        await channel.send(encode_msg(make_msg(
+            "ACK", self.me.short_id, of=msg.get("id"), ok=True,
+        )))
 
     async def flush_call_api_response(self, response):
         """Side-effect step for a CallAPI / CallManager output.
@@ -4265,6 +4366,8 @@ class Daemon:
             await channel.send(encode_msg(make_msg(
                 "ACK", self.me.short_id, of=msg.get("id"), ok=True,
             )))
+        elif t == _TRUST_SYNC_WIRE_TYPE:
+            await self._handle_peer_verify_notice(channel, msg, peer_fp, peer_sid)
 
     # ─── Living Presence wire dispatch helpers ─────────────────────────
 

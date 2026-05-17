@@ -118,6 +118,34 @@ def test_resolve_peer_handles_no_state(alice: Identity) -> None:
     assert d._resolve_peer_for_outbound("anything") is None
 
 
+def test_sync_peer_verification_sends_notice(
+    alice_daemon: Daemon, mom: Identity,
+) -> None:
+    captured: list[dict] = []
+
+    async def fake_send_to(peer, msgs):
+        captured.extend(msgs)
+        return [{"t": "ACK", "ok": True}]
+
+    alice_daemon.send_to = fake_send_to  # type: ignore[assignment]
+    loop = asyncio.new_event_loop()
+    try:
+        ok = loop.run_until_complete(
+            alice_daemon.sync_peer_verification(
+                mom.fingerprint,
+                verified=True,
+                method="sas-digits",
+                note="same room",
+            )
+        )
+    finally:
+        loop.close()
+    assert ok is True
+    assert captured[0]["t"] == "PEER_VERIFY_NOTICE"
+    assert captured[0]["action"] == "set"
+    assert captured[0]["method"] == "sas-digits"
+
+
 def test_flush_empty_response_is_noop(alice_daemon: Daemon) -> None:
     resp = ApiResponse(ok=True, call_id="x")
     loop = asyncio.new_event_loop()
