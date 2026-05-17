@@ -100,7 +100,7 @@ def test_pair_phone_section_present(index_html: str):
     Settings → About — separate from the legacy 'Open desktop UI'
     surface so the user has one obvious primary path."""
     assert 'id="pair-phone-section"' in index_html
-    assert "Pair a phone" in index_html
+    assert "Add a phone or laptop" in index_html
     assert 'id="btn-mint-pair"' in index_html
     assert 'id="pair-phone-qr-wrap"' in index_html
 
@@ -146,8 +146,8 @@ def test_mint_pair_button_handler_calls_endpoint(index_html: str):
     idx = index_html.find('"#btn-mint-pair"')
     handler = index_html.find("addEventListener", idx)
     snippet = index_html[handler:handler + 4000]
-    assert '"/api/v1/peer-rtc/mint-pairing"' in snippet
-    assert "api.post(" in snippet
+    assert "api.setupDeviceInvite(" in snippet
+    assert "/api/v1/peer-rtc/mint-pairing" not in snippet
 
 
 def test_mint_response_renders_qr_via_pair_qr_endpoint(index_html: str):
@@ -156,8 +156,8 @@ def test_mint_response_renders_qr_via_pair_qr_endpoint(index_html: str):
     idx = index_html.find('"#btn-mint-pair"')
     handler = index_html.find("addEventListener", idx)
     snippet = index_html[handler:handler + 4000]
-    assert "/api/v1/peer-rtc/qr.svg?u=" in snippet
-    assert "encodeURIComponent(info.lan_url)" in snippet
+    assert "info.qr_url" in snippet
+    assert "One Setup device invite QR" in snippet
 
 
 def test_mint_response_surfaces_lan_url_for_copy(index_html: str):
@@ -166,8 +166,21 @@ def test_mint_response_surfaces_lan_url_for_copy(index_html: str):
     idx = index_html.find('"#btn-mint-pair"')
     handler = index_html.find("addEventListener", idx)
     snippet = index_html[handler:handler + 4000]
-    assert "info.lan_url" in snippet
+    assert "info.peer_url" in snippet
     assert "navigator.clipboard.writeText" in snippet
+
+
+def test_settings_pair_qr_opens_setup_confirmation(index_html: str):
+    """The settings QR must not strand users after phone scan. It
+    should poll One Setup and open the confirmation step when the
+    other device is waiting."""
+    idx = index_html.find('"#btn-mint-pair"')
+    handler = index_html.find("addEventListener", idx)
+    snippet = index_html[handler:handler + 6000]
+    assert "Open pairing steps" in snippet
+    assert "_settingsPairPollTimer" in snippet
+    assert "pending_setup_devices" in snippet
+    assert "showOnboardingStep(4)" in snippet
 
 
 def test_pair_phone_card_resets_on_settings_open(index_html: str):
