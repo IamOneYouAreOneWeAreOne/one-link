@@ -64,7 +64,7 @@
     --mono: "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace;
   }
   /* v0.10.0 light theme. Color palette inverted around perceived
-     luminance — same accents (purple + cyan) for brand consistency.
+     luminance - same accents (purple + cyan) for brand consistency.
      Activated by setting <html data-theme="light"> or "auto" + a
      prefers-color-scheme:light user. Toggling at runtime is purely
      a CSS variable swap, no JS-driven repaints. */
@@ -260,7 +260,7 @@
     pointer-events: none;
   }
   /* If a peer has BOTH a key-change AND a verified mark, the
-     key-change red wins — verified is no longer meaningful while
+     key-change red wins - verified is no longer meaningful while
      a conflict is unacked. We hide the green via specificity here
      by relying on render order (overlay appended last in JS). */
   .keychange-banner {
@@ -427,7 +427,7 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* v0.4: empty state for zero-paired sidebar — friendly, not alarming. */
+  /* v0.4: empty state for zero-paired sidebar - friendly, not alarming. */
   .side .empty-state {
     padding: 28px 18px 16px;
     text-align: center;
@@ -481,7 +481,7 @@
   }
   .pair-cta.large { padding: 14px 16px; font-size: 14px; }
 
-  /* v0.4: discovery modal — "Pair a new device" picker. */
+  /* v0.4: discovery modal - "Pair a new device" picker. */
   .discover-overlay {
     position: fixed; inset: 0;
     background: rgba(8, 10, 14, 0.55);
@@ -654,7 +654,7 @@
     color: var(--text); width: 0; opacity: 0; transition: width .2s ease, opacity .2s, padding .2s;
     outline: none;
   }
-  /* UX audit P1-8 — keyboard-focus indicator. The plain `:focus`
+  /* UX audit P1-8 - keyboard-focus indicator. The plain `:focus`
      border swap above is invisible to keyboard-only users when
      the input is already styled; `:focus-visible` guarantees a
      visible focus ring without disturbing mouse-click styling. */
@@ -669,7 +669,7 @@
     position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
     color: var(--text-dim); pointer-events: none; font-size: 13px;
   }
-  /* Hide the icon-trigger when search is collapsed — otherwise it
+  /* Hide the icon-trigger when search is collapsed - otherwise it
      orphan-floats next to the toggle button and looks like two
      separate search icons (only one of which is clickable). */
   .convo-h .search:not(.open) .icon-trigger { display: none; }
@@ -687,10 +687,10 @@
     background: var(--bg-3); color: var(--text);
     border-color: var(--bg-3);
   }
-  /* Living Presence Tier α — Call buttons on contact rows.
+  /* Living Presence Tier α - Call buttons on contact rows.
      Always visible (single-tap to call is core surface). May 15 2026:
      split into voice-only (.call-btn-voice) and video (.call-btn-video).
-     Hover tint differs by intent — green for voice, blue for video —
+     Hover tint differs by intent - green for voice, blue for video -
      so a glance distinguishes them. */
   .peer .call-btn,
   .peer .call-btn-voice,
@@ -798,7 +798,7 @@
     border-top: 1px solid var(--line);
     padding: 12px 16px;
     background: var(--bg-1);
-    /* v0.9.2: 5 columns now — attach, screenshot, voice, textarea, send.
+    /* v0.9.2: 5 columns now - attach, screenshot, voice, textarea, send.
        grid-template-columns: auto auto auto 1fr auto */
     display: grid; grid-template-columns: auto auto auto 1fr auto; gap: 10px; align-items: end;
   }
@@ -824,7 +824,7 @@
     transition: border-color .12s ease;
   }
   .composer textarea:focus { border-color: var(--accent); }
-  /* UX audit P1-8 — keyboard-focus indicator. */
+  /* UX audit P1-8 - keyboard-focus indicator. */
   .composer textarea:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
@@ -869,7 +869,7 @@
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
   }
   .voice-overlay button { padding: 6px 14px; font-size: 12px; }
-  /* Audio bubble — receivers see this in place of a generic file row. */
+  /* Audio bubble - receivers see this in place of a generic file row. */
   .msg.file.audio { padding-bottom: 8px; }
   .msg.file.audio .audio-player {
     margin-top: 6px; width: 100%;
@@ -884,7 +884,7 @@
   .msg.out.file.audio .audio-player audio {
     filter: invert(0) hue-rotate(0deg);
   }
-  /* Living Presence Tier α-pre — Reality dot.
+  /* Living Presence Tier α-pre - Reality dot.
      See docs/LIVING_PRESENCE_ARCHITECTURE.md §4.5 + DOCTRINE §4.c.
      A single calm provenance indicator on each verified media bubble.
      Tap to reveal the trust pane (plain language: who, what, where, how). */
@@ -923,14 +923,14 @@
     color: rgba(255,255,255,0.92);
   }
 
-  /* Living Presence Tier α-pre — call surfaces.
+  /* Living Presence Tier α-pre - call surfaces.
      See docs/LIVING_PRESENCE_ARCHITECTURE.md §3 + DOCTRINE §4. */
 
   /* Outgoing-call "calling…" overlay AND incoming ring. Same
      visual treatment: a fullscreen calm card with one big action.
      Per Doctrine §3.2.a no transport-process verbs ever
      leak into this surface. */
-  /* May 15 2026 — Privacy panel. Hidden by default; opens from
+  /* May 15 2026 - Privacy panel. Hidden by default; opens from
      Settings via the lock icon. Surfaces EVERYTHING the daemon
      could be talking to + a live outbound-call audit trail. The
      main UI stays uncluttered because this overlay only shows
@@ -1076,7 +1076,7 @@
   }
   .call-overlay.show { display: flex; }
 
-  /* May 15 2026 — richer outgoing-call surface. Avatar circle with
+  /* May 15 2026 - richer outgoing-call surface. Avatar circle with
      peer initials, animated pulse ring (only while ringing), call
      kind badge (Voice/Video) under name, elapsed-seconds counter,
      connection-route line, and a pre-call control row so the caller
@@ -1184,7 +1184,7 @@
   .btn-call-decline {
     background: rgba(80,80,80,0.7); color: #fff;
   }
-  /* "Send a message instead" link below the End button — surfaces
+  /* "Send a message instead" link below the End button - surfaces
      after a delay so the user has a graceful escape if the peer is
      slow to pick up. */
   .call-overlay-fallback {
@@ -1200,7 +1200,7 @@
     font: inherit; padding: 0;
   }
   .call-overlay-fallback button:hover { color: rgba(220,235,255,1); }
-  /* Active-call surface — face placeholder + controls. */
+  /* Active-call surface - face placeholder + controls. */
   .call-active {
     position: fixed; inset: 0;
     background:
@@ -1236,7 +1236,7 @@
     box-shadow: 0 26px 90px rgba(0,0,0,0.55);
     z-index: 2;
   }
-  /* Tier α media — local + remote video elements. Remote fills the
+  /* Tier α media - local + remote video elements. Remote fills the
      surface (cover); local sits picture-in-picture top-right. Both
      are hidden until tracks are attached, so the face placeholder
      stays visible during audio-only calls. */
@@ -1427,7 +1427,7 @@
     display: none;
   }
   .call-recording-badge.show { display: inline-block; }
-  /* SAS verification pane — shown briefly on first call. */
+  /* SAS verification pane - shown briefly on first call. */
   .sas-pane {
     margin-top: 24px;
     padding: 14px 18px;
@@ -1461,7 +1461,7 @@
     color: var(--text); font-size: 15px;
     padding: 4px 0;
   }
-  /* UX audit P1-8 — keyboard-focus indicator. Input has no border;
+  /* UX audit P1-8 - keyboard-focus indicator. Input has no border;
      show a clear outline on keyboard focus. */
   .palette-input-row input:focus-visible {
     outline: 2px solid var(--accent);
@@ -3346,7 +3346,7 @@
     border-top: 1px solid var(--line);
     background: var(--bg-2);
   }
-  /* v0.11.1 Profile pane — avatar preview + color picker. */
+  /* v0.11.1 Profile pane - avatar preview + color picker. */
   .profile-avatar-row {
     display: flex; align-items: center; gap: 16px;
     margin-bottom: 18px;
@@ -3708,7 +3708,7 @@
 
      This media query is the WHOLE responsive layer. Below 720px is
      phone/tablet portrait; above is desktop. We intentionally DON'T
-     have an in-between "tablet-landscape" tier — too much surface
+     have an in-between "tablet-landscape" tier - too much surface
      for too little real-world coverage. */
   @media (max-width: 720px) {
     /* Hamburger button. Hidden on desktop; shown on mobile in the
@@ -3938,7 +3938,7 @@
          the base rule below is the fallback. */
     }
 
-    /* Top header sits at the top edge — needs safe-area padding to
+    /* Top header sits at the top edge - needs safe-area padding to
        avoid the notch / status bar on iOS / status indicators on
        Android. The 56px row height in .app grid still defines the
        interactive area; the safe-area pad is extra above it. */
@@ -3962,7 +3962,7 @@
     /* Momentum scroll + overscroll containment on every long
        scrollable surface. Without this an enthusiastic flick in
        the message list can drag the whole page (or trigger the
-       browser's pull-to-refresh, which we don't want — the WS
+       browser's pull-to-refresh, which we don't want - the WS
        feed is live, manual refresh is a desktop concept). */
     .side,
     .convo,
@@ -3975,7 +3975,7 @@
       overscroll-behavior: contain;
     }
 
-    /* Hide scrollbars on phone — they take horizontal pixels and
+    /* Hide scrollbars on phone - they take horizontal pixels and
        feel out of place. Touch users scroll with fingers, not bars.
        Webkit form: ::-webkit-scrollbar; Firefox: scrollbar-width. */
     .side::-webkit-scrollbar,
@@ -4030,7 +4030,7 @@
       max-height: 38vh;
     }
 
-    /* Modal entry feels heavier on phone — slow the slide so it
+    /* Modal entry feels heavier on phone - slow the slide so it
        reads as a page transition, not a popover. */
     .modal-backdrop.show .modal,
     .backdrop.show .modal,
@@ -4042,7 +4042,7 @@
       to   { transform: translateY(0);    opacity: 1; }
     }
 
-    /* Bigger tap target for messages — long-press on a message
+    /* Bigger tap target for messages - long-press on a message
        should be easy to land. The message bubble itself was hard
        to grab on narrow phones because horizontal padding was
        desktop-sized. */
@@ -4074,7 +4074,7 @@
      on render" behaviour, which yanked the user away from history
      they were reading. iMessage / WhatsApp / Telegram all do this.
 
-     Positioned via the .convo flex parent — sits above .composer
+     Positioned via the .convo flex parent - sits above .composer
      in the conversation panel, centered horizontally. Hidden via
      [hidden] attribute when count is 0. */
   .msg-new-pill {
@@ -4265,7 +4265,7 @@
   }
   .chip .x:hover { background: var(--bad); color: white; }
 
-  /* ── File message bubble — progress + status icon ──────────────────── */
+  /* ── File message bubble - progress + status icon ──────────────────── */
   .msg.file .progress-mini {
     height: 3px;
     background: rgba(255,255,255,.10);
@@ -4438,7 +4438,7 @@
   .conflict-row .resolve-actions .keep-both { background: rgba(76,209,117,.18); color: var(--good); }
   .conflict-row .resolve-actions .keep-both:hover { background: var(--good); color: #0a1f0a; }
   .conflict-row.resolving { opacity: .55; pointer-events: none; }
-  /* v0.9.0 inline previews — markdown / code / text. */
+  /* v0.9.0 inline previews - markdown / code / text. */
   .preview-toggle-row {
     margin-top: 6px;
   }
@@ -4536,7 +4536,7 @@
     white-space: pre;
   }
   .code-preview .code-body code { background: transparent; padding: 0; }
-  /* v0.9.1 activity feed surfaces — filter chips + timeline rows. */
+  /* v0.9.1 activity feed surfaces - filter chips + timeline rows. */
   .activity-filters {
     display: flex; gap: 6px; flex-wrap: wrap;
     padding: 8px 16px;
@@ -4595,7 +4595,7 @@
     color: var(--text-dim); font-size: 10px;
     margin-top: 2px; font-style: italic;
   }
-  /* v0.9.5 PDF preview — uses browser-native PDF viewer in an iframe. */
+  /* v0.9.5 PDF preview - uses browser-native PDF viewer in an iframe. */
   .pdf-preview {
     background: var(--bg-2);
     border-radius: 6px;
@@ -4658,7 +4658,7 @@
     font-family: ui-monospace, Menlo, monospace; font-size: 10px;
     margin: 0 1px;
   }
-  /* First-pair nudge — shown once after a successful pair. */
+  /* First-pair nudge - shown once after a successful pair. */
   .first-pair-nudge {
     display: flex; align-items: center; gap: 10px;
     padding: 10px 14px; margin: 8px 18px 4px;
@@ -5317,7 +5317,7 @@
   </div>
 
   <!-- v0.14.0 mobile scrim. Sits between sidebar drawer + page on
-       narrow screens; tap to dismiss. CSS-driven — JS only flips
+       narrow screens; tap to dismiss. CSS-driven - JS only flips
        .mobile-side-open on .app. -->
   <div class="mobile-scrim" id="mobile-scrim"></div>
 
@@ -5359,7 +5359,7 @@
         <span id="me-host">…</span>
         <span class="presence-caret">▾</span>
       </button>
-      <!-- May 15-16 2026 — Privacy lock icon. Opens the Privacy
+      <!-- May 15-16 2026 - Privacy lock icon. Opens the Privacy
            panel (which mode you're on + what this device is
            talking to + recent outside connections). Hidden by
            default to keep the main UI clean. Ctrl+Shift+P opens
@@ -5370,7 +5370,7 @@
               style="font-size: 15px;">🔒</button>
       <button class="gear" id="btn-settings" title="Settings">⚙</button>
     </div>
-    <!-- v0.10.4 presence dropdown menu — anchored to the pill;
+    <!-- v0.10.4 presence dropdown menu - anchored to the pill;
          hidden by default. -->
     <div class="presence-menu" id="presence-menu" style="display:none;">
       <button data-presence="online"><span class="dot online"></span> Online</button>
@@ -5383,7 +5383,7 @@
   <!-- v0.15.1: offline banner. Invisible by default; the JS handler
        below toggles `.show` based on navigator.onLine + the
        `online` / `offline` window events. The text is deliberately
-       calm — "messages queue and send when you're back" — so users
+       calm - "messages queue and send when you're back" - so users
        don't think anything is broken when they're on a flaky
        cafe Wi-Fi. -->
   <div class="offline-banner" id="offline-banner" role="status" aria-live="polite">
@@ -5459,7 +5459,7 @@
             <div class="trust-marker" id="convo-trust"></div>
           </div>
           <div class="actions">
-            <!-- v0.8.8: aggregate transfer pill — visible only while
+            <!-- v0.8.8: aggregate transfer pill - visible only while
                  1+ transfers are active. Click → opens Files pane.
                  Empty by default; populated by renderTransferHeaderPill. -->
             <div class="transfer-pill" id="transfer-pill" style="display:none;"></div>
@@ -5538,14 +5538,14 @@
                Phones don't have a "paste from clipboard" UX for
                screenshots; the OS share sheet handles it. -->
           <button class="icon-btn desktop-only" id="btn-screenshot" title="Paste screenshot from clipboard">📷</button>
-          <!-- v0.9.2 voice messages — click to start recording, click
+          <!-- v0.9.2 voice messages - click to start recording, click
                again to stop. While recording, the icon flips to a
                red square + a timer/cancel overlay slides in. -->
           <button class="icon-btn" id="btn-voice" title="Record voice message (Ctrl+Shift+M)">🎤</button>
           <textarea id="input" placeholder="Message your peer… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
           <button class="send" id="btn-send" disabled>Send</button>
         </div>
-        <!-- v0.9.2 voice recording overlay — visible only while
+        <!-- v0.9.2 voice recording overlay - visible only while
              recording. Slides in above the composer with a live
              timer + cancel + stop-and-send. -->
         <div class="voice-overlay" id="voice-overlay" style="display:none;">
@@ -5560,7 +5560,7 @@
       </div>
     </section>
 
-    <!-- FILES PANEL (toggled). v0.14.3: desktop-only — file inbox on
+    <!-- FILES PANEL (toggled). v0.14.3: desktop-only - file inbox on
          phone is the chat composer's attach button + share-sheet flow,
          not a separate panel. -->
     <aside class="files desktop-only" id="files-panel" style="display:none;">
@@ -5592,7 +5592,7 @@
       </div>
     </aside>
 
-    <!-- FOLDERS PANEL. v0.14.3: desktop-only — folder-sync semantics
+    <!-- FOLDERS PANEL. v0.14.3: desktop-only - folder-sync semantics
          (watch a directory, observe conflicts, manage exclusions)
          don't translate to phone OS sandboxes. -->
     <aside class="files desktop-only" id="folders-panel" style="display:none;">
@@ -5850,7 +5850,7 @@
           <p>Pairings, transfers, key changes, trust events. They'll show up here when they show up.</p>
         </div>
       </div>
-      <!-- Legacy transfer list, kept hidden for now — Files pane Sent
+      <!-- Legacy transfer list, kept hidden for now - Files pane Sent
            tab covers transfer-only views. -->
       <div id="transferlist" style="display:none;"></div>
       <div class="panel-form">
@@ -5893,12 +5893,12 @@
   <input type="file" id="file-input" style="display:none" multiple
          aria-label="Files to send" />
 
-  <!-- v0.4: DISCOVERY MODAL — "Pair a new device" picker -->
-  <!-- May 16 2026 — redesigned discover modal. Three sections:
+  <!-- v0.4: DISCOVERY MODAL - "Pair a new device" picker -->
+  <!-- May 16 2026 - redesigned discover modal. Three sections:
        1. Ready to pair (already running One Link).
        2. Other devices on your Wi-Fi (phones / laptops / etc.
-          without One Link installed — can be invited).
-       3. Other gear (TVs / speakers / printers — visible but
+          without One Link installed - can be invited).
+       3. Other gear (TVs / speakers / printers - visible but
           not the primary pair target; tucked behind a disclosure).
        Plus a network-health banner if AP isolation is detected. -->
   <div class="discover-overlay" id="discover-overlay" role="dialog" aria-modal="true" aria-labelledby="discover-title">
@@ -5986,7 +5986,7 @@
 
       <!-- Action row. Buttons are tailored to the platform:
            - Mobile / touch: native Share sheet via navigator.share.
-           - Desktop: sovereign options — Email link, Show fullscreen
+           - Desktop: sovereign options - Email link, Show fullscreen
              QR (great for displaying across a room), Save QR image.
            "Copy link" + "Done" are always present. -->
       <div class="actions" style="margin-top:14px; gap:8px; display:flex;
@@ -6052,8 +6052,8 @@
         </div>
       </div>
       <!-- v0.8.7: pair flow has two stages.
-           1. STAGE-COMPARE — show SAS, user clicks "Codes match"
-           2. STAGE-VERIFIED — once both devices have confirmed,
+           1. STAGE-COMPARE - show SAS, user clicks "Codes match"
+           2. STAGE-VERIFIED - once both devices have confirmed,
               prompt the user to ALSO mark this peer
               verified-in-person while the SAS is still on screen.
               This is the highest-trust moment we'll ever have with
@@ -6198,7 +6198,7 @@
               (or pair in person) so peers can confirm it's actually you
               and not a very motivated stranger.
             </p>
-            <!-- v0.14.2 — Show advanced controls toggle. Default-off
+            <!-- v0.14.2 - Show advanced controls toggle. Default-off
                  on phone (per-session), default-on on desktop. Flipping
                  it adds .show-advanced to <html> which reveals every
                  [data-tier="advanced"] element across all panes. -->
@@ -6337,7 +6337,7 @@
               </p>
             </div>
             <!-- v0.11.1 Blocked devices. Sources from /api/peers with
-                 trust='rejected' — already a backed feature, just
+                 trust='rejected' - already a backed feature, just
                  wasn't surfaced anywhere a user could find. -->
             <div class="settings-section">
               <div class="settings-section-h"><span>Blocked devices</span></div>
@@ -6542,7 +6542,7 @@
 
             <!-- v0.11.6: bandwidth cap. Pinned in settings; the
                  transfer engine consumes this value to throttle
-                 chunks. v0.14.4: data-tier="advanced" — granular
+                 chunks. v0.14.4: data-tier="advanced" - granular
                  throttling is operator-grade; phone users on metered
                  connections rely on the OS' own data-saver. -->
             <div class="settings-section" data-tier="advanced">
@@ -6659,7 +6659,7 @@
 
           <!-- ── Advanced ───────────────────────────────────────── -->
           <!-- v0.14.4: desktop-only. Diagnostics, debug overlay,
-               database vacuum — operator-tier surfaces. v0.14.8 adds
+               database vacuum - operator-tier surfaces. v0.14.8 adds
                a phone escape hatch (long-press version). -->
           <section class="settings-pane desktop-only" data-settings-pane="advanced">
             <h3>Advanced</h3>
@@ -6747,7 +6747,7 @@
                 </details>
               </div>
             </div>
-            <!-- v0.20.4 — legacy "Connect another device" (URL-only
+            <!-- v0.20.4 - legacy "Connect another device" (URL-only
                  desktop-UI-on-phone flow) removed entirely. The
                  add-device surface above is the single source
                  of truth for getting any other device connected to
@@ -6963,7 +6963,7 @@
         <button class="btn-ghost" id="group-copy-invite">Copy invite link</button>
       </div>
 
-      <!-- v0.11.5 per-group chat tools. Local-only operations —
+      <!-- v0.11.5 per-group chat tools. Local-only operations -
            Other members keep their copies untouched. -->
       <div class="settings-section">
         <div class="settings-section-h"><span>Chat tools</span></div>
@@ -6978,7 +6978,7 @@
         </p>
       </div>
 
-      <!-- v0.11.3: archive — local-only "hide from sidebar" without
+      <!-- v0.11.3: archive - local-only "hide from sidebar" without
            leaving. Other members aren't affected. -->
       <div class="settings-section">
         <div class="settings-section-h"><span>Archive</span></div>
@@ -7069,7 +7069,7 @@
              surface; granular per-capability tuning is power-user.
              May 15 2026: added Voice + Video. They're separate caps
              so a user can grant a colleague Voice without Video,
-             or vice versa — independent of the chat/files set. -->
+             or vice versa - independent of the chat/files set. -->
         <div class="mini-actions wrap" id="dev-cap-row" data-tier="advanced">
           <button class="cap-toggle" data-cap="chat">Chat</button>
           <button class="cap-toggle" data-cap="files">Files</button>
@@ -7125,7 +7125,7 @@
           </div>
           <p class="settings-help" style="margin-top:8px;">
             A key change is benign when the device was reinstalled or
-            replaced — but if you didn't expect one, treat it as a
+            replaced - but if you didn't expect one, treat it as a
             potential impersonation. Re-pair only after confirming the
             new identity through a side channel.
           </p>
@@ -7170,7 +7170,7 @@
            transition (verify_set, verify_clear, trust_set,
            cap_policy_set, cap_policy_clear, key_change events)
            plus a synthetic 'first seen' event from peers.first_seen_ms.
-           Loaded lazily when the disclosure opens — most users
+           Loaded lazily when the disclosure opens - most users
            won't expand it. -->
       <!-- v0.14.5: trust timeline is forensic / audit surface, not
            daily use. Hide on phone; phone users still see Identity
@@ -7185,7 +7185,7 @@
         </div>
       </div>
 
-      <!-- v0.10.2 disappearing messages — per-peer TTL. -->
+      <!-- v0.10.2 disappearing messages - per-peer TTL. -->
       <div class="settings-section">
         <div class="settings-section-h"><span>Disappearing messages</span></div>
         <div class="settings-row">
@@ -7208,7 +7208,7 @@
       </div>
 
       <!-- v0.11.5 per-chat tools. Wallpaper accent + media + export
-           + clear-history. Each is local-only — peer's data stays
+           + clear-history. Each is local-only - peer's data stays
            untouched. -->
       <div class="settings-section">
         <div class="settings-section-h"><span>Chat wallpaper</span></div>
@@ -7506,29 +7506,29 @@
   </div>
 
   <!-- v0.9.7: simplified rendezvous help. Default answer for
-       most users is "you don't need this — Wi-Fi only is fine."
+       most users is "you don't need this - Wi-Fi only is fine."
        Advanced setup details live behind a disclosure. -->
   <div class="modal-backdrop" id="rdz-help-backdrop">
     <div class="modal" style="max-width:520px;">
       <h2>Reach devices across the internet?</h2>
       <p>
         Right now One Link only finds devices on the <strong>same
-        Wi-Fi network</strong>. That's perfect for household use —
+        Wi-Fi network</strong>. That's perfect for household use -
         nothing else to set up.
       </p>
       <p>
         To reach devices in <strong>other locations</strong> (a
         laptop at home from a coffee shop, family across town),
         you need a tiny relay called a <strong>rendezvous</strong>.
-        It only carries signed presence beacons — never your
+        It only carries signed presence beacons - never your
         messages or files.
       </p>
       <details class="rdz-advanced">
         <summary>How to set one up (advanced)</summary>
         <ul style="margin: 8px 0 0 22px; line-height: 1.6;">
-          <li>Use a rendezvous a friend or community is running —
+          <li>Use a rendezvous a friend or community is running -
             paste their URL into Settings → Rendezvous URLs.</li>
-          <li>Run your own — free, ~5 minutes, see
+          <li>Run your own - free, ~5 minutes, see
             <code>RENDEZVOUS_DEPLOY.md</code> in the repo.</li>
         </ul>
       </details>
@@ -7542,7 +7542,7 @@
 
 <script>
 (() => {
-  // ── v0.14.2 — Phone-tier foundation ─────────────────────────────────
+  // ── v0.14.2 - Phone-tier foundation ─────────────────────────────────
   // Detect form-factor at boot, set data-form-factor on <html>, and
   // re-evaluate on debounced resize. CSS in the page reads the
   // attribute via `html[data-form-factor="phone"] .desktop-only` and
@@ -7590,7 +7590,7 @@
   };
   // v0.8.8: bytes/sec → human string for chat-bubble rate display.
   const fmtRate = (bps) => {
-    if (!bps || bps < 1) return "—";
+    if (!bps || bps < 1) return "-";
     return fmtBytes(bps) + "/s";
   };
   const fmtMbps = (bytesPerSecond) => {
@@ -7600,7 +7600,7 @@
   };
   // v0.8.8: bytes-remaining ÷ bps → "12s" or "3m 04s".
   const fmtEta = (remainingBytes, bps) => {
-    if (!bps || bps < 1 || remainingBytes <= 0) return "—";
+    if (!bps || bps < 1 || remainingBytes <= 0) return "-";
     const sec = Math.round(remainingBytes / bps);
     if (sec < 60) return `${sec}s`;
     const m = Math.floor(sec / 60);
@@ -7687,7 +7687,7 @@
     // Drives the ✓✓ checkmark on our outbound messages.
     readMarkers: {},
     // v0.7.6: monotonic-per-peer "highest ts of theirs we've already
-    // ACKed back as read" — prevents redundant network calls.
+    // ACKed back as read" - prevents redundant network calls.
     sentReadUpTo: {},
     // v0.8.0: groups. {group_id_hex: {name, member_count, my_role}}.
     groups: new Map(),
@@ -7699,19 +7699,19 @@
     groupDetail: null,    // {members, my_role, name, ...}
     pins: {},
     drafts: {},
-    // Living Presence Tier α-pre — Reality dot state.
+    // Living Presence Tier α-pre - Reality dot state.
     // Map<blob_hex, {kind, path, recording, verified, produced_at_us}>.
     // Populated by the "frame_provenance" WS event when the daemon
     // verifies an inbound FILE_PROVENANCE message (see
     // docs/LIVING_PRESENCE_ARCHITECTURE.md §9.3 for the daemon-side
     // wiring). When the map is empty (today, pre-daemon-hook), the
-    // Reality dot does not surface — that's Doctrine §3.5.c (no
+    // Reality dot does not surface - that's Doctrine §3.5.c (no
     // surreptitious indicators; if we don't know, we don't say).
     provenanceByBlob: new Map(),
   };
 
   // v0.7.5: fixed emoji palette for reactions. Custom picker
-  // arrives in v0.7.5.1 — for now five universally-meaningful
+  // arrives in v0.7.5.1 - for now five universally-meaningful
   // reactions cover the 80% case.
   const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "🎉"];
 
@@ -7795,7 +7795,7 @@
   }
 
   function reachLabel(p) {
-    // v0.5.6: server-side regime is authoritative when present —
+    // v0.5.6: server-side regime is authoritative when present -
     // it knows whether the actual transport went through the relay.
     // Fall back to client-side classification if the server didn't
     // stamp one (offline DB peers, older builds).
@@ -7829,12 +7829,12 @@
   // recording state. Tap to reveal the trust pane.
   //
   // Doctrine compliance:
-  //   §4.c — calm provenance indicator is REQUIRED on every verified
+  //   §4.c - calm provenance indicator is REQUIRED on every verified
   //          media bubble.
-  //   §3.5.c — no surreptitious indicators. The dot is visible
+  //   §3.5.c - no surreptitious indicators. The dot is visible
   //            but unobtrusive at 14px; the detail pane is full text.
-  //   §3.9.a — no raw fingerprint hex anywhere in the detail pane.
-  //   §3.6.c — no network-technology jargon ("on Wi-Fi"); we use the
+  //   §3.9.a - no raw fingerprint hex anywhere in the detail pane.
+  //   §3.6.c - no network-technology jargon ("on Wi-Fi"); we use the
   //            plain-language labels from frame_provenance.py.
   //
   // The provenance state is provided by frame_provenance.to_ui_dict:
@@ -7845,7 +7845,7 @@
   //     produced_at_us: int }
   //
   // Returns a {dot, detail} DOM pair the caller appends to the
-  // bubble; OR null if no provenance is known (calm hidden state —
+  // bubble; OR null if no provenance is known (calm hidden state -
   // we never show a dot for unknown).
   function renderRealityDot(blobHex) {
     if (!blobHex) return null;
@@ -7855,10 +7855,10 @@
     const dot = el("span", "reality-dot");
     dot.classList.add(state_.verified ? "verified" : "unverified");
     // Title attribute on hover for quick reference. Plain language
-    // only — never hex, never network type names.
+    // only - never hex, never network type names.
     dot.title = state_.verified
       ? `${state_.kind} · ${state_.path} · ${state_.recording}`
-      : "Unverified sender — tap for details";
+      : "Unverified sender - tap for details";
     dot.setAttribute("aria-label", dot.title);
     dot.setAttribute("role", "button");
 
@@ -7910,11 +7910,11 @@
   // expired banner can surface ONCE instead of every page being
   // littered with cryptic per-endpoint "401" messages.
   //
-  // May 15 2026 — auto-recovery layer.
+  // May 15 2026 - auto-recovery layer.
   // The page used to surface a hard "We forgot who you are" banner
   // on ANY 401, which fired every time the daemon restarted (dev
   // loop, audit fixes, OS sleep, etc.). That UX broke the "flawless"
-  // promise — every code change required the user to relaunch from
+  // promise - every code change required the user to relaunch from
   // the tray.
   //
   // The token lives at ``ui.token`` on disk and PERSISTS across
@@ -7932,7 +7932,7 @@
   //      cookie from the URL token; subsequent fetches succeed
   //      transparently.
   //   3. Only if step 2 ALSO fails (token doesn't match the
-  //      daemon's current on-disk token — true credential
+  //      daemon's current on-disk token - true credential
   //      mismatch) do we show the alarming banner.
 
   // Snapshot the URL token before anything else runs. The server's
@@ -7962,7 +7962,7 @@
     _autoRecoveryInFlight = true;
     _autoRecoveryAttempts += 1;
     try {
-      // Re-fetch / with the token — the daemon's _index handler
+      // Re-fetch / with the token - the daemon's _index handler
       // re-sets the session cookie if the token still matches the
       // on-disk ui.token. We discard the body; we just want the
       // Set-Cookie response header to land.
@@ -7982,12 +7982,12 @@
     if (status !== 401) return;
     if (_sessionExpiredBannerShown) return;
     // Try silent auto-recovery FIRST. If it succeeds, the next
-    // fetch should succeed too — no banner. If it fails (token
+    // fetch should succeed too - no banner. If it fails (token
     // mismatch with new daemon), fall through to the banner.
     _attemptAutoRecovery().then((ok) => {
       if (ok) {
         // Cookie refreshed. Reload the data without a full page
-        // reload — gentler UX. Polling tasks will pick up the
+        // reload - gentler UX. Polling tasks will pick up the
         // fresh cookie on their next tick.
         try {
           if (typeof refreshAll === "function") refreshAll();
@@ -8012,7 +8012,7 @@
     // Banner copy is deliberately about USER ACTION ("authorize this
     // device"), not about transient link status. Doctrine of
     // Invisibility §3.2.a keeps transport status out of the user's
-    // way — link repair is the engine's job to handle silently
+    // way - link repair is the engine's job to handle silently
     // (which the auto-recovery layer above does for every recoverable
     // case). The banner only ever appears now for a TRUE credential
     // mismatch where the user must explicitly re-authorize.
@@ -8119,7 +8119,7 @@
     // for catch-all "Send didn't work." errors. Without this the user
     // just sees "Send didn't work." and the actual cause is invisible.
     const detail = e?.error_detail;
-    let body = hint ? `${headline} — ${hint}` : headline;
+    let body = hint ? `${headline} - ${hint}` : headline;
     if (detail && (e?.code === "send_failed" || !e?.code)) {
       body += ` (${detail})`;
     }
@@ -8201,7 +8201,7 @@
     try {
       info = await api.get("/api/update/check");
     } catch (_e) {
-      return;  // network/auth fail — silently no-op
+      return;  // network/auth fail - silently no-op
     }
     if (!info || info.status !== "newer") {
       banner.classList.remove("show");
@@ -8231,9 +8231,9 @@
     banner.classList.add("show");
   }
 
-  // May 16 2026 — RED-TEAM FIX. This script block runs at end-of-
+  // May 16 2026 - RED-TEAM FIX. This script block runs at end-of-
   // body, by which point DOMContentLoaded has ALREADY fired.
-  // Registering a listener for it after the fact never fires —
+  // Registering a listener for it after the fact never fires -
   // these handlers were silently dead. Replace with an
   // "either run now or wait for DOMContentLoaded" helper.
   function _onReady(fn) {
@@ -8289,7 +8289,7 @@
         const url = new URL(link?.href || "");
         const tag = url.pathname.split("/").pop();
         if (tag) localStorage.setItem(`ol_update_dismissed:${tag}`, "1");
-      } catch (_e) { /* swallow — best-effort */ }
+      } catch (_e) { /* swallow - best-effort */ }
       document.getElementById("update-banner")?.classList.remove("show");
     });
   });
@@ -8313,7 +8313,7 @@
       btn.classList.remove("on");
     }
   }
-  // v0.10.0 — runtime settings cache populated when settings load.
+  // v0.10.0 - runtime settings cache populated when settings load.
   // Defaults are sane so notifyIncoming + soundOnIncoming work even
   // before /api/settings has been fetched.
   state.runtimeSettings = {
@@ -8358,7 +8358,7 @@
         display_typing_indicators: r.display_typing_indicators !== false,
       };
     } catch {
-      // Daemon unreachable / fresh install — default theme stays.
+      // Daemon unreachable / fresh install - default theme stays.
     }
   }
 
@@ -8445,7 +8445,7 @@
     if (Notification.permission !== "granted") return;
     if (document.hasFocus()) return;
     // v0.10.0: do-not-disturb suppresses BOTH the chime AND the
-    // desktop notification. Messages still arrive — they just
+    // desktop notification. Messages still arrive - they just
     // don't ping.
     if (isQuietHoursActive()) return;
     // v0.7.3: respect per-device mute. Caller passes peer_fp; if
@@ -8625,7 +8625,7 @@
   function _peerListHash(peers, selected) {
     // v0.7.x: stable signature of everything renderPeers reads off
     // each peer record. If this is unchanged across two refreshPeers
-    // ticks, skip the DOM rebuild — the previous version was tearing
+    // ticks, skip the DOM rebuild - the previous version was tearing
     // down + re-attaching every peer row every 5s, which the user
     // sees as a visible flicker. We coalesce latency into 80/250 ms
     // buckets so a few ms of jitter don't trigger redraws.
@@ -8706,13 +8706,13 @@
       // glance at the sidebar tells the user which devices have been
       // SAS-confirmed in person.
       // v0.7.8: a red ⚠ overlay supersedes ✓ when the peer has any
-      // unacked key-change event — a rotated key invalidates trust.
+      // unacked key-change event - a rotated key invalidates trust.
       const avWrap = el("div", "avatar-wrap");
       const av = el("div", "avatar", initials(p.display_name || p.hostname || p.short_id));
       avWrap.appendChild(av);
       if ((p.key_change_unacked || 0) > 0) {
         const badge = el("span", "keychange-overlay", "!");
-        badge.title = `Key change detected — ${p.key_change_unacked} unacknowledged event${p.key_change_unacked === 1 ? "" : "s"}. Click for details.`;
+        badge.title = `Key change detected - ${p.key_change_unacked} unacknowledged event${p.key_change_unacked === 1 ? "" : "s"}. Click for details.`;
         avWrap.appendChild(badge);
       } else if (p.is_verified) {
         const badge = el("span", "verified-overlay", "✓");
@@ -8762,13 +8762,13 @@
       // Only render for paired (pinned/rejected) peers; unpaired
       // peers are managed via the discovery / pair flow instead.
       if (p.fingerprint && p.trust !== "pending") {
-        // Living Presence Tier α — Call buttons. May 15 2026: split
+        // Living Presence Tier α - Call buttons. May 15 2026: split
         // the single 📞 button into TWO buttons so the user can pick
         // audio-only OR video at call time. The icons read like
         // standard phone-app affordances: phone glyph = voice, video-
         // camera glyph = video. Hover colors differ (green/blue) so
         // a quick visual scan distinguishes them at a glance. Each
-        // honors its own capability (voice_call / video_call) — a
+        // honors its own capability (voice_call / video_call) - a
         // peer who's only been granted Voice has the video button
         // hidden.
         if (p.trust === "pinned") {
@@ -8819,7 +8819,7 @@
     }
 
     // Auto-select if there's exactly one paired peer and nothing currently selected.
-    // v0.10.8 bug fix: must also check selectedGroup — otherwise the
+    // v0.10.8 bug fix: must also check selectedGroup - otherwise the
     // 5s refreshPeers tick would silently snap back to the lone peer
     // a few seconds after the user clicks a group, since selectGroup
     // sets selectedPeer = null. Symptom was: "chat changes for a few
@@ -8857,7 +8857,7 @@
       if (prune) {
         try { await api.post("/api/peers/prune", {}); } catch {}
       }
-      // May 16 2026 — call the new smart-discovery endpoint that
+      // May 16 2026 - call the new smart-discovery endpoint that
       // runs mDNS + ARP + SSDP + NetBIOS in parallel and returns
       // three sections. Falls back to the legacy peer-only path
       // if the endpoint isn't available yet (e.g., daemon is
@@ -9037,7 +9037,7 @@
       }
     }
 
-    // Network-health banner — surface AP isolation / captive
+    // Network-health banner - surface AP isolation / captive
     // portal issues so the user knows WHY the scan looks empty.
     if (health.ap_isolation_suspected || health.captive_portal_suspected) {
       const banner = el("div", "discover-health-warn");
@@ -9084,7 +9084,7 @@
       ));
       for (const d of pairable) body.appendChild(_renderDeviceRow(d, "invite"));
     }
-    // Section 3: Other gear (TVs / speakers / printers) — collapsed.
+    // Section 3: Other gear (TVs / speakers / printers) - collapsed.
     if (other.length > 0) {
       const details = el("details");
       details.style.marginTop = "12px";
@@ -9182,7 +9182,7 @@
       // Windows share sheet which defaults to Microsoft Phone Link
       // (a corp account-tied service that violates the sovereignty
       // floor and confuses users). So Web Share is ONLY used when
-      // we're on a real mobile / touch-primary device — there the
+      // we're on a real mobile / touch-primary device - there the
       // OS share sheet is a first-class send mechanism (Messages /
       // Mail / AirDrop / etc.).
       //
@@ -9245,7 +9245,7 @@
     _inviteCurrentCode = null;
   }
 
-  // Trust API — kept for power-user paths (right-click menu later); the
+  // Trust API - kept for power-user paths (right-click menu later); the
   // primary trust UX is the pair modal now.
   async function setTrust(fingerprint, trust) {
     try {
@@ -9257,7 +9257,7 @@
   }
 
   // ── Inline text rendering: links, code, bold, italic ──────────────
-  // Tokenize and build DOM nodes — never inject raw HTML.
+  // Tokenize and build DOM nodes - never inject raw HTML.
   // Tokens (in order of priority): triple-backtick blocks, inline `code`,
   // URLs, **bold**, _italic_.
   function renderInlineText(body) {
@@ -9336,7 +9336,7 @@
   }
 
   // ── Inline previews (v0.9.0) ───────────────────────────────────────
-  // Whitelist mirrors server-side PREVIEW_KINDS — keep in sync.
+  // Whitelist mirrors server-side PREVIEW_KINDS - keep in sync.
   const PREVIEW_KINDS = new Map([
     ["pdf","pdf"],
     ["md","markdown"],["markdown","markdown"],["mdown","markdown"],
@@ -9367,7 +9367,7 @@
   // Supports: ATX headings (# ##), paragraphs, fenced code blocks,
   // blockquotes, ordered + unordered lists (single-level), horizontal
   // rules. Inline syntax delegates to renderInlineNonCode (bold,
-  // italic, inline code, autolinks). Deliberately small + safe — no
+  // italic, inline code, autolinks). Deliberately small + safe - no
   // raw HTML escape hatch, so no XSS surface.
   function renderMarkdownDoc(source) {
     const root = el("div", "md-preview");
@@ -9409,7 +9409,7 @@
         continue;
       }
       if (/^>\s?/.test(ln)) {
-        // Blockquote — collect contiguous > lines.
+        // Blockquote - collect contiguous > lines.
         const buf = [];
         while (i < n && /^>\s?/.test(lines[i])) {
           buf.push(lines[i].replace(/^>\s?/, ""));
@@ -9438,7 +9438,7 @@
         continue;
       }
       if (ln.trim() === "") { i += 1; continue; }
-      // Paragraph — collect lines until blank or block boundary.
+      // Paragraph - collect lines until blank or block boundary.
       const buf = [ln];
       i += 1;
       while (i < n) {
@@ -9484,7 +9484,7 @@
   }
 
   // v0.9.5: PDF preview via the browser's native viewer. We render
-  // an <iframe> pointing at /api/files/{name} — Chrome/Edge/Safari/
+  // an <iframe> pointing at /api/files/{name} - Chrome/Edge/Safari/
   // Firefox all ship with built-in PDF support, so we don't need to
   // vendor PDF.js (~600 KB). The fourth-arg streamUrl is the path
   // the file is served from (passed by the caller in the file-bubble
@@ -9552,7 +9552,7 @@
   }
 
   // v0.8.8: per-transfer EWMA rate tracker. Each `transfer` WS event
-  // is a snapshot — by diffing progress_bytes across events we get
+  // is a snapshot - by diffing progress_bytes across events we get
   // bytes/sec without any extra wire data. EWMA (alpha=0.4) smooths
   // out the chunk-by-chunk burstiness without going stale on slow
   // links. Reset on terminal status so the next transfer for the
@@ -9566,7 +9566,7 @@
       return;
     }
     if (t.status !== "active" && t.status !== "offered") {
-      // queued / paused — keep last bps but stamp timestamp so a
+      // queued / paused - keep last bps but stamp timestamp so a
       // resume's first delta is reasonable.
       const cur = state.transferRates.get(t.id) || {};
       cur.lastBytes = t.progress_bytes || 0;
@@ -9585,10 +9585,10 @@
       return;
     }
     const dt = (now - prev.lastTs) / 1000;
-    if (dt < 0.1) return;  // ignore <100ms gaps — too noisy.
+    if (dt < 0.1) return;  // ignore <100ms gaps - too noisy.
     const db = (t.progress_bytes || 0) - prev.lastBytes;
     if (db < 0) {
-      // progress went backwards (resume / retry) — restart.
+      // progress went backwards (resume / retry) - restart.
       state.transferRates.set(t.id, {
         lastBytes: t.progress_bytes || 0,
         lastTs: now,
@@ -9608,7 +9608,7 @@
     if (!t) return 0;
     const r = state.transferRates.get(t.id);
     if (!r) return 0;
-    // Decay if no event for >3s — peer probably stalled. Avoids
+    // Decay if no event for >3s - peer probably stalled. Avoids
     // showing a stale "14 MB/s" forever on a frozen transfer.
     const age = (Date.now() - (r.lastTs || 0)) / 1000;
     if (age > 3) return 0;
@@ -10983,7 +10983,7 @@
     pill.onclick = () => {
       // Switch to the Files pane → Sent tab.
       const filesBtn = document.querySelector('[data-pane="files"]');
-      // v0.14.3: bail on phone — Files pane is desktop-only.
+      // v0.14.3: bail on phone - Files pane is desktop-only.
       if (_phoneCannotShow(filesBtn)) return;
       filesBtn.click();
       state.filesMode = "sent";
@@ -11000,7 +11000,7 @@
       renderTransferHeaderPill();
     });
   }
-  // Refresh pill on a timer too — so the rate decays correctly
+  // Refresh pill on a timer too - so the rate decays correctly
   // even if no transfer event arrives for several seconds.
   setInterval(() => {
     const pill = $("#transfer-pill");
@@ -11058,7 +11058,7 @@
   //
   // New behaviour:
   //   - If the user was at-or-near the bottom (within 80px) before
-  //     the render, snap to bottom afterward — what they're reading
+  //     the render, snap to bottom afterward - what they're reading
   //     is the live edge.
   //   - If the user was scrolled up reading history, PRESERVE their
   //     scroll position; show a floating "↓ N new" pill they can
@@ -11068,7 +11068,7 @@
   //   - On peer switch, force snap (no pill for new conversation).
   //
   // Used by both renderMessages (direct chat) and
-  // renderGroupConversation (group chat) — same container, same
+  // renderGroupConversation (group chat) - same container, same
   // behaviour.
   const NEAR_BOTTOM_PX = 80;
   let _msgPillCount = 0;
@@ -11089,7 +11089,7 @@
     const grew = newLen > (before?.prevLen ?? 0);
     _lastRenderedLen = newLen;
     if (before?.wasAtBottom) {
-      // User was at the live edge — keep them there.
+      // User was at the live edge - keep them there.
       container.scrollTop = container.scrollHeight;
       _hideNewMessagePill();
       return;
@@ -11152,7 +11152,7 @@
     if (!state.selectedPeer) {
       if (m._renderSig !== "no-peer") {
         m._renderSig = "no-peer";
-        // UX audit P1-3 — show an explicit "pick a device" empty
+        // UX audit P1-3 - show an explicit "pick a device" empty
         // state instead of an empty white pane. The sidebar
         // already lists every device; this just confirms the
         // next step. Doctrine of invisibility honored: the copy
@@ -11175,7 +11175,7 @@
       : state.messages.filter(x => x.peer === state.selectedPeer);
 
     // Hide redundant FILE_DONE messages when we already have FILE_OFFER for
-    // the same blob — the FILE_OFFER bubble will reflect completion via its
+    // the same blob - the FILE_OFFER bubble will reflect completion via its
     // matching transfer record, and showing both is duplicative.
     const offerBlobs = new Set();
     for (const msg of source) {
@@ -11325,7 +11325,7 @@
     return `🔥 ${d}d`;
   }
   // Per-second tick to keep every visible expiry-badge countdown
-  // fresh. Cheap — N <= 200 visible bubbles, single innerText set
+  // fresh. Cheap - N <= 200 visible bubbles, single innerText set
   // each. No DOM rebuilds.
   setInterval(() => {
     document.querySelectorAll(".expiry-badge").forEach((span) => {
@@ -11648,7 +11648,7 @@
           { emoji, op, peer: msg.peer },
         );
       }
-      // Optimistic local mutation — server will broadcast a
+      // Optimistic local mutation - server will broadcast a
       // reaction event to confirm.
       msg.reactions = msg.reactions || {};
       const myFp = state.me?.fingerprint || "self";
@@ -11702,7 +11702,7 @@
 
     // v0.8.8: enriched progress display while in-flight. Live rate
     // (bytes/sec EWMA) + ETA + bytes-done / total. Static bar is
-    // kept too — it's the most-glanced status indicator.
+    // kept too - it's the most-glanced status indicator.
     if (kind === "sending" && t) {
       const bar = el("div", "progress-mini");
       const fill = el("span");
@@ -11744,7 +11744,7 @@
     }
     // v0.9.2: inline audio player for any received audio file
     // (voice messages OR forwarded clips). Only after transfer is
-    // complete — mid-flight transfers don't have a file on disk
+    // complete - mid-flight transfers don't have a file on disk
     // to source from.
     if (msg.dir === "in" && kind === "sent" && isAudioName(msg.name)) {
       const fname = (incomingPath || msg.name || "").toString().split(/[\\\/]/).pop();
@@ -11756,10 +11756,10 @@
         audio.preload = "metadata";
         audio.src = `/api/files/${encodeURIComponent(fname)}`;
         wrap.appendChild(audio);
-        // Living Presence Tier α-pre — Reality dot.
+        // Living Presence Tier α-pre - Reality dot.
         // If the daemon has recorded provenance for this blob (via
         // the frame_provenance WS event), render the calm indicator
-        // next to the audio player. Otherwise no surface — see
+        // next to the audio player. Otherwise no surface - see
         // Doctrine §3.5.c.
         const reality = renderRealityDot(msg.blob);
         if (reality) {
@@ -11773,7 +11773,7 @@
     // removes them after send, so /api/files can't source the
     // sender's own clip. Sender hears themselves while recording;
     // re-playback would need a separate outbox-mirror endpoint
-    // — defer that to a follow-up.)
+    // - defer that to a follow-up.)
     if (msg.dir === "out" && kind === "sent" && isAudioName(msg.name)) {
       b.classList.add("audio");
       const note = el("div", "audio-player");
@@ -11842,7 +11842,7 @@
       }
     }
 
-    // Action row — Open / Reveal / Retry depending on state
+    // Action row - Open / Reveal / Retry depending on state
     const actions = el("div", "actions");
     if (msg.dir === "in" && kind === "sent") {
       const fname = (incomingPath || msg.name || "").toString().split(/[\\\/]/).pop();
@@ -11863,7 +11863,7 @@
             const res = await api.post(`/api/files/${encodeURIComponent(fname)}/reveal`, {});
             if (res?.throttled) {
               t?.remove?.();
-              toast("Folder is opening — check your taskbar.", "info", 2500);
+              toast("Folder is opening - check your taskbar.", "info", 2500);
             }
           } catch (e) {
             t?.remove?.();
@@ -11990,7 +11990,7 @@
             const res = await api.post(`/api/files/${encodeURIComponent(f.name)}/reveal`, {});
             if (res?.throttled) {
               t?.remove?.();
-              toast("Folder is opening — check your taskbar.", "info", 2500);
+              toast("Folder is opening - check your taskbar.", "info", 2500);
             }
           } catch (e) {
             t?.remove?.();
@@ -12041,7 +12041,7 @@
         .sort((a, b) => (b.updated_ms || 0) - (a.updated_ms || 0));
       $("#files-count").textContent = sent.length;
       if (sent.length === 0) {
-        // UX audit P1-4 — rich empty state matching the Received
+        // UX audit P1-4 - rich empty state matching the Received
         // tab's style so the two halves of the Files pane feel
         // consistent. Tells the user how to send their first file.
         const empty = el("div", "empty rich");
@@ -12198,7 +12198,7 @@
     renderGroupConversation();
     renderPins();
     restoreDraft();
-    // v0.11.5 — apply this group's wallpaper accent.
+    // v0.11.5 - apply this group's wallpaper accent.
     applyActiveChatWallpaper();
     $("#input").focus();
   }
@@ -12381,7 +12381,7 @@
     "#7c4dff", "#3b82f6", "#06b6d4", "#10b981",
     "#facc15", "#f97316", "#ef4444", "#ec4899",
   ];
-  // v0.12.1 — chat-prefs cache. Source-of-truth for per-chat
+  // v0.12.1 - chat-prefs cache. Source-of-truth for per-chat
   // cosmetic state (color, wallpaper, archived). Populated from
   // /api/chat-prefs at boot + kept in sync by chat_pref WS events.
   // localStorage is still written so the FIRST paint after a
@@ -12476,7 +12476,7 @@
     }
   }
 
-  // v0.12.1 archive — server-synced "hide from sidebar". Other
+  // v0.12.1 archive - server-synced "hide from sidebar". Other
   // members aren't affected; this is local to the user's account
   // but does sync across the user's own devices.
   function isGroupArchived(gid) {
@@ -12499,7 +12499,7 @@
   }
 
   // v0.11.3: per-group mute apply. Backend already in place from
-  // v0.11.2 — this just hooks up the duration picker.
+  // v0.11.2 - this just hooks up the duration picker.
   async function applyGroupMute() {
     const gid = state.selectedGroup;
     if (!gid) return;
@@ -12648,7 +12648,7 @@
         reactions: msg.reactions || {},
       }));
       // v0.10.1: multi-select hooks for group messages too. Same
-      // shape as 1:1 — selection state is shared across both.
+      // shape as 1:1 - selection state is shared across both.
       bindSelectionToBubble(b, {
         id: msg.id,
         body: msg.body,
@@ -12679,7 +12679,7 @@
     return pubHex.slice(0, 8);
   }
 
-  // Open create-group modal — populates the member checkboxes.
+  // Open create-group modal - populates the member checkboxes.
   function openCreateGroupModal() {
     $("#cg-name").value = "";
     const list = $("#cg-members");
@@ -12757,7 +12757,7 @@
       const { folders } = await api.folders();
       state.folders = folders || [];
       // v0.8.9: refresh the conflicts banner whenever the folders
-      // pane refreshes — they're tightly coupled.
+      // pane refreshes - they're tightly coupled.
       refreshFolderConflictsBanner();
       const list = $("#folderlist");
       list.innerHTML = "";
@@ -12833,7 +12833,7 @@
       state.folderConflicts.unresolved_total = r.unresolved_total || 0;
       state.folderConflicts.conflicts = r.conflicts || [];
     } catch (e) {
-      // 404 means a pre-v0.8.9 daemon — banner stays hidden.
+      // 404 means a pre-v0.8.9 daemon - banner stays hidden.
       state.folderConflicts.unresolved_total = 0;
       state.folderConflicts.conflicts = [];
     }
@@ -12852,7 +12852,7 @@
     const strong = el("strong", null, `${n} divergent-edit conflict${n === 1 ? "" : "s"}`);
     text.appendChild(strong);
     text.appendChild(document.createTextNode(
-      ` — two devices changed the same file at the same time. Click to choose which version wins.`
+      ` - two devices changed the same file at the same time. Click to choose which version wins.`
     ));
     banner.appendChild(text);
     banner.appendChild(el("span", "cb-cta", "Review →"));
@@ -12937,9 +12937,9 @@
     const mtime = c[side + "_mtime_ms"];
     const peer = side === "remote" ? (c.peer_fp || "?") : "this device";
     v.appendChild(makeMetaLine("blob", (blob || "?").slice(0, 16) + "…"));
-    v.appendChild(makeMetaLine("size", size != null ? fmtBytes(size) : "—"));
+    v.appendChild(makeMetaLine("size", size != null ? fmtBytes(size) : "-"));
     v.appendChild(makeMetaLine(
-      "modified", mtime ? new Date(mtime).toLocaleString() : "—"
+      "modified", mtime ? new Date(mtime).toLocaleString() : "-"
     ));
     v.appendChild(makeMetaLine(
       "from", peer === "this device" ? peer : peer.slice(0, 12) + "…"
@@ -12966,7 +12966,7 @@
       if (res.already_resolved) {
         toast("Conflict already resolved.", "info");
       } else if (choice === "both") {
-        toast(`Kept both — saved peer's version as ${res.suffixed_path || "*.conflict-…"}`, "good", 6000);
+        toast(`Kept both - saved peer's version as ${res.suffixed_path || "*.conflict-…"}`, "good", 6000);
       } else if (choice === "mine") {
         toast("Kept your version.", "good");
       } else {
@@ -13183,10 +13183,10 @@
       const before = (state.rendezvousUrls || []).length;
       state.rendezvousUrls = r.urls || [];
       if (before === 0 && state.peers && state.peers.size === 0) {
-        // The empty-state callout depends on this — re-render.
+        // The empty-state callout depends on this - re-render.
         renderPeers();
       }
-    } catch (e) { /* ignore — rendezvous is optional */ }
+    } catch (e) { /* ignore - rendezvous is optional */ }
   }
 
   async function refreshFabricTruth() {
@@ -13384,7 +13384,7 @@
     });
   });
 
-  // Schedule a refresh — coalesce many WS events per frame.
+  // Schedule a refresh - coalesce many WS events per frame.
   $("#one-now-send")?.addEventListener("click", () => {
     const filesBtn = document.querySelector('[data-pane="files"]');
     if (filesBtn && !_phoneCannotShow(filesBtn)) {
@@ -13428,7 +13428,7 @@
       for (const t of state.transfers) state.transfersById.set(t.id, t);
       renderTransfers();
       renderCourierKit();
-      // Status of file bubbles is driven by transfersById — re-render
+      // Status of file bubbles is driven by transfersById - re-render
       // the active conversation so progress reflects the fresh data.
       renderMessages();
       await refreshStatus();
@@ -13542,7 +13542,7 @@
   }
 
   // ── Selection ──────────────────────────────────────────────────────
-  // v0.14.0 — Service Worker registration + offline outbox.
+  // v0.14.0 - Service Worker registration + offline outbox.
   // Goal: a tab-blur during composition saves the draft + queues
   // any in-flight send into IDB. The browser's `sync` event drains
   // the queue when connectivity returns. The page also pokes the
@@ -13610,7 +13610,7 @@
   }
 
   // Wrap api.post so a network failure on /api/send queues into IDB
-  // for later. Called explicitly from sendCurrent — we don't want to
+  // for later. Called explicitly from sendCurrent - we don't want to
   // queue arbitrary failed POSTs (that would queue auth refreshes,
   // settings saves, etc.). Outbox is for sends ONLY.
   async function _sendWithOutbox(path, body) {
@@ -13636,7 +13636,7 @@
       throw e;
     }
   }
-  // v0.15.1 — Offline indicator. Reads navigator.onLine at boot
+  // v0.15.1 - Offline indicator. Reads navigator.onLine at boot
   // + listens for online/offline events. The banner is calm copy
   // ("messages queue and send when you're back") so a flaky cafe
   // Wi-Fi doesn't read as something being broken. We deliberately
@@ -13648,7 +13648,7 @@
     if (!b) return;
     b.classList.toggle("show", !online);
   }
-  // Apply at boot — navigator.onLine is set by the time scripts run.
+  // Apply at boot - navigator.onLine is set by the time scripts run.
   _applyOnlineState(navigator.onLine !== false);
   window.addEventListener("offline", () => {
     _applyOnlineState(false);
@@ -13663,7 +13663,7 @@
     toast("Back online. Sending queued messages.", "good", 3000);
   });
 
-  // v0.14.0 — Frame-budget instrumentation. Records the duration
+  // v0.14.0 - Frame-budget instrumentation. Records the duration
   // of selected hot operations into a capped ring buffer. CI / the
   // diagnostics overlay can read state.frameBudget to verify SLAs
   // (renderMessages within 16.7ms, conversation-switch within
@@ -13719,7 +13719,7 @@
     return out;
   };
 
-  // v0.14.0 — Predictive peer-switch prefetch (Markov chain).
+  // v0.14.0 - Predictive peer-switch prefetch (Markov chain).
   //
   // Frontier engine for conversation-switch latency: when the user
   // taps peer A, we want their last 50 messages already decoded into
@@ -13793,9 +13793,9 @@
   state.markov = _loadMarkov();
   state.lastSelectedShortId = null;
 
-  // v0.14.2 — state.tier and the show-advanced toggle.
+  // v0.14.2 - state.tier and the show-advanced toggle.
   // tier = "default" | "advanced". On phone: default-off, per-session
-  // (resets on tab close — we deliberately don't persist). On desktop:
+  // (resets on tab close - we deliberately don't persist). On desktop:
   // default-on, persists in localStorage so power users don't have to
   // re-enable on every reload.
   state.tier = "default";
@@ -13852,7 +13852,7 @@
     host.appendChild(hint);
   }
 
-  // v0.14.3 — guard programmatic pane navigation. The transfer pill
+  // v0.14.3 - guard programmatic pane navigation. The transfer pill
   // and the mesh-panel "active" tile both call .click() on a
   // [data-pane="files"] button. On phone that button carries
   // .desktop-only and is hidden via display:none !important; firing
@@ -13930,7 +13930,7 @@
     if (next && next !== currentShortId) _prefetchPeerMessages(next);
   }
 
-  // v0.14.1 — Last-conversation persistence. We persist the
+  // v0.14.1 - Last-conversation persistence. We persist the
   // currently-selected peer / group so opening the app boots
   // straight back into the user's last chat (no manual re-tap on
   // every reload). Stored under one_link.last_selection.v1; tiny
@@ -13994,7 +13994,7 @@
     // v0.14.0 mobile: tapping a peer auto-closes the drawer.
     closeMobileSidebar();
     // v0.21.1: switching peers resets the new-message pill state
-    // — a stale "↓ 3 new" badge from the previous conversation
+    // - a stale "↓ 3 new" badge from the previous conversation
     // would mislead the user about the new one.
     _hideNewMessagePill();
     _lastRenderedLen = 0;
@@ -14021,7 +14021,7 @@
     $("#convo-who").title = "Open device settings";
     $("#btn-group-settings").style.display = "none";
     $("#btn-attach").style.display = "";
-    // v0.11.5 — apply this peer's wallpaper accent.
+    // v0.11.5 - apply this peer's wallpaper accent.
     applyActiveChatWallpaper();
     if (state.replyTo?.group_id) clearReplyTo();
     $("#convo-name").textContent = peer.display_name || peer.hostname || "(unknown)";
@@ -14068,28 +14068,28 @@
     $("#input").focus();
     $("#drop-peer").textContent = peer.hostname || peer.short_id;
     // v0.7.6: opening the conversation marks all of this peer's
-    // messages as read. Best-effort — don't block on the network.
+    // messages as read. Best-effort - don't block on the network.
     maybeSendReadMarker(peer);
   }
 
   // v0.7.8: pretty severity label.
   function severityLabel(sev) {
-    if (sev === "high") return "high — was a paired device";
-    if (sev === "medium") return "medium — known peer";
-    if (sev === "low") return "low — never paired";
+    if (sev === "high") return "high - was a paired device";
+    if (sev === "medium") return "medium - known peer";
+    if (sev === "low") return "low - never paired";
     return sev || "unknown";
   }
   function severityClass(sev) {
     return `severity-tag severity-${sev || "low"}`;
   }
   function shortFp(fp) {
-    if (!fp) return "—";
+    if (!fp) return "-";
     return fp.length > 16 ? `${fp.slice(0, 8)}…${fp.slice(-8)}` : fp;
   }
 
   // v0.7.8: render the prominent red banner under the conversation
   // header when the selected peer has 1+ unacked key-change events.
-  // Hidden if zero. The banner is conversation-scoped — moving to
+  // Hidden if zero. The banner is conversation-scoped - moving to
   // a different peer reruns this with that peer's events.
   function renderConvKeyChangeBanner(peer) {
     const banner = $("#convo-keychange");
@@ -14107,7 +14107,7 @@
     const strong = el("strong", null, "Key change detected");
     text.appendChild(strong);
     const detail = document.createTextNode(
-      ` — "${ev.hostname}" is now advertising a different identity key. ` +
+      ` - "${ev.hostname}" is now advertising a different identity key. ` +
       (count > 1 ? `${count} events unacknowledged. ` : "") +
       "Re-pair only after confirming the new identity through a side channel."
     );
@@ -14221,7 +14221,7 @@
       const label = peer.verified_method
         ? `Verified in person · ${verifyMethodLabel(peer.verified_method)}`
         : "Verified in person";
-      pill.title = peer.verified_note ? `${label} — ${peer.verified_note}` : label;
+      pill.title = peer.verified_note ? `${label} - ${peer.verified_note}` : label;
       host.appendChild(pill);
     } else {
       const cta = el("span", "verify-cta", "Verify in person");
@@ -14297,7 +14297,7 @@
   state.deviceDrawerSas = null;      // v0.7.9: cached SAS for speak / art
 
   function _humanRelMs(ms) {
-    if (!ms) return "—";
+    if (!ms) return "-";
     const d = Date.now() - ms;
     if (d < 0) return "just now";
     const m = Math.floor(d / 60000);
@@ -14377,7 +14377,7 @@
     if (regEl) regEl.textContent = reachLabel(peer);
     const lat = peer.health?.latency_ewma_ms;
     const latEl = $("#dev-latency");
-    if (latEl) latEl.textContent = lat == null ? "—" : `${Math.round(lat)} ms`;
+    if (latEl) latEl.textContent = lat == null ? "-" : `${Math.round(lat)} ms`;
     const lastAliveEl = $("#dev-lastalive");
     if (lastAliveEl) lastAliveEl.textContent =
       _humanRelMs(peer.health?.last_alive_ms || peer.last_seen_ms);
@@ -14402,7 +14402,7 @@
     });
     // SAS fetch is async; we still want to surface the modal even if
     // /api/peers/{fp}/sas hangs or 404s. We don't await it before
-    // showing the modal — fire-and-forget below.
+    // showing the modal - fire-and-forget below.
 
     tryStep("verification", () => renderDrawerVerification(peer));
     tryStep("key-change", () => renderDrawerKeyChange(peer));
@@ -14421,7 +14421,7 @@
       tlBtn.classList.remove("on");
     }
 
-    // v0.13.2: show the modal NOW — every cosmetic helper has run
+    // v0.13.2: show the modal NOW - every cosmetic helper has run
     // (or failed soft) and the user gets settings up regardless.
     $("#device-backdrop")?.classList.add("show");
 
@@ -14431,7 +14431,7 @@
       try {
         const sas = await api.get(`/api/peers/${peer.fingerprint}/sas`);
         const sasEl = $("#dev-sas");
-        if (sasEl) sasEl.textContent = sas.sas || "—";
+        if (sasEl) sasEl.textContent = sas.sas || "-";
         if (sas.sas) {
           state.deviceDrawerSas = sas.sas;
           tryStep("sas-art", () => renderSasArt($("#dev-sas-art"), sas.sas));
@@ -14444,7 +14444,7 @@
   }
 
   // v0.7.7: pretty label for a verification method tag stored in
-  // peers.verified_method. Single source of truth — the device
+  // peers.verified_method. Single source of truth - the device
   // drawer status row, the avatar overlay tooltip, and any future
   // audit-log surface use the same labels.
   function verifyMethodLabel(method) {
@@ -14453,7 +14453,7 @@
       case "sas-qr":     return "QR scan";
       case "sas-audio":  return "Spoken SAS";
       case "manual":     return "Manual";
-      default:           return method || "—";
+      default:           return method || "-";
     }
   }
 
@@ -14474,7 +14474,7 @@
       whenRow.style.display = "";
       $("#dev-verify-when").textContent = peer.verified_at_ms
         ? `${_humanRelMs(peer.verified_at_ms)} (${new Date(peer.verified_at_ms).toLocaleString()})`
-        : "—";
+        : "-";
       methodRow.style.display = "";
       $("#dev-verify-method").textContent = verifyMethodLabel(peer.verified_method);
       if (peer.verified_note) {
@@ -14488,7 +14488,7 @@
     } else {
       helpEl.textContent =
         "Compare the SAS above with the same value on the other " +
-        "device — face-to-face, on a call, or by reading it aloud. " +
+        "device - face-to-face, on a call, or by reading it aloud. " +
         "If they match, mark this device verified to surface a " +
         "green checkmark across the chat.";
       whenRow.style.display = "none";
@@ -14534,9 +14534,9 @@
     syncA11y();
   }
 
-  // May 16 2026 — RED-TEAM FIX. The Settings panel + device drawer
+  // May 16 2026 - RED-TEAM FIX. The Settings panel + device drawer
   // had 13 visual "toggle" UIs (CSS-styled checkboxes), but only 4
-  // were wired through bindSwitch. The other 9 were dead — clicking
+  // were wired through bindSwitch. The other 9 were dead - clicking
   // the slider did NOTHING because the underlying <input> never
   // flipped + no change event ever fired. (The input itself is
   // hidden via `display: none` so users can't click it directly
@@ -14544,7 +14544,7 @@
   //
   // Fix: bindSwitch every checkbox that lives inside a .toggle
   // wrapper. Plus remove the stale "set-rendezvous" entry (it's a
-  // textarea — bindSwitch silently no-oped for it but it confused
+  // textarea - bindSwitch silently no-oped for it but it confused
   // future maintainers).
   //
   // We pull the list dynamically from the DOM so a future toggle
@@ -14815,7 +14815,7 @@
     }
   };
 
-  // v0.11.5 per-chat tools — peer scope.
+  // v0.11.5 per-chat tools - peer scope.
   $("#dev-clear-history")?.addEventListener("click", async () => {
     const fp = state.deviceDrawerFp;
     if (!fp) return;
@@ -14853,7 +14853,7 @@
     openMediaGallery(fp);
   });
 
-  // v0.11.5 — kick off a download via a temporary anchor. Avoids the
+  // v0.11.5 - kick off a download via a temporary anchor. Avoids the
   // CORS / fetch-blob dance and lets the browser handle saving.
   function _downloadConvoExport(url) {
     const a = document.createElement("a");
@@ -14864,7 +14864,7 @@
     document.body.removeChild(a);
   }
 
-  // v0.12.1 — wallpaper accent for an individual chat. Now
+  // v0.12.1 - wallpaper accent for an individual chat. Now
   // server-synced via _writeChatPref so the user's other devices
   // see the same tint.
   const _CHAT_WALLPAPER_PRESETS = [
@@ -14919,7 +14919,7 @@
     }
   }
 
-  // v0.11.5 — media gallery modal (peer scope only for now; group
+  // v0.11.5 - media gallery modal (peer scope only for now; group
   // gallery slots in here once the backend list_group_files lands).
   async function openMediaGallery(fp) {
     const host = $("#media-gallery-list");
@@ -15002,7 +15002,7 @@
     const peer = drawerPeerByFp(fp);
     if (!peer) return;
     const sas = ($("#dev-sas").textContent || "").trim();
-    const sasLine = sas && sas !== "…" && sas !== "—" && sas !== "(unavailable)"
+    const sasLine = sas && sas !== "…" && sas !== "-" && sas !== "(unavailable)"
       ? `\n\nSAS for ${peer.display_name || peer.short_id}: ${sas}\n\nConfirm only if it matches what the other device shows.`
       : "\n\nConfirm only if you have already compared the SAS through a side channel.";
     if (!confirm(
@@ -15041,7 +15041,7 @@
       toast(`Verify didn't work: ${errorToastBody(e)}`, "bad");
     }
   };
-  // v0.7.8: drawer's "Acknowledge" button — clears the red banner +
+  // v0.7.8: drawer's "Acknowledge" button - clears the red banner +
   // overlay for THIS peer and writes acked_ms on every unacked event
   // for the peer's fingerprint. Audit rows persist (the events stay
   // in the DB; just marked seen).
@@ -15051,7 +15051,7 @@
     if (!confirm(
       "Acknowledge every key-change event for this device?\n\n" +
       "The events stay in the audit log. Acknowledging only clears " +
-      "the red warning banner — it does NOT re-trust the new key. " +
+      "the red warning banner - it does NOT re-trust the new key. " +
       "If you want to chat with the new identity, re-pair from scratch."
     )) return;
     await ackPeerKeyChange(fp);
@@ -15091,7 +15091,7 @@
     if (!peer) return;
     if (!confirm(
       `Revoke the in-person verification for "${peer.display_name || peer.hostname || peer.short_id}"?\n\n` +
-      "The cryptographic channel stays intact — only the side-channel " +
+      "The cryptographic channel stays intact - only the side-channel " +
       "trust mark is cleared. The original verification stays in the audit log."
     )) return;
     try {
@@ -15142,7 +15142,7 @@
     toggleMobileSidebar();
   });
   $("#mobile-scrim")?.addEventListener("click", closeMobileSidebar);
-  // Escape closes the drawer (and any modal — that's already handled
+  // Escape closes the drawer (and any modal - that's already handled
   // elsewhere; we no-op when a modal is open so we don't compete).
   document.addEventListener("keydown", (ev) => {
     if (ev.key !== "Escape") return;
@@ -15205,7 +15205,7 @@
       const drawerOpen = document.querySelector(".app")?.classList.contains("mobile-side-open");
       // To open: must start in the left edge zone.
       // To close: drawer is open and finger started anywhere right of
-      // the drawer's right edge (~320px) — closes via swipe-left from
+      // the drawer's right edge (~320px) - closes via swipe-left from
       // the conversation area.
       if (!drawerOpen && t.clientX > EDGE_ZONE_PX) return;
       if (drawerOpen && t.clientX < 100) return;  // ignore drag from inside drawer
@@ -15395,7 +15395,7 @@
     setInterval(refreshGroups, 12000);
     maybeShowNotifBanner();
     // v0.21.x: check GitHub Releases for a newer version and surface
-    // the update banner if one's out. Fire-and-forget — the banner
+    // the update banner if one's out. Fire-and-forget - the banner
     // stays hidden if the check fails (offline, rate-limited, etc.).
     checkForUpdate().catch(() => {});
     // v0.8.0: group buttons.
@@ -15408,10 +15408,10 @@
     $("#group-add-member")?.addEventListener("click", addGroupMember);
     $("#group-copy-invite")?.addEventListener("click", copyGroupInviteLink);
     $("#group-leave")?.addEventListener("click", leaveCurrentGroup);
-    // v0.11.3 — new group-settings actions.
+    // v0.11.3 - new group-settings actions.
     $("#group-mute-apply")?.addEventListener("click", applyGroupMute);
     $("#group-archive-toggle")?.addEventListener("click", toggleArchiveCurrentGroup);
-    // v0.11.5 — group chat tools.
+    // v0.11.5 - group chat tools.
     $("#group-clear-history")?.addEventListener("click", async () => {
       const gid = state.selectedGroup;
       if (!gid) return;
@@ -15543,11 +15543,11 @@
   //   2. Don't disrupt the user. Never auto-reload while the user has
   //      draft text in a composer, is mid-pair, has a modal open, or
   //      typed in the last few seconds. If they're busy, defer the
-  //      reload until they're idle — there is no hurry.
+  //      reload until they're idle - there is no hurry.
   //   3. Stay silent when normal. A brief WS reconnect (< 4s) should
   //      pass without surfacing anything. Only when reconnect drags
   //      do we light up the existing offline banner with a calm
-  //      link-repair message — same channel users already know
+  //      link-repair message - same channel users already know
   //      from the OS-offline path, so it reads as familiar, not new.
   //   4. Never reload-loop. We persist "already refreshed for version
   //      X" in sessionStorage so a misbehaving daemon can't flap us
@@ -15690,7 +15690,7 @@
         if (v === PAGE_BUILT_FOR) return;
         scheduleSoftReload(v, "reconnect");
       } catch {
-        // Ignore — we'll get another shot on the next reconnect.
+        // Ignore - we'll get another shot on the next reconnect.
       }
     }
 
@@ -15706,7 +15706,7 @@
       function attempt() {
         pendingReloadTimer = null;
         if (isUserBusy()) {
-          // Defer up to 5 minutes; after that, just reload — the
+          // Defer up to 5 minutes; after that, just reload - the
           // user might have walked away leaving draft text behind,
           // and a stale page is more dangerous than a lost draft.
           if (waitedMs >= 5 * 60 * 1000) {
@@ -15782,16 +15782,16 @@
         refreshPeers();
         if (state.discoverOpen) loadDiscoverable();
       } else if (m.type === "call_event") {
-        // Living Presence Tier α-pre — call lifecycle / consent
+        // Living Presence Tier α-pre - call lifecycle / consent
         // / capsule events broadcast by the daemon's CallManager.
         // Forward to the call-UI driver defined later in this page.
         try {
           if (typeof window.handleLivingPresenceCallEvent === "function") {
             window.handleLivingPresenceCallEvent(m);
           }
-        } catch (_) { /* defensive — never let UI handler crash WS */ }
+        } catch (_) { /* defensive - never let UI handler crash WS */ }
       } else if (m.type === "frame_provenance") {
-        // Living Presence Tier α-pre — daemon verified an inbound
+        // Living Presence Tier α-pre - daemon verified an inbound
         // FILE_PROVENANCE message (or recorded our own outbound
         // provenance). Update the local map so subsequent
         // renderFileBubble calls render the Reality dot.
@@ -15833,12 +15833,12 @@
         }
         refreshPeers();
       } else if (m.type === "peer_profile" || m.type === "peer_capabilities") {
-        // v0.7.3: alias / mute / cap changes — refresh the sidebar so
+        // v0.7.3: alias / mute / cap changes - refresh the sidebar so
         // the new display name and toggle states show up immediately.
         refreshPeers();
       } else if (m.type === "folder_conflict_detected") {
         scheduleActivityRefresh();  // v0.9.1: surface in activity feed
-        // v0.8.9: live conflict — refresh the banner + (if open)
+        // v0.8.9: live conflict - refresh the banner + (if open)
         // the modal so the new entry appears immediately.
         toast(
           `Folder conflict in "${m.conflict?.folder_name || "?"}": ${m.conflict?.file_path || ""}`,
@@ -15849,7 +15849,7 @@
           renderConflictsModal();
         }
       } else if (m.type === "folder_conflict_resolved") {
-        // Another tab resolved one — clear it from our view.
+        // Another tab resolved one - clear it from our view.
         refreshFolderConflictsBanner();
         if ($("#conflicts-backdrop").classList.contains("show")) {
           renderConflictsModal();
@@ -15873,7 +15873,7 @@
         );
         refreshPeers();
       } else if (m.type === "self_presence") {
-        // v0.10.4: another tab changed our presence — sync.
+        // v0.10.4: another tab changed our presence - sync.
         applyPresenceUI(m.presence);
       } else if (m.type === "chat_pref") {
         // v0.12.1: another tab (or another device) changed a per-
@@ -15962,7 +15962,7 @@
         // expires_at_ms so we can render the banner + auto-hide
         // when the deadline passes. Honors display privacy: if
         // off, the daemon broadcasts to other tabs but we treat
-        // each tab independently — a tab where the user has the
+        // each tab independently - a tab where the user has the
         // toggle off should still drop the banner. (The daemon
         // does the gating; this is belt-and-suspenders.)
         if (state.runtimeSettings?.display_typing_indicators === false) return;
@@ -16118,7 +16118,7 @@
             if (peer) {
               openPairModalIncoming(peer, m.sas);
             } else {
-              toast("Incoming pair request — refreshing devices…", "info");
+              toast("Incoming pair request - refreshing devices…", "info");
             }
           } catch (e) {
             console.warn(e);
@@ -16528,7 +16528,7 @@
     }
   });
 
-  // v0.10.5 bonus polish — slash commands. Preprocesses the
+  // v0.10.5 bonus polish - slash commands. Preprocesses the
   // composer body before send. Recognized: /shrug, /tableflip,
   // /unflip, /me <text>, /clear (clears pinned), /help.
   function _expandSlashCommand(body) {
@@ -16604,15 +16604,63 @@
       }
       return;
     }
-    if (!state.selectedPeer) return;
+    // v0.21.x - bulletproof send path. Previous behavior silently
+    // returned when state.selectedPeer was unset (e.g. focus drifted
+    // during a call, peer list refreshed mid-keystroke). User got no
+    // feedback and assumed the message sent. NEVER swallow Enter
+    // without telling the user what happened.
+    if (!state.selectedPeer) {
+      // Try to recover the intended peer from the visible chat header
+      // or the last-selected fingerprint persisted at boot.
+      const recovered = (function () {
+        // Last-selected from localStorage (saved on every selectPeer).
+        try {
+          const raw = localStorage.getItem("one_link.last_selection");
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed.kind === "peer" && parsed.id) {
+              const p = state.peers.get(parsed.id);
+              if (p && p.trust !== "rejected") return parsed.id;
+            }
+          }
+        } catch (_) { /* fall through */ }
+        // First pinned online peer as a sane fallback.
+        for (const p of state.peers.values()) {
+          if (p.trust === "pinned" && p.online) return p.short_id;
+        }
+        return null;
+      })();
+      if (recovered) {
+        selectPeer(recovered);
+      } else {
+        toast(
+          "Pick a device first - tap a name in the left sidebar to start.",
+          "info", 5000,
+        );
+        return;
+      }
+    }
     const peer = state.peers.get(state.selectedPeer);
-    if (peer?.trust === "rejected") {
+    if (!peer) {
+      toast(
+        "That device just dropped off the network. Try again in a moment.",
+        "info", 5000,
+      );
+      return;
+    }
+    if (peer.trust === "rejected") {
       toast("This device is blocked. Use Allow device first.", "bad");
       return;
     }
     const body = input.value.trim();
     const filesToSend = state.staged.slice();
-    if (!body && filesToSend.length === 0) return;
+    if (!body && filesToSend.length === 0) {
+      // Don't silently no-op an Enter on an empty input - the user
+      // probably hit Enter to send a paste that didn't land in the
+      // textarea. Surface that.
+      toast("Nothing to send - type or paste your message first.", "info", 3000);
+      return;
+    }
 
     sendBtn.disabled = true;
     try {
@@ -16627,7 +16675,23 @@
           // payload into IDB; the Service Worker drains it when
           // connectivity returns. Treat queued = success from the
           // user's perspective (UI clears + draft saved).
-          await _sendWithOutbox("/api/send", sendBody);
+          const result = await _sendWithOutbox("/api/send", sendBody);
+          // Defensive: if the daemon returned a structured failure
+          // (e.g. capability_disabled, peer_rejected) the request
+          // succeeds at the HTTP layer but result.ok is false. The
+          // old code only caught thrown exceptions and let the
+          // input clear on a "soft" rejection - losing the typed
+          // message with no toast. Surface that here.
+          if (result && result.ok === false) {
+            toast(
+              result.user_message
+                || result.error
+                || "Message couldn't be sent. Try again.",
+              "bad", 8000,
+            );
+            // Keep the input so the user can edit + retry.
+            return;
+          }
           input.value = "";
           input.style.height = "auto";
           clearActiveDraft();
@@ -16662,7 +16726,7 @@
   };
   $("#btn-attach").addEventListener("click", triggerAttach);
   $("#btn-attach2").addEventListener("click", triggerAttach);
-  // v0.9.2 voice — click toggles record / stop. Cancel + Send buttons
+  // v0.9.2 voice - click toggles record / stop. Cancel + Send buttons
   // in the overlay handle explicit cancel vs send.
   $("#btn-voice")?.addEventListener("click", () => {
     if (state.voiceRec) {
@@ -16691,7 +16755,7 @@
     if (state.voiceRec) stopVoiceRecording({ cancel: false });
     else startVoiceRecording();
   });
-  // Screenshot button — reads clipboard image (e.g. from Win+Shift+S) and stages it.
+  // Screenshot button - reads clipboard image (e.g. from Win+Shift+S) and stages it.
   $("#btn-screenshot").addEventListener("click", async () => {
     if (!state.selectedPeer) { toast("Pick a device first. Aim is required.", "info"); return; }
     if (!navigator.clipboard?.read) {
@@ -16735,7 +16799,7 @@
       const res = await api.post("/api/inbox/reveal", {});
       if (res?.throttled) {
         t?.remove?.();
-        toast("Inbox is opening — check your taskbar.", "info", 2500);
+        toast("Inbox is opening - check your taskbar.", "info", 2500);
       }
     } catch (e) {
       t?.remove?.();
@@ -16913,7 +16977,7 @@
     const setup = await refreshOneSetup();
     try {
       if (localStorage.getItem(ONBOARDING_STORAGE_KEY) === "1") return;
-    } catch { /* localStorage may be blocked — fall through */ }
+    } catch { /* localStorage may be blocked - fall through */ }
     if (setup?.completed) {
       _markOnboardingComplete(/* persistRemote */ false);
       return;
@@ -16996,7 +17060,7 @@
         $("#me-host").textContent = newName;
       } catch (e) {
         toast(`Couldn't save name: ${e.message || e}`, "warn");
-        // Don't bail — let the user finish onboarding anyway.
+        // Don't bail - let the user finish onboarding anyway.
       }
     }
     try { await api.setupAction("complete"); } catch {}
@@ -17283,7 +17347,7 @@
   }
 
   function paletteHighlight(text, query) {
-    // Simple case-insensitive highlight — wraps the matched span
+    // Simple case-insensitive highlight - wraps the matched span
     // in <mark>. Falls back to plain text if no match.
     const t = String(text || "");
     if (!query) return document.createTextNode(t);
@@ -17435,7 +17499,7 @@
     closePalette();
     // Switch to the conversation, then scroll to the message id.
     if (m.room_id) {
-      // Group message — if we know which group.
+      // Group message - if we know which group.
       // No direct ID mapping here; just open the conversation.
     }
     if (m.peer_fp) {
@@ -17452,7 +17516,7 @@
   }
   function paletteOpenFile(f) {
     closePalette();
-    // Open the file in a new tab — same as the per-bubble Open link.
+    // Open the file in a new tab - same as the per-bubble Open link.
     window.open(`/api/files/${encodeURIComponent(f.name)}`, "_blank");
   }
 
@@ -17496,7 +17560,7 @@
     // Ctrl/Cmd + K opens the palette from anywhere.
     // Legacy shortcut smoke shape: "k" || e.key === "K"
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k" && !e.shiftKey) {
-      // Don't fight the existing per-conversation Ctrl+K — only
+      // Don't fight the existing per-conversation Ctrl+K - only
       // override when palette is closed AND the active element
       // isn't the conversation search input.
       if (document.activeElement?.id === "search-input") return;
@@ -17533,7 +17597,7 @@
 
   // ── Voice recording (v0.9.2) ───────────────────────────────────────
   // Uses MediaRecorder (browser-native opus/webm) + reuses the
-  // existing /api/send-file pipeline. No new wire protocol — the
+  // existing /api/send-file pipeline. No new wire protocol - the
   // peer just receives a regular file send; renderFileBubble
   // recognizes audio extensions and renders a player inline.
   state.voiceRec = null;        // MediaRecorder instance
@@ -17629,7 +17693,7 @@
       state.voiceChunks = [];
       if (wasCancelled || chunks.length === 0) return;
       const blob = new Blob(chunks, { type: recMime });
-      // Minimum threshold — anything under 200ms is almost
+      // Minimum threshold - anything under 200ms is almost
       // certainly a misclick. Don't waste a peer-side bubble.
       if (blob.size < 1024) {
         toast("Voice clip was barely a syllable. Tossed.", "info");
@@ -17684,7 +17748,7 @@
     // Hard cap at 5 minutes to protect the channel.
     if (sec >= 300) {
       stopVoiceRecording({ cancel: false });
-      toast("Voice clip capped at 5 minutes — sending now.", "info", 4000);
+      toast("Voice clip capped at 5 minutes - sending now.", "info", 4000);
     }
   }
 
@@ -17700,7 +17764,7 @@
       const result = await api.upload(state.selectedPeer, file);
       sendingToast?.remove();
       if (result?.queued || result?.paused) {
-        toast(`Waiting for device — ${file.name} will send automatically.`, "info", 5000);
+        toast(`Waiting for device - ${file.name} will send automatically.`, "info", 5000);
       }
     } catch (e) {
       sendingToast?.remove();
@@ -17708,7 +17772,7 @@
     }
   }
 
-  // Paste — stage instead of auto-send.
+  // Paste - stage instead of auto-send.
   function handlePasteImage(e) {
     if (!state.selectedPeer) return false;
     const items = e.clipboardData?.items;
@@ -17735,7 +17799,7 @@
   // v0.12.3: typing indicator. Fires on every non-empty input
   // event; daemon-side debounces to once per 2.5s/peer so a fast
   // typer doesn't flood the wire. Privacy gate is enforced
-  // server-side too — we don't bother shipping the API call when
+  // server-side too - we don't bother shipping the API call when
   // the user has opted out, because we know we'll get
   // skipped='privacy' back.
   let _lastTypingFiredAt = 0;
@@ -17755,7 +17819,7 @@
           .catch(() => { /* best-effort */ });
       }
     }
-    // Group typing not implemented in this ship — would need a
+    // Group typing not implemented in this ship - would need a
     // group_typing wire kind that fans out to all members.
   });
   document.addEventListener("paste", (e) => {
@@ -17766,7 +17830,7 @@
     handlePasteImage(e);
   });
 
-  // Drag-drop — stage instead of auto-send.
+  // Drag-drop - stage instead of auto-send.
   let dragCounter = 0;
   document.addEventListener("dragenter", (e) => {
     if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) {
@@ -17885,7 +17949,7 @@
 
   // v0.7.3: the previous global `.cap-toggle` binding lived here.
   // It was leftover from the now-deleted chat-header peer-tools
-  // row, and it ran AFTER the drawer-specific binding — silently
+  // row, and it ran AFTER the drawer-specific binding - silently
   // overwriting the drawer's onclick handlers, which is why the
   // drawer's toggles + Save flow appeared dead. Drawer wiring is
   // now self-contained inside openDeviceDrawer.
@@ -17956,7 +18020,7 @@
     });
   }
   // Tap-to-copy on the pair-code card. The whole big code is a
-  // button — single tap copies + flashes feedback.
+  // button - single tap copies + flashes feedback.
   const _inviteCodeCard = $("#invite-code-card");
   if (_inviteCodeCard) {
     _inviteCodeCard.addEventListener("click", async () => {
@@ -17975,7 +18039,7 @@
       }
     });
   }
-  // Native share sheet (mobile / touch only — on Windows desktop
+  // Native share sheet (mobile / touch only - on Windows desktop
   // this routes to Microsoft Phone Link which is corp-tied and not
   // what the user wants). The Share button is hidden on desktop.
   const _inviteShare = $("#invite-share");
@@ -17997,7 +18061,7 @@
       }
     });
   }
-  // Email — opens the user's default mail client with a
+  // Email - opens the user's default mail client with a
   // pre-filled subject + body. No corp routing, no Phone Link.
   const _inviteEmail = $("#invite-email");
   if (_inviteEmail) {
@@ -18019,7 +18083,7 @@
       }
     });
   }
-  // Show big — display the QR fullscreen so a device across the
+  // Show big - display the QR fullscreen so a device across the
   // room can scan it. Great for showing on a TV / external monitor.
   const _inviteFullscreen = $("#invite-fullscreen");
   if (_inviteFullscreen) {
@@ -18048,7 +18112,7 @@
       }
     });
   }
-  // Fullscreen QR — tap anywhere to close.
+  // Fullscreen QR - tap anywhere to close.
   const _fsBackdrop = $("#invite-fullscreen-backdrop");
   if (_fsBackdrop) {
     _fsBackdrop.addEventListener("click", () => {
@@ -18096,7 +18160,7 @@
     };
   });
 
-  // v0.8.1.1: Diagnostics overlay open/close — accessible only via
+  // v0.8.1.1: Diagnostics overlay open/close - accessible only via
   // Ctrl+Shift+D OR the Settings modal's "Open diagnostics" button.
   // Intentionally hidden from the chat surface (chat-first, debug
   // when you need it).
@@ -18122,7 +18186,7 @@
     openDebugOverlay();
   });
 
-  // v0.15.0 — PWA install prompt handler. Browsers (Chrome, Edge,
+  // v0.15.0 - PWA install prompt handler. Browsers (Chrome, Edge,
   // Samsung Internet, Brave) fire `beforeinstallprompt` once
   // installability criteria are met (manifest valid + SW registered
   // + served over HTTPS or localhost). We capture the event, prevent
@@ -18181,7 +18245,7 @@
     }
   });
 
-  // Detect "already running as installed PWA" — Chrome sets the
+  // Detect "already running as installed PWA" - Chrome sets the
   // display-mode media query to "standalone" inside the installed
   // shell. Suppress the install affordance so the user isn't told
   // to "install" the thing they're already inside.
@@ -18189,7 +18253,7 @@
     _hideInstallAffordance();
   }
 
-  // v0.14.8 — Phone diagnostics escape hatch. The Advanced settings
+  // v0.14.8 - Phone diagnostics escape hatch. The Advanced settings
   // pane carries the desktop-only "Open diagnostics" button + the
   // page-wide Ctrl+Shift+D shortcut. Phones have neither (no
   // keyboard, Advanced pane is hidden). Long-pressing the version
@@ -18202,7 +18266,7 @@
     if (!target) return;
     let timer = null;
     const start = (e) => {
-      // Skip non-phone form-factors — desktop has Ctrl+Shift+D and
+      // Skip non-phone form-factors - desktop has Ctrl+Shift+D and
       // the Advanced pane button. Avoid surprising desktop users
       // who linger on the version string.
       const ff = document.documentElement.getAttribute("data-form-factor");
@@ -18350,7 +18414,7 @@
           if (leaf) nameEl.value = leaf;
         }
       } else if (r && r.cancelled) {
-        // User cancelled — no toast, no noise.
+        // User cancelled - no toast, no noise.
       }
     } catch (e) {
       toast(`Browse unavailable on this device: ${errorToastBody(e)}`, "info", 4000);
@@ -18358,7 +18422,7 @@
   });
   // v0.8.9: conflicts modal close button.
   $("#conflicts-close")?.addEventListener("click", closeConflictsModal);
-  // Esc closes too — match other modals.
+  // Esc closes too - match other modals.
   $("#conflicts-backdrop")?.addEventListener("click", (e) => {
     if (e.target === e.currentTarget) closeConflictsModal();
   });
@@ -18515,14 +18579,14 @@
   // representations alongside the canonical digits so the user can
   // pick whichever modality fits the situation:
   //
-  //   • Audio readback — SpeechSynthesis reads "zero four three,
+  //   • Audio readback - SpeechSynthesis reads "zero four three,
   //     one nine two" aloud so the OTHER end can echo it back.
-  //   • Visual SAS art — a deterministic 6-cell grid of distinct
+  //   • Visual SAS art - a deterministic 6-cell grid of distinct
   //     emoji + colors derived from the SAS. Faster to compare
   //     visually than reading 6 digits twice (similar in spirit to
   //     SSH host-key randomart, Threema's emoji codes).
   //
-  // Both are pure functions of the SAS digits — no extra wire data
+  // Both are pure functions of the SAS digits - no extra wire data
   // needed. Either side can render them locally.
 
   // 24 distinct, easy-to-distinguish emoji. Avoid skin-tone
@@ -18590,7 +18654,7 @@
     }
     // Cancel any in-flight readback so rapid clicks don't queue.
     window.speechSynthesis.cancel();
-    // Spell digit-by-digit with a pause every 3 digits — matches
+    // Spell digit-by-digit with a pause every 3 digits - matches
     // the "043 192" formatting and makes phone-call confirmation
     // bulletproof.
     const words = ["zero","one","two","three","four","five","six","seven","eight","nine"];
@@ -18604,7 +18668,7 @@
     window.speechSynthesis.speak(u);
   }
 
-  // v0.14.7 — phone pair flow: SAS-art primary + shorter button
+  // v0.14.7 - phone pair flow: SAS-art primary + shorter button
   // copy. Reading 6 digits twice on a phone screen is fiddly; the
   // 6-cell visual grid is faster to glance-compare. Buttons get a
   // direct "Match" / "Don't match" framing matching what the user
@@ -18715,8 +18779,8 @@
   }
 
   // v0.8.7: when both devices confirm SAS match, slide to stage 2
-  // ('paired — also verify in person?') instead of closing outright.
-  // Closing the modal still happens — just from the new stage's
+  // ('paired - also verify in person?') instead of closing outright.
+  // Closing the modal still happens - just from the new stage's
   // explicit Skip / Verify button.
   function enterPairVerifyStage() {
     pairTitle.textContent = "Paired successfully";
@@ -18731,7 +18795,7 @@
       const res = await api.post(`/api/peers/${state.pairing.peerFp}/pair-confirm`, {});
       state.pairing.weConfirmed = true;
       if (res.both_confirmed) {
-        // v0.8.7: do NOT close the modal — pivot to the verify-now
+        // v0.8.7: do NOT close the modal - pivot to the verify-now
         // stage. Toast still fires so the user knows pairing succeeded.
         toast("Paired", "good");
         enterPairVerifyStage();
@@ -18774,15 +18838,15 @@
       await api.post(`/api/peers/${state.pairing.peerFp}/pair-reject`, {});
     } catch (e) { /* ignore */ }
     closePairModal(false);
-    toast("Pairing rejected — possible MITM", "bad", 6000);
+    toast("Pairing rejected - possible MITM", "bad", 6000);
     refreshPeers();
   };
   pairCancel.onclick = () => closePairModal(false);
   pairSasEl.onclick = () => {
     const txt = (pairSasEl.textContent || "").replace(/\s+/g, "");
-    if (txt && txt !== "—" && txt !== "…") copyToClipboard(txt, "verification code");
+    if (txt && txt !== "-" && txt !== "…") copyToClipboard(txt, "verification code");
   };
-  // v0.7.9 multi-modal SAS — wire pair-modal helpers.
+  // v0.7.9 multi-modal SAS - wire pair-modal helpers.
   $("#pair-sas-speak")?.addEventListener("click", () => {
     speakSas(state.pairing?.sas);
   });
@@ -18803,8 +18867,8 @@
   const settingsBackdrop = $("#settings-backdrop");
 
   // v0.11.0: settings nav-rail dispatcher. Click a nav button → show
-  // the matching pane, hide the rest. Entirely DOM-local — no router,
-  // no state outside the modal — so a refresh just lands you back
+  // the matching pane, hide the rest. Entirely DOM-local - no router,
+  // no state outside the modal - so a refresh just lands you back
   // on Profile (the default active pane).
   function switchSettingsPane(name) {
     document.querySelectorAll('[data-settings-pane]').forEach((el) => {
@@ -18826,7 +18890,7 @@
     });
   });
 
-  // v0.11.6 — fetch + render the per-chat storage breakdown.
+  // v0.11.6 - fetch + render the per-chat storage breakdown.
   async function refreshStorageUsage() {
     const totalsHost = $("#storage-totals");
     const tableHost = $("#storage-table");
@@ -18865,7 +18929,7 @@
       const num = el("div", "stat-num", String(msgs));
       num.appendChild(el("span", "stat-lbl-inline", " msgs"));
       row.appendChild(num);
-      const sz = el("div", "stat-num", bytes != null ? fmtBytes(bytes) : "—");
+      const sz = el("div", "stat-num", bytes != null ? fmtBytes(bytes) : "-");
       row.appendChild(sz);
       const btn = el("button", "btn-ghost", "Clear");
       btn.onclick = clearFn;
@@ -18983,7 +19047,7 @@
   $("#storage-clear-activity")?.addEventListener("click", () => clearTraceScope("activity", "activity traces"));
   $("#storage-wipe-local")?.addEventListener("click", wipeLocalAppTraces);
 
-  // v0.11.1 Profile helpers — avatar preview + bio counter + color
+  // v0.11.1 Profile helpers - avatar preview + bio counter + color
   // swatches. Local DOM only; persistence is via /api/settings.
   function _initialsFor(name) {
     if (!name) return "?";
@@ -19035,7 +19099,7 @@
   $("#set-name")?.addEventListener("input", _refreshProfileAvatarPreview);
   $("#set-bio")?.addEventListener("input", _renderBioCounter);
 
-  // v0.11.1 — apply chosen avatar color to the user's own avatar
+  // v0.11.1 - apply chosen avatar color to the user's own avatar
   // tiles across the UI. Cheap CSS variable propagation; no DOM
   // re-render needed.
   function applyMyAvatarColor(hex) {
@@ -19067,7 +19131,7 @@
     target.textContent = `Muted until ${d.toLocaleString()}`;
   }
 
-  // v0.11.1 — render blocked devices in Privacy pane. Uses the
+  // v0.11.1 - render blocked devices in Privacy pane. Uses the
   // existing /api/peers endpoint with ?include=rejected so we don't
   // need a new backend route.
   async function refreshBlockedDevicesList() {
@@ -19187,7 +19251,7 @@
 
   // v0.11.0: fill Profile + About panes from /api/me. Done up-front
   // (state.me is already loaded by init()) so opening Settings is
-  // instant — no flash of empty fields.
+  // instant - no flash of empty fields.
   function refreshSettingsAbout() {
     const me = state.me || {};
     const fp = me.fingerprint || "";
@@ -19224,7 +19288,7 @@
       wrap.style.display = "none";
       wrap.innerHTML = "";
     }
-    // v0.20.6 — also clear the iOS trust QR so a stale one
+    // v0.20.6 - also clear the iOS trust QR so a stale one
     // doesn't sit there pointing at a different cert if the
     // user re-mints after the daemon rotated certs.
     const trustWrap = $("#ios-trust-qr-wrap");
@@ -19342,7 +19406,7 @@
 
     toast("Device QR ready. You'll confirm before it becomes trusted.", "good", 3500);
 
-    // v0.20.6 — render the iOS trust-profile QR alongside the
+    // v0.20.6 - render the iOS trust-profile QR alongside the
     // pair QR. iOS Safari refuses to bypass self-signed certs on
     // LAN IPs (no "visit anyway" link), so phones need the
     // .mobileconfig installed once. The trust profile URL is
@@ -19424,7 +19488,7 @@
   });
   $("#btn-mint-pair-cancel")?.addEventListener("click", _resetPairPhoneCard);
 
-  // May 15 2026 — Privacy panel trigger. Opens the sovereignty-
+  // May 15 2026 - Privacy panel trigger. Opens the sovereignty-
   // preset + outbound-audit overlay. Clicking the lock icon does
   // exactly one thing: surface the privacy picture.
   const _privacyBtn = $("#btn-privacy");
@@ -19529,7 +19593,7 @@
   // sounds like before committing.
   $("#set-sound-test")?.addEventListener("click", () => {
     // Bypass the master toggle so test-sound works even when the
-    // user has it disabled — they're explicitly asking to hear it.
+    // user has it disabled - they're explicitly asking to hear it.
     playNotificationChime();
   });
   // v0.10.0: live theme preview as the user changes the dropdown.
@@ -19537,7 +19601,7 @@
     applyTheme(e.target.value);
   });
   $("#settings-save").onclick = async () => {
-    // v0.11.1 — pull avatar_color from the active swatch, bio from
+    // v0.11.1 - pull avatar_color from the active swatch, bio from
     // the input. Both are optional; nullish skips the field on the
     // backend.
     const activeSwatch = $(".profile-color-swatch.active");
@@ -19605,7 +19669,7 @@
       return;
     }
 
-    // v0.5.3: rendezvous URL list — only POST if value actually changed
+    // v0.5.3: rendezvous URL list - only POST if value actually changed
     // (avoids needlessly tearing down a working client).
     const newUrls = $("#set-rendezvous").value
       .split(/[\s,]+/)
@@ -19622,8 +19686,8 @@
         renderRendezvousStatus({ active: res.active, urls: res.urls });
         toast(
           res.urls.length === 0
-            ? "Saved — Wi-Fi-only mode"
-            : `Saved — connected to ${res.urls.length} rendezvous`,
+            ? "Saved - Wi-Fi-only mode"
+            : `Saved - connected to ${res.urls.length} rendezvous`,
           "good",
         );
       } catch (e) {
@@ -19685,7 +19749,7 @@
     rdzHelpBackdrop.classList.add("show");
   };
   $("#rdz-help-close").onclick = () => rdzHelpBackdrop.classList.remove("show");
-  // v0.10.3 — convo-empty pane CTAs.
+  // v0.10.3 - convo-empty pane CTAs.
   $("#convo-empty-pair")?.addEventListener("click", () => {
     $("#open-discover-modal")?.click();
   });
@@ -19723,7 +19787,7 @@
     if (state.discoverOpen) state.discoverOpen = false;
   }
   document.addEventListener("keydown", (e) => {
-    // Esc — universal close (search input, modals)
+    // Esc - universal close (search input, modals)
     if (e.key === "Escape") {
       if (searchWrap.classList.contains("open")) {
         searchInput.value = ""; finishSearch();
@@ -19741,7 +19805,7 @@
     const ctrl = e.ctrlKey || e.metaKey;
     // v0.9.3: Ctrl+K is now the GLOBAL command palette (handled in
     // its own listener earlier in the file). Ctrl+F replaces it as
-    // the per-conversation search trigger — matches Slack / VS Code
+    // the per-conversation search trigger - matches Slack / VS Code
     // / Notion conventions. Without this remap the two handlers
     // would race + the palette would steal focus mid-search.
     if (ctrl && (e.key === "f" || e.key === "F") && !e.shiftKey) {
@@ -19758,7 +19822,7 @@
       input.focus();
       return;
     }
-    // v0.8.1.1: hidden diagnostics — Ctrl+Shift+D.
+    // v0.8.1.1: hidden diagnostics - Ctrl+Shift+D.
     if (ctrl && e.shiftKey && (e.key === "d" || e.key === "D")) {
       e.preventDefault();
       openDebugOverlay();
@@ -19790,7 +19854,7 @@
 
   init();
 
-  // MAY 15 2026 — removed the diagnostic title-bar overlay that
+  // MAY 15 2026 - removed the diagnostic title-bar overlay that
   // previously surfaced viewport measurements like
   // "One Link [vp 1707x996] [win 1707x1019] [chrome-px 23]
   // [.top y=56 h=34]" into the visible title bar. That string was
@@ -19801,7 +19865,7 @@
 })();
 </script>
 
-<!-- May 15 2026 — Privacy panel. Hidden by default; opened from the
+<!-- May 15 2026 - Privacy panel. Hidden by default; opened from the
      Settings sidebar via the lock icon. Renders the live
      sovereignty status: active preset, per-feature state, and the
      full outbound-call audit log. Keeps the main UI simple (this
@@ -19821,7 +19885,7 @@
   </div>
 </div>
 
-<!-- Living Presence Tier α-pre — call surfaces.
+<!-- Living Presence Tier α-pre - call surfaces.
      Hidden by default; populated via JS when call events fire over
      the WebSocket. See docs/LIVING_PRESENCE_ARCHITECTURE.md §3. -->
 <div id="call-outgoing-overlay" class="call-overlay" role="dialog" aria-label="Calling">
@@ -19854,7 +19918,7 @@
   <div class="call-overlay-buttons">
     <button class="btn-call-end" id="btn-call-cancel" aria-label="End call">End</button>
   </div>
-  <!-- "Send a message instead" — appears after 8s with no answer. -->
+  <!-- "Send a message instead" - appears after 8s with no answer. -->
   <div class="call-overlay-fallback" id="call-outgoing-fallback">
     <button id="btn-call-send-msg-instead">Send a message instead</button>
   </div>
@@ -19921,14 +19985,14 @@
 </div>
 
 <script>
-// Living Presence Tier α-pre — call UI driver.
+// Living Presence Tier α-pre - call UI driver.
 // All call actions go through POST /api/v1/calls; state updates
 // arrive over the WebSocket as "call_event" tail events.
 (function () {
   if (typeof window === "undefined") return;
   const $$ = (sel) => document.querySelector(sel);
 
-  // Local state — tracks the currently-shown call surface.
+  // Local state - tracks the currently-shown call surface.
   const callUI = {
     activeCallId: null,
     activeCallPeer: null,
@@ -19973,10 +20037,10 @@
     }
   }
 
-  // ── Tier α media — getUserMedia + RTCPeerConnection bring-up.
+  // ── Tier α media - getUserMedia + RTCPeerConnection bring-up.
   // The browser handles audio/video tracks directly via WebRTC SRTP;
   // the daemon brokers SDP exchange. Local media stays on this device
-  // until the call ends — the daemon never sees the raw audio/video.
+  // until the call ends - the daemon never sees the raw audio/video.
   const media = {
     localStream: null,        // MediaStream from getUserMedia
     remoteStream: null,        // assembled from ontrack events
@@ -20007,7 +20071,7 @@
             { audio: true },
           );
           media.localStream = audioOnly;
-          // No video preview to show — but the call can still
+          // No video preview to show - but the call can still
           // proceed with voice.
           return audioOnly;
         } catch (_) { /* fall through to silent */ }
@@ -20069,7 +20133,7 @@
     syncMuteCameraButtons();
   }
 
-  // Tier β — Reality Engine browser bridge.
+  // Tier β - Reality Engine browser bridge.
   //
   // Every ATTEST_WINDOW_MS (default 1000) the browser hashes the
   // captured audio since the last attestation and POSTs the SHA-256
@@ -20115,7 +20179,7 @@
         recording_state: "none",
       });
     } catch (_) {
-      // Failure is non-fatal — the call continues, dot just stays grey.
+      // Failure is non-fatal - the call continues, dot just stays grey.
     }
   }
 
@@ -20129,7 +20193,7 @@
         mimeType: "audio/webm; codecs=opus",
       });
     } catch (_) {
-      // Browser doesn't support that mimeType — fall back to defaults.
+      // Browser doesn't support that mimeType - fall back to defaults.
       try { attest.recorder = new MediaRecorder(stream); }
       catch (_) { return; }
     }
@@ -20161,7 +20225,7 @@
     // send_ice_candidate). Inbound SDP / ICE arrives as
     // ``call_event`` tail messages over the existing WebSocket.
     if (!window.RTCPeerConnection) return null;
-    // May 15 2026 — sovereignty default: NO third-party STUN
+    // May 15 2026 - sovereignty default: NO third-party STUN
     // servers. Same-LAN pairing works without them (host
     // candidates suffice). Cross-NAT pairing requires the user to
     // opt in via Settings → stun_servers, or the operator to set
@@ -20171,7 +20235,7 @@
     // in. Empty list = host-only ICE = LAN-only fallback.
     const pc = new RTCPeerConnection({ iceServers: [] });
     // Best-effort fetch of user-configured STUN. Silent on failure
-    // — we'd rather degrade to LAN-only than reach a third party.
+    // - we'd rather degrade to LAN-only than reach a third party.
     (async () => {
       try {
         const r = await fetch("/api/peer-rtc/ice-config", {
@@ -20234,7 +20298,7 @@
         call_id: callUI.activeCallId,
         sdp: offer.sdp,
       });
-    } catch (_) { /* fall through — peer may already have an offer */ }
+    } catch (_) { /* fall through - peer may already have an offer */ }
   }
 
   async function sendLocalSdpAnswer() {
@@ -20319,7 +20383,7 @@
   //
   // Surfaces sovereignty preset + per-feature state + the live
   // outbound-call audit log. Hidden by default; opens via
-  // window.openPrivacyPanel() — wired to the lock icon in
+  // window.openPrivacyPanel() - wired to the lock icon in
   // Settings + the Ctrl+Shift+P shortcut.
 
   window.openPrivacyPanel = async function () {
@@ -20437,7 +20501,7 @@
         }</div>`;
     const promise = (outbound && outbound.promise) || "";
 
-    // May 16 2026 — paired-device update hint. When a paired device
+    // May 16 2026 - paired-device update hint. When a paired device
     // is on a newer version, surface that. No call to any outside
     // server needed; the device itself told us.
     const hint = (status && status.peer_version_hint) || {};
@@ -20508,7 +20572,7 @@
   }
 
   function _fmtRelTime(ts_ms) {
-    if (!ts_ms) return "—";
+    if (!ts_ms) return "-";
     const dt = Date.now() - ts_ms;
     if (dt < 60_000) return `${Math.round(dt / 1000)}s ago`;
     if (dt < 3600_000) return `${Math.round(dt / 60_000)}m ago`;
@@ -20526,7 +20590,7 @@
     return String(s == null ? "" : s).replace(/"/g, "&quot;");
   }
 
-  // May 16 2026 — UNIVERSAL MODAL CLOSE LAYER (UX audit P0-1, P0-2,
+  // May 16 2026 - UNIVERSAL MODAL CLOSE LAYER (UX audit P0-1, P0-2,
   // P1-9). Replaces 18+ ad-hoc bindings with one document-level
   // pair of handlers that close ANY visible modal via:
   //   - click on the backdrop element itself (not its children)
@@ -20556,7 +20620,7 @@
   }
   function _closeOverlay(el) {
     if (!el) return;
-    // Special closers — let the existing code path run if it
+    // Special closers - let the existing code path run if it
     // exposes a documented close function. This preserves
     // side-effects (stop recording, release camera, restore focus
     // to the trigger, etc.).
@@ -20583,7 +20647,7 @@
     try { el.dispatchEvent(new CustomEvent("ol-modal-closed", { bubbles: true })); }
     catch (_) {}
   }
-  // Backdrop-click delegation — close when the user clicks the
+  // Backdrop-click delegation - close when the user clicks the
   // dark area outside the inner panel.
   document.addEventListener("click", (ev) => {
     const t = ev.target;
@@ -20624,11 +20688,11 @@
   // Single Esc handler closes the TOPMOST visible overlay.
   // "Topmost" = last visible one in DOM order (highest z-index
   // stacking-context for our use; we always append overlays at
-  // body level). This makes Esc work everywhere — pair modal,
-  // settings, device drawer, call overlays, every menu —
+  // body level). This makes Esc work everywhere - pair modal,
+  // settings, device drawer, call overlays, every menu -
   // without each modal needing its own listener. Doctrine of
   // invisibility honored: the keyboard-shortcuts modal at
-  // L5961 explicitly promises "Esc — close current modal";
+  // L5961 explicitly promises "Esc - close current modal";
   // before this commit that promise was a lie.
   function _topmostVisibleOverlay() {
     const candidates = document.querySelectorAll(
@@ -20670,7 +20734,7 @@
   window.startLivingPresenceCall = async function (
     peerMasterVkHex, peerLabel, opts,
   ) {
-    // May 15 2026 — `opts` is an optional `{ video: boolean }`.
+    // May 15 2026 - `opts` is an optional `{ video: boolean }`.
     //   { video: true }  → voice + video call (camera on)
     //   { video: false } → voice-only call (camera off)
     // Default (no opts) preserves the legacy video-on behaviour so
@@ -20704,11 +20768,11 @@
       stream.getTracks().forEach((t) => {
         try { media.pc.addTrack(t, stream); } catch (_) {}
       });
-      // Tier β — start per-window frame attestation (video only;
+      // Tier β - start per-window frame attestation (video only;
       // voice-only calls have no video frames to attest).
       if (wantVideo) startAttestStream(stream);
       // Wire the self-preview tile (video only). Lets the caller
-      // see exactly what the peer will see when they pick up —
+      // see exactly what the peer will see when they pick up -
       // catches "wrong camera selected" / "lens cover on" before
       // they answer.
       if (wantVideo) {
@@ -20835,7 +20899,7 @@
     }, 8000);
 
     // Probe the daemon's connection-status endpoint to label the
-    // route. Refresh every 2.5s while the overlay is up — the
+    // route. Refresh every 2.5s while the overlay is up - the
     // detected regime may sharpen as the dial progresses.
     _refreshOutgoingRoute().catch(() => { /* non-fatal */ });
     _outgoingState.routeTimerId = setInterval(() => {
@@ -20846,7 +20910,7 @@
   /**
    * Best-effort: pull per-peer regime + latency from /api/peers
    * (the same data the sidebar surfaces) and write a one-liner
-   * route label under the status. Silent on failure — the call
+   * route label under the status. Silent on failure - the call
    * surface must never block on a network probe.
    */
   async function _refreshOutgoingRoute() {
@@ -20884,7 +20948,7 @@
         ? ` · ${Math.round(peer.latency_ms)} ms`
         : "";
       route.textContent = `${regimeLabel}${latency}`;
-    } catch (_) { /* silent — never block the call surface */ }
+    } catch (_) { /* silent - never block the call surface */ }
   }
 
   function hideOutgoingOverlay() {
@@ -21284,7 +21348,7 @@
         stream.getTracks().forEach((t) => {
           try { media.pc.addTrack(t, stream); } catch (_) {}
         });
-        // Tier β — start per-window frame attestation.
+        // Tier β - start per-window frame attestation.
         startAttestStream(stream);
       }
       // If the originator's SDP offer arrived before we accepted,
@@ -21315,7 +21379,7 @@
     });
   });
   // Tier α mute + camera-toggle. The user controls media; the
-  // toggles flip MediaStreamTrack.enabled — track stays connected
+  // toggles flip MediaStreamTrack.enabled - track stays connected
   // (so DTLS-SRTP doesn't churn) but silently emits silence/black.
   const muteBtn = $$("#btn-call-mute");
   if (muteBtn) muteBtn.addEventListener("click", () => {
@@ -21331,7 +21395,7 @@
     media.localStream.getVideoTracks().forEach((t) => { t.enabled = !media.cameraOff; });
     syncMuteCameraButtons();
   });
-  // SAS confirmation pane — shown when the daemon's TrustLedger
+  // SAS confirmation pane - shown when the daemon's TrustLedger
   // reports first-contact (UNVERIFIED) OR a rotated key (CHAIN_OK).
   // Yes = user confirms the words match → daemon pins this peer.
   // No  = user reports a mismatch → daemon refuses + warns.
@@ -21450,7 +21514,7 @@
       return true;
     }
     if (tail === "resume_offer_available") {
-      // The chat surface will render a resume affordance — no
+      // The chat surface will render a resume affordance - no
       // overlay needed here (the call is no longer live).
       if (typeof toast === "function") {
         toast("Voice note saved. You can pick up where you left off.", "info", 4000);
@@ -21496,7 +21560,7 @@
       return true;
     }
     if (tail === "frame_attestation") {
-      // Tier β — Reality dot live update.
+      // Tier β - Reality dot live update.
       // m.verified: bool. m.kind: "Real" | "Repaired" | etc. (UI words).
       if (typeof window.updateRealityDot === "function") {
         window.updateRealityDot({
@@ -21511,11 +21575,11 @@
       addOneCallEvent(m.verified ? "Reality proof confirmed this media window." : "Reality proof is checking this media.");
       return true;
     }
-    // ── Tier δ — Immune System actions ───────────────────────────
+    // ── Tier δ - Immune System actions ───────────────────────────
     if (tail === "immune_lower_fidelity") {
       // Drop the outbound video bitrate. RTCRtpSender.setParameters
       // takes a few hundred ms to negotiate, but the codec ramp is
-      // smooth — no visible glitch.
+      // smooth - no visible glitch.
       const targetKbps = m.target_video_bitrate_kbps || 200;
       updateOneChip("#call-one-engine", "Adaptive");
       addOneCallEvent("One Link lowered video bitrate to keep the call smooth.");
@@ -21556,7 +21620,7 @@
       }
       updateOneChip("#call-one-engine", "Capsule");
       addOneCallEvent("One Link is preserving the conversation as a resumable voice capsule.");
-      // Stop ICE / RTC sends — voice-note ride only happens via
+      // Stop ICE / RTC sends - voice-note ride only happens via
       // the daemon's CALL_CAPSULE_CHUNK / capsule_transport path,
       // which the attest stream Blobs already feed.
       // We keep the MediaRecorder running so capsule_transport
@@ -21566,7 +21630,7 @@
     if (tail === "immune_prewarm_route") {
       updateOneChip("#call-one-route", "Preparing");
       addOneCallEvent("One Link is warming a stronger path in the background.");
-      // Tier ε — no UI yet; the Route Brain owns this. The hook is
+      // Tier ε - no UI yet; the Route Brain owns this. The hook is
       // here so the next tier doesn't need an additional dispatch.
       return true;
     }
@@ -21583,7 +21647,7 @@
       addOneCallEvent(tail === "immune_rekey"
         ? "Secure connection refreshed."
         : "One Link moved the call to a better route.");
-      // Quiet acks — the underlying switch happens daemon-side.
+      // Quiet acks - the underlying switch happens daemon-side.
       return true;
     }
     return false;

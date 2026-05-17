@@ -7,6 +7,13 @@ end-to-end encrypted, mutually authenticated.
 Built on the Coherence Language ecosystem (CRDT runtime, identity primitives,
 effect tracking) with a Python host harness and a Rust native fast path.
 
+**Project home:** [weareone-link.org](https://weareone-link.org) - live
+in-browser demos of every cryptographic primitive in this repo (pair-by-QR,
+Sphinx onion, PQ-hybrid sign, Shamir threshold recovery, per-chunk ratchet,
+TOFU device recognition, streaming verifying download).
+
+I am One. You are One. We are One.
+
 ---
 
 ## Download
@@ -30,13 +37,13 @@ No Python, no Rust, no `pip`. Roughly 120-150 MB after install.
 - **Chat.** Direct messages, group threads. Edit, react, delete.
 - **Files & folders.** Drag-drop send. Synced folders that update both ways.
 - **Voice & video calls.** Living Presence: a call that survives bad
-  networks — when the WiFi drops, it becomes a voice note and resumes
+  networks - when the WiFi drops, it becomes a voice note and resumes
   when you reconnect. Optional Tier ζ semantic codec compresses voice
   to ~640 bps (25× smaller than Opus) using a trained predictor that
   ships in the binary.
 - **Identity that's yours.** One private key on your device. No login.
   Pair with people by QR or a five-word safety string.
-- **Cryptographic provenance** on every frame and file — you can see
+- **Cryptographic provenance** on every frame and file - you can see
   exactly what came from whom, without surfacing jargon.
 
 ---
@@ -69,18 +76,18 @@ PowerShell -ExecutionPolicy Bypass -File scripts\install_desktop_shortcut.ps1
 `one-link app` starts the daemon (if not already running) and opens
 the desktop UI in your browser. The window has:
 
-- **Sidebar** — every peer One_link finds on your LAN, with hostname,
+- **Sidebar** - every peer One_link finds on your LAN, with hostname,
   short_id, and an online indicator
-- **Conversation pane** — pick a peer; chat with bubbles + timestamps
-- **Drag-drop file zone** — drop any file anywhere on the window to send
-- **Files panel** — toggle `Files` to see everything you've received
-- **Folders panel** — add local sync folders and push Merkle/CDC folder
+- **Conversation pane** - pick a peer; chat with bubbles + timestamps
+- **Drag-drop file zone** - drop any file anywhere on the window to send
+- **Files panel** - toggle `Files` to see everything you've received
+- **Folders panel** - add local sync folders and push Merkle/CDC folder
   drift rounds to paired peers
-- **Mesh panel** — see recent transfers with durable progress and
+- **Mesh panel** - see recent transfers with durable progress and
   completion/failure state
-- **Peer controls** — allow/deny chat, file transfer, or folder sync per
+- **Peer controls** - allow/deny chat, file transfer, or folder sync per
   paired device
-- **Live updates** — incoming messages and files appear instantly via
+- **Live updates** - incoming messages and files appear instantly via
   WebSocket; no refresh needed
 
 Files of any size, no upload limits, no third party in the middle.
@@ -116,7 +123,7 @@ one-link tail              # stream events as JSON lines
 
 The local UI is served by the daemon on a token-gated 127.0.0.1 port.
 Only your browser, with the cookie set on first GET, can talk to it.
-The daemon does not listen on any external interface for HTTP — only
+The daemon does not listen on any external interface for HTTP - only
 the encrypted peer protocol on TCP for LAN traffic.
 
 - **Identity:** long-term Ed25519 keypair, BLAKE3 fingerprint = device ID
@@ -203,7 +210,7 @@ python scripts/perf_lab.py --scale quick
 The smoke test (`tests/smoke_loopback.py`) starts two daemons in temp
 directories and runs a complete end-to-end round-trip including a
 multi-chunk file. The pytest suite covers everything in much greater
-depth — see `TESTING.md`.
+depth - see `TESTING.md`.
 
 ### Performance Lab
 
@@ -240,12 +247,12 @@ ONE_LINK_HOME=/tmp/ol-B one-link app    # different port, different identity
 
 ## Roadmap
 
-- **v0.3** — Complete folder sync wire integration, group rooms,
+- **v0.3** - Complete folder sync wire integration, group rooms,
   native window via Tauri (proper app, not a browser tab),
   signed installers (EV cert) for Win + Mac, tray icon, auto-start
-- **v0.4** — Internet P2P (NAT traversal via Iroh), persistent peers
+- **v0.4** - Internet P2P (NAT traversal via Iroh), persistent peers
   beyond mDNS range, distributed gossip discovery
-- **v1.0** — Multi-modal transports from OneField (RF, audio, DSSS sub-noise),
+- **v1.0** - Multi-modal transports from OneField (RF, audio, DSSS sub-noise),
   voice/video, mobile (iOS/Android via React Native)
 
 ---
