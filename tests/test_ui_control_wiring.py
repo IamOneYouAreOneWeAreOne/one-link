@@ -312,6 +312,7 @@ def test_activity_surface_uses_progressive_disclosure() -> None:
     assert "async function loadActivityNearby" in html
     assert "async function toggleActivityNearby()" in html
     assert "function closeActivityNearby()" in html
+    assert 'card.style.display = nearbyOpen ? "none" : "";' in html
     assert "toggleActivityNearby();" in html
     assert "function nearbyCount()" in html
     assert "function updateNearbyMetric()" in html

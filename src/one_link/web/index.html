@@ -12724,6 +12724,11 @@
   }
 
   function renderOneNow() {
+    const card = $("#one-now");
+    if (card) {
+      const nearbyOpen = $("#activity-nearby-panel")?.classList.contains("show");
+      card.style.display = nearbyOpen ? "none" : "";
+    }
     const title = $("#one-now-title");
     const detail = $("#one-now-detail");
     if (!title || !detail) return;
@@ -12805,6 +12810,7 @@
   function closeActivityNearby() {
     $("#activity-nearby-panel")?.classList.remove("show");
     updateNearbyMetric();
+    renderOneNow();
   }
 
   function nearbyRow(icon, name, sub, actionLabel, onAction) {
@@ -12887,6 +12893,7 @@
       }
     }
     renderActivityNearby();
+    renderOneNow();
     panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
