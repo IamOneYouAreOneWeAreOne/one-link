@@ -1248,6 +1248,12 @@
     display: none;
   }
   .call-remote-video.show { display: block; }
+  .call-remote-audio {
+    position: absolute;
+    width: 1px; height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
   .call-active.has-remote-video .call-active-face { display: none; }
   .call-local-video {
     position: absolute; top: 24px; right: 24px;
@@ -20308,6 +20314,8 @@
        face placeholder when no remote video track is present. -->
   <video id="call-remote-video" class="call-remote-video"
          autoplay playsinline aria-label="Remote video stream"></video>
+  <audio id="call-remote-audio" class="call-remote-audio"
+         autoplay aria-label="Remote audio stream"></audio>
   <div class="call-active-face" id="call-active-face" aria-hidden="true">🙂</div>
   <!-- Local self-view, picture-in-picture style. -->
   <video id="call-local-video" class="call-local-video"
@@ -20457,15 +20465,23 @@
     // Only show the preview pip if we actually have video.
     const hasVideo = stream.getVideoTracks().length > 0;
     v.classList.toggle("show", hasVideo);
+    try { v.play(); } catch (_) {}
   }
 
   function attachRemoteStream(stream) {
     media.remoteStream = stream;
     const v = $$("#call-remote-video");
-    if (!v) return;
-    v.srcObject = stream;
+    const a = $$("#call-remote-audio");
+    if (v) v.srcObject = stream;
+    if (a) a.srcObject = stream;
     const hasVideo = stream.getVideoTracks().length > 0;
-    v.classList.toggle("show", hasVideo);
+    if (v) {
+      v.classList.toggle("show", hasVideo);
+      try { v.play(); } catch (_) {}
+    }
+    if (a) {
+      try { a.play(); } catch (_) {}
+    }
     const surface = $$("#call-active-surface");
     if (surface) surface.classList.toggle("has-remote-video", hasVideo);
   }
@@ -20490,6 +20506,8 @@
       remoteV.srcObject = null;
       remoteV.classList.remove("show");
     }
+    const remoteA = $$("#call-remote-audio");
+    if (remoteA) remoteA.srcObject = null;
     const surface = $$("#call-active-surface");
     if (surface) surface.classList.remove("has-remote-video");
     if (media.pc) {
@@ -20622,9 +20640,10 @@
       let stream = media.remoteStream;
       if (!stream || (ev.streams && ev.streams[0] && stream !== ev.streams[0])) {
         stream = (ev.streams && ev.streams[0]) || new MediaStream();
-        attachRemoteStream(stream);
       }
       try { stream.addTrack(ev.track); } catch (_) {}
+      attachRemoteStream(stream);
+      addOneCallEvent(`Remote ${ev.track.kind} connected.`);
     };
     pc.onicecandidate = (ev) => {
       // Trickle each candidate to the daemon as it's gathered.

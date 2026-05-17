@@ -42,6 +42,14 @@ def test_remote_video_element_present(index_html: str) -> None:
     assert "playsinline" in snippet
 
 
+def test_remote_audio_sink_present(index_html: str) -> None:
+    assert 'id="call-remote-audio"' in index_html
+    idx = index_html.find('id="call-remote-audio"')
+    snippet = index_html[idx:idx + 260]
+    assert "autoplay" in snippet
+    assert "Remote audio stream" in snippet
+
+
 def test_local_video_element_present(index_html: str) -> None:
     assert 'id="call-local-video"' in index_html
     idx = index_html.find('id="call-local-video"')
@@ -88,6 +96,9 @@ def test_ontrack_attaches_remote_stream(index_html: str) -> None:
     assert idx > 0
     snippet = index_html[idx:idx + 800]
     assert "attachRemoteStream" in snippet
+    assert "stream.addTrack(ev.track)" in snippet
+    assert snippet.find("stream.addTrack(ev.track)") < snippet.find("attachRemoteStream(stream)")
+    assert "Remote ${ev.track.kind} connected." in snippet
 
 
 def test_addtrack_on_call_start(index_html: str) -> None:
