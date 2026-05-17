@@ -416,6 +416,15 @@ def _env_bool(env: Mapping[str, str], key: str) -> bool:
 
 
 def _run_command(argv: list[str], timeout_s: float) -> tuple[int, str, str]:
+    # CREATE_NO_WINDOW (0x08000000) on Windows so the periodic hardware
+    # inventory probes (wmic / powershell / PnPUtil) don't flash a
+    # console window every refresh cycle. The UI polls /api/fabric
+    # every 30s, which triggers this; without the flag the user sees
+    # a black box pop up on the desktop every 30 seconds.
+    import os as _os
+    creationflags = 0
+    if _os.name == "nt":
+        creationflags = 0x08000000  # CREATE_NO_WINDOW
     try:
         r = subprocess.run(
             argv,
@@ -423,6 +432,7 @@ def _run_command(argv: list[str], timeout_s: float) -> tuple[int, str, str]:
             text=True,
             timeout=timeout_s,
             check=False,
+            creationflags=creationflags,
         )
     except Exception as exc:
         return 127, "", str(exc)

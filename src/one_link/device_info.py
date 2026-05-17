@@ -91,12 +91,19 @@ def _normalize_arch() -> str:
 
 def _safe_run(cmd: list[str], *, timeout: float = 1.5) -> str:
     """Run a small command, return stdout or empty string on any
-    error. Bounded; never blocks the daemon startup if a tool hangs."""
+    error. Bounded; never blocks the daemon startup if a tool hangs.
+
+    On Windows we pass CREATE_NO_WINDOW so the probe doesn't flash a
+    conhost window when the daemon shells out to wmic / powershell /
+    PnPUtil for system info."""
+    import os as _os
+    creationflags = 0x08000000 if _os.name == "nt" else 0
     try:
         out = subprocess.run(
             cmd,
             capture_output=True, text=True, check=False,
             timeout=timeout,
+            creationflags=creationflags,
         )
         return (out.stdout or "").strip()
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, Exception):

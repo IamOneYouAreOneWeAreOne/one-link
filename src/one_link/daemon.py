@@ -783,6 +783,9 @@ def _candidate_control_ports_for_pid(pid: int) -> list[int]:
                 stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=5,
+                # CREATE_NO_WINDOW — otherwise a conhost flashes every
+                # call. This codepath is recovery-only but still hit.
+                creationflags=0x08000000,
             )
             for line in out.splitlines():
                 line = line.strip()
@@ -827,6 +830,7 @@ def _candidate_local_listen_ports() -> list[int]:
                 stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=5,
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
             )
             for line in out.splitlines():
                 line = line.strip()
@@ -9443,13 +9447,13 @@ class Daemon:
         """v0.20.7 (security audit C3): at SAS-pair finalize, the per-peer
         policy default is driven by the `pair_default_allow_all` setting.
 
-        v0.7.3 silently reversed the v0.7.2 audit-finding-A deny-by-default
-        ground (a None setting was treated as allow-all). The audit doc
-        and capabilities.py STILL document deny-by-default; runtime
-        contradicted both. v0.20.7 restores the deny-by-default ground:
-        a None or unset setting is treated as DENY, not allow.
+        One Link's user-facing default is trust-after-SAS: an unset
+        pair_default_allow_all setting is treated as allow-all so a
+        verified person/device can chat, send files, sync folders, and
+        call without hidden prompts. Users who want strict per-capability
+        grants can turn the setting off before pairing.
 
-          - True: leave policy = None.
+          - True or unset: leave policy = None.
             policy=None means legacy allow-all — every advertised
             capability flows. Aligns with the user mental model
             "I just SAS-verified this device, of course I trust it."
@@ -9465,16 +9469,14 @@ class Daemon:
             return
         try:
             v = self.state.get_setting("pair_default_allow_all")
-            # v0.20.7: deny-by-default. Only an explicit truthy setting
-            # opts in to legacy allow-all; None / unset / empty / falsy
-            # all resolve to deny (policy=[]).
+            # Match /api/settings: unset means allow-all. Only an
+            # explicit false/off/no/0 switches pairing into strict mode.
             allow_all = (
-                v is not None
-                and isinstance(v, str)
-                and v.lower() in ("1", "true", "yes")
+                v is None
+                or (isinstance(v, str) and v.lower() in ("1", "true", "yes"))
             )
         except Exception:
-            allow_all = False
+            allow_all = True
         if allow_all:
             return  # leave policy = None (legacy allow-all semantics)
         from one_link.capabilities import DEFAULT_ALLOW_AFTER_PAIRING
