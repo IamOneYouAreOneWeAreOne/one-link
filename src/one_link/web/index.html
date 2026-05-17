@@ -1755,6 +1755,113 @@
     color: var(--text);
     background: rgba(255,255,255,.085);
   }
+  .one-health {
+    margin: 0 12px 10px;
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(70,211,154,.18);
+    background: linear-gradient(180deg, rgba(70,211,154,.08), rgba(255,255,255,.025));
+  }
+  .one-health-head {
+    display: grid;
+    grid-template-columns: 58px minmax(0,1fr);
+    gap: 10px;
+    align-items: center;
+  }
+  .one-health-score {
+    width: 54px;
+    height: 54px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    color: var(--text);
+    font-size: 18px;
+    font-weight: 950;
+    border: 1px solid rgba(70,211,154,.35);
+    background: rgba(70,211,154,.12);
+  }
+  .one-health-title {
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 900;
+  }
+  .one-health-detail {
+    margin-top: 3px;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .one-health-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0,1fr));
+    gap: 5px;
+    margin-top: 10px;
+  }
+  .one-health-metric {
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: 7px;
+    padding: 6px;
+    background: rgba(255,255,255,.035);
+  }
+  .one-health-metric b {
+    display: block;
+    color: var(--text);
+    font-size: 12px;
+  }
+  .one-health-metric span {
+    display: block;
+    color: var(--text-dimmer);
+    font-size: 9px;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+  .one-health-actions,
+  .one-health-people,
+  .one-health-timeline {
+    display: grid;
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .one-health-row {
+    display: grid;
+    grid-template-columns: minmax(0,1fr) auto;
+    gap: 8px;
+    align-items: center;
+    color: var(--text-dim);
+    font-size: 11px;
+    border-top: 1px solid rgba(255,255,255,.05);
+    padding-top: 6px;
+  }
+  .one-health-row b {
+    display: block;
+    color: var(--text);
+    font-size: 12px;
+  }
+  .one-health-row .tag {
+    color: var(--text-dimmer);
+    font-size: 9px;
+    text-transform: uppercase;
+    font-weight: 900;
+  }
+  .one-health-actions button {
+    border-radius: 7px;
+    padding: 7px 8px;
+    color: var(--text);
+    background: rgba(70,211,154,.12);
+    font-size: 10px;
+    font-weight: 850;
+  }
+  .one-health-actions button.warn {
+    background: rgba(255,202,87,.14);
+  }
+  .one-health-actions button.danger {
+    background: rgba(255,107,107,.14);
+  }
+  @media (max-width: 1180px) {
+    .one-health-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .one-health-head { grid-template-columns: 48px minmax(0,1fr); }
+    .one-health-score { width: 46px; height: 46px; font-size: 15px; }
+  }
   .one-setup-panel {
     margin: 0 12px 10px;
     padding: 10px;
@@ -5003,6 +5110,22 @@
           <button id="one-now-privacy" title="Show privacy proof">Privacy</button>
         </div>
       </div>
+      <div class="one-health" id="one-health">
+        <div class="one-health-head">
+          <div class="one-health-score" id="one-health-score">--</div>
+          <div>
+            <div class="one-health-title" id="one-health-title">Checking One Link</div>
+            <div class="one-health-detail" id="one-health-detail">Protection, speed, recovery, people, and devices.</div>
+          </div>
+        </div>
+        <div class="one-health-grid" id="one-health-grid"></div>
+        <div class="one-health-actions" id="one-health-actions"></div>
+        <details class="panel-advanced" id="one-health-details">
+          <summary>People, calls, lost-device safety, and trust timeline</summary>
+          <div class="one-health-people" id="one-health-people"></div>
+          <div class="one-health-timeline" id="one-health-timeline"></div>
+        </details>
+      </div>
       <div class="one-setup-panel" id="one-setup-panel">
         <div class="setup-head">
           <div>
@@ -6876,6 +6999,7 @@
     fabric: null,
     selfMesh: null,
     oneSetup: null,
+    oneHealth: null,
     searchQuery: "",
     searchResults: null,
     activePane: "convo",
@@ -7275,6 +7399,7 @@
     status() { return this.get("/api/status"); },
     setup() { return this.get("/api/setup"); },
     setupAction(action) { return this.post("/api/setup", { action }); },
+    oneHealth() { return this.get("/api/one-health"); },
     setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); },
     claimSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/claim", body); },
     confirmSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/confirm", body); },
@@ -9003,10 +9128,106 @@
     }
     if (select && selectedBefore) select.value = selectedBefore;
   }
+  function renderOneHealth() {
+    const health = state.oneHealth || {};
+    const score = $("#one-health-score");
+    const title = $("#one-health-title");
+    const detail = $("#one-health-detail");
+    if (score) score.textContent = health.score != null ? String(health.score) : "--";
+    if (title) title.textContent = health.headline || "Checking One Link";
+    if (detail) detail.textContent = health.detail || "Protection, speed, recovery, people, and devices.";
+    const grid = $("#one-health-grid");
+    if (grid) {
+      grid.replaceChildren();
+      for (const s of (health.scores || []).slice(0, 5)) {
+        const card = el("div", "one-health-metric");
+        card.appendChild(el("b", "", `${s.score ?? "--"}`));
+        card.appendChild(el("span", "", s.label || s.id || "score"));
+        grid.appendChild(card);
+      }
+    }
+    const actions = $("#one-health-actions");
+    if (actions) {
+      actions.replaceChildren();
+      for (const a of (health.actions || []).slice(0, 4)) {
+        const row = el("div", "one-health-row");
+        const text = el("div", "");
+        text.appendChild(el("b", "", a.label || "Recommended action"));
+        text.appendChild(el("span", "", a.detail || ""));
+        row.appendChild(text);
+        const btn = el("button", a.severity === "urgent" ? "danger" : a.severity === "recommended" ? "warn" : "", "Open");
+        btn.dataset.oneHealthAction = a.id || "";
+        row.appendChild(btn);
+        actions.appendChild(row);
+      }
+      if (!actions.children.length) {
+        const row = el("div", "one-health-row");
+        row.appendChild(el("b", "", "Everything important is ready"));
+        row.appendChild(el("span", "tag", "ok"));
+        actions.appendChild(row);
+      }
+    }
+    const people = $("#one-health-people");
+    if (people) {
+      people.replaceChildren();
+      const lost = health.lost_device || {};
+      const calls = health.calls || {};
+      const summary = el("div", "one-health-row");
+      const summaryText = el("div", "");
+      summaryText.appendChild(el("b", "", "Lost-device and calls"));
+      summaryText.appendChild(el("span", "", `${lost.human || "Device Guardian is checking."} ${calls.human || ""}`));
+      summary.appendChild(summaryText);
+      summary.appendChild(el("span", "tag", `${lost.unsafe_devices || 0} unsafe`));
+      people.appendChild(summary);
+      for (const p of (health.people || []).slice(0, 6)) {
+        const row = el("div", "one-health-row");
+        const text = el("div", "");
+        text.appendChild(el("b", "", p.label || "Trusted"));
+        text.appendChild(el("span", "", p.kind === "device" ? `Device Guardian ${p.safety_state || "trusted"}` : (p.verified ? "Verified in person" : "Trusted person")));
+        row.appendChild(text);
+        row.appendChild(el("span", "tag", p.kind || "one"));
+        people.appendChild(row);
+      }
+    }
+    const timeline = $("#one-health-timeline");
+    if (timeline) {
+      timeline.replaceChildren();
+      for (const t of (health.timeline || []).slice(0, 6)) {
+        const row = el("div", "one-health-row");
+        const text = el("div", "");
+        text.appendChild(el("b", "", String(t.event || "trust event").replaceAll("_", " ")));
+        text.appendChild(el("span", "", t.detail || "Recorded by One Link"));
+        row.appendChild(text);
+        row.appendChild(el("span", "tag", t.severity || "info"));
+        timeline.appendChild(row);
+      }
+    }
+  }
+  async function refreshOneHealth() {
+    try {
+      state.oneHealth = await api.oneHealth();
+      renderOneHealth();
+    } catch (_e) {
+      renderOneHealth();
+    }
+  }
+  function runOneHealthAction(id) {
+    if (id === "finish_setup") return openOneSetupFromState();
+    if (id === "add_device") return $("#one-setup-add-device-panel")?.click();
+    if (id === "set_recovery") return oneSetupMarkRecoveryConfigured();
+    if (id === "review_lost_device") {
+      $("#self-mesh-safety-actions").open = true;
+      return $("#self-mesh-kit")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    if (id === "pair_person") return $("#btn-discover")?.click();
+    if (id === "view_privacy_proof") return $("#one-setup-privacy-panel")?.click();
+    return toast("That check is already handled.", "info", 2500);
+  }
   async function refreshSelfMesh() {
     try {
       state.selfMesh = await api.selfMesh();
       renderSelfMesh();
+      refreshOneHealth();
     } catch (_e) {
       renderSelfMesh();
     }
@@ -13939,6 +14160,7 @@
       await refreshTransfers();
       await refreshStatus();
       await refreshFabricTruth();
+      await refreshOneHealth();
       await refreshCourierStatus();
     await refreshGroups();
     // v0.10.0: load + apply persisted settings before onboarding so the
@@ -13965,6 +14187,7 @@
     setInterval(refreshPeers, 5000);
     setInterval(refreshTransfers, 4000);
     setInterval(refreshStatus, 8000);
+    setInterval(refreshOneHealth, 15000);
     setInterval(refreshFabricTruth, 30000);
     setInterval(refreshGroups, 12000);
     maybeShowNotifBanner();
@@ -14474,6 +14697,7 @@
         }
       } else if (m.type === "self_mesh_changed") {
         refreshSelfMesh();
+        refreshOneHealth();
         scheduleActivityRefresh();
       } else if (m.type === "peer_verified") {
         scheduleActivityRefresh();  // v0.9.1: surface in activity feed
@@ -16846,6 +17070,10 @@
   $("#btn-self-mesh-trust-root")?.addEventListener("click", trustSelfMeshFolder);
   $("#btn-self-mesh-manifest")?.addEventListener("click", () => sendSelfMeshInstruction("pull_file_manifest"));
   $("#btn-self-mesh-send")?.addEventListener("click", () => sendSelfMeshInstruction("send_file_from_device"));
+  $("#one-health-actions")?.addEventListener("click", (e) => {
+    const btn = e.target?.closest?.("[data-one-health-action]");
+    if (btn) runOneHealthAction(btn.dataset.oneHealthAction || "");
+  });
   $("#btn-courier-export")?.addEventListener("click", exportCourierBundle);
   $("#btn-courier-stage")?.addEventListener("click", stageCourierBundle);
   $("#btn-courier-copy-removable")?.addEventListener("click", copyCourierToRemovable);

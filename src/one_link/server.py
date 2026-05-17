@@ -1494,6 +1494,7 @@ class UIServer:
         r.add_get("/api/connect-info", self._guarded(self.api_connect_info))
         r.add_get("/api/connect-info/qr.svg", self._guarded(self.api_connect_info_qr))
         r.add_get("/api/me", self._guarded(self.api_me))
+        r.add_get("/api/one-health", self._guarded(self.api_one_health))
         r.add_get("/api/setup", self._guarded(self.api_setup_status))
         r.add_post("/api/setup", self._guarded(self.api_update_setup))
         r.add_post("/api/setup/device-invite", self._guarded(self.api_setup_device_invite))
@@ -4045,6 +4046,267 @@ class UIServer:
 
     async def api_setup_status(self, request: web.Request) -> web.Response:
         return web.json_response(self._one_setup_snapshot())
+
+    async def api_one_health(self, request: web.Request) -> web.Response:
+        """Human-first readiness center for the whole One Link fabric."""
+        state = self.daemon.state
+        now = int(time.time() * 1000)
+        if state is None:
+            return web.json_response({
+                "ok": False,
+                "score": 0,
+                "state": "starting",
+                "headline": "One Link is starting",
+                "detail": "Local state is not available yet.",
+                "scores": [],
+                "actions": [],
+                "timeline": [],
+            }, status=503)
+
+        setup = self._one_setup_snapshot()
+        roots = state.list_self_mesh_roots()
+        devices = state.list_self_mesh_devices()
+        presence = state.list_self_mesh_presence()
+        peers = state.list_peers()
+        pinned = [p for p in peers if getattr(p, "trust", "") == "pinned"]
+        trusted_devices = [
+            d for d in devices
+            if not d.get("revoked")
+            and str(d.get("safety_state") or "trusted") not in {
+                "frozen", "revoked", "quarantined",
+            }
+        ]
+        remote_devices = [d for d in trusted_devices if not d.get("local")]
+        unsafe_devices = [
+            d for d in devices
+            if d.get("revoked")
+            or str(d.get("safety_state") or "trusted") in {
+                "maybe_lost", "frozen", "revoked", "quarantined",
+            }
+        ]
+        awake = [
+            p for p in presence
+            if str(p.get("state") or "").lower() == "awake"
+        ]
+        folders = []
+        with contextlib.suppress(Exception):
+            folders = state.list_folders()
+        transfers_active = 0
+        with contextlib.suppress(Exception):
+            transfers_active = sum(
+                1 for t in state.list_transfers(limit=200)
+                if str(getattr(t, "status", "") or "") not in {"complete", "failed", "cancelled"}
+            )
+        active_calls = 0
+        with contextlib.suppress(Exception):
+            active_calls = len(self.daemon._call_registry.active_call_ids())
+        perf = {}
+        with contextlib.suppress(Exception):
+            perf = self.daemon.self_mesh_performance_snapshot(record=False)
+        avg_route_ms = float(perf.get("route_probe_avg_ms") or 0.0)
+
+        def setting_ready(key: str) -> bool:
+            return bool(state.get_setting(key))
+
+        privacy_ready = bool(setup.get("privacy_proof", {}).get("viewed"))
+        safety_ready = setting_ready("one_setup_safety_reviewed_at_ms")
+        recovery_ready = setting_ready("one_setup_recovery_configured_at_ms")
+        setup_ready = bool(setup.get("completed")) or setup.get("current_step") == "finish"
+
+        protection = 30
+        if roots:
+            protection += 25
+        if trusted_devices:
+            protection += 20
+        if privacy_ready:
+            protection += 10
+        if safety_ready:
+            protection += 10
+        if not unsafe_devices:
+            protection += 5
+        protection = min(100, protection)
+
+        speed = 45
+        if awake:
+            speed += 20
+        if pinned:
+            speed += 10
+        if avg_route_ms and avg_route_ms <= 25:
+            speed += 15
+        elif avg_route_ms and avg_route_ms <= 100:
+            speed += 10
+        if transfers_active:
+            speed += 5
+        speed = min(100, speed)
+
+        recovery = 20
+        if recovery_ready:
+            recovery += 45
+        if remote_devices:
+            recovery += 25
+        if safety_ready:
+            recovery += 10
+        recovery = min(100, recovery)
+
+        device_score = 25
+        if roots:
+            device_score += 20
+        if remote_devices:
+            device_score += 30
+        if awake:
+            device_score += 15
+        if not unsafe_devices:
+            device_score += 10
+        device_score = min(100, device_score)
+
+        people = 35
+        if pinned:
+            people += 30
+        if remote_devices:
+            people += 20
+        if active_calls or pinned:
+            people += 15
+        people = min(100, people)
+
+        score_rows = [
+            {"id": "protection", "label": "Protection", "score": protection},
+            {"id": "speed", "label": "Speed", "score": speed},
+            {"id": "recovery", "label": "Recovery", "score": recovery},
+            {"id": "devices", "label": "Devices", "score": device_score},
+            {"id": "people", "label": "People", "score": people},
+        ]
+        overall = round(sum(int(r["score"]) for r in score_rows) / len(score_rows))
+
+        actions: list[dict[str, Any]] = []
+        if not setup_ready:
+            actions.append({
+                "id": "finish_setup",
+                "label": "Finish One Setup",
+                "detail": setup.get("next_action", {}).get("detail") or "Complete the account-free setup.",
+                "kind": "setup",
+                "severity": "recommended",
+            })
+        if not remote_devices:
+            actions.append({
+                "id": "add_device",
+                "label": "Add a phone or laptop",
+                "detail": "A second trusted device makes recovery and routing much stronger.",
+                "kind": "devices",
+                "severity": "recommended",
+            })
+        if not recovery_ready:
+            actions.append({
+                "id": "set_recovery",
+                "label": "Set recovery",
+                "detail": "Choose a trusted way back in before you need it.",
+                "kind": "recovery",
+                "severity": "recommended",
+            })
+        if unsafe_devices:
+            actions.append({
+                "id": "review_lost_device",
+                "label": "Review frozen or unsafe devices",
+                "detail": "One or more devices are restricted by Device Guardian.",
+                "kind": "lost_device",
+                "severity": "urgent",
+            })
+        if not pinned and not remote_devices:
+            actions.append({
+                "id": "pair_person",
+                "label": "Pair with someone or another device",
+                "detail": "One Link becomes useful once a trusted person or device is connected.",
+                "kind": "people",
+                "severity": "optional",
+            })
+        if not privacy_ready:
+            actions.append({
+                "id": "view_privacy_proof",
+                "label": "View privacy proof",
+                "detail": "See what happened in plain language and what stayed local.",
+                "kind": "privacy",
+                "severity": "recommended",
+            })
+
+        timeline = []
+        for row in state.list_self_mesh_audit(limit=14):
+            timeline.append({
+                "id": row.get("id"),
+                "ts_ms": row.get("ts_ms"),
+                "event": row.get("event"),
+                "severity": row.get("severity"),
+                "detail": row.get("detail") or "",
+                "kind": "trust",
+            })
+
+        people_rows = []
+        def pub_id(raw: bytes | None) -> str:
+            if not raw:
+                return ""
+            return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+        for rec in pinned[:12]:
+            people_rows.append({
+                "id": getattr(rec, "fingerprint", "")[:12],
+                "label": (
+                    getattr(rec, "local_alias", None)
+                    or getattr(rec, "display_name", None)
+                    or getattr(rec, "hostname", None)
+                    or getattr(rec, "short_id", None)
+                    or "Trusted person"
+                ),
+                "kind": "person",
+                "trusted": True,
+                "verified": bool(getattr(rec, "is_verified", False)),
+            })
+        for dev in remote_devices[:12]:
+            dev_pub_b64 = pub_id(dev.get("device_pub"))
+            people_rows.append({
+                "id": dev_pub_b64[:12],
+                "label": dev.get("label") or dev.get("device_kind") or "My device",
+                "kind": "device",
+                "trusted": bool(dev.get("trusted")),
+                "safety_state": dev.get("safety_state") or "trusted",
+            })
+
+        state_label = "excellent" if overall >= 85 else "good" if overall >= 70 else "needs_attention"
+        headline = {
+            "excellent": "One Link is strongly protected",
+            "good": "One Link is ready, with a few upgrades available",
+            "needs_attention": "One Link needs a little setup",
+        }[state_label]
+        return web.json_response({
+            "ok": True,
+            "generated_at_ms": now,
+            "score": overall,
+            "state": state_label,
+            "headline": headline,
+            "detail": (
+                f"{len(trusted_devices)} trusted device(s), {len(pinned)} trusted people, "
+                f"{len(folders)} shared folder(s), {active_calls} active call(s)."
+            ),
+            "scores": score_rows,
+            "actions": actions[:6],
+            "people": people_rows[:16],
+            "lost_device": {
+                "ready": bool(roots and trusted_devices),
+                "unsafe_devices": len(unsafe_devices),
+                "freeze_available": bool(trusted_devices),
+                "recover_available": bool(unsafe_devices),
+                "human": (
+                    "Freeze a device first, then recover or revoke after you verify what happened."
+                ),
+            },
+            "calls": {
+                "ready": bool(pinned or remote_devices),
+                "active": active_calls,
+                "human": "Calls use trusted peers and the same private fabric readiness checks.",
+            },
+            "timeline": timeline,
+            "setup": {
+                "completed": bool(setup.get("completed")),
+                "current_step": setup.get("current_step"),
+                "next_action": setup.get("next_action") or {},
+            },
+        })
 
     async def api_update_setup(self, request: web.Request) -> web.Response:
         state = self.daemon.state
