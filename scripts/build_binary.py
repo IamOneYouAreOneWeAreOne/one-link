@@ -188,9 +188,18 @@ def _render_spec(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    # GUI/windowed is the default: end-user clicks the desktop icon, the
+    # daemon should run silently in the background — no black console
+    # window flashing up. Developers wanting a console for debugging
+    # pass --console.
     parser.add_argument(
-        "--gui", action="store_true",
-        help="Build a windowed binary (no console). For end-user installs.",
+        "--gui", action="store_true", default=True,
+        help="Build a windowed binary (no console window). DEFAULT.",
+    )
+    parser.add_argument(
+        "--console", dest="gui", action="store_false",
+        help="Build a console binary (visible stdout/stderr). For "
+             "debugging only; end users want --gui.",
     )
     parser.add_argument(
         "--no-ml", action="store_true",
