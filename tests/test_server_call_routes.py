@@ -200,6 +200,39 @@ async def test_list_returns_active_call_after_initiate() -> None:
     assert len(payload["calls"]) == 1
     assert payload["calls"][0]["call_id"] == "c1"
     assert payload["calls"][0]["phase"] == "inviting"
+    assert payload["calls"][0]["peer_master_vk_hex"] == peer.fingerprint
+    assert payload["calls"][0]["local_role"] == "originator"
+    assert payload["calls"][0]["is_incoming"] is False
+    assert payload["calls"][0]["peer_label"] == peer.short_id
+
+
+@pytest.mark.asyncio
+async def test_list_surfaces_incoming_ring_context_for_ui_backfill() -> None:
+    srv, daemon = _server_with_daemon()
+    peer = _identity("mom-inbound")
+    daemon.state = MagicMock()
+    daemon.state.get_peer.return_value = MagicMock(
+        local_alias=None,
+        display_name="Mom's laptop",
+        hostname="Mom's laptop",
+    )
+    mgr = daemon._call_registry.open(
+        call_id="c-ring",
+        peer_master_vk_hex=peer.fingerprint,
+        local_role="recipient",
+        local_master_vk_hex=daemon.me.fingerprint,
+        started_at_ms=2_000,
+    )
+    mgr.handle(ManagerEvent(ManagerEventKind.WIRE_CALL_INVITE, 2_000))
+    resp = await srv.api_calls_list(_FakeRequest())  # type: ignore[arg-type]
+    import json
+    payload = json.loads(resp._body or b"")
+    call = payload["calls"][0]
+    assert call["call_id"] == "c-ring"
+    assert call["phase"] == "ringing"
+    assert call["local_role"] == "recipient"
+    assert call["is_incoming"] is True
+    assert call["peer_label"] == "Mom's laptop"
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +274,9 @@ async def test_state_returns_call_snapshot() -> None:
     assert payload["call_id"] == "c2"
     assert payload["phase"] == "inviting"
     assert payload["is_active"] is False  # not yet ACCEPTed → not ACTIVE
+    assert payload["peer_master_vk_hex"] == peer.fingerprint
+    assert payload["local_role"] == "originator"
+    assert payload["is_incoming"] is False
     assert "intensity" in payload
 
 

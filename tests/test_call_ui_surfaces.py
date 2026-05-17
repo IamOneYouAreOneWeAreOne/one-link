@@ -143,6 +143,17 @@ def test_ws_dispatch_forwards_call_event(index_html: str) -> None:
     assert "handleLivingPresenceCallEvent(m)" in snippet
 
 
+def test_call_driver_backfills_incoming_rings_from_call_list(index_html: str) -> None:
+    idx = index_html.find("async function backfillLivingPresenceCalls")
+    assert idx > 0
+    snippet = index_html[idx:idx + 2500]
+    assert 'fetch("/api/v1/calls"' in index_html
+    assert 'phase === "ringing"' in snippet
+    assert "call.local_role === \"recipient\"" in snippet
+    assert "showIncomingRing" in snippet
+    assert "setInterval(backfillLivingPresenceCalls, 1500)" in index_html
+
+
 # ---------------------------------------------------------------------------
 # All four overlay states the driver handles
 # ---------------------------------------------------------------------------

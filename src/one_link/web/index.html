@@ -19755,6 +19755,19 @@
     }
   }
 
+  async function callApiList() {
+    try {
+      const r = await fetch("/api/v1/calls", {
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      return await r.json();
+    } catch (_) {
+      return { calls: [] };
+    }
+  }
+
   // ── Tier α media — getUserMedia + RTCPeerConnection bring-up.
   // The browser handles audio/video tracks directly via WebRTC SRTP;
   // the daemon brokers SDP exchange. Local media stays on this device
@@ -20759,6 +20772,72 @@
     if (badge) badge.classList.remove("show");
   }
 
+  function peerLabelFromCall(call) {
+    return (
+      (call && (call.peer_label || call.peer_display_name)) ||
+      (call && call.peer_master_vk_hex && call.peer_master_vk_hex.slice(0, 8)) ||
+      (call && call.call_id && call.call_id.slice(0, 8)) ||
+      "That device"
+    );
+  }
+
+  async function backfillLivingPresenceCalls() {
+    const payload = await callApiList();
+    const calls = Array.isArray(payload && payload.calls) ? payload.calls : [];
+    let inboundStillRinging = false;
+    for (const call of calls) {
+      if (!call || !call.call_id) continue;
+      const phase = String(call.phase || "").toLowerCase();
+      const incoming = !!call.is_incoming || call.local_role === "recipient";
+      if (incoming && phase === "ringing") {
+        inboundStillRinging = true;
+        if (callUI.inboundCallId !== call.call_id) {
+          callUI.inboundCallId = call.call_id;
+          callUI.inboundCallPeer = peerLabelFromCall(call);
+        }
+        showIncomingRing(callUI.inboundCallPeer || peerLabelFromCall(call));
+        continue;
+      }
+      if (phase === "active") {
+        if (!callUI.activeCallId || callUI.activeCallId === call.call_id) {
+          callUI.activeCallId = call.call_id;
+          callUI.activeCallPeer = peerLabelFromCall(call);
+          hideOutgoingOverlay();
+          hideIncomingRing();
+          showActiveSurface(callUI.activeCallPeer, "");
+        }
+        continue;
+      }
+      if (
+        call.call_id === callUI.inboundCallId &&
+        (phase === "ended" || phase === "async_capture" || phase === "resumable")
+      ) {
+        hideIncomingRing();
+        callUI.inboundCallId = null;
+        callUI.inboundCallPeer = null;
+      }
+      if (
+        call.call_id === callUI.activeCallId &&
+        (phase === "ended" || phase === "async_capture" || phase === "resumable")
+      ) {
+        hideOutgoingOverlay();
+        hideActiveSurface();
+        stopAllMedia();
+        callUI.activeCallId = null;
+        callUI.activeCallPeer = null;
+      }
+    }
+    if (callUI.inboundCallId && !inboundStillRinging) {
+      const matching = calls.find((c) => c && c.call_id === callUI.inboundCallId);
+      if (!matching) {
+        hideIncomingRing();
+        callUI.inboundCallId = null;
+        callUI.inboundCallPeer = null;
+      }
+    }
+  }
+  window.backfillLivingPresenceCalls = backfillLivingPresenceCalls;
+
   // ── Button handlers ──
   const cancelBtn = $$("#btn-call-cancel");
   if (cancelBtn) cancelBtn.addEventListener("click", async () => {
@@ -21036,6 +21115,11 @@
     }
     return false;
   };
+  setTimeout(backfillLivingPresenceCalls, 250);
+  setInterval(backfillLivingPresenceCalls, 1500);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) backfillLivingPresenceCalls();
+  });
 })();
 </script>
 

@@ -3700,8 +3700,26 @@ class UIServer:
             mgr = registry.get(cid)
             if mgr is None:
                 continue
+            peer_fp = mgr.state.peer_master_vk_hex
+            peer_label = peer_fp[:8]
+            try:
+                rec = self.daemon.state.get_peer(peer_fp)
+                if rec is not None:
+                    peer_label = (
+                        getattr(rec, "local_alias", None)
+                        or getattr(rec, "display_name", None)
+                        or getattr(rec, "hostname", None)
+                        or peer_label
+                    )
+            except Exception:
+                pass
+            local_role = mgr.state.local_role
             out.append({
                 "call_id": cid,
+                "peer_master_vk_hex": peer_fp,
+                "peer_label": peer_label,
+                "local_role": local_role,
+                "is_incoming": local_role == "recipient",
                 "phase": mgr.phase.name.lower(),
                 "consent_phase": mgr.consent_phase.name.lower(),
                 "is_active": mgr.is_active,
@@ -3727,9 +3745,27 @@ class UIServer:
             )
         s = mgr.session_snapshot()
         rec_value = s.recording_state.value if s.recording_state.value is not None else 0
+        peer_fp = mgr.state.peer_master_vk_hex
+        peer_label = peer_fp[:8]
+        try:
+            rec = self.daemon.state.get_peer(peer_fp)
+            if rec is not None:
+                peer_label = (
+                    getattr(rec, "local_alias", None)
+                    or getattr(rec, "display_name", None)
+                    or getattr(rec, "hostname", None)
+                    or peer_label
+                )
+        except Exception:
+            pass
+        local_role = mgr.state.local_role
         return web.json_response({
             "ok": True,
             "call_id": call_id,
+            "peer_master_vk_hex": peer_fp,
+            "peer_label": peer_label,
+            "local_role": local_role,
+            "is_incoming": local_role == "recipient",
             "phase": mgr.phase.name.lower(),
             "consent_phase": mgr.consent_phase.name.lower(),
             "intensity": s.current_intensity.name.lower(),
