@@ -1969,6 +1969,18 @@
     border-radius: 8px;
     border: 1px solid rgba(255,255,255,.07);
     background: rgba(255,255,255,.035);
+    cursor: pointer;
+    text-align: left;
+    transition: border-color .14s ease, background .14s ease, transform .14s ease;
+  }
+  .one-health-guide-card:hover,
+  .one-health-guide-card:focus-visible {
+    border-color: rgba(124,92,255,.46);
+    background: rgba(124,92,255,.09);
+  }
+  .one-health-guide-card:focus-visible {
+    outline: 2px solid rgba(124,92,255,.75);
+    outline-offset: 2px;
   }
   .one-health-guide-card-top {
     display: flex;
@@ -1996,6 +2008,33 @@
     font-weight: 850;
     text-transform: uppercase;
   }
+  .one-health-guide-card .one-health-guide-cta {
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 900;
+    text-transform: none;
+  }
+  .one-health-guide-autopilot {
+    display: grid;
+    grid-template-columns: minmax(0,1fr) auto;
+    gap: 12px;
+    align-items: center;
+    padding: 13px 14px;
+    border-radius: 8px;
+    border: 1px solid rgba(124,92,255,.25);
+    background: rgba(124,92,255,.08);
+  }
+  .one-health-guide-autopilot b {
+    display: block;
+    color: var(--text);
+    font-size: 14px;
+    margin-bottom: 3px;
+  }
+  .one-health-guide-autopilot span {
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.4;
+  }
   .one-health-guide-actions {
     display: grid;
     gap: 8px;
@@ -2022,7 +2061,8 @@
     line-height: 1.35;
   }
   .one-health-guide-action button,
-  .one-health-guide-footer button {
+  .one-health-guide-footer button,
+  .one-health-guide-autopilot button {
     border-radius: 8px;
     padding: 8px 10px;
     color: var(--text);
@@ -6587,6 +6627,15 @@
           </div>
         </div>
         <div class="one-health-guide-grid" id="one-health-guide-grid"></div>
+        <div class="one-health-guide-autopilot" id="one-health-guide-autopilot">
+          <div>
+            <b id="one-health-guide-autopilot-title">Let One Link handle the next step</b>
+            <span id="one-health-guide-autopilot-detail">
+              One Link will open the most useful setup action for what is missing right now.
+            </span>
+          </div>
+          <button id="one-health-guide-autopilot-button">Do next step</button>
+        </div>
         <div class="one-health-guide-actions" id="one-health-guide-actions"></div>
         <div class="one-health-guide-footer">
           <span>
@@ -9637,27 +9686,37 @@
       protection: {
         title: "Protection",
         plain: "How well your identity, encryption, trust checks, privacy proof, and lost-device controls are protecting you.",
-        next: "Add trusted devices, verify people in person, and review privacy proof."
+        next: "Add trusted devices, verify people in person, and review privacy proof.",
+        action: "view_privacy_proof",
+        cta: "Review privacy proof"
       },
       speed: {
         title: "Speed",
         plain: "Whether One Link can find a nearby, trusted, fast path without making you choose the route yourself.",
-        next: "Keep trusted devices awake and let One Link use the best local path automatically."
+        next: "Keep trusted devices awake and let One Link use the best local path automatically.",
+        action: "review_speed",
+        cta: "Check fastest path"
       },
       recovery: {
         title: "Recovery",
         plain: "How ready you are if a phone or computer is lost, replaced, offline, or stolen.",
-        next: "Set recovery and keep at least one second trusted device enrolled."
+        next: "Set recovery and keep at least one second trusted device enrolled.",
+        action: "set_recovery",
+        cta: "Set recovery"
       },
       devices: {
         title: "Devices",
         plain: "How many of your own devices are enrolled, trusted, reachable, and safe to use as One.",
-        next: "Add your phone or laptop so One Link can route and recover for you."
+        next: "Add your phone or laptop so One Link can route and recover for you.",
+        action: "add_device",
+        cta: "Add a device"
       },
       people: {
         title: "People",
         plain: "How clearly One Link knows who you trust for chats, files, calls, verification, and safety.",
-        next: "Pair trusted people and verify important contacts in person."
+        next: "Pair trusted people and verify important contacts in person.",
+        action: "pair_person",
+        cta: "Find trusted people"
       }
     };
   }
@@ -9667,6 +9726,16 @@
   function oneHealthScoreById(id) {
     const key = normalizeOneHealthId(id);
     return (state.oneHealth?.scores || []).find(s => normalizeOneHealthId(s.id || s.label) === key) || null;
+  }
+  function bestOneHealthActionId() {
+    const health = state.oneHealth || {};
+    const first = (health.actions || []).find(a => a && a.id);
+    if (first?.id) return first.id;
+    const scores = (health.scores || []).filter(s => s && s.score != null);
+    const lowest = scores.sort((a, b) => Number(a.score || 0) - Number(b.score || 0))[0];
+    const explainers = oneHealthExplainers();
+    const mapped = explainers[normalizeOneHealthId(lowest?.id || lowest?.label)]?.action;
+    return mapped || "finish_setup";
   }
   function renderOneHealthGuide() {
     const health = state.oneHealth || {};
@@ -9687,14 +9756,30 @@
         const exp = explainers[id];
         const score = oneHealthScoreById(id);
         const card = el("div", "one-health-guide-card");
+        card.setAttribute("role", "button");
+        card.setAttribute("tabindex", "0");
+        card.setAttribute("aria-label", `${exp.cta}: ${exp.title}`);
+        card.dataset.oneHealthAction = exp.action;
         const top = el("div", "one-health-guide-card-top");
         top.appendChild(el("b", "", exp.title));
         top.appendChild(el("strong", "", score?.score != null ? String(score.score) : "--"));
         card.appendChild(top);
         card.appendChild(el("p", "", exp.plain));
         card.appendChild(el("span", "", score?.detail || exp.next));
+        card.appendChild(el("span", "one-health-guide-cta", exp.cta));
         grid.appendChild(card);
       }
+    }
+    const bestAction = bestOneHealthActionId();
+    const best = (health.actions || []).find(a => a.id === bestAction) || {};
+    const autoTitle = $("#one-health-guide-autopilot-title");
+    const autoDetail = $("#one-health-guide-autopilot-detail");
+    const autoButton = $("#one-health-guide-autopilot-button");
+    if (autoTitle) autoTitle.textContent = best.label || "Let One Link handle the next step";
+    if (autoDetail) autoDetail.textContent = best.detail || "One Link will open the most useful setup action for what is missing right now.";
+    if (autoButton) {
+      autoButton.dataset.oneHealthAction = bestAction;
+      autoButton.textContent = bestAction === "finish_setup" ? "Resume setup" : "Do next step";
     }
     const actions = $("#one-health-guide-actions");
     if (actions) {
@@ -9830,6 +9915,14 @@
     if (id === "finish_setup") return openOneSetupFromState();
     if (id === "add_device") return $("#one-setup-add-device-panel")?.click();
     if (id === "set_recovery") return oneSetupMarkRecoveryConfigured();
+    if (id === "review_speed") {
+      closeOneHealthGuide();
+      const details = $("#activity-advanced-tools");
+      if (details) details.open = true;
+      const target = $("#fabric-truth") || $("#no-router-kit") || $("#activity-advanced-tools");
+      target?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      return toast("One Link is checking the fastest trusted path.", "info", 3000);
+    }
     if (id === "review_lost_device") {
       $("#self-mesh-safety-actions").open = true;
       return $("#self-mesh-kit")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -17990,6 +18083,25 @@
     if (!btn) return;
     closeOneHealthGuide();
     runOneHealthAction(btn.dataset.oneHealthAction || "");
+  });
+  $("#one-health-guide-grid")?.addEventListener("click", (e) => {
+    const card = e.target?.closest?.("[data-one-health-action]");
+    if (!card) return;
+    closeOneHealthGuide();
+    runOneHealthAction(card.dataset.oneHealthAction || "");
+  });
+  $("#one-health-guide-grid")?.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const card = e.target?.closest?.("[data-one-health-action]");
+    if (!card) return;
+    e.preventDefault();
+    closeOneHealthGuide();
+    runOneHealthAction(card.dataset.oneHealthAction || "");
+  });
+  $("#one-health-guide-autopilot-button")?.addEventListener("click", (e) => {
+    const action = e.currentTarget?.dataset?.oneHealthAction || bestOneHealthActionId();
+    closeOneHealthGuide();
+    runOneHealthAction(action);
   });
   $("#one-health-guide-setup")?.addEventListener("click", () => {
     closeOneHealthGuide();

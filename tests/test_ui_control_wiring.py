@@ -294,6 +294,10 @@ def test_activity_surface_uses_progressive_disclosure() -> None:
     assert 'id="one-health-guide-backdrop"' in html
     assert "openOneHealthGuide();" in html
     assert "closeOneHealthGuide();" in html
+    assert 'id="one-health-guide-autopilot-button"' in html
+    assert '$("#one-health-guide-grid")?.addEventListener("click"' in html
+    assert '$("#one-health-guide-grid")?.addEventListener("keydown"' in html
+    assert '$("#one-health-guide-autopilot-button")?.addEventListener("click"' in html
     assert 'role", "button"' in html
     assert 'tabindex", "0"' in html
     assert 'id="activity-advanced-tools"' in html
