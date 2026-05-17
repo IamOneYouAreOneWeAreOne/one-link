@@ -5487,20 +5487,57 @@
         </div>
       </button>
 
-      <!-- Action row: share / copy / done. -->
+      <!-- Action row. Buttons are tailored to the platform:
+           - Mobile / touch: native Share sheet via navigator.share.
+           - Desktop: sovereign options — Email link, Show fullscreen
+             QR (great for displaying across a room), Save QR image.
+           "Copy link" + "Done" are always present. -->
       <div class="actions" style="margin-top:14px; gap:8px; display:flex;
                                    align-items:center; flex-wrap:wrap;">
+        <!-- Mobile-only -->
         <button class="btn-ghost" id="invite-share"
                 style="display:none;">Share...</button>
+        <!-- Always -->
         <button class="btn-ghost" id="invite-copy">Copy link</button>
-        <a id="invite-open-tab" href="#" target="_blank" rel="noopener"
-           class="btn-ghost" style="text-decoration:none;">Open landing</a>
+        <!-- Desktop -->
+        <button class="btn-ghost" id="invite-email"
+                style="display:none;">Email link</button>
+        <button class="btn-ghost" id="invite-fullscreen"
+                style="display:none;">Show big</button>
+        <button class="btn-ghost" id="invite-save-qr"
+                style="display:none;">Save QR</button>
+        <!-- Always -->
         <button class="btn-primary" id="invite-close"
                 style="margin-left:auto;">Done</button>
       </div>
 
       <!-- Hidden: the raw landing URL, kept in DOM for Copy/Share -->
       <div id="invite-url" style="display:none;"></div>
+      <!-- Hidden anchor used by Save-QR to trigger a download. -->
+      <a id="invite-qr-download" download="one-link-invite.svg"
+         style="display:none;"></a>
+    </div>
+  </div>
+
+  <!-- Fullscreen QR backdrop. Shown when user taps "Show big" so
+       another device can scan it from across the room. -->
+  <div class="modal-backdrop" id="invite-fullscreen-backdrop"
+       role="dialog" aria-modal="true" aria-label="Pair QR code">
+    <div style="position:fixed; inset:0; background:#fff;
+                display:flex; flex-direction:column; align-items:center;
+                justify-content:center; padding:24px; cursor:zoom-out;"
+         id="invite-fullscreen-stage">
+      <div id="invite-fullscreen-qr"
+           style="width:min(70vh, 70vw); height:min(70vh, 70vw);
+                  display:flex; align-items:center; justify-content:center;">
+      </div>
+      <div id="invite-fullscreen-code"
+           style="font-family:ui-monospace,monospace; font-size:28px;
+                  font-weight:700; letter-spacing:0.3em; color:#111;
+                  margin-top:28px;"></div>
+      <div style="color:#777; font-size:13px; margin-top:6px;">
+        Tap anywhere to close.
+      </div>
     </div>
   </div>
 
@@ -8480,11 +8517,29 @@
 
   // Invite sub-modal. Mints a pair code, renders a real SVG QR
   // (from /api/discover/invite/qr.svg), runs a live MM:SS countdown,
-  // and exposes tap-to-copy on the code + native Web Share where
-  // available.
+  // and exposes platform-appropriate share actions:
+  //   - mobile / touch-primary: navigator.share -> native sheet
+  //   - desktop: Email link / Show fullscreen QR / Save QR file
   let _inviteCountdownTimer = null;
   let _inviteCurrentCode = null;
   let _inviteExpiresAtMs = 0;
+
+  // Best-effort platform detection. UA-string + touch-primary
+  // pointer check; tablets with a stylus still count as touch.
+  function _isMobileLikely() {
+    try {
+      const ua = navigator.userAgent || "";
+      if (/Android|iPhone|iPad|iPod|Mobile/i.test(ua)) return true;
+      // Some Windows tablets report Mobile UA; double-check via
+      // pointer media query.
+      if (window.matchMedia &&
+          window.matchMedia("(pointer: coarse)").matches &&
+          navigator.maxTouchPoints > 1) {
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
 
   async function openInviteModal(targetDevice) {
     const overlay = $("#invite-backdrop");
@@ -8493,8 +8548,6 @@
     const expiryEl = $("#invite-expiry");
     const qrHost = $("#invite-qr");
     const tgtLine = $("#invite-target-line");
-    const openTab = $("#invite-open-tab");
-    const shareBtn = $("#invite-share");
     if (!overlay || !codeEl || !urlEl || !qrHost) return;
     overlay.classList.add("show");
 
@@ -8514,7 +8567,6 @@
     urlEl.textContent = "";
     if (expiryEl) expiryEl.textContent = "...";
     qrHost.innerHTML = '<div style="color:#888; font-size:12px;">Generating QR...</div>';
-    if (openTab) openTab.style.display = "none";
     _stopInviteCountdown();
 
     try {
@@ -8529,10 +8581,6 @@
       _inviteExpiresAtMs = body.expires_ms || (Date.now() + 300000);
       codeEl.textContent = code;
       urlEl.textContent = landing;
-      if (openTab && landing) {
-        openTab.href = landing;
-        openTab.style.display = "";
-      }
       // Real SVG QR from the daemon, sized to the card. <img src>
       // automatically sends the session cookie for same-origin
       // requests, so the auth gate accepts it transparently.
@@ -8542,9 +8590,29 @@
         + `onerror="this.parentNode.innerHTML='<div style=color:#c33;font-size:12px;>QR generation failed</div>'" />`;
       // Live MM:SS countdown.
       _startInviteCountdown();
-      // Show the Share button only on platforms that support Web Share.
-      if (shareBtn) {
-        shareBtn.style.display = (navigator.share ? "" : "none");
+      // Tailor the action row to the platform.
+      //
+      // On Windows desktop, navigator.share() routes through the
+      // Windows share sheet which defaults to Microsoft Phone Link
+      // (a corp account-tied service that violates the sovereignty
+      // floor and confuses users). So Web Share is ONLY used when
+      // we're on a real mobile / touch-primary device — there the
+      // OS share sheet is a first-class send mechanism (Messages /
+      // Mail / AirDrop / etc.).
+      //
+      // On desktop we show our own sovereign options: Email link
+      // via mailto:, Show fullscreen QR (great for showing across
+      // a room), and Save QR (downloads the SVG to disk).
+      const isMobile = _isMobileLikely();
+      $("#invite-share").style.display = (isMobile && navigator.share) ? "" : "none";
+      $("#invite-email").style.display = isMobile ? "none" : "";
+      $("#invite-fullscreen").style.display = isMobile ? "none" : "";
+      $("#invite-save-qr").style.display = isMobile ? "none" : "";
+      // Wire the save-QR anchor to the qr.svg URL.
+      const dl = $("#invite-qr-download");
+      if (dl) {
+        dl.href = qrUrl;
+        dl.download = `one-link-invite-${code}.svg`;
       }
     } catch (e) {
       codeEl.textContent = "ERROR";
@@ -17073,18 +17141,15 @@
       }
     });
   }
-  // Native share sheet (mobile + supported desktops). The Share
-  // button is only shown when navigator.share is available.
+  // Native share sheet (mobile / touch only — on Windows desktop
+  // this routes to Microsoft Phone Link which is corp-tied and not
+  // what the user wants). The Share button is hidden on desktop.
   const _inviteShare = $("#invite-share");
   if (_inviteShare) {
     _inviteShare.addEventListener("click", async () => {
       const url = ($("#invite-url").textContent || "").trim();
       const code = ($("#invite-code").textContent || "").trim();
-      if (!url) return;
-      if (!navigator.share) {
-        toast("Sharing not supported here.", "warn");
-        return;
-      }
+      if (!url || !navigator.share) return;
       try {
         await navigator.share({
           title: "One Link invite",
@@ -17092,11 +17157,68 @@
           url,
         });
       } catch (e) {
-        // User cancelled — silent. Other errors get toasted.
         if (e && e.name !== "AbortError") {
           toast(`Couldn't share. ${e.message || e}`, "bad");
         }
       }
+    });
+  }
+  // Email — opens the user's default mail client with a
+  // pre-filled subject + body. No corp routing, no Phone Link.
+  const _inviteEmail = $("#invite-email");
+  if (_inviteEmail) {
+    _inviteEmail.addEventListener("click", () => {
+      const url = ($("#invite-url").textContent || "").trim();
+      const code = ($("#invite-code").textContent || "").trim();
+      if (!url) return;
+      const subject = encodeURIComponent("One Link invite");
+      const body = encodeURIComponent(
+        `Open this link on your device to join me on One Link:\n\n${url}\n\nPair code: ${code}\n\nIt works whether or not you already have One Link installed.`
+      );
+      const href = `mailto:?subject=${subject}&body=${body}`;
+      // Use window.location so the OS opens the default mail
+      // handler. No new tab needed.
+      try {
+        window.location.href = href;
+      } catch (e) {
+        toast("Couldn't open mail client.", "bad");
+      }
+    });
+  }
+  // Show big — display the QR fullscreen so a device across the
+  // room can scan it. Great for showing on a TV / external monitor.
+  const _inviteFullscreen = $("#invite-fullscreen");
+  if (_inviteFullscreen) {
+    _inviteFullscreen.addEventListener("click", () => {
+      const code = ($("#invite-code").textContent || "").trim();
+      if (!code || code === "------") return;
+      const qrUrl = `/api/discover/invite/qr.svg?code=${encodeURIComponent(code)}`;
+      const stage = $("#invite-fullscreen-qr");
+      const codeEl = $("#invite-fullscreen-code");
+      const backdrop = $("#invite-fullscreen-backdrop");
+      if (stage) {
+        stage.innerHTML = `<img src="${qrUrl}" alt="Pair QR" `
+          + `style="width:100%; height:100%; object-fit:contain;" />`;
+      }
+      if (codeEl) codeEl.textContent = code;
+      if (backdrop) backdrop.classList.add("show");
+    });
+  }
+  // Save QR image (download SVG).
+  const _inviteSaveQr = $("#invite-save-qr");
+  if (_inviteSaveQr) {
+    _inviteSaveQr.addEventListener("click", () => {
+      const a = $("#invite-qr-download");
+      if (a && a.href && a.href !== "#") {
+        a.click();
+      }
+    });
+  }
+  // Fullscreen QR — tap anywhere to close.
+  const _fsBackdrop = $("#invite-fullscreen-backdrop");
+  if (_fsBackdrop) {
+    _fsBackdrop.addEventListener("click", () => {
+      _fsBackdrop.classList.remove("show");
     });
   }
   const _inviteBackdrop = $("#invite-backdrop");
