@@ -8823,7 +8823,13 @@
     ));
     const actions = el("div", "actions");
     const invite = el("button", "primary", "Pair phone by QR");
-    invite.onclick = () => openInviteModal({ kind: "phone", hostname: "Phone" });
+    invite.onclick = async () => {
+      closeDiscoverModal();
+      await refreshOneSetup();
+      showOnboardingStep(4);
+      $("#onboarding-backdrop").style.display = "flex";
+      await oneSetupAddDevice();
+    };
     const scan = el("button", "", "Scan again");
     scan.onclick = () => loadDiscoverable({ prune: true });
     actions.appendChild(invite);

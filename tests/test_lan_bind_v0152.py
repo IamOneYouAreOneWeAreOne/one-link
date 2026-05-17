@@ -119,6 +119,23 @@ async def test_status_reports_actual_bind_host(server_lan):
     assert body["bind_host"] == "0.0.0.0"
 
 
+def test_setup_invite_peer_url_uses_lan_ip_when_lan_bound(server_lan, monkeypatch):
+    """A QR minted from the desktop UI is requested over 127.0.0.1,
+    but the encoded phone URL must use the reachable LAN address."""
+    from one_link import server as server_mod
+
+    class Req:
+        scheme = "http"
+        host = f"127.0.0.1:{server_lan.port}"
+
+    monkeypatch.setattr(server_mod, "_detect_lan_ip", lambda: "192.168.1.142")
+    server_lan.https_port = server_lan.port + 1
+    assert (
+        server_lan._setup_invite_peer_url(Req(), "tok")
+        == f"https://192.168.1.142:{server_lan.https_port}/peer?setup_device_invite=tok"
+    )
+
+
 @pytest.mark.asyncio
 async def test_socket_actually_listens_on_lan_iface(server_lan):
     """A 0.0.0.0 bind MUST be reachable from a non-loopback IP. Probe
@@ -145,6 +162,28 @@ def test_cli_lan_flag_exists():
     assert "--lan" in result.output
     # The help text must mention the trust boundary explicitly.
     assert "Wi-Fi" in result.output or "LAN" in result.output
+
+
+def test_cli_app_defaults_to_lan_for_phone_pairing(monkeypatch):
+    """Desktop app launch should be phone-ready by default; users can
+    still opt out with --loopback-only."""
+    from click.testing import CliRunner
+    from one_link.cli import cli
+
+    calls = []
+
+    def fake_run_app(**kwargs):
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr("one_link.app.run_app", fake_run_app)
+    result = CliRunner().invoke(cli, ["app", "--no-browser"])
+    assert result.exit_code == 0
+    assert calls[-1]["lan"] is True
+
+    result = CliRunner().invoke(cli, ["app", "--no-browser", "--loopback-only"])
+    assert result.exit_code == 0
+    assert calls[-1]["lan"] is False
 
 
 def test_run_app_sets_env_var_when_lan_passed(monkeypatch):

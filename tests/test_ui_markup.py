@@ -72,7 +72,8 @@ def test_discovery_modal_has_phone_fallback(html: str):
         "Phone or tablet",
         "private Wi-Fi addresses",
         "scan the QR from the phone",
-        'openInviteModal({ kind: "phone", hostname: "Phone" })',
+        "showOnboardingStep(4)",
+        "oneSetupAddDevice()",
         "inviteable",
     ):
         assert marker in html

@@ -821,12 +821,12 @@ def send_file(peer, path):
     ),
 )
 @click.option(
-    "--lan",
-    is_flag=True,
+    "--lan/--loopback-only",
+    default=True,
     help=(
         "Bind to 0.0.0.0 so devices on your local Wi-Fi (your phone, "
-        "another laptop) can reach the UI. Prints the LAN URL + a "
-        "security warning. Default is loopback-only."
+        "another laptop) can reach the UI. Use --loopback-only for "
+        "local-computer-only mode."
     ),
 )
 def app(no_browser, browser_tab, lan):

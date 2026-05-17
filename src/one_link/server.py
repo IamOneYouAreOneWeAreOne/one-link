@@ -4428,8 +4428,26 @@ class UIServer:
     def _setup_invite_deep_link(self, token: str) -> str:
         return f"one-link://setup/add-device?token={token}"
 
+    def _lan_peer_base_url(self, request: web.Request) -> str:
+        """Return the URL base another device on Wi-Fi should open.
+
+        The desktop UI usually calls invite endpoints through
+        127.0.0.1, but a phone scanning that URL would hit itself.
+        When the daemon is LAN-bound, encode the machine's LAN IP in
+        QR links so the invited phone reaches the actual desktop
+        daemon. If the daemon is intentionally loopback-only, keep the
+        request host so tests and local-only flows remain deterministic.
+        """
+        if self.bind_host not in ("127.0.0.1", "localhost", "::1"):
+            lan_ip = _detect_lan_ip()
+            if lan_ip != "127.0.0.1":
+                if self.https_port:
+                    return f"https://{lan_ip}:{self.https_port}"
+                return f"http://{lan_ip}:{self.port}"
+        return f"{request.scheme}://{request.host}"
+
     def _setup_invite_peer_url(self, request: web.Request, token: str) -> str:
-        return f"{request.scheme}://{request.host}/peer?setup_device_invite={token}"
+        return f"{self._lan_peer_base_url(request)}/peer?setup_device_invite={token}"
 
     async def api_setup_device_invite(self, request: web.Request) -> web.Response:
         """Create a short-lived One Setup invite for a new device.
