@@ -197,6 +197,13 @@ class TrayIcon:
             return
         try:
             base_icon = self._tinted_icon("online")
+            if base_icon is None:
+                log.warning(
+                    "tray start skipped: no icon image available. "
+                    "Daemon continues without a tray icon."
+                )
+                self._available = False
+                return
             self._icon = Icon(
                 "one_link",
                 icon=base_icon,

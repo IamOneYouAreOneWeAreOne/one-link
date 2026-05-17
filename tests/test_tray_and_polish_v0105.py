@@ -59,6 +59,32 @@ def test_tray_status_tint_handles_all_states():
         t.set_status(s)
 
 
+def test_tray_start_skips_when_icon_image_is_missing(monkeypatch):
+    """A windowed build may have pystray importable while Pillow or
+    bundled image data is unavailable. That must degrade to no tray,
+    not crash a background thread."""
+    import types
+
+    from one_link import tray as tray_mod
+
+    class FakeIcon:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Icon must not be constructed without image data")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "pystray",
+        types.SimpleNamespace(Icon=FakeIcon),
+    )
+    monkeypatch.setattr(tray_mod.TrayIcon, "_tinted_icon", staticmethod(lambda status: None))
+
+    t = tray_mod.TrayIcon(on_quit=lambda: None, url="x")
+    assert t.available is True
+    t.start()
+    assert t.available is False
+    assert t._icon is None
+
+
 def test_tray_optional_deps_in_pyproject():
     """The pyproject.toml must declare a 'tray' optional-deps
     extra so users can `pip install one_link[tray]`."""
