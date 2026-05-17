@@ -69,6 +69,7 @@ def test_discovery_modal_has_phone_fallback(html: str):
         "function _renderPhoneHelp",
         "Don't see your phone?",
         "Pair phone by QR",
+        "Phone or tablet",
         "private Wi-Fi addresses",
         "scan the QR from the phone",
         'openInviteModal({ kind: "phone", hostname: "Phone" })',

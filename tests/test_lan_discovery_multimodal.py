@@ -87,6 +87,37 @@ class TestMergeDevices:
         assert "aa:bb:cc:dd:ee:ff" in all_macs
 
 
+class TestMobileInference:
+    def test_ios_lockdown_port_classifies_phone(self):
+        dev = DiscoveredDevice(ip="192.168.1.20", open_ports=[62078])
+        assert lan_discovery._infer_kind(dev) == "phone"
+
+    def test_apple_mobdev_mdns_classifies_phone(self):
+        dev = DiscoveredDevice(
+            ip="192.168.1.21",
+            mdns_services=["_apple-mobdev2"],
+        )
+        assert lan_discovery._infer_kind(dev) == "phone"
+
+    def test_companion_link_without_model_is_mobile_candidate(self):
+        dev = DiscoveredDevice(
+            ip="192.168.1.22",
+            vendor="Apple",
+            mdns_services=["_companion-link"],
+        )
+        assert lan_discovery._infer_kind(dev) == "mobile"
+        assert lan_discovery._is_pairable_kind("mobile")
+
+    def test_private_quiet_arp_device_is_mobile_candidate(self):
+        dev = DiscoveredDevice(
+            ip="192.168.1.23",
+            mac="da:11:22:33:44:55",
+            sources=["arp"],
+            open_ports=[],
+        )
+        assert lan_discovery._infer_kind(dev) == "mobile"
+
+
 class TestNetworkHealth:
     def test_empty_scan_implies_isolation_suspicion(self):
         """Zero devices found, but we know we have a gateway — that's

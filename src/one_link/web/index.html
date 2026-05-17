@@ -8747,6 +8747,7 @@
   }
 
   function _kindIcon(kind) {
+    if (kind === "mobile") return "📱";
     return {
       phone: "📱", tablet: "📱", laptop: "💻", desktop: "🖥️",
       watch: "⌚", tv: "📺", speaker: "🔊", printer: "🖨️",
@@ -8755,6 +8756,7 @@
   }
 
   function _kindLabel(kind) {
+    if (kind === "mobile") return "Phone or tablet";
     return {
       phone: "Phone", tablet: "Tablet", laptop: "Laptop",
       desktop: "Desktop", watch: "Watch", tv: "TV",

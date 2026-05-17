@@ -72,9 +72,10 @@ class DiscoveredDevice:
     mac: str = ""                       # lowercase, colons; empty if unknown
     hostname: str = ""                  # friendly name from mDNS / NetBIOS / SMB
     vendor: str = ""                    # OUI-derived ("Apple, Inc.", "Samsung")
-    # Inferred kind: "phone" / "tablet" / "laptop" / "desktop" /
+    # Inferred kind: "phone" / "tablet" / "mobile" / "laptop" / "desktop" /
     # "tv" / "speaker" / "printer" / "router" / "iot" / "unknown".
-    # The UI uses this to filter "pairable" (phone/laptop/tablet/
+    # "mobile" means privacy-masked phone/tablet candidate. The UI
+    # uses this to filter "pairable" (phone/laptop/tablet/mobile/
     # desktop) vs "other gear".
     kind: str = "unknown"
     # Best-guess model string, e.g. "iPhone15,3" or "MacBookPro18,3".
@@ -335,6 +336,7 @@ def scan_arp_table(timeout_s: float = 2.0) -> list[DiscoveredDevice]:
 _INTERESTING_MDNS_SERVICES = [
     # Apple-y
     "_companion-link._tcp.local.",      # Continuity / Handoff
+    "_airdrop._tcp.local.",             # AirDrop peer discovery
     "_airplay._tcp.local.",             # AirPlay (TVs, speakers, Apple TVs)
     "_raop._tcp.local.",                # Remote Audio Output (AirPlay v1)
     "_homekit._tcp.local.",             # HomeKit accessories
@@ -1533,7 +1535,7 @@ async def enrich_via_reverse_dns(devices: list[DiscoveredDevice]) -> None:
 
 def _infer_kind(dev: DiscoveredDevice) -> str:
     """Look at the merged signals and guess the device kind.
-    Returns one of: phone, tablet, laptop, desktop, tv, speaker,
+    Returns one of: phone, tablet, mobile, laptop, desktop, tv, speaker,
     printer, router, watch, console, iot, unknown.
 
     Inference order (strongest signal first):
@@ -1555,7 +1557,9 @@ def _infer_kind(dev: DiscoveredDevice) -> str:
     combined = f"{host} {model}".strip()
 
     # 2. mDNS portfolio signatures (with disambiguation).
-    if "_companion-link" in svcs or "_apple-mobdev2" in svcs:
+    if "_apple-mobdev2" in svcs:
+        return "phone"
+    if "_companion-link" in svcs or "_airdrop" in svcs:
         if "iphone" in model:    return "phone"
         if "ipad" in model:      return "tablet"
         if "macbook" in model:   return "laptop"
@@ -1564,7 +1568,7 @@ def _infer_kind(dev: DiscoveredDevice) -> str:
         if "watch" in model:     return "watch"
         if "ps5" in combined or "ps4" in combined or "playstation" in combined:
             return "console"
-        return "laptop"
+        return "mobile"
     if "_airplay" in svcs and "_raop" in svcs:
         # AirPlay receiver. Could be Apple TV / HomePod / Sonos /
         # smart-speaker / PS5 / smart-TV. Discriminate by host/model.
@@ -1589,6 +1593,8 @@ def _infer_kind(dev: DiscoveredDevice) -> str:
     if 1400 in op:           return "speaker"   # Sonos
     if 32400 in op:          return "desktop"   # Plex
     if 7000 in op:           return "speaker"   # AirPlay 2
+    if 62078 in op:          return "phone"     # iOS lockdown
+    if 5555 in op:           return "phone"     # Android debug bridge
     if 631 in op or 9100 in op: return "printer"
     if 3389 in op:           return "desktop"   # Windows RDP
     if 5000 in op or 5001 in op or 548 in op:
@@ -1603,13 +1609,20 @@ def _infer_kind(dev: DiscoveredDevice) -> str:
     if "tesla" in vendor:         return "iot"
     if "ring" in vendor or "wyze" in vendor:
         return "iot"
+    if is_locally_administered_mac(dev.mac) and not op:
+        # iOS/Android private Wi-Fi addresses intentionally erase OUI
+        # vendor identity. If the host is otherwise quiet and only
+        # visible through ARP, surface it as a mobile candidate instead
+        # of burying it under "unknown". This is a confidence-limited
+        # hint, not a claim that we defeated phone privacy.
+        return "mobile"
     return "unknown"
 
 
 def _is_pairable_kind(kind: str) -> bool:
     """One Link pairs to user-controlled compute. TVs, speakers,
     printers, IoT — visible but not the primary pair target."""
-    return kind in ("phone", "tablet", "laptop", "desktop", "watch")
+    return kind in ("phone", "tablet", "mobile", "laptop", "desktop", "watch")
 
 
 def merge_devices(*lists: list[DiscoveredDevice]) -> list[DiscoveredDevice]:
