@@ -2008,6 +2008,25 @@ class Daemon:
                         timeout=self.CALL_SIGNAL_SEND_TIMEOUT_S,
                     )
                 except Exception as exc:
+                    if self._call_signal_retryable(msgs):
+                        log.info(
+                            "flush_call_api: retrying call signal for %s "
+                            "after closed session: %s",
+                            peer_fp[:16], exc,
+                        )
+                        try:
+                            await asyncio.wait_for(
+                                self.send_to(peer, msgs),
+                                timeout=self.CALL_SIGNAL_SEND_TIMEOUT_S,
+                            )
+                        except Exception as retry_exc:
+                            log.warning(
+                                "flush_call_api: send_to raised for %s: %s",
+                                peer_fp[:16], retry_exc,
+                            )
+                            continue
+                        delivered.append(peer_fp)
+                        continue
                     log.warning(
                         "flush_call_api: send_to raised for %s: %s",
                         peer_fp[:16], exc,
@@ -2032,6 +2051,30 @@ class Daemon:
                 )
 
         return tuple(delivered)
+
+    @staticmethod
+    def _call_signal_retryable(msgs: list[dict]) -> bool:
+        """Call signaling messages are keyed by call_id, so a one-shot
+        fresh-session retry is safe when the reusable session closed before
+        ACK. Avoid doing this for normal chat/file frames where duplicate
+        user-visible content would be worse than a clear retry prompt.
+        """
+        if not msgs:
+            return False
+        retryable = {
+            "CALL_INVITE",
+            "CALL_ACCEPT",
+            "CALL_DECLINE",
+            "CALL_END",
+            "CALL_INVITE_SDP_V1",
+            "CALL_ICE",
+            "CALL_FRAME_ATTEST",
+            "RECORDING_START",
+            "RECORDING_STOP",
+            "SAS_CONFIRM",
+            "SAS_DECLINE",
+        }
+        return all(str(m.get("t") or "") in retryable for m in msgs)
 
     async def _handle_self_mesh_presence(
         self,

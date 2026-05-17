@@ -314,6 +314,44 @@ def test_flush_send_to_failure_logs_and_drops(
     assert delivered == ()
 
 
+def test_flush_retries_call_signal_once_on_closed_session(
+    alice_daemon: Daemon, mom: Identity,
+) -> None:
+    """Call signaling is idempotent by call_id, so a stale reusable
+    session should get one fresh-session retry before the UI gives up."""
+
+    attempts: list[list[dict]] = []
+
+    async def flaky(peer, msgs):
+        attempts.append(list(msgs))
+        if len(attempts) == 1:
+            raise ConnectionError("closed session")
+        return msgs
+
+    alice_daemon.send_to = flaky  # type: ignore[assignment]
+
+    resp = ApiResponse(
+        ok=True,
+        call_id="call-retry",
+        outbound=(
+            ApiOutboundMessage(
+                type="CALL_INVITE",
+                peer_master_vk_hex=mom.fingerprint,
+                payload={"call_id": "call-retry"},
+            ),
+        ),
+    )
+    loop = asyncio.new_event_loop()
+    try:
+        delivered = loop.run_until_complete(
+            alice_daemon.flush_call_api_response(resp)
+        )
+    finally:
+        loop.close()
+    assert delivered == (mom.fingerprint,)
+    assert len(attempts) == 2
+
+
 def test_flush_send_to_timeout_does_not_hang_call_ui(
     alice_daemon: Daemon, mom: Identity,
 ) -> None:
