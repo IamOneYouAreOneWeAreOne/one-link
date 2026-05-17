@@ -3395,7 +3395,10 @@ class UIServer:
             else:
                 wire_msg.pop("sdp_offer", None)
             try:
-                await self.daemon.send_to(peer, [wire_msg])
+                await asyncio.wait_for(
+                    self.daemon.send_to(peer, [wire_msg]),
+                    timeout=getattr(self.daemon, "CALL_SIGNAL_SEND_TIMEOUT_S", 6.0),
+                )
             except Exception as exc:
                 log.warning("send_sdp failed: %s", exc)
                 return web.json_response(
@@ -3430,7 +3433,10 @@ class UIServer:
         body_msg = build_ice_message(call_id=call_id, candidate=cand)
         wire_msg = make_msg(CALL_ICE, self.daemon.me.short_id, **body_msg)
         try:
-            await self.daemon.send_to(peer, [wire_msg])
+            await asyncio.wait_for(
+                self.daemon.send_to(peer, [wire_msg]),
+                timeout=getattr(self.daemon, "CALL_SIGNAL_SEND_TIMEOUT_S", 6.0),
+            )
         except Exception as exc:
             log.warning("send_ice failed: %s", exc)
             return web.json_response(
@@ -3650,7 +3656,10 @@ class UIServer:
             attestation=to_wire_dict(signed),
         )
         try:
-            await self.daemon.send_to(peer, [wire_msg])
+            await asyncio.wait_for(
+                self.daemon.send_to(peer, [wire_msg]),
+                timeout=getattr(self.daemon, "CALL_SIGNAL_SEND_TIMEOUT_S", 6.0),
+            )
         except Exception as exc:
             log.warning("attest_frame send failed: %s", exc)
             return web.json_response(

@@ -937,6 +937,8 @@ class OutboundSession:
 
 
 class Daemon:
+    CALL_SIGNAL_SEND_TIMEOUT_S = 6.0
+
     def __init__(self, me: Identity):
         self.me = me
         self.discovery: Discovery | None = None
@@ -2001,7 +2003,10 @@ class Daemon:
                     )
                     continue
                 try:
-                    await self.send_to(peer, msgs)
+                    await asyncio.wait_for(
+                        self.send_to(peer, msgs),
+                        timeout=self.CALL_SIGNAL_SEND_TIMEOUT_S,
+                    )
                 except Exception as exc:
                     log.warning(
                         "flush_call_api: send_to raised for %s: %s",
@@ -4652,7 +4657,10 @@ class Daemon:
                 if peer is None:
                     continue
                 try:
-                    await self.send_to(peer, msgs)
+                    await asyncio.wait_for(
+                        self.send_to(peer, msgs),
+                        timeout=self.CALL_SIGNAL_SEND_TIMEOUT_S,
+                    )
                 except Exception:
                     continue
 
@@ -4679,7 +4687,10 @@ class Daemon:
                 if peer is None:
                     continue
                 try:
-                    await self.send_to(peer, msgs)
+                    await asyncio.wait_for(
+                        self.send_to(peer, msgs),
+                        timeout=self.CALL_SIGNAL_SEND_TIMEOUT_S,
+                    )
                 except Exception:
                     continue
 

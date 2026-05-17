@@ -314,6 +314,40 @@ def test_flush_send_to_failure_logs_and_drops(
     assert delivered == ()
 
 
+def test_flush_send_to_timeout_does_not_hang_call_ui(
+    alice_daemon: Daemon, mom: Identity,
+) -> None:
+    """A stuck live transport must not hold the /api/v1/calls
+    response forever. The UI can show inviting state while the daemon
+    logs the delivery timeout."""
+
+    async def stuck(peer, msgs):
+        await asyncio.sleep(60)
+
+    alice_daemon.CALL_SIGNAL_SEND_TIMEOUT_S = 0.01
+    alice_daemon.send_to = stuck  # type: ignore[assignment]
+
+    resp = ApiResponse(
+        ok=True,
+        call_id="call-timeout",
+        outbound=(
+            ApiOutboundMessage(
+                type="CALL_INVITE",
+                peer_master_vk_hex=mom.fingerprint,
+                payload={"call_id": "call-timeout"},
+            ),
+        ),
+    )
+    loop = asyncio.new_event_loop()
+    try:
+        delivered = loop.run_until_complete(
+            alice_daemon.flush_call_api_response(resp)
+        )
+    finally:
+        loop.close()
+    assert delivered == ()
+
+
 def test_flush_skips_malformed_outbound_payload(
     alice_daemon: Daemon, mom: Identity,
 ) -> None:
