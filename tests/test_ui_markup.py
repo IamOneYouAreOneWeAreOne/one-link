@@ -72,8 +72,11 @@ def test_discovery_modal_has_phone_fallback(html: str):
         "Phone or tablet",
         "private Wi-Fi addresses",
         "scan the QR from the phone",
+        "function startOneSetupDevicePairing()",
+        "function _isPersonalDeviceKind",
         "showOnboardingStep(4)",
         "oneSetupAddDevice()",
+        "await startOneSetupDevicePairing();",
         "inviteable",
     ):
         assert marker in html

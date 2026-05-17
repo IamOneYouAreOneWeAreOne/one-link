@@ -8766,6 +8766,18 @@
     }[kind] || "Device";
   }
 
+  function _isPersonalDeviceKind(kind) {
+    return ["phone", "tablet", "mobile", "laptop", "desktop"].includes(String(kind || ""));
+  }
+
+  async function startOneSetupDevicePairing() {
+    closeDiscoverModal();
+    await refreshOneSetup();
+    showOnboardingStep(4);
+    $("#onboarding-backdrop").style.display = "flex";
+    await oneSetupAddDevice();
+  }
+
   function _renderDeviceRow(d, action) {
     /* action = "pair" | "invite" */
     const row = el("div", "discover-row");
@@ -8783,7 +8795,7 @@
     const btn = el(
       "button",
       action === "pair" ? "pair-btn" : "pair-btn",
-      action === "pair" ? "Pair" : "Send invite",
+      action === "pair" ? "Pair" : (_isPersonalDeviceKind(d.kind) ? "Pair" : "Invite"),
     );
     row.appendChild(av);
     row.appendChild(meta);
@@ -8796,6 +8808,8 @@
         }
         closeDiscoverModal();
         openPairModal(d.one_link_peer);
+      } else if (_isPersonalDeviceKind(d.kind)) {
+        await startOneSetupDevicePairing();
       } else {
         await openInviteModal(d);
       }
@@ -8823,13 +8837,7 @@
     ));
     const actions = el("div", "actions");
     const invite = el("button", "primary", "Pair phone by QR");
-    invite.onclick = async () => {
-      closeDiscoverModal();
-      await refreshOneSetup();
-      showOnboardingStep(4);
-      $("#onboarding-backdrop").style.display = "flex";
-      await oneSetupAddDevice();
-    };
+    invite.onclick = startOneSetupDevicePairing;
     const scan = el("button", "", "Scan again");
     scan.onclick = () => loadDiscoverable({ prune: true });
     actions.appendChild(invite);
@@ -8949,6 +8957,10 @@
   }
 
   async function openInviteModal(targetDevice) {
+    if (!targetDevice || _isPersonalDeviceKind(targetDevice.kind) || targetDevice.kind === "unknown") {
+      await startOneSetupDevicePairing();
+      return;
+    }
     const overlay = $("#invite-backdrop");
     const codeEl = $("#invite-code");
     const urlEl = $("#invite-url");
@@ -16887,7 +16899,13 @@
         token.style.display = "block";
       }
       renderOneSetupInviteCountdown();
-      _oneSetupInviteTimer = setInterval(renderOneSetupInviteCountdown, 1000);
+      _oneSetupInviteTimer = setInterval(async () => {
+        renderOneSetupInviteCountdown();
+        const setup = await refreshOneSetup();
+        if (setup?.pending_setup_devices?.length) {
+          showOnboardingStep(4);
+        }
+      }, 1500);
       await copyToClipboard(invite.peer_url || invite.deep_link || invite.token, "One Setup invite");
       await refreshOneSetup();
       toast("Invite ready and copied.", "good", 3500);
