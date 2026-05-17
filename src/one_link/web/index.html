@@ -1772,6 +1772,17 @@
     border-radius: 8px;
     border: 1px solid rgba(70,211,154,.18);
     background: linear-gradient(180deg, rgba(70,211,154,.08), rgba(255,255,255,.025));
+    cursor: pointer;
+    transition: border-color .14s ease, background .14s ease, transform .14s ease;
+  }
+  .one-health:hover,
+  .one-health:focus-visible {
+    border-color: rgba(70,211,154,.34);
+    background: linear-gradient(180deg, rgba(70,211,154,.11), rgba(255,255,255,.035));
+  }
+  .one-health:focus-visible {
+    outline: 2px solid rgba(124,92,255,.75);
+    outline-offset: 2px;
   }
   .one-health-head {
     display: grid;
@@ -1870,6 +1881,168 @@
   }
   .one-health-actions button.danger {
     background: rgba(255,107,107,.14);
+  }
+  .one-health-guide-modal {
+    width: min(760px, calc(100vw - 28px));
+    max-width: 760px;
+    padding: 0;
+  }
+  .one-health-guide-head {
+    display: grid;
+    grid-template-columns: minmax(0,1fr) auto;
+    gap: 14px;
+    align-items: start;
+    padding: 22px 24px 16px;
+    border-bottom: 1px solid rgba(255,255,255,.07);
+  }
+  .one-health-guide-head h2 {
+    margin: 0 0 6px;
+    font-size: 20px;
+    font-weight: 900;
+  }
+  .one-health-guide-head p {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .one-health-guide-close {
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    color: var(--text-dim);
+    background: rgba(255,255,255,.05);
+    font-size: 20px;
+    line-height: 1;
+  }
+  .one-health-guide-close:hover {
+    color: var(--text);
+    background: rgba(255,255,255,.09);
+  }
+  .one-health-guide-body {
+    display: grid;
+    gap: 14px;
+    padding: 18px 24px 24px;
+  }
+  .one-health-guide-summary {
+    display: grid;
+    grid-template-columns: 76px minmax(0,1fr);
+    gap: 14px;
+    align-items: center;
+    padding: 14px;
+    border-radius: 8px;
+    border: 1px solid rgba(70,211,154,.22);
+    background: rgba(70,211,154,.08);
+  }
+  .one-health-guide-score {
+    width: 66px;
+    height: 66px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    color: var(--text);
+    font-size: 22px;
+    font-weight: 950;
+    border: 1px solid rgba(70,211,154,.38);
+    background: rgba(70,211,154,.13);
+  }
+  .one-health-guide-summary b {
+    display: block;
+    color: var(--text);
+    font-size: 15px;
+    margin-bottom: 4px;
+  }
+  .one-health-guide-summary span {
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  .one-health-guide-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 10px;
+  }
+  .one-health-guide-card {
+    display: grid;
+    gap: 7px;
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,.07);
+    background: rgba(255,255,255,.035);
+  }
+  .one-health-guide-card-top {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: center;
+  }
+  .one-health-guide-card b {
+    color: var(--text);
+    font-size: 13px;
+  }
+  .one-health-guide-card strong {
+    color: var(--text);
+    font-size: 16px;
+  }
+  .one-health-guide-card p {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.42;
+  }
+  .one-health-guide-card span {
+    color: var(--text-dimmer);
+    font-size: 10px;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+  .one-health-guide-actions {
+    display: grid;
+    gap: 8px;
+  }
+  .one-health-guide-action {
+    display: grid;
+    grid-template-columns: minmax(0,1fr) auto;
+    gap: 12px;
+    align-items: center;
+    padding: 11px 12px;
+    border: 1px solid rgba(255,255,255,.07);
+    border-radius: 8px;
+    background: rgba(255,255,255,.035);
+  }
+  .one-health-guide-action b {
+    display: block;
+    color: var(--text);
+    font-size: 13px;
+    margin-bottom: 2px;
+  }
+  .one-health-guide-action span {
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  .one-health-guide-action button,
+  .one-health-guide-footer button {
+    border-radius: 8px;
+    padding: 8px 10px;
+    color: var(--text);
+    background: rgba(124,92,255,.75);
+    font-size: 11px;
+    font-weight: 850;
+    white-space: nowrap;
+  }
+  .one-health-guide-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 4px;
+  }
+  .one-health-guide-footer span {
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.4;
   }
   .activity-nearby {
     display: none;
@@ -6392,6 +6565,40 @@
     </div>
   </div>
 
+  <div class="modal-backdrop" id="one-health-guide-backdrop" aria-hidden="true">
+    <div class="modal one-health-guide-modal" role="dialog" aria-modal="true" aria-labelledby="one-health-guide-title">
+      <div class="one-health-guide-head">
+        <div>
+          <h2 id="one-health-guide-title">One Health guide</h2>
+          <p id="one-health-guide-subtitle">
+            A plain-language checkup for protection, speed, recovery, devices, and people.
+          </p>
+        </div>
+        <button class="one-health-guide-close" id="one-health-guide-close" aria-label="Close One Health guide">×</button>
+      </div>
+      <div class="one-health-guide-body">
+        <div class="one-health-guide-summary">
+          <div class="one-health-guide-score" id="one-health-guide-score">--</div>
+          <div>
+            <b id="one-health-guide-headline">Checking One Link</b>
+            <span id="one-health-guide-detail">
+              One Setup introduces this during first run, and you can reopen it here any time.
+            </span>
+          </div>
+        </div>
+        <div class="one-health-guide-grid" id="one-health-guide-grid"></div>
+        <div class="one-health-guide-actions" id="one-health-guide-actions"></div>
+        <div class="one-health-guide-footer">
+          <span>
+            This is part of One Setup: it explains what is ready, what stayed local,
+            and what action makes One Link safer or faster next.
+          </span>
+          <button id="one-health-guide-setup">Resume setup</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- v0.8.0 CREATE-GROUP MODAL -->
   <div class="modal-backdrop" id="create-group-backdrop">
     <div class="modal" style="max-width:480px;">
@@ -9425,8 +9632,116 @@
     }
     if (select && selectedBefore) select.value = selectedBefore;
   }
+  function oneHealthExplainers() {
+    return {
+      protection: {
+        title: "Protection",
+        plain: "How well your identity, encryption, trust checks, privacy proof, and lost-device controls are protecting you.",
+        next: "Add trusted devices, verify people in person, and review privacy proof."
+      },
+      speed: {
+        title: "Speed",
+        plain: "Whether One Link can find a nearby, trusted, fast path without making you choose the route yourself.",
+        next: "Keep trusted devices awake and let One Link use the best local path automatically."
+      },
+      recovery: {
+        title: "Recovery",
+        plain: "How ready you are if a phone or computer is lost, replaced, offline, or stolen.",
+        next: "Set recovery and keep at least one second trusted device enrolled."
+      },
+      devices: {
+        title: "Devices",
+        plain: "How many of your own devices are enrolled, trusted, reachable, and safe to use as One.",
+        next: "Add your phone or laptop so One Link can route and recover for you."
+      },
+      people: {
+        title: "People",
+        plain: "How clearly One Link knows who you trust for chats, files, calls, verification, and safety.",
+        next: "Pair trusted people and verify important contacts in person."
+      }
+    };
+  }
+  function normalizeOneHealthId(value) {
+    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  }
+  function oneHealthScoreById(id) {
+    const key = normalizeOneHealthId(id);
+    return (state.oneHealth?.scores || []).find(s => normalizeOneHealthId(s.id || s.label) === key) || null;
+  }
+  function renderOneHealthGuide() {
+    const health = state.oneHealth || {};
+    const explainers = oneHealthExplainers();
+    const guideScore = $("#one-health-guide-score");
+    const guideHeadline = $("#one-health-guide-headline");
+    const guideDetail = $("#one-health-guide-detail");
+    if (guideScore) guideScore.textContent = health.score != null ? String(health.score) : "--";
+    if (guideHeadline) guideHeadline.textContent = health.headline || "Checking One Link";
+    if (guideDetail) {
+      guideDetail.textContent = health.detail
+        || "One Setup introduces this during first run, and you can reopen it here any time.";
+    }
+    const grid = $("#one-health-guide-grid");
+    if (grid) {
+      grid.replaceChildren();
+      for (const id of ["protection", "speed", "recovery", "devices", "people"]) {
+        const exp = explainers[id];
+        const score = oneHealthScoreById(id);
+        const card = el("div", "one-health-guide-card");
+        const top = el("div", "one-health-guide-card-top");
+        top.appendChild(el("b", "", exp.title));
+        top.appendChild(el("strong", "", score?.score != null ? String(score.score) : "--"));
+        card.appendChild(top);
+        card.appendChild(el("p", "", exp.plain));
+        card.appendChild(el("span", "", score?.detail || exp.next));
+        grid.appendChild(card);
+      }
+    }
+    const actions = $("#one-health-guide-actions");
+    if (actions) {
+      actions.replaceChildren();
+      const healthActions = (health.actions || []).slice(0, 5);
+      const rows = healthActions.length ? healthActions : [{
+        id: "finish_setup",
+        label: "Walk through One Setup",
+        detail: "Review your identity, devices, recovery, privacy proof, and first private send."
+      }];
+      for (const a of rows) {
+        const row = el("div", "one-health-guide-action");
+        const text = el("div", "");
+        text.appendChild(el("b", "", a.label || "Recommended action"));
+        text.appendChild(el("span", "", a.detail || "One Link will open the right place."));
+        row.appendChild(text);
+        const btn = el("button", "", a.id === "finish_setup" ? "Resume setup" : "Open");
+        btn.dataset.oneHealthAction = a.id || "finish_setup";
+        row.appendChild(btn);
+        actions.appendChild(row);
+      }
+    }
+  }
+  function openOneHealthGuide() {
+    renderOneHealthGuide();
+    const backdrop = $("#one-health-guide-backdrop");
+    if (!backdrop) return;
+    backdrop.classList.add("show");
+    backdrop.setAttribute("aria-hidden", "false");
+    $("#one-health-guide-close")?.focus();
+  }
+  function closeOneHealthGuide() {
+    const backdrop = $("#one-health-guide-backdrop");
+    if (!backdrop) return;
+    backdrop.classList.remove("show");
+    backdrop.setAttribute("aria-hidden", "true");
+    $("#one-health")?.focus();
+  }
   function renderOneHealth() {
     const health = state.oneHealth || {};
+    const healthCard = $("#one-health");
+    if (healthCard) {
+      healthCard.setAttribute("role", "button");
+      healthCard.setAttribute("tabindex", "0");
+      healthCard.setAttribute("aria-label", "Open One Health guide");
+      healthCard.title = "Open One Health guide";
+    }
     const score = $("#one-health-score");
     const title = $("#one-health-title");
     const detail = $("#one-health-detail");
@@ -9438,6 +9753,7 @@
       grid.replaceChildren();
       for (const s of (health.scores || []).slice(0, 5)) {
         const card = el("div", "one-health-metric");
+        card.title = "Open One Health guide";
         card.appendChild(el("b", "", `${s.score ?? "--"}`));
         card.appendChild(el("span", "", s.label || s.id || "score"));
         grid.appendChild(card);
@@ -9454,6 +9770,7 @@
         row.appendChild(text);
         const btn = el("button", a.severity === "urgent" ? "danger" : a.severity === "recommended" ? "warn" : "", "Open");
         btn.dataset.oneHealthAction = a.id || "";
+        btn.title = a.detail || a.label || "Open";
         row.appendChild(btn);
         actions.appendChild(row);
       }
@@ -9499,6 +9816,7 @@
         timeline.appendChild(row);
       }
     }
+    renderOneHealthGuide();
   }
   async function refreshOneHealth() {
     try {
@@ -17649,7 +17967,33 @@
   $("#btn-self-mesh-send")?.addEventListener("click", () => sendSelfMeshInstruction("send_file_from_device"));
   $("#one-health-actions")?.addEventListener("click", (e) => {
     const btn = e.target?.closest?.("[data-one-health-action]");
-    if (btn) runOneHealthAction(btn.dataset.oneHealthAction || "");
+    if (btn) {
+      e.stopPropagation();
+      runOneHealthAction(btn.dataset.oneHealthAction || "");
+    }
+  });
+  $("#one-health")?.addEventListener("click", (e) => {
+    if (e.target?.closest?.("button, a, details, summary, input, textarea, select")) return;
+    openOneHealthGuide();
+  });
+  $("#one-health")?.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    openOneHealthGuide();
+  });
+  $("#one-health-guide-close")?.addEventListener("click", closeOneHealthGuide);
+  $("#one-health-guide-backdrop")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeOneHealthGuide();
+  });
+  $("#one-health-guide-actions")?.addEventListener("click", (e) => {
+    const btn = e.target?.closest?.("[data-one-health-action]");
+    if (!btn) return;
+    closeOneHealthGuide();
+    runOneHealthAction(btn.dataset.oneHealthAction || "");
+  });
+  $("#one-health-guide-setup")?.addEventListener("click", () => {
+    closeOneHealthGuide();
+    openOneSetupFromState();
   });
   $("#btn-courier-export")?.addEventListener("click", exportCourierBundle);
   $("#btn-courier-stage")?.addEventListener("click", stageCourierBundle);

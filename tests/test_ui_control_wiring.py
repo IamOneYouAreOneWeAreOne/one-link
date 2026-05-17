@@ -291,6 +291,11 @@ def test_activity_surface_uses_progressive_disclosure() -> None:
     assert 'id="one-now-privacy"' in html
     assert 'id="activity-nearby-panel"' in html
     assert 'id="activity-nearby-close"' in html
+    assert 'id="one-health-guide-backdrop"' in html
+    assert "openOneHealthGuide();" in html
+    assert "closeOneHealthGuide();" in html
+    assert 'role", "button"' in html
+    assert 'tabindex", "0"' in html
     assert 'id="activity-advanced-tools"' in html
     assert "Advanced fabric tools" in html
     assert "#mesh-panel" in html
