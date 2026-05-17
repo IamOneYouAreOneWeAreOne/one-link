@@ -1857,6 +1857,77 @@
   .one-health-actions button.danger {
     background: rgba(255,107,107,.14);
   }
+  .activity-nearby {
+    display: none;
+    margin: 0 12px 10px;
+    padding: 10px;
+    border: 1px solid rgba(255,255,255,.07);
+    border-radius: 8px;
+    background: rgba(255,255,255,.025);
+  }
+  .activity-nearby.show { display: grid; gap: 8px; }
+  .activity-nearby-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .activity-nearby-title {
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 900;
+  }
+  .activity-nearby-count {
+    color: var(--text-dimmer);
+    font-size: 10px;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+  .activity-nearby-list {
+    display: grid;
+    gap: 6px;
+  }
+  .activity-nearby-row {
+    display: grid;
+    grid-template-columns: 28px minmax(0,1fr) auto;
+    gap: 8px;
+    align-items: center;
+    padding: 7px 8px;
+    border-radius: 7px;
+    background: rgba(255,255,255,.035);
+  }
+  .activity-nearby-icon {
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: rgba(124,92,255,.12);
+  }
+  .activity-nearby-name {
+    min-width: 0;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 850;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .activity-nearby-sub {
+    color: var(--text-dim);
+    font-size: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .activity-nearby-row button {
+    border-radius: 7px;
+    padding: 6px 8px;
+    font-size: 10px;
+    font-weight: 850;
+    color: var(--text);
+    background: rgba(255,255,255,.055);
+  }
   @media (max-width: 1180px) {
     .one-health-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
     .one-health-head { grid-template-columns: 48px minmax(0,1fr); }
@@ -1868,6 +1939,9 @@
     border-radius: 8px;
     border: 1px solid rgba(255,255,255,.07);
     background: rgba(255,255,255,.025);
+  }
+  .one-setup-panel.is-complete {
+    display: none;
   }
   .one-setup-panel .setup-head {
     display: flex;
@@ -5099,6 +5173,13 @@
         <div class="metric clickable" id="metric-tile-active" role="button" tabindex="0" data-mesh-tile="active" aria-label="Open Files Sent tab"><div class="num" id="metric-active">0</div><div class="lbl">moving now</div></div>
         <div class="metric clickable" id="metric-tile-cache" role="button" tabindex="0" data-mesh-tile="cache" aria-label="Filter activity to file transfers"><div class="num" id="metric-cache">0 B</div><div class="lbl">saved chunks</div></div>
         <div class="metric clickable" id="metric-tile-sessions" role="button" tabindex="0" data-mesh-tile="sessions" aria-label="Filter activity to trust events"><div class="num" id="metric-sessions">0</div><div class="lbl">secure links</div></div>
+      </div>
+      <div class="activity-nearby" id="activity-nearby-panel">
+        <div class="activity-nearby-head">
+          <div class="activity-nearby-title">Nearby now</div>
+          <div class="activity-nearby-count" id="activity-nearby-count">Checking</div>
+        </div>
+        <div class="activity-nearby-list" id="activity-nearby-list"></div>
       </div>
       <div class="one-now" id="one-now">
         <div class="one-kicker">One now</div>
@@ -11963,7 +12044,6 @@
     if (!title || !detail) return;
     const status = state.status || {};
     const mesh = state.selfMesh || {};
-    const online = Number(status.peers?.online || 0);
     const moving = Number(status.transfers?.active || 0);
     const sessions = Number(status.performance?.sessions?.open || 0);
     const devices = Array.isArray(mesh.devices) ? mesh.devices.filter(d => !d.revoked) : [];
@@ -11973,11 +12053,12 @@
     if (moving > 0) {
       title.textContent = `${moving} transfer${moving === 1 ? "" : "s"} moving`;
       detail.textContent = "Autopilot is choosing the safest fast path. Open Files only if you want the details.";
-    } else if (online > 0) {
-      title.textContent = `${online} trusted device${online === 1 ? "" : "s"} nearby`;
+    } else if (nearbyCount() > 0) {
+      const nearby = nearbyCount();
+      title.textContent = `${nearby} nearby device${nearby === 1 ? "" : "s"}`;
       detail.textContent = sessions > 0
         ? `${sessions} secure link${sessions === 1 ? "" : "s"} open. Chat, files, and folders are ready.`
-        : "Chat, files, and folders are ready when you are.";
+        : "Trusted devices are ready, and other nearby devices can be paired or invited.";
     } else if (devices.length > 1) {
       title.textContent = "Your personal mesh is ready";
       detail.textContent = `${awake}/${devices.length} device${devices.length === 1 ? "" : "s"} awake. One Link can pick the best device for you.`;
@@ -11987,11 +12068,137 @@
     }
   }
 
+  function trustedNearbyPeers() {
+    return [...state.peers.values()].filter(p => p.trust === "pinned" && p.online);
+  }
+
+  function nearbyDiscoveryRows() {
+    const smart = state.discoverSmart || {};
+    return [
+      ...(smart.ready_to_pair || []),
+      ...(smart.pairable || []),
+      ...(smart.other_gear || []),
+    ];
+  }
+
+  function nearbyCount() {
+    const seen = new Set();
+    let count = 0;
+    for (const p of trustedNearbyPeers()) {
+      const key = p.fingerprint || p.address || p.short_id;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      count += 1;
+    }
+    for (const d of nearbyDiscoveryRows()) {
+      const peer = d.one_link_peer || {};
+      const key = peer.fingerprint || d.ip || d.hostname;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      count += 1;
+    }
+    return count;
+  }
+
+  function updateNearbyMetric() {
+    const n = Math.max(
+      Number(state.status?.peers?.online || 0),
+      nearbyCount(),
+    );
+    const metric = $("#metric-online");
+    if (metric) metric.textContent = String(n);
+    const count = $("#activity-nearby-count");
+    if (count) count.textContent = `${n} found`;
+  }
+
+  function nearbyRow(icon, name, sub, actionLabel, onAction) {
+    const row = el("div", "activity-nearby-row");
+    row.appendChild(el("div", "activity-nearby-icon", icon));
+    const meta = el("div", null);
+    meta.appendChild(el("div", "activity-nearby-name", name || "Nearby device"));
+    meta.appendChild(el("div", "activity-nearby-sub", sub || "On your network"));
+    row.appendChild(meta);
+    const btn = el("button", null, actionLabel || "Open");
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      if (onAction) onAction();
+    };
+    row.appendChild(btn);
+    return row;
+  }
+
+  function renderActivityNearby() {
+    const panel = $("#activity-nearby-panel");
+    const list = $("#activity-nearby-list");
+    if (!panel || !list) return;
+    list.innerHTML = "";
+    const seen = new Set();
+    for (const p of trustedNearbyPeers()) {
+      const key = p.fingerprint || p.short_id;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      list.appendChild(nearbyRow(
+        deviceKindLabel(p)?.icon || "💻",
+        p.display_name || p.hostname || p.short_id,
+        `${reachLabel(p)} · trusted`,
+        "Chat",
+        () => {
+          selectPeer(p.short_id);
+          document.querySelector('[data-pane="convo"]')?.click();
+        },
+      ));
+    }
+    for (const d of nearbyDiscoveryRows()) {
+      const peer = d.one_link_peer || {};
+      const key = peer.fingerprint || d.ip || d.hostname;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const canPair = !!peer.fingerprint;
+      list.appendChild(nearbyRow(
+        _kindIcon(d.kind),
+        d.hostname || peer.hostname || d.vendor || _kindLabel(d.kind),
+        [d.ip, _kindLabel(d.kind), canPair ? "ready to pair" : "invite available"]
+          .filter(Boolean).join(" · "),
+        canPair ? "Pair" : "Invite",
+        () => {
+          if (canPair) openPairModal(peer);
+          else openInviteModal(d);
+        },
+      ));
+    }
+    if (!list.children.length) {
+      list.appendChild(el(
+        "div",
+        "activity-nearby-sub",
+        "No nearby devices found yet. Refresh will scan Wi-Fi and trusted links again.",
+      ));
+    }
+    updateNearbyMetric();
+  }
+
+  async function loadActivityNearby({ force = false } = {}) {
+    const panel = $("#activity-nearby-panel");
+    const list = $("#activity-nearby-list");
+    if (!panel || !list) return;
+    panel.classList.add("show");
+    if (force || !state.discoverSmart) {
+      list.innerHTML = "";
+      list.appendChild(el("div", "activity-nearby-sub", "Scanning nearby devices..."));
+      try {
+        await loadDiscoverable({ prune: false });
+      } catch (_e) {
+        // loadDiscoverable already soft-fails into the discovery UI.
+      }
+    }
+    renderActivityNearby();
+    panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
   async function refreshStatus() {
     try {
       state.status = await api.status();
       if (state.status?.performance?.fabric) state.fabric = state.status.performance.fabric;
-      $("#metric-online").textContent = state.status.peers?.online ?? 0;
+      updateNearbyMetric();
       $("#metric-active").textContent = state.status.transfers?.active ?? 0;
       $("#metric-cache").textContent = fmtBytes(state.status.performance?.cdc_cache?.bytes || 0);
       $("#metric-sessions").textContent = state.status.performance?.sessions?.open ?? 0;
@@ -12183,10 +12390,7 @@
   }
   function _handleMeshTile(kind) {
     if (kind === "online") {
-      const convoBtn = document.querySelector('[data-pane="convo"]');
-      if (convoBtn) convoBtn.click();
-      const peerlist = document.querySelector("#peerlist");
-      if (peerlist) peerlist.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      loadActivityNearby({ force: true });
     } else if (kind === "active") {
       const filesBtn = document.querySelector('[data-pane="files"]');
       const sentBtn = document.querySelector('[data-files-mode="sent"]');
@@ -14304,6 +14508,10 @@
       for (const p of peers) state.peers.set(p.short_id, p);
       renderPeers();
       renderPeerControls();
+      updateNearbyMetric();
+      if ($("#activity-nearby-panel")?.classList.contains("show")) {
+        renderActivityNearby();
+      }
       recordPeerCompatibility();
       // v0.7.7/v0.7.8: re-render trust + key-change surfaces for the
       // currently selected peer so a freshly-recorded event flips the
@@ -15644,6 +15852,8 @@
     }
     const panelTitle = $("#one-setup-panel-title");
     const panelSub = $("#one-setup-panel-sub");
+    const panel = $("#one-setup-panel");
+    if (panel) panel.classList.toggle("is-complete", !!setup.completed);
     if (panelTitle) panelTitle.textContent = setup.completed ? "One Setup complete" : "One Setup";
     if (panelSub) {
       panelSub.textContent = setup.next_action?.detail
@@ -17077,6 +17287,9 @@
     await refreshTransfers();
     await refreshStatus();
     await refreshFabricTruth();
+    if ($("#activity-nearby-panel")?.classList.contains("show")) {
+      await loadActivityNearby({ force: true });
+    }
   };
   $("#btn-clear-activity-traces")?.addEventListener("click", () => {
     clearTraceScope("activity", "activity traces");

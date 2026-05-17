@@ -289,6 +289,13 @@ def test_activity_surface_uses_progressive_disclosure() -> None:
     assert 'id="one-now-send"' in html
     assert 'id="one-now-devices"' in html
     assert 'id="one-now-privacy"' in html
+    assert 'id="activity-nearby-panel"' in html
+    assert "async function loadActivityNearby" in html
+    assert 'loadActivityNearby({ force: true });' in html
+    assert "function nearbyCount()" in html
+    assert "function updateNearbyMetric()" in html
+    assert 'await loadActivityNearby({ force: true });' in html
+    assert 'classList.toggle("is-complete", !!setup.completed)' in html
     assert 'id="self-mesh-remote-actions"' in html
     assert 'id="self-mesh-join-actions"' in html
     assert 'id="self-mesh-safety-actions"' in html
