@@ -4262,6 +4262,9 @@ class Daemon:
             await self._dispatch_living_presence_message(
                 channel=channel, msg=msg, peer_fp=peer_fp, peer_sid=peer_sid,
             )
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"), ok=True,
+            )))
 
     # ─── Living Presence wire dispatch helpers ─────────────────────────
 

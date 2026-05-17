@@ -27,6 +27,7 @@ from one_link.call_signaling import CALL_ACCEPT, CALL_INVITE, CallPhase
 from one_link.daemon import Daemon
 from one_link.identity import Identity
 from one_link.recording_consent import RECORDING_GRANT, RECORDING_REQUEST
+from one_link.wire import decode_msg
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,10 @@ def test_inbound_call_invite_opens_manager_and_rings(
     # Tail event broadcast
     ring_events = [e for e in tail_events if e.get("tail_kind") == "show_ring"]
     assert len(ring_events) >= 1
+    ack = decode_msg(channel.sent[-1])
+    assert ack["t"] == "ACK"
+    assert ack["of"] == "msg-1"
+    assert ack["ok"] is True
 
 
 def test_inbound_call_accept_advances_to_active(
