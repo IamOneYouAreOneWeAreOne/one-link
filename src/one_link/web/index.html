@@ -1883,6 +1883,21 @@
     font-weight: 850;
     text-transform: uppercase;
   }
+  .activity-nearby-close {
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border-radius: 7px;
+    color: var(--text-dim);
+    background: rgba(255,255,255,.045);
+    font-size: 16px;
+    line-height: 1;
+  }
+  .activity-nearby-close:hover {
+    color: var(--text);
+    background: rgba(255,255,255,.08);
+  }
   .activity-nearby-list {
     display: grid;
     gap: 6px;
@@ -5178,6 +5193,7 @@
         <div class="activity-nearby-head">
           <div class="activity-nearby-title">Nearby now</div>
           <div class="activity-nearby-count" id="activity-nearby-count">Checking</div>
+          <button class="activity-nearby-close" id="activity-nearby-close" title="Minimize nearby devices" aria-label="Minimize nearby devices">×</button>
         </div>
         <div class="activity-nearby-list" id="activity-nearby-list"></div>
       </div>
@@ -5515,6 +5531,7 @@
       <div id="invite-url" style="display:none;"></div>
       <!-- Hidden anchor used by Save-QR to trigger a download. -->
       <a id="invite-qr-download" download="one-link-invite.svg"
+         href="about:blank" data-ready="0"
          style="display:none;"></a>
     </div>
   </div>
@@ -8613,6 +8630,7 @@
       if (dl) {
         dl.href = qrUrl;
         dl.download = `one-link-invite-${code}.svg`;
+        dl.dataset.ready = "1";
       }
     } catch (e) {
       codeEl.textContent = "ERROR";
@@ -12254,8 +12272,19 @@
     );
     const metric = $("#metric-online");
     if (metric) metric.textContent = String(n);
+    const tile = $("#metric-tile-online");
+    if (tile) {
+      const open = $("#activity-nearby-panel")?.classList.contains("show");
+      tile.setAttribute("aria-expanded", open ? "true" : "false");
+      tile.setAttribute("aria-label", open ? "Hide nearby devices" : "Show nearby devices");
+    }
     const count = $("#activity-nearby-count");
     if (count) count.textContent = `${n} found`;
+  }
+
+  function closeActivityNearby() {
+    $("#activity-nearby-panel")?.classList.remove("show");
+    updateNearbyMetric();
   }
 
   function nearbyRow(icon, name, sub, actionLabel, onAction) {
@@ -12339,6 +12368,15 @@
     }
     renderActivityNearby();
     panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  async function toggleActivityNearby() {
+    const panel = $("#activity-nearby-panel");
+    if (panel?.classList.contains("show")) {
+      closeActivityNearby();
+      return;
+    }
+    await loadActivityNearby({ force: true });
   }
 
   async function refreshStatus() {
@@ -12537,7 +12575,7 @@
   }
   function _handleMeshTile(kind) {
     if (kind === "online") {
-      loadActivityNearby({ force: true });
+      toggleActivityNearby();
     } else if (kind === "active") {
       const filesBtn = document.querySelector('[data-pane="files"]');
       const sentBtn = document.querySelector('[data-files-mode="sent"]');
@@ -12580,6 +12618,10 @@
   });
   $("#one-now-privacy")?.addEventListener("click", () => {
     $("#btn-privacy")?.click();
+  });
+  $("#activity-nearby-close")?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    closeActivityNearby();
   });
 
   let _activityRefreshScheduled = false;
@@ -17209,7 +17251,7 @@
   if (_inviteSaveQr) {
     _inviteSaveQr.addEventListener("click", () => {
       const a = $("#invite-qr-download");
-      if (a && a.href && a.href !== "#") {
+      if (a && a.dataset.ready === "1" && a.href && a.href !== "#") {
         a.click();
       }
     });
