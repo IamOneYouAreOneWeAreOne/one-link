@@ -195,6 +195,25 @@ def test_call_driver_reports_metrics_to_immune_system(index_html: str) -> None:
     assert "setInterval(reportCallMetricsOnce, 2000)" in index_html
 
 
+def test_call_driver_backfills_pending_ice_candidates(index_html: str) -> None:
+    idx = index_html.find("async function backfillLivingPresenceCalls")
+    assert idx > 0
+    snippet = index_html[idx:idx + 2200]
+    assert "pending_ice_candidates" in snippet
+    assert "await applyRemoteIceCandidate" in snippet
+    assert "appliedIceKeys" in index_html
+
+
+def test_call_driver_resolves_simultaneous_calls(index_html: str) -> None:
+    idx = index_html.find("async function resolveSimultaneousCallIfNeeded")
+    assert idx > 0
+    snippet = index_html[idx:idx + 1800]
+    assert 'action: "hangup"' in snippet
+    assert 'action: "decline"' in snippet
+    assert "String(inboundCallId) < String(callUI.activeCallId)" in snippet
+    assert "await acceptInboundCall()" in snippet
+
+
 def test_call_driver_can_send_files_inside_call(index_html: str) -> None:
     idx = index_html.find('const callFileInput = $$("#call-file-input")')
     assert idx > 0

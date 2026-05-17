@@ -341,7 +341,7 @@ def test_call_ice_end_of_candidates_sentinel(
     assert ice_events[0]["end_of_candidates"] is True
 
 
-def test_call_ice_for_unknown_call_is_dropped(
+def test_call_ice_for_unknown_call_is_cached_for_backfill(
     mom_daemon: Daemon, alice: Identity,
 ) -> None:
     """ICE for a call we don't know about (race / stale) → no event."""
@@ -360,7 +360,43 @@ def test_call_ice_for_unknown_call_is_dropped(
     _run(mom_daemon._on_peer_message(channel, msg))
 
     ice_events = [e for e in tail if e.get("tail_kind") == "ice_candidate"]
-    assert ice_events == []
+    assert len(ice_events) == 1
+    assert ice_events[0]["end_of_candidates"] is True
+    assert mom_daemon._call_ice_backfill["ghost-call"][0]["end_of_candidates"] is True
+
+
+def test_sdp_offer_before_invite_is_cached_then_visible_on_call(
+    mom_daemon: Daemon, alice: Identity,
+) -> None:
+    """Real transports can deliver the standalone offer before the
+    invite. Preserve it so /api/v1/calls can backfill the browser."""
+    offer_msg = attach_offer_to_invite({
+        "t": "CALL_SDP_OFFER",
+        "id": "offer-before-invite",
+        "ts": 0,
+        "from": alice.short_id,
+        "call_id": "race-call-1",
+    }, sdp=SAMPLE_OFFER_SDP)
+    invite_msg = {
+        "t": "CALL_INVITE",
+        "id": "invite-after-offer",
+        "ts": 1,
+        "from": alice.short_id,
+        "call_id": "race-call-1",
+    }
+    tail: list[dict] = []
+    mom_daemon._broadcast_tail = lambda ev: tail.append(ev)  # type: ignore
+    channel = _FakeChannel(peer_ed_pub=alice.public_bytes, peer_short_id=alice.short_id)
+
+    _run(mom_daemon._on_peer_message(channel, offer_msg))
+    assert mom_daemon._call_registry.get("race-call-1") is None
+    assert mom_daemon._call_sdp_backfill["race-call-1"]["sdp_offer"] == SAMPLE_OFFER_SDP
+
+    _run(mom_daemon._on_peer_message(channel, invite_msg))
+
+    assert mom_daemon._call_registry.get("race-call-1") is not None
+    offer_events = [e for e in tail if e.get("tail_kind") == "sdp_offer"]
+    assert offer_events[0]["sdp"] == SAMPLE_OFFER_SDP
 
 
 def test_call_ice_malformed_is_dropped_gracefully(

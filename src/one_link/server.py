@@ -3721,6 +3721,12 @@ class UIServer:
                 )
             except Exception:
                 sdp_backfill = {}
+            try:
+                ice_backfill = list(
+                    getattr(self.daemon, "_call_ice_backfill", {}).get(cid, [])
+                )
+            except Exception:
+                ice_backfill = []
             out.append({
                 "call_id": cid,
                 "peer_master_vk_hex": peer_fp,
@@ -3729,6 +3735,7 @@ class UIServer:
                 "is_incoming": local_role == "recipient",
                 "pending_sdp_offer": sdp_backfill.get("sdp_offer"),
                 "pending_sdp_answer": sdp_backfill.get("sdp_answer"),
+                "pending_ice_candidates": ice_backfill,
                 "phase": mgr.phase.name.lower(),
                 "consent_phase": mgr.consent_phase.name.lower(),
                 "is_active": mgr.is_active,
@@ -3775,6 +3782,12 @@ class UIServer:
             )
         except Exception:
             sdp_backfill = {}
+        try:
+            ice_backfill = list(
+                getattr(self.daemon, "_call_ice_backfill", {}).get(call_id, [])
+            )
+        except Exception:
+            ice_backfill = []
         return web.json_response({
             "ok": True,
             "call_id": call_id,
@@ -3784,6 +3797,7 @@ class UIServer:
             "is_incoming": local_role == "recipient",
             "pending_sdp_offer": sdp_backfill.get("sdp_offer"),
             "pending_sdp_answer": sdp_backfill.get("sdp_answer"),
+            "pending_ice_candidates": ice_backfill,
             "phase": mgr.phase.name.lower(),
             "consent_phase": mgr.consent_phase.name.lower(),
             "intensity": s.current_intensity.name.lower(),

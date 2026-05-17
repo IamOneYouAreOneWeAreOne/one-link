@@ -967,6 +967,7 @@ class Daemon:
         # cache the latest SDP per call and expose it through that same
         # snapshot as a durable backfill path.
         self._call_sdp_backfill: dict[str, dict[str, str]] = {}
+        self._call_ice_backfill: dict[str, list[dict]] = {}
         # Living Presence Tier β/γ/δ/ε/η runtime adapters. These
         # are the live-system glue between the pure engine modules
         # and the daemon's tick loop + HTTP surface.
@@ -2146,6 +2147,13 @@ class Daemon:
             try:
                 payload = dict(ev.payload or {})
                 payload.setdefault("call_id", response.call_id)
+                if response.call_id:
+                    mgr = self._call_registry.get(response.call_id)
+                    if mgr is not None:
+                        payload.setdefault(
+                            "peer_master_vk_hex",
+                            mgr.state.peer_master_vk_hex,
+                        )
                 self._broadcast_tail({
                     "type": "call_event",
                     "tail_kind": ev.kind.name.lower(),
@@ -2159,6 +2167,7 @@ class Daemon:
         if getattr(response, "call_complete", False) and response.call_id:
             try:
                 self._call_sdp_backfill.pop(response.call_id, None)
+                self._call_ice_backfill.pop(response.call_id, None)
                 self._call_registry.close(response.call_id)
             except Exception:
                 pass
@@ -2179,7 +2188,8 @@ class Daemon:
             "CALL_ACCEPT",
             "CALL_DECLINE",
             "CALL_END",
-            "CALL_INVITE_SDP_V1",
+            "CALL_SDP_OFFER",
+            "CALL_SDP_ANSWER",
             "CALL_ICE",
             "CALL_FRAME_ATTEST",
             "RECORDING_START",
@@ -4600,6 +4610,60 @@ class Daemon:
             await self._handle_call_manager_output(mgr, event)
             return
 
+        # Media setup may race ahead of CALL_INVITE because SDP and ICE
+        # travel as independent wire messages. Cache + broadcast these
+        # even when the call manager is not open yet; /api/v1/calls will
+        # backfill them after the lifecycle invite arrives.
+        if t == "CALL_SDP_OFFER":
+            try:
+                sdp_offer = extract_offer(msg)
+            except Exception as exc:
+                log.warning(
+                    "living-presence: CALL_SDP_OFFER %s: %s",
+                    call_id[:8], exc,
+                )
+                return
+            self._forward_sdp_to_ui(
+                call_id=call_id,
+                peer_master_vk_hex=peer_fp,
+                kind="sdp_offer",
+                sdp_payload=sdp_offer,
+            )
+            return
+
+        if t == "CALL_SDP_ANSWER":
+            try:
+                sdp_answer = extract_answer(msg)
+            except Exception as exc:
+                log.warning(
+                    "living-presence: CALL_SDP_ANSWER %s: %s",
+                    call_id[:8], exc,
+                )
+                return
+            self._forward_sdp_to_ui(
+                call_id=call_id,
+                peer_master_vk_hex=peer_fp,
+                kind="sdp_answer",
+                sdp_payload=sdp_answer,
+            )
+            return
+
+        if t == "CALL_ICE":
+            try:
+                _cid, cand = parse_ice_message(msg)
+            except Exception as exc:
+                log.warning(
+                    "living-presence: CALL_ICE %s: malformed: %s",
+                    call_id[:8], exc,
+                )
+                return
+            self._forward_ice_to_ui(
+                call_id=call_id,
+                peer_master_vk_hex=peer_fp,
+                candidate_payload=cand,
+            )
+            return
+
         # All other messages require an existing manager.
         mgr = self._call_registry.get(call_id)
         if mgr is None:
@@ -4860,6 +4924,10 @@ class Daemon:
             try:
                 payload = dict(ev.payload or {})
                 payload.setdefault("call_id", getattr(mgr, "call_id", ""))
+                payload.setdefault(
+                    "peer_master_vk_hex",
+                    getattr(getattr(mgr, "state", None), "peer_master_vk_hex", ""),
+                )
                 self._broadcast_tail({
                     "type": "call_event",
                     "tail_kind": ev.kind.name.lower(),
@@ -4872,6 +4940,7 @@ class Daemon:
         if getattr(output, "call_complete", False):
             try:
                 self._call_sdp_backfill.pop(getattr(mgr, "call_id", ""), None)
+                self._call_ice_backfill.pop(getattr(mgr, "call_id", ""), None)
                 self._call_registry.close(getattr(mgr, "call_id", ""))
             except Exception:
                 pass
@@ -4899,6 +4968,43 @@ class Daemon:
                 "sdp": sdp_payload.sdp,
                 "sdp_kind": sdp_payload.kind.to_str(),
             })
+        except Exception:
+            pass
+
+    def _forward_ice_to_ui(
+        self,
+        *,
+        call_id: str,
+        peer_master_vk_hex: str,
+        candidate_payload,
+    ) -> None:
+        """Cache and broadcast a browser ICE candidate.
+
+        ICE often arrives before the remote browser has accepted the call
+        or before a WebSocket is attached. Keeping a small backfill list
+        makes call setup recoverable instead of depending on perfect event
+        ordering.
+        """
+        try:
+            ev = {
+                "type": "call_event",
+                "tail_kind": "ice_candidate",
+                "call_id": call_id,
+                "peer_master_vk_hex": peer_master_vk_hex,
+                "candidate": candidate_payload.candidate,
+                "sdp_mid": candidate_payload.sdp_mid,
+                "sdp_m_line_index": candidate_payload.sdp_m_line_index,
+                "end_of_candidates": candidate_payload.end_of_candidates,
+            }
+            pending = self._call_ice_backfill.setdefault(call_id, [])
+            pending.append({
+                "candidate": ev["candidate"],
+                "sdp_mid": ev["sdp_mid"],
+                "sdp_m_line_index": ev["sdp_m_line_index"],
+                "end_of_candidates": ev["end_of_candidates"],
+            })
+            del pending[:-32]
+            self._broadcast_tail(ev)
         except Exception:
             pass
 
