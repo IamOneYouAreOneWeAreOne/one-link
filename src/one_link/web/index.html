@@ -3127,6 +3127,71 @@
       height: 100vh;
       border-radius: 0;
     }
+    .onboarding-backdrop {
+      align-items: stretch;
+      justify-content: stretch;
+      padding: max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right))
+               max(10px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left));
+    }
+    .onboarding-card {
+      width: 100%;
+      max-width: none;
+      max-height: none;
+      border-radius: 12px;
+      padding: 20px 16px;
+    }
+    .onboarding-step h1 {
+      font-size: clamp(20px, 7vw, 26px);
+      line-height: 1.08;
+    }
+    .onboarding-step p,
+    .onboarding-tip {
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    .onboarding-step input[type="text"] {
+      font-size: 16px;
+      min-height: 46px;
+    }
+    .setup-device-line {
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+    .setup-connection {
+      width: 2px;
+      height: 24px;
+      margin: 0 auto;
+      background: linear-gradient(180deg, transparent, var(--accent-2), transparent);
+    }
+    .setup-receipt-row,
+    .setup-technical-list div {
+      grid-template-columns: 1fr;
+      gap: 3px;
+    }
+    .setup-code {
+      font-size: clamp(26px, 10vw, 34px);
+      word-spacing: .18em;
+    }
+    .setup-token {
+      font-size: 12px;
+      max-height: 96px;
+    }
+    .onboarding-actions {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+    .onboarding-actions button {
+      min-height: 44px;
+      width: 100%;
+    }
+    .settings-pane .setup-mini-row {
+      grid-template-columns: 18px minmax(0,1fr);
+    }
+    .settings-pane .setup-mini-row .tag {
+      grid-column: 2;
+      justify-self: start;
+    }
     .settings-header {
       padding: 10px 14px;
     }

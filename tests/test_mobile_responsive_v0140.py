@@ -93,7 +93,7 @@ def test_mobile_breakpoint_overrides_main_grid(index_html: str):
     # Find the SECOND media-query block (the new full-layout one).
     idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
     assert idx2 > 0
-    scope = index_html[idx2:idx2 + 4000]
+    scope = index_html[idx2:idx2 + 9000]
     assert ".main {" in scope
     assert "grid-template-columns: 1fr !important;" in scope
 
@@ -139,12 +139,49 @@ def test_touch_target_minimums(index_html: str):
     assert "44px" in scope
 
 
+def test_one_setup_is_phone_native_inside_mobile_query(index_html: str):
+    """One Setup is often the first screen a phone user sees. It must
+    behave like a mobile page, not a desktop modal squeezed onto glass."""
+    idx = index_html.find("@media (max-width: 720px)")
+    idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
+    scope = index_html[idx2:idx2 + 9000]
+    for marker in (
+        ".onboarding-backdrop",
+        ".onboarding-card",
+        ".setup-device-line",
+        "grid-template-columns: 1fr;",
+        ".onboarding-actions button",
+        "min-height: 44px",
+        "env(safe-area-inset-top)",
+        "env(safe-area-inset-bottom)",
+    ):
+        assert marker in scope
+
+
+def test_one_setup_prevents_ios_input_zoom(index_html: str):
+    idx = index_html.find("@media (max-width: 720px)")
+    idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
+    scope = index_html[idx2:idx2 + 9000]
+    assert '.onboarding-step input[type="text"]' in scope
+    assert "font-size: 16px" in scope
+    assert "min-height: 46px" in scope
+
+
+def test_one_setup_receipts_stack_on_phone(index_html: str):
+    idx = index_html.find("@media (max-width: 720px)")
+    idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
+    scope = index_html[idx2:idx2 + 9000]
+    assert ".setup-receipt-row," in scope
+    assert ".setup-technical-list div" in scope
+    assert "grid-template-columns: 1fr;" in scope
+
+
 def test_ios_zoom_prevention_on_textarea(index_html: str):
     """iOS Safari zooms the page when an input has font-size < 16px.
     Composer textarea must bump to 16px on mobile."""
     idx = index_html.find("@media (max-width: 720px)")
     idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
-    scope = index_html[idx2:idx2 + 4000]
+    scope = index_html[idx2:idx2 + 9000]
     assert ".composer textarea" in scope
     assert "font-size: 16px" in scope
 
