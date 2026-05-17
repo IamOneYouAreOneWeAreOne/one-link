@@ -119,6 +119,8 @@ def test_one_health_ui_surface_exists_and_is_actionable() -> None:
         "oneHealth() { return this.get(\"/api/one-health\"); }",
         "function oneHealthExplainers()",
         "function bestOneHealthActionId()",
+        "function oneHealthGuideFocus()",
+        "function setOneHealthGuideFocus(id)",
         "function openOneHealthGuide()",
         "function closeOneHealthGuide()",
         "function renderOneHealthGuide()",
@@ -128,10 +130,15 @@ def test_one_health_ui_surface_exists_and_is_actionable() -> None:
         'if (id === "review_speed")',
         "One Link is checking the fastest trusted path.",
         "data-one-health-action",
+        "data-one-health-focus",
         'aria-label", "Open One Health guide"',
         'card.setAttribute("role", "button")',
+        'card.setAttribute("aria-pressed"',
         'card.dataset.oneHealthAction = exp.action',
+        'card.dataset.oneHealthFocus = id',
+        'card.classList.toggle("is-selected"',
         "one-health-guide-cta",
+        "Click the button only when you want One Link to open the right place.",
     ):
         assert marker in html
 

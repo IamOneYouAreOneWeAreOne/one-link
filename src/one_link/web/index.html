@@ -1974,7 +1974,8 @@
     transition: border-color .14s ease, background .14s ease, transform .14s ease;
   }
   .one-health-guide-card:hover,
-  .one-health-guide-card:focus-visible {
+  .one-health-guide-card:focus-visible,
+  .one-health-guide-card.is-selected {
     border-color: rgba(124,92,255,.46);
     background: rgba(124,92,255,.09);
   }
@@ -2023,6 +2024,10 @@
     border-radius: 8px;
     border: 1px solid rgba(124,92,255,.25);
     background: rgba(124,92,255,.08);
+  }
+  .one-health-guide-autopilot.is-selected {
+    border-color: rgba(70,211,154,.32);
+    background: rgba(70,211,154,.08);
   }
   .one-health-guide-autopilot b {
     display: block;
@@ -9737,9 +9742,25 @@
     const mapped = explainers[normalizeOneHealthId(lowest?.id || lowest?.label)]?.action;
     return mapped || "finish_setup";
   }
+  function oneHealthGuideFocus() {
+    const explainers = oneHealthExplainers();
+    const selected = normalizeOneHealthId(state.oneHealthGuideSelected || "");
+    if (explainers[selected]) return selected;
+    const best = bestOneHealthActionId();
+    const match = Object.entries(explainers).find(([, exp]) => exp.action === best);
+    return match?.[0] || "protection";
+  }
+  function setOneHealthGuideFocus(id) {
+    const key = normalizeOneHealthId(id);
+    if (!oneHealthExplainers()[key]) return;
+    state.oneHealthGuideSelected = key;
+    renderOneHealthGuide();
+    $("#one-health-guide-autopilot")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
   function renderOneHealthGuide() {
     const health = state.oneHealth || {};
     const explainers = oneHealthExplainers();
+    const focus = oneHealthGuideFocus();
     const guideScore = $("#one-health-guide-score");
     const guideHeadline = $("#one-health-guide-headline");
     const guideDetail = $("#one-health-guide-detail");
@@ -9758,8 +9779,11 @@
         const card = el("div", "one-health-guide-card");
         card.setAttribute("role", "button");
         card.setAttribute("tabindex", "0");
-        card.setAttribute("aria-label", `${exp.cta}: ${exp.title}`);
+        card.setAttribute("aria-label", `Show ${exp.title} next step`);
+        card.setAttribute("aria-pressed", id === focus ? "true" : "false");
         card.dataset.oneHealthAction = exp.action;
+        card.dataset.oneHealthFocus = id;
+        card.classList.toggle("is-selected", id === focus);
         const top = el("div", "one-health-guide-card-top");
         top.appendChild(el("b", "", exp.title));
         top.appendChild(el("strong", "", score?.score != null ? String(score.score) : "--"));
@@ -9770,16 +9794,22 @@
         grid.appendChild(card);
       }
     }
-    const bestAction = bestOneHealthActionId();
+    const focused = explainers[focus] || explainers.protection;
+    const bestAction = focused.action || bestOneHealthActionId();
     const best = (health.actions || []).find(a => a.id === bestAction) || {};
+    const autopilot = $("#one-health-guide-autopilot");
     const autoTitle = $("#one-health-guide-autopilot-title");
     const autoDetail = $("#one-health-guide-autopilot-detail");
     const autoButton = $("#one-health-guide-autopilot-button");
-    if (autoTitle) autoTitle.textContent = best.label || "Let One Link handle the next step";
-    if (autoDetail) autoDetail.textContent = best.detail || "One Link will open the most useful setup action for what is missing right now.";
+    if (autopilot) autopilot.classList.toggle("is-selected", !!state.oneHealthGuideSelected);
+    if (autoTitle) autoTitle.textContent = best.label || focused.cta || "Let One Link handle the next step";
+    if (autoDetail) {
+      autoDetail.textContent = best.detail
+        || `${focused.title}: ${focused.next} Click the button only when you want One Link to open the right place.`;
+    }
     if (autoButton) {
       autoButton.dataset.oneHealthAction = bestAction;
-      autoButton.textContent = bestAction === "finish_setup" ? "Resume setup" : "Do next step";
+      autoButton.textContent = bestAction === "finish_setup" ? "Resume setup" : (focused.cta || "Do next step");
     }
     const actions = $("#one-health-guide-actions");
     if (actions) {
@@ -18085,18 +18115,16 @@
     runOneHealthAction(btn.dataset.oneHealthAction || "");
   });
   $("#one-health-guide-grid")?.addEventListener("click", (e) => {
-    const card = e.target?.closest?.("[data-one-health-action]");
+    const card = e.target?.closest?.("[data-one-health-focus]");
     if (!card) return;
-    closeOneHealthGuide();
-    runOneHealthAction(card.dataset.oneHealthAction || "");
+    setOneHealthGuideFocus(card.dataset.oneHealthFocus || "");
   });
   $("#one-health-guide-grid")?.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" && e.key !== " ") return;
-    const card = e.target?.closest?.("[data-one-health-action]");
+    const card = e.target?.closest?.("[data-one-health-focus]");
     if (!card) return;
     e.preventDefault();
-    closeOneHealthGuide();
-    runOneHealthAction(card.dataset.oneHealthAction || "");
+    setOneHealthGuideFocus(card.dataset.oneHealthFocus || "");
   });
   $("#one-health-guide-autopilot-button")?.addEventListener("click", (e) => {
     const action = e.currentTarget?.dataset?.oneHealthAction || bestOneHealthActionId();
