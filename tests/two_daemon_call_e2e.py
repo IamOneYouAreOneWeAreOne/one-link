@@ -492,7 +492,32 @@ def main() -> int:
             print(f"[smoke] FAIL — accept returned {status}: {body}")
             return 1
 
-        # Step 7: both sides should reach ACTIVE
+        # Step 7a: A's browser must receive a phase_changed → active
+        # tail event. This is the regression that left A on the
+        # "Calling…" outgoing overlay even after B accepted.
+        active_event = a_ws.wait_for(
+            lambda ev: ev.get("type") == "call_event"
+            and ev.get("tail_kind") == "phase_changed"
+            and ev.get("new_phase") == "active"
+            and ev.get("call_id") == call_id,
+            timeout=4.0,
+        )
+        if active_event is None:
+            captured = a_ws.captured()
+            phase_evts = [
+                e for e in captured
+                if e.get("tail_kind") == "phase_changed"
+            ]
+            print(
+                "[smoke] FAIL — A's WebSocket never received "
+                "phase_changed → active after B accepted. Outgoing "
+                "overlay would stay on 'Calling…' indefinitely."
+            )
+            print(f"  phase_changed events seen on A: {phase_evts!r}")
+            return 1
+        print("  ✓ A's WebSocket saw phase_changed → active (overlay would dismiss)")
+
+        # Step 7b: both sides should reach ACTIVE (HTTP confirmation)
         print("[smoke] waiting for both to reach ACTIVE …")
         end = time.time() + 5.0
         a_active = False
