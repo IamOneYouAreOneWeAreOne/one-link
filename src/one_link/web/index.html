@@ -20382,6 +20382,7 @@
     appliedIceKeys: new Set(),
     metricsTimer: null,
     oneEvents: [],
+    localMediaReady: false,
   };
   // Expose for debug + tests
   if (typeof window !== "undefined") {
@@ -20516,6 +20517,7 @@
     }
     callUI.pendingIceCandidates = [];
     callUI.appliedIceKeys.clear();
+    callUI.localMediaReady = false;
     media.muted = false;
     media.cameraOff = false;
     syncMuteCameraButtons();
@@ -21139,6 +21141,7 @@
     });
     addOneCallEvent("Starting secure call path...");
     setupRtcPeerConnection();
+    callUI.localMediaReady = false;
     const mediaPromise = startLocalMedia({ audio: true, video: wantVideo });
     const result = await callApiPost({
       action: "initiate",
@@ -21189,6 +21192,7 @@
         stream.getVideoTracks().forEach((t) => { t.enabled = false; });
       }
     }
+    callUI.localMediaReady = true;
     // Originator creates the SDP offer + sends it now. The peer
     // will respond with an SDP answer once they accept.
     await sendLocalSdpOffer();
@@ -21579,6 +21583,7 @@
     callUI.activeCallPeerFp = inboundPeerFp;
     showActiveSurface(inboundPeer, "");
     setupRtcPeerConnection();
+    callUI.localMediaReady = false;
     const mediaPromise = startLocalMedia({ audio: true, video: true });
     const result = await callApiPost({
       action: "accept", call_id: inboundCallId,
@@ -21591,12 +21596,14 @@
         });
         startAttestStream(stream);
       }
+      callUI.localMediaReady = true;
       if (callUI.pendingRemoteOffer) {
         const offerSdp = callUI.pendingRemoteOffer;
         callUI.pendingRemoteOffer = null;
         await applyRemoteSdpOffer(offerSdp);
       }
     } else {
+      callUI.localMediaReady = false;
       hideActiveSurface();
       stopAllMedia();
       callUI.activeCallId = null;
@@ -21937,7 +21944,8 @@
       // Recipient side: peer's SDP offer arrived. Track it so we
       // setRemoteDescription + createAnswer once we accept.
       callUI.pendingRemoteOffer = m.sdp || "";
-      if (callUI.activeCallId === callId && media.pc) {
+      if (callUI.activeCallId === callId && media.pc && callUI.localMediaReady) {
+        callUI.pendingRemoteOffer = null;
         applyRemoteSdpOffer(m.sdp);
       }
       return true;
