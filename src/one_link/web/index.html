@@ -803,7 +803,16 @@
        minmax track so browser textarea intrinsic sizing cannot
        collapse it back to a tiny control on wide desktops. */
     display: grid;
-    grid-template-columns: auto auto auto auto auto minmax(260px, 1fr) auto;
+    /* v0.21.x final: NAMED grid lines for the two pinned elements
+       (textarea + send) so the layout survives any number of
+       visible icon buttons. The previous numeric-line approach
+       (`grid-column: -2 / -1`) broke when a 5th icon arrived
+       because -2 resolved to the trailing auto track, not the 1fr
+       track — that's why the textarea drifted into the corner. */
+    grid-template-columns:
+      auto auto auto auto auto
+      [comp] minmax(260px, 1fr)
+      [send-col] auto [send-end];
     gap: 10px;
     align-items: end;
   }
@@ -816,12 +825,12 @@
     transition: background .12s, color .12s;
     font-size: 18px;
   }
-  /* v0.21.x: pin the textarea + send button to the last two columns
-     so the composer survives icon-button hides (desktop-only screenshot
-     button vanishes on mobile, etc.) without the textarea landing in
-     a tiny auto-sized column. */
-  .composer textarea { grid-column: -2; }
-  .composer #btn-send  { grid-column: -1; }
+  /* Pin textarea to the named `comp` 1fr column and send to the
+     named `send-col` auto column. Auto-flow puts icons into the
+     leading auto tracks; hidden icons (mobile) collapse without
+     pushing textarea + send out of place. */
+  .composer textarea { grid-column: comp / send-col; }
+  .composer #btn-send  { grid-column: send-col / send-end; }
   .composer .icon-btn:hover { background: var(--bg-3); color: var(--text); }
   .composer textarea {
     background: var(--bg-2);
@@ -25917,6 +25926,7 @@
     tauPressureTicks: 0,
     tauStableTicks: 0,
     lastTauAdaptMs: 0,
+    lastCaptureProfile: "",
     mediaRepairStage: 0,
     lastPlaybackReviveMs: 0,
     lastPcRebuildMs: 0,
@@ -25985,6 +25995,8 @@
     selectedVideoInputId: "",
     selectedAudioOutputId: "",
     videoFit: "cover",
+    iceHelperReady: false,
+    iceRelayReady: false,
   };
   if (typeof window !== "undefined") {
     window._livingPresenceMedia = media;
@@ -26017,10 +26029,49 @@
       : false;
     const video = wantVideo
       ? (media.selectedVideoInputId
-        ? { deviceId: { exact: media.selectedVideoInputId } }
-        : true)
+        ? {
+            deviceId: { exact: media.selectedVideoInputId },
+            width: { ideal: 960, max: 1280 },
+            height: { ideal: 540, max: 720 },
+            frameRate: { ideal: 24, max: 30 },
+          }
+        : {
+            width: { ideal: 960, max: 1280 },
+            height: { ideal: 540, max: 720 },
+            frameRate: { ideal: 24, max: 30 },
+          })
       : false;
     return { audio, video };
+  }
+
+  function targetMediaProfile(level) {
+    return [
+      { name: "full", width: 1280, height: 720, frameRate: 30, maxBitrate: 1800000, scale: 1 },
+      { name: "steady", width: 960, height: 540, frameRate: 24, maxBitrate: 850000, scale: 1.5 },
+      { name: "survival", width: 640, height: 360, frameRate: 18, maxBitrate: 360000, scale: 2.5 },
+      { name: "audio-first", width: 426, height: 240, frameRate: 12, maxBitrate: 160000, scale: 4 },
+    ][Math.max(0, Math.min(3, Number(level || 0)))] || null;
+  }
+
+  async function applyCaptureProfileForTau(level, reason) {
+    const profile = targetMediaProfile(level);
+    if (!profile || callUI.lastCaptureProfile === profile.name) return;
+    const track = media.localStream && media.localStream.getVideoTracks()[0];
+    if (!track || typeof track.applyConstraints !== "function" || track.readyState !== "live") return;
+    try {
+      await track.applyConstraints({
+        width: { ideal: profile.width, max: profile.width },
+        height: { ideal: profile.height, max: profile.height },
+        frameRate: { ideal: profile.frameRate, max: profile.frameRate },
+      });
+      callUI.lastCaptureProfile = profile.name;
+      reportCallEvent("tau_capture_adapted", {
+        state: profile.name === "audio-first" ? "survival" : profile.name,
+        reason: reason || "metrics",
+      });
+    } catch (_) {
+      reportCallEvent("tau_capture_adapt_failed", { reason: reason || "metrics" });
+    }
   }
 
   async function startLocalMedia(constraints) {
@@ -26191,8 +26242,11 @@
     if (!media.pc || !media.pc.getSenders) return;
     const loss = Number(metrics.loss_rate || 0);
     const rtt = Number(metrics.rtt_ms || 0);
-    const shouldDowngrade = loss >= 0.05 || rtt >= 260 || media.reconnecting;
-    const shouldRecover = loss < 0.02 && rtt > 0 && rtt < 120 && !media.reconnecting;
+    const jitter = Number(metrics.jitter_ms || 0);
+    const remoteWaiting = expectedRemoteMediaMissing(metrics);
+    const shouldDowngrade = loss >= 0.05 || rtt >= 260 || jitter >= 85 || media.reconnecting || remoteWaiting;
+    const shouldSurvive = loss >= 0.12 || rtt >= 700 || jitter >= 180 || String(metrics.ice_connection_state || "") === "failed";
+    const shouldRecover = loss < 0.02 && rtt > 0 && rtt < 120 && jitter < 35 && !media.reconnecting && !remoteWaiting;
     if (shouldDowngrade) {
       callUI.tauPressureTicks += 1;
       callUI.tauStableTicks = 0;
@@ -26206,16 +26260,14 @@
     const now = Date.now();
     if (now - Number(callUI.lastTauAdaptMs || 0) < 5000) return;
     let targetLevel = callUI.adaptationLevel || 0;
-    if (callUI.tauPressureTicks >= 2) targetLevel = Math.min(2, targetLevel + 1);
+    if (shouldSurvive && callUI.tauPressureTicks >= 2) targetLevel = 3;
+    else if (callUI.tauPressureTicks >= 2) targetLevel = Math.min(2, targetLevel + 1);
     else if (callUI.tauStableTicks >= 4) targetLevel = Math.max(0, targetLevel - 1);
     if (targetLevel === callUI.adaptationLevel) return;
     callUI.adaptationLevel = targetLevel;
     callUI.lastTauAdaptMs = now;
-    const caps = [
-      { maxBitrate: 1800000, scale: 1 },
-      { maxBitrate: 850000, scale: 1.5 },
-      { maxBitrate: 360000, scale: 2.5 },
-    ][targetLevel];
+    const caps = targetMediaProfile(targetLevel);
+    await applyCaptureProfileForTau(targetLevel, "metrics");
     for (const sender of media.pc.getSenders()) {
       if (!sender || !sender.track || sender.track.kind !== "video" || !sender.getParameters) continue;
       try {
@@ -26227,7 +26279,7 @@
         if (sender.setParameters) await sender.setParameters(params);
       } catch (_) {}
     }
-    updateOneChip("#call-one-engine", targetLevel === 0 ? "Tau full" : targetLevel === 1 ? "Tau steady" : "Tau voice-first");
+    updateOneChip("#call-one-engine", targetLevel === 0 ? "Tau full" : targetLevel === 1 ? "Tau steady" : targetLevel === 2 ? "Tau voice-first" : "Tau audio-first");
     addOneCallEvent(targetLevel === 0
       ? "Tau restored full video quality."
       : "Tau lowered video load to keep the call stable.");
@@ -26589,6 +26641,8 @@
     }
     media.iceConfigReady = null;
     media.transceiversReady = false;
+    media.iceHelperReady = false;
+    media.iceRelayReady = false;
     callUI.pendingIceCandidates = [];
     callUI.appliedIceKeys.clear();
     callUI.appliedRemoteOfferKeys.clear();
@@ -26616,6 +26670,7 @@
     callUI.tauPressureTicks = 0;
     callUI.tauStableTicks = 0;
     callUI.lastTauAdaptMs = 0;
+    callUI.lastCaptureProfile = "";
     callUI.mediaRepairStage = 0;
     callUI.lastPlaybackReviveMs = 0;
     callUI.lastPcRebuildMs = 0;
@@ -26747,7 +26802,12 @@
     // ``/api/peer-rtc/ice-config`` endpoint returns whatever the
     // user has configured; we fetch it asynchronously and wire it
     // in. Empty list = host-only ICE = LAN-only fallback.
-    const pc = new RTCPeerConnection({ iceServers: [] });
+    const pc = new RTCPeerConnection({
+      iceServers: [],
+      bundlePolicy: "max-bundle",
+      rtcpMuxPolicy: "require",
+      iceCandidatePoolSize: 4,
+    });
     // Best-effort fetch of user-configured STUN. Silent on failure
     // - we'd rather degrade to LAN-only than reach a third party.
     media.iceConfigReady = (async () => {
@@ -26757,8 +26817,16 @@
         });
         if (!r.ok) return;
         const cfg = await r.json();
+        media.iceRelayReady = Array.isArray(cfg.iceServers)
+          && cfg.iceServers.some((srv) => {
+            const urls = Array.isArray(srv.urls) ? srv.urls : [srv.urls];
+            return urls.some((u) => String(u || "").toLowerCase().startsWith("turn:") || String(u || "").toLowerCase().startsWith("turns:"));
+          });
+        media.iceHelperReady = Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0;
         if (Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0) {
           pc.setConfiguration({ iceServers: cfg.iceServers });
+        } else {
+          reportCallEvent("ice_host_only_mode", { state: "enabled" });
         }
       } catch (_) { /* LAN-only fallback is fine */ }
     })();
@@ -28305,6 +28373,11 @@
       let inboundVideoFramesDropped = 0;
       let inboundPacketsLost = 0;
       let inboundPacketsReceived = 0;
+      const statById = new Map();
+      stats.forEach((s) => { if (s && s.id) statById.set(s.id, s); });
+      let selectedCandidateType = "";
+      let selectedCandidateProtocol = "";
+      let selectedCandidateNetwork = "";
       stats.forEach((s) => {
         if (s.type === "candidate-pair" && (s.selected || s.nominated)) {
           if (typeof s.currentRoundTripTime === "number") {
@@ -28312,6 +28385,12 @@
           }
           const bytes = Number(s.availableOutgoingBitrate || 0);
           if (bytes > 0) kbps = Math.round(bytes / 1000);
+          const localCand = statById.get(s.localCandidateId);
+          if (localCand) {
+            selectedCandidateType = String(localCand.candidateType || "");
+            selectedCandidateProtocol = String(localCand.protocol || "");
+            selectedCandidateNetwork = String(localCand.networkType || "");
+          }
         }
         if (s.type === "inbound-rtp" && !s.isRemote) {
           if (typeof s.jitter === "number") jitterMs = Math.round(s.jitter * 1000);
@@ -28384,7 +28463,18 @@
         remote_video_height: Number($$("#call-remote-video")?.videoHeight || 0),
         remote_video_ready_state: Number($$("#call-remote-video")?.readyState || 0),
         remote_video_paused: $$("#call-remote-video")?.paused === true,
+        selected_candidate_type: selectedCandidateType,
+        selected_candidate_protocol: selectedCandidateProtocol,
+        selected_candidate_network: selectedCandidateNetwork,
+        ice_helper_ready: media.iceHelperReady === true,
+        ice_relay_ready: media.iceRelayReady === true,
       };
+      if (selectedCandidateType === "relay") updateOneChip("#call-one-route", "Relay");
+      else if (selectedCandidateType === "srflx" || selectedCandidateType === "prflx") updateOneChip("#call-one-route", "Assisted");
+      else if (selectedCandidateType === "host") updateOneChip("#call-one-route", "Direct");
+      if (!media.iceRelayReady && selected.has_remote_description && selected.ice_connection_state === "checking") {
+        updateOneChip("#call-one-engine", "Direct only");
+      }
       callUI.lastMetricsSnapshot = {
         at_ms: Date.now(),
         ...selected,
