@@ -798,9 +798,13 @@
     border-top: 1px solid var(--line);
     padding: 12px 16px;
     background: var(--bg-1);
-    /* v0.9.2: 5 columns now - attach, screenshot, voice, textarea, send.
-       grid-template-columns: auto auto auto 1fr auto */
-    display: grid; grid-template-columns: auto auto auto 1fr auto; gap: 10px; align-items: end;
+    /* v0.21.x: 6 columns now - attach, screenshot, camera, voice,
+       textarea, send. Each icon-btn auto-sized; textarea claims the
+       remaining row width via 1fr; send is right-pinned auto. */
+    display: grid;
+    grid-template-columns: auto auto auto auto 1fr auto;
+    gap: 10px;
+    align-items: end;
   }
   .composer .icon-btn {
     width: 38px; height: 38px;
@@ -811,6 +815,12 @@
     transition: background .12s, color .12s;
     font-size: 18px;
   }
+  /* v0.21.x: pin the textarea + send button to the last two columns
+     so the composer survives icon-button hides (desktop-only screenshot
+     button vanishes on mobile, etc.) without the textarea landing in
+     a tiny auto-sized column. */
+  .composer textarea { grid-column: -2; }
+  .composer #btn-send  { grid-column: -1; }
   .composer .icon-btn:hover { background: var(--bg-3); color: var(--text); }
   .composer textarea {
     background: var(--bg-2);
@@ -3257,10 +3267,44 @@
   }
   .settings-header {
     display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
     padding: 14px 18px;
     border-bottom: 1px solid var(--line);
   }
-  .settings-header h2 { margin: 0; font-size: 16px; }
+  .settings-header h2 { margin: 0; font-size: 16px; flex-shrink: 0; }
+  /* v0.21.x: settings search input. Lives in the header between the
+     title and close button. Wide enough to type a real query but
+     not so wide it crowds the title. */
+  .settings-search-wrap {
+    flex: 1;
+    max-width: 320px;
+    margin: 0 8px;
+  }
+  .settings-search {
+    width: 100%;
+    background: var(--bg-2);
+    border: 1px solid var(--bg-3);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 6px 10px;
+    font-size: 13px;
+    outline: none;
+    transition: border-color .12s ease;
+  }
+  .settings-search::placeholder { color: var(--text-dimmer); }
+  .settings-search:focus { border-color: var(--accent); }
+  .settings-nav-item.nav-hidden { display: none; }
+  .settings-pane .row-hidden { display: none !important; }
+  .settings-search-empty {
+    margin: 24px auto;
+    color: var(--text-dim);
+    font-size: 13px;
+    text-align: center;
+    padding: 24px;
+    border: 1px dashed var(--line);
+    border-radius: 10px;
+    max-width: 360px;
+  }
   .settings-close {
     width: 30px; height: 30px;
     display: grid; place-items: center;
@@ -6060,6 +6104,245 @@
     user-select: none;
   }
 
+  /* v0.21.x: What's new modal on daemon-version change. */
+  .wnm-modal {
+    position: fixed; inset: 0;
+    display: none;
+    z-index: 9998;
+    align-items: center; justify-content: center;
+  }
+  .wnm-modal.show { display: flex; animation: wnm-fade 200ms ease-out; }
+  body.wnm-open { overflow: hidden; }
+  @keyframes wnm-fade { from { opacity: 0; } to { opacity: 1; } }
+  .wnm-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,.55);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .wnm-pane {
+    position: relative;
+    width: min(560px, 92vw);
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5);
+    padding: 22px 24px 18px;
+    animation: wnm-rise 220ms cubic-bezier(.2,.8,0,1);
+  }
+  @keyframes wnm-rise {
+    from { transform: translateY(16px); opacity: 0; }
+    to   { transform: translateY(0);    opacity: 1; }
+  }
+  .wnm-title {
+    margin: 0 0 14px;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .wnm-items {
+    padding-left: 22px;
+    margin: 0 0 16px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .wnm-items li { margin: 0 0 8px; }
+  .wnm-actions {
+    display: flex; justify-content: flex-end;
+  }
+  .wnm-dismiss {
+    background: var(--accent);
+    color: white;
+    border: 1px solid var(--accent);
+    padding: 8px 18px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .wnm-dismiss:hover { filter: brightness(1.08); }
+
+  /* v0.21.x: first-action chips on a paired-but-empty chat. */
+  .first-action-empty {
+    margin: auto;
+    max-width: 420px;
+    padding: 32px 24px;
+    text-align: center;
+    color: var(--text);
+  }
+  .first-action-empty .empty-glyph {
+    font-size: 36px;
+    margin-bottom: 8px;
+  }
+  .first-action-empty h3 {
+    margin: 0 0 8px;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .first-action-empty p {
+    margin: 0 0 18px;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .first-action-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+  }
+  .first-action-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 999px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    color: var(--text);
+    font-size: 13px;
+    cursor: pointer;
+    transition: background .12s ease, border-color .12s ease;
+  }
+  .first-action-chip:hover {
+    background: var(--bg-3);
+    border-color: var(--accent);
+  }
+  .first-action-chip .fac-icon { font-size: 16px; line-height: 1; }
+  @media (prefers-reduced-motion: no-preference) {
+    .first-action-empty {
+      animation: fa-fade-in 360ms ease-out;
+    }
+    @keyframes fa-fade-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: none; }
+    }
+  }
+
+  /* v0.21.x: first-send celebration glow. One-time per peer. */
+  .msg.first-send-glow {
+    animation: first-send-glow 2.0s ease-out;
+  }
+  @keyframes first-send-glow {
+    0%   { box-shadow: 0 0 0 0 rgba(124,92,255,.55); }
+    40%  { box-shadow: 0 0 0 12px rgba(124,92,255,.0), 0 4px 22px rgba(124,92,255,.55); }
+    100% { box-shadow: 0 2px 6px rgba(0,0,0,.18); }
+  }
+  .msg.first-send-glow::before {
+    content: "✨";
+    position: absolute;
+    top: -8px;
+    right: 8px;
+    font-size: 14px;
+    animation: first-send-sparkle 1.5s ease-out;
+    pointer-events: none;
+  }
+  @keyframes first-send-sparkle {
+    0%   { opacity: 0; transform: scale(0) rotate(0deg); }
+    30%  { opacity: 1; transform: scale(1.2) rotate(30deg); }
+    100% { opacity: 0; transform: scale(1) rotate(60deg) translateY(-6px); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .msg.first-send-glow,
+    .msg.first-send-glow::before { animation: none; }
+  }
+
+  /* v0.21.x: recovery-verify modal. Two-step verification before
+     marking recovery as configured — the user has to type a
+     phrase that proves they actually did the work. */
+  .rvm-modal {
+    position: fixed; inset: 0;
+    display: none;
+    z-index: 9999;
+    align-items: center; justify-content: center;
+  }
+  .rvm-modal.show { display: flex; }
+  body.rvm-open { overflow: hidden; }
+  .rvm-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,.62);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .rvm-pane {
+    position: relative;
+    width: min(520px, 92vw);
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5);
+    padding: 22px 24px;
+  }
+  .rvm-title {
+    margin: 0 0 10px;
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .rvm-lead {
+    margin: 0 0 12px;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .rvm-checklist {
+    margin: 0 0 14px 18px;
+    padding: 0;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .rvm-checklist li { margin: 0 0 4px; }
+  .rvm-prompt {
+    margin: 14px 0 8px;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .rvm-challenge {
+    background: var(--bg-2);
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-family: var(--mono);
+    color: var(--accent);
+  }
+  .rvm-input {
+    width: 100%;
+    background: var(--bg-2);
+    border: 1px solid var(--bg-3);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: var(--mono);
+    outline: none;
+    margin-bottom: 14px;
+  }
+  .rvm-input:focus { border-color: var(--accent); }
+  .rvm-actions {
+    display: flex; justify-content: flex-end; gap: 8px;
+  }
+  .rvm-cancel, .rvm-confirm {
+    padding: 7px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+    border: 1px solid var(--line);
+  }
+  .rvm-cancel {
+    background: transparent;
+    color: var(--text-dim);
+  }
+  .rvm-cancel:hover { background: var(--bg-3); color: var(--text); }
+  .rvm-confirm {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .rvm-confirm:hover:not(:disabled) { filter: brightness(1.08); }
+  .rvm-confirm:disabled { opacity: .4; cursor: default; }
+
   /* v0.21.x: missed / ended call bubble. Centered-ish "system
      message" feel — distinguishes from regular text/file bubbles
      so the call log entry reads as metadata about the chat, not
@@ -6974,6 +7257,14 @@
     <div class="modal settings-shell" style="max-width:880px;">
       <div class="settings-header">
         <h2>Settings</h2>
+        <!-- v0.21.x: search-as-you-type across every pane. Filters
+             both the left nav (panes with no matches are hidden) and
+             the rows within each pane (non-matching rows hide). -->
+        <div class="settings-search-wrap">
+          <input type="search" id="settings-search" class="settings-search"
+                 placeholder="Search settings…"
+                 aria-label="Search settings" />
+        </div>
         <button class="settings-close" id="settings-cancel" title="Close" aria-label="Close settings">×</button>
       </div>
       <div class="settings-body">
@@ -7547,6 +7838,33 @@
                 Open diagnostics
               </button>
             </div>
+            <!-- v0.21.x: diagnostics export + bug report. Both
+                 redact secrets before producing output. The export
+                 button generates a JSON snapshot the user can
+                 download or copy. The bug-report button opens a
+                 pre-filled GitHub issue in a new tab with the
+                 redacted state already in the body. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Share a diagnostic snapshot</span></div>
+              <p class="settings-help">
+                Build a redacted report (your version, OS info,
+                paired-peer count, recent error log) you can save
+                or paste into a bug report. Identifying info
+                (display name, peer fingerprints, message bodies)
+                is stripped first.
+              </p>
+              <div class="row" style="gap:8px; margin-top:10px;">
+                <button class="btn-ghost" id="settings-export-diagnostics">
+                  Download diagnostic report
+                </button>
+                <button class="btn-ghost" id="settings-copy-diagnostics">
+                  Copy to clipboard
+                </button>
+                <button class="btn-ghost" id="settings-open-bug-report">
+                  Report a bug on GitHub
+                </button>
+              </div>
+            </div>
           </section>
 
           <!-- ── About ──────────────────────────────────────────── -->
@@ -7659,6 +7977,19 @@
               Built on Coherence; yes, we drank our own kool-aid.
               <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link" target="_blank" rel="noopener" class="learn-more">Source on GitHub</a>
             </p>
+            <!-- v0.21.x: re-open the welcome wizard for users who
+                 skipped it on first launch or just want a refresher. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Show me around again</span></div>
+              <p class="settings-help">
+                Replay the welcome wizard. Useful if you skipped it
+                during first launch, or if you want to walk a guest
+                through how One Link works.
+              </p>
+              <button class="btn-ghost" id="settings-replay-wizard">
+                Replay welcome wizard
+              </button>
+            </div>
           </section>
 
         </div>
@@ -13032,6 +13363,53 @@
     m._renderSig = sig;
     m.innerHTML = "";
 
+    // v0.21.x: first-action chips for a paired-but-empty chat. When
+    // there's a selected peer + zero messages, surface three
+    // example actions. Auto-dismisses on first send.
+    if (filtered.length === 0) {
+      const wrap = el("div", "first-action-empty");
+      const peer = state.peers.get(state.selectedPeer);
+      const who = peer?.display_name || peer?.hostname || "this device";
+      wrap.innerHTML = `
+        <div class="empty-glyph">👋</div>
+        <h3>You're paired with ${_escapeHtml(who)}.</h3>
+        <p>Send the first message, drop a file, or jump on a call.</p>
+      `;
+      const chips = el("div", "first-action-chips");
+      const tryThing = (icon, label, action) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "first-action-chip";
+        b.innerHTML = `<span class="fac-icon">${icon}</span><span>${_escapeHtml(label)}</span>`;
+        b.onclick = action;
+        return b;
+      };
+      chips.appendChild(tryThing("✉️", "Send hi", () => {
+        const input = $("#input");
+        input.value = "hi 👋";
+        input.focus();
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }));
+      chips.appendChild(tryThing("📎", "Send a photo", () => {
+        $("#btn-attach2")?.click();
+      }));
+      if (peer?.fingerprint && peer.trust === "pinned") {
+        chips.appendChild(tryThing("📞", "Voice call", () => {
+          if (typeof window.startLivingPresenceCall === "function") {
+            window.startLivingPresenceCall(
+              peer.fingerprint,
+              peer.display_name || peer.hostname || peer.short_id,
+              { video: false },
+            );
+          }
+        }));
+      }
+      wrap.appendChild(chips);
+      m.appendChild(wrap);
+      _smartScrollAfter(m, prevBottomState, 0);
+      return;
+    }
+
     let lastTs = null;
     for (const msg of filtered) {
       if (!lastTs || !sameDay(lastTs, msg.ts)) {
@@ -17451,6 +17829,128 @@
     }
   }
 
+  // v0.21.x: first-send celebration. Tracks per-peer in
+  // localStorage so the moment fires exactly once per peer. Renders
+  // a brief ✨ glow on the just-painted bubble. Skips when the
+  // celebration is disabled or the bubble can't be found.
+  const FIRST_SEND_KEY = "one_link.first_send_celebrated";
+  function _maybeCelebrateFirstSend(msg) {
+    if (!msg?.peer || !msg?.id) return;
+    let seen = {};
+    try { seen = JSON.parse(localStorage.getItem(FIRST_SEND_KEY) || "{}"); }
+    catch {}
+    if (seen[msg.peer]) return;
+    seen[msg.peer] = Date.now();
+    try { localStorage.setItem(FIRST_SEND_KEY, JSON.stringify(seen)); } catch {}
+    // Defer one frame so the bubble has been added to the DOM.
+    requestAnimationFrame(() => {
+      const node = document.querySelector(`[data-msg-id="${CSS.escape(msg.id)}"]`);
+      if (!node) return;
+      node.classList.add("first-send-glow");
+      // Remove the class after the animation completes so the bubble
+      // settles into its normal style without manual cleanup elsewhere.
+      setTimeout(() => node.classList.remove("first-send-glow"), 2200);
+    });
+  }
+
+  // v0.21.x: "What's new" modal. Keyed by daemon's app_version in
+  // localStorage; on a fresh install the first run is consumed by
+  // the welcome wizard, so we seed the key on first observation
+  // and only surface the modal when a subsequent run sees a new
+  // version. Highlights are baked-in per release; the doc link
+  // points at the GitHub repo's CHANGELOG.
+  const WHATS_NEW_KEY = "one_link.last_seen_version";
+  const WHATS_NEW_HIGHLIGHTS = {
+    "0.21.0-alpha": {
+      headline: "v0.21 · the build that feels finished",
+      items: [
+        "Send button never silently hangs — every outbound message gets a status pill (Sending → Queued → Failed → Retry) and a 25s hard timeout that falls into the offline queue.",
+        "Click any photo to open a fullscreen lightbox. Arrow keys / swipe move between every photo in this conversation.",
+        "Long pasted messages collapse to a preview with a Show more toggle so the chat stays readable.",
+        "Calls now have audible ringback + ringtone, a permission preflight, and leave a missed-call entry with Call back if no one answers.",
+        "Voice messages: listen back before you send, play at 1.5x / 2x, with a waveform on every bubble.",
+        "Unread count surfaces in the tab title, OS dock badge, and per-peer sidebar.",
+        "Photos shipped with EXIF stripped by default. Edit before sending: crop, draw, blur a face.",
+      ],
+    },
+  };
+  function _maybeShowWhatsNew(currentVersion) {
+    if (!currentVersion) return;
+    let lastSeen = "";
+    try { lastSeen = localStorage.getItem(WHATS_NEW_KEY) || ""; } catch {}
+    if (lastSeen === currentVersion) return;
+    // First-launch ever path: the welcome wizard handles the user.
+    // Seed the key without showing the modal so the next version
+    // bump shows it correctly.
+    const onboardingDone = (() => {
+      try { return localStorage.getItem(ONBOARDING_STORAGE_KEY) === "1"; }
+      catch { return false; }
+    })();
+    if (!lastSeen && !onboardingDone) {
+      try { localStorage.setItem(WHATS_NEW_KEY, currentVersion); } catch {}
+      return;
+    }
+    const highlights = WHATS_NEW_HIGHLIGHTS[currentVersion]
+      || _autoGenericWhatsNew(currentVersion);
+    _showWhatsNewModal(highlights, currentVersion);
+  }
+  function _autoGenericWhatsNew(version) {
+    return {
+      headline: `Updated to v${version}`,
+      items: [
+        "Bug fixes and improvements across the chat surface.",
+        "See the project changelog for the full list of changes.",
+      ],
+    };
+  }
+  function _showWhatsNewModal(highlights, version) {
+    _ensureWhatsNewModal();
+    const modal = document.getElementById("whatsnew-modal");
+    modal.querySelector(".wnm-title").textContent = highlights.headline;
+    const list = modal.querySelector(".wnm-items");
+    list.innerHTML = "";
+    for (const it of highlights.items) {
+      const li = document.createElement("li");
+      li.textContent = it;
+      list.appendChild(li);
+    }
+    const dismiss = () => {
+      try { localStorage.setItem(WHATS_NEW_KEY, version); } catch {}
+      modal.classList.remove("show");
+      document.body.classList.remove("wnm-open");
+    };
+    modal.querySelector(".wnm-dismiss").onclick = dismiss;
+    modal.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (t && t instanceof Element && t.hasAttribute("data-wnm-close")) dismiss();
+    }, { once: false });
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && modal.classList.contains("show")) dismiss();
+    }, { once: true });
+    modal.classList.add("show");
+    document.body.classList.add("wnm-open");
+  }
+  function _ensureWhatsNewModal() {
+    if (document.getElementById("whatsnew-modal")) return;
+    const m = document.createElement("div");
+    m.id = "whatsnew-modal";
+    m.className = "wnm-modal";
+    m.setAttribute("role", "dialog");
+    m.setAttribute("aria-modal", "true");
+    m.setAttribute("aria-labelledby", "wnm-title-id");
+    m.innerHTML = `
+      <div class="wnm-backdrop" data-wnm-close></div>
+      <div class="wnm-pane">
+        <h2 class="wnm-title" id="wnm-title-id">What's new</h2>
+        <ul class="wnm-items"></ul>
+        <div class="wnm-actions">
+          <button type="button" class="wnm-dismiss">Start using it</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(m);
+  }
+
   function handleLocalVersionDrift(daemonVer, pageVer, reason) {
     console.warn(
       `One Link page/backend drift: page=${pageVer}, daemon=${daemonVer}, reason=${reason || "version"}`,
@@ -17515,6 +18015,12 @@
           "source",
         );
       }
+      // v0.21.x: "What's new" modal on first launch after a daemon
+      // version bump. localStorage stores the last-seen version; if
+      // it differs from me.app_version we show a small bottom-sheet
+      // with the headline changes for the new version. Skipped on
+      // very first launch (the welcome wizard handles that user).
+      _maybeShowWhatsNew(me.app_version);
     } catch (e) {
       toast("Can't reach One Link. Is it running?", "bad", 8000);
       console.error(e);
@@ -19377,6 +19883,11 @@
         clearActiveDraft();
         clearReplyTo();
         renderMessages();
+        // v0.21.x: first-send celebration. The first message ever
+        // sent to a given peer gets a one-time ✨ glow on the bubble.
+        // Persists per-peer in localStorage so subsequent sends
+        // don't repeat the moment.
+        _maybeCelebrateFirstSend(optimistic);
         try {
           const sendBody = {
             peer: state.selectedPeer,
@@ -19563,7 +20074,20 @@
         video.srcObject = stream;
         await video.play().catch(() => {});
       } catch (e) {
-        toast(`Camera access failed: ${e?.message || e}`, "bad", 6000);
+        // v0.21.x: edge-case-specific friendly copy instead of raw
+        // browser exception strings. Common causes: denied
+        // permission, no camera attached, another app holding it.
+        const why =
+          e?.name === "NotAllowedError"
+            ? "Camera permission denied. Allow it in your browser settings and try again."
+          : e?.name === "NotFoundError"
+            ? "No camera detected on this device. Plug one in or use a device with one."
+          : e?.name === "NotReadableError"
+            ? "Another app is using the camera right now. Close it and try again."
+          : e?.name === "OverconstrainedError"
+            ? "This camera doesn't support that resolution. Try again."
+          : `Camera access failed: ${e?.message || e}`;
+        toast(why, "bad", 6000);
         cleanup();
       }
     }
@@ -20006,13 +20530,116 @@
   }
 
   async function oneSetupMarkRecoveryConfigured() {
+    // v0.21.x: verification challenge before marking recovery as
+    // "configured". The old path was a one-click "yes I did the
+    // thing" with no friction — a user could accidentally click
+    // it and have no way to actually recover later. New flow asks
+    // the user to type a confirmation phrase, so the click is
+    // deliberate and the user has at least read the explanation.
+    const confirmed = await _showRecoveryVerifyModal();
+    if (!confirmed) return;
     try {
       await api.setupAction("recovery_configured");
-      toast("Recovery marked ready for this setup.", "good", 3500);
+      toast("Recovery marked ready. Keep that paper safe.", "good", 4000);
       await refreshOneSetup();
     } catch (e) {
       toast(`Recovery update failed: ${errorToastBody(e)}`, "bad", 6000);
     }
+  }
+  // v0.21.x: recovery-verify modal. Two-step:
+  //   1. Explain WHY recovery matters in plain language.
+  //   2. Require user to type a short phrase to confirm.
+  // The phrase is randomized between two options so the user can't
+  // muscle-memory through. Resolves true on Confirm, false on
+  // Cancel / Escape / backdrop click.
+  function _showRecoveryVerifyModal() {
+    return new Promise((resolve) => {
+      _ensureRecoveryVerifyModal();
+      const modal = document.getElementById("recovery-verify-modal");
+      const challenges = [
+        "I wrote it down",
+        "I have my recovery info",
+      ];
+      const challenge = challenges[Math.floor(Math.random() * challenges.length)];
+      modal.querySelector(".rvm-challenge").textContent = challenge;
+      const input = modal.querySelector(".rvm-input");
+      const confirmBtn = modal.querySelector(".rvm-confirm");
+      const cancelBtn = modal.querySelector(".rvm-cancel");
+      input.value = "";
+      confirmBtn.disabled = true;
+      function checkMatch() {
+        const norm = (s) => s.trim().toLowerCase().replace(/\s+/g, " ");
+        confirmBtn.disabled = norm(input.value) !== norm(challenge);
+      }
+      input.addEventListener("input", checkMatch);
+      function cleanup() {
+        modal.classList.remove("show");
+        document.body.classList.remove("rvm-open");
+        input.removeEventListener("input", checkMatch);
+        confirmBtn.removeEventListener("click", onConfirm);
+        cancelBtn.removeEventListener("click", onCancel);
+        modal.removeEventListener("click", onBackdrop);
+        document.removeEventListener("keydown", onKey);
+      }
+      function onConfirm() {
+        if (confirmBtn.disabled) return;
+        cleanup();
+        resolve(true);
+      }
+      function onCancel() { cleanup(); resolve(false); }
+      function onBackdrop(ev) {
+        const t = ev.target;
+        if (t && t instanceof Element && t.hasAttribute("data-rvm-close")) onCancel();
+      }
+      function onKey(ev) {
+        if (ev.key === "Escape") onCancel();
+        if (ev.key === "Enter" && !confirmBtn.disabled) onConfirm();
+      }
+      confirmBtn.addEventListener("click", onConfirm);
+      cancelBtn.addEventListener("click", onCancel);
+      modal.addEventListener("click", onBackdrop);
+      document.addEventListener("keydown", onKey);
+      modal.classList.add("show");
+      document.body.classList.add("rvm-open");
+      setTimeout(() => input.focus(), 60);
+    });
+  }
+  function _ensureRecoveryVerifyModal() {
+    if (document.getElementById("recovery-verify-modal")) return;
+    const m = document.createElement("div");
+    m.id = "recovery-verify-modal";
+    m.className = "rvm-modal";
+    m.setAttribute("role", "dialog");
+    m.setAttribute("aria-modal", "true");
+    m.setAttribute("aria-label", "Confirm recovery setup");
+    m.innerHTML = `
+      <div class="rvm-backdrop" data-rvm-close></div>
+      <div class="rvm-pane">
+        <h2 class="rvm-title">Confirm you set up recovery</h2>
+        <p class="rvm-lead">
+          If you lose every device with One Link installed, this is
+          the ONLY way back into your identity. There's no email
+          reset, no password recovery, no cloud backup we can
+          unlock for you.
+        </p>
+        <ul class="rvm-checklist">
+          <li>You wrote your recovery info on paper, OR</li>
+          <li>You set up trusted contacts (3 of 5 social recovery), OR</li>
+          <li>You stored an encrypted backup somewhere safe</li>
+        </ul>
+        <p class="rvm-prompt">
+          To confirm you actually did one of these, type:
+          <strong class="rvm-challenge">I wrote it down</strong>
+        </p>
+        <input type="text" class="rvm-input" aria-label="Confirmation phrase"
+               autocomplete="off" spellcheck="false" />
+        <div class="rvm-actions">
+          <button type="button" class="rvm-cancel">Not yet</button>
+          <button type="button" class="rvm-confirm" disabled>Mark configured</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(m);
   }
 
   async function openOneSetupFromState() {
@@ -21237,6 +21864,150 @@
     openDebugOverlay();
   });
 
+  // v0.21.x: build a redacted diagnostic snapshot. NEVER include
+  // peer fingerprints, display names, message bodies, file names,
+  // paths, addresses, or any other identifying info. Counts +
+  // shapes + recent error severities are enough for triage.
+  async function _buildDiagnosticReport() {
+    const report = {
+      generated_at: new Date().toISOString(),
+      app_version: state.me?.app_version || PAGE_BUILT_FOR || "unknown",
+      page_version: PAGE_BUILT_FOR,
+      ua: {
+        platform: (navigator.userAgentData?.platform) || navigator.platform || "unknown",
+        mobile: navigator.userAgentData?.mobile === true,
+        language: navigator.language || "",
+        cores: navigator.hardwareConcurrency || 0,
+      },
+      window: {
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        devicePixelRatio: window.devicePixelRatio || 1,
+      },
+      peers: {
+        count: state.peers.size,
+        online: [...state.peers.values()].filter((p) => p.online).length,
+        pinned: [...state.peers.values()].filter((p) => p.trust === "pinned").length,
+        rejected: [...state.peers.values()].filter((p) => p.trust === "rejected").length,
+        // Coarse version distribution; specific versions only, no FPs.
+        versions: (() => {
+          const v = {};
+          for (const p of state.peers.values()) {
+            const k = p.app_version || "unknown";
+            v[k] = (v[k] || 0) + 1;
+          }
+          return v;
+        })(),
+      },
+      groups: { count: state.groups?.size || 0 },
+      messages_in_memory: state.messages.length,
+      transfers: { active: state.transfers?.length || 0 },
+      unread_total: state.totalUnread || 0,
+      debug_errors_recent: (state.debugEntries || [])
+        .filter((e) => e.severity === "error")
+        .slice(0, 50)
+        .map((e) => ({
+          severity: e.severity,
+          // Strip user-supplied bodies if they leaked in. The first
+          // 200 chars of the structured message is enough for triage.
+          message: String(e.message || "").slice(0, 200),
+          ts: e.ts || e.timestamp || "",
+        })),
+      runtime_settings: (() => {
+        const r = state.runtimeSettings || {};
+        // Whitelist only known knob names; drop any user-supplied
+        // strings (e.g. download_folder paths) that could identify.
+        const allow = [
+          "display_read_receipts", "send_read_receipts",
+          "send_typing_indicators", "notification_sound",
+          "show_message_preview", "keep_image_metadata",
+          "voice_skip_preview", "dnd_enabled",
+        ];
+        const out = {};
+        for (const k of allow) if (k in r) out[k] = r[k];
+        return out;
+      })(),
+      status_summary: state.status ? {
+        transfers_active: state.status.transfers?.active || 0,
+        sessions_open: state.status.performance?.sessions?.open || 0,
+        cdc_cache_bytes: state.status.performance?.cdc_cache?.bytes || 0,
+        schema_version: state.status.schema_version || null,
+        protocol_version: state.status.protocol_version || null,
+      } : null,
+    };
+    return report;
+  }
+  function _diagnosticReportToText(report) {
+    return JSON.stringify(report, null, 2);
+  }
+  // v0.21.x: replay welcome wizard. Resets the completion flags so
+  // maybeShowOnboarding will render the wizard again on the next
+  // /api/me call. Closes the settings modal first so the wizard
+  // takes over the screen cleanly.
+  $("#settings-replay-wizard")?.addEventListener("click", async () => {
+    try { localStorage.removeItem(ONBOARDING_STORAGE_KEY); } catch {}
+    try {
+      // Best-effort: tell daemon to forget too, so a separate
+      // browser tab also re-sees the wizard.
+      await api.post("/api/settings", { onboarding_completed: false });
+    } catch {}
+    $("#settings-backdrop")?.classList.remove("show");
+    document.body.classList.remove("settings-open");
+    // Force-show step 1 of the wizard now.
+    showOnboardingStep(1);
+    $("#onboarding-backdrop").style.display = "flex";
+  });
+
+  $("#settings-export-diagnostics")?.addEventListener("click", async () => {
+    const report = await _buildDiagnosticReport();
+    const text = _diagnosticReportToText(report);
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `one-link-diagnostics-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast("Diagnostic report downloaded. Nothing identifying inside.", "good", 4500);
+  });
+  $("#settings-copy-diagnostics")?.addEventListener("click", async () => {
+    const report = await _buildDiagnosticReport();
+    const text = _diagnosticReportToText(report);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Diagnostic report copied to clipboard.", "good", 4000);
+    } catch {
+      toast("Couldn't copy — clipboard access denied.", "bad", 4500);
+    }
+  });
+  $("#settings-open-bug-report")?.addEventListener("click", async () => {
+    const report = await _buildDiagnosticReport();
+    // Build a GitHub issue URL. The body is URL-encoded; GitHub
+    // truncates at ~8K so we keep the report compact.
+    const summary = `Bug: <short description here>`;
+    const body = [
+      "## What happened",
+      "<describe what you did and what you expected vs what happened>",
+      "",
+      "## Steps to reproduce",
+      "1. ",
+      "2. ",
+      "3. ",
+      "",
+      "## Diagnostic snapshot",
+      "```json",
+      _diagnosticReportToText(report).slice(0, 6000),
+      "```",
+      "",
+      "_Generated by the in-app bug-report flow. Identifying info already stripped._",
+    ].join("\n");
+    const url = `https://github.com/IamOneYouAreOneWeAreOne/one-link/issues/new?title=${encodeURIComponent(summary)}&body=${encodeURIComponent(body)}`;
+    window.open(url, "_blank", "noopener,noreferrer");
+    toast("GitHub opened in a new tab with the snapshot pre-filled.", "info", 4500);
+  });
+
   // v0.15.0 - PWA install prompt handler. Browsers (Chrome, Edge,
   // Samsung Internet, Brave) fire `beforeinstallprompt` once
   // installability criteria are met (manifest valid + SW registered
@@ -21940,6 +22711,113 @@
       switchSettingsPane(btn.dataset.settingsPane);
     });
   });
+
+  // v0.21.x: search-as-you-type across all settings panes. Empty
+  // query restores the full nav + all rows. Non-empty hides any
+  // settings-row whose text doesn't include the query (case-fold),
+  // hides any pane that has zero matching rows, and hides nav
+  // buttons for hidden panes. If the active pane becomes hidden,
+  // jump to the first pane that still has matches.
+  const _settingsSearchInput = $("#settings-search");
+  function _applySettingsSearch(q) {
+    const needle = (q || "").trim().toLowerCase();
+    const navButtons = document.querySelectorAll(".settings-nav-item");
+    const panes = document.querySelectorAll(".settings-pane[data-settings-pane]");
+    if (needle === "") {
+      // Reset: every row visible, every nav button visible.
+      navButtons.forEach((b) => b.classList.remove("nav-hidden"));
+      panes.forEach((p) => {
+        p.classList.remove("pane-empty");
+        p.querySelectorAll(".settings-row, .settings-help, .settings-section-h, .settings-row-block, .profile-avatar-row")
+          .forEach((el) => el.classList.remove("row-hidden"));
+      });
+      _settingsEmptyState(false);
+      return;
+    }
+    const visiblePanes = new Set();
+    panes.forEach((pane) => {
+      let visibleInPane = 0;
+      // Treat each child element as a row group; if its text matches,
+      // keep it. Two passes — first include matching elements + their
+      // immediate label cluster, then hide the rest.
+      const groups = pane.querySelectorAll(":scope > *");
+      groups.forEach((group) => {
+        const text = (group.textContent || "").toLowerCase();
+        if (text.includes(needle)) {
+          group.classList.remove("row-hidden");
+          visibleInPane++;
+        } else {
+          group.classList.add("row-hidden");
+        }
+      });
+      // Pane title (h3) almost always matches the pane name; keep it
+      // visible when any descendant matched so users don't lose context.
+      const h3 = pane.querySelector(":scope > h3");
+      if (h3 && visibleInPane > 0) h3.classList.remove("row-hidden");
+      if (visibleInPane > 0) {
+        pane.classList.remove("pane-empty");
+        visiblePanes.add(pane.dataset.settingsPane);
+      } else {
+        pane.classList.add("pane-empty");
+      }
+    });
+    navButtons.forEach((btn) => {
+      const k = btn.dataset.settingsPane;
+      // Also keep the nav button visible if the pane name itself
+      // matches the query, even when no row inside matched.
+      const labelMatches = (btn.textContent || "").toLowerCase().includes(needle);
+      if (visiblePanes.has(k) || labelMatches) btn.classList.remove("nav-hidden");
+      else btn.classList.add("nav-hidden");
+    });
+    // If the current active pane is now empty, switch to the first pane
+    // that has matches.
+    const activePane = document.querySelector(".settings-pane.active");
+    if (activePane && activePane.classList.contains("pane-empty")) {
+      const firstVisible = [...navButtons].find((b) => !b.classList.contains("nav-hidden"));
+      if (firstVisible) switchSettingsPane(firstVisible.dataset.settingsPane);
+    }
+    _settingsEmptyState(visiblePanes.size === 0);
+  }
+  function _settingsEmptyState(show) {
+    const host = document.querySelector(".settings-pane-host");
+    if (!host) return;
+    let banner = host.querySelector(".settings-search-empty");
+    if (show) {
+      if (!banner) {
+        banner = document.createElement("div");
+        banner.className = "settings-search-empty";
+        banner.textContent = "Nothing matches that. Try fewer words.";
+        host.appendChild(banner);
+      }
+      banner.style.display = "";
+    } else if (banner) {
+      banner.style.display = "none";
+    }
+  }
+  if (_settingsSearchInput) {
+    _settingsSearchInput.addEventListener("input", (ev) => {
+      _applySettingsSearch(ev.target.value);
+    });
+    _settingsSearchInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") {
+        ev.target.value = "";
+        _applySettingsSearch("");
+      }
+    });
+    // Reset search whenever the settings modal opens fresh.
+    const settingsBackdrop = document.getElementById("settings-backdrop");
+    if (settingsBackdrop) {
+      const obs = new MutationObserver(() => {
+        if (settingsBackdrop.classList.contains("show")) {
+          // Don't clear text; let users return to their query. Just
+          // re-apply so newly-rendered content (e.g. lazy-loaded
+          // storage pane) honors the current filter.
+          _applySettingsSearch(_settingsSearchInput.value);
+        }
+      });
+      obs.observe(settingsBackdrop, { attributes: true, attributeFilter: ["class"] });
+    }
+  }
 
   // v0.11.6 - fetch + render the per-chat storage breakdown.
   async function refreshStorageUsage() {
