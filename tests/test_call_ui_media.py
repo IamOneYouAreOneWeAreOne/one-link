@@ -173,6 +173,20 @@ def test_accept_answers_pending_offer_before_self_offer(index_html: str) -> None
     assert "} else {" in snippet[pending_idx:ensure_idx]
 
 
+def test_remote_sdp_backfill_is_deduped(index_html: str) -> None:
+    assert "appliedRemoteOfferKeys: new Set()" in index_html
+    assert "appliedRemoteAnswerKeys: new Set()" in index_html
+    assert "function sdpKey" in index_html
+    offer_idx = index_html.find("async function applyRemoteSdpOffer")
+    offer_snippet = index_html[offer_idx:offer_idx + 1200]
+    assert "appliedRemoteOfferKeys.has(key)" in offer_snippet
+    assert 'media.pc.signalingState !== "stable"' in offer_snippet
+    answer_idx = index_html.find("async function applyRemoteSdpAnswer")
+    answer_snippet = index_html[answer_idx:answer_idx + 1200]
+    assert "appliedRemoteAnswerKeys.has(key)" in answer_snippet
+    assert 'media.pc.signalingState !== "have-local-offer"' in answer_snippet
+
+
 def test_call_media_events_are_reported(index_html: str) -> None:
     assert 'action: "report_call_event"' in index_html
     for event in [

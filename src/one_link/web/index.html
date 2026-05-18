@@ -5468,6 +5468,52 @@
   .convo-h .who .sub .lat-dot.medium { background: var(--warn); }
   .convo-h .who .sub .lat-dot.slow   { background: var(--bad); }
 
+  /* v0.21.x: peer-version comparison badge. Lives in the peer-row
+     sub-line next to the reach label. Shown only when something is
+     worth surfacing — same-version + unknown both render nothing,
+     because the row is small and clutter compounds. The colors
+     match the existing palette: muted/yellow for "older" (you're
+     ahead), blue for "newer" (peer is ahead), red for incompat,
+     yellow for fallback. */
+  .peer-ver-badge {
+    display: inline-block;
+    padding: 0 5px;
+    margin-left: 4px;
+    font-size: 10px;
+    line-height: 1.4;
+    border-radius: 10px;
+    vertical-align: 1px;
+    border: 1px solid transparent;
+    font-family: var(--mono);
+    white-space: nowrap;
+  }
+  .peer-ver-older {
+    color: var(--warn);
+    border-color: rgba(245,196,81,.35);
+    background: rgba(245,196,81,.08);
+  }
+  .peer-ver-newer {
+    color: var(--accent-2);
+    border-color: rgba(78,193,255,.35);
+    background: rgba(78,193,255,.08);
+  }
+  .peer-ver-incompat {
+    color: var(--bad);
+    border-color: rgba(255,108,108,.45);
+    background: rgba(255,108,108,.10);
+  }
+  .peer-ver-fallback {
+    color: var(--warn);
+    border-color: rgba(245,196,81,.35);
+    background: rgba(245,196,81,.08);
+  }
+  /* Same badge in the conversation header — render slightly larger
+     since the header has more breathing room. */
+  .convo-h .who .sub .peer-ver-badge {
+    font-size: 11px;
+    padding: 1px 7px;
+  }
+
   /* ── Click-to-copy affordance ──────────────────────────────────────── */
   .copyable {
     cursor: copy;
@@ -8870,6 +8916,9 @@
     // buckets so a few ms of jitter don't trigger redraws.
     const parts = [];
     parts.push(`sel=${selected || ""}`);
+    // v0.21.x: my own version goes into the hash so a daemon update
+    // re-renders every peer row's version-compare badge.
+    parts.push(`my=${state.me?.app_version || ""}`);
     for (const p of peers) {
       const lat = p?.health?.latency_ewma_ms;
       const latBucket = lat == null ? -1 : (lat < 80 ? 0 : lat < 250 ? 1 : 2);
@@ -8884,9 +8933,85 @@
         (p.key_change_unacked || 0) === 0 ? 0 : ((p.key_change_unacked || 0) === 1 ? 1 : 2),
         // v0.10.4: presence drives the avatar dot color.
         p.presence || "",
+        // v0.21.x: peer's advertised app_version drives a "matches /
+        // older / newer" pill in the row sub-line. Compatibility
+        // verdict drives a yellow ⚠ badge when the negotiated path
+        // is degraded vs our local preferred. Both surface so the
+        // "queued while online" confusion has a visible cause.
+        p.app_version || "",
+        (p.compatibility?.compatible === false) ? "incompat" : "",
+        (p.compatibility?.mode || ""),
       ].join("|"));
     }
     return parts.join("§");
+  }
+
+  // v0.21.x: numeric-aware semver-ish compare. Accepts strings like
+  // "0.21.0-alpha", "0.20.6", "1.0.0". Returns negative if a<b, 0 if
+  // equal, positive if a>b. Falls back to lexical compare on parse
+  // failure (still useful, and the worst case is the badge says
+  // "different version" without older/newer arrow).
+  function _compareAppVersion(a, b) {
+    if (!a || !b) return 0;
+    if (a === b) return 0;
+    const partsA = String(a).split(/[-+]/, 1)[0].split(".").map(n => parseInt(n, 10));
+    const partsB = String(b).split(/[-+]/, 1)[0].split(".").map(n => parseInt(n, 10));
+    const len = Math.max(partsA.length, partsB.length);
+    for (let i = 0; i < len; i++) {
+      const x = partsA[i] || 0;
+      const y = partsB[i] || 0;
+      if (isNaN(x) || isNaN(y)) return a < b ? -1 : 1;
+      if (x !== y) return x - y;
+    }
+    // numeric parts equal; compare pre-release suffix (none > any suffix)
+    const sufA = String(a).split(/[-+]/).slice(1).join("-");
+    const sufB = String(b).split(/[-+]/).slice(1).join("-");
+    if (sufA === sufB) return 0;
+    if (!sufA) return 1;
+    if (!sufB) return -1;
+    return sufA < sufB ? -1 : 1;
+  }
+  // v0.21.x: returns a small DOM badge or null when nothing useful to
+  // say. Three cases worth surfacing:
+  //   - peer is on an older build than us  → "On older build" + ⬇
+  //   - peer is on a newer build than us  → "On newer build" + ⬆
+  //   - peer never did a CAPS exchange    → null (we don't speak FUD)
+  //   - peer is same version               → null (least clutter)
+  // When the daemon's compatibility negotiation marks the path as
+  // incompatible OR forced to a fallback transfer_mode, we also
+  // surface that as a yellow ⚠ chip — this is the case that drives
+  // "queued while online" symptoms.
+  function renderPeerVersionBadge(peer) {
+    const myVer = state.me?.app_version || null;
+    const theirVer = peer?.app_version || null;
+    const compat = peer?.compatibility || null;
+    // Compatibility-degraded path takes priority because that's the
+    // case that actually breaks sends; version-only diff is just
+    // informational.
+    if (compat && compat.compatible === false) {
+      const chip = el("span", "peer-ver-badge peer-ver-incompat", "⚠ Incompatible");
+      const reasons = (compat.reasons || []).filter(Boolean).slice(0, 3).join(", ");
+      chip.title = reasons
+        ? `Wire-path renegotiation needed: ${reasons}`
+        : "Wire-path renegotiation needed. Sends may queue until both sides catch up.";
+      return chip;
+    }
+    if (compat && compat.mode === "fallback") {
+      const chip = el("span", "peer-ver-badge peer-ver-fallback", "⚠ Fallback path");
+      chip.title = `Negotiated transfer_mode: ${compat.transfer_mode || "fallback"}. Some features may be limited until both sides match.`;
+      return chip;
+    }
+    if (!myVer || !theirVer) return null;
+    const cmp = _compareAppVersion(theirVer, myVer);
+    if (cmp === 0) return null;
+    if (cmp < 0) {
+      const chip = el("span", "peer-ver-badge peer-ver-older", "⬇ Older build");
+      chip.title = `Other device is on v${theirVer}. You're on v${myVer}.`;
+      return chip;
+    }
+    const chip = el("span", "peer-ver-badge peer-ver-newer", "⬆ Newer build");
+    chip.title = `Other device is on v${theirVer}. You're on v${myVer}.`;
+    return chip;
   }
 
   function renderPeers() {
@@ -8991,6 +9116,15 @@
         sub.appendChild(dot);
       }
       sub.appendChild(document.createTextNode(reachLabel(p)));
+      // v0.21.x: peer-version comparison badge. Surfaces "older" /
+      // "newer" / "incompatible" / "fallback path" so the user sees
+      // why a send queued even though presence says online. Returns
+      // null for same-version + unknown cases (least clutter).
+      const verBadge = renderPeerVersionBadge(p);
+      if (verBadge) {
+        sub.appendChild(document.createTextNode(" "));
+        sub.appendChild(verBadge);
+      }
       txt.appendChild(sub);
 
       row.title = `${p.display_name || p.hostname || p.short_id} · ${reachLabel(p)}`;
@@ -14737,6 +14871,17 @@
       const ms = peer.health?.latency_ewma_ms;
       if (ms != null) {
         subEl.appendChild(document.createTextNode(` · ${Math.round(ms)} ms`));
+      }
+      // v0.21.x: peer-version comparison in the convo header. Same
+      // semantics as the sidebar badge — only surfaces when there's
+      // something the user should know (older / newer / incompat /
+      // fallback). Lives here too so during an active chat the
+      // version-mismatch reason for queued sends is visible without
+      // hunting in the sidebar.
+      const verBadge = renderPeerVersionBadge(peer);
+      if (verBadge) {
+        subEl.appendChild(document.createTextNode(" "));
+        subEl.appendChild(verBadge);
       }
     }
     $("#btn-unblock").style.display = peer.trust === "rejected" && peer.fingerprint ? "inline-block" : "none";
@@ -20796,6 +20941,8 @@
     inboundCallPeerFp: null,
     pendingIceCandidates: [],
     appliedIceKeys: new Set(),
+    appliedRemoteOfferKeys: new Set(),
+    appliedRemoteAnswerKeys: new Set(),
     metricsTimer: null,
     mediaWatchdogTimer: null,
     oneEvents: [],
@@ -20938,6 +21085,8 @@
     media.iceConfigReady = null;
     callUI.pendingIceCandidates = [];
     callUI.appliedIceKeys.clear();
+    callUI.appliedRemoteOfferKeys.clear();
+    callUI.appliedRemoteAnswerKeys.clear();
     callUI.localMediaReady = false;
     media.muted = false;
     media.cameraOff = false;
@@ -21154,6 +21303,12 @@
     return true;
   }
 
+  function sdpKey(sdp) {
+    const text = String(sdp || "");
+    if (!text) return "";
+    return `${text.length}:${text.slice(0, 96)}:${text.slice(-96)}`;
+  }
+
   async function sendLocalSdpAnswer() {
     if (!media.pc || !callUI.activeCallId) return;
     if (callUI.sdpAnswerInFlight) return;
@@ -21201,7 +21356,19 @@
   async function applyRemoteSdpOffer(sdp) {
     if (!sdp) return;
     if (!media.pc) setupRtcPeerConnection();
+    const key = sdpKey(sdp);
+    if (key && callUI.appliedRemoteOfferKeys.has(key)) return;
+    if (
+      media.pc.remoteDescription
+      && media.pc.remoteDescription.type === "offer"
+      && sdpKey(media.pc.remoteDescription.sdp) === key
+    ) {
+      if (key) callUI.appliedRemoteOfferKeys.add(key);
+      return;
+    }
+    if (media.pc.signalingState && media.pc.signalingState !== "stable") return;
     try {
+      if (key) callUI.appliedRemoteOfferKeys.add(key);
       await media.pc.setRemoteDescription({ type: "offer", sdp });
       await flushPendingIceCandidates();
       await sendLocalSdpAnswer();
@@ -21210,7 +21377,19 @@
 
   async function applyRemoteSdpAnswer(sdp) {
     if (!sdp || !media.pc) return;
+    const key = sdpKey(sdp);
+    if (key && callUI.appliedRemoteAnswerKeys.has(key)) return;
+    if (
+      media.pc.remoteDescription
+      && media.pc.remoteDescription.type === "answer"
+      && sdpKey(media.pc.remoteDescription.sdp) === key
+    ) {
+      if (key) callUI.appliedRemoteAnswerKeys.add(key);
+      return;
+    }
+    if (media.pc.signalingState !== "have-local-offer") return;
     try {
+      if (key) callUI.appliedRemoteAnswerKeys.add(key);
       await media.pc.setRemoteDescription({ type: "answer", sdp });
       await flushPendingIceCandidates();
     } catch (_) { /* fall through */ }
