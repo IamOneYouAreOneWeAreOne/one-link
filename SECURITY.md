@@ -48,7 +48,7 @@ Include:
 ## What we ask from you
 
 - **Don't disclose publicly until the fix has shipped.** 90 days
-  is the firm wall (per industry norm — Project Zero / CERT/CC
+  is the firm wall (per industry norm - Project Zero / CERT/CC
   alignment).
 - **Don't test against production / third-party deployments**
   without explicit permission. The project's own rendezvous server
@@ -71,7 +71,7 @@ In scope:
 Out of scope:
 
 - Vulnerabilities in third-party libraries (`cryptography`,
-  `aiohttp`, `aiortc`, etc.) — report those upstream. We're happy
+  `aiohttp`, `aiortc`, etc.) - report those upstream. We're happy
   to coordinate.
 - Browser engine / OS / hardware vulnerabilities (Apple, Google,
   Mozilla, Microsoft). Same: upstream first.
@@ -94,7 +94,7 @@ community donations once the project's foundation infrastructure
 is in place. Until then, credit + a "Hall of Thanks" entry is what
 we can offer; we appreciate that's not the same as money. If you
 need a paid security engagement, reach out and we'll find a
-budget — security work is the priority spend in this project.
+budget - security work is the priority spend in this project.
 
 ## Past advisories
 

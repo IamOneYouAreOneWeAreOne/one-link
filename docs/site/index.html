@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>One Link — peer-to-peer chat + file sync, for the people</title>
+<title>One Link - peer-to-peer chat + file sync, for the people</title>
 <meta name="description" content="Peer-to-peer chat and file sync. No accounts, no servers, no cloud. Your devices find each other on your network and talk directly, end-to-end encrypted, mutually authenticated.">
 <meta name="theme-color" content="#0e0e10">
 <style>
@@ -83,7 +83,7 @@
   .download .what { font-weight: 600; color: var(--fg); }
   .download .for { color: var(--dim); font-size: 13px; }
 
-  /* Primary download button — auto-detects OS, one click. */
+  /* Primary download button - auto-detects OS, one click. */
   .download-primary {
     display: flex;
     align-items: center;
@@ -179,7 +179,7 @@
     done.
   </p>
 
-  <!-- Primary download — auto-detects OS via JS. data-os defaults
+  <!-- Primary download - auto-detects OS via JS. data-os defaults
        to 'unknown' (linked to releases page); JS sets it to a
        direct asset URL on detection. -->
   <a class="download-primary" id="download-primary"
@@ -278,7 +278,7 @@ one-link app</code></pre>
     Source <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link">on GitHub</a>.
     Security disclosure
     <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/blob/master/SECURITY.md">here</a>.
-    AGPLv3 — copy, modify, share. Build something good.
+    AGPLv3 - copy, modify, share. Build something good.
   </div>
 </main>
 
@@ -296,7 +296,7 @@ one-link app</code></pre>
       `https://github.com/${OWNER}/${REPO}/releases`;
 
     // Detect the user's OS. We accept a few false-negatives (e.g.
-    // BSDs report as Linux, ChromeOS reports as Linux) — they get
+    // BSDs report as Linux, ChromeOS reports as Linux) - they get
     // the Linux binary, which is the right answer anyway.
     function detectOS() {
       const ua = (navigator.userAgent || "").toLowerCase();
@@ -369,7 +369,7 @@ one-link app</code></pre>
       const textEl = btn.querySelector(".text");
       if (textEl) textEl.textContent = info.label;
       if (info.asset) {
-        // Direct asset URL — GitHub redirects /releases/latest/download/<file>
+        // Direct asset URL - GitHub redirects /releases/latest/download/<file>
         // to the actual versioned URL. No API call needed.
         btn.href = `${RELEASE_BASE}/latest/download/${info.asset}`;
       } else {
@@ -396,9 +396,9 @@ one-link app</code></pre>
         if (!r.ok) return;
         const j = await r.json();
         if (j.tag_name) {
-          pill.textContent = `${j.tag_name} — for the people`;
+          pill.textContent = `${j.tag_name} - for the people`;
         }
-      } catch (_e) { /* swallow — pill stays as fallback text */ }
+      } catch (_e) { /* swallow - pill stays as fallback text */ }
     }
 
     if (document.readyState === "loading") {

@@ -1,4 +1,4 @@
-One Link — for the people
+One Link - for the people
 =========================
 
 One Link is a peer-to-peer LAN chat and file-sync tool that runs
@@ -27,8 +27,8 @@ collect data from users who think they're running the upstream
 project. The MIT license offers no remedy for this.
 
 AGPLv3 prevents it. Anyone who modifies One Link and offers the
-modified version to others — whether by distribution OR by network
-service — must offer the corresponding source under AGPLv3 too. A
+modified version to others - whether by distribution OR by network
+service - must offer the corresponding source under AGPLv3 too. A
 corporation can still build a product on One Link; they just can't
 hide the modifications they make. Users always have the source of
 the version they're running, which means they can audit it,
@@ -51,7 +51,7 @@ One Link commits to:
     this.)
   - No advertising. Ever.
   - No selling user data. There is no user data on any server
-    we control to sell — the architecture forbids it.
+    we control to sell - the architecture forbids it.
   - No corporate substrate dependency that the user can't opt
     out of. Hardware secure-element APIs (Secure Enclave,
     StrongBox, TPM) are local primitives and are used; cloud

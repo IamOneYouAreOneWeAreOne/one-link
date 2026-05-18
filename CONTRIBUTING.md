@@ -5,13 +5,13 @@ covers the things that matter most.
 
 ## Before you start
 
-- **Read [`NOTICE`](NOTICE)** — the project's "for the people"
+- **Read [`NOTICE`](NOTICE)** - the project's "for the people"
   charter and the reasoning behind the AGPLv3 license. By
   contributing, you agree your contribution will be licensed
   under AGPLv3.
-- **Read [`docs/SECURITY.md`](docs/SECURITY.md)** — the threat
+- **Read [`docs/SECURITY.md`](docs/SECURITY.md)** - the threat
   model. Anything you ship has to live up to it.
-- **Read [`docs/PRINCIPLES.md`](docs/PRINCIPLES.md)** — the
+- **Read [`docs/PRINCIPLES.md`](docs/PRINCIPLES.md)** - the
   Reach / Hide / Async / Depth / Defang ship-gate.
 
 ## How we review changes
