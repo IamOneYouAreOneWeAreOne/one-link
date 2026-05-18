@@ -150,7 +150,7 @@ def test_media_watchdog_restarts_stuck_negotiation(index_html: str) -> None:
     assert "media.pc.signalingState" in snippet
     assert "sendLocalSdpOffer" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 6200]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 7600]
     assert 'ensureMediaNegotiation("metrics").catch' in metrics_snippet
     active_idx = index_html.find('window.handleLivingPresenceCallEvent = function')
     active_idx = index_html.find('if (phase === "active")', active_idx)
@@ -256,6 +256,38 @@ def test_call_debug_snapshot_and_frame_counters_present(index_html: str) -> None
     assert "remote_video_ready_state" in index_html
     assert "remote_muted_video_tracks" in index_html
     assert "remoteTrackSummary()" in index_html
+
+
+def test_call_media_recorder_start_is_nonfatal(index_html: str) -> None:
+    idx = index_html.find("function startAttestStream")
+    snippet = index_html[idx:idx + 1200]
+    assert "attest.recorder.start(200)" in snippet
+    assert "attest_recorder_start_failed" in snippet
+    assert "try {" in snippet
+
+
+def test_call_has_device_settings_and_video_fit_controls(index_html: str) -> None:
+    assert 'id="btn-call-settings"' in index_html
+    assert 'id="call-mic-select"' in index_html
+    assert 'id="call-camera-select"' in index_html
+    assert 'id="call-speaker-select"' in index_html
+    assert "navigator.mediaDevices.enumerateDevices" in index_html
+    assert "replaceLocalMediaTracks" in index_html
+    assert "setSinkId" in index_html
+    assert "video-fit-contain" in index_html
+
+
+def test_call_media_watchdog_repairs_stalled_frames(index_html: str) -> None:
+    assert "async function repairMediaPath" in index_html
+    idx = index_html.find("async function repairMediaPath")
+    snippet = index_html[idx:idx + 1700]
+    assert "restartIce" in snippet
+    assert "media_path_repair" in snippet
+    assert "sendLocalSdpOffer" in snippet
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 6500]
+    assert "stalledMediaTicks" in metrics_snippet
+    assert 'repairMediaPath("stalled_media")' in metrics_snippet
 
 
 def test_inbound_accept_waits_for_offer_instead_of_self_offering(index_html: str) -> None:
