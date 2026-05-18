@@ -306,7 +306,7 @@ def test_call_has_device_settings_and_video_fit_controls(index_html: str) -> Non
 def test_call_media_watchdog_repairs_stalled_frames(index_html: str) -> None:
     assert "async function repairMediaPath" in index_html
     idx = index_html.find("async function repairMediaPath")
-    snippet = index_html[idx:idx + 2200]
+    snippet = index_html[idx:idx + 4200]
     assert "restartIce" in snippet
     assert "media_path_repair" in snippet
     assert "sendLocalSdpOffer" in snippet
@@ -444,9 +444,18 @@ def test_call_metrics_use_smoothed_interval_loss(index_html: str) -> None:
 def test_call_repair_has_staged_recovery_and_rebuild(index_html: str) -> None:
     assert "function reviveRemotePlayback" in index_html
     assert "async function rebuildPeerConnectionForActiveCall" in index_html
+    assert "function diagnoseMediaRepair" in index_html
+    assert "function markMediaRepairHealthy" in index_html
     idx = index_html.find("async function repairMediaPath")
-    snippet = index_html[idx:idx + 2800]
+    snippet = index_html[idx:idx + 4200]
     assert "mediaRepairStage" in snippet
+    assert "diagnoseMediaRepair" in snippet
+    assert "media_repair_diagnosis" in snippet
+    assert "playback_frozen" in index_html
+    assert "remote_media_missing" in index_html
+    assert "signaling_stuck" in index_html
+    assert "relay_rebuild" in index_html
+    assert "repair_escalation_score" in index_html
     assert "reviveRemotePlayback" in snippet
     assert "rebuildPeerConnectionForActiveCall" in snippet
     assert "restartIce" in snippet

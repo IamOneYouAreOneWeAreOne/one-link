@@ -26227,6 +26227,9 @@
     lastPcRebuildMs: 0,
     lastNetworkResumeRepairMs: 0,
     lastRemoteMediaMovingMs: 0,
+    lastRepairDiagnosis: null,
+    repairDiagnosisCounts: {},
+    repairEscalationScore: 0,
     callHistory: [],
     acceptedCallIds: new Set(),
     lastAcceptRetryMs: {},
@@ -27117,6 +27120,9 @@
     callUI.lastPlaybackReviveMs = 0;
     callUI.lastPcRebuildMs = 0;
     callUI.lastRemoteMediaMovingMs = 0;
+    callUI.lastRepairDiagnosis = null;
+    callUI.repairDiagnosisCounts = {};
+    callUI.repairEscalationScore = 0;
     callUI.acceptedCallIds.clear();
     callUI.lastAcceptRetryMs = {};
     media.screenStream = null;
@@ -27570,12 +27576,104 @@
     await sendLocalSdpOffer();
   }
 
+  function diagnoseMediaRepair(reason) {
+    const metrics = callUI.lastMetricsSnapshot || {};
+    const ice = String(media.pc?.iceConnectionState || metrics.ice_connection_state || "");
+    const conn = String(media.pc?.connectionState || metrics.connection_state || "");
+    const signaling = String(media.pc?.signalingState || metrics.signaling_state || "");
+    const remoteMissing = expectedRemoteMediaMissing(metrics);
+    const hasLocal = metrics.has_local_description === true || !!media.pc?.localDescription;
+    const hasRemote = metrics.has_remote_description === true || !!media.pc?.remoteDescription;
+    const inboundVideoPackets = Number(metrics.inbound_video_packets || 0);
+    const inboundAudioPackets = Number(metrics.inbound_audio_packets || 0);
+    const remoteVideoReady = Number(metrics.remote_video_ready_state || 0);
+    const secondsSinceMoving = callUI.lastRemoteMediaMovingMs
+      ? Math.round((Date.now() - Number(callUI.lastRemoteMediaMovingMs || 0)) / 1000)
+      : null;
+    let kind = "renegotiate";
+    let strategy = "ice_restart";
+    let severity = 1;
+    if (!hasLocal || !hasRemote || signaling === "have-local-offer" || signaling === "have-remote-offer") {
+      kind = "signaling_stuck";
+      strategy = "resend_sdp";
+      severity = 2;
+    } else if (ice === "failed" || conn === "failed") {
+      kind = "ice_failed";
+      strategy = "ice_restart";
+      severity = 3;
+    } else if (ice === "disconnected" || conn === "disconnected" || ice === "checking") {
+      kind = "ice_unstable";
+      strategy = "ice_restart";
+      severity = 2;
+    } else if (remoteMissing) {
+      kind = "remote_media_missing";
+      strategy = "renegotiate";
+      severity = 2;
+    } else if (
+      Number(callUI.frozenMediaTicks || 0) > 0 ||
+      (remoteVideoReady >= 2 && inboundVideoPackets > 0 && secondsSinceMoving !== null && secondsSinceMoving >= 6)
+    ) {
+      kind = "playback_frozen";
+      strategy = "revive_playback";
+      severity = 1;
+    } else if (inboundVideoPackets === 0 && inboundAudioPackets === 0 && secondsSinceMoving !== null && secondsSinceMoving >= 8) {
+      kind = "media_starved";
+      strategy = "renegotiate";
+      severity = 2;
+    }
+    const counts = callUI.repairDiagnosisCounts || {};
+    counts[kind] = Number(counts[kind] || 0) + 1;
+    callUI.repairDiagnosisCounts = counts;
+    callUI.repairEscalationScore = Math.min(10, Number(callUI.repairEscalationScore || 0) + severity);
+    if (
+      callUI.repairEscalationScore >= 6 ||
+      Number(counts[kind] || 0) >= 3 ||
+      callUI.mediaRepairStage >= 3
+    ) {
+      strategy = "rebuild_peer_connection";
+    }
+    if (
+      strategy === "rebuild_peer_connection" &&
+      media.iceRelayReady &&
+      (media.forceRelayOnRepair || kind === "ice_failed" || kind === "ice_unstable")
+    ) {
+      strategy = "relay_rebuild";
+    }
+    const diagnosis = {
+      kind,
+      strategy,
+      severity,
+      reason: reason || "watchdog",
+      repair_stage: callUI.mediaRepairStage,
+      escalation_score: callUI.repairEscalationScore,
+      diagnosis_count: counts[kind],
+      ice,
+      connection: conn,
+      signaling,
+      has_local_description: hasLocal,
+      has_remote_description: hasRemote,
+      remote_missing: remoteMissing,
+      seconds_since_media_moving: secondsSinceMoving,
+    };
+    callUI.lastRepairDiagnosis = diagnosis;
+    return diagnosis;
+  }
+
+  function markMediaRepairHealthy() {
+    callUI.repairEscalationScore = Math.max(0, Number(callUI.repairEscalationScore || 0) - 2);
+    if (callUI.repairEscalationScore === 0) {
+      callUI.repairDiagnosisCounts = {};
+      callUI.lastRepairDiagnosis = null;
+    }
+  }
+
   async function repairMediaPath(reason) {
     if (!callUI.activeCallId || !media.pc) return;
     const now = Date.now();
     if (now - Number(callUI.lastMediaRepairMs || 0) < 9000) return;
     callUI.lastMediaRepairMs = now;
     callUI.mediaRepairStage = Math.min(3, Number(callUI.mediaRepairStage || 0) + 1);
+    const diagnosis = diagnoseMediaRepair(reason || "watchdog");
     if (now - Number(callUI.lastUserVisibleRepairMs || 0) > 15000 && callUI.qualityBadTicks >= 2) {
       callUI.lastUserVisibleRepairMs = now;
       setReconnectState(true, "Repairing media path...");
@@ -27584,9 +27682,14 @@
     reportCallEvent("media_path_repair", {
       reason: reason || "watchdog",
       repair_stage: callUI.mediaRepairStage,
+      diagnosis: diagnosis.kind,
+      strategy: diagnosis.strategy,
+      escalation_score: diagnosis.escalation_score,
     });
     try {
       reviveRemotePlayback(reason || "repair");
+      reportCallEvent("media_repair_diagnosis", diagnosis);
+      if (diagnosis.strategy === "revive_playback") return;
       ensureLocalTracksOnPeerConnection();
       ensureMediaTransceivers();
       await tuneOutboundMediaForTau({
@@ -27594,22 +27697,24 @@
         loss_rate: Math.max(Number(callUI.lastMetricsSnapshot?.loss_rate || 0), 0.09),
         rtt_ms: Math.max(Number(callUI.lastMetricsSnapshot?.rtt_ms || 0), 320),
       });
-      if (callUI.mediaRepairStage >= 3) {
-        if (media.iceRelayReady && media.forceRelayOnRepair) {
+      if (diagnosis.strategy === "rebuild_peer_connection" || diagnosis.strategy === "relay_rebuild") {
+        if (diagnosis.strategy === "relay_rebuild") {
           media.preferRelayNext = true;
           updateOneChip("#call-one-engine", "Relay escape");
           reportCallEvent("relay_escape_requested", {
             reason: reason || "media_path_repair",
+            diagnosis: diagnosis.kind,
           });
         }
         const rebuilt = await rebuildPeerConnectionForActiveCall(reason || "media_path_repair");
         if (rebuilt) return;
       }
-      if (typeof media.pc.restartIce === "function") {
+      if (diagnosis.strategy === "ice_restart" && typeof media.pc.restartIce === "function") {
         media.pc.restartIce();
         reportCallEvent("ice_restart_requested", {
           reason: reason || "watchdog",
           repair_stage: callUI.mediaRepairStage,
+          diagnosis: diagnosis.kind,
         });
       }
       if (media.pc.signalingState === "stable") {
@@ -29000,6 +29105,7 @@
           selected.ice_connection_state === "completed"
         ) {
           callUI.mediaRepairStage = 0;
+          markMediaRepairHealthy();
         }
       }
       if (
@@ -29122,6 +29228,9 @@
         } : null,
         last_metrics: callUI.lastMetricsSnapshot,
         tau_decision: callUI.tauLastDecision,
+        repair_diagnosis: callUI.lastRepairDiagnosis,
+        repair_counts: callUI.repairDiagnosisCounts,
+        repair_escalation_score: callUI.repairEscalationScore,
         stats: statsSummary,
       };
     };
