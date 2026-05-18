@@ -1106,7 +1106,12 @@ impl PyConnection {
                     set.spawn(async move {
                         let _permit = permit;
                         let (mut send, mut recv) = conn.accept_bi_stream().await?;
-                        let _request = read_frame(&mut recv).await?;
+                        read_expected_stream_payload_bytes_chunks(
+                            &mut recv,
+                            FrameKind::ChunkRequest,
+                            1,
+                        )
+                        .await?;
                         write_encoded_frame(&mut send, response.clone()).await?;
                         send.finish().map_err(|e| {
                             ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
@@ -1166,16 +1171,19 @@ impl PyConnection {
                     set.spawn(async move {
                         let _permit = permit;
                         let (mut send, mut recv) = conn.accept_bi_stream().await?;
-                        let mut served = 0usize;
+                        read_expected_stream_payload_bytes_chunks(
+                            &mut recv,
+                            FrameKind::ChunkRequest,
+                            requests_per_stream,
+                        )
+                        .await?;
                         for _ in 0..requests_per_stream {
-                            let _request = read_frame(&mut recv).await?;
                             write_encoded_frame(&mut send, response.clone()).await?;
-                            served += 1;
                         }
                         send.finish().map_err(|e| {
                             ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
                         })?;
-                        Ok::<_, ol_quic::QuicError>(served)
+                        Ok::<_, ol_quic::QuicError>(requests_per_stream)
                     });
                 }
                 let mut served = 0usize;

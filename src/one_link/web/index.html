@@ -26216,6 +26216,11 @@
     tauPressureTicks: 0,
     tauStableTicks: 0,
     lastTauAdaptMs: 0,
+    tauRiskEwma: null,
+    tauCoherenceEwma: null,
+    tauSurpriseEwma: null,
+    tauBandwidthEwmaKbps: null,
+    tauLastDecision: null,
     lastCaptureProfile: "",
     mediaRepairStage: 0,
     lastPlaybackReviveMs: 0,
@@ -26553,37 +26558,140 @@
     return selectedPair;
   }
 
-  async function tuneOutboundMediaForTau(metrics) {
-    if (!media.pc || !media.pc.getSenders) return;
-    const loss = Number(metrics.loss_rate || 0);
-    const rtt = Number(metrics.rtt_ms || 0);
+  function clampUnit(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(1, n));
+  }
+
+  function ewmaNullable(previous, value, alpha) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return previous;
+    return previous == null ? n : (Number(previous) * (1 - alpha)) + (n * alpha);
+  }
+
+  function scoreMediaPathForTau(metrics) {
+    const currentLevel = Math.max(0, Math.min(3, Number(callUI.adaptationLevel || 0)));
+    const profile = targetMediaProfile(currentLevel) || targetMediaProfile(0);
+    const rtt = Number(metrics.smoothed_rtt_ms || metrics.rtt_ms || 0);
+    const loss = Number(metrics.loss_rate || metrics.raw_loss_rate || 0);
     const jitter = Number(metrics.jitter_ms || 0);
+    const bandwidthKbps = Number(metrics.bandwidth_estimate_kbps || 0);
+    if (bandwidthKbps > 0) {
+      callUI.tauBandwidthEwmaKbps = ewmaNullable(callUI.tauBandwidthEwmaKbps, bandwidthKbps, 0.22);
+    }
+    const smoothedBandwidthKbps = Number(callUI.tauBandwidthEwmaKbps || bandwidthKbps || 0);
+    const expectedKbps = profile ? Math.max(1, Number(profile.maxBitrate || 0) / 1000) : 850;
     const remoteWaiting = expectedRemoteMediaMissing(metrics);
-    // doctrine-ok: §3.2.a internal state name; no user-facing reconnect prompt.
-    const shouldDowngrade = loss >= 0.05 || rtt >= 260 || jitter >= 85 || media.reconnecting || remoteWaiting;
-    const shouldSurvive = loss >= 0.12 || rtt >= 700 || jitter >= 180 || String(metrics.ice_connection_state || "") === "failed";
-    const shouldRecover = loss < 0.02 && rtt > 0 && rtt < 120 && jitter < 35 && !media.reconnecting && !remoteWaiting;
-    if (shouldDowngrade) {
+    const ice = String(metrics.ice_connection_state || "");
+    const conn = String(metrics.connection_state || "");
+    const route = String(metrics.selected_candidate_type || "");
+    const icePenalty = (ice === "failed" || conn === "failed") ? 1
+      : (ice === "disconnected" || conn === "disconnected") ? 0.82
+      : (ice === "checking" || conn === "connecting" || ice === "new") ? 0.46
+      : 0;
+    const routePenalty = route === "relay" ? 0.10 : route === "srflx" || route === "prflx" ? 0.04 : 0;
+    const bandwidthPressure = smoothedBandwidthKbps > 0
+      ? clampUnit((expectedKbps - smoothedBandwidthKbps * 0.72) / expectedKbps)
+      : 0.18;
+    const freezePressure = remoteWaiting ? 1 : clampUnit(Number(callUI.frozenMediaTicks || 0) / 3);
+    const stallPressure = clampUnit(Number(callUI.stalledMediaTicks || 0) / 4);
+    const rttPressure = clampUnit((rtt - 70) / 560);
+    const lossPressure = clampUnit(loss / 0.16);
+    const jitterPressure = clampUnit(jitter / 170);
+    const rawRisk = clampUnit(
+      (0.28 * lossPressure) +
+      (0.21 * rttPressure) +
+      (0.16 * jitterPressure) +
+      (0.16 * freezePressure) +
+      (0.08 * stallPressure) +
+      (0.07 * bandwidthPressure) +
+      (0.08 * icePenalty) +
+      routePenalty
+    );
+    callUI.tauRiskEwma = ewmaNullable(
+      callUI.tauRiskEwma,
+      rawRisk,
+      rawRisk > Number(callUI.tauRiskEwma || 0) ? 0.38 : 0.16,
+    );
+    const risk = clampUnit(callUI.tauRiskEwma);
+    const coherence = clampUnit(1 - risk);
+    callUI.tauCoherenceEwma = ewmaNullable(callUI.tauCoherenceEwma, coherence, 0.2);
+    const surprise = -Math.log(Math.max(0.01, Number(callUI.tauCoherenceEwma || coherence || 0.01)));
+    callUI.tauSurpriseEwma = ewmaNullable(callUI.tauSurpriseEwma, surprise, 0.2);
+    return {
+      rawRisk,
+      risk,
+      coherence: clampUnit(callUI.tauCoherenceEwma),
+      surprise: Number(callUI.tauSurpriseEwma || surprise || 0),
+      rttPressure,
+      lossPressure,
+      jitterPressure,
+      freezePressure,
+      stallPressure,
+      bandwidthPressure,
+      icePenalty,
+      routePenalty,
+      bandwidthKbps: smoothedBandwidthKbps,
+      expectedKbps,
+      remoteWaiting,
+    };
+  }
+
+  function chooseTauVideoLevel(metrics) {
+    const score = scoreMediaPathForTau(metrics);
+    const currentLevel = Math.max(0, Math.min(3, Number(callUI.adaptationLevel || 0)));
+    let targetLevel = currentLevel;
+    const critical = score.risk >= 0.78 || score.icePenalty >= 1 || score.freezePressure >= 1;
+    const pressured = score.risk >= 0.52 || score.bandwidthPressure >= 0.72 || score.lossPressure >= 0.62;
+    const cautious = score.risk >= 0.30 || score.jitterPressure >= 0.46;
+    const excellent = score.risk <= 0.14 && score.coherence >= 0.82 && !score.remoteWaiting && score.icePenalty === 0;
+    if (critical) {
+      callUI.tauPressureTicks += 2;
+      callUI.tauStableTicks = 0;
+    } else if (pressured) {
       callUI.tauPressureTicks += 1;
       callUI.tauStableTicks = 0;
-    } else if (shouldRecover) {
+    } else if (excellent) {
       callUI.tauStableTicks += 1;
       callUI.tauPressureTicks = Math.max(0, callUI.tauPressureTicks - 1);
+    } else if (cautious) {
+      callUI.tauPressureTicks = Math.max(1, callUI.tauPressureTicks);
+      callUI.tauStableTicks = 0;
     } else {
       callUI.tauPressureTicks = Math.max(0, callUI.tauPressureTicks - 1);
-      callUI.tauStableTicks = 0;
+      callUI.tauStableTicks = Math.max(0, callUI.tauStableTicks - 1);
     }
+    if (critical && callUI.tauPressureTicks >= 2) targetLevel = 3;
+    else if (pressured && callUI.tauPressureTicks >= 2) targetLevel = Math.max(currentLevel, Math.min(2, currentLevel + 1));
+    else if (cautious && callUI.tauPressureTicks >= 3) targetLevel = Math.max(currentLevel, 1);
+    else if (excellent && callUI.tauStableTicks >= 5) targetLevel = Math.max(0, currentLevel - 1);
+    return {
+      ...score,
+      currentLevel,
+      targetLevel,
+      reason: critical ? "critical_path_risk"
+        : pressured ? "path_pressure"
+        : cautious ? "path_caution"
+        : excellent ? "stable_recovery"
+        : "hold",
+    };
+  }
+
+  async function tuneOutboundMediaForTau(metrics) {
+    if (!media.pc || !media.pc.getSenders) return;
+    const decision = chooseTauVideoLevel(metrics);
+    callUI.tauLastDecision = decision;
+    // doctrine-ok: §3.2.a internal state name; no user-facing reconnect prompt.
+    const cooldownMs = decision.targetLevel > decision.currentLevel ? 2800 : 9000;
     const now = Date.now();
-    if (now - Number(callUI.lastTauAdaptMs || 0) < 5000) return;
-    let targetLevel = callUI.adaptationLevel || 0;
-    if (shouldSurvive && callUI.tauPressureTicks >= 2) targetLevel = 3;
-    else if (callUI.tauPressureTicks >= 2) targetLevel = Math.min(2, targetLevel + 1);
-    else if (callUI.tauStableTicks >= 4) targetLevel = Math.max(0, targetLevel - 1);
+    if (now - Number(callUI.lastTauAdaptMs || 0) < cooldownMs) return;
+    const targetLevel = decision.targetLevel;
     if (targetLevel === callUI.adaptationLevel) return;
     callUI.adaptationLevel = targetLevel;
     callUI.lastTauAdaptMs = now;
     const caps = targetMediaProfile(targetLevel);
-    await applyCaptureProfileForTau(targetLevel, "metrics");
+    await applyCaptureProfileForTau(targetLevel, decision.reason);
     for (const sender of media.pc.getSenders()) {
       if (!sender || !sender.track || sender.track.kind !== "video" || !sender.getParameters) continue;
       try {
@@ -26601,6 +26709,13 @@
       : "Tau lowered video load to keep the call stable.");
     reportCallEvent("tau_media_adapted", {
       state: targetLevel === 0 ? "full" : targetLevel === 1 ? "steady" : "survival",
+      reason: decision.reason,
+      risk: Math.round(decision.risk * 1000) / 1000,
+      coherence: Math.round(decision.coherence * 1000) / 1000,
+      surprise: Math.round(decision.surprise * 1000) / 1000,
+      bandwidth_pressure: Math.round(decision.bandwidthPressure * 1000) / 1000,
+      loss_pressure: Math.round(decision.lossPressure * 1000) / 1000,
+      rtt_pressure: Math.round(decision.rttPressure * 1000) / 1000,
     });
   }
 
@@ -26828,11 +26943,14 @@
   function renderLiveStats(metrics) {
     const host = $$("#call-stats-grid");
     if (!host || !metrics) return;
+    const tau = callUI.tauLastDecision || null;
     host.innerHTML = [
       ["RTT", metrics.rtt_ms == null ? "--" : `${metrics.rtt_ms} ms`],
       ["Loss", metrics.loss_rate == null ? "--" : `${Math.round(metrics.loss_rate * 100)}%`],
       ["ICE", metrics.ice_connection_state || "--"],
       ["Video", metrics.remote_video_width ? `${metrics.remote_video_width}p` : "waiting"],
+      ["Tau", tau ? `${Math.round(tau.coherence * 100)}%` : "--"],
+      ["Load", tau ? targetMediaProfile(tau.targetLevel)?.name || "--" : "--"],
     ].map(([k, v]) => `<div><b>${escapeText(v)}</b>${escapeText(k)}</div>`).join("");
   }
 
@@ -26989,6 +27107,11 @@
     callUI.tauPressureTicks = 0;
     callUI.tauStableTicks = 0;
     callUI.lastTauAdaptMs = 0;
+    callUI.tauRiskEwma = null;
+    callUI.tauCoherenceEwma = null;
+    callUI.tauSurpriseEwma = null;
+    callUI.tauBandwidthEwmaKbps = null;
+    callUI.tauLastDecision = null;
     callUI.lastCaptureProfile = "";
     callUI.mediaRepairStage = 0;
     callUI.lastPlaybackReviveMs = 0;
@@ -28931,6 +29054,9 @@
         jitter_ms: jitterMs,
         loss_rate: loss,
         bandwidth_estimate_kbps: kbps,
+        tau_risk: callUI.tauLastDecision ? callUI.tauLastDecision.risk : null,
+        tau_coherence: callUI.tauLastDecision ? callUI.tauLastDecision.coherence : null,
+        tau_level: callUI.adaptationLevel,
         ...selected,
       });
     } catch (_) {}
@@ -28995,6 +29121,7 @@
           currentTime: ra.currentTime,
         } : null,
         last_metrics: callUI.lastMetricsSnapshot,
+        tau_decision: callUI.tauLastDecision,
         stats: statsSummary,
       };
     };

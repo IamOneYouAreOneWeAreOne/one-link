@@ -503,7 +503,7 @@ def _bench_quic_parallel_streams(
     holder: list = []
     done = threading.Event()
     bench_iterations = 3
-    stream_lanes = 1
+    stream_lanes = 2 if payload_kib >= 256 and total_round_trips >= 2 else 1
     requests_per_stream = total_round_trips // stream_lanes
 
     def loop() -> None:
@@ -629,6 +629,8 @@ def _bench_quic_parallel_streams(
             "payload_kib": payload_kib,
             "parallelism": parallelism,
             "iterations_per_stream": iterations_per_stream,
+            "stream_lanes": stream_lanes,
+            "requests_per_stream": requests_per_stream,
         },
     )
     done.wait(timeout=10)

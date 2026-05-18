@@ -383,6 +383,13 @@ def test_call_quality_uses_hysteresis_and_tau_adaptation(index_html: str) -> Non
     assert 'rawLevel === "connecting"' in index_html
     assert 'updateCallQuality("connecting"' in index_html
     assert "function tuneOutboundMediaForTau" in index_html
+    assert "function scoreMediaPathForTau" in index_html
+    assert "function chooseTauVideoLevel" in index_html
+    assert "tauRiskEwma" in index_html
+    assert "tauCoherenceEwma" in index_html
+    assert "tauSurpriseEwma" in index_html
+    assert "bandwidthPressure" in index_html
+    assert "critical_path_risk" in index_html
     assert "function targetMediaProfile" in index_html
     assert "function applyCaptureProfileForTau" in index_html
     assert "tauPressureTicks" in index_html
@@ -395,6 +402,7 @@ def test_call_quality_uses_hysteresis_and_tau_adaptation(index_html: str) -> Non
     assert "tau_capture_adapted" in index_html
     assert "audio-first" in index_html
     assert "tau_media_adapted" in index_html
+    assert "tau_decision" in index_html
 
 
 def test_call_quality_does_not_claim_good_while_media_waits(index_html: str) -> None:
