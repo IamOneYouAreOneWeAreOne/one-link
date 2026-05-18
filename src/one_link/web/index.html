@@ -6972,6 +6972,51 @@
   .truth-cell.partial { background: rgba(245,196,81,.18); color: var(--warn); }
   .truth-cell.no      { background: rgba(255,108,108,.14); color: var(--bad); }
 
+  /* v0.21.x: "Update ready" banner. Sticky strip at the top so a
+     user mid-conversation can opt to reload immediately for the new
+     build instead of waiting for the idle-wait timer in
+     LiveRefresh.scheduleSoftReload. Non-modal, dismissible. */
+  .update-ready-banner {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 10001;
+    display: flex; align-items: center; justify-content: center;
+    gap: 12px;
+    padding: 8px 16px;
+    background: var(--accent);
+    color: white;
+    font-size: 13px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.22);
+    animation: urb-slide 240ms cubic-bezier(.2,.8,0,1);
+  }
+  @keyframes urb-slide {
+    from { transform: translateY(-100%); }
+    to   { transform: translateY(0); }
+  }
+  .update-ready-banner .urb-text { font-weight: 500; }
+  .update-ready-banner .urb-reload {
+    background: white;
+    color: var(--accent);
+    border: 0;
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .update-ready-banner .urb-reload:hover { filter: brightness(.96); }
+  .update-ready-banner .urb-dismiss {
+    background: transparent;
+    color: white;
+    border: 0;
+    padding: 2px 8px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    opacity: .85;
+  }
+  .update-ready-banner .urb-dismiss:hover { opacity: 1; }
+
   /* v0.21.x: slash command help modal. */
   .slash-help-modal {
     position: fixed; inset: 0;
@@ -19544,6 +19589,33 @@
   //   4. Never reload-loop. We persist "already refreshed for version
   //      X" in sessionStorage so a misbehaving daemon can't flap us
   //      into a refresh cycle.
+  // v0.21.x: "Update ready" banner surfaced from inside LiveRefresh's
+  // scheduleSoftReload. Module-scoped so the function lives outside
+  // the IIFE and can be referenced without hoisting concerns.
+  function _showUpdateReadyBanner(targetVersion, doReloadNow) {
+    if (document.getElementById("update-ready-banner")) return;
+    const bar = document.createElement("div");
+    bar.id = "update-ready-banner";
+    bar.className = "update-ready-banner";
+    bar.setAttribute("role", "status");
+    bar.innerHTML = `
+      <span class="urb-text">An update is ready for One Link.</span>
+      <button type="button" class="urb-reload">Reload now</button>
+      <button type="button" class="urb-dismiss" aria-label="Dismiss">✕</button>
+    `;
+    document.body.appendChild(bar);
+    const reload = bar.querySelector(".urb-reload");
+    const dismiss = bar.querySelector(".urb-dismiss");
+    function remove() { try { bar.remove(); } catch {} }
+    reload.onclick = (ev) => {
+      ev.stopPropagation();
+      remove();
+      try { doReloadNow && doReloadNow(); }
+      catch { try { location.reload(); } catch {} }
+    };
+    dismiss.onclick = (ev) => { ev.stopPropagation(); remove(); };
+  }
+
   const LiveRefresh = (() => {
     let reconnectAttempts = 0;
     let reconnectTimer = null;
@@ -19735,6 +19807,15 @@
       // open/close handshakes during a daemon restart) doesn't
       // race us to reload before the daemon stabilizes.
       pendingReloadTimer = setTimeout(attempt, 2000);
+      // v0.21.x: also surface a sticky "Update ready" banner so a
+      // user mid-conversation can opt to reload now instead of
+      // waiting for the idle-wait timer to fire. Banner is a
+      // single 28px strip at the top of the chat surface; clicking
+      // "Reload now" runs the same doReload() path the timer would
+      // run, so the loop-guard sessionStorage key is honored
+      // uniformly. Ignoring the banner falls through to the
+      // existing idle-wait behaviour with no behaviour change.
+      try { _showUpdateReadyBanner(targetVersion, doReload); } catch (_) {}
     }
 
     function attachWindowHandlers() {

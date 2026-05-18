@@ -1,0 +1,258 @@
+name: auto-build standalone binary
+
+# Continuously-built standalone binary so "the newest" stops being
+# "whatever Alex last rebuilt locally" and becomes "whatever the
+# most recent green push to master produced."
+#
+# Differs from .github/workflows/release.yml (which fires only on
+# `v*` tags and runs the full reproducible-build pipeline +
+# Sigstore attestation): this one runs on every push, builds the
+# PyInstaller standalone exe for each OS, and uploads it as a
+# workflow artifact + as the assets of a rolling `latest` GitHub
+# Release. The rolling release is intentionally NOT a tagged
+# version — it tracks master's HEAD so users can grab the most
+# recent build without waiting for a tagged version cut.
+#
+# Why this matters in practice: PyInstaller bundles index.html +
+# all Python source AT BUILD TIME. A locally-running exe serves
+# WHATEVER index.html it was built with, not the current source.
+# Without an auto-build pipeline, every "I just fixed it" requires
+# a manual `python scripts/build_binary.py --gui` + redistribute.
+# With this workflow, every push produces a downloadable bundle.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Workflow-level concurrency: if a new push lands while a build is
+# in flight, cancel the in-flight build. Keeps the rolling release
+# pointing at master HEAD; avoids the awkward case where build N+1
+# finishes before build N and the rolling release shows N.
+concurrency:
+  group: auto-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write    # update the rolling `latest` release
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact-name: one-link-windows-x86_64
+            exe-name: one-link.exe
+          - os: macos-latest
+            artifact-name: one-link-macos-arm64
+            exe-name: one-link
+          - os: ubuntu-latest
+            artifact-name: one-link-linux-x86_64
+            exe-name: one-link
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: cache pip
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~\AppData\Local\pip\Cache
+            ~/Library/Caches/pip
+          key: ${{ runner.os }}-pip-auto-build-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-auto-build-
+
+      - name: install build tooling
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          # Install the project itself in editable mode so PyInstaller
+          # can resolve every import path.
+          pip install -e .
+
+      - name: install platform-specific native wheel (best effort)
+        shell: bash
+        continue-on-error: true
+        # The native crate is published per-OS to GitHub Releases.
+        # If the wheel for this runner's OS exists, pip pulls it in
+        # and PyInstaller bundles the .pyd/.so/.dylib via the
+        # --collect-all flag that build_binary.py sets up.
+        # If no wheel exists for this runner, the build proceeds in
+        # pure-Python mode (`scripts/build_binary.py` is tolerant).
+        run: |
+          pip install one_link_native \
+            --find-links https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest \
+            || echo "no native wheel for this OS; building pure-Python"
+
+      - name: build the standalone binary
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python scripts/build_binary.py --gui
+
+      - name: stamp build metadata
+        shell: bash
+        run: |
+          # A small marker file in the bundle so a user looking at
+          # dist/one-link/ can tell which commit they're running.
+          mkdir -p dist/one-link
+          {
+            echo "commit: ${GITHUB_SHA}"
+            echo "ref: ${GITHUB_REF}"
+            echo "run_id: ${GITHUB_RUN_ID}"
+            echo "built_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "runner: ${{ matrix.os }}"
+          } > dist/one-link/BUILD_INFO.txt
+
+      - name: compute SHA-256 of the bundle
+        shell: bash
+        run: |
+          cd dist
+          # macOS uses shasum; Windows + Linux use sha256sum.
+          if command -v sha256sum >/dev/null 2>&1; then
+            find one-link -type f -print0 | sort -z \
+              | xargs -0 sha256sum > one-link.sha256
+          else
+            find one-link -type f -print0 | sort -z \
+              | xargs -0 shasum -a 256 > one-link.sha256
+          fi
+          # Also produce a single-file digest of the main exe so
+          # users on the GitHub Releases page can quick-verify.
+          if [ -f "one-link/${{ matrix.exe-name }}" ]; then
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "one-link/${{ matrix.exe-name }}" \
+                > "one-link/${{ matrix.exe-name }}.sha256"
+            else
+              shasum -a 256 "one-link/${{ matrix.exe-name }}" \
+                > "one-link/${{ matrix.exe-name }}.sha256"
+            fi
+          fi
+
+      - name: package bundle as a zip
+        shell: bash
+        run: |
+          cd dist
+          # Zip the whole onedir bundle. zip works on Windows runners
+          # via the built-in `zip` (Git Bash) or PowerShell fallback.
+          if command -v zip >/dev/null 2>&1; then
+            zip -r ${{ matrix.artifact-name }}.zip one-link
+          else
+            powershell -Command "Compress-Archive -Path one-link -DestinationPath ${{ matrix.artifact-name }}.zip"
+          fi
+
+      - name: upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: |
+            dist/${{ matrix.artifact-name }}.zip
+            dist/one-link.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-rolling-latest:
+    name: publish rolling `latest` release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: flatten + manifest
+        shell: bash
+        run: |
+          mkdir -p out
+          # Collect every zip + sha file into one out/ directory.
+          find artifacts -name '*.zip' -exec cp {} out/ \;
+          find artifacts -name '*.sha256' -exec cp {} out/ \;
+          # Build a consolidated manifest mapping artifact → SHA256.
+          # This lets a verifier `curl <release>/manifest.txt` and
+          # cross-check every download in one read.
+          cd out
+          for f in *.zip; do
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$f" >> manifest.txt
+            else
+              shasum -a 256 "$f" >> manifest.txt
+            fi
+          done
+          ls -la
+          cat manifest.txt
+
+      - name: update rolling latest release
+        # The action upserts a release tagged `auto-latest` so users
+        # can grab the most recent build from a stable URL. Releases
+        # cut from `v*` tags via .github/workflows/release.yml are
+        # NOT affected — that pipeline runs in parallel and produces
+        # signed reproducible artifacts on its own schedule.
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: auto-latest
+          name: "Rolling build (master ${{ github.sha }})"
+          body: |
+            **Automated continuous build from `master`.**
+
+            This release tracks the tip of `master` and is overwritten on
+            every push. It is _not_ a tagged version — for that, see the
+            `v*` tagged releases produced by `release.yml`.
+
+            **Commit:** ${{ github.sha }}
+            **Built at:** ${{ github.event.head_commit.timestamp }}
+            **Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ### Verifying
+
+            Each `*.zip` ships a `*.sha256` next to it; `manifest.txt`
+            collates every artifact's hash so one fetch covers every
+            platform. Cross-check before extracting:
+
+            ```bash
+            curl -sLO <release_url>/manifest.txt
+            sha256sum --check manifest.txt
+            ```
+
+            ### Install
+
+            1. Download the zip for your OS.
+            2. Unzip into a folder you control.
+            3. Double-click `one-link` / `one-link.exe`.
+
+            No installer, no admin, no telemetry. Quit via the tray icon
+            to stop the daemon.
+
+            ### What's bundled
+
+            * Python daemon + all stdlib-only deps frozen via PyInstaller
+            * The Rust native crate where a wheel was available for this
+              OS (`one_link_native`). On runners without a published
+              wheel, the bundle falls back to the pure-Python transport
+              paths transparently.
+            * The current `src/one_link/web/index.html` UI baked in.
+            * `BUILD_INFO.txt` inside the bundle records the source
+              commit + build time + runner OS.
+          prerelease: true
+          make_latest: false
+          files: |
+            out/*.zip
+            out/*.sha256
+            out/manifest.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
