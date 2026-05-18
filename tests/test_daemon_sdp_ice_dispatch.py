@@ -464,6 +464,7 @@ def test_call_invite_first_contact_emits_sas_verification_required(
         e for e in tail if e.get("tail_kind") == "sas_verification_required"
     ]
     assert len(sas_events) == 1
+    assert sas_events[0].get("sas_words")
     # Manager opened.
     assert mom_daemon._call_registry.get("tofu-call-1") is not None
 

@@ -111,7 +111,7 @@ from one_link.personal_device_mesh import (
     verify_remote_instruction,
 )
 from one_link.native_cdc import native_cdc_status
-from one_link.pairing import PairingTracker, PairState, compute_sas
+from one_link.pairing import PairingTracker, PairState, compute_sas, format_sas
 from one_link.paths import (
     data_dir,
     inbox_dir,
@@ -4655,11 +4655,19 @@ class Daemon:
             # If decision allows but is first-contact, surface the
             # SAS-required tail so the UI can prompt the user.
             if decision is not None and decision.needs_reverify:
+                try:
+                    sas_words = format_sas(compute_sas(
+                        self.me.public_bytes,
+                        channel.peer_ed_pub,
+                    ))
+                except Exception:
+                    sas_words = ""
                 self._broadcast_tail({
                     "type": "call_event",
                     "tail_kind": "sas_verification_required",
                     "call_id": call_id,
                     "peer_master_vk_hex": peer_fp,
+                    "sas_words": sas_words,
                     "user_message": decision.explanation,
                 })
             await self._handle_call_manager_output(mgr, event)

@@ -23947,6 +23947,8 @@
     lastAnswerSendMs: 0,
     lastLocalOfferCreatedMs: 0,
     remoteOfferCollisionCount: 0,
+    lastMetricsSnapshot: null,
+    lastFrameWarningMs: 0,
     acceptedCallIds: new Set(),
     lastAcceptRetryMs: {},
   };
@@ -23994,6 +23996,9 @@
     muted: false,
     cameraOff: false,
   };
+  if (typeof window !== "undefined") {
+    window._livingPresenceMedia = media;
+  }
 
   async function startLocalMedia(constraints) {
     // Doctrine §3.3.c: permissions are asked at install or first
@@ -24052,6 +24057,53 @@
     }
     const surface = $$("#call-active-surface");
     if (surface) surface.classList.toggle("has-remote-video", hasVideo);
+  }
+
+  function remoteTrackSummary() {
+    const stream = media.remoteStream;
+    if (!stream) return [];
+    return stream.getTracks().map((track) => ({
+      kind: track.kind || "",
+      readyState: track.readyState || "",
+      muted: track.muted === true,
+      enabled: track.enabled !== false,
+    }));
+  }
+
+  function bindRemoteTrackDiagnostics(track) {
+    if (!track || track._oneLinkTraceBound) return;
+    track._oneLinkTraceBound = true;
+    track.onmute = () => {
+      addOneCallEvent(`Remote ${track.kind} paused.`);
+      reportCallEvent("remote_track_muted", { media_kind: track.kind });
+      reportCallMetricsOnce();
+    };
+    track.onunmute = () => {
+      addOneCallEvent(`Remote ${track.kind} flowing.`);
+      reportCallEvent("remote_track_unmuted", { media_kind: track.kind });
+      reportCallMetricsOnce();
+    };
+    track.onended = () => {
+      addOneCallEvent(`Remote ${track.kind} ended.`);
+      reportCallEvent("remote_track_ended", { media_kind: track.kind });
+      reportCallMetricsOnce();
+    };
+  }
+
+  function bindRemoteVideoElementDiagnostics() {
+    const v = $$("#call-remote-video");
+    if (!v || v._oneLinkTraceBound) return;
+    v._oneLinkTraceBound = true;
+    const emit = (event) => {
+      reportCallEvent(event, { media_kind: "video" });
+      reportCallMetricsOnce();
+    };
+    v.addEventListener("loadedmetadata", () => emit("remote_video_metadata"));
+    v.addEventListener("resize", () => emit("remote_video_resize"));
+    v.addEventListener("playing", () => emit("remote_video_playing"));
+    v.addEventListener("waiting", () => emit("remote_video_waiting"));
+    v.addEventListener("stalled", () => emit("remote_video_stalled"));
+    v.addEventListener("error", () => emit("remote_video_error"));
   }
 
   function stopAllMedia() {
@@ -24218,6 +24270,8 @@
       } catch (_) { /* LAN-only fallback is fine */ }
     })();
     pc.ontrack = (ev) => {
+      bindRemoteTrackDiagnostics(ev.track);
+      bindRemoteVideoElementDiagnostics();
       let stream = media.remoteStream;
       if (!stream || (ev.streams && ev.streams[0] && stream !== ev.streams[0])) {
         stream = (ev.streams && ev.streams[0]) || new MediaStream();
@@ -24225,7 +24279,11 @@
       try { stream.addTrack(ev.track); } catch (_) {}
       attachRemoteStream(stream);
       addOneCallEvent(`Remote ${ev.track.kind} connected.`);
-      reportCallEvent("remote_track_connected", { media_kind: ev.track.kind });
+      reportCallEvent("remote_track_connected", {
+        media_kind: ev.track.kind,
+        state: ev.track.muted ? "muted" : "connected",
+      });
+      reportCallMetricsOnce();
     };
     pc.onicecandidate = (ev) => {
       // Trickle each candidate to the daemon as it's gathered.
@@ -24514,7 +24572,14 @@
       return;
     }
     if (key && callUI.appliedRemoteOfferKeys.has(key)) {
-      await resendLocalSdpAnswer("duplicate_offer");
+      const hasLocalAnswer = !!(
+        callUI.lastLocalAnswerSdp
+        || (media.pc.localDescription && media.pc.localDescription.type === "answer")
+      );
+      reportCallEvent("duplicate_remote_offer_ignored", {
+        reason: hasLocalAnswer ? "answered" : "no_answer",
+      });
+      if (!hasLocalAnswer) await resendLocalSdpAnswer("duplicate_offer");
       return;
     }
     if (
@@ -24523,7 +24588,14 @@
       && sdpKey(media.pc.remoteDescription.sdp) === key
     ) {
       if (key) callUI.appliedRemoteOfferKeys.add(key);
-      await resendLocalSdpAnswer("duplicate_offer");
+      const hasLocalAnswer = !!(
+        callUI.lastLocalAnswerSdp
+        || (media.pc.localDescription && media.pc.localDescription.type === "answer")
+      );
+      reportCallEvent("duplicate_remote_offer_ignored", {
+        reason: hasLocalAnswer ? "answered" : "no_answer",
+      });
+      if (!hasLocalAnswer) await resendLocalSdpAnswer("duplicate_offer");
       return;
     }
     if (media.pc.signalingState && media.pc.signalingState !== "stable") {
@@ -25433,6 +25505,12 @@
       let jitterMs = null;
       let loss = null;
       let kbps = null;
+      let inboundAudioBytes = 0;
+      let inboundAudioPackets = 0;
+      let inboundVideoBytes = 0;
+      let inboundVideoPackets = 0;
+      let inboundVideoFramesDecoded = 0;
+      let inboundVideoFramesDropped = 0;
       stats.forEach((s) => {
         if (s.type === "candidate-pair" && (s.selected || s.nominated)) {
           if (typeof s.currentRoundTripTime === "number") {
@@ -25446,6 +25524,18 @@
           const lost = Number(s.packetsLost || 0);
           const received = Number(s.packetsReceived || 0);
           if (lost + received > 0) loss = lost / (lost + received);
+        }
+        if (s.type === "inbound-rtp" && !s.isRemote) {
+          const kind = String(s.kind || s.mediaType || "").toLowerCase();
+          if (kind === "audio") {
+            inboundAudioBytes += Number(s.bytesReceived || 0);
+            inboundAudioPackets += Number(s.packetsReceived || 0);
+          } else if (kind === "video") {
+            inboundVideoBytes += Number(s.bytesReceived || 0);
+            inboundVideoPackets += Number(s.packetsReceived || 0);
+            inboundVideoFramesDecoded += Number(s.framesDecoded || 0);
+            inboundVideoFramesDropped += Number(s.framesDropped || 0);
+          }
         }
       });
       if (rttMs !== null) updateOneChip("#call-one-rtt", `${rttMs} ms`);
@@ -25466,7 +25556,39 @@
         remote_video_tracks: media.remoteStream ? media.remoteStream.getVideoTracks().length : 0,
         remote_live_audio_tracks: media.remoteStream ? media.remoteStream.getAudioTracks().filter((t) => t.readyState === "live").length : 0,
         remote_live_video_tracks: media.remoteStream ? media.remoteStream.getVideoTracks().filter((t) => t.readyState === "live").length : 0,
+        remote_muted_audio_tracks: media.remoteStream ? media.remoteStream.getAudioTracks().filter((t) => t.muted).length : 0,
+        remote_muted_video_tracks: media.remoteStream ? media.remoteStream.getVideoTracks().filter((t) => t.muted).length : 0,
+        inbound_audio_bytes: inboundAudioBytes,
+        inbound_audio_packets: inboundAudioPackets,
+        inbound_video_bytes: inboundVideoBytes,
+        inbound_video_packets: inboundVideoPackets,
+        inbound_video_frames_decoded: inboundVideoFramesDecoded,
+        inbound_video_frames_dropped: inboundVideoFramesDropped,
+        remote_video_width: Number($$("#call-remote-video")?.videoWidth || 0),
+        remote_video_height: Number($$("#call-remote-video")?.videoHeight || 0),
+        remote_video_ready_state: Number($$("#call-remote-video")?.readyState || 0),
+        remote_video_paused: $$("#call-remote-video")?.paused === true,
       };
+      callUI.lastMetricsSnapshot = {
+        at_ms: Date.now(),
+        ...selected,
+        rtt_ms: rttMs,
+        jitter_ms: jitterMs,
+        loss_rate: loss,
+        bandwidth_estimate_kbps: kbps,
+        remote_tracks: remoteTrackSummary(),
+      };
+      if (
+        selected.remote_video_tracks > 0
+        && selected.inbound_video_frames_decoded === 0
+        && selected.remote_video_width === 0
+      ) {
+        const now = Date.now();
+        if (now - callUI.lastFrameWarningMs > 5000) {
+          callUI.lastFrameWarningMs = now;
+          reportCallEvent("remote_video_no_frames", { media_kind: "video" });
+        }
+      }
       ensureMediaNegotiation("metrics").catch(() => {});
       await callApiPost({
         action: "report_metrics",
@@ -25478,6 +25600,70 @@
         ...selected,
       });
     } catch (_) {}
+  }
+
+  if (typeof window !== "undefined") {
+    window._oneLinkCallDebug = async function () {
+      let statsSummary = [];
+      try {
+        if (media.pc) {
+          const stats = await media.pc.getStats();
+          stats.forEach((s) => {
+            if (s.type === "inbound-rtp" || s.type === "outbound-rtp" || s.type === "candidate-pair") {
+              statsSummary.push({
+                type: s.type,
+                kind: s.kind || s.mediaType || "",
+                selected: s.selected === true || s.nominated === true,
+                state: s.state || "",
+                bytesReceived: Number(s.bytesReceived || 0),
+                bytesSent: Number(s.bytesSent || 0),
+                packetsReceived: Number(s.packetsReceived || 0),
+                packetsSent: Number(s.packetsSent || 0),
+                framesDecoded: Number(s.framesDecoded || 0),
+                framesEncoded: Number(s.framesEncoded || 0),
+              });
+            }
+          });
+        }
+      } catch (_) {
+        statsSummary = [{ error: "stats_unavailable" }];
+      }
+      const rv = $$("#call-remote-video");
+      const ra = $$("#call-remote-audio");
+      return {
+        call_id: callUI.activeCallId,
+        peer: callUI.activeCallPeer,
+        pc: media.pc ? {
+          signalingState: media.pc.signalingState,
+          iceConnectionState: media.pc.iceConnectionState,
+          connectionState: media.pc.connectionState,
+          iceGatheringState: media.pc.iceGatheringState,
+          localDescriptionType: media.pc.localDescription && media.pc.localDescription.type,
+          remoteDescriptionType: media.pc.remoteDescription && media.pc.remoteDescription.type,
+        } : null,
+        local_tracks: media.localStream ? media.localStream.getTracks().map((t) => ({
+          kind: t.kind, readyState: t.readyState, muted: t.muted === true, enabled: t.enabled !== false,
+        })) : [],
+        remote_tracks: remoteTrackSummary(),
+        remote_video_element: rv ? {
+          shown: rv.classList.contains("show"),
+          videoWidth: rv.videoWidth,
+          videoHeight: rv.videoHeight,
+          readyState: rv.readyState,
+          paused: rv.paused,
+          ended: rv.ended,
+          currentTime: rv.currentTime,
+        } : null,
+        remote_audio_element: ra ? {
+          readyState: ra.readyState,
+          paused: ra.paused,
+          ended: ra.ended,
+          currentTime: ra.currentTime,
+        } : null,
+        last_metrics: callUI.lastMetricsSnapshot,
+        stats: statsSummary,
+      };
+    };
   }
 
   function startCallTelemetry() {
@@ -25544,7 +25730,9 @@
         callUI.pendingRemoteOffer = null;
         await applyRemoteSdpOffer(offerSdp);
       } else {
-        await ensureMediaNegotiation("accept");
+        addOneCallEvent("Waiting for media offer...");
+        reportCallEvent("waiting_for_media_offer", { reason: "accept" });
+        setTimeout(() => { backfillLivingPresenceCalls().catch(() => {}); }, 250);
       }
     } else {
       callUI.acceptedCallIds.delete(inboundCallId);
@@ -25794,7 +25982,10 @@
   // No  = user reports a mismatch → daemon refuses + warns.
   function hideSasPane() {
     const pane = $$("#call-sas-pane");
-    if (pane) pane.style.display = "none";
+    if (pane) {
+      pane.style.display = "none";
+      pane.classList.remove("show");
+    }
     const words = $$("#call-sas-words");
     if (words) words.textContent = "";
   }
@@ -26061,10 +26252,15 @@
     if (tail === "sas_verification_required") {
       const pane = $$("#call-sas-pane");
       const words = $$("#call-sas-words");
-      if (words && typeof m.sas_words === "string") {
-        words.textContent = m.sas_words;
+      const phrase = String(m.sas_words || m.sas || "").trim();
+      if (words) {
+        words.textContent = phrase || "No verification words were supplied. Do not tap Yes yet.";
       }
-      if (pane) pane.style.display = "block";
+      reportCallEvent(phrase ? "sas_words_shown" : "sas_words_missing");
+      if (pane) {
+        pane.style.display = "block";
+        pane.classList.add("show");
+      }
       return true;
     }
     if (tail === "frame_attestation") {

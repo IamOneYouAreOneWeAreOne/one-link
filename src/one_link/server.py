@@ -3546,9 +3546,36 @@ class UIServer:
                 "answer_preparing",
                 "answer_sent",
                 "answer_send_failed",
+                "answer_resend",
+                "answer_resent",
+                "answer_resend_failed",
+                "offer_resend",
+                "offer_resent",
+                "offer_resend_failed",
+                "accept_resend",
+                "waiting_for_media_offer",
                 "remote_offer_received",
                 "remote_answer_received",
                 "remote_track_connected",
+                "remote_track_muted",
+                "remote_track_unmuted",
+                "remote_track_ended",
+                "remote_video_metadata",
+                "remote_video_resize",
+                "remote_video_playing",
+                "remote_video_waiting",
+                "remote_video_stalled",
+                "remote_video_error",
+                "remote_video_no_frames",
+                "duplicate_remote_offer_ignored",
+                "sas_words_shown",
+                "sas_words_missing",
+                "offer_collision",
+                "offer_collision_recovery_start",
+                "offer_collision_rollback",
+                "offer_collision_rebuild",
+                "offer_collision_recovered",
+                "offer_collision_recovery_failed",
                 "ice_state_changed",
             }
             if not call_id or event not in allowed_events:
@@ -3567,7 +3594,11 @@ class UIServer:
                 "call_id": call_id,
                 "event": event,
                 "reason": _clean_token(
-                    "reason", {"start", "accept", "active", "watchdog", "metrics"},
+                    "reason", {
+                        "start", "accept", "active", "watchdog", "metrics",
+                        "duplicate_offer", "offer_collision", "offer_echo",
+                        "ringing_backfill", "answered", "no_answer",
+                    },
                 ),
                 "media_kind": _clean_token("media_kind", {"audio", "video"}),
                 "state": _clean_token(
@@ -3625,6 +3656,16 @@ class UIServer:
                     return None
                 return max(0, min(value, 32))
 
+            def _counter(name: str) -> int | None:
+                raw = body.get(name)
+                if raw is None:
+                    return None
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError):
+                    return None
+                return max(0, min(value, 10_000_000_000))
+
             def _float(name: str) -> float | None:
                 raw = body.get(name)
                 if raw is None:
@@ -3655,6 +3696,18 @@ class UIServer:
                 "remote_video_tracks": _int("remote_video_tracks"),
                 "remote_live_audio_tracks": _int("remote_live_audio_tracks"),
                 "remote_live_video_tracks": _int("remote_live_video_tracks"),
+                "remote_muted_audio_tracks": _int("remote_muted_audio_tracks"),
+                "remote_muted_video_tracks": _int("remote_muted_video_tracks"),
+                "inbound_audio_bytes": _counter("inbound_audio_bytes"),
+                "inbound_audio_packets": _counter("inbound_audio_packets"),
+                "inbound_video_bytes": _counter("inbound_video_bytes"),
+                "inbound_video_packets": _counter("inbound_video_packets"),
+                "inbound_video_frames_decoded": _counter("inbound_video_frames_decoded"),
+                "inbound_video_frames_dropped": _counter("inbound_video_frames_dropped"),
+                "remote_video_width": _counter("remote_video_width"),
+                "remote_video_height": _counter("remote_video_height"),
+                "remote_video_ready_state": _counter("remote_video_ready_state"),
+                "remote_video_paused": bool(body.get("remote_video_paused")),
                 "rtt_ms": _float("rtt_ms"),
                 "jitter_ms": _float("jitter_ms"),
                 "loss_rate": _float("loss_rate"),

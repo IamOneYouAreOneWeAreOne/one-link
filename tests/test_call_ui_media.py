@@ -125,7 +125,7 @@ def test_ontrack_attaches_remote_stream(index_html: str) -> None:
 
 def test_report_metrics_includes_media_state(index_html: str) -> None:
     idx = index_html.find("async function reportCallMetricsOnce")
-    snippet = index_html[idx:idx + 2600]
+    snippet = index_html[idx:idx + 5200]
     assert "ice_connection_state" in snippet
     assert "remote_audio_tracks" in snippet
     assert "remote_video_tracks" in snippet
@@ -150,7 +150,7 @@ def test_media_watchdog_restarts_stuck_negotiation(index_html: str) -> None:
     assert "media.pc.signalingState" in snippet
     assert "sendLocalSdpOffer" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 3300]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 6200]
     assert 'ensureMediaNegotiation("metrics").catch' in metrics_snippet
     active_idx = index_html.find('window.handleLivingPresenceCallEvent = function')
     active_idx = index_html.find('if (phase === "active")', active_idx)
@@ -166,11 +166,12 @@ def test_accept_answers_pending_offer_before_self_offer(index_html: str) -> None
     snippet = index_html[idx:idx + 1800]
     pending_idx = snippet.find("if (callUI.pendingRemoteOffer)")
     apply_idx = snippet.find("await applyRemoteSdpOffer")
-    ensure_idx = snippet.find('await ensureMediaNegotiation("accept")')
+    wait_idx = snippet.find('addOneCallEvent("Waiting for media offer...")')
     assert pending_idx > 0
     assert apply_idx > pending_idx
-    assert ensure_idx > apply_idx
-    assert "} else {" in snippet[pending_idx:ensure_idx]
+    assert wait_idx > apply_idx
+    assert 'await ensureMediaNegotiation("accept")' not in snippet
+    assert "} else {" in snippet[pending_idx:wait_idx]
 
 
 def test_remote_sdp_backfill_is_deduped(index_html: str) -> None:
@@ -178,7 +179,7 @@ def test_remote_sdp_backfill_is_deduped(index_html: str) -> None:
     assert "appliedRemoteAnswerKeys: new Set()" in index_html
     assert "function sdpKey" in index_html
     offer_idx = index_html.find("async function applyRemoteSdpOffer")
-    offer_snippet = index_html[offer_idx:offer_idx + 1200]
+    offer_snippet = index_html[offer_idx:offer_idx + 2200]
     assert "appliedRemoteOfferKeys.has(key)" in offer_snippet
     assert 'media.pc.signalingState !== "stable"' in offer_snippet
     answer_idx = index_html.find("async function applyRemoteSdpAnswer")
@@ -204,7 +205,8 @@ def test_sdp_offer_answer_retries_when_signaling_is_lost(index_html: str) -> Non
     assert "remote_offer_echo_ignored" in offer_snippet
     assert 'await resendLocalSdpOffer("offer_echo")' in offer_snippet
     assert "recoverRemoteOfferCollision" in offer_snippet
-    assert 'await resendLocalSdpAnswer("duplicate_offer")' in offer_snippet
+    assert "duplicate_remote_offer_ignored" in offer_snippet
+    assert "hasLocalAnswer" in offer_snippet
 
 
 def test_offer_collision_rolls_back_and_answers_remote_offer(index_html: str) -> None:
@@ -238,11 +240,38 @@ def test_call_media_events_are_reported(index_html: str) -> None:
         "remote_offer_received",
         "remote_answer_received",
         "remote_track_connected",
+        "remote_video_no_frames",
         "ice_state_changed",
         "offer_resend",
         "answer_resend",
     ]:
         assert event in index_html
+
+
+def test_call_debug_snapshot_and_frame_counters_present(index_html: str) -> None:
+    assert "window._livingPresenceMedia = media" in index_html
+    assert "window._oneLinkCallDebug = async function" in index_html
+    assert "inbound_video_frames_decoded" in index_html
+    assert "remote_video_width" in index_html
+    assert "remote_video_ready_state" in index_html
+    assert "remote_muted_video_tracks" in index_html
+    assert "remoteTrackSummary()" in index_html
+
+
+def test_inbound_accept_waits_for_offer_instead_of_self_offering(index_html: str) -> None:
+    idx = index_html.find("async function acceptInboundCall")
+    snippet = index_html[idx:idx + 1800]
+    assert 'addOneCallEvent("Waiting for media offer...")' in snippet
+    assert 'reportCallEvent("waiting_for_media_offer"' in snippet
+    assert 'await ensureMediaNegotiation("accept")' not in snippet
+
+
+def test_call_sas_prompt_never_shows_empty_words(index_html: str) -> None:
+    idx = index_html.find('if (tail === "sas_verification_required")')
+    snippet = index_html[idx:idx + 700]
+    assert "sas_words_missing" in snippet
+    assert "No verification words were supplied" in snippet
+    assert 'pane.classList.add("show")' in snippet
 
 
 def test_source_fingerprint_drift_triggers_soft_reload(index_html: str) -> None:
