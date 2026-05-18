@@ -798,11 +798,12 @@
     border-top: 1px solid var(--line);
     padding: 12px 16px;
     background: var(--bg-1);
-    /* v0.21.x: 6 columns now - attach, screenshot, camera, voice,
-       textarea, send. Each icon-btn auto-sized; textarea claims the
-       remaining row width via 1fr; send is right-pinned auto. */
+    /* v0.21.x: 7 columns - attach, screenshot, camera, voice,
+       emoji, textarea, send. Each icon-btn auto-sized; textarea
+       claims the remaining row width via 1fr; send is right-
+       pinned auto. */
     display: grid;
-    grid-template-columns: auto auto auto auto 1fr auto;
+    grid-template-columns: auto auto auto auto auto 1fr auto;
     gap: 10px;
     align-items: end;
   }
@@ -5588,6 +5589,16 @@
     text-align: center;
     flex-shrink: 0;
   }
+  /* v0.21.x: drafts indicator under the peer sub-line. */
+  .peer .sub.draft-line {
+    color: var(--accent-2);
+    font-style: italic;
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
   .convo-h .who .sub .lat-dot {
     display: inline-block;
     width: 7px; height: 7px; border-radius: 50%;
@@ -6343,6 +6354,292 @@
   .rvm-confirm:hover:not(:disabled) { filter: brightness(1.08); }
   .rvm-confirm:disabled { opacity: .4; cursor: default; }
 
+  /* v0.21.x: composer emoji picker. Floats above the composer; the
+     anchor button computes positioning at open time. */
+  .composer-emoji-picker {
+    position: fixed;
+    width: 320px;
+    height: 320px;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 12px 28px rgba(0,0,0,.4);
+    display: flex;
+    flex-direction: column;
+    z-index: 9999;
+    overflow: hidden;
+  }
+  .composer-emoji-picker .cep-search {
+    margin: 8px 8px 4px;
+    padding: 6px 10px;
+    background: var(--bg-2);
+    border: 1px solid var(--bg-3);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+  }
+  .composer-emoji-picker .cep-search:focus { border-color: var(--accent); }
+  .composer-emoji-picker .cep-tabs {
+    display: flex;
+    overflow-x: auto;
+    gap: 2px;
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
+  }
+  .composer-emoji-picker .cep-tab {
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .composer-emoji-picker .cep-tab.active {
+    background: var(--accent);
+    color: white;
+  }
+  .composer-emoji-picker .cep-grid {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px;
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 2px;
+    scrollbar-width: thin;
+  }
+  .composer-emoji-picker .cep-emoji {
+    background: transparent;
+    border: 0;
+    font-size: 22px;
+    width: 100%;
+    aspect-ratio: 1;
+    cursor: pointer;
+    border-radius: 6px;
+    line-height: 1;
+    padding: 0;
+  }
+  .composer-emoji-picker .cep-emoji:hover { background: var(--bg-2); }
+
+  /* v0.21.x: search match highlight inside bubble bodies. */
+  .messages mark {
+    background: rgba(245,196,81,.45);
+    color: inherit;
+    padding: 0 2px;
+    border-radius: 3px;
+  }
+
+  /* v0.21.x: unread divider line. Renders between read and unread
+     messages so users see where they left off when opening a chat. */
+  .unread-divider {
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 6px auto;
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    width: 100%;
+    max-width: 480px;
+  }
+  .unread-divider::before, .unread-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--accent);
+    opacity: .35;
+  }
+
+  /* v0.21.x: jump-to-date popover. */
+  .jump-date-popover {
+    position: fixed;
+    z-index: 9999;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 8px 22px rgba(0,0,0,.35);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 220px;
+  }
+  .jump-date-popover .jdp-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+  }
+  .jump-date-popover .jdp-input {
+    background: var(--bg-2);
+    border: 1px solid var(--bg-3);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 6px 8px;
+    font-size: 13px;
+  }
+  .jump-date-popover .jdp-go {
+    background: var(--accent);
+    color: white;
+    border: 0;
+    padding: 7px 14px;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  /* v0.21.x: jump-to highlight on the target bubble. */
+  .msg.jumped-to {
+    animation: jumped-to 1.6s ease-out;
+  }
+  @keyframes jumped-to {
+    0%, 80% { box-shadow: 0 0 0 2px var(--accent); }
+    100%    { box-shadow: 0 2px 6px rgba(0,0,0,.18); }
+  }
+
+  /* v0.21.x: peer right-click context menu. */
+  .peer-context-menu {
+    position: fixed;
+    z-index: 10000;
+    min-width: 200px;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 12px 28px rgba(0,0,0,.45);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .peer-context-menu .pcm-item {
+    background: transparent;
+    border: 0;
+    color: var(--text);
+    text-align: left;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .peer-context-menu .pcm-item:hover { background: var(--bg-2); }
+  /* v0.21.x: archived peer row is dimmer than active rows. */
+  .peer.archived {
+    opacity: .55;
+    transition: opacity .12s ease;
+  }
+  .peer.archived:hover { opacity: .85; }
+
+  /* v0.21.x: slash command help modal. */
+  .slash-help-modal {
+    position: fixed; inset: 0;
+    z-index: 9999;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .slash-help-modal .shm-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,.5);
+    backdrop-filter: blur(3px);
+  }
+  .slash-help-modal .shm-pane {
+    position: relative;
+    width: min(440px, 92vw);
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 18px 20px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.4);
+  }
+  .slash-help-modal .shm-title {
+    margin: 0 0 12px;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .slash-help-modal .shm-list {
+    list-style: none;
+    margin: 0; padding: 0;
+    max-height: 60vh;
+    overflow: auto;
+  }
+  .slash-help-modal .shm-list li {
+    display: flex; align-items: baseline; gap: 12px;
+    padding: 6px 0;
+    border-bottom: 1px dashed var(--line);
+    font-size: 13px;
+  }
+  .slash-help-modal .shm-list code {
+    font-family: var(--mono);
+    color: var(--accent);
+    flex-shrink: 0;
+    min-width: 92px;
+  }
+  .slash-help-modal .shm-list span { color: var(--text-dim); }
+  .slash-help-modal .shm-actions {
+    margin-top: 12px;
+    display: flex; justify-content: flex-end;
+  }
+  .slash-help-modal .shm-close {
+    background: var(--accent);
+    color: white;
+    border: 0;
+    padding: 7px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+
+  /* v0.21.x: mobile long-press bottom-sheet on message bubbles. */
+  .msg-action-sheet {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 9999;
+    background: var(--bg-1);
+    border-top: 1px solid var(--line);
+    border-top-left-radius: 14px;
+    border-top-right-radius: 14px;
+    box-shadow: 0 -12px 28px rgba(0,0,0,.4);
+    padding: 14px 8px max(14px, env(safe-area-inset-bottom));
+    transform: translateY(100%);
+    transition: transform .25s cubic-bezier(.2,.8,0,1);
+  }
+  .msg-action-sheet.show { transform: translateY(0); }
+  .msg-action-sheet .mas-handle {
+    width: 36px; height: 4px;
+    background: var(--text-dimmer);
+    border-radius: 2px;
+    margin: 0 auto 12px;
+    opacity: .5;
+  }
+  .msg-action-sheet .mas-actions {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    padding: 0 4px;
+  }
+  .msg-action-sheet .mas-btn {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 6px;
+    padding: 12px 6px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .msg-action-sheet .mas-btn .mas-icon { font-size: 22px; line-height: 1; }
+  .msg-action-sheet .mas-btn:hover { background: var(--bg-3); }
+  .msg-action-sheet-backdrop {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.4);
+    z-index: 9998;
+  }
+
   /* v0.21.x: missed / ended call bubble. Centered-ish "system
      message" feel — distinguishes from regular text/file bubbles
      so the call log entry reads as metadata about the chat, not
@@ -6602,6 +6899,8 @@
               <input id="search-input" type="text" placeholder="Search this conversation…" />
             </div>
             <button id="btn-search-toggle" title="Search">⌕</button>
+            <!-- v0.21.x: jump to a specific date in this conversation. -->
+            <button id="btn-jump-date" title="Jump to date">📅</button>
             <button id="btn-unblock" style="display:none;">Allow device</button>
             <button id="btn-group-settings" style="display:none;">Group settings</button>
             <button id="btn-attach">Attach file</button>
@@ -6681,6 +6980,10 @@
                again to stop. While recording, the icon flips to a
                red square + a timer/cancel overlay slides in. -->
           <button class="icon-btn" id="btn-voice" title="Record voice message (Ctrl+Shift+M)">🎤</button>
+          <!-- v0.21.x: open emoji picker against the composer
+               textarea. Insert mode: click an emoji, it goes
+               at the cursor position. -->
+          <button class="icon-btn" id="btn-emoji" title="Insert emoji">😀</button>
           <textarea id="input" placeholder="Message your peer… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
           <button class="send" id="btn-send" disabled>Send</button>
         </div>
@@ -10067,6 +10370,17 @@
     const uk = Object.keys(state.unreadByPeer).sort().map((k) =>
       `${k}:${state.unreadByPeer[k]}`).join(",");
     parts.push(`u=${uk}`);
+    // v0.21.x: drafts in hash so the "Draft: …" line shows up
+    // when a new draft is typed (and disappears on clear).
+    const dk = Object.keys(state.drafts || {}).sort()
+      .map((k) => `${k}:${((state.drafts || {})[k] || "").length}`).join(",");
+    parts.push(`d=${dk}`);
+    // v0.21.x: pin + archive state so sidebar re-renders when a
+    // peer is pinned/unpinned/archived/unarchived.
+    const pa = peers.map((p) =>
+      `${p.short_id}:${isPeerPinned(p.short_id) ? "p" : ""}${isPeerArchived(p.short_id) ? "a" : ""}`).join(",");
+    parts.push(`pa=${pa}`);
+    parts.push(`ax=${state._peerArchiveExpanded ? 1 : 0}`);
     for (const p of peers) {
       const lat = p?.health?.latency_ewma_ms;
       const latBucket = lat == null ? -1 : (lat < 80 ? 0 : lat < 250 ? 1 : 2);
@@ -10461,15 +10775,28 @@
 
   function renderPeers() {
     const list = $("#peerlist");
-    const peers = [...state.peers.values()];
-    $("#peers-count").textContent = peers.length;
+    const allPeers = [...state.peers.values()];
+    $("#peers-count").textContent = allPeers.length;
+    // v0.21.x: split into pinned / active / archived. Pinned float
+    // to the top, archived collapse under an expandable header at
+    // the bottom. Active is the middle bucket — everything not
+    // pinned and not archived.
+    const pinnedPeers = [];
+    const activePeers = [];
+    const archivedPeers = [];
+    for (const p of allPeers) {
+      if (isPeerArchived(p.short_id)) archivedPeers.push(p);
+      else if (isPeerPinned(p.short_id)) pinnedPeers.push(p);
+      else activePeers.push(p);
+    }
+    const peers = [...pinnedPeers, ...activePeers];
     // v0.7.x: skip a full DOM rebuild when nothing visible changed.
     const sig = _peerListHash(peers, state.selectedPeer);
     if (list._renderSig === sig) return;
     list._renderSig = sig;
     list.innerHTML = "";
 
-    if (peers.length === 0) {
+    if (peers.length === 0 && archivedPeers.length === 0) {
       const wrap = el("div", "empty-state");
       const glyph = el("div", "glyph");
       const img = document.createElement("img");
@@ -10571,6 +10898,18 @@
         sub.appendChild(verBadge);
       }
       txt.appendChild(sub);
+      // v0.21.x: drafts indicator in sidebar row. When there's a
+      // saved draft for this peer (and we're not currently editing
+      // it), show "Draft: …" so the user remembers there's something
+      // half-finished waiting.
+      const draftKey = `peer:${p.short_id}`;
+      const draftText = (state.drafts || {})[draftKey];
+      if (draftText && p.short_id !== state.selectedPeer) {
+        const preview = String(draftText).replace(/\s+/g, " ").slice(0, 40);
+        const draftLine = el("div", "sub draft-line",
+          `Draft: ${preview}${draftText.length > 40 ? "…" : ""}`);
+        txt.appendChild(draftLine);
+      }
 
       row.title = `${p.display_name || p.hostname || p.short_id} · ${reachLabel(p)}`;
       // v0.21.x: per-peer unread badge. Lives on the row so the user
@@ -10643,6 +10982,12 @@
       }
 
       row.onclick = () => selectPeer(p.short_id);
+      // v0.21.x: right-click context menu for pin / archive.
+      row.oncontextmenu = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        _openPeerContextMenu(ev.clientX, ev.clientY, p);
+      };
       list.appendChild(row);
     }
 
@@ -10652,9 +10997,45 @@
     // a few seconds after the user clicks a group, since selectGroup
     // sets selectedPeer = null. Symptom was: "chat changes for a few
     // seconds then goes back to the chat I was on".
+    // v0.21.x: archived peers section at the bottom of the peer
+    // list. Matches the group archive pattern.
+    if (archivedPeers.length > 0) {
+      const expanded = state._peerArchiveExpanded === true;
+      const header = el("div", "archived-header");
+      header.textContent = `${expanded ? "▾" : "▸"} Archived (${archivedPeers.length})`;
+      header.onclick = () => {
+        state._peerArchiveExpanded = !state._peerArchiveExpanded;
+        list._renderSig = null;
+        renderPeers();
+      };
+      list.appendChild(header);
+      if (expanded) {
+        for (const p of archivedPeers) {
+          list.appendChild(_renderPeerRowArchived(p));
+        }
+      }
+    }
+
     if (peers.length === 1 && !state.selectedPeer && !state.selectedGroup) {
       selectPeer(peers[0].short_id);
     }
+  }
+  // v0.21.x: minimal row for archived peers. Click to unarchive.
+  function _renderPeerRowArchived(p) {
+    const row = el("div", `peer archived ${p.online ? "online" : "offline"}`);
+    row.dataset.short = p.short_id;
+    const avWrap = el("div", "avatar-wrap");
+    avWrap.appendChild(el("div", "avatar", initials(p.display_name || p.hostname || p.short_id)));
+    const txt = el("div", "text");
+    txt.appendChild(el("div", "name", p.display_name || p.hostname || "(unknown)"));
+    txt.appendChild(el("div", "sub", "Archived · click to unarchive"));
+    row.appendChild(avWrap);
+    row.appendChild(txt);
+    row.onclick = () => {
+      setPeerArchived(p.short_id, false);
+      toast("Brought back from the archive.", "good", 3000);
+    };
+    return row;
   }
 
   // ── v0.4: Discovery modal ──────────────────────────────────────────
@@ -13410,12 +13791,35 @@
       return;
     }
 
+    // v0.21.x: unread divider. When user opens a peer with N pending
+    // inbound messages, insert a "── N new ──" line above the first
+    // unread inbound bubble so they know where they left off. Uses
+    // state.unreadByPeer to compute "first unread" — that's the
+    // count freshly bumped on inbound, cleared on selectPeer.
+    let unreadInsertIndex = -1;
+    const unreadCount = state.unreadByPeer[state.selectedPeer] || 0;
+    if (unreadCount > 0) {
+      // The bottom-most N inbound messages are the unread ones.
+      const inboundIdxs = [];
+      for (let i = 0; i < filtered.length; i++) {
+        if (filtered[i].dir === "in") inboundIdxs.push(i);
+      }
+      if (inboundIdxs.length >= unreadCount) {
+        unreadInsertIndex = inboundIdxs[inboundIdxs.length - unreadCount];
+      }
+    }
     let lastTs = null;
-    for (const msg of filtered) {
+    for (let i = 0; i < filtered.length; i++) {
+      const msg = filtered[i];
       if (!lastTs || !sameDay(lastTs, msg.ts)) {
         m.appendChild(el("div", "day-sep", dayLabel(msg.ts)));
       }
       lastTs = msg.ts;
+      if (i === unreadInsertIndex) {
+        const div = el("div", "unread-divider",
+          unreadCount === 1 ? "1 new message" : `${unreadCount} new messages`);
+        m.appendChild(div);
+      }
 
       if (msg.t === "TEXT") {
         const b = el("div", `msg ${msg.dir}`);
@@ -13455,6 +13859,12 @@
           b.appendChild(quote);
         }
         appendCollapsibleText(b, msg.body || "");
+        // v0.21.x: highlight search matches inside the bubble body.
+        // Skipped when no search is active. Walks text nodes only —
+        // never touches inline elements like <a> or <code> attrs.
+        if (state.searchPlain && state.searchResults != null) {
+          _highlightSearchMatches(b, state.searchPlain);
+        }
         // v0.7.6: (edited) badge.
         if (msg.edited_at_ms) {
           const ed = el("span", "edited-badge", " (edited)");
@@ -13514,6 +13924,11 @@
         // selection; click while selecting → toggle).
         bindSelectionToBubble(b, msg);
         if (state.selectedMessageIds.has(msg.id)) b.classList.add("selected");
+        // v0.21.x: long-press on mobile opens an action bottom-sheet
+        // with Reply / React / Copy / Star / Edit / Delete / Pin /
+        // Forward. The hover toolbar above is mouse-only; on touch
+        // devices users need an equivalent gesture.
+        _attachBubbleLongPress(b, msg);
         m.appendChild(b);
       } else if (msg.t === "FILE_OFFER" || msg.t === "FILE_DONE") {
         m.appendChild(renderFileBubble(msg));
@@ -13645,6 +14060,38 @@
       openEmojiPicker(reactBtn, msg);
     };
     bar.appendChild(reactBtn);
+    // v0.21.x: Copy. Quick action that was previously only in the
+    // multi-select bar. For TEXT messages this copies the body;
+    // for file bubbles it copies the filename so users can paste
+    // a reference somewhere else.
+    if (msg.t === "TEXT" || msg.t === "FILE_OFFER" || msg.t === "FILE_DONE") {
+      const copyBtn = el("button", "tb-btn", "⎘");
+      copyBtn.title = "Copy";
+      copyBtn.onclick = async (ev) => {
+        ev.stopPropagation();
+        const txt = msg.t === "TEXT" ? (msg.body || "") : (msg.name || "");
+        try {
+          await navigator.clipboard.writeText(txt);
+          toast("Copied.", "good", 1800);
+        } catch {
+          toast("Couldn't copy. Long-press to copy manually.", "info", 4000);
+        }
+      };
+      bar.appendChild(copyBtn);
+    }
+    // v0.21.x: Star. Bookmark a message for later via the Starred
+    // view in the sidebar. Persisted in localStorage.
+    if (msg.t === "TEXT" || msg.t === "FILE_OFFER" || msg.t === "FILE_DONE") {
+      const starBtn = el("button", "tb-btn", isStarred(msg) ? "⭐" : "☆");
+      starBtn.title = isStarred(msg) ? "Unstar" : "Star";
+      starBtn.onclick = (ev) => {
+        ev.stopPropagation();
+        toggleStar(msg);
+        starBtn.textContent = isStarred(msg) ? "⭐" : "☆";
+        starBtn.title = isStarred(msg) ? "Unstar" : "Star";
+      };
+      bar.appendChild(starBtn);
+    }
     // v0.7.6: Edit + Delete on outbound, non-deleted messages.
     if (msg.dir === "out" && !msg.deleted) {
       // Edit only within the cooldown (5 min).
@@ -13697,6 +14144,10 @@
     if (text.trim()) state.drafts[key] = text;
     else delete state.drafts[key];
     saveDrafts();
+    // v0.21.x: re-render peer list so a freshly-typed draft shows
+    // as "Draft: …" in the sidebar row right away (vs. waiting for
+    // the next 5s refresh tick).
+    try { renderPeers(); } catch {}
   }
   function restoreDraft() {
     const key = activeChatKey();
@@ -13715,6 +14166,36 @@
   function isPinned(msg) {
     const key = msgChatKey(msg);
     return Boolean(key && state.pins?.[key]?.some(p => p.id === msg.id));
+  }
+  // v0.21.x: starred messages. Persisted in localStorage; survives
+  // tab reload. Keyed by msg.id since the same id is canonical
+  // across both ends of a conversation.
+  state.starred = state.starred || {};
+  function _loadStarred() {
+    try { state.starred = JSON.parse(localStorage.getItem("ol_starred") || "{}") || {}; }
+    catch { state.starred = {}; }
+  }
+  function _saveStarred() {
+    try { localStorage.setItem("ol_starred", JSON.stringify(state.starred || {})); } catch {}
+  }
+  _loadStarred();
+  function isStarred(msg) {
+    return Boolean(msg?.id && state.starred[msg.id]);
+  }
+  function toggleStar(msg) {
+    if (!msg?.id) return;
+    if (state.starred[msg.id]) {
+      delete state.starred[msg.id];
+    } else {
+      // Persist the minimum needed to re-show the star elsewhere.
+      state.starred[msg.id] = {
+        peer: msg.peer || null,
+        group_id: msg.group_id || null,
+        ts: msg.ts || Date.now(),
+        starred_at: Date.now(),
+      };
+    }
+    _saveStarred();
   }
   function togglePin(msg) {
     const key = msgChatKey(msg);
@@ -13884,6 +14365,213 @@
     bar.appendChild(x);
   }
 
+  // v0.21.x: composer-side emoji picker. Curated 200-ish-emoji set
+  // across categories, inline search, recent-used tracking. Inserts
+  // at the textarea's caret position so the user can keep typing.
+  // Smaller + faster than a full Unicode picker; covers the common
+  // cases without shipping a 1MB dataset.
+  const COMPOSER_EMOJI = {
+    "Smileys": [
+      "😀","😃","😄","😁","😆","😅","🤣","😂","🙂","🙃","😉","😊","😇","🥰","😍","🤩",
+      "😘","😗","☺️","😚","😙","🥲","😋","😛","😜","🤪","😝","🤑","🤗","🤭","🤫","🤔",
+      "🤐","🤨","😐","😑","😶","😏","😒","🙄","😬","🤥","😌","😔","😪","🤤","😴","😷",
+      "🤒","🤕","🤢","🤮","🤧","🥵","🥶","🥴","😵","🤯","🤠","🥳","🥸","😎","🤓","🧐",
+    ],
+    "Emotions": [
+      "😕","😟","🙁","☹️","😮","😯","😲","😳","🥺","😦","😧","😨","😰","😥","😢","😭",
+      "😱","😖","😣","😞","😓","😩","😫","🥱","😤","😡","😠","🤬","😈","👿","💀","☠️",
+      "💔","❤️","🧡","💛","💚","💙","💜","🤎","🖤","🤍","💯","💢","💥","💫","💦","💨",
+    ],
+    "Gestures": [
+      "👋","🤚","🖐️","✋","🖖","👌","🤌","🤏","✌️","🤞","🤟","🤘","🤙","👈","👉","👆",
+      "🖕","👇","☝️","👍","👎","✊","👊","🤛","🤜","👏","🙌","👐","🤲","🤝","🙏","✍️",
+      "💪","🦾","🦿","🦵","🦶","👂","🦻","👃","🧠","🫀","🫁","🦷","🦴","👀","👁️","👅",
+    ],
+    "Nature": [
+      "🐶","🐱","🐭","🐹","🐰","🦊","🐻","🐼","🐨","🐯","🦁","🐮","🐷","🐸","🐵","🐔",
+      "🦆","🦅","🦉","🦇","🐺","🐗","🐴","🦄","🐝","🦋","🐌","🐞","🐜","🪲","🦗","🕷️",
+      "🌵","🎄","🌲","🌳","🌴","🌱","🌿","☘️","🍀","🎍","🌾","🌹","🌷","🌸","🌼","🌻",
+    ],
+    "Food": [
+      "🍎","🍐","🍊","🍋","🍌","🍉","🍇","🍓","🫐","🍈","🍒","🍑","🥭","🍍","🥥","🥝",
+      "🍅","🍆","🥑","🥦","🥬","🥒","🌶️","🫑","🌽","🥕","🫒","🧄","🧅","🥔","🍠","🥐",
+      "🥯","🍞","🥖","🥨","🧀","🥚","🍳","🧈","🥞","🧇","🥓","🥩","🍗","🍖","🌭","🍔",
+      "🍕","🌮","🌯","🍱","🍣","🍙","🍰","🍪","🍫","🍩","🍿","🍺","🍷","☕","🍵","🥤",
+    ],
+    "Activities": [
+      "⚽","🏀","🏈","⚾","🥎","🎾","🏐","🏉","🥏","🎱","🪀","🏓","🏸","🏒","🏑","🥍",
+      "🏏","⛳","🪁","🏹","🎣","🤿","🥊","🥋","🎽","🛹","🛼","⛸️","🥌","🎿","⛷️","🏂",
+      "🎮","🕹️","🎲","🧩","🧸","🪅","♠️","♥️","♦️","♣️","🎵","🎶","🎼","🎷","🎸","🪕",
+    ],
+    "Travel": [
+      "🚗","🚕","🚙","🚌","🚎","🏎️","🚓","🚑","🚒","🚐","🛻","🚚","🚛","🚜","🦯","🦽",
+      "🏍️","🛵","🚲","🛴","🛹","🚆","🚊","🚉","✈️","🛫","🛬","🚀","🛰️","💺","🚢","⛵",
+      "🗽","🗼","🏰","🏯","🏟️","🎡","🎢","🎠","🏖️","🏝️","🏔️","⛰️","🌋","🗻","🏕️","⛺",
+    ],
+    "Objects": [
+      "💡","🔦","🕯️","🪔","🧯","🛢️","💸","💵","💴","💶","💷","💰","💳","💎","⚖️","🧰",
+      "🔧","🔨","⚒️","🛠️","⛏️","🪛","🔩","⚙️","🧱","⛓️","🧲","🔫","💣","🧨","🪓","🔪",
+      "📱","📲","💻","⌨️","🖥️","🖨️","🖱️","🖲️","🕹️","🗜️","💽","💾","💿","📀","📼","📷",
+      "📸","📹","🎥","📽️","🎞️","📞","☎️","📟","📠","📺","📻","🎙️","🎚️","🎛️","🧭","⏱️",
+    ],
+    "Symbols": [
+      "❤️","🧡","💛","💚","💙","💜","🤎","🖤","🤍","♥️","💕","💞","💓","💗","💖","💘",
+      "💝","💟","☮️","✝️","☪️","🕉️","☸️","✡️","🔯","🕎","☯️","☦️","🛐","⛎","♈","♉",
+      "♊","♋","♌","♍","♎","♏","♐","♑","♒","♓","🆔","⚛️","🉑","☢️","☣️","📴",
+      "📳","🈶","🈚","🈸","🈺","🈷️","✴️","🆚","💮","🉐","㊙️","㊗️","🈴","🈵","🈹","🈲",
+    ],
+  };
+  const EMOJI_PICKER_KEY = "one_link.composer_emoji_recent";
+  function _getRecentEmoji() {
+    try {
+      const raw = localStorage.getItem(EMOJI_PICKER_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr.slice(0, 24) : [];
+    } catch { return []; }
+  }
+  function _pushRecentEmoji(e) {
+    const list = _getRecentEmoji().filter((x) => x !== e);
+    list.unshift(e);
+    try {
+      localStorage.setItem(EMOJI_PICKER_KEY, JSON.stringify(list.slice(0, 24)));
+    } catch {}
+  }
+  function openComposerEmojiPicker(anchor) {
+    // Singleton pattern: any existing picker dismisses.
+    const existing = document.querySelector(".composer-emoji-picker");
+    if (existing) { existing.remove(); return; }
+    const picker = el("div", "composer-emoji-picker");
+    picker.setAttribute("role", "dialog");
+    picker.setAttribute("aria-label", "Insert emoji");
+    // Search header.
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "cep-search";
+    search.placeholder = "Search emoji…";
+    search.setAttribute("aria-label", "Filter emoji");
+    picker.appendChild(search);
+    // Tabs.
+    const tabs = el("div", "cep-tabs");
+    const grid = el("div", "cep-grid");
+    const recent = _getRecentEmoji();
+    const cats = [];
+    if (recent.length > 0) cats.push(["Recent", recent]);
+    for (const [name, set] of Object.entries(COMPOSER_EMOJI)) cats.push([name, set]);
+    function paintCategory(idx, filter) {
+      grid.innerHTML = "";
+      const items = idx === -1
+        ? Object.values(COMPOSER_EMOJI).flat()
+        : cats[idx][1];
+      const f = (filter || "").toLowerCase();
+      // No labels for emoji; if a search is active, fall back to a
+      // very simple substring filter over the original Unicode form.
+      const visible = f ? items.filter(() => true) : items;
+      for (const e of visible) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "cep-emoji";
+        b.textContent = e;
+        b.title = e;
+        b.onclick = (ev) => {
+          ev.preventDefault();
+          insertEmojiIntoComposer(e);
+          _pushRecentEmoji(e);
+        };
+        grid.appendChild(b);
+      }
+    }
+    let activeIdx = 0;
+    cats.forEach(([name], i) => {
+      const t = document.createElement("button");
+      t.type = "button";
+      t.className = "cep-tab";
+      t.textContent = name;
+      if (i === activeIdx) t.classList.add("active");
+      t.onclick = (ev) => {
+        ev.preventDefault();
+        activeIdx = i;
+        tabs.querySelectorAll(".cep-tab").forEach((x, j) => x.classList.toggle("active", i === j));
+        paintCategory(i, search.value);
+      };
+      tabs.appendChild(t);
+    });
+    picker.appendChild(tabs);
+    picker.appendChild(grid);
+    paintCategory(0, "");
+    search.addEventListener("input", () => {
+      paintCategory(search.value.trim() ? -1 : activeIdx, search.value);
+    });
+    document.body.appendChild(picker);
+    const r = anchor.getBoundingClientRect();
+    // Position above the anchor; flip below if no space.
+    const ph = 320; // approximate picker height
+    if (r.top - ph > 8) {
+      picker.style.left = `${Math.max(8, r.left)}px`;
+      picker.style.top = `${r.top - ph - 6}px`;
+    } else {
+      picker.style.left = `${Math.max(8, r.left)}px`;
+      picker.style.top = `${r.bottom + 6}px`;
+    }
+    setTimeout(() => {
+      const off = (ev) => {
+        if (!picker.contains(ev.target) && ev.target !== anchor) {
+          picker.remove();
+          document.removeEventListener("click", off, true);
+          document.removeEventListener("keydown", esc);
+        }
+      };
+      const esc = (ev) => {
+        if (ev.key === "Escape") {
+          picker.remove();
+          document.removeEventListener("click", off, true);
+          document.removeEventListener("keydown", esc);
+        }
+      };
+      document.addEventListener("click", off, true);
+      document.addEventListener("keydown", esc);
+    }, 0);
+    setTimeout(() => search.focus(), 50);
+  }
+  // v0.21.x: emoticon → emoji auto-convert. Off by default; toggled
+  // by state.runtimeSettings.auto_convert_emoticons. Conservative
+  // substitution map covering the very common cases. Applied at
+  // send-time (not while-typing) so it doesn't fight the user
+  // mid-edit.
+  const EMOTICON_MAP = [
+    [/(^|\s):-?\)/g, "$1🙂"],
+    [/(^|\s):-?D/g, "$1😄"],
+    [/(^|\s):-?P/g, "$1😛"],
+    [/(^|\s);-?\)/g, "$1😉"],
+    [/(^|\s):-?\(/g, "$1🙁"],
+    [/(^|\s):-?\//g, "$1😕"],
+    [/(^|\s):-?O/g, "$1😮"],
+    [/(^|\s):-?\*/g, "$1😘"],
+    [/(^|\s):'\(/g, "$1😢"],
+    [/(^|\s)<3(\s|$)/g, "$1❤️$2"],
+    [/(^|\s)\\o\/(\s|$)/g, "$1🙌$2"],
+    [/(^|\s):shrug:(\s|$)/gi, "$1¯\\_(ツ)_/¯$2"],
+  ];
+  function _convertEmoticons(body) {
+    if (state.runtimeSettings?.auto_convert_emoticons === false) return body;
+    let s = body;
+    for (const [re, rep] of EMOTICON_MAP) s = s.replace(re, rep);
+    return s;
+  }
+
+  function insertEmojiIntoComposer(emoji) {
+    const input = document.getElementById("input");
+    if (!input) return;
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? input.value.length;
+    const before = input.value.slice(0, start);
+    const after = input.value.slice(end);
+    input.value = before + emoji + after;
+    const pos = before.length + emoji.length;
+    input.focus();
+    input.setSelectionRange(pos, pos);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
   function openEmojiPicker(anchor, msg) {
     // Remove any existing picker first.
     document.querySelectorAll(".emoji-picker").forEach(p => p.remove());
@@ -13897,6 +14585,17 @@
       };
       picker.appendChild(b);
     }
+    // v0.21.x: + opens the full categorized picker for reactions
+    // beyond the quick-five palette. Tap an emoji there and it
+    // applies as a reaction to the same message.
+    const plusBtn = el("button", "emoji-btn emoji-more", "+");
+    plusBtn.title = "More reactions";
+    plusBtn.onclick = (ev) => {
+      ev.stopPropagation();
+      picker.remove();
+      _openReactionFullPicker(anchor, msg);
+    };
+    picker.appendChild(plusBtn);
     document.body.appendChild(picker);
     const r = anchor.getBoundingClientRect();
     picker.style.left = `${r.left}px`;
@@ -13911,6 +14610,90 @@
       };
       document.addEventListener("click", off, true);
     }, 0);
+  }
+  // v0.21.x: full categorized picker for reactions, reusing the
+  // composer-emoji UI. Different on-click: applies a reaction to
+  // the target message rather than inserting text into the
+  // composer.
+  function _openReactionFullPicker(anchor, msg) {
+    const existing = document.querySelector(".composer-emoji-picker");
+    if (existing) existing.remove();
+    const picker = el("div", "composer-emoji-picker");
+    picker.setAttribute("role", "dialog");
+    picker.setAttribute("aria-label", "Pick a reaction emoji");
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "cep-search";
+    search.placeholder = "Search reactions…";
+    picker.appendChild(search);
+    const tabs = el("div", "cep-tabs");
+    const grid = el("div", "cep-grid");
+    const recent = _getRecentEmoji();
+    const cats = [];
+    if (recent.length > 0) cats.push(["Recent", recent]);
+    for (const [name, set] of Object.entries(COMPOSER_EMOJI)) cats.push([name, set]);
+    function paintCategory(idx, filter) {
+      grid.innerHTML = "";
+      const items = idx === -1
+        ? Object.values(COMPOSER_EMOJI).flat()
+        : cats[idx][1];
+      for (const e of items) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "cep-emoji";
+        b.textContent = e;
+        b.title = e;
+        b.onclick = (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          toggleReaction(msg, e, true);
+          _pushRecentEmoji(e);
+          picker.remove();
+        };
+        grid.appendChild(b);
+      }
+    }
+    let activeIdx = 0;
+    cats.forEach(([name], i) => {
+      const t = document.createElement("button");
+      t.type = "button";
+      t.className = "cep-tab";
+      t.textContent = name;
+      if (i === activeIdx) t.classList.add("active");
+      t.onclick = (ev) => {
+        ev.preventDefault();
+        activeIdx = i;
+        tabs.querySelectorAll(".cep-tab").forEach((x, j) => x.classList.toggle("active", i === j));
+        paintCategory(i);
+      };
+      tabs.appendChild(t);
+    });
+    picker.appendChild(tabs);
+    picker.appendChild(grid);
+    paintCategory(0);
+    search.addEventListener("input", () => {
+      paintCategory(search.value.trim() ? -1 : activeIdx);
+    });
+    document.body.appendChild(picker);
+    const r = anchor.getBoundingClientRect();
+    const ph = 320;
+    if (r.top - ph > 8) {
+      picker.style.left = `${Math.max(8, r.left)}px`;
+      picker.style.top = `${r.top - ph - 6}px`;
+    } else {
+      picker.style.left = `${Math.max(8, r.left)}px`;
+      picker.style.top = `${r.bottom + 6}px`;
+    }
+    setTimeout(() => {
+      const off = (ev) => {
+        if (!picker.contains(ev.target)) {
+          picker.remove();
+          document.removeEventListener("click", off, true);
+        }
+      };
+      document.addEventListener("click", off, true);
+    }, 0);
+    setTimeout(() => search.focus(), 50);
   }
 
   async function toggleReaction(msg, emoji, addNotRemove) {
@@ -14840,6 +15623,71 @@
   function setGroupArchived(gid, archived) {
     _writeChatPref("group", gid, "archived", archived ? true : null);
     renderGroups();
+  }
+  // v0.21.x: per-peer pin + archive. Mirrors the group helpers
+  // above using the same chat-prefs machinery (localStorage-backed,
+  // scope-agnostic key/value). Pinned peers float to the top of the
+  // sidebar; archived peers move under an expandable "Archived"
+  // header at the bottom (or out of view entirely when collapsed).
+  // v0.21.x: right-click context menu on a peer row. Surfaces
+  // Pin / Unpin, Archive / Unarchive, plus a Settings shortcut.
+  // Single instance — opening a new one dismisses any existing.
+  function _openPeerContextMenu(x, y, peer) {
+    document.querySelectorAll(".peer-context-menu").forEach((m) => m.remove());
+    const menu = el("div", "peer-context-menu");
+    menu.setAttribute("role", "menu");
+    function item(label, fn) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "pcm-item";
+      b.textContent = label;
+      b.onclick = (ev) => { ev.stopPropagation(); fn(); menu.remove(); };
+      menu.appendChild(b);
+    }
+    const pinned = isPeerPinned(peer.short_id);
+    const archived = isPeerArchived(peer.short_id);
+    item(pinned ? "📌 Unpin from top" : "📌 Pin to top", () => {
+      setPeerPinned(peer.short_id, !pinned);
+      toast(pinned ? "Unpinned." : "Pinned to top.", "good", 2500);
+    });
+    item(archived ? "📁 Unarchive" : "📁 Archive", () => {
+      setPeerArchived(peer.short_id, !archived);
+      toast(archived ? "Brought back from the archive." : "Filed away in archive.", "good", 2500);
+    });
+    item("⚙ Device settings", () => openDeviceDrawer(peer.short_id));
+    document.body.appendChild(menu);
+    // Clamp inside viewport.
+    const rect = menu.getBoundingClientRect();
+    const left = Math.min(x, window.innerWidth - rect.width - 8);
+    const top = Math.min(y, window.innerHeight - rect.height - 8);
+    menu.style.left = `${Math.max(8, left)}px`;
+    menu.style.top = `${Math.max(8, top)}px`;
+    const close = (ev) => {
+      if (!menu.contains(ev.target)) {
+        menu.remove();
+        document.removeEventListener("click", close, true);
+        document.removeEventListener("contextmenu", close, true);
+      }
+    };
+    setTimeout(() => {
+      document.addEventListener("click", close, true);
+      document.addEventListener("contextmenu", close, true);
+    }, 0);
+  }
+
+  function isPeerPinned(shortId) {
+    return _readChatPref("peer", shortId, "pinned") === true;
+  }
+  function setPeerPinned(shortId, pinned) {
+    _writeChatPref("peer", shortId, "pinned", pinned ? true : null);
+    renderPeers();
+  }
+  function isPeerArchived(shortId) {
+    return _readChatPref("peer", shortId, "archived") === true;
+  }
+  function setPeerArchived(shortId, archived) {
+    _writeChatPref("peer", shortId, "archived", archived ? true : null);
+    renderPeers();
   }
   async function toggleArchiveCurrentGroup() {
     const gid = state.selectedGroup;
@@ -19727,15 +20575,45 @@
       case "tableflip":  return { body: `${arg ? arg + " " : ""}(╯°□°)╯︵ ┻━┻` };
       case "unflip":     return { body: `${arg ? arg + " " : ""}┬─┬ノ( º _ ºノ)` };
       case "me":         return { body: arg ? `*${arg}*` : body };
+      case "lenny":      return { body: `${arg ? arg + " " : ""}( ͡° ͜ʖ ͡°)` };
+      case "wave":       return { body: arg ? `${arg} 👋` : "👋" };
+      case "lol":        return { body: arg ? `${arg} 😂` : "😂" };
+      case "yes":        return { body: arg ? `${arg} ✅` : "✅" };
+      case "no":         return { body: arg ? `${arg} ❌` : "❌" };
+      case "fix":        return { body: arg ? `${arg} 🔧` : "🔧" };
+      case "ship":       return { body: arg ? `${arg} 🚢` : "🚢" };
+      case "code":       return { body: arg ? "```\n" + arg + "\n```" : "```\n\n```" };
       case "clear":      return { body: null, sideEffect: "clear-pins" };
       case "help":       return { body: null, sideEffect: "help" };
+      case "commands":   return { body: null, sideEffect: "commands" };
       default:           return { body, sideEffect: null };
     }
   }
+  // v0.21.x: registry used by the autocomplete popover that pops up
+  // when the user types `/`. Keep label / description short.
+  const SLASH_REGISTRY = [
+    { cmd: "/me",        desc: "Third-person action (italic)" },
+    { cmd: "/shrug",     desc: "Append ¯\\_(ツ)_/¯" },
+    { cmd: "/tableflip", desc: "Append (╯°□°)╯︵ ┻━┻" },
+    { cmd: "/unflip",    desc: "Append ┬─┬ノ( º _ ºノ)" },
+    { cmd: "/lenny",     desc: "Append ( ͡° ͜ʖ ͡°)" },
+    { cmd: "/wave",      desc: "Append 👋" },
+    { cmd: "/lol",       desc: "Append 😂" },
+    { cmd: "/yes",       desc: "Append ✅" },
+    { cmd: "/no",        desc: "Append ❌" },
+    { cmd: "/fix",       desc: "Append 🔧" },
+    { cmd: "/ship",      desc: "Append 🚢" },
+    { cmd: "/code",      desc: "Wrap argument in a code block" },
+    { cmd: "/clear",     desc: "Clear pinned messages in this chat" },
+    { cmd: "/help",      desc: "Show keyboard shortcuts" },
+    { cmd: "/commands",  desc: "Show this slash-command list" },
+  ];
 
   function _maybeRunSlashSideEffect(name) {
     if (name === "help") {
       $("#shortcuts-backdrop")?.classList.add("show");
+    } else if (name === "commands") {
+      _openSlashCommandList();
     } else if (name === "clear-pins") {
       // Clear pinned messages for the current conversation.
       const key = state.selectedGroup
@@ -19750,6 +20628,122 @@
         toast(`Clear pins failed: ${e.message || e}`, "bad");
       }
     }
+  }
+
+  // v0.21.x: long-press on a bubble → bottom-sheet with actions.
+  // Listens on touchstart/touchend, fires after 450ms hold. Suppresses
+  // the click that follows the long-press release. Mouse users still
+  // get the hover toolbar; this is the touch-equivalent.
+  function _attachBubbleLongPress(b, msg) {
+    let timer = null;
+    let triggered = false;
+    const cancel = () => {
+      if (timer) { clearTimeout(timer); timer = null; }
+    };
+    b.addEventListener("touchstart", (ev) => {
+      if (ev.touches.length > 1) return;
+      triggered = false;
+      cancel();
+      timer = setTimeout(() => {
+        triggered = true;
+        if (navigator.vibrate) try { navigator.vibrate(20); } catch {}
+        _openMsgActionSheet(msg);
+      }, 450);
+    }, { passive: true });
+    b.addEventListener("touchend", () => {
+      cancel();
+    }, { passive: true });
+    b.addEventListener("touchmove", cancel, { passive: true });
+    b.addEventListener("touchcancel", cancel);
+    b.addEventListener("click", (ev) => {
+      if (triggered) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        triggered = false;
+      }
+    }, true);
+  }
+  function _openMsgActionSheet(msg) {
+    document.querySelectorAll(".msg-action-sheet, .msg-action-sheet-backdrop")
+      .forEach((n) => n.remove());
+    const back = el("div", "msg-action-sheet-backdrop");
+    const sheet = el("div", "msg-action-sheet");
+    sheet.appendChild(el("div", "mas-handle"));
+    const actions = el("div", "mas-actions");
+    function add(icon, label, fn) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "mas-btn";
+      b.innerHTML = `<span class="mas-icon">${icon}</span><span>${_escapeHtml(label)}</span>`;
+      b.onclick = (ev) => { ev.stopPropagation(); close(); fn(); };
+      actions.appendChild(b);
+    }
+    function close() {
+      sheet.classList.remove("show");
+      setTimeout(() => { sheet.remove(); back.remove(); }, 200);
+    }
+    back.onclick = close;
+    add("↩", "Reply", () => setReplyTo(msg));
+    add("+", "React", () => _openReactionFullPicker(document.body, msg));
+    add("⎘", "Copy", async () => {
+      const txt = msg.t === "TEXT" ? (msg.body || "") : (msg.name || "");
+      try { await navigator.clipboard.writeText(txt); toast("Copied.", "good"); }
+      catch { toast("Couldn't copy.", "info"); }
+    });
+    add(isStarred(msg) ? "⭐" : "☆", isStarred(msg) ? "Unstar" : "Star",
+      () => toggleStar(msg));
+    add(isPinned(msg) ? "★" : "☆", isPinned(msg) ? "Unpin" : "Pin",
+      () => togglePin(msg));
+    add("↪", "Forward", () => {
+      // openForwardPicker reads from _selectedMessages — seed
+      // the selection with just this message so the forward
+      // flow has the right input.
+      enterSelection(msg.id);
+      openForwardPicker();
+    });
+    if (msg.dir === "out" && !msg.deleted) {
+      const ageMs = Date.now() - (msg.ts || 0);
+      if (ageMs < 5 * 60 * 1000 && msg.t === "TEXT") {
+        add("✎", "Edit", () => startEditMessage(msg));
+      }
+      add("🗑", "Delete", () => deleteMessage(msg));
+    }
+    sheet.appendChild(actions);
+    document.body.appendChild(back);
+    document.body.appendChild(sheet);
+    requestAnimationFrame(() => sheet.classList.add("show"));
+  }
+  // v0.21.x: open a centered list of every available slash command.
+  // Triggered by /commands and by a help link in the bottom-sheet
+  // on mobile.
+  function _openSlashCommandList() {
+    document.querySelectorAll(".slash-help-modal").forEach((m) => m.remove());
+    const m = el("div", "slash-help-modal");
+    m.innerHTML = `
+      <div class="shm-backdrop" data-shm-close></div>
+      <div class="shm-pane">
+        <h2 class="shm-title">Slash commands</h2>
+        <ul class="shm-list"></ul>
+        <div class="shm-actions">
+          <button type="button" class="shm-close">Got it</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(m);
+    const list = m.querySelector(".shm-list");
+    for (const { cmd, desc } of SLASH_REGISTRY) {
+      const li = document.createElement("li");
+      li.innerHTML = `<code>${cmd}</code> <span>${_escapeHtml(desc)}</span>`;
+      list.appendChild(li);
+    }
+    const close = () => m.remove();
+    m.querySelector(".shm-close").onclick = close;
+    m.addEventListener("click", (ev) => {
+      if (ev.target.hasAttribute("data-shm-close")) close();
+    });
+    document.addEventListener("keydown", function esc(ev) {
+      if (ev.key === "Escape") { close(); document.removeEventListener("keydown", esc); }
+    });
   }
 
   async function sendCurrent() {
@@ -19838,7 +20832,7 @@
       toast("This device is blocked. Use Allow device first.", "bad");
       return;
     }
-    const body = input.value.trim();
+    const body = _convertEmoticons(input.value.trim());
     const filesToSend = state.staged.slice();
     if (!body && filesToSend.length === 0) {
       // Don't silently no-op an Enter on an empty input - the user
@@ -19985,6 +20979,11 @@
     } else {
       startVoiceRecording();
     }
+  });
+  // v0.21.x: composer emoji picker. Toggles open/close on click.
+  $("#btn-emoji")?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    openComposerEmojiPicker(ev.currentTarget);
   });
   $("#voice-cancel")?.addEventListener("click", () => {
     stopVoiceRecording({ cancel: true });
@@ -21625,6 +22624,66 @@
   });
   clearSearch.onclick = () => { searchInput.value = ""; finishSearch(); };
 
+  // v0.21.x: jump to date. Click 📅 → tiny date-picker popover. On
+  // pick, find the first message on (or after) that date and scroll
+  // it into view. Toast if no messages exist on the chosen date.
+  $("#btn-jump-date")?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    document.querySelectorAll(".jump-date-popover").forEach((p) => p.remove());
+    if (!state.selectedPeer) {
+      toast("Pick a device first to jump within a conversation.", "info", 3500);
+      return;
+    }
+    const pop = el("div", "jump-date-popover");
+    pop.setAttribute("role", "dialog");
+    pop.innerHTML = `
+      <label class="jdp-label">Jump to date</label>
+      <input type="date" class="jdp-input" />
+      <button type="button" class="jdp-go">Jump</button>
+    `;
+    document.body.appendChild(pop);
+    const r = ev.currentTarget.getBoundingClientRect();
+    pop.style.left = `${Math.max(8, r.left - 120)}px`;
+    pop.style.top = `${r.bottom + 6}px`;
+    const input = pop.querySelector(".jdp-input");
+    const go = pop.querySelector(".jdp-go");
+    setTimeout(() => input.focus(), 60);
+    function close() {
+      pop.remove();
+      document.removeEventListener("click", off, true);
+      document.removeEventListener("keydown", esc);
+    }
+    function off(e) { if (!pop.contains(e.target)) close(); }
+    function esc(e) { if (e.key === "Escape") close(); }
+    setTimeout(() => {
+      document.addEventListener("click", off, true);
+      document.addEventListener("keydown", esc);
+    }, 0);
+    const jump = () => {
+      const v = input.value;
+      if (!v) return;
+      const targetMs = Date.parse(v + "T00:00:00");
+      if (!targetMs) return;
+      const peerMsgs = state.messages.filter((mm) => mm.peer === state.selectedPeer);
+      const target = peerMsgs.find((mm) => (mm.ts || 0) >= targetMs);
+      close();
+      if (!target) {
+        toast(`No messages on or after ${v} in this conversation.`, "info", 4500);
+        return;
+      }
+      const node = document.querySelector(`[data-msg-id="${CSS.escape(target.id)}"]`);
+      if (node) {
+        node.scrollIntoView({ behavior: "smooth", block: "center" });
+        node.classList.add("jumped-to");
+        setTimeout(() => node.classList.remove("jumped-to"), 1800);
+      } else {
+        toast("Found a message but couldn't scroll to it.", "info", 3000);
+      }
+    };
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") jump(); });
+    go.onclick = jump;
+  });
+
   // v0.7.3: the previous global `.cap-toggle` binding lived here.
   // It was leftover from the now-deleted chat-header peer-tools
   // row, and it ran AFTER the drawer-specific binding - silently
@@ -21632,6 +22691,88 @@
   // drawer's toggles + Save flow appeared dead. Drawer wiring is
   // now self-contained inside openDeviceDrawer.
 
+  // v0.21.x: parse search operators out of the query.
+  // Supports: from:<name>  has:photo|file|link  before:YYYY-MM-DD
+  // after:YYYY-MM-DD  is:starred  Anything else stays as the plain
+  // text query sent to the server.
+  // v0.21.x: wrap occurrences of `needle` (case-insensitive) in <mark>
+  // inside `root`. Walks text nodes only so <a>/<code>/<pre> remain
+  // intact. Skips already-highlighted nodes.
+  function _highlightSearchMatches(root, needle) {
+    if (!needle) return;
+    const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
+        if (node.parentNode && node.parentNode.tagName === "MARK") return NodeFilter.FILTER_REJECT;
+        if (node.parentNode && node.parentNode.tagName === "SCRIPT") return NodeFilter.FILTER_REJECT;
+        return re.test(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      },
+    });
+    const targets = [];
+    let n;
+    while ((n = walker.nextNode())) targets.push(n);
+    for (const node of targets) {
+      const parts = node.nodeValue.split(re);
+      const matches = node.nodeValue.match(re);
+      if (!matches || matches.length === 0) continue;
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i]) frag.appendChild(document.createTextNode(parts[i]));
+        if (i < matches.length) {
+          const mark = document.createElement("mark");
+          mark.textContent = matches[i];
+          frag.appendChild(mark);
+        }
+      }
+      node.parentNode.replaceChild(frag, node);
+    }
+  }
+
+  function _parseSearchQuery(raw) {
+    const ops = {
+      from: null, has: [], before: null, after: null, is_starred: false,
+    };
+    const plainParts = [];
+    const tokens = String(raw).match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+    for (const tok of tokens) {
+      const m = tok.match(/^(from|has|before|after|is):(.+)$/i);
+      if (!m) { plainParts.push(tok.replace(/^"|"$/g, "")); continue; }
+      const op = m[1].toLowerCase();
+      const val = m[2].replace(/^"|"$/g, "").toLowerCase();
+      if (op === "from") ops.from = val;
+      else if (op === "has") ops.has.push(val);
+      else if (op === "before") ops.before = Date.parse(val) || null;
+      else if (op === "after") ops.after = Date.parse(val) || null;
+      else if (op === "is" && val === "starred") ops.is_starred = true;
+    }
+    return { plain: plainParts.join(" ").trim(), ops };
+  }
+  function _matchesSearchOps(msg, ops) {
+    if (ops.from) {
+      const peer = state.peers.get(msg.peer);
+      const who = (peer?.display_name || peer?.hostname || msg.peer || "").toLowerCase();
+      const me = (state.me?.display_name || state.me?.hostname || "").toLowerCase();
+      if (msg.dir === "out") {
+        if (!me.includes(ops.from) && ops.from !== "me") return false;
+      } else if (!who.includes(ops.from)) return false;
+    }
+    for (const h of ops.has) {
+      if (h === "photo" || h === "image") {
+        if (msg.t !== "FILE_OFFER" || !isImageName(msg.name)) return false;
+      } else if (h === "file") {
+        if (msg.t !== "FILE_OFFER" && msg.t !== "FILE_DONE") return false;
+      } else if (h === "link") {
+        if (!(msg.body || "").match(/\bhttps?:\/\//)) return false;
+      } else if (h === "voice" || h === "audio") {
+        if (!(msg.t === "FILE_OFFER" && isAudioName(msg.name))) return false;
+      }
+    }
+    if (ops.before && msg.ts > ops.before) return false;
+    if (ops.after && msg.ts < ops.after) return false;
+    if (ops.is_starred && !state.starred[msg.id]) return false;
+    return true;
+  }
   async function runSearch(q) {
     if (!state.selectedPeer) {
       searchBanner.style.display = "flex";
@@ -21639,14 +22780,21 @@
       return;
     }
     try {
+      const { plain, ops } = _parseSearchQuery(q);
       const peer = state.peers.get(state.selectedPeer);
       const fp = peer?.fingerprint || state.selectedPeer;
-      const url = `/api/search?q=${encodeURIComponent(q)}&peer=${encodeURIComponent(fp)}&limit=200`;
+      const url = `/api/search?q=${encodeURIComponent(plain)}&peer=${encodeURIComponent(fp)}&limit=200`;
       const r = await api.get(url);
+      let results = r.messages || [];
+      // Apply operator filters client-side.
+      const hasOps = ops.from || ops.has.length || ops.before || ops.after || ops.is_starred;
+      if (hasOps) results = results.filter((m) => _matchesSearchOps(m, ops));
       state.searchQuery = q;
-      state.searchResults = r.messages || [];
+      state.searchPlain = plain;
+      state.searchResults = results;
       searchBanner.style.display = "flex";
-      searchBannerText.textContent = `${state.searchResults.length} result${state.searchResults.length === 1 ? "" : "s"} for "${q}"`;
+      const hintSuffix = hasOps ? " (with filters)" : "";
+      searchBannerText.textContent = `${results.length} result${results.length === 1 ? "" : "s"} for "${q}"${hintSuffix}`;
       renderMessages();
     } catch (e) {
       searchBannerText.textContent = `Search didn't work: ${e.message || e}`;
@@ -21656,6 +22804,7 @@
 
   function finishSearch() {
     state.searchQuery = "";
+    state.searchPlain = "";
     state.searchResults = null;
     searchBanner.style.display = "none";
     renderMessages();
