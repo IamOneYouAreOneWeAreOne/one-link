@@ -4935,6 +4935,112 @@
   }
   .msg.file .img-preview:hover { filter: brightness(1.05); }
 
+  /* v0.21.x file-bubble open: clicking a complete file bubble opens
+     the file (lightbox for images, new tab otherwise). Cursor cue +
+     subtle hover lift make the affordance discoverable. */
+  .msg.file.file-clickable { cursor: pointer; }
+  .msg.file.file-clickable:hover {
+    filter: brightness(1.04);
+    box-shadow: 0 4px 12px rgba(0,0,0,.22);
+  }
+  .msg.file.file-clickable:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  /* Children that have their own click semantics shouldn't show
+     the parent's grab cursor. */
+  .msg.file.file-clickable .msg-toolbar,
+  .msg.file.file-clickable .msg-toolbar *,
+  .msg.file.file-clickable .audio-player,
+  .msg.file.file-clickable .audio-player *,
+  .msg.file.file-clickable .preview-toggle-link,
+  .msg.file.file-clickable .preview-host,
+  .msg.file.file-clickable .preview-host *,
+  .msg.file.file-clickable .send-retry,
+  .msg.file.file-clickable .reactions-row,
+  .msg.file.file-clickable .reactions-row * {
+    cursor: auto;
+  }
+
+  /* Lightbox: full-screen image viewer triggered by clicking an
+     image bubble. Backdrop is a translucent black; the pane floats
+     centred with a header (name + close X), the image, and footer
+     actions (Open in new tab / Save a copy). Esc closes; clicking
+     the backdrop closes; clicking inside the pane doesn't. */
+  .file-lightbox {
+    position: fixed; inset: 0;
+    display: none;
+    z-index: 9999;
+    align-items: center; justify-content: center;
+  }
+  .file-lightbox.show { display: flex; }
+  body.lb-open { overflow: hidden; }
+  .file-lightbox-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,.72);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+  .file-lightbox-pane {
+    position: relative;
+    max-width: min(96vw, 1400px);
+    max-height: 92vh;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .file-lightbox-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-2);
+  }
+  .file-lightbox-name {
+    font-size: 13px;
+    color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1; min-width: 0;
+  }
+  .file-lightbox-close {
+    background: transparent; border: 0;
+    color: var(--text-dim);
+    font-size: 18px; line-height: 1;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .file-lightbox-close:hover { color: var(--text); background: var(--bg-3); }
+  .file-lightbox-body {
+    flex: 1; min-height: 0;
+    display: flex; align-items: center; justify-content: center;
+    padding: 12px;
+    background: #0a0a0d;
+  }
+  .file-lightbox-img {
+    max-width: 100%;
+    max-height: calc(92vh - 110px);
+    object-fit: contain;
+    display: block;
+    user-select: none;
+  }
+  .file-lightbox-foot {
+    display: flex; align-items: center; justify-content: flex-end;
+    gap: 16px;
+    padding: 8px 14px;
+    border-top: 1px solid var(--line);
+    background: var(--bg-2);
+    font-size: 12px;
+  }
+  .file-lightbox-foot a {
+    color: var(--accent-2);
+    text-decoration: none;
+  }
+  .file-lightbox-foot a:hover { text-decoration: underline; }
+
   /* ── Files panel: Received|Sent toggle ─────────────────────────────── */
   .files-toggle {
     display: flex; gap: 4px;
@@ -7800,6 +7906,14 @@
     // Reality dot does not surface - that's Doctrine §3.5.c (no
     // surreptitious indicators; if we don't know, we don't say).
     provenanceByBlob: new Map(),
+    // v0.21.x: in-memory cache of recently-uploaded outbound files,
+    // keyed by `${name}|${size}`. Lets the sender click their own
+    // outbound file bubble to re-open the photo/file they just sent
+    // — the daemon stages uploads to a temp dir then deletes them
+    // post-send, so without this cache the sender's bubble would
+    // dead-end. Entry shape: {file: File, addedAt: ms, objectUrl: string|null}.
+    // Lives across renders; cleared on tab close (best-effort, by design).
+    outboundFileCache: new Map(),
   };
 
   // v0.7.5: fixed emoji palette for reactions. Custom picker
@@ -9400,6 +9514,164 @@
       }
     }
     return frag;
+  }
+
+  // v0.21.x file-bubble open: click a complete FILE bubble (sender
+  // OR receiver) to see the file. For images we open an inline
+  // lightbox; for everything else the file is opened in a new tab
+  // (the browser then renders it inline or downloads it depending
+  // on type). The sender side resolves the file from
+  // state.outboundFileCache (browser holds the original File until
+  // tab close); the receiver side hits /api/files/<name> which the
+  // daemon serves from inbox_dir. When neither path is available
+  // the bubble surfaces a calm hint instead of dead-clicking.
+  function _outboundFileKey(name, size) {
+    return `${(name || "").toLowerCase()}|${size || 0}`;
+  }
+  function rememberOutboundFile(file) {
+    if (!file || !file.name) return;
+    const key = _outboundFileKey(file.name, file.size);
+    const prev = state.outboundFileCache.get(key);
+    if (prev?.objectUrl) {
+      try { URL.revokeObjectURL(prev.objectUrl); } catch (_) {}
+    }
+    state.outboundFileCache.set(key, {
+      file,
+      addedAt: Date.now(),
+      objectUrl: null,
+    });
+  }
+  function objectUrlForOutboundFile(name, size) {
+    const key = _outboundFileKey(name, size);
+    const ent = state.outboundFileCache.get(key);
+    if (!ent) return null;
+    if (!ent.objectUrl) ent.objectUrl = URL.createObjectURL(ent.file);
+    return ent.objectUrl;
+  }
+  // Lightbox singleton. Created on first use, reused thereafter.
+  function _ensureLightbox() {
+    let lb = document.getElementById("file-lightbox");
+    if (lb) return lb;
+    lb = document.createElement("div");
+    lb.id = "file-lightbox";
+    lb.className = "file-lightbox";
+    lb.setAttribute("role", "dialog");
+    lb.setAttribute("aria-modal", "true");
+    lb.setAttribute("aria-label", "Image viewer");
+    const backdrop = document.createElement("div");
+    backdrop.className = "file-lightbox-backdrop";
+    backdrop.setAttribute("data-lb-close", "");
+    lb.appendChild(backdrop);
+    const pane = document.createElement("div");
+    pane.className = "file-lightbox-pane";
+    pane.setAttribute("role", "document");
+    lb.appendChild(pane);
+    const head = document.createElement("div");
+    head.className = "file-lightbox-head";
+    pane.appendChild(head);
+    const nameEl = document.createElement("div");
+    nameEl.className = "file-lightbox-name";
+    head.appendChild(nameEl);
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "file-lightbox-close";
+    closeBtn.setAttribute("data-lb-close", "");
+    closeBtn.setAttribute("aria-label", "Close");
+    closeBtn.textContent = "x";
+    head.appendChild(closeBtn);
+    const body = document.createElement("div");
+    body.className = "file-lightbox-body";
+    pane.appendChild(body);
+    const foot = document.createElement("div");
+    foot.className = "file-lightbox-foot";
+    pane.appendChild(foot);
+    const openLink = document.createElement("a");
+    openLink.className = "file-lightbox-open";
+    openLink.target = "_blank";
+    openLink.rel = "noopener noreferrer";
+    openLink.textContent = "Open in new tab";
+    foot.appendChild(openLink);
+    const downloadLink = document.createElement("a");
+    downloadLink.className = "file-lightbox-download";
+    downloadLink.setAttribute("download", "");
+    downloadLink.textContent = "Save a copy";
+    foot.appendChild(downloadLink);
+    document.body.appendChild(lb);
+    lb.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (t && t instanceof Element && t.hasAttribute("data-lb-close")) {
+        closeLightbox();
+      }
+    });
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && lb.classList.contains("show")) {
+        closeLightbox();
+      }
+    });
+    return lb;
+  }
+  function openLightbox({ url, name, sizeBytes, downloadName }) {
+    const lb = _ensureLightbox();
+    lb.querySelector(".file-lightbox-name").textContent = name
+      + (sizeBytes ? ` · ${fmtBytes(sizeBytes)}` : "");
+    const body = lb.querySelector(".file-lightbox-body");
+    body.replaceChildren();
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = name || "image";
+    img.className = "file-lightbox-img";
+    body.appendChild(img);
+    const openA = lb.querySelector(".file-lightbox-open");
+    openA.href = url;
+    const dlA = lb.querySelector(".file-lightbox-download");
+    dlA.href = url;
+    dlA.setAttribute("download", downloadName || name || "file");
+    lb.classList.add("show");
+    document.body.classList.add("lb-open");
+  }
+  function closeLightbox() {
+    const lb = document.getElementById("file-lightbox");
+    if (!lb) return;
+    lb.classList.remove("show");
+    document.body.classList.remove("lb-open");
+    const body = lb.querySelector(".file-lightbox-body");
+    if (body) body.replaceChildren();
+  }
+  // Open the file referenced by `msg` (a TEXT-shaped FILE_OFFER or
+  // FILE_DONE event). Picks the right source: receiver → daemon's
+  // /api/files; sender → cached File object. Picks the right
+  // viewer: image → lightbox; everything else → new tab.
+  function openMessageFile(msg) {
+    const name = msg.name || "file";
+    const size = msg.size || 0;
+    const isImage = isImageName(name);
+    let url = null;
+    let downloadName = name;
+    if (msg.dir === "in") {
+      const fname = (msg.path || name || "").toString().split(/[\\\/]/).pop();
+      if (!fname) {
+        toast("Couldn't find the file on disk.", "info", 4000);
+        return;
+      }
+      url = `/api/files/${encodeURIComponent(fname)}`;
+      downloadName = fname;
+    } else if (msg.dir === "out") {
+      url = objectUrlForOutboundFile(name, size);
+      if (!url) {
+        toast(
+          "The original file isn't kept in the browser after a tab refresh. "
+          + "Drag and drop it again to re-share.",
+          "info", 6000,
+        );
+        return;
+      }
+    }
+    if (!url) return;
+    if (isImage) {
+      openLightbox({ url, name, sizeBytes: size, downloadName });
+    } else {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
   }
 
   // Long message bodies clutter the chat the way a pasted log or
@@ -11211,10 +11483,13 @@
         msg.ok == null ? "" : msg.ok, msg.path || "", transferSig,
         // v0.21.x: include send-state so optimistic→sent/queued/
         // failed transitions actually re-render (the bubble's
-        // status pill + Retry button depend on it).
+        // status pill + Retry button depend on it). _queueDetail
+        // and _queueHint feed the per-bubble user-facing copy
+        // pulled from the daemon's translated error.
         msg._sendingState || "",
         msg._error ? "e1" : "",
         msg._queueReason || "",
+        msg._queueDetail ? "d1" : "",
       ].join("|"));
     }
     return parts.join("Â¶");
@@ -11872,6 +12147,40 @@
     const icon = el("div", "icon", fileIcon(msg.name || ""));
     const meta = el("div", "meta");
     meta.appendChild(el("div", "name", msg.name || "file"));
+    // v0.21.x: clicking a completed file bubble opens the file
+    // (image → inline lightbox; anything else → new tab). Sender +
+    // receiver supported via openMessageFile's source-routing. Only
+    // active for "sent"/done state — clicking an in-flight bubble
+    // would race the transfer.
+    const isCompleteForOpen = (kind === "sent")
+      || (msg.t === "FILE_DONE" && msg.ok);
+    if (isCompleteForOpen) {
+      b.classList.add("file-clickable");
+      const openHandler = (ev) => {
+        // Don't hijack clicks on inner controls (toolbar buttons,
+        // inline audio player, preview link, multi-select chip).
+        if (ev.target.closest(
+          ".msg-toolbar, .audio-player, .preview-toggle-link, "
+          + ".preview-host, .send-retry, .reactions-row, .selection-checkbox"
+        )) return;
+        if (state.selectedMessageIds.has(msg.id)) return;
+        ev.preventDefault();
+        openMessageFile(msg);
+      };
+      b.addEventListener("click", openHandler);
+      b.setAttribute("role", "button");
+      b.setAttribute("tabindex", "0");
+      b.setAttribute(
+        "aria-label",
+        `Open ${msg.name || "file"}${msg.size ? ` (${fmtBytes(msg.size)})` : ""}`,
+      );
+      b.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          openMessageFile(msg);
+        }
+      });
+    }
 
     // Size + status icon line
     const sizeLine = el("div", "size");
@@ -11910,7 +12219,9 @@
     const facts = renderTransferFacts(t, kind);
     if (facts) meta.appendChild(facts);
 
-    // Inline image preview for received images that are on disk
+    // Inline image preview for received images that are on disk.
+    // Clicking the thumbnail opens the inline lightbox (with
+    // Open-in-new-tab + Save-a-copy footer). v0.21.x.
     const incomingPath = msg.path || (t?.metadata?.path);
     if (msg.dir === "in" && kind === "sent" && isImageName(msg.name)) {
       const fname = (incomingPath || msg.name || "").toString().split(/[\\\/]/).pop();
@@ -11919,7 +12230,40 @@
         img.className = "img-preview";
         img.src = `/api/files/${encodeURIComponent(fname)}`;
         img.alt = msg.name || "image";
-        img.onclick = () => window.open(img.src, "_blank");
+        img.onclick = (ev) => {
+          ev.stopPropagation();
+          openLightbox({
+            url: img.src,
+            name: msg.name || fname,
+            sizeBytes: msg.size || 0,
+            downloadName: fname,
+          });
+        };
+        meta.appendChild(img);
+      }
+    }
+    // v0.21.x: outbound image thumbnail. The sender used to see no
+    // preview of their own sent photo — only the recipient did. With
+    // the in-memory File cache populated at upload time, we can
+    // render an identical thumbnail from a blob: URL so the sender's
+    // bubble matches the recipient's. Falls back to the icon-only
+    // bubble if the File isn't cached (e.g. after a tab refresh).
+    if (msg.dir === "out" && kind === "sent" && isImageName(msg.name)) {
+      const cachedUrl = objectUrlForOutboundFile(msg.name, msg.size || 0);
+      if (cachedUrl) {
+        const img = document.createElement("img");
+        img.className = "img-preview";
+        img.src = cachedUrl;
+        img.alt = msg.name || "image";
+        img.onclick = (ev) => {
+          ev.stopPropagation();
+          openLightbox({
+            url: cachedUrl,
+            name: msg.name || "image",
+            sizeBytes: msg.size || 0,
+            downloadName: msg.name || "image",
+          });
+        };
         meta.appendChild(img);
       }
     }
@@ -13540,6 +13884,8 @@
   }
   function _handleMeshTile(kind) {
     if (kind === "online") {
+      const convoBtn = document.querySelector('[data-pane="convo"]');
+      if (convoBtn && !_phoneCannotShow(convoBtn)) convoBtn.click();
       toggleActivityNearby();
     } else if (kind === "active") {
       const filesBtn = document.querySelector('[data-pane="files"]');
@@ -13877,12 +14223,43 @@
       wrap.appendChild(el("span", "send-dot"));
       wrap.appendChild(document.createTextNode(" Sending…"));
     } else if (msg._sendingState === "queued") {
-      const reasonHint = (msg._queueReason === "client_timeout")
-        ? "Send took longer than expected"
-        : (msg._queueReason === "peer_offline")
-          ? "Other device is offline"
-          : "Will send when the path is healthy";
+      // Prefer the daemon's user-facing copy when present — it
+      // explains the actual wire-path state (handshake, ratchet
+      // desync, peer unreachable…) rather than the vague "path is
+      // healthy" line that confused users when presence said online.
+      let reasonHint;
+      if (msg._queueDetail) {
+        reasonHint = msg._queueDetail;
+      } else if (msg._queueReason === "client_timeout") {
+        reasonHint = "Send took longer than expected";
+      } else if (msg._queueReason === "peer_offline") {
+        reasonHint = "Other device is offline";
+      } else if (msg._queueReason === "peer_unreachable") {
+        reasonHint = "Other device is not reachable right now";
+      } else if (msg._queueReason === "handshake_failed") {
+        reasonHint = "Re-establishing secure session";
+      } else if (msg._queueReason === "timeout") {
+        reasonHint = "Other device didn't respond in time";
+      } else if (msg._queueReason === "secure_session_desync") {
+        reasonHint = "Refreshing secure session";
+      } else {
+        reasonHint = "Will send when the path is healthy";
+      }
       wrap.appendChild(document.createTextNode(`Queued · ${reasonHint}`));
+      // Inline "Retry now" so impatient users don't have to wait on
+      // the daemon's heal-and-drain loop. Re-uses the same retrySend
+      // path the Failed state uses, so the state machine stays
+      // single-source.
+      wrap.appendChild(document.createTextNode(" · "));
+      const retryNow = document.createElement("button");
+      retryNow.type = "button";
+      retryNow.className = "send-retry";
+      retryNow.textContent = "Retry now";
+      retryNow.onclick = (ev) => {
+        ev.stopPropagation();
+        retrySend(msg.id);
+      };
+      wrap.appendChild(retryNow);
     } else if (msg._sendingState === "failed") {
       const txt = msg._error || "Failed to send";
       wrap.appendChild(document.createTextNode(`${txt} · `));
@@ -13930,8 +14307,11 @@
           _error: result.user_message || result.error || "Message couldn't be sent.",
         });
       } else if (result && result.queued) {
+        const tx = result.after_failure || {};
         _markBubbleState(msgId, "queued", {
           _queueReason: result.reason || null,
+          _queueDetail: tx.error || null,
+          _queueHint: tx.hint || null,
         });
       } else {
         _markBubbleState(msgId, "sent");
@@ -15604,15 +15984,15 @@
     }
   }
 
-  function handleLocalVersionDrift(daemonVer, pageVer) {
+  function handleLocalVersionDrift(daemonVer, pageVer, reason) {
     console.warn(
-      `One Link page/backend version drift: page=${pageVer}, daemon=${daemonVer}`,
+      `One Link page/backend drift: page=${pageVer}, daemon=${daemonVer}, reason=${reason || "version"}`,
     );
     // Hand off to LiveRefresh: it schedules a soft reload as soon as
     // the user is idle (no draft text, no open modal, no recent typing)
     // so the UI quietly upgrades itself without disrupting work.
     if (typeof LiveRefresh !== "undefined" && LiveRefresh.scheduleSoftReload) {
-      LiveRefresh.scheduleSoftReload(daemonVer, "boot");
+      LiveRefresh.scheduleSoftReload(daemonVer, reason || "boot");
     } else {
       // Fallback: should never fire because LiveRefresh is defined
       // earlier in this file. Keeps behavior safe if init order
@@ -15630,6 +16010,7 @@
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
   const PAGE_BUILT_FOR = "0.21.0-alpha";
+  const PAGE_SOURCE_FINGERPRINT = "__ONE_LINK_SOURCE_FINGERPRINT__";
 
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
@@ -15655,7 +16036,17 @@
       // daemons automatically; if a browser tab survives that handoff, keep the
       // chat surface usable and log the drift instead of blocking the user.
       if (me.app_version && me.app_version !== PAGE_BUILT_FOR) {
-        handleLocalVersionDrift(me.app_version, PAGE_BUILT_FOR);
+        handleLocalVersionDrift(me.app_version, PAGE_BUILT_FOR, "boot");
+      } else if (
+        me.source_fingerprint
+        && PAGE_SOURCE_FINGERPRINT !== "__ONE_LINK_SOURCE_FINGERPRINT__"
+        && me.source_fingerprint !== PAGE_SOURCE_FINGERPRINT
+      ) {
+        handleLocalVersionDrift(
+          `${me.app_version || PAGE_BUILT_FOR}:${me.source_fingerprint}`,
+          `${PAGE_BUILT_FOR}:${PAGE_SOURCE_FINGERPRINT}`,
+          "source",
+        );
       }
     } catch (e) {
       toast("Can't reach One Link. Is it running?", "bad", 8000);
@@ -15990,9 +16381,18 @@
       try {
         const me = await api.get("/api/me");
         const v = me && me.app_version;
-        if (!v) return;
-        if (v === PAGE_BUILT_FOR) return;
-        scheduleSoftReload(v, "reconnect");
+        const fp = me && me.source_fingerprint;
+        if (v && v !== PAGE_BUILT_FOR) {
+          scheduleSoftReload(v, "reconnect");
+          return;
+        }
+        if (
+          fp
+          && PAGE_SOURCE_FINGERPRINT !== "__ONE_LINK_SOURCE_FINGERPRINT__"
+          && fp !== PAGE_SOURCE_FINGERPRINT
+        ) {
+          scheduleSoftReload(`${v || PAGE_BUILT_FOR}:${fp}`, "source");
+        }
       } catch {
         // Ignore - we'll get another shot on the next reconnect.
       }
@@ -17054,8 +17454,18 @@
             );
           } else if (result && result.queued) {
             // 202: server queued (peer offline / timeout / transient).
+            // Plumb the daemon's user-facing copy ("Could not
+            // establish a secure connection…" / "The other device
+            // didn't respond in time" / etc.) onto the bubble so the
+            // user sees the actual reason. The generic "Will send
+            // when the path is healthy" line was confusing when
+            // presence said "online" — presence is mDNS-level, the
+            // actual wire path can still be desynced.
+            const tx = result.after_failure || {};
             _markBubbleState(clientMsgId, "queued", {
               _queueReason: result.reason || null,
+              _queueDetail: tx.error || null,
+              _queueHint: tx.hint || null,
             });
           } else {
             // Success: daemon will broadcast the persisted event via
@@ -18135,6 +18545,12 @@
       toast("This device is blocked. Use Allow device first.", "bad");
       return;
     }
+    // v0.21.x: keep the File object so the sender's bubble can open
+    // the photo / file on click. The daemon stages then deletes the
+    // upload, so without this cache the outbound bubble would
+    // dead-end. Cached by name+size, so a same-name+size resend
+    // refreshes the entry.
+    rememberOutboundFile(file);
     const sendingToast = toast(`Sending ${file.name}...`, "info", 30000);
     try {
       const result = await api.upload(state.selectedPeer, file);
@@ -20351,7 +20767,7 @@
     <button class="btn-ghost" id="btn-call-record" aria-label="Save this call">Save</button>
   </div>
   <div id="call-recording-badge" class="call-recording-badge" aria-live="polite">Recording (both sides agreed)</div>
-  <input type="file" id="call-file-input" style="display:none" multiple />
+  <input type="file" id="call-file-input" style="display:none" multiple aria-label="Send file in call" />
   <div id="call-sas-pane" class="sas-pane" aria-live="polite">
     <div>Read this aloud. If you both hear the same words, tap Yes.</div>
     <div class="sas-words" id="call-sas-words"></div>
@@ -20381,8 +20797,11 @@
     pendingIceCandidates: [],
     appliedIceKeys: new Set(),
     metricsTimer: null,
+    mediaWatchdogTimer: null,
     oneEvents: [],
     localMediaReady: false,
+    sdpOfferInFlight: false,
+    sdpAnswerInFlight: false,
   };
   // Expose for debug + tests
   if (typeof window !== "undefined") {
@@ -20424,6 +20843,7 @@
     localStream: null,        // MediaStream from getUserMedia
     remoteStream: null,        // assembled from ontrack events
     pc: null,                  // RTCPeerConnection (when wired)
+    iceConfigReady: null,      // Promise that resolves after STUN config is applied
     muted: false,
     cameraOff: false,
   };
@@ -20515,6 +20935,7 @@
       try { media.pc.close(); } catch (_) {}
       media.pc = null;
     }
+    media.iceConfigReady = null;
     callUI.pendingIceCandidates = [];
     callUI.appliedIceKeys.clear();
     callUI.localMediaReady = false;
@@ -20615,6 +21036,7 @@
     // send_ice_candidate). Inbound SDP / ICE arrives as
     // ``call_event`` tail messages over the existing WebSocket.
     if (!window.RTCPeerConnection) return null;
+    if (media.pc && media.pc.signalingState !== "closed") return media.pc;
     // May 15 2026 - sovereignty default: NO third-party STUN
     // servers. Same-LAN pairing works without them (host
     // candidates suffice). Cross-NAT pairing requires the user to
@@ -20626,7 +21048,7 @@
     const pc = new RTCPeerConnection({ iceServers: [] });
     // Best-effort fetch of user-configured STUN. Silent on failure
     // - we'd rather degrade to LAN-only than reach a third party.
-    (async () => {
+    media.iceConfigReady = (async () => {
       try {
         const r = await fetch("/api/peer-rtc/ice-config", {
           credentials: "include", cache: "no-store",
@@ -20646,6 +21068,7 @@
       try { stream.addTrack(ev.track); } catch (_) {}
       attachRemoteStream(stream);
       addOneCallEvent(`Remote ${ev.track.kind} connected.`);
+      reportCallEvent("remote_track_connected", { media_kind: ev.track.kind });
     };
     pc.onicecandidate = (ev) => {
       // Trickle each candidate to the daemon as it's gathered.
@@ -20674,6 +21097,12 @@
     pc.oniceconnectionstatechange = () => {
       // The Immune System reads connection state via vitals; emitted
       // as a metrics ping on the events WebSocket.
+      reportCallMetricsOnce();
+      addOneCallEvent(`Media route ${pc.iceConnectionState}.`);
+      reportCallEvent("ice_state_changed", { state: pc.iceConnectionState });
+    };
+    pc.onconnectionstatechange = () => {
+      reportCallMetricsOnce();
     };
     media.pc = pc;
     return pc;
@@ -20681,28 +21110,72 @@
 
   async function sendLocalSdpOffer() {
     if (!media.pc || !callUI.activeCallId) return;
+    if (callUI.sdpOfferInFlight) return;
     try {
+      callUI.sdpOfferInFlight = true;
+      addOneCallEvent("Preparing media offer...");
+      reportCallEvent("offer_preparing");
+      if (media.iceConfigReady) await media.iceConfigReady;
       const offer = await media.pc.createOffer();
       await media.pc.setLocalDescription(offer);
-      await callApiPost({
+      const result = await callApiPost({
         action: "send_sdp_offer",
         call_id: callUI.activeCallId,
         sdp: offer.sdp,
       });
-    } catch (_) { /* fall through - peer may already have an offer */ }
+      addOneCallEvent(result && result.ok
+        ? "Media offer sent."
+        : "Media offer could not reach the other device.");
+      reportCallEvent(result && result.ok ? "offer_sent" : "offer_send_failed", {
+        ok: !!(result && result.ok),
+      });
+    } catch (e) {
+      addOneCallEvent(`Media offer failed: ${e && e.name ? e.name : "error"}.`);
+      reportCallEvent("offer_send_failed", { ok: false });
+    } finally {
+      callUI.sdpOfferInFlight = false;
+    }
   }
 
   async function sendLocalSdpAnswer() {
     if (!media.pc || !callUI.activeCallId) return;
+    if (callUI.sdpAnswerInFlight) return;
     try {
+      callUI.sdpAnswerInFlight = true;
+      addOneCallEvent("Preparing media answer...");
+      reportCallEvent("answer_preparing");
+      if (media.iceConfigReady) await media.iceConfigReady;
       const answer = await media.pc.createAnswer();
       await media.pc.setLocalDescription(answer);
-      await callApiPost({
+      const result = await callApiPost({
         action: "send_sdp_answer",
         call_id: callUI.activeCallId,
         sdp: answer.sdp,
       });
-    } catch (_) { /* fall through */ }
+      addOneCallEvent(result && result.ok
+        ? "Media answer sent."
+        : "Media answer could not reach the other device.");
+      reportCallEvent(result && result.ok ? "answer_sent" : "answer_send_failed", {
+        ok: !!(result && result.ok),
+      });
+    } catch (e) {
+      addOneCallEvent(`Media answer failed: ${e && e.name ? e.name : "error"}.`);
+      reportCallEvent("answer_send_failed", { ok: false });
+    } finally {
+      callUI.sdpAnswerInFlight = false;
+    }
+  }
+
+  async function ensureMediaNegotiation(reason) {
+    if (!callUI.activeCallId || !media.pc || !media.localStream) return;
+    if (!callUI.localMediaReady) return;
+    const hasLiveLocal = media.localStream.getTracks().some((t) => t.readyState === "live");
+    if (!hasLiveLocal) return;
+    if (media.pc.localDescription) return;
+    if (media.pc.signalingState && media.pc.signalingState !== "stable") return;
+    addOneCallEvent(`Media negotiation starting${reason ? ` (${reason})` : ""}.`);
+    reportCallEvent("negotiation_starting", { reason });
+    await sendLocalSdpOffer();
   }
 
   async function applyRemoteSdpOffer(sdp) {
@@ -21193,6 +21666,7 @@
       }
     }
     callUI.localMediaReady = true;
+    reportCallEvent("local_media_ready", { reason: "start" });
     // Originator creates the SDP offer + sends it now. The peer
     // will respond with an SDP answer once they accept.
     await sendLocalSdpOffer();
@@ -21357,11 +21831,13 @@
     const overlay = $$("#call-outgoing-overlay");
     if (overlay) overlay.classList.remove("show");
     _resetOutgoingState();
-    // Stop the self-preview video stream.
+    // Detach the self-preview video. It points at the same MediaStream
+    // that is already attached to RTCPeerConnection, so stopping tracks
+    // here would kill mic/camera exactly when the call becomes active.
     const selfPrev = $$("#call-outgoing-selfpreview");
     if (selfPrev) {
       try {
-        if (selfPrev.srcObject) {
+        if (selfPrev.srcObject && selfPrev.srcObject !== media.localStream) {
           selfPrev.srcObject.getTracks().forEach((t) => {
             try { t.stop(); } catch (_) {}
           });
@@ -21495,6 +21971,17 @@
     )).join("");
   }
 
+  function reportCallEvent(event, extra) {
+    const callId = callUI.activeCallId || callUI.inboundCallId;
+    if (!callId || !event) return;
+    callApiPost({
+      action: "report_call_event",
+      call_id: callId,
+      event,
+      ...(extra || {}),
+    }).catch(() => {});
+  }
+
   function showCallFileStatus(text, kind) {
     const box = $$("#call-one-file-status");
     if (!box) return;
@@ -21548,6 +22035,22 @@
       if (rttMs !== null) updateOneChip("#call-one-rtt", `${rttMs} ms`);
       if (loss !== null) updateOneChip("#call-one-loss", `${Math.round(loss * 100)}%`);
       if (kbps !== null) updateOneChip("#call-one-route", kbps > 5000 ? "Fast local" : "Local");
+      const selected = {
+        ice_connection_state: media.pc.iceConnectionState || null,
+        connection_state: media.pc.connectionState || null,
+        ice_gathering_state: media.pc.iceGatheringState || null,
+        signaling_state: media.pc.signalingState || null,
+        has_local_description: !!media.pc.localDescription,
+        has_remote_description: !!media.pc.remoteDescription,
+        local_audio_tracks: media.localStream ? media.localStream.getAudioTracks().length : 0,
+        local_video_tracks: media.localStream ? media.localStream.getVideoTracks().length : 0,
+        local_live_audio_tracks: media.localStream ? media.localStream.getAudioTracks().filter((t) => t.readyState === "live").length : 0,
+        local_live_video_tracks: media.localStream ? media.localStream.getVideoTracks().filter((t) => t.readyState === "live").length : 0,
+        remote_audio_tracks: media.remoteStream ? media.remoteStream.getAudioTracks().length : 0,
+        remote_video_tracks: media.remoteStream ? media.remoteStream.getVideoTracks().length : 0,
+        remote_live_audio_tracks: media.remoteStream ? media.remoteStream.getAudioTracks().filter((t) => t.readyState === "live").length : 0,
+        remote_live_video_tracks: media.remoteStream ? media.remoteStream.getVideoTracks().filter((t) => t.readyState === "live").length : 0,
+      };
       await callApiPost({
         action: "report_metrics",
         call_id: callUI.activeCallId,
@@ -21555,6 +22058,7 @@
         jitter_ms: jitterMs,
         loss_rate: loss,
         bandwidth_estimate_kbps: kbps,
+        ...selected,
       });
     } catch (_) {}
   }
@@ -21563,12 +22067,28 @@
     if (callUI.metricsTimer) clearInterval(callUI.metricsTimer);
     reportCallMetricsOnce();
     callUI.metricsTimer = setInterval(reportCallMetricsOnce, 2000);
+    startMediaWatchdog();
   }
 
   function stopCallTelemetry() {
     if (callUI.metricsTimer) {
       clearInterval(callUI.metricsTimer);
       callUI.metricsTimer = null;
+    }
+    stopMediaWatchdog();
+  }
+
+  function startMediaWatchdog() {
+    if (callUI.mediaWatchdogTimer) clearInterval(callUI.mediaWatchdogTimer);
+    callUI.mediaWatchdogTimer = setInterval(() => {
+      ensureMediaNegotiation("watchdog");
+    }, 1500);
+  }
+
+  function stopMediaWatchdog() {
+    if (callUI.mediaWatchdogTimer) {
+      clearInterval(callUI.mediaWatchdogTimer);
+      callUI.mediaWatchdogTimer = null;
     }
   }
 
@@ -21597,10 +22117,13 @@
         startAttestStream(stream);
       }
       callUI.localMediaReady = true;
+      reportCallEvent("local_media_ready", { reason: "accept" });
       if (callUI.pendingRemoteOffer) {
         const offerSdp = callUI.pendingRemoteOffer;
         callUI.pendingRemoteOffer = null;
         await applyRemoteSdpOffer(offerSdp);
+      } else {
+        await ensureMediaNegotiation("accept");
       }
     } else {
       callUI.localMediaReady = false;
@@ -21915,6 +22438,7 @@
         }
         if (m.peer_master_vk_hex) callUI.activeCallPeerFp = m.peer_master_vk_hex;
         showActiveSurface(callUI.activeCallPeer, "");
+        ensureMediaNegotiation("active");
       } else if (phase === "ended" || phase === "async_capture") {
         hideOutgoingOverlay();
         hideIncomingRing();
@@ -21944,6 +22468,8 @@
       // Recipient side: peer's SDP offer arrived. Track it so we
       // setRemoteDescription + createAnswer once we accept.
       callUI.pendingRemoteOffer = m.sdp || "";
+      addOneCallEvent("Media offer received.");
+      reportCallEvent("remote_offer_received");
       if (callUI.activeCallId === callId && media.pc && callUI.localMediaReady) {
         callUI.pendingRemoteOffer = null;
         applyRemoteSdpOffer(m.sdp);
@@ -21951,6 +22477,8 @@
       return true;
     }
     if (tail === "sdp_answer") {
+      addOneCallEvent("Media answer received.");
+      reportCallEvent("remote_answer_received");
       applyRemoteSdpAnswer(m.sdp);
       return true;
     }

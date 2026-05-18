@@ -92,7 +92,15 @@ def peer() -> Identity:
 
 
 @pytest.fixture
-def server(me: Identity, peer: Identity):
+def server(
+    me: Identity,
+    peer: Identity,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import one_link.server as server_mod
+
+    monkeypatch.setattr(server_mod, "data_dir", lambda: tmp_path)
     from one_link.server import UIServer
     d = Daemon(me=me)
     d.state = _FakeState({peer.fingerprint: peer.public_bytes.hex()})
@@ -145,6 +153,99 @@ def test_report_metrics_updates_immune_cache(server) -> None:
     assert cached["rtt_ms"] == 320.0
     assert cached["loss_rate"] == 0.12
     assert cached["confirm_ratio_voice"] == 0.7
+
+
+def test_report_metrics_writes_privacy_safe_media_audit(
+    server,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import one_link.server as server_mod
+
+    monkeypatch.setattr(server_mod, "data_dir", lambda: tmp_path)
+    req = _FakeRequest({
+        "action": "report_metrics",
+        "call_id": "rt-call-1",
+        "rtt_ms": 44.0,
+        "loss_rate": 0.0,
+        "ice_connection_state": "connected",
+        "connection_state": "connected",
+        "ice_gathering_state": "complete",
+        "signaling_state": "stable",
+        "has_local_description": True,
+        "has_remote_description": True,
+        "local_audio_tracks": 1,
+        "local_video_tracks": 1,
+        "local_live_audio_tracks": 1,
+        "local_live_video_tracks": 1,
+        "remote_audio_tracks": 1,
+        "remote_video_tracks": 1,
+        "remote_live_audio_tracks": 1,
+        "remote_live_video_tracks": 1,
+        # These must never be persisted by the audit helper.
+        "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+        "candidate": "candidate:1 1 udp 1 192.168.1.10 9999 typ host",
+    })
+    resp = _run(server.api_call_action(req))
+    body = json.loads(resp.body.decode("utf-8"))
+    assert body["ok"] is True
+
+    audit = tmp_path / "logs" / "call_media_audit.jsonl"
+    row = json.loads(audit.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["call_id"] == "rt-call-1"
+    assert row["ice_connection_state"] == "connected"
+    assert row["remote_audio_tracks"] == 1
+    assert row["remote_video_tracks"] == 1
+    assert row["local_live_audio_tracks"] == 1
+    assert row["remote_live_video_tracks"] == 1
+    assert row["has_local_description"] is True
+    assert row["has_remote_description"] is True
+    assert row["row_type"] == "metrics"
+    serialized = json.dumps(row)
+    assert "192.168.1.10" not in serialized
+    assert "v=0" not in serialized
+
+
+def test_report_call_event_writes_privacy_safe_media_audit(
+    server,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import one_link.server as server_mod
+
+    monkeypatch.setattr(server_mod, "data_dir", lambda: tmp_path)
+    req = _FakeRequest({
+        "action": "report_call_event",
+        "call_id": "rt-call-1",
+        "event": "offer_sent",
+        "reason": "watchdog",
+        "state": "connected",
+        "media_kind": "video",
+        "ok": True,
+        # These must never be persisted by the audit helper.
+        "sdp": "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n",
+        "candidate": "candidate:1 1 udp 1 10.0.0.5 9999 typ host",
+        "peer_label": "Personal Laptop",
+        "file_name": "private.pdf",
+    })
+    resp = _run(server.api_call_action(req))
+    body = json.loads(resp.body.decode("utf-8"))
+    assert body["ok"] is True
+
+    audit = tmp_path / "logs" / "call_media_audit.jsonl"
+    row = json.loads(audit.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["row_type"] == "event"
+    assert row["call_id"] == "rt-call-1"
+    assert row["event"] == "offer_sent"
+    assert row["reason"] == "watchdog"
+    assert row["state"] == "connected"
+    assert row["media_kind"] == "video"
+    assert row["ok"] is True
+    serialized = json.dumps(row)
+    assert "10.0.0.5" not in serialized
+    assert "v=0" not in serialized
+    assert "Personal Laptop" not in serialized
+    assert "private.pdf" not in serialized
 
 
 def test_report_metrics_clamps_out_of_range_values(server) -> None:

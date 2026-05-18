@@ -1939,6 +1939,11 @@ class UIServer:
             html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
         except FileNotFoundError:
             html = "<h1>One Link UI not bundled</h1>"
+        else:
+            html = html.replace(
+                "__ONE_LINK_SOURCE_FINGERPRINT__",
+                runtime_build_identity()["source_fingerprint"],
+            )
         if bootstrap_ok:
             scrub = (
                 "<script>"
@@ -3312,6 +3317,8 @@ class UIServer:
         # Tier γ — browser pushes per-window WebRTC stats.
         if action_name == "report_metrics":
             return self._handle_report_metrics_action(body)
+        if action_name == "report_call_event":
+            return self._handle_report_call_event_action(body)
 
         # Tier η — browser-driven Predictive Continuity API.
         if action_name == "observe_frame":
@@ -3507,7 +3514,160 @@ class UIServer:
             confirm_ratio_voice=_opt_float("confirm_ratio_voice"),
             bandwidth_estimate_kbps=_opt_float("bandwidth_estimate_kbps"),
         )
+        self._append_call_media_audit(body)
         return web.json_response({"ok": True, "call_id": call_id})
+
+    def _handle_report_call_event_action(self, body: dict) -> web.Response:
+        """Browser posts privacy-safe WebRTC state-machine breadcrumbs."""
+        call_id = body.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return web.json_response(
+                {"ok": False, "user_message": "Call is no longer active."},
+            )
+        self._append_call_media_event_audit(body)
+        return web.json_response({"ok": True, "call_id": call_id})
+
+    def _append_call_media_event_audit(self, body: dict) -> None:
+        """Append a sanitized call-media event row.
+
+        Events are fixed slugs from the browser media driver. They do not
+        include SDP, ICE candidates, IP addresses, device names, file names,
+        peer labels, or message contents.
+        """
+        try:
+            call_id = str(body.get("call_id") or "")
+            event = str(body.get("event") or "").strip().lower()
+            allowed_events = {
+                "local_media_ready",
+                "negotiation_starting",
+                "offer_preparing",
+                "offer_sent",
+                "offer_send_failed",
+                "answer_preparing",
+                "answer_sent",
+                "answer_send_failed",
+                "remote_offer_received",
+                "remote_answer_received",
+                "remote_track_connected",
+                "ice_state_changed",
+            }
+            if not call_id or event not in allowed_events:
+                return
+
+            def _clean_token(name: str, allowed: set[str]) -> str | None:
+                raw = body.get(name)
+                if not isinstance(raw, str):
+                    return None
+                clean = raw.strip().lower()
+                return clean if clean in allowed else None
+
+            row = {
+                "ts_ms": int(time.time() * 1000),
+                "row_type": "event",
+                "call_id": call_id,
+                "event": event,
+                "reason": _clean_token(
+                    "reason", {"start", "accept", "active", "watchdog"},
+                ),
+                "media_kind": _clean_token("media_kind", {"audio", "video"}),
+                "state": _clean_token(
+                    "state",
+                    {
+                        "new", "checking", "connected", "completed",
+                        "failed", "disconnected", "closed", "connecting",
+                    },
+                ),
+                "ok": bool(body.get("ok")) if "ok" in body else None,
+            }
+            log_dir = data_dir() / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            with (log_dir / "call_media_audit.jsonl").open(
+                "a", encoding="utf-8",
+            ) as f:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+        except Exception as exc:
+            log.debug("call media event audit append failed: %s", exc)
+
+    def _append_call_media_audit(self, body: dict) -> None:
+        """Append a privacy-safe WebRTC media diagnostic row.
+
+        The row intentionally excludes SDP bodies, ICE candidate strings,
+        IP addresses, device names, and message contents. It captures only
+        state-machine and aggregate media counters so a failed call can be
+        diagnosed after the fact.
+        """
+        try:
+            call_id = str(body.get("call_id") or "")
+            if not call_id:
+                return
+            allowed_states = {
+                "new", "checking", "connected", "completed", "failed",
+                "disconnected", "closed", "connecting", "stable",
+                "have-local-offer", "have-remote-offer",
+                "have-local-pranswer", "have-remote-pranswer",
+                "gathering", "complete",
+            }
+
+            def _state(name: str) -> str | None:
+                raw = body.get(name)
+                if not isinstance(raw, str):
+                    return None
+                clean = raw.strip().lower()
+                return clean if clean in allowed_states else None
+
+            def _int(name: str) -> int | None:
+                raw = body.get(name)
+                if raw is None:
+                    return None
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError):
+                    return None
+                return max(0, min(value, 32))
+
+            def _float(name: str) -> float | None:
+                raw = body.get(name)
+                if raw is None:
+                    return None
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    return None
+                if value != value:
+                    return None
+                return value
+
+            row = {
+                "ts_ms": int(time.time() * 1000),
+                "row_type": "metrics",
+                "call_id": call_id,
+                "ice_connection_state": _state("ice_connection_state"),
+                "connection_state": _state("connection_state"),
+                "ice_gathering_state": _state("ice_gathering_state"),
+                "signaling_state": _state("signaling_state"),
+                "has_local_description": bool(body.get("has_local_description")),
+                "has_remote_description": bool(body.get("has_remote_description")),
+                "local_audio_tracks": _int("local_audio_tracks"),
+                "local_video_tracks": _int("local_video_tracks"),
+                "local_live_audio_tracks": _int("local_live_audio_tracks"),
+                "local_live_video_tracks": _int("local_live_video_tracks"),
+                "remote_audio_tracks": _int("remote_audio_tracks"),
+                "remote_video_tracks": _int("remote_video_tracks"),
+                "remote_live_audio_tracks": _int("remote_live_audio_tracks"),
+                "remote_live_video_tracks": _int("remote_live_video_tracks"),
+                "rtt_ms": _float("rtt_ms"),
+                "jitter_ms": _float("jitter_ms"),
+                "loss_rate": _float("loss_rate"),
+                "bandwidth_estimate_kbps": _float("bandwidth_estimate_kbps"),
+            }
+            log_dir = data_dir() / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            with (log_dir / "call_media_audit.jsonl").open(
+                "a", encoding="utf-8",
+            ) as f:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+        except Exception as exc:
+            log.debug("call media audit append failed: %s", exc)
 
     def _handle_observe_frame_action(self, body: dict) -> web.Response:
         """Tier η — browser reports an arriving real audio/video frame.
