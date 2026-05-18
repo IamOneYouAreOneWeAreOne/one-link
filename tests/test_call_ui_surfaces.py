@@ -168,7 +168,7 @@ def test_call_driver_queues_ice_until_remote_description(index_html: str) -> Non
 def test_active_call_surface_is_polished_full_screen(index_html: str) -> None:
     idx = index_html.find(".call-active {")
     assert idx > 0
-    snippet = index_html[idx:idx + 3500]
+    snippet = index_html[idx:idx + 5200]
     assert "radial-gradient" in snippet
     assert "backdrop-filter: blur(18px)" in snippet
     assert "bottom: 34px" in snippet

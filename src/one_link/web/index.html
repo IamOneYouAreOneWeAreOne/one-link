@@ -25818,6 +25818,9 @@
     screenSharing: false,
     backgroundBlur: false,
     reconnecting: false,
+    expectRemoteVideo: false,
+    expectRemoteAudio: true,
+    transceiversReady: false,
     muted: false,
     cameraOff: false,
     selectedAudioInputId: "",
@@ -25902,7 +25905,9 @@
     const a = $$("#call-remote-audio");
     if (v) v.srcObject = stream;
     if (a) a.srcObject = stream;
-    const hasVideo = stream.getVideoTracks().length > 0;
+    const liveVideoTracks = stream.getVideoTracks()
+      .filter((t) => t.readyState === "live");
+    const hasVideo = liveVideoTracks.length > 0;
     if (v) {
       v.classList.toggle("show", hasVideo);
       safeMediaPlay(v);
@@ -25943,7 +25948,51 @@
       addOneCallEvent(`Remote ${track.kind} ended.`);
       reportCallEvent("remote_track_ended", { media_kind: track.kind });
       reportCallMetricsOnce();
+      repairMediaPath(`remote_${track.kind}_ended`).catch(() => {});
     };
+  }
+
+  function classifyCallQuality(metrics) {
+    const rtt = Number(metrics.rtt_ms || 0);
+    const loss = Number(metrics.loss_rate || 0);
+    const ice = String(metrics.ice_connection_state || "");
+    const conn = String(metrics.connection_state || "");
+    if (
+      media.reconnecting ||
+      ice === "disconnected" || ice === "failed" ||
+      conn === "disconnected" || conn === "failed"
+    ) return "reconnecting";
+    if (loss >= 0.08 || rtt >= 450) return "bad";
+    if (loss >= 0.025 || rtt >= 180) return "fair";
+    return "good";
+  }
+
+  function expectedRemoteMediaMissing(selected) {
+    if (!selected || !selected.has_remote_description) return false;
+    const missingAudio = media.expectRemoteAudio
+      && selected.remote_live_audio_tracks === 0
+      && selected.inbound_audio_packets === 0;
+    const missingVideo = media.expectRemoteVideo
+      && selected.remote_live_video_tracks === 0
+      && selected.inbound_video_packets === 0
+      && selected.remote_video_width === 0;
+    return missingAudio || missingVideo;
+  }
+
+  function ensureMediaTransceivers() {
+    if (!media.pc || media.transceiversReady) return;
+    try {
+      const existing = (media.pc.getTransceivers ? media.pc.getTransceivers() : [])
+        .map((t) => t && t.receiver && t.receiver.track && t.receiver.track.kind)
+        .filter(Boolean);
+      if (!existing.includes("audio") && media.pc.addTransceiver) {
+        media.pc.addTransceiver("audio", { direction: "sendrecv" });
+      }
+      if (!existing.includes("video") && media.pc.addTransceiver) {
+        media.pc.addTransceiver("video", { direction: "sendrecv" });
+      }
+      media.transceiversReady = true;
+    } catch (_) {}
   }
 
   function bindRemoteVideoElementDiagnostics() {
@@ -26036,6 +26085,104 @@
     reportCallEvent(wantVideo ? "camera_changed" : "microphone_changed");
   }
 
+  async function replaceOutgoingTrack(kind, newTrack) {
+    if (!media.pc || !newTrack) return false;
+    const sender = (media.pc.getSenders ? media.pc.getSenders() : [])
+      .find((s) => s && s.track && s.track.kind === kind);
+    try {
+      if (sender && sender.replaceTrack) {
+        await sender.replaceTrack(newTrack);
+        return true;
+      }
+      if (media.localStream) {
+        media.pc.addTrack(newTrack, media.localStream);
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  async function toggleScreenShare() {
+    if (!callUI.activeCallId || !media.pc) return;
+    const surface = $$("#call-active-surface");
+    const btn = $$("#btn-call-share-screen");
+    if (media.screenSharing) {
+      try { media.screenStream?.getTracks().forEach((t) => t.stop()); } catch (_) {}
+      media.screenStream = null;
+      const cameraTrack = media.cameraVideoTrack || media.localStream?.getVideoTracks()[0] || null;
+      if (cameraTrack) await replaceOutgoingTrack("video", cameraTrack);
+      media.screenSharing = false;
+      surface?.classList.remove("screen-sharing");
+      if (btn) {
+        btn.textContent = "Share";
+        btn.setAttribute("aria-pressed", "false");
+      }
+      addOneCallEvent("Screen sharing stopped.");
+      reportCallEvent("screen_share_stopped");
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      addOneCallEvent("Screen sharing is not available in this browser.");
+      reportCallEvent("screen_share_unavailable");
+      return;
+    }
+    try {
+      const display = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false,
+      });
+      const screenTrack = display.getVideoTracks()[0];
+      if (!screenTrack) return;
+      media.cameraVideoTrack = media.localStream?.getVideoTracks()[0] || null;
+      media.screenStream = display;
+      await replaceOutgoingTrack("video", screenTrack);
+      media.screenSharing = true;
+      screenTrack.onended = () => { toggleScreenShare().catch(() => {}); };
+      surface?.classList.add("screen-sharing");
+      if (btn) {
+        btn.textContent = "Stop share";
+        btn.setAttribute("aria-pressed", "true");
+      }
+      addOneCallEvent("Screen sharing started.");
+      reportCallEvent("screen_share_started");
+      sendLocalSdpOffer().catch(() => {});
+    } catch (_) {
+      addOneCallEvent("Screen sharing was cancelled.");
+      reportCallEvent("screen_share_failed");
+    }
+  }
+
+  async function openCallPictureInPicture() {
+    const remote = $$("#call-remote-video");
+    const local = $$("#call-local-video");
+    const target = remote && remote.classList.contains("show") ? remote : local;
+    if (!target || typeof target.requestPictureInPicture !== "function") {
+      addOneCallEvent("Picture in Picture is not available here.");
+      reportCallEvent("pip_unavailable");
+      return;
+    }
+    try {
+      await target.requestPictureInPicture();
+      reportCallEvent("pip_started");
+    } catch (_) {
+      reportCallEvent("pip_failed");
+    }
+  }
+
+  function toggleBackgroundBlur() {
+    media.backgroundBlur = !media.backgroundBlur;
+    const local = $$("#call-local-video");
+    const btn = $$("#btn-call-blur");
+    local?.classList.toggle("local-blur", media.backgroundBlur);
+    if (btn) {
+      btn.textContent = media.backgroundBlur ? "Clear preview" : "Blur preview";
+      btn.setAttribute("aria-pressed", String(media.backgroundBlur));
+    }
+    reportCallEvent("background_blur_changed", {
+      state: media.backgroundBlur ? "enabled" : "disabled",
+    });
+  }
+
   function stopAllMedia() {
     stopAttestStream();
     if (media.localStream) {
@@ -26065,6 +26212,7 @@
       media.pc = null;
     }
     media.iceConfigReady = null;
+    media.transceiversReady = false;
     callUI.pendingIceCandidates = [];
     callUI.appliedIceKeys.clear();
     callUI.appliedRemoteOfferKeys.clear();
@@ -26083,6 +26231,14 @@
     callUI.stalledMediaTicks = 0;
     callUI.acceptedCallIds.clear();
     callUI.lastAcceptRetryMs = {};
+    media.screenStream = null;
+    media.cameraVideoTrack = null;
+    media.screenSharing = false;
+    media.backgroundBlur = false;
+    media.reconnecting = false;
+    media.expectRemoteVideo = false;
+    media.expectRemoteAudio = true;
+    media.transceiversReady = false;
     media.muted = false;
     media.cameraOff = false;
     syncMuteCameraButtons();
@@ -26255,11 +26411,24 @@
       reportCallMetricsOnce();
       addOneCallEvent(`Media route ${pc.iceConnectionState}.`);
       reportCallEvent("ice_state_changed", { state: pc.iceConnectionState });
+      if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed") {
+        setReconnectState(true, `Media route ${pc.iceConnectionState}; repairing...`);
+        repairMediaPath("ice_state_changed").catch(() => {});
+      } else if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+        setReconnectState(false);
+      }
     };
     pc.onconnectionstatechange = () => {
       reportCallMetricsOnce();
+      if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
+        setReconnectState(true, `Connection ${pc.connectionState}; repairing...`);
+        repairMediaPath("connection_state_changed").catch(() => {});
+      } else if (pc.connectionState === "connected") {
+        setReconnectState(false);
+      }
     };
     media.pc = pc;
+    ensureMediaTransceivers();
     return pc;
   }
 
@@ -26271,6 +26440,7 @@
       addOneCallEvent("Preparing media offer...");
       reportCallEvent("offer_preparing");
       if (media.iceConfigReady) await media.iceConfigReady;
+      ensureMediaTransceivers();
       const offer = await media.pc.createOffer();
       await media.pc.setLocalDescription(offer);
       callUI.lastLocalOfferSdp = offer.sdp || "";
@@ -26359,6 +26529,7 @@
       addOneCallEvent("Preparing media answer...");
       reportCallEvent("answer_preparing");
       if (media.iceConfigReady) await media.iceConfigReady;
+      ensureMediaTransceivers();
       const answer = await media.pc.createAnswer();
       await media.pc.setLocalDescription(answer);
       callUI.lastLocalAnswerSdp = answer.sdp || "";
@@ -26443,13 +26614,15 @@
     const now = Date.now();
     if (now - Number(callUI.lastMediaRepairMs || 0) < 9000) return;
     callUI.lastMediaRepairMs = now;
+    setReconnectState(true, "Repairing media path...");
     addOneCallEvent("Repairing media path...");
     reportCallEvent("media_path_repair", { reason: reason || "watchdog" });
     try {
       ensureLocalTracksOnPeerConnection();
+      ensureMediaTransceivers();
       if (typeof media.pc.restartIce === "function") {
         media.pc.restartIce();
-        reportCallEvent("ice_restart_requested");
+        reportCallEvent("ice_restart_requested", { reason: reason || "watchdog" });
       }
       if (media.pc.signalingState === "stable") {
         await sendLocalSdpOffer();
@@ -26460,6 +26633,13 @@
       }
     } catch (_) {
       reportCallEvent("media_path_repair_failed", { reason: reason || "watchdog" });
+    } finally {
+      setTimeout(() => {
+        if (media.pc && (
+          media.pc.iceConnectionState === "connected" ||
+          media.pc.iceConnectionState === "completed"
+        )) setReconnectState(false);
+      }, 2500);
     }
   }
 
@@ -26650,6 +26830,56 @@
     }
   }
 
+  function setReconnectState(on, text) {
+    media.reconnecting = !!on;
+    const surface = $$("#call-active-surface");
+    const banner = $$("#call-reconnect-banner");
+    surface?.classList.toggle("reconnecting", !!on);
+    if (banner && text) banner.textContent = text;
+    updateCallQuality(on ? "reconnecting" : "good");
+  }
+
+  function updateCallQuality(level, label) {
+    const dot = $$("#call-quality-dot");
+    const text = $$("#call-quality-text");
+    if (dot) {
+      dot.classList.remove("fair", "bad", "reconnecting");
+      if (level && level !== "good") dot.classList.add(level);
+    }
+    if (text) {
+      text.textContent = label || (
+        level === "reconnecting" ? "Reconnecting media"
+        : level === "bad" ? "Poor call quality"
+        : level === "fair" ? "Fair call quality"
+        : "Good call quality"
+      );
+    }
+    const chip = $$("#call-outgoing-quality-chip");
+    if (chip && label) chip.textContent = label;
+  }
+
+  function renderCallHistory() {
+    const host = $$("#call-history-list");
+    if (!host) return;
+    const rows = callUI.callHistory.slice(0, 5);
+    if (!rows.length) {
+      host.innerHTML = `<div class="call-history-item"><span>No recent calls</span><span>--</span></div>`;
+      return;
+    }
+    host.innerHTML = rows.map((row) => (
+      `<div class="call-history-item"><span>${escapeText(row.label)}</span><span>${escapeText(row.when)}</span></div>`
+    )).join("");
+  }
+
+  function rememberCallHistory(label, outcome) {
+    callUI.callHistory.unshift({
+      label: `${outcome || "Call"} · ${label || callUI.activeCallPeer || "Device"}`,
+      when: new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+    });
+    callUI.callHistory = callUI.callHistory.slice(0, 10);
+    renderCallHistory();
+  }
+
   function toggleCallSettings(show) {
     const pane = $$("#call-settings-popover");
     const btn = $$("#btn-call-settings");
@@ -26670,6 +26900,50 @@
     if (btn) btn.textContent = media.videoFit === "contain" ? "Fill video" : "Fit video";
     reportCallEvent("video_fit_changed", { reason: media.videoFit === "contain" ? "contain" : "cover" });
   });
+  $$("#btn-call-blur")?.addEventListener("click", () => toggleBackgroundBlur());
+  $$("#btn-call-share-screen")?.addEventListener("click", () => toggleScreenShare().catch(() => {}));
+  $$("#btn-call-pip")?.addEventListener("click", () => openCallPictureInPicture().catch(() => {}));
+  $$("#btn-call-capsule")?.addEventListener("click", () => {
+    addOneCallEvent("Capsule capture is ready when the call downgrades to async.");
+    reportCallEvent("voicemail_capsule_requested");
+  });
+  $$("#btn-call-group-upgrade")?.addEventListener("click", () => {
+    addOneCallEvent("Group calling is staged; start a group thread to bring more people in.");
+    reportCallEvent("group_call_requested");
+  });
+  $$("#btn-call-voicemail-instead")?.addEventListener("click", async () => {
+    if (callUI.inboundCallId) {
+      const callId = callUI.inboundCallId;
+      hideIncomingRing();
+      callUI.inboundCallId = null;
+      await callApiPost({ action: "decline", call_id: callId });
+      rememberCallHistory(callUI.inboundCallPeer, "Capsule");
+    }
+  });
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      const data = event.data || {};
+      if (data.type !== "call-notification-action") return;
+      if (data.action === "accept-call") {
+        if (data.call_id && callUI.inboundCallId === data.call_id) {
+          acceptInboundCall().catch(() => {});
+        } else {
+          backfillLivingPresenceCalls().then(() => acceptInboundCall()).catch(() => {});
+        }
+      } else if (data.action === "message-peer") {
+        hideIncomingRing();
+        if (callUI.inboundCallId) {
+          callApiPost({ action: "decline", call_id: callUI.inboundCallId }).catch(() => {});
+          callUI.inboundCallId = null;
+        }
+        if (data.peer && typeof selectPeer === "function") selectPeer(data.peer);
+        const composer = $$("#msg-input");
+        if (composer) composer.focus();
+      } else {
+        backfillLivingPresenceCalls().catch(() => {});
+      }
+    });
+  }
   $$("#call-mic-select")?.addEventListener("change", async (ev) => {
     media.selectedAudioInputId = ev.target.value || "";
     await replaceLocalMediaTracks("audio");
@@ -27068,6 +27342,8 @@
     callUI.activeCallPeer = label;
     callUI.activeCallPeerFp = peerMasterVkHex;
     callUI.activeCallKind = wantVideo ? "video" : "voice";
+    media.expectRemoteAudio = true;
+    media.expectRemoteVideo = wantVideo;
     showOutgoingOverlay(label, {
       kind: wantVideo ? "video" : "voice",
     });
@@ -27387,6 +27663,8 @@
   function showIncomingRing(peerLabel) {
     const peer = $$("#call-incoming-peer");
     if (peer) peer.textContent = peerLabel;
+    const avatar = $$("#call-incoming-avatar");
+    if (avatar) avatar.textContent = _peerInitials(peerLabel || "One");
     const overlay = $$("#call-incoming-overlay");
     if (overlay) overlay.classList.add("show");
     // v0.21.x: audible phone-style ringtone. Plays even when the
@@ -27396,6 +27674,21 @@
     if (typeof window.startCallRingtone === "function") {
       window.startCallRingtone({ peer_fp: callUI?.activeCallPeerFp });
     }
+    try {
+      if (
+        "Notification" in window &&
+        Notification.permission === "granted" &&
+        navigator.serviceWorker?.controller
+      ) {
+        navigator.serviceWorker.controller.postMessage({
+          type: "incoming-call-notification",
+          title: `${peerLabel || "One Link"} is calling`,
+          body: "Accept or open the chat.",
+          call_id: callUI.inboundCallId || "",
+          peer: callUI.inboundCallPeerFp || "",
+        });
+      }
+    } catch (_) {}
   }
   function hideIncomingRing() {
     const overlay = $$("#call-incoming-overlay");
@@ -27420,6 +27713,7 @@
     // before the active call audio takes over.
     if (typeof window.stopCallRing === "function") window.stopCallRing();
     resetOneCallRail(peerLabel);
+    renderCallHistory();
     startCallTelemetry();
   }
   function hideActiveSurface() {
@@ -27428,6 +27722,7 @@
     const badge = $$("#call-recording-badge");
     if (badge) badge.classList.remove("show");
     stopCallTelemetry();
+    setReconnectState(false);
   }
   function showRecordingBadge() {
     const badge = $$("#call-recording-badge");
@@ -27582,6 +27877,13 @@
         bandwidth_estimate_kbps: kbps,
         remote_tracks: remoteTrackSummary(),
       };
+      const quality = classifyCallQuality(callUI.lastMetricsSnapshot);
+      updateCallQuality(quality);
+      if (quality === "reconnecting") {
+        setReconnectState(true, "Reconnecting media path...");
+      } else {
+        setReconnectState(false);
+      }
       const videoMoving = inboundVideoBytes > Number(callUI.lastInboundVideoBytes || 0)
         || inboundVideoFramesDecoded > Number(callUI.lastInboundVideoFramesDecoded || 0);
       const audioMoving = inboundAudioBytes > Number(callUI.lastInboundAudioBytes || 0);
@@ -27594,6 +27896,8 @@
         && selected.ice_connection_state !== "connected"
         && selected.ice_connection_state !== "completed"
       ) {
+        callUI.stalledMediaTicks += 1;
+      } else if (expectedRemoteMediaMissing(selected)) {
         callUI.stalledMediaTicks += 1;
       } else if (selected.remote_video_tracks > 0 && !videoMoving && selected.inbound_video_packets > 0) {
         callUI.stalledMediaTicks += 1;
@@ -27736,6 +28040,8 @@
     showActiveSurface(inboundPeer, "");
     setupRtcPeerConnection();
     callUI.localMediaReady = false;
+    media.expectRemoteAudio = true;
+    media.expectRemoteVideo = true;
     const mediaPromise = startLocalMedia({ audio: true, video: true });
     const result = await callApiPost({
       action: "accept", call_id: inboundCallId,

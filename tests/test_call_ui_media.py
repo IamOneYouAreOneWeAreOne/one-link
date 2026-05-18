@@ -290,6 +290,31 @@ def test_call_media_watchdog_repairs_stalled_frames(index_html: str) -> None:
     assert 'repairMediaPath("stalled_media")' in metrics_snippet
 
 
+def test_call_phase4_controls_and_quality_surface(index_html: str) -> None:
+    assert 'id="btn-call-share-screen"' in index_html
+    assert 'id="btn-call-pip"' in index_html
+    assert 'id="btn-call-blur"' in index_html
+    assert 'id="call-quality-dot"' in index_html
+    assert 'id="call-history-list"' in index_html
+    assert 'id="btn-call-capsule"' in index_html
+    assert 'id="btn-call-group-upgrade"' in index_html
+    assert "getDisplayMedia" in index_html
+    assert "requestPictureInPicture" in index_html
+    assert "toggleBackgroundBlur" in index_html
+    assert "call-notification-action" in index_html
+    assert "incoming-call-notification" in index_html
+
+
+def test_call_watchdog_repairs_missing_expected_remote_media(index_html: str) -> None:
+    assert "expectedRemoteMediaMissing" in index_html
+    assert "expectRemoteVideo" in index_html
+    assert "ensureMediaTransceivers" in index_html
+    idx = index_html.find("async function reportCallMetricsOnce")
+    snippet = index_html[idx:idx + 9000]
+    assert "expectedRemoteMediaMissing(selected)" in snippet
+    assert "repairMediaPath(\"stalled_media\")" in snippet
+
+
 def test_inbound_accept_waits_for_offer_instead_of_self_offering(index_html: str) -> None:
     idx = index_html.find("async function acceptInboundCall")
     snippet = index_html[idx:idx + 1800]

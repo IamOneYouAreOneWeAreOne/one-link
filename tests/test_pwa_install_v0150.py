@@ -303,3 +303,12 @@ def test_page_version_matches_package(index_html: str):
     from one_link import __version__
 
     assert f'PAGE_BUILT_FOR = "{__version__}"' in index_html
+
+
+def test_sw_incoming_call_notification_actions(sw_js: str):
+    assert "incoming-call-notification" in sw_js
+    assert "showNotification" in sw_js
+    assert 'action: "accept-call"' in sw_js
+    assert 'action: "message-peer"' in sw_js
+    assert "notificationclick" in sw_js
+    assert "call-notification-action" in sw_js

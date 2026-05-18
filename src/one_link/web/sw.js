@@ -173,4 +173,46 @@ self.addEventListener("message", (event) => {
   if (event.data?.type === "drain-now") {
     event.waitUntil(drainOutbox());
   }
+  if (event.data?.type === "incoming-call-notification") {
+    const title = event.data.title || "Incoming One Link call";
+    const body = event.data.body || "Tap to open One Link.";
+    const callId = event.data.call_id || "";
+    const peer = event.data.peer || "";
+    event.waitUntil(
+      self.registration.showNotification(title, {
+        body,
+        tag: callId ? `one-link-call-${callId}` : "one-link-call",
+        renotify: true,
+        data: { type: "incoming-call", call_id: callId, peer },
+        actions: [
+          { action: "accept-call", title: "Accept" },
+          { action: "message-peer", title: "Message" },
+        ],
+      }).catch(() => null),
+    );
+  }
+});
+
+self.addEventListener("notificationclick", (event) => {
+  const data = event.notification?.data || {};
+  event.notification.close();
+  event.waitUntil((async () => {
+    const allClients = await self.clients.matchAll({
+      type: "window",
+      includeUncontrolled: true,
+    });
+    let client = allClients.find((c) => "focus" in c);
+    if (!client && self.clients.openWindow) {
+      client = await self.clients.openWindow("/");
+    }
+    if (client && "focus" in client) await client.focus();
+    if (client && "postMessage" in client) {
+      client.postMessage({
+        type: "call-notification-action",
+        action: event.action || "open-call",
+        call_id: data.call_id || "",
+        peer: data.peer || "",
+      });
+    }
+  })());
 });
