@@ -338,6 +338,8 @@ def test_call_quality_uses_hysteresis_and_tau_adaptation(index_html: str) -> Non
     assert "function applyCallQualityHysteresis" in index_html
     assert "qualityBadTicks" in index_html
     assert "qualityGoodTicks" in index_html
+    assert 'rawLevel === "connecting"' in index_html
+    assert 'updateCallQuality("connecting"' in index_html
     assert "function tuneOutboundMediaForTau" in index_html
     assert "tauPressureTicks" in index_html
     assert "tauStableTicks" in index_html
@@ -346,6 +348,31 @@ def test_call_quality_uses_hysteresis_and_tau_adaptation(index_html: str) -> Non
     assert "scaleResolutionDownBy" in index_html
     assert "degradationPreference" in index_html
     assert "tau_media_adapted" in index_html
+
+
+def test_call_quality_does_not_claim_good_while_media_waits(index_html: str) -> None:
+    idx = index_html.find("function classifyCallQuality")
+    snippet = index_html[idx:idx + 1100]
+    assert 'ice === "checking"' in snippet
+    assert 'conn === "connecting"' in snippet
+    assert "!hasLocal || !hasRemote" in snippet
+    assert "expectedRemoteMediaMissing(metrics)" in snippet
+    assert 'return "connecting"' in snippet
+    quality_idx = index_html.find("function updateCallQuality")
+    quality_snippet = index_html[quality_idx:quality_idx + 900]
+    assert '"connecting"' in quality_snippet
+    assert "Connecting media" in quality_snippet
+
+
+def test_call_rail_suppresses_noisy_internal_media_events(index_html: str) -> None:
+    idx = index_html.find("function isNoisyCallEvent")
+    snippet = index_html[idx:idx + 650]
+    assert "Resending media" in snippet
+    assert "Repairing media" in snippet
+    assert "Media route" in snippet
+    add_idx = index_html.find("function addOneCallEvent")
+    add_snippet = index_html[add_idx:add_idx + 400]
+    assert "isNoisyCallEvent(text)" in add_snippet
 
 
 def test_call_metrics_use_smoothed_interval_loss(index_html: str) -> None:

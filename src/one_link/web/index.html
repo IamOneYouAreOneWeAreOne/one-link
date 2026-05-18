@@ -1300,6 +1300,10 @@
     background: #fbbf24;
     box-shadow: 0 0 18px rgba(251,191,36,0.64);
   }
+  .call-quality-dot.connecting {
+    background: #60a5fa;
+    box-shadow: 0 0 18px rgba(96,165,250,0.64);
+  }
   .call-quality-dot.bad,
   .call-quality-dot.reconnecting {
     background: #f87171;
@@ -1494,7 +1498,7 @@
     z-index: 3;
     width: min(300px, calc(100vw - 48px));
     min-width: 160px;
-    display: grid;
+    display: none;
     gap: 8px;
   }
   .call-side-panel {
@@ -1503,15 +1507,18 @@
     top: 278px;
     z-index: 3;
     width: min(300px, calc(100vw - 48px));
-    display: grid;
+    display: none;
     gap: 8px;
+  }
+  .call-active.details-open .call-history-strip,
+  .call-active.details-open .call-side-panel {
+    display: grid;
   }
   .call-side-card {
     border-radius: 16px;
-    background: rgba(14,17,27,0.62);
+    background: rgba(14,17,27,0.78);
     border: 1px solid rgba(255,255,255,0.12);
-    box-shadow: 0 18px 58px rgba(0,0,0,0.30);
-    backdrop-filter: blur(18px);
+    box-shadow: 0 18px 42px rgba(0,0,0,0.32);
     padding: 12px;
   }
   .call-side-card h3 {
@@ -1581,10 +1588,9 @@
   .call-history-card,
   .call-voicemail-capsule {
     border-radius: 16px;
-    background: rgba(14,17,27,0.62);
+    background: rgba(14,17,27,0.78);
     border: 1px solid rgba(255,255,255,0.12);
-    box-shadow: 0 18px 58px rgba(0,0,0,0.30);
-    backdrop-filter: blur(18px);
+    box-shadow: 0 18px 42px rgba(0,0,0,0.32);
     padding: 12px;
   }
   .call-history-card h3,
@@ -26118,6 +26124,13 @@
     const loss = Number(metrics.loss_rate || 0);
     const ice = String(metrics.ice_connection_state || "");
     const conn = String(metrics.connection_state || "");
+    const hasLocal = metrics.has_local_description === true;
+    const hasRemote = metrics.has_remote_description === true;
+    const remoteWaiting = expectedRemoteMediaMissing(metrics);
+    if (!hasLocal || !hasRemote || ice === "new" || ice === "checking" || conn === "new" || conn === "connecting") {
+      return "connecting";
+    }
+    if (remoteWaiting) return "connecting";
     if (
       media.reconnecting ||
       ice === "disconnected" || ice === "failed" ||
@@ -26129,6 +26142,12 @@
   }
 
   function applyCallQualityHysteresis(rawLevel, label) {
+    if (rawLevel === "connecting") {
+      callUI.qualityGoodTicks = 0;
+      setReconnectState(false);
+      updateCallQuality("connecting", label || "Connecting media");
+      return;
+    }
     if (rawLevel === "reconnecting" || rawLevel === "bad") {
       callUI.qualityBadTicks += 1;
       callUI.qualityGoodTicks = 0;
@@ -27281,14 +27300,14 @@
     const banner = $$("#call-reconnect-banner");
     surface?.classList.toggle("reconnecting", !!on);
     if (banner && text) banner.textContent = text;
-    updateCallQuality(on ? "reconnecting" : "good");
+    if (on) updateCallQuality("reconnecting");
   }
 
   function updateCallQuality(level, label) {
     const dot = $$("#call-quality-dot");
     const text = $$("#call-quality-text");
     if (dot) {
-      dot.classList.remove("fair", "bad", "reconnecting");
+      dot.classList.remove("fair", "bad", "reconnecting", "connecting");
       if (level && level !== "good") dot.classList.add(level);
     }
     if (text) {
@@ -27296,6 +27315,7 @@
         level === "reconnecting" ? "Reconnecting media"
         : level === "bad" ? "Poor call quality"
         : level === "fair" ? "Fair call quality"
+        : level === "connecting" ? "Connecting media"
         : "Good call quality"
       );
     }
@@ -28170,6 +28190,7 @@
     if (face) face.textContent = _peerInitials(peerLabel || "One");
     const surface = $$("#call-active-surface");
     if (surface) surface.classList.add("show");
+    if (surface) surface.classList.remove("details-open");
     // v0.21.x: defensive — cut any lingering ringback/ringtone the
     // moment the call connects. The overlay-hide paths usually
     // handle this already, but if a peer accepts the same instant
@@ -28184,7 +28205,7 @@
   }
   function hideActiveSurface() {
     const surface = $$("#call-active-surface");
-    if (surface) surface.classList.remove("show");
+    if (surface) surface.classList.remove("show", "details-open", "reconnecting");
     const badge = $$("#call-recording-badge");
     if (badge) badge.classList.remove("show");
     stopCallTelemetry();
@@ -28213,8 +28234,14 @@
     if (el) el.textContent = value;
   }
 
+  function isNoisyCallEvent(text) {
+    return /^(Preparing media|Media offer|Media answer|Resending media|Repairing media|Media route|Remote .* paused|Remote .* flowing)/i
+      .test(String(text || ""));
+  }
+
   function addOneCallEvent(text) {
     if (!text) return;
+    if (isNoisyCallEvent(text)) return;
     callUI.oneEvents.unshift({ text, at: Date.now() });
     callUI.oneEvents = callUI.oneEvents.slice(0, 4);
     const feed = $$("#call-one-feed");

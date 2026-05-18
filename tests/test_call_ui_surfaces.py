@@ -174,11 +174,14 @@ def test_active_call_surface_is_polished_full_screen(index_html: str) -> None:
     assert "bottom: 34px" in snippet
 
 
-def test_call_side_panels_are_compact_and_mobile_hidden(index_html: str) -> None:
+def test_call_side_panels_are_hidden_until_details_open(index_html: str) -> None:
     idx = index_html.find(".call-history-strip")
     snippet = index_html[idx:idx + 1800]
     assert "top: 112px" in snippet
     assert "top: 278px" in snippet
+    assert "display: none" in snippet
+    assert ".call-active.details-open .call-history-strip" in index_html
+    assert ".call-active.details-open .call-side-panel" in index_html
     mobile_idx = index_html.find("@media (max-width: 780px)", idx)
     mobile_snippet = index_html[mobile_idx:mobile_idx + 1400]
     assert ".call-history-strip" in mobile_snippet
@@ -186,6 +189,15 @@ def test_call_side_panels_are_compact_and_mobile_hidden(index_html: str) -> None
     assert "display: none" in mobile_snippet
     assert "min-width: 160px" in snippet
     assert "Connected privately over One Link" in index_html
+
+
+def test_call_surface_hides_details_when_opening_or_closing(index_html: str) -> None:
+    idx = index_html.find("function showActiveSurface")
+    snippet = index_html[idx:idx + 1100]
+    assert 'classList.remove("details-open")' in snippet
+    close_idx = index_html.find("function hideActiveSurface")
+    close_snippet = index_html[close_idx:close_idx + 500]
+    assert 'classList.remove("show", "details-open", "reconnecting")' in close_snippet
 
 
 def test_active_call_surface_has_one_assist_rail(index_html: str) -> None:
