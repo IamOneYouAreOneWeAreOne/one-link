@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use ol_quic::{
-    proto::encode_varint,
+    proto::{decode_varint, encode_varint},
     transport::{read_frame, write_frame},
     Endpoint as RustEndpoint, EndpointConfig as RustEndpointConfig, Frame, FrameKind,
     Identity as RustIdentity, PeerFingerprint, PeerRegistry,
@@ -759,22 +759,23 @@ impl PyConnection {
         let bytes = py.allow_threads(|| {
             runtime().block_on(async move {
                 let (mut send, mut recv) = conn.open_bi_stream().await?;
-                for payload in payloads {
-                    write_frame_parts(&mut send, kind, &payload).await?;
-                }
-                send.finish()
-                    .map_err(|e| ol_quic::QuicError::Io(std::io::Error::other(e.to_string())))?;
-                let mut bytes = 0usize;
-                for _ in 0..total {
-                    let response = read_frame(&mut recv).await?;
-                    if response.kind != expected {
-                        return Err(ol_quic::QuicError::MalformedFrame {
-                            offset: 0,
-                            reason: "unexpected response kind",
-                        });
+                let writer = async {
+                    for payload in payloads {
+                        write_frame_parts(&mut send, kind, &payload).await?;
                     }
-                    bytes += response.payload.len();
-                }
+                    send.finish().map_err(|e| {
+                        ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
+                    })?;
+                    Ok::<_, ol_quic::QuicError>(())
+                };
+                let reader = async {
+                    let mut bytes = 0usize;
+                    for _ in 0..total {
+                        bytes += read_expected_frame_payload_len(&mut recv, expected).await?;
+                    }
+                    Ok::<_, ol_quic::QuicError>(bytes)
+                };
+                let (_, bytes) = tokio::try_join!(writer, reader)?;
                 Ok::<_, ol_quic::QuicError>(bytes)
             })
         });
@@ -823,23 +824,23 @@ impl PyConnection {
                     set.spawn(async move {
                         let total = bucket.len();
                         let (mut send, mut recv) = conn.open_bi_stream().await?;
-                        for payload in bucket {
-                            write_frame_parts(&mut send, kind, &payload).await?;
-                        }
-                        send.finish().map_err(|e| {
-                            ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
-                        })?;
-                        let mut bytes = 0usize;
-                        for _ in 0..total {
-                            let response = read_frame(&mut recv).await?;
-                            if response.kind != expected {
-                                return Err(ol_quic::QuicError::MalformedFrame {
-                                    offset: 0,
-                                    reason: "unexpected response kind",
-                                });
+                        let writer = async {
+                            for payload in bucket {
+                                write_frame_parts(&mut send, kind, &payload).await?;
                             }
-                            bytes += response.payload.len();
-                        }
+                            send.finish().map_err(|e| {
+                                ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
+                            })?;
+                            Ok::<_, ol_quic::QuicError>(())
+                        };
+                        let reader = async {
+                            let mut bytes = 0usize;
+                            for _ in 0..total {
+                                bytes += read_expected_frame_payload_len(&mut recv, expected).await?;
+                            }
+                            Ok::<_, ol_quic::QuicError>(bytes)
+                        };
+                        let (_, bytes) = tokio::try_join!(writer, reader)?;
                         Ok::<_, ol_quic::QuicError>(bytes)
                     });
                 }
@@ -1291,6 +1292,85 @@ async fn write_frame_parts(
         send.write_all(payload)
             .await
             .map_err(ol_quic::QuicError::StreamWrite)?;
+    }
+    Ok(())
+}
+
+async fn read_expected_frame_payload_len(
+    recv: &mut quinn::RecvStream,
+    expected: FrameKind,
+) -> Result<usize, ol_quic::QuicError> {
+    let mut kind_buf = [0u8; 1];
+    read_exact_parts(recv, &mut kind_buf).await?;
+    let kind = FrameKind::from_u8(kind_buf[0]).ok_or(ol_quic::QuicError::MalformedFrame {
+        offset: 0,
+        reason: "unknown frame kind",
+    })?;
+    if kind != expected {
+        return Err(ol_quic::QuicError::MalformedFrame {
+            offset: 0,
+            reason: "unexpected response kind",
+        });
+    }
+
+    let mut varint_buf = Vec::with_capacity(9);
+    loop {
+        let mut b = [0u8; 1];
+        read_exact_parts(recv, &mut b).await?;
+        varint_buf.push(b[0]);
+        if b[0] & 0x80 == 0 {
+            break;
+        }
+        if varint_buf.len() > 9 {
+            return Err(ol_quic::QuicError::MalformedFrame {
+                offset: varint_buf.len() as u64,
+                reason: "varint overflow",
+            });
+        }
+    }
+    let (length, _consumed) = decode_varint(&varint_buf, 0)?;
+    let max = kind.max_payload_bytes();
+    if length > max {
+        return Err(ol_quic::QuicError::FrameTooLarge {
+            kind: kind.as_u8(),
+            got: length,
+            max,
+        });
+    }
+    drain_exact_parts(recv, length as usize).await?;
+    Ok(length as usize)
+}
+
+async fn read_exact_parts(
+    recv: &mut quinn::RecvStream,
+    buf: &mut [u8],
+) -> Result<(), ol_quic::QuicError> {
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        let n = match recv.read(&mut buf[filled..]).await {
+            Ok(Some(n)) => n,
+            Ok(None) => {
+                return Err(ol_quic::QuicError::StreamShortRead {
+                    needed: buf.len(),
+                    got: filled,
+                });
+            }
+            Err(e) => return Err(ol_quic::QuicError::StreamRead(e)),
+        };
+        filled += n;
+    }
+    Ok(())
+}
+
+async fn drain_exact_parts(
+    recv: &mut quinn::RecvStream,
+    mut remaining: usize,
+) -> Result<(), ol_quic::QuicError> {
+    let mut buf = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let want = remaining.min(buf.len());
+        read_exact_parts(recv, &mut buf[..want]).await?;
+        remaining -= want;
     }
     Ok(())
 }
