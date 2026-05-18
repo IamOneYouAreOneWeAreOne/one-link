@@ -1,4 +1,4 @@
-// v0.14.0 — One Link Service Worker.
+// v0.14.1 — One Link Service Worker.
 //
 // Two jobs only:
 // 1. Background sync: when the browser fires a `sync` event tagged
@@ -78,25 +78,41 @@ self.addEventListener("fetch", (event) => {
     );
     return;
   }
-  // Cache-first for the small static assets (manifest, icons).
-  // These rarely change, and serving them from cache makes the
-  // first paint snappy.
+  // Stale-while-revalidate for the small static assets (manifest,
+  // icons). Serve from cache instantly for snappy first paint, but
+  // ALWAYS kick off a background network refresh so a poisoned or
+  // simply outdated cache entry self-heals on the next load.
+  //
+  // Previously this branch was pure cache-first with a network
+  // fallback, which meant a bad cache entry would persist
+  // indefinitely until the user manually cleared site data.
   if (
     url.pathname === "/manifest.json" ||
     url.pathname.startsWith("/static/")
   ) {
     event.respondWith(
-      caches.match(event.request).then((cached) =>
-        cached || fetch(event.request).then((res) => {
-          if (!res || res.status !== 200) return res;
-          const copy = res.clone();
-          caches.open(CACHE_NAME).then((c) => c.put(event.request, copy));
+      caches.match(event.request).then((cached) => {
+        const networkFetch = fetch(event.request).then((res) => {
+          if (res && res.status === 200) {
+            const copy = res.clone();
+            caches.open(CACHE_NAME).then((c) => c.put(event.request, copy));
+          }
           return res;
-        }).catch(() => cached),
-      ),
+        }).catch(() => null);
+        return cached || networkFetch;
+      }),
     );
   }
 });
+
+// Cap user-supplied notification strings so a postMessage caller
+// can't ship a 1 MB title or hide a payload inside control chars.
+function _sanitizeNotifText(s, maxLen) {
+  if (typeof s !== "string") return "";
+  // Strip C0 + DEL controls, normalize CR/LF/TAB to a single space.
+  const cleaned = s.replace(/[\x00-\x1F\x7F]+/g, " ").trim();
+  return cleaned.length > maxLen ? cleaned.slice(0, maxLen) : cleaned;
+}
 
 // ── Background sync (outbox) ──────────────────────────────────────
 //
@@ -169,15 +185,28 @@ self.addEventListener("sync", (event) => {
 // Page-side communicates with the SW via postMessage. We expose
 // "drain-now" so the UI can force a flush when the user comes
 // online without waiting for the browser's sync event.
+//
+// Guard rails:
+// - Reject any message whose origin is not our own. The SW scope
+//   is same-origin only, so any `event.origin` that doesn't match
+//   means something has changed the threat model out from under us
+//   and we should drop the message rather than honor it.
+// - Cap and sanitize all user-supplied notification strings to
+//   prevent control-char or oversized payloads from being baked
+//   into an OS notification.
 self.addEventListener("message", (event) => {
-  if (event.data?.type === "drain-now") {
+  if (event.origin && event.origin !== self.origin) return;
+  const data = event.data;
+  if (!data || typeof data !== "object") return;
+  if (data.type === "drain-now") {
     event.waitUntil(drainOutbox());
+    return;
   }
-  if (event.data?.type === "incoming-call-notification") {
-    const title = event.data.title || "Incoming One Link call";
-    const body = event.data.body || "Tap to open One Link.";
-    const callId = event.data.call_id || "";
-    const peer = event.data.peer || "";
+  if (data.type === "incoming-call-notification") {
+    const title = _sanitizeNotifText(data.title, 120) || "Incoming One Link call";
+    const body = _sanitizeNotifText(data.body, 240) || "Tap to open One Link.";
+    const callId = _sanitizeNotifText(data.call_id, 128);
+    const peer = _sanitizeNotifText(data.peer, 128);
     event.waitUntil(
       self.registration.showNotification(title, {
         body,
