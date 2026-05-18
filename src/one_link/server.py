@@ -3570,6 +3570,9 @@ class UIServer:
                 "media_path_repair",
                 "media_path_repair_failed",
                 "ice_restart_requested",
+                "remote_playback_revive",
+                "pc_rebuild_start",
+                "pc_rebuild_offer_sent",
                 "attest_recorder_start_failed",
                 "microphone_changed",
                 "microphone_change_failed",
@@ -3621,6 +3624,15 @@ class UIServer:
                 clean = raw.strip().lower()
                 return clean if clean in allowed else None
 
+            def _clean_small_int(name: str, lo: int, hi: int) -> int | None:
+                if name not in body:
+                    return None
+                try:
+                    value = int(body.get(name) or 0)
+                except (TypeError, ValueError):
+                    return None
+                return max(lo, min(hi, value))
+
             row = {
                 "ts_ms": int(time.time() * 1000),
                 "row_type": "event",
@@ -3632,6 +3644,7 @@ class UIServer:
                         "duplicate_offer", "offer_collision", "offer_echo",
                         "ringing_backfill", "answered", "no_answer",
                         "stalled_media", "media_path_repair", "contain", "cover",
+                        "repair",
                         "ice_state_changed", "connection_state_changed",
                         "remote_audio_ended", "remote_video_ended",
                         "focus", "split", "compact",
@@ -3647,6 +3660,7 @@ class UIServer:
                     },
                 ),
                 "ok": bool(body.get("ok")) if "ok" in body else None,
+                "repair_stage": _clean_small_int("repair_stage", 0, 3),
             }
             log_dir = data_dir() / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)

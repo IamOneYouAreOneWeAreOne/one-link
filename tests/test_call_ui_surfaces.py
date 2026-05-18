@@ -200,10 +200,12 @@ def test_active_call_surface_has_one_assist_rail(index_html: str) -> None:
 def test_call_driver_reports_metrics_to_immune_system(index_html: str) -> None:
     idx = index_html.find("async function reportCallMetricsOnce")
     assert idx > 0
-    snippet = index_html[idx:idx + 7600]
+    snippet = index_html[idx:idx + 9800]
     assert "media.pc.getStats()" in snippet
     assert 'action: "report_metrics"' in snippet
     assert "bandwidth_estimate_kbps" in snippet
+    assert "raw_loss_rate" in snippet
+    assert "smoothed_rtt_ms" in snippet
     assert "setInterval(reportCallMetricsOnce, 2000)" in index_html
 
 

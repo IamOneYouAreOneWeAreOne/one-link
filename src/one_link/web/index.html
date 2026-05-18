@@ -25896,10 +25896,21 @@
     lastInboundVideoBytes: 0,
     lastInboundAudioBytes: 0,
     stalledMediaTicks: 0,
+    lastInboundPacketsLost: 0,
+    lastInboundPacketsReceived: 0,
+    qualityEwmaRttMs: null,
+    qualityEwmaLoss: null,
     qualityBadTicks: 0,
     qualityGoodTicks: 0,
     lastUserVisibleRepairMs: 0,
     adaptationLevel: 0,
+    tauPressureTicks: 0,
+    tauStableTicks: 0,
+    lastTauAdaptMs: 0,
+    mediaRepairStage: 0,
+    lastPlaybackReviveMs: 0,
+    lastPcRebuildMs: 0,
+    lastRemoteMediaMovingMs: 0,
     callHistory: [],
     acceptedCallIds: new Set(),
     lastAcceptRetryMs: {},
@@ -26099,7 +26110,7 @@
   }
 
   function classifyCallQuality(metrics) {
-    const rtt = Number(metrics.rtt_ms || 0);
+    const rtt = Number(metrics.smoothed_rtt_ms || metrics.rtt_ms || 0);
     const loss = Number(metrics.loss_rate || 0);
     const ice = String(metrics.ice_connection_state || "");
     const conn = String(metrics.connection_state || "");
@@ -26159,11 +26170,24 @@
     const rtt = Number(metrics.rtt_ms || 0);
     const shouldDowngrade = loss >= 0.05 || rtt >= 260 || media.reconnecting;
     const shouldRecover = loss < 0.02 && rtt > 0 && rtt < 120 && !media.reconnecting;
+    if (shouldDowngrade) {
+      callUI.tauPressureTicks += 1;
+      callUI.tauStableTicks = 0;
+    } else if (shouldRecover) {
+      callUI.tauStableTicks += 1;
+      callUI.tauPressureTicks = Math.max(0, callUI.tauPressureTicks - 1);
+    } else {
+      callUI.tauPressureTicks = Math.max(0, callUI.tauPressureTicks - 1);
+      callUI.tauStableTicks = 0;
+    }
+    const now = Date.now();
+    if (now - Number(callUI.lastTauAdaptMs || 0) < 5000) return;
     let targetLevel = callUI.adaptationLevel || 0;
-    if (shouldDowngrade) targetLevel = Math.min(2, targetLevel + 1);
-    else if (shouldRecover) targetLevel = Math.max(0, targetLevel - 1);
+    if (callUI.tauPressureTicks >= 2) targetLevel = Math.min(2, targetLevel + 1);
+    else if (callUI.tauStableTicks >= 4) targetLevel = Math.max(0, targetLevel - 1);
     if (targetLevel === callUI.adaptationLevel) return;
     callUI.adaptationLevel = targetLevel;
+    callUI.lastTauAdaptMs = now;
     const caps = [
       { maxBitrate: 1800000, scale: 1 },
       { maxBitrate: 850000, scale: 1.5 },
@@ -26176,6 +26200,7 @@
         params.encodings = params.encodings && params.encodings.length ? params.encodings : [{}];
         params.encodings[0].maxBitrate = caps.maxBitrate;
         params.encodings[0].scaleResolutionDownBy = caps.scale;
+        params.degradationPreference = targetLevel >= 2 ? "maintain-framerate" : "balanced";
         if (sender.setParameters) await sender.setParameters(params);
       } catch (_) {}
     }
@@ -26557,10 +26582,21 @@
     callUI.lastInboundVideoBytes = 0;
     callUI.lastInboundAudioBytes = 0;
     callUI.stalledMediaTicks = 0;
+    callUI.lastInboundPacketsLost = 0;
+    callUI.lastInboundPacketsReceived = 0;
+    callUI.qualityEwmaRttMs = null;
+    callUI.qualityEwmaLoss = null;
     callUI.qualityBadTicks = 0;
     callUI.qualityGoodTicks = 0;
     callUI.lastUserVisibleRepairMs = 0;
     callUI.adaptationLevel = 0;
+    callUI.tauPressureTicks = 0;
+    callUI.tauStableTicks = 0;
+    callUI.lastTauAdaptMs = 0;
+    callUI.mediaRepairStage = 0;
+    callUI.lastPlaybackReviveMs = 0;
+    callUI.lastPcRebuildMs = 0;
+    callUI.lastRemoteMediaMovingMs = 0;
     callUI.acceptedCallIds.clear();
     callUI.lastAcceptRetryMs = {};
     media.screenStream = null;
@@ -26851,6 +26887,55 @@
     return true;
   }
 
+  function reviveRemotePlayback(reason) {
+    const now = Date.now();
+    if (now - Number(callUI.lastPlaybackReviveMs || 0) < 2500) return;
+    callUI.lastPlaybackReviveMs = now;
+    const v = $$("#call-remote-video");
+    const a = $$("#call-remote-audio");
+    if (media.remoteStream) {
+      if (v && v.srcObject !== media.remoteStream) v.srcObject = media.remoteStream;
+      if (a && a.srcObject !== media.remoteStream) a.srcObject = media.remoteStream;
+    }
+    safeMediaPlay(v);
+    safeMediaPlay(a);
+    reportCallEvent("remote_playback_revive", { reason: reason || "watchdog" });
+  }
+
+  async function rebuildPeerConnectionForActiveCall(reason) {
+    if (!callUI.activeCallId || !media.localStream) return false;
+    const now = Date.now();
+    if (now - Number(callUI.lastPcRebuildMs || 0) < 30000) return false;
+    callUI.lastPcRebuildMs = now;
+    addOneCallEvent("Rebuilding media engine...");
+    reportCallEvent("pc_rebuild_start", { reason: reason || "watchdog" });
+    const remoteTracks = media.remoteStream ? media.remoteStream.getTracks() : [];
+    remoteTracks.forEach((track) => {
+      try { media.remoteStream.removeTrack(track); } catch (_) {}
+    });
+    attachRemoteStream(media.remoteStream || new MediaStream());
+    if (media.pc) {
+      try { media.pc.close(); } catch (_) {}
+      media.pc = null;
+    }
+    media.iceConfigReady = null;
+    media.transceiversReady = false;
+    callUI.pendingIceCandidates = [];
+    callUI.appliedIceKeys.clear();
+    callUI.appliedRemoteOfferKeys.clear();
+    callUI.appliedRemoteAnswerKeys.clear();
+    callUI.sdpOfferInFlight = false;
+    callUI.sdpAnswerInFlight = false;
+    callUI.lastLocalOfferSdp = "";
+    callUI.lastLocalAnswerSdp = "";
+    const pc = setupRtcPeerConnection();
+    if (!pc) return false;
+    ensureLocalTracksOnPeerConnection();
+    await sendLocalSdpOffer();
+    reportCallEvent("pc_rebuild_offer_sent", { reason: reason || "watchdog" });
+    return true;
+  }
+
   function sdpKey(sdp) {
     const text = String(sdp || "");
     if (!text) return "";
@@ -26950,18 +27035,35 @@
     const now = Date.now();
     if (now - Number(callUI.lastMediaRepairMs || 0) < 9000) return;
     callUI.lastMediaRepairMs = now;
+    callUI.mediaRepairStage = Math.min(3, Number(callUI.mediaRepairStage || 0) + 1);
     if (now - Number(callUI.lastUserVisibleRepairMs || 0) > 15000 && callUI.qualityBadTicks >= 2) {
       callUI.lastUserVisibleRepairMs = now;
       setReconnectState(true, "Repairing media path...");
     }
     addOneCallEvent("Repairing media path...");
-    reportCallEvent("media_path_repair", { reason: reason || "watchdog" });
+    reportCallEvent("media_path_repair", {
+      reason: reason || "watchdog",
+      repair_stage: callUI.mediaRepairStage,
+    });
     try {
+      reviveRemotePlayback(reason || "repair");
       ensureLocalTracksOnPeerConnection();
       ensureMediaTransceivers();
+      await tuneOutboundMediaForTau({
+        ...(callUI.lastMetricsSnapshot || {}),
+        loss_rate: Math.max(Number(callUI.lastMetricsSnapshot?.loss_rate || 0), 0.09),
+        rtt_ms: Math.max(Number(callUI.lastMetricsSnapshot?.rtt_ms || 0), 320),
+      });
+      if (callUI.mediaRepairStage >= 3) {
+        const rebuilt = await rebuildPeerConnectionForActiveCall(reason || "media_path_repair");
+        if (rebuilt) return;
+      }
       if (typeof media.pc.restartIce === "function") {
         media.pc.restartIce();
-        reportCallEvent("ice_restart_requested", { reason: reason || "watchdog" });
+        reportCallEvent("ice_restart_requested", {
+          reason: reason || "watchdog",
+          repair_stage: callUI.mediaRepairStage,
+        });
       }
       if (media.pc.signalingState === "stable") {
         await sendLocalSdpOffer();
@@ -28170,6 +28272,8 @@
       let inboundVideoPackets = 0;
       let inboundVideoFramesDecoded = 0;
       let inboundVideoFramesDropped = 0;
+      let inboundPacketsLost = 0;
+      let inboundPacketsReceived = 0;
       stats.forEach((s) => {
         if (s.type === "candidate-pair" && (s.selected || s.nominated)) {
           if (typeof s.currentRoundTripTime === "number") {
@@ -28182,7 +28286,8 @@
           if (typeof s.jitter === "number") jitterMs = Math.round(s.jitter * 1000);
           const lost = Number(s.packetsLost || 0);
           const received = Number(s.packetsReceived || 0);
-          if (lost + received > 0) loss = lost / (lost + received);
+          inboundPacketsLost += lost;
+          inboundPacketsReceived += received;
         }
         if (s.type === "inbound-rtp" && !s.isRemote) {
           const kind = String(s.kind || s.mediaType || "").toLowerCase();
@@ -28197,6 +28302,27 @@
           }
         }
       });
+      if (inboundPacketsLost + inboundPacketsReceived > 0) {
+        const deltaLost = Math.max(0, inboundPacketsLost - Number(callUI.lastInboundPacketsLost || 0));
+        const deltaReceived = Math.max(0, inboundPacketsReceived - Number(callUI.lastInboundPacketsReceived || 0));
+        if (deltaLost + deltaReceived > 0) {
+          loss = deltaLost / (deltaLost + deltaReceived);
+        } else {
+          loss = inboundPacketsLost / (inboundPacketsLost + inboundPacketsReceived);
+        }
+        callUI.lastInboundPacketsLost = inboundPacketsLost;
+        callUI.lastInboundPacketsReceived = inboundPacketsReceived;
+      }
+      if (rttMs !== null) {
+        callUI.qualityEwmaRttMs = callUI.qualityEwmaRttMs === null
+          ? rttMs
+          : Math.round((callUI.qualityEwmaRttMs * 0.7) + (rttMs * 0.3));
+      }
+      if (loss !== null) {
+        callUI.qualityEwmaLoss = callUI.qualityEwmaLoss === null
+          ? loss
+          : (callUI.qualityEwmaLoss * 0.75) + (loss * 0.25);
+      }
       if (rttMs !== null) updateOneChip("#call-one-rtt", `${rttMs} ms`);
       if (loss !== null) updateOneChip("#call-one-loss", `${Math.round(loss * 100)}%`);
       if (kbps !== null) updateOneChip("#call-one-route", kbps > 5000 ? "Fast local" : "Local");
@@ -28233,7 +28359,10 @@
         ...selected,
         rtt_ms: rttMs,
         jitter_ms: jitterMs,
-        loss_rate: loss,
+        loss_rate: callUI.qualityEwmaLoss === null ? loss : callUI.qualityEwmaLoss,
+        raw_loss_rate: loss,
+        raw_rtt_ms: rttMs,
+        smoothed_rtt_ms: callUI.qualityEwmaRttMs,
         bandwidth_estimate_kbps: kbps,
         remote_tracks: remoteTrackSummary(),
       };
@@ -28248,6 +28377,15 @@
       callUI.lastInboundVideoBytes = inboundVideoBytes;
       callUI.lastInboundAudioBytes = inboundAudioBytes;
       callUI.lastInboundVideoFramesDecoded = inboundVideoFramesDecoded;
+      if (videoMoving || audioMoving) {
+        callUI.lastRemoteMediaMovingMs = Date.now();
+        if (
+          selected.ice_connection_state === "connected" ||
+          selected.ice_connection_state === "completed"
+        ) {
+          callUI.mediaRepairStage = 0;
+        }
+      }
       if (
         selected.has_remote_description
         && (selected.remote_video_tracks > 0 || selected.remote_audio_tracks > 0)

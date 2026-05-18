@@ -150,7 +150,7 @@ def test_media_watchdog_restarts_stuck_negotiation(index_html: str) -> None:
     assert "media.pc.signalingState" in snippet
     assert "sendLocalSdpOffer" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 7600]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 9800]
     assert 'ensureMediaNegotiation("metrics").catch' in metrics_snippet
     active_idx = index_html.find('window.handleLivingPresenceCallEvent = function')
     active_idx = index_html.find('if (phase === "active")', active_idx)
@@ -285,7 +285,7 @@ def test_call_media_watchdog_repairs_stalled_frames(index_html: str) -> None:
     assert "media_path_repair" in snippet
     assert "sendLocalSdpOffer" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 6500]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 8600]
     assert "stalledMediaTicks" in metrics_snippet
     assert 'repairMediaPath("stalled_media")' in metrics_snippet
 
@@ -339,9 +339,37 @@ def test_call_quality_uses_hysteresis_and_tau_adaptation(index_html: str) -> Non
     assert "qualityBadTicks" in index_html
     assert "qualityGoodTicks" in index_html
     assert "function tuneOutboundMediaForTau" in index_html
+    assert "tauPressureTicks" in index_html
+    assert "tauStableTicks" in index_html
+    assert "lastTauAdaptMs" in index_html
     assert "maxBitrate" in index_html
     assert "scaleResolutionDownBy" in index_html
+    assert "degradationPreference" in index_html
     assert "tau_media_adapted" in index_html
+
+
+def test_call_metrics_use_smoothed_interval_loss(index_html: str) -> None:
+    idx = index_html.find("async function reportCallMetricsOnce")
+    snippet = index_html[idx:idx + 7600]
+    assert "deltaLost" in snippet
+    assert "deltaReceived" in snippet
+    assert "qualityEwmaRttMs" in snippet
+    assert "qualityEwmaLoss" in snippet
+    assert "raw_loss_rate" in snippet
+    assert "smoothed_rtt_ms" in snippet
+
+
+def test_call_repair_has_staged_recovery_and_rebuild(index_html: str) -> None:
+    assert "function reviveRemotePlayback" in index_html
+    assert "async function rebuildPeerConnectionForActiveCall" in index_html
+    idx = index_html.find("async function repairMediaPath")
+    snippet = index_html[idx:idx + 2800]
+    assert "mediaRepairStage" in snippet
+    assert "reviveRemotePlayback" in snippet
+    assert "rebuildPeerConnectionForActiveCall" in snippet
+    assert "restartIce" in snippet
+    assert "pc_rebuild_start" in index_html
+    assert "pc_rebuild_offer_sent" in index_html
 
 
 def test_call_watchdog_repairs_missing_expected_remote_media(index_html: str) -> None:
