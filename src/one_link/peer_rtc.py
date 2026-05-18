@@ -138,7 +138,7 @@ DAEMON_BULK_LABEL = "one-link-daemon-bulk-v1"
 # attack window short. If a slow user fails the scan, the UI shows
 # the timer and they can mint a fresh QR with one click — better
 # UX than a long-lived token waiting to be stolen.
-PAIRING_TOKEN_TTL_MS = 90 * 1000
+PAIRING_TOKEN_TTL_MS = 5 * 60 * 1000
 PAIRING_TOKEN_BYTES = 32
 # External audit 2026-05-18 ES-46 (P3): bump the cap so a multi-user
 # laptop pairing many family devices in succession doesn't sweep out

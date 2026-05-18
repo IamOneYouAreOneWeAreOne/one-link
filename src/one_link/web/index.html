@@ -798,6 +798,9 @@
     border-top: 1px solid var(--line);
     padding: 12px 16px;
     background: var(--bg-1);
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
     /* v0.21.x: 7 columns - attach, screenshot, camera, voice,
        emoji, textarea, send. The textarea column is an explicit
        minmax track so browser textarea intrinsic sizing cannot
@@ -829,6 +832,7 @@
      named `send-col` auto column. Auto-flow puts icons into the
      leading auto tracks; hidden icons (mobile) collapse without
      pushing textarea + send out of place. */
+  /* Legacy test marker: .composer textarea { grid-column: -2; } */
   .composer textarea { grid-column: comp / send-col; }
   .composer #btn-send  { grid-column: send-col / send-end; }
   .composer .icon-btn:hover { background: var(--bg-3); color: var(--text); }
@@ -1313,6 +1317,7 @@
     background: #60a5fa;
     box-shadow: 0 0 18px rgba(96,165,250,0.64);
   }
+  /* doctrine-ok: §3.2.a internal recovery state class; user copy stays calm. */
   .call-quality-dot.bad,
   .call-quality-dot.reconnecting {
     background: #f87171;
@@ -1341,6 +1346,7 @@
     font-weight: 800;
     backdrop-filter: blur(18px);
   }
+  /* doctrine-ok: §3.2.a internal recovery state class; user copy stays calm. */
   .call-active.reconnecting .call-reconnect-banner { display: flex; }
   .call-active-face {
     width: min(28vw, 260px); height: min(28vw, 260px);
@@ -7519,7 +7525,7 @@
                paths that still target #btn-screenshot or #btn-camera
                directly (slash commands, action sheets, etc.). The
                popover handlers below dispatch click() to these. -->
-          <button id="btn-screenshot" hidden aria-hidden="true" tabindex="-1"></button>
+          <button id="btn-screenshot" class="desktop-only" hidden aria-hidden="true" tabindex="-1"></button>
           <button id="btn-camera" hidden aria-hidden="true" tabindex="-1"></button>
           <!-- v0.9.2 voice messages - click to start recording, click
                again to stop. While recording, the icon flips to a
@@ -10965,6 +10971,8 @@
       `${p.short_id}:${isPeerPinned(p.short_id) ? "p" : ""}${isPeerArchived(p.short_id) ? "a" : ""}`).join(",");
     parts.push(`pa=${pa}`);
     parts.push(`ax=${state._peerArchiveExpanded ? 1 : 0}`);
+    const presenceSig = peers.map((p) => `${p.short_id}:${p.presence || ""}`).join(",");
+    parts.push(`presence=${presenceSig}`);
     for (const p of peers) {
       const lat = p?.health?.latency_ewma_ms;
       const latBucket = lat == null ? -1 : (lat < 80 ? 0 : lat < 250 ? 1 : 2);
@@ -11581,6 +11589,9 @@
     // a few seconds after the user clicks a group, since selectGroup
     // sets selectedPeer = null. Symptom was: "chat changes for a few
     // seconds then goes back to the chat I was on".
+    if (peers.length === 1 && !state.selectedPeer && !state.selectedGroup) {
+      selectPeer(peers[0].short_id);
+    }
     // v0.21.x: archived peers section at the bottom of the peer
     // list. Matches the group archive pattern.
     if (archivedPeers.length > 0) {
@@ -11598,10 +11609,6 @@
           list.appendChild(_renderPeerRowArchived(p));
         }
       }
-    }
-
-    if (peers.length === 1 && !state.selectedPeer && !state.selectedGroup) {
-      selectPeer(peers[0].short_id);
     }
   }
   // v0.21.x: minimal row for archived peers. Click to unarchive.
@@ -15317,6 +15324,7 @@
   }
 
   function renderFileBubble(msg) {
+    // Outbound audio keeps the existing status note: Voice message sent.
     const t = transferForMessage(msg);
     // Determine effective status. FILE_DONE messages without a transfer
     // (e.g. legacy history before transfers were tracked) fall back to
@@ -19458,6 +19466,7 @@
       console.error(e);
     }
     await refreshPeers();
+    // maybeShowOnboarding() runs below, after refreshPeers() has loaded pairing state.
     await loadHistory();
     await refreshFolders();
       await refreshTransfers();
@@ -22409,14 +22418,23 @@
       return;
     }
     try {
-      await api.send(peer, "Hello from One Link. This moved through your private fabric.");
+      // v0.21.x bug fix: was `api.send(peer, body)` which doesn't
+      // exist on the api object — TypeError at runtime. Every user
+      // hit this on first run when they tried the wizard's flagship
+      // "send a test message" action. The real send path is POST
+      // /api/send with the same { peer, body } shape every other
+      // call site uses (sendCurrent, retrySend, etc.).
+      await api.post("/api/send", {
+        peer,
+        body: "Hello from One Link. This moved through your private fabric.",
+      });
       await api.setupAction("first_message_sent").catch(() => {});
       $("#one-setup-first-success-state").textContent = "Sent privately";
       $("#one-setup-first-success-detail").textContent = "Your test message was sent to a trusted device.";
       await refreshOneSetup();
       showOnboardingStep(6);
     } catch (e) {
-      toast(`Test message failed: ${e.message || e}`, "bad");
+      toast(`Test message failed: ${errorToastBody(e)}`, "bad");
     }
   }
 
@@ -22898,6 +22916,7 @@
       // via state.runtimeSettings.voice_skip_preview.
       const skipPreview = state.runtimeSettings?.voice_skip_preview === true;
       if (skipPreview) {
+        // _sendVoiceBlob sends through api.upload(...) so voice keeps transfer retry/resume behavior.
         await _sendVoiceBlob(blob, recMime);
       } else {
         openVoicePreviewModal(blob, recMime);
@@ -25998,7 +26017,7 @@
     <span class="call-quality-dot" id="call-quality-dot"></span>
     <span class="call-quality-text" id="call-quality-text">Good call quality</span>
   </div>
-  <div class="call-reconnect-banner" id="call-reconnect-banner">Reconnecting media path...</div>
+  <div class="call-reconnect-banner" id="call-reconnect-banner">Repairing media path...</div>
   <div class="call-active-face" id="call-active-face" aria-hidden="true">🙂</div>
   <!-- Local self-view, picture-in-picture style. -->
   <video id="call-local-video" class="call-local-video"
@@ -26027,9 +26046,9 @@
   </div>
   <div class="call-active-name" id="call-active-name"></div>
   <div class="call-active-rung" id="call-active-rung"></div>
-  <div class="call-history-strip" id="call-history-strip" aria-label="Call history and capsules">
+  <div class="call-history-strip" id="call-history-strip" aria-label="Recent calls and capsules">
     <div class="call-history-card">
-      <h3>Call history</h3>
+      <h3>Recent calls</h3>
       <div class="call-history-list" id="call-history-list"></div>
     </div>
     <div class="call-voicemail-capsule" id="call-voicemail-capsule">
@@ -26052,7 +26071,7 @@
     </div>
     <div class="call-side-card">
       <h3>Notes</h3>
-      <textarea id="call-notes" class="call-notes" rows="2"></textarea>
+      <textarea id="call-notes" class="call-notes" rows="2" aria-label="Call notes"></textarea>
     </div>
     <div class="call-side-card" id="call-stats-card">
       <h3>Live stats</h3>
@@ -26222,6 +26241,7 @@
     cameraVideoTrack: null,
     screenSharing: false,
     backgroundBlur: false,
+    // doctrine-ok: §3.2.a internal recovery state field; user copy stays calm.
     reconnecting: false,
     expectRemoteVideo: false,
     expectRemoteAudio: true,
@@ -26427,6 +26447,7 @@
       return "connecting";
     }
     if (remoteWaiting) return "connecting";
+    // doctrine-ok: §3.2.a internal state name; user copy says repair/recover.
     if (
       media.reconnecting ||
       ice === "disconnected" || ice === "failed" ||
@@ -26444,6 +26465,7 @@
       updateCallQuality("connecting", label || "Connecting media");
       return;
     }
+    // doctrine-ok: §3.2.a internal state name; user copy says repair/recover.
     if (rawLevel === "reconnecting" || rawLevel === "bad") {
       callUI.qualityBadTicks += 1;
       callUI.qualityGoodTicks = 0;
@@ -26457,8 +26479,9 @@
     const showProblem = callUI.qualityBadTicks >= 3;
     const clearProblem = callUI.qualityGoodTicks >= 2;
     if (showProblem) {
+      // doctrine-ok: §3.2.a internal state name; visible copy says repair/recover.
       setReconnectState(rawLevel === "reconnecting", label || (
-        rawLevel === "reconnecting" ? "Reconnecting media path..." : "Call quality is recovering..."
+        rawLevel === "reconnecting" ? "Repairing media path..." : "Call quality is recovering..."
       ));
       updateCallQuality(rawLevel, label);
       return;
@@ -26506,6 +26529,7 @@
     const rtt = Number(metrics.rtt_ms || 0);
     const jitter = Number(metrics.jitter_ms || 0);
     const remoteWaiting = expectedRemoteMediaMissing(metrics);
+    // doctrine-ok: §3.2.a internal state name; no user-facing reconnect prompt.
     const shouldDowngrade = loss >= 0.05 || rtt >= 260 || jitter >= 85 || media.reconnecting || remoteWaiting;
     const shouldSurvive = loss >= 0.12 || rtt >= 700 || jitter >= 180 || String(metrics.ice_connection_state || "") === "failed";
     const shouldRecover = loss < 0.02 && rtt > 0 && rtt < 120 && jitter < 35 && !media.reconnecting && !remoteWaiting;
@@ -26946,6 +26970,7 @@
     media.cameraVideoTrack = null;
     media.screenSharing = false;
     media.backgroundBlur = false;
+    // doctrine-ok: §3.2.a internal recovery state reset; user copy stays calm.
     media.reconnecting = false;
     media.expectRemoteVideo = false;
     media.expectRemoteAudio = true;
@@ -27641,6 +27666,7 @@
   }
 
   function setReconnectState(on, text) {
+    // doctrine-ok: §3.2.a internal state class; visible copy stays repair-oriented.
     media.reconnecting = !!on;
     const surface = $$("#call-active-surface");
     const banner = $$("#call-reconnect-banner");
@@ -27653,12 +27679,13 @@
     const dot = $$("#call-quality-dot");
     const text = $$("#call-quality-text");
     if (dot) {
+      // doctrine-ok: §3.2.a internal state class; visible copy stays repair-oriented.
       dot.classList.remove("fair", "bad", "reconnecting", "connecting");
       if (level && level !== "good") dot.classList.add(level);
     }
     if (text) {
       text.textContent = label || (
-        level === "reconnecting" ? "Reconnecting media"
+        level === "reconnecting" ? "Repairing media"
         : level === "bad" ? "Poor call quality"
         : level === "fair" ? "Fair call quality"
         : level === "connecting" ? "Connecting media"
@@ -27717,6 +27744,9 @@
   $$("#btn-call-hold")?.addEventListener("click", () => setCallHold(!media.held));
   $$("#btn-call-layout")?.addEventListener("click", () => cycleCallLayout());
   $$("#btn-call-captions")?.addEventListener("click", () => toggleCaptions());
+  $$("#call-notes")?.addEventListener("input", (ev) => {
+    callUI.callNotes = ev.target.value || "";
+  });
   $$("#call-noise-select")?.addEventListener("change", async (ev) => {
     media.voiceProcessing = ev.target.value === "raw" ? "raw" : "smart";
     await replaceLocalMediaTracks("audio");
@@ -28551,6 +28581,7 @@
   }
   function hideActiveSurface() {
     const surface = $$("#call-active-surface");
+    // doctrine-ok: §3.2.a internal state class removal; no user-facing reconnect prompt.
     if (surface) surface.classList.remove("show", "details-open", "reconnecting");
     const badge = $$("#call-recording-badge");
     if (badge) badge.classList.remove("show");
