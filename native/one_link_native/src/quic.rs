@@ -1,4 +1,4 @@
-//! `one_link_native.quic` — Python binding for the `ol_quic` crate.
+﻿//! `one_link_native.quic` â€” Python binding for the `ol_quic` crate.
 //!
 //! Surfaces identity-bound QUIC transport to Python with a synchronous
 //! call shape that hides the underlying tokio runtime.
@@ -44,6 +44,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use bytes::Bytes;
 use ol_quic::{
     proto::{decode_varint, encode_varint},
     transport::{read_frame, write_frame},
@@ -59,7 +60,7 @@ use tokio::task::JoinSet;
 
 use crate::errors::quic_error_to_pyerr;
 
-// ───────────────────────────── runtime ─────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ runtime â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Single shared tokio runtime for all QUIC I/O. Spawned with as many
 /// worker threads as the host has cores (capped at 8 for sanity).
@@ -78,7 +79,7 @@ fn runtime() -> &'static Runtime {
     })
 }
 
-// ───────────────────────────── identity ────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Python view of an Ed25519 peer identity.
 #[pyclass(name = "Identity", module = "one_link_native.quic", frozen)]
@@ -127,11 +128,11 @@ impl PyIdentity {
     }
 
     fn __repr__(&self) -> String {
-        format!("Identity(fingerprint={}…)", &self.fingerprint_hex()[..16])
+        format!("Identity(fingerprint={}â€¦)", &self.fingerprint_hex()[..16])
     }
 }
 
-// ───────────────────────────── endpoint config ─────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ endpoint config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Python view of `ol_quic::EndpointConfig`.
 #[pyclass(name = "EndpointConfig", module = "one_link_native.quic")]
@@ -234,13 +235,13 @@ impl PyEndpointConfig {
     }
 }
 
-// ───────────────────────────── peer registry (Python callback) ─────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ peer registry (Python callback) â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Wraps a Python callable `(fingerprint: bytes) -> bool` as a
 /// [`PeerRegistry`].
 ///
 /// The callback is invoked with the GIL acquired. Verifier path is
-/// short and direct — TLS handshake hot path; the callback should do
+/// short and direct â€” TLS handshake hot path; the callback should do
 /// O(1) lookup work (peer registry hashmap).
 struct PyCallbackRegistry {
     callback: Arc<Mutex<PyObject>>,
@@ -265,7 +266,7 @@ impl PeerRegistry for PyCallbackRegistry {
     }
 }
 
-// ───────────────────────────── endpoint ────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ endpoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Python view of `ol_quic::Endpoint`.
 ///
@@ -319,7 +320,7 @@ impl PyEndpoint {
                     Ok(conn) => {
                         let py_conn = PyConnection::new(conn);
                         if tx.send(py_conn).await.is_err() {
-                            // Receiver dropped → endpoint shutting down.
+                            // Receiver dropped â†’ endpoint shutting down.
                             break;
                         }
                     }
@@ -432,7 +433,7 @@ impl PyEndpoint {
     }
 }
 
-// ───────────────────────────── connection ──────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ connection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A handle to a fresh inbound bidirectional stream that the server-side
 /// caller hasn't replied to yet. Issued by [`PyConnection::recv_frame_blocking`].
@@ -517,7 +518,7 @@ impl PyConnection {
     /// Batched request/response helper: enter the Rust async runtime once,
     /// then issue many sequential frame round-trips on the same connection.
     ///
-    /// This avoids one Pythonâ†”Rust boundary crossing per chunk request,
+    /// This avoids one PythonÃ¢â€ â€Rust boundary crossing per chunk request,
     /// which matters for high-throughput loopback and LAN chunk pulls.
     fn send_frame_round_trips<'py>(
         &self,
@@ -754,28 +755,22 @@ impl PyConnection {
                 }));
             }
         }
+        let payloads = payloads
+            .into_iter()
+            .map(|payload| encode_frame_bytes(kind, &payload))
+            .collect::<Vec<_>>();
         let conn = self.inner.clone();
         let total = payloads.len();
         let bytes = py.allow_threads(|| {
             runtime().block_on(async move {
                 let (mut send, mut recv) = conn.open_bi_stream().await?;
-                let writer = async {
-                    for payload in payloads {
-                        write_frame_parts(&mut send, kind, &payload).await?;
-                    }
-                    send.finish().map_err(|e| {
-                        ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
-                    })?;
-                    Ok::<_, ol_quic::QuicError>(())
-                };
-                let reader = async {
-                    let mut bytes = 0usize;
-                    for _ in 0..total {
-                        bytes += read_expected_frame_payload_len(&mut recv, expected).await?;
-                    }
-                    Ok::<_, ol_quic::QuicError>(bytes)
-                };
-                let (_, bytes) = tokio::try_join!(writer, reader)?;
+                for payload in payloads {
+                    write_encoded_frame(&mut send, payload).await?;
+                }
+                send.finish()
+                    .map_err(|e| ol_quic::QuicError::Io(std::io::Error::other(e.to_string())))?;
+                let bytes =
+                    read_expected_stream_payload_bytes_chunks(&mut recv, expected, total).await?;
                 Ok::<_, ol_quic::QuicError>(bytes)
             })
         });
@@ -810,8 +805,12 @@ impl PyConnection {
             }
         }
         let total = payloads.len();
+        let payloads = payloads
+            .into_iter()
+            .map(|payload| encode_frame_bytes(kind, &payload))
+            .collect::<Vec<_>>();
         let lane_count = lanes.unwrap_or(4).clamp(1, total.max(1)).min(256);
-        let mut buckets: Vec<Vec<Vec<u8>>> = (0..lane_count).map(|_| Vec::new()).collect();
+        let mut buckets: Vec<Vec<Bytes>> = (0..lane_count).map(|_| Vec::new()).collect();
         for (idx, payload) in payloads.into_iter().enumerate() {
             buckets[idx % lane_count].push(payload);
         }
@@ -824,23 +823,18 @@ impl PyConnection {
                     set.spawn(async move {
                         let total = bucket.len();
                         let (mut send, mut recv) = conn.open_bi_stream().await?;
-                        let writer = async {
-                            for payload in bucket {
-                                write_frame_parts(&mut send, kind, &payload).await?;
-                            }
-                            send.finish().map_err(|e| {
-                                ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
-                            })?;
-                            Ok::<_, ol_quic::QuicError>(())
-                        };
-                        let reader = async {
-                            let mut bytes = 0usize;
-                            for _ in 0..total {
-                                bytes += read_expected_frame_payload_len(&mut recv, expected).await?;
-                            }
-                            Ok::<_, ol_quic::QuicError>(bytes)
-                        };
-                        let (_, bytes) = tokio::try_join!(writer, reader)?;
+                        for payload in bucket {
+                            write_encoded_frame(&mut send, payload).await?;
+                        }
+                        send.finish().map_err(|e| {
+                            ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
+                        })?;
+                        let bytes = read_expected_stream_payload_bytes_chunks(
+                            &mut recv,
+                            expected,
+                            total,
+                        )
+                        .await?;
                         Ok::<_, ol_quic::QuicError>(bytes)
                     });
                 }
@@ -1098,7 +1092,7 @@ impl PyConnection {
         }
         let cap = max_in_flight.unwrap_or(64).clamp(1, 1024);
         let conn = self.inner.clone();
-        let payload = Arc::new(payload);
+        let response = encode_frame_bytes(kind, &payload);
         let result = py.allow_threads(|| {
             runtime().block_on(async move {
                 let semaphore = Arc::new(Semaphore::new(cap));
@@ -1108,12 +1102,12 @@ impl PyConnection {
                         ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
                     })?;
                     let conn = conn.clone();
-                    let payload = payload.clone();
+                    let response = response.clone();
                     set.spawn(async move {
                         let _permit = permit;
                         let (mut send, mut recv) = conn.accept_bi_stream().await?;
                         let _request = read_frame(&mut recv).await?;
-                        write_frame_parts(&mut send, kind, payload.as_ref()).await?;
+                        write_encoded_frame(&mut send, response.clone()).await?;
                         send.finish().map_err(|e| {
                             ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
                         })?;
@@ -1158,7 +1152,7 @@ impl PyConnection {
         }
         let cap = max_in_flight.unwrap_or(16).clamp(1, 256);
         let conn = self.inner.clone();
-        let payload = Arc::new(payload);
+        let response = encode_frame_bytes(kind, &payload);
         let result = py.allow_threads(|| {
             runtime().block_on(async move {
                 let semaphore = Arc::new(Semaphore::new(cap));
@@ -1168,14 +1162,14 @@ impl PyConnection {
                         ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
                     })?;
                     let conn = conn.clone();
-                    let payload = payload.clone();
+                    let response = response.clone();
                     set.spawn(async move {
                         let _permit = permit;
                         let (mut send, mut recv) = conn.accept_bi_stream().await?;
                         let mut served = 0usize;
                         for _ in 0..requests_per_stream {
                             let _request = read_frame(&mut recv).await?;
-                            write_frame_parts(&mut send, kind, payload.as_ref()).await?;
+                            write_encoded_frame(&mut send, response.clone()).await?;
                             served += 1;
                         }
                         send.finish().map_err(|e| {
@@ -1208,7 +1202,7 @@ impl PyConnection {
     }
 }
 
-// ───────────────────────────── module registration ─────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ module registration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     use ol_quic::{ALPN, MAX_BULK_FRAME_BYTES, MAX_CONTROL_FRAME_BYTES};
@@ -1216,7 +1210,7 @@ pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
     m.add("MAX_BULK_FRAME_BYTES", MAX_BULK_FRAME_BYTES)?;
     m.add("MAX_CONTROL_FRAME_BYTES", MAX_CONTROL_FRAME_BYTES)?;
 
-    // Frame kind constants — exported as module-level integers so Python
+    // Frame kind constants â€” exported as module-level integers so Python
     // callers can pass `quic.FRAME_CHUNK_REQUEST` instead of memorizing 0x01.
     m.add("FRAME_CHUNK_REQUEST", FrameKind::ChunkRequest.as_u8())?;
     m.add("FRAME_CHUNK_RESPONSE", FrameKind::ChunkResponse.as_u8())?;
@@ -1250,7 +1244,6 @@ pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
     m.add_class::<PyInboundStream>()?;
     Ok(())
 }
-
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -1295,82 +1288,127 @@ async fn write_frame_parts(
     }
     Ok(())
 }
-
-async fn read_expected_frame_payload_len(
-    recv: &mut quinn::RecvStream,
-    expected: FrameKind,
-) -> Result<usize, ol_quic::QuicError> {
-    let mut kind_buf = [0u8; 1];
-    read_exact_parts(recv, &mut kind_buf).await?;
-    let kind = FrameKind::from_u8(kind_buf[0]).ok_or(ol_quic::QuicError::MalformedFrame {
-        offset: 0,
-        reason: "unknown frame kind",
-    })?;
-    if kind != expected {
-        return Err(ol_quic::QuicError::MalformedFrame {
-            offset: 0,
-            reason: "unexpected response kind",
-        });
-    }
-
-    let mut varint_buf = Vec::with_capacity(9);
-    loop {
-        let mut b = [0u8; 1];
-        read_exact_parts(recv, &mut b).await?;
-        varint_buf.push(b[0]);
-        if b[0] & 0x80 == 0 {
-            break;
-        }
-        if varint_buf.len() > 9 {
-            return Err(ol_quic::QuicError::MalformedFrame {
-                offset: varint_buf.len() as u64,
-                reason: "varint overflow",
-            });
-        }
-    }
-    let (length, _consumed) = decode_varint(&varint_buf, 0)?;
-    let max = kind.max_payload_bytes();
-    if length > max {
-        return Err(ol_quic::QuicError::FrameTooLarge {
-            kind: kind.as_u8(),
-            got: length,
-            max,
-        });
-    }
-    drain_exact_parts(recv, length as usize).await?;
-    Ok(length as usize)
+fn encode_frame_bytes(kind: FrameKind, payload: &[u8]) -> Bytes {
+    let mut encoded = Vec::with_capacity(1 + 9 + payload.len());
+    encoded.push(kind.as_u8());
+    encode_varint(&mut encoded, payload.len() as u64);
+    encoded.extend_from_slice(payload);
+    Bytes::from(encoded)
 }
 
-async fn read_exact_parts(
-    recv: &mut quinn::RecvStream,
-    buf: &mut [u8],
+async fn write_encoded_frame(
+    send: &mut quinn::SendStream,
+    encoded: Bytes,
 ) -> Result<(), ol_quic::QuicError> {
-    let mut filled = 0usize;
-    while filled < buf.len() {
-        let n = match recv.read(&mut buf[filled..]).await {
-            Ok(Some(n)) => n,
-            Ok(None) => {
-                return Err(ol_quic::QuicError::StreamShortRead {
-                    needed: buf.len(),
-                    got: filled,
-                });
-            }
-            Err(e) => return Err(ol_quic::QuicError::StreamRead(e)),
-        };
-        filled += n;
-    }
+    send.write_chunk(encoded)
+        .await
+        .map_err(ol_quic::QuicError::StreamWrite)?;
     Ok(())
 }
 
-async fn drain_exact_parts(
+async fn read_expected_stream_payload_bytes_chunks(
     recv: &mut quinn::RecvStream,
+    expected: FrameKind,
+    frame_count: usize,
+) -> Result<usize, ol_quic::QuicError> {
+    let mut cur: Option<Bytes> = None;
+    let mut pos = 0usize;
+    let mut bytes = 0usize;
+    for _ in 0..frame_count {
+        let kind_byte = read_chunk_byte(recv, &mut cur, &mut pos).await?;
+        let kind = FrameKind::from_u8(kind_byte).ok_or(ol_quic::QuicError::MalformedFrame {
+            offset: 0,
+            reason: "unknown frame kind",
+        })?;
+        if kind != expected {
+            return Err(ol_quic::QuicError::MalformedFrame {
+                offset: 0,
+                reason: "unexpected response kind",
+            });
+        }
+        let mut varint_buf = [0u8; 9];
+        let mut varint_len = 0usize;
+        loop {
+            if varint_len >= varint_buf.len() {
+                return Err(ol_quic::QuicError::MalformedFrame {
+                    offset: varint_len as u64,
+                    reason: "varint overflow",
+                });
+            }
+            let b = read_chunk_byte(recv, &mut cur, &mut pos).await?;
+            varint_buf[varint_len] = b;
+            varint_len += 1;
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        let (length, _consumed) = decode_varint(&varint_buf[..varint_len], 0)?;
+        let max = kind.max_payload_bytes();
+        if length > max {
+            return Err(ol_quic::QuicError::FrameTooLarge {
+                kind: kind.as_u8(),
+                got: length,
+                max,
+            });
+        }
+        skip_chunk_bytes(recv, &mut cur, &mut pos, length as usize).await?;
+        bytes += length as usize;
+    }
+    Ok(bytes)
+}
+
+async fn read_chunk_byte(
+    recv: &mut quinn::RecvStream,
+    cur: &mut Option<Bytes>,
+    pos: &mut usize,
+) -> Result<u8, ol_quic::QuicError> {
+    loop {
+        if let Some(chunk) = cur.as_ref() {
+            if *pos < chunk.len() {
+                let b = chunk[*pos];
+                *pos += 1;
+                return Ok(b);
+            }
+        }
+        *cur = recv
+            .read_chunk(usize::MAX, true)
+            .await
+            .map_err(ol_quic::QuicError::StreamRead)?
+            .map(|chunk| chunk.bytes);
+        *pos = 0;
+        if cur.is_none() {
+            return Err(ol_quic::QuicError::StreamShortRead { needed: 1, got: 0 });
+        }
+    }
+}
+
+async fn skip_chunk_bytes(
+    recv: &mut quinn::RecvStream,
+    cur: &mut Option<Bytes>,
+    pos: &mut usize,
     mut remaining: usize,
 ) -> Result<(), ol_quic::QuicError> {
-    let mut buf = [0u8; 64 * 1024];
     while remaining > 0 {
-        let want = remaining.min(buf.len());
-        read_exact_parts(recv, &mut buf[..want]).await?;
-        remaining -= want;
+        if let Some(chunk) = cur.as_ref() {
+            if *pos < chunk.len() {
+                let take = remaining.min(chunk.len() - *pos);
+                *pos += take;
+                remaining -= take;
+                continue;
+            }
+        }
+        *cur = recv
+            .read_chunk(usize::MAX, true)
+            .await
+            .map_err(ol_quic::QuicError::StreamRead)?
+            .map(|chunk| chunk.bytes);
+        *pos = 0;
+        if cur.is_none() {
+            return Err(ol_quic::QuicError::StreamShortRead {
+                needed: remaining,
+                got: 0,
+            });
+        }
     }
     Ok(())
 }

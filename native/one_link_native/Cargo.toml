@@ -53,6 +53,7 @@ quinn           = { workspace = true }
 tokio           = { workspace = true }
 thiserror       = { workspace = true }
 tracing         = { workspace = true }
+bytes           = "1"
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
