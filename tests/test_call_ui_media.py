@@ -328,10 +328,20 @@ def test_call_room_parity_controls_present(index_html: str) -> None:
 
 def test_call_room_live_panels_update_from_metrics(index_html: str) -> None:
     idx = index_html.find("async function reportCallMetricsOnce")
-    snippet = index_html[idx:idx + 9200]
+    snippet = index_html[idx:idx + 9800]
     assert "renderParticipants()" in snippet
     assert "renderLiveStats(callUI.lastMetricsSnapshot)" in snippet
     assert "classifyCallQuality" in snippet
+
+
+def test_call_quality_uses_hysteresis_and_tau_adaptation(index_html: str) -> None:
+    assert "function applyCallQualityHysteresis" in index_html
+    assert "qualityBadTicks" in index_html
+    assert "qualityGoodTicks" in index_html
+    assert "function tuneOutboundMediaForTau" in index_html
+    assert "maxBitrate" in index_html
+    assert "scaleResolutionDownBy" in index_html
+    assert "tau_media_adapted" in index_html
 
 
 def test_call_watchdog_repairs_missing_expected_remote_media(index_html: str) -> None:

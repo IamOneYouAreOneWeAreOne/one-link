@@ -3599,6 +3599,7 @@ class UIServer:
                 "voice_processing_changed",
                 "call_debug_copied",
                 "call_debug_copy_failed",
+                "tau_media_adapted",
                 "duplicate_remote_offer_ignored",
                 "sas_words_shown",
                 "sas_words_missing",
@@ -3642,7 +3643,7 @@ class UIServer:
                     {
                         "new", "checking", "connected", "completed",
                         "failed", "disconnected", "closed", "connecting",
-                        "enabled", "disabled",
+                        "enabled", "disabled", "full", "steady", "survival",
                     },
                 ),
                 "ok": bool(body.get("ok")) if "ok" in body else None,

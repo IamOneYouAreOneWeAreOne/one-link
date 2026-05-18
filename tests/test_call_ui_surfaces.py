@@ -172,6 +172,18 @@ def test_active_call_surface_is_polished_full_screen(index_html: str) -> None:
     assert "radial-gradient" in snippet
     assert "backdrop-filter: blur(18px)" in snippet
     assert "bottom: 34px" in snippet
+
+
+def test_call_side_panels_are_compact_and_mobile_hidden(index_html: str) -> None:
+    idx = index_html.find(".call-history-strip")
+    snippet = index_html[idx:idx + 1800]
+    assert "top: 112px" in snippet
+    assert "top: 278px" in snippet
+    mobile_idx = index_html.find("@media (max-width: 780px)", idx)
+    mobile_snippet = index_html[mobile_idx:mobile_idx + 1400]
+    assert ".call-history-strip" in mobile_snippet
+    assert ".call-side-panel" in mobile_snippet
+    assert "display: none" in mobile_snippet
     assert "min-width: 160px" in snippet
     assert "Connected privately over One Link" in index_html
 
