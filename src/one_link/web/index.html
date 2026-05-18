@@ -21137,6 +21137,23 @@
     }
   }
 
+  function ensureLocalTracksOnPeerConnection() {
+    if (!media.pc || !media.localStream) return false;
+    const liveTracks = media.localStream.getTracks()
+      .filter((t) => t.readyState === "live");
+    if (!liveTracks.length) return false;
+    const alreadyAttached = new Set(
+      (media.pc.getSenders ? media.pc.getSenders() : [])
+        .map((s) => s && s.track)
+        .filter(Boolean),
+    );
+    liveTracks.forEach((track) => {
+      if (alreadyAttached.has(track)) return;
+      try { media.pc.addTrack(track, media.localStream); } catch (_) {}
+    });
+    return true;
+  }
+
   async function sendLocalSdpAnswer() {
     if (!media.pc || !callUI.activeCallId) return;
     if (callUI.sdpAnswerInFlight) return;
@@ -21168,9 +21185,12 @@
 
   async function ensureMediaNegotiation(reason) {
     if (!callUI.activeCallId || !media.pc || !media.localStream) return;
-    if (!callUI.localMediaReady) return;
-    const hasLiveLocal = media.localStream.getTracks().some((t) => t.readyState === "live");
+    const hasLiveLocal = ensureLocalTracksOnPeerConnection();
     if (!hasLiveLocal) return;
+    if (!callUI.localMediaReady) {
+      callUI.localMediaReady = true;
+      reportCallEvent("local_media_ready", { reason: reason || "watchdog" });
+    }
     if (media.pc.localDescription) return;
     if (media.pc.signalingState && media.pc.signalingState !== "stable") return;
     addOneCallEvent(`Media negotiation starting${reason ? ` (${reason})` : ""}.`);
@@ -22051,6 +22071,7 @@
         remote_live_audio_tracks: media.remoteStream ? media.remoteStream.getAudioTracks().filter((t) => t.readyState === "live").length : 0,
         remote_live_video_tracks: media.remoteStream ? media.remoteStream.getVideoTracks().filter((t) => t.readyState === "live").length : 0,
       };
+      ensureMediaNegotiation("metrics").catch(() => {});
       await callApiPost({
         action: "report_metrics",
         call_id: callUI.activeCallId,

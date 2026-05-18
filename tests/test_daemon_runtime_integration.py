@@ -218,7 +218,7 @@ def test_report_call_event_writes_privacy_safe_media_audit(
         "action": "report_call_event",
         "call_id": "rt-call-1",
         "event": "offer_sent",
-        "reason": "watchdog",
+        "reason": "metrics",
         "state": "connected",
         "media_kind": "video",
         "ok": True,
@@ -237,7 +237,7 @@ def test_report_call_event_writes_privacy_safe_media_audit(
     assert row["row_type"] == "event"
     assert row["call_id"] == "rt-call-1"
     assert row["event"] == "offer_sent"
-    assert row["reason"] == "watchdog"
+    assert row["reason"] == "metrics"
     assert row["state"] == "connected"
     assert row["media_kind"] == "video"
     assert row["ok"] is True

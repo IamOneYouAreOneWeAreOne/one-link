@@ -141,11 +141,17 @@ def test_media_watchdog_restarts_stuck_negotiation(index_html: str) -> None:
     offer creation from that state."""
     assert "function startMediaWatchdog" in index_html
     assert 'ensureMediaNegotiation("watchdog")' in index_html
+    assert "function ensureLocalTracksOnPeerConnection" in index_html
     idx = index_html.find("async function ensureMediaNegotiation")
-    snippet = index_html[idx:idx + 1000]
+    snippet = index_html[idx:idx + 1400]
+    assert "ensureLocalTracksOnPeerConnection()" in snippet
+    assert "callUI.localMediaReady = true" in snippet
     assert "media.pc.localDescription" in snippet
     assert "media.pc.signalingState" in snippet
     assert "sendLocalSdpOffer" in snippet
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 3300]
+    assert 'ensureMediaNegotiation("metrics").catch' in metrics_snippet
     active_idx = index_html.find('window.handleLivingPresenceCallEvent = function')
     active_idx = index_html.find('if (phase === "active")', active_idx)
     active_snippet = index_html[active_idx:active_idx + 700]

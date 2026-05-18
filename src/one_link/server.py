@@ -3567,7 +3567,7 @@ class UIServer:
                 "call_id": call_id,
                 "event": event,
                 "reason": _clean_token(
-                    "reason", {"start", "accept", "active", "watchdog"},
+                    "reason", {"start", "accept", "active", "watchdog", "metrics"},
                 ),
                 "media_kind": _clean_token("media_kind", {"audio", "video"}),
                 "state": _clean_token(
