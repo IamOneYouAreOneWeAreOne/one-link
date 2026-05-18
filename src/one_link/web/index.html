@@ -810,7 +810,7 @@
        because -2 resolved to the trailing auto track, not the 1fr
        track — that's why the textarea drifted into the corner. */
     grid-template-columns:
-      auto auto auto auto auto
+      auto auto auto
       [comp] minmax(260px, 1fr)
       [send-col] auto [send-end];
     gap: 10px;
@@ -7017,6 +7017,64 @@
   }
   .update-ready-banner .urb-dismiss:hover { opacity: 1; }
 
+  /* v0.21.x final: 3-source attach menu (File / Camera / Paste).
+     Floats above the composer 📎 button. Same visual language as
+     the right-click peer context menu. */
+  .attach-source-menu {
+    position: fixed;
+    z-index: 10001;
+    min-width: 260px;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 12px 28px rgba(0,0,0,.45);
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    animation: asm-pop 160ms cubic-bezier(.2,.8,0,1);
+  }
+  @keyframes asm-pop {
+    from { transform: translateY(4px); opacity: 0; }
+    to   { transform: translateY(0);   opacity: 1; }
+  }
+  .attach-source-menu .asm-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: transparent;
+    border: 0;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+    border-radius: 8px;
+    width: 100%;
+  }
+  .attach-source-menu .asm-item:hover { background: var(--bg-2); }
+  .attach-source-menu .asm-icon {
+    font-size: 22px;
+    line-height: 1;
+    flex-shrink: 0;
+    width: 28px;
+    text-align: center;
+  }
+  .attach-source-menu .asm-label {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+  .attach-source-menu .asm-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+  }
+  .attach-source-menu .asm-sub {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
   /* v0.21.x: slash command help modal. */
   .slash-help-modal {
     position: fixed; inset: 0;
@@ -7448,16 +7506,21 @@
           <!-- v0.7.5: shows the message we're replying to. -->
           <div class="reply-bar" id="reply-bar"></div>
           <div class="attach-tray" id="attach-tray"></div>
-          <button class="icon-btn" id="btn-attach2" title="Attach file">📎</button>
-          <!-- v0.14.6: screenshot-from-clipboard is desktop-only.
-               Phones don't have a "paste from clipboard" UX for
-               screenshots; the OS share sheet handles it. -->
-          <button class="icon-btn desktop-only" id="btn-screenshot" title="Paste screenshot from clipboard">📷</button>
-          <!-- v0.21.x: take a photo with the device camera. Opens a
-               capture modal with live preview + Snap button. On
-               mobile, falls back to the OS camera intent via the
-               native file input capture attribute. -->
-          <button class="icon-btn" id="btn-camera" title="Take a photo with the camera">📸</button>
+          <!-- v0.21.x final: one 📎 attach button opens a popover
+               menu with three sources (File · Camera · Paste from
+               clipboard). Drops the old standalone 📷 / 📸 icons
+               which were visually identical and semantically
+               confusing. Standard pattern from Telegram / Signal
+               / WhatsApp. The keyboard Ctrl+V paste still works as
+               a fast path (no popover; pasted images go straight
+               to the attach tray). -->
+          <button class="icon-btn" id="btn-attach2" title="Attach (file, camera, or paste)">📎</button>
+          <!-- Hidden invisible buttons kept for compat with code
+               paths that still target #btn-screenshot or #btn-camera
+               directly (slash commands, action sheets, etc.). The
+               popover handlers below dispatch click() to these. -->
+          <button id="btn-screenshot" hidden aria-hidden="true" tabindex="-1"></button>
+          <button id="btn-camera" hidden aria-hidden="true" tabindex="-1"></button>
           <!-- v0.9.2 voice messages - click to start recording, click
                again to stop. While recording, the icon flips to a
                red square + a timer/cancel overlay slides in. -->
@@ -21526,8 +21589,95 @@
     }
     fileInput.click();
   };
+  // v0.21.x final: #btn-attach (header / mobile) keeps the direct
+  // file-picker behaviour (one tap = one action on small screens).
+  // #btn-attach2 (composer, desktop) opens the three-source popover
+  // so File / Camera / Paste collapse into a single icon slot.
   $("#btn-attach").addEventListener("click", triggerAttach);
-  $("#btn-attach2").addEventListener("click", triggerAttach);
+  $("#btn-attach2").addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    _openAttachSourceMenu(ev.currentTarget);
+  });
+  function _openAttachSourceMenu(anchor) {
+    if (!state.selectedPeer) {
+      toast("Pick a device first. Aim is required.", "info");
+      return;
+    }
+    const peer = state.peers.get(state.selectedPeer);
+    if (peer?.trust === "rejected") {
+      toast("This device is blocked. Use Allow device first.", "bad");
+      return;
+    }
+    // Singleton: clicking the button again with the menu open dismisses.
+    const existing = document.querySelector(".attach-source-menu");
+    if (existing) { existing.remove(); return; }
+    const menu = document.createElement("div");
+    menu.className = "attach-source-menu";
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = `
+      <button type="button" class="asm-item" data-src="file">
+        <span class="asm-icon">📁</span>
+        <span class="asm-label">
+          <span class="asm-title">File</span>
+          <span class="asm-sub">Pick any file from this device</span>
+        </span>
+      </button>
+      <button type="button" class="asm-item" data-src="camera">
+        <span class="asm-icon">📸</span>
+        <span class="asm-label">
+          <span class="asm-title">Take a photo</span>
+          <span class="asm-sub">Webcam preview + Snap</span>
+        </span>
+      </button>
+      <button type="button" class="asm-item" data-src="paste">
+        <span class="asm-icon">🖼️</span>
+        <span class="asm-label">
+          <span class="asm-title">Paste a screenshot</span>
+          <span class="asm-sub">From clipboard (or just press Ctrl+V)</span>
+        </span>
+      </button>
+    `;
+    document.body.appendChild(menu);
+    // Position above the anchor (composer button); flip below if no room.
+    const r = anchor.getBoundingClientRect();
+    // Measure after attach for correct height.
+    const mh = menu.getBoundingClientRect().height;
+    const above = r.top - mh - 8;
+    if (above > 8) {
+      menu.style.left = `${Math.max(8, r.left)}px`;
+      menu.style.top = `${above}px`;
+    } else {
+      menu.style.left = `${Math.max(8, r.left)}px`;
+      menu.style.top = `${r.bottom + 8}px`;
+    }
+    function close() {
+      menu.remove();
+      document.removeEventListener("click", off, true);
+      document.removeEventListener("keydown", esc);
+    }
+    function off(ev) {
+      if (!menu.contains(ev.target) && ev.target !== anchor) close();
+    }
+    function esc(ev) { if (ev.key === "Escape") close(); }
+    menu.addEventListener("click", (ev) => {
+      const btn = ev.target.closest(".asm-item");
+      if (!btn) return;
+      ev.stopPropagation();
+      const src = btn.dataset.src;
+      close();
+      if (src === "file") {
+        triggerAttach();
+      } else if (src === "camera") {
+        $("#btn-camera")?.click();
+      } else if (src === "paste") {
+        $("#btn-screenshot")?.click();
+      }
+    });
+    setTimeout(() => {
+      document.addEventListener("click", off, true);
+      document.addEventListener("keydown", esc);
+    }, 0);
+  }
   // v0.9.2 voice - click toggles record / stop. Cancel + Send buttons
   // in the overlay handle explicit cancel vs send.
   $("#btn-voice")?.addEventListener("click", () => {
@@ -25995,7 +26145,11 @@
     lastMediaRepairMs: 0,
     lastInboundVideoBytes: 0,
     lastInboundAudioBytes: 0,
+    lastInboundVideoFramesDecoded: 0,
     stalledMediaTicks: 0,
+    frozenMediaTicks: 0,
+    lastRemoteVideoTime: 0,
+    lastRemoteAudioTime: 0,
     lastInboundPacketsLost: 0,
     lastInboundPacketsReceived: 0,
     qualityEwmaRttMs: null,
@@ -26011,6 +26165,7 @@
     mediaRepairStage: 0,
     lastPlaybackReviveMs: 0,
     lastPcRebuildMs: 0,
+    lastNetworkResumeRepairMs: 0,
     lastRemoteMediaMovingMs: 0,
     callHistory: [],
     acceptedCallIds: new Set(),
