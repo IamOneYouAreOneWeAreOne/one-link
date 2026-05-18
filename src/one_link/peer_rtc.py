@@ -105,6 +105,7 @@ import binascii
 import contextlib
 import json
 import logging
+import os
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -353,7 +354,14 @@ class BrowserPeerManager:
         # forks without a wire-format change. Tolerates up to
         # MAX_CLOCK_SKEW_SECS (5s, matches the I3 issuer-skew
         # bound) of natural NTP wobble before flagging.
-        self._master_vk_last_issued_unix: "dict[bytes, int]" = {}
+        #
+        # External audit 2026-05-18 ES-44: persisted to disk so the
+        # check survives daemon restart. Without persistence, an
+        # attacker with the stolen SDP signing key could wait out a
+        # daemon restart and present an earlier-issued doc.
+        self._master_vk_last_issued_unix: "dict[bytes, int]" = (
+            self._load_master_vk_hwm()
+        )
 
     # Audit I4 May 2026 — replay-cache TTL (ms). Comfortably exceeds
     # the 30s ATTESTATION_FRESHNESS_WINDOW_SECS so the cache strictly
@@ -473,6 +481,55 @@ class BrowserPeerManager:
 
     def list_peers(self) -> list[BrowserPeer]:
         return list(self._peers.values())
+
+    # External audit 2026-05-18 ES-44: load + persist the master-VK
+    # high-water marks across daemon restarts. JSON file in data_dir
+    # because it's small (peer count × ~80 bytes) and we don't need
+    # transactional updates. Atomic write via temp + rename so a
+    # crash mid-write doesn't truncate.
+    def _master_vk_hwm_path(self):
+        from one_link.paths import data_dir
+        return data_dir() / "peer_rtc_master_vk_hwm.json"
+    def _load_master_vk_hwm(self) -> "dict[bytes, int]":
+        try:
+            p = self._master_vk_hwm_path()
+            if not p.exists():
+                return {}
+            raw = p.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            out: dict[bytes, int] = {}
+            if isinstance(data, dict):
+                for hex_key, ts in data.items():
+                    if not isinstance(hex_key, str) or not isinstance(ts, int):
+                        continue
+                    try:
+                        out[bytes.fromhex(hex_key)] = int(ts)
+                    except ValueError:
+                        continue
+            return out
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            log.warning(
+                "peer-rtc: failed to load master-vk HWM (%s); fork detection "
+                "for known peers will start fresh until next attestation",
+                e,
+            )
+            return {}
+    def _persist_master_vk_hwm(self, master_vk: bytes, issued_unix: int) -> None:
+        try:
+            p = self._master_vk_hwm_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                vk.hex(): ts for vk, ts in self._master_vk_last_issued_unix.items()
+            }
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, p)
+        except OSError as e:
+            log.warning(
+                "peer-rtc: failed to persist master-vk HWM (%s); fork "
+                "detection across restart may regress for this master_vk",
+                e,
+            )
 
     def _close_peer(self, peer: BrowserPeer) -> None:
         if peer.closed:
@@ -896,6 +953,15 @@ class BrowserPeerManager:
             prev_issued_unix if prev_issued_unix is not None else 0,
             doc.issued_unix,
         )
+        # External audit 2026-05-18 ES-44: persist the HWM to disk so
+        # the fork-detection check survives a daemon restart. The
+        # previous in-memory-only behaviour let an attacker with the
+        # stolen SDP signing key wait out a daemon restart, then
+        # present an earlier-issued doc with the same master_vk and
+        # bypass fork detection. Best-effort write — failures don't
+        # abort the live request because the in-memory check still
+        # holds for the rest of this session.
+        self._persist_master_vk_hwm(doc.master_vk, doc.issued_unix)
         # Audit C2 (May 14 2026): TOFU-pin peer_master_vk. If we
         # previously pinned a different master VK against this peer
         # fingerprint, refuse the new doc and tear the peer down.

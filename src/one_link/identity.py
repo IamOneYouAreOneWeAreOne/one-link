@@ -165,6 +165,57 @@ def _restrict_windows_acl(p: Path) -> None:
         return
 
 
+def _zero_overwrite_file(p: Path) -> None:
+    """Best-effort secure-overwrite for an existing file before it's
+    replaced. Writes random bytes the same length as the original,
+    fsyncs, then leaves the path in place for the caller's atomic-
+    rename to clobber.
+
+    This is the v0.21.x ES-3 mitigation for cleartext-PEM-on-COW-
+    filesystem-residue. It cannot guarantee the original bytes are
+    irrecoverable (SSDs / journaled / log-structured filesystems
+    may have already mirrored the page to a different physical
+    block), but it closes the simple-metadata-stays-readable hole
+    that arises when ``os.replace`` releases the old inode without
+    overwriting its contents.
+
+    On any IO error this returns silently — the caller's atomic
+    rename will still proceed, and not doing the overwrite is no
+    worse than the pre-v0.21.x behaviour.
+    """
+    try:
+        if not p.exists() or not p.is_file():
+            return
+        size = p.stat().st_size
+        if size <= 0:
+            return
+        with open(p, "r+b", buffering=0) as f:
+            # Two passes: first random (defeats simple sector-scanner
+            # tools), then zeros (defeats "leftover entropy" heuristics).
+            # Both fsync'd so the OS can't reorder them away.
+            f.seek(0)
+            f.write(os.urandom(size))
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+            f.seek(0)
+            f.write(b"\x00" * size)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+    except OSError as e:
+        log.warning(
+            "identity._zero_overwrite_file: best-effort secure-erase "
+            "failed for %s: %s. Continuing with atomic rename; the old "
+            "cleartext bytes may survive in FS free space.",
+            p, e,
+        )
+
+
 def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> None:
     """Atomically persist the Ed25519 identity key.
 
@@ -265,9 +316,25 @@ def load_or_create(
                 # (verified downstream by the caller); _save_key's
                 # signature is intentionally tight.
                 if pw:
-                    assert isinstance(priv, Ed25519PrivateKey), (
-                        "key file must hold an Ed25519 private key"
-                    )
+                    if not isinstance(priv, Ed25519PrivateKey):
+                        raise RuntimeError(
+                            "key file must hold an Ed25519 private key"
+                        )
+                    # External audit 2026-05-18 ES-3: before _save_key
+                    # atomic-renames the new encrypted PEM into place,
+                    # overwrite the existing cleartext PEM file with
+                    # random bytes + fsync. Without this, the old
+                    # inode's cleartext bytes can survive in BTRFS /
+                    # ZFS-snapshots / NTFS-USN / journal free lists
+                    # and be recovered from a stolen disk image, even
+                    # though the user thinks they've migrated to
+                    # encrypted-at-rest. Best-effort: filesystem-level
+                    # guarantees are weak (SSDs may have already
+                    # written the bytes to a different physical
+                    # block), but this closes the in-place metadata
+                    # leak. _zero_overwrite_file is a no-op if the
+                    # path no longer exists by the time it runs.
+                    _zero_overwrite_file(p)
                     _save_key(p, priv, pw)
             except (TypeError, ValueError):
                 pass

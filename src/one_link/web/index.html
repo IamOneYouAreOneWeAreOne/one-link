@@ -1078,14 +1078,51 @@
 
   .call-overlay {
     position: fixed; inset: 0;
-    background: rgba(0,0,0,0.78);
-    backdrop-filter: blur(12px);
+    background:
+      radial-gradient(circle at 50% 18%, rgba(123,93,246,0.24), transparent 32%),
+      radial-gradient(circle at 84% 74%, rgba(49,151,149,0.16), transparent 32%),
+      rgba(0,0,0,0.82);
+    backdrop-filter: blur(18px);
     display: none;
     flex-direction: column; align-items: center; justify-content: center;
     z-index: 9000;
     color: #fff;
   }
   .call-overlay.show { display: flex; }
+  .call-overlay-card {
+    width: min(430px, calc(100vw - 36px));
+    min-height: 520px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 26px;
+    border-radius: 28px;
+    background: rgba(12,15,24,0.58);
+    border: 1px solid rgba(255,255,255,0.12);
+    box-shadow: 0 32px 110px rgba(0,0,0,0.52);
+    backdrop-filter: blur(22px);
+  }
+  .call-overlay-chiprow {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin: 10px 0 18px;
+  }
+  .call-overlay-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.12);
+    color: rgba(232,236,248,0.76);
+    font-size: 12px;
+    font-weight: 700;
+  }
 
   /* May 15 2026 - richer outgoing-call surface. Avatar circle with
      peer initials, animated pulse ring (only while ringing), call
@@ -1233,6 +1270,62 @@
     pointer-events: none;
     z-index: 1;
   }
+  .call-active-topbar {
+    position: absolute;
+    top: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-radius: 999px;
+    background: rgba(14,17,27,0.70);
+    border: 1px solid rgba(255,255,255,0.12);
+    box-shadow: 0 16px 48px rgba(0,0,0,0.38);
+    backdrop-filter: blur(18px);
+  }
+  .call-quality-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #86efac;
+    box-shadow: 0 0 18px rgba(134,239,172,0.7);
+  }
+  .call-quality-dot.fair {
+    background: #fbbf24;
+    box-shadow: 0 0 18px rgba(251,191,36,0.64);
+  }
+  .call-quality-dot.bad,
+  .call-quality-dot.reconnecting {
+    background: #f87171;
+    box-shadow: 0 0 18px rgba(248,113,113,0.64);
+  }
+  .call-quality-text {
+    font-size: 12px;
+    font-weight: 850;
+    color: rgba(245,247,255,0.88);
+  }
+  .call-reconnect-banner {
+    position: absolute;
+    top: 78px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 4;
+    display: none;
+    min-height: 36px;
+    align-items: center;
+    padding: 0 14px;
+    border-radius: 999px;
+    background: rgba(239,68,68,0.18);
+    border: 1px solid rgba(248,113,113,0.32);
+    color: rgba(254,226,226,0.96);
+    font-size: 12px;
+    font-weight: 800;
+    backdrop-filter: blur(18px);
+  }
+  .call-active.reconnecting .call-reconnect-banner { display: flex; }
   .call-active-face {
     width: min(28vw, 260px); height: min(28vw, 260px);
     min-width: 168px; min-height: 168px;
@@ -1280,6 +1373,11 @@
     z-index: 3;
   }
   .call-local-video.show { display: block; }
+  .call-local-video.local-blur { filter: blur(9px) saturate(0.82); }
+  .call-active.screen-sharing .call-local-video {
+    outline: 2px solid rgba(96,165,250,0.85);
+    box-shadow: 0 18px 70px rgba(37,99,235,0.38);
+  }
   .call-active-name {
     z-index: 2;
     font-size: clamp(28px, 4vw, 52px);
@@ -1309,7 +1407,7 @@
     backdrop-filter: blur(18px);
   }
   .call-active-controls button {
-    min-width: 92px;
+    min-width: 82px;
     min-height: 46px;
     border-radius: 999px;
     border: 1px solid rgba(255,255,255,0.12);
@@ -1372,6 +1470,74 @@
     gap: 8px;
     flex-wrap: wrap;
     margin-top: 12px;
+  }
+  .call-history-strip {
+    position: absolute;
+    right: 24px;
+    top: 230px;
+    z-index: 3;
+    width: min(300px, calc(100vw - 48px));
+    display: grid;
+    gap: 8px;
+  }
+  .call-history-card,
+  .call-voicemail-capsule {
+    border-radius: 16px;
+    background: rgba(14,17,27,0.62);
+    border: 1px solid rgba(255,255,255,0.12);
+    box-shadow: 0 18px 58px rgba(0,0,0,0.30);
+    backdrop-filter: blur(18px);
+    padding: 12px;
+  }
+  .call-history-card h3,
+  .call-voicemail-capsule h3 {
+    margin: 0 0 8px;
+    font-size: 12px;
+    text-transform: uppercase;
+    color: rgba(232,236,248,0.62);
+    letter-spacing: 0.08em;
+  }
+  .call-history-list {
+    display: grid;
+    gap: 6px;
+    max-height: 126px;
+    overflow: auto;
+  }
+  .call-history-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.055);
+    padding: 7px 9px;
+    font-size: 12px;
+    color: rgba(232,236,248,0.84);
+  }
+  .call-history-item span:last-child {
+    color: rgba(232,236,248,0.52);
+    font-variant-numeric: tabular-nums;
+  }
+  .call-voicemail-capsule p {
+    margin: 0 0 10px;
+    color: rgba(232,236,248,0.72);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .call-voicemail-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .call-voicemail-actions button {
+    min-height: 34px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.08);
+    color: rgba(255,255,255,0.9);
+    padding: 0 12px;
+    font-weight: 800;
+    cursor: pointer;
   }
   .call-one-rail {
     position: absolute;
@@ -6590,6 +6756,104 @@
   }
   .peer.archived:hover { opacity: .85; }
 
+  /* v0.21.x ES-20: One Link Doctor results. */
+  .doctor-results {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .doctor-empty { color: var(--text-dim); font-size: 12px; padding: 8px 0; }
+  .doctor-summary {
+    display: flex; gap: 14px;
+    padding: 6px 8px 10px;
+    border-bottom: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .doctor-tally { display: inline-flex; align-items: center; gap: 6px; }
+  .doctor-tally .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block;
+  }
+  .doctor-tally .dot.ok   { background: var(--good); }
+  .doctor-tally .dot.warn { background: var(--warn); }
+  .doctor-tally .dot.fail { background: var(--bad); }
+  .doctor-row {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 7px 8px;
+    border-radius: 6px;
+    font-size: 12.5px;
+  }
+  .doctor-row.doctor-ok { background: rgba(70,211,154,.06); }
+  .doctor-row.doctor-warn { background: rgba(245,196,81,.08); }
+  .doctor-row.doctor-fail { background: rgba(255,108,108,.10); }
+  .doctor-row .doctor-icon {
+    font-weight: 700;
+    width: 18px; text-align: center; flex-shrink: 0;
+    font-size: 14px;
+    line-height: 1.3;
+  }
+  .doctor-row.doctor-ok .doctor-icon   { color: var(--good); }
+  .doctor-row.doctor-warn .doctor-icon { color: var(--warn); }
+  .doctor-row.doctor-fail .doctor-icon { color: var(--bad); }
+  .doctor-row .doctor-body { min-width: 0; flex: 1; }
+  .doctor-row .doctor-label { color: var(--text); font-weight: 500; }
+  .doctor-row .doctor-hint  { color: var(--text-dim); font-size: 11.5px; margin-top: 1px; }
+
+  /* v0.21.x ES-35: Truth Dashboard grid. */
+  .truth-dashboard summary.truth-summary {
+    cursor: pointer;
+    display: flex; align-items: center;
+    gap: 8px;
+    list-style: none;
+  }
+  .truth-dashboard summary.truth-summary::-webkit-details-marker { display: none; }
+  .truth-grid {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .truth-head, .truth-row {
+    display: grid;
+    grid-template-columns: 1fr 36px 36px 36px 36px;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 10px;
+  }
+  .truth-head {
+    background: var(--bg-2);
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 600;
+    text-align: center;
+    border-bottom: 1px solid var(--line);
+  }
+  .truth-head > div { text-align: center; }
+  .truth-head > div:first-child { text-align: left; }
+  .truth-row:nth-child(odd) { background: rgba(255,255,255,.02); }
+  .truth-name {
+    font-size: 12px;
+    color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .truth-cell {
+    width: 28px; height: 24px;
+    margin: 0 auto;
+    text-align: center;
+    line-height: 24px;
+    border-radius: 4px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .truth-cell.ok      { background: rgba(70,211,154,.18); color: var(--good); }
+  .truth-cell.partial { background: rgba(245,196,81,.18); color: var(--warn); }
+  .truth-cell.no      { background: rgba(255,108,108,.14); color: var(--bad); }
+
   /* v0.21.x: slash command help modal. */
   .slash-help-modal {
     position: fixed; inset: 0;
@@ -8223,6 +8487,24 @@
                 </button>
               </div>
             </div>
+            <!-- v0.21.x ES-20 (external audit): One Link Doctor.
+                 Interactive health check rendering pass/warn/fail
+                 per surface so users can self-diagnose without
+                 reading logs. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>One Link Doctor</span></div>
+              <p class="settings-help">
+                Quick health check across every surface that has to
+                work for messages, files, and calls. Tells you
+                what's healthy, what's degraded, and what to do.
+              </p>
+              <div class="row" style="gap:8px; margin-top:10px;">
+                <button class="btn-ghost" id="settings-run-doctor">
+                  Run health check
+                </button>
+              </div>
+              <div class="doctor-results" id="doctor-results"></div>
+            </div>
           </section>
 
           <!-- ── About ──────────────────────────────────────────── -->
@@ -8348,6 +8630,27 @@
                 Replay welcome wizard
               </button>
             </div>
+            <!-- v0.21.x ES-35 (external audit 2026-05-18): Truth
+                 Dashboard. Marketing claims need to be auditable:
+                 each major feature gets four boxes — primitive
+                 proven, daemon wired, UI exposed, soak proven.
+                 Only all-four-green features are "shipped". This
+                 keeps roadmap and reality in sync. -->
+            <details class="settings-section truth-dashboard">
+              <summary class="truth-summary">
+                <span class="settings-section-h"><span>Feature truth status</span></span>
+                <span class="settings-help"
+                      style="margin-left:auto; font-size:11px;">click to expand</span>
+              </summary>
+              <p class="settings-help">
+                What's primitive-proven (the crate / module is built
+                + tested), daemon-wired (the protocol path is live),
+                UI-exposed (you can drive it from this screen), and
+                soak-proven (24h two-device test passes). Only all
+                four green is "shipped".
+              </p>
+              <div class="truth-grid" id="truth-grid"></div>
+            </details>
           </section>
 
         </div>
@@ -23186,6 +23489,252 @@
       toast("Couldn't copy — clipboard access denied.", "bad", 4500);
     }
   });
+  // v0.21.x ES-35 (external audit 2026-05-18): Truth Dashboard.
+  // Hard-coded matrix of each major feature's ship state across
+  // four axes. Updated at-each-release; keeps the marketing copy
+  // honest. PI: primitive_proven; DW: daemon_wired; UE: UI_exposed;
+  // SP: soak_proven. "✓" green, "~" yellow (partial), "✗" red.
+  const TRUTH_MATRIX = [
+    ["1:1 chat",                    "✓", "✓", "✓", "~"],
+    ["File transfer (native)",      "✓", "✓", "✓", "~"],
+    ["Voice call",                  "✓", "~", "✓", "✗"],
+    ["Video call",                  "✓", "~", "✓", "✗"],
+    ["Group chat",                  "✓", "✓", "✓", "~"],
+    ["Group call",                  "~", "~", "✗", "✗"],
+    ["Pair-by-QR",                  "✓", "✓", "✓", "~"],
+    ["Threshold recovery (Shamir)", "✓", "~", "~", "✗"],
+    ["Social recovery",             "~", "~", "~", "✗"],
+    ["Sealed sender",               "✓", "~", "~", "✗"],
+    ["Onion / Sphinx",              "✓", "~", "✗", "✗"],
+    ["Cover traffic",               "✓", "~", "✗", "✗"],
+    ["Double Ratchet (in-session)", "✓", "✗", "✗", "✗"],
+    ["MLS groups",                  "~", "✗", "✗", "✗"],
+    ["PQ hybrid (X25519+ML-KEM)",   "✓", "✓", "✗", "✗"],
+    ["QUIC transport",              "✓", "✓", "✓", "~"],
+    ["TPM attestation",             "✓", "✓", "✗", "✗"],
+    ["Self-mesh (multi-device)",    "✓", "✓", "✓", "~"],
+    ["Pinned-pubkey SW updates",    "~", "✗", "✗", "✗"],
+    ["At-rest passphrase (Argon2)", "✗", "✗", "✗", "✗"],
+  ];
+  function _renderTruthDashboard() {
+    const host = document.getElementById("truth-grid");
+    if (!host || host.dataset.painted === "1") return;
+    host.innerHTML = `
+      <div class="truth-head">
+        <div></div>
+        <div title="Primitive proven (crate + tests)">PI</div>
+        <div title="Daemon wired (protocol live)">DW</div>
+        <div title="UI exposed (driveable from this screen)">UE</div>
+        <div title="Soak proven (24h two-device test)">SP</div>
+      </div>
+    `;
+    for (const row of TRUTH_MATRIX) {
+      const [name, ...marks] = row;
+      const div = document.createElement("div");
+      div.className = "truth-row";
+      div.innerHTML = `
+        <div class="truth-name">${_escapeHtml(name)}</div>
+        ${marks.map((m) => `<div class="truth-cell ${m === "✓" ? "ok" : m === "~" ? "partial" : "no"}">${m}</div>`).join("")}
+      `;
+      host.appendChild(div);
+    }
+    host.dataset.painted = "1";
+  }
+  // Paint truth dashboard whenever the About pane becomes visible.
+  document.addEventListener("DOMContentLoaded", () => {
+    const aboutPane = document.querySelector('[data-settings-pane="about"]');
+    if (!aboutPane) return;
+    const obs = new MutationObserver(() => {
+      if (aboutPane.classList.contains("active")) _renderTruthDashboard();
+    });
+    obs.observe(aboutPane, { attributes: true, attributeFilter: ["class"] });
+  });
+
+  // v0.21.x ES-20 (external audit 2026-05-18): One Link Doctor.
+  // Runs ~12 checks against current state + browser capabilities +
+  // recent daemon health. Each check returns
+  // { id, label, status: "ok"|"warn"|"fail", hint }. Result rendered
+  // into #doctor-results. No backend calls beyond the existing
+  // /api/status that's already polled.
+  async function _runOneLinkDoctor() {
+    const out = [];
+    function push(id, label, status, hint = "") { out.push({ id, label, status, hint }); }
+    // Daemon reachable.
+    let statusBody = null;
+    try {
+      statusBody = await api.get("/api/status", { timeoutMs: 5000 });
+      push("daemon", "Daemon reachable", "ok",
+        `Version ${statusBody?.app_version || statusBody?.version || "unknown"}`);
+    } catch (e) {
+      push("daemon", "Daemon reachable", "fail",
+        `Can't reach the One Link daemon: ${e?.message || e}`);
+      return out;
+    }
+    // UI token still valid (if api.get returned, it is).
+    push("ui_token", "UI authentication", "ok",
+      "Browser is authenticated to the local daemon.");
+    // My version matches what the page expects.
+    const myVer = state.me?.app_version || statusBody.app_version;
+    if (myVer && PAGE_BUILT_FOR && myVer !== PAGE_BUILT_FOR) {
+      push("page_drift", "Page / daemon version", "warn",
+        `Page built for v${PAGE_BUILT_FOR}; daemon is v${myVer}. Hard-refresh the browser.`);
+    } else {
+      push("page_drift", "Page / daemon version", "ok",
+        `Both on v${myVer || PAGE_BUILT_FOR}.`);
+    }
+    // Paired peers.
+    const peers = [...state.peers.values()];
+    const pinned = peers.filter((p) => p.trust === "pinned");
+    if (pinned.length === 0) {
+      push("peers", "Paired devices", "warn",
+        "No paired devices. Pair another device to start chatting.");
+    } else {
+      const online = pinned.filter((p) => p.online).length;
+      push("peers", "Paired devices", "ok",
+        `${pinned.length} paired, ${online} online right now.`);
+    }
+    // Version compatibility with paired peers.
+    const olderPeers = pinned.filter((p) => {
+      const cmp = _compareAppVersion(p.app_version, myVer);
+      return p.app_version && myVer && cmp < 0;
+    });
+    if (olderPeers.length > 0) {
+      push("peer_version", "Peer versions", "warn",
+        `${olderPeers.length} paired device${olderPeers.length === 1 ? " is" : "s are"} on older builds. Sends may queue until they update.`);
+    } else if (pinned.length > 0) {
+      push("peer_version", "Peer versions", "ok",
+        "All paired devices match your build.");
+    }
+    // Incompatible peers.
+    const broken = pinned.filter((p) =>
+      p.compatibility && p.compatibility.compatible === false);
+    if (broken.length > 0) {
+      push("peer_compat", "Wire-path compatibility", "fail",
+        `${broken.length} paired device${broken.length === 1 ? " can't" : "s can't"} negotiate a compatible wire path right now.`);
+    }
+    // Browser secure context (needed for getUserMedia / SW).
+    if (window.isSecureContext) {
+      push("secure_context", "Secure context", "ok",
+        "Browser sees this as a secure context (mic / camera / SW work).");
+    } else {
+      push("secure_context", "Secure context", "fail",
+        "Browser isn't in a secure context. Calls + service worker won't work. Use HTTPS or localhost.");
+    }
+    // WebRTC support.
+    if (typeof RTCPeerConnection === "function") {
+      push("webrtc", "WebRTC support", "ok",
+        "Browser supports the call stack (RTCPeerConnection available).");
+    } else {
+      push("webrtc", "WebRTC support", "fail",
+        "Browser doesn't expose RTCPeerConnection. Calls won't work in this browser.");
+    }
+    // Mic permission (cached from preflight or queried fresh).
+    if (navigator.permissions?.query) {
+      try {
+        const mic = await navigator.permissions.query({ name: "microphone" });
+        const micStatus = mic.state === "granted" ? "ok" : (mic.state === "denied" ? "fail" : "warn");
+        push("mic", "Microphone permission",
+          micStatus,
+          `Currently ${mic.state}. ${mic.state === "denied" ? "Re-enable in browser site settings." : ""}`);
+        const cam = await navigator.permissions.query({ name: "camera" });
+        const camStatus = cam.state === "granted" ? "ok" : (cam.state === "denied" ? "fail" : "warn");
+        push("cam", "Camera permission",
+          camStatus,
+          `Currently ${cam.state}. ${cam.state === "denied" ? "Re-enable in browser site settings." : ""}`);
+      } catch (e) {
+        push("media_perm", "Mic / camera permission", "warn",
+          "Couldn't query permission status. Will be asked when you start a call.");
+      }
+    }
+    // Notification permission.
+    if ("Notification" in window) {
+      const np = Notification.permission;
+      push("notifications", "Desktop notifications",
+        np === "granted" ? "ok" : (np === "denied" ? "warn" : "warn"),
+        `Currently ${np}. ${np === "denied" ? "Re-enable in browser site settings to get incoming-call popups." : ""}`);
+    }
+    // Service Worker.
+    if ("serviceWorker" in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration().catch(() => null);
+      push("sw", "Service worker",
+        reg ? "ok" : "warn",
+        reg ? "Installed (offline + outbox queue work)." : "Not yet installed. Visit the page once over HTTPS to register it.");
+    }
+    // Online connectivity (navigator.onLine is unreliable but a useful coarse signal).
+    push("online", "Network",
+      navigator.onLine ? "ok" : "fail",
+      navigator.onLine ? "Browser reports online." : "Browser reports offline. Messages will queue.");
+    // Local storage / IDB usable.
+    try {
+      const k = "_doctor_check_" + Date.now();
+      localStorage.setItem(k, "1");
+      localStorage.removeItem(k);
+      push("storage", "Local storage", "ok",
+        "Browser can persist drafts + reaction history + onboarding state.");
+    } catch (e) {
+      push("storage", "Local storage", "fail",
+        "Browser blocked localStorage. Drafts, pin/archive, and onboarding completion won't persist across reloads.");
+    }
+    // Outbox depth (from state).
+    const queued = state.messages.filter((m) =>
+      m._sendingState === "queued" || m._sendingState === "failed").length;
+    if (queued > 0) {
+      push("outbox", "Pending outbox", "warn",
+        `${queued} message${queued === 1 ? " is" : "s are"} waiting to send. They'll retry automatically.`);
+    } else {
+      push("outbox", "Pending outbox", "ok", "Nothing queued.");
+    }
+    return out;
+  }
+  function _renderDoctorResults(results) {
+    const host = $("#doctor-results");
+    if (!host) return;
+    host.innerHTML = "";
+    if (!results || results.length === 0) {
+      host.innerHTML = `<div class="doctor-empty">No checks ran.</div>`;
+      return;
+    }
+    const counts = { ok: 0, warn: 0, fail: 0 };
+    for (const r of results) counts[r.status] = (counts[r.status] || 0) + 1;
+    const summary = el("div", "doctor-summary");
+    summary.innerHTML = `
+      <span class="doctor-tally"><span class="dot ok"></span> ${counts.ok} OK</span>
+      <span class="doctor-tally"><span class="dot warn"></span> ${counts.warn} Warn</span>
+      <span class="doctor-tally"><span class="dot fail"></span> ${counts.fail} Fail</span>
+    `;
+    host.appendChild(summary);
+    for (const r of results) {
+      const row = el("div", `doctor-row doctor-${r.status}`);
+      row.innerHTML = `
+        <span class="doctor-icon">${r.status === "ok" ? "✓" : r.status === "warn" ? "⚠" : "✕"}</span>
+        <div class="doctor-body">
+          <div class="doctor-label">${_escapeHtml(r.label)}</div>
+          ${r.hint ? `<div class="doctor-hint">${_escapeHtml(r.hint)}</div>` : ""}
+        </div>
+      `;
+      host.appendChild(row);
+    }
+  }
+  $("#settings-run-doctor")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    btn.textContent = "Running…";
+    try {
+      const results = await _runOneLinkDoctor();
+      _renderDoctorResults(results);
+    } catch (e) {
+      _renderDoctorResults([{
+        id: "exception",
+        label: "Health check threw an exception",
+        status: "fail",
+        hint: String(e?.message || e),
+      }]);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Run health check";
+    }
+  });
+
   $("#settings-open-bug-report")?.addEventListener("click", async () => {
     const report = await _buildDiagnosticReport();
     // Build a GitHub issue URL. The body is URL-encoded; GitHub
@@ -25026,43 +25575,60 @@
        parent has no .has-video class, set when wantVideo=true. -->
   <video id="call-outgoing-selfpreview" class="call-overlay-selfpreview"
          autoplay playsinline muted aria-label="Your camera preview"></video>
-  <!-- Avatar circle with initials + animated pulse rings. -->
-  <div class="call-overlay-avatar" id="call-outgoing-avatar" aria-hidden="true">C2</div>
-  <div class="call-overlay-peer" id="call-outgoing-peer"></div>
-  <div class="call-overlay-kind-badge" id="call-outgoing-kind" data-kind="video">
-    <span id="call-outgoing-kind-icon">📹</span>
-    <span id="call-outgoing-kind-text">Video call</span>
-  </div>
-  <div class="call-overlay-status" id="call-outgoing-status">
-    Calling… <span class="call-elapsed" id="call-outgoing-elapsed"></span>
-  </div>
-  <div class="call-overlay-route" id="call-outgoing-route">connecting…</div>
-  <!-- Pre-call controls: pre-mute and pre-camera-off so the user can
-       choose how they enter the call before the peer picks up. The
-       Camera button only shows for video calls. -->
-  <div class="call-overlay-precontrols" id="call-outgoing-precontrols">
-    <button class="precontrol" id="btn-call-precmute"
-            aria-label="Mute microphone" aria-pressed="false"
-            title="Mute before peer picks up">🎙️</button>
-    <button class="precontrol" id="btn-call-precam"
-            aria-label="Turn camera off" aria-pressed="false"
-            title="Turn camera off before peer picks up">📹</button>
-  </div>
-  <div class="call-overlay-buttons">
-    <button class="btn-call-end" id="btn-call-cancel" aria-label="End call">End</button>
-  </div>
-  <!-- "Send a message instead" - appears after 8s with no answer. -->
-  <div class="call-overlay-fallback" id="call-outgoing-fallback">
-    <button id="btn-call-send-msg-instead">Send a message instead</button>
+  <div class="call-overlay-card">
+    <!-- Avatar circle with initials + animated pulse rings. -->
+    <div class="call-overlay-avatar" id="call-outgoing-avatar" aria-hidden="true">C2</div>
+    <div class="call-overlay-peer" id="call-outgoing-peer"></div>
+    <div class="call-overlay-kind-badge" id="call-outgoing-kind" data-kind="video">
+      <span id="call-outgoing-kind-icon">📹</span>
+      <span id="call-outgoing-kind-text">Video call</span>
+    </div>
+    <div class="call-overlay-chiprow" aria-label="Call readiness">
+      <span class="call-overlay-chip">Private</span>
+      <span class="call-overlay-chip">Encrypted</span>
+      <span class="call-overlay-chip" id="call-outgoing-quality-chip">Checking route</span>
+    </div>
+    <div class="call-overlay-status" id="call-outgoing-status">
+      Calling… <span class="call-elapsed" id="call-outgoing-elapsed"></span>
+    </div>
+    <div class="call-overlay-route" id="call-outgoing-route">connecting…</div>
+    <!-- Pre-call controls: pre-mute and pre-camera-off so the user can
+         choose how they enter the call before the peer picks up. The
+         Camera button only shows for video calls. -->
+    <div class="call-overlay-precontrols" id="call-outgoing-precontrols">
+      <button class="precontrol" id="btn-call-precmute"
+              aria-label="Mute microphone" aria-pressed="false"
+              title="Mute before peer picks up">🎙️</button>
+      <button class="precontrol" id="btn-call-precam"
+              aria-label="Turn camera off" aria-pressed="false"
+              title="Turn camera off before peer picks up">📹</button>
+    </div>
+    <div class="call-overlay-buttons">
+      <button class="btn-call-end" id="btn-call-cancel" aria-label="End call">End</button>
+    </div>
+    <!-- "Send a message instead" - appears after 8s with no answer. -->
+    <div class="call-overlay-fallback" id="call-outgoing-fallback">
+      <button id="btn-call-send-msg-instead">Send a message instead</button>
+    </div>
   </div>
 </div>
 
 <div id="call-incoming-overlay" class="call-overlay" role="dialog" aria-label="Incoming call">
-  <div class="call-overlay-peer" id="call-incoming-peer"></div>
-  <div class="call-overlay-status">Calling you</div>
-  <div class="call-overlay-buttons">
-    <button class="btn-call-decline" id="btn-call-decline" aria-label="Decline call">Decline</button>
-    <button class="btn-call-accept" id="btn-call-accept" aria-label="Accept call">Accept</button>
+  <div class="call-overlay-card">
+    <div class="call-overlay-avatar" id="call-incoming-avatar" aria-hidden="true">C2</div>
+    <div class="call-overlay-peer" id="call-incoming-peer"></div>
+    <div class="call-overlay-status">Calling you</div>
+    <div class="call-overlay-chiprow" aria-label="Incoming call trust">
+      <span class="call-overlay-chip">Verified path</span>
+      <span class="call-overlay-chip">Local first</span>
+    </div>
+    <div class="call-overlay-buttons">
+      <button class="btn-call-decline" id="btn-call-decline" aria-label="Decline call">Decline</button>
+      <button class="btn-call-accept" id="btn-call-accept" aria-label="Accept call">Accept</button>
+    </div>
+    <div class="call-overlay-fallback show">
+      <button id="btn-call-voicemail-instead">Leave a capsule instead</button>
+    </div>
   </div>
 </div>
 
@@ -25073,6 +25639,11 @@
          autoplay playsinline aria-label="Remote video stream"></video>
   <audio id="call-remote-audio" class="call-remote-audio"
          autoplay aria-label="Remote audio stream"></audio>
+  <div class="call-active-topbar" aria-label="Call quality">
+    <span class="call-quality-dot" id="call-quality-dot"></span>
+    <span class="call-quality-text" id="call-quality-text">Good call quality</span>
+  </div>
+  <div class="call-reconnect-banner" id="call-reconnect-banner">Reconnecting media path...</div>
   <div class="call-active-face" id="call-active-face" aria-hidden="true">🙂</div>
   <!-- Local self-view, picture-in-picture style. -->
   <video id="call-local-video" class="call-local-video"
@@ -25101,10 +25672,26 @@
   </div>
   <div class="call-active-name" id="call-active-name"></div>
   <div class="call-active-rung" id="call-active-rung"></div>
+  <div class="call-history-strip" id="call-history-strip" aria-label="Call history and capsules">
+    <div class="call-history-card">
+      <h3>Call history</h3>
+      <div class="call-history-list" id="call-history-list"></div>
+    </div>
+    <div class="call-voicemail-capsule" id="call-voicemail-capsule">
+      <h3>Capsule</h3>
+      <p>Turn a missed or unstable call into an async voice note without losing the thread.</p>
+      <div class="call-voicemail-actions">
+        <button id="btn-call-capsule" type="button">Record capsule</button>
+        <button id="btn-call-group-upgrade" type="button">Invite group</button>
+      </div>
+    </div>
+  </div>
   <div class="call-active-controls">
     <button class="btn-call-end" id="btn-call-hangup" aria-label="End call">End</button>
     <button class="btn-ghost" id="btn-call-mute" aria-label="Mute microphone" aria-pressed="false">Mute</button>
     <button class="btn-ghost" id="btn-call-camera" aria-label="Turn camera off" aria-pressed="false">Camera</button>
+    <button class="btn-ghost" id="btn-call-share-screen" aria-label="Share screen" aria-pressed="false">Share</button>
+    <button class="btn-ghost" id="btn-call-pip" aria-label="Open picture in picture">PiP</button>
     <button class="btn-ghost" id="btn-call-settings" aria-label="Call settings" aria-expanded="false">Settings</button>
     <button class="btn-ghost" id="btn-call-record" aria-label="Save this call">Save</button>
   </div>
@@ -25127,6 +25714,7 @@
     </div>
     <div class="call-settings-actions">
       <button class="btn-ghost" id="btn-call-video-fit" type="button">Fit video</button>
+      <button class="btn-ghost" id="btn-call-blur" type="button" aria-pressed="false">Blur preview</button>
       <button class="btn-ghost" id="btn-call-refresh-devices" type="button">Refresh devices</button>
     </div>
   </div>
@@ -25180,6 +25768,7 @@
     lastInboundVideoBytes: 0,
     lastInboundAudioBytes: 0,
     stalledMediaTicks: 0,
+    callHistory: [],
     acceptedCallIds: new Set(),
     lastAcceptRetryMs: {},
   };
@@ -25224,6 +25813,11 @@
     remoteStream: null,        // assembled from ontrack events
     pc: null,                  // RTCPeerConnection (when wired)
     iceConfigReady: null,      // Promise that resolves after STUN config is applied
+    screenStream: null,
+    cameraVideoTrack: null,
+    screenSharing: false,
+    backgroundBlur: false,
+    reconnecting: false,
     muted: false,
     cameraOff: false,
     selectedAudioInputId: "",

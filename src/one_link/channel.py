@@ -81,6 +81,29 @@ from one_link.wire import read_frame, write_frame, write_frame_nowait
 
 log = logging.getLogger(__name__)
 
+# External audit 2026-05-18 ES-1: per-peer counter of v1-fallback
+# HELLO sig acceptances. The flag-day plan is a CAPS-advertised
+# `uks_v2_only` after which v1 acceptance becomes a hard reject;
+# until then, ops grep this counter to spot peers stuck on v1 (or
+# attackers trying to splice).
+_v1_sig_fallback_counts: dict[bytes, int] = {}
+
+def _bump_v1_sig_counter(peer_ed_pub: bytes) -> int:
+    """Increment + return the v1-fallback count for this peer's
+    Ed25519 pubkey. Module-local; bounded by the number of distinct
+    peers, which is itself bounded by paired-peer count."""
+    n = _v1_sig_fallback_counts.get(peer_ed_pub, 0) + 1
+    _v1_sig_fallback_counts[peer_ed_pub] = n
+    return n
+
+
+def v1_sig_fallback_summary() -> dict[str, int]:
+    """Diagnostic surface: peer-fingerprint-prefix -> v1 fallback
+    count. Read by the One Link Doctor health check and the
+    Truth Dashboard."""
+    return {pk.hex()[:16]: n for pk, n in _v1_sig_fallback_counts.items()}
+
+
 PROTO = b"OL1"
 NONCE_LEN = 16
 HELLO_TAG = b"OL1|HELLO|"
@@ -694,10 +717,27 @@ async def respond(
     if verify(i_ed, sig_i, sig_v2_material):
         pass  # v2 sig — UKS-defended path, the common case once peers upgrade.
     elif verify(i_ed, sig_i, sig_v1_material):
-        log.info(
-            "respond: peer %s used legacy v1 HELLO sig (no responder-"
-            "pubkey binding); UKS defence not active for this handshake",
+        # External audit 2026-05-18 ES-1: this fallback was added as
+        # a rolling-upgrade hatch (audit M1) but at v0.20.7 it's still
+        # universally accepted. An attacker on a hostile LAN who MITMs
+        # a TOFU first-meet between two paired peers (A and C, both
+        # paired with B) can splice their HELLO/REPLY because v1 sig
+        # doesn't bind the responder's pubkey. The flag-day cleanup
+        # is a CAPS-advertised `uks_v2_only` flag after which v1
+        # acceptance becomes a hard reject.
+        #
+        # Until that ships: log at WARNING (not INFO) so ops can
+        # actually grep for it, and increment a per-pubkey counter so
+        # a sudden spike of v1-fallback from a known-upgraded peer
+        # surfaces as suspicious behaviour.
+        v1_count = _bump_v1_sig_counter(i_ed)
+        log.warning(
+            "channel.respond: peer %s used legacy v1 HELLO sig "
+            "(no responder-pubkey binding). UKS defence NOT active "
+            "for this handshake. v1-fallback count for this peer: %d. "
+            "Fix: upgrade the other side so it signs the v2 transcript.",
             i_ed.hex()[:16],
+            v1_count,
         )
     else:
         raise RuntimeError("HELLO signature invalid")

@@ -938,6 +938,57 @@ class OutboundSession:
     relay_pump_task: asyncio.Task | None = None
 
 
+def _harden_process_dumpability() -> None:
+    """External audit 2026-05-18 ES-12: prevent coredumps / crash dumps
+    from writing identity-key bytes to disk. Best-effort across OSes;
+    every step is wrapped in try/except so a missing kernel feature or
+    insufficient permission doesn't block daemon start.
+
+    Coverage:
+      - POSIX: setrlimit(RLIMIT_CORE, 0) so the kernel never writes
+        a coredump for this process.
+      - Linux: prctl(PR_SET_DUMPABLE, 0) so even if RLIMIT_CORE is
+        bypassed, ptrace and /proc/<pid>/mem are blocked from peer
+        processes (and the process is excluded from system-wide
+        crash-dump capture).
+      - macOS: setrlimit(RLIMIT_CORE, 0) is the main lever; the
+        equivalent of PR_SET_DUMPABLE is a setuid-trickery special
+        case that doesn't apply to user-mode daemons.
+      - Windows: SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS)
+        suppresses the Windows Error Reporting dump. Additionally
+        SetProcessMitigationPolicy(ProcessExtensionPointDisablePolicy)
+        blocks DLL-injection-based debugger attach (best-effort).
+    """
+    try:
+        import resource  # POSIX only
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        log.info("hardened: RLIMIT_CORE=0 (no coredumps)")
+    except (ImportError, OSError, ValueError) as e:
+        # ImportError = Windows; OSError = permission/unsupported.
+        log.debug("RLIMIT_CORE not set: %s", e)
+    try:
+        import ctypes
+        # Linux: PR_SET_DUMPABLE = 4
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        rc = libc.prctl(4, 0, 0, 0, 0)
+        if rc == 0:
+            log.info("hardened: PR_SET_DUMPABLE=0 (no ptrace, no /proc/<pid>/mem)")
+    except (OSError, AttributeError):
+        # Not Linux, or libc not available; non-fatal.
+        pass
+    try:
+        # Windows: suppress Windows Error Reporting crash dumps.
+        import ctypes
+        SEM_NOGPFAULTERRORBOX = 0x0002
+        SEM_FAILCRITICALERRORS = 0x0001
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS)
+        log.info("hardened: Windows ErrorMode suppresses GP fault dumps")
+    except (OSError, AttributeError):
+        # Not Windows, or ctypes can't reach windll; non-fatal.
+        pass
+
+
 class Daemon:
     CALL_SIGNAL_SEND_TIMEOUT_S = 6.0
     TRUST_SYNC_SEND_TIMEOUT_S = 6.0
@@ -14566,6 +14617,12 @@ class Daemon:
     # ─── lifecycle ──────────────────────────────────────────────────────
     async def start(self) -> None:
         self._acquire_instance_lock()
+        # External audit 2026-05-18 ES-12: disable coredumps + crash
+        # dumps so identity-key bytes from the cryptography library's
+        # C arenas can never hit disk via a kernel-generated dump.
+        # Best-effort: failures here are non-fatal (the daemon still
+        # starts) but logged so ops can verify the hardening landed.
+        _harden_process_dumpability()
         # Persistent state (sqlite) — created early so peer/handshake hooks
         # can record into it.
         try:
