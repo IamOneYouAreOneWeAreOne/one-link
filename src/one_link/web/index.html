@@ -799,11 +799,11 @@
     padding: 12px 16px;
     background: var(--bg-1);
     /* v0.21.x: 7 columns - attach, screenshot, camera, voice,
-       emoji, textarea, send. Each icon-btn auto-sized; textarea
-       claims the remaining row width via 1fr; send is right-
-       pinned auto. */
+       emoji, textarea, send. The textarea column is an explicit
+       minmax track so browser textarea intrinsic sizing cannot
+       collapse it back to a tiny control on wide desktops. */
     display: grid;
-    grid-template-columns: auto auto auto auto auto 1fr auto;
+    grid-template-columns: auto auto auto auto auto minmax(260px, 1fr) auto;
     gap: 10px;
     align-items: end;
   }
@@ -828,6 +828,9 @@
     border: 1px solid var(--bg-3);
     border-radius: var(--radius-sm);
     padding: 10px 12px;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
     color: var(--text);
     resize: none; max-height: 160px;
     line-height: 1.4;
@@ -5715,6 +5718,7 @@
 
   /* v0.7.5: composer reply bar */
   .reply-bar {
+    grid-column: 1 / -1;
     display: none; position: relative;
     background: rgba(124,92,255,.1); border-left: 2px solid var(--accent);
     padding: 6px 32px 6px 10px; margin-bottom: 4px; border-radius: 4px;

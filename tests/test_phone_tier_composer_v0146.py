@@ -97,6 +97,21 @@ def test_composer_uses_safe_area_inset_bottom(index_html: str):
     assert "padding-bottom: max(8px, env(safe-area-inset-bottom))" in index_html
 
 
+def test_desktop_composer_textarea_fills_available_width(index_html: str):
+    """The chat composer textarea must stay long on desktop.
+
+    A regression let the browser use the textarea's intrinsic width,
+    squeezing it into a small box at the far right of the composer.
+    """
+    idx = index_html.find(".composer {")
+    scope = index_html[idx:idx + 1800]
+    assert "minmax(260px, 1fr)" in scope
+    assert "width: 100%" in scope
+    assert "min-width: 0" in scope
+    assert "box-sizing: border-box" in scope
+    assert ".composer textarea { grid-column: -2; }" in index_html
+
+
 def test_safe_area_rule_lives_inside_mobile_media_query(index_html: str):
     """The rule must NOT apply on desktop, where browsers without
     env() support could choke. Verify it sits inside the existing
