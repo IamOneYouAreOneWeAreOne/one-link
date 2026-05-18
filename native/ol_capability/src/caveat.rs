@@ -91,7 +91,16 @@ impl Caveat {
             });
         }
         let tag_byte = buf[0];
-        let len = u32::from_le_bytes(buf[1..5].try_into().expect("4 bytes")) as usize;
+        // External audit 2026-05-18 ES-31: each `.expect("4 bytes")` here
+        // was unreachable given the bounds checks above, but a remote
+        // decoder must NEVER panic — a panic in this path converts to
+        // a measurable latency spike under flood (and on some runtimes
+        // a worker-thread crash). `?`-propagated Malformed errors are
+        // uniform with the rest of this decoder.
+        let len_bytes: [u8; 4] = buf[1..5].try_into().map_err(|_| CapError::Malformed {
+            reason: "caveat length field not 4 bytes",
+        })?;
+        let len = u32::from_le_bytes(len_bytes) as usize;
         if buf.len() < 5 + len {
             return Err(CapError::Malformed {
                 reason: "caveat truncated",
@@ -105,8 +114,10 @@ impl Caveat {
                         reason: "ExpiresAt body != 8 bytes",
                     });
                 }
-                let ms = u64::from_le_bytes(body.try_into().expect("8 bytes"));
-                Self::ExpiresAt(ms)
+                let ms_bytes: [u8; 8] = body.try_into().map_err(|_| CapError::Malformed {
+                    reason: "ExpiresAt body not 8 bytes (bounds invariant violated)",
+                })?;
+                Self::ExpiresAt(u64::from_le_bytes(ms_bytes))
             }
             tag::PEER_FINGERPRINT => {
                 if body.len() != 32 {
@@ -130,7 +141,12 @@ impl Caveat {
                         reason: "OperationIn header < 4 bytes",
                     });
                 }
-                let count = u32::from_le_bytes(body[..4].try_into().expect("4 bytes")) as usize;
+                let count_bytes: [u8; 4] = body[..4].try_into().map_err(|_| {
+                    CapError::Malformed {
+                        reason: "OperationIn count field not 4 bytes",
+                    }
+                })?;
+                let count = u32::from_le_bytes(count_bytes) as usize;
                 let mut ops = Vec::with_capacity(count);
                 let mut cursor = 4usize;
                 for _ in 0..count {
@@ -139,9 +155,12 @@ impl Caveat {
                             reason: "OperationIn entry truncated",
                         });
                     }
-                    let l =
-                        u32::from_le_bytes(body[cursor..cursor + 4].try_into().expect("4 bytes"))
-                            as usize;
+                    let entry_len_bytes: [u8; 4] = body[cursor..cursor + 4]
+                        .try_into()
+                        .map_err(|_| CapError::Malformed {
+                            reason: "OperationIn entry length not 4 bytes",
+                        })?;
+                    let l = u32::from_le_bytes(entry_len_bytes) as usize;
                     cursor += 4;
                     if body.len() < cursor + l {
                         return Err(CapError::Malformed {

@@ -16,6 +16,7 @@ Optional passphrase encryption-at-rest:
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import secrets
@@ -23,6 +24,13 @@ import socket
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+# External audit 2026-05-18 ES-39 + ES-40: previously silent
+# best-effort failures (os.chmod, directory fsync, Windows ACL apply)
+# now log.warning so a misbehaving filesystem or stripped-down
+# Windows policy doesn't quietly leave the identity key with weaker-
+# than-expected at-rest permissions.
+log = logging.getLogger(__name__)
 
 import blake3
 from cryptography.hazmat.primitives import serialization
@@ -86,10 +94,18 @@ def _restrict_windows_acl(p: Path) -> None:
     (containers, embedded, bypassed system policies)."""
     if os.name != "nt":
         return
+    # External audit 2026-05-18 ES-40: every failure path in this
+    # function was `return` with no log. On a Windows box where the
+    # ACL apply fails, the user thought the file was user-only but
+    # was actually on the inherited %APPDATA% ACL (which typically
+    # grants Administrators + SYSTEM read). Promote each early
+    # return to log.warning with the failure point named so ops can
+    # grep for "ACL apply failed at step N".
     try:
         import ctypes
         from ctypes import wintypes
-    except Exception:
+    except Exception as e:
+        log.warning("identity._restrict_windows_acl: ctypes unavailable: %s", e)
         return
     try:
         # Constants
@@ -111,6 +127,11 @@ def _restrict_windows_acl(p: Path) -> None:
         if not advapi32.OpenProcessToken(
             kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)
         ):
+            log.warning(
+                "identity._restrict_windows_acl: OpenProcessToken failed "
+                "(error %d); identity key on inherited %%APPDATA%% ACL.",
+                ctypes.get_last_error(),
+            )
             return
         try:
             size = wintypes.DWORD(0)
@@ -121,11 +142,17 @@ def _restrict_windows_acl(p: Path) -> None:
             if not advapi32.GetTokenInformation(
                 token, TokenUser, buf, size, ctypes.byref(size)
             ):
+                log.warning(
+                    "identity._restrict_windows_acl: GetTokenInformation failed "
+                    "(error %d); identity key on inherited ACL.",
+                    ctypes.get_last_error(),
+                )
                 return
             # TOKEN_USER struct: SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes }
             user_sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
             sid_len = advapi32.GetLengthSid(user_sid_ptr)
             if not sid_len:
+                log.warning("identity._restrict_windows_acl: GetLengthSid returned 0")
                 return
         finally:
             kernel32.CloseHandle(token)
@@ -135,20 +162,24 @@ def _restrict_windows_acl(p: Path) -> None:
         if not advapi32.InitializeSecurityDescriptor(
             sd, SECURITY_DESCRIPTOR_REVISION
         ):
+            log.warning("identity._restrict_windows_acl: InitializeSecurityDescriptor failed")
             return
         # Allocate ACL: enough for the SD header (8) + one ACE
         # (8 + sid_len). Round up.
         acl_size = 8 + 8 + sid_len + 16
         acl = (ctypes.c_byte * acl_size)()
         if not advapi32.InitializeAcl(acl, acl_size, ACL_REVISION):
+            log.warning("identity._restrict_windows_acl: InitializeAcl failed")
             return
         if not advapi32.AddAccessAllowedAce(
             acl, ACL_REVISION,
             FILE_ALL_ACCESS,
             user_sid_ptr,
         ):
+            log.warning("identity._restrict_windows_acl: AddAccessAllowedAce failed")
             return
         if not advapi32.SetSecurityDescriptorDacl(sd, True, acl, False):
+            log.warning("identity._restrict_windows_acl: SetSecurityDescriptorDacl failed")
             return
         # 3. Apply to the file with PROTECTED so inheritance is broken.
         path_w = ctypes.c_wchar_p(str(p))
@@ -158,10 +189,19 @@ def _restrict_windows_acl(p: Path) -> None:
             | PROTECTED_DACL_SECURITY_INFORMATION,
             sd,
         ):
+            log.warning(
+                "identity._restrict_windows_acl: SetFileSecurityW on %s failed "
+                "(error %d); identity key on inherited ACL.",
+                p, ctypes.get_last_error(),
+            )
             return
-    except Exception:
-        # Any reflection / API mismatch: drop quietly. The chmod
-        # below is the best-effort fallback.
+        log.debug("identity._restrict_windows_acl: applied user-only DACL to %s", p)
+    except Exception as e:
+        log.warning(
+            "identity._restrict_windows_acl: unexpected exception (%s); "
+            "identity key on inherited %%APPDATA%% ACL.",
+            e,
+        )
         return
 
 
@@ -278,12 +318,24 @@ def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> 
                 os.fsync(dfd)
             finally:
                 os.close(dfd)
-        except (OSError, AttributeError):
-            pass
+        except (OSError, AttributeError) as e:
+            # External audit 2026-05-18 ES-39: was silent. A
+            # directory-fsync failure could mean the FS is read-only,
+            # or O_DIRECTORY isn't supported on this platform (Windows
+            # is one case where AttributeError fires). Log so ops can
+            # grep for misbehaving filesystems instead of guessing.
+            log.warning("identity._save_key: directory fsync failed: %s", e)
     try:
         os.chmod(p, 0o600)
-    except (OSError, NotImplementedError):
-        pass
+    except (OSError, NotImplementedError) as e:
+        # ES-39: silent before. A chmod failure means the file is
+        # readable by other users on this box. Loud so a misconfigured
+        # umask / Windows quirk doesn't quietly weaken at-rest perms.
+        log.warning(
+            "identity._save_key: chmod 0o600 on %s failed: %s. "
+            "Identity-key file may be readable by other local users.",
+            p, e,
+        )
     # v0.20.7 (security audit H3): Windows-only explicit DACL.
     # Best-effort; a failure here leaves the file under the
     # inherited %APPDATA% ACL — same defense as before this fix.

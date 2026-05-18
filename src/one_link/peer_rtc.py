@@ -130,12 +130,21 @@ PEER_DC_PROTOCOL_VERSION = "OL-PEER-1"
 DAEMON_CONTROL_LABEL = "one-link-daemon-control-v1"
 DAEMON_BULK_LABEL = "one-link-daemon-bulk-v1"
 
-# Pairing-token TTL. 5 minutes is enough for the user to physically
-# pick up their phone, open the camera, and scan the QR + a couple
-# of network round-trips of slack. Shorter and a slow user fails
-# without a clear cause.
-PAIRING_TOKEN_TTL_MS = 5 * 60 * 1000
+# Pairing-token TTL. External audit 2026-05-18 ES-30 (P2): the old
+# 5-minute default was generous to the point of giving a shoulder-
+# surfer / screen-share-leaker plenty of window. Real-time pairing
+# is the whole point of the QR; 90 seconds is enough to pick up the
+# phone, open the camera, and scan, while keeping the leaked-QR
+# attack window short. If a slow user fails the scan, the UI shows
+# the timer and they can mint a fresh QR with one click — better
+# UX than a long-lived token waiting to be stolen.
+PAIRING_TOKEN_TTL_MS = 90 * 1000
 PAIRING_TOKEN_BYTES = 32
+# External audit 2026-05-18 ES-46 (P3): bump the cap so a multi-user
+# laptop pairing many family devices in succession doesn't sweep out
+# tokens before the user finishes the last one. Sweep is opportunistic
+# and bounded by TTL, so a higher cap is harmless.
+MAX_PENDING_PAIRING_TOKENS_DEFAULT = 256
 
 # Signature freshness window — accept offer envelopes with a
 # timestamp within this many ms of "now". Prevents trivial replay
@@ -146,7 +155,7 @@ OFFER_REPLAY_WINDOW_MS = 60 * 1000
 MAX_SIGNALING_TEXT_BYTES = 256 * 1024
 MAX_SDP_BYTES = 128 * 1024
 MAX_DC_TEXT_BYTES = 256 * 1024
-MAX_PENDING_PAIRING_TOKENS = 64
+MAX_PENDING_PAIRING_TOKENS = MAX_PENDING_PAIRING_TOKENS_DEFAULT
 _B64URL_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 # Audit H8/H9 May 2026 — per-peer rate-limit caps for the two

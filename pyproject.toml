@@ -92,6 +92,12 @@ one_link = [
 # we do not depend on pytest-benchmark, and disabling it keeps the test gate from
 # hanging before collection on WMI-unhealthy machines.
 addopts = "-p no:benchmark -p no:hypothesispytest"
+# External audit 2026-05-18 ES-8: `soak` marker isolates the
+# two-device regression gate (tests/test_two_device_soak.py) from
+# the fast unit suite. Run with `pytest -m soak` before each ship.
+markers = [
+    "soak: slower two-device regression tests (run with -m soak)",
+]
 
 # Phase C-3 (ADR-0008): mypy resolves `one_link_native` types from the
 # PEP 561 stub-only package shipped under `stubs/one_link_native-stubs/`.

@@ -518,7 +518,12 @@ def establish_session_pair(
     sk, pk = kem.keypair()
     ct, shared_send = kem.encapsulate(pk)
     shared_recv = kem.decapsulate(ct, sk)
-    assert shared_send == shared_recv, "KEM round-trip failed"
+    # ES-18: explicit raise, not assert. KEM round-trip mismatch is a
+    # crypto-correctness invariant — under python -O the assert would
+    # disappear and we'd silently set up sessions with mismatched
+    # shared secrets that fail later in AEAD with "invalid tag".
+    if shared_send != shared_recv:
+        raise RuntimeError("KEM round-trip failed: shared_send != shared_recv")
 
     sender = NativeTransferSession(
         shared_secret=shared_send,

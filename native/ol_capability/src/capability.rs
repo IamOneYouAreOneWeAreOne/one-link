@@ -198,8 +198,19 @@ impl Capability {
         }
         let mut id = [0u8; CAP_ID_LEN];
         id.copy_from_slice(&bytes[..CAP_ID_LEN]);
-        let count_bytes = &bytes[CAP_ID_LEN..CAP_ID_LEN + 4];
-        let count = u32::from_le_bytes(count_bytes.try_into().expect("4 bytes")) as usize;
+        // External audit 2026-05-18 ES-31: was `.expect("4 bytes")` which
+        // panics on malformed input. The bounds check above already
+        // proves the slice is exactly 4 bytes, so the expect WAS
+        // unreachable in practice — but in a remote-decoder a panic
+        // converts to a worker-thread crash (or in pyo3, a measurable
+        // latency spike under flood). Replace with explicit `?` so the
+        // decoder fail-fast path is uniform.
+        let count_bytes: [u8; 4] = bytes[CAP_ID_LEN..CAP_ID_LEN + 4]
+            .try_into()
+            .map_err(|_| CapError::Malformed {
+                reason: "count field not 4 bytes (bounds-check invariant violated)",
+            })?;
+        let count = u32::from_le_bytes(count_bytes) as usize;
         if count > MAX_CAVEATS {
             return Err(CapError::Malformed {
                 reason: "caveat count exceeds MAX_CAVEATS",

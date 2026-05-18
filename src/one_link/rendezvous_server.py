@@ -785,12 +785,24 @@ class RendezvousApp:
             self.metrics.lookup_misses_total += 1
             return web.Response(status=404, text="not registered")
 
+        # External audit 2026-05-18 ES-17: cap the response size so the
+        # /lookup endpoint can't be used as a 15-30× UDP-style reflection
+        # vector. Per-IP rate limit doesn't help a distributed source
+        # (10k IPs × 30/min × 1-2KB amplifies to 75-150 MB/s reflected).
+        # By bounding endpoint count + caps count we make the response
+        # ~5-10× the request, not 15-30×. The cap is high enough that
+        # legitimate clients (which typically advertise 2-3 endpoints
+        # at most: LAN, WAN, optional relay) see no functional change.
+        LOOKUP_MAX_ADVERTISED_ENDPOINTS = 3
+        LOOKUP_MAX_CAPABILITIES = 16
         ack = LookupAck(
             pubkey=reg.pubkey,
             observed_endpoint=reg.observed_endpoint,
-            advertised_endpoints=list(reg.advertised_endpoints),
+            advertised_endpoints=list(reg.advertised_endpoints)[
+                :LOOKUP_MAX_ADVERTISED_ENDPOINTS
+            ],
             nat_type=reg.nat_type,
-            capabilities=list(reg.capabilities),
+            capabilities=list(reg.capabilities)[:LOOKUP_MAX_CAPABILITIES],
             expires_at_ms=reg.expires_at_ms,
             server_time_ms=now,
         )

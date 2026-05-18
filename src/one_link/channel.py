@@ -521,9 +521,12 @@ class Channel:
         )
         # All four ratchet methods are only reached after
         # ``is_ratcheting`` returns True, which guarantees
-        # ``_dr_state is not None``. The asserts encode that
-        # invariant for the type checker.
-        assert self._dr_state is not None, "ratchet not yet activated"
+        # ``_dr_state is not None``. External audit 2026-05-18 ES-18:
+        # converted from `assert` to explicit raise so the invariant
+        # survives `python -O` (which strips asserts). The runtime
+        # cost is one branch per send/recv; negligible.
+        if self._dr_state is None:
+            raise RuntimeError("ratchet not yet activated")
         if len(payload) < DR_HEADER_LEN:
             raise RuntimeError(
                 f"ratchet frame too short: {len(payload)} bytes "
@@ -537,7 +540,9 @@ class Channel:
 
     async def _send_ratchet(self, plaintext: bytes) -> None:
         from one_link.double_ratchet import encrypt as dr_encrypt
-        assert self._dr_state is not None, "ratchet not yet activated"
+        # ES-18: explicit raise, not assert (python -O strips asserts).
+        if self._dr_state is None:
+            raise RuntimeError("ratchet not yet activated")
         header, ct = dr_encrypt(
             self._dr_state, plaintext, ad=self.transcript_hash,
         )
@@ -546,7 +551,9 @@ class Channel:
 
     def _queue_send_ratchet(self, plaintext: bytes) -> None:
         from one_link.double_ratchet import encrypt as dr_encrypt
-        assert self._dr_state is not None, "ratchet not yet activated"
+        # ES-18: explicit raise, not assert.
+        if self._dr_state is None:
+            raise RuntimeError("ratchet not yet activated")
         header, ct = dr_encrypt(
             self._dr_state, plaintext, ad=self.transcript_hash,
         )
@@ -556,7 +563,9 @@ class Channel:
         from one_link.double_ratchet import (
             Header as DRHeader, decrypt as dr_decrypt,
         )
-        assert self._dr_state is not None, "ratchet not yet activated"
+        # ES-18: explicit raise, not assert.
+        if self._dr_state is None:
+            raise RuntimeError("ratchet not yet activated")
         payload = await read_frame(self.reader)
         if len(payload) < DR_HEADER_LEN:
             raise RuntimeError(

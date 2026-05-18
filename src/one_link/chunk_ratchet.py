@@ -83,7 +83,9 @@ class ChunkRatchet:
         index is monotonically increasing; callers must transmit it on
         the wire so the receiver can re-derive (or look up a skipped
         key)."""
-        assert self._chain is not None, "ChunkRatchet not initialized"
+        # ES-18: explicit raise, not assert (python -O strips asserts).
+        if self._chain is None:
+            raise RuntimeError("ChunkRatchet not initialized")
         key = bytes(self._chain.next_message_key())
         idx = self._next_idx
         self._next_idx += 1
@@ -93,7 +95,9 @@ class ChunkRatchet:
         """Return the chunk-key at the CURRENT index without
         advancing. Used by the receiver to derive a key in-order
         before committing the advance."""
-        assert self._chain is not None, "ChunkRatchet not initialized"
+        # ES-18: explicit raise, not assert (python -O strips asserts).
+        if self._chain is None:
+            raise RuntimeError("ChunkRatchet not initialized")
         return bytes(self._chain.peek_message_key(self._next_idx))
 
     def skipped_store(self, cap: int = 1024):
@@ -107,7 +111,9 @@ class ChunkRatchet:
         derive intermediate keys and stash them in ``skipped`` (if
         provided) for later lookup. If ``target_idx`` is behind,
         look it up in ``skipped`` (raises KeyError if absent)."""
-        assert self._chain is not None, "ChunkRatchet not initialized"
+        # ES-18: explicit raise, not assert (python -O strips asserts).
+        if self._chain is None:
+            raise RuntimeError("ChunkRatchet not initialized")
         if target_idx == self._next_idx:
             key, _ = self.next_key()
             return key
