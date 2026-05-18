@@ -204,6 +204,35 @@ def test_call_driver_backfills_pending_ice_candidates(index_html: str) -> None:
     assert "appliedIceKeys" in index_html
 
 
+def test_call_driver_reconciles_stale_call_surfaces(index_html: str) -> None:
+    """Regression: browser overlays must not keep ringing/calling when
+    the daemon call registry no longer has that call."""
+    idx = index_html.find("async function backfillLivingPresenceCalls")
+    assert idx > 0
+    snippet = index_html[idx:idx + 4200]
+    assert "visibleCallIds" in snippet
+    assert "hideOutgoingOverlay()" in snippet
+    assert "hideIncomingRing()" in snippet
+    assert "!visibleCallIds.has(callUI.activeCallId)" in snippet
+
+
+def test_call_driver_suppresses_duplicate_rings_after_accept(index_html: str) -> None:
+    assert "acceptedCallIds: new Set()" in index_html
+    assert "lastAcceptRetryMs" in index_html
+    accept_idx = index_html.find("async function acceptInboundCall")
+    accept_snippet = index_html[accept_idx:accept_idx + 1800]
+    assert "callUI.acceptedCallIds.add(inboundCallId)" in accept_snippet
+    assert "accept_sent" in accept_snippet
+    backfill_idx = index_html.find("async function backfillLivingPresenceCalls")
+    backfill_snippet = index_html[backfill_idx:backfill_idx + 3600]
+    assert "callUI.acceptedCallIds.has(call.call_id)" in backfill_snippet
+    assert 'action: "accept", call_id: call.call_id' in backfill_snippet
+    ring_idx = index_html.find('if (tail === "show_ring")')
+    ring_snippet = index_html[ring_idx:ring_idx + 1200]
+    assert "callUI.acceptedCallIds.has(callId)" in ring_snippet
+    assert 'reason: "duplicate_ring"' in ring_snippet
+
+
 def test_start_call_paints_overlay_before_daemon_roundtrip(index_html: str) -> None:
     idx = index_html.find("window.startLivingPresenceCall = async function")
     assert idx > 0

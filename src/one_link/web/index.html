@@ -4257,6 +4257,30 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     max-width: 140px;
   }
+  /* v0.21.x: inline-rename affordance. Hover hints that the name
+     is clickable; focus ring covers keyboard nav. */
+  .chip .meta .name.editable { cursor: text; }
+  .chip .meta .name.editable:hover {
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: var(--text-dim);
+  }
+  .chip .meta .name.editable:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+  .chip .meta .name-edit {
+    font-size: 12px;
+    font-weight: 500;
+    max-width: 140px;
+    background: var(--bg-1);
+    color: var(--text);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 1px 4px;
+    outline: none;
+  }
   .chip .meta .size {
     font-size: 11px; color: var(--text-dim);
   }
@@ -5040,6 +5064,35 @@
     text-decoration: none;
   }
   .file-lightbox-foot a:hover { text-decoration: underline; }
+  /* v0.21.x: gallery prev/next buttons. Sit outside the pane on the
+     left and right edges of the viewport. Hidden when gallery has
+     only one image (visibility toggled in _paintLightbox). */
+  .file-lightbox-prev, .file-lightbox-next {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 48px; height: 48px;
+    border-radius: 50%;
+    border: 1px solid rgba(255,255,255,.2);
+    background: rgba(0,0,0,.45);
+    color: white;
+    font-size: 28px;
+    line-height: 1;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    z-index: 10000;
+    transition: background 120ms ease;
+  }
+  .file-lightbox-prev { left: 16px; }
+  .file-lightbox-next { right: 16px; }
+  .file-lightbox-prev:hover, .file-lightbox-next:hover {
+    background: rgba(0,0,0,.7);
+  }
+  .file-lightbox-prev:focus-visible, .file-lightbox-next:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
 
   /* ── Files panel: Received|Sent toggle ─────────────────────────────── */
   .files-toggle {
@@ -5474,6 +5527,23 @@
     0%, 100% { opacity: 1; }
     50%      { opacity: .55; }
   }
+  /* v0.21.x: per-peer unread badge in the sidebar row. Right-aligned
+     pill so it shows up on the gear/call buttons' side when peer is
+     unselected. Hidden when peer is currently active. */
+  .peer .peer-unread-badge {
+    margin-left: auto;
+    align-self: center;
+    background: var(--accent);
+    color: white;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+    padding: 3px 7px;
+    border-radius: 999px;
+    min-width: 18px;
+    text-align: center;
+    flex-shrink: 0;
+  }
   .convo-h .who .sub .lat-dot {
     display: inline-block;
     width: 7px; height: 7px; border-radius: 50%;
@@ -5703,6 +5773,291 @@
   .cpm-primary:focus-visible {
     outline: 2px solid var(--accent-2);
     outline-offset: 2px;
+  }
+
+  /* v0.21.x: camera capture modal. Full-screen webcam preview +
+     Snap button. Live preview is mirrored so the user sees a
+     selfie-style image during framing (camera capture itself is
+     not mirrored — receiver sees the correct orientation). */
+  .ccm-modal {
+    position: fixed; inset: 0;
+    display: none;
+    z-index: 9999;
+    align-items: center; justify-content: center;
+  }
+  .ccm-modal.show { display: flex; }
+  body.ccm-open { overflow: hidden; }
+  .ccm-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,.78);
+  }
+  .ccm-pane {
+    position: relative;
+    display: flex; flex-direction: column;
+    gap: 12px;
+    max-width: min(96vw, 1100px);
+    max-height: 92vh;
+  }
+  .ccm-video {
+    width: 100%;
+    max-height: calc(92vh - 100px);
+    background: #000;
+    border-radius: 14px;
+    transform: scaleX(-1); /* mirror preview for selfie framing */
+    object-fit: contain;
+  }
+  .ccm-actions {
+    display: flex; align-items: center; justify-content: center;
+    gap: 14px;
+    padding: 6px 0 0;
+  }
+  .ccm-close, .ccm-swap, .ccm-snap {
+    padding: 10px 22px;
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--line);
+  }
+  .ccm-close {
+    background: rgba(255,255,255,.08);
+    color: white;
+  }
+  .ccm-swap {
+    background: rgba(255,255,255,.08);
+    color: white;
+    width: 44px;
+    padding: 10px 0;
+    font-size: 18px;
+  }
+  .ccm-snap {
+    background: white;
+    color: black;
+    border-color: white;
+    padding: 12px 32px;
+    font-weight: 700;
+  }
+  .ccm-snap:hover { filter: brightness(.95); }
+  .ccm-snap:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  /* v0.21.x: voice preview-before-send modal. */
+  .vpm-modal {
+    position: fixed; inset: 0;
+    display: none;
+    z-index: 9999;
+    align-items: center; justify-content: center;
+  }
+  .vpm-modal.show { display: flex; }
+  body.vpm-open { overflow: hidden; }
+  .vpm-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,.55);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .vpm-pane {
+    position: relative;
+    width: min(440px, 92vw);
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5);
+    padding: 18px;
+  }
+  .vpm-title {
+    margin: 0 0 12px;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .vpm-audio {
+    width: 100%;
+    display: block;
+    margin: 0 0 10px;
+  }
+  .vpm-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+  }
+  .vpm-actions {
+    display: flex; align-items: center; justify-content: flex-end;
+    gap: 8px;
+  }
+  .vpm-cancel, .vpm-rerec, .vpm-send {
+    padding: 7px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+    border: 1px solid var(--line);
+  }
+  .vpm-cancel {
+    background: transparent;
+    color: var(--bad);
+  }
+  .vpm-cancel:hover { background: rgba(255,108,108,.10); }
+  .vpm-rerec {
+    background: transparent;
+    color: var(--text-dim);
+  }
+  .vpm-rerec:hover { background: var(--bg-3); color: var(--text); }
+  .vpm-send {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .vpm-send:hover { filter: brightness(1.08); }
+
+  /* v0.21.x: audio speed cycle button on inbound voice bubbles. */
+  .audio-speed-btn {
+    background: rgba(255,255,255,.18);
+    border: 0;
+    color: white;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 999px;
+    cursor: pointer;
+    margin-left: 8px;
+    flex-shrink: 0;
+  }
+  .audio-speed-btn:hover { background: rgba(255,255,255,.28); }
+
+  /* v0.21.x: waveform background. Drawn behind the native audio
+     controls — gives the bubble a "voice message" feel. */
+  .audio-player.has-waveform {
+    background-image: var(--wf-bg);
+    background-repeat: no-repeat;
+    background-position: center 8px;
+    background-size: calc(100% - 24px) 36px;
+    padding-top: 8px;
+  }
+
+  /* v0.21.x: edit-pencil button on staged image thumbs. */
+  .chip .thumb { position: relative; }
+  .chip .chip-edit-btn {
+    position: absolute;
+    bottom: 2px;
+    right: 2px;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: rgba(0,0,0,.55);
+    color: white;
+    border: 1px solid rgba(255,255,255,.4);
+    font-size: 10px;
+    line-height: 1;
+    padding: 0;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+  }
+  .chip .chip-edit-btn:hover { background: rgba(0,0,0,.85); }
+
+  /* v0.21.x: image markup editor modal. Pen / blur / crop tools,
+     undo stack, color palette for pen, save flattens to PNG. */
+  .iem-modal {
+    position: fixed; inset: 0;
+    display: none;
+    z-index: 10000;
+    align-items: center; justify-content: center;
+  }
+  .iem-modal.show { display: flex; }
+  body.iem-open { overflow: hidden; }
+  .iem-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,.78);
+  }
+  .iem-pane {
+    position: relative;
+    display: flex; flex-direction: column;
+    gap: 10px;
+    max-width: 96vw;
+    max-height: 96vh;
+  }
+  .iem-toolbar {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--bg-2);
+    padding: 8px 12px;
+    border-radius: 12px;
+    flex-wrap: wrap;
+  }
+  .iem-tools, .iem-color-row, .iem-actions {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .iem-actions { margin-left: auto; }
+  .iem-tool {
+    background: var(--bg-3);
+    color: var(--text);
+    border: 1px solid var(--line);
+    padding: 6px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .iem-tool:hover { background: var(--bg-1); }
+  .iem-tool.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  .iem-color {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,.25);
+    cursor: pointer;
+    padding: 0;
+  }
+  .iem-color.active {
+    border-color: white;
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  .iem-undo, .iem-apply-crop, .iem-cancel, .iem-save {
+    padding: 6px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    cursor: pointer;
+    border: 1px solid var(--line);
+  }
+  .iem-undo {
+    background: transparent;
+    color: var(--text-dim);
+  }
+  .iem-undo:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+  .iem-undo:disabled { opacity: .35; cursor: default; }
+  .iem-apply-crop {
+    background: var(--accent-2);
+    color: white;
+    border-color: var(--accent-2);
+    font-weight: 600;
+  }
+  .iem-cancel {
+    background: transparent;
+    color: var(--bad);
+  }
+  .iem-cancel:hover { background: rgba(255,108,108,.10); }
+  .iem-save {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .iem-save:hover { filter: brightness(1.08); }
+  .iem-canvas-wrap {
+    display: grid; place-items: center;
+    background: #000;
+    border-radius: 12px;
+    overflow: hidden;
+    flex: 1; min-height: 0;
+  }
+  .iem-canvas {
+    display: block;
+    background: #111;
+    touch-action: none;
+    user-select: none;
   }
 
   /* v0.21.x: missed / ended call bubble. Centered-ish "system
@@ -6034,6 +6389,11 @@
                Phones don't have a "paste from clipboard" UX for
                screenshots; the OS share sheet handles it. -->
           <button class="icon-btn desktop-only" id="btn-screenshot" title="Paste screenshot from clipboard">📷</button>
+          <!-- v0.21.x: take a photo with the device camera. Opens a
+               capture modal with live preview + Snap button. On
+               mobile, falls back to the OS camera intent via the
+               native file input capture attribute. -->
+          <button class="icon-btn" id="btn-camera" title="Take a photo with the camera">📸</button>
           <!-- v0.9.2 voice messages - click to start recording, click
                again to stop. While recording, the icon flips to a
                red square + a timer/cancel overlay slides in. -->
@@ -8212,6 +8572,13 @@
     // dead-end. Entry shape: {file: File, addedAt: ms, objectUrl: string|null}.
     // Lives across renders; cleared on tab close (best-effort, by design).
     outboundFileCache: new Map(),
+    // v0.21.x: unread counters drive the tab title prefix "(N) One
+    // Link" and the OS-level app badge (taskbar / dock). Keyed by
+    // peer short_id. Incremented on every inbound TEXT / FILE
+    // when (a) we're not focused on that peer AND (b) the window
+    // is not focused. Cleared on selectPeer + on window focus.
+    unreadByPeer: {},
+    totalUnread: 0,
   };
 
   // v0.7.5: fixed emoji palette for reactions. Custom picker
@@ -9114,6 +9481,60 @@
     playNotificationChime();
   }
 
+  // v0.21.x: increment / decrement / refresh unread surfaces.
+  //
+  // Single source of truth: state.unreadByPeer + state.totalUnread.
+  // Document title prefix and navigator.setAppBadge() (the OS-level
+  // dock / taskbar count) are derived. Browser tab title format:
+  // "(N) One Link" mirrors iMessage/Slack/Discord.
+  const _BASE_TAB_TITLE = "One Link";
+  function _refreshUnreadSurfaces() {
+    const total = state.totalUnread || 0;
+    try {
+      document.title = total > 0
+        ? `(${total > 99 ? "99+" : total}) ${_BASE_TAB_TITLE}`
+        : _BASE_TAB_TITLE;
+    } catch {}
+    try {
+      if (total > 0 && navigator.setAppBadge) {
+        navigator.setAppBadge(total).catch(() => {});
+      } else if (navigator.clearAppBadge) {
+        navigator.clearAppBadge().catch(() => {});
+      }
+    } catch {}
+  }
+  function bumpUnread(peerShortId) {
+    if (!peerShortId) return;
+    state.unreadByPeer[peerShortId] = (state.unreadByPeer[peerShortId] || 0) + 1;
+    state.totalUnread = (state.totalUnread || 0) + 1;
+    _refreshUnreadSurfaces();
+    try { renderPeers(); } catch {}
+  }
+  function clearUnread(peerShortId) {
+    if (!peerShortId) return;
+    const prev = state.unreadByPeer[peerShortId] || 0;
+    if (prev === 0) return;
+    delete state.unreadByPeer[peerShortId];
+    state.totalUnread = Math.max(0, (state.totalUnread || 0) - prev);
+    _refreshUnreadSurfaces();
+    try { renderPeers(); } catch {}
+  }
+  function clearAllUnread() {
+    if (!state.totalUnread) return;
+    state.unreadByPeer = {};
+    state.totalUnread = 0;
+    _refreshUnreadSurfaces();
+  }
+  // On window focus, clear unread for the currently-selected peer
+  // (the user IS reading those messages right now). Other peers
+  // keep their badges until they're opened.
+  window.addEventListener("focus", () => {
+    if (state.selectedPeer) clearUnread(state.selectedPeer);
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && state.selectedPeer) clearUnread(state.selectedPeer);
+  });
+
   function notifyIncoming(title, body, opts = {}) {
     // v0.10.0: pair the desktop notification with the chime.
     soundOnIncoming(opts);
@@ -9310,6 +9731,11 @@
     // v0.21.x: my own version goes into the hash so a daemon update
     // re-renders every peer row's version-compare badge.
     parts.push(`my=${state.me?.app_version || ""}`);
+    // v0.21.x: per-peer unread counts in the hash so the sidebar
+    // badge appears/disappears as unread state changes.
+    const uk = Object.keys(state.unreadByPeer).sort().map((k) =>
+      `${k}:${state.unreadByPeer[k]}`).join(",");
+    parts.push(`u=${uk}`);
     for (const p of peers) {
       const lat = p?.health?.latency_ewma_ms;
       const latBucket = lat == null ? -1 : (lat < 80 ? 0 : lat < 250 ? 1 : 2);
@@ -9816,6 +10242,16 @@
       txt.appendChild(sub);
 
       row.title = `${p.display_name || p.hostname || p.short_id} · ${reachLabel(p)}`;
+      // v0.21.x: per-peer unread badge. Lives on the row so the user
+      // sees WHICH conversation has waiting messages without opening
+      // every one. Cap display at "99+".
+      const ucount = state.unreadByPeer[p.short_id] || 0;
+      if (ucount > 0 && p.short_id !== state.selectedPeer) {
+        const badge = el("span", "peer-unread-badge",
+          ucount > 99 ? "99+" : String(ucount));
+        badge.title = `${ucount} unread`;
+        row.appendChild(badge);
+      }
       row.appendChild(avWrap);
       row.appendChild(txt);
 
@@ -10432,24 +10868,141 @@
     });
     return lb;
   }
-  function openLightbox({ url, name, sizeBytes, downloadName }) {
+  // v0.21.x: lightbox is gallery-aware. When opened on an image
+  // bubble in a conversation, it computes the set of other images
+  // in that conversation and lets ← / → / swipe move between them
+  // without closing. Falls back to single-image mode if no
+  // conversation context is supplied.
+  const _lightboxState = { gallery: [], index: 0 };
+  function openLightbox({ url, name, sizeBytes, downloadName, gallery, index }) {
     const lb = _ensureLightbox();
-    lb.querySelector(".file-lightbox-name").textContent = name
-      + (sizeBytes ? ` · ${fmtBytes(sizeBytes)}` : "");
+    _ensureLightboxNavButtons();
+    if (Array.isArray(gallery) && gallery.length > 0) {
+      _lightboxState.gallery = gallery;
+      _lightboxState.index = Math.max(0, Math.min(gallery.length - 1, index || 0));
+    } else {
+      _lightboxState.gallery = [{ url, name, sizeBytes, downloadName }];
+      _lightboxState.index = 0;
+    }
+    _paintLightbox();
+    _attachLightboxNav();
+    lb.classList.add("show");
+    document.body.classList.add("lb-open");
+  }
+  function _paintLightbox() {
+    const lb = document.getElementById("file-lightbox");
+    if (!lb) return;
+    const ent = _lightboxState.gallery[_lightboxState.index];
+    if (!ent) return;
+    const count = _lightboxState.gallery.length;
+    const indexLabel = count > 1
+      ? ` · ${_lightboxState.index + 1} of ${count}`
+      : "";
+    lb.querySelector(".file-lightbox-name").textContent = (ent.name || "image")
+      + (ent.sizeBytes ? ` · ${fmtBytes(ent.sizeBytes)}` : "")
+      + indexLabel;
     const body = lb.querySelector(".file-lightbox-body");
     body.replaceChildren();
     const img = document.createElement("img");
-    img.src = url;
-    img.alt = name || "image";
+    img.src = ent.url;
+    img.alt = ent.name || "image";
     img.className = "file-lightbox-img";
     body.appendChild(img);
     const openA = lb.querySelector(".file-lightbox-open");
-    openA.href = url;
+    openA.href = ent.url;
     const dlA = lb.querySelector(".file-lightbox-download");
-    dlA.href = url;
-    dlA.setAttribute("download", downloadName || name || "file");
-    lb.classList.add("show");
-    document.body.classList.add("lb-open");
+    dlA.href = ent.url;
+    dlA.setAttribute("download", ent.downloadName || ent.name || "file");
+    // Nav button visibility — hidden when there's only one image.
+    const prev = lb.querySelector(".file-lightbox-prev");
+    const next = lb.querySelector(".file-lightbox-next");
+    if (prev) prev.style.display = count > 1 ? "" : "none";
+    if (next) next.style.display = count > 1 ? "" : "none";
+  }
+  function _stepLightbox(delta) {
+    const count = _lightboxState.gallery.length;
+    if (count <= 1) return;
+    _lightboxState.index = (_lightboxState.index + delta + count) % count;
+    _paintLightbox();
+  }
+  function _ensureLightboxNavButtons() {
+    const lb = document.getElementById("file-lightbox");
+    if (!lb || lb.querySelector(".file-lightbox-prev")) return;
+    const prev = document.createElement("button");
+    prev.type = "button";
+    prev.className = "file-lightbox-prev";
+    prev.setAttribute("aria-label", "Previous image");
+    prev.textContent = "‹";
+    prev.onclick = (ev) => { ev.stopPropagation(); _stepLightbox(-1); };
+    const next = document.createElement("button");
+    next.type = "button";
+    next.className = "file-lightbox-next";
+    next.setAttribute("aria-label", "Next image");
+    next.textContent = "›";
+    next.onclick = (ev) => { ev.stopPropagation(); _stepLightbox(1); };
+    lb.appendChild(prev);
+    lb.appendChild(next);
+  }
+  function _attachLightboxNav() {
+    const lb = document.getElementById("file-lightbox");
+    if (!lb || lb._navAttached) return;
+    lb._navAttached = true;
+    document.addEventListener("keydown", (ev) => {
+      if (!lb.classList.contains("show")) return;
+      if (ev.key === "ArrowLeft") { ev.preventDefault(); _stepLightbox(-1); }
+      else if (ev.key === "ArrowRight") { ev.preventDefault(); _stepLightbox(1); }
+    });
+    // Touch swipe
+    let startX = 0, startY = 0, tracking = false;
+    const body = lb.querySelector(".file-lightbox-body");
+    body.addEventListener("touchstart", (ev) => {
+      const t = ev.touches[0]; startX = t.clientX; startY = t.clientY; tracking = true;
+    }, { passive: true });
+    body.addEventListener("touchend", (ev) => {
+      if (!tracking) return; tracking = false;
+      const t = ev.changedTouches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+        _stepLightbox(dx > 0 ? -1 : 1);
+      }
+    }, { passive: true });
+  }
+  // v0.21.x: build a gallery for the current conversation by
+  // walking state.messages for image-typed bubbles. Each entry maps
+  // to the inbound /api/files URL or the outbound cached blob URL.
+  function _buildLightboxGalleryForCurrent(currentMsg) {
+    const peerShortId = currentMsg.peer;
+    if (!peerShortId) return null;
+    const entries = [];
+    let activeIdx = 0;
+    const all = state.messages.filter((m) =>
+      m.peer === peerShortId
+      && (m.t === "FILE_OFFER" || m.t === "FILE_DONE")
+      && isImageName(m.name));
+    for (const m of all) {
+      let url = null;
+      let downloadName = m.name || "";
+      if (m.dir === "in") {
+        const fname = (m.path || m.name || "").toString().split(/[\\\/]/).pop();
+        if (fname) {
+          url = `/api/files/${encodeURIComponent(fname)}`;
+          downloadName = fname;
+        }
+      } else {
+        url = objectUrlForOutboundFile(m.name, m.size || 0);
+      }
+      if (!url) continue;
+      if (m.id === currentMsg.id) activeIdx = entries.length;
+      entries.push({
+        url,
+        name: m.name || "image",
+        sizeBytes: m.size || 0,
+        downloadName,
+      });
+    }
+    if (entries.length === 0) return null;
+    return { gallery: entries, index: activeIdx };
   }
   function closeLightbox() {
     const lb = document.getElementById("file-lightbox");
@@ -10490,7 +11043,15 @@
     }
     if (!url) return;
     if (isImage) {
-      openLightbox({ url, name, sizeBytes: size, downloadName });
+      // v0.21.x: prefer gallery mode so ← / → swipe through every
+      // image in this conversation. Falls back to single-image when
+      // we can't compute the gallery (e.g. orphan bubble).
+      const gal = _buildLightboxGalleryForCurrent(msg);
+      if (gal) {
+        openLightbox({ gallery: gal.gallery, index: gal.index });
+      } else {
+        openLightbox({ url, name, sizeBytes: size, downloadName });
+      }
     } else {
       window.open(url, "_blank", "noopener,noreferrer");
     }
@@ -13116,7 +13677,9 @@
         img.alt = msg.name || "image";
         img.onclick = (ev) => {
           ev.stopPropagation();
-          openLightbox({
+          const gal = _buildLightboxGalleryForCurrent(msg);
+          if (gal) openLightbox({ gallery: gal.gallery, index: gal.index });
+          else openLightbox({
             url: img.src,
             name: msg.name || fname,
             sizeBytes: msg.size || 0,
@@ -13141,7 +13704,9 @@
         img.alt = msg.name || "image";
         img.onclick = (ev) => {
           ev.stopPropagation();
-          openLightbox({
+          const gal = _buildLightboxGalleryForCurrent(msg);
+          if (gal) openLightbox({ gallery: gal.gallery, index: gal.index });
+          else openLightbox({
             url: cachedUrl,
             name: msg.name || "image",
             sizeBytes: msg.size || 0,
@@ -13165,6 +13730,9 @@
         audio.preload = "metadata";
         audio.src = `/api/files/${encodeURIComponent(fname)}`;
         wrap.appendChild(audio);
+        // v0.21.x: playback-speed cycle button + waveform overlay.
+        wrap.appendChild(_renderAudioSpeedButton(audio));
+        _renderWaveformBg(audio, audio.src, wrap, msg.blob);
         // Living Presence Tier α-pre - Reality dot.
         // If the daemon has recorded provenance for this blob (via
         // the frame_provenance WS event), render the calm indicator
@@ -15576,6 +16144,10 @@
     state.selectedGroup = null;
     state.groupDetail = null;
     state.groupMessages = [];
+    // v0.21.x: opening a peer is "I've read everything queued there",
+    // so the per-peer badge clears and the tab title + OS badge
+    // recompute. Reading a group does the same in selectGroup below.
+    clearUnread(shortId);
     const peer = state.peers.get(shortId);
     if (!peer) {
       $("#convo-empty").style.display = "grid";
@@ -17764,7 +18336,21 @@
           if (msg.peer !== state.selectedPeer && !peer?.muted) {
             toast(`${who}: ${msg.body || ""}`, "info");
           }
+          // v0.21.x: bump unread when this message isn't visibly being
+          // read right now (peer not selected OR window not focused).
+          const isReadingThisPeer = msg.peer === state.selectedPeer
+            && !document.hidden
+            && document.hasFocus();
+          if (!isReadingThisPeer && !peer?.muted) bumpUnread(msg.peer);
           notifyIncoming(who, msg.body || "", { peer_fp: peer?.fingerprint });
+        }
+        if (msg.t === "FILE_OFFER" && msg.dir === "in") {
+          // File offers also count as unread until the user opens the chat.
+          const peer = state.peers.get(msg.peer);
+          const isReadingThisPeer = msg.peer === state.selectedPeer
+            && !document.hidden
+            && document.hasFocus();
+          if (!isReadingThisPeer && !peer?.muted) bumpUnread(msg.peer);
         }
         if (msg.t === "FILE_DONE" && msg.dir === "in" && msg.ok) {
           const peer = state.peers.get(msg.peer);
@@ -17857,11 +18443,62 @@
   }
   async function stageFile(file) {
     if (!file) return;
+    // v0.21.x: EXIF / metadata stripping for images. Camera photos
+    // carry GPS coords + camera model + timestamp by default; sending
+    // those reveals where and how a photo was taken. We re-encode
+    // through canvas (which discards all EXIF) UNLESS the user
+    // explicitly opted in to keep metadata via the per-tenant
+    // runtime setting. JPEG-quality 92 + size preserved at original
+    // pixel dims — only metadata changes.
+    const stripExif = state.runtimeSettings?.keep_image_metadata !== true;
+    let workingFile = file;
+    if (stripExif && _isImageFileForStrip(file)) {
+      try {
+        workingFile = await _stripImageMetadata(file);
+      } catch (e) {
+        // Best-effort: if re-encode fails (unsupported format, OOM),
+        // fall back to the original file rather than blocking the send.
+        console.warn("EXIF strip failed, sending original:", e);
+      }
+    }
     const id = ++state.stagedSeq;
-    const dataUrl = await readDataUrl(file);
-    state.staged.push({ id, file, dataUrl });
+    const dataUrl = await readDataUrl(workingFile);
+    state.staged.push({ id, file: workingFile, dataUrl });
     renderStaging();
     refreshSendEnabled();
+  }
+  function _isImageFileForStrip(file) {
+    const type = (file?.type || "").toLowerCase();
+    if (type === "image/jpeg" || type === "image/jpg" || type === "image/png" || type === "image/webp") return true;
+    // Some browsers leave file.type empty — sniff by extension.
+    const ext = (file?.name || "").split(".").pop()?.toLowerCase() || "";
+    return ext === "jpg" || ext === "jpeg" || ext === "png" || ext === "webp";
+  }
+  async function _stripImageMetadata(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((res, rej) => {
+        const i = new Image();
+        i.onload = () => res(i);
+        i.onerror = rej;
+        i.src = url;
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const outType = file.type === "image/png" ? "image/png" : "image/jpeg";
+      const quality = outType === "image/jpeg" ? 0.92 : undefined;
+      const blob = await new Promise((res) => canvas.toBlob(res, outType, quality));
+      if (!blob) return file;
+      return new File([blob], file.name, {
+        type: outType,
+        lastModified: file.lastModified,
+      });
+    } finally {
+      URL.revokeObjectURL(url);
+    }
   }
   function removeStaged(id) {
     state.staged = state.staged.filter(s => s.id !== id);
@@ -17882,11 +18519,43 @@
         const img = document.createElement("img");
         img.src = s.dataUrl;
         thumb.appendChild(img);
+        // v0.21.x: edit affordance on image chips. Click thumb edge
+        // pencil OR double-click thumb itself opens the markup
+        // editor. Crop / pen / blur + undo + save replaces the
+        // staged file with the edited version.
+        if (_isImageFileForStrip(s.file)) {
+          const editBtn = document.createElement("button");
+          editBtn.type = "button";
+          editBtn.className = "chip-edit-btn";
+          editBtn.title = "Edit image (crop, draw, blur)";
+          editBtn.textContent = "✎";
+          editBtn.onclick = (ev) => { ev.stopPropagation(); openImageEditor(s); };
+          thumb.appendChild(editBtn);
+          thumb.ondblclick = (ev) => { ev.stopPropagation(); openImageEditor(s); };
+        }
       } else {
         thumb.textContent = fileIcon(s.file.name);
       }
       const meta = el("div", "meta");
-      meta.appendChild(el("div", "name", s.file.name));
+      // v0.21.x: inline-editable filename. Click → contenteditable
+      // → blur or Enter commits. Keeps "1779063202010_*.png"-style
+      // ugly names out of the receiver's chat history. Updates the
+      // File object on commit (browser File constructor preserves
+      // content + type; new instance gets the friendlier name).
+      const nameEl = el("div", "name editable", s.file.name);
+      nameEl.title = "Click to rename before sending";
+      nameEl.tabIndex = 0;
+      nameEl.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        _beginRenameStaged(nameEl, s);
+      });
+      nameEl.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          _beginRenameStaged(nameEl, s);
+        }
+      });
+      meta.appendChild(nameEl);
       meta.appendChild(el("div", "size", fmtBytes(s.file.size)));
       const x = el("button", "x", "×");
       x.title = "Remove";
@@ -17896,6 +18565,396 @@
       chip.appendChild(x);
       tray.appendChild(chip);
     }
+  }
+  // v0.21.x: image markup editor for staged photos. Pen / blur /
+  // crop with undo. Output replaces the staged File so the receiver
+  // sees the edited version. Pure Canvas2D — no external deps.
+  //
+  // Op model: each user action pushes onto an `ops` stack. Render =
+  // baseImage → apply each op in order → render live stroke on top.
+  // Save flattens to a JPEG / PNG depending on source type.
+  const _editorState = {
+    chipId: null,
+    baseImage: null,
+    width: 0,
+    height: 0,
+    ops: [],
+    activeOp: null,
+    tool: "pen",
+    color: "#ff4d4d",
+    penSize: 4,
+    blurRadius: 14,
+    scale: 1,
+    pointer: null,
+  };
+  async function openImageEditor(staged) {
+    _ensureImageEditorModal();
+    const modal = document.getElementById("image-editor-modal");
+    const canvas = modal.querySelector(".iem-canvas");
+    const ctx = canvas.getContext("2d");
+    const stageUrl = URL.createObjectURL(staged.file);
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = stageUrl;
+    });
+    _editorState.chipId = staged.id;
+    _editorState.baseImage = img;
+    _editorState.width = img.naturalWidth;
+    _editorState.height = img.naturalHeight;
+    _editorState.ops = [];
+    _editorState.activeOp = null;
+    _editorState.tool = "pen";
+    _editorState.color = "#ff4d4d";
+    _editorState.penSize = 4;
+    _editorState.blurRadius = 14;
+    _resizeEditorCanvas(canvas);
+    _redrawEditor();
+    URL.revokeObjectURL(stageUrl);
+    _attachEditorHandlers(canvas);
+    modal.classList.add("show");
+    document.body.classList.add("iem-open");
+  }
+  function _resizeEditorCanvas(canvas) {
+    const maxW = Math.min(window.innerWidth * 0.92, 1100);
+    const maxH = Math.min(window.innerHeight * 0.78, 720);
+    const aspect = _editorState.width / _editorState.height;
+    let w = _editorState.width;
+    let h = _editorState.height;
+    if (w > maxW) { w = maxW; h = w / aspect; }
+    if (h > maxH) { h = maxH; w = h * aspect; }
+    _editorState.scale = w / _editorState.width;
+    canvas.style.width = `${w}px`;
+    canvas.style.height = `${h}px`;
+    canvas.width = _editorState.width;
+    canvas.height = _editorState.height;
+  }
+  function _redrawEditor() {
+    const canvas = document.querySelector("#image-editor-modal .iem-canvas");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(_editorState.baseImage, 0, 0, canvas.width, canvas.height);
+    for (const op of _editorState.ops) _applyOp(ctx, op, canvas);
+    if (_editorState.activeOp) _applyOp(ctx, _editorState.activeOp, canvas);
+    // Crop preview rectangle (active crop op is rendered as a marquee)
+    if (_editorState.tool === "crop" && _editorState.activeOp?.type === "crop-marquee") {
+      const r = _editorState.activeOp.rect;
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,.9)";
+      ctx.lineWidth = 2 / _editorState.scale;
+      ctx.setLineDash([6 / _editorState.scale, 4 / _editorState.scale]);
+      ctx.strokeRect(r.x, r.y, r.w, r.h);
+      ctx.restore();
+    }
+  }
+  function _applyOp(ctx, op, canvas) {
+    if (op.type === "pen") {
+      if (!op.points || op.points.length === 0) return;
+      ctx.save();
+      ctx.strokeStyle = op.color;
+      ctx.lineWidth = op.size;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(op.points[0].x, op.points[0].y);
+      for (let i = 1; i < op.points.length; i++) {
+        ctx.lineTo(op.points[i].x, op.points[i].y);
+      }
+      ctx.stroke();
+      ctx.restore();
+    } else if (op.type === "blur") {
+      if (!op.points || op.points.length === 0) return;
+      // Draw a blurred copy of the canvas region into an off-screen
+      // canvas, then composite back through a path mask. Two passes
+      // keep the live preview cheap.
+      const off = document.createElement("canvas");
+      off.width = canvas.width;
+      off.height = canvas.height;
+      const octx = off.getContext("2d");
+      octx.filter = `blur(${op.radius}px)`;
+      octx.drawImage(canvas, 0, 0);
+      ctx.save();
+      ctx.beginPath();
+      for (const p of op.points) {
+        ctx.moveTo(p.x + op.radius * 1.6, p.y);
+        ctx.arc(p.x, p.y, op.radius * 1.6, 0, Math.PI * 2);
+      }
+      ctx.clip();
+      ctx.drawImage(off, 0, 0);
+      ctx.restore();
+    } else if (op.type === "crop") {
+      // Crop is destructive — applied at apply-crop time, not in
+      // the live op stack. Handled by _applyCrop().
+    }
+  }
+  function _attachEditorHandlers(canvas) {
+    if (canvas._handlersAttached) return;
+    canvas._handlersAttached = true;
+    function ptFromEvent(ev) {
+      const rect = canvas.getBoundingClientRect();
+      const x = (ev.clientX - rect.left) / rect.width * canvas.width;
+      const y = (ev.clientY - rect.top) / rect.height * canvas.height;
+      return { x, y };
+    }
+    canvas.addEventListener("pointerdown", (ev) => {
+      canvas.setPointerCapture(ev.pointerId);
+      const p = ptFromEvent(ev);
+      const t = _editorState.tool;
+      if (t === "pen") {
+        _editorState.activeOp = {
+          type: "pen",
+          color: _editorState.color,
+          size: _editorState.penSize / _editorState.scale,
+          points: [p],
+        };
+      } else if (t === "blur") {
+        _editorState.activeOp = {
+          type: "blur",
+          radius: _editorState.blurRadius / _editorState.scale,
+          points: [p],
+        };
+      } else if (t === "crop") {
+        _editorState.activeOp = {
+          type: "crop-marquee",
+          rect: { x: p.x, y: p.y, w: 0, h: 0 },
+          startX: p.x,
+          startY: p.y,
+        };
+      }
+      _redrawEditor();
+    });
+    canvas.addEventListener("pointermove", (ev) => {
+      if (!_editorState.activeOp) return;
+      const p = ptFromEvent(ev);
+      const op = _editorState.activeOp;
+      if (op.type === "pen" || op.type === "blur") {
+        op.points.push(p);
+      } else if (op.type === "crop-marquee") {
+        op.rect.x = Math.min(op.startX, p.x);
+        op.rect.y = Math.min(op.startY, p.y);
+        op.rect.w = Math.abs(p.x - op.startX);
+        op.rect.h = Math.abs(p.y - op.startY);
+      }
+      _redrawEditor();
+    });
+    function endStroke() {
+      const op = _editorState.activeOp;
+      if (op) {
+        if (op.type === "pen" || op.type === "blur") {
+          _editorState.ops.push(op);
+        }
+        // crop-marquee stays as activeOp until user clicks Apply crop
+        if (op.type !== "crop-marquee") _editorState.activeOp = null;
+      }
+      _redrawEditor();
+      _refreshEditorToolbarState();
+    }
+    canvas.addEventListener("pointerup", endStroke);
+    canvas.addEventListener("pointerleave", () => {
+      // Don't end strokes when pointer briefly leaves; only on up.
+    });
+    canvas.addEventListener("pointercancel", endStroke);
+  }
+  function _refreshEditorToolbarState() {
+    const modal = document.getElementById("image-editor-modal");
+    if (!modal) return;
+    const undoBtn = modal.querySelector(".iem-undo");
+    const applyCropBtn = modal.querySelector(".iem-apply-crop");
+    undoBtn.disabled = _editorState.ops.length === 0;
+    const hasCrop = _editorState.activeOp?.type === "crop-marquee"
+      && _editorState.activeOp.rect.w > 4
+      && _editorState.activeOp.rect.h > 4;
+    applyCropBtn.style.display = hasCrop ? "" : "none";
+  }
+  function _undoEditorOp() {
+    if (_editorState.ops.length === 0) return;
+    _editorState.ops.pop();
+    _redrawEditor();
+    _refreshEditorToolbarState();
+  }
+  function _applyCrop() {
+    const op = _editorState.activeOp;
+    if (op?.type !== "crop-marquee" || op.rect.w < 4 || op.rect.h < 4) return;
+    // Bake current state into a new baseImage at the crop rect.
+    const canvas = document.querySelector("#image-editor-modal .iem-canvas");
+    const off = document.createElement("canvas");
+    off.width = Math.max(1, Math.round(op.rect.w));
+    off.height = Math.max(1, Math.round(op.rect.h));
+    const octx = off.getContext("2d");
+    octx.drawImage(canvas, op.rect.x, op.rect.y, op.rect.w, op.rect.h,
+                   0, 0, off.width, off.height);
+    const dataUrl = off.toDataURL("image/png");
+    const img = new Image();
+    img.onload = () => {
+      _editorState.baseImage = img;
+      _editorState.width = img.naturalWidth;
+      _editorState.height = img.naturalHeight;
+      _editorState.ops = [];
+      _editorState.activeOp = null;
+      _resizeEditorCanvas(canvas);
+      _redrawEditor();
+      _refreshEditorToolbarState();
+    };
+    img.src = dataUrl;
+  }
+  function _saveEditor() {
+    const canvas = document.querySelector("#image-editor-modal .iem-canvas");
+    if (!canvas) return;
+    // Discard any active crop marquee before save.
+    if (_editorState.activeOp?.type === "crop-marquee") {
+      _editorState.activeOp = null;
+      _redrawEditor();
+    }
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const staged = state.staged.find((s) => s.id === _editorState.chipId);
+      if (!staged) { _closeEditor(); return; }
+      const newName = staged.file.name.replace(/\.(png|jpe?g|webp)$/i, ".png")
+                      || `edited-${Date.now()}.png`;
+      try {
+        staged.file = new File([blob], newName, {
+          type: "image/png",
+          lastModified: Date.now(),
+        });
+      } catch {
+        staged.displayName = newName;
+      }
+      readDataUrl(staged.file).then((du) => {
+        staged.dataUrl = du;
+        renderStaging();
+      });
+      _closeEditor();
+      toast("Image updated. Click Send when ready.", "good", 3000);
+    }, "image/png");
+  }
+  function _closeEditor() {
+    const modal = document.getElementById("image-editor-modal");
+    if (modal) {
+      modal.classList.remove("show");
+      document.body.classList.remove("iem-open");
+    }
+    _editorState.baseImage = null;
+    _editorState.ops = [];
+    _editorState.activeOp = null;
+  }
+  function _ensureImageEditorModal() {
+    if (document.getElementById("image-editor-modal")) return;
+    const m = document.createElement("div");
+    m.id = "image-editor-modal";
+    m.className = "iem-modal";
+    m.setAttribute("role", "dialog");
+    m.setAttribute("aria-modal", "true");
+    m.setAttribute("aria-label", "Edit image");
+    m.innerHTML = `
+      <div class="iem-backdrop"></div>
+      <div class="iem-pane">
+        <div class="iem-toolbar">
+          <div class="iem-tools">
+            <button type="button" class="iem-tool" data-tool="pen" title="Draw">✏️ Pen</button>
+            <button type="button" class="iem-tool" data-tool="blur" title="Blur a region">⬜ Blur</button>
+            <button type="button" class="iem-tool" data-tool="crop" title="Crop">✂ Crop</button>
+          </div>
+          <div class="iem-color-row" data-color-row>
+            <button type="button" class="iem-color" data-color="#ff4d4d" style="background:#ff4d4d"></button>
+            <button type="button" class="iem-color" data-color="#ffd83b" style="background:#ffd83b"></button>
+            <button type="button" class="iem-color" data-color="#46d39a" style="background:#46d39a"></button>
+            <button type="button" class="iem-color" data-color="#5b9bff" style="background:#5b9bff"></button>
+            <button type="button" class="iem-color" data-color="#ffffff" style="background:#ffffff"></button>
+          </div>
+          <div class="iem-actions">
+            <button type="button" class="iem-undo" disabled>Undo</button>
+            <button type="button" class="iem-apply-crop" style="display:none">Apply crop</button>
+            <button type="button" class="iem-cancel">Cancel</button>
+            <button type="button" class="iem-save">Save</button>
+          </div>
+        </div>
+        <div class="iem-canvas-wrap">
+          <canvas class="iem-canvas"></canvas>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(m);
+    // Wire toolbar handlers.
+    m.querySelectorAll(".iem-tool").forEach((btn) => {
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const tool = btn.dataset.tool;
+        _editorState.tool = tool;
+        m.querySelectorAll(".iem-tool").forEach((x) =>
+          x.classList.toggle("active", x === btn));
+        const colorRow = m.querySelector("[data-color-row]");
+        if (colorRow) colorRow.style.display = tool === "pen" ? "" : "none";
+        // Cancel any in-flight crop marquee when switching tools.
+        if (tool !== "crop" && _editorState.activeOp?.type === "crop-marquee") {
+          _editorState.activeOp = null;
+          _redrawEditor();
+        }
+        _refreshEditorToolbarState();
+      });
+    });
+    m.querySelectorAll(".iem-color").forEach((btn) => {
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        _editorState.color = btn.dataset.color;
+        m.querySelectorAll(".iem-color").forEach((x) =>
+          x.classList.toggle("active", x === btn));
+      });
+    });
+    m.querySelector(".iem-undo").addEventListener("click", _undoEditorOp);
+    m.querySelector(".iem-apply-crop").addEventListener("click", _applyCrop);
+    m.querySelector(".iem-cancel").addEventListener("click", _closeEditor);
+    m.querySelector(".iem-save").addEventListener("click", _saveEditor);
+    // Default tool + color visual state.
+    m.querySelector(".iem-tool[data-tool='pen']").classList.add("active");
+    m.querySelector(".iem-color[data-color='#ff4d4d']").classList.add("active");
+    document.addEventListener("keydown", (ev) => {
+      if (!m.classList.contains("show")) return;
+      if (ev.key === "Escape") _closeEditor();
+      else if (ev.key === "z" && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); _undoEditorOp(); }
+    });
+  }
+
+  // v0.21.x: inline rename for staged files. Replaces the static
+  // filename label with a focused input; commits on blur/Enter,
+  // cancels on Escape. Sanitises to drop path-separator chars +
+  // disallow empty + cap at 255 chars.
+  function _beginRenameStaged(nameEl, s) {
+    const original = s.file.name;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "name-edit";
+    input.value = original;
+    input.maxLength = 255;
+    input.setAttribute("aria-label", "Rename staged file");
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+    const commit = () => {
+      const raw = input.value.trim();
+      const sanitised = raw.replace(/[\\\/]/g, "_").slice(0, 255);
+      const next = sanitised || original;
+      if (next !== original) {
+        try {
+          s.file = new File([s.file], next, {
+            type: s.file.type,
+            lastModified: s.file.lastModified,
+          });
+        } catch {
+          // Older browsers without File-renaming support: best-effort
+          // overlay name so the chip + send-time receiver still see
+          // the friendlier label.
+          s.displayName = next;
+        }
+      }
+      renderStaging();
+    };
+    input.addEventListener("blur", commit);
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") { ev.preventDefault(); input.blur(); }
+      else if (ev.key === "Escape") { ev.preventDefault(); renderStaging(); }
+    });
   }
 
   // ── Multi-select + forward (v0.10.1) ──────────────────────────────
@@ -18462,6 +19521,126 @@
       toast(`Clipboard read failed: ${e.message || e}. You may need to grant permission.`, "bad", 6000);
     }
   });
+  // v0.21.x camera capture button. Opens a modal that streams the
+  // user's webcam to a video preview; Snap captures a JPEG and
+  // stages it. On mobile (no getUserMedia) the file picker with
+  // capture="environment" hits the OS camera app directly.
+  $("#btn-camera")?.addEventListener("click", async () => {
+    if (!state.selectedPeer) { toast("Pick a device first. Aim is required.", "info"); return; }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      // Mobile fallback: native file picker with capture intent.
+      const inp = document.createElement("input");
+      inp.type = "file";
+      inp.accept = "image/*";
+      inp.capture = "environment";
+      inp.onchange = () => {
+        for (const f of inp.files || []) stageFile(f);
+      };
+      inp.click();
+      return;
+    }
+    await openCameraCaptureModal();
+  });
+  async function openCameraCaptureModal() {
+    _ensureCameraCaptureModal();
+    const modal = document.getElementById("camera-capture-modal");
+    const video = modal.querySelector(".ccm-video");
+    const snapBtn = modal.querySelector(".ccm-snap");
+    const closeBtn = modal.querySelector(".ccm-close");
+    const swapBtn = modal.querySelector(".ccm-swap");
+    let stream = null;
+    let facingMode = "user";
+    async function startStream(mode) {
+      if (stream) {
+        stream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
+        stream = null;
+      }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: mode || facingMode },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play().catch(() => {});
+      } catch (e) {
+        toast(`Camera access failed: ${e?.message || e}`, "bad", 6000);
+        cleanup();
+      }
+    }
+    function cleanup() {
+      if (stream) {
+        stream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
+        stream = null;
+      }
+      try { video.srcObject = null; } catch {}
+      modal.classList.remove("show");
+      document.body.classList.remove("ccm-open");
+      snapBtn.removeEventListener("click", onSnap);
+      closeBtn.removeEventListener("click", onClose);
+      swapBtn.removeEventListener("click", onSwap);
+      modal.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey);
+    }
+    async function onSnap() {
+      if (!video.videoWidth) return;
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0);
+      const blob = await new Promise((res) =>
+        canvas.toBlob(res, "image/jpeg", 0.92));
+      if (blob) {
+        const file = new File([blob], `photo-${Date.now()}.jpg`, { type: "image/jpeg" });
+        await stageFile(file);
+        toast("Photo captured. Click Send when ready.", "good", 3000);
+      }
+      cleanup();
+    }
+    function onSwap() {
+      facingMode = facingMode === "user" ? "environment" : "user";
+      startStream(facingMode);
+    }
+    function onClose() { cleanup(); }
+    function onBackdrop(ev) {
+      const t = ev.target;
+      if (t && t instanceof Element && t.hasAttribute("data-ccm-close")) cleanup();
+    }
+    function onKey(ev) {
+      if (ev.key === "Escape") cleanup();
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); onSnap(); }
+    }
+    snapBtn.addEventListener("click", onSnap);
+    closeBtn.addEventListener("click", onClose);
+    swapBtn.addEventListener("click", onSwap);
+    modal.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey);
+    modal.classList.add("show");
+    document.body.classList.add("ccm-open");
+    await startStream(facingMode);
+    setTimeout(() => snapBtn.focus(), 50);
+  }
+  function _ensureCameraCaptureModal() {
+    if (document.getElementById("camera-capture-modal")) return;
+    const m = document.createElement("div");
+    m.id = "camera-capture-modal";
+    m.className = "ccm-modal";
+    m.setAttribute("role", "dialog");
+    m.setAttribute("aria-modal", "true");
+    m.setAttribute("aria-label", "Camera capture");
+    m.innerHTML = `
+      <div class="ccm-backdrop" data-ccm-close></div>
+      <div class="ccm-pane">
+        <video class="ccm-video" autoplay playsinline muted></video>
+        <div class="ccm-actions">
+          <button type="button" class="ccm-close">Cancel</button>
+          <button type="button" class="ccm-swap" title="Switch camera">↻</button>
+          <button type="button" class="ccm-snap">Snap</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(m);
+  }
   $("#btn-unblock").addEventListener("click", async () => {
     const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
     if (!peer?.fingerprint) return;
@@ -19380,15 +20559,15 @@
         toast("Voice clip was barely a syllable. Tossed.", "info");
         return;
       }
-      const fname = _voiceFilenameFor(recMime);
-      const file = new File([blob], fname, { type: recMime });
-      const sending = toast(`Sending voice message…`, "info", 30000);
-      try {
-        await api.upload(state.selectedPeer, file);
-        sending?.remove();
-      } catch (e) {
-        sending?.remove();
-        toast(`Voice send failed: ${errorToastBody(e)}`, "bad");
+      // v0.21.x: preview-before-send. Instead of immediately
+      // uploading, open a preview modal so the user can listen
+      // back, re-record, or cancel. Power users can disable this
+      // via state.runtimeSettings.voice_skip_preview.
+      const skipPreview = state.runtimeSettings?.voice_skip_preview === true;
+      if (skipPreview) {
+        await _sendVoiceBlob(blob, recMime);
+      } else {
+        openVoicePreviewModal(blob, recMime);
       }
     };
     try {
@@ -19430,6 +20609,191 @@
     if (sec >= 300) {
       stopVoiceRecording({ cancel: false });
       toast("Voice clip capped at 5 minutes - sending now.", "info", 4000);
+    }
+  }
+
+  // v0.21.x: voice playback speed. Click cycles through 1x → 1.5x
+  // → 2x → 1x. Persisted in localStorage so the user's preferred
+  // speed sticks across audio bubbles. Browser natively supports
+  // arbitrary playbackRate values, including pitch preservation.
+  const VOICE_SPEEDS = [1.0, 1.5, 2.0];
+  const VOICE_SPEED_KEY = "one_link.voice_speed";
+  function _getVoiceSpeed() {
+    try {
+      const v = parseFloat(localStorage.getItem(VOICE_SPEED_KEY) || "1");
+      return VOICE_SPEEDS.includes(v) ? v : 1.0;
+    } catch { return 1.0; }
+  }
+  function _setVoiceSpeed(v) {
+    try { localStorage.setItem(VOICE_SPEED_KEY, String(v)); } catch {}
+  }
+  function _renderAudioSpeedButton(audio) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "audio-speed-btn";
+    btn.title = "Change playback speed";
+    const apply = (v) => {
+      try {
+        audio.playbackRate = v;
+        if ("preservesPitch" in audio) audio.preservesPitch = true;
+        else if ("mozPreservesPitch" in audio) audio.mozPreservesPitch = true;
+        else if ("webkitPreservesPitch" in audio) audio.webkitPreservesPitch = true;
+      } catch {}
+      btn.textContent = v === 1.0 ? "1x" : (v === 1.5 ? "1.5x" : "2x");
+      btn.dataset.speed = String(v);
+    };
+    apply(_getVoiceSpeed());
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const cur = parseFloat(btn.dataset.speed || "1");
+      const idx = VOICE_SPEEDS.indexOf(cur);
+      const next = VOICE_SPEEDS[(idx + 1) % VOICE_SPEEDS.length];
+      _setVoiceSpeed(next);
+      apply(next);
+    };
+    return btn;
+  }
+  // v0.21.x: waveform background for audio bubbles. Decodes the
+  // blob via Web Audio, samples peak amplitudes, draws bars. Cached
+  // per-blob-hash so re-renders are cheap. Drawn as a CSS background
+  // image on the audio-player wrap (the native controls remain
+  // interactive — the waveform sits behind them).
+  state.waveformCache = state.waveformCache || new Map();
+  async function _renderWaveformBg(audio, src, wrap, blobHash) {
+    if (!blobHash) return;
+    const cached = state.waveformCache.get(blobHash);
+    if (cached) { wrap.style.setProperty("--wf-bg", `url(${cached})`); wrap.classList.add("has-waveform"); return; }
+    try {
+      const resp = await fetch(src, { credentials: "same-origin" });
+      if (!resp.ok) return;
+      const buf = await resp.arrayBuffer();
+      const ACtx = window.AudioContext || window.webkitAudioContext;
+      if (!ACtx) return;
+      const ctx = new ACtx();
+      try {
+        const decoded = await ctx.decodeAudioData(buf.slice(0));
+        const dataUrl = _renderWaveformToDataUrl(decoded);
+        state.waveformCache.set(blobHash, dataUrl);
+        wrap.style.setProperty("--wf-bg", `url(${dataUrl})`);
+        wrap.classList.add("has-waveform");
+      } finally { try { ctx.close(); } catch {} }
+    } catch (_) { /* silent: waveform is purely cosmetic */ }
+  }
+  function _renderWaveformToDataUrl(audioBuffer) {
+    const W = 400, H = 48;
+    const canvas = document.createElement("canvas");
+    canvas.width = W; canvas.height = H;
+    const cx = canvas.getContext("2d");
+    cx.clearRect(0, 0, W, H);
+    const data = audioBuffer.getChannelData(0);
+    const bars = 100;
+    const samplesPerBar = Math.max(1, Math.floor(data.length / bars));
+    const barW = W / bars;
+    cx.fillStyle = "rgba(255,255,255,.42)";
+    for (let i = 0; i < bars; i++) {
+      let peak = 0;
+      for (let j = 0; j < samplesPerBar; j++) {
+        const v = Math.abs(data[i * samplesPerBar + j] || 0);
+        if (v > peak) peak = v;
+      }
+      const h = Math.max(2, peak * H * 0.9);
+      cx.fillRect(i * barW + 1, (H - h) / 2, barW - 2, h);
+    }
+    return canvas.toDataURL("image/png");
+  }
+
+  // v0.21.x: preview-before-send modal for voice messages. Opens
+  // after recording stops; user can listen back, re-record, send,
+  // or discard. The "do this every time" experience matches
+  // iMessage / WhatsApp behavior. Skip can be enabled per-user via
+  // state.runtimeSettings.voice_skip_preview.
+  function openVoicePreviewModal(blob, mime) {
+    _ensureVoicePreviewModal();
+    const modal = document.getElementById("voice-preview-modal");
+    const audio = modal.querySelector(".vpm-audio");
+    const sendBtn = modal.querySelector(".vpm-send");
+    const reBtn = modal.querySelector(".vpm-rerec");
+    const cancelBtn = modal.querySelector(".vpm-cancel");
+    const sizeLabel = modal.querySelector(".vpm-size");
+    const url = URL.createObjectURL(blob);
+    audio.src = url;
+    sizeLabel.textContent = fmtBytes(blob.size);
+    function cleanup() {
+      modal.classList.remove("show");
+      document.body.classList.remove("vpm-open");
+      try { audio.pause(); } catch {}
+      try { audio.src = ""; } catch {}
+      try { URL.revokeObjectURL(url); } catch {}
+      sendBtn.removeEventListener("click", onSend);
+      reBtn.removeEventListener("click", onRerec);
+      cancelBtn.removeEventListener("click", onCancel);
+      modal.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey);
+    }
+    async function onSend() {
+      cleanup();
+      await _sendVoiceBlob(blob, mime);
+    }
+    function onRerec() {
+      cleanup();
+      // Re-open the mic. Defer with a microtask so the cleanup
+      // settles before getUserMedia kicks back on.
+      Promise.resolve().then(() => startVoiceRecording());
+    }
+    function onCancel() {
+      cleanup();
+      toast("Voice clip discarded.", "info", 2500);
+    }
+    function onBackdrop(ev) {
+      const t = ev.target;
+      if (t && t instanceof Element && t.hasAttribute("data-vpm-close")) onCancel();
+    }
+    function onKey(ev) {
+      if (ev.key === "Escape") onCancel();
+      else if (ev.key === "Enter") onSend();
+    }
+    sendBtn.addEventListener("click", onSend);
+    reBtn.addEventListener("click", onRerec);
+    cancelBtn.addEventListener("click", onCancel);
+    modal.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey);
+    modal.classList.add("show");
+    document.body.classList.add("vpm-open");
+    setTimeout(() => sendBtn.focus(), 60);
+  }
+  function _ensureVoicePreviewModal() {
+    if (document.getElementById("voice-preview-modal")) return;
+    const m = document.createElement("div");
+    m.id = "voice-preview-modal";
+    m.className = "vpm-modal";
+    m.setAttribute("role", "dialog");
+    m.setAttribute("aria-modal", "true");
+    m.setAttribute("aria-label", "Voice message preview");
+    m.innerHTML = `
+      <div class="vpm-backdrop" data-vpm-close></div>
+      <div class="vpm-pane">
+        <h2 class="vpm-title">Listen before you send</h2>
+        <audio class="vpm-audio" controls></audio>
+        <div class="vpm-meta">Clip size: <span class="vpm-size">--</span></div>
+        <div class="vpm-actions">
+          <button type="button" class="vpm-cancel">Discard</button>
+          <button type="button" class="vpm-rerec">Re-record</button>
+          <button type="button" class="vpm-send">Send</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(m);
+  }
+  async function _sendVoiceBlob(blob, mime) {
+    const fname = _voiceFilenameFor(mime);
+    const file = new File([blob], fname, { type: mime });
+    const sending = toast(`Sending voice message…`, "info", 30000);
+    try {
+      await api.upload(state.selectedPeer, file);
+      sending?.remove();
+    } catch (e) {
+      sending?.remove();
+      toast(`Voice send failed: ${errorToastBody(e)}`, "bad");
     }
   }
 
@@ -21703,6 +23067,8 @@
     lastLocalAnswerSdp: "",
     lastOfferSendMs: 0,
     lastAnswerSendMs: 0,
+    acceptedCallIds: new Set(),
+    lastAcceptRetryMs: {},
   };
   // Expose for debug + tests
   if (typeof window !== "undefined") {
@@ -21846,6 +23212,8 @@
     callUI.lastLocalAnswerSdp = "";
     callUI.lastOfferSendMs = 0;
     callUI.lastAnswerSendMs = 0;
+    callUI.acceptedCallIds.clear();
+    callUI.lastAcceptRetryMs = {};
     media.muted = false;
     media.cameraOff = false;
     syncMuteCameraButtons();
@@ -23201,6 +24569,7 @@
     const inboundCallId = callUI.inboundCallId;
     const inboundPeer = callUI.inboundCallPeer;
     const inboundPeerFp = callUI.inboundCallPeerFp;
+    callUI.acceptedCallIds.add(inboundCallId);
     hideIncomingRing();
     callUI.activeCallId = inboundCallId;
     callUI.activeCallPeer = inboundPeer;
@@ -23211,6 +24580,9 @@
     const mediaPromise = startLocalMedia({ audio: true, video: true });
     const result = await callApiPost({
       action: "accept", call_id: inboundCallId,
+    });
+    reportCallEvent(result && result.ok ? "accept_sent" : "accept_failed", {
+      ok: !!(result && result.ok),
     });
     if (result.ok) {
       const stream = await mediaPromise;
@@ -23230,6 +24602,7 @@
         await ensureMediaNegotiation("accept");
       }
     } else {
+      callUI.acceptedCallIds.delete(inboundCallId);
       callUI.localMediaReady = false;
       hideActiveSurface();
       stopAllMedia();
@@ -23270,6 +24643,7 @@
   async function backfillLivingPresenceCalls() {
     const payload = await callApiList();
     const calls = Array.isArray(payload && payload.calls) ? payload.calls : [];
+    const visibleCallIds = new Set(calls.map((c) => c && c.call_id).filter(Boolean));
     let inboundStillRinging = false;
     for (const call of calls) {
       if (!call || !call.call_id) continue;
@@ -23292,6 +24666,20 @@
         });
       }
       if (incoming && phase === "ringing") {
+        if (
+          callUI.acceptedCallIds.has(call.call_id)
+          || callUI.activeCallId === call.call_id
+        ) {
+          inboundStillRinging = callUI.inboundCallId === call.call_id;
+          const now = Date.now();
+          const last = Number(callUI.lastAcceptRetryMs[call.call_id] || 0);
+          if (now - last > 3000) {
+            callUI.lastAcceptRetryMs[call.call_id] = now;
+            callApiPost({ action: "accept", call_id: call.call_id }).catch(() => {});
+            reportCallEvent("accept_resend", { reason: "ringing_backfill" });
+          }
+          continue;
+        }
         inboundStillRinging = true;
         if (callUI.inboundCallId !== call.call_id) {
           callUI.inboundCallId = call.call_id;
@@ -23308,6 +24696,7 @@
         continue;
       }
       if (phase === "active") {
+        callUI.acceptedCallIds.add(call.call_id);
         if (!callUI.activeCallId || callUI.activeCallId === call.call_id) {
           callUI.activeCallId = call.call_id;
           callUI.activeCallPeer = peerLabelFromCall(call);
@@ -23342,6 +24731,19 @@
         callUI.activeCallPeer = null;
         callUI.activeCallPeerFp = null;
       }
+    }
+    if (callUI.activeCallId && !visibleCallIds.has(callUI.activeCallId)) {
+      hideOutgoingOverlay();
+      hideIncomingRing();
+      hideActiveSurface();
+      stopAllMedia();
+      stopCallTelemetry();
+      callUI.activeCallId = null;
+      callUI.activeCallPeer = null;
+      callUI.activeCallPeerFp = null;
+      callUI.inboundCallId = null;
+      callUI.inboundCallPeer = null;
+      callUI.inboundCallPeerFp = null;
     }
     if (callUI.inboundCallId && !inboundStillRinging) {
       const matching = calls.find((c) => c && c.call_id === callUI.inboundCallId);
@@ -23615,6 +25017,16 @@
     const tail = m.tail_kind;
     const callId = m.call_id;
     if (tail === "show_ring") {
+      if (callUI.acceptedCallIds.has(callId) || callUI.activeCallId === callId) {
+        const now = Date.now();
+        const last = Number(callUI.lastAcceptRetryMs[callId] || 0);
+        if (now - last > 3000) {
+          callUI.lastAcceptRetryMs[callId] = now;
+          callApiPost({ action: "accept", call_id: callId }).catch(() => {});
+          reportCallEvent("accept_resend", { reason: "duplicate_ring" });
+        }
+        return true;
+      }
       callUI.inboundCallId = callId;
       callUI.inboundCallPeer = (m.peer_label || callId.slice(0, 8));
       callUI.inboundCallPeerFp = m.peer_master_vk_hex || null;
