@@ -16,19 +16,40 @@ I am One. You are One. We are One.
 
 ---
 
-## Download
+## 60-second start
 
-Pick the artifact for your platform from the
-[latest release](https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest).
+1. Open the [`auto-latest` release](https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/tag/auto-latest) — rebuilt on every push to `master` by CI.
+2. Download the zip for your OS.
+3. Unzip into any folder you control.
+4. Double-click `one-link` (or `one-link.exe` on Windows).
+5. Your browser opens to a local URL. Click **Set up One Link** in the welcome wizard.
+6. To pair a second device, open One Link there too, then scan the QR.
+
+That's the install. No Python, no Rust, no `pip`. Roughly 120-150 MB on disk.
+
+## Releases
+
+Two channels:
+
+| Channel | What it is | When to use |
+|---|---|---|
+| [`auto-latest`](https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/tag/auto-latest) | Rolling continuous build, overwritten on every push to `master` | You want the most recent fixes |
+| [tagged `v*` releases](https://github.com/IamOneYouAreOneWeAreOne/one-link/releases) | Versioned releases with Sigstore signatures + SLSA attestation | You want a stable, reproducibly-signed build |
+
+Per-platform install notes:
 
 | Platform | File | What you do |
 |---|---|---|
-| Windows | `one-link-windows.exe` | Double-click. The first run may need "More info → Run anyway" until code-signing lands. |
-| macOS | `one-link-macos` | Double-click. The first run may need a right-click → Open to bypass Gatekeeper. |
-| Linux | `one-link-linux-x86_64` | `chmod +x one-link-linux-x86_64 && ./one-link-linux-x86_64` |
+| Windows | `one-link-windows-x86_64.zip` | Unzip, double-click `one-link.exe`. The first run may need "More info → Run anyway" until code-signing lands. |
+| macOS | `one-link-macos-arm64.zip` | Unzip, double-click `one-link`. The first run may need a right-click → Open to bypass Gatekeeper. |
+| Linux | `one-link-linux-x86_64.zip` | `unzip one-link-linux-x86_64.zip && cd one-link && chmod +x one-link && ./one-link` |
 
-The binary opens your browser to a local URL. That's the whole install.
-No Python, no Rust, no `pip`. Roughly 120-150 MB after install.
+Each download has a matching `.sha256` next to it; `manifest.txt` collates every artifact's hash. Verify before extracting:
+
+```bash
+curl -sLO <release_url>/manifest.txt
+sha256sum --check manifest.txt
+```
 
 ---
 
@@ -245,15 +266,59 @@ ONE_LINK_HOME=/tmp/ol-B one-link app    # different port, different identity
 
 ---
 
+## Troubleshooting
+
+If something feels off, open **Settings → Advanced → One Link Doctor**
+and click **Run health check**. It runs ~14 checks against the
+current state (daemon reachable, peer version compatibility,
+browser secure context, WebRTC support, mic + camera permission,
+service worker registration, pending outbox depth, etc.) and
+renders pass / warn / fail per surface with a one-line fix hint.
+
+Common issues:
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| Messages sit as "Queued" while the peer is online | The other device is on an older build. Wire-version mismatch. | Update the other device to the same `auto-latest` build. |
+| Calls connect but no audio / video | Browser blocked mic / camera permission. | Site settings → reset permissions → reload, accept on the next call. |
+| Welcome wizard re-appears every launch | localStorage blocked or cleared by privacy mode. | Check browser settings; allow site data for `127.0.0.1`. |
+| "Can't reach One Link. Is it running?" | The tray daemon stopped. | Restart by double-clicking the `one-link` binary again. |
+| Files arrive but don't open | Daemon doesn't auto-open; this is by design. | Click the file bubble; image / PDF previews open in the lightbox, others open in a new tab. |
+
+To file a bug: **Settings → Advanced → Report a bug on GitHub**
+pre-fills an issue with a redacted diagnostic snapshot (no
+fingerprints, no message bodies, no paths — only counts +
+versions + recent error severities).
+
+---
+
 ## Roadmap
 
-- **v0.3** - Complete folder sync wire integration, group rooms,
-  native window via Tauri (proper app, not a browser tab),
-  signed installers (EV cert) for Win + Mac, tray icon, auto-start
-- **v0.4** - Internet P2P (NAT traversal via Iroh), persistent peers
-  beyond mDNS range, distributed gossip discovery
-- **v1.0** - Multi-modal transports from OneField (RF, audio, DSSS sub-noise),
-  voice/video, mobile (iOS/Android via React Native)
+Live status: see the **Truth Dashboard** in **Settings → About** — every
+major feature is rated across four axes (primitive proven / daemon wired
+/ UI exposed / soak proven). Only all-four-green = "shipped".
+
+What's already in master at v0.21.x:
+- Chat (1:1 + groups) with edit / react / delete / disappearing messages
+- File transfer (native chunk store + AEAD, 10 MiB+ verified in soak)
+- Voice + video calls (Living Presence Tier α-pre, signed offers, missed-call entries, audible ringtone)
+- Pair-by-QR with Ed25519+ML-DSA hybrid signatures + SAS verification
+- Personal device mesh (multi-device on same identity)
+- Folder sync with CRDT conflict resolution
+- Confidential-compute attestation (software provider; TPM in flight)
+- Pinned + archived conversations, slash commands, image markup before send
+
+What's queued:
+- Double Ratchet activation in CAPS (closes the headline crypto gap)
+- Service Worker pinned-pubkey signature verification (closes the update channel)
+- Argon2id-wrapped identity key + OS-keyring passphrase (replaces PBKDF2 + env var)
+- `server.py` modularization (12K → many smaller files for review)
+- CSP nonce migration + TrustedTypes
+- Group calls (3+ participants)
+- Code-signed installers (Authenticode + Apple notarization)
+
+See [`docs/UX_AUDIT_2026-05-17.md`](docs/UX_AUDIT_2026-05-17.md) for the
+full audit list and recommended ordering.
 
 ---
 
