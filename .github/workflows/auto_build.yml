@@ -82,19 +82,47 @@ jobs:
           # can resolve every import path.
           pip install -e .
 
-      - name: install platform-specific native wheel (best effort)
+      - name: install Rust toolchain
+        # Needed by `maturin develop --release` below. The action
+        # caches the toolchain across runs so this only pays the
+        # download cost on first invocation.
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: ${{ runner.os }}-cargo-auto-build-${{ hashFiles('native/Cargo.lock', 'native/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-auto-build-
+
+      - name: build native crate from source
         shell: bash
         continue-on-error: true
-        # The native crate is published per-OS to GitHub Releases.
-        # If the wheel for this runner's OS exists, pip pulls it in
-        # and PyInstaller bundles the .pyd/.so/.dylib via the
-        # --collect-all flag that build_binary.py sets up.
-        # If no wheel exists for this runner, the build proceeds in
-        # pure-Python mode (`scripts/build_binary.py` is tolerant).
+        # Build one_link_native locally with maturin instead of pulling
+        # a published wheel. Previous approach used `pip install
+        # one_link_native --find-links <github-release-html-url>`,
+        # which never actually resolved a wheel because the URL points
+        # at an HTML release page (not a pip-parseable index). That
+        # meant every auto-build silently fell back to pure-Python.
+        #
+        # Building from source adds ~3-5 min per OS but produces a
+        # bundle that includes the native fast paths (CDC, AEAD, QUIC,
+        # capability, ratchet, coherence-field). The cache step above
+        # makes incremental rebuilds much faster than this estimate.
+        #
+        # continue-on-error: a Rust-toolchain hiccup OR a maturin
+        # version skew should never block the standalone exe build —
+        # the standalone exe is tolerant of pure-Python fallback and
+        # the user-facing chat / file paths work either way.
         run: |
-          pip install one_link_native \
-            --find-links https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest \
-            || echo "no native wheel for this OS; building pure-Python"
+          pip install maturin
+          cd native/one_link_native
+          maturin develop --release \
+            || echo "maturin build failed; auto-build will ship pure-Python"
 
       - name: build the standalone binary
         shell: bash
