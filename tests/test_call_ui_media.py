@@ -187,6 +187,26 @@ def test_remote_sdp_backfill_is_deduped(index_html: str) -> None:
     assert 'media.pc.signalingState !== "have-local-offer"' in answer_snippet
 
 
+def test_sdp_offer_answer_retries_when_signaling_is_lost(index_html: str) -> None:
+    """Live call recovery: the daemon can best-effort a frame over a
+    reverse control channel, so browsers must retransmit unanswered
+    WebRTC setup instead of waiting forever in have-local-offer."""
+    assert "lastLocalOfferSdp" in index_html
+    assert "lastLocalAnswerSdp" in index_html
+    assert "async function resendLocalSdpOffer" in index_html
+    assert "async function resendLocalSdpAnswer" in index_html
+    ensure_idx = index_html.find("async function ensureMediaNegotiation")
+    ensure_snippet = index_html[ensure_idx:ensure_idx + 1800]
+    assert 'media.pc.signalingState === "have-local-offer"' in ensure_snippet
+    assert "await resendLocalSdpOffer" in ensure_snippet
+    offer_idx = index_html.find("async function applyRemoteSdpOffer")
+    offer_snippet = index_html[offer_idx:offer_idx + 1800]
+    assert "remote_offer_echo_ignored" in offer_snippet
+    assert 'await resendLocalSdpOffer("offer_echo")' in offer_snippet
+    assert 'await resendLocalSdpOffer("offer_collision")' in offer_snippet
+    assert 'await resendLocalSdpAnswer("duplicate_offer")' in offer_snippet
+
+
 def test_call_media_events_are_reported(index_html: str) -> None:
     assert 'action: "report_call_event"' in index_html
     for event in [
@@ -200,6 +220,8 @@ def test_call_media_events_are_reported(index_html: str) -> None:
         "remote_answer_received",
         "remote_track_connected",
         "ice_state_changed",
+        "offer_resend",
+        "answer_resend",
     ]:
         assert event in index_html
 
@@ -332,6 +354,10 @@ const context = {{
   clearTimeout() {{}},
   crypto: {{ subtle: {{ async digest() {{ return new ArrayBuffer(32); }} }} }},
   Blob: function Blob() {{ this.arrayBuffer = async () => new ArrayBuffer(0); }},
+  _callPermissionPreflight: async () => true,
+  startCallRingback() {{}},
+  startCallRingtone() {{}},
+  stopCallRing() {{}},
   fetch: async (_url, opts) => {{
     const body = opts && opts.body ? JSON.parse(opts.body) : {{}};
     return {{
@@ -350,9 +376,16 @@ const context = {{
     addEventListener() {{}},
   }},
   navigator: {{
+    permissions: {{
+      query: async () => ({{ state: "granted" }}),
+    }},
     mediaDevices: {{
       getUserMedia: async () => new FakeStream(),
     }},
+  }},
+  localStorage: {{
+    getItem() {{ return null; }},
+    setItem() {{}},
   }},
   window: {{}},
 }};

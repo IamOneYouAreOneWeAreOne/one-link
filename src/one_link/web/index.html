@@ -5457,6 +5457,23 @@
   .peer .sub .lat-dot.fast    { background: var(--good); box-shadow: 0 0 4px rgba(70,211,154,.55); }
   .peer .sub .lat-dot.medium  { background: var(--warn); }
   .peer .sub .lat-dot.slow    { background: var(--bad); }
+  /* v0.21.x channel-health states. "stale" = paired + online but no
+     recent bytes (channel quiet, not broken). "broken" = compat
+     negotiation said the wire path is incompatible — sends WILL
+     queue. The pulse calls attention without being alarming. */
+  .peer .sub .lat-dot.stale   {
+    background: var(--text-dimmer);
+    box-shadow: 0 0 4px rgba(245,196,81,.30);
+  }
+  .peer .sub .lat-dot.broken  {
+    background: var(--bad);
+    box-shadow: 0 0 6px rgba(255,108,108,.6);
+    animation: chan-pulse 2s ease-in-out infinite;
+  }
+  @keyframes chan-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: .55; }
+  }
   .convo-h .who .sub .lat-dot {
     display: inline-block;
     width: 7px; height: 7px; border-radius: 50%;
@@ -5467,6 +5484,15 @@
   .convo-h .who .sub .lat-dot.fast   { background: var(--good); box-shadow: 0 0 5px rgba(70,211,154,.55); }
   .convo-h .who .sub .lat-dot.medium { background: var(--warn); }
   .convo-h .who .sub .lat-dot.slow   { background: var(--bad); }
+  .convo-h .who .sub .lat-dot.stale  {
+    background: var(--text-dimmer);
+    box-shadow: 0 0 5px rgba(245,196,81,.30);
+  }
+  .convo-h .who .sub .lat-dot.broken {
+    background: var(--bad);
+    box-shadow: 0 0 6px rgba(255,108,108,.6);
+    animation: chan-pulse 2s ease-in-out infinite;
+  }
 
   /* v0.21.x: peer-version comparison badge. Lives in the peer-row
      sub-line next to the reach label. Shown only when something is
@@ -5512,6 +5538,232 @@
   .convo-h .who .sub .peer-ver-badge {
     font-size: 11px;
     padding: 1px 7px;
+  }
+  .peer-ver-badge:hover { filter: brightness(1.12); }
+  .peer-ver-badge:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* v0.21.x: version-mismatch explainer modal. Triggered by clicking
+     a peer-ver-badge. Three flavors (older / newer / incompat /
+     fallback) share one shell. */
+  .vmm-modal {
+    position: fixed; inset: 0;
+    display: none;
+    z-index: 9998;
+    align-items: center; justify-content: center;
+  }
+  .vmm-modal.show { display: flex; }
+  body.vmm-open { overflow: hidden; }
+  .vmm-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,.55);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .vmm-pane {
+    position: relative;
+    max-width: min(520px, 92vw);
+    max-height: 86vh;
+    overflow: auto;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5);
+    padding: 0;
+  }
+  .vmm-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
+    padding: 14px 18px 6px;
+  }
+  .vmm-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 0;
+  }
+  .vmm-close {
+    background: transparent; border: 0;
+    color: var(--text-dim);
+    font-size: 16px; line-height: 1;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .vmm-close:hover { color: var(--text); background: var(--bg-3); }
+  .vmm-lead {
+    padding: 0 18px;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 4px 0 12px;
+  }
+  .vmm-steps {
+    padding: 0 36px 4px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .vmm-steps li { margin-bottom: 6px; }
+  .vmm-actions {
+    display: flex; align-items: center; justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 18px 14px;
+    border-top: 1px solid var(--line);
+    margin-top: 12px;
+  }
+  .vmm-secondary, .vmm-primary {
+    padding: 6px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+    border: 1px solid var(--line);
+  }
+  .vmm-secondary {
+    background: transparent;
+    color: var(--text-dim);
+  }
+  .vmm-secondary:hover { background: var(--bg-3); color: var(--text); }
+  .vmm-primary {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  .vmm-primary:hover { filter: brightness(1.08); }
+
+  /* v0.21.x: pre-call permission preflight modal. Same visual
+     language as the version-mismatch modal so they feel like a
+     consistent family. Shown on first call only. */
+  .cpm-modal {
+    position: fixed; inset: 0;
+    display: none;
+    z-index: 9999;
+    align-items: center; justify-content: center;
+  }
+  .cpm-modal.show { display: flex; }
+  body.cpm-open { overflow: hidden; }
+  .cpm-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,.55);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .cpm-pane {
+    position: relative;
+    max-width: min(480px, 92vw);
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5);
+  }
+  .cpm-head {
+    padding: 16px 20px 6px;
+  }
+  .cpm-title {
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 0;
+  }
+  .cpm-lead {
+    padding: 0 20px;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .cpm-lead p { margin: 6px 0 12px; }
+  .cpm-actions {
+    display: flex; align-items: center; justify-content: flex-end;
+    gap: 8px;
+    padding: 8px 18px 16px;
+    border-top: 1px solid var(--line);
+    margin-top: 8px;
+  }
+  .cpm-secondary, .cpm-primary {
+    padding: 7px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--line);
+  }
+  .cpm-secondary {
+    background: transparent;
+    color: var(--text-dim);
+  }
+  .cpm-secondary:hover { background: var(--bg-3); color: var(--text); }
+  .cpm-primary {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  .cpm-primary:hover { filter: brightness(1.08); }
+  .cpm-primary:focus-visible {
+    outline: 2px solid var(--accent-2);
+    outline-offset: 2px;
+  }
+
+  /* v0.21.x: missed / ended call bubble. Centered-ish "system
+     message" feel — distinguishes from regular text/file bubbles
+     so the call log entry reads as metadata about the chat, not
+     as a sent message. Missed calls get a soft red tint with
+     Call back action. Ended calls render slimmer in muted color. */
+  .call-log {
+    align-self: center;
+    max-width: 90%;
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px;
+    margin: 4px auto;
+    border-radius: 18px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    font-size: 12.5px;
+    line-height: 1.35;
+    color: var(--text-dim);
+  }
+  .call-log.missed {
+    background: rgba(255, 108, 108, .07);
+    border-color: rgba(255, 108, 108, .25);
+    color: var(--text);
+  }
+  .call-log .call-log-icon {
+    font-size: 16px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .call-log .call-log-body {
+    display: flex; flex-direction: column; gap: 1px;
+    min-width: 0;
+  }
+  .call-log .call-log-line {
+    color: inherit;
+  }
+  .call-log.missed .call-log-line { color: var(--text); }
+  .call-log .call-log-when {
+    font-size: 10px;
+    color: var(--text-dimmer);
+  }
+  .call-log .call-log-callback {
+    background: transparent;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    padding: 3px 12px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-left: 4px;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .call-log .call-log-callback:hover {
+    background: var(--accent);
+    color: white;
+  }
+  .call-log .call-log-callback:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   /* ── Click-to-copy affordance ──────────────────────────────────────── */
@@ -8061,17 +8313,65 @@
 
   // Pick a class name for the latency dot based on rolling RTT.
   // Thresholds match what users intuitively call "snappy" vs "laggy".
+  // v0.21.x: the dot now reflects CHANNEL HEALTH, not just RTT.
+  // Presence (avatar dot) tells you whether the peer is reachable on
+  // the network (mDNS sees them). The channel-health dot tells you
+  // whether the actual wire path can deliver right now. Five states:
+  //   null      — offline / unknown; no dot rendered
+  //   "fast"    — recent bytes (<60s) + RTT <80ms; green
+  //   "medium"  — recent bytes (<60s) + RTT <250ms; yellow
+  //   "slow"    — recent bytes (<60s) + RTT >=250ms; red-ish
+  //   "stale"   — no bytes in 60s+; gray-yellow ("channel idle")
+  //   "broken"  — paired+online but compatibility negotiation failed;
+  //               same red as "slow" with an exclamation cue.
+  // This is what makes the "queued while online" symptom legible at
+  // a glance — a stale or broken channel paints differently from a
+  // fast one, even though presence says online either way.
   function latencyClass(p) {
+    if (!p.online) return null;
+    if (p.compatibility && p.compatibility.compatible === false) return "broken";
     const ms = p.health?.latency_ewma_ms;
-    if (ms == null || !p.online) return null;
-    if (ms < 80)  return "fast";
+    const lastAlive = p.health?.last_alive_ms;
+    const stale = lastAlive != null
+      && lastAlive > 0
+      && (Date.now() - lastAlive) > 60_000;
+    if (ms == null && stale) return "stale";
+    if (ms == null) return null;
+    if (stale) return "stale";
+    if (ms < 80) return "fast";
     if (ms < 250) return "medium";
     return "slow";
   }
   function latencyTitle(p) {
+    if (!p.online) return "";
     const ms = p.health?.latency_ewma_ms;
-    if (ms == null) return "";
-    return `${Math.round(ms)} ms round-trip`;
+    const lastAlive = p.health?.last_alive_ms;
+    const parts = [];
+    const cls = latencyClass(p);
+    if (cls === "broken") {
+      parts.push("Channel needs renegotiation — sends will queue until both sides catch up.");
+    } else if (cls === "stale") {
+      const ago = lastAlive ? Math.round((Date.now() - lastAlive) / 1000) : null;
+      parts.push(
+        ago != null
+          ? `Channel idle (last bytes ${_fmtAgo(ago)})`
+          : "Channel idle (no recent bytes)",
+      );
+    } else if (cls === "fast") {
+      parts.push("Channel healthy");
+    } else if (cls === "medium") {
+      parts.push("Channel OK");
+    } else if (cls === "slow") {
+      parts.push("Channel slow");
+    }
+    if (ms != null) parts.push(`${Math.round(ms)} ms round-trip`);
+    return parts.join(" · ");
+  }
+  function _fmtAgo(seconds) {
+    if (seconds < 60) return `${seconds}s ago`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+    if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+    return `${Math.round(seconds / 86400)}d ago`;
   }
 
   // ── Living Presence Tier α-pre: Reality dot rendering ─────────────
@@ -8713,6 +9013,92 @@
       osc.stop(now + start + dur + 0.05);
     });
   }
+  // v0.21.x: synthesized ring audio for calls. Two flavors:
+  //   - Ringback (outgoing): quiet sine pulse, 0.5s on / 0.5s off,
+  //     reassures the caller that something is happening. Stopped
+  //     on accept / decline / end.
+  //   - Ringtone (incoming): louder dual-frequency phone-style ring,
+  //     1s on / 0.4s gap, repeating. Stopped on accept / decline /
+  //     end. Honors notification-sound + quiet-hours + peer-mute
+  //     just like other in-app audio.
+  // Synthesizing in-browser avoids shipping audio assets and lets
+  // the user mute by toggling notification sound.
+  const _callRingState = {
+    timer: null,
+    nodes: [],
+  };
+  function _stopCallRing() {
+    if (_callRingState.timer) {
+      clearInterval(_callRingState.timer);
+      _callRingState.timer = null;
+    }
+    for (const n of _callRingState.nodes) {
+      try { n.stop(); } catch (_) {}
+      try { n.disconnect(); } catch (_) {}
+    }
+    _callRingState.nodes = [];
+  }
+  function _scheduleRingPulse({ freqs, dur, gainPeak, when }) {
+    const ctx = _getAudioCtx();
+    if (!ctx) return;
+    const start = when ?? ctx.currentTime;
+    for (const f of freqs) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = f;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(gainPeak, start + 0.02);
+      gain.gain.setValueAtTime(gainPeak, start + dur - 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + dur + 0.05);
+      _callRingState.nodes.push(osc, gain);
+    }
+  }
+  function _shouldPlayCallRing(opts = {}) {
+    if (state.runtimeSettings?.notification_sound === false) return false;
+    if (isQuietHoursActive()) return false;
+    if (opts.peer_fp) {
+      const peer = [...state.peers.values()]
+        .find((p) => p.fingerprint === opts.peer_fp);
+      if (peer?.muted) return false;
+    }
+    return true;
+  }
+  function startCallRingback(opts = {}) {
+    _stopCallRing();
+    if (!_shouldPlayCallRing(opts)) return;
+    // Quiet single-tone pulse, classic "I'm calling, they're ringing" feel.
+    // 0.5s on, 0.5s silence, repeating.
+    const pulse = () => {
+      _scheduleRingPulse({ freqs: [440], dur: 0.45, gainPeak: 0.04 });
+    };
+    pulse();
+    _callRingState.timer = setInterval(pulse, 1000);
+  }
+  function startCallRingtone(opts = {}) {
+    _stopCallRing();
+    if (!_shouldPlayCallRing(opts)) return;
+    // Dual-frequency phone-style ring, louder than ringback. Two
+    // short pulses (1s + 1s) followed by a 1.2s gap = recognizable
+    // ring cadence.
+    const ctx = _getAudioCtx();
+    if (!ctx) return;
+    const ring = () => {
+      const t0 = ctx.currentTime;
+      _scheduleRingPulse({ freqs: [440, 480], dur: 0.4, gainPeak: 0.10, when: t0 });
+      _scheduleRingPulse({ freqs: [440, 480], dur: 0.4, gainPeak: 0.10, when: t0 + 0.6 });
+    };
+    ring();
+    // Total cadence 2.4s (0.4 + 0.2 + 0.4 + 1.4 gap)
+    _callRingState.timer = setInterval(ring, 2400);
+  }
+  function stopCallRing() {
+    _stopCallRing();
+  }
+
   function soundOnIncoming(opts = {}) {
     if (isQuietHoursActive()) return;
     if (opts.peer_fp) {
@@ -8922,9 +9308,16 @@
     for (const p of peers) {
       const lat = p?.health?.latency_ewma_ms;
       const latBucket = lat == null ? -1 : (lat < 80 ? 0 : lat < 250 ? 1 : 2);
+      // v0.21.x channel staleness bucket — coalesces last_alive_ms
+      // into "fresh / stale / unknown" so a few seconds of jitter
+      // doesn't trigger redraws but a transition (fresh→stale) does.
+      const la = p?.health?.last_alive_ms;
+      const staleBucket = la == null || la <= 0
+        ? -1
+        : ((Date.now() - la) < 60_000 ? 0 : 1);
       parts.push([
         p.short_id, p.hostname || "", p.address || "", p.port || 0,
-        p.online ? 1 : 0, p.trust || "", latBucket,
+        p.online ? 1 : 0, p.trust || "", latBucket, staleBucket,
         (p.allowed_capabilities || ["*"]).join(","),
         // v0.7.7: avatar overlay flips when verification toggles.
         p.is_verified ? 1 : 0,
@@ -8985,33 +9378,320 @@
     const myVer = state.me?.app_version || null;
     const theirVer = peer?.app_version || null;
     const compat = peer?.compatibility || null;
+    let chip = null;
+    let kind = null;
     // Compatibility-degraded path takes priority because that's the
     // case that actually breaks sends; version-only diff is just
     // informational.
     if (compat && compat.compatible === false) {
-      const chip = el("span", "peer-ver-badge peer-ver-incompat", "⚠ Incompatible");
+      chip = el("span", "peer-ver-badge peer-ver-incompat", "⚠ Incompatible");
       const reasons = (compat.reasons || []).filter(Boolean).slice(0, 3).join(", ");
       chip.title = reasons
-        ? `Wire-path renegotiation needed: ${reasons}`
-        : "Wire-path renegotiation needed. Sends may queue until both sides catch up.";
-      return chip;
+        ? `Wire-path renegotiation needed: ${reasons}. Click for details.`
+        : "Wire-path renegotiation needed. Sends may queue until both sides catch up. Click for details.";
+      kind = "incompat";
+    } else if (compat && compat.mode === "fallback") {
+      chip = el("span", "peer-ver-badge peer-ver-fallback", "⚠ Fallback path");
+      chip.title = `Negotiated transfer_mode: ${compat.transfer_mode || "fallback"}. Some features may be limited. Click for details.`;
+      kind = "fallback";
+    } else if (myVer && theirVer) {
+      const cmp = _compareAppVersion(theirVer, myVer);
+      if (cmp < 0) {
+        chip = el("span", "peer-ver-badge peer-ver-older", "⬇ Older build");
+        chip.title = `Other device is on v${theirVer}. You're on v${myVer}. Click for how to update.`;
+        kind = "older";
+      } else if (cmp > 0) {
+        chip = el("span", "peer-ver-badge peer-ver-newer", "⬆ Newer build");
+        chip.title = `Other device is on v${theirVer}. You're on v${myVer}. Click for what to do.`;
+        kind = "newer";
+      }
     }
-    if (compat && compat.mode === "fallback") {
-      const chip = el("span", "peer-ver-badge peer-ver-fallback", "⚠ Fallback path");
-      chip.title = `Negotiated transfer_mode: ${compat.transfer_mode || "fallback"}. Some features may be limited until both sides match.`;
-      return chip;
-    }
-    if (!myVer || !theirVer) return null;
-    const cmp = _compareAppVersion(theirVer, myVer);
-    if (cmp === 0) return null;
-    if (cmp < 0) {
-      const chip = el("span", "peer-ver-badge peer-ver-older", "⬇ Older build");
-      chip.title = `Other device is on v${theirVer}. You're on v${myVer}.`;
-      return chip;
-    }
-    const chip = el("span", "peer-ver-badge peer-ver-newer", "⬆ Newer build");
-    chip.title = `Other device is on v${theirVer}. You're on v${myVer}.`;
+    if (!chip) return null;
+    // v0.21.x: every surface a "why is this badge here" affordance.
+    // Click opens a calm explainer modal with concrete next steps.
+    // Buttons inside the modal route to: copy install path, open
+    // dist folder, dismiss. Sender-side: no auto-push of binaries
+    // (that's the next layer); this is the human-readable path.
+    chip.style.cursor = "pointer";
+    chip.tabIndex = 0;
+    chip.setAttribute("role", "button");
+    const openExplainer = (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      openVersionMismatchModal(peer, kind, { myVer, theirVer, compat });
+    };
+    chip.addEventListener("click", openExplainer);
+    chip.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") openExplainer(ev);
+    });
     return chip;
+  }
+  // v0.21.x: explainer modal for the peer-version badge. Lives as a
+  // singleton on document.body so renderPeers can fire-and-forget.
+  // Three flavors (older / newer / incompat / fallback) share one
+  // shell; copy differs.
+  function openVersionMismatchModal(peer, kind, ctx) {
+    const peerLabel = peer?.display_name || peer?.hostname || peer?.short_id || "the other device";
+    let title, lead, steps, primaryLabel, primaryAction;
+    const myVer = ctx.myVer || "unknown";
+    const theirVer = ctx.theirVer || "unknown";
+    if (kind === "incompat") {
+      title = "Secure path needs renegotiation";
+      lead = `Your daemon and ${peerLabel}'s daemon disagree on the wire format right now. Sends will queue until both sides catch up.`;
+      steps = [
+        "Open One Link on the other device and let it run for a few seconds — the daemons re-handshake automatically.",
+        "If it doesn't clear in 30 seconds, both sides probably need the same build. Update whichever side is older.",
+        `Your build is v${myVer}. The other device reports v${theirVer || "unknown"}.`,
+      ];
+      if (Array.isArray(ctx.compat?.reasons) && ctx.compat.reasons.length) {
+        steps.push(`Detected reasons: ${ctx.compat.reasons.slice(0, 3).join(", ")}`);
+      }
+      primaryLabel = "Got it";
+      primaryAction = null;
+    } else if (kind === "fallback") {
+      title = "Using a fallback wire path";
+      lead = `${peerLabel} can talk to you, but on a slower or older transfer mode (${ctx.compat?.transfer_mode || "legacy"}). Sends still work, but features added in your build may not be available until the other side catches up.`;
+      steps = [
+        `Your build is v${myVer}. The other device reports v${theirVer || "unknown"}.`,
+        "Update whichever side is older to get the full feature set on both ends.",
+      ];
+      primaryLabel = "OK";
+      primaryAction = null;
+    } else if (kind === "older") {
+      title = "Other device is on an older build";
+      lead = `${peerLabel} is running v${theirVer}. You're running v${myVer}. Some sends may queue or fall back to a slower path until both sides match.`;
+      steps = [
+        "Open One Link on this machine's repo or installer folder.",
+        "Copy the *whole* dist/one-link/ folder (or the latest installer) to the other device.",
+        "On the other device: close One Link completely, replace the folder, then reopen.",
+        "Both sides will re-handshake automatically. The badge clears within a few seconds.",
+      ];
+      primaryLabel = "Copy my version label";
+      primaryAction = () => {
+        const label = `One Link v${myVer}`;
+        try {
+          if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(label);
+            toast("Version copied. Tell the other device which build to match.", "good", 4500);
+          } else {
+            toast(label, "info", 6000);
+          }
+        } catch {
+          toast(label, "info", 6000);
+        }
+      };
+    } else { // newer
+      title = "Other device is on a newer build";
+      lead = `${peerLabel} is running v${theirVer}. You're running v${myVer}. Newer features they add may not be available on your side until you catch up.`;
+      steps = [
+        "Pull the latest from your One Link source (git pull) and rebuild the daemon, OR",
+        "Ask the person running the other device to share their dist/one-link/ folder back.",
+        "Restart One Link on this machine after replacing the folder.",
+      ];
+      primaryLabel = "OK";
+      primaryAction = null;
+    }
+    _ensureVersionMismatchModal();
+    const modal = document.getElementById("version-mismatch-modal");
+    modal.querySelector(".vmm-title").textContent = title;
+    modal.querySelector(".vmm-lead").textContent = lead;
+    const stepsHost = modal.querySelector(".vmm-steps");
+    stepsHost.innerHTML = "";
+    steps.forEach((s) => {
+      const li = document.createElement("li");
+      li.textContent = s;
+      stepsHost.appendChild(li);
+    });
+    const primaryBtn = modal.querySelector(".vmm-primary");
+    primaryBtn.textContent = primaryLabel;
+    primaryBtn.onclick = (ev) => {
+      ev.stopPropagation();
+      if (primaryAction) primaryAction();
+      else closeVersionMismatchModal();
+    };
+    modal.classList.add("show");
+    document.body.classList.add("vmm-open");
+  }
+  function _ensureVersionMismatchModal() {
+    let m = document.getElementById("version-mismatch-modal");
+    if (m) return m;
+    m = document.createElement("div");
+    m.id = "version-mismatch-modal";
+    m.className = "vmm-modal";
+    m.setAttribute("role", "dialog");
+    m.setAttribute("aria-modal", "true");
+    m.setAttribute("aria-labelledby", "vmm-title-id");
+    m.innerHTML = `
+      <div class="vmm-backdrop" data-vmm-close></div>
+      <div class="vmm-pane">
+        <div class="vmm-head">
+          <h2 class="vmm-title" id="vmm-title-id">Version mismatch</h2>
+          <button class="vmm-close" data-vmm-close aria-label="Close">✕</button>
+        </div>
+        <p class="vmm-lead"></p>
+        <ol class="vmm-steps"></ol>
+        <div class="vmm-actions">
+          <button class="vmm-secondary" data-vmm-close>Close</button>
+          <button class="vmm-primary">OK</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(m);
+    m.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (t && t instanceof Element && t.hasAttribute("data-vmm-close")) {
+        closeVersionMismatchModal();
+      }
+    });
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && m.classList.contains("show")) {
+        closeVersionMismatchModal();
+      }
+    });
+    return m;
+  }
+  function closeVersionMismatchModal() {
+    const m = document.getElementById("version-mismatch-modal");
+    if (!m) return;
+    m.classList.remove("show");
+    document.body.classList.remove("vmm-open");
+  }
+
+  // v0.21.x: call permission preflight. The first time a user
+  // clicks 📞 / 📹 we explain WHY the browser is about to ask for
+  // mic / camera. Without this, the cold prompt feels random and
+  // some users deny it by reflex, which then leaves the call
+  // half-set-up with no useful UI feedback. Returns true to
+  // proceed with the call, false to abort silently.
+  //
+  // Skip conditions:
+  //   - The user already saw the preflight (localStorage flag).
+  //   - The browser reports the permission as "granted" already.
+  // Both conditions can apply per-permission (mic-only voice calls
+  // don't preflight camera).
+  const CALL_PREFLIGHT_KEY = "one_link.call_preflight.v1";
+  async function _callPermissionPreflight({ video, peerLabel }) {
+    const needs = ["microphone"];
+    if (video) needs.push("camera");
+    // Fast path: every permission already granted -> proceed.
+    let allGranted = true;
+    if (navigator.permissions && navigator.permissions.query) {
+      for (const name of needs) {
+        try {
+          const st = await navigator.permissions.query({ name });
+          if (st.state !== "granted") { allGranted = false; break; }
+        } catch {
+          allGranted = false;
+          break;
+        }
+      }
+    } else {
+      allGranted = false;
+    }
+    if (allGranted) return true;
+    // Already acked the explainer in a previous call? Skip directly to the cold prompt.
+    try {
+      const ack = JSON.parse(localStorage.getItem(CALL_PREFLIGHT_KEY) || "{}");
+      const needed = needs.every((n) => ack[n] === true);
+      if (needed) return true;
+    } catch {}
+    // Otherwise show the preflight modal and wait for user choice.
+    return await _showCallPreflightModal({ needs, peerLabel });
+  }
+  function _showCallPreflightModal({ needs, peerLabel }) {
+    return new Promise((resolve) => {
+      _ensureCallPreflightModal();
+      const modal = document.getElementById("call-preflight-modal");
+      const wantsCamera = needs.includes("camera");
+      modal.querySelector(".cpm-title").textContent = wantsCamera
+        ? "One Link needs your mic and camera"
+        : "One Link needs your microphone";
+      const leadLines = [];
+      if (peerLabel) {
+        leadLines.push(`To call ${peerLabel}, your browser is about to ask permission.`);
+      } else {
+        leadLines.push("Your browser is about to ask permission.");
+      }
+      leadLines.push(
+        wantsCamera
+          ? "Nothing is recorded or sent anywhere except to this call. You can revoke mic or camera access any time from your browser settings."
+          : "Nothing is recorded or sent anywhere except to this call. You can revoke mic access any time from your browser settings.",
+      );
+      modal.querySelector(".cpm-lead").innerHTML = leadLines
+        .map((s) => `<p>${_escapeHtml(s)}</p>`)
+        .join("");
+      const proceedBtn = modal.querySelector(".cpm-primary");
+      const cancelBtn = modal.querySelector(".cpm-secondary");
+      const onProceed = () => {
+        try {
+          const ack = JSON.parse(localStorage.getItem(CALL_PREFLIGHT_KEY) || "{}");
+          for (const n of needs) ack[n] = true;
+          localStorage.setItem(CALL_PREFLIGHT_KEY, JSON.stringify(ack));
+        } catch {}
+        cleanup();
+        resolve(true);
+      };
+      const onCancel = () => {
+        cleanup();
+        resolve(false);
+      };
+      const onBackdrop = (ev) => {
+        const t = ev.target;
+        if (t && t instanceof Element && t.hasAttribute("data-cpm-close")) {
+          onCancel();
+        }
+      };
+      const onKey = (ev) => {
+        if (ev.key === "Escape") onCancel();
+        if (ev.key === "Enter") onProceed();
+      };
+      function cleanup() {
+        proceedBtn.removeEventListener("click", onProceed);
+        cancelBtn.removeEventListener("click", onCancel);
+        modal.removeEventListener("click", onBackdrop);
+        document.removeEventListener("keydown", onKey);
+        modal.classList.remove("show");
+        document.body.classList.remove("cpm-open");
+      }
+      proceedBtn.addEventListener("click", onProceed);
+      cancelBtn.addEventListener("click", onCancel);
+      modal.addEventListener("click", onBackdrop);
+      document.addEventListener("keydown", onKey);
+      modal.classList.add("show");
+      document.body.classList.add("cpm-open");
+      setTimeout(() => proceedBtn.focus(), 50);
+    });
+  }
+  function _ensureCallPreflightModal() {
+    if (document.getElementById("call-preflight-modal")) return;
+    const m = document.createElement("div");
+    m.id = "call-preflight-modal";
+    m.className = "cpm-modal";
+    m.setAttribute("role", "dialog");
+    m.setAttribute("aria-modal", "true");
+    m.setAttribute("aria-labelledby", "cpm-title-id");
+    m.innerHTML = `
+      <div class="cpm-backdrop" data-cpm-close></div>
+      <div class="cpm-pane">
+        <div class="cpm-head">
+          <h2 class="cpm-title" id="cpm-title-id">Allow mic and camera</h2>
+        </div>
+        <div class="cpm-lead"></div>
+        <div class="cpm-actions">
+          <button type="button" class="cpm-secondary">Not now</button>
+          <button type="button" class="cpm-primary">Continue</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(m);
+  }
+  function _escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function renderPeers() {
@@ -11624,6 +12304,10 @@
         msg._error ? "e1" : "",
         msg._queueReason || "",
         msg._queueDetail ? "d1" : "",
+        // v0.21.x: CALL_LOG entries (missed / ended call bubbles)
+        // need to participate in the hash so they re-render when
+        // an outcome flips (e.g., user clicked Call back).
+        msg.call_outcome || "", msg.call_end_label || "",
       ].join("|"));
     }
     return parts.join("Â¶");
@@ -11886,9 +12570,67 @@
         m.appendChild(b);
       } else if (msg.t === "FILE_OFFER" || msg.t === "FILE_DONE") {
         m.appendChild(renderFileBubble(msg));
+      } else if (msg.t === "CALL_LOG") {
+        // v0.21.x: missed call / ended call entry in chat history.
+        m.appendChild(renderCallLogBubble(msg));
       }
     }
     _smartScrollAfter(m, prevBottomState, source.length);
+  }
+
+  // v0.21.x: small bubble for missed / ended calls. Lives in the
+  // chat stream so a missed call leaves a visible trace ("Alice
+  // called you · No answer · Call back") instead of vanishing.
+  function renderCallLogBubble(msg) {
+    const outcome = msg.call_outcome || "ended";
+    const isMissed = outcome === "missed";
+    const isVideo = msg.call_kind === "video";
+    const dirClass = msg.dir === "out" ? "out" : "in";
+    const wrap = el("div", `call-log ${dirClass} ${isMissed ? "missed" : "ended"}`);
+    const icon = el("span", "call-log-icon", isMissed ? "🚫" : (isVideo ? "📹" : "📞"));
+    wrap.appendChild(icon);
+    const body = el("div", "call-log-body");
+    const peerName = state.peers.get(msg.peer)?.display_name
+      || state.peers.get(msg.peer)?.hostname
+      || msg.peer;
+    let line;
+    if (isMissed) {
+      if (msg.dir === "in") {
+        line = `Missed ${isVideo ? "video " : ""}call from ${peerName} · ${msg.call_end_label || "No answer"}`;
+      } else {
+        line = `${isVideo ? "Video call" : "Call"} not answered · ${msg.call_end_label || "No answer"}`;
+      }
+    } else {
+      line = `${isVideo ? "Video call" : "Call"} ended · ${msg.call_end_label || ""}`;
+    }
+    body.appendChild(el("div", "call-log-line", line));
+    body.appendChild(el("span", "call-log-when", fmtTime(msg.ts)));
+    wrap.appendChild(body);
+    // Call-back button on missed calls only. Reuses the existing
+    // startLivingPresenceCall path; respects the same permission
+    // preflight + capabilities.
+    if (isMissed) {
+      const peer = state.peers.get(msg.peer);
+      if (peer?.fingerprint && peer.trust === "pinned") {
+        const cbBtn = document.createElement("button");
+        cbBtn.type = "button";
+        cbBtn.className = "call-log-callback";
+        cbBtn.textContent = isVideo ? "Video back" : "Call back";
+        cbBtn.onclick = (ev) => {
+          ev.stopPropagation();
+          if (typeof window.startLivingPresenceCall === "function") {
+            window.startLivingPresenceCall(
+              peer.fingerprint,
+              peer.display_name || peer.hostname || peer.short_id,
+              { video: isVideo },
+            );
+          }
+        };
+        wrap.appendChild(cbBtn);
+      }
+    }
+    wrap.dataset.msgId = msg.id;
+    return wrap;
   }
 
   // v0.10.2: live countdown badge for disappearing messages.
@@ -20949,6 +21691,10 @@
     localMediaReady: false,
     sdpOfferInFlight: false,
     sdpAnswerInFlight: false,
+    lastLocalOfferSdp: "",
+    lastLocalAnswerSdp: "",
+    lastOfferSendMs: 0,
+    lastAnswerSendMs: 0,
   };
   // Expose for debug + tests
   if (typeof window !== "undefined") {
@@ -21088,6 +21834,10 @@
     callUI.appliedRemoteOfferKeys.clear();
     callUI.appliedRemoteAnswerKeys.clear();
     callUI.localMediaReady = false;
+    callUI.lastLocalOfferSdp = "";
+    callUI.lastLocalAnswerSdp = "";
+    callUI.lastOfferSendMs = 0;
+    callUI.lastAnswerSendMs = 0;
     media.muted = false;
     media.cameraOff = false;
     syncMuteCameraButtons();
@@ -21267,6 +22017,8 @@
       if (media.iceConfigReady) await media.iceConfigReady;
       const offer = await media.pc.createOffer();
       await media.pc.setLocalDescription(offer);
+      callUI.lastLocalOfferSdp = offer.sdp || "";
+      callUI.lastOfferSendMs = Date.now();
       const result = await callApiPost({
         action: "send_sdp_offer",
         call_id: callUI.activeCallId,
@@ -21281,6 +22033,38 @@
     } catch (e) {
       addOneCallEvent(`Media offer failed: ${e && e.name ? e.name : "error"}.`);
       reportCallEvent("offer_send_failed", { ok: false });
+    } finally {
+      callUI.sdpOfferInFlight = false;
+    }
+  }
+
+  async function resendLocalSdpOffer(reason) {
+    if (!media.pc || !callUI.activeCallId || callUI.sdpOfferInFlight) return;
+    const sdp = (
+      callUI.lastLocalOfferSdp
+      || (media.pc.localDescription && media.pc.localDescription.type === "offer"
+        ? media.pc.localDescription.sdp
+        : "")
+    );
+    if (!sdp) return;
+    const now = Date.now();
+    if (now - callUI.lastOfferSendMs < 3000) return;
+    try {
+      callUI.sdpOfferInFlight = true;
+      callUI.lastOfferSendMs = now;
+      addOneCallEvent("Resending media offer...");
+      reportCallEvent("offer_resend", { reason: reason || "watchdog" });
+      const result = await callApiPost({
+        action: "send_sdp_offer",
+        call_id: callUI.activeCallId,
+        sdp,
+      });
+      reportCallEvent(result && result.ok ? "offer_resent" : "offer_resend_failed", {
+        ok: !!(result && result.ok),
+        reason: reason || "watchdog",
+      });
+    } catch (_) {
+      reportCallEvent("offer_resend_failed", { ok: false, reason: reason || "watchdog" });
     } finally {
       callUI.sdpOfferInFlight = false;
     }
@@ -21319,6 +22103,8 @@
       if (media.iceConfigReady) await media.iceConfigReady;
       const answer = await media.pc.createAnswer();
       await media.pc.setLocalDescription(answer);
+      callUI.lastLocalAnswerSdp = answer.sdp || "";
+      callUI.lastAnswerSendMs = Date.now();
       const result = await callApiPost({
         action: "send_sdp_answer",
         call_id: callUI.activeCallId,
@@ -21338,6 +22124,38 @@
     }
   }
 
+  async function resendLocalSdpAnswer(reason) {
+    if (!media.pc || !callUI.activeCallId || callUI.sdpAnswerInFlight) return;
+    const sdp = (
+      callUI.lastLocalAnswerSdp
+      || (media.pc.localDescription && media.pc.localDescription.type === "answer"
+        ? media.pc.localDescription.sdp
+        : "")
+    );
+    if (!sdp) return;
+    const now = Date.now();
+    if (now - callUI.lastAnswerSendMs < 3000) return;
+    try {
+      callUI.sdpAnswerInFlight = true;
+      callUI.lastAnswerSendMs = now;
+      addOneCallEvent("Resending media answer...");
+      reportCallEvent("answer_resend", { reason: reason || "duplicate_offer" });
+      const result = await callApiPost({
+        action: "send_sdp_answer",
+        call_id: callUI.activeCallId,
+        sdp,
+      });
+      reportCallEvent(result && result.ok ? "answer_resent" : "answer_resend_failed", {
+        ok: !!(result && result.ok),
+        reason: reason || "duplicate_offer",
+      });
+    } catch (_) {
+      reportCallEvent("answer_resend_failed", { ok: false, reason: reason || "duplicate_offer" });
+    } finally {
+      callUI.sdpAnswerInFlight = false;
+    }
+  }
+
   async function ensureMediaNegotiation(reason) {
     if (!callUI.activeCallId || !media.pc || !media.localStream) return;
     const hasLiveLocal = ensureLocalTracksOnPeerConnection();
@@ -21345,6 +22163,15 @@
     if (!callUI.localMediaReady) {
       callUI.localMediaReady = true;
       reportCallEvent("local_media_ready", { reason: reason || "watchdog" });
+    }
+    if (
+      media.pc.signalingState === "have-local-offer"
+      && media.pc.localDescription
+      && media.pc.localDescription.type === "offer"
+      && !media.pc.remoteDescription
+    ) {
+      await resendLocalSdpOffer(reason || "watchdog");
+      return;
     }
     if (media.pc.localDescription) return;
     if (media.pc.signalingState && media.pc.signalingState !== "stable") return;
@@ -21357,16 +22184,39 @@
     if (!sdp) return;
     if (!media.pc) setupRtcPeerConnection();
     const key = sdpKey(sdp);
-    if (key && callUI.appliedRemoteOfferKeys.has(key)) return;
+    if (
+      key
+      && media.pc.localDescription
+      && media.pc.localDescription.type === "offer"
+      && sdpKey(media.pc.localDescription.sdp) === key
+    ) {
+      reportCallEvent("remote_offer_echo_ignored");
+      await resendLocalSdpOffer("offer_echo");
+      return;
+    }
+    if (key && callUI.appliedRemoteOfferKeys.has(key)) {
+      await resendLocalSdpAnswer("duplicate_offer");
+      return;
+    }
     if (
       media.pc.remoteDescription
       && media.pc.remoteDescription.type === "offer"
       && sdpKey(media.pc.remoteDescription.sdp) === key
     ) {
       if (key) callUI.appliedRemoteOfferKeys.add(key);
+      await resendLocalSdpAnswer("duplicate_offer");
       return;
     }
-    if (media.pc.signalingState && media.pc.signalingState !== "stable") return;
+    if (media.pc.signalingState && media.pc.signalingState !== "stable") {
+      if (
+        media.pc.signalingState === "have-local-offer"
+        && media.pc.localDescription
+        && media.pc.localDescription.type === "offer"
+      ) {
+        await resendLocalSdpOffer("offer_collision");
+      }
+      return;
+    }
     try {
       if (key) callUI.appliedRemoteOfferKeys.add(key);
       await media.pc.setRemoteDescription({ type: "offer", sdp });
@@ -21804,6 +22654,14 @@
     // older callers don't break.
     const wantVideo = !opts || opts.video !== false;
     const label = peerLabel || peerMasterVkHex.slice(0, 8);
+    // v0.21.x: permission preflight. Before triggering the cold
+    // browser getUserMedia prompt, run a one-time explainer modal
+    // so the user knows WHY the browser is about to ask for mic /
+    // camera. Skip when permissions are already granted (returning
+    // user) OR when the user has acked the preflight before. On
+    // Cancel: abort silently without firing the call_invite.
+    const proceed = await _callPermissionPreflight({ video: wantVideo, peerLabel: label });
+    if (!proceed) return;
     callUI.activeCallId = null;
     callUI.activeCallPeer = label;
     callUI.activeCallPeerFp = peerMasterVkHex;
@@ -21831,6 +22689,15 @@
       return;
     }
     callUI.activeCallId = result.call_id;
+    // v0.21.x: track this outgoing call so we get a missed-call /
+    // ended-call bubble in chat when the daemon's phase_changed
+    // event fires for ended/async_capture.
+    _trackCallStart(result.call_id, {
+      peerLabel: label,
+      peerFp: peerMasterVkHex,
+      direction: "out",
+      kind: wantVideo ? "video" : "voice",
+    });
     // Tier α: pre-warm local media so the mic (and optionally the
     // camera) are ready by the time the peer accepts. If
     // permissions are denied, the call still proceeds (text/voice-
@@ -21955,6 +22822,9 @@
       overlay.classList.add("show");
       overlay.classList.toggle("has-video", isVideo);
     }
+    // v0.21.x: audible ringback while waiting for peer to pick up.
+    // Honors quiet hours, peer mute, and notification-sound toggle.
+    startCallRingback({ peer_fp: callUI.activeCallPeerFp });
 
     // Kick off the elapsed-seconds counter (ticks every 1s).
     _outgoingState.startedMs = Date.now();
@@ -22029,6 +22899,9 @@
   function hideOutgoingOverlay() {
     const overlay = $$("#call-outgoing-overlay");
     if (overlay) overlay.classList.remove("show");
+    // v0.21.x: cut ringback the instant the overlay closes (accept,
+    // decline, hangup, fallback to message). Idempotent.
+    stopCallRing();
     _resetOutgoingState();
     // Detach the self-preview video. It points at the same MediaStream
     // that is already attached to RTCPeerConnection, so stopping tracks
@@ -22112,10 +22985,18 @@
     if (peer) peer.textContent = peerLabel;
     const overlay = $$("#call-incoming-overlay");
     if (overlay) overlay.classList.add("show");
+    // v0.21.x: audible phone-style ringtone. Plays even when the
+    // tab is unfocused (Web Audio doesn't pause on blur). Honors
+    // peer mute via callUI.activeCallPeerFp when set, otherwise
+    // plays for any incoming call.
+    startCallRingtone({ peer_fp: callUI?.activeCallPeerFp });
   }
   function hideIncomingRing() {
     const overlay = $$("#call-incoming-overlay");
     if (overlay) overlay.classList.remove("show");
+    // v0.21.x: cut the ringtone on any dismissal path (accept,
+    // decline, end, peer hangup before pickup). Idempotent.
+    stopCallRing();
   }
   function showActiveSurface(peerLabel, rungLabel) {
     const name = $$("#call-active-name");
@@ -22126,6 +23007,12 @@
     if (face) face.textContent = _peerInitials(peerLabel || "One");
     const surface = $$("#call-active-surface");
     if (surface) surface.classList.add("show");
+    // v0.21.x: defensive — cut any lingering ringback/ringtone the
+    // moment the call connects. The overlay-hide paths usually
+    // handle this already, but if a peer accepts the same instant
+    // the timer would fire a next pulse, this ensures silence
+    // before the active call audio takes over.
+    stopCallRing();
     resetOneCallRail(peerLabel);
     startCallTelemetry();
   }
@@ -22615,6 +23502,97 @@
     addOneCallEvent("One Link is checking local, trusted, and backup paths for this call.");
   });
 
+  // v0.21.x: per-call lifecycle tracking so we can synthesize a
+  // "missed call" bubble for calls that ended without reaching
+  // active phase (peer_declined, invite_timeout, originator
+  // cancelled). In-memory; the daemon-side persistence ship will
+  // replace this with durable history.
+  if (!callUI._callTracking) callUI._callTracking = {};
+  function _trackCallStart(callId, info) {
+    if (!callId) return;
+    callUI._callTracking[callId] = {
+      peerLabel: info.peerLabel || "",
+      peerFp: info.peerFp || null,
+      direction: info.direction || "out",
+      kind: info.kind || "voice",
+      startedMs: Date.now(),
+      reachedActive: false,
+      endedAt: null,
+    };
+  }
+  function _markCallActive(callId) {
+    const t = callUI._callTracking[callId];
+    if (t) t.reachedActive = true;
+  }
+  function _resolveCallEnded(callId, endCause) {
+    const t = callUI._callTracking[callId];
+    if (!t || t.endedAt) return;
+    t.endedAt = Date.now();
+    if (!t.reachedActive) {
+      _renderMissedCallBubble(callId, t, endCause);
+    } else {
+      _renderEndedCallBubble(callId, t, endCause);
+    }
+    delete callUI._callTracking[callId];
+  }
+  function _peerShortIdForFp(fp) {
+    if (!fp) return null;
+    for (const p of state.peers.values()) {
+      if (p.fingerprint === fp) return p.short_id;
+    }
+    return null;
+  }
+  function _renderMissedCallBubble(callId, t, endCause) {
+    const peerShortId = _peerShortIdForFp(t.peerFp) || t.peerFp || "";
+    if (!peerShortId) return;
+    const labelByCause = {
+      peer_declined: "Declined",
+      invite_timeout: "No answer",
+      user_hangup_local: "Cancelled",
+      network_async_conversion: "Could not connect",
+    };
+    const msg = {
+      id: `missed-${callId}`,
+      t: "CALL_LOG",
+      ts: t.startedMs,
+      dir: t.direction === "out" ? "out" : "in",
+      peer: peerShortId,
+      peer_fp: t.peerFp,
+      call_kind: t.kind || "voice",
+      call_outcome: "missed",
+      call_end_cause: endCause || "",
+      call_end_label: labelByCause[endCause] || "No answer",
+      call_duration_s: 0,
+    };
+    state.messages.push(msg);
+    if (state.messages.length > 1000) state.messages = state.messages.slice(-800);
+    if (msg.peer === state.selectedPeer) renderMessages();
+  }
+  function _renderEndedCallBubble(callId, t, endCause) {
+    const peerShortId = _peerShortIdForFp(t.peerFp) || t.peerFp || "";
+    if (!peerShortId) return;
+    const durSec = Math.max(0, Math.round((t.endedAt - t.startedMs) / 1000));
+    const durLabel = durSec >= 60
+      ? `${Math.floor(durSec / 60)}m ${durSec % 60}s`
+      : `${durSec}s`;
+    const msg = {
+      id: `ended-${callId}`,
+      t: "CALL_LOG",
+      ts: t.startedMs,
+      dir: t.direction === "out" ? "out" : "in",
+      peer: peerShortId,
+      peer_fp: t.peerFp,
+      call_kind: t.kind || "voice",
+      call_outcome: "ended",
+      call_end_cause: endCause || "",
+      call_end_label: durLabel,
+      call_duration_s: durSec,
+    };
+    state.messages.push(msg);
+    if (state.messages.length > 1000) state.messages = state.messages.slice(-800);
+    if (msg.peer === state.selectedPeer) renderMessages();
+  }
+
   window.handleLivingPresenceCallEvent = function (m) {
     if (!m || m.type !== "call_event") return false;
     const tail = m.tail_kind;
@@ -22624,12 +23602,19 @@
       callUI.inboundCallPeer = (m.peer_label || callId.slice(0, 8));
       callUI.inboundCallPeerFp = m.peer_master_vk_hex || null;
       resolveSimultaneousCallIfNeeded(callId, callUI.inboundCallPeerFp);
+      _trackCallStart(callId, {
+        peerLabel: callUI.inboundCallPeer,
+        peerFp: callUI.inboundCallPeerFp,
+        direction: "in",
+        kind: m.kind || "voice",
+      });
       showIncomingRing(callUI.inboundCallPeer);
       return true;
     }
     if (tail === "phase_changed") {
       const phase = m.new_phase;
       if (phase === "active") {
+        _markCallActive(callId);
         hideOutgoingOverlay();
         hideIncomingRing();
         if (!callUI.activeCallId) {
@@ -22640,6 +23625,7 @@
         showActiveSurface(callUI.activeCallPeer, "");
         ensureMediaNegotiation("active");
       } else if (phase === "ended" || phase === "async_capture") {
+        _resolveCallEnded(callId, m.end_cause || "");
         hideOutgoingOverlay();
         hideIncomingRing();
         hideActiveSurface();
