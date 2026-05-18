@@ -23210,7 +23210,13 @@
     const t = e.target;
     const isOurInput = t && t.id === "input";
     const isAnyInput = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
+    // Skip when focus is in some OTHER input (don't hijack their paste).
     if (isAnyInput && !isOurInput) return;
+    // v0.21.x: also skip when focus IS in our composer textarea. The
+    // `#input`-scoped paste listener registered above already handled
+    // it. Without this guard both listeners fire and stageFile()
+    // gets called twice, doubling the attach-tray entries.
+    if (isOurInput) return;
     handlePasteImage(e);
   });
 
