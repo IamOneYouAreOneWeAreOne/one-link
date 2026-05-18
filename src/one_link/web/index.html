@@ -9098,6 +9098,11 @@
   function stopCallRing() {
     _stopCallRing();
   }
+  if (typeof window !== "undefined") {
+    window.startCallRingback = startCallRingback;
+    window.startCallRingtone = startCallRingtone;
+    window.stopCallRing = stopCallRing;
+  }
 
   function soundOnIncoming(opts = {}) {
     if (isQuietHoursActive()) return;
@@ -9597,6 +9602,9 @@
     } catch {}
     // Otherwise show the preflight modal and wait for user choice.
     return await _showCallPreflightModal({ needs, peerLabel });
+  }
+  if (typeof window !== "undefined") {
+    window._callPermissionPreflight = _callPermissionPreflight;
   }
   function _showCallPreflightModal({ needs, peerLabel }) {
     return new Promise((resolve) => {
@@ -22660,7 +22668,12 @@
     // camera. Skip when permissions are already granted (returning
     // user) OR when the user has acked the preflight before. On
     // Cancel: abort silently without firing the call_invite.
-    const proceed = await _callPermissionPreflight({ video: wantVideo, peerLabel: label });
+    const preflight = (
+      typeof window._callPermissionPreflight === "function"
+        ? window._callPermissionPreflight
+        : async () => true
+    );
+    const proceed = await preflight({ video: wantVideo, peerLabel: label });
     if (!proceed) return;
     callUI.activeCallId = null;
     callUI.activeCallPeer = label;
@@ -22824,7 +22837,9 @@
     }
     // v0.21.x: audible ringback while waiting for peer to pick up.
     // Honors quiet hours, peer mute, and notification-sound toggle.
-    startCallRingback({ peer_fp: callUI.activeCallPeerFp });
+    if (typeof window.startCallRingback === "function") {
+      window.startCallRingback({ peer_fp: callUI.activeCallPeerFp });
+    }
 
     // Kick off the elapsed-seconds counter (ticks every 1s).
     _outgoingState.startedMs = Date.now();
@@ -22901,7 +22916,7 @@
     if (overlay) overlay.classList.remove("show");
     // v0.21.x: cut ringback the instant the overlay closes (accept,
     // decline, hangup, fallback to message). Idempotent.
-    stopCallRing();
+    if (typeof window.stopCallRing === "function") window.stopCallRing();
     _resetOutgoingState();
     // Detach the self-preview video. It points at the same MediaStream
     // that is already attached to RTCPeerConnection, so stopping tracks
@@ -22989,14 +23004,16 @@
     // tab is unfocused (Web Audio doesn't pause on blur). Honors
     // peer mute via callUI.activeCallPeerFp when set, otherwise
     // plays for any incoming call.
-    startCallRingtone({ peer_fp: callUI?.activeCallPeerFp });
+    if (typeof window.startCallRingtone === "function") {
+      window.startCallRingtone({ peer_fp: callUI?.activeCallPeerFp });
+    }
   }
   function hideIncomingRing() {
     const overlay = $$("#call-incoming-overlay");
     if (overlay) overlay.classList.remove("show");
     // v0.21.x: cut the ringtone on any dismissal path (accept,
     // decline, end, peer hangup before pickup). Idempotent.
-    stopCallRing();
+    if (typeof window.stopCallRing === "function") window.stopCallRing();
   }
   function showActiveSurface(peerLabel, rungLabel) {
     const name = $$("#call-active-name");
@@ -23012,7 +23029,7 @@
     // handle this already, but if a peer accepts the same instant
     // the timer would fire a next pulse, this ensures silence
     // before the active call audio takes over.
-    stopCallRing();
+    if (typeof window.stopCallRing === "function") window.stopCallRing();
     resetOneCallRail(peerLabel);
     startCallTelemetry();
   }

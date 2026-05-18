@@ -237,7 +237,7 @@ def test_outgoing_overlay_does_not_stop_active_call_stream(index_html: str) -> N
     Hiding the ringing overlay must detach that preview without stopping
     the tracks already attached to RTCPeerConnection."""
     idx = index_html.find("function hideOutgoingOverlay")
-    snippet = index_html[idx:idx + 900]
+    snippet = index_html[idx:idx + 1200]
     assert "selfPrev.srcObject !== media.localStream" in snippet
     assert "selfPrev.srcObject = null" in snippet
 

@@ -216,6 +216,21 @@ def test_start_call_paints_overlay_before_daemon_roundtrip(index_html: str) -> N
     assert "const mediaPromise = startLocalMedia" in snippet
 
 
+def test_start_call_uses_window_scoped_preflight_and_ring_helpers(index_html: str) -> None:
+    """Regression: the contact buttons live in one script scope and
+    the call driver in another. Cross-scope helpers must be resolved
+    through window or button clicks stop before dialing."""
+    assert "window._callPermissionPreflight = _callPermissionPreflight" in index_html
+    assert "window.startCallRingback = startCallRingback" in index_html
+    assert "window.startCallRingtone = startCallRingtone" in index_html
+    assert "window.stopCallRing = stopCallRing" in index_html
+    idx = index_html.find("window.startLivingPresenceCall = async function")
+    snippet = index_html[idx:idx + 4200]
+    assert 'typeof window._callPermissionPreflight === "function"' in snippet
+    assert "const proceed = await preflight" in snippet
+    assert "window.startCallRingback" in index_html
+
+
 def test_inbound_sdp_waits_for_local_media_before_answer(index_html: str) -> None:
     accept_idx = index_html.find("async function acceptInboundCall")
     assert accept_idx > 0
