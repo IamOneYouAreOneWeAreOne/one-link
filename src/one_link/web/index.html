@@ -26474,6 +26474,23 @@
     return missingAudio || missingVideo;
   }
 
+  function selectedCandidatePairFromStats(stats, statById) {
+    let selectedPair = null;
+    stats.forEach((s) => {
+      if (s.type === "transport" && s.selectedCandidatePairId && statById.has(s.selectedCandidatePairId)) {
+        selectedPair = statById.get(s.selectedCandidatePairId);
+      }
+    });
+    if (selectedPair) return selectedPair;
+    stats.forEach((s) => {
+      if (selectedPair) return;
+      if (s.type === "candidate-pair" && (s.selected === true || s.nominated === true || s.state === "succeeded")) {
+        selectedPair = s;
+      }
+    });
+    return selectedPair;
+  }
+
   async function tuneOutboundMediaForTau(metrics) {
     if (!media.pc || !media.pc.getSenders) return;
     const loss = Number(metrics.loss_rate || 0);
@@ -26876,9 +26893,9 @@
       media.pc = null;
     }
     media.iceConfigReady = null;
-    media.transceiversReady = false;
     media.iceHelperReady = false;
     media.iceRelayReady = false;
+    media.transceiversReady = false;
     callUI.pendingIceCandidates = [];
     callUI.appliedIceKeys.clear();
     callUI.appliedRemoteOfferKeys.clear();
@@ -28614,15 +28631,29 @@
       let selectedCandidateType = "";
       let selectedCandidateProtocol = "";
       let selectedCandidateNetwork = "";
+      const selectedPair = selectedCandidatePairFromStats(stats, statById);
+      if (selectedPair) {
+        if (typeof selectedPair.currentRoundTripTime === "number") {
+          rttMs = Math.round(selectedPair.currentRoundTripTime * 1000);
+        }
+        const bytes = Number(selectedPair.availableOutgoingBitrate || 0);
+        if (bytes > 0) kbps = Math.round(bytes / 1000);
+        const localCand = statById.get(selectedPair.localCandidateId);
+        if (localCand) {
+          selectedCandidateType = String(localCand.candidateType || "");
+          selectedCandidateProtocol = String(localCand.protocol || "");
+          selectedCandidateNetwork = String(localCand.networkType || "");
+        }
+      }
       stats.forEach((s) => {
         if (s.type === "candidate-pair" && (s.selected || s.nominated)) {
-          if (typeof s.currentRoundTripTime === "number") {
+          if (rttMs === null && typeof s.currentRoundTripTime === "number") {
             rttMs = Math.round(s.currentRoundTripTime * 1000);
           }
           const bytes = Number(s.availableOutgoingBitrate || 0);
-          if (bytes > 0) kbps = Math.round(bytes / 1000);
+          if (kbps === null && bytes > 0) kbps = Math.round(bytes / 1000);
           const localCand = statById.get(s.localCandidateId);
-          if (localCand) {
+          if (!selectedCandidateType && localCand) {
             selectedCandidateType = String(localCand.candidateType || "");
             selectedCandidateProtocol = String(localCand.protocol || "");
             selectedCandidateNetwork = String(localCand.networkType || "");
@@ -28731,11 +28762,28 @@
       const videoMoving = inboundVideoBytes > Number(callUI.lastInboundVideoBytes || 0)
         || inboundVideoFramesDecoded > Number(callUI.lastInboundVideoFramesDecoded || 0);
       const audioMoving = inboundAudioBytes > Number(callUI.lastInboundAudioBytes || 0);
+      const remoteVideoEl = $$("#call-remote-video");
+      const remoteAudioEl = $$("#call-remote-audio");
+      const remoteVideoTime = Number(remoteVideoEl?.currentTime || 0);
+      const remoteAudioTime = Number(remoteAudioEl?.currentTime || 0);
+      const videoElementMoving = remoteVideoTime > Number(callUI.lastRemoteVideoTime || 0);
+      const audioElementMoving = remoteAudioTime > Number(callUI.lastRemoteAudioTime || 0);
+      const videoElementFrozen = selected.remote_video_tracks > 0
+        && selected.remote_video_width > 0
+        && selected.remote_video_ready_state >= 2
+        && !videoElementMoving
+        && !videoMoving;
+      const audioElementFrozen = selected.remote_audio_tracks > 0
+        && !audioElementMoving
+        && !audioMoving;
+      callUI.lastRemoteVideoTime = remoteVideoTime;
+      callUI.lastRemoteAudioTime = remoteAudioTime;
       callUI.lastInboundVideoBytes = inboundVideoBytes;
       callUI.lastInboundAudioBytes = inboundAudioBytes;
       callUI.lastInboundVideoFramesDecoded = inboundVideoFramesDecoded;
-      if (videoMoving || audioMoving) {
+      if (videoMoving || audioMoving || videoElementMoving || audioElementMoving) {
         callUI.lastRemoteMediaMovingMs = Date.now();
+        callUI.frozenMediaTicks = 0;
         if (
           selected.ice_connection_state === "connected" ||
           selected.ice_connection_state === "completed"
@@ -28759,9 +28807,22 @@
       } else {
         callUI.stalledMediaTicks = 0;
       }
+      if (videoElementFrozen || audioElementFrozen) {
+        callUI.frozenMediaTicks += 1;
+      } else {
+        callUI.frozenMediaTicks = 0;
+      }
       if (callUI.stalledMediaTicks >= 3) {
         callUI.stalledMediaTicks = 0;
         repairMediaPath("stalled_media").catch(() => {});
+      }
+      if (callUI.frozenMediaTicks >= 3) {
+        callUI.frozenMediaTicks = 0;
+        reportCallEvent("remote_media_frozen", {
+          video_frozen: videoElementFrozen,
+          audio_frozen: audioElementFrozen,
+        });
+        repairMediaPath("frozen_media").catch(() => {});
       }
       if (
         selected.remote_video_tracks > 0
@@ -28870,6 +28931,14 @@
     if (callUI.mediaWatchdogTimer) clearInterval(callUI.mediaWatchdogTimer);
     callUI.mediaWatchdogTimer = setInterval(() => {
       ensureMediaNegotiation("watchdog");
+      if (
+        callUI.activeCallId &&
+        media.pc &&
+        media.pc.remoteDescription &&
+        Date.now() - Number(callUI.lastRemoteMediaMovingMs || 0) > 8000
+      ) {
+        repairMediaPath("watchdog_no_media_movement").catch(() => {});
+      }
     }, 1500);
   }
 
@@ -28878,6 +28947,22 @@
       clearInterval(callUI.mediaWatchdogTimer);
       callUI.mediaWatchdogTimer = null;
     }
+  }
+
+  if (window.addEventListener) {
+    window.addEventListener("online", () => {
+      const now = Date.now();
+      if (!callUI.activeCallId || now - Number(callUI.lastNetworkResumeRepairMs || 0) < 3000) return;
+      callUI.lastNetworkResumeRepairMs = now;
+      reportCallEvent("network_resume_repair");
+      repairMediaPath("network_online").catch(() => {});
+    });
+
+    window.addEventListener("offline", () => {
+      if (!callUI.activeCallId) return;
+      setReconnectState(true, "Network paused. Holding the call...");
+      reportCallEvent("network_offline");
+    });
   }
 
   async function acceptInboundCall() {

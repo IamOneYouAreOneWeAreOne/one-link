@@ -86,6 +86,9 @@ def test_get_user_media_audio_and_video(index_html: str) -> None:
     asserted."""
     assert "navigator.mediaDevices.getUserMedia" in index_html
     assert "{ audio: true, video: true }" in index_html
+    assert "width: { ideal: 960, max: 1280 }" in index_html
+    assert "height: { ideal: 540, max: 720 }" in index_html
+    assert "frameRate: { ideal: 24, max: 30 }" in index_html
     # Audio-only fallback exists.
     assert "{ audio: true }" in index_html
 
@@ -93,8 +96,25 @@ def test_get_user_media_audio_and_video(index_html: str) -> None:
 def test_setup_rtc_peer_connection_function(index_html: str) -> None:
     assert "function setupRtcPeerConnection" in index_html
     assert "new RTCPeerConnection" in index_html
+    assert 'bundlePolicy: "max-bundle"' in index_html
+    assert 'rtcpMuxPolicy: "require"' in index_html
+    assert "iceCandidatePoolSize: 4" in index_html
     assert "media.iceConfigReady" in index_html
     assert 'fetch("/api/peer-rtc/ice-config"' in index_html
+
+
+def test_call_engine_tracks_ice_route_readiness(index_html: str) -> None:
+    assert "iceHelperReady" in index_html
+    assert "iceRelayReady" in index_html
+    assert "ice_host_only_mode" in index_html
+    assert "function selectedCandidatePairFromStats" in index_html
+    assert "selectedCandidatePairId" in index_html
+    idx = index_html.find("async function reportCallMetricsOnce")
+    snippet = index_html[idx:idx + 8600]
+    assert "selected_candidate_type" in snippet
+    assert "selected_candidate_protocol" in snippet
+    assert "selected_candidate_network" in snippet
+    assert '"Direct only"' in snippet
 
 
 def test_sdp_waits_for_ice_config(index_html: str) -> None:
@@ -125,7 +145,7 @@ def test_ontrack_attaches_remote_stream(index_html: str) -> None:
 
 def test_report_metrics_includes_media_state(index_html: str) -> None:
     idx = index_html.find("async function reportCallMetricsOnce")
-    snippet = index_html[idx:idx + 5200]
+    snippet = index_html[idx:idx + 6400]
     assert "ice_connection_state" in snippet
     assert "remote_audio_tracks" in snippet
     assert "remote_video_tracks" in snippet
@@ -150,7 +170,7 @@ def test_media_watchdog_restarts_stuck_negotiation(index_html: str) -> None:
     assert "media.pc.signalingState" in snippet
     assert "sendLocalSdpOffer" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 9800]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 12200]
     assert 'ensureMediaNegotiation("metrics").catch' in metrics_snippet
     active_idx = index_html.find('window.handleLivingPresenceCallEvent = function')
     active_idx = index_html.find('if (phase === "active")', active_idx)
@@ -285,9 +305,25 @@ def test_call_media_watchdog_repairs_stalled_frames(index_html: str) -> None:
     assert "media_path_repair" in snippet
     assert "sendLocalSdpOffer" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 8600]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 12400]
     assert "stalledMediaTicks" in metrics_snippet
     assert 'repairMediaPath("stalled_media")' in metrics_snippet
+
+
+def test_call_engine_detects_frozen_media_and_network_resume(index_html: str) -> None:
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 11600]
+    assert "frozenMediaTicks" in metrics_snippet
+    assert "videoElementFrozen" in metrics_snippet
+    assert "audioElementFrozen" in metrics_snippet
+    assert "remote_media_frozen" in metrics_snippet
+    assert 'repairMediaPath("frozen_media")' in metrics_snippet
+    watchdog_idx = index_html.find("function startMediaWatchdog")
+    watchdog_snippet = index_html[watchdog_idx:watchdog_idx + 1000]
+    assert "watchdog_no_media_movement" in watchdog_snippet
+    assert 'window.addEventListener("online"' in index_html
+    assert "network_resume_repair" in index_html
+    assert "network_offline" in index_html
 
 
 def test_call_phase4_controls_and_quality_surface(index_html: str) -> None:
@@ -341,12 +377,17 @@ def test_call_quality_uses_hysteresis_and_tau_adaptation(index_html: str) -> Non
     assert 'rawLevel === "connecting"' in index_html
     assert 'updateCallQuality("connecting"' in index_html
     assert "function tuneOutboundMediaForTau" in index_html
+    assert "function targetMediaProfile" in index_html
+    assert "function applyCaptureProfileForTau" in index_html
     assert "tauPressureTicks" in index_html
     assert "tauStableTicks" in index_html
     assert "lastTauAdaptMs" in index_html
     assert "maxBitrate" in index_html
     assert "scaleResolutionDownBy" in index_html
     assert "degradationPreference" in index_html
+    assert "applyConstraints" in index_html
+    assert "tau_capture_adapted" in index_html
+    assert "audio-first" in index_html
     assert "tau_media_adapted" in index_html
 
 
@@ -377,7 +418,7 @@ def test_call_rail_suppresses_noisy_internal_media_events(index_html: str) -> No
 
 def test_call_metrics_use_smoothed_interval_loss(index_html: str) -> None:
     idx = index_html.find("async function reportCallMetricsOnce")
-    snippet = index_html[idx:idx + 7600]
+    snippet = index_html[idx:idx + 9000]
     assert "deltaLost" in snippet
     assert "deltaReceived" in snippet
     assert "qualityEwmaRttMs" in snippet
@@ -404,7 +445,7 @@ def test_call_watchdog_repairs_missing_expected_remote_media(index_html: str) ->
     assert "expectRemoteVideo" in index_html
     assert "ensureMediaTransceivers" in index_html
     idx = index_html.find("async function reportCallMetricsOnce")
-    snippet = index_html[idx:idx + 9000]
+    snippet = index_html[idx:idx + 12800]
     assert "expectedRemoteMediaMissing(selected)" in snippet
     assert "repairMediaPath(\"stalled_media\")" in snippet
 
