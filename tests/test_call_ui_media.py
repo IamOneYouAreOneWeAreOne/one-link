@@ -305,6 +305,35 @@ def test_call_phase4_controls_and_quality_surface(index_html: str) -> None:
     assert "incoming-call-notification" in index_html
 
 
+def test_call_room_parity_controls_present(index_html: str) -> None:
+    for marker in [
+        'id="btn-call-hold"',
+        'id="btn-call-layout"',
+        'id="btn-call-captions"',
+        'id="call-participants-list"',
+        'id="call-transcript"',
+        'id="call-notes"',
+        'id="call-stats-grid"',
+        'id="call-noise-select"',
+        'id="btn-call-copy-debug"',
+    ]:
+        assert marker in index_html
+    assert "function setCallHold" in index_html
+    assert "function cycleCallLayout" in index_html
+    assert "function toggleCaptions" in index_html
+    assert "noiseSuppression" in index_html
+    assert "echoCancellation" in index_html
+    assert "autoGainControl" in index_html
+
+
+def test_call_room_live_panels_update_from_metrics(index_html: str) -> None:
+    idx = index_html.find("async function reportCallMetricsOnce")
+    snippet = index_html[idx:idx + 9200]
+    assert "renderParticipants()" in snippet
+    assert "renderLiveStats(callUI.lastMetricsSnapshot)" in snippet
+    assert "classifyCallQuality" in snippet
+
+
 def test_call_watchdog_repairs_missing_expected_remote_media(index_html: str) -> None:
     assert "expectedRemoteMediaMissing" in index_html
     assert "expectRemoteVideo" in index_html

@@ -1352,6 +1352,15 @@
     display: none;
   }
   .call-active.video-fit-contain .call-remote-video { object-fit: contain; }
+  .call-active.layout-compact .call-remote-video { object-fit: contain; }
+  .call-active.layout-split .call-remote-video {
+    inset: 88px 360px 120px 420px;
+    width: auto;
+    height: auto;
+    border-radius: 20px;
+    border: 1px solid rgba(255,255,255,0.14);
+    box-shadow: 0 22px 80px rgba(0,0,0,0.44);
+  }
   .call-remote-video.show { display: block; }
   .call-remote-audio {
     position: absolute;
@@ -1377,6 +1386,10 @@
   .call-active.screen-sharing .call-local-video {
     outline: 2px solid rgba(96,165,250,0.85);
     box-shadow: 0 18px 70px rgba(37,99,235,0.38);
+  }
+  .call-active.on-hold .call-local-video {
+    opacity: 0.45;
+    filter: grayscale(1) blur(2px);
   }
   .call-active-name {
     z-index: 2;
@@ -1479,6 +1492,87 @@
     width: min(300px, calc(100vw - 48px));
     display: grid;
     gap: 8px;
+  }
+  .call-side-panel {
+    position: absolute;
+    right: 24px;
+    bottom: 182px;
+    z-index: 3;
+    width: min(300px, calc(100vw - 48px));
+    display: grid;
+    gap: 8px;
+  }
+  .call-side-card {
+    border-radius: 16px;
+    background: rgba(14,17,27,0.62);
+    border: 1px solid rgba(255,255,255,0.12);
+    box-shadow: 0 18px 58px rgba(0,0,0,0.30);
+    backdrop-filter: blur(18px);
+    padding: 12px;
+  }
+  .call-side-card h3 {
+    margin: 0 0 8px;
+    font-size: 12px;
+    text-transform: uppercase;
+    color: rgba(232,236,248,0.62);
+    letter-spacing: 0.08em;
+  }
+  .call-participants {
+    display: grid;
+    gap: 6px;
+  }
+  .call-participant {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.055);
+    padding: 7px 9px;
+    font-size: 12px;
+    color: rgba(232,236,248,0.84);
+  }
+  .call-participant span:last-child {
+    color: rgba(134,239,172,0.86);
+    font-size: 11px;
+  }
+  .call-transcript {
+    max-height: 116px;
+    overflow: auto;
+    display: grid;
+    gap: 6px;
+  }
+  .call-transcript-line {
+    border-radius: 10px;
+    background: rgba(255,255,255,0.055);
+    color: rgba(232,236,248,0.82);
+    font-size: 12px;
+    line-height: 1.35;
+    padding: 7px 9px;
+  }
+  .call-notes {
+    width: 100%;
+    min-height: 58px;
+    resize: vertical;
+    border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.14);
+    background: rgba(255,255,255,0.07);
+    color: #fff;
+    padding: 9px;
+    font: inherit;
+    font-size: 12px;
+  }
+  .call-stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    font-size: 11px;
+    color: rgba(232,236,248,0.72);
+  }
+  .call-stats-grid b {
+    display: block;
+    color: rgba(255,255,255,0.92);
+    font-size: 13px;
   }
   .call-history-card,
   .call-voicemail-capsule {
@@ -25686,12 +25780,33 @@
       </div>
     </div>
   </div>
+  <div class="call-side-panel" id="call-side-panel" aria-label="Call room tools">
+    <div class="call-side-card">
+      <h3>People</h3>
+      <div class="call-participants" id="call-participants-list"></div>
+    </div>
+    <div class="call-side-card">
+      <h3>Captions</h3>
+      <div class="call-transcript" id="call-transcript"></div>
+    </div>
+    <div class="call-side-card">
+      <h3>Notes</h3>
+      <textarea id="call-notes" class="call-notes" rows="2"></textarea>
+    </div>
+    <div class="call-side-card" id="call-stats-card">
+      <h3>Live stats</h3>
+      <div class="call-stats-grid" id="call-stats-grid"></div>
+    </div>
+  </div>
   <div class="call-active-controls">
     <button class="btn-call-end" id="btn-call-hangup" aria-label="End call">End</button>
     <button class="btn-ghost" id="btn-call-mute" aria-label="Mute microphone" aria-pressed="false">Mute</button>
     <button class="btn-ghost" id="btn-call-camera" aria-label="Turn camera off" aria-pressed="false">Camera</button>
+    <button class="btn-ghost" id="btn-call-hold" aria-label="Hold call" aria-pressed="false">Hold</button>
     <button class="btn-ghost" id="btn-call-share-screen" aria-label="Share screen" aria-pressed="false">Share</button>
     <button class="btn-ghost" id="btn-call-pip" aria-label="Open picture in picture">PiP</button>
+    <button class="btn-ghost" id="btn-call-layout" aria-label="Change call layout">Layout</button>
+    <button class="btn-ghost" id="btn-call-captions" aria-label="Toggle captions" aria-pressed="false">CC</button>
     <button class="btn-ghost" id="btn-call-settings" aria-label="Call settings" aria-expanded="false">Settings</button>
     <button class="btn-ghost" id="btn-call-record" aria-label="Save this call">Save</button>
   </div>
@@ -25712,10 +25827,18 @@
       <label for="call-speaker-select">Speaker</label>
       <select id="call-speaker-select"></select>
     </div>
+    <div class="call-settings-row">
+      <label for="call-noise-select">Voice processing</label>
+      <select id="call-noise-select">
+        <option value="smart">Smart voice</option>
+        <option value="raw">Raw audio</option>
+      </select>
+    </div>
     <div class="call-settings-actions">
       <button class="btn-ghost" id="btn-call-video-fit" type="button">Fit video</button>
       <button class="btn-ghost" id="btn-call-blur" type="button" aria-pressed="false">Blur preview</button>
       <button class="btn-ghost" id="btn-call-refresh-devices" type="button">Refresh devices</button>
+      <button class="btn-ghost" id="btn-call-copy-debug" type="button">Copy debug</button>
     </div>
   </div>
   <div id="call-recording-badge" class="call-recording-badge" aria-live="polite">Recording (both sides agreed)</div>
@@ -25821,6 +25944,11 @@
     expectRemoteVideo: false,
     expectRemoteAudio: true,
     transceiversReady: false,
+    held: false,
+    captionsOn: false,
+    captionRecognizer: null,
+    layoutMode: "focus",
+    voiceProcessing: "smart",
     muted: false,
     cameraOff: false,
     selectedAudioInputId: "",
@@ -25845,8 +25973,17 @@
     const wantVideo = !!(base && base.video);
     const audio = wantAudio
       ? (media.selectedAudioInputId
-        ? { deviceId: { exact: media.selectedAudioInputId } }
-        : true)
+        ? {
+            deviceId: { exact: media.selectedAudioInputId },
+            noiseSuppression: media.voiceProcessing !== "raw",
+            echoCancellation: media.voiceProcessing !== "raw",
+            autoGainControl: media.voiceProcessing !== "raw",
+          }
+        : {
+            noiseSuppression: media.voiceProcessing !== "raw",
+            echoCancellation: media.voiceProcessing !== "raw",
+            autoGainControl: media.voiceProcessing !== "raw",
+          })
       : false;
     const video = wantVideo
       ? (media.selectedVideoInputId
@@ -26183,6 +26320,125 @@
     });
   }
 
+  function renderParticipants() {
+    const host = $$("#call-participants-list");
+    if (!host) return;
+    const localKinds = media.localStream
+      ? media.localStream.getTracks().filter((t) => t.readyState === "live").map((t) => t.kind)
+      : [];
+    const remoteKinds = media.remoteStream
+      ? media.remoteStream.getTracks().filter((t) => t.readyState === "live").map((t) => t.kind)
+      : [];
+    const localState = media.held ? "held" : localKinds.join("+") || "joining";
+    const remoteState = remoteKinds.join("+") || "waiting";
+    host.innerHTML = [
+      `<div class="call-participant"><span>You</span><span>${escapeText(localState)}</span></div>`,
+      `<div class="call-participant"><span>${escapeText(callUI.activeCallPeer || "Peer")}</span><span>${escapeText(remoteState)}</span></div>`,
+    ].join("");
+  }
+
+  function renderLiveStats(metrics) {
+    const host = $$("#call-stats-grid");
+    if (!host || !metrics) return;
+    host.innerHTML = [
+      ["RTT", metrics.rtt_ms == null ? "--" : `${metrics.rtt_ms} ms`],
+      ["Loss", metrics.loss_rate == null ? "--" : `${Math.round(metrics.loss_rate * 100)}%`],
+      ["ICE", metrics.ice_connection_state || "--"],
+      ["Video", metrics.remote_video_width ? `${metrics.remote_video_width}p` : "waiting"],
+    ].map(([k, v]) => `<div><b>${escapeText(v)}</b>${escapeText(k)}</div>`).join("");
+  }
+
+  function setCallHold(on) {
+    media.held = !!on;
+    if (media.localStream) {
+      media.localStream.getTracks().forEach((t) => {
+        t.enabled = !media.held && (
+          t.kind === "audio" ? !media.muted :
+          t.kind === "video" ? !media.cameraOff :
+          true
+        );
+      });
+    }
+    const surface = $$("#call-active-surface");
+    surface?.classList.toggle("on-hold", media.held);
+    const btn = $$("#btn-call-hold");
+    if (btn) {
+      btn.textContent = media.held ? "Resume" : "Hold";
+      btn.setAttribute("aria-pressed", String(media.held));
+    }
+    addOneCallEvent(media.held ? "Call on hold." : "Call resumed.");
+    reportCallEvent(media.held ? "call_hold_started" : "call_hold_ended");
+    renderParticipants();
+  }
+
+  function cycleCallLayout() {
+    const modes = ["focus", "split", "compact"];
+    const next = modes[(modes.indexOf(media.layoutMode) + 1) % modes.length] || "focus";
+    media.layoutMode = next;
+    const surface = $$("#call-active-surface");
+    if (surface) {
+      surface.classList.toggle("layout-split", next === "split");
+      surface.classList.toggle("layout-compact", next === "compact");
+    }
+    const btn = $$("#btn-call-layout");
+    if (btn) btn.textContent = next === "focus" ? "Layout" : next;
+    reportCallEvent("layout_changed", { reason: next });
+  }
+
+  function addTranscriptLine(text, who) {
+    const host = $$("#call-transcript");
+    if (!host || !text) return;
+    const row = document.createElement("div");
+    row.className = "call-transcript-line";
+    row.textContent = `${who || "You"}: ${text}`;
+    host.prepend(row);
+    while (host.children.length > 12) host.removeChild(host.lastChild);
+  }
+
+  function toggleCaptions() {
+    media.captionsOn = !media.captionsOn;
+    const btn = $$("#btn-call-captions");
+    if (btn) btn.setAttribute("aria-pressed", String(media.captionsOn));
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!media.captionsOn) {
+      try { media.captionRecognizer?.stop(); } catch (_) {}
+      media.captionRecognizer = null;
+      reportCallEvent("captions_stopped");
+      return;
+    }
+    if (!SpeechRecognition) {
+      addTranscriptLine("Captions are not available in this browser.", "One Link");
+      reportCallEvent("captions_unavailable");
+      return;
+    }
+    try {
+      const rec = new SpeechRecognition();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.onresult = (ev) => {
+        const results = Array.from(ev.results || []);
+        const finalText = results
+          .filter((r) => r.isFinal)
+          .map((r) => r[0] && r[0].transcript)
+          .filter(Boolean)
+          .join(" ")
+          .trim();
+        if (finalText) addTranscriptLine(finalText, "You");
+      };
+      rec.onend = () => {
+        if (media.captionsOn && media.captionRecognizer === rec) {
+          try { rec.start(); } catch (_) {}
+        }
+      };
+      media.captionRecognizer = rec;
+      rec.start();
+      reportCallEvent("captions_started");
+    } catch (_) {
+      addTranscriptLine("Captions could not start.", "One Link");
+      reportCallEvent("captions_failed");
+    }
+  }
+
   function stopAllMedia() {
     stopAttestStream();
     if (media.localStream) {
@@ -26239,6 +26495,12 @@
     media.expectRemoteVideo = false;
     media.expectRemoteAudio = true;
     media.transceiversReady = false;
+    media.held = false;
+    media.captionsOn = false;
+    try { media.captionRecognizer?.stop(); } catch (_) {}
+    media.captionRecognizer = null;
+    media.layoutMode = "focus";
+    media.voiceProcessing = "smart";
     media.muted = false;
     media.cameraOff = false;
     syncMuteCameraButtons();
@@ -26903,6 +27165,25 @@
   $$("#btn-call-blur")?.addEventListener("click", () => toggleBackgroundBlur());
   $$("#btn-call-share-screen")?.addEventListener("click", () => toggleScreenShare().catch(() => {}));
   $$("#btn-call-pip")?.addEventListener("click", () => openCallPictureInPicture().catch(() => {}));
+  $$("#btn-call-hold")?.addEventListener("click", () => setCallHold(!media.held));
+  $$("#btn-call-layout")?.addEventListener("click", () => cycleCallLayout());
+  $$("#btn-call-captions")?.addEventListener("click", () => toggleCaptions());
+  $$("#call-noise-select")?.addEventListener("change", async (ev) => {
+    media.voiceProcessing = ev.target.value === "raw" ? "raw" : "smart";
+    await replaceLocalMediaTracks("audio");
+    reportCallEvent("voice_processing_changed", { state: media.voiceProcessing });
+  });
+  $$("#btn-call-copy-debug")?.addEventListener("click", async () => {
+    try {
+      const snapshot = await window._oneLinkCallDebug?.();
+      await navigator.clipboard?.writeText(JSON.stringify(snapshot || {}, null, 2));
+      addOneCallEvent("Call debug copied.");
+      reportCallEvent("call_debug_copied");
+    } catch (_) {
+      addOneCallEvent("Call debug could not be copied.");
+      reportCallEvent("call_debug_copy_failed");
+    }
+  });
   $$("#btn-call-capsule")?.addEventListener("click", () => {
     addOneCallEvent("Capsule capture is ready when the call downgrades to async.");
     reportCallEvent("voicemail_capsule_requested");
@@ -27714,6 +27995,8 @@
     if (typeof window.stopCallRing === "function") window.stopCallRing();
     resetOneCallRail(peerLabel);
     renderCallHistory();
+    renderParticipants();
+    renderLiveStats(callUI.lastMetricsSnapshot || {});
     startCallTelemetry();
   }
   function hideActiveSurface() {
@@ -27884,6 +28167,8 @@
       } else {
         setReconnectState(false);
       }
+      renderParticipants();
+      renderLiveStats(callUI.lastMetricsSnapshot);
       const videoMoving = inboundVideoBytes > Number(callUI.lastInboundVideoBytes || 0)
         || inboundVideoFramesDecoded > Number(callUI.lastInboundVideoFramesDecoded || 0);
       const audioMoving = inboundAudioBytes > Number(callUI.lastInboundAudioBytes || 0);
