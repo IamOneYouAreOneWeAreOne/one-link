@@ -23067,6 +23067,8 @@
     lastLocalAnswerSdp: "",
     lastOfferSendMs: 0,
     lastAnswerSendMs: 0,
+    lastLocalOfferCreatedMs: 0,
+    remoteOfferCollisionCount: 0,
     acceptedCallIds: new Set(),
     lastAcceptRetryMs: {},
   };
@@ -23212,6 +23214,8 @@
     callUI.lastLocalAnswerSdp = "";
     callUI.lastOfferSendMs = 0;
     callUI.lastAnswerSendMs = 0;
+    callUI.lastLocalOfferCreatedMs = 0;
+    callUI.remoteOfferCollisionCount = 0;
     callUI.acceptedCallIds.clear();
     callUI.lastAcceptRetryMs = {};
     media.muted = false;
@@ -23395,6 +23399,8 @@
       await media.pc.setLocalDescription(offer);
       callUI.lastLocalOfferSdp = offer.sdp || "";
       callUI.lastOfferSendMs = Date.now();
+      callUI.lastLocalOfferCreatedMs = callUI.lastOfferSendMs;
+      callUI.remoteOfferCollisionCount = 0;
       const result = await callApiPost({
         action: "send_sdp_offer",
         call_id: callUI.activeCallId,
@@ -23556,6 +23562,65 @@
     await sendLocalSdpOffer();
   }
 
+  function rebuildPeerConnectionForRemoteOffer() {
+    const localStream = media.localStream;
+    if (media.pc) {
+      try { media.pc.close(); } catch (_) {}
+      media.pc = null;
+    }
+    media.iceConfigReady = null;
+    callUI.pendingIceCandidates = [];
+    callUI.appliedIceKeys.clear();
+    const pc = setupRtcPeerConnection();
+    if (!pc) return false;
+    if (localStream) ensureLocalTracksOnPeerConnection();
+    return true;
+  }
+
+  async function recoverRemoteOfferCollision(sdp, key) {
+    callUI.remoteOfferCollisionCount += 1;
+    const ageMs = Date.now() - Number(callUI.lastLocalOfferCreatedMs || 0);
+    const shouldRecover = callUI.remoteOfferCollisionCount >= 2 || ageMs > 7000;
+    reportCallEvent("offer_collision", {
+      collision_count: callUI.remoteOfferCollisionCount,
+      offer_age_ms: Math.max(0, ageMs),
+      recovering: shouldRecover,
+    });
+    if (!shouldRecover) {
+      await resendLocalSdpOffer("offer_collision");
+      return false;
+    }
+    addOneCallEvent("Repairing media handshake...");
+    reportCallEvent("offer_collision_recovery_start", {
+      collision_count: callUI.remoteOfferCollisionCount,
+      offer_age_ms: Math.max(0, ageMs),
+    });
+    try {
+      await media.pc.setLocalDescription({ type: "rollback" });
+      reportCallEvent("offer_collision_rollback");
+    } catch (_) {
+      reportCallEvent("offer_collision_rebuild");
+      if (!rebuildPeerConnectionForRemoteOffer()) return false;
+    }
+    try {
+      await media.pc.setRemoteDescription({ type: "offer", sdp });
+      if (key) callUI.appliedRemoteOfferKeys.add(key);
+      callUI.remoteOfferCollisionCount = 0;
+      callUI.lastLocalOfferSdp = "";
+      callUI.lastOfferSendMs = 0;
+      callUI.lastLocalOfferCreatedMs = 0;
+      await flushPendingIceCandidates();
+      await sendLocalSdpAnswer();
+      reportCallEvent("offer_collision_recovered");
+      return true;
+    } catch (_) {
+      reportCallEvent("offer_collision_recovery_failed", {
+        state: media.pc && media.pc.signalingState,
+      });
+      return false;
+    }
+  }
+
   async function applyRemoteSdpOffer(sdp) {
     if (!sdp) return;
     if (!media.pc) setupRtcPeerConnection();
@@ -23589,13 +23654,14 @@
         && media.pc.localDescription
         && media.pc.localDescription.type === "offer"
       ) {
-        await resendLocalSdpOffer("offer_collision");
+        await recoverRemoteOfferCollision(sdp, key);
       }
       return;
     }
     try {
-      if (key) callUI.appliedRemoteOfferKeys.add(key);
       await media.pc.setRemoteDescription({ type: "offer", sdp });
+      if (key) callUI.appliedRemoteOfferKeys.add(key);
+      callUI.remoteOfferCollisionCount = 0;
       await flushPendingIceCandidates();
       await sendLocalSdpAnswer();
     } catch (_) { /* fall through */ }
@@ -23615,8 +23681,9 @@
     }
     if (media.pc.signalingState !== "have-local-offer") return;
     try {
-      if (key) callUI.appliedRemoteAnswerKeys.add(key);
       await media.pc.setRemoteDescription({ type: "answer", sdp });
+      if (key) callUI.appliedRemoteAnswerKeys.add(key);
+      callUI.remoteOfferCollisionCount = 0;
       await flushPendingIceCandidates();
     } catch (_) { /* fall through */ }
   }

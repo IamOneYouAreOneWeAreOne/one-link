@@ -203,8 +203,27 @@ def test_sdp_offer_answer_retries_when_signaling_is_lost(index_html: str) -> Non
     offer_snippet = index_html[offer_idx:offer_idx + 1800]
     assert "remote_offer_echo_ignored" in offer_snippet
     assert 'await resendLocalSdpOffer("offer_echo")' in offer_snippet
-    assert 'await resendLocalSdpOffer("offer_collision")' in offer_snippet
+    assert "recoverRemoteOfferCollision" in offer_snippet
     assert 'await resendLocalSdpAnswer("duplicate_offer")' in offer_snippet
+
+
+def test_offer_collision_rolls_back_and_answers_remote_offer(index_html: str) -> None:
+    """Regression: two devices can race and both create offers.
+    The browser must not resend forever from have-local-offer; after
+    repeated/stale glare it rolls back/rebuilds, applies the remote
+    offer, and sends an answer so remote audio/video tracks can land."""
+    assert "remoteOfferCollisionCount" in index_html
+    assert "lastLocalOfferCreatedMs" in index_html
+    idx = index_html.find("async function recoverRemoteOfferCollision")
+    assert idx > 0
+    snippet = index_html[idx:idx + 2600]
+    assert "remoteOfferCollisionCount >= 2" in snippet
+    assert "ageMs > 7000" in snippet
+    assert 'setLocalDescription({ type: "rollback" })' in snippet
+    assert "rebuildPeerConnectionForRemoteOffer" in snippet
+    assert 'setRemoteDescription({ type: "offer", sdp })' in snippet
+    assert "await sendLocalSdpAnswer()" in snippet
+    assert "offer_collision_recovered" in snippet
 
 
 def test_call_media_events_are_reported(index_html: str) -> None:
