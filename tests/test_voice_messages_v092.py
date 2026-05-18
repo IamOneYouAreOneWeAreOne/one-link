@@ -83,7 +83,7 @@ def test_no_op_if_no_peer_selected(index_html: str):
     idx = index_html.find("async function startVoiceRecording(")
     snippet = index_html[idx:idx + 1500]
     assert "state.selectedPeer" in snippet
-    assert "Pick a device first" in snippet
+    assert "Pick a device on the left to start." in snippet
 
 
 def test_handles_permission_denial_gracefully(index_html: str):
