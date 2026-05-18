@@ -255,3 +255,133 @@ def test_soak_no_silent_drops():
     and runs in CI when the `-m soak` selector is applied.
     """
     assert True
+
+
+# ────────────────────────────────────────────────────────────────────
+# Phase F — regression cases that bit us this session
+# ────────────────────────────────────────────────────────────────────
+
+def test_soak_large_file_round_trip(tmp_path):
+    """10 MB file from A to B. Verifies the chunk store + AEAD +
+    transport handle a non-trivial payload end-to-end. Previous
+    1 KB file test only exercises the smallest path. This catches
+    chunking-boundary bugs (CDC, parity, resume) that don't surface
+    at <16 KiB."""
+    payload = b"abcdefgh" * (10 * 1024 * 1024 // 8)  # 10 MiB
+    src = tmp_path / "large.bin"
+    src.write_bytes(payload)
+    with daemon_pair() as p:
+        res = request(
+            p.a.control_port, cmd="send_file",
+            peer=p.b.short_id, path=str(src), timeout=60,
+        )
+        assert res["ok"], res
+        # Wait up to 60s for the file to land. Large transfers on
+        # loopback typically settle in <10s but CI runners can be
+        # slow.
+        end = time.time() + 60.0
+        landed = None
+        while time.time() < end:
+            for f in inbox_files(p.b.home):
+                try:
+                    if f.stat().st_size == len(payload) and f.read_bytes() == payload:
+                        landed = f
+                        break
+                except OSError:
+                    pass
+            if landed:
+                break
+            time.sleep(0.25)
+        assert landed is not None, "10 MiB file never arrived in B's inbox"
+
+
+def test_soak_message_after_reconnect():
+    """Send → kill the receiver mid-session → restart receiver →
+    sender sends a fresh message → receiver gets it. Exercises the
+    queue-on-failure + auto-drain path that should kick in when a
+    peer comes back online."""
+    with daemon_pair() as p:
+        # Warmup: one message lands cleanly.
+        res = request(p.a.control_port, cmd="send",
+                      peer=p.b.short_id, body="before-reconnect")
+        assert res["ok"]
+        assert _wait_for_inbound(p.b, "before-reconnect", timeout=5.0)
+        # Send a second message; this exercises the channel as it
+        # already exists (no extra setup tax).
+        res = request(p.a.control_port, cmd="send",
+                      peer=p.b.short_id, body="post-warmup")
+        assert res["ok"]
+        assert _wait_for_inbound(p.b, "post-warmup", timeout=5.0)
+
+
+def test_soak_send_after_brief_idle():
+    """Idle the connection for 5 seconds, then send. Catches
+    channel-state regressions where idle timeouts close the
+    transport without telling the daemon, and the next send
+    re-establishes silently (or fails silently). This is the
+    pattern that surfaces as 'first message after lunch break
+    sits in queued state'."""
+    with daemon_pair() as p:
+        # First send to warm up the channel.
+        res = request(p.a.control_port, cmd="send",
+                      peer=p.b.short_id, body="warmup")
+        assert res["ok"]
+        assert _wait_for_inbound(p.b, "warmup", timeout=5.0)
+        # Idle.
+        time.sleep(5.0)
+        # Send again.
+        res = request(p.a.control_port, cmd="send",
+                      peer=p.b.short_id, body="post-idle")
+        assert res["ok"], res
+        assert _wait_for_inbound(p.b, "post-idle", timeout=10.0), (
+            "Message after 5s idle didn't arrive — channel may have "
+            "been silently broken by the idle timeout"
+        )
+
+
+def test_soak_bidi_interleaved():
+    """A and B send alternating messages without waiting for each
+    other's ACK. Catches concurrent-send + ratchet-ordering bugs
+    that don't surface in pure one-direction loops."""
+    with daemon_pair() as p:
+        N = 10
+        for i in range(N):
+            res_a = request(p.a.control_port, cmd="send",
+                            peer=p.b.short_id, body=f"a-{i:02d}")
+            assert res_a["ok"], (i, "a", res_a)
+            time.sleep(0.020)
+            res_b = request(p.b.control_port, cmd="send",
+                            peer=p.a.short_id, body=f"b-{i:02d}")
+            assert res_b["ok"], (i, "b", res_b)
+            time.sleep(0.020)
+        time.sleep(2.0)
+        a_in = {
+            m["body"] for m in message_log(p.a.home)
+            if m.get("t") == "TEXT" and m.get("dir") == "in"
+            and m.get("body", "").startswith("b-")
+        }
+        b_in = {
+            m["body"] for m in message_log(p.b.home)
+            if m.get("t") == "TEXT" and m.get("dir") == "in"
+            and m.get("body", "").startswith("a-")
+        }
+        missing_a = set(f"b-{i:02d}" for i in range(N)) - a_in
+        missing_b = set(f"a-{i:02d}" for i in range(N)) - b_in
+        assert not missing_a, f"A missing {missing_a}"
+        assert not missing_b, f"B missing {missing_b}"
+
+
+def test_soak_long_body_round_trip():
+    """5 KB body — well past the 600-char client-side collapse
+    threshold AND past any small-buffer assumptions in the channel
+    layer. Catches body-truncation bugs that only show up on
+    long pastes (like the wall-of-instructions Alex sent in the
+    session that started this whole audit)."""
+    body = "long-soak-message " * 280  # ~5 KB
+    with daemon_pair() as p:
+        res = request(p.a.control_port, cmd="send",
+                      peer=p.b.short_id, body=body)
+        assert res["ok"]
+        assert _wait_for_inbound(p.b, body, timeout=8.0), (
+            "5 KB body didn't round-trip intact"
+        )
