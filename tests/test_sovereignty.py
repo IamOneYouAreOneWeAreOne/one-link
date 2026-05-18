@@ -325,6 +325,46 @@ async def test_api_status_returns_expected_shape(monkeypatch):
         "update_check", "stun_servers", "mdns_discovery", "rendezvous",
     ):
         assert key in body["features"]
+    assert "turn_relay" in body["features"]
+
+
+@pytest.mark.asyncio
+async def test_peer_rtc_ice_config_includes_turn_relay_from_settings(monkeypatch):
+    """TURN is the real wild-network fallback: the endpoint must be
+    able to hand browser WebRTC relay credentials without hardcoding
+    a third-party service."""
+    from one_link.server import UIServer
+
+    class _State:
+        def __init__(self):
+            self.settings = {
+                "stun_servers": "stun:lab.local:3478",
+                "turn_servers": "turn:relay.local:3478, turns:relay.local:5349",
+                "turn_username": "one",
+                "turn_credential": "secret",
+            }
+        def get_setting(self, k):
+            return self.settings.get(k)
+
+    daemon = SimpleNamespace(
+        state=_State(),
+        discovery=None,
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aa", hostname="me"),
+        _outbound_log=[],
+        _outbound_log_started_ms=0,
+        _outbound_sessions={},
+    )
+    server = UIServer(daemon)
+    resp = await server.api_peer_rtc_ice_config(SimpleNamespace(query={}))
+    body = json.loads(resp.text)
+    assert body["routePolicy"]["mode"] == "direct_first"
+    assert body["routePolicy"]["relay_ready"] is True
+    assert body["routePolicy"]["force_relay_on_repair"] is True
+    assert {"urls": "stun:lab.local:3478"} in body["iceServers"]
+    turn = body["iceServers"][-1]
+    assert turn["urls"] == ["turn:relay.local:3478", "turns:relay.local:5349"]
+    assert turn["username"] == "one"
+    assert turn["credential"] == "secret"
 
 
 @pytest.mark.asyncio

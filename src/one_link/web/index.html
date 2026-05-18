@@ -26239,6 +26239,9 @@
     videoFit: "cover",
     iceHelperReady: false,
     iceRelayReady: false,
+    routePolicy: "direct_first",
+    forceRelayOnRepair: false,
+    preferRelayNext: false,
   };
   if (typeof window !== "undefined") {
     window._livingPresenceMedia = media;
@@ -26901,6 +26904,9 @@
     media.iceConfigReady = null;
     media.iceHelperReady = false;
     media.iceRelayReady = false;
+    media.routePolicy = "direct_first";
+    media.forceRelayOnRepair = false;
+    media.preferRelayNext = false;
     media.transceiversReady = false;
     callUI.pendingIceCandidates = [];
     callUI.appliedIceKeys.clear();
@@ -27063,6 +27069,7 @@
     // in. Empty list = host-only ICE = LAN-only fallback.
     const pc = new RTCPeerConnection({
       iceServers: [],
+      iceTransportPolicy: media.preferRelayNext ? "relay" : "all",
       bundlePolicy: "max-bundle",
       rtcpMuxPolicy: "require",
       iceCandidatePoolSize: 4,
@@ -27082,8 +27089,13 @@
             return urls.some((u) => String(u || "").toLowerCase().startsWith("turn:") || String(u || "").toLowerCase().startsWith("turns:"));
           });
         media.iceHelperReady = Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0;
+        media.routePolicy = String(cfg.routePolicy?.mode || "direct_first");
+        media.forceRelayOnRepair = cfg.routePolicy?.force_relay_on_repair === true;
         if (Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0) {
           pc.setConfiguration({ iceServers: cfg.iceServers });
+          if (media.iceRelayReady) {
+            reportCallEvent("ice_relay_ready", { state: "available" });
+          }
         } else {
           reportCallEvent("ice_host_only_mode", { state: "enabled" });
         }
@@ -27405,6 +27417,13 @@
         rtt_ms: Math.max(Number(callUI.lastMetricsSnapshot?.rtt_ms || 0), 320),
       });
       if (callUI.mediaRepairStage >= 3) {
+        if (media.iceRelayReady && media.forceRelayOnRepair) {
+          media.preferRelayNext = true;
+          updateOneChip("#call-one-engine", "Relay escape");
+          reportCallEvent("relay_escape_requested", {
+            reason: reason || "media_path_repair",
+          });
+        }
         const rebuilt = await rebuildPeerConnectionForActiveCall(reason || "media_path_repair");
         if (rebuilt) return;
       }
@@ -28741,6 +28760,8 @@
         selected_candidate_network: selectedCandidateNetwork,
         ice_helper_ready: media.iceHelperReady === true,
         ice_relay_ready: media.iceRelayReady === true,
+        route_policy: media.routePolicy,
+        relay_escape_active: media.preferRelayNext === true,
       };
       if (selectedCandidateType === "relay") updateOneChip("#call-one-route", "Relay");
       else if (selectedCandidateType === "srflx" || selectedCandidateType === "prflx") updateOneChip("#call-one-route", "Assisted");

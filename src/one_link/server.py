@@ -2188,6 +2188,65 @@ class UIServer:
             preset_name=preset_name,
         ))
 
+    def _setting_value(self, key: str) -> str | None:
+        if self.daemon is None or self.daemon.state is None:
+            return None
+        try:
+            raw = self.daemon.state.get_setting(key)
+        except Exception:
+            return None
+        if raw is None:
+            return None
+        return str(raw)
+
+    def _resolved_turn_config(self) -> dict:
+        """Resolve operator/user TURN relay config for WebRTC calls.
+
+        STUN helps discover addresses; TURN is the actual "works in
+        the wild" escape hatch because it can carry encrypted media
+        when NAT, AP isolation, firewall policy, or bad Wi-Fi blocks
+        the direct path. We support both settings and env vars so a
+        lab relay can be added without rebuilding the app.
+        """
+        raw_urls = self._setting_value("turn_servers")
+        if raw_urls is None:
+            raw_urls = os.environ.get("ONE_LINK_TURN_SERVERS")
+        username = self._setting_value("turn_username")
+        if username is None:
+            username = os.environ.get("ONE_LINK_TURN_USERNAME")
+        credential = self._setting_value("turn_credential")
+        if credential is None:
+            credential = os.environ.get("ONE_LINK_TURN_CREDENTIAL")
+
+        urls: list[str] = []
+        seen: set[str] = set()
+        for u in str(raw_urls or "").split(","):
+            u = u.strip()
+            if not u or u in seen:
+                continue
+            if not (u.lower().startswith("turn:") or u.lower().startswith("turns:")):
+                continue
+            urls.append(u)
+            seen.add(u)
+        return {
+            "urls": urls,
+            "username": (username or "").strip(),
+            "credential": (credential or "").strip(),
+        }
+
+    def _resolved_webrtc_ice_servers(self) -> list[dict]:
+        servers: list[dict] = [{"urls": u} for u in self._resolved_stun_servers()]
+        turn = self._resolved_turn_config()
+        turn_urls = list(turn.get("urls") or [])
+        if turn_urls:
+            entry: dict = {"urls": turn_urls}
+            if turn.get("username"):
+                entry["username"] = turn["username"]
+            if turn.get("credential"):
+                entry["credential"] = turn["credential"]
+            servers.append(entry)
+        return servers
+
     # ── Sovereignty API (May 15 2026) ──────────────────────────────
     #
     # The Privacy panel UI consumes these. The contract is:
@@ -2353,6 +2412,16 @@ class UIServer:
                     "list": self._resolved_stun_servers(),
                     "source": _source(
                         "stun_servers", "ONE_LINK_STUN_SERVERS",
+                    ),
+                },
+                "turn_relay": {
+                    "enabled": bool(self._resolved_turn_config().get("urls")),
+                    "urls": list(self._resolved_turn_config().get("urls") or []),
+                    "source": _source(
+                        "turn_servers", "ONE_LINK_TURN_SERVERS",
+                    ),
+                    "credential_configured": bool(
+                        self._resolved_turn_config().get("credential")
                     ),
                 },
                 "mdns_discovery": {
@@ -2739,10 +2808,25 @@ class UIServer:
         JSON object ``{"iceServers": [...]}`` shaped exactly the way
         WebRTC's RTCPeerConnection setConfiguration() expects. Empty
         list = sovereignty default (LAN-only pairing)."""
-        urls = self._resolved_stun_servers()
+        servers = self._resolved_webrtc_ice_servers()
+        relay_ready = any(
+            str(url).lower().startswith(("turn:", "turns:"))
+            for srv in servers
+            for url in (
+                srv.get("urls")
+                if isinstance(srv.get("urls"), list)
+                else [srv.get("urls")]
+            )
+        )
         return web.json_response({
-            "iceServers": [{"urls": u} for u in urls],
-            "sovereignty_default": len(urls) == 0,
+            "iceServers": servers,
+            "routePolicy": {
+                "mode": "direct_first",
+                "relay_ready": relay_ready,
+                "direct_first": True,
+                "force_relay_on_repair": relay_ready,
+            },
+            "sovereignty_default": len(servers) == 0,
         })
 
     async def api_peer_rtc_ice_config_public(
@@ -2750,12 +2834,19 @@ class UIServer:
     ) -> web.Response:
         """Unguarded variant of the ICE-config endpoint for
         peer.html (the browser-as-peer surface) which runs without
-        an auth token. STUN URLs are public hostnames; exposing the
-        user-configured list openly is not a credential leak."""
+        an auth token. Keep this STUN-only: TURN credentials are
+        secrets and are only returned through the guarded endpoint."""
         urls = self._resolved_stun_servers()
+        servers = [{"urls": u} for u in urls]
         return web.json_response({
-            "iceServers": [{"urls": u} for u in urls],
-            "sovereignty_default": len(urls) == 0,
+            "iceServers": servers,
+            "routePolicy": {
+                "mode": "direct_first",
+                "relay_ready": False,
+                "direct_first": True,
+                "force_relay_on_repair": False,
+            },
+            "sovereignty_default": len(servers) == 0,
         })
 
     async def _pair_profile(self, request: web.Request) -> web.StreamResponse:
@@ -3606,6 +3697,8 @@ class UIServer:
                 "tau_capture_adapted",
                 "tau_capture_adapt_failed",
                 "ice_host_only_mode",
+                "ice_relay_ready",
+                "relay_escape_requested",
                 "remote_media_frozen",
                 "network_resume_repair",
                 "network_offline",

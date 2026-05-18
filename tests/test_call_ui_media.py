@@ -96,6 +96,8 @@ def test_get_user_media_audio_and_video(index_html: str) -> None:
 def test_setup_rtc_peer_connection_function(index_html: str) -> None:
     assert "function setupRtcPeerConnection" in index_html
     assert "new RTCPeerConnection" in index_html
+    assert "iceTransportPolicy" in index_html
+    assert 'media.preferRelayNext ? "relay" : "all"' in index_html
     assert 'bundlePolicy: "max-bundle"' in index_html
     assert 'rtcpMuxPolicy: "require"' in index_html
     assert "iceCandidatePoolSize: 4" in index_html
@@ -106,7 +108,10 @@ def test_setup_rtc_peer_connection_function(index_html: str) -> None:
 def test_call_engine_tracks_ice_route_readiness(index_html: str) -> None:
     assert "iceHelperReady" in index_html
     assert "iceRelayReady" in index_html
+    assert "routePolicy" in index_html
+    assert "forceRelayOnRepair" in index_html
     assert "ice_host_only_mode" in index_html
+    assert "ice_relay_ready" in index_html
     assert "function selectedCandidatePairFromStats" in index_html
     assert "selectedCandidatePairId" in index_html
     idx = index_html.find("async function reportCallMetricsOnce")
@@ -115,6 +120,7 @@ def test_call_engine_tracks_ice_route_readiness(index_html: str) -> None:
     assert "selected_candidate_protocol" in snippet
     assert "selected_candidate_network" in snippet
     assert '"Direct only"' in snippet
+    assert "relay_escape_active" in snippet
 
 
 def test_sdp_waits_for_ice_config(index_html: str) -> None:
@@ -300,7 +306,7 @@ def test_call_has_device_settings_and_video_fit_controls(index_html: str) -> Non
 def test_call_media_watchdog_repairs_stalled_frames(index_html: str) -> None:
     assert "async function repairMediaPath" in index_html
     idx = index_html.find("async function repairMediaPath")
-    snippet = index_html[idx:idx + 1700]
+    snippet = index_html[idx:idx + 2200]
     assert "restartIce" in snippet
     assert "media_path_repair" in snippet
     assert "sendLocalSdpOffer" in snippet
@@ -438,6 +444,8 @@ def test_call_repair_has_staged_recovery_and_rebuild(index_html: str) -> None:
     assert "restartIce" in snippet
     assert "pc_rebuild_start" in index_html
     assert "pc_rebuild_offer_sent" in index_html
+    assert "relay_escape_requested" in index_html
+    assert "Relay escape" in index_html
 
 
 def test_call_watchdog_repairs_missing_expected_remote_media(index_html: str) -> None:
