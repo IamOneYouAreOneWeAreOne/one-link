@@ -14570,7 +14570,19 @@ class Daemon:
                 # can render "Resuming X (3.2 MB / 8.1 MB)" indicators
                 # for inbound transfers that survived a daemon restart
                 # or a peer disconnect. Pure read — no state changes.
-                entries = self._resume_registry.snapshot()
+                #
+                # Pass the cache-availability checker so each snapshot
+                # entry comes back with progress_ratio /
+                # cdc_chunks_cached / cached_bytes already resolved.
+                # UI can render "67 % already on disk" before the
+                # sender's retry FILE_OFFER even arrives.
+                def _cache_check(hashes: list[str]) -> list[str]:
+                    return list(self._available_chunk_hashes(
+                        hashes, hydrate=False, limit=len(hashes),
+                    ))
+                entries = self._resume_registry.snapshot(
+                    cache_check_fn=_cache_check,
+                )
                 await self._reply(writer, {
                     "ok": True,
                     "entries": entries,

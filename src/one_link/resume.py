@@ -362,16 +362,31 @@ class ResumeRegistry:
             log.info("resume registry: pruned %d stale entry(ies)", pruned)
         return len(self._by_key)
 
-    def snapshot(self) -> list[dict]:
+    def snapshot(
+        self,
+        *,
+        cache_check_fn=None,
+    ) -> list[dict]:
         """JSON-shaped list of current entries for the status API.
 
         Each entry is a small dict; the full CDC manifest
         (potentially thousands of entries) is replaced with a count
         so the snapshot stays bounded for the UI / control plane.
+
+        If ``cache_check_fn`` is provided, it's called once per
+        entry with the entry's full list of chunk hashes and must
+        return the SUBSET that's currently present in the local
+        chunk cache. The snapshot enriches each entry with:
+
+          - ``cdc_chunks_cached``: count of chunks already on disk
+          - ``cached_bytes``: byte total of those chunks
+          - ``progress_ratio``: cached_bytes / size, 0..1, lets the
+            UI render "67 % already on disk" before the sender
+            even reconnects.
         """
         out: list[dict] = []
         for (peer_fp, blob), sc in sorted(self._by_key.items()):
-            out.append({
+            entry: dict = {
                 "blob": blob,
                 "peer_fp": peer_fp,
                 "name": sc.name,
@@ -380,7 +395,32 @@ class ResumeRegistry:
                 "cdc_chunks_total": len(sc.cdc_chunks),
                 "created_ms": sc.created_ms,
                 "updated_ms": sc.updated_ms,
-            })
+            }
+            if cache_check_fn is not None and sc.cdc_chunks:
+                try:
+                    hashes = [str(c["hash"]) for c in sc.cdc_chunks if "hash" in c]
+                    present = set(cache_check_fn(hashes))
+                    cached_count = 0
+                    cached_bytes = 0
+                    for c in sc.cdc_chunks:
+                        h = str(c.get("hash", ""))
+                        if h in present:
+                            cached_count += 1
+                            try:
+                                cached_bytes += int(c.get("size", 0))
+                            except (TypeError, ValueError):
+                                pass
+                    entry["cdc_chunks_cached"] = cached_count
+                    entry["cached_bytes"] = cached_bytes
+                    entry["progress_ratio"] = (
+                        round(cached_bytes / sc.size, 4) if sc.size > 0 else 0.0
+                    )
+                except Exception as e:
+                    # cache_check_fn raised — fall back to no-progress
+                    # snapshot. Better to ship a UI without progress
+                    # numbers than crash the control endpoint.
+                    log.debug("cache_check_fn failed for %s: %s", blob[:8], e)
+            out.append(entry)
         return out
 
     def pop_match(self, peer_fp: str, blob_hex: str) -> ResumeSidecar | None:

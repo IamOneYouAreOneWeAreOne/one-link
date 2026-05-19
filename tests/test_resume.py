@@ -352,3 +352,60 @@ def test_registry_snapshot_shape(tmp_path: Path) -> None:
     assert "cdc_chunks" not in entry  # the full manifest must NOT be inlined
     # JSON round-trip must succeed (catches accidentally non-serialisable values).
     json.loads(json.dumps(snap))
+
+
+def test_registry_snapshot_enriched_with_cache_progress(tmp_path: Path) -> None:
+    """When the snapshot is called with a cache_check_fn, each
+    entry comes back with progress_ratio / cdc_chunks_cached /
+    cached_bytes derived from how many of the manifest's chunk
+    hashes are currently in the local cache. The UI uses this to
+    render 'X% already on disk' before the sender reconnects."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    partial = inbox / "x.bin"
+    partial.write_bytes(b"x" * 32)
+    sc = _make("a" * 64, "P" * 64, partial, size=1024)
+    # _make builds 2 chunks: hash "a"*64 (512B), hash "b"*64 (512B).
+    persist_sidecar(inbox, sc)
+
+    reg = ResumeRegistry(inbox)
+    reg.load_from_inbox()
+
+    # Cache reports only the FIRST chunk is present.
+    def cache_check(hashes: list[str]) -> list[str]:
+        return [h for h in hashes if h == "a" * 64]
+
+    snap = reg.snapshot(cache_check_fn=cache_check)
+    assert len(snap) == 1
+    entry = snap[0]
+    assert entry["cdc_chunks_cached"] == 1
+    assert entry["cached_bytes"] == 512
+    assert entry["progress_ratio"] == 0.5  # 512 / 1024
+    # Without the callback the entry stays bare.
+    bare = reg.snapshot()[0]
+    assert "progress_ratio" not in bare
+    assert "cdc_chunks_cached" not in bare
+
+
+def test_registry_snapshot_cache_check_failure_isolated(tmp_path: Path) -> None:
+    """If cache_check_fn raises, the snapshot must still ship —
+    just without the progress enrichment. A broken cache lookup
+    should not take down the control endpoint."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    partial = inbox / "x.bin"
+    partial.write_bytes(b"x" * 16)
+    persist_sidecar(inbox, _make("a" * 64, "P" * 64, partial, size=100))
+
+    reg = ResumeRegistry(inbox)
+    reg.load_from_inbox()
+
+    def broken(hashes: list[str]) -> list[str]:
+        raise RuntimeError("cache lookup is broken")
+
+    snap = reg.snapshot(cache_check_fn=broken)
+    assert len(snap) == 1
+    # Basic fields survive...
+    assert snap[0]["blob"] == "a" * 64
+    # ...but the enrichment fields are absent (broken callback).
+    assert "progress_ratio" not in snap[0]
