@@ -14870,6 +14870,114 @@ class Daemon:
                     return
                 result = await self.resume_paused_transfers_for(peer_fp)
                 await self._reply(writer, {"ok": bool(result.get("ok")), "result": result})
+            elif cmd == "pin_peer":
+                # Pin a peer for testing + scripted flows. Without
+                # this, automated pipelines have no way to flip
+                # trust from "discovered" (None) to "pinned" — the
+                # UI surface had no programmatic equivalent.
+                # Routed through the existing
+                # ``State.set_peer_trust`` so the audit trail + DM
+                # TTL defaults fire normally.
+                if self.state is None:
+                    await self._reply(writer, {"ok": False, "error": "state not available"})
+                    return
+                peer_arg = str(req.get("peer") or req.get("peer_fp") or "")
+                # Resolve short_id -> full fingerprint via the
+                # peer registry.
+                peer_fp = ""
+                if len(peer_arg) == 64:
+                    peer_fp = peer_arg.lower()
+                else:
+                    cands = self._resolve_peer_candidates(peer_arg)
+                    if cands:
+                        peer_fp = self._peer_fp_from_peer(cands[0]) or ""
+                if not peer_fp:
+                    await self._reply(writer, {
+                        "ok": False,
+                        "error": f"no peer {peer_arg!r}",
+                    })
+                    return
+                trust = str(req.get("trust") or "pinned")
+                if trust not in ("pinned", "pending", "rejected"):
+                    await self._reply(writer, {
+                        "ok": False,
+                        "error": f"invalid trust {trust!r}",
+                    })
+                    return
+                try:
+                    self.state.set_peer_trust(
+                        peer_fp,
+                        trust,
+                        actor="control_api:pin_peer",
+                        note=str(req.get("note") or ""),
+                    )
+                    # Newly-pinned peer should learn our endpoints
+                    # (including QUIC port) immediately so they
+                    # can reach us via QUIC without waiting for
+                    # the periodic announcement loop. Fire-and-
+                    # forget; failure is non-fatal.
+                    if trust == "pinned":
+                        with contextlib.suppress(Exception):
+                            asyncio.create_task(
+                                self.broadcast_endpoint_to_paired()
+                            )
+                    await self._reply(writer, {
+                        "ok": True,
+                        "peer_fp": peer_fp,
+                        "trust": trust,
+                    })
+                except Exception as e:
+                    await self._reply(writer, {
+                        "ok": False,
+                        "error": str(e),
+                    })
+            elif cmd == "quic_ping":
+                # Wave 2e: end-to-end QUIC connectivity probe. The
+                # control client passes a peer fingerprint or
+                # short_id; we resolve it the same way ``send``
+                # does (mDNS-discovered peers are fine — the QUIC
+                # is_paired callback enforces the trust gate at the
+                # native layer based on State DB pinning), dial
+                # (or reuse) the peer's QUIC endpoint, send a PING
+                # frame, return the RTT + response metadata. Useful
+                # for "is QUIC actually working between A and B
+                # right now?" without any of the file-engine
+                # plumbing in the loop.
+                peer_arg = str(req.get("peer") or req.get("peer_fp") or "")
+                # Use the same liberal resolver as ``send`` /
+                # ``send_file`` rather than the strict pinned-only
+                # one — tests and dev flows often run between
+                # mDNS-discovered peers, and pinning is the
+                # caller's responsibility upstream.
+                peers = self._resolve_peer_candidates(peer_arg)
+                if not peers:
+                    fallback = await self.resolve_for_send(peer_arg)
+                    if fallback is not None:
+                        peers = [fallback]
+                if not peers:
+                    await self._reply(writer, {
+                        "ok": False,
+                        "error": f"no peer {peer_arg!r}",
+                    })
+                    return
+                payload_str = req.get("payload") or "ping"
+                if isinstance(payload_str, str):
+                    payload_bytes = payload_str.encode("utf-8")[:1024]
+                elif isinstance(payload_str, (bytes, bytearray)):
+                    payload_bytes = bytes(payload_str)[:1024]
+                else:
+                    payload_bytes = b"ping"
+                # Use the peer's fingerprint as the cache key.
+                peer = peers[0]
+                peer_fp = self._peer_fp_from_peer(peer) or ""
+                if not peer_fp:
+                    await self._reply(writer, {
+                        "ok": False,
+                        "error": "peer has no fingerprint",
+                    })
+                    return
+                result = await self.quic_ping(peer_fp, payload_bytes)
+                await self._reply(writer, result)
             elif cmd == "cancel_resumable_transfer":
                 # Abandon a specific in-progress inbound transfer.
                 # Removes the sidecar from the resume registry,
@@ -15702,6 +15810,14 @@ class Daemon:
         )
         peer_port = self._peer_server.sockets[0].getsockname()[1]
         _peer_port_path().write_text(str(peer_port))
+        # Seed ``_rendezvous_peer_port`` from the actual peer-server
+        # port immediately so ``broadcast_endpoint_to_paired`` (which
+        # uses this value to enumerate local endpoints + their
+        # quic_port companion) works in LAN-only mode where no
+        # rendezvous URL is configured. The rendezvous client init
+        # below will overwrite if it gets a chance, but the default
+        # now reflects reality.
+        self._rendezvous_peer_port = peer_port
 
         self._control_server = await asyncio.start_server(
             self._handle_control, host="127.0.0.1", port=0
@@ -16092,6 +16208,48 @@ class Daemon:
             if "is closed" not in str(e):
                 raise
 
+    async def quic_ping(self, peer_fp: str, payload: bytes = b"ping") -> dict:
+        """Wave 2e diagnostic: send a single QUIC PING frame to a
+        paired peer and return RTT + payload echo. Proves the
+        full daemon→daemon QUIC pipeline (dial → frame round-trip
+        → response) without requiring any of the chunk-routing
+        machinery to be hooked up. Used by the control endpoint
+        + tests.
+
+        Returns a dict with:
+          ok: bool — success
+          rtt_ms: float — round-trip time
+          payload_echo: bytes (hex string in JSON) — response
+          error: str — present on failure
+        """
+        from one_link import peer_quic as _peer_quic
+        if not _peer_quic.HAS_NATIVE:
+            return {"ok": False, "error": "native QUIC crate not installed"}
+        if _peer_quic.FRAME_PING is None or _peer_quic.FRAME_PONG is None:
+            return {"ok": False, "error": "QUIC ping frame types unavailable"}
+        peer = await self.resolve_for_send(peer_fp)
+        if peer is None:
+            return {"ok": False, "error": "peer not resolvable"}
+        conn = await self._get_or_dial_quic(peer_fp, peer)
+        if conn is None:
+            return {"ok": False, "error": "no QUIC connection available"}
+        try:
+            t0 = time.perf_counter()
+            kind, response = await asyncio.to_thread(
+                conn.send_frame_round_trip,
+                _peer_quic.FRAME_PING,
+                payload,
+            )
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            return {
+                "ok": True,
+                "rtt_ms": round(elapsed_ms, 3),
+                "response_frame": int(kind),
+                "response_len": len(response),
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"frame round-trip failed: {e}"}
+
     async def _get_or_dial_quic(self, peer_fp: str, peer) -> object | None:
         """Wave 2e: return a cached outbound QUIC Connection to
         ``peer_fp`` or open a fresh one and cache it.
@@ -16174,20 +16332,21 @@ class Daemon:
                 return None
 
     async def _quic_accept_loop(self) -> None:
-        """Wave 2d: accept inbound QUIC connections.
+        """Wave 2d: accept inbound QUIC connections + spawn a
+        per-connection frame-recv task.
 
         Native ``accept_blocking(timeout_ms)`` releases the GIL
         while waiting; we wrap it in ``asyncio.to_thread`` so the
-        loop stays responsive. Each accepted ``Connection`` is
-        stashed in ``_quic_inbound_pending`` for the file-engine
-        wave 2e to consume.
+        loop stays responsive. Each accepted Connection gets a
+        dedicated ``_quic_inbound_frame_loop`` task that reads
+        frames from the connection and dispatches them.
 
         Errors here NEVER take down the daemon — QUIC is the
         opt-in fast path; WebRTC stays the always-on default.
         """
-        # Pending inbound connections keyed by remote address.
-        # Wave 2e drains this when chunk routing kicks in.
-        self._quic_inbound_pending: list[tuple[object, str]] = []
+        self._quic_inbound_tasks: set[asyncio.Task] = getattr(
+            self, "_quic_inbound_tasks", set()
+        )
         endpoint = self._quic_server_endpoint
         if endpoint is None:
             return
@@ -16205,14 +16364,78 @@ class Daemon:
                 await asyncio.sleep(0.5)
                 continue
             if conn is None:
-                # Timeout, no inbound during this window. Loop.
-                continue
+                continue  # timeout, loop
             try:
                 remote = str(conn.remote_address)
             except Exception:
                 remote = "?"
             log.info("QUIC inbound connection accepted from %s", remote)
-            self._quic_inbound_pending.append((conn, remote))
+            task = asyncio.create_task(
+                self._quic_inbound_frame_loop(conn, remote)
+            )
+            self._quic_inbound_tasks.add(task)
+            task.add_done_callback(self._quic_inbound_tasks.discard)
+
+    async def _quic_inbound_frame_loop(self, conn, remote: str) -> None:
+        """Per-connection inbound frame dispatcher (Wave 2e).
+
+        Reads frames in a loop via ``recv_frame_blocking`` and
+        handles the small set we currently understand:
+
+          - FRAME_PING: respond immediately with FRAME_PONG
+            carrying the request payload (echo).
+
+        Future frames (FRAME_CHUNK_REQUEST, etc.) will join here
+        as the Wave 2e chunk router lands. Unknown frames are
+        logged + dropped without tearing down the connection.
+
+        Exits cleanly when ``recv_frame_blocking`` returns None
+        (peer closed gracefully) or raises.
+        """
+        from one_link import peer_quic as _peer_quic
+        try:
+            while True:
+                try:
+                    result = await asyncio.to_thread(
+                        conn.recv_frame_blocking, 30_000,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.debug(
+                        "QUIC inbound recv error from %s: %s",
+                        remote, e,
+                    )
+                    return
+                if result is None:
+                    # 30 s with no frames — peer's still
+                    # connected (otherwise the recv would have
+                    # raised), just idle. Continue.
+                    continue
+                stream_id, frame_kind, payload = result
+                if frame_kind == _peer_quic.FRAME_PING:
+                    # Echo the payload back as PONG. send_response_on
+                    # writes on the SAME bidi stream as the request.
+                    try:
+                        await asyncio.to_thread(
+                            conn.send_response_on,
+                            stream_id,
+                            _peer_quic.FRAME_PONG,
+                            payload,
+                        )
+                    except Exception as e:
+                        log.debug(
+                            "QUIC PONG send failed to %s: %s", remote, e,
+                        )
+                else:
+                    log.debug(
+                        "QUIC inbound frame %d (len=%d) from %s dropped — "
+                        "no handler",
+                        frame_kind, len(payload), remote,
+                    )
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close(0, b"frame loop ended")
 
     async def stop(self) -> None:
         # Wave 2d: tear down the QUIC server endpoint + accept loop
