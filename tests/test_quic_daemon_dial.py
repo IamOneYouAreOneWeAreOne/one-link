@@ -75,16 +75,22 @@ def test_daemon_brings_up_quic_endpoint() -> None:
         # happens in the next test against the in-process state.
 
 
-@pytest.mark.skip(
-    reason="Wave 2e integration: broadcast_endpoint_to_paired in "
-    "LAN-only mode + pin_peer auto-trigger lands the QUIC port on "
-    "the peer reliably in production, but the test-harness daemon "
-    "pair takes a beat longer than the 3 s sleep allows for the "
-    "round-trip to clear. The pieces (Wave 2c bridge, 2d bring-up, "
-    "endpoint advertisement carrying quic_port, _get_or_dial_quic, "
-    "per-connection PING/PONG loop) all unit-test green; this is a "
-    "harness-timing follow-up, not a defect in the production pipeline."
-)
+def _wait_for_quic_peer_port(ctrl_port: int, target_fp_prefix: str, timeout: float = 30.0) -> bool:
+    """Poll the daemon's quic_status endpoint until the named
+    peer's QUIC port is recorded in ``advertised_ports``. Returns
+    True on success, False on timeout."""
+    end = time.time() + timeout
+    while time.time() < end:
+        status = request(ctrl_port, cmd="quic_status")
+        if status.get("ok"):
+            advertised = status.get("advertised_ports") or {}
+            for fp_hex in advertised:
+                if fp_hex.startswith(target_fp_prefix):
+                    return True
+        time.sleep(0.1)
+    return False
+
+
 def test_quic_ping_round_trip_between_daemons() -> None:
     """Headline Wave 2e proof: control-API ``quic_ping`` against
     a paired peer returns ok with a real RTT. This exercises:
@@ -111,13 +117,39 @@ def test_quic_ping_round_trip_between_daemons() -> None:
         assert a_pin.get("ok"), a_pin
         assert b_pin.get("ok"), b_pin
         # Warm up by sending a chat message — drives CAPS +
-        # ENDPOINT_UPDATE so both sides know each other's
-        # QUIC ports.
+        # session bringup so the broadcast_endpoint_to_paired
+        # called by pin_peer has a live channel to push the
+        # quic_port over.
         warm = request(p.a.control_port, cmd="send",
                        peer=p.b.short_id, body="warm")
         assert warm.get("ok") is True
-        # Give endpoint announcement a moment to flow.
-        time.sleep(3.0)
+        # Poll quic_status on BOTH sides until each daemon's
+        # ``advertised_ports`` map has an entry for the OTHER
+        # peer's fingerprint. This replaces the brittle fixed
+        # sleep — we wait for the real signal that the wire
+        # frame landed instead of guessing the timing.
+        #
+        # Note: ``a_pin["peer_fp"]`` is the peer's (B's) fingerprint
+        # as recorded by A's daemon, and vice versa. So:
+        #   - "A learned B's QUIC port" = A's advertised_ports has
+        #      a key matching B's fp prefix = a_pin["peer_fp"]
+        #   - "B learned A's QUIC port" = B's advertised_ports has
+        #      a key matching A's fp prefix = b_pin["peer_fp"]
+        b_fp_from_a = a_pin["peer_fp"][:16]  # B's fp prefix
+        a_fp_from_b = b_pin["peer_fp"][:16]  # A's fp prefix
+        a_sees_b_quic = _wait_for_quic_peer_port(
+            p.a.control_port, b_fp_from_a, timeout=30.0,
+        )
+        b_sees_a_quic = _wait_for_quic_peer_port(
+            p.b.control_port, a_fp_from_b, timeout=30.0,
+        )
+        assert a_sees_b_quic, (
+            "A never learned B's QUIC port; "
+            "broadcast_endpoint_to_paired may not be delivering."
+        )
+        assert b_sees_a_quic, (
+            "B never learned A's QUIC port."
+        )
         # Ask A to ping B over QUIC.
         result = request(
             p.a.control_port, cmd="quic_ping",

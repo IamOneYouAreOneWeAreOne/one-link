@@ -15326,12 +15326,48 @@ class Daemon:
                     })
                     return
                 try:
+                    # set_peer_trust UPDATEs a row that already
+                    # exists. If the peer is only mDNS-discovered
+                    # (no prior pair handshake) state.peers has no
+                    # row for them yet — the UPDATE would be a
+                    # silent no-op + pinning would silently fail.
+                    # Upsert from the discovery registry first.
+                    pre_row = self.state.get_peer(peer_fp)
+                    if pre_row is None and self.discovery is not None:
+                        for p_disc in self.discovery.registry.list():
+                            try:
+                                disc_fp_hex = self._peer_fp_from_peer(p_disc) or ""
+                            except Exception:
+                                disc_fp_hex = ""
+                            if disc_fp_hex == peer_fp:
+                                with contextlib.suppress(Exception):
+                                    self.state.upsert_peer(
+                                        fingerprint=peer_fp,
+                                        short_id=p_disc.short_id,
+                                        pubkey=getattr(p_disc, "ed_pub", b"") or b"",
+                                        hostname=getattr(p_disc, "hostname", None),
+                                        address=getattr(p_disc, "address", None),
+                                        port=getattr(p_disc, "port", None),
+                                        trust_default="pending",
+                                    )
+                                break
                     self.state.set_peer_trust(
                         peer_fp,
                         trust,
                         actor="control_api:pin_peer",
                         note=str(req.get("note") or ""),
                     )
+                    # Verify the trust actually persisted — guards
+                    # against the silent-no-op case above being
+                    # missed by a future refactor.
+                    after = self.state.get_peer(peer_fp)
+                    if after is None or after.trust != trust:
+                        await self._reply(writer, {
+                            "ok": False,
+                            "error": "peer record absent — could not pin",
+                            "peer_fp": peer_fp,
+                        })
+                        return
                     # Newly-pinned peer should learn our endpoints
                     # (including QUIC port) immediately so they
                     # can reach us via QUIC without waiting for
