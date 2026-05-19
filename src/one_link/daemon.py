@@ -14397,6 +14397,21 @@ class Daemon:
                             )
                             if chunk_ack_batch > 1:
                                 chunk_msg["ack_batch"] = chunk_ack_batch
+                            # Wave 2f attempted to route CDC chunks
+                            # over QUIC here. It introduced a
+                            # regression (8 MiB transfer 0.1s →
+                            # 222s) — the ``_handle_file_cdc_chunk``
+                            # path's ACK + finish-schedule needs a
+                            # live channel and our synth_channel
+                            # was breaking that. Reverted; CDC
+                            # mode still rides WebRTC. The
+                            # stream-mode (FILE_NATIVE_CHUNK) path
+                            # in the ``else:`` branch below DOES
+                            # use the QUIC fast path successfully.
+                            # Future Wave 2f+ needs a CDC handler
+                            # that drives the QUIC stream's
+                            # response frame as the ACK instead of
+                            # the WebRTC channel.
                             if cdc_binary_used:
                                 wire_payload = _encode_binary_frame(chunk_msg, payload)
                             else:
@@ -14558,6 +14573,22 @@ class Daemon:
                         QUIC_BATCH_LANES = 4
                         quic_pending_batch: list[dict] = []
                         quic_pending_sizes: list[int] = []
+                        # Pre-dial the peer's QUIC endpoint once
+                        # if conditions allow — populates the
+                        # _quic_outbound cache so the inner loop
+                        # can detect "QUIC is up" without paying a
+                        # dial per chunk. Failure here just means
+                        # the transfer rides WebRTC, no error.
+                        if (
+                            native_transfer_used
+                            and peer_fp_for_policy
+                            and peer_fp_for_policy not in self._quic_outbound
+                            and self._quic_peer_ports.get(peer_fp_for_policy)
+                        ):
+                            with contextlib.suppress(Exception):
+                                await self._get_or_dial_quic(
+                                    peer_fp_for_policy, peer,
+                                )
 
                         async def _fallback_quic_batch_to_webrtc() -> None:
                             """When the QUIC parallel dispatch
@@ -17114,22 +17145,18 @@ class Daemon:
                     and frame_kind == _peer_quic.FRAME_CHUNK_REQUEST
                     and peer_fp
                 ):
-                    # The frame payload is the serialised
-                    # FILE_NATIVE_CHUNK message bytes (JSON) — same
-                    # shape the WebRTC channel carries today. We
-                    # decode it + route through the existing
-                    # ``_handle_file_native_chunk`` so the chunk
-                    # handler doesn't care which transport brought
+                    # The frame payload is a serialised wire
+                    # message (JSON) — same shape the WebRTC
+                    # channel carries today. We decode it +
+                    # dispatch to the matching handler based on
+                    # the ``t`` field so the chunk-receive code
+                    # paths don't care which transport brought
                     # the bytes. A short FRAME_CHUNK_RESPONSE
                     # acknowledges the receive so the sender's
                     # round-trip-style API completes.
                     ack_payload = b"ok"
                     try:
                         msg = decode_msg(payload)
-                        # Synthesize the from/peer_sid the way
-                        # `_on_peer_message` does so the chunk
-                        # handler's existing logic works
-                        # unchanged.
                         peer_sid = peer_fp[:8]
                         # Use a sentinel channel that supports the
                         # minimum the handler touches: ``send``
@@ -17146,9 +17173,24 @@ class Daemon:
                             peer_ed_pub: bytes = b""
                             peer_short_id: str = peer_sid
                         synth_channel = _NoopChannel()
-                        await self._handle_file_native_chunk(
-                            synth_channel, msg, peer_fp, peer_sid,
-                        )
+                        msg_type = str(msg.get("t") or "")
+                        if msg_type == "FILE_NATIVE_CHUNK":
+                            await self._handle_file_native_chunk(
+                                synth_channel, msg, peer_fp, peer_sid,
+                            )
+                        elif msg_type == "FILE_CDC_CHUNK":
+                            await self._handle_file_cdc_chunk(
+                                synth_channel, msg, peer_fp, peer_sid,
+                            )
+                        elif msg_type == "FILE_OFFER":
+                            # Route the offer through the main
+                            # dispatcher so resume registry +
+                            # capability checks fire normally.
+                            await self._on_peer_message(
+                                synth_channel, msg,
+                            )
+                        else:
+                            ack_payload = f"unknown_t:{msg_type}".encode("utf-8")[:128]
                     except Exception as e:
                         log.debug(
                             "QUIC CHUNK dispatch failed from %s: %s",

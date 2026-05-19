@@ -298,6 +298,110 @@ def bench_receiver_memory(size: int) -> dict:
     return out
 
 
+def bench_quic_vs_webrtc(size: int = 16 * 1024 * 1024) -> dict:
+    """A/B compare a paired-pinned transfer (rides Wave 2e+2f
+    QUIC batch path) vs the same transfer between unpinned peers
+    (existing WebRTC pipeline). Both peers in each phase are
+    fresh daemon pairs so the chunk cache is empty.
+
+    The QUIC phase pins the peers + polls quic_status until both
+    sides have learned the other's QUIC port + then runs send_file.
+    The WebRTC baseline skips pinning entirely.
+    """
+    payload = _build_payload(size, seed=42)
+
+    def _phase_pinned() -> float:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "quic.bin"
+            src.write_bytes(payload)
+            with daemon_pair() as p:
+                a_pin = request(p.a.control_port, cmd="pin_peer",
+                                peer=p.b.short_id)
+                b_pin = request(p.b.control_port, cmd="pin_peer",
+                                peer=p.a.short_id)
+                if not (a_pin.get("ok") and b_pin.get("ok")):
+                    return float("nan")
+                request(p.a.control_port, cmd="send",
+                        peer=p.b.short_id, body="warm")
+                # Wait for both sides to learn each other's QUIC port.
+                b_fp_prefix = a_pin["peer_fp"][:16]
+                a_fp_prefix = b_pin["peer_fp"][:16]
+                ready_end = time.time() + 30.0
+                a_ready = b_ready = False
+                while time.time() < ready_end:
+                    if not a_ready:
+                        st = request(p.a.control_port, cmd="quic_status")
+                        if any(k.startswith(b_fp_prefix)
+                               for k in (st.get("advertised_ports") or {})):
+                            a_ready = True
+                    if not b_ready:
+                        st = request(p.b.control_port, cmd="quic_status")
+                        if any(k.startswith(a_fp_prefix)
+                               for k in (st.get("advertised_ports") or {})):
+                            b_ready = True
+                    if a_ready and b_ready:
+                        break
+                    time.sleep(0.1)
+                if not (a_ready and b_ready):
+                    return float("nan")
+                # Time the actual transfer.
+                t0 = time.time()
+                request(p.a.control_port, cmd="send_file",
+                        peer=p.b.short_id, path=str(src), timeout=300)
+                _wait_for_payload(p.b.home, payload, timeout=300.0)
+                return time.time() - t0
+
+    def _phase_unpinned() -> float:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "wrtc.bin"
+            src.write_bytes(payload)
+            with daemon_pair() as p:
+                request(p.a.control_port, cmd="send",
+                        peer=p.b.short_id, body="warm")
+                time.sleep(0.5)
+                t0 = time.time()
+                request(p.a.control_port, cmd="send_file",
+                        peer=p.b.short_id, path=str(src), timeout=300)
+                _wait_for_payload(p.b.home, payload, timeout=300.0)
+                return time.time() - t0
+
+    pinned_runs = []
+    for _ in range(2):
+        elapsed = _phase_pinned()
+        if elapsed == elapsed:  # not NaN
+            pinned_runs.append(elapsed)
+    unpinned_runs = []
+    for _ in range(2):
+        elapsed = _phase_unpinned()
+        if elapsed == elapsed:
+            unpinned_runs.append(elapsed)
+    pinned_med = statistics.median(pinned_runs) if pinned_runs else float("nan")
+    unpinned_med = statistics.median(unpinned_runs) if unpinned_runs else float("nan")
+    speedup = (
+        unpinned_med / pinned_med
+        if pinned_med == pinned_med and unpinned_med == unpinned_med and pinned_med > 0
+        else float("nan")
+    )
+    out = {
+        "scenario": "quic_vs_webrtc",
+        "size_bytes": size,
+        "pinned_quic_median_sec": round(pinned_med, 4) if pinned_med == pinned_med else None,
+        "pinned_quic_throughput_bps": round(size / pinned_med, 2) if pinned_med == pinned_med and pinned_med > 0 else None,
+        "unpinned_webrtc_median_sec": round(unpinned_med, 4) if unpinned_med == unpinned_med else None,
+        "unpinned_webrtc_throughput_bps": round(size / unpinned_med, 2) if unpinned_med == unpinned_med and unpinned_med > 0 else None,
+        "quic_speedup_x": round(speedup, 3) if speedup == speedup else None,
+        "samples_pinned": len(pinned_runs),
+        "samples_unpinned": len(unpinned_runs),
+    }
+    print(
+        f"  QUIC vs WebRTC at {_human_bytes(size)}: "
+        f"pinned/QUIC {pinned_med:.3f}s ({_human_throughput(size, pinned_med)}) "
+        f"vs unpinned/WebRTC {unpinned_med:.3f}s ({_human_throughput(size, unpinned_med)}) "
+        f"= {speedup:.2f}× speedup"
+    )
+    return out
+
+
 def bench_concurrent_transfers(n: int = 4, size: int = 32 * 1024 * 1024) -> dict:
     """Send ``n`` distinct files in parallel from A to B. Measures
     aggregate throughput vs. the per-file baseline; if the engine
@@ -637,7 +741,8 @@ def main() -> int:
         "--scenario",
         choices=[
             "cold", "memory", "sender_memory", "warm", "resume",
-            "sidecar", "cache", "concurrent", "all",
+            "sidecar", "cache", "concurrent", "quic_vs_webrtc",
+            "all",
         ],
         default="all",
         help="Run only the named scenario family",
@@ -674,6 +779,9 @@ def main() -> int:
     run_section("concurrent", lambda: bench_concurrent_transfers(
         n=4,
         size=8 * 1024 * 1024 if args.quick else 32 * 1024 * 1024,
+    ))
+    run_section("quic_vs_webrtc", lambda: bench_quic_vs_webrtc(
+        size=8 * 1024 * 1024 if args.quick else 16 * 1024 * 1024,
     ))
     run_section("warm", lambda: bench_warm_dedup(
         16 * 1024 * 1024 if args.quick else 64 * 1024 * 1024
