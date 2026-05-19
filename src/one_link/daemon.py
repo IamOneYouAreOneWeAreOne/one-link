@@ -1071,6 +1071,19 @@ class Daemon:
         # by _handle_endpoint_update; consumed by the outbound
         # dial helper.
         self._quic_peer_ports: dict[str, int] = {}
+        # peer_fp_hex -> native QUIC Connection (inbound). Wave 2e.
+        # Populated by the accept loop after binding the peer's
+        # fingerprint via the recent-callback deque below.
+        self._quic_inbound: dict[str, object] = {}
+        # Bounded ring of recent is_paired callback hits:
+        # (timestamp_ms, fingerprint_bytes). The accept loop uses
+        # the most-recent entry to map an inbound Connection back
+        # to its peer_fp. Native crate's accept doesn't yet
+        # surface the peer fingerprint directly; this deque is
+        # the workaround. Production-grade fix is to extend the
+        # native API.
+        from collections import deque as _deque
+        self._quic_recent_paired: object = _deque(maxlen=64)
         # Wave 2g: share-link registry (one-time send-to-anyone
         # capabilities). Mints + redeems happen through control
         # commands; persistence lives under data/share_links/.
@@ -15686,6 +15699,17 @@ class Daemon:
                     identity_pem = self.me.to_pkcs8_pem()
 
                     def _quic_is_paired(fp: bytes) -> bool:
+                        # Wave 2e: stash the fingerprint with a
+                        # timestamp so the accept loop can bind it
+                        # to the resulting Connection. Bounded
+                        # deque so a flood of bad handshakes can't
+                        # grow it unboundedly.
+                        try:
+                            self._quic_recent_paired.append(
+                                (int(time.time() * 1000), bytes(fp))
+                            )
+                        except Exception:
+                            pass
                         fp_hex = fp.hex()
                         if self.state is None:
                             return False
@@ -16591,28 +16615,59 @@ class Daemon:
                 remote = str(conn.remote_address)
             except Exception:
                 remote = "?"
-            log.info("QUIC inbound connection accepted from %s", remote)
+            # Wave 2e: bind the inbound Connection to a peer_fp
+            # via the most-recent is_paired callback hit. Bounded
+            # to entries within the last 5 seconds — older
+            # captures probably belong to a different handshake
+            # that came and went.
+            peer_fp = ""
+            now_ms = int(time.time() * 1000)
+            while self._quic_recent_paired:
+                ts_ms, fp_bytes = self._quic_recent_paired[-1]
+                if now_ms - ts_ms > 5000:
+                    self._quic_recent_paired.clear()
+                    break
+                peer_fp = fp_bytes.hex()
+                self._quic_recent_paired.pop()
+                break
+            if peer_fp:
+                # Replace any stale prior connection for this fp.
+                prior = self._quic_inbound.get(peer_fp)
+                if prior is not None:
+                    with contextlib.suppress(Exception):
+                        prior.close(0, b"replaced")
+                self._quic_inbound[peer_fp] = conn
+            log.info(
+                "QUIC inbound accepted from %s peer_fp=%s",
+                remote, peer_fp[:8] if peer_fp else "?",
+            )
             task = asyncio.create_task(
-                self._quic_inbound_frame_loop(conn, remote)
+                self._quic_inbound_frame_loop(conn, remote, peer_fp)
             )
             self._quic_inbound_tasks.add(task)
             task.add_done_callback(self._quic_inbound_tasks.discard)
 
-    async def _quic_inbound_frame_loop(self, conn, remote: str) -> None:
+    async def _quic_inbound_frame_loop(
+        self, conn, remote: str, peer_fp: str = "",
+    ) -> None:
         """Per-connection inbound frame dispatcher (Wave 2e).
 
         Reads frames in a loop via ``recv_frame_blocking`` and
-        handles the small set we currently understand:
+        dispatches each through a small jump table:
 
-          - FRAME_PING: respond immediately with FRAME_PONG
-            carrying the request payload (echo).
+          FRAME_PING            → echo payload as FRAME_PONG
+          FRAME_CHUNK_REQUEST   → decode embedded FILE_NATIVE_CHUNK,
+                                  feed through existing CDC chunk
+                                  handler, ACK with FRAME_CHUNK_RESPONSE
 
-        Future frames (FRAME_CHUNK_REQUEST, etc.) will join here
-        as the Wave 2e chunk router lands. Unknown frames are
-        logged + dropped without tearing down the connection.
+        Unknown frames are logged + dropped without tearing down
+        the connection. Exits cleanly when ``recv_frame_blocking``
+        returns None (peer closed) or raises.
 
-        Exits cleanly when ``recv_frame_blocking`` returns None
-        (peer closed gracefully) or raises.
+        ``peer_fp`` is the fingerprint bound at accept time via the
+        is_paired recent-deque. Required for the chunk handler to
+        gate on the right capability + register the chunk against
+        the right inbound transfer.
         """
         from one_link import peer_quic as _peer_quic
         try:
@@ -16636,8 +16691,6 @@ class Daemon:
                     continue
                 stream_id, frame_kind, payload = result
                 if frame_kind == _peer_quic.FRAME_PING:
-                    # Echo the payload back as PONG. send_response_on
-                    # writes on the SAME bidi stream as the request.
                     try:
                         await asyncio.to_thread(
                             conn.send_response_on,
@@ -16649,15 +16702,78 @@ class Daemon:
                         log.debug(
                             "QUIC PONG send failed to %s: %s", remote, e,
                         )
+                elif (
+                    _peer_quic.FRAME_CHUNK_REQUEST is not None
+                    and frame_kind == _peer_quic.FRAME_CHUNK_REQUEST
+                    and peer_fp
+                ):
+                    # The frame payload is the serialised
+                    # FILE_NATIVE_CHUNK message bytes (JSON) — same
+                    # shape the WebRTC channel carries today. We
+                    # decode it + route through the existing
+                    # ``_handle_file_native_chunk`` so the chunk
+                    # handler doesn't care which transport brought
+                    # the bytes. A short FRAME_CHUNK_RESPONSE
+                    # acknowledges the receive so the sender's
+                    # round-trip-style API completes.
+                    ack_payload = b"ok"
+                    try:
+                        msg = decode_msg(payload)
+                        # Synthesize the from/peer_sid the way
+                        # `_on_peer_message` does so the chunk
+                        # handler's existing logic works
+                        # unchanged.
+                        peer_sid = peer_fp[:8]
+                        # Use a sentinel channel that supports the
+                        # minimum the handler touches: ``send``
+                        # (we route ACKs back via the QUIC frame,
+                        # so the synthetic channel's send is a
+                        # no-op). The handler's primary side-
+                        # effects (cache store, write to disk,
+                        # ledger update) don't depend on the
+                        # channel object.
+                        class _NoopChannel:
+                            async def send(self, _data: bytes) -> None:
+                                return None
+                            peer_caps: dict = {}
+                            peer_ed_pub: bytes = b""
+                            peer_short_id: str = peer_sid
+                        synth_channel = _NoopChannel()
+                        await self._handle_file_native_chunk(
+                            synth_channel, msg, peer_fp, peer_sid,
+                        )
+                    except Exception as e:
+                        log.debug(
+                            "QUIC CHUNK dispatch failed from %s: %s",
+                            remote, e,
+                        )
+                        ack_payload = f"err:{e}".encode("utf-8")[:128]
+                    try:
+                        await asyncio.to_thread(
+                            conn.send_response_on,
+                            stream_id,
+                            _peer_quic.FRAME_CHUNK_RESPONSE,
+                            ack_payload,
+                        )
+                    except Exception as e:
+                        log.debug(
+                            "QUIC CHUNK ack send failed to %s: %s",
+                            remote, e,
+                        )
                 else:
                     log.debug(
                         "QUIC inbound frame %d (len=%d) from %s dropped — "
-                        "no handler",
+                        "no handler (peer_fp=%s)",
                         frame_kind, len(payload), remote,
+                        peer_fp[:8] if peer_fp else "?",
                     )
         finally:
             with contextlib.suppress(Exception):
                 conn.close(0, b"frame loop ended")
+            # Clear the inbound map so the next dial doesn't see
+            # a stale Connection.
+            if peer_fp and self._quic_inbound.get(peer_fp) is conn:
+                self._quic_inbound.pop(peer_fp, None)
 
     async def stop(self) -> None:
         # Wave 2d: tear down the QUIC server endpoint + accept loop
