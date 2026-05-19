@@ -513,6 +513,8 @@ class CallReliabilityBackend:
         if event in {
             "network_offline",
             "network_resume_repair",
+            "client_rejoin_requested",
+            "client_rejoin_media_ready",
             "ice_restart_requested",
             "pc_rebuild_start",
             "pc_rebuild_offer_sent",

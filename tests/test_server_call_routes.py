@@ -297,6 +297,69 @@ async def test_state_returns_call_snapshot() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rejoin_returns_active_snapshot_with_media_backfill() -> None:
+    srv, daemon = _server_with_daemon()
+    peer = _identity("mom-rejoin")
+    mgr = daemon._call_registry.open(
+        call_id="c-rejoin",
+        peer_master_vk_hex=peer.fingerprint,
+        local_role="recipient",
+        local_master_vk_hex=daemon.me.fingerprint,
+        started_at_ms=2_000,
+    )
+    mgr.handle(ManagerEvent(ManagerEventKind.WIRE_CALL_INVITE, 2_000))
+    mgr.handle(ManagerEvent(ManagerEventKind.USER_ACCEPT, 2_100))
+    daemon._call_sdp_backfill = {
+        "c-rejoin": {
+            "sdp_offer": "v=0\r\ns=offer\r\n",
+            "sdp_answer": "v=0\r\ns=answer\r\n",
+        },
+    }
+    daemon._call_ice_backfill = {
+        "c-rejoin": [{
+            "candidate": "candidate:1 1 udp 1 0.0.0.0 9 typ host",
+            "sdp_mid": "0",
+            "sdp_m_line_index": 0,
+        }],
+    }
+    resp = await srv.api_call_action(_FakeRequest(body={  # type: ignore[arg-type]
+        "action": "rejoin",
+        "call_id": "c-rejoin",
+        "reason": "backfill_active",
+    }))
+    import json
+    payload = json.loads(resp._body or b"")
+    assert payload["ok"] is True
+    assert payload["call_id"] == "c-rejoin"
+    assert payload["phase"] == "active"
+    assert payload["is_active"] is True
+    assert payload["rejoin"]["allowed"] is True
+    assert payload["rejoin"]["same_call_id"] is True
+    assert payload["pending_sdp_offer"] == "v=0\r\ns=offer\r\n"
+    assert payload["pending_sdp_answer"] == "v=0\r\ns=answer\r\n"
+    assert payload["pending_ice_candidates"][0]["sdp_mid"] == "0"
+    assert payload["session_authority"]["state"] == "reconnecting"
+    assert payload["recovery_intent"]["action"] in {
+        "restart_ice", "renegotiate", "observe",
+    }
+
+
+@pytest.mark.asyncio
+async def test_rejoin_unknown_call_returns_not_found() -> None:
+    srv, _ = _server_with_daemon()
+    resp = await srv.api_call_action(_FakeRequest(body={  # type: ignore[arg-type]
+        "action": "rejoin",
+        "call_id": "missing",
+        "reason": "browser_rejoin",
+    }))
+    import json
+    payload = json.loads(resp._body or b"")
+    assert resp.status == 404
+    assert payload["ok"] is False
+    assert "no longer active" in payload["user_message"].lower()
+
+
+@pytest.mark.asyncio
 async def test_report_metrics_returns_backend_path_recommendation() -> None:
     srv, daemon = _server_with_daemon()
     peer = _identity("mom-metrics")

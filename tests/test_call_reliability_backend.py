@@ -267,3 +267,24 @@ def test_reliability_backend_session_authority_handles_network_events(tmp_path: 
     recovered = backend.session_for("call-network")
     assert recovered["state"] == "recovered"
     assert recovered["reason"] == "playback_revive"
+
+
+def test_reliability_backend_marks_client_rejoin_as_reconnecting(tmp_path: Path) -> None:
+    backend = CallReliabilityBackend(log_path=tmp_path / "call_reliability.jsonl")
+    backend.record_event({
+        "call_id": "call-rejoin",
+        "event": "client_rejoin_requested",
+        "reason": "browser_rejoin",
+    })
+    requested = backend.session_for("call-rejoin")
+    assert requested["state"] == "reconnecting"
+    assert requested["reason"] == "browser_rejoin"
+
+    backend.record_event({
+        "call_id": "call-rejoin",
+        "event": "client_rejoin_media_ready",
+        "reason": "media_rejoin",
+    })
+    ready = backend.session_for("call-rejoin")
+    assert ready["state"] == "reconnecting"
+    assert ready["reason"] == "media_rejoin"

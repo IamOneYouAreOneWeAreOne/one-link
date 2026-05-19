@@ -260,6 +260,27 @@ def test_call_driver_suppresses_duplicate_rings_after_accept(index_html: str) ->
     assert 'reason: "duplicate_ring"' in ring_snippet
 
 
+def test_call_driver_rejoins_active_calls_after_browser_reload(index_html: str) -> None:
+    assert "lastRejoinAttemptMs" in index_html
+    rejoin_idx = index_html.find("async function rejoinActiveCallFromSnapshot")
+    assert rejoin_idx > 0
+    rejoin_snippet = index_html[rejoin_idx:rejoin_idx + 3600]
+    assert 'action: "rejoin"' in rejoin_snippet
+    assert "same call" not in rejoin_snippet.lower()
+    assert "setupRtcPeerConnection()" in rejoin_snippet
+    assert "startLocalMedia({ audio: true, video: wantsVideo })" in rejoin_snippet
+    assert "client_rejoin_media_ready" in rejoin_snippet
+    assert "applyRemoteSdpOffer(snapshot.pending_sdp_offer)" in rejoin_snippet
+    assert "applyRemoteSdpAnswer(snapshot.pending_sdp_answer)" in rejoin_snippet
+    assert "await applyRemoteIceCandidate" in rejoin_snippet
+    assert 'ensureMediaNegotiation("rejoin")' in rejoin_snippet
+
+    backfill_idx = index_html.find("async function backfillLivingPresenceCalls")
+    backfill_snippet = index_html[backfill_idx:backfill_idx + 4200]
+    assert "!media.pc || !media.localStream || !callUI.localMediaReady" in backfill_snippet
+    assert 'rejoinActiveCallFromSnapshot(call, "backfill_active")' in backfill_snippet
+
+
 def test_start_call_paints_overlay_before_daemon_roundtrip(index_html: str) -> None:
     idx = index_html.find("window.startLivingPresenceCall = async function")
     assert idx > 0

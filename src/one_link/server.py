@@ -3738,6 +3738,12 @@ class UIServer:
         if action_name == "report_call_event":
             return self._handle_report_call_event_action(body)
 
+        # Browser/app restart recovery: restore the live media engine
+        # against an existing backend-owned call instead of opening a
+        # duplicate call or letting each side guess.
+        if action_name == "rejoin":
+            return self._handle_rejoin_call_action(body)
+
         # Tier η — browser-driven Predictive Continuity API.
         if action_name == "observe_frame":
             return self._handle_observe_frame_action(body)
@@ -3966,6 +3972,98 @@ class UIServer:
             "recovery_intent": reliability.recovery_intent_for(call_id),
         })
 
+    def _call_peer_label(self, peer_fp: str) -> str:
+        peer_label = peer_fp[:8]
+        try:
+            rec = self.daemon.state.get_peer(peer_fp)
+            if rec is not None:
+                peer_label = (
+                    getattr(rec, "local_alias", None)
+                    or getattr(rec, "display_name", None)
+                    or getattr(rec, "hostname", None)
+                    or peer_label
+                )
+        except Exception:
+            pass
+        return peer_label
+
+    def _call_media_backfill(self, call_id: str) -> tuple[dict, list]:
+        sdp_backfill = {}
+        ice_backfill = []
+        try:
+            sdp_backfill = dict(
+                getattr(self.daemon, "_call_sdp_backfill", {}).get(call_id, {})
+            )
+        except Exception:
+            sdp_backfill = {}
+        try:
+            ice_backfill = list(
+                getattr(self.daemon, "_call_ice_backfill", {}).get(call_id, [])
+            )
+        except Exception:
+            ice_backfill = []
+        return sdp_backfill, ice_backfill
+
+    def _call_snapshot(self, call_id: str, mgr) -> dict:
+        s = mgr.session_snapshot()
+        rec_value = s.recording_state.value if s.recording_state.value is not None else 0
+        peer_fp = mgr.state.peer_master_vk_hex
+        local_role = mgr.state.local_role
+        sdp_backfill, ice_backfill = self._call_media_backfill(call_id)
+        return {
+            "ok": True,
+            "call_id": call_id,
+            "peer_master_vk_hex": peer_fp,
+            "peer_label": self._call_peer_label(peer_fp),
+            "local_role": local_role,
+            "is_incoming": local_role == "recipient",
+            "pending_sdp_offer": sdp_backfill.get("sdp_offer"),
+            "pending_sdp_answer": sdp_backfill.get("sdp_answer"),
+            "pending_ice_candidates": ice_backfill,
+            "phase": mgr.phase.name.lower(),
+            "consent_phase": mgr.consent_phase.name.lower(),
+            "intensity": s.current_intensity.name.lower(),
+            "current_rung": s.current_rung_value.name.lower(),
+            "recording_state": int(rec_value),
+            "is_active": mgr.is_active,
+            "is_capturing": mgr.is_capturing,
+            "is_resumable": mgr.is_resumable,
+            "is_complete": mgr.is_complete,
+            "backend_authority": self._call_authority_snapshot(mgr),
+            "path_recommendation": self._call_reliability().recommendation_for(call_id),
+            "media_session_authority": self._call_reliability().session_for(call_id),
+            "media_recovery_intent": self._call_reliability().recovery_intent_for(call_id),
+            "rejoin": {
+                "allowed": bool(mgr.is_active or mgr.phase.name.lower() in {"inviting", "ringing"}),
+                "same_call_id": True,
+                "requires_media_restart": bool(mgr.is_active),
+            },
+        }
+
+    def _handle_rejoin_call_action(self, body: dict) -> web.Response:
+        call_id = body.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return web.json_response(
+                {"ok": False, "user_message": "This call is no longer active."},
+                status=404,
+            )
+        mgr = self.daemon._call_registry.get(call_id)
+        if mgr is None or mgr.is_complete:
+            return web.json_response(
+                {"ok": False, "user_message": "This call is no longer active."},
+                status=404,
+            )
+        reliability = self._call_reliability()
+        reliability.record_event({
+            "call_id": call_id,
+            "event": "client_rejoin_requested",
+            "reason": str(body.get("reason") or "browser_rejoin"),
+        })
+        snap = self._call_snapshot(call_id, mgr)
+        snap["session_authority"] = reliability.session_for(call_id)
+        snap["recovery_intent"] = reliability.recovery_intent_for(call_id)
+        return web.json_response(snap)
+
     def _append_call_media_event_audit(self, body: dict) -> None:
         """Append a sanitized call-media event row.
 
@@ -4074,6 +4172,9 @@ class UIServer:
                 "relay_probe_failed",
                 "turn_credentials_refreshed",
                 "turn_credentials_refresh_failed",
+                "client_rejoin_requested",
+                "client_rejoin_media_ready",
+                "client_rejoin_failed",
             }
             if not call_id or event not in allowed_events:
                 return
@@ -4120,6 +4221,8 @@ class UIServer:
                         "recovery_intent", "revive_playback",
                         "relay_probe", "credential_refresh",
                         "credential_expiring",
+                        "browser_rejoin", "backfill_active",
+                        "media_rejoin",
                     },
                 ),
                 "media_kind": _clean_token("media_kind", {"audio", "video"}),
