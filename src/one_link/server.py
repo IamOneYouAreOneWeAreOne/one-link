@@ -3736,6 +3736,7 @@ class UIServer:
             "call_id": call_id,
             "recommendation": recommendation.to_json(),
             "session_authority": reliability.session_for(call_id),
+            "recovery_intent": reliability.recovery_intent_for(call_id),
         })
 
     def _handle_report_call_event_action(self, body: dict) -> web.Response:
@@ -3752,6 +3753,7 @@ class UIServer:
             "ok": True,
             "call_id": call_id,
             "session_authority": reliability.session_for(call_id),
+            "recovery_intent": reliability.recovery_intent_for(call_id),
         })
 
     def _append_call_media_event_audit(self, body: dict) -> None:
@@ -3853,6 +3855,9 @@ class UIServer:
                 "backend_recommendation_applied",
                 "backend_recommendation_failed",
                 "session_authority_seen",
+                "recovery_intent_seen",
+                "recovery_intent_applied",
+                "recovery_intent_failed",
             }
             if not call_id or event not in allowed_events:
                 return
@@ -3895,6 +3900,8 @@ class UIServer:
                         "backend_audio_first_repair",
                         "negotiating", "connected", "degraded",
                         "reconnecting", "recovered", "failed",
+                        "restart_ice", "force_relay",
+                        "recovery_intent", "revive_playback",
                     },
                 ),
                 "media_kind": _clean_token("media_kind", {"audio", "video"}),
@@ -3906,6 +3913,7 @@ class UIServer:
                         "enabled", "disabled", "full", "steady", "survival",
                         "auto", "direct", "relay", "same",
                         "negotiating", "degraded", "recovered",
+                        "survival", "audio_first",
                     },
                 ),
                 "ok": bool(body.get("ok")) if "ok" in body else None,
@@ -4274,6 +4282,7 @@ class UIServer:
                 "backend_authority": self._call_authority_snapshot(mgr),
                 "path_recommendation": self._call_reliability().recommendation_for(cid),
                 "media_session_authority": self._call_reliability().session_for(cid),
+                "media_recovery_intent": self._call_reliability().recovery_intent_for(cid),
             })
         return web.json_response({"calls": out})
 
@@ -4342,6 +4351,7 @@ class UIServer:
             "backend_authority": self._call_authority_snapshot(mgr),
             "path_recommendation": self._call_reliability().recommendation_for(call_id),
             "media_session_authority": self._call_reliability().session_for(call_id),
+            "media_recovery_intent": self._call_reliability().recovery_intent_for(call_id),
         })
 
     async def api_call_trace(self, request: web.Request) -> web.Response:

@@ -26,6 +26,8 @@ def test_reliability_backend_records_metrics_and_recommends_relay(tmp_path: Path
     trace = backend.trace_for("call-1")
     assert trace["ok"] is True
     assert trace["recommendation"]["action"] == "audio_first_repair"
+    assert trace["recovery_intent"]["action"] == "audio_first_repair"
+    assert trace["recovery_intent"]["audio_first"] is True
     assert trace["rows"][0]["row_type"] == "metrics"
     rows_text = json.dumps(trace["rows"])
     assert "candidate:" not in rows_text
@@ -59,6 +61,10 @@ def test_reliability_backend_recommends_ice_restart_on_failure(tmp_path: Path) -
     assert rec.action == "ice_restart"
     assert rec.route_preference == "relay"
     assert rec.severity == 3
+    intent = backend.recovery_intent_for("call-2")
+    assert intent["action"] == "restart_ice"
+    assert intent["route_preference"] == "relay"
+    assert intent["priority"] == 3
 
 
 def test_reliability_backend_escalates_sustained_direct_path_pressure(tmp_path: Path) -> None:
@@ -127,6 +133,8 @@ def test_reliability_backend_trace_exposes_window_and_decision_confidence(tmp_pa
     })
     trace = backend.trace_for("call-window")
     assert trace["recommendation"]["action"] == rec.action
+    assert trace["recovery_intent"]["action"] == "revive_playback"
+    assert trace["rows"][0]["recovery_intent"]["action"] == "revive_playback"
     assert trace["recommendation"]["confidence"] >= 0.5
     assert trace["recommendation"]["ttl_ms"] > 0
     assert trace["window"]["sample_count"] == 1
@@ -179,6 +187,36 @@ def test_reliability_backend_tracks_session_authority_recovery(tmp_path: Path) -
     assert recovered["sequence"] > reconnecting["sequence"]
     trace = backend.trace_for("call-session")
     assert trace["session_authority"]["state"] == "recovered"
+    assert trace["recovery_intent"]["action"] == "hold"
+
+
+def test_reliability_backend_recovery_intent_escalates_reconnects(tmp_path: Path) -> None:
+    backend = CallReliabilityBackend(log_path=tmp_path / "call_reliability.jsonl")
+    backend.record_event({
+        "call_id": "call-intent",
+        "event": "network_offline",
+    })
+    intent = backend.recovery_intent_for("call-intent")
+    assert intent["action"] == "restart_ice"
+    assert intent["route_preference"] == "relay"
+    assert intent["audio_first"] is True
+    assert intent["priority"] == 3
+
+    backend.record_metrics({
+        "call_id": "call-intent",
+        "media_health_state": "healthy",
+        "ice_connection_state": "connected",
+        "connection_state": "connected",
+        "signaling_state": "stable",
+        "remote_live_audio_tracks": 1,
+        "remote_live_video_tracks": 1,
+        "inbound_audio_packets": 500,
+        "inbound_video_packets": 500,
+        "inbound_video_frames_decoded": 80,
+    })
+    recovered = backend.recovery_intent_for("call-intent")
+    assert recovered["action"] == "hold"
+    assert recovered["route_preference"] == "same"
 
 
 def test_reliability_backend_session_authority_handles_network_events(tmp_path: Path) -> None:

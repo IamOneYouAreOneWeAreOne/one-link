@@ -593,6 +593,34 @@ def test_backend_session_authority_drives_recovery_ui(index_html: str) -> None:
     assert "session_authority: callUI.lastSessionAuthority" in index_html
 
 
+def test_backend_recovery_intent_drives_repair_actions(index_html: str) -> None:
+    assert "async function applyBackendRecoveryIntent" in index_html
+    idx = index_html.find("async function applyBackendRecoveryIntent")
+    snippet = index_html[idx:idx + 6200]
+    for action in [
+        "revive_playback",
+        "downshift",
+        "audio_first_repair",
+        "restart_ice",
+        "force_relay",
+        "renegotiate",
+        "rebuild_peer_connection",
+    ]:
+        assert action in snippet
+    assert "rememberBackendRecoveryIntent" in index_html
+    assert "recovery_intent_seen" in index_html
+    assert "recovery_intent_applied" in index_html
+    assert "recovery_intent_failed" in index_html
+    assert "media.preferRelayNext = true" in snippet
+    assert "applyBackendPathRecommendation" in snippet
+    assert "backendActionAllowed(`intent_${action}`" in snippet
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 16000]
+    assert "applyBackendRecoveryIntent(" in metrics_snippet
+    assert "metricsResult && metricsResult.recovery_intent" in metrics_snippet
+    assert "recovery_intent: callUI.lastRecoveryIntent" in index_html
+
+
 def test_inbound_accept_waits_for_offer_instead_of_self_offering(index_html: str) -> None:
     idx = index_html.find("async function acceptInboundCall")
     snippet = index_html[idx:idx + 1800]

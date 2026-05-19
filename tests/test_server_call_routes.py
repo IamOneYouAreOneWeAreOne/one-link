@@ -293,6 +293,7 @@ async def test_state_returns_call_snapshot() -> None:
     assert payload["path_recommendation"]["action"] == "observe"
     assert payload["media_session_authority"]["state"] == "negotiating"
     assert payload["media_session_authority"]["reason"] == "no_media_truth_yet"
+    assert payload["media_recovery_intent"]["action"] == "observe"
 
 
 @pytest.mark.asyncio
@@ -324,6 +325,8 @@ async def test_report_metrics_returns_backend_path_recommendation() -> None:
     assert payload["recommendation"]["reason"] == "renderer_detached"
     assert payload["session_authority"]["state"] == "degraded"
     assert payload["session_authority"]["reason"] == "renderer_detached"
+    assert payload["recovery_intent"]["action"] == "revive_playback"
+    assert payload["recovery_intent"]["route_preference"] == "same"
 
 
 @pytest.mark.asyncio
@@ -358,6 +361,7 @@ async def test_call_trace_exports_privacy_safe_timeline() -> None:
     assert payload["backend_authority"]["state"] == "negotiating"
     assert payload["recommendation"]["action"] == "renegotiate"
     assert payload["session_authority"]["state"] == "negotiating"
+    assert payload["recovery_intent"]["action"] == "renegotiate"
     assert len(payload["rows"]) == 2
     assert "no SDP" in payload["privacy"]
 

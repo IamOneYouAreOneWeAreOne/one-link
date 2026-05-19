@@ -72,6 +72,34 @@ class PathRecommendation:
         }
 
 
+@dataclass(frozen=True)
+class RecoveryIntent:
+    """One executable backend repair intent for the browser call engine."""
+
+    action: str
+    reason: str
+    priority: int
+    route_preference: str
+    video_policy: str
+    audio_first: bool
+    run_after_ms: int = 0
+    cooldown_ms: int = 4_000
+    confidence: float = 0.5
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "reason": self.reason,
+            "priority": max(0, min(3, int(self.priority))),
+            "route_preference": self.route_preference,
+            "video_policy": self.video_policy,
+            "audio_first": bool(self.audio_first),
+            "run_after_ms": max(0, int(self.run_after_ms)),
+            "cooldown_ms": max(1_000, int(self.cooldown_ms)),
+            "confidence": round(float(self.confidence), 3),
+        }
+
+
 class CallReliabilityBackend:
     """Bounded in-memory + JSONL-backed call reliability timeline.
 
@@ -116,6 +144,11 @@ class CallReliabilityBackend:
             state["session"] = self._update_session_from_metrics(
                 state, row, recommendation,
             )
+            intent = self._recovery_intent(
+                state["session"], recommendation, latest=row,
+            )
+            row["recovery_intent"] = intent.to_json()
+            state["recovery_intent"] = intent.to_json()
             state["updated_at_ms"] = row["ts_ms"]
         self._append_jsonl(row)
         return recommendation
@@ -130,6 +163,10 @@ class CallReliabilityBackend:
             state = self._state.setdefault(call_id, {})
             state["last_event"] = row
             state["session"] = self._update_session_from_event(state, row)
+            recommendation = self._recommendation_from_state(state)
+            state["recovery_intent"] = self._recovery_intent(
+                state["session"], recommendation, latest=state.get("last_metrics"),
+            ).to_json()
             state["updated_at_ms"] = row["ts_ms"]
         self._append_jsonl(row)
 
@@ -157,6 +194,20 @@ class CallReliabilityBackend:
             confidence=0.35,
         )
 
+    def recovery_intent_for(self, call_id: str) -> dict[str, Any]:
+        with self._lock:
+            intent = dict(self._state.get(call_id, {}).get("recovery_intent") or {})
+            session = dict(self._state.get(call_id, {}).get("session") or {})
+            recommendation = self._recommendation_from_state(self._state.get(call_id, {}))
+            latest = self._state.get(call_id, {}).get("last_metrics")
+        if intent:
+            return intent
+        return self._recovery_intent(
+            session or self.session_for(call_id),
+            recommendation,
+            latest=latest,
+        ).to_json()
+
     def trace_for(self, call_id: str, *, limit: int = MAX_TRACE_ROWS) -> dict[str, Any]:
         limit = max(16, min(MAX_TRACE_ROWS, int(limit)))
         with self._lock:
@@ -170,6 +221,7 @@ class CallReliabilityBackend:
             "privacy": "aggregate media state only; no SDP, ICE candidates, IP addresses, device names, or media content",
             "recommendation": dict(state.get("recommendation") or self.recommendation_for(call_id)),
             "session_authority": dict(state.get("session") or self.session_for(call_id)),
+            "recovery_intent": dict(state.get("recovery_intent") or self.recovery_intent_for(call_id)),
             "window": state.get("window"),
             "last_metrics": state.get("last_metrics"),
             "last_event": state.get("last_event"),
@@ -532,6 +584,111 @@ class CallReliabilityBackend:
             row["route_preference"] = recommendation.route_preference
             row["video_policy"] = recommendation.video_policy
         return row
+
+    def _recommendation_from_state(self, state: dict[str, Any]) -> PathRecommendation:
+        raw = dict(state.get("recommendation") or {})
+        if not raw:
+            return PathRecommendation(
+                action="observe", reason="no_metrics_yet", severity=0,
+                route_preference="auto", video_policy="auto",
+                audio_priority=False,
+            )
+        return PathRecommendation(
+            action=_clean_slug(raw.get("action")) or "observe",
+            reason=_clean_slug(raw.get("reason")) or "state",
+            severity=_bounded_int(raw.get("severity"), 0, 3) or 0,
+            route_preference=_clean_slug(raw.get("route_preference")) or "auto",
+            video_policy=_clean_slug(raw.get("video_policy")) or "auto",
+            audio_priority=bool(raw.get("audio_priority")),
+            confidence=_bounded_float(raw.get("confidence"), 0.0, 1.0) or 0.5,
+            ttl_ms=_bounded_int(raw.get("ttl_ms"), 1_000, 60_000) or 4_000,
+            pressure_score=_bounded_float(raw.get("pressure_score"), 0.0, 1.0) or 0.0,
+        )
+
+    def _recovery_intent(
+        self,
+        session: dict[str, Any],
+        recommendation: PathRecommendation,
+        *,
+        latest: dict[str, Any] | None,
+    ) -> RecoveryIntent:
+        state = str(session.get("state") or "negotiating")
+        reason = _clean_slug(session.get("reason")) or recommendation.reason
+        action = recommendation.action
+        route = recommendation.route_preference or "auto"
+        video = recommendation.video_policy or "auto"
+        audio_first = bool(recommendation.audio_priority)
+        priority = max(int(session.get("sequence") or 0) and 1, recommendation.severity)
+        cooldown = max(2_000, min(12_000, int(recommendation.ttl_ms or 4_000)))
+
+        if state in {"connected", "recovered"}:
+            return RecoveryIntent(
+                action="hold", reason=reason or "media_flowing", priority=0,
+                route_preference="same", video_policy="auto", audio_first=False,
+                cooldown_ms=6_000, confidence=max(0.7, recommendation.confidence),
+            )
+        if state == "failed":
+            return RecoveryIntent(
+                action="rebuild_peer_connection", reason=reason or "failed",
+                priority=3, route_preference="relay", video_policy="audio-first",
+                audio_first=True, cooldown_ms=9_000,
+                confidence=max(0.75, recommendation.confidence),
+            )
+        if action == "revive_playback":
+            return RecoveryIntent(
+                action="revive_playback", reason=reason, priority=max(1, priority),
+                route_preference="same", video_policy=video, audio_first=False,
+                cooldown_ms=3_000, confidence=recommendation.confidence,
+            )
+        if action == "downshift":
+            return RecoveryIntent(
+                action="downshift", reason=reason, priority=max(1, priority),
+                route_preference=route, video_policy="downshift",
+                audio_first=audio_first, cooldown_ms=6_000,
+                confidence=recommendation.confidence,
+            )
+        if action == "audio_first_repair":
+            return RecoveryIntent(
+                action="audio_first_repair", reason=reason,
+                priority=max(2, priority), route_preference=route,
+                video_policy="audio-first", audio_first=True,
+                cooldown_ms=7_000, confidence=recommendation.confidence,
+            )
+        if action == "ice_restart":
+            preferred_route = "relay" if route == "relay" else route or "auto"
+            if state == "reconnecting" and preferred_route != "relay":
+                preferred_route = "relay"
+            return RecoveryIntent(
+                action="restart_ice", reason=reason, priority=max(2, priority),
+                route_preference=preferred_route, video_policy="downshift",
+                audio_first=True, cooldown_ms=9_000,
+                confidence=max(0.65, recommendation.confidence),
+            )
+        if action in {"renegotiate", "rebuild_peer_connection"}:
+            latest = latest or {}
+            repeated_renderer = str(latest.get("media_health_state") or "") == "renderer_detached"
+            return RecoveryIntent(
+                action="rebuild_peer_connection" if repeated_renderer else "renegotiate",
+                reason=reason, priority=max(2, priority),
+                route_preference=route, video_policy="audio-first",
+                audio_first=True, cooldown_ms=9_000,
+                confidence=recommendation.confidence,
+            )
+        if state in {"degraded", "reconnecting"}:
+            return RecoveryIntent(
+                action="audio_first_repair" if state == "degraded" else "restart_ice",
+                reason=reason, priority=2 if state == "degraded" else 3,
+                route_preference="relay" if state == "reconnecting" else "auto",
+                video_policy="downshift", audio_first=True,
+                cooldown_ms=7_000 if state == "degraded" else 9_000,
+                confidence=max(0.6, recommendation.confidence),
+            )
+        return RecoveryIntent(
+            action="observe", reason=reason or "negotiating", priority=0,
+            route_preference="auto", video_policy="auto", audio_first=False,
+            run_after_ms=500, cooldown_ms=4_000,
+            confidence=max(0.35, recommendation.confidence),
+        )
 
 
 def _clean_call_id(value: Any) -> str:

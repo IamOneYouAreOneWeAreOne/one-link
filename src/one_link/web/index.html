@@ -26234,6 +26234,9 @@
     lastBackendRecommendation: null,
     lastBackendRecommendationKey: "",
     lastBackendRecommendationMs: 0,
+    lastRecoveryIntent: null,
+    lastRecoveryIntentKey: "",
+    lastRecoveryIntentMs: 0,
     backendActionCooldowns: {},
     callHistory: [],
     acceptedCallIds: new Set(),
@@ -28043,6 +28046,83 @@
     }
   }
 
+  function rememberBackendRecoveryIntent(intent) {
+    if (!intent || typeof intent !== "object") return false;
+    const key = [
+      intent.action || "observe",
+      intent.reason || "",
+      intent.priority || 0,
+      intent.route_preference || "auto",
+    ].join("|");
+    callUI.lastRecoveryIntent = {
+      at_ms: Date.now(),
+      ...intent,
+    };
+    callUI.lastRecoveryIntentMs = callUI.lastRecoveryIntent.at_ms;
+    const changed = key && key !== callUI.lastRecoveryIntentKey;
+    if (changed) {
+      callUI.lastRecoveryIntentKey = key;
+      reportCallEvent("recovery_intent_seen", {
+        reason: String(intent.action || "observe"),
+        state: String(intent.route_preference || "auto"),
+        ok: String(intent.action || "observe") === "hold",
+      });
+    }
+    return changed;
+  }
+
+  async function applyBackendRecoveryIntent(intent, metrics) {
+    if (!intent || typeof intent !== "object") return;
+    if (!callUI.activeCallId || !media.pc) return;
+    const executableRecoveryIntents = [
+      "revive_playback",
+      "downshift",
+      "audio_first_repair",
+      "restart_ice",
+      "force_relay",
+      "renegotiate",
+      "rebuild_peer_connection",
+    ];
+    const action = String(intent.action || "observe").toLowerCase();
+    const routePreference = String(intent.route_preference || "auto").toLowerCase();
+    const cooldownMs = Math.max(1000, Number(intent.cooldown_ms || 4000));
+    rememberBackendRecoveryIntent(intent);
+    if (action === "observe" || action === "hold" || action === "watch") return;
+    if (!executableRecoveryIntents.includes(action)) return;
+    if (!backendActionAllowed(`intent_${action}`, cooldownMs)) return;
+    try {
+      const recommendationLike = {
+        action: action === "restart_ice" ? "ice_restart" : action,
+        reason: intent.reason || action,
+        route_preference: routePreference,
+        video_policy: intent.video_policy || "auto",
+        audio_priority: intent.audio_first === true,
+      };
+      if (routePreference === "relay" || action === "force_relay") {
+        media.preferRelayNext = true;
+        updateOneChip("#call-one-engine", "Relay repair");
+      }
+      if (action === "force_relay") {
+        recommendationLike.action = "ice_restart";
+        recommendationLike.route_preference = "relay";
+      }
+      await applyBackendPathRecommendation(
+        recommendationLike,
+        metrics || callUI.lastMetricsSnapshot,
+      );
+      reportCallEvent("recovery_intent_applied", {
+        reason: action,
+        state: routePreference || "auto",
+        ok: true,
+      });
+    } catch (_) {
+      reportCallEvent("recovery_intent_failed", {
+        reason: action,
+        state: routePreference || "auto",
+      });
+    }
+  }
+
   function applyBackendSessionAuthority(session) {
     if (!session || typeof session !== "object") return;
     const state = String(session.state || "").toLowerCase();
@@ -29545,6 +29625,10 @@
         metricsResult && metricsResult.recommendation,
         callUI.lastMetricsSnapshot,
       );
+      await applyBackendRecoveryIntent(
+        metricsResult && metricsResult.recovery_intent,
+        callUI.lastMetricsSnapshot,
+      );
       applyBackendSessionAuthority(
         metricsResult && metricsResult.session_authority,
       );
@@ -29614,6 +29698,7 @@
         last_metrics: callUI.lastMetricsSnapshot,
         tau_decision: callUI.tauLastDecision,
         backend_recommendation: callUI.lastBackendRecommendation,
+        recovery_intent: callUI.lastRecoveryIntent,
         session_authority: callUI.lastSessionAuthority,
         backend_action_cooldowns: callUI.backendActionCooldowns,
         repair_diagnosis: callUI.lastRepairDiagnosis,
