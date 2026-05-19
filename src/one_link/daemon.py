@@ -14499,6 +14499,7 @@ class Daemon:
                                 max(1, int(stream_scheduler.window_chunks)),
                                 remaining_stream_chunks,
                             )
+                            quic_dispatched = False  # Wave 2e fork flag
                             if native_transfer_used and native_session is not None:
                                 # ADR-0026: encrypt plaintext via the
                                 # cached native session; ship encrypted
@@ -14521,10 +14522,36 @@ class Daemon:
                                 )
                                 if chunk_ack_batch > 1 and not eof:
                                     chunk_msg["ack_batch"] = chunk_ack_batch
-                                queued_write = await _queue_or_send(
-                                    channel,
-                                    encode_msg(chunk_msg),
-                                )
+                                # Wave 2e: route this chunk over QUIC
+                                # if the peer has an active outbound
+                                # QUIC connection. The round-trip
+                                # awaits its own ACK frame on the
+                                # QUIC stream, bypassing the WebRTC
+                                # pending_sizes / FILE_ACK_BATCH
+                                # plumbing entirely. On any QUIC
+                                # error (handshake mid-flight, conn
+                                # torn) we fall through to the
+                                # WebRTC path so the transfer still
+                                # completes — never block file
+                                # delivery on the QUIC fast path.
+                                quic_dispatched = False
+                                if (
+                                    peer_fp_for_policy
+                                    and peer_fp_for_policy in self._quic_outbound
+                                ):
+                                    qres = await self.send_chunk_via_quic(
+                                        peer_fp_for_policy, peer, chunk_msg,
+                                    )
+                                    if qres.get("ok"):
+                                        quic_dispatched = True
+                                        chunks_sent += 1
+                                        raw_bytes_sent += len(data)
+                                        wire_bytes_sent += len(encode_msg(chunk_msg))
+                                if not quic_dispatched:
+                                    queued_write = await _queue_or_send(
+                                        channel,
+                                        encode_msg(chunk_msg),
+                                    )
                             elif binary_stream_used:
                                 chunk_msg = make_msg(
                                     "FILE_BIN_CHUNK",
@@ -14554,15 +14581,19 @@ class Daemon:
                                     channel,
                                     encode_msg(chunk_msg),
                                 )
-                            pending_sizes.append((
-                                str(chunk_msg.get("id")),
-                                len(data),
-                                time.perf_counter(),
-                            ))
-                            while not stream_scheduler.can_send(len(pending_sizes)):
-                                await _flush_if_queued(channel, queued_write)
-                                queued_write = False
-                                await _settle_one_stream_ack()
+                            # Wave 2e: skip the WebRTC pending-ACK
+                            # bookkeeping for chunks that already
+                            # round-tripped over QUIC.
+                            if not quic_dispatched:
+                                pending_sizes.append((
+                                    str(chunk_msg.get("id")),
+                                    len(data),
+                                    time.perf_counter(),
+                                ))
+                                while not stream_scheduler.can_send(len(pending_sizes)):
+                                    await _flush_if_queued(channel, queued_write)
+                                    queued_write = False
+                                    await _settle_one_stream_ack()
                             seq += 1
 
                         while pending_sizes:
