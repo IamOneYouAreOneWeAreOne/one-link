@@ -15292,6 +15292,17 @@ class Daemon:
                 # that needs to exercise a specific wire shape
                 # outside the canonical send_file / send paths.
                 # Not exposed in any UI surface.
+                #
+                # Hardening: gated behind ``ONE_LINK_DEV_HOOKS=1``
+                # so production binaries don't ship a control-
+                # plane bypass. Tests + scripted dev workflows set
+                # the env via the daemon-spawn harness.
+                if os.environ.get("ONE_LINK_DEV_HOOKS", "") != "1":
+                    await self._reply(writer, {
+                        "ok": False,
+                        "error": "_send_raw_message requires ONE_LINK_DEV_HOOKS=1",
+                    })
+                    return
                 peer_arg = str(req.get("peer") or "")
                 cands = self._resolve_peer_candidates(peer_arg)
                 if not cands:
@@ -17054,20 +17065,28 @@ class Daemon:
             except Exception:
                 remote = "?"
             # Wave 2e: bind the inbound Connection to a peer_fp
-            # via the most-recent is_paired callback hit. Bounded
-            # to entries within the last 5 seconds — older
-            # captures probably belong to a different handshake
-            # that came and went.
+            # via the OLDEST UNCONSUMED is_paired callback hit
+            # (FIFO order — the native crate's accept queue and
+            # the is_paired callback fire in handshake order, so
+            # the leftmost deque entry corresponds to this
+            # connection's handshake).
+            #
+            # Bounded to entries within the last 5 seconds —
+            # older captures probably belong to a handshake that
+            # ultimately failed mid-flight + never produced an
+            # accept_blocking return. Drop them before binding.
             peer_fp = ""
             now_ms = int(time.time() * 1000)
+            # Drop stale entries from the front first.
             while self._quic_recent_paired:
-                ts_ms, fp_bytes = self._quic_recent_paired[-1]
+                ts_ms, _ = self._quic_recent_paired[0]
                 if now_ms - ts_ms > 5000:
-                    self._quic_recent_paired.clear()
+                    self._quic_recent_paired.popleft()
+                else:
                     break
+            if self._quic_recent_paired:
+                _ts, fp_bytes = self._quic_recent_paired.popleft()
                 peer_fp = fp_bytes.hex()
-                self._quic_recent_paired.pop()
-                break
             if peer_fp:
                 # Replace any stale prior connection for this fp.
                 prior = self._quic_inbound.get(peer_fp)

@@ -169,6 +169,96 @@ def test_quic_ping_round_trip_between_daemons() -> None:
         assert result.get("response_len", 0) >= len(b"hello-quic")
 
 
+@pytest.mark.xfail(
+    reason=(
+        "Wave 2f's QUIC fork lives in send_file's STREAM-MODE branch "
+        "(the ``else:`` of ``if can_offer_cdc and FILE_WANTS:``). Both "
+        "daemon_pair peers advertise FILE_CDC, so any non-trivial file "
+        "takes the CDC branch instead → the QUIC fast path never "
+        "fires on realistic workloads. A clean Wave 2f+ ships QUIC "
+        "into the CDC chunk loop too — my earlier attempt regressed "
+        "8 MiB transfers from 0.1 s to 222 s and was reverted. "
+        "Tracking the live path: the quic_ping E2E test "
+        "(test_quic_ping_round_trip_between_daemons) proves the "
+        "QUIC stack itself works; this test documents that file "
+        "transfers don't yet ride it."
+    ),
+    strict=False,
+)
+def test_send_file_stream_mode_actually_uses_quic_when_pinned() -> None:
+    """Wave 2f integration end-to-end. Pin both directions, send
+    a small file (small enough to skip CDC and route via the
+    stream-mode FILE_NATIVE_CHUNK path where Wave 2e+2f's QUIC
+    fork lives), verify:
+
+      1. The file lands intact on the receiver.
+      2. ``quic_status`` on the sender shows an outbound
+         Connection to the receiver — proves the QUIC dial fired
+         + the chunk-send path actually took the QUIC fork
+         (the cache only populates via ``_get_or_dial_quic`` calls
+         which run on the QUIC fast path).
+    """
+    payload = b"quic-fast-path-payload" * 64  # ~1.4 KiB, way under CDC threshold
+    with daemon_pair() as p:
+        # Pin both directions so QUIC port advertisement flows.
+        a_pin = request(p.a.control_port, cmd="pin_peer",
+                        peer=p.b.short_id)
+        b_pin = request(p.b.control_port, cmd="pin_peer",
+                        peer=p.a.short_id)
+        assert a_pin.get("ok"), a_pin
+        assert b_pin.get("ok"), b_pin
+        request(p.a.control_port, cmd="send",
+                peer=p.b.short_id, body="warm")
+        # Wait until A knows B's QUIC port.
+        b_fp_from_a = a_pin["peer_fp"][:16]
+        assert _wait_for_quic_peer_port(
+            p.a.control_port, b_fp_from_a, timeout=30.0,
+        ), "A never learned B's QUIC port"
+
+        # Send a small file. Should take the stream-mode QUIC
+        # fork in send_file (Wave 2e/2f).
+        import tempfile
+        from pathlib import Path as _Path
+        with tempfile.TemporaryDirectory() as td:
+            src = _Path(td) / "stream_quic.bin"
+            src.write_bytes(payload)
+            res = request(p.a.control_port, cmd="send_file",
+                          peer=p.b.short_id, path=str(src),
+                          timeout=30)
+            assert res.get("ok"), res
+
+        # Verify file landed.
+        deadline = time.time() + 10.0
+        landed = False
+        while time.time() < deadline:
+            for f in (p.b.home / "data" / "inbox").iterdir() if (p.b.home / "data" / "inbox").is_dir() else []:
+                if f.is_file():
+                    try:
+                        if f.read_bytes() == payload:
+                            landed = True
+                            break
+                    except OSError:
+                        pass
+            if landed:
+                break
+            time.sleep(0.1)
+        assert landed, "payload never arrived in B's inbox"
+
+        # Verify the QUIC fast path actually fired — the outbound
+        # cache only populates when the sender dials, which only
+        # happens inside the send_file QUIC fork.
+        status = request(p.a.control_port, cmd="quic_status")
+        outbound = status.get("outbound") or []
+        assert any(
+            entry.get("peer_fp", "").startswith(b_fp_from_a)
+            for entry in outbound
+        ), (
+            f"Wave 2e/2f QUIC fast path didn't fire — A's "
+            f"quic_status outbound is empty after a transfer to "
+            f"a pinned peer. Outbound={outbound}"
+        )
+
+
 def test_endpoint_announcement_carries_quic_port() -> None:
     """The ENDPOINT_UPDATE frame must include ``quic_port`` once
     the daemon has a QUIC endpoint up — paired peers consume

@@ -103,6 +103,10 @@ def _spawn(home: Path, log: Path) -> tuple[subprocess.Popen, object]:
     # before conftest runs (or via a different code path), keep
     # tests from popping real Explorer windows on the developer.
     env.setdefault("ONE_LINK_DISABLE_REVEAL", "1")
+    # Wave 2g+ test hook ``_send_raw_message`` is hardened behind
+    # this env in production so it doesn't ship a control-plane
+    # bypass. Test daemons explicitly opt in.
+    env.setdefault("ONE_LINK_DEV_HOOKS", "1")
     log.parent.mkdir(parents=True, exist_ok=True)
     f = open(log, "wb")
     proc = subprocess.Popen(
