@@ -159,7 +159,7 @@ def _resolve_running_daemon() -> Optional[RunningDaemon]:
     return RunningDaemon(ctrl, int(srv), token, status)
 
 
-def _wait_for_daemon(timeout: float = 12.0) -> Optional[RunningDaemon]:
+def _wait_for_daemon(timeout: float = 45.0) -> Optional[RunningDaemon]:
     deadline = time.time() + timeout
     while time.time() < deadline:
         r = _resolve_running_daemon()
@@ -519,73 +519,13 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                 # conflicts when Edge is also open as a browser.
                 profile_dir = data_dir() / "edge-app-profile"
                 profile_dir.mkdir(parents=True, exist_ok=True)
-                # Edge --app= mode on Win11 still reserves a visible
-                # strip beneath the title bar. Three things contribute:
-                #
-                #   1. Win11 "Window Controls Overlay" — Edge reserves
-                #      a region for the WCO API even when the page
-                #      doesn't draw under it (WindowControlsOverlay,
-                #      WebAppWindowControlsOverlay).
-                #   2. Edge's sidebar / hubs / Copilot strip
-                #      (msEdgeSidebar, msHubsSidebar, msEdgeCopilot,
-                #      msEdgeFollow, msEdgeShoppingAssistant).
-                #   3. Personalization / signin pill (msImplicitSignIn,
-                #      Translate, InterestFeedV2).
-                #
-                # All disabled below. --app-auto-launched tells Edge
-                # this is a launcher, not a browser session, which
-                # further trims new-tab / restore UI. --window-name
-                # gives Edge an explicit title-bar caption so it
-                # doesn't lag waiting on the page title.
-                disable_features = ",".join([
-                    # Signin / personalization pills. The sovereignty
-                    # promise of One Link — no corp accounts, no
-                    # tracker — means the embedded runtime MUST NOT
-                    # silently sign the user into Microsoft / Google
-                    # via the Windows / OS-level account. These flags
-                    # disable EVERY codepath that does that on first
-                    # window open. May 15 2026 — expanded after a
-                    # fresh-profile launch surfaced the "We are now
-                    # syncing your browsing data" Microsoft Edge
-                    # popup. That popup is Edge's first-run sync
-                    # prompt; the flags below kill the codepath that
-                    # triggers it.
-                    "msImplicitSignIn",
-                    "EdgeAccount",
-                    "EdgeIdentitySignIn",
-                    "EdgeShowAccountAvatar",
-                    "IdentityConsistency",
-                    "SyncTrustedVaultPassphraseRecovery",
-                    "SignedExchangePrefetchCacheForNavigations",
-                    "Translate",
-                    "TranslateUI",
-                    "InterestFeedV2",
-                    # Edge sidebar / hubs / Copilot / shopping / follow.
-                    "msEdgeSidebar",
-                    "msHubsSidebar",
-                    "msEdgeCopilot",
-                    "msEdgeFollow",
-                    "msEdgeShoppingAssistant",
-                    "msEdgeAutomaticPasswordSave",
-                    "msEdgeWalletInjection",
-                    "msSplitButton",
-                    # Telemetry / metrics / domain reliability.
-                    "MetricsReportingFeature",
-                    "DomainReliability",
-                    "FieldTrialConfig",
-                    "OptimizationHints",
-                    # Window-controls-overlay reservation — the big
-                    # one on Win11 Edge --app= mode.
-                    "WindowControlsOverlay",
-                    "WebAppWindowControlsOverlay",
-                    # PWA promotion / install bubble.
-                    "DesktopPWAsAppHomePage",
-                    "DesktopPWAsTabStrip",
-                    "PwaUpdateDialogForAppIcon",
-                    # Misc residual UI.
-                    "DownloadBubble",
-                    "ChromeWebuiRefresh2023",
-                ])
+                # Keep this launch path intentionally conservative. A
+                # previous over-hardened flag set disabled a long list of
+                # Edge/Chrome features and could make double-clicks look
+                # dead on some Windows machines. These flags are the small
+                # reliable set verified to open a visible isolated app
+                # window while keeping One Link away from the user's normal
+                # browser profile.
                 # May 16 2026 — sensible default window size + position.
                 # User reported "the app opens at half-view." Edge
                 # --app= mode otherwise restores the LAST window
@@ -594,8 +534,12 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                 # compute a window that's 80% of the primary screen
                 # (clamped to 1400x900 max so on huge monitors the
                 # window doesn't dominate) centered on screen.
-                if _is_existing_app_window_running(profile_dir):
-                    return
+                # Always make a user-triggered desktop launch visible.
+                # A stale/minimized Edge app-mode process can still match
+                # _is_existing_app_window_running(), which made double-clicks
+                # look like One Link did nothing. Opening a fresh app window is
+                # better than silently returning when the user explicitly
+                # clicked the desktop app.
                 win_w, win_h, win_x, win_y = _default_window_geometry()
                 args = [
                     browser,
@@ -608,24 +552,6 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                     f"--window-position={win_x},{win_y}",
                     "--no-first-run",
                     "--no-default-browser-check",
-                    f"--disable-features={disable_features}",
-                    "--disable-sync",
-                    "--disable-sync-preferences",
-                    "--disable-extensions",
-                    "--no-experiments",
-                    # May 15 2026 — sovereignty hardening. None of
-                    # these turn off rendering; they turn off the
-                    # corp-side data flows the embedded Edge/Chrome
-                    # tries to start automatically.
-                    "--disable-background-networking",
-                    "--disable-domain-reliability",
-                    "--disable-component-update",
-                    "--disable-client-side-phishing-detection",
-                    "--disable-default-apps",
-                    "--metrics-recording-only",
-                    "--no-pings",
-                    "--no-service-autorun",
-                    "--password-store=basic",
                 ]
                 flags = (
                     subprocess.CREATE_NO_WINDOW
@@ -633,7 +559,7 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                     if os.name == "nt"
                     else 0
                 )
-                subprocess.Popen(
+                proc = subprocess.Popen(
                     args,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -641,6 +567,12 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                     creationflags=flags,
                     close_fds=True,
                 )
+                if os.name == "nt":
+                    time.sleep(0.75)
+                    if proc.poll() is not None or not _is_existing_app_window_running(
+                        profile_dir
+                    ):
+                        os.startfile(url)  # type: ignore[attr-defined]
                 return
             except Exception:
                 # Standalone failed — fall through to default

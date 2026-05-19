@@ -68,19 +68,13 @@ def test_open_browser_url_standalone_invokes_app_mode_when_chrome_found():
     assert "--new-window" in args
 
 
-def test_open_browser_url_standalone_passes_isolation_and_suppression_flags():
-    """The app-mode invocation must pass:
-      - --user-data-dir=<isolated path>  (clean profile, no MS account
-        sync / extensions / "already open" conflicts)
-      - --no-first-run                    (suppress first-run UI)
-      - --no-default-browser-check        (suppress nag)
-      - --disable-features=... msImplicitSignIn  (suppress signin pill
-        that otherwise reserves an empty strip under the title bar)
-      - --disable-sync                    (no Edge sync on our profile)
+def test_open_browser_url_standalone_passes_reliable_isolation_flags():
+    """The app-mode invocation must pass a small, reliable flag set.
 
-    Without these flags Edge --app= mode renders a visible empty
-    horizontal gap below its title bar — the residual chrome / signin
-    / first-run UI takes space even when blank."""
+    We keep the isolated app profile and first-run suppression, but avoid
+    a large --disable-features list because that over-hardened launch could
+    prevent a visible app window on Windows.
+    """
     from one_link import app as app_mod
 
     captured = []
@@ -111,12 +105,8 @@ def test_open_browser_url_standalone_passes_isolation_and_suppression_flags():
     assert any(a.startswith("--user-data-dir=") for a in args), args
     assert "--no-first-run" in args
     assert "--no-default-browser-check" in args
-    assert any(a.startswith("--disable-features=") for a in args)
-    # The features list must include the signin pill suppressor —
-    # that's the one most directly responsible for the visible gap.
-    feature_flag = next(a for a in args if a.startswith("--disable-features="))
-    assert "msImplicitSignIn" in feature_flag
-    assert "--disable-sync" in args
+    assert not any(a.startswith("--disable-features=") for a in args)
+    assert "--disable-sync" not in args
 
 
 def test_open_browser_url_standalone_false_skips_app_mode():
@@ -154,8 +144,8 @@ def test_open_browser_url_standalone_false_skips_app_mode():
         assert wb_open.called
 
 
-def test_open_browser_url_is_idempotent_when_app_window_is_already_open():
-    """Repeated launcher invocations must not keep spawning app windows."""
+def test_open_browser_url_still_opens_when_stale_app_window_is_detected():
+    """A stale/minimized app-mode process must not make desktop clicks silent."""
     from one_link import app as app_mod
 
     with mock.patch.object(
@@ -167,6 +157,7 @@ def test_open_browser_url_is_idempotent_when_app_window_is_already_open():
             app_mod, "_is_existing_app_window_running", return_value=True
         ):
             with mock.patch.object(app_mod.subprocess, "Popen") as popen:
+                popen.return_value.poll.return_value = None
                 with mock.patch.object(
                     app_mod.os, "startfile", create=True, return_value=None
                 ) as startfile:
@@ -174,7 +165,7 @@ def test_open_browser_url_is_idempotent_when_app_window_is_already_open():
                         "http://127.0.0.1:7117/?t=abc", standalone=True
                     )
 
-    assert not popen.called
+    assert popen.called
     assert not startfile.called
 
 
@@ -246,6 +237,15 @@ def test_run_app_signature_accepts_standalone_kwarg():
     assert "standalone" in sig.parameters
     # Default should be True (app-mode is the default UX).
     assert sig.parameters["standalone"].default is True
+
+
+def test_desktop_launcher_waits_for_slow_packaged_daemon_startup():
+    """Packaged Windows startup can take longer than source startup."""
+    from one_link.app import _wait_for_daemon
+    import inspect
+
+    sig = inspect.signature(_wait_for_daemon)
+    assert sig.parameters["timeout"].default >= 45.0
 
 
 def test_spawn_daemon_uses_python_module_in_source_mode(tmp_path):
