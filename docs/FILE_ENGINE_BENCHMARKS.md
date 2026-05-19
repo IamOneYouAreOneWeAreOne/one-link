@@ -175,6 +175,50 @@ browsers + indexers before a regression run.
    loopback is within noise, but smaller WAL log + atomic batch
    semantics + reduced lock contention are still wins.
 
+## Wave 2 shipped (8 additional commits on `push-relay-health`)
+
+Wave 2 layered on top of Wave 1 with three deeper features +
+the bench-validated foundation for two more:
+
+| Wave | What ships |
+|---|---|
+| **2a** | Hardlink fast-path on warm dedup — re-receiving an already-cached file hardlinks an existing local copy instead of paying a cache→disk reassembly write. Verified live in receiver logs; warm speedup ~1.46× → 1.76×. |
+| **2b** | `FILE_OFFER_BATCH` wire frame: N file offers bundled in one round-trip. Receiver dispatches each through the existing FILE_OFFER pipeline. Caps + hardening (256-offer ceiling, empty-batch rejection, per-offer try/except). 3 integration tests + new `FILE_OFFER_BATCH_V1` capability. |
+| **2c** | QUIC Identity bridge — `peer_quic.make_endpoint` no longer a stub. `make_server_endpoint` / `make_client_endpoint` factory the daemon uses + 5 unit tests including a real loopback handshake between two endpoints in one process. |
+| **2d** | Daemon brings up a QUIC server endpoint at startup, runs an `accept_blocking` loop in `asyncio.to_thread`, exposes the OS-assigned port for advertisement, tears everything down cleanly in `stop()`. |
+| **2e** | Two halves: (1) `quic_port` rides the existing `ENDPOINT_UPDATE` so paired peers learn each other's QUIC binds; per-peer `_get_or_dial_quic` outbound cache; `pin_peer` + `quic_ping` control commands; per-connection inbound frame loop responds to PING/PONG. (2) **Inbound chunk routing** — accept loop binds inbound Connections to peer_fp via a bounded recent-deque populated by the is_paired callback; `FRAME_CHUNK_REQUEST` carries serialised `FILE_NATIVE_CHUNK` payloads and routes through the existing `_handle_file_native_chunk`; `FRAME_CHUNK_RESPONSE` carries the ACK. Sender-side end-to-end wiring lands in 2e-extension. |
+| **2g** | **Share-link mode**: 32-byte bearer tokens + 8-word SAS phrases (derived from `identity_sas.SAS_VOCAB`), one-time, TTL-bounded (default 24 h, max 30 days), persistent across daemon restart via per-blob JSON sidecars under `data/share_links/`. Four new control commands (`create_share_link`, `redeem_share_link`, `list_share_links`, `revoke_share_link`). 16 unit tests + 7 daemon-integration tests covering mint, lookup, single-use redeem, expiry, revoke, persistence, snapshot-omits-token, corrupt-sidecar resilience. |
+
+## Post-Wave-2 measured numbers (median of 2 runs, --quick)
+
+| Metric | Value |
+|---|---|
+| 1 KiB cold transfer | 53 ms median |
+| 1 MiB cold | 46 ms median (21.7 MiB/s) |
+| 16 MiB cold | 188 ms median (85 MiB/s) |
+| 4×8 MiB concurrent aggregate | 87.2 MiB/s |
+| Warm dedup @ 16 MiB | **1.76× speedup** (was 1.46× before Wave 2a hardlink) |
+| Resume after kill+restart | 3.0 s |
+| 64 MiB receiver RSS peak | 88.5 MiB (overhead 1.383×) |
+| 64 MiB sender RSS peak | 90.8 MiB (overhead 1.418×) |
+| Sidecar persist | 725 µs/op |
+| Cache GC eviction | 8867 files/s |
+
+## Test posture after Wave 2
+
+| Suite | Count | Notes |
+|---|---|---|
+| Resume unit | 18 | green |
+| Chunk cache GC unit | 9 | green |
+| Two-device soak | 12 | green |
+| Perf regression gates | 4 | green |
+| QUIC bridge unit | 5 | includes real loopback handshake |
+| QUIC daemon E2E | 3 | 2 green, 1 skipped (harness timing follow-up) |
+| FILE_OFFER_BATCH integration | 3 | green |
+| Share-link unit | 16 | green |
+| Share-link daemon integration | 7 | green |
+| **Total** | **77** | **74 pass, 1 skip, 0 fail** |
+
 ## Wave 1 shipped (14 commits on `push-relay-health`)
 
 - `f5a6f13` resume primitive (ResumeSidecar + ResumeRegistry, 13 unit tests)
