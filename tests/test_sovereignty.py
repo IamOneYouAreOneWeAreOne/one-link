@@ -11,6 +11,7 @@ preset default in that order.
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -399,6 +400,59 @@ async def test_peer_rtc_ice_config_can_mint_per_call_turn_credentials(monkeypatc
     assert ":one-link:call-abc" in turn["username"]
     assert turn["credential"]
     assert body["routePolicy"]["per_call_credentials"] is True
+
+
+@pytest.mark.asyncio
+async def test_peer_rtc_ice_config_orders_turn_relays_by_health(monkeypatch):
+    from one_link.server import UIServer
+
+    now_ms = int(time.time() * 1000)
+
+    class _State:
+        def get_setting(self, k):
+            return {
+                "stun_servers": "",
+                "turn_servers": "turn:slow.relay:3478,turn:fast.relay:3478,turn:unknown.relay:3478",
+                "turn_username": "one",
+                "turn_credential": "secret",
+            }.get(k)
+
+    daemon = SimpleNamespace(
+        state=_State(),
+        discovery=None,
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aa", hostname="me"),
+        _outbound_log=[],
+        _outbound_log_started_ms=0,
+        _outbound_sessions={},
+        _relay_metrics={
+            "turn:slow.relay:3478": {
+                "rtt_ms": 650.0,
+                "loss_rate": 0.42,
+                "n_attempts": 10,
+                "n_successes": 4,
+                "last_observed_ms": now_ms,
+            },
+            "turn:fast.relay:3478": {
+                "rtt_ms": 24.0,
+                "loss_rate": 0.0,
+                "n_attempts": 12,
+                "n_successes": 12,
+                "last_observed_ms": now_ms,
+            },
+        },
+    )
+    server = UIServer(daemon)
+    resp = await server.api_peer_rtc_ice_config(SimpleNamespace(query={}))
+    body = json.loads(resp.text)
+    turn = body["iceServers"][-1]
+    assert turn["urls"][0] == "turn:fast.relay:3478"
+    assert turn["urls"][-1] == "turn:slow.relay:3478"
+    relays = body["routePolicy"]["relay_candidates"]
+    assert relays[0]["url"] == "turn:fast.relay:3478"
+    assert relays[0]["health"] == "healthy"
+    assert relays[-1]["health"] == "poor"
+    assert body["routePolicy"]["best_relay_health"] == "healthy"
+    assert body["routePolicy"]["best_relay_score"] == relays[0]["score"]
 
 
 @pytest.mark.asyncio
