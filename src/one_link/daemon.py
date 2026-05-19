@@ -893,6 +893,17 @@ class IncomingFile:
     cdc_chunks: list[dict] | None = None
     cdc_missing: set[int] | None = None
     cdc_parts: dict[int, bytes] | None = None
+    # Indices of CDC chunks that have already been seeked-and-
+    # written to ``out_path`` at their correct file offset during
+    # this session. ``_finish_cdc_file`` skips re-writing these
+    # (the bytes are already where they should be); only cache-
+    # only chunks (received in a prior session, restored on
+    # cross-restart resume) still need a write at finish time.
+    cdc_streamed: set[int] = field(default_factory=set)
+    # Number of CDC chunks committed since the last sidecar
+    # ``touch()`` write. Debounces sidecar persistence so we don't
+    # do a JSON round-trip on every chunk.
+    cdc_chunks_since_touch: int = 0
     transfer_id: str | None = None
     ack_batch_ids: list[str] = field(default_factory=list)
 
@@ -3965,7 +3976,11 @@ class Daemon:
                     # carried meaningful state during transfer (chunks
                     # land in cdc_parts/cache, not in the handle).
                     # ``_finish_cdc_file`` rewrites from scratch.
-                    handle = open(out_path, "wb")
+                    # ``w+b`` (read+write+truncate) instead of plain
+                    # ``wb`` so ``_finish_cdc_file`` can stream-hash
+                    # the file back through BLAKE3 without having to
+                    # close+reopen.
+                    handle = open(out_path, "w+b")
                     log.info(
                         "resume (cross-restart): %s blob=%s out=%s",
                         name, blob[:8], out_path.name,
@@ -3979,7 +3994,13 @@ class Daemon:
                     if sc_match is not None:
                         _delete_resume_sidecar(inbox_dir(), blob)
                     out_path = self._unique_inbox_path(blob, name)
-                    handle = open(out_path, "xb")
+                    # ``x+b`` (create-exclusive, read+write) instead
+                    # of plain ``xb`` so ``_finish_cdc_file`` can
+                    # stream-hash the file back through BLAKE3
+                    # without having to close+reopen. The exclusive-
+                    # create semantics that the H16 audit asked for
+                    # are preserved by the ``x``.
+                    handle = open(out_path, "x+b")
             if cdc_chunks:
                 if missing:
                     missing, swarm_assist = await self._swarm_assist_file_offer(
@@ -7112,8 +7133,61 @@ class Daemon:
         assert f.cdc_parts is not None
         assert f.cdc_missing is not None
         assert f.cdc_chunks is not None
-        f.cdc_parts[idx] = data
+        # Stream-to-disk: write the chunk to its final offset right
+        # now so the receiver doesn't have to keep the entire file's
+        # plaintext in Python's heap until reassembly. A 5 GB
+        # transfer used to need 5 GB of RAM here; now it needs one
+        # chunk's worth at a time. `_finish_cdc_file` then becomes
+        # "fsync + stream-hash the file" instead of "rewrite the
+        # whole file from heap-resident chunks".
+        try:
+            f.handle.seek(int(expected["start"]))
+            f.handle.write(data)
+        except OSError as e:
+            # Disk-full / permission denied / antivirus block. The
+            # chunk is already in the global cache (so a future
+            # retry can pull from cache without re-fetching), but
+            # this transfer can't continue right now.
+            self._abort_incoming_file(blob, f)
+            log.warning(
+                "stream-to-disk write failed for %s chunk %d: %s",
+                blob[:8], idx, e,
+            )
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="receiver_disk_write_failed",
+            )))
+            return
+        f.cdc_streamed.add(idx)
+        # Keep cdc_parts as a presence marker but drop the plaintext
+        # bytes — they're on disk, not in heap. Defence-in-depth:
+        # shrinks the window during which decrypted bytes sit in
+        # Python's heap from "whole-transfer-duration" to
+        # "single-chunk-processing".
+        f.cdc_parts[idx] = b""
         f.cdc_missing.remove(idx)
+        # Debounced sidecar touch. The TTL prune at daemon startup
+        # axes sidecars whose ``updated_ms`` is older than 30 days,
+        # but an actively-progressing transfer that started 31 days
+        # ago should be PRESERVED. Refresh the sidecar's
+        # ``updated_ms`` every 64 chunks (small enough to bound how
+        # far back the prune cutoff effectively shifts on the next
+        # start; large enough that the JSON round-trip cost
+        # amortises across many chunks).
+        f.cdc_chunks_since_touch += 1
+        if f.cdc_chunks_since_touch >= 64:
+            f.cdc_chunks_since_touch = 0
+            try:
+                _persist_resume_sidecar(inbox_dir(), ResumeSidecar(
+                    blob_hex=blob,
+                    peer_fp=peer_fp,
+                    name=f.name,
+                    size=f.size,
+                    out_path=str(f.out_path),
+                    cdc_chunks=list(f.cdc_chunks),
+                ))
+            except Exception as e:
+                log.debug("sidecar touch failed for %s: %s", blob[:8], e)
         cached = len(f.cdc_chunks) - len(f.cdc_missing)
         done_bytes = sum(int(c["size"]) for c in f.cdc_chunks if int(c["index"]) not in f.cdc_missing)
         self._update_transfer(
@@ -7141,19 +7215,42 @@ class Daemon:
         if not f or f.cdc_chunks is None:
             return
         try:
-            f.handle.seek(0)
-            f.handle.truncate()
-            h = blake3.blake3()
-            written = 0
+            # Stream-to-disk has already deposited every chunk that
+            # arrived during this session at its correct offset in
+            # ``out_path``. We only need to fill in chunks that were
+            # received in a PRIOR session (cache hits restored on
+            # cross-restart resume) — those don't pass through the
+            # current session's chunk handler, so the bytes weren't
+            # streamed to disk this run.
+            #
+            # If no chunks need cache-backfill, this loop is a
+            # no-op and finish becomes "stream-hash the file +
+            # verify against blob_hex". Big files used to allocate
+            # `f.size` bytes here for the in-memory reassembly buffer;
+            # now they allocate `BLAKE3_BLOCK` bytes for the
+            # streaming hasher and nothing more.
             for c in f.cdc_chunks:
-                data = f.cdc_parts.get(c["index"]) if f.cdc_parts else None
-                if data is None:
-                    data = self._read_chunk_cache(c["hash"])
+                idx = int(c["index"])
+                if idx in f.cdc_streamed:
+                    continue  # already at the right offset on disk
+                data = self._read_chunk_cache(c["hash"])
                 if data is None:
                     return
+                f.handle.seek(int(c["start"]))
                 f.handle.write(data)
-                h.update(data)
-                written += len(data)
+            f.handle.flush()
+            # Verify the whole-file hash by streaming the file back
+            # through BLAKE3. Reads in 256 KiB blocks so peak memory
+            # stays bounded regardless of file size.
+            f.handle.seek(0)
+            h = blake3.blake3()
+            written = 0
+            while True:
+                block = f.handle.read(256 * 1024)
+                if not block:
+                    break
+                h.update(block)
+                written += len(block)
             f.handle.close()
             ok = h.hexdigest() == blob and written == f.size
             done = {
