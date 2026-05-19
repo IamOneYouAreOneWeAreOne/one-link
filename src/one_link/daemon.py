@@ -16454,6 +16454,70 @@ class Daemon:
             if "is closed" not in str(e):
                 raise
 
+    async def send_chunk_via_quic(
+        self,
+        peer_fp: str,
+        peer: "Peer",
+        chunk_msg: dict,
+    ) -> dict:
+        """Wave 2e sender helper: encode a FILE_NATIVE_CHUNK
+        message body + ship it through the peer's QUIC
+        connection via a single FRAME_CHUNK_REQUEST round-trip.
+
+        Returns ``{ok, rtt_ms, response_len}`` on success or
+        ``{ok: False, error}`` when:
+
+          - native QUIC crate isn't installed
+          - peer has no advertised QUIC port (didn't ENDPOINT_UPDATE
+            with one) and a fresh dial fails
+          - the frame round-trip fails (handshake mid-flight,
+            connection torn, etc.)
+
+        The receiver's frame loop (Wave 2e inbound) decodes the
+        embedded message + routes it through the existing
+        ``_handle_file_native_chunk``, then ACKs with
+        FRAME_CHUNK_RESPONSE. The ``rtt_ms`` returned here is the
+        round-trip wall time — useful for comparing QUIC vs the
+        WebRTC datagram channel at chunk granularity.
+
+        Caller is responsible for caps/policy gates (e.g. files
+        capability allowed), retry logic, and chunk re-encoding
+        on QUIC-down fallback.
+        """
+        from one_link import peer_quic as _peer_quic
+        if not _peer_quic.HAS_NATIVE:
+            return {"ok": False, "error": "native QUIC crate not installed"}
+        if _peer_quic.FRAME_CHUNK_REQUEST is None or _peer_quic.FRAME_CHUNK_RESPONSE is None:
+            return {"ok": False, "error": "QUIC chunk frame types unavailable"}
+        conn = await self._get_or_dial_quic(peer_fp, peer)
+        if conn is None:
+            return {"ok": False, "error": "no QUIC connection to peer"}
+        try:
+            wire = encode_msg(chunk_msg)
+        except Exception as e:
+            return {"ok": False, "error": f"encode failed: {e}"}
+        try:
+            t0 = time.perf_counter()
+            kind, response = await asyncio.to_thread(
+                conn.send_frame_round_trip,
+                _peer_quic.FRAME_CHUNK_REQUEST,
+                wire,
+            )
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            return {
+                "ok": True,
+                "rtt_ms": round(elapsed_ms, 3),
+                "response_frame": int(kind),
+                "response_len": len(response),
+            }
+        except Exception as e:
+            # Drop the (probably stale) cached outbound connection
+            # so the next dial gets a fresh one.
+            with contextlib.suppress(Exception):
+                conn.close(0, b"send_chunk_via_quic error")
+            self._quic_outbound.pop(peer_fp, None)
+            return {"ok": False, "error": f"frame round-trip failed: {e}"}
+
     async def quic_ping(self, peer_fp: str, payload: bytes = b"ping") -> dict:
         """Wave 2e diagnostic: send a single QUIC PING frame to a
         paired peer and return RTT + payload echo. Proves the
