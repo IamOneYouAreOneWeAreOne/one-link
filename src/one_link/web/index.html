@@ -26231,6 +26231,10 @@
     lastRepairDiagnosis: null,
     repairDiagnosisCounts: {},
     repairEscalationScore: 0,
+    lastBackendRecommendation: null,
+    lastBackendRecommendationKey: "",
+    lastBackendRecommendationMs: 0,
+    backendActionCooldowns: {},
     callHistory: [],
     acceptedCallIds: new Set(),
     lastAcceptRetryMs: {},
@@ -27905,6 +27909,140 @@
     }
   }
 
+  function backendRecommendationKey(recommendation) {
+    if (!recommendation || typeof recommendation !== "object") return "";
+    return [
+      recommendation.action || "",
+      recommendation.reason || "",
+      recommendation.route_preference || "",
+      recommendation.video_policy || "",
+      recommendation.audio_policy || "",
+    ].join("|");
+  }
+
+  function backendActionAllowed(action, minGapMs) {
+    const now = Date.now();
+    const last = Number(callUI.backendActionCooldowns[action] || 0);
+    if (now - last < minGapMs) return false;
+    callUI.backendActionCooldowns[action] = now;
+    return true;
+  }
+
+  function rememberBackendRecommendation(recommendation) {
+    const key = backendRecommendationKey(recommendation);
+    callUI.lastBackendRecommendation = {
+      at_ms: Date.now(),
+      ...(recommendation || {}),
+    };
+    callUI.lastBackendRecommendationMs = callUI.lastBackendRecommendation.at_ms;
+    const changed = key && key !== callUI.lastBackendRecommendationKey;
+    if (changed) {
+      callUI.lastBackendRecommendationKey = key;
+      reportCallEvent("backend_recommendation_received", {
+        reason: String(recommendation.action || "observe"),
+        state: String(recommendation.route_preference || "auto"),
+      });
+    }
+    return changed;
+  }
+
+  async function applyBackendPathRecommendation(recommendation, metrics) {
+    if (!recommendation || typeof recommendation !== "object") return;
+    if (!callUI.activeCallId || !media.pc) return;
+    const action = String(recommendation.action || "observe").toLowerCase();
+    const routePreference = String(recommendation.route_preference || "").toLowerCase();
+    rememberBackendRecommendation(recommendation);
+    try {
+      if (action === "observe" || action === "hold" || action === "watch") return;
+
+      if (routePreference === "relay") {
+        media.preferRelayNext = true;
+        updateOneChip("#call-one-engine", "Relay ready");
+      }
+
+      if (action === "revive_playback") {
+        if (!backendActionAllowed("revive_playback", 3000)) return;
+        reviveRemotePlayback("backend_recommendation");
+        reportCallEvent("backend_recommendation_applied", {
+          reason: "revive_playback",
+          state: routePreference || "auto",
+          ok: true,
+        });
+        return;
+      }
+
+      if (action === "downshift") {
+        if (!backendActionAllowed("downshift", 6000)) return;
+        await tuneOutboundMediaForTau({
+          ...(metrics || callUI.lastMetricsSnapshot || {}),
+          loss_rate: Math.max(Number(metrics?.loss_rate || callUI.lastMetricsSnapshot?.loss_rate || 0), 0.08),
+          rtt_ms: Math.max(Number(metrics?.rtt_ms || callUI.lastMetricsSnapshot?.rtt_ms || 0), 280),
+        });
+        reportCallEvent("backend_recommendation_applied", {
+          reason: "downshift",
+          state: "survival",
+          ok: true,
+        });
+        return;
+      }
+
+      if (action === "audio_first_repair") {
+        if (!backendActionAllowed("audio_first_repair", 7000)) return;
+        reviveRemotePlayback("backend_recommendation");
+        await tuneOutboundMediaForTau({
+          ...(metrics || callUI.lastMetricsSnapshot || {}),
+          loss_rate: Math.max(Number(metrics?.loss_rate || callUI.lastMetricsSnapshot?.loss_rate || 0), 0.1),
+          rtt_ms: Math.max(Number(metrics?.rtt_ms || callUI.lastMetricsSnapshot?.rtt_ms || 0), 340),
+          media_health_strategy: "audio_first",
+        });
+        reportCallEvent("backend_recommendation_applied", {
+          reason: "audio_first_repair",
+          state: "survival",
+          ok: true,
+        });
+        repairMediaPath("backend_audio_first_repair").catch(() => {});
+        return;
+      }
+
+      if (action === "ice_restart") {
+        if (!backendActionAllowed("ice_restart", 9000)) return;
+        if (typeof media.pc.restartIce === "function") {
+          media.pc.restartIce();
+          reportCallEvent("ice_restart_requested", {
+            reason: "backend_ice_restart",
+            state: routePreference || "auto",
+          });
+        }
+        reportCallEvent("backend_recommendation_applied", {
+          reason: "ice_restart",
+          state: routePreference || "auto",
+          ok: true,
+        });
+        if (media.pc.signalingState === "stable") {
+          await sendLocalSdpOffer();
+        } else {
+          repairMediaPath("backend_ice_restart").catch(() => {});
+        }
+        return;
+      }
+
+      if (action === "renegotiate" || action === "rebuild_peer_connection") {
+        if (!backendActionAllowed(action, 9000)) return;
+        reportCallEvent("backend_recommendation_applied", {
+          reason: "renegotiate",
+          state: routePreference || "auto",
+          ok: true,
+        });
+        await repairMediaPath("backend_renegotiate");
+      }
+    } catch (_) {
+      reportCallEvent("backend_recommendation_failed", {
+        reason: action,
+        state: routePreference || "auto",
+      });
+    }
+  }
+
   function rebuildPeerConnectionForRemoteOffer() {
     const localStream = media.localStream;
     if (media.pc) {
@@ -29340,7 +29478,7 @@
         }
       }
       ensureMediaNegotiation("metrics").catch(() => {});
-      await callApiPost({
+      const metricsResult = await callApiPost({
         action: "report_metrics",
         call_id: callUI.activeCallId,
         rtt_ms: rttMs,
@@ -29352,6 +29490,10 @@
         tau_level: callUI.adaptationLevel,
         ...selected,
       });
+      await applyBackendPathRecommendation(
+        metricsResult && metricsResult.recommendation,
+        callUI.lastMetricsSnapshot,
+      );
     } catch (_) {}
   }
 
@@ -29417,6 +29559,8 @@
         } : null,
         last_metrics: callUI.lastMetricsSnapshot,
         tau_decision: callUI.tauLastDecision,
+        backend_recommendation: callUI.lastBackendRecommendation,
+        backend_action_cooldowns: callUI.backendActionCooldowns,
         repair_diagnosis: callUI.lastRepairDiagnosis,
         repair_counts: callUI.repairDiagnosisCounts,
         repair_escalation_score: callUI.repairEscalationScore,

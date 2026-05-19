@@ -281,6 +281,40 @@ def test_report_call_event_records_staged_media_repair(
     assert "v=0" not in serialized
 
 
+def test_report_call_event_records_backend_recommendation_executor(
+    server,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import one_link.server as server_mod
+
+    monkeypatch.setattr(server_mod, "data_dir", lambda: tmp_path)
+    req = _FakeRequest({
+        "action": "report_call_event",
+        "call_id": "rt-call-1",
+        "event": "backend_recommendation_applied",
+        "reason": "ice_restart",
+        "state": "relay",
+        "ok": True,
+        "sdp": "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n",
+        "candidate": "candidate:1 1 udp 1 10.0.0.5 9999 typ host",
+    })
+    resp = _run(server.api_call_action(req))
+    body = json.loads(resp.body.decode("utf-8"))
+    assert body["ok"] is True
+
+    audit = tmp_path / "logs" / "call_media_audit.jsonl"
+    row = json.loads(audit.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["row_type"] == "event"
+    assert row["event"] == "backend_recommendation_applied"
+    assert row["reason"] == "ice_restart"
+    assert row["state"] == "relay"
+    assert row["ok"] is True
+    serialized = json.dumps(row)
+    assert "10.0.0.5" not in serialized
+    assert "v=0" not in serialized
+
+
 def test_report_metrics_clamps_out_of_range_values(server) -> None:
     req = _FakeRequest({
         "action": "report_metrics",

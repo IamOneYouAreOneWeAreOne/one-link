@@ -3758,6 +3758,9 @@ class UIServer:
                 "offer_collision_recovered",
                 "offer_collision_recovery_failed",
                 "ice_state_changed",
+                "backend_recommendation_received",
+                "backend_recommendation_applied",
+                "backend_recommendation_failed",
             }
             if not call_id or event not in allowed_events:
                 return
@@ -3793,6 +3796,11 @@ class UIServer:
                         "ice_state_changed", "connection_state_changed",
                         "remote_audio_ended", "remote_video_ended",
                         "focus", "split", "compact",
+                        "observe", "hold", "watch", "backend_recommendation",
+                        "revive_playback", "renegotiate", "audio_first_repair",
+                        "ice_restart", "downshift", "rebuild_peer_connection",
+                        "backend_ice_restart", "backend_renegotiate",
+                        "backend_audio_first_repair",
                     },
                 ),
                 "media_kind": _clean_token("media_kind", {"audio", "video"}),
@@ -3802,6 +3810,7 @@ class UIServer:
                         "new", "checking", "connected", "completed",
                         "failed", "disconnected", "closed", "connecting",
                         "enabled", "disabled", "full", "steady", "survival",
+                        "auto", "direct", "relay", "same",
                     },
                 ),
                 "ok": bool(body.get("ok")) if "ok" in body else None,

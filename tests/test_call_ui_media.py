@@ -539,6 +539,35 @@ def test_call_watchdog_repairs_missing_expected_remote_media(index_html: str) ->
     assert "repairMediaPath(\"stalled_media\")" in snippet
 
 
+def test_backend_recommendation_executor_controls_media_repairs(index_html: str) -> None:
+    assert "async function applyBackendPathRecommendation" in index_html
+    idx = index_html.find("async function applyBackendPathRecommendation")
+    snippet = index_html[idx:idx + 5200]
+    for action in [
+        "revive_playback",
+        "downshift",
+        "audio_first_repair",
+        "ice_restart",
+        "renegotiate",
+    ]:
+        assert action in snippet
+    assert "reviveRemotePlayback" in snippet
+    assert "tuneOutboundMediaForTau" in snippet
+    assert "media.preferRelayNext = true" in snippet
+    assert "media.pc.restartIce" in snippet
+    assert "sendLocalSdpOffer" in snippet
+    assert 'repairMediaPath("backend_renegotiate")' in snippet
+    assert "backendActionAllowed" in index_html
+    assert "backend_recommendation_received" in index_html
+    assert "backend_recommendation_applied" in index_html
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 15000]
+    assert "const metricsResult = await callApiPost" in metrics_snippet
+    assert "applyBackendPathRecommendation(" in metrics_snippet
+    assert "metricsResult && metricsResult.recommendation" in metrics_snippet
+    assert "backend_recommendation: callUI.lastBackendRecommendation" in index_html
+
+
 def test_inbound_accept_waits_for_offer_instead_of_self_offering(index_html: str) -> None:
     idx = index_html.find("async function acceptInboundCall")
     snippet = index_html[idx:idx + 1800]
