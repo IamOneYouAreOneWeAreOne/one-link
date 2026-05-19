@@ -231,3 +231,63 @@ def test_registry_register_replaces(tmp_path: Path) -> None:
     hit = reg.pop_match("P" * 64, "a" * 64)
     assert hit is not None
     assert hit.size == 200
+
+
+def test_registry_prunes_stale_entries(tmp_path: Path) -> None:
+    """A sidecar whose updated_ms is older than the TTL must be
+    dropped at load time + its partial out_path unlinked. Inboxes
+    can't be allowed to accumulate orphan manifests for blobs the
+    sender will never come back for."""
+    import time
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    fresh_partial = inbox / "fresh.bin"
+    fresh_partial.write_bytes(b"f" * 32)
+    stale_partial = inbox / "stale.bin"
+    stale_partial.write_bytes(b"s" * 32)
+
+    sc_fresh = _make("a" * 64, "P" * 64, fresh_partial)
+    sc_stale = _make("b" * 64, "P" * 64, stale_partial)
+    # Backdate sc_stale to 45 days ago.
+    sc_stale.updated_ms = int((time.time() - 45 * 86400) * 1000)
+    sc_stale.created_ms = sc_stale.updated_ms
+    persist_sidecar(inbox, sc_fresh)
+    persist_sidecar(inbox, sc_stale)
+
+    reg = ResumeRegistry(inbox)
+    kept = reg.load_from_inbox(ttl_days=30)
+    assert kept == 1
+    assert reg.pop_match("P" * 64, "a" * 64) is not None
+    assert reg.pop_match("P" * 64, "b" * 64) is None
+    # The stale partial AND its sidecar must both be gone.
+    assert not stale_partial.exists()
+    from one_link.resume import sidecar_path
+    assert not sidecar_path(inbox, "b" * 64).exists()
+    # The fresh partial stays.
+    assert fresh_partial.exists()
+
+
+def test_registry_snapshot_shape(tmp_path: Path) -> None:
+    """snapshot() must return a UI-safe shape: bounded size, no
+    full CDC manifest, plain JSON-compatible dicts."""
+    import json
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    partial = inbox / "x.bin"
+    partial.write_bytes(b"x" * 64)
+    sc = _make("a" * 64, "P" * 64, partial, size=2048)
+    persist_sidecar(inbox, sc)
+
+    reg = ResumeRegistry(inbox)
+    reg.load_from_inbox()
+    snap = reg.snapshot()
+    assert isinstance(snap, list)
+    assert len(snap) == 1
+    entry = snap[0]
+    assert entry["blob"] == "a" * 64
+    assert entry["peer_fp"] == "P" * 64
+    assert entry["size"] == 2048
+    assert entry["cdc_chunks_total"] == 2  # _make builds 2 chunks
+    assert "cdc_chunks" not in entry  # the full manifest must NOT be inlined
+    # JSON round-trip must succeed (catches accidentally non-serialisable values).
+    json.loads(json.dumps(snap))

@@ -252,6 +252,14 @@ def scan_inbox(inbox_root: Path) -> list[ResumeSidecar]:
     return out
 
 
+# A sidecar that hasn't been touched in this many days is treated
+# as abandoned and pruned at daemon startup. 30 days is enough to
+# cover "user laptop sat in a drawer over vacation" without letting
+# inboxes accumulate orphan manifests for blobs the sender will
+# never come back for.
+SIDECAR_TTL_DAYS_DEFAULT = 30
+
+
 class ResumeRegistry:
     """In-memory index of resumable inbound transfers, keyed by
     ``(peer_fp, blob_hex)``.
@@ -267,18 +275,58 @@ class ResumeRegistry:
         self.inbox_root = Path(inbox_root)
         self._by_key: dict[tuple[str, str], ResumeSidecar] = {}
 
-    def load_from_inbox(self) -> int:
-        """Scan the inbox + populate the registry. Returns the
-        number of resumable entries loaded."""
+    def load_from_inbox(
+        self,
+        *,
+        ttl_days: int = SIDECAR_TTL_DAYS_DEFAULT,
+    ) -> int:
+        """Scan the inbox + populate the registry. Sidecars whose
+        ``updated_ms`` is older than ``ttl_days`` (default 30) are
+        pruned along with their partial out_path before the rest are
+        registered. Returns the number of entries kept."""
         self._by_key.clear()
+        prune_before_ms = int((time.time() - ttl_days * 86400) * 1000)
+        pruned = 0
         for sc in scan_inbox(self.inbox_root):
+            if sc.updated_ms < prune_before_ms:
+                try:
+                    Path(sc.out_path).unlink()
+                except OSError:
+                    pass
+                delete_sidecar(self.inbox_root, sc.blob_hex)
+                pruned += 1
+                continue
             self._by_key[(sc.peer_fp, sc.blob_hex)] = sc
         if self._by_key:
             log.info(
-                "resume registry: loaded %d in-progress inbound transfer(s)",
+                "resume registry: loaded %d in-progress inbound transfer(s)%s",
                 len(self._by_key),
+                f" (pruned {pruned} stale)" if pruned else "",
             )
+        elif pruned:
+            log.info("resume registry: pruned %d stale entry(ies)", pruned)
         return len(self._by_key)
+
+    def snapshot(self) -> list[dict]:
+        """JSON-shaped list of current entries for the status API.
+
+        Each entry is a small dict; the full CDC manifest
+        (potentially thousands of entries) is replaced with a count
+        so the snapshot stays bounded for the UI / control plane.
+        """
+        out: list[dict] = []
+        for (peer_fp, blob), sc in sorted(self._by_key.items()):
+            out.append({
+                "blob": blob,
+                "peer_fp": peer_fp,
+                "name": sc.name,
+                "size": sc.size,
+                "out_path": sc.out_path,
+                "cdc_chunks_total": len(sc.cdc_chunks),
+                "created_ms": sc.created_ms,
+                "updated_ms": sc.updated_ms,
+            })
+        return out
 
     def pop_match(self, peer_fp: str, blob_hex: str) -> ResumeSidecar | None:
         """Return + remove a matching entry. The receiver hands

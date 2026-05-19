@@ -14403,6 +14403,17 @@ class Daemon:
                     return
                 result = await self.resume_paused_transfers_for(peer_fp)
                 await self._reply(writer, {"ok": bool(result.get("ok")), "result": result})
+            elif cmd == "resumable_transfers":
+                # Surface the receiver-side resume registry so the UI
+                # can render "Resuming X (3.2 MB / 8.1 MB)" indicators
+                # for inbound transfers that survived a daemon restart
+                # or a peer disconnect. Pure read — no state changes.
+                entries = self._resume_registry.snapshot()
+                await self._reply(writer, {
+                    "ok": True,
+                    "entries": entries,
+                    "count": len(entries),
+                })
             elif cmd == "tail":
                 self._tail_subs.add(writer)
                 await self._reply(writer, {"ok": True, "tailing": True})
