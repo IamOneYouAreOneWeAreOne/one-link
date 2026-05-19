@@ -127,6 +127,10 @@ from one_link.resume import (
     delete_sidecar as _delete_resume_sidecar,
     persist_sidecar as _persist_resume_sidecar,
 )
+from one_link.share_link import (
+    DEFAULT_TTL_SECONDS as _SHARE_LINK_DEFAULT_TTL,
+    ShareLinkRegistry,
+)
 from one_link.state import State
 from one_link.swarm_plan import ChunkSource, plan_swarm_sources, source_from_hashes
 from one_link.transfer_brain import (
@@ -1067,6 +1071,10 @@ class Daemon:
         # by _handle_endpoint_update; consumed by the outbound
         # dial helper.
         self._quic_peer_ports: dict[str, int] = {}
+        # Wave 2g: share-link registry (one-time send-to-anyone
+        # capabilities). Mints + redeems happen through control
+        # commands; persistence lives under data/share_links/.
+        self._share_links: ShareLinkRegistry = ShareLinkRegistry(data_dir())
         # Async lock to serialise per-peer dial attempts so two
         # concurrent send_files don't race to open duplicate
         # connections.
@@ -14928,6 +14936,111 @@ class Daemon:
                     return
                 result = await self.resume_paused_transfers_for(peer_fp)
                 await self._reply(writer, {"ok": bool(result.get("ok")), "result": result})
+            elif cmd == "create_share_link":
+                # Wave 2g: mint a one-time share-link for a file
+                # on disk. The caller (UI / scripted flow) gets
+                # back a SAS phrase the user can read out loud +
+                # the raw token_hex for programmatic redeem.
+                path_raw = str(req.get("path") or "").strip()
+                if not path_raw:
+                    await self._reply(writer, {
+                        "ok": False, "error": "path is required",
+                    })
+                    return
+                src_path = Path(path_raw)
+                if not src_path.is_file():
+                    await self._reply(writer, {
+                        "ok": False, "error": f"not a file: {path_raw}",
+                    })
+                    return
+                ttl_raw = req.get("ttl_seconds")
+                try:
+                    ttl_seconds = int(ttl_raw) if ttl_raw is not None else _SHARE_LINK_DEFAULT_TTL
+                except (TypeError, ValueError):
+                    await self._reply(writer, {
+                        "ok": False, "error": "ttl_seconds must be int",
+                    })
+                    return
+                if ttl_seconds <= 0 or ttl_seconds > 30 * 86400:
+                    await self._reply(writer, {
+                        "ok": False, "error": "ttl_seconds out of range (1..2592000)",
+                    })
+                    return
+                try:
+                    blob_hex = hash_path(src_path)
+                    st = src_path.stat()
+                    link = self._share_links.mint(
+                        blob_hex=blob_hex,
+                        name=src_path.name,
+                        size=int(st.st_size),
+                        source_path=str(src_path),
+                        ttl_seconds=ttl_seconds,
+                    )
+                    await self._reply(writer, {
+                        "ok": True,
+                        "blob": link.blob_hex,
+                        "name": link.name,
+                        "size": link.size,
+                        "token_hex": link.token_hex,
+                        "sas_phrase": link.sas_phrase,
+                        "expires_at_ms": link.expires_at_ms,
+                        "expires_in_seconds": ttl_seconds,
+                    })
+                except Exception as e:
+                    await self._reply(writer, {
+                        "ok": False, "error": str(e),
+                    })
+            elif cmd == "list_share_links":
+                await self._reply(writer, {
+                    "ok": True,
+                    "links": self._share_links.snapshot(),
+                    "count": len(self._share_links),
+                })
+            elif cmd == "revoke_share_link":
+                blob_arg = str(req.get("blob") or "").strip().lower()
+                if len(blob_arg) != 64:
+                    await self._reply(writer, {
+                        "ok": False, "error": "blob must be 64-char hex",
+                    })
+                    return
+                removed = self._share_links.revoke(blob_arg)
+                await self._reply(writer, {
+                    "ok": True,
+                    "revoked": removed,
+                })
+            elif cmd == "redeem_share_link":
+                # The sender-side redeem path. The recipient's
+                # daemon calls this on OUR control socket via the
+                # out-of-band URL the sender shared. Validates the
+                # token, marks consumed, returns metadata about
+                # the blob. Actual byte delivery happens through
+                # the existing FILE_OFFER pipeline; this endpoint
+                # just authorises it.
+                token_hex = str(req.get("token_hex") or "").strip().lower()
+                if len(token_hex) != 64:
+                    await self._reply(writer, {
+                        "ok": False, "error": "token_hex must be 64 hex chars",
+                    })
+                    return
+                peer_hint = req.get("peer_fp")
+                if peer_hint is not None:
+                    peer_hint = str(peer_hint).strip().lower() or None
+                link, reason = self._share_links.redeem(
+                    token_hex, by_peer_fp=peer_hint,
+                )
+                if link is None:
+                    await self._reply(writer, {
+                        "ok": False, "error": reason,
+                    })
+                    return
+                await self._reply(writer, {
+                    "ok": True,
+                    "blob": link.blob_hex,
+                    "name": link.name,
+                    "size": link.size,
+                    "source_path": link.source_path,
+                    "redeemed_at_ms": link.redeemed_at_ms,
+                })
             elif cmd == "_send_raw_message":
                 # Test / scripted hook: send a raw wire frame to a
                 # peer through the established session. Used by the
@@ -15521,6 +15634,20 @@ class Daemon:
             self._resume_registry.load_from_inbox()
         except Exception as e:
             log.warning("resume registry: failed to load from inbox: %s", e)
+        # Wave 2g: rebuild the share-link registry from disk so
+        # tokens minted in a prior daemon run keep working until
+        # their TTL elapses. Expired entries are pruned during
+        # the load. The local-import alias dodges a Python scoping
+        # quirk: a later ``from one_link.paths import data_dir``
+        # inside the same function turns ``data_dir`` into a local
+        # name everywhere in start(), so referring to the module-
+        # level alias here would hit unbound-local.
+        try:
+            from one_link.paths import data_dir as _share_data_dir
+            self._share_links = ShareLinkRegistry(_share_data_dir())
+            self._share_links.load_from_disk()
+        except Exception as e:
+            log.warning("share-link registry: failed to load: %s", e)
         # Chunk-cache size cap. The cache at data/file_chunks/ is
         # content-addressed and grows monotonically with every CDC
         # transfer. Without an eviction pass it can fill a disk
