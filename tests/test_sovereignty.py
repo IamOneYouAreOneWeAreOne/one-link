@@ -368,6 +368,40 @@ async def test_peer_rtc_ice_config_includes_turn_relay_from_settings(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_peer_rtc_ice_config_can_mint_per_call_turn_credentials(monkeypatch):
+    from one_link.server import UIServer
+
+    monkeypatch.setenv("ONE_LINK_TURN_SHARED_SECRET", "shared-secret")
+    monkeypatch.setenv("ONE_LINK_TURN_TTL_SECONDS", "600")
+
+    class _State:
+        def get_setting(self, k):
+            return {
+                "stun_servers": "",
+                "turn_servers": "turn:relay.local:3478",
+            }.get(k)
+
+    daemon = SimpleNamespace(
+        state=_State(),
+        discovery=None,
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aa", hostname="me"),
+        _outbound_log=[],
+        _outbound_log_started_ms=0,
+        _outbound_sessions={},
+    )
+    server = UIServer(daemon)
+    resp = await server.api_peer_rtc_ice_config(
+        SimpleNamespace(query={"call_id": "call-abc"})
+    )
+    body = json.loads(resp.text)
+    turn = body["iceServers"][-1]
+    assert turn["urls"] == ["turn:relay.local:3478"]
+    assert ":one-link:call-abc" in turn["username"]
+    assert turn["credential"]
+    assert body["routePolicy"]["per_call_credentials"] is True
+
+
+@pytest.mark.asyncio
 async def test_api_preset_set_switches_setting(monkeypatch):
     """POST /api/sovereignty/preset writes state.settings."""
     from one_link.server import UIServer

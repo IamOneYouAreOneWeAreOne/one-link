@@ -53,9 +53,16 @@ class _FakeRequest:
     """Minimal aiohttp.web.Request stand-in.  Just enough for the
     handlers we wrote."""
 
-    def __init__(self, *, body: dict | None = None, match_info: dict | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        body: dict | None = None,
+        match_info: dict | None = None,
+        query: dict | None = None,
+    ) -> None:
         self._body = body or {}
         self.match_info = match_info or {}
+        self.query = query or {}
 
     async def json(self) -> dict:
         return self._body
@@ -282,6 +289,72 @@ async def test_state_returns_call_snapshot() -> None:
     assert payload["local_role"] == "originator"
     assert payload["is_incoming"] is False
     assert "intensity" in payload
+    assert payload["backend_authority"]["state"] == "negotiating"
+    assert payload["path_recommendation"]["action"] == "observe"
+
+
+@pytest.mark.asyncio
+async def test_report_metrics_returns_backend_path_recommendation() -> None:
+    srv, daemon = _server_with_daemon()
+    peer = _identity("mom-metrics")
+    daemon._call_registry.open(
+        call_id="c-metrics",
+        peer_master_vk_hex=peer.fingerprint,
+        local_role="originator",
+        local_master_vk_hex=daemon.me.fingerprint,
+        started_at_ms=1_000,
+    )
+    req = _FakeRequest(body={
+        "action": "report_metrics",
+        "call_id": "c-metrics",
+        "media_health_state": "renderer_detached",
+        "media_health_severity": 1,
+        "ice_connection_state": "connected",
+        "connection_state": "connected",
+        "remote_video_tracks": 1,
+        "remote_video_src_attached": False,
+    })
+    resp = await srv.api_call_action(req)  # type: ignore[arg-type]
+    import json
+    payload = json.loads(resp._body or b"")
+    assert payload["ok"] is True
+    assert payload["recommendation"]["action"] == "revive_playback"
+    assert payload["recommendation"]["reason"] == "renderer_detached"
+
+
+@pytest.mark.asyncio
+async def test_call_trace_exports_privacy_safe_timeline() -> None:
+    srv, daemon = _server_with_daemon()
+    peer = _identity("mom-trace")
+    daemon._call_registry.open(
+        call_id="c-trace",
+        peer_master_vk_hex=peer.fingerprint,
+        local_role="originator",
+        local_master_vk_hex=daemon.me.fingerprint,
+        started_at_ms=1_000,
+    )
+    await srv.api_call_action(_FakeRequest(body={  # type: ignore[arg-type]
+        "action": "report_call_event",
+        "call_id": "c-trace",
+        "event": "remote_surface_synced",
+        "reason": "renderer_detached",
+        "media_kind": "video",
+    }))
+    await srv.api_call_action(_FakeRequest(body={  # type: ignore[arg-type]
+        "action": "report_metrics",
+        "call_id": "c-trace",
+        "media_health_state": "remote_media_missing",
+        "media_health_severity": 2,
+    }))
+    resp = await srv.api_call_trace(_FakeRequest(match_info={"call_id": "c-trace"}))  # type: ignore[arg-type]
+    import json
+    payload = json.loads(resp._body or b"")
+    assert payload["ok"] is True
+    assert payload["call_id"] == "c-trace"
+    assert payload["backend_authority"]["state"] == "negotiating"
+    assert payload["recommendation"]["action"] == "renegotiate"
+    assert len(payload["rows"]) == 2
+    assert "no SDP" in payload["privacy"]
 
 
 # ---------------------------------------------------------------------------

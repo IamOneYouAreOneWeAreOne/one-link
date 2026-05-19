@@ -102,7 +102,8 @@ def test_setup_rtc_peer_connection_function(index_html: str) -> None:
     assert 'rtcpMuxPolicy: "require"' in index_html
     assert "iceCandidatePoolSize: 4" in index_html
     assert "media.iceConfigReady" in index_html
-    assert 'fetch("/api/peer-rtc/ice-config"' in index_html
+    assert '"/api/peer-rtc/ice-config"' in index_html
+    assert "call_id=${encodeURIComponent(callUI.activeCallId)}" in index_html
 
 
 def test_call_engine_tracks_ice_route_readiness(index_html: str) -> None:

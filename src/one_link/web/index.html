@@ -27425,7 +27425,10 @@
     // - we'd rather degrade to LAN-only than reach a third party.
     media.iceConfigReady = (async () => {
       try {
-        const r = await fetch("/api/peer-rtc/ice-config", {
+        const iceUrl = callUI.activeCallId
+          ? `/api/peer-rtc/ice-config?call_id=${encodeURIComponent(callUI.activeCallId)}`
+          : "/api/peer-rtc/ice-config";
+        const r = await fetch(iceUrl, {
           credentials: "include", cache: "no-store",
         });
         if (!r.ok) return;

@@ -1531,6 +1531,7 @@ class UIServer:
         # vocabulary + response shape.
         r.add_post("/api/v1/calls", self._guarded(self.api_call_action))
         r.add_get("/api/v1/calls", self._guarded(self.api_calls_list))
+        r.add_get("/api/v1/calls/{call_id}/trace", self._guarded(self.api_call_trace))
         r.add_get("/api/v1/calls/{call_id}", self._guarded(self.api_call_state))
         # Row 10 — peer-handshake attestation API.
         r.add_post("/api/v1/attestation/challenge", self._guarded(self.api_attestation_challenge))
@@ -2199,7 +2200,7 @@ class UIServer:
             return None
         return str(raw)
 
-    def _resolved_turn_config(self) -> dict:
+    def _resolved_turn_config(self, *, call_id: str | None = None) -> dict:
         """Resolve operator/user TURN relay config for WebRTC calls.
 
         STUN helps discover addresses; TURN is the actual "works in
@@ -2217,6 +2218,14 @@ class UIServer:
         credential = self._setting_value("turn_credential")
         if credential is None:
             credential = os.environ.get("ONE_LINK_TURN_CREDENTIAL")
+        shared_secret = self._setting_value("turn_shared_secret")
+        if shared_secret is None:
+            shared_secret = os.environ.get("ONE_LINK_TURN_SHARED_SECRET")
+        ttl_s = 3600
+        try:
+            ttl_s = max(300, min(86_400, int(os.environ.get("ONE_LINK_TURN_TTL_SECONDS", "3600"))))
+        except ValueError:
+            ttl_s = 3600
 
         urls: list[str] = []
         seen: set[str] = set()
@@ -2228,15 +2237,31 @@ class UIServer:
                 continue
             urls.append(u)
             seen.add(u)
+        username = (username or "").strip()
+        credential = (credential or "").strip()
+        credential_type = "password" if credential else ""
+        if shared_secret and call_id:
+            expires = int(time.time()) + ttl_s
+            safe_call = "".join(ch for ch in str(call_id) if ch.isalnum() or ch in "-_")[:48]
+            username = f"{expires}:one-link:{safe_call}"
+            digest = hmac.new(
+                str(shared_secret).encode("utf-8"),
+                username.encode("utf-8"),
+                hashlib.sha1,
+            ).digest()
+            credential = base64.b64encode(digest).decode("ascii")
+            credential_type = "turn-rest-hmac-sha1"
         return {
             "urls": urls,
-            "username": (username or "").strip(),
-            "credential": (credential or "").strip(),
+            "username": username,
+            "credential": credential,
+            "credential_type": credential_type,
+            "ttl_seconds": ttl_s if shared_secret and call_id else None,
         }
 
-    def _resolved_webrtc_ice_servers(self) -> list[dict]:
+    def _resolved_webrtc_ice_servers(self, *, call_id: str | None = None) -> list[dict]:
         servers: list[dict] = [{"urls": u} for u in self._resolved_stun_servers()]
-        turn = self._resolved_turn_config()
+        turn = self._resolved_turn_config(call_id=call_id)
         turn_urls = list(turn.get("urls") or [])
         if turn_urls:
             entry: dict = {"urls": turn_urls}
@@ -2244,6 +2269,8 @@ class UIServer:
                 entry["username"] = turn["username"]
             if turn.get("credential"):
                 entry["credential"] = turn["credential"]
+            if turn.get("credential_type") == "turn-rest-hmac-sha1":
+                entry["credentialType"] = "password"
             servers.append(entry)
         return servers
 
@@ -2808,7 +2835,8 @@ class UIServer:
         JSON object ``{"iceServers": [...]}`` shaped exactly the way
         WebRTC's RTCPeerConnection setConfiguration() expects. Empty
         list = sovereignty default (LAN-only pairing)."""
-        servers = self._resolved_webrtc_ice_servers()
+        call_id = request.query.get("call_id") if hasattr(request, "query") else None
+        servers = self._resolved_webrtc_ice_servers(call_id=call_id)
         relay_ready = any(
             str(url).lower().startswith(("turn:", "turns:"))
             for srv in servers
@@ -2825,6 +2853,7 @@ class UIServer:
                 "relay_ready": relay_ready,
                 "direct_first": True,
                 "force_relay_on_repair": relay_ready,
+                "per_call_credentials": bool(call_id and os.environ.get("ONE_LINK_TURN_SHARED_SECRET")),
             },
             "sovereignty_default": len(servers) == 0,
         })
@@ -3361,6 +3390,16 @@ class UIServer:
             self._lp_call_api_cached = api
         return api
 
+    def _call_reliability(self):
+        """Lazy reliability backend accessor for tests that construct
+        UIServer through __new__ and for older daemon objects."""
+        rel = getattr(self.daemon, "_call_reliability", None)
+        if rel is None:
+            from one_link.call_reliability import CallReliabilityBackend
+            rel = CallReliabilityBackend(log_path=data_dir() / "logs" / "call_reliability.jsonl")
+            setattr(self.daemon, "_call_reliability", rel)
+        return rel
+
     async def api_call_action(self, request: web.Request) -> web.Response:
         """POST /api/v1/calls — dispatch one action.
 
@@ -3605,8 +3644,13 @@ class UIServer:
             confirm_ratio_voice=_opt_float("confirm_ratio_voice"),
             bandwidth_estimate_kbps=_opt_float("bandwidth_estimate_kbps"),
         )
+        recommendation = self._call_reliability().record_metrics(body)
         self._append_call_media_audit(body)
-        return web.json_response({"ok": True, "call_id": call_id})
+        return web.json_response({
+            "ok": True,
+            "call_id": call_id,
+            "recommendation": recommendation.to_json(),
+        })
 
     def _handle_report_call_event_action(self, body: dict) -> web.Response:
         """Browser posts privacy-safe WebRTC state-machine breadcrumbs."""
@@ -3615,6 +3659,7 @@ class UIServer:
             return web.json_response(
                 {"ok": False, "user_message": "Call is no longer active."},
             )
+        self._call_reliability().record_event(body)
         self._append_call_media_event_audit(body)
         return web.json_response({"ok": True, "call_id": call_id})
 
@@ -3658,6 +3703,7 @@ class UIServer:
                 "remote_video_stalled",
                 "remote_video_error",
                 "remote_video_no_frames",
+                "remote_surface_synced",
                 "media_path_repair",
                 "media_path_repair_failed",
                 "ice_restart_requested",
@@ -3743,7 +3789,7 @@ class UIServer:
                         "duplicate_offer", "offer_collision", "offer_echo",
                         "ringing_backfill", "answered", "no_answer",
                         "stalled_media", "media_path_repair", "contain", "cover",
-                        "repair",
+                        "repair", "renderer_detached", "playback_revive",
                         "ice_state_changed", "connection_state_changed",
                         "remote_audio_ended", "remote_video_ended",
                         "focus", "split", "compact",
@@ -3863,6 +3909,14 @@ class UIServer:
                 "jitter_ms": _float("jitter_ms"),
                 "loss_rate": _float("loss_rate"),
                 "bandwidth_estimate_kbps": _float("bandwidth_estimate_kbps"),
+                "media_health_state": (
+                    str(body.get("media_health_state")).strip().lower()
+                    if isinstance(body.get("media_health_state"), str)
+                    else None
+                ),
+                "media_health_severity": _int("media_health_severity"),
+                "remote_video_src_attached": bool(body.get("remote_video_src_attached")),
+                "remote_audio_src_attached": bool(body.get("remote_audio_src_attached")),
             }
             log_dir = data_dir() / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -4113,6 +4167,8 @@ class UIServer:
                 "is_capturing": mgr.is_capturing,
                 "is_resumable": mgr.is_resumable,
                 "is_complete": mgr.is_complete,
+                "backend_authority": self._call_authority_snapshot(mgr),
+                "path_recommendation": self._call_reliability().recommendation_for(cid),
             })
         return web.json_response({"calls": out})
 
@@ -4178,7 +4234,47 @@ class UIServer:
             "is_capturing": mgr.is_capturing,
             "is_resumable": mgr.is_resumable,
             "is_complete": mgr.is_complete,
+            "backend_authority": self._call_authority_snapshot(mgr),
+            "path_recommendation": self._call_reliability().recommendation_for(call_id),
         })
+
+    async def api_call_trace(self, request: web.Request) -> web.Response:
+        """GET /api/v1/calls/{call_id}/trace — privacy-safe flight recorder."""
+        call_id = request.match_info.get("call_id", "")
+        mgr = self.daemon._call_registry.get(call_id)
+        if mgr is None:
+            return web.json_response(
+                {"ok": False, "user_message": "This call is no longer active."},
+                status=404,
+            )
+        trace = self._call_reliability().trace_for(call_id)
+        trace["backend_authority"] = self._call_authority_snapshot(mgr)
+        return web.json_response(trace)
+
+    @staticmethod
+    def _call_authority_snapshot(mgr) -> dict:
+        phase = mgr.phase.name.lower()
+        if mgr.is_complete:
+            authority_state = "ended"
+        elif mgr.is_resumable:
+            authority_state = "recovered"
+        elif mgr.is_capturing:
+            authority_state = "degraded"
+        elif mgr.is_active:
+            authority_state = "connected"
+        elif phase == "ringing":
+            authority_state = "ringing"
+        elif phase == "inviting":
+            authority_state = "negotiating"
+        else:
+            authority_state = phase
+        return {
+            "state": authority_state,
+            "phase": phase,
+            "is_active": bool(mgr.is_active),
+            "is_resumable": bool(mgr.is_resumable),
+            "is_complete": bool(mgr.is_complete),
+        }
 
     async def api_me(self, request: web.Request) -> web.Response:
         me = self.daemon.me

@@ -1019,6 +1019,11 @@ class Daemon:
         # snapshot as a durable backfill path.
         self._call_sdp_backfill: dict[str, dict[str, str]] = {}
         self._call_ice_backfill: dict[str, list[dict]] = {}
+        from one_link.call_reliability import CallReliabilityBackend as _CRB
+        from one_link.paths import data_dir as _data_dir
+        self._call_reliability: _CRB = _CRB(
+            log_path=_data_dir() / "logs" / "call_reliability.jsonl",
+        )
         # Living Presence Tier β/γ/δ/ε/η runtime adapters. These
         # are the live-system glue between the pure engine modules
         # and the daemon's tick loop + HTTP surface.
