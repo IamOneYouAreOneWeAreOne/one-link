@@ -14,9 +14,14 @@ use ol_aead::{
     cipher::{AeadCipher as RustAeadCipher, AeadKind},
     decrypt_chunk as rust_decrypt_chunk, decrypt_frame as rust_decrypt_frame,
     encrypt_chunk as rust_encrypt_chunk, encrypt_frame as rust_encrypt_frame,
+    frame::{
+        decrypt_chunks_par as rust_decrypt_chunks_par,
+        encrypt_chunks_par as rust_encrypt_chunks_par,
+    },
     key::{ChunkAeadKey, FRAME_KEY_LEN as RUST_FRAME_KEY_LEN},
     AEAD_TAG_LEN as RUST_AEAD_TAG_LEN,
 };
+use pyo3::types::{PyList, PyTupleMethods};
 use ol_chunk::AEAD_FRAME_PLAINTEXT_LEN as RUST_AEAD_FRAME_PLAINTEXT_LEN;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyValueError;
@@ -216,6 +221,118 @@ impl PyAeadCipher {
             .allow_threads(|| rust_decrypt_frame(&cipher, &id, frame_index, &ct, &tag_arr))
             .map_err(aead_error_to_pyerr)?;
         Ok(PyBytes::new_bound(py, &pt))
+    }
+
+    /// Encrypt many chunks in parallel via rayon. Wave 2h: lets
+    /// the daemon hand the AEAD layer a whole window of chunks
+    /// at once + amortise the per-chunk Python/FFI overhead
+    /// across the work.
+    ///
+    /// :param chunks: list of ``(chunk_id, plaintext)`` 2-tuples.
+    ///     ``chunk_id`` must be 32 bytes; ``plaintext`` is any
+    ///     bytes-like with len ≤ 256 KiB.
+    /// :return: list of ciphertext bytes in input order. On any
+    ///     per-chunk failure the entire call raises
+    ///     ``OlAeadError`` — the caller's responsibility is to
+    ///     retry or fall back to the sequential path.
+    fn encrypt_chunks<'py>(
+        &self,
+        py: Python<'py>,
+        chunks: &Bound<'py, PyList>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        // Materialise the Python list into owned Rust buffers so
+        // we can drop the GIL during the parallel encrypt. The
+        // owned (id_array, plaintext_vec) pairs keep ownership in
+        // this stack frame; we pass borrowed slices to the rayon
+        // closure.
+        let mut owned: Vec<([u8; 32], Vec<u8>)> = Vec::with_capacity(chunks.len());
+        for item in chunks.iter() {
+            let tup = item.downcast::<PyTuple>().map_err(|_| {
+                PyValueError::new_err("each chunk must be a (chunk_id, plaintext) tuple")
+            })?;
+            if tup.len() != 2 {
+                return Err(PyValueError::new_err(
+                    "each chunk tuple must have exactly 2 elements",
+                ));
+            }
+            let chunk_id_obj = tup.get_item(0)?;
+            let plaintext_obj = tup.get_item(1)?;
+            let chunk_id_buf: PyBuffer<u8> = PyBuffer::get_bound(&chunk_id_obj)?;
+            let plaintext_buf: PyBuffer<u8> = PyBuffer::get_bound(&plaintext_obj)?;
+            let id_bytes = copy_buffer(py, chunk_id_buf)?;
+            let id = check_chunk_id(&id_bytes)?;
+            let pt = copy_buffer(py, plaintext_buf)?;
+            owned.push((id, pt));
+        }
+        let cipher = self.inner.clone();
+        let ciphertexts = py
+            .allow_threads(|| -> Result<Vec<Vec<u8>>, _> {
+                let borrowed: Vec<(&[u8; 32], &[u8])> = owned
+                    .iter()
+                    .map(|(id, pt)| (id, pt.as_slice()))
+                    .collect();
+                rust_encrypt_chunks_par(&cipher, &borrowed)
+            })
+            .map_err(aead_error_to_pyerr)?;
+        let out = PyList::empty_bound(py);
+        for ct in ciphertexts {
+            out.append(PyBytes::new_bound(py, &ct))?;
+        }
+        Ok(out)
+    }
+
+    /// Decrypt many chunks in parallel via rayon. Mirror of
+    /// :meth:`encrypt_chunks`.
+    ///
+    /// :param chunks: list of ``(chunk_id, plaintext_len, ciphertext)``
+    ///     3-tuples.
+    /// :return: list of plaintext bytes in input order. On any
+    ///     per-chunk tag-verification failure the call raises
+    ///     ``OlAeadError``.
+    fn decrypt_chunks<'py>(
+        &self,
+        py: Python<'py>,
+        chunks: &Bound<'py, PyList>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut owned: Vec<([u8; 32], usize, Vec<u8>)> =
+            Vec::with_capacity(chunks.len());
+        for item in chunks.iter() {
+            let tup = item.downcast::<PyTuple>().map_err(|_| {
+                PyValueError::new_err(
+                    "each chunk must be a (chunk_id, plaintext_len, ciphertext) tuple",
+                )
+            })?;
+            if tup.len() != 3 {
+                return Err(PyValueError::new_err(
+                    "each chunk tuple must have exactly 3 elements",
+                ));
+            }
+            let chunk_id_obj = tup.get_item(0)?;
+            let pt_len_obj = tup.get_item(1)?;
+            let ciphertext_obj = tup.get_item(2)?;
+            let chunk_id_buf: PyBuffer<u8> = PyBuffer::get_bound(&chunk_id_obj)?;
+            let id_bytes = copy_buffer(py, chunk_id_buf)?;
+            let id = check_chunk_id(&id_bytes)?;
+            let pt_len: usize = pt_len_obj.extract()?;
+            let ct_buf: PyBuffer<u8> = PyBuffer::get_bound(&ciphertext_obj)?;
+            let ct = copy_buffer(py, ct_buf)?;
+            owned.push((id, pt_len, ct));
+        }
+        let cipher = self.inner.clone();
+        let plaintexts = py
+            .allow_threads(|| -> Result<Vec<Vec<u8>>, _> {
+                let borrowed: Vec<(&[u8; 32], usize, &[u8])> = owned
+                    .iter()
+                    .map(|(id, pt_len, ct)| (id, *pt_len, ct.as_slice()))
+                    .collect();
+                rust_decrypt_chunks_par(&cipher, &borrowed)
+            })
+            .map_err(aead_error_to_pyerr)?;
+        let out = PyList::empty_bound(py);
+        for pt in plaintexts {
+            out.append(PyBytes::new_bound(py, &pt))?;
+        }
+        Ok(out)
     }
 
     fn __repr__(&self) -> String {
