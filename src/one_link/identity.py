@@ -56,6 +56,20 @@ class Identity:
     def sign(self, data: bytes) -> bytes:
         return self.private.sign(data)
 
+    def to_pkcs8_pem(self) -> str:
+        """Serialise the private key as an unencrypted PKCS#8 PEM
+        string. Used by the Wave 2c QUIC Identity bridge to hand
+        the native ``ol_quic::Identity::from_pkcs8_pem`` the same
+        Ed25519 key the daemon uses everywhere else, without ever
+        sharing the in-memory ``Ed25519PrivateKey`` across the
+        FFI boundary.
+        """
+        return self.private.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode("ascii")
+
 
 def _fingerprint(public_bytes: bytes) -> str:
     return blake3.blake3(public_bytes).hexdigest()

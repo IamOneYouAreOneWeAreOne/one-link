@@ -1048,6 +1048,20 @@ class Daemon:
         # populated from disk in start() and consulted by the
         # FILE_OFFER handler before allocating a fresh IncomingFile.
         self._resume_registry: ResumeRegistry = ResumeRegistry(inbox_dir())
+        # Wave 2d: QUIC server endpoint (None when the native crate
+        # isn't installed). Brought up in start() via the Wave 2c
+        # Identity bridge; published-as-port to paired peers via
+        # the existing endpoint-announcement frame. accept-loop
+        # task and per-peer outbound connection cache populate
+        # below.
+        self._quic_server_endpoint: object | None = None
+        self._quic_accept_task: asyncio.Task | None = None
+        self._quic_local_port: int | None = None
+        # peer_fp_hex -> native QUIC Connection (outbound).
+        # Owned by daemon; closed in stop(). New entries appear
+        # when send_file's QUIC path dials a peer that advertised
+        # a quic port.
+        self._quic_outbound: dict[str, object] = {}
         # Living Presence Tier α-pre — Cryptographic Reality Engine
         # store. Holds verified FrameProvenance state per blob_hex
         # so the UI can render the Reality dot. See
@@ -15296,6 +15310,52 @@ class Daemon:
                 )
         except Exception as e:
             log.warning("chunk cache eviction at startup failed: %s", e)
+        # Wave 2d: bring up the QUIC server endpoint if the native
+        # crate is installed AND the operator hasn't disabled it.
+        # The endpoint binds an OS-assigned port; we record the
+        # port for inclusion in the peer endpoint announcement
+        # below. Failure to bring up the endpoint logs a warning
+        # and leaves WebRTC as the only transport — never blocks
+        # daemon startup.
+        if os.environ.get("ONE_LINK_QUIC_TRANSPORT", "1") != "0":
+            try:
+                from one_link import peer_quic as _peer_quic
+                if _peer_quic.HAS_NATIVE:
+                    identity_pem = self.me.to_pkcs8_pem()
+
+                    def _quic_is_paired(fp: bytes) -> bool:
+                        fp_hex = fp.hex()
+                        if self.state is None:
+                            return False
+                        rec = self.state.get_peer(fp_hex)
+                        return rec is not None and rec.trust == "pinned"
+
+                    self._quic_server_endpoint = _peer_quic.make_server_endpoint(
+                        identity_pem,
+                        _quic_is_paired,
+                        _peer_quic.QuicEndpointConfig(bind_addr="0.0.0.0:0"),
+                    )
+                    if self._quic_server_endpoint is not None:
+                        addr_str = str(self._quic_server_endpoint.local_addr)
+                        # local_addr is "host:port" — pull the port out.
+                        try:
+                            self._quic_local_port = int(addr_str.rsplit(":", 1)[-1])
+                            log.info(
+                                "QUIC server endpoint up on %s (Wave 2c+2d)",
+                                addr_str,
+                            )
+                            # Background accept loop. Detached so a
+                            # failure inside drops the endpoint
+                            # rather than the whole daemon.
+                            self._quic_accept_task = asyncio.create_task(
+                                self._quic_accept_loop()
+                            )
+                        except (ValueError, AttributeError) as e:
+                            log.warning("QUIC endpoint local_addr parse failed: %s", e)
+                            self._quic_server_endpoint = None
+            except Exception as e:
+                log.warning("QUIC server endpoint init failed: %s", e)
+                self._quic_server_endpoint = None
         # Persistent state (sqlite) — created early so peer/handshake hooks
         # can record into it.
         try:
@@ -16000,7 +16060,68 @@ class Daemon:
             if "is closed" not in str(e):
                 raise
 
+    async def _quic_accept_loop(self) -> None:
+        """Wave 2d: accept inbound QUIC connections.
+
+        Native ``accept_blocking(timeout_ms)`` releases the GIL
+        while waiting; we wrap it in ``asyncio.to_thread`` so the
+        loop stays responsive. Each accepted ``Connection`` is
+        stashed in ``_quic_inbound_pending`` for the file-engine
+        wave 2e to consume.
+
+        Errors here NEVER take down the daemon — QUIC is the
+        opt-in fast path; WebRTC stays the always-on default.
+        """
+        # Pending inbound connections keyed by remote address.
+        # Wave 2e drains this when chunk routing kicks in.
+        self._quic_inbound_pending: list[tuple[object, str]] = []
+        endpoint = self._quic_server_endpoint
+        if endpoint is None:
+            return
+        while True:
+            try:
+                # 5 s timeout so we periodically check the daemon
+                # is still meant to be running. Cheap loop.
+                conn = await asyncio.to_thread(
+                    endpoint.accept_blocking, 5000,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.debug("QUIC accept loop error: %s", e)
+                await asyncio.sleep(0.5)
+                continue
+            if conn is None:
+                # Timeout, no inbound during this window. Loop.
+                continue
+            try:
+                remote = str(conn.remote_address)
+            except Exception:
+                remote = "?"
+            log.info("QUIC inbound connection accepted from %s", remote)
+            self._quic_inbound_pending.append((conn, remote))
+
     async def stop(self) -> None:
+        # Wave 2d: tear down the QUIC server endpoint + accept loop
+        # FIRST so no new inbound connections land while the rest
+        # of the daemon is shutting down. Outbound connections in
+        # _quic_outbound are also closed.
+        accept = getattr(self, "_quic_accept_task", None)
+        if accept is not None and not accept.done():
+            accept.cancel()
+            try:
+                await accept
+            except (asyncio.CancelledError, Exception):
+                pass
+        for fp, conn in list(self._quic_outbound.items()):
+            with contextlib.suppress(Exception):
+                conn.close(0, b"daemon stop")
+        self._quic_outbound.clear()
+        ep = self._quic_server_endpoint
+        if ep is not None:
+            with contextlib.suppress(Exception):
+                ep.close(0, b"daemon stop")
+            self._quic_server_endpoint = None
         # Row 6 — drain cover-traffic scheduler first so its worker
         # thread doesn't try to emit through a half-torn-down state.
         cover = getattr(self, "_cover_traffic", None)
