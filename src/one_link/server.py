@@ -3905,6 +3905,8 @@ class UIServer:
                 "recovery_intent_seen",
                 "recovery_intent_applied",
                 "recovery_intent_failed",
+                "call_trace_exported",
+                "call_trace_export_failed",
             }
             if not call_id or event not in allowed_events:
                 return

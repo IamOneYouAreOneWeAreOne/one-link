@@ -112,6 +112,7 @@ def test_buttons_have_aria_labels(index_html: str) -> None:
         ("btn-call-decline", "Decline"),
         ("btn-call-hangup", "End"),
         ("btn-call-record", "Save"),
+        ("btn-call-export-trace", "Export"),
     ]:
         idx = index_html.find(f'id="{btn_id}"')
         assert idx > 0, f"missing button id {btn_id}"

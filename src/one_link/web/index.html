@@ -26149,6 +26149,7 @@
       <button class="btn-ghost" id="btn-call-blur" type="button" aria-pressed="false">Blur preview</button>
       <button class="btn-ghost" id="btn-call-refresh-devices" type="button">Refresh devices</button>
       <button class="btn-ghost" id="btn-call-copy-debug" type="button">Copy debug</button>
+      <button class="btn-ghost" id="btn-call-export-trace" type="button" aria-label="Export call trace">Export trace</button>
     </div>
   </div>
   <div id="call-recording-badge" class="call-recording-badge" aria-live="polite">Recording (both sides agreed)</div>
@@ -28467,6 +28468,43 @@
     } catch (_) {
       addOneCallEvent("Call debug could not be copied.");
       reportCallEvent("call_debug_copy_failed");
+    }
+  });
+  $$("#btn-call-export-trace")?.addEventListener("click", async () => {
+    const callId = callUI.activeCallId;
+    if (!callId) return;
+    try {
+      const [traceResp, localDebug] = await Promise.all([
+        fetch(`/api/v1/calls/${encodeURIComponent(callId)}/trace`, {
+          credentials: "include", cache: "no-store",
+        }),
+        window._oneLinkCallDebug?.().catch(() => null),
+      ]);
+      const trace = await traceResp.json();
+      const payload = {
+        exported_at_ms: Date.now(),
+        call_id: callId,
+        backend_trace: trace,
+        local_debug: localDebug || null,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      });
+      const a = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = `one-link-call-trace-${callId}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        URL.revokeObjectURL(url);
+        a.remove();
+      }, 1000);
+      addOneCallEvent("Call trace exported.");
+      reportCallEvent("call_trace_exported", { ok: true });
+    } catch (_) {
+      addOneCallEvent("Call trace export failed.");
+      reportCallEvent("call_trace_export_failed");
     }
   });
   $$("#btn-call-capsule")?.addEventListener("click", () => {

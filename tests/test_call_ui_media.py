@@ -632,6 +632,19 @@ def test_call_metrics_reports_relay_policy_truth(index_html: str) -> None:
     assert "metricsResult.routePolicy" in metrics_snippet
 
 
+def test_call_trace_export_downloads_backend_flight_recorder(index_html: str) -> None:
+    assert 'id="btn-call-export-trace"' in index_html
+    idx = index_html.find('"#btn-call-export-trace"')
+    snippet = index_html[idx:idx + 1800]
+    assert "/api/v1/calls/" in snippet
+    assert "/trace" in snippet
+    assert "backend_trace" in snippet
+    assert "local_debug" in snippet
+    assert "one-link-call-trace-" in snippet
+    assert "call_trace_exported" in snippet
+    assert "call_trace_export_failed" in snippet
+
+
 def test_inbound_accept_waits_for_offer_instead_of_self_offering(index_html: str) -> None:
     idx = index_html.find("async function acceptInboundCall")
     snippet = index_html[idx:idx + 1800]
