@@ -345,7 +345,7 @@ def test_call_media_watchdog_repairs_stalled_frames(index_html: str) -> None:
     assert "media_path_repair" in snippet
     assert "sendLocalSdpOffer" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 12400]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 14000]
     assert "stalledMediaTicks" in metrics_snippet
     assert 'repairMediaPath("stalled_media")' in metrics_snippet
 
@@ -445,12 +445,40 @@ def test_call_quality_does_not_claim_good_while_media_waits(index_html: str) -> 
     assert 'ice === "checking"' in snippet
     assert 'conn === "connecting"' in snippet
     assert "!hasLocal || !hasRemote" in snippet
-    assert "expectedRemoteMediaMissing(metrics)" in snippet
+    assert "classifyMediaHealth(metrics)" in snippet
+    assert 'health.state === "remote_media_missing"' in snippet
+    assert 'health.state === "renderer_detached"' in snippet
     assert 'return "connecting"' in snippet
     quality_idx = index_html.find("function updateCallQuality")
     quality_snippet = index_html[quality_idx:quality_idx + 900]
     assert '"connecting"' in quality_snippet
     assert "Connecting media" in quality_snippet
+
+
+def test_call_engine_has_single_media_health_classifier(index_html: str) -> None:
+    assert "function classifyMediaHealth" in index_html
+    idx = index_html.find("function classifyMediaHealth")
+    snippet = index_html[idx:idx + 4300]
+    for state in [
+        "signaling_incomplete",
+        "ice_failed",
+        "ice_unstable",
+        "remote_media_missing",
+        "renderer_detached",
+        "playback_frozen",
+        "media_starved",
+    ]:
+        assert state in snippet
+    assert "remote_video_src_attached" in snippet
+    assert "remote_audio_src_attached" in snippet
+    assert "seconds_since_media_moving" in snippet
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 13000]
+    assert "const mediaHealth = classifyMediaHealth(selected)" in metrics_snippet
+    assert "media_health_state" in metrics_snippet
+    assert "media_health_strategy" in metrics_snippet
+    assert "media_health_renderer_detached" in metrics_snippet
+    assert "media_health_no_video_frames" in metrics_snippet
 
 
 def test_call_rail_suppresses_noisy_internal_media_events(index_html: str) -> None:
@@ -466,7 +494,7 @@ def test_call_rail_suppresses_noisy_internal_media_events(index_html: str) -> No
 
 def test_call_metrics_use_smoothed_interval_loss(index_html: str) -> None:
     idx = index_html.find("async function reportCallMetricsOnce")
-    snippet = index_html[idx:idx + 9000]
+    snippet = index_html[idx:idx + 10400]
     assert "deltaLost" in snippet
     assert "deltaReceived" in snippet
     assert "qualityEwmaRttMs" in snippet
@@ -504,8 +532,9 @@ def test_call_watchdog_repairs_missing_expected_remote_media(index_html: str) ->
     assert "expectRemoteVideo" in index_html
     assert "ensureMediaTransceivers" in index_html
     idx = index_html.find("async function reportCallMetricsOnce")
-    snippet = index_html[idx:idx + 12800]
-    assert "expectedRemoteMediaMissing(selected)" in snippet
+    snippet = index_html[idx:idx + 14000]
+    assert "classifyMediaHealth(selected)" in snippet
+    assert 'mediaHealth.state === "remote_media_missing"' in snippet
     assert "repairMediaPath(\"stalled_media\")" in snippet
 
 

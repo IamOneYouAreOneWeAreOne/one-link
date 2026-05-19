@@ -26539,14 +26539,17 @@
     const conn = String(metrics.connection_state || "");
     const hasLocal = metrics.has_local_description === true;
     const hasRemote = metrics.has_remote_description === true;
-    const remoteWaiting = expectedRemoteMediaMissing(metrics);
+    const health = metrics.media_health || classifyMediaHealth(metrics);
     if (!hasLocal || !hasRemote || ice === "new" || ice === "checking" || conn === "new" || conn === "connecting") {
       return "connecting";
     }
-    if (remoteWaiting) return "connecting";
+    if (health.state === "signaling_incomplete" || health.state === "remote_media_missing") return "connecting";
     // doctrine-ok: §3.2.a internal state name; user copy says repair/recover.
     if (
       media.reconnecting ||
+      health.state === "renderer_detached" ||
+      health.state === "playback_frozen" ||
+      health.state === "media_starved" ||
       ice === "disconnected" || ice === "failed" ||
       conn === "disconnected" || conn === "failed"
     ) return "reconnecting";
@@ -26612,6 +26615,91 @@
     return missingAudio || missingVideo;
   }
 
+  function classifyMediaHealth(metrics) {
+    const selected = metrics || {};
+    const ice = String(selected.ice_connection_state || "");
+    const conn = String(selected.connection_state || "");
+    const signaling = String(selected.signaling_state || "");
+    const hasLocal = selected.has_local_description === true;
+    const hasRemote = selected.has_remote_description === true;
+    const remoteMissing = expectedRemoteMediaMissing(selected);
+    const expectsVideo = media.expectRemoteVideo === true;
+    const expectsAudio = media.expectRemoteAudio === true;
+    const videoTracks = Number(selected.remote_video_tracks || 0);
+    const audioTracks = Number(selected.remote_audio_tracks || 0);
+    const inboundVideoPackets = Number(selected.inbound_video_packets || 0);
+    const inboundAudioPackets = Number(selected.inbound_audio_packets || 0);
+    const inboundVideoFramesDecoded = Number(selected.inbound_video_frames_decoded || 0);
+    const remoteVideoWidth = Number(selected.remote_video_width || 0);
+    const remoteVideoReady = Number(selected.remote_video_ready_state || 0);
+    const rendererDetached = (
+      (videoTracks > 0 && selected.remote_video_src_attached === false) ||
+      (audioTracks > 0 && selected.remote_audio_src_attached === false)
+    );
+    const rendererHidden = expectsVideo
+      && videoTracks > 0
+      && selected.remote_video_element_shown !== true
+      && remoteVideoWidth === 0;
+    const secondsSinceMoving = callUI.lastRemoteMediaMovingMs
+      ? Math.round((Date.now() - Number(callUI.lastRemoteMediaMovingMs || 0)) / 1000)
+      : null;
+    const playbackFrozen = Number(callUI.frozenMediaTicks || 0) > 0
+      || (remoteVideoReady >= 2 && inboundVideoPackets > 0 && secondsSinceMoving !== null && secondsSinceMoving >= 6);
+    const mediaStarved = (expectsAudio || expectsVideo)
+      && inboundVideoPackets === 0
+      && inboundAudioPackets === 0
+      && secondsSinceMoving !== null
+      && secondsSinceMoving >= 8;
+    const noVideoFrames = expectsVideo
+      && videoTracks > 0
+      && inboundVideoFramesDecoded === 0
+      && remoteVideoWidth === 0;
+    let state = "healthy";
+    let strategy = "none";
+    let severity = 0;
+    if (!hasLocal || !hasRemote || signaling === "have-local-offer" || signaling === "have-remote-offer") {
+      state = "signaling_incomplete";
+      strategy = "resend_sdp";
+      severity = 2;
+    } else if (ice === "failed" || conn === "failed") {
+      state = "ice_failed";
+      strategy = "ice_restart";
+      severity = 3;
+    } else if (ice === "disconnected" || conn === "disconnected" || ice === "checking") {
+      state = "ice_unstable";
+      strategy = "ice_restart";
+      severity = 2;
+    } else if (remoteMissing) {
+      state = "remote_media_missing";
+      strategy = "renegotiate";
+      severity = 2;
+    } else if (rendererDetached || rendererHidden) {
+      state = "renderer_detached";
+      strategy = "revive_playback";
+      severity = 1;
+    } else if (playbackFrozen || noVideoFrames) {
+      state = "playback_frozen";
+      strategy = "revive_playback";
+      severity = 1;
+    } else if (mediaStarved) {
+      state = "media_starved";
+      strategy = "renegotiate";
+      severity = 2;
+    }
+    return {
+      state,
+      strategy,
+      severity,
+      remote_missing: remoteMissing,
+      renderer_detached: rendererDetached,
+      renderer_hidden: rendererHidden,
+      playback_frozen: playbackFrozen,
+      media_starved: mediaStarved,
+      no_video_frames: noVideoFrames,
+      seconds_since_media_moving: secondsSinceMoving,
+    };
+  }
+
   function selectedCandidatePairFromStats(stats, statById) {
     let selectedPair = null;
     stats.forEach((s) => {
@@ -26653,7 +26741,8 @@
     }
     const smoothedBandwidthKbps = Number(callUI.tauBandwidthEwmaKbps || bandwidthKbps || 0);
     const expectedKbps = profile ? Math.max(1, Number(profile.maxBitrate || 0) / 1000) : 850;
-    const remoteWaiting = expectedRemoteMediaMissing(metrics);
+    const health = metrics.media_health || classifyMediaHealth(metrics);
+    const remoteWaiting = health.state === "remote_media_missing";
     const ice = String(metrics.ice_connection_state || "");
     const conn = String(metrics.connection_state || "");
     const route = String(metrics.selected_candidate_type || "");
@@ -26665,7 +26754,12 @@
     const bandwidthPressure = smoothedBandwidthKbps > 0
       ? clampUnit((expectedKbps - smoothedBandwidthKbps * 0.72) / expectedKbps)
       : 0.18;
-    const freezePressure = remoteWaiting ? 1 : clampUnit(Number(callUI.frozenMediaTicks || 0) / 3);
+    const healthPressure = clampUnit(Number(health.severity || 0) / 3);
+    const freezePressure = Math.max(
+      remoteWaiting ? 1 : 0,
+      healthPressure,
+      clampUnit(Number(callUI.frozenMediaTicks || 0) / 3),
+    );
     const stallPressure = clampUnit(Number(callUI.stalledMediaTicks || 0) / 4);
     const rttPressure = clampUnit((rtt - 70) / 560);
     const lossPressure = clampUnit(loss / 0.16);
@@ -27643,9 +27737,17 @@
     const ice = String(media.pc?.iceConnectionState || metrics.ice_connection_state || "");
     const conn = String(media.pc?.connectionState || metrics.connection_state || "");
     const signaling = String(media.pc?.signalingState || metrics.signaling_state || "");
-    const remoteMissing = expectedRemoteMediaMissing(metrics);
     const hasLocal = metrics.has_local_description === true || !!media.pc?.localDescription;
     const hasRemote = metrics.has_remote_description === true || !!media.pc?.remoteDescription;
+    const mediaHealth = classifyMediaHealth({
+      ...metrics,
+      ice_connection_state: ice,
+      connection_state: conn,
+      signaling_state: signaling,
+      has_local_description: hasLocal,
+      has_remote_description: hasRemote,
+    });
+    const remoteMissing = mediaHealth.remote_missing === true;
     const inboundVideoPackets = Number(metrics.inbound_video_packets || 0);
     const inboundAudioPackets = Number(metrics.inbound_audio_packets || 0);
     const remoteVideoReady = Number(metrics.remote_video_ready_state || 0);
@@ -27655,30 +27757,31 @@
     let kind = "renegotiate";
     let strategy = "ice_restart";
     let severity = 1;
-    if (!hasLocal || !hasRemote || signaling === "have-local-offer" || signaling === "have-remote-offer") {
+    if (mediaHealth.state === "signaling_incomplete") {
       kind = "signaling_stuck";
       strategy = "resend_sdp";
       severity = 2;
-    } else if (ice === "failed" || conn === "failed") {
+    } else if (mediaHealth.state === "ice_failed") {
       kind = "ice_failed";
       strategy = "ice_restart";
       severity = 3;
-    } else if (ice === "disconnected" || conn === "disconnected" || ice === "checking") {
+    } else if (mediaHealth.state === "ice_unstable") {
       kind = "ice_unstable";
       strategy = "ice_restart";
       severity = 2;
-    } else if (remoteMissing) {
+    } else if (mediaHealth.state === "remote_media_missing") {
       kind = "remote_media_missing";
       strategy = "renegotiate";
       severity = 2;
-    } else if (
-      Number(callUI.frozenMediaTicks || 0) > 0 ||
-      (remoteVideoReady >= 2 && inboundVideoPackets > 0 && secondsSinceMoving !== null && secondsSinceMoving >= 6)
-    ) {
+    } else if (mediaHealth.state === "renderer_detached") {
+      kind = "renderer_detached";
+      strategy = "revive_playback";
+      severity = 1;
+    } else if (mediaHealth.state === "playback_frozen") {
       kind = "playback_frozen";
       strategy = "revive_playback";
       severity = 1;
-    } else if (inboundVideoPackets === 0 && inboundAudioPackets === 0 && secondsSinceMoving !== null && secondsSinceMoving >= 8) {
+    } else if (mediaHealth.state === "media_starved") {
       kind = "media_starved";
       strategy = "renegotiate";
       severity = 2;
@@ -27715,6 +27818,7 @@
       has_local_description: hasLocal,
       has_remote_description: hasRemote,
       remote_missing: remoteMissing,
+      media_health: mediaHealth,
       seconds_since_media_moving: secondsSinceMoving,
     };
     callUI.lastRepairDiagnosis = diagnosis;
@@ -29127,9 +29231,17 @@
       selected.remote_video_element_shown = surfaceState.hasRenderableVideo;
       selected.remote_video_src_attached = !!(surfaceState.videoEl && surfaceState.stream && surfaceState.videoEl.srcObject === surfaceState.stream);
       selected.remote_audio_src_attached = !!(surfaceState.audioEl && surfaceState.stream && surfaceState.audioEl.srcObject === surfaceState.stream);
+      const mediaHealth = classifyMediaHealth(selected);
+      selected.media_health_state = mediaHealth.state;
+      selected.media_health_strategy = mediaHealth.strategy;
+      selected.media_health_severity = mediaHealth.severity;
+      selected.media_health_renderer_detached = mediaHealth.renderer_detached;
+      selected.media_health_renderer_hidden = mediaHealth.renderer_hidden;
+      selected.media_health_no_video_frames = mediaHealth.no_video_frames;
       callUI.lastMetricsSnapshot = {
         at_ms: Date.now(),
         ...selected,
+        media_health: mediaHealth,
         rtt_ms: rttMs,
         jitter_ms: jitterMs,
         loss_rate: callUI.qualityEwmaLoss === null ? loss : callUI.qualityEwmaLoss,
@@ -29184,10 +29296,10 @@
         && selected.ice_connection_state !== "completed"
       ) {
         callUI.stalledMediaTicks += 1;
-      } else if (expectedRemoteMediaMissing(selected)) {
+      } else if (mediaHealth.state === "remote_media_missing" || mediaHealth.state === "media_starved") {
         callUI.stalledMediaTicks += 1;
-      } else if (media.expectRemoteVideo && selected.remote_video_tracks > 0 && !selected.remote_video_element_shown) {
-        reviveRemotePlayback("surface_hidden_with_remote_track");
+      } else if (mediaHealth.state === "renderer_detached") {
+        reviveRemotePlayback("renderer_detached");
         callUI.stalledMediaTicks += 1;
       } else if (selected.remote_video_tracks > 0 && !videoMoving && selected.inbound_video_packets > 0) {
         callUI.stalledMediaTicks += 1;
