@@ -116,6 +116,10 @@ from one_link.paths import (
     data_dir,
     inbox_dir,
 )
+from one_link.chunk_cache_gc import (
+    evict_to_target as _chunk_cache_evict,
+    gather_protected_hashes as _gather_protected_cache_hashes,
+)
 from one_link.resume import (
     ResumeRegistry,
     ResumeSidecar,
@@ -6010,34 +6014,40 @@ class Daemon:
         return snapshot
 
     def _prune_chunk_cache(self, max_bytes: int = CDC_CACHE_MAX_BYTES) -> dict:
+        """LRU eviction over the global chunk cache, layered on the
+        ``chunk_cache_gc`` module. Refactored from a self-contained
+        mtime sort to call ``evict_to_target`` so we pick up:
+
+          - **Protected hashes**: an in-progress CDC inbound
+            transfer's manifest is never evicted while it's still
+            running, even if its chunks are technically the oldest.
+          - **Min-age floor**: chunks accessed in the last hour
+            stay regardless of cap pressure. Prevents eviction
+            from racing the receive path on a fresh transfer the
+            daemon hasn't yet catalogued.
+          - **State DB cleanup**: each evicted chunk hash is also
+            dropped from ``chunk_availability`` so a future
+            ``has_chunk`` query doesn't claim we still hold it.
+          - **Env-var overrides**: ``ONE_LINK_CHUNK_CACHE_MAX_BYTES``
+            lets operators tune without code changes.
+
+        Return shape preserved from the prior implementation for
+        any caller (HTTP status surface) reading
+        ``removed`` / ``freed_bytes`` / ``bytes``.
+        """
         root = self._chunk_cache_dir()
-        entries = []
-        total = 0
-        for shard in root.iterdir():
-            if not shard.is_dir():
-                continue
-            for p in shard.iterdir():
-                if not p.is_file():
-                    continue
-                try:
-                    st = p.stat()
-                except OSError:
-                    continue
-                entries.append((st.st_mtime, st.st_size, p))
-                total += st.st_size
-        removed = 0
-        freed = 0
-        for _mtime, size, p in sorted(entries):
-            if total <= max_bytes:
-                break
-            with contextlib.suppress(OSError):
-                p.unlink()
-                removed += 1
-                freed += size
-                total -= size
-                with contextlib.suppress(OSError):
-                    p.parent.rmdir()
-        return {"removed": removed, "freed_bytes": freed, "bytes": total}
+        protected = _gather_protected_cache_hashes(self._incoming_files)
+        report = _chunk_cache_evict(
+            root,
+            max_bytes=max_bytes,
+            protected_hashes=protected,
+            state=self.state,
+        )
+        return {
+            "removed": report.evicted_files,
+            "freed_bytes": report.evicted_bytes,
+            "bytes": max(0, report.scanned_bytes - report.evicted_bytes),
+        }
 
     def _available_chunk_hashes(
         self,
@@ -14882,6 +14892,30 @@ class Daemon:
             self._resume_registry.load_from_inbox()
         except Exception as e:
             log.warning("resume registry: failed to load from inbox: %s", e)
+        # Chunk-cache size cap. The cache at data/file_chunks/ is
+        # content-addressed and grows monotonically with every CDC
+        # transfer. Without an eviction pass it can fill a disk
+        # over weeks of use. Evict the least-recently-accessed
+        # chunks down to 80 % of the (configurable) max at every
+        # startup, plus once every hour via a background task
+        # below. Chunks referenced by in-progress transfers are
+        # protected — see chunk_cache_gc.gather_protected_hashes.
+        try:
+            report = _chunk_cache_evict(
+                self._chunk_cache_dir(),
+                protected_hashes=_gather_protected_cache_hashes(self._incoming_files),
+                state=self.state,
+            )
+            if report.evicted_files:
+                log.info(
+                    "chunk cache: evicted %d file(s) / %d bytes "
+                    "(scanned %d / %d bytes; %d protected; %d errors)",
+                    report.evicted_files, report.evicted_bytes,
+                    report.scanned_files, report.scanned_bytes,
+                    report.skipped_protected, report.errors,
+                )
+        except Exception as e:
+            log.warning("chunk cache eviction at startup failed: %s", e)
         # Persistent state (sqlite) — created early so peer/handshake hooks
         # can record into it.
         try:

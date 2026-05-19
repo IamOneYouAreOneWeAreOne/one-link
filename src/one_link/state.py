@@ -5368,6 +5368,26 @@ class State:
                 ),
             )
 
+    def forget_chunk_available(self, chunk_hash: str) -> None:
+        """Drop a chunk_availability row. Called by the cache GC
+        after the on-disk cache file has been unlinked so a future
+        ``has_chunk`` query doesn't falsely claim we still hold it.
+
+        Idempotent — if the row is already absent (or the schema
+        somehow rejects the delete), we swallow it; the cache file
+        is what matters and that's already gone.
+        """
+        try:
+            with self._write_lock:
+                self._conn.execute(
+                    "DELETE FROM chunk_availability WHERE chunk_hash = ?",
+                    (str(chunk_hash),),
+                )
+        except Exception:
+            # Defensive — see docstring. State-DB errors must not
+            # take down the daemon's startup path.
+            pass
+
     def has_chunk(self, chunk_hash: str) -> bool:
         row = self._conn.execute(
             "SELECT 1 FROM chunk_availability WHERE chunk_hash = ?",
