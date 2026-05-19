@@ -1,0 +1,71 @@
+{
+  "started_at": "2026-05-19T11:22:48",
+  "cold": [
+    {
+      "scenario": "cold_transfer",
+      "size_label": "1 KiB",
+      "size_bytes": 1024,
+      "elapsed_sec": 0.0557,
+      "throughput_bps": 18379.93,
+      "landed": true
+    },
+    {
+      "scenario": "cold_transfer",
+      "size_label": "1 MiB",
+      "size_bytes": 1048576,
+      "elapsed_sec": 0.0373,
+      "throughput_bps": 28089790.01,
+      "landed": true
+    },
+    {
+      "scenario": "cold_transfer",
+      "size_label": "16 MiB",
+      "size_bytes": 16777216,
+      "elapsed_sec": 0.1598,
+      "throughput_bps": 104956699.82,
+      "landed": true
+    }
+  ],
+  "memory": {
+    "scenario": "receiver_memory",
+    "size_bytes": 67108864,
+    "elapsed_sec": 0.595,
+    "rss_peak_bytes": 90505216,
+    "rss_mean_bytes": 90029056,
+    "rss_samples": 12,
+    "rss_overhead_ratio": 1.349,
+    "landed": true
+  },
+  "warm": {
+    "scenario": "warm_dedup",
+    "size_bytes": 16777216,
+    "cold_elapsed_sec": 0.1426,
+    "warm_elapsed_sec": 0.0976,
+    "speedup_x": 1.46
+  },
+  "resume": {
+    "scenario": "resume_effectiveness",
+    "size_bytes": 16777216,
+    "chunks_cached_at_kill": 1,
+    "completed_after_resume": true,
+    "elapsed_after_restart_sec": 3.2217
+  },
+  "sidecar": {
+    "scenario": "resume_sidecar_microbench",
+    "n": 1000,
+    "write_total_sec": 0.7402,
+    "write_per_op_us": 740.23,
+    "read_total_sec": 0.0722,
+    "read_per_op_us": 72.17
+  },
+  "cache": {
+    "scenario": "chunk_cache_gc_microbench",
+    "n_chunks": 1000,
+    "chunk_size_bytes": 65536,
+    "evicted_files": 500,
+    "evicted_bytes": 32768000,
+    "elapsed_sec": 0.0642,
+    "evict_rate_files_per_sec": 7790.0
+  },
+  "finished_at": "2026-05-19T11:23:39"
+}
