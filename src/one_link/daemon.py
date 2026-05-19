@@ -917,6 +917,16 @@ class IncomingFile:
     # a 1024-chunk 256 MiB transfer, that's 16 commits instead of
     # 1024.
     cdc_pending_state: list[dict] = field(default_factory=list)
+    # Running total of bytes committed to disk for this transfer.
+    # Maintained incrementally so the per-chunk progress callback
+    # doesn't have to walk the entire manifest summing sizes
+    # (which was an O(N) walk per chunk = O(N²) overall). Wave 2a+.
+    cdc_done_bytes: int = 0
+    # Number of CDC chunks committed since the last
+    # ``_update_transfer`` broadcast. Same idea as the sidecar
+    # touch debounce — surfaces transfer progress to the UI at
+    # ~16 updates per file instead of N (where N can be 4000+).
+    cdc_chunks_since_progress: int = 0
     transfer_id: str | None = None
     ack_batch_ids: list[str] = field(default_factory=list)
 
@@ -7329,21 +7339,44 @@ class Daemon:
                     # ordering reasonable.
                     f.cdc_pending_state.extend(pending)
         cached = len(f.cdc_chunks) - len(f.cdc_missing)
-        done_bytes = sum(int(c["size"]) for c in f.cdc_chunks if int(c["index"]) not in f.cdc_missing)
-        self._update_transfer(
-            f.transfer_id,
-            status="active",
-            progress_bytes=done_bytes,
-            total_bytes=f.size,
-            chunks_done=cached,
-            chunks_total=len(f.cdc_chunks),
-            metadata={
-                "mode": "cdc",
-                "path": str(f.out_path),
-                "missing_chunks": len(f.cdc_missing),
-                "file_risk": classify_file_risk(f.name),
-            },
-        )
+        # Wave 2b perf: maintain ``cdc_done_bytes`` incrementally so
+        # the progress update is O(1) per chunk instead of the
+        # O(N²) overall cost of summing over the manifest each call.
+        # ``len(data)`` is bytes JUST committed; running total
+        # equals "all chunks not still missing" by induction.
+        f.cdc_done_bytes += len(data)
+        done_bytes = f.cdc_done_bytes
+        # Debounce the per-chunk ``_update_transfer`` so we hit
+        # SQLite UPDATE + WebSocket broadcast 16× per file instead
+        # of N× per file. The UI still gets smooth progress
+        # (16 ticks on a 1024-chunk transfer is plenty); the
+        # daemon stops paying a ms-scale write per chunk. Always
+        # flush when this is the last missing chunk so the
+        # complete-state row is up to date before
+        # ``_finish_cdc_file`` runs.
+        f.cdc_chunks_since_progress += 1
+        is_last = not f.cdc_missing
+        should_publish = is_last or f.cdc_chunks_since_progress >= 64
+        if should_publish:
+            f.cdc_chunks_since_progress = 0
+            self._update_transfer(
+                f.transfer_id,
+                status="active",
+                progress_bytes=done_bytes,
+                total_bytes=f.size,
+                chunks_done=cached,
+                chunks_total=len(f.cdc_chunks),
+                metadata={
+                    "mode": "cdc",
+                    "path": str(f.out_path),
+                    "missing_chunks": len(f.cdc_missing),
+                    "file_risk": classify_file_risk(f.name),
+                },
+            )
+        # ACK + finish-schedule still run on every chunk — only
+        # the progress publish is debounced. The sender's window
+        # needs the ACK to advance; the finish path needs to fire
+        # exactly when the last missing chunk lands.
         if not f.cdc_missing:
             await self._ack_file_chunk(channel, msg, f, force_individual=True)
             self._schedule_finish_cdc_file(blob, peer_fp, peer_sid, msg)

@@ -1,0 +1,56 @@
+{
+  "started_at": "2026-05-19T11:58:59",
+  "cold": [
+    {
+      "scenario": "cold_transfer",
+      "size_label": "1 KiB",
+      "size_bytes": 1024,
+      "elapsed_median_sec": 0.0475,
+      "elapsed_min_sec": 0.0453,
+      "throughput_median_bps": 21540.32,
+      "throughput_best_bps": 22587.5,
+      "samples": 3
+    },
+    {
+      "scenario": "cold_transfer",
+      "size_label": "1 MiB",
+      "size_bytes": 1048576,
+      "elapsed_median_sec": 0.0622,
+      "elapsed_min_sec": 0.053,
+      "throughput_median_bps": 16854369.18,
+      "throughput_best_bps": 19782949.92,
+      "samples": 3
+    },
+    {
+      "scenario": "cold_transfer",
+      "size_label": "16 MiB",
+      "size_bytes": 16777216,
+      "elapsed_median_sec": 0.1722,
+      "elapsed_min_sec": 0.1646,
+      "throughput_median_bps": 97415331.7,
+      "throughput_best_bps": 101920024.13,
+      "samples": 3
+    },
+    {
+      "scenario": "cold_transfer",
+      "size_label": "64 MiB",
+      "size_bytes": 67108864,
+      "elapsed_median_sec": 0.7014,
+      "elapsed_min_sec": 0.6958,
+      "throughput_median_bps": 95684037.4,
+      "throughput_best_bps": 96449148.52,
+      "samples": 3
+    },
+    {
+      "scenario": "cold_transfer",
+      "size_label": "256 MiB",
+      "size_bytes": 268435456,
+      "elapsed_median_sec": 4.1369,
+      "elapsed_min_sec": 4.0317,
+      "throughput_median_bps": 64888560.52,
+      "throughput_best_bps": 66582016.81,
+      "samples": 3
+    }
+  ],
+  "finished_at": "2026-05-19T11:59:52"
+}
