@@ -16485,6 +16485,82 @@ class Daemon:
             if "is closed" not in str(e):
                 raise
 
+    async def send_chunks_via_quic_parallel(
+        self,
+        peer_fp: str,
+        peer: "Peer",
+        chunk_msgs: "list[dict]",
+        *,
+        lanes: int = 4,
+    ) -> dict:
+        """Wave 2f: ship N FILE_NATIVE_CHUNK messages through the
+        peer's QUIC connection across ``lanes`` parallel bi-streams.
+
+        Wraps the native crate's
+        ``send_frame_stream_round_trips_count_parallel`` — each
+        lane opens its own bi-stream, sends a contiguous bucket of
+        chunk payloads, and reads back the matching count of
+        FRAME_CHUNK_RESPONSE acknowledgements. Throughput on
+        loopback is up to ``lanes ×`` the serial
+        ``send_chunk_via_quic`` rate.
+
+        Returns ``{ok, lanes, frames, response_bytes, elapsed_ms}``
+        on success or ``{ok: False, error: <reason>}`` on:
+          - native QUIC crate not installed
+          - peer has no advertised QUIC port + dial fails
+          - any lane's stream round-trip fails (the partial
+            success state is opaque; caller treats the whole
+            batch as one unit and re-sends via the WebRTC
+            fallback or a follow-up call)
+
+        Caller is responsible for caps/policy gates and chunk
+        re-encoding on fallback. The chunk_msgs list MUST be
+        already-encrypted FILE_NATIVE_CHUNK message dicts (i.e.
+        each carries its own chunk_id + ciphertext + seq).
+        """
+        from one_link import peer_quic as _peer_quic
+        if not _peer_quic.HAS_NATIVE:
+            return {"ok": False, "error": "native QUIC crate not installed"}
+        if (
+            _peer_quic.FRAME_CHUNK_REQUEST is None
+            or _peer_quic.FRAME_CHUNK_RESPONSE is None
+        ):
+            return {"ok": False, "error": "QUIC chunk frame types unavailable"}
+        if not chunk_msgs:
+            return {"ok": True, "lanes": 0, "frames": 0, "response_bytes": 0,
+                    "elapsed_ms": 0.0}
+        conn = await self._get_or_dial_quic(peer_fp, peer)
+        if conn is None:
+            return {"ok": False, "error": "no QUIC connection to peer"}
+        # Encode all payloads up-front so the native side just
+        # streams bytes — keeps the GIL window narrow.
+        try:
+            payloads = [encode_msg(m) for m in chunk_msgs]
+        except Exception as e:
+            return {"ok": False, "error": f"encode failed: {e}"}
+        try:
+            t0 = time.perf_counter()
+            response_bytes = await asyncio.to_thread(
+                conn.send_frame_stream_round_trips_count_parallel,
+                _peer_quic.FRAME_CHUNK_REQUEST,
+                payloads,
+                _peer_quic.FRAME_CHUNK_RESPONSE,
+                int(max(1, min(lanes, 16))),
+            )
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            return {
+                "ok": True,
+                "lanes": int(max(1, min(lanes, 16))),
+                "frames": len(payloads),
+                "response_bytes": int(response_bytes),
+                "elapsed_ms": round(elapsed_ms, 3),
+            }
+        except Exception as e:
+            with contextlib.suppress(Exception):
+                conn.close(0, b"send_chunks_via_quic_parallel error")
+            self._quic_outbound.pop(peer_fp, None)
+            return {"ok": False, "error": f"parallel stream failed: {e}"}
+
     async def send_chunk_via_quic(
         self,
         peer_fp: str,
