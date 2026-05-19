@@ -4063,6 +4063,28 @@ class Daemon:
                     # create semantics that the H16 audit asked for
                     # are preserved by the ``x``.
                     handle = open(out_path, "x+b")
+                    # Pre-allocate the partial output for CDC
+                    # transfers. Stream-to-disk does seek+write at
+                    # the chunk's true offset, so on NTFS / ext4
+                    # the FS would otherwise scatter clusters as
+                    # the file grows piecewise. Truncating to the
+                    # declared size up-front lets the FS allocate
+                    # contiguous extents; on filesystems that
+                    # treat the gap as sparse it costs nothing.
+                    # Skip for non-CDC stream mode — those grow
+                    # sequentially anyway.
+                    if cdc_chunks is not None and size > 0:
+                        try:
+                            handle.truncate(size)
+                        except OSError as e:
+                            # Truncate failure (disk full, perm) is
+                            # advisory — the transfer still works,
+                            # just without the contiguous-extent
+                            # hint. Log and continue.
+                            log.debug(
+                                "pre-allocate %s -> %d bytes failed: %s",
+                                out_path.name, size, e,
+                            )
                     cdc_streamed_initial = set()  # case-3: empty
             if cdc_chunks:
                 if missing:
@@ -7351,13 +7373,16 @@ class Daemon:
             f.handle.write(data)
         f.handle.flush()
         # Verify the whole-file hash by streaming the file back
-        # through BLAKE3. Reads in 256 KiB blocks so peak memory
-        # stays bounded regardless of file size.
+        # through BLAKE3. Reads in 1 MiB blocks — bigger than the
+        # 256 KiB chunks used during transfer to halve the read()
+        # syscall count without growing peak memory in any
+        # meaningful way (1 MiB is rounding error compared to the
+        # transferred file's size).
         f.handle.seek(0)
         h = blake3.blake3()
         written = 0
         while True:
-            block = f.handle.read(256 * 1024)
+            block = f.handle.read(1024 * 1024)
             if not block:
                 break
             h.update(block)
