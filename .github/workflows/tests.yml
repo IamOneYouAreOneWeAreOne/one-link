@@ -65,6 +65,20 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
 
+      - name: call reliability soak gate
+        run: |
+          python scripts/call_reliability_soak_gate.py --iterations 320 --out benchmarks/results/call-reliability-soak-${{ matrix.os }}-py${{ matrix.python }}.json
+
+      - name: upload call reliability evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: call-reliability-soak-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            benchmarks/results/call-reliability-soak-${{ matrix.os }}-py${{ matrix.python }}.json
+            benchmarks/results/call-reliability-soak-${{ matrix.os }}-py${{ matrix.python }}.jsonl
+          if-no-files-found: warn
+
   build_windows_binary:
     name: build Windows binary
     runs-on: windows-latest
