@@ -3852,6 +3852,7 @@ class UIServer:
                 "backend_recommendation_received",
                 "backend_recommendation_applied",
                 "backend_recommendation_failed",
+                "session_authority_seen",
             }
             if not call_id or event not in allowed_events:
                 return
@@ -3892,6 +3893,8 @@ class UIServer:
                         "ice_restart", "downshift", "rebuild_peer_connection",
                         "backend_ice_restart", "backend_renegotiate",
                         "backend_audio_first_repair",
+                        "negotiating", "connected", "degraded",
+                        "reconnecting", "recovered", "failed",
                     },
                 ),
                 "media_kind": _clean_token("media_kind", {"audio", "video"}),
@@ -3902,6 +3905,7 @@ class UIServer:
                         "failed", "disconnected", "closed", "connecting",
                         "enabled", "disabled", "full", "steady", "survival",
                         "auto", "direct", "relay", "same",
+                        "negotiating", "degraded", "recovered",
                     },
                 ),
                 "ok": bool(body.get("ok")) if "ok" in body else None,
