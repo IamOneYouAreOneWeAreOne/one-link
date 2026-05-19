@@ -131,3 +131,72 @@ def test_reliability_backend_trace_exposes_window_and_decision_confidence(tmp_pa
     assert trace["recommendation"]["ttl_ms"] > 0
     assert trace["window"]["sample_count"] == 1
     assert "avg_rtt_ms" in trace["window"]
+
+
+def test_reliability_backend_tracks_session_authority_recovery(tmp_path: Path) -> None:
+    backend = CallReliabilityBackend(log_path=tmp_path / "call_reliability.jsonl")
+    backend.record_metrics({
+        "call_id": "call-session",
+        "media_health_state": "playback_frozen",
+        "media_health_severity": 2,
+        "ice_connection_state": "connected",
+        "connection_state": "connected",
+        "signaling_state": "stable",
+        "remote_live_audio_tracks": 1,
+        "remote_live_video_tracks": 1,
+        "inbound_audio_packets": 100,
+        "inbound_video_packets": 100,
+        "inbound_video_frames_decoded": 0,
+    })
+    degraded = backend.session_for("call-session")
+    assert degraded["state"] == "degraded"
+    assert degraded["reason"] == "playback_frozen"
+
+    backend.record_event({
+        "call_id": "call-session",
+        "event": "ice_restart_requested",
+        "reason": "backend_ice_restart",
+    })
+    reconnecting = backend.session_for("call-session")
+    assert reconnecting["state"] == "reconnecting"
+    assert reconnecting["sequence"] > degraded["sequence"]
+
+    backend.record_metrics({
+        "call_id": "call-session",
+        "media_health_state": "healthy",
+        "ice_connection_state": "connected",
+        "connection_state": "connected",
+        "signaling_state": "stable",
+        "remote_live_audio_tracks": 1,
+        "remote_live_video_tracks": 1,
+        "inbound_audio_packets": 200,
+        "inbound_video_packets": 200,
+        "inbound_video_frames_decoded": 30,
+    })
+    recovered = backend.session_for("call-session")
+    assert recovered["state"] == "recovered"
+    assert recovered["reason"] == "media_flowing"
+    assert recovered["sequence"] > reconnecting["sequence"]
+    trace = backend.trace_for("call-session")
+    assert trace["session_authority"]["state"] == "recovered"
+
+
+def test_reliability_backend_session_authority_handles_network_events(tmp_path: Path) -> None:
+    backend = CallReliabilityBackend(log_path=tmp_path / "call_reliability.jsonl")
+    backend.record_event({
+        "call_id": "call-network",
+        "event": "network_offline",
+    })
+    offline = backend.session_for("call-network")
+    assert offline["state"] == "reconnecting"
+    assert offline["reason"] == "network_offline"
+
+    backend.record_event({
+        "call_id": "call-network",
+        "event": "remote_surface_synced",
+        "reason": "playback_revive",
+        "media_kind": "video",
+    })
+    recovered = backend.session_for("call-network")
+    assert recovered["state"] == "recovered"
+    assert recovered["reason"] == "playback_revive"

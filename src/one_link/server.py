@@ -3728,12 +3728,14 @@ class UIServer:
             confirm_ratio_voice=_opt_float("confirm_ratio_voice"),
             bandwidth_estimate_kbps=_opt_float("bandwidth_estimate_kbps"),
         )
-        recommendation = self._call_reliability().record_metrics(body)
+        reliability = self._call_reliability()
+        recommendation = reliability.record_metrics(body)
         self._append_call_media_audit(body)
         return web.json_response({
             "ok": True,
             "call_id": call_id,
             "recommendation": recommendation.to_json(),
+            "session_authority": reliability.session_for(call_id),
         })
 
     def _handle_report_call_event_action(self, body: dict) -> web.Response:
@@ -3743,9 +3745,14 @@ class UIServer:
             return web.json_response(
                 {"ok": False, "user_message": "Call is no longer active."},
             )
-        self._call_reliability().record_event(body)
+        reliability = self._call_reliability()
+        reliability.record_event(body)
         self._append_call_media_event_audit(body)
-        return web.json_response({"ok": True, "call_id": call_id})
+        return web.json_response({
+            "ok": True,
+            "call_id": call_id,
+            "session_authority": reliability.session_for(call_id),
+        })
 
     def _append_call_media_event_audit(self, body: dict) -> None:
         """Append a sanitized call-media event row.
@@ -4262,6 +4269,7 @@ class UIServer:
                 "is_complete": mgr.is_complete,
                 "backend_authority": self._call_authority_snapshot(mgr),
                 "path_recommendation": self._call_reliability().recommendation_for(cid),
+                "media_session_authority": self._call_reliability().session_for(cid),
             })
         return web.json_response({"calls": out})
 
@@ -4329,6 +4337,7 @@ class UIServer:
             "is_complete": mgr.is_complete,
             "backend_authority": self._call_authority_snapshot(mgr),
             "path_recommendation": self._call_reliability().recommendation_for(call_id),
+            "media_session_authority": self._call_reliability().session_for(call_id),
         })
 
     async def api_call_trace(self, request: web.Request) -> web.Response:
