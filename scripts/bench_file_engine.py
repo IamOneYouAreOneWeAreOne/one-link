@@ -220,6 +220,48 @@ def bench_cold_transfer(sizes: list[tuple[str, int]], *, repeat: int = REPEAT_DE
     return results
 
 
+def bench_sender_memory(size: int) -> dict:
+    """RSS peak on the SENDER during a single transfer. Symmetric
+    counterpart to bench_receiver_memory — proves the sender's
+    streaming-encode path doesn't read the whole file into heap.
+
+    The sender's send_file uses ``with open(path, 'rb') as f`` +
+    seek/read per chunk, so the only file-data in heap at any
+    moment is the current chunk's plaintext + the encoded
+    wire-frame. RSS should stay bounded regardless of file size.
+    """
+    payload = _build_payload(size, seed=11)
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "sender_mem.bin"
+        src.write_bytes(payload)
+        with daemon_pair() as p:
+            tracker = _RssTracker(p.a.proc.pid)
+            tracker.start()
+            t0 = time.time()
+            request(p.a.control_port, cmd="send_file",
+                    peer=p.b.short_id, path=str(src), timeout=300)
+            landed, _ = _wait_for_payload(p.b.home, payload, timeout=300.0)
+            elapsed = time.time() - t0
+            mem = tracker.stop()
+    out = {
+        "scenario": "sender_memory",
+        "size_bytes": size,
+        "elapsed_sec": round(elapsed, 4),
+        "rss_peak_bytes": mem["peak_bytes"],
+        "rss_mean_bytes": mem["mean_bytes"],
+        "rss_samples": mem["samples"],
+        "rss_overhead_ratio": (
+            round(mem["peak_bytes"] / size, 3) if size > 0 else None
+        ),
+        "landed": landed is not None,
+    }
+    print(f"  sender RSS during {_human_bytes(size)}: "
+          f"peak {_human_bytes(mem['peak_bytes'])} "
+          f"(mean {_human_bytes(mem['mean_bytes'])}, "
+          f"overhead ratio {out['rss_overhead_ratio']}×)")
+    return out
+
+
 def bench_receiver_memory(size: int) -> dict:
     """RSS peak on the receiver during a single transfer of
     ``size`` bytes. Validates Wave 1d's stream-to-disk: receiver
@@ -253,6 +295,79 @@ def bench_receiver_memory(size: int) -> dict:
           f"peak {_human_bytes(mem['peak_bytes'])} "
           f"(mean {_human_bytes(mem['mean_bytes'])}, "
           f"overhead ratio {out['rss_overhead_ratio']}×)")
+    return out
+
+
+def bench_concurrent_transfers(n: int = 4, size: int = 32 * 1024 * 1024) -> dict:
+    """Send ``n`` distinct files in parallel from A to B. Measures
+    aggregate throughput vs. the per-file baseline; if the engine
+    serializes badly somewhere (e.g., a single per-channel send
+    lock for files), aggregate stays near per-file. If it scales
+    well, aggregate approaches n × per-file."""
+    payloads = [_build_payload(size, seed=100 + i) for i in range(n)]
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        srcs = []
+        for i, payload in enumerate(payloads):
+            p = td_path / f"concurrent_{i}.bin"
+            p.write_bytes(payload)
+            srcs.append(p)
+        with daemon_pair() as p:
+            t0 = time.time()
+            threads = []
+            results: list[bool] = [False] * n
+
+            def _send_one(idx: int) -> None:
+                try:
+                    res = request(
+                        p.a.control_port, cmd="send_file",
+                        peer=p.b.short_id, path=str(srcs[idx]),
+                        timeout=300,
+                    )
+                    results[idx] = bool(res.get("ok"))
+                except Exception:
+                    results[idx] = False
+
+            for i in range(n):
+                t = threading.Thread(target=_send_one, args=(i,), daemon=True)
+                threads.append(t)
+                t.start()
+            for t in threads:
+                t.join(timeout=300.0)
+            # Wait for all payloads to land.
+            end = time.time() + 120.0
+            seen = set()
+            while time.time() < end:
+                for f in inbox_files(p.b.home):
+                    try:
+                        if f.stat().st_size == size:
+                            data = f.read_bytes()
+                            for i, expected in enumerate(payloads):
+                                if i in seen:
+                                    continue
+                                if data == expected:
+                                    seen.add(i)
+                                    break
+                    except OSError:
+                        pass
+                if len(seen) >= n:
+                    break
+                time.sleep(0.2)
+            elapsed = time.time() - t0
+    total_bytes = n * size
+    out = {
+        "scenario": "concurrent_transfers",
+        "n": n,
+        "size_bytes": size,
+        "total_bytes": total_bytes,
+        "elapsed_sec": round(elapsed, 4),
+        "aggregate_throughput_bps": round(total_bytes / elapsed, 2) if elapsed > 0 else 0,
+        "per_transfer_throughput_bps": round(size / elapsed, 2) if elapsed > 0 else 0,
+        "completed": len(seen),
+    }
+    print(f"  concurrent {n}×{_human_bytes(size)}: "
+          f"{out['completed']}/{n} landed in {elapsed:.3f}s "
+          f"-> aggregate {_human_throughput(total_bytes, elapsed)}")
     return out
 
 
@@ -519,7 +634,8 @@ def main() -> int:
     parser.add_argument(
         "--scenario",
         choices=[
-            "cold", "memory", "warm", "resume", "sidecar", "cache", "all",
+            "cold", "memory", "sender_memory", "warm", "resume",
+            "sidecar", "cache", "concurrent", "all",
         ],
         default="all",
         help="Run only the named scenario family",
@@ -549,6 +665,13 @@ def main() -> int:
     run_section("cold", lambda: bench_cold_transfer(sizes, repeat=args.repeat))
     run_section("memory", lambda: bench_receiver_memory(
         64 * 1024 * 1024 if args.quick else 256 * 1024 * 1024
+    ))
+    run_section("sender_memory", lambda: bench_sender_memory(
+        64 * 1024 * 1024 if args.quick else 256 * 1024 * 1024
+    ))
+    run_section("concurrent", lambda: bench_concurrent_transfers(
+        n=4,
+        size=8 * 1024 * 1024 if args.quick else 32 * 1024 * 1024,
     ))
     run_section("warm", lambda: bench_warm_dedup(
         16 * 1024 * 1024 if args.quick else 64 * 1024 * 1024

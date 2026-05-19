@@ -1,0 +1,14 @@
+{
+  "started_at": "2026-05-19T11:45:21",
+  "sender_memory": {
+    "scenario": "sender_memory",
+    "size_bytes": 268435456,
+    "elapsed_sec": 4.2688,
+    "rss_peak_bytes": 98521088,
+    "rss_mean_bytes": 95892323,
+    "rss_samples": 85,
+    "rss_overhead_ratio": 0.367,
+    "landed": true
+  },
+  "finished_at": "2026-05-19T11:45:28"
+}
