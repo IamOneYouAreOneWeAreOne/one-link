@@ -298,6 +298,124 @@ def bench_receiver_memory(size: int) -> dict:
     return out
 
 
+def bench_many_small_files(n: int = 20, per_size: int = 4096) -> dict:
+    """A/B compare sending N small files via the existing
+    per-file send_file (each pays its own FILE_OFFER round-trip)
+    vs the future FILE_OFFER_BATCH path. Wave 2b's receiver
+    handler exists; the sender-side batcher is still a follow-up,
+    so this bench currently establishes only the BASELINE — the
+    cost-of-many-small-files that batching would optimize.
+    """
+    payloads = [_build_payload(per_size, seed=200 + i) for i in range(n)]
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        srcs = []
+        for i, payload in enumerate(payloads):
+            sp = td_path / f"small_{i}.bin"
+            sp.write_bytes(payload)
+            srcs.append(sp)
+        with daemon_pair() as p:
+            request(p.a.control_port, cmd="send",
+                    peer=p.b.short_id, body="warm")
+            time.sleep(0.2)
+            t0 = time.time()
+            for src in srcs:
+                request(p.a.control_port, cmd="send_file",
+                        peer=p.b.short_id, path=str(src), timeout=60)
+            # Wait for all payloads to land.
+            end = time.time() + 60.0
+            seen = set()
+            while time.time() < end:
+                for f in inbox_files(p.b.home):
+                    try:
+                        data = f.read_bytes()
+                        for i, payload in enumerate(payloads):
+                            if i not in seen and data == payload:
+                                seen.add(i)
+                    except OSError:
+                        pass
+                if len(seen) >= n:
+                    break
+                time.sleep(0.1)
+            elapsed = time.time() - t0
+    total_bytes = n * per_size
+    out = {
+        "scenario": "many_small_files",
+        "n": n,
+        "per_size_bytes": per_size,
+        "total_bytes": total_bytes,
+        "elapsed_sec": round(elapsed, 4),
+        "per_file_sec": round(elapsed / n, 4) if n > 0 else None,
+        "aggregate_throughput_bps": round(total_bytes / elapsed, 2) if elapsed > 0 else 0,
+        "completed": len(seen),
+    }
+    print(f"  many-small: {n}×{_human_bytes(per_size)} ({total_bytes} bytes) "
+          f"sequentially -> {elapsed:.3f}s "
+          f"({out['per_file_sec'] * 1000:.1f} ms/file avg)")
+    return out
+
+
+def bench_share_link_round_trip(size: int = 1 * 1024 * 1024) -> dict:
+    """Wave 2g+ share-link end-to-end latency: mint on A, claim on
+    B, file lands. Captures the wall-time cost of the new
+    out-of-band-token flow vs paired-peer send_file (proxy via
+    cold_transfer at same size). Useful to know: is share-link
+    delivery materially slower than direct send, or is the
+    overhead just the mint round-trip?"""
+    payload = _build_payload(size, seed=303)
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "sharelink.bin"
+        src.write_bytes(payload)
+        with daemon_pair() as p:
+            # Warm channel both directions.
+            request(p.a.control_port, cmd="send",
+                    peer=p.b.short_id, body="warm")
+            time.sleep(0.5)
+            t0 = time.time()
+            mint = request(p.a.control_port, cmd="create_share_link",
+                           path=str(src))
+            if not mint.get("ok"):
+                return {"scenario": "share_link_round_trip",
+                        "size_bytes": size, "error": mint}
+            mint_elapsed = time.time() - t0
+            claim = request(p.b.control_port,
+                            cmd="claim_share_link_from_peer",
+                            peer=p.a.short_id,
+                            token_hex=mint["token_hex"])
+            if not claim.get("ok"):
+                return {"scenario": "share_link_round_trip",
+                        "size_bytes": size, "error": claim}
+            # Wait for file to arrive.
+            end = time.time() + 30.0
+            landed = False
+            while time.time() < end:
+                for f in inbox_files(p.b.home):
+                    try:
+                        if f.stat().st_size == size and f.read_bytes() == payload:
+                            landed = True
+                            break
+                    except OSError:
+                        pass
+                if landed:
+                    break
+                time.sleep(0.05)
+            total_elapsed = time.time() - t0
+    out = {
+        "scenario": "share_link_round_trip",
+        "size_bytes": size,
+        "mint_elapsed_sec": round(mint_elapsed, 4),
+        "total_elapsed_sec": round(total_elapsed, 4),
+        "delivery_elapsed_sec": round(total_elapsed - mint_elapsed, 4),
+        "throughput_bps": round(size / total_elapsed, 2) if total_elapsed > 0 else 0,
+        "completed": landed,
+    }
+    print(f"  share-link round-trip {_human_bytes(size)}: "
+          f"mint {mint_elapsed * 1000:.1f}ms + delivery "
+          f"{(total_elapsed - mint_elapsed) * 1000:.1f}ms = "
+          f"{total_elapsed:.3f}s ({_human_throughput(size, total_elapsed)})")
+    return out
+
+
 def bench_quic_vs_webrtc(size: int = 16 * 1024 * 1024) -> dict:
     """A/B compare a paired-pinned transfer (rides Wave 2e+2f
     QUIC batch path) vs the same transfer between unpinned peers
@@ -742,7 +860,7 @@ def main() -> int:
         choices=[
             "cold", "memory", "sender_memory", "warm", "resume",
             "sidecar", "cache", "concurrent", "quic_vs_webrtc",
-            "all",
+            "many_small", "share_link", "all",
         ],
         default="all",
         help="Run only the named scenario family",
@@ -782,6 +900,13 @@ def main() -> int:
     ))
     run_section("quic_vs_webrtc", lambda: bench_quic_vs_webrtc(
         size=8 * 1024 * 1024 if args.quick else 16 * 1024 * 1024,
+    ))
+    run_section("many_small", lambda: bench_many_small_files(
+        n=10 if args.quick else 20,
+        per_size=4096,
+    ))
+    run_section("share_link", lambda: bench_share_link_round_trip(
+        size=256 * 1024 if args.quick else 1 * 1024 * 1024,
     ))
     run_section("warm", lambda: bench_warm_dedup(
         16 * 1024 * 1024 if args.quick else 64 * 1024 * 1024
