@@ -30,6 +30,30 @@ from tests.harness import daemon_pair, request
 pytestmark = [pytest.mark.timeout(120), pytest.mark.soak]
 
 
+def test_quic_status_endpoint_returns_state() -> None:
+    """The ``quic_status`` control command must return a clean
+    state snapshot after the daemon's QUIC server endpoint is
+    up. Used by ops tooling + UI dashboards to verify the QUIC
+    stack is alive without grepping the daemon log."""
+    with daemon_pair() as p:
+        # Drive a chat send so the channel comes up + CAPS
+        # exchange completes.
+        request(p.a.control_port, cmd="send",
+                peer=p.b.short_id, body="warm")
+        time.sleep(1.0)
+        status = request(p.a.control_port, cmd="quic_status")
+        assert status.get("ok") is True
+        assert status.get("native_quic_available") is True
+        assert status.get("server_up") is True
+        assert isinstance(status.get("local_port"), int)
+        assert status["local_port"] > 0
+        # Outbound + inbound are lists; advertised_ports a dict.
+        assert isinstance(status.get("outbound"), list)
+        assert isinstance(status.get("inbound"), list)
+        assert isinstance(status.get("advertised_ports"), dict)
+        assert isinstance(status.get("recent_paired_count"), int)
+
+
 def test_daemon_brings_up_quic_endpoint() -> None:
     """After daemon_pair settles, both daemons must have a
     QUIC server endpoint up on a non-zero port. Without this the

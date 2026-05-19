@@ -15183,6 +15183,37 @@ class Daemon:
                         "ok": False,
                         "error": str(e),
                     })
+            elif cmd == "quic_status":
+                # Wave 2e/2f operational visibility. Returns a
+                # snapshot of the daemon's QUIC stack:
+                #   - whether the server endpoint is up
+                #   - local listening port (None if down)
+                #   - count of cached outbound + inbound
+                #     Connections + per-peer fingerprints
+                #   - count of peers with an advertised quic_port
+                # Useful for UI dashboards + ``one-link status``
+                # tooling + debugging stuck connections without
+                # tailing the daemon log.
+                from one_link import peer_quic as _peer_quic
+                outbound_alive: dict[str, bool] = {}
+                for fp, conn in self._quic_outbound.items():
+                    try:
+                        outbound_alive[fp] = bool(conn.is_connected)
+                    except Exception:
+                        outbound_alive[fp] = False
+                await self._reply(writer, {
+                    "ok": True,
+                    "native_quic_available": bool(_peer_quic.HAS_NATIVE),
+                    "server_up": self._quic_server_endpoint is not None,
+                    "local_port": self._quic_local_port,
+                    "outbound": [
+                        {"peer_fp": fp, "alive": alive}
+                        for fp, alive in sorted(outbound_alive.items())
+                    ],
+                    "inbound": sorted(self._quic_inbound.keys()),
+                    "advertised_ports": dict(self._quic_peer_ports),
+                    "recent_paired_count": len(self._quic_recent_paired),
+                })
             elif cmd == "quic_ping":
                 # Wave 2e: end-to-end QUIC connectivity probe. The
                 # control client passes a peer fingerprint or
