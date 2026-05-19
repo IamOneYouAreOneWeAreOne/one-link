@@ -84,6 +84,16 @@ def _route_hint_for_host(host: str) -> tuple[str, str]:
     return "peer_server", "lan"
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return default
+    if n != n:
+        return default
+    return n
+
+
 def _enumerate_sovereign_primitives() -> list[dict]:
     """Return the catalog of sovereignty / privacy primitives this
     binary ships. Surfaced via /api/audit so an inspecting user can
@@ -2251,13 +2261,83 @@ class UIServer:
             ).digest()
             credential = base64.b64encode(digest).decode("ascii")
             credential_type = "turn-rest-hmac-sha1"
+        candidates = self._rank_turn_urls(urls)
         return {
-            "urls": urls,
+            "urls": [str(c["url"]) for c in candidates],
+            "candidates": candidates,
             "username": username,
             "credential": credential,
             "credential_type": credential_type,
             "ttl_seconds": ttl_s if shared_secret and call_id else None,
         }
+
+    def _rank_turn_urls(self, urls: list[str]) -> list[dict]:
+        """Return TURN URLs in best-first order with privacy-safe health.
+
+        TURN availability is what makes calls survive hostile NATs and
+        locked-down networks. This helper keeps the browser config
+        deterministic while letting real relay observations bias the
+        order over time. Unknown relays stay usable; unhealthy relays
+        are simply pushed down instead of being silently removed.
+        """
+        now_ms = int(time.time() * 1000)
+
+        def metrics_for(url: str) -> dict | None:
+            try:
+                fn = getattr(self.daemon, "_relay_metrics_for", None)
+                if callable(fn):
+                    found = fn(url)
+                    if isinstance(found, dict):
+                        return found
+            except Exception:
+                pass
+            try:
+                store = getattr(self.daemon, "_relay_metrics", None)
+                found = store.get(url) if isinstance(store, dict) else None
+                return found if isinstance(found, dict) else None
+            except Exception:
+                return None
+
+        out: list[dict] = []
+        for index, url in enumerate(urls):
+            metrics = metrics_for(url) or {}
+            rtt = _safe_float(metrics.get("rtt_ms"), 100.0)
+            loss = min(1.0, max(0.0, _safe_float(metrics.get("loss_rate"), 0.0)))
+            attempts = max(0, int(_safe_float(metrics.get("n_attempts"), 0.0)))
+            successes = max(0, int(_safe_float(metrics.get("n_successes"), 0.0)))
+            success_rate = (successes / attempts) if attempts else None
+            last_seen = int(_safe_float(metrics.get("last_observed_ms"), 0.0))
+            stale_penalty = 0.0
+            if last_seen and now_ms - last_seen > 15 * 60 * 1000:
+                stale_penalty = 0.25
+            score = (
+                min(1.0, rtt / 1200.0) * 0.38
+                + loss * 0.42
+                + ((1.0 - success_rate) * 0.2 if success_rate is not None else 0.08)
+                + stale_penalty
+            )
+            health = "unknown"
+            if attempts:
+                if loss >= 0.35 or (success_rate is not None and success_rate < 0.5):
+                    health = "poor"
+                elif loss >= 0.08 or rtt >= 450:
+                    health = "degraded"
+                else:
+                    health = "healthy"
+            out.append({
+                "url": url,
+                "rank": index,
+                "health": health,
+                "score": round(score, 4),
+                "rtt_ms": round(rtt, 3) if attempts else None,
+                "loss_rate": round(loss, 5) if attempts else None,
+                "success_rate": round(success_rate, 4) if success_rate is not None else None,
+                "observed": bool(attempts),
+            })
+        out.sort(key=lambda c: (float(c["score"]), int(c["rank"])))
+        for rank, cand in enumerate(out):
+            cand["rank"] = rank
+        return out
 
     def _resolved_webrtc_ice_servers(self, *, call_id: str | None = None) -> list[dict]:
         servers: list[dict] = [{"urls": u} for u in self._resolved_stun_servers()]
@@ -2273,6 +2353,24 @@ class UIServer:
                 entry["credentialType"] = "password"
             servers.append(entry)
         return servers
+
+    def _resolved_webrtc_route_policy(self, *, call_id: str | None = None) -> dict:
+        turn = self._resolved_turn_config(call_id=call_id)
+        relay_candidates = list(turn.get("candidates") or [])
+        relay_ready = bool(relay_candidates)
+        best = relay_candidates[0] if relay_candidates else None
+        return {
+            "mode": "direct_first",
+            "relay_ready": relay_ready,
+            "direct_first": True,
+            "force_relay_on_repair": relay_ready,
+            "per_call_credentials": bool(
+                call_id and turn.get("credential_type") == "turn-rest-hmac-sha1"
+            ),
+            "relay_candidates": relay_candidates[:8],
+            "best_relay_health": best.get("health") if isinstance(best, dict) else None,
+            "best_relay_score": best.get("score") if isinstance(best, dict) else None,
+        }
 
     # ── Sovereignty API (May 15 2026) ──────────────────────────────
     #
@@ -2837,24 +2935,10 @@ class UIServer:
         list = sovereignty default (LAN-only pairing)."""
         call_id = request.query.get("call_id") if hasattr(request, "query") else None
         servers = self._resolved_webrtc_ice_servers(call_id=call_id)
-        relay_ready = any(
-            str(url).lower().startswith(("turn:", "turns:"))
-            for srv in servers
-            for url in (
-                srv.get("urls")
-                if isinstance(srv.get("urls"), list)
-                else [srv.get("urls")]
-            )
-        )
+        route_policy = self._resolved_webrtc_route_policy(call_id=call_id)
         return web.json_response({
             "iceServers": servers,
-            "routePolicy": {
-                "mode": "direct_first",
-                "relay_ready": relay_ready,
-                "direct_first": True,
-                "force_relay_on_repair": relay_ready,
-                "per_call_credentials": bool(call_id and os.environ.get("ONE_LINK_TURN_SHARED_SECRET")),
-            },
+            "routePolicy": route_policy,
             "sovereignty_default": len(servers) == 0,
         })
 
