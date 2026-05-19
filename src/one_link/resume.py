@@ -84,6 +84,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    from blake3 import blake3 as _blake3
+except ImportError:  # pragma: no cover - optional dep
+    _blake3 = None  # type: ignore[assignment]
+
 log = logging.getLogger(__name__)
 
 
@@ -115,11 +120,47 @@ class ResumeSidecar:
     created_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     updated_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     schema_version: int = SCHEMA_VERSION
+    # Integrity tag over the canonical JSON of every OTHER field.
+    # Lets the loader distinguish "disk corrupted this file" (we'll
+    # log + drop, and let the chunk cache + sender retry rebuild the
+    # transfer) from "user intentionally deleted it" (which is the
+    # same end result but a cleaner mental model in logs).
+    #
+    # Empty string when written by a pre-Wave-1e daemon — the loader
+    # treats absent/empty digest as "legacy sidecar, skip integrity
+    # check". New sidecars always carry one.
+    digest: str = ""
 
     def touch(self) -> None:
         self.updated_ms = int(time.time() * 1000)
 
+    def _to_signing_dict(self) -> dict[str, Any]:
+        """Dict shape used for the integrity digest: every field
+        EXCEPT ``digest`` itself, with a deterministic key ordering
+        so the same content always produces the same hash."""
+        d = asdict(self)
+        d.pop("digest", None)
+        return d
+
+    def _compute_digest(self) -> str:
+        """BLAKE3 of the canonical signing JSON. Returns empty when
+        the blake3 module isn't importable — caller treats that as
+        "skip integrity tagging on this install"."""
+        if _blake3 is None:
+            return ""
+        canon = json.dumps(
+            self._to_signing_dict(),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return _blake3(canon).hexdigest()
+
     def to_json(self) -> str:
+        # Recompute the digest at every persist so debounced
+        # ``touch()`` rewrites (which bump updated_ms) produce a
+        # matching tag. The digest covers updated_ms, so a stale
+        # digest from a prior write would fail the load check.
+        self.digest = self._compute_digest()
         return json.dumps(asdict(self), separators=(",", ":"))
 
     @classmethod
@@ -135,7 +176,21 @@ class ResumeSidecar:
                 f"resume sidecar schema {filtered.get('schema_version')} "
                 f"unsupported (this daemon understands {SCHEMA_VERSION})"
             )
-        return cls(**filtered)
+        sc = cls(**filtered)
+        # Integrity check. A pre-Wave-1e sidecar without a digest
+        # field passes through (digest=""); a newer sidecar whose
+        # digest doesn't match its content raises ValueError so the
+        # caller can log + drop it instead of acting on tampered
+        # state.
+        if sc.digest:
+            expected = sc._compute_digest()
+            if expected != sc.digest:
+                raise ValueError(
+                    f"resume sidecar digest mismatch for blob "
+                    f"{sc.blob_hex[:8]}: expected {expected[:16]}, "
+                    f"got {sc.digest[:16]}"
+                )
+        return sc
 
 
 def sidecar_dir(inbox_root: Path) -> Path:

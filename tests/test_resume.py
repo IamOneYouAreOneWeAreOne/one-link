@@ -267,6 +267,67 @@ def test_registry_prunes_stale_entries(tmp_path: Path) -> None:
     assert fresh_partial.exists()
 
 
+def test_sidecar_digest_round_trip(tmp_path: Path) -> None:
+    """A persisted sidecar must round-trip cleanly: digest is
+    written in, recomputed on load, and matches."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    partial = inbox / "x.bin"
+    partial.write_bytes(b"x")
+    sc = _make("a" * 64, "P" * 64, partial)
+    persist_sidecar(inbox, sc)
+    loaded = load_sidecar(inbox, sc.blob_hex)
+    assert loaded is not None
+    # The persisted sidecar must carry a non-empty digest now that
+    # Wave 1e shipped — earlier sidecars wrote digest="".
+    assert loaded.digest != ""
+    assert loaded.blob_hex == sc.blob_hex
+
+
+def test_sidecar_tampered_payload_rejected(tmp_path: Path) -> None:
+    """Hand-editing the JSON body must invalidate the digest and
+    cause load_sidecar to return None (with a warning logged)."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    partial = inbox / "x.bin"
+    partial.write_bytes(b"x" * 32)
+    sc = _make("a" * 64, "P" * 64, partial, size=100)
+    persist_sidecar(inbox, sc)
+    p = sidecar_path(inbox, sc.blob_hex)
+    # Flip a byte in the size field without touching the digest.
+    raw = p.read_text(encoding="utf-8")
+    tampered = raw.replace('"size":100', '"size":9999')
+    assert tampered != raw, "test setup: size substitution did not match"
+    p.write_text(tampered, encoding="utf-8")
+    assert load_sidecar(inbox, sc.blob_hex) is None
+
+
+def test_sidecar_without_digest_treated_as_legacy(tmp_path: Path) -> None:
+    """A sidecar written by a pre-Wave-1e daemon won't carry a
+    digest field. The loader must still accept it (skipping the
+    integrity check) rather than rejecting the user's pending
+    transfers on the first upgrade."""
+    import json as _json
+    inbox = tmp_path / "inbox"
+    (inbox / ".resume").mkdir(parents=True)
+    p = inbox / ".resume" / ("a" * 64 + ".json")
+    # A sidecar exactly as Wave 1a would have written: no digest
+    # field at all.
+    payload = {
+        "blob_hex": "a" * 64,
+        "peer_fp": "P" * 64,
+        "name": "legacy.bin",
+        "size": 1024,
+        "out_path": str(inbox / "x.bin"),
+        "cdc_chunks": [],
+        "schema_version": SCHEMA_VERSION,
+    }
+    p.write_text(_json.dumps(payload), encoding="utf-8")
+    loaded = load_sidecar(inbox, "a" * 64)
+    assert loaded is not None
+    assert loaded.digest == ""
+
+
 def test_registry_snapshot_shape(tmp_path: Path) -> None:
     """snapshot() must return a UI-safe shape: bounded size, no
     full CDC manifest, plain JSON-compatible dicts."""
