@@ -1062,6 +1062,14 @@ class Daemon:
         # when send_file's QUIC path dials a peer that advertised
         # a quic port.
         self._quic_outbound: dict[str, object] = {}
+        # peer_fp_hex -> advertised QUIC port (Wave 2d). Populated
+        # by _handle_endpoint_update; consumed by the outbound
+        # dial helper.
+        self._quic_peer_ports: dict[str, int] = {}
+        # Async lock to serialise per-peer dial attempts so two
+        # concurrent send_files don't race to open duplicate
+        # connections.
+        self._quic_dial_lock: asyncio.Lock | None = None
         # Living Presence Tier α-pre — Cryptographic Reality Engine
         # store. Holds verified FrameProvenance state per blob_hex
         # so the UI can render the Reality dot. See
@@ -11450,6 +11458,20 @@ class Daemon:
             cleaned.append((host, port))
         if not cleaned:
             return
+        # Wave 2d: stash the peer's advertised QUIC port for
+        # later outbound dialing. Sender's QUIC path consults
+        # ``self._quic_peer_ports[peer_fp]`` to know which port
+        # to dial. Validation: positive 16-bit int or ignored.
+        try:
+            quic_port_raw = msg.get("quic_port")
+            if isinstance(quic_port_raw, int) and 0 < quic_port_raw < 65536:
+                self._quic_peer_ports[peer_fp] = quic_port_raw
+                log.debug(
+                    "stored QUIC port %d for peer %s",
+                    quic_port_raw, peer_fp[:8],
+                )
+        except Exception as e:
+            log.debug("QUIC port stash failed for %s: %s", peer_fp[:8], e)
         # Pick the most-likely-reachable endpoint:
         #   1) any non-LAN public IP if our connection is internet
         #   2) otherwise the first private one (LAN)
@@ -11757,9 +11779,19 @@ class Daemon:
                 peer_obj = await self.resolve_for_send(rec.fingerprint)
                 if peer_obj is None:
                     continue
+                # Wave 2d: piggy-back the QUIC server port on the
+                # endpoint announcement so paired peers can dial us
+                # directly via QUIC after Wave 2e wires the chunk
+                # router. Omitted when QUIC isn't up (operators
+                # who set ONE_LINK_QUIC_TRANSPORT=0 still announce
+                # WebRTC endpoints).
+                extra_fields: dict = {}
+                if self._quic_local_port:
+                    extra_fields["quic_port"] = int(self._quic_local_port)
                 outer = make_msg(
                     "ENDPOINT_UPDATE", self.me.short_id,
                     endpoints=endpoint_dicts,
+                    **extra_fields,
                 )
                 # Best-effort. resolve_for_send + send_to do the right
                 # thing: open or reuse a session, send through it,
@@ -16059,6 +16091,87 @@ class Daemon:
         except RuntimeError as e:
             if "is closed" not in str(e):
                 raise
+
+    async def _get_or_dial_quic(self, peer_fp: str, peer) -> object | None:
+        """Wave 2e: return a cached outbound QUIC Connection to
+        ``peer_fp`` or open a fresh one and cache it.
+
+        Returns None when:
+          - the local QUIC client endpoint can't be built
+          - the peer hasn't advertised a quic_port via
+            ENDPOINT_UPDATE
+          - the dial fails (peer offline, blocked, etc.)
+
+        Caller falls back to the WebRTC transport on None.
+        """
+        existing = self._quic_outbound.get(peer_fp)
+        if existing is not None:
+            try:
+                if existing.is_connected:
+                    return existing
+            except Exception:
+                pass
+            # Stale entry — drop it and re-dial.
+            with contextlib.suppress(Exception):
+                existing.close(0, b"stale")
+            self._quic_outbound.pop(peer_fp, None)
+        # Need both: peer advertised a port AND we have an
+        # outbound endpoint to dial from.
+        port = self._quic_peer_ports.get(peer_fp)
+        if not port:
+            return None
+        peer_addr = getattr(peer, "address", None)
+        if not peer_addr:
+            return None
+        if self._quic_dial_lock is None:
+            self._quic_dial_lock = asyncio.Lock()
+        async with self._quic_dial_lock:
+            # Re-check the cache under the lock — another waiter
+            # may have dialled while we waited.
+            existing = self._quic_outbound.get(peer_fp)
+            if existing is not None:
+                try:
+                    if existing.is_connected:
+                        return existing
+                except Exception:
+                    pass
+            try:
+                from one_link import peer_quic as _peer_quic
+                if not _peer_quic.HAS_NATIVE:
+                    return None
+                identity_pem = self.me.to_pkcs8_pem()
+                client_ep = _peer_quic.make_client_endpoint(
+                    identity_pem,
+                    _peer_quic.QuicEndpointConfig(bind_addr="0.0.0.0:0"),
+                )
+                if client_ep is None:
+                    return None
+                # Expected fingerprint = bytes of the peer's
+                # BLAKE3 hash. The state DB stores it as a hex
+                # string; convert.
+                try:
+                    expected_fp = bytes.fromhex(peer_fp)
+                except ValueError:
+                    return None
+                dial_addr = f"{peer_addr}:{port}"
+                conn = await asyncio.to_thread(
+                    client_ep.connect_blocking,
+                    dial_addr,
+                    expected_fp,
+                    10_000,
+                )
+                if conn is None:
+                    log.debug("QUIC dial to %s returned None", peer_fp[:8])
+                    return None
+                self._quic_outbound[peer_fp] = conn
+                log.info(
+                    "QUIC outbound established to %s via %s",
+                    peer_fp[:8], dial_addr,
+                )
+                return conn
+            except Exception as e:
+                log.debug("QUIC dial to %s failed: %s", peer_fp[:8], e)
+                return None
 
     async def _quic_accept_loop(self) -> None:
         """Wave 2d: accept inbound QUIC connections.
