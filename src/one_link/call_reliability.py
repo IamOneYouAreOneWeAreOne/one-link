@@ -33,6 +33,17 @@ MEDIA_HEALTH_STATES = frozenset({
 })
 
 
+SESSION_STATES = frozenset({
+    "negotiating",
+    "connected",
+    "degraded",
+    "reconnecting",
+    "recovered",
+    "ended",
+    "failed",
+})
+
+
 @dataclass(frozen=True)
 class PathRecommendation:
     """One server-owned path decision for a call."""
@@ -102,6 +113,9 @@ class CallReliabilityBackend:
             state["last_metrics"] = row
             state["recommendation"] = recommendation.to_json()
             state["window"] = self._window_summary(recent)
+            state["session"] = self._update_session_from_metrics(
+                state, row, recommendation,
+            )
             state["updated_at_ms"] = row["ts_ms"]
         self._append_jsonl(row)
         return recommendation
@@ -115,6 +129,7 @@ class CallReliabilityBackend:
             self._append_locked(self._events, call_id, row)
             state = self._state.setdefault(call_id, {})
             state["last_event"] = row
+            state["session"] = self._update_session_from_event(state, row)
             state["updated_at_ms"] = row["ts_ms"]
         self._append_jsonl(row)
 
@@ -129,6 +144,19 @@ class CallReliabilityBackend:
             audio_priority=False,
         ).to_json()
 
+    def session_for(self, call_id: str) -> dict[str, Any]:
+        with self._lock:
+            session = dict(self._state.get(call_id, {}).get("session") or {})
+        if session:
+            return session
+        return self._new_session(
+            "negotiating",
+            "no_media_truth_yet",
+            ts_ms=int(time.time() * 1000),
+            previous=None,
+            confidence=0.35,
+        )
+
     def trace_for(self, call_id: str, *, limit: int = MAX_TRACE_ROWS) -> dict[str, Any]:
         limit = max(16, min(MAX_TRACE_ROWS, int(limit)))
         with self._lock:
@@ -141,6 +169,7 @@ class CallReliabilityBackend:
             "call_id": call_id,
             "privacy": "aggregate media state only; no SDP, ICE candidates, IP addresses, device names, or media content",
             "recommendation": dict(state.get("recommendation") or self.recommendation_for(call_id)),
+            "session_authority": dict(state.get("session") or self.session_for(call_id)),
             "window": state.get("window"),
             "last_metrics": state.get("last_metrics"),
             "last_event": state.get("last_event"),
@@ -340,6 +369,169 @@ class CallReliabilityBackend:
                 if str(r.get("ice_connection_state") or "") in {"failed", "disconnected"}
             ),
         }
+
+    def _update_session_from_metrics(
+        self,
+        state: dict[str, Any],
+        row: dict[str, Any],
+        recommendation: PathRecommendation,
+    ) -> dict[str, Any]:
+        previous = dict(state.get("session") or {})
+        ts_ms = int(row.get("ts_ms") or int(time.time() * 1000))
+        health = str(row.get("media_health_state") or "healthy")
+        ice = str(row.get("ice_connection_state") or "")
+        conn = str(row.get("connection_state") or "")
+        signaling = str(row.get("signaling_state") or "")
+        has_remote_audio = int(row.get("remote_live_audio_tracks") or 0) > 0
+        has_remote_video = int(row.get("remote_live_video_tracks") or 0) > 0
+        audio_packets = int(row.get("inbound_audio_packets") or 0)
+        video_packets = int(row.get("inbound_video_packets") or 0)
+        video_frames = int(row.get("inbound_video_frames_decoded") or 0)
+        media_flowing = (
+            (has_remote_audio and audio_packets > 0)
+            or (has_remote_video and (video_packets > 0 or video_frames > 0))
+        )
+        if ice == "failed" or conn == "failed":
+            return self._new_session(
+                "reconnecting", "ice_failed", ts_ms=ts_ms,
+                previous=previous, confidence=recommendation.confidence,
+                recommendation=recommendation,
+            )
+        if ice == "disconnected" or conn == "disconnected":
+            return self._new_session(
+                "reconnecting", "transport_disconnected", ts_ms=ts_ms,
+                previous=previous, confidence=recommendation.confidence,
+                recommendation=recommendation,
+            )
+        if health in {"signaling_incomplete", "remote_media_missing"}:
+            return self._new_session(
+                "negotiating", health, ts_ms=ts_ms, previous=previous,
+                confidence=recommendation.confidence,
+                recommendation=recommendation,
+            )
+        if health in {"ice_unstable", "playback_frozen", "media_starved", "renderer_detached"}:
+            return self._new_session(
+                "degraded", health, ts_ms=ts_ms, previous=previous,
+                confidence=recommendation.confidence,
+                recommendation=recommendation,
+            )
+        if (
+            health == "healthy"
+            and ice in {"connected", "completed"}
+            and conn in {"", "connected"}
+            and signaling in {"", "stable"}
+            and media_flowing
+        ):
+            old_state = str(previous.get("state") or "")
+            state_name = "recovered" if old_state in {
+                "degraded", "reconnecting", "failed",
+            } else "connected"
+            return self._new_session(
+                state_name, "media_flowing", ts_ms=ts_ms, previous=previous,
+                confidence=max(0.75, recommendation.confidence),
+                recommendation=recommendation,
+            )
+        if health == "healthy" and ice in {"connected", "completed"}:
+            return self._new_session(
+                "connected", "transport_connected", ts_ms=ts_ms,
+                previous=previous, confidence=recommendation.confidence,
+                recommendation=recommendation,
+            )
+        return self._new_session(
+            "negotiating", "awaiting_media_truth", ts_ms=ts_ms,
+            previous=previous, confidence=recommendation.confidence,
+            recommendation=recommendation,
+        )
+
+    def _update_session_from_event(
+        self,
+        state: dict[str, Any],
+        row: dict[str, Any],
+    ) -> dict[str, Any]:
+        previous = dict(state.get("session") or {})
+        ts_ms = int(row.get("ts_ms") or int(time.time() * 1000))
+        event = str(row.get("event") or "")
+        reason = str(row.get("reason") or event or "event")
+        if event in {
+            "network_offline",
+            "network_resume_repair",
+            "ice_restart_requested",
+            "pc_rebuild_start",
+            "pc_rebuild_offer_sent",
+            "media_path_repair",
+        }:
+            return self._new_session(
+                "reconnecting", reason, ts_ms=ts_ms, previous=previous,
+                confidence=0.8,
+            )
+        if event == "backend_recommendation_applied" and reason in {
+            "ice_restart", "renegotiate", "audio_first_repair",
+        }:
+            return self._new_session(
+                "reconnecting", reason, ts_ms=ts_ms, previous=previous,
+                confidence=0.85,
+            )
+        if event in {
+            "remote_track_connected",
+            "remote_surface_synced",
+            "remote_video_playing",
+        }:
+            old_state = str(previous.get("state") or "")
+            state_name = "recovered" if old_state in {
+                "degraded", "reconnecting", "failed",
+            } else "connected"
+            return self._new_session(
+                state_name, reason, ts_ms=ts_ms, previous=previous,
+                confidence=0.82,
+            )
+        if event in {
+            "remote_video_waiting",
+            "remote_video_stalled",
+            "remote_media_frozen",
+            "remote_video_no_frames",
+        }:
+            return self._new_session(
+                "degraded", reason, ts_ms=ts_ms, previous=previous,
+                confidence=0.75,
+            )
+        if event in {"remote_track_ended", "remote_video_error"}:
+            return self._new_session(
+                "reconnecting", reason, ts_ms=ts_ms, previous=previous,
+                confidence=0.78,
+            )
+        return previous or self._new_session(
+            "negotiating", "event_seen", ts_ms=ts_ms, previous=None,
+            confidence=0.45,
+        )
+
+    def _new_session(
+        self,
+        state_name: str,
+        reason: str,
+        *,
+        ts_ms: int,
+        previous: dict[str, Any] | None,
+        confidence: float,
+        recommendation: PathRecommendation | None = None,
+    ) -> dict[str, Any]:
+        state_name = state_name if state_name in SESSION_STATES else "negotiating"
+        previous = previous or {}
+        changed = state_name != previous.get("state")
+        since_ms = ts_ms if changed else int(previous.get("since_ms") or ts_ms)
+        sequence = int(previous.get("sequence") or 0) + (1 if changed else 0)
+        row = {
+            "state": state_name,
+            "reason": _clean_slug(reason) or "unknown",
+            "since_ms": since_ms,
+            "updated_at_ms": ts_ms,
+            "sequence": sequence,
+            "confidence": round(max(0.0, min(1.0, float(confidence))), 3),
+        }
+        if recommendation is not None:
+            row["recommendation_action"] = recommendation.action
+            row["route_preference"] = recommendation.route_preference
+            row["video_policy"] = recommendation.video_policy
+        return row
 
 
 def _clean_call_id(value: Any) -> str:
