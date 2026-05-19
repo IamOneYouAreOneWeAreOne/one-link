@@ -908,6 +908,15 @@ class IncomingFile:
     # ``touch()`` write. Debounces sidecar persistence so we don't
     # do a JSON round-trip on every chunk.
     cdc_chunks_since_touch: int = 0
+    # Deferred chunk-availability records waiting to be batched
+    # into a single SQLite transaction. The receive loop appends
+    # to this list as chunks arrive; the per-64-chunk debounce
+    # flush + the finish path commit them via
+    # ``state.record_chunks_available_batch``. Replaces one
+    # autocommit transaction per chunk with one per batch — for
+    # a 1024-chunk 256 MiB transfer, that's 16 commits instead of
+    # 1024.
+    cdc_pending_state: list[dict] = field(default_factory=list)
     transfer_id: str | None = None
     ack_batch_ids: list[str] = field(default_factory=list)
 
@@ -5569,7 +5578,21 @@ class Daemon:
         *,
         blob_hash: str | None = None,
         chunk_index: int | None = None,
+        defer_state: bool = False,
     ) -> None:
+        """Write a CDC chunk to the cache and (by default) record it
+        in the State DB's ``chunk_availability`` table.
+
+        ``defer_state=True`` skips the per-chunk State write so the
+        receive loop can batch many records into a single SQLite
+        transaction via :meth:`State.record_chunks_available_batch`.
+        Caller is responsible for flushing — both the per-64-chunk
+        debounce point and the finish path do this. Until the flush
+        lands, ``state.has_chunk(...)`` returns False for these
+        chunks; the file IS on disk (so ``_read_chunk_cache`` works
+        fine), but other peers querying availability won't see it.
+        Acceptable for the in-flight window; flush is bounded.
+        """
         if blake3.blake3(data).hexdigest() != chunk_hash:
             raise RuntimeError("CDC chunk hash mismatch")
         dst = self._chunk_cache_path(chunk_hash)
@@ -5578,7 +5601,7 @@ class Daemon:
             tmp = dst.parent / f".{os.getpid()}_{secrets.token_hex(8)}.tmp"
             tmp.write_bytes(data)
             os.replace(tmp, dst)
-        if self.state is not None:
+        if self.state is not None and not defer_state:
             with contextlib.suppress(Exception):
                 self.state.record_chunk_available(
                     chunk_hash,
@@ -7189,12 +7212,25 @@ class Daemon:
                 "ACK", self.me.short_id, of=msg.get("id"), rejected="cdc_chunk_integrity_failure",
             )))
             return
+        # Defer the State DB write so it batches with the rest of
+        # this transfer's chunks. Wave 1n: cuts SQLite transactions
+        # from N per transfer (one per chunk) to ~N/64 (flushed at
+        # the same debounce points as the sidecar touch + once at
+        # finish). Big win on transfers with thousands of chunks.
         self._store_chunk_cache(
             expected["hash"],
             data,
             blob_hash=f.blob_hex,
             chunk_index=idx,
+            defer_state=True,
         )
+        f.cdc_pending_state.append({
+            "chunk_hash": expected["hash"],
+            "size": len(data),
+            "blob_hash": f.blob_hex,
+            "chunk_index": idx,
+            "source": "local",
+        })
         assert f.cdc_parts is not None
         assert f.cdc_missing is not None
         assert f.cdc_chunks is not None
@@ -7253,6 +7289,23 @@ class Daemon:
                 ))
             except Exception as e:
                 log.debug("sidecar touch failed for %s: %s", blob[:8], e)
+            # Flush deferred chunk-availability records to State as
+            # a single transaction. Same cadence as the sidecar
+            # touch so both batched-write paths land together.
+            if self.state is not None and f.cdc_pending_state:
+                pending = f.cdc_pending_state
+                f.cdc_pending_state = []
+                try:
+                    self.state.record_chunks_available_batch(pending)
+                except Exception as e:
+                    log.debug(
+                        "chunk_availability batch flush failed for %s: %s",
+                        blob[:8], e,
+                    )
+                    # On failure, put the records back so the next
+                    # flush retries them. Append-on-the-end keeps
+                    # ordering reasonable.
+                    f.cdc_pending_state.extend(pending)
         cached = len(f.cdc_chunks) - len(f.cdc_missing)
         done_bytes = sum(int(c["size"]) for c in f.cdc_chunks if int(c["index"]) not in f.cdc_missing)
         self._update_transfer(
@@ -7316,6 +7369,22 @@ class Daemon:
         f = self._incoming_files.get(blob)
         if not f or f.cdc_chunks is None:
             return
+        # Flush any deferred chunk-availability records before the
+        # transfer concludes. Without this, swarm peers querying
+        # ``has_chunk`` for our newly-finished blob could miss the
+        # tail end of our manifest until the next transfer's
+        # debounce flush ran.
+        if self.state is not None and f.cdc_pending_state:
+            pending = f.cdc_pending_state
+            f.cdc_pending_state = []
+            try:
+                self.state.record_chunks_available_batch(pending)
+            except Exception as e:
+                log.debug(
+                    "chunk_availability final flush failed for %s: %s",
+                    blob[:8], e,
+                )
+                f.cdc_pending_state.extend(pending)
         try:
             # Off-load the disk I/O + BLAKE3 hash to a worker
             # thread. For a 5 GiB file the streaming-hash pass takes
@@ -9757,6 +9826,16 @@ class Daemon:
     def _abort_incoming_file(self, blob: str, f: IncomingFile) -> None:
         with contextlib.suppress(Exception):
             f.handle.close()
+        # Flush any deferred chunk-availability records — the
+        # cache files are real (each was hash-verified on arrival)
+        # and could still be useful to swarm peers even though we
+        # threw away the partial output. Without this flush, the
+        # bytes-on-disk would be invisible to ``has_chunk``.
+        if self.state is not None and f.cdc_pending_state:
+            pending = f.cdc_pending_state
+            f.cdc_pending_state = []
+            with contextlib.suppress(Exception):
+                self.state.record_chunks_available_batch(pending)
         self._incoming_files.pop(blob, None)
         with contextlib.suppress(OSError):
             f.out_path.unlink()

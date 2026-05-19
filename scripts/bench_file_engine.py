@@ -164,41 +164,59 @@ SIZES_DEFAULT = [
     ("256 MiB", 256 * 1024 * 1024),
 ]
 
+# How many times to repeat each ``--scenario cold`` size; we
+# report the median so a single hiccup doesn't skew the headline
+# numbers. Override via ``--repeat`` on the command line.
+REPEAT_DEFAULT = 1
 
-def bench_cold_transfer(sizes: list[tuple[str, int]]) -> list[dict]:
+
+def bench_cold_transfer(sizes: list[tuple[str, int]], *, repeat: int = REPEAT_DEFAULT) -> list[dict]:
     """Time + throughput at each size, fresh daemons each run so
-    the chunk cache is empty (cold path)."""
+    the chunk cache is empty (cold path). When ``repeat`` > 1 we
+    report the median; wall-clock variance on loopback can be
+    ±10 %, so a single sample can mislead."""
     results = []
     for label, size in sizes:
         payload = _build_payload(size)
-        with tempfile.TemporaryDirectory() as td:
-            src = Path(td) / f"cold_{label.replace(' ', '_')}.bin"
-            src.write_bytes(payload)
-            with daemon_pair() as p:
-                t0 = time.time()
-                res = request(
-                    p.a.control_port, cmd="send_file",
-                    peer=p.b.short_id, path=str(src), timeout=300,
-                )
-                if not res.get("ok"):
-                    results.append({
-                        "scenario": "cold_transfer", "size_label": label,
-                        "size_bytes": size, "error": res,
-                    })
-                    continue
-                landed, _ = _wait_for_payload(p.b.home, payload, timeout=300.0)
-                elapsed = time.time() - t0
-                results.append({
-                    "scenario": "cold_transfer",
-                    "size_label": label,
-                    "size_bytes": size,
-                    "elapsed_sec": round(elapsed, 4),
-                    "throughput_bps": round(size / elapsed, 2) if elapsed > 0 else 0,
-                    "landed": landed is not None,
-                })
-                print(f"  cold {label:>9}: "
-                      f"{_human_bytes(size)} in {elapsed:6.3f}s "
-                      f"-> {_human_throughput(size, elapsed)}")
+        elapsed_samples: list[float] = []
+        for _ in range(max(1, repeat)):
+            with tempfile.TemporaryDirectory() as td:
+                src = Path(td) / f"cold_{label.replace(' ', '_')}.bin"
+                src.write_bytes(payload)
+                with daemon_pair() as p:
+                    t0 = time.time()
+                    res = request(
+                        p.a.control_port, cmd="send_file",
+                        peer=p.b.short_id, path=str(src), timeout=300,
+                    )
+                    if not res.get("ok"):
+                        results.append({
+                            "scenario": "cold_transfer", "size_label": label,
+                            "size_bytes": size, "error": res,
+                        })
+                        break
+                    landed, _ = _wait_for_payload(p.b.home, payload, timeout=300.0)
+                    elapsed = time.time() - t0
+                    if landed:
+                        elapsed_samples.append(elapsed)
+        if not elapsed_samples:
+            continue
+        elapsed_median = statistics.median(elapsed_samples)
+        elapsed_min = min(elapsed_samples)
+        results.append({
+            "scenario": "cold_transfer",
+            "size_label": label,
+            "size_bytes": size,
+            "elapsed_median_sec": round(elapsed_median, 4),
+            "elapsed_min_sec": round(elapsed_min, 4),
+            "throughput_median_bps": round(size / elapsed_median, 2) if elapsed_median > 0 else 0,
+            "throughput_best_bps": round(size / elapsed_min, 2) if elapsed_min > 0 else 0,
+            "samples": len(elapsed_samples),
+        })
+        print(f"  cold {label:>9}: {_human_bytes(size)} "
+              f"median {elapsed_median:6.3f}s "
+              f"-> {_human_throughput(size, elapsed_median)} "
+              f"(best {_human_throughput(size, elapsed_min)}, n={len(elapsed_samples)})")
     return results
 
 
@@ -506,6 +524,14 @@ def main() -> int:
         default="all",
         help="Run only the named scenario family",
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=REPEAT_DEFAULT,
+        help=("How many times to repeat each cold-transfer size. "
+              "Reports median + best — useful for separating real "
+              "regressions from wall-clock noise."),
+    )
     args = parser.parse_args()
 
     sizes = SIZES_DEFAULT
@@ -520,7 +546,7 @@ def main() -> int:
         print(f"\n--- {name} ---")
         results[name] = fn()
 
-    run_section("cold", lambda: bench_cold_transfer(sizes))
+    run_section("cold", lambda: bench_cold_transfer(sizes, repeat=args.repeat))
     run_section("memory", lambda: bench_receiver_memory(
         64 * 1024 * 1024 if args.quick else 256 * 1024 * 1024
     ))

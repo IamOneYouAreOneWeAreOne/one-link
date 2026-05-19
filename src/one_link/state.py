@@ -5368,6 +5368,70 @@ class State:
                 ),
             )
 
+    def record_chunks_available_batch(
+        self,
+        records: "list[dict]",
+    ) -> int:
+        """Batched cousin of :meth:`record_chunk_available`. Wraps
+        all inserts in a single explicit transaction so a
+        thousand-chunk transfer pays one commit instead of one
+        thousand. Returns the number of rows written.
+
+        Each record is a dict with keys ``chunk_hash`` (required),
+        ``size`` (required), ``blob_hash`` (optional),
+        ``chunk_index`` (optional), ``source`` (optional, default
+        ``"local"``). Unknown keys are dropped silently so the
+        caller can over-supply.
+
+        Bench gain: at 256 MiB / 256 KiB chunks = 1024 records,
+        one transaction commit replaces 1024. Wall-time saving
+        scales with chunk count; SQLite WAL log churn drops
+        proportionally too.
+        """
+        if not records:
+            return 0
+        now = _now_ms()
+        rows = []
+        for r in records:
+            try:
+                rows.append((
+                    str(r["chunk_hash"]),
+                    int(r["size"]),
+                    r.get("blob_hash"),
+                    r.get("chunk_index"),
+                    str(r.get("source") or "local"),
+                    now,
+                ))
+            except (KeyError, TypeError, ValueError):
+                # Skip malformed entries — don't poison the batch.
+                continue
+        if not rows:
+            return 0
+        with self._write_lock:
+            c = self._conn.cursor()
+            try:
+                c.execute("BEGIN IMMEDIATE")
+                c.executemany(
+                    """
+                    INSERT INTO chunk_availability(
+                        chunk_hash, size, blob_hash, chunk_index, source, updated_ms
+                    ) VALUES(?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(chunk_hash) DO UPDATE SET
+                        size = excluded.size,
+                        blob_hash = COALESCE(excluded.blob_hash, chunk_availability.blob_hash),
+                        chunk_index = COALESCE(excluded.chunk_index, chunk_availability.chunk_index),
+                        source = excluded.source,
+                        updated_ms = excluded.updated_ms
+                    """,
+                    rows,
+                )
+                c.execute("COMMIT")
+            except Exception:
+                with contextlib.suppress(Exception):
+                    c.execute("ROLLBACK")
+                raise
+        return len(rows)
+
     def forget_chunk_available(self, chunk_hash: str) -> None:
         """Drop a chunk_availability row. Called by the cache GC
         after the on-disk cache file has been unlinked so a future

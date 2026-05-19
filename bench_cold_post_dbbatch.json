@@ -1,0 +1,46 @@
+{
+  "started_at": "2026-05-19T11:34:27",
+  "cold": [
+    {
+      "scenario": "cold_transfer",
+      "size_label": "1 KiB",
+      "size_bytes": 1024,
+      "elapsed_sec": 0.0461,
+      "throughput_bps": 22211.25,
+      "landed": true
+    },
+    {
+      "scenario": "cold_transfer",
+      "size_label": "1 MiB",
+      "size_bytes": 1048576,
+      "elapsed_sec": 0.0537,
+      "throughput_bps": 19524398.63,
+      "landed": true
+    },
+    {
+      "scenario": "cold_transfer",
+      "size_label": "16 MiB",
+      "size_bytes": 16777216,
+      "elapsed_sec": 0.1622,
+      "throughput_bps": 103454845.1,
+      "landed": true
+    },
+    {
+      "scenario": "cold_transfer",
+      "size_label": "64 MiB",
+      "size_bytes": 67108864,
+      "elapsed_sec": 0.7209,
+      "throughput_bps": 93093309.85,
+      "landed": true
+    },
+    {
+      "scenario": "cold_transfer",
+      "size_label": "256 MiB",
+      "size_bytes": 268435456,
+      "elapsed_sec": 3.8518,
+      "throughput_bps": 69691361.57,
+      "landed": true
+    }
+  ],
+  "finished_at": "2026-05-19T11:34:45"
+}
