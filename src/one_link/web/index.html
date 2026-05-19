@@ -26205,6 +26205,7 @@
     frozenMediaTicks: 0,
     lastRemoteVideoTime: 0,
     lastRemoteAudioTime: 0,
+    lastRemoteSurfaceSyncMs: 0,
     lastInboundPacketsLost: 0,
     lastInboundPacketsReceived: 0,
     qualityEwmaRttMs: null,
@@ -26420,25 +26421,80 @@
     safeMediaPlay(v);
   }
 
-  function attachRemoteStream(stream) {
-    media.remoteStream = stream;
+  function remoteVideoSurfaceState() {
+    const stream = media.remoteStream;
     const v = $$("#call-remote-video");
     const a = $$("#call-remote-audio");
-    if (v) v.srcObject = stream;
-    if (a) a.srcObject = stream;
-    const liveVideoTracks = stream.getVideoTracks()
-      .filter((t) => t.readyState === "live");
-    const hasVideo = liveVideoTracks.length > 0;
-    if (v) {
-      v.classList.toggle("show", hasVideo);
-      safeMediaPlay(v);
-    }
-    if (a) {
-      applyAudioOutputDevice(a).catch(() => {});
-      safeMediaPlay(a);
-    }
     const surface = $$("#call-active-surface");
-    if (surface) surface.classList.toggle("has-remote-video", hasVideo);
+    const videoTracks = stream ? stream.getVideoTracks() : [];
+    const audioTracks = stream ? stream.getAudioTracks() : [];
+    const liveVideoTracks = videoTracks.filter((t) => t.readyState === "live");
+    const liveAudioTracks = audioTracks.filter((t) => t.readyState === "live");
+    const unmutedLiveVideoTracks = liveVideoTracks.filter((t) => t.muted !== true);
+    const hasRenderableVideo = unmutedLiveVideoTracks.length > 0
+      && (
+        Number(v?.videoWidth || 0) > 0
+        || Number(v?.readyState || 0) >= 2
+        || Number(callUI.lastMetricsSnapshot?.inbound_video_frames_decoded || 0) > 0
+        || Number(callUI.lastMetricsSnapshot?.inbound_video_packets || 0) > 0
+      );
+    return {
+      stream,
+      videoEl: v,
+      audioEl: a,
+      surface,
+      videoTracks,
+      audioTracks,
+      liveVideoTracks,
+      liveAudioTracks,
+      unmutedLiveVideoTracks,
+      hasRenderableVideo,
+      videoShown: v ? v.classList.contains("show") : false,
+      surfaceShown: surface ? surface.classList.contains("has-remote-video") : false,
+      srcVideoMatches: !!(v && stream && v.srcObject === stream),
+      srcAudioMatches: !!(a && stream && a.srcObject === stream),
+    };
+  }
+
+  function syncRemoteMediaSurface(reason) {
+    const state = remoteVideoSurfaceState();
+    if (state.stream) {
+      if (state.videoEl && state.videoEl.srcObject !== state.stream) state.videoEl.srcObject = state.stream;
+      if (state.audioEl && state.audioEl.srcObject !== state.stream) state.audioEl.srcObject = state.stream;
+    }
+    if (state.videoEl) {
+      state.videoEl.classList.toggle("show", state.hasRenderableVideo);
+      if (state.stream && state.liveVideoTracks.length) safeMediaPlay(state.videoEl);
+    }
+    if (state.audioEl) {
+      if (state.stream && state.liveAudioTracks.length) {
+        applyAudioOutputDevice(state.audioEl).catch(() => {});
+        safeMediaPlay(state.audioEl);
+      }
+    }
+    if (state.surface) state.surface.classList.toggle("has-remote-video", state.hasRenderableVideo);
+    const changed = state.videoShown !== state.hasRenderableVideo
+      || state.surfaceShown !== state.hasRenderableVideo
+      || (state.stream && (!state.srcVideoMatches || !state.srcAudioMatches));
+    const now = Date.now();
+    if (changed || now - Number(callUI.lastRemoteSurfaceSyncMs || 0) > 7000) {
+      callUI.lastRemoteSurfaceSyncMs = now;
+      reportCallEvent("remote_surface_synced", {
+        reason: reason || "sync",
+        remote_video_visible: state.hasRenderableVideo,
+        remote_video_tracks: state.videoTracks.length,
+        remote_live_video_tracks: state.liveVideoTracks.length,
+        remote_unmuted_video_tracks: state.unmutedLiveVideoTracks.length,
+        remote_audio_tracks: state.audioTracks.length,
+        remote_live_audio_tracks: state.liveAudioTracks.length,
+      });
+    }
+    return state;
+  }
+
+  function attachRemoteStream(stream) {
+    media.remoteStream = stream;
+    syncRemoteMediaSurface("attach_remote_stream");
   }
 
   function remoteTrackSummary() {
@@ -26458,16 +26514,19 @@
     track.onmute = () => {
       addOneCallEvent(`Remote ${track.kind} paused.`);
       reportCallEvent("remote_track_muted", { media_kind: track.kind });
+      syncRemoteMediaSurface(`remote_${track.kind}_muted`);
       reportCallMetricsOnce();
     };
     track.onunmute = () => {
       addOneCallEvent(`Remote ${track.kind} flowing.`);
       reportCallEvent("remote_track_unmuted", { media_kind: track.kind });
+      syncRemoteMediaSurface(`remote_${track.kind}_unmuted`);
       reportCallMetricsOnce();
     };
     track.onended = () => {
       addOneCallEvent(`Remote ${track.kind} ended.`);
       reportCallEvent("remote_track_ended", { media_kind: track.kind });
+      syncRemoteMediaSurface(`remote_${track.kind}_ended`);
       reportCallMetricsOnce();
       repairMediaPath(`remote_${track.kind}_ended`).catch(() => {});
     };
@@ -26538,9 +26597,18 @@
       && selected.remote_live_audio_tracks === 0
       && selected.inbound_audio_packets === 0;
     const missingVideo = media.expectRemoteVideo
-      && selected.remote_live_video_tracks === 0
-      && selected.inbound_video_packets === 0
-      && selected.remote_video_width === 0;
+      && (
+        selected.remote_live_video_tracks === 0
+        || (
+          selected.remote_video_element_shown !== true
+          && selected.remote_video_width === 0
+          && selected.inbound_video_frames_decoded === 0
+        )
+        || (
+          selected.remote_muted_video_tracks >= selected.remote_live_video_tracks
+          && selected.inbound_video_packets === 0
+        )
+      );
     return missingAudio || missingVideo;
   }
 
@@ -26744,6 +26812,7 @@
     v._oneLinkTraceBound = true;
     const emit = (event) => {
       reportCallEvent(event, { media_kind: "video" });
+      syncRemoteMediaSurface(event);
       reportCallMetricsOnce();
     };
     v.addEventListener("loadedmetadata", () => emit("remote_video_metadata"));
@@ -27437,14 +27506,7 @@
     const now = Date.now();
     if (now - Number(callUI.lastPlaybackReviveMs || 0) < 2500) return;
     callUI.lastPlaybackReviveMs = now;
-    const v = $$("#call-remote-video");
-    const a = $$("#call-remote-audio");
-    if (media.remoteStream) {
-      if (v && v.srcObject !== media.remoteStream) v.srcObject = media.remoteStream;
-      if (a && a.srcObject !== media.remoteStream) a.srcObject = media.remoteStream;
-    }
-    safeMediaPlay(v);
-    safeMediaPlay(a);
+    syncRemoteMediaSurface(reason || "playback_revive");
     reportCallEvent("remote_playback_revive", { reason: reason || "watchdog" });
   }
 
@@ -29044,6 +29106,9 @@
         remote_video_height: Number($$("#call-remote-video")?.videoHeight || 0),
         remote_video_ready_state: Number($$("#call-remote-video")?.readyState || 0),
         remote_video_paused: $$("#call-remote-video")?.paused === true,
+        remote_video_element_shown: $$("#call-remote-video")?.classList.contains("show") === true,
+        remote_video_src_attached: !!($$("#call-remote-video") && media.remoteStream && $$("#call-remote-video").srcObject === media.remoteStream),
+        remote_audio_src_attached: !!($$("#call-remote-audio") && media.remoteStream && $$("#call-remote-audio").srcObject === media.remoteStream),
         selected_candidate_type: selectedCandidateType,
         selected_candidate_protocol: selectedCandidateProtocol,
         selected_candidate_network: selectedCandidateNetwork,
@@ -29058,6 +29123,10 @@
       if (!media.iceRelayReady && selected.has_remote_description && selected.ice_connection_state === "checking") {
         updateOneChip("#call-one-engine", "Direct only");
       }
+      const surfaceState = syncRemoteMediaSurface("metrics");
+      selected.remote_video_element_shown = surfaceState.hasRenderableVideo;
+      selected.remote_video_src_attached = !!(surfaceState.videoEl && surfaceState.stream && surfaceState.videoEl.srcObject === surfaceState.stream);
+      selected.remote_audio_src_attached = !!(surfaceState.audioEl && surfaceState.stream && surfaceState.audioEl.srcObject === surfaceState.stream);
       callUI.lastMetricsSnapshot = {
         at_ms: Date.now(),
         ...selected,
@@ -29116,6 +29185,9 @@
       ) {
         callUI.stalledMediaTicks += 1;
       } else if (expectedRemoteMediaMissing(selected)) {
+        callUI.stalledMediaTicks += 1;
+      } else if (media.expectRemoteVideo && selected.remote_video_tracks > 0 && !selected.remote_video_element_shown) {
+        reviveRemotePlayback("surface_hidden_with_remote_track");
         callUI.stalledMediaTicks += 1;
       } else if (selected.remote_video_tracks > 0 && !videoMoving && selected.inbound_video_packets > 0) {
         callUI.stalledMediaTicks += 1;
@@ -29213,6 +29285,7 @@
         remote_tracks: remoteTrackSummary(),
         remote_video_element: rv ? {
           shown: rv.classList.contains("show"),
+          srcAttached: !!(media.remoteStream && rv.srcObject === media.remoteStream),
           videoWidth: rv.videoWidth,
           videoHeight: rv.videoHeight,
           readyState: rv.readyState,
@@ -29221,6 +29294,7 @@
           currentTime: rv.currentTime,
         } : null,
         remote_audio_element: ra ? {
+          srcAttached: !!(media.remoteStream && ra.srcObject === media.remoteStream),
           readyState: ra.readyState,
           paused: ra.paused,
           ended: ra.ended,
@@ -29254,6 +29328,7 @@
   function startMediaWatchdog() {
     if (callUI.mediaWatchdogTimer) clearInterval(callUI.mediaWatchdogTimer);
     callUI.mediaWatchdogTimer = setInterval(() => {
+      syncRemoteMediaSurface("watchdog");
       ensureMediaNegotiation("watchdog");
       if (
         callUI.activeCallId &&

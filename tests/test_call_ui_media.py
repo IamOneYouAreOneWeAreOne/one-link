@@ -176,7 +176,7 @@ def test_media_watchdog_restarts_stuck_negotiation(index_html: str) -> None:
     assert "media.pc.signalingState" in snippet
     assert "sendLocalSdpOffer" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 12200]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 13600]
     assert 'ensureMediaNegotiation("metrics").catch' in metrics_snippet
     active_idx = index_html.find('window.handleLivingPresenceCallEvent = function')
     active_idx = index_html.find('if (phase === "active")', active_idx)
@@ -281,7 +281,41 @@ def test_call_debug_snapshot_and_frame_counters_present(index_html: str) -> None
     assert "remote_video_width" in index_html
     assert "remote_video_ready_state" in index_html
     assert "remote_muted_video_tracks" in index_html
+    assert "remote_video_src_attached" in index_html
+    assert "srcAttached" in index_html
     assert "remoteTrackSummary()" in index_html
+
+
+def test_remote_surface_reconciles_renderer_state(index_html: str) -> None:
+    assert "function remoteVideoSurfaceState" in index_html
+    assert "function syncRemoteMediaSurface" in index_html
+    sync_idx = index_html.find("function syncRemoteMediaSurface")
+    sync_snippet = index_html[sync_idx:sync_idx + 2600]
+    assert 'reportCallEvent("remote_surface_synced"' in sync_snippet
+    assert "videoEl.srcObject !== state.stream" in sync_snippet
+    assert "audioEl.srcObject !== state.stream" in sync_snippet
+    assert 'classList.toggle("show", state.hasRenderableVideo)' in sync_snippet
+    assert 'classList.toggle("has-remote-video", state.hasRenderableVideo)' in sync_snippet
+    attach_idx = index_html.find("function attachRemoteStream")
+    attach_snippet = index_html[attach_idx:attach_idx + 260]
+    assert 'syncRemoteMediaSurface("attach_remote_stream")' in attach_snippet
+
+
+def test_remote_surface_sync_runs_on_track_events_and_watchdog(index_html: str) -> None:
+    track_idx = index_html.find("function bindRemoteTrackDiagnostics")
+    track_snippet = index_html[track_idx:track_idx + 1100]
+    assert "remote_${track.kind}_muted" in track_snippet
+    assert "remote_${track.kind}_unmuted" in track_snippet
+    assert "remote_${track.kind}_ended" in track_snippet
+    video_idx = index_html.find("function bindRemoteVideoElementDiagnostics")
+    video_snippet = index_html[video_idx:video_idx + 700]
+    assert "syncRemoteMediaSurface(event)" in video_snippet
+    revive_idx = index_html.find("function reviveRemotePlayback")
+    revive_snippet = index_html[revive_idx:revive_idx + 500]
+    assert 'syncRemoteMediaSurface(reason || "playback_revive")' in revive_snippet
+    watchdog_idx = index_html.find("function startMediaWatchdog")
+    watchdog_snippet = index_html[watchdog_idx:watchdog_idx + 600]
+    assert 'syncRemoteMediaSurface("watchdog")' in watchdog_snippet
 
 
 def test_call_media_recorder_start_is_nonfatal(index_html: str) -> None:
@@ -318,7 +352,7 @@ def test_call_media_watchdog_repairs_stalled_frames(index_html: str) -> None:
 
 def test_call_engine_detects_frozen_media_and_network_resume(index_html: str) -> None:
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 11600]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 13000]
     assert "frozenMediaTicks" in metrics_snippet
     assert "videoElementFrozen" in metrics_snippet
     assert "audioElementFrozen" in metrics_snippet
