@@ -327,6 +327,44 @@ async def test_report_metrics_returns_backend_path_recommendation() -> None:
     assert payload["session_authority"]["reason"] == "renderer_detached"
     assert payload["recovery_intent"]["action"] == "revive_playback"
     assert payload["recovery_intent"]["route_preference"] == "same"
+    assert payload["routePolicy"]["mode"] == "direct_first"
+
+
+@pytest.mark.asyncio
+async def test_report_metrics_enriches_recovery_intent_with_relay_policy(monkeypatch) -> None:
+    monkeypatch.setenv("ONE_LINK_TURN_SERVERS", "turn:relay.local:3478")
+    srv, daemon = _server_with_daemon()
+    peer = _identity("mom-relay-policy")
+    daemon._relay_metrics = {
+        "turn:relay.local:3478": {
+            "rtt_ms": 20.0,
+            "loss_rate": 0.0,
+            "n_attempts": 5,
+            "n_successes": 5,
+            "last_observed_ms": 1_000,
+        },
+    }
+    daemon._call_registry.open(
+        call_id="c-relay-policy",
+        peer_master_vk_hex=peer.fingerprint,
+        local_role="originator",
+        local_master_vk_hex=daemon.me.fingerprint,
+        started_at_ms=1_000,
+    )
+    resp = await srv.api_call_action(_FakeRequest(body={  # type: ignore[arg-type]
+        "action": "report_metrics",
+        "call_id": "c-relay-policy",
+        "media_health_state": "healthy",
+        "ice_connection_state": "failed",
+        "selected_candidate_type": "host",
+    }))
+    import json
+    payload = json.loads(resp._body or b"")
+    assert payload["ok"] is True
+    assert payload["routePolicy"]["relay_ready"] is True
+    assert payload["routePolicy"]["best_relay_health"] == "healthy"
+    assert payload["recovery_intent"]["action"] == "restart_ice"
+    assert payload["recovery_intent"]["route_preference"] == "relay"
 
 
 @pytest.mark.asyncio

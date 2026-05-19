@@ -621,6 +621,17 @@ def test_backend_recovery_intent_drives_repair_actions(index_html: str) -> None:
     assert "recovery_intent: callUI.lastRecoveryIntent" in index_html
 
 
+def test_call_metrics_reports_relay_policy_truth(index_html: str) -> None:
+    assert "routePolicyDetail" in index_html
+    assert "bestRelayHealth" in index_html
+    assert "turnCredentialExpiresAtMs" in index_html
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 16000]
+    assert "best_relay_health: media.bestRelayHealth" in metrics_snippet
+    assert "best_relay_score: media.bestRelayScore" in metrics_snippet
+    assert "metricsResult.routePolicy" in metrics_snippet
+
+
 def test_inbound_accept_waits_for_offer_instead_of_self_offering(index_html: str) -> None:
     idx = index_html.find("async function acceptInboundCall")
     snippet = index_html[idx:idx + 1800]

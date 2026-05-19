@@ -304,6 +304,12 @@ class CallReliabilityBackend:
             "inbound_audio_packets": _bounded_int(body.get("inbound_audio_packets"), 0, 10_000_000_000),
             "inbound_video_packets": _bounded_int(body.get("inbound_video_packets"), 0, 10_000_000_000),
             "inbound_video_frames_decoded": _bounded_int(body.get("inbound_video_frames_decoded"), 0, 10_000_000_000),
+            "ice_relay_ready": _as_bool(body.get("ice_relay_ready")),
+            "relay_escape_active": _as_bool(body.get("relay_escape_active")),
+            "best_relay_health": _clean_token(body.get("best_relay_health"), {
+                "healthy", "degraded", "poor", "unknown",
+            }),
+            "best_relay_score": _bounded_float(body.get("best_relay_score"), 0.0, 10.0),
         }
 
     def _sanitize_event(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -655,8 +661,11 @@ class CallReliabilityBackend:
                 cooldown_ms=7_000, confidence=recommendation.confidence,
             )
         if action == "ice_restart":
-            preferred_route = "relay" if route == "relay" else route or "auto"
-            if state == "reconnecting" and preferred_route != "relay":
+            relay_ready = bool((latest or {}).get("ice_relay_ready"))
+            relay_health = str((latest or {}).get("best_relay_health") or "")
+            relay_usable = relay_ready and relay_health not in {"poor"}
+            preferred_route = "relay" if route == "relay" and relay_usable else "auto"
+            if state == "reconnecting" and relay_usable and preferred_route != "relay":
                 preferred_route = "relay"
             return RecoveryIntent(
                 action="restart_ice", reason=reason, priority=max(2, priority),
@@ -675,10 +684,14 @@ class CallReliabilityBackend:
                 confidence=recommendation.confidence,
             )
         if state in {"degraded", "reconnecting"}:
+            latest = latest or {}
+            relay_ready = bool(latest.get("ice_relay_ready"))
+            relay_health = str(latest.get("best_relay_health") or "")
+            reconnect_route = "relay" if relay_ready and relay_health != "poor" else "auto"
             return RecoveryIntent(
                 action="audio_first_repair" if state == "degraded" else "restart_ice",
                 reason=reason, priority=2 if state == "degraded" else 3,
-                route_preference="relay" if state == "reconnecting" else "auto",
+                route_preference=reconnect_route if state == "reconnecting" else "auto",
                 video_policy="downshift", audio_first=True,
                 cooldown_ms=7_000 if state == "degraded" else 9_000,
                 confidence=max(0.6, recommendation.confidence),

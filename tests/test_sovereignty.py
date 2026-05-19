@@ -400,6 +400,9 @@ async def test_peer_rtc_ice_config_can_mint_per_call_turn_credentials(monkeypatc
     assert ":one-link:call-abc" in turn["username"]
     assert turn["credential"]
     assert body["routePolicy"]["per_call_credentials"] is True
+    assert body["routePolicy"]["credential_ttl_seconds"] == 600
+    assert body["routePolicy"]["credential_expires_at_ms"] is not None
+    assert body["routePolicy"]["relay_escalation"]["enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -453,6 +456,9 @@ async def test_peer_rtc_ice_config_orders_turn_relays_by_health(monkeypatch):
     assert relays[-1]["health"] == "poor"
     assert body["routePolicy"]["best_relay_health"] == "healthy"
     assert body["routePolicy"]["best_relay_score"] == relays[0]["score"]
+    assert body["routePolicy"]["relay_health_summary"]["healthy"] == 1
+    assert body["routePolicy"]["relay_health_summary"]["poor"] == 1
+    assert body["routePolicy"]["relay_escalation"]["force_on_ice_failed"] is True
 
 
 @pytest.mark.asyncio

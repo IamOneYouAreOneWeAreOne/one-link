@@ -26306,6 +26306,10 @@
     iceHelperReady: false,
     iceRelayReady: false,
     routePolicy: "direct_first",
+    routePolicyDetail: null,
+    bestRelayHealth: "",
+    bestRelayScore: null,
+    turnCredentialExpiresAtMs: null,
     forceRelayOnRepair: false,
     preferRelayNext: false,
   };
@@ -27447,6 +27451,12 @@
           });
         media.iceHelperReady = Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0;
         media.routePolicy = String(cfg.routePolicy?.mode || "direct_first");
+        media.routePolicyDetail = cfg.routePolicy || null;
+        media.bestRelayHealth = String(cfg.routePolicy?.best_relay_health || "");
+        media.bestRelayScore = Number.isFinite(Number(cfg.routePolicy?.best_relay_score))
+          ? Number(cfg.routePolicy.best_relay_score)
+          : null;
+        media.turnCredentialExpiresAtMs = Number(cfg.routePolicy?.credential_expires_at_ms || 0) || null;
         media.forceRelayOnRepair = cfg.routePolicy?.force_relay_on_repair === true;
         if (Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0) {
           pc.setConfiguration({ iceServers: cfg.iceServers });
@@ -29492,6 +29502,8 @@
         ice_relay_ready: media.iceRelayReady === true,
         route_policy: media.routePolicy,
         relay_escape_active: media.preferRelayNext === true,
+        best_relay_health: media.bestRelayHealth || null,
+        best_relay_score: media.bestRelayScore,
       };
       if (selectedCandidateType === "relay") updateOneChip("#call-one-route", "Relay");
       else if (selectedCandidateType === "srflx" || selectedCandidateType === "prflx") updateOneChip("#call-one-route", "Assisted");
@@ -29629,6 +29641,14 @@
         metricsResult && metricsResult.recovery_intent,
         callUI.lastMetricsSnapshot,
       );
+      if (metricsResult && metricsResult.routePolicy) {
+        media.routePolicyDetail = metricsResult.routePolicy;
+        media.bestRelayHealth = String(metricsResult.routePolicy.best_relay_health || "");
+        media.bestRelayScore = Number.isFinite(Number(metricsResult.routePolicy.best_relay_score))
+          ? Number(metricsResult.routePolicy.best_relay_score)
+          : null;
+        media.turnCredentialExpiresAtMs = Number(metricsResult.routePolicy.credential_expires_at_ms || 0) || null;
+      }
       applyBackendSessionAuthority(
         metricsResult && metricsResult.session_authority,
       );

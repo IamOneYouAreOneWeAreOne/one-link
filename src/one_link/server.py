@@ -2250,8 +2250,11 @@ class UIServer:
         username = (username or "").strip()
         credential = (credential or "").strip()
         credential_type = "password" if credential else ""
+        issued_at_s = int(time.time())
+        expires_at_s = None
         if shared_secret and call_id:
-            expires = int(time.time()) + ttl_s
+            expires = issued_at_s + ttl_s
+            expires_at_s = expires
             safe_call = "".join(ch for ch in str(call_id) if ch.isalnum() or ch in "-_")[:48]
             username = f"{expires}:one-link:{safe_call}"
             digest = hmac.new(
@@ -2269,7 +2272,33 @@ class UIServer:
             "credential": credential,
             "credential_type": credential_type,
             "ttl_seconds": ttl_s if shared_secret and call_id else None,
+            "issued_at_ms": issued_at_s * 1000 if shared_secret and call_id else None,
+            "expires_at_ms": expires_at_s * 1000 if expires_at_s is not None else None,
         }
+
+    @staticmethod
+    def _relay_health_summary(candidates: list[dict]) -> dict:
+        summary = {
+            "total": len(candidates),
+            "observed": 0,
+            "healthy": 0,
+            "degraded": 0,
+            "poor": 0,
+            "unknown": 0,
+            "usable": 0,
+        }
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            health = str(cand.get("health") or "unknown")
+            if health not in {"healthy", "degraded", "poor", "unknown"}:
+                health = "unknown"
+            summary[health] += 1
+            if cand.get("observed"):
+                summary["observed"] += 1
+            if health in {"healthy", "degraded", "unknown"}:
+                summary["usable"] += 1
+        return summary
 
     def _rank_turn_urls(self, urls: list[str]) -> list[dict]:
         """Return TURN URLs in best-first order with privacy-safe health.
@@ -2359,17 +2388,29 @@ class UIServer:
         relay_candidates = list(turn.get("candidates") or [])
         relay_ready = bool(relay_candidates)
         best = relay_candidates[0] if relay_candidates else None
+        best_health = best.get("health") if isinstance(best, dict) else None
+        best_score = best.get("score") if isinstance(best, dict) else None
+        relay_summary = self._relay_health_summary(relay_candidates)
         return {
             "mode": "direct_first",
             "relay_ready": relay_ready,
             "direct_first": True,
             "force_relay_on_repair": relay_ready,
+            "relay_escalation": {
+                "enabled": relay_ready and best_health != "poor",
+                "force_on_ice_failed": relay_ready and best_health != "poor",
+                "audio_first_before_relay": True,
+                "max_direct_repair_ms": 9000,
+            },
             "per_call_credentials": bool(
                 call_id and turn.get("credential_type") == "turn-rest-hmac-sha1"
             ),
+            "credential_expires_at_ms": turn.get("expires_at_ms"),
+            "credential_ttl_seconds": turn.get("ttl_seconds"),
             "relay_candidates": relay_candidates[:8],
-            "best_relay_health": best.get("health") if isinstance(best, dict) else None,
-            "best_relay_score": best.get("score") if isinstance(best, dict) else None,
+            "relay_health_summary": relay_summary,
+            "best_relay_health": best_health,
+            "best_relay_score": best_score,
         }
 
     # ── Sovereignty API (May 15 2026) ──────────────────────────────
@@ -3729,14 +3770,20 @@ class UIServer:
             bandwidth_estimate_kbps=_opt_float("bandwidth_estimate_kbps"),
         )
         reliability = self._call_reliability()
-        recommendation = reliability.record_metrics(body)
-        self._append_call_media_audit(body)
+        route_policy = self._resolved_webrtc_route_policy(call_id=call_id)
+        enriched_body = dict(body)
+        enriched_body.setdefault("ice_relay_ready", route_policy.get("relay_ready"))
+        enriched_body.setdefault("best_relay_health", route_policy.get("best_relay_health"))
+        enriched_body.setdefault("best_relay_score", route_policy.get("best_relay_score"))
+        recommendation = reliability.record_metrics(enriched_body)
+        self._append_call_media_audit(enriched_body)
         return web.json_response({
             "ok": True,
             "call_id": call_id,
             "recommendation": recommendation.to_json(),
             "session_authority": reliability.session_for(call_id),
             "recovery_intent": reliability.recovery_intent_for(call_id),
+            "routePolicy": route_policy,
         })
 
     def _handle_report_call_event_action(self, body: dict) -> web.Response:
@@ -4029,6 +4076,15 @@ class UIServer:
                 "media_health_severity": _int("media_health_severity"),
                 "remote_video_src_attached": bool(body.get("remote_video_src_attached")),
                 "remote_audio_src_attached": bool(body.get("remote_audio_src_attached")),
+                "ice_relay_ready": bool(body.get("ice_relay_ready")),
+                "relay_escape_active": bool(body.get("relay_escape_active")),
+                "best_relay_health": (
+                    str(body.get("best_relay_health")).strip().lower()
+                    if str(body.get("best_relay_health") or "").strip().lower()
+                    in {"healthy", "degraded", "poor", "unknown"}
+                    else None
+                ),
+                "best_relay_score": _float("best_relay_score"),
             }
             log_dir = data_dir() / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -4365,6 +4421,7 @@ class UIServer:
             )
         trace = self._call_reliability().trace_for(call_id)
         trace["backend_authority"] = self._call_authority_snapshot(mgr)
+        trace["routePolicy"] = self._resolved_webrtc_route_policy(call_id=call_id)
         return web.json_response(trace)
 
     @staticmethod

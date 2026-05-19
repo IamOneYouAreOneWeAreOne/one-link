@@ -63,7 +63,7 @@ def test_reliability_backend_recommends_ice_restart_on_failure(tmp_path: Path) -
     assert rec.severity == 3
     intent = backend.recovery_intent_for("call-2")
     assert intent["action"] == "restart_ice"
-    assert intent["route_preference"] == "relay"
+    assert intent["route_preference"] == "auto"
     assert intent["priority"] == 3
 
 
@@ -198,7 +198,7 @@ def test_reliability_backend_recovery_intent_escalates_reconnects(tmp_path: Path
     })
     intent = backend.recovery_intent_for("call-intent")
     assert intent["action"] == "restart_ice"
-    assert intent["route_preference"] == "relay"
+    assert intent["route_preference"] == "auto"
     assert intent["audio_first"] is True
     assert intent["priority"] == 3
 
@@ -217,6 +217,35 @@ def test_reliability_backend_recovery_intent_escalates_reconnects(tmp_path: Path
     recovered = backend.recovery_intent_for("call-intent")
     assert recovered["action"] == "hold"
     assert recovered["route_preference"] == "same"
+
+
+def test_reliability_backend_recovery_intent_uses_relay_truth(tmp_path: Path) -> None:
+    backend = CallReliabilityBackend(log_path=tmp_path / "call_reliability.jsonl")
+    backend.record_metrics({
+        "call_id": "call-relay-truth",
+        "media_health_state": "healthy",
+        "ice_connection_state": "failed",
+        "selected_candidate_type": "host",
+        "ice_relay_ready": True,
+        "best_relay_health": "healthy",
+        "best_relay_score": 0.05,
+    })
+    usable = backend.recovery_intent_for("call-relay-truth")
+    assert usable["action"] == "restart_ice"
+    assert usable["route_preference"] == "relay"
+
+    backend.record_metrics({
+        "call_id": "call-relay-poor",
+        "media_health_state": "healthy",
+        "ice_connection_state": "failed",
+        "selected_candidate_type": "host",
+        "ice_relay_ready": True,
+        "best_relay_health": "poor",
+        "best_relay_score": 0.98,
+    })
+    poor = backend.recovery_intent_for("call-relay-poor")
+    assert poor["action"] == "restart_ice"
+    assert poor["route_preference"] == "auto"
 
 
 def test_reliability_backend_session_authority_handles_network_events(tmp_path: Path) -> None:
