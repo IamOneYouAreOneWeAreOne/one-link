@@ -221,6 +221,74 @@ def test_inbound_call_accept_advances_to_active(
     assert mgr.phase == CallPhase.ACTIVE
 
 
+def test_call_resume_ledger_restores_active_call_after_daemon_restart(
+    tmp_path, monkeypatch, mom: Identity, alice: Identity,
+) -> None:
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    from one_link.call_manager import ManagerEvent
+
+    first = Daemon(me=mom)
+    mgr = first._call_registry.open(
+        call_id="resume-call-1",
+        peer_master_vk_hex=alice.fingerprint,
+        local_role="recipient",
+        local_master_vk_hex=mom.fingerprint,
+        started_at_ms=1_000,
+        negotiated_capabilities=frozenset({"webrtc_av_v1"}),
+    )
+    mgr.handle(ManagerEvent(ManagerEventKind.WIRE_CALL_INVITE, 1_000))
+    mgr.handle(ManagerEvent(ManagerEventKind.USER_ACCEPT, 2_000))
+    first._call_sdp_backfill["resume-call-1"] = {
+        "sdp_offer": "v=0\r\ns=offer\r\n",
+    }
+    first._call_ice_backfill["resume-call-1"] = [{
+        "candidate": "candidate:1 1 udp 1 0.0.0.0 9 typ host",
+        "sdp_mid": "0",
+        "sdp_m_line_index": 0,
+        "end_of_candidates": False,
+    }]
+    first._save_call_resume_ledger()
+
+    restored = Daemon(me=mom)
+    restored_mgr = restored._call_registry.get("resume-call-1")
+    assert restored_mgr is not None
+    assert restored_mgr.phase == CallPhase.ACTIVE
+    assert restored_mgr.state.peer_master_vk_hex == alice.fingerprint
+    assert restored_mgr.state.local_role == "recipient"
+    assert (
+        restored._call_sdp_backfill["resume-call-1"]["sdp_offer"]
+        == "v=0\r\ns=offer\r\n"
+    )
+    assert restored._call_ice_backfill["resume-call-1"][0]["sdp_mid"] == "0"
+    assert (
+        restored._call_reliability.session_for("resume-call-1")["state"]
+        == "reconnecting"
+    )
+
+
+def test_call_resume_ledger_drops_completed_calls(
+    tmp_path, monkeypatch, mom: Identity, alice: Identity,
+) -> None:
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    fresh = Daemon(me=mom)
+    mgr = fresh._call_registry.open(
+        call_id="resume-call-ended",
+        peer_master_vk_hex=alice.fingerprint,
+        local_role="originator",
+        local_master_vk_hex=mom.fingerprint,
+        started_at_ms=1_000,
+    )
+    from one_link.call_manager import ManagerEvent
+    mgr.handle(ManagerEvent(ManagerEventKind.USER_INITIATE_CALL, 1_000))
+    mgr.handle(ManagerEvent(ManagerEventKind.WIRE_CALL_ACCEPT, 2_000))
+    mgr.handle(ManagerEvent(ManagerEventKind.USER_HANGUP, 3_000))
+    fresh._call_registry.close("resume-call-ended")
+    fresh._save_call_resume_ledger()
+
+    restored = Daemon(me=mom)
+    assert restored._call_registry.get("resume-call-ended") is None
+
+
 def test_inbound_verify_notice_marks_peer_verified_and_acks(
     mom_daemon: Daemon, alice: Identity,
 ) -> None:
