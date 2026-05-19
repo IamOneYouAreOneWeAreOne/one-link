@@ -28043,6 +28043,57 @@
     }
   }
 
+  function applyBackendSessionAuthority(session) {
+    if (!session || typeof session !== "object") return;
+    const state = String(session.state || "").toLowerCase();
+    if (!state) return;
+    const reason = String(session.reason || "").toLowerCase();
+    const key = [
+      state,
+      reason,
+      session.sequence || "",
+      session.recommendation_action || "",
+    ].join("|");
+    callUI.lastSessionAuthority = {
+      at_ms: Date.now(),
+      ...session,
+    };
+    callUI.lastSessionAuthorityMs = callUI.lastSessionAuthority.at_ms;
+    if (key !== callUI.lastSessionAuthorityKey) {
+      callUI.lastSessionAuthorityKey = key;
+      reportCallEvent("session_authority_seen", {
+        reason: state,
+        state: state === "reconnecting" ? "connecting" : state,
+        ok: state === "connected" || state === "recovered",
+      });
+    }
+    if (state === "reconnecting") {
+      const label = reason === "transport_disconnected" || reason === "network_offline"
+        ? "Holding the call while the path recovers..."
+        : "Repairing media path...";
+      setReconnectState(true, label);
+      return;
+    }
+    if (state === "degraded") {
+      setReconnectState(true, "Call quality is recovering...");
+      updateCallQuality("fair", "Recovering media");
+      return;
+    }
+    if (state === "negotiating") {
+      updateCallQuality("connecting", "Connecting media");
+      return;
+    }
+    if (state === "connected" || state === "recovered") {
+      setReconnectState(false);
+      updateCallQuality("good", state === "recovered" ? "Media recovered" : "Good call quality");
+      return;
+    }
+    if (state === "failed") {
+      setReconnectState(true, "Repairing media path...");
+      updateCallQuality("bad", "Media needs repair");
+    }
+  }
+
   function rebuildPeerConnectionForRemoteOffer() {
     const localStream = media.localStream;
     if (media.pc) {
@@ -29494,6 +29545,9 @@
         metricsResult && metricsResult.recommendation,
         callUI.lastMetricsSnapshot,
       );
+      applyBackendSessionAuthority(
+        metricsResult && metricsResult.session_authority,
+      );
     } catch (_) {}
   }
 
@@ -29560,6 +29614,7 @@
         last_metrics: callUI.lastMetricsSnapshot,
         tau_decision: callUI.tauLastDecision,
         backend_recommendation: callUI.lastBackendRecommendation,
+        session_authority: callUI.lastSessionAuthority,
         backend_action_cooldowns: callUI.backendActionCooldowns,
         repair_diagnosis: callUI.lastRepairDiagnosis,
         repair_counts: callUI.repairDiagnosisCounts,

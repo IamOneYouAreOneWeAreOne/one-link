@@ -568,6 +568,31 @@ def test_backend_recommendation_executor_controls_media_repairs(index_html: str)
     assert "backend_recommendation: callUI.lastBackendRecommendation" in index_html
 
 
+def test_backend_session_authority_drives_recovery_ui(index_html: str) -> None:
+    assert "function applyBackendSessionAuthority" in index_html
+    idx = index_html.find("function applyBackendSessionAuthority")
+    snippet = index_html[idx:idx + 3600]
+    for state in [
+        "reconnecting",
+        "degraded",
+        "negotiating",
+        "connected",
+        "recovered",
+        "failed",
+    ]:
+        assert state in snippet
+    assert "lastSessionAuthority" in snippet
+    assert "session_authority_seen" in snippet
+    assert "setReconnectState(true" in snippet
+    assert "setReconnectState(false)" in snippet
+    assert "updateCallQuality" in snippet
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 15500]
+    assert "applyBackendSessionAuthority(" in metrics_snippet
+    assert "metricsResult && metricsResult.session_authority" in metrics_snippet
+    assert "session_authority: callUI.lastSessionAuthority" in index_html
+
+
 def test_inbound_accept_waits_for_offer_instead_of_self_offering(index_html: str) -> None:
     idx = index_html.find("async function acceptInboundCall")
     snippet = index_html[idx:idx + 1800]

@@ -315,6 +315,37 @@ def test_report_call_event_records_backend_recommendation_executor(
     assert "v=0" not in serialized
 
 
+def test_report_call_event_records_session_authority_seen(
+    server,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import one_link.server as server_mod
+
+    monkeypatch.setattr(server_mod, "data_dir", lambda: tmp_path)
+    req = _FakeRequest({
+        "action": "report_call_event",
+        "call_id": "rt-call-1",
+        "event": "session_authority_seen",
+        "reason": "reconnecting",
+        "state": "connecting",
+        "ok": False,
+        "candidate": "candidate:1 1 udp 1 10.0.0.5 9999 typ host",
+    })
+    resp = _run(server.api_call_action(req))
+    body = json.loads(resp.body.decode("utf-8"))
+    assert body["ok"] is True
+
+    audit = tmp_path / "logs" / "call_media_audit.jsonl"
+    row = json.loads(audit.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["row_type"] == "event"
+    assert row["event"] == "session_authority_seen"
+    assert row["reason"] == "reconnecting"
+    assert row["state"] == "connecting"
+    serialized = json.dumps(row)
+    assert "10.0.0.5" not in serialized
+
+
 def test_report_metrics_clamps_out_of_range_values(server) -> None:
     req = _FakeRequest({
         "action": "report_metrics",
