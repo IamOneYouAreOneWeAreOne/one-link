@@ -14547,6 +14547,45 @@ class Daemon:
                                 },
                             )
 
+                        # Wave 2f: batch QUIC-routed chunks across N
+                        # lanes via send_chunks_via_quic_parallel.
+                        # Buffer fills up to QUIC_BATCH_SIZE (or
+                        # eof) then dispatches; on failure the
+                        # entire batch falls back to per-chunk
+                        # WebRTC send through the existing
+                        # pipelined pending_sizes/_settle path.
+                        QUIC_BATCH_SIZE = 8
+                        QUIC_BATCH_LANES = 4
+                        quic_pending_batch: list[dict] = []
+                        quic_pending_sizes: list[int] = []
+
+                        async def _fallback_quic_batch_to_webrtc() -> None:
+                            """When the QUIC parallel dispatch
+                            fails, push every still-pending chunk
+                            through the WebRTC pipeline so the
+                            transfer keeps moving. Chunks have
+                            already been encrypted via the
+                            shared native_session, so the ratchet
+                            stays in sync."""
+                            nonlocal queued_write
+                            for fb_msg, fb_size in zip(quic_pending_batch, quic_pending_sizes):
+                                queued_write = await _queue_or_send(
+                                    channel,
+                                    encode_msg(fb_msg),
+                                )
+                                pending_sizes.append((
+                                    str(fb_msg.get("id")),
+                                    fb_size,
+                                    time.perf_counter(),
+                                ))
+                                while not stream_scheduler.can_send(len(pending_sizes)):
+                                    await _flush_if_queued(channel, queued_write)
+                                    queued_write = False
+                                    await _settle_one_stream_ack()
+                            quic_pending_batch.clear()
+                            quic_pending_sizes.clear()
+
+                        queued_write = False
                         while True:
                             data = f.read(stream_chunk_size)
                             if not data:
@@ -14584,31 +14623,54 @@ class Daemon:
                                 )
                                 if chunk_ack_batch > 1 and not eof:
                                     chunk_msg["ack_batch"] = chunk_ack_batch
-                                # Wave 2e: route this chunk over QUIC
-                                # if the peer has an active outbound
-                                # QUIC connection. The round-trip
-                                # awaits its own ACK frame on the
-                                # QUIC stream, bypassing the WebRTC
-                                # pending_sizes / FILE_ACK_BATCH
-                                # plumbing entirely. On any QUIC
-                                # error (handshake mid-flight, conn
-                                # torn) we fall through to the
-                                # WebRTC path so the transfer still
-                                # completes — never block file
-                                # delivery on the QUIC fast path.
+                                # Wave 2f: batch QUIC-routed chunks
+                                # across N parallel streams instead
+                                # of one round-trip per chunk.
+                                # Accumulate up to QUIC_BATCH_SIZE
+                                # chunks (or until eof), then ship
+                                # them all via
+                                # ``send_chunks_via_quic_parallel``.
+                                # On any QUIC error the batch falls
+                                # back to per-chunk WebRTC through
+                                # the existing pipelined send path
+                                # — the transfer always completes.
                                 quic_dispatched = False
                                 if (
                                     peer_fp_for_policy
                                     and peer_fp_for_policy in self._quic_outbound
                                 ):
-                                    qres = await self.send_chunk_via_quic(
-                                        peer_fp_for_policy, peer, chunk_msg,
+                                    quic_pending_batch.append(chunk_msg)
+                                    quic_pending_sizes.append(len(data))
+                                    quic_dispatched = True  # owned by the batch
+                                    should_flush = (
+                                        len(quic_pending_batch) >= QUIC_BATCH_SIZE
+                                        or eof
                                     )
-                                    if qres.get("ok"):
-                                        quic_dispatched = True
-                                        chunks_sent += 1
-                                        raw_bytes_sent += len(data)
-                                        wire_bytes_sent += len(encode_msg(chunk_msg))
+                                    if should_flush:
+                                        qres = await self.send_chunks_via_quic_parallel(
+                                            peer_fp_for_policy,
+                                            peer,
+                                            quic_pending_batch,
+                                            lanes=QUIC_BATCH_LANES,
+                                        )
+                                        if qres.get("ok"):
+                                            chunks_sent += len(quic_pending_batch)
+                                            for sz in quic_pending_sizes:
+                                                raw_bytes_sent += sz
+                                                wire_bytes_sent += sz
+                                            quic_pending_batch.clear()
+                                            quic_pending_sizes.clear()
+                                        else:
+                                            # Whole-batch fallback to
+                                            # WebRTC. Chunks have
+                                            # already been encrypted
+                                            # via the shared native
+                                            # session; the WebRTC
+                                            # send re-uses the same
+                                            # chunk_msg dicts so the
+                                            # receiver's ratchet
+                                            # stays in lockstep.
+                                            await _fallback_quic_batch_to_webrtc()
                                 if not quic_dispatched:
                                     queued_write = await _queue_or_send(
                                         channel,
