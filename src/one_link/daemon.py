@@ -7275,49 +7275,71 @@ class Daemon:
         else:
             await self._ack_file_chunk(channel, msg, f)
 
+    def _finish_cdc_file_assemble(self, f: IncomingFile, blob: str) -> tuple[bool, int]:
+        """Synchronous reassemble-and-hash. Returns (ok, written_bytes).
+        Designed to be dispatched via ``asyncio.to_thread`` so the
+        event loop stays responsive while large files (multi-GiB)
+        spend seconds doing disk I/O + BLAKE3.
+
+        ``ok`` is False either because a cache-only chunk couldn't
+        be read (missing entry) or because the streamed hash didn't
+        match ``blob``. Callers handle persist + broadcast +
+        quarantine on the event loop afterward.
+        """
+        assert f.cdc_chunks is not None
+        for c in f.cdc_chunks:
+            idx = int(c["index"])
+            if idx in f.cdc_streamed:
+                continue  # already at the right offset on disk
+            data = self._read_chunk_cache(c["hash"])
+            if data is None:
+                return (False, 0)
+            f.handle.seek(int(c["start"]))
+            f.handle.write(data)
+        f.handle.flush()
+        # Verify the whole-file hash by streaming the file back
+        # through BLAKE3. Reads in 256 KiB blocks so peak memory
+        # stays bounded regardless of file size.
+        f.handle.seek(0)
+        h = blake3.blake3()
+        written = 0
+        while True:
+            block = f.handle.read(256 * 1024)
+            if not block:
+                break
+            h.update(block)
+            written += len(block)
+        f.handle.close()
+        return (h.hexdigest() == blob and written == f.size, written)
+
     async def _finish_cdc_file(self, blob: str, peer_fp: str, peer_sid: str, src_msg: dict) -> None:
         f = self._incoming_files.get(blob)
         if not f or f.cdc_chunks is None:
             return
         try:
+            # Off-load the disk I/O + BLAKE3 hash to a worker
+            # thread. For a 5 GiB file the streaming-hash pass takes
+            # ~5 seconds on a typical SSD; running it on the event
+            # loop would stall every other coroutine — handshakes,
+            # heartbeats, the UI WebSocket — for the duration. The
+            # state mutations + broadcast that follow stay on the
+            # event loop because the StreamWriter handles in
+            # ``_tail_subs`` aren't thread-safe.
+            #
             # Stream-to-disk has already deposited every chunk that
             # arrived during this session at its correct offset in
-            # ``out_path``. We only need to fill in chunks that were
-            # received in a PRIOR session (cache hits restored on
-            # cross-restart resume) — those don't pass through the
-            # current session's chunk handler, so the bytes weren't
-            # streamed to disk this run.
-            #
-            # If no chunks need cache-backfill, this loop is a
-            # no-op and finish becomes "stream-hash the file +
-            # verify against blob_hex". Big files used to allocate
-            # `f.size` bytes here for the in-memory reassembly buffer;
-            # now they allocate `BLAKE3_BLOCK` bytes for the
-            # streaming hasher and nothing more.
-            for c in f.cdc_chunks:
-                idx = int(c["index"])
-                if idx in f.cdc_streamed:
-                    continue  # already at the right offset on disk
-                data = self._read_chunk_cache(c["hash"])
-                if data is None:
-                    return
-                f.handle.seek(int(c["start"]))
-                f.handle.write(data)
-            f.handle.flush()
-            # Verify the whole-file hash by streaming the file back
-            # through BLAKE3. Reads in 256 KiB blocks so peak memory
-            # stays bounded regardless of file size.
-            f.handle.seek(0)
-            h = blake3.blake3()
-            written = 0
-            while True:
-                block = f.handle.read(256 * 1024)
-                if not block:
-                    break
-                h.update(block)
-                written += len(block)
-            f.handle.close()
-            ok = h.hexdigest() == blob and written == f.size
+            # ``out_path``; the helper just fills in any cache-only
+            # chunks restored from prior sessions and verifies the
+            # whole-file hash.
+            ok, written = await asyncio.to_thread(
+                self._finish_cdc_file_assemble, f, blob,
+            )
+            if not ok and written == 0:
+                # Cache miss on a chunk we expected to have. Leave
+                # the transfer in its current state so the
+                # `_schedule_resume_paused` retry path can ask the
+                # sender for it.
+                return
             done = {
                 "t": "FILE_DONE", "id": src_msg["id"], "ts": src_msg["ts"],
                 "from": src_msg["from"], "name": f.name, "size": f.size,
