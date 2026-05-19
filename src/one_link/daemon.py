@@ -116,6 +116,12 @@ from one_link.paths import (
     data_dir,
     inbox_dir,
 )
+from one_link.resume import (
+    ResumeRegistry,
+    ResumeSidecar,
+    delete_sidecar as _delete_resume_sidecar,
+    persist_sidecar as _persist_resume_sidecar,
+)
 from one_link.state import State
 from one_link.swarm_plan import ChunkSource, plan_swarm_sources, source_from_hashes
 from one_link.transfer_brain import (
@@ -1001,6 +1007,13 @@ class Daemon:
         self._tail_subs: set[asyncio.StreamWriter] = set()
         self._incoming_files: dict[str, IncomingFile] = {}
         self._incoming_blobs: dict[str, dict] = {}
+        # Receiver-side resume: a small persistent sidecar per
+        # in-progress CDC inbound transfer lets us survive a
+        # daemon restart or a mid-transfer peer disconnect without
+        # re-fetching chunks already in the cache. The registry is
+        # populated from disk in start() and consulted by the
+        # FILE_OFFER handler before allocating a fresh IncomingFile.
+        self._resume_registry: ResumeRegistry = ResumeRegistry(inbox_dir())
         # Living Presence Tier α-pre — Cryptographic Reality Engine
         # store. Holds verified FrameProvenance state per blob_hex
         # so the UI can render the Reality dot. See
@@ -3873,11 +3886,100 @@ class Daemon:
                     ),
                 )
                 return
-            # v0.20.7 (security audit H16): open with exclusive-create
-            # against a uniquified path so a name + blob-prefix
-            # collision can't truncate an existing inbox file.
-            out_path = self._unique_inbox_path(blob, name)
-            handle = open(out_path, "xb")
+            # Receiver-side resume. Three cases for where the
+            # output file + CDC manifest come from:
+            #
+            #   1. The blob is already in ``_incoming_files`` from
+            #      an in-session transfer the sender is retrying.
+            #      Reuse the entry as-is, recompute the missing set
+            #      against the current chunk cache (chunks may have
+            #      landed since the original FILE_OFFER), and skip
+            #      the open() entirely. The existing handle stays
+            #      live; only the ``cdc_missing`` set changes.
+            #
+            #   2. A persistent resume sidecar matches ``(peer_fp,
+            #      blob)``. The daemon crashed or restarted after a
+            #      prior FILE_OFFER landed but before completion.
+            #      The sidecar carries the original out_path + the
+            #      CDC manifest; we reuse the path, open it
+            #      truncating, and rebuild IncomingFile. The chunk
+            #      bytes already in the cache flow through the
+            #      existing ``known_hashes`` filter so the receiver
+            #      requests only what's still missing.
+            #
+            #   3. Brand-new transfer. The pre-resume codepath:
+            #      allocate a unique inbox path, open exclusive-
+            #      create, build a fresh IncomingFile. For CDC
+            #      offers we also persist a sidecar so a future
+            #      restart can resurrect this transfer.
+            transfer_id = f"in:{blob}"
+            existing_inflight = self._incoming_files.get(blob)
+            in_session_retry = (
+                existing_inflight is not None
+                and existing_inflight.cdc_chunks is not None
+                and cdc_chunks is not None
+                and len(existing_inflight.cdc_chunks) == len(cdc_chunks)
+                and all(
+                    str(a.get("hash")) == str(b.get("hash"))
+                    for a, b in zip(existing_inflight.cdc_chunks, cdc_chunks)
+                )
+            )
+            if in_session_retry and existing_inflight is not None and cdc_chunks is not None:
+                # Case 1: in-session retry of the same transfer.
+                # Same blob, same CDC manifest. Recompute the
+                # missing set in case more chunks have cached
+                # since the first offer landed.
+                cached_now = set(self._available_chunk_hashes(
+                    [str(c["hash"]) for c in cdc_chunks],
+                    hydrate=False,
+                    limit=len(cdc_chunks),
+                ))
+                missing = {
+                    int(c["index"]) for c in cdc_chunks
+                    if str(c["hash"]) not in cached_now
+                }
+                existing_inflight.cdc_missing = missing
+                out_path = existing_inflight.out_path
+                handle = existing_inflight.handle
+                log.info(
+                    "resume (in-session): %s blob=%s missing=%d",
+                    name, blob[:8], len(missing or []),
+                )
+            else:
+                sc_match = self._resume_registry.pop_match(peer_fp, blob)
+                if (
+                    sc_match is not None
+                    and cdc_chunks is not None
+                    and len(sc_match.cdc_chunks) == len(cdc_chunks)
+                    and all(
+                        str(a.get("hash")) == str(b.get("hash"))
+                        for a, b in zip(sc_match.cdc_chunks, cdc_chunks)
+                    )
+                ):
+                    # Case 2: cross-restart resume. The partial
+                    # out_path was validated by
+                    # ResumeRegistry.load_from_inbox to exist + sit
+                    # under the inbox root.
+                    out_path = Path(sc_match.out_path)
+                    # Open truncating: the partial output file never
+                    # carried meaningful state during transfer (chunks
+                    # land in cdc_parts/cache, not in the handle).
+                    # ``_finish_cdc_file`` rewrites from scratch.
+                    handle = open(out_path, "wb")
+                    log.info(
+                        "resume (cross-restart): %s blob=%s out=%s",
+                        name, blob[:8], out_path.name,
+                    )
+                else:
+                    # Case 3: brand-new transfer (or stale sidecar —
+                    # drop it). v0.20.7 (security audit H16): open
+                    # with exclusive-create against a uniquified path
+                    # so a name + blob-prefix collision can't truncate
+                    # an existing inbox file.
+                    if sc_match is not None:
+                        _delete_resume_sidecar(inbox_dir(), blob)
+                    out_path = self._unique_inbox_path(blob, name)
+                    handle = open(out_path, "xb")
             if cdc_chunks:
                 if missing:
                     missing, swarm_assist = await self._swarm_assist_file_offer(
@@ -3888,23 +3990,46 @@ class Daemon:
                         cdc_chunks=cdc_chunks,
                         missing=missing,
                     )
-            transfer_id = f"in:{blob}"
-            self._incoming_files[blob] = IncomingFile(
-                name=name,
-                size=size,
-                blob_hex=blob,
-                out_path=out_path,
-                handle=handle,
-                # blake3 lacks PEP-561 stubs; the runtime hasher
-                # exposes update/hexdigest exactly per _HasherProtocol.
-                # ``cast`` documents the contract for the type
-                # checker without bypassing it.
-                hasher=cast(_HasherProtocol, blake3.blake3()),
-                cdc_chunks=cdc_chunks,
-                cdc_missing=missing,
-                cdc_parts={},
-                transfer_id=transfer_id,
-            )
+            if not in_session_retry:
+                # Build (or rebuild) the IncomingFile entry. Skipped
+                # for the in-session-retry case 1 above, which keeps
+                # the existing entry's handle + hasher live.
+                self._incoming_files[blob] = IncomingFile(
+                    name=name,
+                    size=size,
+                    blob_hex=blob,
+                    out_path=out_path,
+                    handle=handle,
+                    # blake3 lacks PEP-561 stubs; the runtime hasher
+                    # exposes update/hexdigest exactly per _HasherProtocol.
+                    # ``cast`` documents the contract for the type
+                    # checker without bypassing it.
+                    hasher=cast(_HasherProtocol, blake3.blake3()),
+                    cdc_chunks=cdc_chunks,
+                    cdc_missing=missing,
+                    cdc_parts={},
+                    transfer_id=transfer_id,
+                )
+            if cdc_chunks is not None:
+                # Persist (or refresh) the resume sidecar so a daemon
+                # crash before completion is recoverable on the next
+                # start. Best-effort: a failure here doesn't block
+                # the in-memory transfer, just leaves resume off for
+                # this one blob if the crash hits later.
+                try:
+                    _persist_resume_sidecar(inbox_dir(), ResumeSidecar(
+                        blob_hex=blob,
+                        peer_fp=peer_fp,
+                        name=name,
+                        size=size,
+                        out_path=str(out_path),
+                        cdc_chunks=list(cdc_chunks),
+                    ))
+                except Exception as e:
+                    log.warning(
+                        "resume sidecar write failed for %s: %s",
+                        blob[:8], e,
+                    )
             self._upsert_transfer(
                 id=transfer_id,
                 direction="in",
@@ -7074,6 +7199,10 @@ class Daemon:
                 )
                 self._broadcast_tail(ev)
                 self._update_transfer(f.transfer_id, status="failed")
+                # Drop the resume sidecar — the assembled file
+                # failed the whole-blob hash check, so resuming
+                # would just reassemble the same bad content.
+                _delete_resume_sidecar(inbox_dir(), blob)
                 return
             ev = self._persist(msg=done, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
             self._broadcast_tail(ev)
@@ -7086,6 +7215,10 @@ class Daemon:
                 chunks_done=len(f.cdc_chunks),
                 chunks_total=len(f.cdc_chunks),
             )
+            # Transfer landed clean. Drop the resume sidecar so the
+            # next daemon start doesn't try to re-acquire a
+            # finished blob.
+            _delete_resume_sidecar(inbox_dir(), blob)
         except Exception:
             self._update_transfer(f.transfer_id, status="failed")
             self._abort_incoming_file(blob, f)
@@ -9443,6 +9576,9 @@ class Daemon:
         self._incoming_files.pop(blob, None)
         with contextlib.suppress(OSError):
             f.out_path.unlink()
+        # Drop the resume sidecar so a future FILE_OFFER for the
+        # same blob doesn't try to resurrect this aborted transfer.
+        _delete_resume_sidecar(inbox_dir(), blob)
         self._update_transfer(f.transfer_id, status="failed")
 
     def _ack_batch_size_from_chunk(self, msg: dict) -> int:
@@ -14628,6 +14764,16 @@ class Daemon:
         # Best-effort: failures here are non-fatal (the daemon still
         # starts) but logged so ops can verify the hardening landed.
         _harden_process_dumpability()
+        # Receiver-side resume: scan the inbox for any in-progress
+        # CDC transfer sidecars left over from a prior daemon run.
+        # Each matched (peer_fp, blob) gets restored as a pending
+        # offer in the FILE_OFFER handler when the sender retries.
+        # No-op on a fresh inbox; quiet (single info line) otherwise.
+        try:
+            self._resume_registry = ResumeRegistry(inbox_dir())
+            self._resume_registry.load_from_inbox()
+        except Exception as e:
+            log.warning("resume registry: failed to load from inbox: %s", e)
         # Persistent state (sqlite) — created early so peer/handshake hooks
         # can record into it.
         try:

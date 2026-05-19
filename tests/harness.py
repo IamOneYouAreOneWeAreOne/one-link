@@ -347,7 +347,11 @@ def inbox_files(home: Path) -> list[Path]:
     p = home / "data" / "inbox"
     if not p.exists():
         return []
-    return sorted(p.iterdir())
+    # Filter to actual files. The daemon stashes a ``.resume``
+    # sidecar subdirectory next to the user-visible payloads; if we
+    # returned that, callers iterating with .read_bytes() would
+    # PermissionError on the directory entry.
+    return sorted(e for e in p.iterdir() if e.is_file())
 
 
 def wait_for_inbox_file(
