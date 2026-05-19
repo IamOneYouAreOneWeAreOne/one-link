@@ -102,37 +102,108 @@ class QuicEndpointConfig:
     dead. 30s is conservative enough to survive a cellular handoff."""
 
 
-def make_endpoint(
+def _build_native_identity_from_pem(identity_pem: str):
+    """Wave 2c: bridge from the daemon's Ed25519 Identity to the
+    native ``ol_quic::Identity`` via PKCS#8 PEM. Returns the
+    native Identity or raises if the native crate isn't usable.
+
+    The PEM is loaded fresh on the native side; the daemon's
+    in-memory Ed25519PrivateKey is never shared across the FFI
+    boundary directly.
+    """
+    if not HAS_NATIVE or _native_quic is None:
+        raise RuntimeError("one_link_native.quic not installed")
+    return _native_quic.Identity.from_pkcs8_pem(identity_pem)
+
+
+def _native_endpoint_config(cfg: QuicEndpointConfig):
+    """Build a native ``ol_quic::EndpointConfig`` from our local
+    dataclass. Keeps the daemon-facing API in pure Python while
+    the native side keeps its own struct shape."""
+    if not HAS_NATIVE or _native_quic is None:
+        raise RuntimeError("one_link_native.quic not installed")
+    return _native_quic.EndpointConfig(
+        bind=cfg.bind_addr,
+        keepalive_interval_ms=cfg.keep_alive_interval_ms,
+        idle_timeout_ms=cfg.max_idle_timeout_ms,
+    )
+
+
+def make_server_endpoint(
+    identity_pem: str,
+    is_paired_callback,
     config: Optional[QuicEndpointConfig] = None,
-) -> Optional[object]:
-    """Build a local QUIC endpoint. Returns ``None`` when the native
-    crate isn't installed — callers fall back to WebRTC for all
-    transports.
+):
+    """Build a local QUIC server endpoint. Wave 2c — the Identity
+    bridge that lit up the QUIC stack.
 
-    The returned object exposes:
-    - ``connect_blocking(addr) -> Connection`` for outbound
-    - ``accept_blocking() -> (Connection, addr)`` for inbound
-    - ``local_addr() -> (host, port)`` for advertising
-    - ``close()`` for shutdown
+    Args:
+        identity_pem: The daemon's Ed25519 private key encoded as
+            PKCS#8 PEM. Same key that signs the WebRTC handshake.
+        is_paired_callback: A function ``(fingerprint_bytes) -> bool``
+            that the native endpoint calls during TLS to decide
+            whether to admit an inbound connection. The daemon
+            wires this to its PeerStore: pinned == accept.
+        config: Optional ``QuicEndpointConfig``; defaults pick an
+            OS-assigned port on ``0.0.0.0``.
 
-    The daemon owns one endpoint per running instance.
+    Returns:
+        The native ``Endpoint`` instance (exposes
+        ``accept_blocking``, ``local_addr``, ``close``, etc.), or
+        ``None`` when the native crate isn't installed and the
+        daemon should fall back to WebRTC.
     """
     if not HAS_NATIVE:
         return None
     cfg = config or QuicEndpointConfig()
-    # `Endpoint.server(identity, is_paired_callback, config)` requires
-    # a native ``Identity`` object + a Python callback + a native
-    # ``EndpointConfig`` — the full plumbing to derive the Identity
-    # from the daemon's existing Ed25519 keypair and build the
-    # paired-peer callback is Phase A2 datapath work that hasn't
-    # landed yet. Per PHASE_A2_QUIC_CUTOVER_PLAN.md the capability is
-    # advertised so peer negotiation works, but the endpoint stays
-    # unbuilt at startup until the Identity bridge ships.
-    #
-    # Returning None here means transport_choice_for_peer falls back
-    # to WebRTC for every peer. No log spam, no warning — this is
-    # the documented Phase A2 wiring state, not a failure.
-    _ = cfg
+    try:
+        identity = _build_native_identity_from_pem(identity_pem)
+        nat_cfg = _native_endpoint_config(cfg)
+        return _native_quic.Endpoint.server(identity, is_paired_callback, nat_cfg)
+    except Exception as e:
+        log.warning(
+            "QUIC server endpoint bring-up failed (%s); falling back to WebRTC",
+            e,
+        )
+        return None
+
+
+def make_client_endpoint(
+    identity_pem: str,
+    config: Optional[QuicEndpointConfig] = None,
+):
+    """Build a local QUIC client endpoint for outbound dials.
+    Wave 2c counterpart to :func:`make_server_endpoint`.
+
+    Unlike the server, a client endpoint doesn't need an
+    is_paired callback — the daemon checks the peer's fingerprint
+    against its own store before calling ``connect_blocking``.
+    """
+    if not HAS_NATIVE:
+        return None
+    cfg = config or QuicEndpointConfig()
+    try:
+        identity = _build_native_identity_from_pem(identity_pem)
+        nat_cfg = _native_endpoint_config(cfg)
+        return _native_quic.Endpoint.client(identity, nat_cfg)
+    except Exception as e:
+        log.warning(
+            "QUIC client endpoint bring-up failed (%s); falling back to WebRTC",
+            e,
+        )
+        return None
+
+
+def make_endpoint(
+    config: Optional[QuicEndpointConfig] = None,
+) -> Optional[object]:
+    """Legacy alias kept for backward-compat with existing
+    call sites that don't yet pass an identity. Returns ``None`` —
+    real endpoint construction goes through
+    :func:`make_server_endpoint` / :func:`make_client_endpoint`,
+    which Wave 2c added.
+    """
+    _ = config
     return None
 
 
