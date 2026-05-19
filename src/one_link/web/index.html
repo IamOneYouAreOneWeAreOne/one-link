@@ -26311,6 +26311,7 @@
     bestRelayHealth: "",
     bestRelayScore: null,
     turnCredentialExpiresAtMs: null,
+    lastRelayProbeMs: 0,
     forceRelayOnRepair: false,
     preferRelayNext: false,
   };
@@ -26358,6 +26359,43 @@
           })
       : false;
     return { audio, video };
+  }
+
+  async function requestRelayHealthProbe(reason) {
+    if (!callUI.activeCallId || !media.iceRelayReady) return;
+    const now = Date.now();
+    if (now - Number(media.lastRelayProbeMs || 0) < 120000) return;
+    media.lastRelayProbeMs = now;
+    try {
+      const result = await fetch("/api/peer-rtc/relay-probe", {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          call_id: callUI.activeCallId,
+          reason: reason || "call_health",
+        }),
+      }).then((r) => r.json());
+      if (result && result.routePolicy) {
+        media.routePolicyDetail = result.routePolicy;
+        media.bestRelayHealth = String(result.routePolicy.best_relay_health || "");
+        media.bestRelayScore = Number.isFinite(Number(result.routePolicy.best_relay_score))
+          ? Number(result.routePolicy.best_relay_score)
+          : null;
+        media.turnCredentialExpiresAtMs = Number(result.routePolicy.credential_expires_at_ms || 0) || null;
+      }
+      reportCallEvent("relay_probe_completed", {
+        reason: "relay_probe",
+        state: media.bestRelayHealth || "unknown",
+        ok: result && result.ok === true,
+      });
+    } catch (_) {
+      reportCallEvent("relay_probe_failed", {
+        reason: "relay_probe",
+        state: media.bestRelayHealth || "unknown",
+      });
+    }
   }
 
   function targetMediaProfile(level) {
@@ -27463,6 +27501,7 @@
           pc.setConfiguration({ iceServers: cfg.iceServers });
           if (media.iceRelayReady) {
             reportCallEvent("ice_relay_ready", { state: "available" });
+            requestRelayHealthProbe("ice_config").catch(() => {});
           }
         } else {
           reportCallEvent("ice_host_only_mode", { state: "enabled" });
@@ -29577,6 +29616,16 @@
       applyCallQualityHysteresis(quality);
       renderParticipants();
       renderLiveStats(callUI.lastMetricsSnapshot);
+      if (
+        media.iceRelayReady
+        && (
+          selected.ice_connection_state === "checking"
+          || selected.ice_connection_state === "disconnected"
+          || selected.media_health_severity >= 2
+        )
+      ) {
+        requestRelayHealthProbe("metrics").catch(() => {});
+      }
       tuneOutboundMediaForTau(callUI.lastMetricsSnapshot).catch(() => {});
       const videoMoving = inboundVideoBytes > Number(callUI.lastInboundVideoBytes || 0)
         || inboundVideoFramesDecoded > Number(callUI.lastInboundVideoFramesDecoded || 0);

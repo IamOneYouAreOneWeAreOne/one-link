@@ -1454,6 +1454,10 @@ class UIServer:
             "/api/peer-rtc/ice-config",
             self._guarded(self.api_peer_rtc_ice_config),
         )
+        r.add_post(
+            "/api/peer-rtc/relay-probe",
+            self._guarded(self.api_peer_rtc_relay_probe),
+        )
         # May 15 2026 — sovereignty surface. Three endpoints power
         # the UI Privacy panel:
         #   GET  /api/sovereignty/status     — preset + per-feature state
@@ -2368,6 +2372,119 @@ class UIServer:
             cand["rank"] = rank
         return out
 
+    @staticmethod
+    def _parse_turn_probe_target(url: str) -> dict | None:
+        text = str(url or "").strip()
+        lower = text.lower()
+        if not (lower.startswith("turn:") or lower.startswith("turns:")):
+            return None
+        scheme, rest = text.split(":", 1)
+        rest = rest.lstrip("/")
+        target = rest.split("?", 1)[0].strip()
+        if not target:
+            return None
+        default_port = 5349 if scheme.lower() == "turns" else 3478
+        host = target
+        port = default_port
+        if target.startswith("["):
+            end = target.find("]")
+            if end <= 1:
+                return None
+            host = target[1:end]
+            tail = target[end + 1:]
+            if tail.startswith(":"):
+                try:
+                    port = int(tail[1:])
+                except ValueError:
+                    return None
+        elif ":" in target:
+            host, raw_port = target.rsplit(":", 1)
+            try:
+                port = int(raw_port)
+            except ValueError:
+                return None
+        host = host.strip()
+        if not host or port <= 0 or port > 65535:
+            return None
+        return {
+            "scheme": scheme.lower(),
+            "host": host,
+            "port": port,
+            "tls": scheme.lower() == "turns",
+        }
+
+    async def _probe_turn_relay_once(
+        self,
+        url: str,
+        *,
+        timeout_s: float = 1.5,
+    ) -> dict:
+        target = self._parse_turn_probe_target(url)
+        if target is None:
+            return {"url": url, "ok": False, "reason": "invalid_turn_url"}
+        started = time.perf_counter()
+        writer = None
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    target["host"],
+                    int(target["port"]),
+                    ssl=bool(target["tls"]),
+                ),
+                timeout=max(0.2, min(5.0, float(timeout_s))),
+            )
+            rtt_ms = (time.perf_counter() - started) * 1000.0
+            return {
+                "url": url,
+                "ok": True,
+                "reason": "tcp_connect",
+                "rtt_ms": round(rtt_ms, 3),
+            }
+        except asyncio.TimeoutError:
+            return {"url": url, "ok": False, "reason": "timeout"}
+        except OSError:
+            return {"url": url, "ok": False, "reason": "connect_failed"}
+        except Exception:
+            return {"url": url, "ok": False, "reason": "probe_failed"}
+        finally:
+            if writer is not None:
+                with contextlib.suppress(Exception):
+                    writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+
+    def _record_relay_probe_result(self, result: dict) -> None:
+        url = str(result.get("url") or "")
+        if not url:
+            return
+        rtt_ms = result.get("rtt_ms") if result.get("ok") else None
+        try:
+            fn = getattr(self.daemon, "record_relay_observation", None)
+            if callable(fn):
+                fn(url, rtt_ms=rtt_ms, success=bool(result.get("ok")))
+                return
+        except Exception:
+            pass
+        store = getattr(self.daemon, "_relay_metrics", None)
+        if isinstance(store, dict):
+            now_ms = int(time.time() * 1000)
+            cur = store.get(url) or {
+                "rtt_ms": 100.0,
+                "loss_rate": 0.0,
+                "n_attempts": 0,
+                "n_successes": 0,
+                "last_observed_ms": now_ms,
+            }
+            cur["n_attempts"] = int(cur.get("n_attempts", 0)) + 1
+            if result.get("ok"):
+                cur["n_successes"] = int(cur.get("n_successes", 0)) + 1
+                if rtt_ms is not None:
+                    cur["rtt_ms"] = 0.8 * float(cur.get("rtt_ms", rtt_ms)) + 0.2 * float(rtt_ms)
+            prev_loss = float(cur.get("loss_rate", 0.0))
+            cur["loss_rate"] = 0.8 * prev_loss + 0.2 * (0.0 if result.get("ok") else 1.0)
+            cur["last_observed_ms"] = now_ms
+            store[url] = cur
+
     def _resolved_webrtc_ice_servers(self, *, call_id: str | None = None) -> list[dict]:
         servers: list[dict] = [{"urls": u} for u in self._resolved_stun_servers()]
         turn = self._resolved_turn_config(call_id=call_id)
@@ -2981,6 +3098,52 @@ class UIServer:
             "iceServers": servers,
             "routePolicy": route_policy,
             "sovereignty_default": len(servers) == 0,
+        })
+
+    async def api_peer_rtc_relay_probe(
+        self, request: web.Request,
+    ) -> web.Response:
+        """POST /api/peer-rtc/relay-probe - proactive TURN health check.
+
+        This only probes operator/user-configured TURN host:port reachability
+        and records privacy-safe RTT/success metrics. It never returns or logs
+        TURN credentials, SDP, ICE candidates, IP addresses, or media content.
+        """
+        call_id = None
+        try:
+            data = await request.json()
+            if isinstance(data, dict):
+                raw_call_id = data.get("call_id")
+                if isinstance(raw_call_id, str):
+                    call_id = raw_call_id
+        except Exception:
+            data = {}
+        turn = self._resolved_turn_config(call_id=call_id)
+        candidates = list(turn.get("candidates") or [])[:8]
+        urls = [str(c.get("url")) for c in candidates if isinstance(c, dict) and c.get("url")]
+        if not urls:
+            return web.json_response({
+                "ok": True,
+                "probed": 0,
+                "results": [],
+                "routePolicy": self._resolved_webrtc_route_policy(call_id=call_id),
+            })
+        timeout_s = 1.5
+        try:
+            timeout_s = max(0.3, min(5.0, float(os.environ.get("ONE_LINK_RELAY_PROBE_TIMEOUT_SECONDS", "1.5"))))
+        except ValueError:
+            timeout_s = 1.5
+        results = await asyncio.gather(*[
+            self._probe_turn_relay_once(url, timeout_s=timeout_s)
+            for url in urls
+        ])
+        for result in results:
+            self._record_relay_probe_result(result)
+        return web.json_response({
+            "ok": True,
+            "probed": len(results),
+            "results": results,
+            "routePolicy": self._resolved_webrtc_route_policy(call_id=call_id),
         })
 
     async def api_peer_rtc_ice_config_public(
@@ -3907,6 +4070,8 @@ class UIServer:
                 "recovery_intent_failed",
                 "call_trace_exported",
                 "call_trace_export_failed",
+                "relay_probe_completed",
+                "relay_probe_failed",
             }
             if not call_id or event not in allowed_events:
                 return
@@ -3951,6 +4116,7 @@ class UIServer:
                         "reconnecting", "recovered", "failed",
                         "restart_ice", "force_relay",
                         "recovery_intent", "revive_playback",
+                        "relay_probe",
                     },
                 ),
                 "media_kind": _clean_token("media_kind", {"audio", "video"}),
@@ -3963,6 +4129,7 @@ class UIServer:
                         "auto", "direct", "relay", "same",
                         "negotiating", "degraded", "recovered",
                         "survival", "audio_first",
+                        "healthy", "poor", "unknown",
                     },
                 ),
                 "ok": bool(body.get("ok")) if "ok" in body else None,

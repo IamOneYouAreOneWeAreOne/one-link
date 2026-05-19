@@ -368,6 +368,31 @@ async def test_report_metrics_enriches_recovery_intent_with_relay_policy(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_relay_probe_records_turn_health_and_refreshes_policy(monkeypatch) -> None:
+    monkeypatch.setenv("ONE_LINK_TURN_SERVERS", "turn:relay-a.local:3478,turn:relay-b.local:3478")
+    srv, daemon = _server_with_daemon()
+
+    async def fake_probe(url: str, *, timeout_s: float = 1.5) -> dict:
+        if "relay-a" in url:
+            return {"url": url, "ok": True, "reason": "tcp_connect", "rtt_ms": 22.0}
+        return {"url": url, "ok": False, "reason": "timeout"}
+
+    monkeypatch.setattr(srv, "_probe_turn_relay_once", fake_probe)
+    resp = await srv.api_peer_rtc_relay_probe(_FakeRequest(body={
+        "call_id": "c-probe",
+    }))  # type: ignore[arg-type]
+    import json
+    payload = json.loads(resp._body or b"")
+    assert payload["ok"] is True
+    assert payload["probed"] == 2
+    assert payload["results"][0]["ok"] is True
+    assert daemon._relay_metrics["turn:relay-a.local:3478"]["n_successes"] == 1
+    assert daemon._relay_metrics["turn:relay-b.local:3478"]["n_successes"] == 0
+    assert payload["routePolicy"]["relay_ready"] is True
+    assert payload["routePolicy"]["best_relay_health"] == "healthy"
+
+
+@pytest.mark.asyncio
 async def test_call_trace_exports_privacy_safe_timeline() -> None:
     srv, daemon = _server_with_daemon()
     peer = _identity("mom-trace")
@@ -421,3 +446,4 @@ def test_routes_registered_on_app_router() -> None:
     assert inspect.iscoroutinefunction(srv.api_call_action)
     assert inspect.iscoroutinefunction(srv.api_calls_list)
     assert inspect.iscoroutinefunction(srv.api_call_state)
+    assert inspect.iscoroutinefunction(srv.api_peer_rtc_relay_probe)

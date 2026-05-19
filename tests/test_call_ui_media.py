@@ -177,7 +177,7 @@ def test_media_watchdog_restarts_stuck_negotiation(index_html: str) -> None:
     assert "media.pc.signalingState" in snippet
     assert "sendLocalSdpOffer" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 13600]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 15000]
     assert 'ensureMediaNegotiation("metrics").catch' in metrics_snippet
     active_idx = index_html.find('window.handleLivingPresenceCallEvent = function')
     active_idx = index_html.find('if (phase === "active")', active_idx)
@@ -353,7 +353,7 @@ def test_call_media_watchdog_repairs_stalled_frames(index_html: str) -> None:
 
 def test_call_engine_detects_frozen_media_and_network_resume(index_html: str) -> None:
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 13000]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 14500]
     assert "frozenMediaTicks" in metrics_snippet
     assert "videoElementFrozen" in metrics_snippet
     assert "audioElementFrozen" in metrics_snippet
@@ -630,6 +630,18 @@ def test_call_metrics_reports_relay_policy_truth(index_html: str) -> None:
     assert "best_relay_health: media.bestRelayHealth" in metrics_snippet
     assert "best_relay_score: media.bestRelayScore" in metrics_snippet
     assert "metricsResult.routePolicy" in metrics_snippet
+
+
+def test_call_ui_proactively_probes_relay_health(index_html: str) -> None:
+    assert "async function requestRelayHealthProbe" in index_html
+    idx = index_html.find("async function requestRelayHealthProbe")
+    snippet = index_html[idx:idx + 2300]
+    assert "/api/peer-rtc/relay-probe" in snippet
+    assert "lastRelayProbeMs" in snippet
+    assert "relay_probe_completed" in snippet
+    assert "relay_probe_failed" in snippet
+    assert 'requestRelayHealthProbe("ice_config")' in index_html
+    assert 'requestRelayHealthProbe("metrics")' in index_html
 
 
 def test_call_trace_export_downloads_backend_flight_recorder(index_html: str) -> None:
