@@ -16,6 +16,14 @@ FILE_COMPRESSION = "file_compression"
 FILE_BINARY_FRAME = "file_binary_frame"
 FILE_CDC_BINARY_FRAME = "file_cdc_binary_frame"
 FILE_ACK_BATCH = "file_ack_batch"
+# Wave 2b: multiple FILE_OFFERs bundled in a single
+# FILE_OFFER_BATCH frame so a "send 100 photos" workflow pays
+# one round-trip instead of N. Receiver answers with one
+# FILE_WANTS_BATCH covering every offer; sender then streams
+# chunks for all of them through the existing per-file
+# pipeline. Both peers must advertise this cap; falls back to
+# one-FILE_OFFER-at-a-time when either side lacks it.
+FILE_OFFER_BATCH_V1 = "file_offer_batch_v1"
 FOLDER_SYNC = "folder_sync"
 MERKLE_SYNC = "merkle_sync"
 FUTURE_TRANSPORTS = "future_transports"
@@ -104,6 +112,7 @@ LOCAL_CAPABILITIES = (
     FILE_BINARY_FRAME,
     FILE_CDC_BINARY_FRAME,
     FILE_ACK_BATCH,
+    FILE_OFFER_BATCH_V1,
     FOLDER_SYNC,
     MERKLE_SYNC,
     FUTURE_TRANSPORTS,
@@ -161,6 +170,7 @@ TRANSPORT_LAYER_CAPS = (
     FILE_BINARY_FRAME,
     FILE_CDC_BINARY_FRAME,
     FILE_ACK_BATCH,
+    FILE_OFFER_BATCH_V1,
     DOUBLE_RATCHET_V1,
     NATIVE_TRANSFER_V1,
     BLOOM_INIT_V1,

@@ -80,6 +80,7 @@ from one_link.capabilities import (
     FILE_ACK_BATCH,
     FILE_BINARY_FRAME,
     FILE_CDC_BINARY_FRAME,
+    FILE_OFFER_BATCH_V1,
     FILES,
     FILE_SWARM,
     FOLDER_SYNC,
@@ -3825,6 +3826,63 @@ class Daemon:
             ev = self._persist(msg=msg, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
             self._broadcast_tail(ev)
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+        elif t == "FILE_OFFER_BATCH":
+            # Wave 2b: the sender bundled N FILE_OFFERs into one
+            # frame so a "send a folder of 100 photos" workflow
+            # pays one round-trip instead of N. The receive side
+            # is the same per-offer logic as a single FILE_OFFER;
+            # we just iterate. Each inner offer keeps its own ``id``
+            # so the receiver's reply (FILE_WANTS or ACK) still
+            # correlates correctly with the sender's per-file
+            # tracking state.
+            raw_offers = msg.get("offers")
+            if not isinstance(raw_offers, list) or not raw_offers:
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="bad_file_offer_batch_empty",
+                )))
+                return
+            # Defence: cap the batch so a hostile peer can't make
+            # us allocate / process an unbounded number of offers
+            # in one frame.
+            MAX_BATCH_OFFERS = 256
+            if len(raw_offers) > MAX_BATCH_OFFERS:
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="file_offer_batch_too_large",
+                )))
+                return
+            outer_from = msg.get("from")
+            outer_ts = msg.get("ts")
+            processed = 0
+            for raw in raw_offers:
+                if not isinstance(raw, dict):
+                    continue
+                # Inject the outer envelope's from/ts when the
+                # offer body doesn't carry its own — keeps the
+                # downstream handler's expectations satisfied.
+                inner = dict(raw)
+                inner["t"] = "FILE_OFFER"
+                inner.setdefault("from", outer_from)
+                inner.setdefault("ts", outer_ts)
+                # Recurse through the dispatch so the existing
+                # FILE_OFFER logic runs unchanged — capability
+                # gate, resume registry, sidecar persist, etc.
+                try:
+                    await self._on_peer_message(channel, inner)
+                    processed += 1
+                except Exception as e:
+                    log.warning(
+                        "FILE_OFFER_BATCH inner offer failed: %s", e,
+                    )
+            # ACK the outer envelope so the sender's `await_ack`
+            # for the batch frame completes. Per-offer ACKs already
+            # went out in the recursive dispatch above.
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                batch_processed=processed,
+            )))
+            return
         elif t == "FILE_OFFER":
             if not self._capability_allowed(peer_fp, FILES):
                 self._emit_capability_request(peer_fp, peer_sid, FILES)
@@ -14870,6 +14928,43 @@ class Daemon:
                     return
                 result = await self.resume_paused_transfers_for(peer_fp)
                 await self._reply(writer, {"ok": bool(result.get("ok")), "result": result})
+            elif cmd == "_send_raw_message":
+                # Test / scripted hook: send a raw wire frame to a
+                # peer through the established session. Used by the
+                # FILE_OFFER_BATCH integration test + by anything
+                # that needs to exercise a specific wire shape
+                # outside the canonical send_file / send paths.
+                # Not exposed in any UI surface.
+                peer_arg = str(req.get("peer") or "")
+                cands = self._resolve_peer_candidates(peer_arg)
+                if not cands:
+                    fallback = await self.resolve_for_send(peer_arg)
+                    if fallback is not None:
+                        cands = [fallback]
+                if not cands:
+                    await self._reply(writer, {
+                        "ok": False, "error": f"no peer {peer_arg!r}",
+                    })
+                    return
+                raw = req.get("message")
+                if not isinstance(raw, dict):
+                    await self._reply(writer, {
+                        "ok": False, "error": "message must be a dict",
+                    })
+                    return
+                # Ensure ``from`` is stamped so the receiver's
+                # handlers see it the same way they do for real
+                # frames.
+                raw.setdefault("from", self.me.short_id)
+                raw.setdefault("id", uuid.uuid4().hex)
+                raw.setdefault("ts", int(time.time() * 1000))
+                try:
+                    await self.send_to(cands[0], [raw])
+                    await self._reply(writer, {"ok": True})
+                except Exception as e:
+                    await self._reply(writer, {
+                        "ok": False, "error": str(e),
+                    })
             elif cmd == "pin_peer":
                 # Pin a peer for testing + scripted flows. Without
                 # this, automated pipelines have no way to flip
