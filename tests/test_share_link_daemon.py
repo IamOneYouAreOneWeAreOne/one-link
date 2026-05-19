@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.harness import _bring_up, daemon_pair, request
+from tests.harness import _bring_up, daemon_pair, inbox_files, request
 
 
 pytestmark = [pytest.mark.timeout(120), pytest.mark.soak]
@@ -135,6 +135,118 @@ def test_revoke_share_link_removes(tmp_path: Path) -> None:
         )
         assert not redeem.get("ok")
         assert redeem.get("error") == "not_found"
+
+
+def test_share_link_redeem_wire_frame_triggers_file_offer(tmp_path: Path) -> None:
+    """A peer that presents a valid token via SHARE_LINK_REDEEM
+    wire frame must trigger the sender to fire a FILE_OFFER for
+    the blob the token points at. This is the on-wire half of
+    Wave 2g — the recipient-side machinery to construct +
+    transmit the frame lives in a follow-up control endpoint, so
+    here we use the test-only ``_send_raw_message`` hook to
+    inject the frame directly."""
+    src = tmp_path / "shared-payload.bin"
+    payload = b"share-link-end-to-end" * 32
+    src.write_bytes(payload)
+    with daemon_pair() as p:
+        # A is the sender + share-link minter.
+        mint = request(p.a.control_port, cmd="create_share_link", path=str(src))
+        assert mint.get("ok"), mint
+        token_hex = mint["token_hex"]
+        # Warm channel.
+        request(p.b.control_port, cmd="send",
+                peer=p.a.short_id, body="warmup")
+        time.sleep(0.5)
+        # B sends the redeem frame to A — bypasses any UI flow;
+        # the test simulates a future "claim_share_link" control
+        # cmd or UI button.
+        res = request(
+            p.b.control_port, cmd="_send_raw_message",
+            peer=p.a.short_id,
+            message={"t": "SHARE_LINK_REDEEM", "token_hex": token_hex},
+        )
+        # ok=True regardless — the receiver ACKs immediately
+        # whether accepting or rejecting; in success case the
+        # follow-up send_file runs asynchronously.
+        assert res.get("ok"), res
+        # Wait for the file to land in B's inbox.
+        end = time.time() + 20.0
+        landed = None
+        while time.time() < end:
+            for f in inbox_files(p.b.home):
+                try:
+                    if f.stat().st_size == len(payload) and f.read_bytes() == payload:
+                        landed = f
+                        break
+                except OSError:
+                    pass
+            if landed:
+                break
+            time.sleep(0.2)
+        assert landed is not None, (
+            "Share-link redeem didn't trigger the file transfer; "
+            "either the wire frame handler didn't run or send_file failed."
+        )
+        # The token must now be marked consumed.
+        redeem_again = request(
+            p.a.control_port, cmd="redeem_share_link",
+            token_hex=token_hex,
+        )
+        assert not redeem_again.get("ok")
+        assert redeem_again.get("error") == "already_redeemed"
+
+
+def test_share_link_redeem_wire_rejects_bad_token() -> None:
+    """A SHARE_LINK_REDEEM with a token that was never minted
+    must be rejected — no file offer fires, no spurious transfer
+    row appears on the sender side."""
+    with daemon_pair() as p:
+        # Warm so the channel is alive.
+        request(p.b.control_port, cmd="send",
+                peer=p.a.short_id, body="warmup")
+        time.sleep(0.5)
+        # B sends a redeem with garbage token.
+        res = request(
+            p.b.control_port, cmd="_send_raw_message",
+            peer=p.a.short_id,
+            message={"t": "SHARE_LINK_REDEEM", "token_hex": "f" * 64},
+        )
+        # ACK arrives (with rejected= field). _send_raw_message
+        # surfaces it either as ok=True (sent fine) or ok=False
+        # with the rejected reason — both shapes are acceptable.
+        # Critical: no inbound file transfer rows on B.
+        time.sleep(1.0)
+        rows = request(p.b.control_port, cmd="transfers")
+        in_files = [
+            t for t in rows.get("transfers", [])
+            if t.get("direction") == "in" and t.get("kind") == "file"
+            and t.get("status") in ("offered", "active")
+        ]
+        assert not in_files, (
+            f"bad-token redeem should not trigger file offer; got {in_files}"
+        )
+
+
+def test_share_link_redeem_wire_rejects_malformed_token() -> None:
+    """A SHARE_LINK_REDEEM with a non-64-char token gets the
+    rejected=bad_share_link_token ACK and produces no transfer."""
+    with daemon_pair() as p:
+        request(p.b.control_port, cmd="send",
+                peer=p.a.short_id, body="warmup")
+        time.sleep(0.5)
+        request(
+            p.b.control_port, cmd="_send_raw_message",
+            peer=p.a.short_id,
+            message={"t": "SHARE_LINK_REDEEM", "token_hex": "short"},
+        )
+        time.sleep(1.0)
+        rows = request(p.b.control_port, cmd="transfers")
+        in_files = [
+            t for t in rows.get("transfers", [])
+            if t.get("direction") == "in" and t.get("kind") == "file"
+            and t.get("status") in ("offered", "active")
+        ]
+        assert not in_files
 
 
 def test_share_link_survives_daemon_restart(tmp_path: Path) -> None:

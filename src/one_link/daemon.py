@@ -3847,6 +3847,68 @@ class Daemon:
             ev = self._persist(msg=msg, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
             self._broadcast_tail(ev)
             await channel.send(encode_msg(make_msg("ACK", self.me.short_id, of=msg["id"])))
+        elif t == "SHARE_LINK_REDEEM":
+            # Wave 2g/2g+: a peer is presenting a share-link
+            # token we minted. Validate, consume atomically, then
+            # fire a FILE_OFFER for the blob the token names.
+            # The token IS the authentication — 32 bytes of
+            # entropy from secrets.token_bytes — so a peer that
+            # holds it is implicitly authorised to receive the
+            # blob it points at. The receiver-side peer doesn't
+            # need to be pre-paired; pairing is the WHOLE point
+            # of share-links.
+            token_hex_raw = msg.get("token_hex")
+            if not isinstance(token_hex_raw, str) or len(token_hex_raw) != 64:
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="bad_share_link_token",
+                )))
+                return
+            token_hex = token_hex_raw.lower()
+            link, reason = self._share_links.redeem(
+                token_hex, by_peer_fp=peer_fp,
+            )
+            if link is None:
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected=f"share_link_{reason}",
+                )))
+                return
+            # ACK the redeem so the recipient knows it worked +
+            # what blob to expect.
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                accepted_blob=link.blob_hex,
+                accepted_name=link.name,
+                accepted_size=link.size,
+            )))
+            # Now initiate the actual file send. The recipient is
+            # already on the other end of this channel; we can
+            # construct a Peer-like shim from the channel context.
+            # Done in a detached task so the redeem handler
+            # returns promptly.
+            try:
+                # Resolve the inbound peer to a Peer object the
+                # send_file machinery understands.
+                peers = self._resolve_peer_candidates(peer_fp)
+                if not peers:
+                    fallback = await self.resolve_for_send(peer_fp)
+                    if fallback is not None:
+                        peers = [fallback]
+                if peers:
+                    src_path = Path(link.source_path)
+                    if src_path.is_file():
+                        asyncio.create_task(
+                            self.send_file(peers[0], src_path)
+                        )
+                    else:
+                        log.warning(
+                            "share-link redeem: source path missing for %s: %s",
+                            link.blob_hex[:8], src_path,
+                        )
+            except Exception as e:
+                log.warning("share-link redeem follow-up send failed: %s", e)
+            return
         elif t == "FILE_OFFER_BATCH":
             # Wave 2b: the sender bundled N FILE_OFFERs into one
             # frame so a "send a folder of 100 photos" workflow
