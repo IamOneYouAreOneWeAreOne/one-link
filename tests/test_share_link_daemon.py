@@ -137,6 +137,48 @@ def test_revoke_share_link_removes(tmp_path: Path) -> None:
         assert redeem.get("error") == "not_found"
 
 
+def test_claim_share_link_from_peer_end_to_end(tmp_path: Path) -> None:
+    """Recipient-side public API: ``claim_share_link_from_peer``
+    constructs + sends SHARE_LINK_REDEEM behind the scenes. UI
+    surfaces should call THIS command, not the test-only raw-
+    message hook. End-to-end this commit closes the share-link
+    UX loop."""
+    src = tmp_path / "claim-payload.bin"
+    payload = b"claim-share-link" * 32
+    src.write_bytes(payload)
+    with daemon_pair() as p:
+        mint = request(p.a.control_port, cmd="create_share_link", path=str(src))
+        assert mint.get("ok"), mint
+        # Warm B → A channel so send_to has somewhere to land.
+        request(p.b.control_port, cmd="send",
+                peer=p.a.short_id, body="warmup")
+        time.sleep(0.5)
+        # B claims the share-link via the new control endpoint.
+        claim = request(
+            p.b.control_port, cmd="claim_share_link_from_peer",
+            peer=p.a.short_id,
+            token_hex=mint["token_hex"],
+        )
+        assert claim.get("ok"), claim
+        # Wait for the file to land in B's inbox.
+        end = time.time() + 20.0
+        landed = None
+        while time.time() < end:
+            for f in inbox_files(p.b.home):
+                try:
+                    if f.stat().st_size == len(payload) and f.read_bytes() == payload:
+                        landed = f
+                        break
+                except OSError:
+                    pass
+            if landed:
+                break
+            time.sleep(0.2)
+        assert landed is not None, (
+            "claim_share_link_from_peer didn't trigger the transfer"
+        )
+
+
 def test_share_link_redeem_wire_frame_triggers_file_offer(tmp_path: Path) -> None:
     """A peer that presents a valid token via SHARE_LINK_REDEEM
     wire frame must trigger the sender to fire a FILE_OFFER for

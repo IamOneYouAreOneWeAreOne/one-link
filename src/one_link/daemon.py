@@ -15114,6 +15114,51 @@ class Daemon:
                     "ok": True,
                     "revoked": removed,
                 })
+            elif cmd == "claim_share_link_from_peer":
+                # Wave 2g+ recipient-side: construct + send a
+                # SHARE_LINK_REDEEM wire frame to the named peer.
+                # Caller passes the token they got out of band
+                # plus the peer fingerprint or short_id they want
+                # to redeem against. The sender-side handler
+                # responds with an ACK + (on success) fires the
+                # FILE_OFFER for the blob.
+                peer_arg = str(req.get("peer") or "").strip()
+                token_hex = str(req.get("token_hex") or "").strip().lower()
+                if len(token_hex) != 64:
+                    await self._reply(writer, {
+                        "ok": False, "error": "token_hex must be 64 hex chars",
+                    })
+                    return
+                cands = self._resolve_peer_candidates(peer_arg)
+                if not cands:
+                    fallback = await self.resolve_for_send(peer_arg)
+                    if fallback is not None:
+                        cands = [fallback]
+                if not cands:
+                    await self._reply(writer, {
+                        "ok": False, "error": f"no peer {peer_arg!r}",
+                    })
+                    return
+                try:
+                    redeem_msg = {
+                        "t": "SHARE_LINK_REDEEM",
+                        "token_hex": token_hex,
+                        "from": self.me.short_id,
+                        "id": uuid.uuid4().hex,
+                        "ts": int(time.time() * 1000),
+                    }
+                    await self.send_to(cands[0], [redeem_msg])
+                    await self._reply(writer, {
+                        "ok": True,
+                        "peer_short_id": cands[0].short_id,
+                    })
+                except Exception as e:
+                    # The sender may reject (already_redeemed,
+                    # expired, etc.) — surface the error so the
+                    # UI can show a clean failure reason.
+                    await self._reply(writer, {
+                        "ok": False, "error": str(e),
+                    })
             elif cmd == "redeem_share_link":
                 # The sender-side redeem path. The recipient's
                 # daemon calls this on OUR control socket via the
