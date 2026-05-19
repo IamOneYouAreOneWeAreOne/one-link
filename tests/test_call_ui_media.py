@@ -644,6 +644,20 @@ def test_call_ui_proactively_probes_relay_health(index_html: str) -> None:
     assert 'requestRelayHealthProbe("metrics")' in index_html
 
 
+def test_call_ui_refreshes_expiring_turn_credentials(index_html: str) -> None:
+    assert "async function refreshIceConfigForCall" in index_html
+    assert "function maybeRefreshTurnCredentials" in index_html
+    idx = index_html.find("async function refreshIceConfigForCall")
+    snippet = index_html[idx:idx + 3200]
+    assert "/api/peer-rtc/ice-config?call_id=" in snippet
+    assert "media.pc.setConfiguration" in snippet
+    assert "turn_credentials_refreshed" in snippet
+    assert "turn_credentials_refresh_failed" in snippet
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 15500]
+    assert 'maybeRefreshTurnCredentials("metrics")' in metrics_snippet
+
+
 def test_call_trace_export_downloads_backend_flight_recorder(index_html: str) -> None:
     assert 'id="btn-call-export-trace"' in index_html
     idx = index_html.find('"#btn-call-export-trace"')

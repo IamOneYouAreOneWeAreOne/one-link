@@ -4072,6 +4072,8 @@ class UIServer:
                 "call_trace_export_failed",
                 "relay_probe_completed",
                 "relay_probe_failed",
+                "turn_credentials_refreshed",
+                "turn_credentials_refresh_failed",
             }
             if not call_id or event not in allowed_events:
                 return
@@ -4116,7 +4118,8 @@ class UIServer:
                         "reconnecting", "recovered", "failed",
                         "restart_ice", "force_relay",
                         "recovery_intent", "revive_playback",
-                        "relay_probe",
+                        "relay_probe", "credential_refresh",
+                        "credential_expiring",
                     },
                 ),
                 "media_kind": _clean_token("media_kind", {"audio", "video"}),

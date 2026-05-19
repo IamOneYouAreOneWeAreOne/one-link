@@ -26311,6 +26311,7 @@
     bestRelayHealth: "",
     bestRelayScore: null,
     turnCredentialExpiresAtMs: null,
+    lastIceConfigRefreshMs: 0,
     lastRelayProbeMs: 0,
     forceRelayOnRepair: false,
     preferRelayNext: false,
@@ -26395,6 +26396,53 @@
         reason: "relay_probe",
         state: media.bestRelayHealth || "unknown",
       });
+    }
+  }
+
+  async function refreshIceConfigForCall(reason) {
+    if (!callUI.activeCallId || !media.pc) return false;
+    const now = Date.now();
+    if (now - Number(media.lastIceConfigRefreshMs || 0) < 60000) return false;
+    media.lastIceConfigRefreshMs = now;
+    try {
+      const iceUrl = `/api/peer-rtc/ice-config?call_id=${encodeURIComponent(callUI.activeCallId)}`;
+      const cfg = await fetch(iceUrl, {
+        credentials: "include", cache: "no-store",
+      }).then((r) => r.json());
+      if (Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0) {
+        media.pc.setConfiguration({ iceServers: cfg.iceServers });
+      }
+      media.routePolicyDetail = cfg.routePolicy || null;
+      media.iceRelayReady = Array.isArray(cfg.iceServers)
+        && cfg.iceServers.some((srv) => {
+          const urls = Array.isArray(srv.urls) ? srv.urls : [srv.urls];
+          return urls.some((u) => String(u || "").toLowerCase().startsWith("turn:") || String(u || "").toLowerCase().startsWith("turns:"));
+        });
+      media.bestRelayHealth = String(cfg.routePolicy?.best_relay_health || "");
+      media.bestRelayScore = Number.isFinite(Number(cfg.routePolicy?.best_relay_score))
+        ? Number(cfg.routePolicy.best_relay_score)
+        : null;
+      media.turnCredentialExpiresAtMs = Number(cfg.routePolicy?.credential_expires_at_ms || 0) || null;
+      reportCallEvent("turn_credentials_refreshed", {
+        reason: reason || "credential_refresh",
+        state: media.iceRelayReady ? "relay" : "direct",
+        ok: true,
+      });
+      return true;
+    } catch (_) {
+      reportCallEvent("turn_credentials_refresh_failed", {
+        reason: reason || "credential_refresh",
+        state: media.iceRelayReady ? "relay" : "direct",
+      });
+      return false;
+    }
+  }
+
+  function maybeRefreshTurnCredentials(reason) {
+    if (!media.turnCredentialExpiresAtMs || !media.iceRelayReady) return;
+    const msLeft = Number(media.turnCredentialExpiresAtMs || 0) - Date.now();
+    if (msLeft > 0 && msLeft < 120000) {
+      refreshIceConfigForCall(reason || "credential_expiring").catch(() => {});
     }
   }
 
@@ -29626,6 +29674,7 @@
       ) {
         requestRelayHealthProbe("metrics").catch(() => {});
       }
+      maybeRefreshTurnCredentials("metrics");
       tuneOutboundMediaForTau(callUI.lastMetricsSnapshot).catch(() => {});
       const videoMoving = inboundVideoBytes > Number(callUI.lastInboundVideoBytes || 0)
         || inboundVideoFramesDecoded > Number(callUI.lastInboundVideoFramesDecoded || 0);
