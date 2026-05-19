@@ -222,6 +222,29 @@ def test_call_driver_reports_metrics_to_immune_system(index_html: str) -> None:
     assert "setInterval(reportCallMetricsOnce, 2000)" in index_html
 
 
+def test_call_driver_auto_captures_trace_on_freeze_and_watchdog(index_html: str) -> None:
+    assert "autoTraceBuffer: []" in index_html
+    fn_idx = index_html.find("async function captureAutoCallTrace")
+    assert fn_idx > 0
+    fn_snippet = index_html[fn_idx:fn_idx + 2600]
+    assert "/api/v1/calls/${encodeURIComponent(callId)}/trace" in fn_snippet
+    assert "window._oneLinkCallDebug" in fn_snippet
+    assert "localStorage.setItem" in fn_snippet
+    assert "one_link_auto_call_traces" in fn_snippet
+    assert "auto_call_trace_captured" in fn_snippet
+    assert "auto_call_trace_failed" in fn_snippet
+
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 20000]
+    assert 'captureAutoCallTrace("sustained_media_freeze"' in metrics_snippet
+    watchdog_idx = index_html.find("function startMediaWatchdog")
+    watchdog_snippet = index_html[watchdog_idx:watchdog_idx + 1600]
+    assert 'captureAutoCallTrace("watchdog_no_media_movement"' in watchdog_snippet
+    debug_idx = index_html.find("window._oneLinkCallDebug = async function")
+    debug_snippet = index_html[debug_idx:debug_idx + 3500]
+    assert "auto_trace_buffer: callUI.autoTraceBuffer" in debug_snippet
+
+
 def test_call_driver_backfills_pending_ice_candidates(index_html: str) -> None:
     idx = index_html.find("async function backfillLivingPresenceCalls")
     assert idx > 0

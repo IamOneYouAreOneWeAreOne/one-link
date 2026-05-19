@@ -26243,6 +26243,9 @@
     acceptedCallIds: new Set(),
     lastAcceptRetryMs: {},
     lastRejoinAttemptMs: {},
+    autoTraceBuffer: [],
+    lastAutoTraceMs: 0,
+    lastAutoTraceKey: "",
   };
   // Expose for debug + tests
   if (typeof window !== "undefined") {
@@ -26273,6 +26276,52 @@
       return await r.json();
     } catch (_) {
       return { calls: [] };
+    }
+  }
+
+  async function captureAutoCallTrace(reason, extra) {
+    const callId = callUI.activeCallId;
+    if (!callId) return null;
+    const cleanReason = String(reason || "auto_trace").replace(/[^a-z0-9_-]/gi, "_").toLowerCase().slice(0, 64);
+    const key = `${callId}:${cleanReason}`;
+    const now = Date.now();
+    if (callUI.lastAutoTraceKey === key && now - Number(callUI.lastAutoTraceMs || 0) < 15000) return null;
+    callUI.lastAutoTraceKey = key;
+    callUI.lastAutoTraceMs = now;
+    try {
+      const [traceResp, localDebug] = await Promise.all([
+        fetch(`/api/v1/calls/${encodeURIComponent(callId)}/trace`, {
+          credentials: "include", cache: "no-store",
+        }),
+        window._oneLinkCallDebug?.().catch(() => null),
+      ]);
+      const trace = await traceResp.json();
+      const payload = {
+        captured_at_ms: now,
+        reason: cleanReason,
+        call_id: callId,
+        backend_trace: trace,
+        local_debug: localDebug || null,
+        extra: extra || null,
+      };
+      callUI.autoTraceBuffer.unshift(payload);
+      callUI.autoTraceBuffer = callUI.autoTraceBuffer.slice(0, 12);
+      try {
+        localStorage.setItem(
+          "one_link_auto_call_traces",
+          JSON.stringify(callUI.autoTraceBuffer.slice(0, 6)),
+        );
+      } catch (_) {}
+      reportCallEvent("auto_call_trace_captured", {
+        reason: cleanReason,
+        ok: true,
+      });
+      return payload;
+    } catch (_) {
+      reportCallEvent("auto_call_trace_failed", {
+        reason: cleanReason,
+      });
+      return null;
     }
   }
 
@@ -29744,6 +29793,12 @@
           video_frozen: videoElementFrozen,
           audio_frozen: audioElementFrozen,
         });
+        captureAutoCallTrace("sustained_media_freeze", {
+          video_frozen: videoElementFrozen,
+          audio_frozen: audioElementFrozen,
+          media_health_state: selected.media_health_state,
+          ice_connection_state: selected.ice_connection_state,
+        }).catch(() => {});
         repairMediaPath("frozen_media").catch(() => {});
       }
       if (
@@ -29858,6 +29913,7 @@
         recovery_intent: callUI.lastRecoveryIntent,
         session_authority: callUI.lastSessionAuthority,
         backend_action_cooldowns: callUI.backendActionCooldowns,
+        auto_trace_buffer: callUI.autoTraceBuffer,
         repair_diagnosis: callUI.lastRepairDiagnosis,
         repair_counts: callUI.repairDiagnosisCounts,
         repair_escalation_score: callUI.repairEscalationScore,
@@ -29892,6 +29948,12 @@
         media.pc.remoteDescription &&
         Date.now() - Number(callUI.lastRemoteMediaMovingMs || 0) > 8000
       ) {
+        captureAutoCallTrace("watchdog_no_media_movement", {
+          seconds_since_media_moved: Math.round((Date.now() - Number(callUI.lastRemoteMediaMovingMs || 0)) / 1000),
+          ice_connection_state: media.pc.iceConnectionState || "",
+          connection_state: media.pc.connectionState || "",
+          signaling_state: media.pc.signalingState || "",
+        }).catch(() => {});
         repairMediaPath("watchdog_no_media_movement").catch(() => {});
       }
     }, 1500);

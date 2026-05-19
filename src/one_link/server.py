@@ -4175,6 +4175,8 @@ class UIServer:
                 "client_rejoin_requested",
                 "client_rejoin_media_ready",
                 "client_rejoin_failed",
+                "auto_call_trace_captured",
+                "auto_call_trace_failed",
             }
             if not call_id or event not in allowed_events:
                 return
@@ -4222,7 +4224,9 @@ class UIServer:
                         "relay_probe", "credential_refresh",
                         "credential_expiring",
                         "browser_rejoin", "backfill_active",
-                        "media_rejoin",
+                        "media_rejoin", "daemon_restart",
+                        "auto_trace", "sustained_media_freeze",
+                        "watchdog_no_media_movement",
                     },
                 ),
                 "media_kind": _clean_token("media_kind", {"audio", "video"}),

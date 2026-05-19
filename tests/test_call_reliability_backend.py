@@ -288,3 +288,53 @@ def test_reliability_backend_marks_client_rejoin_as_reconnecting(tmp_path: Path)
     ready = backend.session_for("call-rejoin")
     assert ready["state"] == "reconnecting"
     assert ready["reason"] == "media_rejoin"
+
+
+def test_reliability_backend_auto_traces_sustained_media_freeze(tmp_path: Path) -> None:
+    backend = CallReliabilityBackend(log_path=tmp_path / "call_reliability.jsonl")
+    for _ in range(3):
+        backend.record_metrics({
+            "call_id": "call-freeze",
+            "media_health_state": "playback_frozen",
+            "media_health_severity": 2,
+            "ice_connection_state": "connected",
+            "connection_state": "connected",
+            "signaling_state": "stable",
+            "selected_candidate_type": "host",
+            "remote_live_audio_tracks": 1,
+            "remote_live_video_tracks": 1,
+            "inbound_audio_packets": 500,
+            "inbound_video_packets": 500,
+            "inbound_video_frames_decoded": 0,
+        })
+    trace = backend.trace_for("call-freeze")
+    assert trace["auto_trace"]["incident_count"] >= 1
+    latest = trace["auto_trace"]["latest_incident"]
+    assert latest["row_type"] == "auto_trace"
+    assert latest["trigger"] == "sustained_media_freeze"
+    assert latest["recommendation"]["action"] in {
+        "audio_first_repair", "ice_restart",
+    }
+    assert latest["recovery_intent"]["audio_first"] is True
+    rows_text = json.dumps(trace["rows"])
+    assert "candidate:" not in rows_text
+    assert "v=0" not in rows_text
+
+
+def test_reliability_backend_auto_traces_repeated_repair_events(tmp_path: Path) -> None:
+    backend = CallReliabilityBackend(log_path=tmp_path / "call_reliability.jsonl")
+    backend.record_event({
+        "call_id": "call-event-trace",
+        "event": "remote_media_frozen",
+        "reason": "sustained_media_freeze",
+    })
+    backend.record_event({
+        "call_id": "call-event-trace",
+        "event": "remote_media_frozen",
+        "reason": "sustained_media_freeze",
+    })
+    trace = backend.trace_for("call-event-trace")
+    assert trace["auto_trace"]["incident_count"] == 1
+    incident = trace["auto_trace"]["latest_incident"]
+    assert incident["trigger"] == "event_remote_media_frozen"
+    assert incident["event_repeat_count"] == 2

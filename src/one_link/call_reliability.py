@@ -118,6 +118,7 @@ class CallReliabilityBackend:
         self._max_rows = max(32, int(max_rows_per_call))
         self._metrics: dict[str, list[dict[str, Any]]] = {}
         self._events: dict[str, list[dict[str, Any]]] = {}
+        self._incidents: dict[str, list[dict[str, Any]]] = {}
         self._state: dict[str, dict[str, Any]] = {}
         self._log_path = Path(log_path) if log_path is not None else None
         if self._log_path is not None:
@@ -150,7 +151,12 @@ class CallReliabilityBackend:
             row["recovery_intent"] = intent.to_json()
             state["recovery_intent"] = intent.to_json()
             state["updated_at_ms"] = row["ts_ms"]
+            incident = self._maybe_auto_trace_locked(
+                call_id, state, row, recent, recommendation, intent,
+            )
         self._append_jsonl(row)
+        if incident is not None:
+            self._append_jsonl(incident)
         return recommendation
 
     def record_event(self, body: dict[str, Any]) -> None:
@@ -168,7 +174,10 @@ class CallReliabilityBackend:
                 state["session"], recommendation, latest=state.get("last_metrics"),
             ).to_json()
             state["updated_at_ms"] = row["ts_ms"]
+            incident = self._maybe_auto_trace_event_locked(call_id, state, row)
         self._append_jsonl(row)
+        if incident is not None:
+            self._append_jsonl(incident)
 
     def recommendation_for(self, call_id: str) -> dict[str, Any]:
         with self._lock:
@@ -213,8 +222,9 @@ class CallReliabilityBackend:
         with self._lock:
             metrics = list(self._metrics.get(call_id, []))[-limit:]
             events = list(self._events.get(call_id, []))[-limit:]
+            incidents = list(self._incidents.get(call_id, []))[-limit:]
             state = dict(self._state.get(call_id, {}))
-        rows = sorted(metrics + events, key=lambda r: int(r.get("ts_ms") or 0))[-limit:]
+        rows = sorted(metrics + events + incidents, key=lambda r: int(r.get("ts_ms") or 0))[-limit:]
         return {
             "ok": True,
             "call_id": call_id,
@@ -225,6 +235,11 @@ class CallReliabilityBackend:
             "window": state.get("window"),
             "last_metrics": state.get("last_metrics"),
             "last_event": state.get("last_event"),
+            "auto_trace": {
+                "incident_count": len(incidents),
+                "latest_incident": incidents[-1] if incidents else None,
+                "capture_policy": "captures privacy-safe incident summaries on sustained freeze, repeated media repair, reconnect, or ICE failure",
+            },
             "rows": rows,
         }
 
@@ -232,6 +247,7 @@ class CallReliabilityBackend:
         with self._lock:
             self._metrics.pop(call_id, None)
             self._events.pop(call_id, None)
+            self._incidents.pop(call_id, None)
             self._state.pop(call_id, None)
 
     def _append_locked(
@@ -268,6 +284,19 @@ class CallReliabilityBackend:
                 f.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
         except OSError:
             return
+
+    def _append_incident_locked(
+        self,
+        call_id: str,
+        incident: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._append_locked(self._incidents, call_id, incident)
+        state = self._state.setdefault(call_id, {})
+        state["last_incident"] = incident
+        state["auto_trace_incident_count"] = int(
+            state.get("auto_trace_incident_count") or 0,
+        ) + 1
+        return incident
 
     def _sanitize_metrics(self, body: dict[str, Any]) -> dict[str, Any]:
         health = _clean_token(body.get("media_health_state"), MEDIA_HEALTH_STATES) or "healthy"
@@ -323,6 +352,126 @@ class CallReliabilityBackend:
             "state": _clean_slug(body.get("state")),
             "repair_stage": _bounded_int(body.get("repair_stage"), 0, 3),
         }
+
+    def _maybe_auto_trace_locked(
+        self,
+        call_id: str,
+        state: dict[str, Any],
+        row: dict[str, Any],
+        recent: list[dict[str, Any]],
+        recommendation: PathRecommendation,
+        intent: RecoveryIntent,
+    ) -> dict[str, Any] | None:
+        ts_ms = int(row.get("ts_ms") or int(time.time() * 1000))
+        health = str(row.get("media_health_state") or "healthy")
+        ice = str(row.get("ice_connection_state") or "")
+        bad_health_samples = sum(
+            1 for r in recent
+            if str(r.get("media_health_state") or "healthy") != "healthy"
+        )
+        frozen_samples = sum(
+            1 for r in recent
+            if str(r.get("media_health_state") or "") in {"playback_frozen", "media_starved"}
+        )
+        ice_bad_samples = sum(
+            1 for r in recent
+            if str(r.get("ice_connection_state") or "") in {"failed", "disconnected"}
+        )
+        pressure = _avg_pressure(recent)
+        trigger = ""
+        if ice == "failed" or ice_bad_samples >= 2:
+            trigger = "ice_failure"
+        elif frozen_samples >= 2:
+            trigger = "sustained_media_freeze"
+        elif bad_health_samples >= 3:
+            trigger = "repeated_media_degradation"
+        elif pressure >= 0.78 and len(recent) >= 3:
+            trigger = "sustained_network_pressure"
+        if not trigger:
+            return None
+        last_key = str(state.get("last_auto_trace_key") or "")
+        key = f"{trigger}:{recommendation.action}:{intent.action}"
+        last_ms = int(state.get("last_auto_trace_ms") or 0)
+        if key == last_key and ts_ms - last_ms < 20_000:
+            return None
+        state["last_auto_trace_key"] = key
+        state["last_auto_trace_ms"] = ts_ms
+        incident = {
+            "ts_ms": ts_ms,
+            "row_type": "auto_trace",
+            "call_id": call_id,
+            "trigger": trigger,
+            "media_health_state": health,
+            "ice_connection_state": ice,
+            "session_authority": dict(state.get("session") or {}),
+            "recommendation": recommendation.to_json(),
+            "recovery_intent": intent.to_json(),
+            "window": self._window_summary(recent),
+            "latest_metrics": {
+                "rtt_ms": row.get("rtt_ms"),
+                "jitter_ms": row.get("jitter_ms"),
+                "loss_rate": row.get("loss_rate"),
+                "selected_candidate_type": row.get("selected_candidate_type"),
+                "remote_audio_tracks": row.get("remote_audio_tracks"),
+                "remote_video_tracks": row.get("remote_video_tracks"),
+                "inbound_audio_packets": row.get("inbound_audio_packets"),
+                "inbound_video_packets": row.get("inbound_video_packets"),
+                "inbound_video_frames_decoded": row.get("inbound_video_frames_decoded"),
+                "ice_relay_ready": row.get("ice_relay_ready"),
+                "best_relay_health": row.get("best_relay_health"),
+                "best_relay_score": row.get("best_relay_score"),
+            },
+        }
+        return self._append_incident_locked(call_id, incident)
+
+    def _maybe_auto_trace_event_locked(
+        self,
+        call_id: str,
+        state: dict[str, Any],
+        row: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        event = str(row.get("event") or "")
+        reason = str(row.get("reason") or event)
+        repair_events = {
+            "remote_media_frozen",
+            "remote_video_stalled",
+            "remote_video_no_frames",
+            "media_path_repair",
+            "ice_restart_requested",
+            "pc_rebuild_start",
+            "network_offline",
+        }
+        if event not in repair_events:
+            return None
+        ts_ms = int(row.get("ts_ms") or int(time.time() * 1000))
+        recent_events = self._events.get(call_id, [])[-12:]
+        repeat_count = sum(1 for r in recent_events if str(r.get("event") or "") == event)
+        if event not in {"network_offline", "ice_restart_requested", "pc_rebuild_start"} and repeat_count < 2:
+            return None
+        key = f"event:{event}:{reason}"
+        if key == str(state.get("last_auto_trace_event_key") or "") and ts_ms - int(state.get("last_auto_trace_event_ms") or 0) < 20_000:
+            return None
+        state["last_auto_trace_event_key"] = key
+        state["last_auto_trace_event_ms"] = ts_ms
+        recommendation = self._recommendation_from_state(state)
+        intent = self._recovery_intent(
+            state.get("session") or {},
+            recommendation,
+            latest=state.get("last_metrics"),
+        )
+        incident = {
+            "ts_ms": ts_ms,
+            "row_type": "auto_trace",
+            "call_id": call_id,
+            "trigger": "event_" + event,
+            "event": event,
+            "reason": reason,
+            "session_authority": dict(state.get("session") or {}),
+            "recommendation": recommendation.to_json(),
+            "recovery_intent": intent.to_json(),
+            "event_repeat_count": repeat_count,
+        }
+        return self._append_incident_locked(call_id, incident)
 
     def _recommend(
         self,
