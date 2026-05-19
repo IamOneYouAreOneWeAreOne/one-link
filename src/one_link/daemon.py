@@ -14587,6 +14587,60 @@ class Daemon:
                     return
                 result = await self.resume_paused_transfers_for(peer_fp)
                 await self._reply(writer, {"ok": bool(result.get("ok")), "result": result})
+            elif cmd == "cancel_resumable_transfer":
+                # Abandon a specific in-progress inbound transfer.
+                # Removes the sidecar from the resume registry,
+                # deletes the partial out_path on disk, and aborts
+                # the in-memory IncomingFile if the transfer is
+                # actively running. Lets users unstick a transfer
+                # whose sender will never come back without waiting
+                # 30 days for the TTL prune.
+                blob = str(req.get("blob") or "").strip().lower()
+                if not blob or len(blob) != 64:
+                    await self._reply(writer, {
+                        "ok": False,
+                        "error": "blob must be a 64-character hex string",
+                    })
+                    return
+                cancelled_in_session = False
+                cancelled_partial = False
+                cancelled_sidecar = False
+                # 1. In-session transfer (the offer landed; the
+                #    receive loop is currently running). Use the
+                #    existing abort path which deletes the partial
+                #    and the sidecar AND clears _incoming_files.
+                in_flight = self._incoming_files.get(blob)
+                if in_flight is not None:
+                    self._abort_incoming_file(blob, in_flight)
+                    cancelled_in_session = True
+                    cancelled_partial = True
+                    cancelled_sidecar = True
+                else:
+                    # 2. Waiting-for-sender entry in the registry.
+                    #    Pop it (so a later FILE_OFFER doesn't
+                    #    auto-resume), then delete the partial and
+                    #    the sidecar.
+                    keys_to_remove = [
+                        (pfp, bb) for (pfp, bb) in list(self._resume_registry.keys())
+                        if bb == blob
+                    ]
+                    for (pfp, bb) in keys_to_remove:
+                        sc = self._resume_registry.pop_match(pfp, bb)
+                        if sc is not None:
+                            try:
+                                Path(sc.out_path).unlink()
+                                cancelled_partial = True
+                            except OSError:
+                                pass
+                    _delete_resume_sidecar(inbox_dir(), blob)
+                    cancelled_sidecar = True
+                await self._reply(writer, {
+                    "ok": True,
+                    "blob": blob,
+                    "cancelled_in_session": cancelled_in_session,
+                    "cancelled_partial": cancelled_partial,
+                    "cancelled_sidecar": cancelled_sidecar,
+                })
             elif cmd == "resumable_transfers":
                 # Surface the receiver-side resume registry so the UI
                 # can render "Resuming X (3.2 MB / 8.1 MB)" indicators
