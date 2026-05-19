@@ -1,0 +1,38 @@
+name: browser call media soak
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * *"
+
+jobs:
+  browser-call-media-soak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: list available Chromium browsers
+        run: |
+          python scripts/browser_call_media_soak_gate.py --list-browsers
+
+      - name: real browser WebRTC media soak
+        run: |
+          python scripts/browser_call_media_soak_gate.py --duration-ms 10000 --out benchmarks/results/browser-call-media-soak.json
+
+      - name: upload browser media evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-call-media-soak
+          path: benchmarks/results/browser-call-media-soak.json
+          if-no-files-found: warn
