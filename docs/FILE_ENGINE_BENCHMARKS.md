@@ -213,11 +213,126 @@ the bench-validated foundation for two more:
 | Two-device soak | 12 | green |
 | Perf regression gates | 4 | green |
 | QUIC bridge unit | 5 | includes real loopback handshake |
-| QUIC daemon E2E | 3 | 2 green, 1 skipped (harness timing follow-up) |
+| QUIC daemon E2E | 3 | green (was 2 green + 1 skip; un-skipped in `fb298fa`) |
+| QUIC stream-mode integration | 1 | xfail — see "Honest QUIC status" below |
 | FILE_OFFER_BATCH integration | 3 | green |
 | Share-link unit | 16 | green |
 | Share-link daemon integration | 7 | green |
-| **Total** | **77** | **74 pass, 1 skip, 0 fail** |
+| Concurrent control-endpoint race | 3 | green (soak-marked) |
+| **Total** | **81** | **80 pass, 1 xfail (documented), 0 fail** |
+
+## Pre-real-network closeout (2026-05-19, commits `fb298fa`..`0821d0f`)
+
+Five hardening commits sit on `push-relay-health` on top of the Wave 2
+ship; this is the state we'll carry into the two-laptop bring-up.
+
+| Commit | What | Why |
+|---|---|---|
+| `fb298fa` | un-skip QUIC daemon-to-daemon ping; poll `quic_status` until both sides have advertised ports | the test was skipped on a brittle fixed sleep; the real signal is the wire frame landing |
+| `e05f77b` | revert the CDC-branch QUIC fork; keep stream-mode fork only | the attempted CDC QUIC integration regressed 8 MiB transfers from 0.1 s → 222 s (NoopChannel broke ACK + finish-schedule); reverted intact |
+| `d20e9c3` | FIFO recent-deque + stale-entry prune for inbound peer-fp binding; gate `_send_raw_message` behind `ONE_LINK_DEV_HOOKS=1` | LIFO popped fresh entries first → race when two pairs hit accept loop near-simultaneously; `_send_raw_message` is for dev/test harnesses only |
+| `d20e9c3` | xfail `test_send_file_stream_mode_actually_uses_quic_when_pinned` with full prose reason | honest documentation: the QUIC fork lives in stream-mode branch, daemon_pair peers advertise FILE_CDC, so realistic payloads bypass QUIC entirely |
+| `0821d0f` | three concurrent control-endpoint race tests; two new bench scenarios | guard idempotency under concurrent `pin_peer`, send_file racing chats, six concurrent `quic_ping` on cached connection |
+| (in pin_peer) | upsert from discovery registry before `set_peer_trust`; verify trust persisted by re-reading | `set_peer_trust` is UPDATE-only — was a silent no-op for mDNS-discovered peers with no prior pair handshake row |
+
+## Honest QUIC status
+
+The Wave 2c/2d/2e/2f/2h stack is wired end-to-end **for chat-sized
+payloads**. The control-API `quic_ping` round-trip works in CI now
+(`test_quic_ping_round_trip_between_daemons`). The crate is
+real, the bridge is real, the per-connection frame loop answers
+PING with PONG, and the outbound dial cache populates.
+
+**What does *not* yet ride QUIC**: realistic file transfers. When
+both peers advertise `FILE_CDC_V1` (the daemon_pair default and the
+common case), `send_file` takes the CDC chunk path, which lives in
+its own `_handle_file_cdc_chunk` pipeline. The QUIC fork was
+written into the *stream-mode* branch (`else:` of `if can_offer_cdc
+and FILE_WANTS`), so it never fires on realistic workloads. A
+clean Wave 2f+ ships QUIC into the CDC chunk loop too — the earlier
+attempt did and regressed 8 MiB transfers by ~2200×, so it was
+reverted. Tracked by the documented xfail.
+
+This is why the QUIC-vs-WebRTC A/B at 16 MiB looks like this:
+
+| Phase | Wall time | Throughput |
+|---|---|---|
+| Pinned (intended QUIC) | 0.236 s | 67.9 MiB/s |
+| Unpinned (WebRTC) | 0.142 s | 112.5 MiB/s |
+| "Speedup" | **0.60×** | — |
+
+The "speedup" is < 1× because the pinned phase pays QUIC dial +
+`broadcast_endpoint_to_paired` coordination cost without taking
+the QUIC fast path for the bytes. The CDC path that actually
+carries the data is the same in both phases. The right read of
+this number is: **on loopback today, the QUIC overhead for a
+file-sized transfer is real and not yet offset by a faster wire**.
+Real network latency (where QUIC's congestion control + 0-RTT
+matter most) will make the picture different; this is one of the
+two-laptop bring-up's first measurements.
+
+## Wave 2 closeout measurements (median of 2 runs on loopback)
+
+Re-measured 2026-05-19 from a clean tree post-closeout. Numbers
+match the post-Wave-2 table above within run-to-run variance; the
+two new scenarios are baselines, not regressions.
+
+| Scenario | Result | Notes |
+|---|---|---|
+| 1 KiB cold | 43 ms median, best 40 ms | handshake-bound |
+| 1 MiB cold | 60 ms (17.5 MiB/s) | handshake still dominant |
+| 16 MiB cold | 176 ms (95.3 MiB/s) | steady-state |
+| 64 MiB receiver RSS | 92.0 MiB peak (overhead 1.371×) | stream-to-disk holds |
+| 64 MiB sender RSS | 94.9 MiB peak (overhead 1.414×) | symmetric |
+| 4×8 MiB concurrent aggregate | 87.6 MiB/s | per-peer send-lock still the gate |
+| Warm dedup @ 16 MiB | **1.45× speedup** | hardlink path |
+| Resume after kill+restart | 3.4 s | unchanged |
+| Sidecar persist | 759 µs/op | unchanged |
+| Cache GC eviction | 7950 files/s | unchanged |
+| **QUIC vs WebRTC @ 16 MiB** | **0.60×** (QUIC slower) | see "Honest QUIC status" above |
+| **Many-small-files (20 × 4 KiB sequential)** | 605 ms total / **30.2 ms per file avg** | baseline before FILE_OFFER_BATCH fires on this path |
+| **Share-link round-trip @ 1 MiB** | mint 3.4 ms + delivery 59.9 ms = **63 ms total (15.8 MiB/s)** | one-time bearer token + 1 MiB blob |
+
+### What the new scenarios tell us
+
+- **many-small-files** is a 30 ms/file floor on loopback. With 256 photos
+  in a folder, that's ~7.7 s — and FILE_OFFER's ~50 ms round-trip is
+  the dominant term, not the bytes. `FILE_OFFER_BATCH` exists as a
+  wire frame (`b859861`) but `send_file` does not yet take a multi-file
+  argument, so the bench can't yet exercise the batched path
+  end-to-end. Next ship: a `send_files` control command that emits
+  one `FILE_OFFER_BATCH` instead of N `FILE_OFFER`s.
+- **share-link** at 1 MiB is 63 ms total wall time, with mint at
+  3.4 ms and the rest being the standard CDC delivery. The mint
+  cost is negligible compared to the transfer; share-link adds
+  effectively zero overhead on top of a direct send. Larger payloads
+  scale with the regular cold-transfer ladder.
+
+## Two-laptop bring-up checklist
+
+Before walking to the second machine, these are the regression gates
+this tree has to clear (and does, as of `0821d0f`):
+
+1. Python 3.14 + native crate maturin-built: `python -m pytest` full
+   suite — last run was 45 passed + 1 xfailed across the QUIC daemon
+   dial, two-device soak, resume, chunk cache GC suites.
+2. Three concurrent control-endpoint race tests pass: idempotent
+   `pin_peer` under 4-way burst, send_file ⨯ chat interleave, six
+   concurrent `quic_ping` on a cached connection.
+3. `_send_raw_message` is gated behind `ONE_LINK_DEV_HOOKS=1` — won't
+   accept arbitrary frames from anywhere on `127.0.0.1` in a normal
+   user install.
+4. `pin_peer` upserts the discovery-registry row before flipping
+   trust, and verifies the write — no more silent no-op on
+   mDNS-only peers.
+5. Inbound peer-fp binding pulls FIFO from a stale-pruned recent-deque
+   — two near-simultaneous pairs no longer race for the wrong fp.
+
+What still needs the two-laptop run:
+- Real-network QUIC vs WebRTC A/B at 1 GB+
+- mDNS across subnets / link-local TTL behavior
+- Wake-from-sleep + reconnect on flaky Wi-Fi (resume sidecars
+  validated in soak, not yet in the field)
 
 ## Wave 1 shipped (14 commits on `push-relay-health`)
 
