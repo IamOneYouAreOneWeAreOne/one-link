@@ -43,6 +43,9 @@ class PathRecommendation:
     route_preference: str
     video_policy: str
     audio_priority: bool
+    confidence: float = 0.5
+    ttl_ms: int = 4_000
+    pressure_score: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -52,6 +55,9 @@ class PathRecommendation:
             "route_preference": self.route_preference,
             "video_policy": self.video_policy,
             "audio_priority": self.audio_priority,
+            "confidence": round(float(self.confidence), 3),
+            "ttl_ms": int(self.ttl_ms),
+            "pressure_score": round(float(self.pressure_score), 3),
         }
 
 
@@ -87,13 +93,15 @@ class CallReliabilityBackend:
                 audio_priority=False,
             )
         row = self._sanitize_metrics(body)
-        recommendation = self._recommend(row)
-        row["recommendation"] = recommendation.to_json()
         with self._lock:
             self._append_locked(self._metrics, call_id, row)
+            recent = self._recent_metrics_locked(call_id, newest=row)
+            recommendation = self._recommend(row, recent)
+            row["recommendation"] = recommendation.to_json()
             state = self._state.setdefault(call_id, {})
             state["last_metrics"] = row
             state["recommendation"] = recommendation.to_json()
+            state["window"] = self._window_summary(recent)
             state["updated_at_ms"] = row["ts_ms"]
         self._append_jsonl(row)
         return recommendation
@@ -133,6 +141,7 @@ class CallReliabilityBackend:
             "call_id": call_id,
             "privacy": "aggregate media state only; no SDP, ICE candidates, IP addresses, device names, or media content",
             "recommendation": dict(state.get("recommendation") or self.recommendation_for(call_id)),
+            "window": state.get("window"),
             "last_metrics": state.get("last_metrics"),
             "last_event": state.get("last_event"),
             "rows": rows,
@@ -154,6 +163,21 @@ class CallReliabilityBackend:
         rows.append(row)
         if len(rows) > self._max_rows:
             del rows[: len(rows) - self._max_rows]
+
+    def _recent_metrics_locked(
+        self,
+        call_id: str,
+        *,
+        newest: dict[str, Any],
+        max_age_ms: int = 20_000,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        now = int(newest.get("ts_ms") or int(time.time() * 1000))
+        rows = [
+            r for r in self._metrics.get(call_id, [])
+            if now - int(r.get("ts_ms") or 0) <= max_age_ms
+        ]
+        return rows[-limit:]
 
     def _append_jsonl(self, row: dict[str, Any]) -> None:
         if self._log_path is None:
@@ -213,27 +237,109 @@ class CallReliabilityBackend:
             "repair_stage": _bounded_int(body.get("repair_stage"), 0, 3),
         }
 
-    def _recommend(self, row: dict[str, Any]) -> PathRecommendation:
+    def _recommend(
+        self,
+        row: dict[str, Any],
+        recent: list[dict[str, Any]] | None = None,
+    ) -> PathRecommendation:
+        recent = recent or [row]
         health = str(row.get("media_health_state") or "healthy")
         ice = str(row.get("ice_connection_state") or "")
         route = str(row.get("selected_candidate_type") or "")
-        rtt = float(row.get("rtt_ms") or 0.0)
-        jitter = float(row.get("jitter_ms") or 0.0)
-        loss = float(row.get("loss_rate") or 0.0)
+        rtt = _avg_recent(recent, "rtt_ms")
+        jitter = _avg_recent(recent, "jitter_ms")
+        loss = _avg_recent(recent, "loss_rate")
         severity = int(row.get("media_health_severity") or 0)
+        bad_health_count = sum(
+            1 for r in recent
+            if str(r.get("media_health_state") or "healthy") != "healthy"
+        )
+        network_pressure_count = sum(
+            1 for r in recent
+            if _metric_pressure(r) >= 0.55
+        )
+        ice_bad_count = sum(
+            1 for r in recent
+            if str(r.get("ice_connection_state") or "") in {"failed", "disconnected"}
+        )
+        renderer_detach_count = sum(
+            1 for r in recent
+            if str(r.get("media_health_state") or "") == "renderer_detached"
+        )
+        pressure = min(
+            1.0,
+            (_metric_pressure(row) * 0.55)
+            + ((_avg_pressure(recent)) * 0.45)
+            + min(0.25, bad_health_count * 0.04),
+        )
+        confidence = min(0.98, 0.5 + (len(recent) * 0.05) + (pressure * 0.25))
+
+        def rec(
+            action: str,
+            reason: str,
+            sev: int,
+            route_pref: str,
+            video_policy: str,
+            audio_priority: bool,
+            ttl_ms: int = 4_000,
+        ) -> PathRecommendation:
+            return PathRecommendation(
+                action,
+                reason,
+                max(0, min(3, int(sev))),
+                route_pref,
+                video_policy,
+                audio_priority,
+                confidence=confidence,
+                ttl_ms=ttl_ms,
+                pressure_score=pressure,
+            )
+
         if health in {"signaling_incomplete", "remote_media_missing"}:
-            return PathRecommendation("renegotiate", health, max(2, severity), "auto", "audio-first", True)
+            return rec("renegotiate", health, max(2, severity), "auto", "audio-first", True, 3_000)
         if health == "renderer_detached":
-            return PathRecommendation("revive_playback", health, max(1, severity), "same", "auto", False)
+            if renderer_detach_count >= 3:
+                return rec("renegotiate", "renderer_repeatedly_detached", 2, "same", "audio-first", True, 3_000)
+            return rec("revive_playback", health, max(1, severity), "same", "auto", False, 2_500)
         if health in {"playback_frozen", "media_starved"}:
-            return PathRecommendation("audio_first_repair", health, max(1, severity), "auto", "downshift", True)
+            if bad_health_count >= 3 and route != "relay":
+                return rec("ice_restart", f"sustained_{health}", 3, "relay", "downshift", True, 5_000)
+            return rec("audio_first_repair", health, max(1, severity), "auto", "downshift", True, 4_000)
         if ice in {"failed", "disconnected"}:
-            return PathRecommendation("ice_restart", f"ice_{ice}", 3 if ice == "failed" else 2, "relay" if route != "relay" else "auto", "downshift", True)
-        if loss >= 0.08 or rtt >= 450 or jitter >= 180:
-            return PathRecommendation("downshift", "network_pressure", 2, "relay" if route != "relay" else "auto", "downshift", True)
-        if loss >= 0.025 or rtt >= 180 or jitter >= 70:
-            return PathRecommendation("watch", "network_caution", 1, "auto", "steady", False)
-        return PathRecommendation("hold", "healthy", 0, "auto", "auto", False)
+            return rec("ice_restart", f"ice_{ice}", 3 if ice == "failed" else 2, "relay" if route != "relay" else "auto", "downshift", True, 4_000)
+        if ice_bad_count >= 2:
+            return rec("ice_restart", "repeated_ice_instability", 3, "relay" if route != "relay" else "auto", "downshift", True, 4_000)
+        if pressure >= 0.78 or network_pressure_count >= 3:
+            if route != "relay" and network_pressure_count >= 3:
+                return rec("ice_restart", "sustained_network_pressure", 3, "relay", "downshift", True, 5_000)
+            return rec("downshift", "network_pressure", 2, "auto", "downshift", True, 4_000)
+        if pressure >= 0.35 or loss >= 0.025 or rtt >= 180 or jitter >= 70:
+            return rec("watch", "network_caution", 1, "auto", "steady", False, 5_000)
+        return rec("hold", "healthy", 0, "auto", "auto", False, 6_000)
+
+    def _window_summary(self, recent: list[dict[str, Any]]) -> dict[str, Any]:
+        if not recent:
+            return {
+                "sample_count": 0,
+                "pressure_score": 0.0,
+                "bad_health_samples": 0,
+                "ice_bad_samples": 0,
+            }
+        return {
+            "sample_count": len(recent),
+            "pressure_score": round(_avg_pressure(recent), 3),
+            "avg_rtt_ms": round(_avg_recent(recent, "rtt_ms"), 3),
+            "avg_jitter_ms": round(_avg_recent(recent, "jitter_ms"), 3),
+            "avg_loss_rate": round(_avg_recent(recent, "loss_rate"), 5),
+            "bad_health_samples": sum(
+                1 for r in recent
+                if str(r.get("media_health_state") or "healthy") != "healthy"
+            ),
+            "ice_bad_samples": sum(
+                1 for r in recent
+                if str(r.get("ice_connection_state") or "") in {"failed", "disconnected"}
+            ),
+        }
 
 
 def _clean_call_id(value: Any) -> str:
@@ -286,3 +392,38 @@ def _bounded_float(value: Any, lo: float, hi: float) -> float | None:
     if n != n:
         return None
     return max(lo, min(hi, n))
+
+
+def _avg_recent(rows: list[dict[str, Any]], key: str) -> float:
+    values = [
+        float(r[key]) for r in rows
+        if isinstance(r.get(key), (int, float))
+    ]
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _metric_pressure(row: dict[str, Any]) -> float:
+    rtt = float(row.get("rtt_ms") or 0.0)
+    jitter = float(row.get("jitter_ms") or 0.0)
+    loss = float(row.get("loss_rate") or 0.0)
+    severity = float(row.get("media_health_severity") or 0.0)
+    ice = str(row.get("ice_connection_state") or "")
+    health = str(row.get("media_health_state") or "healthy")
+    score = 0.0
+    score += min(0.32, rtt / 1_600.0)
+    score += min(0.22, jitter / 900.0)
+    score += min(0.32, loss * 3.2)
+    score += min(0.22, severity * 0.08)
+    if ice in {"failed", "disconnected"}:
+        score += 0.28
+    if health not in {"healthy", "renderer_detached"}:
+        score += 0.16
+    return min(1.0, score)
+
+
+def _avg_pressure(rows: list[dict[str, Any]]) -> float:
+    if not rows:
+        return 0.0
+    return sum(_metric_pressure(r) for r in rows) / len(rows)

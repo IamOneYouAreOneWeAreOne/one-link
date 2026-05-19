@@ -59,3 +59,75 @@ def test_reliability_backend_recommends_ice_restart_on_failure(tmp_path: Path) -
     assert rec.action == "ice_restart"
     assert rec.route_preference == "relay"
     assert rec.severity == 3
+
+
+def test_reliability_backend_escalates_sustained_direct_path_pressure(tmp_path: Path) -> None:
+    backend = CallReliabilityBackend(log_path=tmp_path / "call_reliability.jsonl")
+    rec = None
+    for _ in range(4):
+        rec = backend.record_metrics({
+            "call_id": "call-pressure",
+            "media_health_state": "healthy",
+            "ice_connection_state": "connected",
+            "selected_candidate_type": "host",
+            "rtt_ms": 520,
+            "jitter_ms": 210,
+            "loss_rate": 0.11,
+        })
+    assert rec is not None
+    assert rec.action == "ice_restart"
+    assert rec.reason == "sustained_network_pressure"
+    assert rec.route_preference == "relay"
+    assert rec.pressure_score > 0.5
+    assert rec.confidence > 0.6
+
+
+def test_reliability_backend_recovers_to_hold_after_stable_samples(tmp_path: Path) -> None:
+    backend = CallReliabilityBackend(log_path=tmp_path / "call_reliability.jsonl")
+    backend.record_metrics({
+        "call_id": "call-recover",
+        "media_health_state": "media_starved",
+        "media_health_severity": 2,
+        "ice_connection_state": "connected",
+        "selected_candidate_type": "host",
+        "rtt_ms": 600,
+        "loss_rate": 0.12,
+    })
+    rec = None
+    for _ in range(8):
+        rec = backend.record_metrics({
+            "call_id": "call-recover",
+            "media_health_state": "healthy",
+            "ice_connection_state": "connected",
+            "selected_candidate_type": "host",
+            "rtt_ms": 18,
+            "jitter_ms": 2,
+            "loss_rate": 0.0,
+            "inbound_audio_packets": 200,
+            "inbound_video_packets": 200,
+            "inbound_video_frames_decoded": 200,
+        })
+    assert rec is not None
+    assert rec.action == "hold"
+    assert rec.reason == "healthy"
+    trace = backend.trace_for("call-recover")
+    assert trace["window"]["sample_count"] == 8
+    assert trace["window"]["pressure_score"] < 0.1
+
+
+def test_reliability_backend_trace_exposes_window_and_decision_confidence(tmp_path: Path) -> None:
+    backend = CallReliabilityBackend(log_path=tmp_path / "call_reliability.jsonl")
+    rec = backend.record_metrics({
+        "call_id": "call-window",
+        "media_health_state": "renderer_detached",
+        "ice_connection_state": "connected",
+        "selected_candidate_type": "host",
+        "rtt_ms": 30,
+        "loss_rate": 0.0,
+    })
+    trace = backend.trace_for("call-window")
+    assert trace["recommendation"]["action"] == rec.action
+    assert trace["recommendation"]["confidence"] >= 0.5
+    assert trace["recommendation"]["ttl_ms"] > 0
+    assert trace["window"]["sample_count"] == 1
+    assert "avg_rtt_ms" in trace["window"]
