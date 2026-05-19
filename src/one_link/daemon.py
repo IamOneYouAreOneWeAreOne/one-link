@@ -7362,6 +7362,27 @@ class Daemon:
         quarantine on the event loop afterward.
         """
         assert f.cdc_chunks is not None
+        # Wave 2a: hardlink fast-path. If no chunks were streamed
+        # this session (warm-dedup or cross-restart with full cache
+        # hit) AND a local file is already known to hold every
+        # chunk of this blob at its declared offset, hardlink that
+        # file as our output instead of doing the cache-read +
+        # write loop. The whole-file hash check still runs (cheap
+        # belt-and-suspenders) — it just reads from the hardlinked
+        # file directly.
+        if self._try_hardlink_complete_blob(f, blob):
+            f.handle.seek(0)
+            h = blake3.blake3()
+            written = 0
+            while True:
+                block = f.handle.read(1024 * 1024)
+                if not block:
+                    break
+                h.update(block)
+                written += len(block)
+            f.handle.close()
+            return (h.hexdigest() == blob and written == f.size, written)
+
         for c in f.cdc_chunks:
             idx = int(c["index"])
             if idx in f.cdc_streamed:
@@ -7389,6 +7410,85 @@ class Daemon:
             written += len(block)
         f.handle.close()
         return (h.hexdigest() == blob and written == f.size, written)
+
+    def _try_hardlink_complete_blob(self, f: IncomingFile, blob: str) -> bool:
+        """Wave 2a hardlink fast-path.
+
+        Returns True when we successfully hardlinked an existing
+        complete copy of ``blob`` into ``f.out_path`` and reopened
+        ``f.handle`` for reading. Returns False (with side-effects
+        rolled back where possible) when:
+
+          - Any chunk was streamed during this session (would lose
+            those bytes).
+          - State has no record of a complete source file.
+          - The recorded source file no longer exists or its
+            size/mtime drifted (chunks may have been edited out
+            from under us; safer to reassemble from cache).
+          - ``os.link`` failed (cross-filesystem, permission, etc.).
+        """
+        if f.cdc_streamed:
+            return False
+        if self.state is None or f.cdc_chunks is None:
+            return False
+        try:
+            source = self.state.find_complete_source_file(f.cdc_chunks)
+        except Exception as e:
+            log.debug("hardlink lookup failed for %s: %s", blob[:8], e)
+            return False
+        if source is None:
+            return False
+        try:
+            src_path = Path(source["path"])
+            if not src_path.is_file():
+                return False
+            # Don't hardlink ONTO ourselves — if the recorded source
+            # IS the out_path we're trying to fill (can happen on a
+            # weird race), bail.
+            try:
+                if src_path.resolve() == f.out_path.resolve():
+                    return False
+            except OSError:
+                return False
+            st = src_path.stat()
+            if st.st_size != int(source["file_size"]):
+                return False
+            # 2-second mtime tolerance for filesystems with coarse
+            # resolution (FAT32, some network mounts).
+            if abs(int(st.st_mtime * 1000) - int(source["mtime_ms"])) >= 2000:
+                return False
+        except OSError:
+            return False
+        # All gates pass. Swap the handle for a hardlinked one.
+        try:
+            f.handle.close()
+            try:
+                f.out_path.unlink()
+            except FileNotFoundError:
+                pass
+            os.link(src_path, f.out_path)
+            f.handle = open(f.out_path, "rb")
+            log.info(
+                "hardlink fast-path: %s <- %s (skip cache-read for %d chunk(s))",
+                f.out_path.name, src_path.name, len(f.cdc_chunks),
+            )
+            return True
+        except OSError as e:
+            # Hardlink failed (cross-fs, perm, file-lock, etc.).
+            # Re-open the original partial so the cache-read loop
+            # below has somewhere to write. The partial may have
+            # been unlinked; create-exclusive a fresh empty file.
+            log.debug("hardlink swap failed for %s: %s", blob[:8], e)
+            try:
+                f.handle = open(f.out_path, "x+b")
+                if f.size > 0:
+                    f.handle.truncate(f.size)
+            except OSError:
+                # Catastrophic: can't reopen. Caller will see the
+                # closed-handle error on the next write. Worst case:
+                # transfer aborts and the retry resumes from cache.
+                pass
+            return False
 
     async def _finish_cdc_file(self, blob: str, peer_fp: str, peer_sid: str, src_msg: dict) -> None:
         f = self._incoming_files.get(blob)

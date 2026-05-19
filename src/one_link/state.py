@@ -5630,6 +5630,108 @@ class State:
             for r in rows
         ]
 
+    def find_complete_source_file(
+        self,
+        chunks: "list[dict]",
+        *,
+        max_candidates: int = 8,
+    ) -> "Optional[dict]":
+        """Find a local file that already contains every chunk in
+        the manifest at its declared offset.
+
+        Used by the hardlink warm-dedup path: when every chunk a
+        new CDC FILE_OFFER asks for has already been recorded as
+        sourced from one specific file, we can hardlink that file
+        as the new transfer's output instead of re-reading every
+        chunk through the cache and writing them out again. Wave
+        2a — pulls warm-dedup latency at 16 MiB from ~100 ms down
+        to milliseconds.
+
+        ``chunks`` is the CDC manifest: list of dicts with at
+        least ``hash``, ``start``, ``size`` keys, in any order.
+        Returns a dict with ``path``, ``file_size``, ``mtime_ms``
+        when a match is found, ``None`` otherwise.
+
+        The match is strict: every chunk must be sourced from the
+        SAME file at the SAME offset. If even one chunk is missing
+        or has a different recorded start, we bail. The receiver
+        does its own existence + size + mtime verification before
+        hardlinking; this is just the index lookup.
+        """
+        if not chunks:
+            return None
+        # Pick the first chunk's candidate paths; intersect against
+        # subsequent chunks' candidate paths to converge on the set
+        # of files that hold all of them. Fail-fast when the
+        # intersection becomes empty.
+        try:
+            first_hash = str(chunks[0]["hash"])
+            first_start = int(chunks[0]["start"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        rows = self._conn.execute(
+            """
+            SELECT path, file_size, mtime_ms
+            FROM chunk_sources
+            WHERE chunk_hash = ? AND start = ?
+            ORDER BY updated_ms DESC
+            LIMIT ?
+            """,
+            (first_hash, first_start, int(max_candidates)),
+        ).fetchall()
+        # Map of wrapped-path -> (unwrapped_path, file_size, mtime_ms)
+        # so the rest of the loop matches on the wrapped form (cheap,
+        # avoids unwrap-per-row) and only unwraps the winner.
+        candidates: dict[str, tuple[str, int, int]] = {}
+        for r in rows:
+            wrapped = str(r["path"])
+            candidates[wrapped] = (
+                wrapped,
+                int(r["file_size"]),
+                int(r["mtime_ms"]),
+            )
+        if not candidates:
+            return None
+        # Walk the remaining chunks; keep only candidates that
+        # still contain each one. SQL constraints (chunk_hash,
+        # start) ensure each row is uniquely matchable.
+        for c in chunks[1:]:
+            try:
+                h = str(c["hash"])
+                s = int(c["start"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            placeholders = ",".join("?" * len(candidates))
+            sql = (
+                "SELECT path FROM chunk_sources "
+                "WHERE chunk_hash = ? AND start = ? "
+                f"AND path IN ({placeholders})"  # nosec B608
+            )
+            params = (h, s, *candidates.keys())
+            hits = {
+                str(r["path"]) for r in self._conn.execute(sql, params).fetchall()
+            }
+            # Drop any candidate that doesn't have this chunk.
+            candidates = {
+                wrapped: meta for wrapped, meta in candidates.items()
+                if wrapped in hits
+            }
+            if not candidates:
+                return None
+        # Survivor wins. Unwrap and return.
+        wrapped, (_w, file_size, mtime_ms) = next(iter(candidates.items()))
+        try:
+            unwrapped = self._unwrap_path(
+                wrapped, aad=self._PATH_PII_AAD_CHUNK_SOURCES,
+            )
+        except Exception:
+            return None
+        return {
+            "path": unwrapped,
+            "file_size": file_size,
+            "mtime_ms": mtime_ms,
+        }
+
     def chunks_sourced(self, chunk_hashes: Iterable[str]) -> list[str]:
         clean = [str(h) for h in chunk_hashes if str(h)]
         if not clean:

@@ -391,8 +391,10 @@ def bench_warm_dedup(size: int = 64 * 1024 * 1024) -> dict:
             request(p.a.control_port, cmd="send_file",
                     peer=p.b.short_id, path=str(src), timeout=300)
             # The receiver writes to a NEW unique path because
-            # _unique_inbox_path adds " (1)" on collision; just
-            # wait for two payload-matching inbox files.
+            # _unique_inbox_path adds " (1)" on collision; wait
+            # for two payload-matching inbox files. Sub-10 ms poll
+            # so wall-clock granularity doesn't drown the
+            # hardlink-fast-path measurement (Wave 2a).
             end = time.time() + 60.0
             count = 0
             while time.time() < end:
@@ -402,7 +404,7 @@ def bench_warm_dedup(size: int = 64 * 1024 * 1024) -> dict:
                 )
                 if count >= 2:
                     break
-                time.sleep(0.1)
+                time.sleep(0.005)
             warm_elapsed = time.time() - t0
     out = {
         "scenario": "warm_dedup",
