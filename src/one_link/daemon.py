@@ -3976,18 +3976,67 @@ class Daemon:
                     # ResumeRegistry.load_from_inbox to exist + sit
                     # under the inbox root.
                     out_path = Path(sc_match.out_path)
-                    # Open truncating: the partial output file never
-                    # carried meaningful state during transfer (chunks
-                    # land in cdc_parts/cache, not in the handle).
-                    # ``_finish_cdc_file`` rewrites from scratch.
-                    # ``w+b`` (read+write+truncate) instead of plain
-                    # ``wb`` so ``_finish_cdc_file`` can stream-hash
-                    # the file back through BLAKE3 without having to
-                    # close+reopen.
-                    handle = open(out_path, "w+b")
+                    # Open WITHOUT truncating. With Wave 1d's
+                    # stream-to-disk, the partial file carries
+                    # real chunk bytes at their correct offsets
+                    # for every chunk that landed in the prior
+                    # session. Validating those bytes against the
+                    # manifest hashes lets us flag them as
+                    # ``cdc_streamed`` so ``_finish_cdc_file``
+                    # neither re-fetches them from the sender nor
+                    # rewrites them from the chunk cache — a free
+                    # win on every restart-mid-transfer.
+                    #
+                    # Open r+b instead of w+b (truncate); if that
+                    # fails because the partial vanished between
+                    # the sidecar scan and now, fall through to
+                    # truncating create so the transfer still
+                    # works (just without the validate-on-disk
+                    # short-circuit).
+                    try:
+                        handle = open(out_path, "r+b")
+                        validate_partial = True
+                    except OSError:
+                        handle = open(out_path, "w+b")
+                        validate_partial = False
+                    # Pre-stamp ``cdc_streamed`` with whichever
+                    # chunk indices validate against the sidecar
+                    # manifest. We seek + read + BLAKE3 each one.
+                    # Failures (read short, hash mismatch) leave
+                    # the chunk out of ``cdc_streamed`` so the
+                    # normal path re-fetches it.
+                    cdc_streamed_initial: set[int] = set()
+                    if validate_partial and cdc_chunks is not None:
+                        for c in cdc_chunks:
+                            try:
+                                start = int(c["start"])
+                                csize = int(c["size"])
+                                expected_hash = str(c["hash"])
+                            except (KeyError, TypeError, ValueError):
+                                continue
+                            try:
+                                handle.seek(start)
+                                got = handle.read(csize)
+                            except OSError:
+                                break  # disk error — stop
+                            if (
+                                len(got) == csize
+                                and blake3.blake3(got).hexdigest() == expected_hash
+                            ):
+                                cdc_streamed_initial.add(int(c["index"]))
+                        # A chunk that's valid on disk is also
+                        # "received" — exclude it from the missing
+                        # set even if the cache lost it.
+                        if missing is not None:
+                            missing = {
+                                i for i in missing
+                                if i not in cdc_streamed_initial
+                            }
                     log.info(
-                        "resume (cross-restart): %s blob=%s out=%s",
+                        "resume (cross-restart): %s blob=%s out=%s "
+                        "validated_on_disk=%d",
                         name, blob[:8], out_path.name,
+                        len(cdc_streamed_initial),
                     )
                 else:
                     # Case 3: brand-new transfer (or stale sidecar —
@@ -4005,6 +4054,7 @@ class Daemon:
                     # create semantics that the H16 audit asked for
                     # are preserved by the ``x``.
                     handle = open(out_path, "x+b")
+                    cdc_streamed_initial = set()  # case-3: empty
             if cdc_chunks:
                 if missing:
                     missing, swarm_assist = await self._swarm_assist_file_offer(
@@ -4033,6 +4083,11 @@ class Daemon:
                     cdc_chunks=cdc_chunks,
                     cdc_missing=missing,
                     cdc_parts={},
+                    # Cross-restart resume may have pre-validated
+                    # some chunks against the on-disk partial.
+                    # Those don't need re-fetch + re-write at
+                    # finish; they're already at the right offset.
+                    cdc_streamed=set(cdc_streamed_initial),
                     transfer_id=transfer_id,
                 )
             if cdc_chunks is not None:
