@@ -14006,6 +14006,27 @@ class Daemon:
             intent=intent,
             existing_metadata=base_metadata,
         )
+        # Phase C: prefer stream mode for small files when QUIC is
+        # available. CDC's dedup win is negligible below 512 KiB, but
+        # the QUIC fast path (4 ms RTT on real Wi-Fi vs WebRTC's 75 ms)
+        # is a 15-20× round-trip latency improvement for the FILE_OFFER
+        # → FILE_WANTS → chunks → FILE_OK chain. The existing stream-
+        # mode QUIC fork (Wave 2e/2f) batches FILE_NATIVE_CHUNKs across
+        # QUIC_BATCH_LANES parallel streams — but it never fires when
+        # both peers advertise FILE_CDC_V1 (the daemon_pair default)
+        # because CDC mode wins the routing. This override forces small
+        # files into stream mode + the QUIC fork when the peer also has
+        # NATIVE_TRANSFER_V1 + a known QUIC port.
+        QUIC_SMALL_FILE_THRESHOLD = 512 * 1024
+        if (
+            can_offer_cdc
+            and size > 0
+            and size <= QUIC_SMALL_FILE_THRESHOLD
+            and NATIVE_TRANSFER_V1 in peer_features
+            and self._quic_peer_ports.get(peer_fp)
+        ):
+            can_offer_cdc = False
+            cdc_decision_reason = "quic_small_file_fast_path"
         if can_offer_cdc:
             if cached_file_index is not None and cached_file_index.chunks:
                 file_index = cached_file_index
