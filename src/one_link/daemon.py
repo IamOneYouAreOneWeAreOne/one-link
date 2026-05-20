@@ -432,6 +432,29 @@ def _final_stream_ack_deadline(size: int) -> float:
     ))
 
 
+def _inter_chunk_ack_deadline(window_bytes: int) -> float:
+    """Per-ACK deadline that scales with the in-flight window.
+
+    Under load the receiver can stall draining its inbox while GC,
+    state-store writes, or BLAKE3 verify take longer than expected.
+    A fixed 30 s deadline (FILE_ACK_DEADLINE_S) makes 256 MiB+ transfers
+    fail intermittently in real-network stress tests — the bytes get
+    there but the ACK round-trip slips past 30 s.
+
+    Scale with the window's drain time at the conservative 2 MiB/s
+    floor, with FILE_ACK_DEADLINE_S as the lower bound and 120 s as
+    the upper bound so we don't go past the final-ACK grace.
+    """
+    window_bytes = max(0, int(window_bytes))
+    if window_bytes <= 0:
+        return FILE_ACK_DEADLINE_S
+    drain_s = window_bytes / FILE_FINAL_ACK_BYTES_PER_S
+    return float(min(
+        FILE_FINAL_ACK_MIN_GRACE_S,
+        max(FILE_ACK_DEADLINE_S, drain_s),
+    ))
+
+
 def _version_at_least(version: str | None, major: int, minor: int, patch: int) -> bool:
     if not version:
         return False
@@ -14484,7 +14507,14 @@ class Daemon:
                         async def _settle_one_cdc_ack() -> None:
                             nonlocal chunks_sent, raw_bytes_sent, wire_bytes_sent
                             msg_id, raw_size, wire_size, sent_at = pending_cdc_sizes[0]
-                            await _await_ack(channel, request_id=msg_id)
+                            window_bytes = sum(
+                                int(entry[2] or 0) for entry in pending_cdc_sizes
+                            )
+                            await _await_ack(
+                                channel,
+                                request_id=msg_id,
+                                deadline=_inter_chunk_ack_deadline(window_bytes),
+                            )
                             ack_done = time.perf_counter()
                             pending_cdc_sizes.popleft()
                             cdc_scheduler.observe_ack(
@@ -14697,6 +14727,11 @@ class Daemon:
                         ) -> None:
                             nonlocal chunks_sent, raw_bytes_sent, wire_bytes_sent
                             msg_id, acked_size, sent_at = pending_sizes[0]
+                            if deadline is None:
+                                window_bytes = sum(
+                                    int(entry[1] or 0) for entry in pending_sizes
+                                )
+                                deadline = _inter_chunk_ack_deadline(window_bytes)
                             await _await_ack(
                                 channel,
                                 request_id=msg_id,
