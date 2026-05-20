@@ -130,7 +130,7 @@ def test_sdp_waits_for_ice_config(index_html: str) -> None:
     Otherwise the call can connect at the UI layer while media remains
     host-candidate-only."""
     offer_idx = index_html.find("async function sendLocalSdpOffer")
-    offer_snippet = index_html[offer_idx:offer_idx + 600]
+    offer_snippet = index_html[offer_idx:offer_idx + 900]
     assert "await media.iceConfigReady" in offer_snippet
     assert offer_snippet.find("await media.iceConfigReady") < offer_snippet.find("createOffer")
 
@@ -228,7 +228,7 @@ def test_sdp_offer_answer_retries_when_signaling_is_lost(index_html: str) -> Non
     assert 'media.pc.signalingState === "have-local-offer"' in ensure_snippet
     assert "await resendLocalSdpOffer" in ensure_snippet
     offer_idx = index_html.find("async function applyRemoteSdpOffer")
-    offer_snippet = index_html[offer_idx:offer_idx + 1800]
+    offer_snippet = index_html[offer_idx:offer_idx + 3000]
     assert "remote_offer_echo_ignored" in offer_snippet
     assert 'await resendLocalSdpOffer("offer_echo")' in offer_snippet
     assert "recoverRemoteOfferCollision" in offer_snippet
@@ -568,6 +568,34 @@ def test_backend_recommendation_executor_controls_media_repairs(index_html: str)
     assert "backend_recommendation: callUI.lastBackendRecommendation" in index_html
 
 
+def test_call_repair_keeps_strict_offer_answer_roles(index_html: str) -> None:
+    """Repair must not let both browsers become offerers.
+
+    The real two-computer failure showed a repeated
+    offer/answer/repair loop with zero inbound packets. The UI must
+    keep one offer owner (originator) and make the recipient answer
+    only, otherwise WebRTC glare can strand media while the call looks
+    active.
+    """
+    assert "activeCallLocalRole" in index_html
+    assert "function isLocalOfferOwner" in index_html
+    offer_idx = index_html.find("async function sendLocalSdpOffer")
+    offer_snippet = index_html[offer_idx:offer_idx + 2600]
+    assert "offer_suppressed_by_role" in offer_snippet
+    assert "isLocalOfferOwner()" in offer_snippet
+
+    repair_idx = index_html.find("async function repairMediaPath")
+    repair_snippet = index_html[repair_idx:repair_idx + 5200]
+    assert "recipient_repair_waiting_for_offer" in repair_snippet
+    assert "recipient_offer_rollback" in repair_snippet
+    assert "await resendLocalSdpAnswer" in repair_snippet
+
+    remote_offer_idx = index_html.find("async function applyRemoteSdpOffer")
+    remote_offer_snippet = index_html[remote_offer_idx:remote_offer_idx + 2600]
+    assert "remote_offer_rejected_by_role" in remote_offer_snippet
+    assert "unexpected_remote_offer" in remote_offer_snippet
+
+
 def test_backend_session_authority_drives_recovery_ui(index_html: str) -> None:
     assert "function applyBackendSessionAuthority" in index_html
     idx = index_html.find("function applyBackendSessionAuthority")
@@ -897,8 +925,9 @@ def test_addtrack_on_call_start(index_html: str) -> None:
     """When startLivingPresenceCall fires + media comes up,
     each track is added to the RTCPeerConnection. Pin the wiring."""
     idx = index_html.find("window.startLivingPresenceCall = async function")
-    snippet = index_html[idx:idx + 3000]
-    assert "media.pc.addTrack" in snippet
+    snippet = index_html[idx:idx + 3400]
+    assert "ensureLocalTracksOnPeerConnectionSettled" in snippet
+    assert "media.pc.addTrack" in index_html
 
 
 def test_addtrack_on_accept(index_html: str) -> None:
