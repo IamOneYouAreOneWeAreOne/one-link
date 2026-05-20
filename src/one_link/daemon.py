@@ -14567,6 +14567,121 @@ class Daemon:
 
                         wanted_total = len(wanted_indexes)
                         wanted_sent_index = 0
+                        # Phase F: CDC-over-QUIC fast path. When the peer
+                        # advertises NATIVE_TRANSFER_V1 AND we have a live
+                        # QUIC outbound to it, batch CDC chunks (8 at a
+                        # time, 4 parallel streams) and ship them via
+                        # send_chunks_via_quic_parallel. The receiver's
+                        # inbound QUIC frame loop already routes
+                        # FILE_CDC_CHUNK through _handle_file_cdc_chunk
+                        # with a NoopChannel — the disk write + sidecar
+                        # touch + finish-schedule run normally; the
+                        # WebRTC ACK that handler emits is silently
+                        # dropped, and the QUIC FRAME_CHUNK_RESPONSE
+                        # serves as the real ACK. On any QUIC failure
+                        # the rest of the transfer degrades to WebRTC
+                        # — no retry loop, just graceful fallback.
+                        QUIC_CDC_BATCH_SIZE = 1
+                        QUIC_CDC_BATCH_LANES = 1
+                        # Pre-dial QUIC once if conditions allow. The
+                        # CDC branch had no pre-dial historically (the
+                        # stream-mode branch does its own); without
+                        # this the per-batch eligibility check below
+                        # would always be False on first run because
+                        # _quic_outbound is empty.
+                        if (
+                            peer_fp_for_policy
+                            and NATIVE_TRANSFER_V1 in peer_feature_set
+                            and peer_fp_for_policy not in self._quic_outbound
+                            and self._quic_peer_ports.get(peer_fp_for_policy)
+                        ):
+                            with contextlib.suppress(Exception):
+                                await self._get_or_dial_quic(
+                                    peer_fp_for_policy, peer,
+                                )
+                        cdc_quic_eligible = (
+                            peer_fp_for_policy is not None
+                            and NATIVE_TRANSFER_V1 in peer_feature_set
+                            and peer_fp_for_policy in self._quic_outbound
+                        )
+                        cdc_quic_batch: list[dict] = []
+                        cdc_quic_sizes: list[tuple[int, int]] = []
+
+                        async def _flush_cdc_quic_batch() -> bool:
+                            """Ship the accumulated CDC chunks over QUIC.
+
+                            Dispatches each chunk as its own single-frame
+                            QUIC send via send_chunk_via_quic, parallelized
+                            with asyncio.gather. Avoids the multi-chunk
+                            bulk-frame size limit (each individual
+                            FILE_CDC_CHUNK envelope is ~340 KB, and
+                            concatenating N of them per lane exceeds
+                            MAX_BULK_FRAME_BYTES).
+
+                            Returns True if every chunk in the batch was
+                            ACK'd; False if anything went wrong and the
+                            caller must fall back."""
+                            nonlocal chunks_sent, raw_bytes_sent, wire_bytes_sent
+                            if not cdc_quic_batch:
+                                return True
+                            batch_start = time.perf_counter()
+                            tasks = [
+                                self.send_chunk_via_quic(
+                                    peer_fp_for_policy, peer, m,
+                                )
+                                for m in cdc_quic_batch
+                            ]
+                            results = await asyncio.gather(
+                                *tasks, return_exceptions=True,
+                            )
+                            for idx, r in enumerate(results):
+                                if isinstance(r, BaseException):
+                                    log.info(
+                                        "CDC-over-QUIC chunk %d/%d failed: %s",
+                                        idx, len(cdc_quic_batch), r,
+                                    )
+                                    return False
+                                if not (r or {}).get("ok"):
+                                    log.info(
+                                        "CDC-over-QUIC chunk %d/%d not ok: %s",
+                                        idx, len(cdc_quic_batch),
+                                        (r or {}).get("error"),
+                                    )
+                                    return False
+                            elapsed_ms = (time.perf_counter() - batch_start) * 1000.0
+                            # Mirror the per-chunk ACK accounting that
+                            # the WebRTC settle path does.
+                            for raw_sz, wire_sz in cdc_quic_sizes:
+                                chunks_sent += 1
+                                raw_bytes_sent += raw_sz
+                                wire_bytes_sent += wire_sz
+                                cdc_scheduler.observe_ack(
+                                    ack_ms=elapsed_ms / max(1, len(cdc_quic_sizes)),
+                                    raw_bytes=raw_sz,
+                                    wire_bytes=wire_sz,
+                                    in_flight_chunks=0,
+                                )
+                            self._update_transfer(
+                                transfer_id,
+                                status="active",
+                                progress_bytes=skipped_bytes + raw_bytes_sent,
+                                total_bytes=size,
+                                chunks_done=(len(cdc_chunks) - len(wanted_indexes)) + chunks_sent,
+                                chunks_total=len(cdc_chunks),
+                                raw_bytes=raw_bytes_sent,
+                                wire_bytes=wire_bytes_sent,
+                                metadata={
+                                    **base_metadata,
+                                    "delivery_state": "sending",
+                                    "actual_method": "file_cdc_quic",
+                                    "in_flight_chunks": 0,
+                                    "adaptive_scheduler": cdc_scheduler.snapshot(),
+                                },
+                            )
+                            cdc_quic_batch.clear()
+                            cdc_quic_sizes.clear()
+                            return True
+
                         for c in cdc_chunks:
                             if c.index not in wanted_indexes:
                                 continue
@@ -14620,21 +14735,51 @@ class Daemon:
                             )
                             if chunk_ack_batch > 1:
                                 chunk_msg["ack_batch"] = chunk_ack_batch
-                            # Wave 2f attempted to route CDC chunks
-                            # over QUIC here. It introduced a
-                            # regression (8 MiB transfer 0.1s →
-                            # 222s) — the ``_handle_file_cdc_chunk``
-                            # path's ACK + finish-schedule needs a
-                            # live channel and our synth_channel
-                            # was breaking that. Reverted; CDC
-                            # mode still rides WebRTC. The
-                            # stream-mode (FILE_NATIVE_CHUNK) path
-                            # in the ``else:`` branch below DOES
-                            # use the QUIC fast path successfully.
-                            # Future Wave 2f+ needs a CDC handler
-                            # that drives the QUIC stream's
-                            # response frame as the ACK instead of
-                            # the WebRTC channel.
+                            # Phase F: route CDC chunks via QUIC when
+                            # the peer + connection support it. The
+                            # FILE_CDC_CHUNK message format is the same
+                            # over both transports — only the carrier
+                            # differs, so the receiver's per-chunk
+                            # logic (integrity check, stream-to-disk,
+                            # sidecar touch, finish schedule) runs the
+                            # same way from either path.
+                            if cdc_quic_eligible:
+                                # QUIC carries the bytes inline in the
+                                # message — base64-encode payload into
+                                # the dict (the same way the WebRTC
+                                # JSON path would, but we never call
+                                # _encode_binary_frame).
+                                chunk_msg["data"] = base64.b64encode(payload).decode("ascii")
+                                cdc_quic_batch.append(chunk_msg)
+                                cdc_quic_sizes.append((len(data), len(payload)))
+                                if len(cdc_quic_batch) >= QUIC_CDC_BATCH_SIZE:
+                                    ok = await _flush_cdc_quic_batch()
+                                    if not ok:
+                                        # Graceful degrade: switch the
+                                        # rest of this transfer to
+                                        # WebRTC and re-ship the failed
+                                        # batch through the legacy path.
+                                        log.info(
+                                            "CDC-over-QUIC batch failed, "
+                                            "falling back to WebRTC for "
+                                            "remainder of %s", blob_hex[:8],
+                                        )
+                                        cdc_quic_eligible = False
+                                        for fb_msg, (fb_raw, fb_wire) in zip(
+                                            cdc_quic_batch, cdc_quic_sizes,
+                                        ):
+                                            fb_wire_payload = encode_msg(fb_msg)
+                                            queued_write = await _queue_or_send(
+                                                channel, fb_wire_payload,
+                                            )
+                                            pending_cdc_sizes.append((
+                                                str(fb_msg.get("id")),
+                                                fb_raw, fb_wire,
+                                                time.perf_counter(),
+                                            ))
+                                        cdc_quic_batch.clear()
+                                        cdc_quic_sizes.clear()
+                                continue  # skip the WebRTC dispatch below
                             if cdc_binary_used:
                                 wire_payload = _encode_binary_frame(chunk_msg, payload)
                             else:
@@ -14654,6 +14799,31 @@ class Daemon:
                                 await _flush_if_queued(channel, queued_write)
                                 queued_write = False
                                 await _settle_one_cdc_ack()
+                        # Flush any remaining QUIC batch first; on
+                        # failure, fall back through the WebRTC tail
+                        # below.
+                        if cdc_quic_batch:
+                            ok = await _flush_cdc_quic_batch()
+                            if not ok:
+                                log.info(
+                                    "CDC-over-QUIC final-batch flush failed, "
+                                    "tailing through WebRTC for %s",
+                                    blob_hex[:8],
+                                )
+                                for fb_msg, (fb_raw, fb_wire) in zip(
+                                    cdc_quic_batch, cdc_quic_sizes,
+                                ):
+                                    fb_wire_payload = encode_msg(fb_msg)
+                                    queued_write = await _queue_or_send(
+                                        channel, fb_wire_payload,
+                                    )
+                                    pending_cdc_sizes.append((
+                                        str(fb_msg.get("id")),
+                                        fb_raw, fb_wire,
+                                        time.perf_counter(),
+                                    ))
+                                cdc_quic_batch.clear()
+                                cdc_quic_sizes.clear()
                         while pending_cdc_sizes:
                             await _flush_if_queued(channel, True)
                             await _settle_one_cdc_ack()

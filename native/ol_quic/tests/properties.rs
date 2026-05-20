@@ -125,7 +125,8 @@ proptest! {
         let max = kind.max_payload_bytes();
         let is_bulk = matches!(
             kind,
-            FrameKind::ChunkResponse
+            FrameKind::ChunkRequest
+                | FrameKind::ChunkResponse
                 | FrameKind::ManifestRecord
                 | FrameKind::BloomFilter
                 | FrameKind::FountainBurst
