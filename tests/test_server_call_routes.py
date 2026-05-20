@@ -293,6 +293,70 @@ async def test_state_returns_call_snapshot() -> None:
     assert payload["path_recommendation"]["action"] == "observe"
     assert payload["media_session_authority"]["state"] == "negotiating"
     assert payload["media_session_authority"]["reason"] == "no_media_truth_yet"
+    assert payload["media_recovery_intent"]["action"] == "observe"
+
+
+@pytest.mark.asyncio
+async def test_rejoin_returns_active_snapshot_with_media_backfill() -> None:
+    srv, daemon = _server_with_daemon()
+    peer = _identity("mom-rejoin")
+    mgr = daemon._call_registry.open(
+        call_id="c-rejoin",
+        peer_master_vk_hex=peer.fingerprint,
+        local_role="recipient",
+        local_master_vk_hex=daemon.me.fingerprint,
+        started_at_ms=2_000,
+    )
+    mgr.handle(ManagerEvent(ManagerEventKind.WIRE_CALL_INVITE, 2_000))
+    mgr.handle(ManagerEvent(ManagerEventKind.USER_ACCEPT, 2_100))
+    daemon._call_sdp_backfill = {
+        "c-rejoin": {
+            "sdp_offer": "v=0\r\ns=offer\r\n",
+            "sdp_answer": "v=0\r\ns=answer\r\n",
+        },
+    }
+    daemon._call_ice_backfill = {
+        "c-rejoin": [{
+            "candidate": "candidate:1 1 udp 1 0.0.0.0 9 typ host",
+            "sdp_mid": "0",
+            "sdp_m_line_index": 0,
+        }],
+    }
+    resp = await srv.api_call_action(_FakeRequest(body={  # type: ignore[arg-type]
+        "action": "rejoin",
+        "call_id": "c-rejoin",
+        "reason": "backfill_active",
+    }))
+    import json
+    payload = json.loads(resp._body or b"")
+    assert payload["ok"] is True
+    assert payload["call_id"] == "c-rejoin"
+    assert payload["phase"] == "active"
+    assert payload["is_active"] is True
+    assert payload["rejoin"]["allowed"] is True
+    assert payload["rejoin"]["same_call_id"] is True
+    assert payload["pending_sdp_offer"] == "v=0\r\ns=offer\r\n"
+    assert payload["pending_sdp_answer"] == "v=0\r\ns=answer\r\n"
+    assert payload["pending_ice_candidates"][0]["sdp_mid"] == "0"
+    assert payload["session_authority"]["state"] == "reconnecting"
+    assert payload["recovery_intent"]["action"] in {
+        "restart_ice", "renegotiate", "observe",
+    }
+
+
+@pytest.mark.asyncio
+async def test_rejoin_unknown_call_returns_not_found() -> None:
+    srv, _ = _server_with_daemon()
+    resp = await srv.api_call_action(_FakeRequest(body={  # type: ignore[arg-type]
+        "action": "rejoin",
+        "call_id": "missing",
+        "reason": "browser_rejoin",
+    }))
+    import json
+    payload = json.loads(resp._body or b"")
+    assert resp.status == 404
+    assert payload["ok"] is False
+    assert "no longer active" in payload["user_message"].lower()
 
 
 @pytest.mark.asyncio
@@ -324,6 +388,71 @@ async def test_report_metrics_returns_backend_path_recommendation() -> None:
     assert payload["recommendation"]["reason"] == "renderer_detached"
     assert payload["session_authority"]["state"] == "degraded"
     assert payload["session_authority"]["reason"] == "renderer_detached"
+    assert payload["recovery_intent"]["action"] == "revive_playback"
+    assert payload["recovery_intent"]["route_preference"] == "same"
+    assert payload["routePolicy"]["mode"] == "direct_first"
+
+
+@pytest.mark.asyncio
+async def test_report_metrics_enriches_recovery_intent_with_relay_policy(monkeypatch) -> None:
+    monkeypatch.setenv("ONE_LINK_TURN_SERVERS", "turn:relay.local:3478")
+    srv, daemon = _server_with_daemon()
+    peer = _identity("mom-relay-policy")
+    daemon._relay_metrics = {
+        "turn:relay.local:3478": {
+            "rtt_ms": 20.0,
+            "loss_rate": 0.0,
+            "n_attempts": 5,
+            "n_successes": 5,
+            "last_observed_ms": 1_000,
+        },
+    }
+    daemon._call_registry.open(
+        call_id="c-relay-policy",
+        peer_master_vk_hex=peer.fingerprint,
+        local_role="originator",
+        local_master_vk_hex=daemon.me.fingerprint,
+        started_at_ms=1_000,
+    )
+    resp = await srv.api_call_action(_FakeRequest(body={  # type: ignore[arg-type]
+        "action": "report_metrics",
+        "call_id": "c-relay-policy",
+        "media_health_state": "healthy",
+        "ice_connection_state": "failed",
+        "selected_candidate_type": "host",
+    }))
+    import json
+    payload = json.loads(resp._body or b"")
+    assert payload["ok"] is True
+    assert payload["routePolicy"]["relay_ready"] is True
+    assert payload["routePolicy"]["best_relay_health"] == "healthy"
+    assert payload["recovery_intent"]["action"] == "restart_ice"
+    assert payload["recovery_intent"]["route_preference"] == "relay"
+
+
+@pytest.mark.asyncio
+async def test_relay_probe_records_turn_health_and_refreshes_policy(monkeypatch) -> None:
+    monkeypatch.setenv("ONE_LINK_TURN_SERVERS", "turn:relay-a.local:3478,turn:relay-b.local:3478")
+    srv, daemon = _server_with_daemon()
+
+    async def fake_probe(url: str, *, timeout_s: float = 1.5) -> dict:
+        if "relay-a" in url:
+            return {"url": url, "ok": True, "reason": "tcp_connect", "rtt_ms": 22.0}
+        return {"url": url, "ok": False, "reason": "timeout"}
+
+    monkeypatch.setattr(srv, "_probe_turn_relay_once", fake_probe)
+    resp = await srv.api_peer_rtc_relay_probe(_FakeRequest(body={
+        "call_id": "c-probe",
+    }))  # type: ignore[arg-type]
+    import json
+    payload = json.loads(resp._body or b"")
+    assert payload["ok"] is True
+    assert payload["probed"] == 2
+    assert payload["results"][0]["ok"] is True
+    assert daemon._relay_metrics["turn:relay-a.local:3478"]["n_successes"] == 1
+    assert daemon._relay_metrics["turn:relay-b.local:3478"]["n_successes"] == 0
+    assert payload["routePolicy"]["relay_ready"] is True
+    assert payload["routePolicy"]["best_relay_health"] == "healthy"
 
 
 @pytest.mark.asyncio
@@ -358,6 +487,7 @@ async def test_call_trace_exports_privacy_safe_timeline() -> None:
     assert payload["backend_authority"]["state"] == "negotiating"
     assert payload["recommendation"]["action"] == "renegotiate"
     assert payload["session_authority"]["state"] == "negotiating"
+    assert payload["recovery_intent"]["action"] == "renegotiate"
     assert len(payload["rows"]) == 2
     assert "no SDP" in payload["privacy"]
 
@@ -379,3 +509,4 @@ def test_routes_registered_on_app_router() -> None:
     assert inspect.iscoroutinefunction(srv.api_call_action)
     assert inspect.iscoroutinefunction(srv.api_calls_list)
     assert inspect.iscoroutinefunction(srv.api_call_state)
+    assert inspect.iscoroutinefunction(srv.api_peer_rtc_relay_probe)

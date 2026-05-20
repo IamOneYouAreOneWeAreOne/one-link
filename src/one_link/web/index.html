@@ -26149,6 +26149,7 @@
       <button class="btn-ghost" id="btn-call-blur" type="button" aria-pressed="false">Blur preview</button>
       <button class="btn-ghost" id="btn-call-refresh-devices" type="button">Refresh devices</button>
       <button class="btn-ghost" id="btn-call-copy-debug" type="button">Copy debug</button>
+      <button class="btn-ghost" id="btn-call-export-trace" type="button" aria-label="Export call trace">Export trace</button>
     </div>
   </div>
   <div id="call-recording-badge" class="call-recording-badge" aria-live="polite">Recording (both sides agreed)</div>
@@ -26234,10 +26235,17 @@
     lastBackendRecommendation: null,
     lastBackendRecommendationKey: "",
     lastBackendRecommendationMs: 0,
+    lastRecoveryIntent: null,
+    lastRecoveryIntentKey: "",
+    lastRecoveryIntentMs: 0,
     backendActionCooldowns: {},
     callHistory: [],
     acceptedCallIds: new Set(),
     lastAcceptRetryMs: {},
+    lastRejoinAttemptMs: {},
+    autoTraceBuffer: [],
+    lastAutoTraceMs: 0,
+    lastAutoTraceKey: "",
   };
   // Expose for debug + tests
   if (typeof window !== "undefined") {
@@ -26268,6 +26276,52 @@
       return await r.json();
     } catch (_) {
       return { calls: [] };
+    }
+  }
+
+  async function captureAutoCallTrace(reason, extra) {
+    const callId = callUI.activeCallId;
+    if (!callId) return null;
+    const cleanReason = String(reason || "auto_trace").replace(/[^a-z0-9_-]/gi, "_").toLowerCase().slice(0, 64);
+    const key = `${callId}:${cleanReason}`;
+    const now = Date.now();
+    if (callUI.lastAutoTraceKey === key && now - Number(callUI.lastAutoTraceMs || 0) < 15000) return null;
+    callUI.lastAutoTraceKey = key;
+    callUI.lastAutoTraceMs = now;
+    try {
+      const [traceResp, localDebug] = await Promise.all([
+        fetch(`/api/v1/calls/${encodeURIComponent(callId)}/trace`, {
+          credentials: "include", cache: "no-store",
+        }),
+        window._oneLinkCallDebug?.().catch(() => null),
+      ]);
+      const trace = await traceResp.json();
+      const payload = {
+        captured_at_ms: now,
+        reason: cleanReason,
+        call_id: callId,
+        backend_trace: trace,
+        local_debug: localDebug || null,
+        extra: extra || null,
+      };
+      callUI.autoTraceBuffer.unshift(payload);
+      callUI.autoTraceBuffer = callUI.autoTraceBuffer.slice(0, 12);
+      try {
+        localStorage.setItem(
+          "one_link_auto_call_traces",
+          JSON.stringify(callUI.autoTraceBuffer.slice(0, 6)),
+        );
+      } catch (_) {}
+      reportCallEvent("auto_call_trace_captured", {
+        reason: cleanReason,
+        ok: true,
+      });
+      return payload;
+    } catch (_) {
+      reportCallEvent("auto_call_trace_failed", {
+        reason: cleanReason,
+      });
+      return null;
     }
   }
 
@@ -26303,6 +26357,12 @@
     iceHelperReady: false,
     iceRelayReady: false,
     routePolicy: "direct_first",
+    routePolicyDetail: null,
+    bestRelayHealth: "",
+    bestRelayScore: null,
+    turnCredentialExpiresAtMs: null,
+    lastIceConfigRefreshMs: 0,
+    lastRelayProbeMs: 0,
     forceRelayOnRepair: false,
     preferRelayNext: false,
   };
@@ -26350,6 +26410,90 @@
           })
       : false;
     return { audio, video };
+  }
+
+  async function requestRelayHealthProbe(reason) {
+    if (!callUI.activeCallId || !media.iceRelayReady) return;
+    const now = Date.now();
+    if (now - Number(media.lastRelayProbeMs || 0) < 120000) return;
+    media.lastRelayProbeMs = now;
+    try {
+      const result = await fetch("/api/peer-rtc/relay-probe", {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          call_id: callUI.activeCallId,
+          reason: reason || "call_health",
+        }),
+      }).then((r) => r.json());
+      if (result && result.routePolicy) {
+        media.routePolicyDetail = result.routePolicy;
+        media.bestRelayHealth = String(result.routePolicy.best_relay_health || "");
+        media.bestRelayScore = Number.isFinite(Number(result.routePolicy.best_relay_score))
+          ? Number(result.routePolicy.best_relay_score)
+          : null;
+        media.turnCredentialExpiresAtMs = Number(result.routePolicy.credential_expires_at_ms || 0) || null;
+      }
+      reportCallEvent("relay_probe_completed", {
+        reason: "relay_probe",
+        state: media.bestRelayHealth || "unknown",
+        ok: result && result.ok === true,
+      });
+    } catch (_) {
+      reportCallEvent("relay_probe_failed", {
+        reason: "relay_probe",
+        state: media.bestRelayHealth || "unknown",
+      });
+    }
+  }
+
+  async function refreshIceConfigForCall(reason) {
+    if (!callUI.activeCallId || !media.pc) return false;
+    const now = Date.now();
+    if (now - Number(media.lastIceConfigRefreshMs || 0) < 60000) return false;
+    media.lastIceConfigRefreshMs = now;
+    try {
+      const iceUrl = `/api/peer-rtc/ice-config?call_id=${encodeURIComponent(callUI.activeCallId)}`;
+      const cfg = await fetch(iceUrl, {
+        credentials: "include", cache: "no-store",
+      }).then((r) => r.json());
+      if (Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0) {
+        media.pc.setConfiguration({ iceServers: cfg.iceServers });
+      }
+      media.routePolicyDetail = cfg.routePolicy || null;
+      media.iceRelayReady = Array.isArray(cfg.iceServers)
+        && cfg.iceServers.some((srv) => {
+          const urls = Array.isArray(srv.urls) ? srv.urls : [srv.urls];
+          return urls.some((u) => String(u || "").toLowerCase().startsWith("turn:") || String(u || "").toLowerCase().startsWith("turns:"));
+        });
+      media.bestRelayHealth = String(cfg.routePolicy?.best_relay_health || "");
+      media.bestRelayScore = Number.isFinite(Number(cfg.routePolicy?.best_relay_score))
+        ? Number(cfg.routePolicy.best_relay_score)
+        : null;
+      media.turnCredentialExpiresAtMs = Number(cfg.routePolicy?.credential_expires_at_ms || 0) || null;
+      reportCallEvent("turn_credentials_refreshed", {
+        reason: reason || "credential_refresh",
+        state: media.iceRelayReady ? "relay" : "direct",
+        ok: true,
+      });
+      return true;
+    } catch (_) {
+      reportCallEvent("turn_credentials_refresh_failed", {
+        reason: reason || "credential_refresh",
+        state: media.iceRelayReady ? "relay" : "direct",
+      });
+      return false;
+    }
+  }
+
+  function maybeRefreshTurnCredentials(reason) {
+    if (!media.turnCredentialExpiresAtMs || !media.iceRelayReady) return;
+    const msLeft = Number(media.turnCredentialExpiresAtMs || 0) - Date.now();
+    if (msLeft > 0 && msLeft < 120000) {
+      refreshIceConfigForCall(reason || "credential_expiring").catch(() => {});
+    }
   }
 
   function targetMediaProfile(level) {
@@ -27444,11 +27588,18 @@
           });
         media.iceHelperReady = Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0;
         media.routePolicy = String(cfg.routePolicy?.mode || "direct_first");
+        media.routePolicyDetail = cfg.routePolicy || null;
+        media.bestRelayHealth = String(cfg.routePolicy?.best_relay_health || "");
+        media.bestRelayScore = Number.isFinite(Number(cfg.routePolicy?.best_relay_score))
+          ? Number(cfg.routePolicy.best_relay_score)
+          : null;
+        media.turnCredentialExpiresAtMs = Number(cfg.routePolicy?.credential_expires_at_ms || 0) || null;
         media.forceRelayOnRepair = cfg.routePolicy?.force_relay_on_repair === true;
         if (Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0) {
           pc.setConfiguration({ iceServers: cfg.iceServers });
           if (media.iceRelayReady) {
             reportCallEvent("ice_relay_ready", { state: "available" });
+            requestRelayHealthProbe("ice_config").catch(() => {});
           }
         } else {
           reportCallEvent("ice_host_only_mode", { state: "enabled" });
@@ -28043,6 +28194,83 @@
     }
   }
 
+  function rememberBackendRecoveryIntent(intent) {
+    if (!intent || typeof intent !== "object") return false;
+    const key = [
+      intent.action || "observe",
+      intent.reason || "",
+      intent.priority || 0,
+      intent.route_preference || "auto",
+    ].join("|");
+    callUI.lastRecoveryIntent = {
+      at_ms: Date.now(),
+      ...intent,
+    };
+    callUI.lastRecoveryIntentMs = callUI.lastRecoveryIntent.at_ms;
+    const changed = key && key !== callUI.lastRecoveryIntentKey;
+    if (changed) {
+      callUI.lastRecoveryIntentKey = key;
+      reportCallEvent("recovery_intent_seen", {
+        reason: String(intent.action || "observe"),
+        state: String(intent.route_preference || "auto"),
+        ok: String(intent.action || "observe") === "hold",
+      });
+    }
+    return changed;
+  }
+
+  async function applyBackendRecoveryIntent(intent, metrics) {
+    if (!intent || typeof intent !== "object") return;
+    if (!callUI.activeCallId || !media.pc) return;
+    const executableRecoveryIntents = [
+      "revive_playback",
+      "downshift",
+      "audio_first_repair",
+      "restart_ice",
+      "force_relay",
+      "renegotiate",
+      "rebuild_peer_connection",
+    ];
+    const action = String(intent.action || "observe").toLowerCase();
+    const routePreference = String(intent.route_preference || "auto").toLowerCase();
+    const cooldownMs = Math.max(1000, Number(intent.cooldown_ms || 4000));
+    rememberBackendRecoveryIntent(intent);
+    if (action === "observe" || action === "hold" || action === "watch") return;
+    if (!executableRecoveryIntents.includes(action)) return;
+    if (!backendActionAllowed(`intent_${action}`, cooldownMs)) return;
+    try {
+      const recommendationLike = {
+        action: action === "restart_ice" ? "ice_restart" : action,
+        reason: intent.reason || action,
+        route_preference: routePreference,
+        video_policy: intent.video_policy || "auto",
+        audio_priority: intent.audio_first === true,
+      };
+      if (routePreference === "relay" || action === "force_relay") {
+        media.preferRelayNext = true;
+        updateOneChip("#call-one-engine", "Relay repair");
+      }
+      if (action === "force_relay") {
+        recommendationLike.action = "ice_restart";
+        recommendationLike.route_preference = "relay";
+      }
+      await applyBackendPathRecommendation(
+        recommendationLike,
+        metrics || callUI.lastMetricsSnapshot,
+      );
+      reportCallEvent("recovery_intent_applied", {
+        reason: action,
+        state: routePreference || "auto",
+        ok: true,
+      });
+    } catch (_) {
+      reportCallEvent("recovery_intent_failed", {
+        reason: action,
+        state: routePreference || "auto",
+      });
+    }
+  }
+
   function applyBackendSessionAuthority(session) {
     if (!session || typeof session !== "object") return;
     const state = String(session.state || "").toLowerCase();
@@ -28377,6 +28605,43 @@
     } catch (_) {
       addOneCallEvent("Call debug could not be copied.");
       reportCallEvent("call_debug_copy_failed");
+    }
+  });
+  $$("#btn-call-export-trace")?.addEventListener("click", async () => {
+    const callId = callUI.activeCallId;
+    if (!callId) return;
+    try {
+      const [traceResp, localDebug] = await Promise.all([
+        fetch(`/api/v1/calls/${encodeURIComponent(callId)}/trace`, {
+          credentials: "include", cache: "no-store",
+        }),
+        window._oneLinkCallDebug?.().catch(() => null),
+      ]);
+      const trace = await traceResp.json();
+      const payload = {
+        exported_at_ms: Date.now(),
+        call_id: callId,
+        backend_trace: trace,
+        local_debug: localDebug || null,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      });
+      const a = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = `one-link-call-trace-${callId}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        URL.revokeObjectURL(url);
+        a.remove();
+      }, 1000);
+      addOneCallEvent("Call trace exported.");
+      reportCallEvent("call_trace_exported", { ok: true });
+    } catch (_) {
+      addOneCallEvent("Call trace export failed.");
+      reportCallEvent("call_trace_export_failed");
     }
   });
   $$("#btn-call-capsule")?.addEventListener("click", () => {
@@ -29412,6 +29677,8 @@
         ice_relay_ready: media.iceRelayReady === true,
         route_policy: media.routePolicy,
         relay_escape_active: media.preferRelayNext === true,
+        best_relay_health: media.bestRelayHealth || null,
+        best_relay_score: media.bestRelayScore,
       };
       if (selectedCandidateType === "relay") updateOneChip("#call-one-route", "Relay");
       else if (selectedCandidateType === "srflx" || selectedCandidateType === "prflx") updateOneChip("#call-one-route", "Assisted");
@@ -29447,6 +29714,17 @@
       applyCallQualityHysteresis(quality);
       renderParticipants();
       renderLiveStats(callUI.lastMetricsSnapshot);
+      if (
+        media.iceRelayReady
+        && (
+          selected.ice_connection_state === "checking"
+          || selected.ice_connection_state === "disconnected"
+          || selected.media_health_severity >= 2
+        )
+      ) {
+        requestRelayHealthProbe("metrics").catch(() => {});
+      }
+      maybeRefreshTurnCredentials("metrics");
       tuneOutboundMediaForTau(callUI.lastMetricsSnapshot).catch(() => {});
       const videoMoving = inboundVideoBytes > Number(callUI.lastInboundVideoBytes || 0)
         || inboundVideoFramesDecoded > Number(callUI.lastInboundVideoFramesDecoded || 0);
@@ -29515,6 +29793,12 @@
           video_frozen: videoElementFrozen,
           audio_frozen: audioElementFrozen,
         });
+        captureAutoCallTrace("sustained_media_freeze", {
+          video_frozen: videoElementFrozen,
+          audio_frozen: audioElementFrozen,
+          media_health_state: selected.media_health_state,
+          ice_connection_state: selected.ice_connection_state,
+        }).catch(() => {});
         repairMediaPath("frozen_media").catch(() => {});
       }
       if (
@@ -29545,6 +29829,18 @@
         metricsResult && metricsResult.recommendation,
         callUI.lastMetricsSnapshot,
       );
+      await applyBackendRecoveryIntent(
+        metricsResult && metricsResult.recovery_intent,
+        callUI.lastMetricsSnapshot,
+      );
+      if (metricsResult && metricsResult.routePolicy) {
+        media.routePolicyDetail = metricsResult.routePolicy;
+        media.bestRelayHealth = String(metricsResult.routePolicy.best_relay_health || "");
+        media.bestRelayScore = Number.isFinite(Number(metricsResult.routePolicy.best_relay_score))
+          ? Number(metricsResult.routePolicy.best_relay_score)
+          : null;
+        media.turnCredentialExpiresAtMs = Number(metricsResult.routePolicy.credential_expires_at_ms || 0) || null;
+      }
       applyBackendSessionAuthority(
         metricsResult && metricsResult.session_authority,
       );
@@ -29614,8 +29910,10 @@
         last_metrics: callUI.lastMetricsSnapshot,
         tau_decision: callUI.tauLastDecision,
         backend_recommendation: callUI.lastBackendRecommendation,
+        recovery_intent: callUI.lastRecoveryIntent,
         session_authority: callUI.lastSessionAuthority,
         backend_action_cooldowns: callUI.backendActionCooldowns,
+        auto_trace_buffer: callUI.autoTraceBuffer,
         repair_diagnosis: callUI.lastRepairDiagnosis,
         repair_counts: callUI.repairDiagnosisCounts,
         repair_escalation_score: callUI.repairEscalationScore,
@@ -29650,6 +29948,12 @@
         media.pc.remoteDescription &&
         Date.now() - Number(callUI.lastRemoteMediaMovingMs || 0) > 8000
       ) {
+        captureAutoCallTrace("watchdog_no_media_movement", {
+          seconds_since_media_moved: Math.round((Date.now() - Number(callUI.lastRemoteMediaMovingMs || 0)) / 1000),
+          ice_connection_state: media.pc.iceConnectionState || "",
+          connection_state: media.pc.connectionState || "",
+          signaling_state: media.pc.signalingState || "",
+        }).catch(() => {});
         repairMediaPath("watchdog_no_media_movement").catch(() => {});
       }
     }, 1500);
@@ -29731,6 +30035,75 @@
     }
     callUI.inboundCallId = null;
     callUI.inboundCallPeerFp = null;
+  }
+
+  async function rejoinActiveCallFromSnapshot(call, reason) {
+    if (!call || !call.call_id) return false;
+    const callId = call.call_id;
+    const now = Date.now();
+    const last = Number(callUI.lastRejoinAttemptMs[callId] || 0);
+    if (now - last < 3000) return false;
+    callUI.lastRejoinAttemptMs[callId] = now;
+    const peerLabel = peerLabelFromCall(call);
+    callUI.activeCallId = callId;
+    callUI.activeCallPeer = peerLabel;
+    callUI.activeCallPeerFp = call.peer_master_vk_hex || callUI.activeCallPeerFp;
+    callUI.acceptedCallIds.add(callId);
+    const wantsVideo = String(call.kind || call.call_kind || callUI.activeCallKind || "video").toLowerCase() !== "voice";
+    callUI.activeCallKind = wantsVideo ? "video" : "voice";
+    media.expectRemoteAudio = true;
+    media.expectRemoteVideo = wantsVideo;
+    hideOutgoingOverlay();
+    hideIncomingRing();
+    showActiveSurface(peerLabel, "");
+    const snapshot = await callApiPost({
+      action: "rejoin",
+      call_id: callId,
+      reason: reason || "browser_rejoin",
+    });
+    if (!snapshot || snapshot.ok !== true) {
+      reportCallEvent("client_rejoin_failed", { reason: reason || "browser_rejoin" });
+      return false;
+    }
+    setupRtcPeerConnection();
+    callUI.localMediaReady = false;
+    const stream = await startLocalMedia({ audio: true, video: wantsVideo });
+    if (stream && media.pc) {
+      stream.getTracks().forEach((track) => {
+        try { media.pc.addTrack(track, stream); } catch (_) {}
+      });
+      if (wantsVideo) startAttestStream(stream);
+      callUI.localMediaReady = true;
+      reportCallEvent("client_rejoin_media_ready", {
+        reason: reason || "browser_rejoin",
+        ok: true,
+      });
+    }
+    const pendingIce = Array.isArray(snapshot.pending_ice_candidates)
+      ? snapshot.pending_ice_candidates
+      : [];
+    if (snapshot.pending_sdp_offer) {
+      await applyRemoteSdpOffer(snapshot.pending_sdp_offer);
+    } else if (snapshot.pending_sdp_answer) {
+      await applyRemoteSdpAnswer(snapshot.pending_sdp_answer);
+    }
+    for (const candidate of pendingIce) {
+      await applyRemoteIceCandidate({
+        call_id: callId,
+        peer_master_vk_hex: snapshot.peer_master_vk_hex || call.peer_master_vk_hex,
+        ...candidate,
+      });
+    }
+    if (
+      media.pc
+      && media.localStream
+      && !media.pc.remoteDescription
+      && !snapshot.pending_sdp_offer
+    ) {
+      await ensureMediaNegotiation("rejoin");
+    }
+    startCallTelemetry();
+    return true;
   }
 
   async function resolveSimultaneousCallIfNeeded(inboundCallId, inboundPeerFp) {
@@ -29822,6 +30195,10 @@
           hideOutgoingOverlay();
           hideIncomingRing();
           showActiveSurface(callUI.activeCallPeer, "");
+        }
+        if (!media.pc || !media.localStream || !callUI.localMediaReady) {
+          await rejoinActiveCallFromSnapshot(call, "backfill_active");
+          continue;
         }
         if (incoming && call.pending_sdp_offer && media.pc) {
           applyRemoteSdpOffer(call.pending_sdp_offer);

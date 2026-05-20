@@ -33,8 +33,39 @@ permissions:
   attestations: write
 
 jobs:
+  call_reliability_gate:
+    name: call reliability release gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: deterministic call reliability soak
+        run: |
+          python scripts/call_reliability_soak_gate.py --iterations 640 --out benchmarks/results/release-call-reliability-soak.json
+
+      - name: upload call reliability evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-call-reliability-soak
+          path: |
+            benchmarks/results/release-call-reliability-soak.json
+            benchmarks/results/release-call-reliability-soak.jsonl
+          if-no-files-found: warn
+
   build:
     name: build reproducible artifacts
+    needs: call_reliability_gate
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}

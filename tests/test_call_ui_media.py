@@ -177,7 +177,7 @@ def test_media_watchdog_restarts_stuck_negotiation(index_html: str) -> None:
     assert "media.pc.signalingState" in snippet
     assert "sendLocalSdpOffer" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 13600]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 15000]
     assert 'ensureMediaNegotiation("metrics").catch' in metrics_snippet
     active_idx = index_html.find('window.handleLivingPresenceCallEvent = function')
     active_idx = index_html.find('if (phase === "active")', active_idx)
@@ -353,7 +353,7 @@ def test_call_media_watchdog_repairs_stalled_frames(index_html: str) -> None:
 
 def test_call_engine_detects_frozen_media_and_network_resume(index_html: str) -> None:
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 13000]
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 14500]
     assert "frozenMediaTicks" in metrics_snippet
     assert "videoElementFrozen" in metrics_snippet
     assert "audioElementFrozen" in metrics_snippet
@@ -591,6 +591,84 @@ def test_backend_session_authority_drives_recovery_ui(index_html: str) -> None:
     assert "applyBackendSessionAuthority(" in metrics_snippet
     assert "metricsResult && metricsResult.session_authority" in metrics_snippet
     assert "session_authority: callUI.lastSessionAuthority" in index_html
+
+
+def test_backend_recovery_intent_drives_repair_actions(index_html: str) -> None:
+    assert "async function applyBackendRecoveryIntent" in index_html
+    idx = index_html.find("async function applyBackendRecoveryIntent")
+    snippet = index_html[idx:idx + 6200]
+    for action in [
+        "revive_playback",
+        "downshift",
+        "audio_first_repair",
+        "restart_ice",
+        "force_relay",
+        "renegotiate",
+        "rebuild_peer_connection",
+    ]:
+        assert action in snippet
+    assert "rememberBackendRecoveryIntent" in index_html
+    assert "recovery_intent_seen" in index_html
+    assert "recovery_intent_applied" in index_html
+    assert "recovery_intent_failed" in index_html
+    assert "media.preferRelayNext = true" in snippet
+    assert "applyBackendPathRecommendation" in snippet
+    assert "backendActionAllowed(`intent_${action}`" in snippet
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 16000]
+    assert "applyBackendRecoveryIntent(" in metrics_snippet
+    assert "metricsResult && metricsResult.recovery_intent" in metrics_snippet
+    assert "recovery_intent: callUI.lastRecoveryIntent" in index_html
+
+
+def test_call_metrics_reports_relay_policy_truth(index_html: str) -> None:
+    assert "routePolicyDetail" in index_html
+    assert "bestRelayHealth" in index_html
+    assert "turnCredentialExpiresAtMs" in index_html
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 16000]
+    assert "best_relay_health: media.bestRelayHealth" in metrics_snippet
+    assert "best_relay_score: media.bestRelayScore" in metrics_snippet
+    assert "metricsResult.routePolicy" in metrics_snippet
+
+
+def test_call_ui_proactively_probes_relay_health(index_html: str) -> None:
+    assert "async function requestRelayHealthProbe" in index_html
+    idx = index_html.find("async function requestRelayHealthProbe")
+    snippet = index_html[idx:idx + 2300]
+    assert "/api/peer-rtc/relay-probe" in snippet
+    assert "lastRelayProbeMs" in snippet
+    assert "relay_probe_completed" in snippet
+    assert "relay_probe_failed" in snippet
+    assert 'requestRelayHealthProbe("ice_config")' in index_html
+    assert 'requestRelayHealthProbe("metrics")' in index_html
+
+
+def test_call_ui_refreshes_expiring_turn_credentials(index_html: str) -> None:
+    assert "async function refreshIceConfigForCall" in index_html
+    assert "function maybeRefreshTurnCredentials" in index_html
+    idx = index_html.find("async function refreshIceConfigForCall")
+    snippet = index_html[idx:idx + 3200]
+    assert "/api/peer-rtc/ice-config?call_id=" in snippet
+    assert "media.pc.setConfiguration" in snippet
+    assert "turn_credentials_refreshed" in snippet
+    assert "turn_credentials_refresh_failed" in snippet
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 15500]
+    assert 'maybeRefreshTurnCredentials("metrics")' in metrics_snippet
+
+
+def test_call_trace_export_downloads_backend_flight_recorder(index_html: str) -> None:
+    assert 'id="btn-call-export-trace"' in index_html
+    idx = index_html.find('"#btn-call-export-trace"')
+    snippet = index_html[idx:idx + 1800]
+    assert "/api/v1/calls/" in snippet
+    assert "/trace" in snippet
+    assert "backend_trace" in snippet
+    assert "local_debug" in snippet
+    assert "one-link-call-trace-" in snippet
+    assert "call_trace_exported" in snippet
+    assert "call_trace_export_failed" in snippet
 
 
 def test_inbound_accept_waits_for_offer_instead_of_self_offering(index_html: str) -> None:

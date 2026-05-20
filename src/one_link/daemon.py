@@ -1115,6 +1115,17 @@ class Daemon:
         self._call_reliability: _CRB = _CRB(
             log_path=_data_dir() / "logs" / "call_reliability.jsonl",
         )
+        import threading as _threading_mod
+        self._call_resume_path = _data_dir() / "logs" / "call_resume_ledger.json"
+        self._call_resume_lock: _threading_mod.Lock = _threading_mod.Lock()
+        self._call_resume_enabled = (
+            os.environ.get("ONE_LINK_CALL_RESUME", "").strip().lower()
+            in {"1", "true", "yes", "on"}
+            or "PYTEST_CURRENT_TEST" not in os.environ
+            or bool(os.environ.get("ONE_LINK_HOME"))
+        )
+        if self._call_resume_enabled:
+            self._restore_call_resume_ledger()
         # Living Presence Tier β/γ/δ/ε/η runtime adapters. These
         # are the live-system glue between the pure engine modules
         # and the daemon's tick loop + HTTP surface.
@@ -1541,6 +1552,163 @@ class Daemon:
             with contextlib.suppress(OSError):
                 self._lock_file.close()
             self._lock_file = None
+
+    # ─── call resume persistence ────────────────────────────────────────
+    def _snapshot_call_for_resume(self, mgr) -> dict | None:
+        """Return a bounded, local-only call record for restart recovery."""
+        try:
+            lifecycle = mgr.state.lifecycle
+            phase_name = lifecycle.phase.name.lower()
+            if phase_name == "ended":
+                return None
+            call_id = str(getattr(mgr, "call_id", "") or "")
+            if not call_id:
+                return None
+            sdp_backfill = dict(self._call_sdp_backfill.get(call_id, {}))
+            ice_backfill = list(self._call_ice_backfill.get(call_id, []))[-32:]
+            return {
+                "version": 1,
+                "saved_at_ms": int(time.time() * 1000),
+                "call_id": call_id,
+                "peer_master_vk_hex": str(lifecycle.peer_master_vk_hex),
+                "local_role": str(lifecycle.local_role),
+                "local_master_vk_hex": str(self.me.fingerprint),
+                "negotiated_capabilities": sorted(
+                    str(x) for x in mgr.state.session.negotiated_capabilities
+                ),
+                "lifecycle": {
+                    "phase": phase_name,
+                    "started_at_ms": int(lifecycle.started_at_ms),
+                    "invite_sent_at_ms": int(lifecycle.invite_sent_at_ms),
+                    "accepted_at_ms": int(lifecycle.accepted_at_ms),
+                    "ended_at_ms": int(lifecycle.ended_at_ms),
+                    "end_cause": lifecycle.end_cause.name.lower(),
+                    "resume_window_close_at_ms": int(lifecycle.resume_window_close_at_ms),
+                    "invite_timeout_ms": int(lifecycle.invite_timeout_ms),
+                    "resume_window_ms": int(lifecycle.resume_window_ms),
+                },
+                "media_backfill": {
+                    "sdp": sdp_backfill,
+                    "ice": ice_backfill,
+                },
+            }
+        except Exception:
+            return None
+
+    def _save_call_resume_ledger(self) -> None:
+        """Persist active call truth atomically so a daemon restart can rejoin."""
+        if not getattr(self, "_call_resume_enabled", True):
+            return
+        try:
+            with self._call_resume_lock:
+                path = self._call_resume_path
+                records = []
+                for call_id in self._call_registry.active_call_ids():
+                    mgr = self._call_registry.get(call_id)
+                    if mgr is None:
+                        continue
+                    rec = self._snapshot_call_for_resume(mgr)
+                    if rec is not None:
+                        records.append(rec)
+                payload = {
+                    "version": 1,
+                    "saved_at_ms": int(time.time() * 1000),
+                    "calls": records,
+                }
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+                tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+                os.replace(tmp, path)
+        except Exception as exc:
+            log.debug("call resume ledger save failed: %s", exc)
+
+    def _restore_call_resume_ledger(self) -> None:
+        """Restore restart-resumable call state from the local ledger."""
+        if not getattr(self, "_call_resume_enabled", True):
+            return
+        try:
+            path = self._call_resume_path
+            if not path.is_file():
+                return
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            calls = payload.get("calls")
+            if not isinstance(calls, list):
+                return
+        except Exception as exc:
+            log.debug("call resume ledger load failed: %s", exc)
+            return
+
+        try:
+            from one_link.call_signaling import CallPhase, CallState, EndCause
+        except Exception:
+            return
+
+        now_ms = int(time.time() * 1000)
+        max_age_ms = 12 * 60 * 60 * 1000
+        restored = 0
+        for rec in calls:
+            if not isinstance(rec, dict):
+                continue
+            try:
+                saved_at = int(rec.get("saved_at_ms") or 0)
+                if saved_at and now_ms - saved_at > max_age_ms:
+                    continue
+                call_id = str(rec.get("call_id") or "")
+                peer_fp = str(rec.get("peer_master_vk_hex") or "")
+                role = str(rec.get("local_role") or "")
+                if not call_id or not peer_fp or role not in {"originator", "recipient"}:
+                    continue
+                life = rec.get("lifecycle") if isinstance(rec.get("lifecycle"), dict) else {}
+                phase = CallPhase[str(life.get("phase") or "").upper()]
+                if phase == CallPhase.ENDED:
+                    continue
+                end_cause_name = str(life.get("end_cause") or "unset").upper()
+                end_cause = EndCause.__members__.get(end_cause_name, EndCause.UNSET)
+                mgr = self._call_registry.open(
+                    call_id=call_id,
+                    peer_master_vk_hex=peer_fp,
+                    local_role=role,
+                    local_master_vk_hex=self.me.fingerprint,
+                    started_at_ms=int(life.get("started_at_ms") or saved_at or now_ms),
+                    negotiated_capabilities=frozenset(
+                        str(x) for x in (rec.get("negotiated_capabilities") or [])
+                    ),
+                )
+                mgr.state.lifecycle = CallState(
+                    call_id=call_id,
+                    peer_master_vk_hex=peer_fp,
+                    local_role=role,
+                    phase=phase,
+                    started_at_ms=int(life.get("started_at_ms") or saved_at or now_ms),
+                    invite_sent_at_ms=int(life.get("invite_sent_at_ms") or 0),
+                    accepted_at_ms=int(life.get("accepted_at_ms") or 0),
+                    ended_at_ms=int(life.get("ended_at_ms") or 0),
+                    end_cause=end_cause,
+                    resume_window_close_at_ms=int(life.get("resume_window_close_at_ms") or 0),
+                    invite_timeout_ms=int(life.get("invite_timeout_ms") or 30_000),
+                    resume_window_ms=int(life.get("resume_window_ms") or 600_000),
+                )
+                media = rec.get("media_backfill") if isinstance(rec.get("media_backfill"), dict) else {}
+                sdp = media.get("sdp") if isinstance(media.get("sdp"), dict) else {}
+                ice = media.get("ice") if isinstance(media.get("ice"), list) else []
+                self._call_sdp_backfill[call_id] = {
+                    str(k): str(v) for k, v in sdp.items()
+                    if k in {"sdp_offer", "sdp_answer"} and isinstance(v, str)
+                }
+                self._call_ice_backfill[call_id] = [
+                    item for item in ice[-32:] if isinstance(item, dict)
+                ]
+                self._call_reliability.record_event({
+                    "call_id": call_id,
+                    "event": "client_rejoin_requested",
+                    "reason": "daemon_restart",
+                })
+                restored += 1
+            except Exception as exc:
+                log.debug("skipping call resume record: %s", exc)
+                continue
+        if restored:
+            log.info("restored %d active call(s) from resume ledger", restored)
 
     # ─── persistence helper ─────────────────────────────────────────────
     def _persist(self, *, msg: dict, direction: str, peer_fp: str, peer_short_id: str) -> dict:
@@ -2297,6 +2465,7 @@ class Daemon:
                 self._call_registry.close(response.call_id)
             except Exception:
                 pass
+        self._save_call_resume_ledger()
 
         return tuple(delivered)
 
@@ -5472,6 +5641,7 @@ class Daemon:
                 self._call_registry.close(getattr(mgr, "call_id", ""))
             except Exception:
                 pass
+        self._save_call_resume_ledger()
 
     def _forward_sdp_to_ui(
         self,
@@ -5488,6 +5658,7 @@ class Daemon:
             return
         try:
             self._call_sdp_backfill.setdefault(call_id, {})[kind] = sdp_payload.sdp
+            self._save_call_resume_ledger()
             self._broadcast_tail({
                 "type": "call_event",
                 "tail_kind": kind,
@@ -5532,6 +5703,7 @@ class Daemon:
                 "end_of_candidates": ev["end_of_candidates"],
             })
             del pending[:-32]
+            self._save_call_resume_ledger()
             self._broadcast_tail(ev)
         except Exception:
             pass

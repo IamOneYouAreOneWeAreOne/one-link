@@ -1454,6 +1454,10 @@ class UIServer:
             "/api/peer-rtc/ice-config",
             self._guarded(self.api_peer_rtc_ice_config),
         )
+        r.add_post(
+            "/api/peer-rtc/relay-probe",
+            self._guarded(self.api_peer_rtc_relay_probe),
+        )
         # May 15 2026 — sovereignty surface. Three endpoints power
         # the UI Privacy panel:
         #   GET  /api/sovereignty/status     — preset + per-feature state
@@ -2250,8 +2254,11 @@ class UIServer:
         username = (username or "").strip()
         credential = (credential or "").strip()
         credential_type = "password" if credential else ""
+        issued_at_s = int(time.time())
+        expires_at_s = None
         if shared_secret and call_id:
-            expires = int(time.time()) + ttl_s
+            expires = issued_at_s + ttl_s
+            expires_at_s = expires
             safe_call = "".join(ch for ch in str(call_id) if ch.isalnum() or ch in "-_")[:48]
             username = f"{expires}:one-link:{safe_call}"
             digest = hmac.new(
@@ -2269,7 +2276,33 @@ class UIServer:
             "credential": credential,
             "credential_type": credential_type,
             "ttl_seconds": ttl_s if shared_secret and call_id else None,
+            "issued_at_ms": issued_at_s * 1000 if shared_secret and call_id else None,
+            "expires_at_ms": expires_at_s * 1000 if expires_at_s is not None else None,
         }
+
+    @staticmethod
+    def _relay_health_summary(candidates: list[dict]) -> dict:
+        summary = {
+            "total": len(candidates),
+            "observed": 0,
+            "healthy": 0,
+            "degraded": 0,
+            "poor": 0,
+            "unknown": 0,
+            "usable": 0,
+        }
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            health = str(cand.get("health") or "unknown")
+            if health not in {"healthy", "degraded", "poor", "unknown"}:
+                health = "unknown"
+            summary[health] += 1
+            if cand.get("observed"):
+                summary["observed"] += 1
+            if health in {"healthy", "degraded", "unknown"}:
+                summary["usable"] += 1
+        return summary
 
     def _rank_turn_urls(self, urls: list[str]) -> list[dict]:
         """Return TURN URLs in best-first order with privacy-safe health.
@@ -2339,6 +2372,119 @@ class UIServer:
             cand["rank"] = rank
         return out
 
+    @staticmethod
+    def _parse_turn_probe_target(url: str) -> dict | None:
+        text = str(url or "").strip()
+        lower = text.lower()
+        if not (lower.startswith("turn:") or lower.startswith("turns:")):
+            return None
+        scheme, rest = text.split(":", 1)
+        rest = rest.lstrip("/")
+        target = rest.split("?", 1)[0].strip()
+        if not target:
+            return None
+        default_port = 5349 if scheme.lower() == "turns" else 3478
+        host = target
+        port = default_port
+        if target.startswith("["):
+            end = target.find("]")
+            if end <= 1:
+                return None
+            host = target[1:end]
+            tail = target[end + 1:]
+            if tail.startswith(":"):
+                try:
+                    port = int(tail[1:])
+                except ValueError:
+                    return None
+        elif ":" in target:
+            host, raw_port = target.rsplit(":", 1)
+            try:
+                port = int(raw_port)
+            except ValueError:
+                return None
+        host = host.strip()
+        if not host or port <= 0 or port > 65535:
+            return None
+        return {
+            "scheme": scheme.lower(),
+            "host": host,
+            "port": port,
+            "tls": scheme.lower() == "turns",
+        }
+
+    async def _probe_turn_relay_once(
+        self,
+        url: str,
+        *,
+        timeout_s: float = 1.5,
+    ) -> dict:
+        target = self._parse_turn_probe_target(url)
+        if target is None:
+            return {"url": url, "ok": False, "reason": "invalid_turn_url"}
+        started = time.perf_counter()
+        writer = None
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    target["host"],
+                    int(target["port"]),
+                    ssl=bool(target["tls"]),
+                ),
+                timeout=max(0.2, min(5.0, float(timeout_s))),
+            )
+            rtt_ms = (time.perf_counter() - started) * 1000.0
+            return {
+                "url": url,
+                "ok": True,
+                "reason": "tcp_connect",
+                "rtt_ms": round(rtt_ms, 3),
+            }
+        except asyncio.TimeoutError:
+            return {"url": url, "ok": False, "reason": "timeout"}
+        except OSError:
+            return {"url": url, "ok": False, "reason": "connect_failed"}
+        except Exception:
+            return {"url": url, "ok": False, "reason": "probe_failed"}
+        finally:
+            if writer is not None:
+                with contextlib.suppress(Exception):
+                    writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+
+    def _record_relay_probe_result(self, result: dict) -> None:
+        url = str(result.get("url") or "")
+        if not url:
+            return
+        rtt_ms = result.get("rtt_ms") if result.get("ok") else None
+        try:
+            fn = getattr(self.daemon, "record_relay_observation", None)
+            if callable(fn):
+                fn(url, rtt_ms=rtt_ms, success=bool(result.get("ok")))
+                return
+        except Exception:
+            pass
+        store = getattr(self.daemon, "_relay_metrics", None)
+        if isinstance(store, dict):
+            now_ms = int(time.time() * 1000)
+            cur = store.get(url) or {
+                "rtt_ms": 100.0,
+                "loss_rate": 0.0,
+                "n_attempts": 0,
+                "n_successes": 0,
+                "last_observed_ms": now_ms,
+            }
+            cur["n_attempts"] = int(cur.get("n_attempts", 0)) + 1
+            if result.get("ok"):
+                cur["n_successes"] = int(cur.get("n_successes", 0)) + 1
+                if rtt_ms is not None:
+                    cur["rtt_ms"] = 0.8 * float(cur.get("rtt_ms", rtt_ms)) + 0.2 * float(rtt_ms)
+            prev_loss = float(cur.get("loss_rate", 0.0))
+            cur["loss_rate"] = 0.8 * prev_loss + 0.2 * (0.0 if result.get("ok") else 1.0)
+            cur["last_observed_ms"] = now_ms
+            store[url] = cur
+
     def _resolved_webrtc_ice_servers(self, *, call_id: str | None = None) -> list[dict]:
         servers: list[dict] = [{"urls": u} for u in self._resolved_stun_servers()]
         turn = self._resolved_turn_config(call_id=call_id)
@@ -2359,17 +2505,29 @@ class UIServer:
         relay_candidates = list(turn.get("candidates") or [])
         relay_ready = bool(relay_candidates)
         best = relay_candidates[0] if relay_candidates else None
+        best_health = best.get("health") if isinstance(best, dict) else None
+        best_score = best.get("score") if isinstance(best, dict) else None
+        relay_summary = self._relay_health_summary(relay_candidates)
         return {
             "mode": "direct_first",
             "relay_ready": relay_ready,
             "direct_first": True,
             "force_relay_on_repair": relay_ready,
+            "relay_escalation": {
+                "enabled": relay_ready and best_health != "poor",
+                "force_on_ice_failed": relay_ready and best_health != "poor",
+                "audio_first_before_relay": True,
+                "max_direct_repair_ms": 9000,
+            },
             "per_call_credentials": bool(
                 call_id and turn.get("credential_type") == "turn-rest-hmac-sha1"
             ),
+            "credential_expires_at_ms": turn.get("expires_at_ms"),
+            "credential_ttl_seconds": turn.get("ttl_seconds"),
             "relay_candidates": relay_candidates[:8],
-            "best_relay_health": best.get("health") if isinstance(best, dict) else None,
-            "best_relay_score": best.get("score") if isinstance(best, dict) else None,
+            "relay_health_summary": relay_summary,
+            "best_relay_health": best_health,
+            "best_relay_score": best_score,
         }
 
     # ── Sovereignty API (May 15 2026) ──────────────────────────────
@@ -2940,6 +3098,52 @@ class UIServer:
             "iceServers": servers,
             "routePolicy": route_policy,
             "sovereignty_default": len(servers) == 0,
+        })
+
+    async def api_peer_rtc_relay_probe(
+        self, request: web.Request,
+    ) -> web.Response:
+        """POST /api/peer-rtc/relay-probe - proactive TURN health check.
+
+        This only probes operator/user-configured TURN host:port reachability
+        and records privacy-safe RTT/success metrics. It never returns or logs
+        TURN credentials, SDP, ICE candidates, IP addresses, or media content.
+        """
+        call_id = None
+        try:
+            data = await request.json()
+            if isinstance(data, dict):
+                raw_call_id = data.get("call_id")
+                if isinstance(raw_call_id, str):
+                    call_id = raw_call_id
+        except Exception:
+            data = {}
+        turn = self._resolved_turn_config(call_id=call_id)
+        candidates = list(turn.get("candidates") or [])[:8]
+        urls = [str(c.get("url")) for c in candidates if isinstance(c, dict) and c.get("url")]
+        if not urls:
+            return web.json_response({
+                "ok": True,
+                "probed": 0,
+                "results": [],
+                "routePolicy": self._resolved_webrtc_route_policy(call_id=call_id),
+            })
+        timeout_s = 1.5
+        try:
+            timeout_s = max(0.3, min(5.0, float(os.environ.get("ONE_LINK_RELAY_PROBE_TIMEOUT_SECONDS", "1.5"))))
+        except ValueError:
+            timeout_s = 1.5
+        results = await asyncio.gather(*[
+            self._probe_turn_relay_once(url, timeout_s=timeout_s)
+            for url in urls
+        ])
+        for result in results:
+            self._record_relay_probe_result(result)
+        return web.json_response({
+            "ok": True,
+            "probed": len(results),
+            "results": results,
+            "routePolicy": self._resolved_webrtc_route_policy(call_id=call_id),
         })
 
     async def api_peer_rtc_ice_config_public(
@@ -3534,6 +3738,12 @@ class UIServer:
         if action_name == "report_call_event":
             return self._handle_report_call_event_action(body)
 
+        # Browser/app restart recovery: restore the live media engine
+        # against an existing backend-owned call instead of opening a
+        # duplicate call or letting each side guess.
+        if action_name == "rejoin":
+            return self._handle_rejoin_call_action(body)
+
         # Tier η — browser-driven Predictive Continuity API.
         if action_name == "observe_frame":
             return self._handle_observe_frame_action(body)
@@ -3729,13 +3939,20 @@ class UIServer:
             bandwidth_estimate_kbps=_opt_float("bandwidth_estimate_kbps"),
         )
         reliability = self._call_reliability()
-        recommendation = reliability.record_metrics(body)
-        self._append_call_media_audit(body)
+        route_policy = self._resolved_webrtc_route_policy(call_id=call_id)
+        enriched_body = dict(body)
+        enriched_body.setdefault("ice_relay_ready", route_policy.get("relay_ready"))
+        enriched_body.setdefault("best_relay_health", route_policy.get("best_relay_health"))
+        enriched_body.setdefault("best_relay_score", route_policy.get("best_relay_score"))
+        recommendation = reliability.record_metrics(enriched_body)
+        self._append_call_media_audit(enriched_body)
         return web.json_response({
             "ok": True,
             "call_id": call_id,
             "recommendation": recommendation.to_json(),
             "session_authority": reliability.session_for(call_id),
+            "recovery_intent": reliability.recovery_intent_for(call_id),
+            "routePolicy": route_policy,
         })
 
     def _handle_report_call_event_action(self, body: dict) -> web.Response:
@@ -3752,7 +3969,100 @@ class UIServer:
             "ok": True,
             "call_id": call_id,
             "session_authority": reliability.session_for(call_id),
+            "recovery_intent": reliability.recovery_intent_for(call_id),
         })
+
+    def _call_peer_label(self, peer_fp: str) -> str:
+        peer_label = peer_fp[:8]
+        try:
+            rec = self.daemon.state.get_peer(peer_fp)
+            if rec is not None:
+                peer_label = (
+                    getattr(rec, "local_alias", None)
+                    or getattr(rec, "display_name", None)
+                    or getattr(rec, "hostname", None)
+                    or peer_label
+                )
+        except Exception:
+            pass
+        return peer_label
+
+    def _call_media_backfill(self, call_id: str) -> tuple[dict, list]:
+        sdp_backfill = {}
+        ice_backfill = []
+        try:
+            sdp_backfill = dict(
+                getattr(self.daemon, "_call_sdp_backfill", {}).get(call_id, {})
+            )
+        except Exception:
+            sdp_backfill = {}
+        try:
+            ice_backfill = list(
+                getattr(self.daemon, "_call_ice_backfill", {}).get(call_id, [])
+            )
+        except Exception:
+            ice_backfill = []
+        return sdp_backfill, ice_backfill
+
+    def _call_snapshot(self, call_id: str, mgr) -> dict:
+        s = mgr.session_snapshot()
+        rec_value = s.recording_state.value if s.recording_state.value is not None else 0
+        peer_fp = mgr.state.peer_master_vk_hex
+        local_role = mgr.state.local_role
+        sdp_backfill, ice_backfill = self._call_media_backfill(call_id)
+        return {
+            "ok": True,
+            "call_id": call_id,
+            "peer_master_vk_hex": peer_fp,
+            "peer_label": self._call_peer_label(peer_fp),
+            "local_role": local_role,
+            "is_incoming": local_role == "recipient",
+            "pending_sdp_offer": sdp_backfill.get("sdp_offer"),
+            "pending_sdp_answer": sdp_backfill.get("sdp_answer"),
+            "pending_ice_candidates": ice_backfill,
+            "phase": mgr.phase.name.lower(),
+            "consent_phase": mgr.consent_phase.name.lower(),
+            "intensity": s.current_intensity.name.lower(),
+            "current_rung": s.current_rung_value.name.lower(),
+            "recording_state": int(rec_value),
+            "is_active": mgr.is_active,
+            "is_capturing": mgr.is_capturing,
+            "is_resumable": mgr.is_resumable,
+            "is_complete": mgr.is_complete,
+            "backend_authority": self._call_authority_snapshot(mgr),
+            "path_recommendation": self._call_reliability().recommendation_for(call_id),
+            "media_session_authority": self._call_reliability().session_for(call_id),
+            "media_recovery_intent": self._call_reliability().recovery_intent_for(call_id),
+            "rejoin": {
+                "allowed": bool(mgr.is_active or mgr.phase.name.lower() in {"inviting", "ringing"}),
+                "same_call_id": True,
+                "requires_media_restart": bool(mgr.is_active),
+            },
+        }
+
+    def _handle_rejoin_call_action(self, body: dict) -> web.Response:
+        call_id = body.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return web.json_response(
+                {"ok": False, "user_message": "This call is no longer active."},
+                status=404,
+            )
+        mgr = self.daemon._call_registry.get(call_id)
+        if mgr is None or mgr.is_complete:
+            return web.json_response(
+                {"ok": False, "user_message": "This call is no longer active."},
+                status=404,
+            )
+        reliability = self._call_reliability()
+        reliability.record_event({
+            "call_id": call_id,
+            "event": "client_rejoin_requested",
+            "reason": str(body.get("reason") or "browser_rejoin"),
+        })
+        snap = self._call_snapshot(call_id, mgr)
+        snap["session_authority"] = reliability.session_for(call_id)
+        snap["recovery_intent"] = reliability.recovery_intent_for(call_id)
+        return web.json_response(snap)
 
     def _append_call_media_event_audit(self, body: dict) -> None:
         """Append a sanitized call-media event row.
@@ -3853,6 +4163,20 @@ class UIServer:
                 "backend_recommendation_applied",
                 "backend_recommendation_failed",
                 "session_authority_seen",
+                "recovery_intent_seen",
+                "recovery_intent_applied",
+                "recovery_intent_failed",
+                "call_trace_exported",
+                "call_trace_export_failed",
+                "relay_probe_completed",
+                "relay_probe_failed",
+                "turn_credentials_refreshed",
+                "turn_credentials_refresh_failed",
+                "client_rejoin_requested",
+                "client_rejoin_media_ready",
+                "client_rejoin_failed",
+                "auto_call_trace_captured",
+                "auto_call_trace_failed",
             }
             if not call_id or event not in allowed_events:
                 return
@@ -3895,6 +4219,14 @@ class UIServer:
                         "backend_audio_first_repair",
                         "negotiating", "connected", "degraded",
                         "reconnecting", "recovered", "failed",
+                        "restart_ice", "force_relay",
+                        "recovery_intent", "revive_playback",
+                        "relay_probe", "credential_refresh",
+                        "credential_expiring",
+                        "browser_rejoin", "backfill_active",
+                        "media_rejoin", "daemon_restart",
+                        "auto_trace", "sustained_media_freeze",
+                        "watchdog_no_media_movement",
                     },
                 ),
                 "media_kind": _clean_token("media_kind", {"audio", "video"}),
@@ -3906,6 +4238,8 @@ class UIServer:
                         "enabled", "disabled", "full", "steady", "survival",
                         "auto", "direct", "relay", "same",
                         "negotiating", "degraded", "recovered",
+                        "survival", "audio_first",
+                        "healthy", "poor", "unknown",
                     },
                 ),
                 "ok": bool(body.get("ok")) if "ok" in body else None,
@@ -4021,6 +4355,15 @@ class UIServer:
                 "media_health_severity": _int("media_health_severity"),
                 "remote_video_src_attached": bool(body.get("remote_video_src_attached")),
                 "remote_audio_src_attached": bool(body.get("remote_audio_src_attached")),
+                "ice_relay_ready": bool(body.get("ice_relay_ready")),
+                "relay_escape_active": bool(body.get("relay_escape_active")),
+                "best_relay_health": (
+                    str(body.get("best_relay_health")).strip().lower()
+                    if str(body.get("best_relay_health") or "").strip().lower()
+                    in {"healthy", "degraded", "poor", "unknown"}
+                    else None
+                ),
+                "best_relay_score": _float("best_relay_score"),
             }
             log_dir = data_dir() / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -4274,6 +4617,7 @@ class UIServer:
                 "backend_authority": self._call_authority_snapshot(mgr),
                 "path_recommendation": self._call_reliability().recommendation_for(cid),
                 "media_session_authority": self._call_reliability().session_for(cid),
+                "media_recovery_intent": self._call_reliability().recovery_intent_for(cid),
             })
         return web.json_response({"calls": out})
 
@@ -4342,6 +4686,7 @@ class UIServer:
             "backend_authority": self._call_authority_snapshot(mgr),
             "path_recommendation": self._call_reliability().recommendation_for(call_id),
             "media_session_authority": self._call_reliability().session_for(call_id),
+            "media_recovery_intent": self._call_reliability().recovery_intent_for(call_id),
         })
 
     async def api_call_trace(self, request: web.Request) -> web.Response:
@@ -4355,6 +4700,7 @@ class UIServer:
             )
         trace = self._call_reliability().trace_for(call_id)
         trace["backend_authority"] = self._call_authority_snapshot(mgr)
+        trace["routePolicy"] = self._resolved_webrtc_route_policy(call_id=call_id)
         return web.json_response(trace)
 
     @staticmethod

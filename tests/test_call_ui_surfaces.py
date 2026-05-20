@@ -112,6 +112,7 @@ def test_buttons_have_aria_labels(index_html: str) -> None:
         ("btn-call-decline", "Decline"),
         ("btn-call-hangup", "End"),
         ("btn-call-record", "Save"),
+        ("btn-call-export-trace", "Export"),
     ]:
         idx = index_html.find(f'id="{btn_id}"')
         assert idx > 0, f"missing button id {btn_id}"
@@ -212,13 +213,36 @@ def test_active_call_surface_has_one_assist_rail(index_html: str) -> None:
 def test_call_driver_reports_metrics_to_immune_system(index_html: str) -> None:
     idx = index_html.find("async function reportCallMetricsOnce")
     assert idx > 0
-    snippet = index_html[idx:idx + 13800]
+    snippet = index_html[idx:idx + 15200]
     assert "media.pc.getStats()" in snippet
     assert 'action: "report_metrics"' in snippet
     assert "bandwidth_estimate_kbps" in snippet
     assert "raw_loss_rate" in snippet
     assert "smoothed_rtt_ms" in snippet
     assert "setInterval(reportCallMetricsOnce, 2000)" in index_html
+
+
+def test_call_driver_auto_captures_trace_on_freeze_and_watchdog(index_html: str) -> None:
+    assert "autoTraceBuffer: []" in index_html
+    fn_idx = index_html.find("async function captureAutoCallTrace")
+    assert fn_idx > 0
+    fn_snippet = index_html[fn_idx:fn_idx + 2600]
+    assert "/api/v1/calls/${encodeURIComponent(callId)}/trace" in fn_snippet
+    assert "window._oneLinkCallDebug" in fn_snippet
+    assert "localStorage.setItem" in fn_snippet
+    assert "one_link_auto_call_traces" in fn_snippet
+    assert "auto_call_trace_captured" in fn_snippet
+    assert "auto_call_trace_failed" in fn_snippet
+
+    metrics_idx = index_html.find("async function reportCallMetricsOnce")
+    metrics_snippet = index_html[metrics_idx:metrics_idx + 20000]
+    assert 'captureAutoCallTrace("sustained_media_freeze"' in metrics_snippet
+    watchdog_idx = index_html.find("function startMediaWatchdog")
+    watchdog_snippet = index_html[watchdog_idx:watchdog_idx + 1600]
+    assert 'captureAutoCallTrace("watchdog_no_media_movement"' in watchdog_snippet
+    debug_idx = index_html.find("window._oneLinkCallDebug = async function")
+    debug_snippet = index_html[debug_idx:debug_idx + 3500]
+    assert "auto_trace_buffer: callUI.autoTraceBuffer" in debug_snippet
 
 
 def test_call_driver_backfills_pending_ice_candidates(index_html: str) -> None:
@@ -257,6 +281,27 @@ def test_call_driver_suppresses_duplicate_rings_after_accept(index_html: str) ->
     ring_snippet = index_html[ring_idx:ring_idx + 1200]
     assert "callUI.acceptedCallIds.has(callId)" in ring_snippet
     assert 'reason: "duplicate_ring"' in ring_snippet
+
+
+def test_call_driver_rejoins_active_calls_after_browser_reload(index_html: str) -> None:
+    assert "lastRejoinAttemptMs" in index_html
+    rejoin_idx = index_html.find("async function rejoinActiveCallFromSnapshot")
+    assert rejoin_idx > 0
+    rejoin_snippet = index_html[rejoin_idx:rejoin_idx + 3600]
+    assert 'action: "rejoin"' in rejoin_snippet
+    assert "same call" not in rejoin_snippet.lower()
+    assert "setupRtcPeerConnection()" in rejoin_snippet
+    assert "startLocalMedia({ audio: true, video: wantsVideo })" in rejoin_snippet
+    assert "client_rejoin_media_ready" in rejoin_snippet
+    assert "applyRemoteSdpOffer(snapshot.pending_sdp_offer)" in rejoin_snippet
+    assert "applyRemoteSdpAnswer(snapshot.pending_sdp_answer)" in rejoin_snippet
+    assert "await applyRemoteIceCandidate" in rejoin_snippet
+    assert 'ensureMediaNegotiation("rejoin")' in rejoin_snippet
+
+    backfill_idx = index_html.find("async function backfillLivingPresenceCalls")
+    backfill_snippet = index_html[backfill_idx:backfill_idx + 4200]
+    assert "!media.pc || !media.localStream || !callUI.localMediaReady" in backfill_snippet
+    assert 'rejoinActiveCallFromSnapshot(call, "backfill_active")' in backfill_snippet
 
 
 def test_start_call_paints_overlay_before_daemon_roundtrip(index_html: str) -> None:
