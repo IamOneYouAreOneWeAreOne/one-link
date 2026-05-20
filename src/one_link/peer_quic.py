@@ -92,14 +92,21 @@ class QuicEndpointConfig:
     """Bind address. ``0.0.0.0:0`` picks an OS-assigned port; the
     daemon publishes the resulting port via mDNS / rendezvous."""
 
-    keep_alive_interval_ms: int = 5_000
+    keep_alive_interval_ms: int = 10_000
     """How often the endpoint sends a PING to detect dead peers.
-    5s matches the field-snapshot tick so the per-peer state stays
-    fresh."""
+    Bumped from 5s → 10s after real-network observation: under
+    quiet conditions the 5s tick generated more wakeful traffic
+    than necessary. 10s is well below the idle timeout so the
+    connection stays warm without burning radio time."""
 
-    max_idle_timeout_ms: int = 30_000
+    max_idle_timeout_ms: int = 300_000
     """How long without traffic before the connection is considered
-    dead. 30s is conservative enough to survive a cellular handoff."""
+    dead. Bumped from 30s → 300s (5 min) after real-network
+    observation: cached outbound connections were going
+    ``alive=False`` between bench scenarios with idle gaps of
+    ~30-60s — forcing a redial-cost on every subsequent send.
+    5 min easily survives cellular handoff, Wi-Fi roaming, lid
+    close, and the natural gaps between user-initiated sends."""
 
 
 def _build_native_identity_from_pem(identity_pem: str):
