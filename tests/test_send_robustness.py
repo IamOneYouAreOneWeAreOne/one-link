@@ -60,6 +60,44 @@ class _DesyncedChannel:
 # ─── handshake-timeout protection ─────────────────────────────────
 
 @pytest.mark.asyncio
+async def test_send_text_retries_same_message_id_after_transient_read_drop(
+    tmp_path: Path,
+    monkeypatch,
+):
+    me = _new_identity()
+    them = _new_identity()
+    daemon = Daemon(me)
+    daemon.state = State(db_path=tmp_path / "state.db")
+    daemon.state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    daemon.state.set_peer_trust(them.fingerprint, "pinned")
+    peer = Peer(
+        short_id=them.short_id,
+        hostname="peer",
+        address="127.0.0.1",
+        port=1,
+        ed_pub_hex=them.public_bytes.hex(),
+    )
+    sent_ids: list[str] = []
+
+    async def fake_send_to(_peer, msgs):
+        sent_ids.append(str(msgs[0]["id"]))
+        if len(sent_ids) == 1:
+            raise asyncio.IncompleteReadError(partial=b"", expected=4)
+        return [{"t": "ACK", "of": msgs[0]["id"]}]
+
+    monkeypatch.setattr(daemon, "send_to", fake_send_to)
+    result = await daemon.send_text(peer, "hello")
+
+    assert result["ack"]["of"] == result["sent"]["id"]
+    assert len(sent_ids) == 2
+    assert sent_ids[0] == sent_ids[1] == result["sent"]["id"]
+
+
+@pytest.mark.asyncio
 async def test_send_file_aborts_when_receiver_doesnt_speak_protocol(
     tmp_path: Path,
     monkeypatch,

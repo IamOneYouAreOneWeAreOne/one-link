@@ -65,6 +65,11 @@ def test_asyncio_timeout_is_transient():
     assert _is_transient_send_error(asyncio.TimeoutError()) is True
 
 
+def test_incomplete_read_is_transient():
+    err = asyncio.IncompleteReadError(partial=b"", expected=4)
+    assert _is_transient_send_error(err) is True
+
+
 def test_runtimeerror_handshake_timeout_is_transient():
     e = RuntimeError("file send to abc: handshake timed out after 8.0s")
     assert _is_transient_send_error(e) is True

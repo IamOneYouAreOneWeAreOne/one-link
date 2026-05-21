@@ -381,7 +381,15 @@ def _is_transient_send_error(exc: BaseException) -> bool:
     Ratchet header mismatch is session-bound and recoverable: drop the
     session, preserve the staged file, and retry after a fresh handshake.
     """
-    if isinstance(exc, (OSError, ConnectionError, asyncio.TimeoutError)):
+    if isinstance(
+        exc,
+        (
+            OSError,
+            ConnectionError,
+            asyncio.TimeoutError,
+            asyncio.IncompleteReadError,
+        ),
+    ):
         return True
     msg = str(exc).lower()
     if "capability" in msg and "disabled" in msg:
@@ -16019,8 +16027,24 @@ class Daemon:
                 if ttl:
                     kwargs["ttl_ms"] = int(ttl)
         m = make_msg("TEXT", self.me.short_id, **kwargs)
-        acks = await self.send_to(peer, [m])
-        return {"sent": m, "ack": acks[0] if acks else None}
+        last_exc: BaseException | None = None
+        for attempt in range(2):
+            try:
+                acks = await self.send_to(peer, [m])
+                return {"sent": m, "ack": acks[0] if acks else None}
+            except Exception as exc:
+                if not _is_transient_send_error(exc) or attempt >= 1:
+                    raise
+                last_exc = exc
+                log.info(
+                    "retrying TEXT send to %s after transient session error: %s",
+                    peer.short_id,
+                    exc,
+                )
+                await asyncio.sleep(0.05)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("text send failed without an exception")
 
     async def send_self_mesh_remote_instruction(
         self,
