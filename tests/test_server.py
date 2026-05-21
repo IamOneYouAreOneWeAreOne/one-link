@@ -546,6 +546,42 @@ async def test_server_index_serves_html_and_sets_cookie():
 
 
 @pytest.mark.asyncio
+async def test_stale_index_token_recovers_for_local_document_navigation():
+    with daemon_pair() as p:
+        base, _token = _server_addr(p.a.home)
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"{base}/?t=abc",
+                headers={
+                    "Accept": "text/html",
+                    "Sec-Fetch-Dest": "document",
+                },
+            ) as r:
+                assert r.status == 200
+                txt = await r.text()
+                assert "old local session" in txt
+                assert "location.replace(location.pathname)" in txt
+                assert any(c.key == "ol_ui" for c in r.cookies.values())
+                assert r.headers.get("Cache-Control") == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_stale_index_token_still_rejects_subresource_request():
+    with daemon_pair() as p:
+        base, _token = _server_addr(p.a.home)
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"{base}/?t=abc",
+                headers={
+                    "Accept": "image/avif,image/webp,*/*",
+                    "Sec-Fetch-Dest": "image",
+                },
+            ) as r:
+                assert r.status == 401
+                assert await r.text() == "unauthorized"
+
+
+@pytest.mark.asyncio
 async def test_query_token_only_bootstraps_index_not_api():
     with daemon_pair() as p:
         base, token = _server_addr(p.a.home)

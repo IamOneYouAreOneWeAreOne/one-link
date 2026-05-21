@@ -1991,7 +1991,26 @@ class UIServer:
     async def _index(self, request: web.Request) -> web.Response:
         bootstrap_ok = request.query.get("t") == self.token
         if request.query.get("t") and not bootstrap_ok:
-            return web.Response(status=401, text="unauthorized")
+            # A stale desktop tab commonly keeps an old bootstrap token in
+            # its URL after the daemon restarts. Treat top-level loopback
+            # document navigations as recoverable, but keep API/subresource
+            # requests locked down so the token gate remains meaningful.
+            if not self._is_local_document_navigation(request):
+                return web.Response(status=401, text="unauthorized")
+            html = self._stale_session_recovery_page()
+            resp = web.Response(text=html, content_type="text/html")
+            self._set_ui_cookie(request, resp)
+            resp.headers["Cache-Control"] = "no-store"
+            resp.headers["Referrer-Policy"] = "no-referrer"
+            resp.headers["Content-Security-Policy"] = (
+                "default-src 'none'; "
+                "script-src 'unsafe-inline'; "
+                "style-src 'unsafe-inline'; "
+                "base-uri 'none'; "
+                "frame-ancestors 'none'; "
+                "form-action 'none'"
+            )
+            return resp
         try:
             html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -2040,24 +2059,63 @@ class UIServer:
             "form-action 'none'"
         )
         if bootstrap_ok or request.cookies.get(COOKIE_NAME) == self.token:
-            # v0.20.7 (security audit M13): mark Secure when this very
-            # request was served over HTTPS so the cookie can never be
-            # echoed back over plain HTTP. We can't unconditionally set
-            # Secure because the daemon also serves the same UI over
-            # plain http://127.0.0.1 by default; setting Secure on a
-            # plain-http response makes the browser drop the cookie.
-            # Tying it to request.scheme keeps the loopback story
-            # working while making the LAN-HTTPS path leak-proof.
-            resp.set_cookie(
-                COOKIE_NAME,
-                self.token,
-                httponly=True,
-                samesite="Strict",
-                secure=(request.scheme == "https"),
-                max_age=86400,
-                path="/",
-            )
+            self._set_ui_cookie(request, resp)
         return resp
+
+    def _is_local_document_navigation(self, request: web.Request) -> bool:
+        if not self._is_loopback_bound() or not self._accept_request_host(request):
+            return False
+        dest = (request.headers.get("Sec-Fetch-Dest") or "").lower()
+        if dest:
+            return dest == "document"
+        accept = (request.headers.get("Accept") or "").lower()
+        return "text/html" in accept
+
+    def _set_ui_cookie(self, request: web.Request, resp: web.Response) -> None:
+        # v0.20.7 (security audit M13): mark Secure when this very
+        # request was served over HTTPS so the cookie can never be
+        # echoed back over plain HTTP. We can't unconditionally set
+        # Secure because the daemon also serves the same UI over plain
+        # http://127.0.0.1 by default; setting Secure on a plain-http
+        # response makes the browser drop the cookie. Tying it to
+        # request.scheme keeps loopback working while making LAN-HTTPS
+        # leak-proof.
+        resp.set_cookie(
+            COOKIE_NAME,
+            self.token,
+            httponly=True,
+            samesite="Strict",
+            secure=(request.scheme == "https"),
+            max_age=86400,
+            path="/",
+        )
+
+    @staticmethod
+    def _stale_session_recovery_page() -> str:
+        return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Opening One Link</title>
+  <style>
+    html,body{height:100%;margin:0;background:#080910;color:#f8f8ff;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+    body{display:grid;place-items:center}
+    main{width:min(440px,calc(100vw - 40px));padding:28px;border:1px solid #2b2f3d;border-radius:18px;background:#11131c;box-shadow:0 20px 80px rgba(0,0,0,.45)}
+    h1{font-size:24px;margin:0 0 10px}
+    p{margin:0;color:#c8ccda;line-height:1.45}
+    button{margin-top:20px;border:0;border-radius:14px;background:#7657f4;color:white;font-weight:800;padding:12px 18px;cursor:pointer}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Opening One Link...</h1>
+    <p>This tab had an old local session. One Link refreshed it safely.</p>
+    <button type="button" onclick="location.replace(location.pathname)">Open now</button>
+  </main>
+  <script>setTimeout(function(){location.replace(location.pathname)},250)</script>
+</body>
+</html>"""
 
     # ─── /api/connect-info ────────────────────────────────────────────
     def _connect_info(self) -> dict:
