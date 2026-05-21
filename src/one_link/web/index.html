@@ -4731,6 +4731,54 @@
     white-space: nowrap;
   }
   .file-row .transfer-facts { max-width: 100%; }
+  /* Collapsed transfer-facts: tiny "Details" pill that expands the
+     row of fact-pills on click. Matches the existing details/summary
+     pattern in .file-row but scoped here so it works in chat bubbles
+     and the transfer pane too. */
+  .transfer-facts-collapsed {
+    margin-top: 6px;
+  }
+  .transfer-facts-collapsed summary {
+    cursor: pointer;
+    width: fit-content;
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 700;
+    list-style: none;
+    border-radius: 999px;
+    padding: 3px 9px;
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.10);
+    letter-spacing: .2px;
+    transition: background .12s, color .12s;
+  }
+  .transfer-facts-collapsed summary::-webkit-details-marker { display: none; }
+  .transfer-facts-collapsed summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 5px;
+    transform: translateY(-1px);
+    font-size: 9px;
+  }
+  .transfer-facts-collapsed[open] summary::before { content: "▾"; }
+  .transfer-facts-collapsed[open] summary,
+  .transfer-facts-collapsed summary:hover {
+    color: var(--text);
+    background: rgba(255,255,255,.10);
+  }
+  .transfer-facts-collapsed .transfer-facts {
+    margin-top: 6px;
+  }
+  .msg.out.file .transfer-facts-collapsed summary {
+    color: rgba(255,255,255,.78);
+    background: rgba(255,255,255,.14);
+    border-color: rgba(255,255,255,.20);
+  }
+  .msg.out.file .transfer-facts-collapsed[open] summary,
+  .msg.out.file .transfer-facts-collapsed summary:hover {
+    color: #fff;
+    background: rgba(255,255,255,.22);
+  }
   .file-row .file-group-details,
   .file-row .transfer-details {
     grid-column: 2 / -1;
@@ -12810,6 +12858,21 @@
     }
     return wrap;
   }
+  function renderTransferFactsCollapsed(t, kind) {
+    // Chat-bubble + transfer-pane variant: pills are useful for
+    // ops + debugging but visually busy on every message. Wrap them
+    // in <details> so the headline (size + status) stays clean and
+    // the user opts in to the detail pills when they want them.
+    const facts = renderTransferFacts(t, kind);
+    if (!facts) return null;
+    const details = document.createElement("details");
+    details.className = "transfer-facts-collapsed";
+    const summary = document.createElement("summary");
+    summary.textContent = "Details";
+    details.appendChild(summary);
+    details.appendChild(facts);
+    return details;
+  }
   function transferCommandMetrics(t) {
     if (!t) return [];
     const truth = t.autopilot_truth || {};
@@ -15414,7 +15477,7 @@
       detail.textContent = `${fmtBytes(t.progress_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)} · ${autoMsg}`;
       meta.appendChild(detail);
     }
-    const facts = renderTransferFacts(t, kind);
+    const facts = renderTransferFactsCollapsed(t, kind);
     if (facts) meta.appendChild(facts);
 
     // Inline image preview for received images that are on disk.
@@ -17265,7 +17328,7 @@
       meta.appendChild(bar);
       const command = renderTransferCommandCenter(t);
       if (command) meta.appendChild(command);
-      const facts = renderTransferFacts(t, statusKind(t));
+      const facts = renderTransferFactsCollapsed(t, statusKind(t));
       if (facts) meta.appendChild(facts);
       row.appendChild(meta);
       // v0.7.x: Retry button for failed outbound transfers. The
