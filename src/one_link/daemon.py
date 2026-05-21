@@ -102,6 +102,7 @@ from one_link.capabilities import (
     FILE_OFFER_BATCH_V1,
     FILES,
     FILE_SWARM,
+    BLOB_REQUEST_V1,
     FOLDER_SYNC,
     FOLDER_SYNC_BIDI_V1,
     LOCAL_CAPABILITIES,
@@ -5235,6 +5236,15 @@ class Daemon:
                 self._emit_capability_request(peer_fp, peer_sid, FOLDER_SYNC)
                 return
             await self._handle_blob_chunk(channel, msg, peer_fp)
+        elif t == "BLOB_REQUEST":
+            # D17 wire-up — receiver-initiated blob pull. Same cap gate
+            # as BLOB_OFFER; the actual reply (BLOB_OFFER + chunks) is
+            # gated again inside the handler so a stale revocation
+            # between dispatch + handler can't leak data.
+            if not self._capability_allowed(peer_fp, FOLDER_SYNC):
+                self._emit_capability_request(peer_fp, peer_sid, FOLDER_SYNC)
+                return
+            await self._handle_blob_request(channel, msg, peer_fp)
 
         # ─── FILE_PROVENANCE — inbound Reality-dot evidence ─────────────
         elif t == "FILE_PROVENANCE":
@@ -8524,6 +8534,183 @@ class Daemon:
                         prev = cur
             except OSError as e:
                 log.warning("blob stream %s failed: %s", blob_hex[:8], e)
+
+    async def _handle_blob_request(self, channel, msg, peer_fp):
+        """D17 wire-up — peer is asking us to push a blob they know we
+        have. The standard outbound BLOB_OFFER → BLOB_CHUNKs flow then
+        fires. Validates the request against the existing pinned-peer
+        + folder-share + capability gates so this can't widen access
+        beyond what BLOB_OFFER already permits.
+
+        Frame shape:
+            {"t": "BLOB_REQUEST", "blob": "<64-hex>",
+             "folder": "<name-optional>"}
+
+        - ``folder`` is optional. When set, the request is gated by the
+          folder's share-list (same as MANIFEST_WANTS-driven offers).
+          When unset, the blob must already be in our store AND the
+          requester must hold the FILES capability — this is the
+          dedupe-site path used for files exchanged outside of a
+          shared folder.
+        """
+        if not self._is_pinned(peer_fp) or self.blob_store is None:
+            return
+        blob = msg.get("blob")
+        if not self._valid_blob_hex(blob or ""):
+            return
+        if not self.blob_store.has(blob):
+            # We don't actually have it. Silent no-op — peer learns
+            # nothing from our non-response (their dedupe index will
+            # decay our claim via TTL).
+            return
+        folder_name = msg.get("folder")
+        if folder_name:
+            if self.state is None:
+                return
+            f = self.state.get_folder(folder_name)
+            if not f or peer_fp not in f["shared_with"]:
+                return
+            if not self.state.folder_peer_allows(folder_name, peer_fp, "push"):
+                return
+        else:
+            # No folder context — gate on the FILES capability instead.
+            # FILES is the dedupe-site fallback for blobs that aren't
+            # in any shared folder (e.g. a file the peer received via
+            # send_file earlier and is now refreshing).
+            if not self._capability_allowed(peer_fp, FILES):
+                return
+        try:
+            size = self.blob_store.size(blob)
+        except Exception:
+            return
+        # Pre-register the expected pull on the peer's side so their
+        # _handle_blob_offer accepts our reply — they explicitly asked
+        # for it, but the gate there checks the expected-pull set.
+        self._expected_blob_pulls.setdefault(peer_fp, set()).add(blob)
+        try:
+            await channel.send(encode_msg(make_msg(
+                "BLOB_OFFER", self.me.short_id,
+                blob=blob, size=size,
+            )))
+            seq = 0
+            with self.blob_store.open_read(blob) as fh:
+                prev = fh.read(CHUNK_SIZE)
+                while prev:
+                    cur = fh.read(CHUNK_SIZE)
+                    eof = not cur
+                    await channel.send(encode_msg(make_msg(
+                        "BLOB_CHUNK", self.me.short_id,
+                        blob=blob, seq=seq,
+                        data=base64.b64encode(prev).decode("ascii"),
+                        eof=eof,
+                    )))
+                    seq += 1
+                    prev = cur
+        except OSError as e:
+            log.warning("BLOB_REQUEST stream %s failed: %s", blob[:8], e)
+
+    def find_alternate_sources_for_blob(
+        self,
+        blob_hash: str,
+        *,
+        exclude: Optional[Iterable[str]] = None,
+        require_blob_request_cap: bool = True,
+    ) -> tuple[str, ...]:
+        """D17 wire-up — return paired peers that (a) have claimed to
+        hold ``blob_hash`` AND (b) advertise BLOB_REQUEST_V1 so we can
+        actually pull from them. Newest-first.
+
+        Used by transfer routing to redirect a fetch from a slow /
+        congested original sender to a faster alternate. The list
+        excludes peers in ``exclude`` (typically the original sender
+        plus any peers already being asked).
+
+        When ``require_blob_request_cap=False``, the cap filter is
+        skipped — useful for diagnostics or for the eventual fallback
+        path that uses the legacy MANIFEST_WANTS / BLOB_OFFER flow
+        rather than a direct BLOB_REQUEST.
+        """
+        try:
+            sites = self._dedupe_sites.sites_for(blob_hash, exclude=exclude)
+        except Exception:
+            return ()
+        if not require_blob_request_cap:
+            return sites
+        # Filter to peers that (a) are still pinned and (b) advertise
+        # the new BLOB_REQUEST_V1 capability so the protocol round-trip
+        # will actually work.
+        out: list[str] = []
+        for fp in sites:
+            if not self._is_pinned(fp):
+                continue
+            try:
+                features = self.state.get_peer_capabilities(fp) if self.state else []
+            except Exception:
+                features = []
+            if BLOB_REQUEST_V1 in features:
+                out.append(fp)
+        return tuple(out)
+
+    async def request_blob_from_peer(
+        self,
+        peer_fp: str,
+        blob_hash: str,
+        *,
+        folder_name: Optional[str] = None,
+        timeout_s: float = 30.0,
+    ) -> dict:
+        """D17 wire-up — Initiate a BLOB_REQUEST to ``peer_fp`` asking
+        them to push ``blob_hash`` over their existing outbound session
+        (or dial them if no session exists). Returns a structured dict
+        documenting the outcome. Never raises.
+
+        Status values:
+          - "requested": frame sent successfully; blob arrival happens
+            asynchronously via the standard BLOB_CHUNK path.
+          - "not_pinned": peer isn't pinned in our trust store.
+          - "no_cap": peer doesn't advertise BLOB_REQUEST_V1.
+          - "no_session": couldn't establish an outbound session.
+          - "send_failed": frame send raised.
+
+        ``folder_name`` (optional) is forwarded so the peer's
+        BLOB_REQUEST handler can scope the response to a shared folder.
+        """
+        if self.state is None:
+            return {"status": "send_failed", "detail": "daemon not initialized"}
+        if not self._is_pinned(peer_fp):
+            return {"status": "not_pinned"}
+        try:
+            features = self.state.get_peer_capabilities(peer_fp) or []
+        except Exception:
+            features = []
+        if BLOB_REQUEST_V1 not in features:
+            return {"status": "no_cap"}
+        rec = self.state.get_peer(peer_fp)
+        if rec is None:
+            return {"status": "send_failed", "detail": "peer record missing"}
+        # Look up an existing outbound session by peer_fp.
+        sess = None
+        try:
+            sess = self._outbound_sessions.get(peer_fp) if hasattr(
+                self, "_outbound_sessions"
+            ) else None
+        except Exception:
+            sess = None
+        if sess is None or not getattr(sess, "channel", None):
+            return {"status": "no_session"}
+        try:
+            payload = {"blob": blob_hash}
+            if folder_name:
+                payload["folder"] = folder_name
+            await asyncio.wait_for(
+                sess.channel.send(encode_msg(make_msg(
+                    "BLOB_REQUEST", self.me.short_id, **payload,
+                ))),
+                timeout=timeout_s,
+            )
+            return {"status": "requested"}
+        except Exception as exc:
+            return {"status": "send_failed", "detail": str(exc)}
 
     async def _handle_blob_offer(self, channel, msg, peer_fp):
         if not self._is_pinned(peer_fp) or self.blob_store is None:

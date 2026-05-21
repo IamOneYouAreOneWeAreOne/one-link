@@ -110,6 +110,14 @@ VIDEO_CALL = "video_call"
 # sync — graceful interop.
 FOLDER_SYNC_BIDI_V1 = "folder_sync_bidi_v1"
 
+# D17 (wire-up) — Receiver-initiated blob fetch. When both peers
+# advertise this, the daemon can send BLOB_REQUEST{blob=hash} and the
+# peer (if it has the blob and the requester is paired) responds with
+# BLOB_OFFER + BLOB_CHUNKs in the same channel. Lets the dedupe-site
+# index actually accelerate fetches by pulling from any paired peer
+# that has the blob cached, not just the original sender.
+BLOB_REQUEST_V1 = "blob_request_v1"
+
 LOCAL_CAPABILITIES = (
     CHAT,
     FILES,
@@ -123,6 +131,7 @@ LOCAL_CAPABILITIES = (
     FILE_OFFER_BATCH_V1,
     FOLDER_SYNC,
     FOLDER_SYNC_BIDI_V1,
+    BLOB_REQUEST_V1,
     MERKLE_SYNC,
     FUTURE_TRANSPORTS,
     SELF_MESH_MANIFEST,
@@ -196,6 +205,11 @@ TRANSPORT_LAYER_CAPS = (
     # (granting the peer access to the folder) is still gated by
     # FOLDER_SYNC + the per-folder share-list.
     FOLDER_SYNC_BIDI_V1,
+    # BLOB_REQUEST_V1 is a protocol extension of FOLDER_SYNC for
+    # receiver-pulled blob fetches. It doesn't grant any new permission;
+    # the BLOB_REQUEST handler still gates on the same pinned-peer +
+    # folder-share + capability checks as the existing BLOB_OFFER path.
+    BLOB_REQUEST_V1,
 )
 
 
