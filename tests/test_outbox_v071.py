@@ -684,6 +684,28 @@ async def test_api_send_queue_on_failure_opt_out(tmp_path: Path):
 
 # ─── helpers ───────────────────────────────────────────────────────
 
+def test_foreground_send_prioritizes_user_message_before_outbox_flush():
+    """A fresh session must not let backlog delivery race ahead of the
+    message the user just typed.
+
+    This pins the regression that made a simple "hi" appear queued/slow:
+    session creation scheduled an outbox flush immediately, and that flush
+    could acquire the same session lock before the foreground send.
+    """
+    import inspect
+    import textwrap
+
+    source = textwrap.dedent(inspect.getsource(Daemon.send_to))
+    get_session = source.find("_get_outbound_session(peer, flush_pending=False)")
+    send_frame = source.find("_send_via_transport")
+    flush_after = source.rfind("_schedule_outbox_flush(sess.peer_fp)")
+
+    assert get_session != -1
+    assert send_frame != -1
+    assert flush_after != -1
+    assert get_session < send_frame < flush_after
+
+
 def _async_returns(v):
     async def _co():
         return v

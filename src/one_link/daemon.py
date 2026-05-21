@@ -13725,6 +13725,7 @@ class Daemon:
         peer: Peer,
         *,
         resume_pending: bool = True,
+        flush_pending: bool = True,
     ) -> OutboundSession:
         peer_fp = self._peer_fp_from_peer(peer)
         if not peer_fp:
@@ -13754,7 +13755,10 @@ class Daemon:
                 )
             await self._drop_outbound_session(peer_fp)
             return await self._create_outbound_session_locked(
-                peer, peer_fp, resume_pending=resume_pending,
+                peer,
+                peer_fp,
+                resume_pending=resume_pending,
+                flush_pending=flush_pending,
             )
 
     async def _create_outbound_session_locked(
@@ -13763,6 +13767,7 @@ class Daemon:
         peer_fp: str,
         *,
         resume_pending: bool = True,
+        flush_pending: bool = True,
     ) -> OutboundSession:
         """Caller holds ``self._outbound_session_create_locks[peer_fp]``.
         Performs the dial + handshake + dict-store under the lock so a
@@ -13843,7 +13848,8 @@ class Daemon:
             # this session). Schedule any pending outbox messages
             # for delivery in the background — the caller doesn't
             # block on the flush.
-            self._schedule_outbox_flush(peer_fp)
+            if flush_pending:
+                self._schedule_outbox_flush(peer_fp)
             # v0.7.4: same trigger for paused outbound transfers.
             # The resume task acquires its own per-peer lock so two
             # session-up events can't fire duplicate sends. Fresh
@@ -13867,7 +13873,7 @@ class Daemon:
         peer_fp = self._peer_fp_from_peer(peer)
         if peer_fp and not self._capability_allowed(peer_fp, CHAT):
             raise RuntimeError(f"chat capability disabled for peer {peer.short_id}")
-        sess = await self._get_outbound_session(peer)
+        sess = await self._get_outbound_session(peer, flush_pending=False)
         try:
             async with sess.lock:
                 results: list[dict] = []
@@ -13950,6 +13956,7 @@ class Daemon:
                         )
                         self._broadcast_tail(ev)
                 self._schedule_resume_paused(sess.peer_fp, force=True)
+                self._schedule_outbox_flush(sess.peer_fp)
                 return results
         except Exception:
             await self._drop_outbound_session(sess.peer_fp)
