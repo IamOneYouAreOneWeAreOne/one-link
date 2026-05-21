@@ -37,6 +37,7 @@
 
 pub mod decision;
 pub mod error;
+pub mod learner;
 pub mod smart_rules;
 pub mod unified_min;
 pub mod weights;
@@ -45,9 +46,13 @@ pub use decision::{
     BatchDecision, ContractMode, ContractViolation, Decision, OnionHops, Path, Transport,
 };
 pub use error::SelectorError;
+pub use learner::{EnergyGradient, LearnerStats, OnlineLearner};
 pub use smart_rules::SmartRules;
 pub use unified_min::UnifiedMin;
 pub use weights::Weights;
+
+// Re-export the Decide trait at the crate root for the learner.
+pub use ol_decide::Decide;
 
 /// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

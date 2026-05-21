@@ -74,6 +74,35 @@ def unified_min(**weights):
     return _native_selector.UnifiedMin.with_weights(**weights)
 
 
+def online_learner(
+    learning_rate: float = 0.001,
+    regularization: float = 0.01,
+    weight_bound_multiplier: float = 10.0,
+):
+    """Construct a Phase I OnlineLearner — UnifiedMin + observed-regret
+    weight adaptation.
+
+    Production usage (gated by ONE_LINK_ONLINE_LEARN=1):
+        learner = selector_native.online_learner()
+        # decide as normal:
+        d = learner.decide(kind=..., size=..., ...)
+        # after observing the outcome (latency, leak, etc.) compute regret:
+        regret = observed_cost - expected_cost
+        learner.observe(regret, d, kind=..., size=..., ...)
+
+    Default rate (0.001) is small enough that ~100 mis-tuned
+    observations across a single decision can't materially change
+    behavior. Regularization (0.01) keeps weights bounded around
+    the factory defaults in steady state.
+    """
+    _require_native()
+    return _native_selector.OnlineLearner(
+        learning_rate=float(learning_rate),
+        regularization=float(regularization),
+        weight_bound_multiplier=float(weight_bound_multiplier),
+    )
+
+
 def safe_default() -> Decision:
     """The conservative fallback decision: 5-hop onion, cover on,
     anchor laid, emit-now, classical path. Used when smart logic errors
