@@ -46,6 +46,7 @@ use pyo3::prelude::*;
 mod aead;
 mod align;
 mod bandit;
+mod compress;
 mod radio_batcher;
 mod selector;
 mod bloom;
@@ -373,6 +374,17 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.radio_batcher", radio_batcher_mod)?;
+
+    // D14 — Payload-aware compression dispatcher. lz4 for fast paths,
+    // zstd for bulk, none for tiny msgs / already-compressed payloads.
+    // Replaces the daemon's static zstd-everywhere with per-(kind, size,
+    // hint) routing. ~30% bandwidth target on the test workload mix.
+    let compress_mod = PyModule::new_bound(py, "compress")?;
+    compress::register(py, &compress_mod)?;
+    m.add_submodule(&compress_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.compress", compress_mod)?;
 
     Ok(())
 }

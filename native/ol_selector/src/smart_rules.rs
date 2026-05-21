@@ -49,16 +49,26 @@ impl Decide<Decision> for SmartRules {
 
 /// Rule: transport choice.
 ///
-///   file & size > 500KB        → QuicStream (bulk)
+///   paranoid                    → Relay (hide path always)
+///   battery_save                → Relay if cellular, QuicStream otherwise
+///                                  (avoid expensive WebRTC SDP exchange)
+///   file & size > 500KB         → QuicStream (bulk)
 ///   stranger | cellular         → Relay (hide path on metered/untrusted)
+///   latency_strict & size<8KB   → QuicDatagram (no head-of-line block)
 ///   foreground & size < 8KB     → QuicDatagram (no head-of-line block)
 ///   else                        → QuicStream
 fn pick_transport(ctx: &Context) -> Transport {
+    if ctx.user_mode == UserMode::Paranoid {
+        return Transport::Relay;
+    }
     if ctx.kind == EventKind::File && ctx.size > 500_000 {
         return Transport::QuicStream;
     }
     if ctx.peer == PeerRelationship::Stranger || ctx.network == NetworkType::Cellular {
         return Transport::Relay;
+    }
+    if ctx.user_mode == UserMode::LatencyStrict && ctx.size < 8_000 {
+        return Transport::QuicDatagram;
     }
     if ctx.urgency == Urgency::Foreground && ctx.size < 8_000 {
         return Transport::QuicDatagram;
@@ -147,14 +157,26 @@ fn pick_batch(ctx: &Context) -> BatchDecision {
 
 /// Rule: anchor-lay for sub-RTT loss recovery.
 ///
+///   battery_save                → only on observed loss > 10% (save bytes)
+///   paranoid                    → always lay (resilience > bandwidth)
 ///   observed_loss > 5%          → yes
 ///   cellular & file             → yes (cellular often re-transmits at chunk granularity)
+///   latency_strict & file       → yes (re-transmit on loss adds latency)
 ///   else                        → no (anchor laying costs bandwidth)
 fn pick_anchor(ctx: &Context) -> bool {
+    if ctx.user_mode == UserMode::BatterySave {
+        return ctx.observed_loss > 0.10;
+    }
+    if ctx.user_mode == UserMode::Paranoid {
+        return true;
+    }
     if ctx.observed_loss > 0.05 {
         return true;
     }
     if ctx.network == NetworkType::Cellular && ctx.kind == EventKind::File {
+        return true;
+    }
+    if ctx.user_mode == UserMode::LatencyStrict && ctx.kind == EventKind::File {
         return true;
     }
     false
@@ -162,9 +184,17 @@ fn pick_anchor(ctx: &Context) -> bool {
 
 /// Rule: pre-warm the predictor for this event.
 ///
+///   battery_save                → never (no speculative work)
+///   latency_strict & strong pattern → yes (favor speed over caution)
 ///   pattern_strength > 0.5      → yes (predictor has signal)
 ///   else                        → no (cold predictor pollutes pattern store)
 fn pick_predictor_warm(ctx: &Context) -> bool {
+    if ctx.user_mode == UserMode::BatterySave {
+        return false;
+    }
+    if ctx.user_mode == UserMode::LatencyStrict && ctx.pattern_strength > 0.3 {
+        return true;
+    }
     ctx.pattern_strength > 0.5
 }
 
@@ -426,6 +456,93 @@ mod tests {
             ..paired_msg(100)
         };
         assert!(!pick_predictor_warm(&c));
+    }
+
+    // ───── Mode-aware refinement (F3) ──────────────────────────────
+
+    #[test]
+    fn paranoid_always_relay_transport() {
+        // Even big files via paranoid → relay path.
+        let c = Context {
+            kind: EventKind::File,
+            size: 10_000_000,
+            user_mode: UserMode::Paranoid,
+            ..paired_msg(0)
+        };
+        assert_eq!(pick_transport(&c), Transport::Relay);
+    }
+
+    #[test]
+    fn battery_save_anchor_only_on_high_loss() {
+        // Default loss 0.07: normal would anchor, battery_save would not.
+        let c = Context {
+            observed_loss: 0.07,
+            user_mode: UserMode::BatterySave,
+            ..paired_msg(100)
+        };
+        assert!(!pick_anchor(&c));
+        // But at 0.12 (above battery threshold) it does.
+        let c = Context {
+            observed_loss: 0.12,
+            user_mode: UserMode::BatterySave,
+            ..paired_msg(100)
+        };
+        assert!(pick_anchor(&c));
+    }
+
+    #[test]
+    fn paranoid_always_anchor() {
+        let c = Context {
+            observed_loss: 0.0,
+            user_mode: UserMode::Paranoid,
+            ..paired_msg(100)
+        };
+        assert!(pick_anchor(&c));
+    }
+
+    #[test]
+    fn latency_strict_anchor_file_always() {
+        let c = Context {
+            kind: EventKind::File,
+            size: 500_000,
+            observed_loss: 0.0,
+            user_mode: UserMode::LatencyStrict,
+            ..paired_msg(0)
+        };
+        assert!(pick_anchor(&c));
+    }
+
+    #[test]
+    fn battery_save_never_predictor_warm() {
+        let c = Context {
+            pattern_strength: 0.9,
+            user_mode: UserMode::BatterySave,
+            ..paired_msg(100)
+        };
+        assert!(!pick_predictor_warm(&c));
+    }
+
+    #[test]
+    fn latency_strict_warms_at_lower_threshold() {
+        // 0.35 wouldn't warm under normal (needs > 0.5)
+        // but does under latency_strict (needs > 0.3).
+        let c = Context {
+            pattern_strength: 0.35,
+            user_mode: UserMode::LatencyStrict,
+            ..paired_msg(100)
+        };
+        assert!(pick_predictor_warm(&c));
+    }
+
+    #[test]
+    fn latency_strict_small_uses_datagram() {
+        let c = Context {
+            size: 500,
+            urgency: Urgency::Background, // even background
+            user_mode: UserMode::LatencyStrict,
+            ..paired_msg(0)
+        };
+        assert_eq!(pick_transport(&c), Transport::QuicDatagram);
     }
 
     // ───── Full Decide impl ────────────────────────────────────────

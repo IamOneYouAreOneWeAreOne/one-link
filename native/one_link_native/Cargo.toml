@@ -45,6 +45,7 @@ ol_align          = { path = "../ol_align" }
 ol_decide         = { path = "../ol_decide" }
 ol_selector       = { path = "../ol_selector" }
 ol_radio_batcher  = { path = "../ol_radio_batcher" }
+ol_compress       = { path = "../ol_compress" }
 curve25519-dalek  = { version = "4", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
 ml-kem            = "0.2"
 hybrid-array      = "0.2"

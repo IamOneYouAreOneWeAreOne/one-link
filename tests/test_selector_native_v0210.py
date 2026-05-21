@@ -301,3 +301,84 @@ def test_invariant_battery_save_never_cover() -> None:
     ]:
         d = s.decide(kind=kind, size=size, peer=peer, user_mode="battery_save")
         assert d["cover_traffic"] is False, f"battery_save {kind} cover on"
+
+
+# ---------- F3 mode-aware refinement ----------
+
+
+def test_paranoid_transport_always_relay() -> None:
+    s = selector_native.smart_rules()
+    # Even big files through paranoid → relay path.
+    d = s.decide(
+        kind="FILE_CHUNK", size=10_000_000, peer="pinned", user_mode="paranoid"
+    )
+    assert d["transport"] == "relay"
+
+
+def test_paranoid_always_anchors() -> None:
+    s = selector_native.smart_rules()
+    d = s.decide(
+        kind="TEXT", size=100, peer="pinned", user_mode="paranoid",
+        observed_loss=0.0,
+    )
+    assert d["anchor_lay"] is True
+
+
+def test_battery_save_anchor_only_on_high_loss() -> None:
+    s = selector_native.smart_rules()
+    # 7% loss: battery_save would skip anchor (normal would lay it).
+    d_low = s.decide(
+        kind="TEXT", size=100, peer="pinned", user_mode="battery_save",
+        observed_loss=0.07,
+    )
+    assert d_low["anchor_lay"] is False
+    # 12% loss: battery_save lays anchor.
+    d_high = s.decide(
+        kind="TEXT", size=100, peer="pinned", user_mode="battery_save",
+        observed_loss=0.12,
+    )
+    assert d_high["anchor_lay"] is True
+
+
+def test_battery_save_never_warms_predictor() -> None:
+    s = selector_native.smart_rules()
+    d = s.decide(
+        kind="TEXT", size=100, peer="pinned",
+        user_mode="battery_save", pattern_strength=0.9,
+    )
+    assert d["predictor_warm"] is False
+
+
+def test_latency_strict_anchors_files() -> None:
+    s = selector_native.smart_rules()
+    d = s.decide(
+        kind="FILE_CHUNK", size=500_000, peer="pinned",
+        user_mode="latency_strict", observed_loss=0.0,
+    )
+    assert d["anchor_lay"] is True
+
+
+def test_latency_strict_warms_at_lower_threshold() -> None:
+    s = selector_native.smart_rules()
+    # 0.35 wouldn't warm under normal (needs > 0.5)
+    # but does under latency_strict (needs > 0.3).
+    d_strict = s.decide(
+        kind="TEXT", size=100, peer="pinned",
+        user_mode="latency_strict", pattern_strength=0.35,
+    )
+    assert d_strict["predictor_warm"] is True
+    d_normal = s.decide(
+        kind="TEXT", size=100, peer="pinned",
+        user_mode="normal", pattern_strength=0.35,
+    )
+    assert d_normal["predictor_warm"] is False
+
+
+def test_latency_strict_small_uses_datagram_regardless_of_urgency() -> None:
+    s = selector_native.smart_rules()
+    d = s.decide(
+        kind="TEXT", size=500, peer="pinned",
+        urgency="background",  # even background
+        user_mode="latency_strict",
+    )
+    assert d["transport"] == "quic_datagram"

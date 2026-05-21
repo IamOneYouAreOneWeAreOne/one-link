@@ -14124,7 +14124,24 @@ class Daemon:
                 if not live:
                     continue
             peers.add(r.peer_fp)
+        # D08 — pre-warm the predictor for each peer whose transfer is
+        # about to retry. If predict_next_files_for_peer returns high-
+        # confidence predictions, the daemon has already tracked them
+        # via _observe_prefetch; the prefetch substrate is the source
+        # of pattern_strength for the selector's predictor_warm field.
+        # Here we log the top-1 prediction at debug level for telemetry,
+        # without forcing any extra work on the prefetch hot path.
         for fp in peers:
+            with contextlib.suppress(Exception):
+                preds = self.predict_next_files_for_peer(fp, n=1)
+                if preds:
+                    blob_hex, confidence = preds[0]
+                    log.debug(
+                        "predictor pre-warm: peer=%s next_blob=%s confidence=%.3f",
+                        fp[:8],
+                        blob_hex.hex()[:12] if isinstance(blob_hex, bytes) else str(blob_hex)[:12],
+                        float(confidence),
+                    )
             self._schedule_resume_paused(fp)
         return len(peers)
 

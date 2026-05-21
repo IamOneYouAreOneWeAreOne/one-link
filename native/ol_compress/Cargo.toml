@@ -1,0 +1,22 @@
+[package]
+name = "ol_compress"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link: payload-aware compression dispatcher (lz4 / zstd / none) per integration-map D14"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_compress"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror = { workspace = true }
+lz4_flex  = { version = "0.11", default-features = false, features = ["std"] }
+zstd      = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+proptest  = { workspace = true }
+
+[lints]
+workspace = true

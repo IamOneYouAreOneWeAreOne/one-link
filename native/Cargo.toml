@@ -53,6 +53,7 @@ members = [
     "ol_decide",
     "ol_selector",
     "ol_radio_batcher",
+    "ol_compress",
     "one_link_native",
     # Future crates (added as they ship):
     # Future Phase A2:
