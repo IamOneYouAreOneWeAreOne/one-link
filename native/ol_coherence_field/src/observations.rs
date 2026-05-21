@@ -14,7 +14,9 @@
 //! 15% attacker fraction drove the naive field ~12% off truth). The
 //! trust weight scales the update:
 //!
-//!     new_τ = (1 − α·trust) · old_τ + α·trust · observed
+//! ```text
+//! new_τ = (1 − α·trust) · old_τ + α·trust · observed
+//! ```
 //!
 //! At trust = 1.0 this is the standard EWMA. At trust < 1.0 the update
 //! is dampened proportionally. At trust = 0 the field is read-only
