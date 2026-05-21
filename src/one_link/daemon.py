@@ -1178,6 +1178,13 @@ class Daemon:
         # Populated by the accept loop after binding the peer's
         # fingerprint via the recent-callback deque below.
         self._quic_inbound: dict[str, object] = {}
+        # QUIC endpoint-advertisement healing. QUIC ports are
+        # OS-assigned and can change on daemon restart. If a single
+        # ENDPOINT_UPDATE is missed, the fast path used to stay dark
+        # until a manual restart/pin. These timestamps throttle
+        # reciprocal announcements so pinned peers converge again
+        # automatically.
+        self._quic_endpoint_reply_last_ms: dict[str, int] = {}
         # Bounded ring of recent is_paired callback hits:
         # (timestamp_ms, fingerprint_bytes). The accept loop uses
         # the most-recent entry to map an inbound Connection back
@@ -14466,6 +14473,13 @@ class Daemon:
                     "stored QUIC port %d for peer %s",
                     quic_port_raw, peer_fp[:8],
                 )
+                if self._quic_local_port:
+                    asyncio.create_task(
+                        self._reply_endpoint_update_to_peer(
+                            peer_fp,
+                            reason="quic_port_reciprocal",
+                        )
+                    )
         except Exception as e:
             log.debug("QUIC port stash failed for %s: %s", peer_fp[:8], e)
         # Pick the most-likely-reachable endpoint:
@@ -14921,7 +14935,11 @@ class Daemon:
         if peer_port <= 0:
             return ()
         endpoints = rendezvous_client.discover_local_endpoints(peer_port=peer_port)
-        return tuple(sorted(f"{e.host}:{int(e.port)}" for e in endpoints))
+        parts = [f"{e.host}:{int(e.port)}" for e in endpoints]
+        quic_port = getattr(self, "_quic_local_port", None)
+        if quic_port:
+            parts.append(f"quic:{int(quic_port)}")
+        return tuple(sorted(parts))
 
     async def broadcast_endpoint_to_paired_if_changed(self) -> dict[str, object]:
         """Announce local endpoint changes caused by Wi-Fi/LAN movement."""
@@ -14944,6 +14962,75 @@ class Daemon:
             "previous": list(previous),
             "current": list(signature),
         }
+
+    async def _reply_endpoint_update_to_peer(
+        self,
+        peer_fp: str,
+        *,
+        reason: str = "reciprocal_quic_advertise",
+    ) -> bool:
+        """Send our current endpoint/QUIC port to one pinned peer.
+
+        This is the self-healing counterpart to broadcast-on-start:
+        when a pinned peer talks to us but our QUIC port state is not
+        converged, answer with a fresh ENDPOINT_UPDATE. Throttled per
+        peer so two healthy daemons do not chatter.
+        """
+        if not peer_fp or self.state is None:
+            return False
+        if not self._is_pinned(peer_fp):
+            return False
+        quic_port = getattr(self, "_quic_local_port", None)
+        if not quic_port:
+            return False
+        now_ms = int(time.time() * 1000)
+        last_ms = int(self._quic_endpoint_reply_last_ms.get(peer_fp, 0) or 0)
+        if now_ms - last_ms < 30_000:
+            return False
+        self._quic_endpoint_reply_last_ms[peer_fp] = now_ms
+        from one_link import rendezvous_client
+
+        peer_port = getattr(self, "_rendezvous_peer_port", 0)
+        if peer_port <= 0:
+            return False
+        try:
+            local_endpoints = rendezvous_client.discover_local_endpoints(
+                peer_port=peer_port
+            )
+        except Exception as exc:
+            log.debug("QUIC reciprocal endpoint enumerate failed: %s", exc)
+            return False
+        endpoint_dicts = [
+            {"host": e.host, "port": e.port}
+            for e in local_endpoints[: self.MAX_ENDPOINTS_PER_ANNOUNCEMENT]
+        ]
+        if not endpoint_dicts:
+            return False
+        try:
+            peer_obj = await self.resolve_for_send(peer_fp)
+            if peer_obj is None:
+                return False
+            outer = make_msg(
+                "ENDPOINT_UPDATE",
+                self.me.short_id,
+                endpoints=endpoint_dicts,
+                quic_port=int(quic_port),
+                reason=reason,
+            )
+            await asyncio.wait_for(self.send_to(peer_obj, [outer]), timeout=10.0)
+            log.debug(
+                "QUIC reciprocal endpoint update sent to %s (%s)",
+                peer_fp[:8],
+                reason,
+            )
+            return True
+        except Exception as exc:
+            log.debug(
+                "QUIC reciprocal endpoint update to %s failed: %s",
+                peer_fp[:8],
+                exc,
+            )
+            return False
 
     async def _handle_group_key_offer(
         self, channel: ch.Channel, msg: dict, peer_fp: str,
@@ -18792,6 +18879,33 @@ class Daemon:
                     "inbound": sorted(self._quic_inbound.keys()),
                     "advertised_ports": dict(self._quic_peer_ports),
                     "recent_paired_count": len(self._quic_recent_paired),
+                })
+            elif cmd == "quic_advertise":
+                peer_arg = str(req.get("peer") or req.get("peer_fp") or "")
+                peers = self._resolve_peer_candidates(peer_arg) if peer_arg else []
+                if peer_arg and not peers:
+                    fallback = await self.resolve_for_send(peer_arg)
+                    if fallback is not None:
+                        peers = [fallback]
+                if peers:
+                    delivered = 0
+                    for peer in peers:
+                        try:
+                            fp = fingerprint_of(peer.ed_pub)
+                            ok = await self._reply_endpoint_update_to_peer(
+                                fp,
+                                reason="manual_quic_advertise",
+                            )
+                            delivered += 1 if ok else 0
+                        except Exception:
+                            continue
+                else:
+                    delivered = await self.broadcast_endpoint_to_paired()
+                await self._reply(writer, {
+                    "ok": delivered > 0,
+                    "delivered": delivered,
+                    "local_port": self._quic_local_port,
+                    "advertised_ports": dict(self._quic_peer_ports),
                 })
             elif cmd == "quic_ping":
                 # Wave 2e: end-to-end QUIC connectivity probe. The
