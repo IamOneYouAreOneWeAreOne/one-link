@@ -1529,8 +1529,19 @@ class Daemon:
         # decisions are computed and logged at debug level (observability
         # mode). When set to "1" they would override the static logic
         # (deferred until existing send_file tests are updated).
+        #
+        # The selector instance is picked from ONE_LINK_SELECTOR_KIND:
+        #   - "smart_rules" (default): 14-rule discrete tree
+        #   - "unified_min": Phase H continuous energy-minimization
+        #   - "online_learner": Phase I UnifiedMin + observed regret
+        # All three share the same .decide(...) / .safe_default() /
+        # verify_contract surface, so the daemon code paths don't care
+        # which one is active.
+        self._selector_kind: str = os.environ.get(
+            "ONE_LINK_SELECTOR_KIND", "smart_rules"
+        ).strip().lower()
         try:
-            self._smart_selector: Any = selector_native.smart_rules()
+            self._smart_selector: Any = self._build_selector(self._selector_kind)
         except RuntimeError:
             self._smart_selector = None
         self._selector_mode: str = os.environ.get(
@@ -1559,6 +1570,16 @@ class Daemon:
         # BLOB_OFFER handlers + folder manifest application. Lookup is
         # opt-in by callers — no behavior change for existing paths.
         self._dedupe_sites: Any = dedupe_sites_module.DedupeSiteIndex()
+
+        # Phase I — OnlineLearner observe() feedback loop. At send-time
+        # we stash the (decision, context) that produced the dispatch
+        # so we can compute regret when the transfer reaches a terminal
+        # status and feed the result back to the learner. Bounded so a
+        # transfer that never reaches terminal doesn't accumulate
+        # forever; oldest entries fall off via LRU.
+        from collections import OrderedDict as _OD
+        self._pending_selector_observations: _OD = _OD()
+        self._pending_selector_observations_cap: int = 4096
 
     def _build_my_caps(self) -> dict:
         """Build a CAPS frame for THIS daemon. Includes our rendezvous
@@ -3518,6 +3539,18 @@ class Daemon:
                         )
             except Exception:
                 # Field-state writes must never break transfer accounting.
+                pass
+            # Phase I — OnlineLearner observe() feedback loop. When a
+            # transfer reaches terminal status, compute regret + feed
+            # back to the learner (if the active selector supports it).
+            try:
+                status = kwargs.get("status")
+                if status:
+                    self._maybe_feed_selector_observation(
+                        str(transfer_id), str(status),
+                    )
+            except Exception:
+                # Learner errors must never break transfer accounting.
                 pass
             return rec
         except Exception as e:
@@ -11147,6 +11180,7 @@ class Daemon:
         peer: Any,
         peer_fp: Optional[str],
         size: int,
+        transfer_id: Optional[str] = None,
     ) -> None:
         """Compute + log the Smart-Rules selector's decision for a
         send_file event, without changing actual routing behavior.
@@ -11189,19 +11223,25 @@ class Daemon:
             # Observed loss: ad-hoc 0.0 here; the relay-metrics EWMA
             # would feed in if we had a relay path picked, but at this
             # stage we haven't yet chosen a transport.
-            decision = self._smart_selector.decide(
-                kind="FILE_OFFER",
-                size=size,
-                peer=peer_label,
-                user_mode=self._user_mode_value,
-                pattern_strength=pattern_strength,
-            )
+            decide_kwargs = {
+                "kind": "FILE_OFFER",
+                "size": size,
+                "peer": peer_label,
+                "user_mode": self._user_mode_value,
+                "pattern_strength": pattern_strength,
+            }
+            decision = self._smart_selector.decide(**decide_kwargs)
             log.debug(
                 "selector(send_file): peer=%s size=%d -> %s",
                 (peer_fp or "?")[:8],
                 size,
                 decision,
             )
+            # Phase I — stash for observe() feedback on terminal status.
+            if transfer_id and isinstance(decision, dict):
+                self._record_pending_selector_observation(
+                    transfer_id, decision, decide_kwargs,
+                )
             # F4 — verify the decision respects the user's mode contract.
             # Log structured violations so production telemetry can
             # surface them; the SmartRules property test asserts this
@@ -11339,12 +11379,165 @@ class Daemon:
             return {"status": "backend_error", "detail": str(exc)}
         return {"status": result.status, "detail": result.detail}
 
+    def _record_pending_selector_observation(
+        self,
+        transfer_id: str,
+        decision: dict,
+        context: dict,
+    ) -> None:
+        """Phase I — Stash a (decision, context) tuple under
+        ``transfer_id`` so the eventual completion can compute regret
+        and call selector.observe(). Bounded LRU; oldest entries are
+        dropped when the cap is hit. Never raises."""
+        if not transfer_id or not isinstance(decision, dict):
+            return
+        try:
+            cache = self._pending_selector_observations
+            if transfer_id in cache:
+                cache.move_to_end(transfer_id)
+                cache[transfer_id] = (decision, dict(context or {}))
+            else:
+                cache[transfer_id] = (decision, dict(context or {}))
+                while len(cache) > self._pending_selector_observations_cap:
+                    cache.popitem(last=False)
+        except Exception:
+            pass
+
+    def _pop_pending_selector_observation(
+        self, transfer_id: str,
+    ) -> Optional[tuple[dict, dict]]:
+        """Pop the stashed (decision, context) for ``transfer_id``.
+        Returns None when nothing was stashed (transfer didn't go
+        through the selector path, or the cache evicted it)."""
+        if not transfer_id:
+            return None
+        try:
+            return self._pending_selector_observations.pop(
+                transfer_id, None,
+            )
+        except Exception:
+            return None
+
+    def _regret_for_transfer_status(self, status: str) -> Optional[float]:
+        """Phase I — Map a terminal transfer status to a scalar regret.
+
+        Regret is the excess cost vs the selector's expectation. Higher
+        means "the selector underestimated how bad this decision was";
+        the learner uses gradient descent on regret * partial-derivative
+        of energy by weight to push the weights toward better future
+        choices.
+
+        Mapping:
+          - completed: 0.0 (decision matched outcome — no learning signal)
+          - paused / waiting: 0.5 (peer reachability issue; signal that
+            the chosen transport was sub-optimal)
+          - failed: 1.0 (terminal failure — strongest learning signal)
+          - anything else: None (don't observe; non-terminal status)
+        """
+        s = (status or "").strip().lower()
+        if s == "completed":
+            return 0.0
+        if s in ("paused", "waiting", "waiting_for_device"):
+            return 0.5
+        if s == "failed":
+            return 1.0
+        return None
+
+    def _maybe_feed_selector_observation(
+        self, transfer_id: str, status: str,
+    ) -> None:
+        """Phase I — When a transfer reaches terminal status, pop the
+        stashed decision + context and call selector.observe(...) if
+        the active selector is a learner. Never raises."""
+        if self._smart_selector is None:
+            return
+        observe = getattr(self._smart_selector, "observe", None)
+        if not callable(observe):
+            return
+        regret = self._regret_for_transfer_status(status)
+        if regret is None:
+            return
+        stashed = self._pop_pending_selector_observation(transfer_id)
+        if stashed is None:
+            return
+        decision, context = stashed
+        try:
+            observe(regret=float(regret), decision=decision, **context)
+        except TypeError:
+            # Some learners may not accept all our context kwargs
+            # (e.g. user_mode); retry with the minimum surface.
+            try:
+                observe(
+                    regret=float(regret),
+                    decision=decision,
+                    kind=str(context.get("kind", "FILE_OFFER")),
+                    size=int(context.get("size", 0)),
+                    peer=str(context.get("peer", "stranger")),
+                )
+            except Exception as exc:
+                log.debug(
+                    "selector.observe() failed (minimum surface): %s", exc,
+                )
+        except Exception as exc:
+            log.debug("selector.observe() failed: %s", exc)
+
+    def _build_selector(self, kind: str) -> Any:
+        """Construct a per-event selector instance for ``kind``.
+
+        Recognised kinds:
+          - "smart_rules": 14-rule discrete decision tree (Phase B)
+          - "unified_min": continuous energy-minimization (Phase H)
+          - "online_learner": UnifiedMin + observed-regret weight
+            adaptation (Phase I)
+
+        Unknown kinds fall back to SmartRules with a log warning so a
+        typo in an env var never silently disables the selector.
+        Raises RuntimeError when the native module isn't installed
+        (caller catches + sets self._smart_selector = None).
+        """
+        k = (kind or "smart_rules").strip().lower()
+        if k == "unified_min":
+            return selector_native.unified_min()
+        if k in ("online_learner", "learner"):
+            return selector_native.online_learner()
+        if k not in ("", "smart_rules", "smart-rules"):
+            log.warning(
+                "unknown ONE_LINK_SELECTOR_KIND=%r; falling back to "
+                "smart_rules", kind,
+            )
+        return selector_native.smart_rules()
+
+    def selector_kind(self) -> str:
+        """Return the currently-active selector kind (one of
+        ``smart_rules`` / ``unified_min`` / ``online_learner``).
+        Surfaced for ops telemetry + the operator UI."""
+        return self._selector_kind
+
+    def selector_info(self) -> dict:
+        """Inspection helper: which selector is active + whether it's
+        a learner (i.e. has a working observe() loop)."""
+        kind = self._selector_kind
+        has_observe = False
+        try:
+            if self._smart_selector is not None:
+                has_observe = hasattr(self._smart_selector, "observe")
+        except Exception:
+            pass
+        return {
+            "kind": kind,
+            "available": self._smart_selector is not None,
+            "enforce": self._selector_enforce,
+            "mode": self._selector_mode,
+            "has_observe": has_observe,
+        }
+
     def _selector_decision_for_file(
         self,
         *,
         peer_fp: Optional[str],
         size: int,
         kind: str = "FILE_OFFER",
+        transfer_id: Optional[str] = None,
     ) -> Optional[dict]:
         """B2 — Compute (but do not log) the Smart-Rules decision for
         a send_file event, applying the F4 contract.
@@ -11373,13 +11566,14 @@ class Daemon:
                     pattern_strength = float(preds[0][1])
             except Exception:
                 pass
-            decision = self._smart_selector.decide(
-                kind=kind,
-                size=size,
-                peer=peer_label,
-                user_mode=self._user_mode_value,
-                pattern_strength=pattern_strength,
-            )
+            decide_kwargs = {
+                "kind": kind,
+                "size": size,
+                "peer": peer_label,
+                "user_mode": self._user_mode_value,
+                "pattern_strength": pattern_strength,
+            }
+            decision = self._smart_selector.decide(**decide_kwargs)
             violations = selector_native.verify_contract(
                 decision, self._user_mode_value
             )
@@ -11392,9 +11586,22 @@ class Daemon:
                     violations,
                 )
                 try:
-                    return self._smart_selector.safe_default()
+                    safe = self._smart_selector.safe_default()
+                    # Phase I — stash the safe-default for observe()
+                    # feedback so a violation case still trains the
+                    # learner toward safer choices.
+                    if transfer_id and isinstance(safe, dict):
+                        self._record_pending_selector_observation(
+                            transfer_id, safe, decide_kwargs,
+                        )
+                    return safe
                 except Exception:
                     return None
+            # Phase I — stash the chosen decision for observe() feedback.
+            if transfer_id and isinstance(decision, dict):
+                self._record_pending_selector_observation(
+                    transfer_id, decision, decide_kwargs,
+                )
             return decision
         except Exception as exc:
             log.debug("selector enforce eval failed: %s", exc)
@@ -14891,27 +15098,12 @@ class Daemon:
             raise RuntimeError(f"files capability disabled for peer {peer.short_id}")
         file_sig = self._file_cache_signature(path)
         size = int(file_sig["size"])
-        # D01 — observability call to the Smart-Rules selector.
-        # In `off` mode (default), no work is done. In `log` mode,
-        # the selector computes a decision and logs it at debug level
-        # so production telemetry can compare against the static
-        # decision before the selector becomes load-bearing. The
-        # actual routing logic below is unchanged.
-        if self._selector_mode in ("log", "1"):
-            self._log_selector_decision_for_file(
-                peer=peer,
-                peer_fp=peer_fp_for_policy,
-                size=size,
-            )
-        # B2 — Smart-Rules enforcement. Gated by ONE_LINK_SMART_SELECTOR_ENFORCE.
-        # When on, the selector decision is computed once here and reused
-        # below to override the static QUIC_SMALL_FILE_THRESHOLD branch.
-        selector_decision: Optional[dict] = None
-        if self._selector_enforce:
-            selector_decision = self._selector_decision_for_file(
-                peer_fp=peer_fp_for_policy,
-                size=size,
-            )
+        # Resolve blob_hex + transfer_id early so the selector calls
+        # below can stash a (decision, context) tuple under a stable
+        # transfer_id and the Phase I observe() loop fires for every
+        # transfer (not just retries that come in with a transfer_id
+        # already attached). blake3 of a path is cheap; the cached
+        # file-index path skips the rehash.
         cached_file_index: FileIndex | None = None
         cached_index_kind = "miss"
         cached = self._cached_file_index(file_sig)
@@ -14925,6 +15117,30 @@ class Daemon:
                 FileIndex(blob_hash=blob_hex, size=size, chunks=()),
                 index_kind="hash_only",
             )
+        transfer_id = transfer_id or f"out:{blob_hex}:{uuid.uuid4().hex[:12]}"
+        # D01 — observability call to the Smart-Rules selector.
+        # In `off` mode (default), no work is done. In `log` mode,
+        # the selector computes a decision and logs it at debug level
+        # so production telemetry can compare against the static
+        # decision before the selector becomes load-bearing. The
+        # actual routing logic below is unchanged.
+        if self._selector_mode in ("log", "1"):
+            self._log_selector_decision_for_file(
+                peer=peer,
+                peer_fp=peer_fp_for_policy,
+                size=size,
+                transfer_id=transfer_id,
+            )
+        # B2 — Smart-Rules enforcement. Gated by ONE_LINK_SMART_SELECTOR_ENFORCE.
+        # When on, the selector decision is computed once here and reused
+        # below to override the static QUIC_SMALL_FILE_THRESHOLD branch.
+        selector_decision: Optional[dict] = None
+        if self._selector_enforce:
+            selector_decision = self._selector_decision_for_file(
+                peer_fp=peer_fp_for_policy,
+                size=size,
+                transfer_id=transfer_id,
+            )
         cdc_chunks: tuple[Chunk, ...] = ()
         cdc_index: list[dict] = []
         stream_chunks_total = max(1, (size + CHUNK_SIZE - 1) // CHUNK_SIZE)
@@ -14934,7 +15150,8 @@ class Daemon:
         # as 'failed' rather than disappearing silently. The peer_fp at
         # this stage is the policy-side estimate (from peer.ed_pub_hex);
         # the post-handshake _verify_channel_peer corrects it on success.
-        transfer_id = transfer_id or f"out:{blob_hex}:{uuid.uuid4().hex[:12]}"
+        # (transfer_id was resolved above so the Phase I selector
+        # observe() stash is keyed off a stable id.)
         provisional_fp = peer_fp_for_policy or ""
         existing = self.state.get_transfer(transfer_id) if self.state else None
         existing_progress_bytes = int(
