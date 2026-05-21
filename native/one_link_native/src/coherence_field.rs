@@ -20,8 +20,10 @@ use ol_coherence_field::{
     pde::CgConfig,
     prefetch_priorities, rotation_cadence_multiplier, screening_length, solve_helmholtz,
     source::SupportPhaseConfig,
-    support_phase_kernel, Calibration, Domain, FragilityEvent,
-    GraphLaplacian as RustGraphLaplacian, PrefetchPriority, RotationCadence,
+    support_phase_kernel,
+    wave::{WaveError, WaveStepper as RustWaveStepper},
+    Calibration, Domain, FragilityEvent, GraphLaplacian as RustGraphLaplacian, PrefetchPriority,
+    RotationCadence,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -372,12 +374,104 @@ fn observation_err_to_py(err: ObservationError) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
+fn wave_err_to_py(err: WaveError) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
+
+/// pyo3 wrapper around `WaveStepper` (D25 / RESEARCH-GRADE).
+#[pyclass(name = "WaveStepper", module = "one_link_native.coherence_field")]
+pub struct PyWaveStepper {
+    inner: RustWaveStepper,
+}
+
+#[pymethods]
+impl PyWaveStepper {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: RustWaveStepper::new(),
+        }
+    }
+
+    /// Override the wave speed `c`. Returns self for chaining.
+    fn set_wave_speed(&mut self, c: f32) -> PyResult<()> {
+        // Re-create with new parameter; with_wave_speed consumes self,
+        // so swap inner via mem::take to honor the builder pattern.
+        let current = std::mem::take(&mut self.inner);
+        self.inner = current.with_wave_speed(c).map_err(wave_err_to_py)?;
+        Ok(())
+    }
+
+    /// Override the damping coefficient.
+    fn set_damping(&mut self, gamma: f32) -> PyResult<()> {
+        let current = std::mem::take(&mut self.inner);
+        self.inner = current.with_damping(gamma).map_err(wave_err_to_py)?;
+        Ok(())
+    }
+
+    /// Override the cascade-warning threshold.
+    fn set_threshold(&mut self, threshold: f32) {
+        let current = std::mem::take(&mut self.inner);
+        self.inner = current.with_threshold(threshold);
+    }
+
+    /// Seed the current snapshot from a {node_id: tau} dict.
+    fn seed(&mut self, values: std::collections::HashMap<String, f32>) {
+        self.inner.seed(&values);
+    }
+
+    /// Advance one time step. ``neighbors`` is a {node: [neighbor_ids]}
+    /// mapping. Returns the number of nodes whose disturbance crossed
+    /// the threshold during this step.
+    fn step(
+        &mut self,
+        dt: f32,
+        neighbors: std::collections::HashMap<String, Vec<String>>,
+    ) -> PyResult<u32> {
+        self.inner.step(dt, &neighbors).map_err(wave_err_to_py)
+    }
+
+    /// Current field value at `node`. None if untracked.
+    fn psi_at(&self, node: &str) -> Option<f32> {
+        self.inner.psi_at(node)
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    #[getter]
+    fn wave_speed(&self) -> f32 {
+        self.inner.wave_speed()
+    }
+
+    #[getter]
+    fn damping(&self) -> f32 {
+        self.inner.damping()
+    }
+
+    #[getter]
+    fn cascade_threshold(&self) -> f32 {
+        self.inner.cascade_threshold()
+    }
+
+    #[getter]
+    fn cascade_warnings(&self) -> u64 {
+        self.inner.cascade_warnings()
+    }
+
+    fn reset_warnings(&mut self) {
+        self.inner.reset_warnings();
+    }
+}
+
 /// Register the `coherence_field` submodule.
 pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", ol_coherence_field::VERSION)?;
     m.add("G_A_GALAXY_PLANCK", G_A_GALAXY_PLANCK)?;
     m.add_class::<PyGraphLaplacian>()?;
     m.add_class::<PyFieldObservations>()?;
+    m.add_class::<PyWaveStepper>()?;
     m.add_function(wrap_pyfunction!(py_solve_helmholtz, m)?)?;
     m.add_function(wrap_pyfunction!(py_green_function, m)?)?;
     m.add_function(wrap_pyfunction!(py_be_rar, m)?)?;

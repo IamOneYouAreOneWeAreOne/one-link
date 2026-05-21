@@ -1635,6 +1635,18 @@ class Daemon:
         # _peer_trust_score evaluation. Counts only — no peer IDs.
         self._alignment_trust_histogram: list[int] = [0, 0, 0, 0, 0]
 
+        # Integration map §11 + D24 — cascade warning counter. Every
+        # field-observation write probes |∇τ_c|² via gradient_at; if
+        # it exceeds the threshold, this counter ticks. Per Gap 25
+        # the gradient is RESEARCH-GRADE (high recall, ~21% precision
+        # at the tuned threshold), so the selector treats it as a
+        # soft signal — but operator dashboards still want to see
+        # cascade-warning rate as a leading indicator of mesh stress.
+        self._cascade_warning_threshold: float = float(
+            os.environ.get("ONE_LINK_CASCADE_THRESHOLD", "0.5") or "0.5",
+        )
+        self._cascade_warning_count: int = 0
+
         # Selector-decision telemetry. Every selector.decide() call from
         # _log_selector_decision_for_file or _selector_decision_for_file
         # increments these counters. Exposed via selector_decision_stats
@@ -11289,6 +11301,57 @@ class Daemon:
                 trust,
                 exc,
             )
+            return
+        # D24 + integration map §11 — probe gradient_at after every
+        # write. If |∇τ_c|² crosses the threshold, increment the
+        # cascade-warning counter. RESEARCH-GRADE per Gap 25, so the
+        # selector doesn't gate on this — it's a leading-indicator
+        # telemetry signal only.
+        with contextlib.suppress(Exception):
+            self._maybe_record_cascade_warning(peer_fp)
+
+    def _maybe_record_cascade_warning(self, peer_fp: str) -> None:
+        """D24 — Probe |∇τ_c|² at ``peer_fp`` and bump the cascade
+        warning counter when it crosses the threshold. Never raises.
+
+        Used as a soft signal in operator telemetry — the integration
+        map §11 calls for ``cascade_warnings`` count alongside the
+        other equation-of-ONE metrics. Per Gap 25 the gradient has
+        high recall + low precision at the tuned threshold, so we
+        treat crossings as suggestions, not commands.
+        """
+        if self._field_obs is None:
+            return
+        gradient_at = getattr(self._field_obs, "gradient_at", None)
+        if not callable(gradient_at):
+            return
+        try:
+            grad = gradient_at(peer_fp)
+        except Exception:
+            return
+        if grad is None:
+            return
+        try:
+            grad_f = float(grad)
+        except (TypeError, ValueError):
+            return
+        if grad_f > float(self._cascade_warning_threshold):
+            self._cascade_warning_count += 1
+
+    def cascade_warning_stats(self) -> dict:
+        """Integration map §11 — cascade-warning telemetry snapshot.
+
+        Returns the running count + the threshold + the gradient
+        availability so operators can tell whether the metric is
+        meaningful (gradient_at requires per-peer neighbor lists
+        configured on FieldObservations)."""
+        return {
+            "count": int(getattr(self, "_cascade_warning_count", 0) or 0),
+            "threshold": float(
+                getattr(self, "_cascade_warning_threshold", 0.5) or 0.5,
+            ),
+            "field_obs_available": getattr(self, "_field_obs", None) is not None,
+        }
 
     def _drain_radio_batcher_tick(self) -> int:
         """Drain any radio-batched outbound traffic on the prune tick.

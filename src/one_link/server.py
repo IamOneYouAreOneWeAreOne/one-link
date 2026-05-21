@@ -5337,6 +5337,11 @@ class UIServer:
             out["alignment_trust"] = d.alignment_trust_histogram()
         except Exception as exc:
             out["alignment_trust"] = {"error": str(exc)}
+        # Integration map §11 + D24 — cascade-warning counter.
+        try:
+            out["cascade_warnings"] = d.cascade_warning_stats()
+        except Exception as exc:
+            out["cascade_warnings"] = {"error": str(exc)}
         try:
             out["cover_traffic"] = d.cover_traffic_stats()
         except Exception as exc:

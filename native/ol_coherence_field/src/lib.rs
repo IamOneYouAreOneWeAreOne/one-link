@@ -57,6 +57,7 @@ pub mod interpolation;
 pub mod observations;
 pub mod pde;
 pub mod source;
+pub mod wave;
 
 pub use anchor::{apparent_horizon_anchor, screening_length, ScreeningRegime};
 pub use calibration::{Calibration, Domain};
@@ -75,6 +76,9 @@ pub use pde::{
 pub use source::{
     align_source, alignment_scalars, identity_dual_source, identity_dual_source_with_phase,
     linear_source, support_phase_kernel, SourceError,
+};
+pub use wave::{
+    WaveError, WaveStepper, DEFAULT_CASCADE_THRESHOLD, DEFAULT_DAMPING, DEFAULT_WAVE_SPEED,
 };
 
 /// Crate version embedded for diagnostics.
