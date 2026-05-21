@@ -8721,6 +8721,97 @@ class Daemon:
                 out.append(fp)
         return tuple(out)
 
+    async def request_blob_with_dedupe_fallback(
+        self,
+        blob_hash: str,
+        *,
+        primary: str,
+        folder_name: Optional[str] = None,
+        max_alternates: int = 3,
+        timeout_s: float = 30.0,
+    ) -> dict:
+        """D17 — Try to fetch ``blob_hash`` from ``primary``; if that
+        fails for a recoverable reason (no_session, not_pinned, no_cap,
+        send_failed), fall through to alternate dedupe sites learned
+        from prior BLOB_OFFER traffic.
+
+        Returns a structured dict documenting the chain:
+          {"status": "requested" | "no_alternates" | "all_failed",
+           "succeeded_via": <peer_fp or None>,
+           "primary_status": <status of primary attempt>,
+           "attempts": [{"peer": fp, "status": "...", "detail": "..."}, ...]}
+
+        - "requested" means a peer accepted the request (BLOB_OFFER +
+          BLOB_CHUNKs will land asynchronously). Could be the primary
+          or any alternate.
+        - "no_alternates" means primary failed AND no alternate sources
+          exist in the dedupe-site index.
+        - "all_failed" means primary + every alternate up to
+          max_alternates failed.
+
+        Bounds the alternate retries at ``max_alternates`` (default 3)
+        so a poisoned dedupe index can't cause an unbounded fanout.
+
+        Never raises.
+        """
+        attempts: list[dict] = []
+        # Try primary first.
+        primary_result = await self.request_blob_from_peer(
+            primary, blob_hash,
+            folder_name=folder_name,
+            timeout_s=timeout_s,
+        )
+        attempts.append({
+            "peer": primary,
+            "status": primary_result["status"],
+            "detail": primary_result.get("detail", ""),
+        })
+        if primary_result["status"] == "requested":
+            return {
+                "status": "requested",
+                "succeeded_via": primary,
+                "primary_status": "requested",
+                "attempts": attempts,
+            }
+        # Primary failed. Look for alternates.
+        try:
+            alternates = self.find_alternate_sources_for_blob(
+                blob_hash, exclude=[primary],
+            )
+        except Exception:
+            alternates = ()
+        if not alternates:
+            return {
+                "status": "no_alternates",
+                "succeeded_via": None,
+                "primary_status": primary_result["status"],
+                "attempts": attempts,
+            }
+        for alt in alternates[:max(0, int(max_alternates))]:
+            alt_result = await self.request_blob_from_peer(
+                alt, blob_hash,
+                folder_name=folder_name,
+                timeout_s=timeout_s,
+            )
+            attempts.append({
+                "peer": alt,
+                "status": alt_result["status"],
+                "detail": alt_result.get("detail", ""),
+            })
+            if alt_result["status"] == "requested":
+                return {
+                    "status": "requested",
+                    "succeeded_via": alt,
+                    "primary_status": primary_result["status"],
+                    "attempts": attempts,
+                }
+        return {
+            "status": "all_failed",
+            "succeeded_via": None,
+            "primary_status": primary_result["status"],
+            "attempts": attempts,
+        }
+
     async def request_blob_from_peer(
         self,
         peer_fp: str,
