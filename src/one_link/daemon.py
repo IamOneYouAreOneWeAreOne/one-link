@@ -11278,6 +11278,53 @@ class Daemon:
             return self._cover_traffic.apply_mode_contract()
         return False
 
+    def update_cover_traffic_rate_from_selector(self) -> Optional[float]:
+        """D05 wire-up — Adaptive cover-traffic rate.
+
+        Reads the selector's recent ``cover_ratio`` (fraction of
+        events that recommended cover_traffic=True) and maps it to a
+        rate multiplier on the cover-traffic emitter. The result is
+        a closed-loop feedback: when the selector sees more events
+        that want cover, the emitter scales up; when fewer events do,
+        the emitter throttles back toward a baseline floor.
+
+        Mapping:
+          - cover_ratio in [0, 1] -> multiplier = max(BASELINE,
+            cover_ratio). BASELINE = 0.3 so the emitter always
+            ships SOMETHING — a zero-rate emitter would itself be a
+            signal that nothing is happening, which is the leak we
+            want to prevent.
+          - In paranoid mode (F4-mandated), multiplier is forced to
+            1.0 regardless of the ratio; the F4 contract takes
+            precedence over the adaptive signal.
+
+        Returns the new multiplier, or None if the emitter / selector
+        aren't both available. Never raises.
+        """
+        if self._cover_traffic is None:
+            return None
+        try:
+            mode = self._user_mode_value
+        except Exception:
+            mode = "normal"
+        # F4 paranoid mandates full-rate cover regardless of signal.
+        if cover_traffic_module.is_cover_mandated(mode):
+            self._cover_traffic.set_rate_multiplier(1.0)
+            return 1.0
+        try:
+            stats = self.selector_decision_stats()
+            ratio = float(stats.get("cover_ratio", 0.0) or 0.0)
+        except Exception:
+            return None
+        # Floor at 0.3 — a fully-quiet emitter is itself a signal.
+        BASELINE = 0.3
+        multiplier = max(BASELINE, min(1.0, ratio))
+        try:
+            self._cover_traffic.set_rate_multiplier(multiplier)
+        except Exception:
+            return None
+        return multiplier
+
     def cover_traffic_stats(self) -> dict:
         """Inspection: return the cover-traffic emitter's current
         state. Returns ``{"available": False, ...}`` when the native

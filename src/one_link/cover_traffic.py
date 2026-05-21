@@ -120,6 +120,9 @@ class CoverTrafficDaemon:
         "_user_mode",
         "_env_gate",
         "_mode_lock",
+        "_rate_multiplier",
+        "_skipped",
+        "_rng",
     )
 
     def __init__(
@@ -158,6 +161,21 @@ class CoverTrafficDaemon:
         self._user_mode: str = "normal"
         self._env_gate: bool = False
         self._mode_lock = threading.Lock()
+        # Adaptive-rate multiplier in [0, 1]. The Bernoulli-skip
+        # in _run() emits with probability ``_rate_multiplier`` on
+        # every native-scheduler tick. Equivalent to a Poisson
+        # process at effective rate base_rate * multiplier.
+        # Default 1.0 = no adaptation (baseline rate).
+        self._rate_multiplier: float = 1.0
+        self._skipped: int = 0
+        # Dedicated RNG seeded from the same source so two daemons
+        # with the same seed produce the same skip pattern (testable).
+        import random as _random
+        self._rng = _random.Random()
+        # Derive a deterministic seed from the same bytes the scheduler
+        # got — when callers pass a fixed seed, the skip pattern is
+        # reproducible for tests.
+        self._rng.seed(int.from_bytes(seed, "big", signed=False))
 
     @property
     def rate_hz(self) -> float:
@@ -193,6 +211,40 @@ class CoverTrafficDaemon:
         overridden in both directions by mandated/forbidden modes."""
         with self._mode_lock:
             self._env_gate = bool(enabled)
+
+    def set_rate_multiplier(self, multiplier: float) -> None:
+        """Set the adaptive-rate multiplier in [0, 1].
+
+        Effective emission rate becomes ``base_rate * multiplier``
+        via a Bernoulli-skip in the run loop: every native scheduler
+        tick emits with probability ``multiplier``, skips otherwise.
+        Mathematically equivalent to a Poisson process at
+        ``base_rate * multiplier`` rate (thinning property).
+
+        Use cases:
+          - Selector-driven: ``cover_ratio`` from
+            ``Daemon.selector_decision_stats()`` scaled to a
+            multiplier. High cover_ratio -> high rate; low ->
+            baseline floor.
+          - Bandwidth-driven: throttle down when the radio is
+            constrained.
+
+        Clamped to [0.0, 1.0]. Values outside the range are silently
+        snapped to the nearest endpoint."""
+        m = max(0.0, min(1.0, float(multiplier)))
+        with self._mode_lock:
+            self._rate_multiplier = m
+
+    @property
+    def rate_multiplier(self) -> float:
+        """Current adaptive-rate multiplier."""
+        with self._mode_lock:
+            return self._rate_multiplier
+
+    @property
+    def skipped(self) -> int:
+        """Total scheduler ticks skipped by the Bernoulli adapter."""
+        return self._skipped
 
     @property
     def effective_enabled(self) -> bool:
@@ -256,13 +308,17 @@ class CoverTrafficDaemon:
             mode = self._user_mode
             gate = self._env_gate
             effective = should_run_cover(mode, gate)
+            multiplier = self._rate_multiplier
         return {
             "rate_hz": self._rate_hz,
+            "rate_multiplier": multiplier,
+            "effective_rate_hz": self._rate_hz * multiplier,
             "user_mode": mode,
             "env_gate": gate,
             "effective_enabled": effective,
             "running": self.is_running,
             "emitted": self._emitted,
+            "skipped": self._skipped,
             "errors": self._errors,
             "mandated_by_mode": is_cover_mandated(mode),
             "forbidden_by_mode": is_cover_forbidden(mode),
@@ -277,6 +333,16 @@ class CoverTrafficDaemon:
             wait_s = min(wait_ms / 1000.0, 30.0)
             if self._stop_event.wait(timeout=wait_s):
                 return
+            # Adaptive-rate Bernoulli skip. multiplier=1.0 always emits;
+            # multiplier=0.0 always skips. The thinning property of
+            # Poisson processes guarantees the resulting inter-arrival
+            # distribution is still Poisson with rate
+            # base_rate * multiplier.
+            with self._mode_lock:
+                m = self._rate_multiplier
+            if m < 1.0 and self._rng.random() >= m:
+                self._skipped += 1
+                continue
             if self._emit_cover is not None:
                 try:
                     self._emit_cover()
