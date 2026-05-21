@@ -255,6 +255,7 @@ STREAM_MAX_CHUNK_SIZE = 4 * 1024 * 1024
 STREAM_PIPELINE_TARGET_BYTES = 24 * 1024 * 1024
 STREAM_PIPELINE_MAX_CHUNKS = 16
 FILE_ACK_BATCH_MAX = 32
+FILE_QUIC_CHUNKS_ENABLED = False
 BINARY_FRAME_MAGIC = b"OLB1"
 BINARY_FRAME_HEADER_MAX = 64 * 1024
 MAX_INCOMING_FILE_BYTES = 1024 * 1024 * 1024  # match UI upload cap
@@ -17645,6 +17646,8 @@ class Daemon:
                         # would always be False on first run because
                         # _quic_outbound is empty.
                         if (
+                            FILE_QUIC_CHUNKS_ENABLED
+                            and
                             peer_fp_for_policy
                             and NATIVE_TRANSFER_INDEXED_V1 in peer_feature_set
                             and peer_fp_for_policy not in self._quic_outbound
@@ -17655,7 +17658,8 @@ class Daemon:
                                     peer_fp_for_policy, peer,
                                 )
                         cdc_quic_eligible = (
-                            peer_fp_for_policy is not None
+                            FILE_QUIC_CHUNKS_ENABLED
+                            and peer_fp_for_policy is not None
                             and NATIVE_TRANSFER_INDEXED_V1 in peer_feature_set
                             and peer_fp_for_policy in self._quic_outbound
                         )
@@ -18063,6 +18067,8 @@ class Daemon:
                         # dial per chunk. Failure here just means
                         # the transfer rides WebRTC, no error.
                         if (
+                            FILE_QUIC_CHUNKS_ENABLED
+                            and
                             native_transfer_used
                             and peer_fp_for_policy
                             and peer_fp_for_policy not in self._quic_outbound
@@ -18151,7 +18157,8 @@ class Daemon:
                                 # — the transfer always completes.
                                 quic_dispatched = False
                                 if (
-                                    peer_fp_for_policy
+                                    FILE_QUIC_CHUNKS_ENABLED
+                                    and peer_fp_for_policy
                                     and peer_fp_for_policy in self._quic_outbound
                                 ):
                                     quic_pending_batch.append(chunk_msg)
