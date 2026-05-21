@@ -50,25 +50,35 @@ impl Decide<Decision> for SmartRules {
 /// Rule: transport choice.
 ///
 ///   paranoid                    → Relay (hide path always)
-///   battery_save                → Relay if cellular, QuicStream otherwise
-///                                  (avoid expensive WebRTC SDP exchange)
+///   latency_strict              → QuicDatagram (size<8K) or QuicStream
+///                                  (NEVER relay — relay doubles RTT,
+///                                   which violates the LatencyStrict
+///                                   contract from Gap 20)
 ///   file & size > 500KB         → QuicStream (bulk)
 ///   stranger | cellular         → Relay (hide path on metered/untrusted)
-///   latency_strict & size<8KB   → QuicDatagram (no head-of-line block)
 ///   foreground & size < 8KB     → QuicDatagram (no head-of-line block)
 ///   else                        → QuicStream
 fn pick_transport(ctx: &Context) -> Transport {
     if ctx.user_mode == UserMode::Paranoid {
         return Transport::Relay;
     }
+    // LatencyStrict must short-circuit BEFORE the stranger/cellular →
+    // Relay branch. Per the F4 contract from Gap 20, LatencyStrict's
+    // p99 ≤ 80ms target excludes any relay path (doubles RTT). The
+    // selector accepts the privacy cost of going direct in exchange
+    // for the latency the user asked for.
+    if ctx.user_mode == UserMode::LatencyStrict {
+        return if ctx.size < 8_000 {
+            Transport::QuicDatagram
+        } else {
+            Transport::QuicStream
+        };
+    }
     if ctx.kind == EventKind::File && ctx.size > 500_000 {
         return Transport::QuicStream;
     }
     if ctx.peer == PeerRelationship::Stranger || ctx.network == NetworkType::Cellular {
         return Transport::Relay;
-    }
-    if ctx.user_mode == UserMode::LatencyStrict && ctx.size < 8_000 {
-        return Transport::QuicDatagram;
     }
     if ctx.urgency == Urgency::Foreground && ctx.size < 8_000 {
         return Transport::QuicDatagram;

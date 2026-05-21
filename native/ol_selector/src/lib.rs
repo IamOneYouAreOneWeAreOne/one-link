@@ -39,7 +39,9 @@ pub mod decision;
 pub mod error;
 pub mod smart_rules;
 
-pub use decision::{BatchDecision, Decision, OnionHops, Path, Transport};
+pub use decision::{
+    BatchDecision, ContractMode, ContractViolation, Decision, OnionHops, Path, Transport,
+};
 pub use error::SelectorError;
 pub use smart_rules::SmartRules;
 

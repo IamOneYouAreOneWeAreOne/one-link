@@ -5,7 +5,9 @@
 use ol_decide::{
     Context, Decide, EventKind, NetworkType, PeerRelationship, RadioState, Urgency, UserMode,
 };
-use ol_selector::{BatchDecision, Decision, OnionHops, Path, SmartRules, Transport};
+use ol_selector::{
+    BatchDecision, ContractMode, Decision, OnionHops, Path, SmartRules, Transport,
+};
 use proptest::prelude::*;
 
 fn arb_event_kind() -> impl Strategy<Value = EventKind> {
@@ -192,5 +194,26 @@ proptest! {
     fn safe_default_is_constant(ctx in arb_context()) {
         let d = SmartRules.safe_default(&ctx);
         prop_assert_eq!(d, Decision::safe_default());
+    }
+
+    /// F4 invariant: every selector output respects the user_mode's
+    /// contract. The selector should NEVER produce a Decision that
+    /// violates the mode the user asked for. This is the runtime
+    /// guarantee underpinning paranoid/battery_save/latency_strict.
+    #[test]
+    fn selector_output_respects_mode_contract(ctx in arb_context()) {
+        let d = SmartRules.decide(&ctx);
+        let mode = match ctx.user_mode {
+            UserMode::Normal => ContractMode::Normal,
+            UserMode::Paranoid => ContractMode::Paranoid,
+            UserMode::BatterySave => ContractMode::BatterySave,
+            UserMode::LatencyStrict => ContractMode::LatencyStrict,
+        };
+        let violations = d.verify_contract(mode);
+        prop_assert!(
+            violations.is_empty(),
+            "mode={:?} produced violations: {:?}; context={:?}; decision={:?}",
+            mode, violations, ctx, d,
+        );
     }
 }
