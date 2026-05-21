@@ -5348,6 +5348,13 @@ class UIServer:
             out["wave_forecast"] = d.wave_forecast_stats()
         except Exception as exc:
             out["wave_forecast"] = {"error": str(exc)}
+        # Phase E (D11/D12/D13) — adaptive transport refinement
+        # telemetry: heartbeat/reconnect/discovery bounds + per-peer
+        # reconnect EWMA preview + capability fail-open counter.
+        try:
+            out["adaptive_transport"] = d.adaptive_transport_stats()
+        except Exception as exc:
+            out["adaptive_transport"] = {"error": str(exc)}
         try:
             out["cover_traffic"] = d.cover_traffic_stats()
         except Exception as exc:

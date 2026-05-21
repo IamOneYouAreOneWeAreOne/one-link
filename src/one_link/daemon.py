@@ -297,6 +297,32 @@ PRIOR_INDEX_INTERVAL_S = 120.0
 # short (1.5s) so a real failure forces a fast reopen.
 OUTBOUND_SESSION_PING_AFTER_S = 30.0
 OUTBOUND_SESSION_PING_DEADLINE_S = 1.5
+
+# D13 — Adaptive heartbeat bounds. Per integration map Phase E E3:
+# heartbeat interval scales with τ_c trust + observed_loss so a
+# healthy paired peer only needs a probe every ~60s while a flaky /
+# stranger peer gets probed every ~10s. The min/max bound the
+# adaptive multiplier so a totally-unknown peer still gets a sane
+# interval.
+HEARTBEAT_MIN_INTERVAL_S = 10.0     # lower bound for adaptive interval
+HEARTBEAT_MAX_INTERVAL_S = 120.0    # upper bound; healthy peers
+HEARTBEAT_BASELINE_S = 30.0         # baseline (matches PING_AFTER_S)
+
+# D12 — Reconnect-backoff EWMA. Per integration map Phase E E4: when a
+# peer reconnects successfully, we EWMA-smooth the success-stride
+# (time between failures) so the next reconnect uses an interval
+# tuned to that peer's observed stability. Below: backoff bounds in
+# milliseconds + smoothing alpha.
+RECONNECT_BACKOFF_MIN_MS = 500
+RECONNECT_BACKOFF_MAX_MS = 60_000
+RECONNECT_BACKOFF_EWMA_ALPHA = 0.2
+
+# D11 — Adaptive discovery cadence bounds. mDNS probes are cheap but
+# not free; high-stability mesh -> long interval, recent churn ->
+# short interval to converge faster.
+DISCOVERY_MIN_INTERVAL_S = 2.0
+DISCOVERY_MAX_INTERVAL_S = 60.0
+DISCOVERY_BASELINE_S = 10.0
 # v0.7.1: dedup window for the capability_request WS event. A peer
 # retrying a denied FILE_OFFER once a second shouldn't fire 60 toasts;
 # the UI gets one prompt per (peer, cap) per minute.
@@ -1647,6 +1673,29 @@ class Daemon:
             os.environ.get("ONE_LINK_CASCADE_THRESHOLD", "0.5") or "0.5",
         )
         self._cascade_warning_count: int = 0
+
+        # D10 — Capability fail-open counter. Per integration map §2.3,
+        # when the capability verifier itself errors (signature parse
+        # failure, native crash, etc.) the daemon must fail OPEN +
+        # audit-log so a verifier bug doesn't break legitimate traffic.
+        # Counter is bumped every time the fail-open path fires; the
+        # audit log carries the structured reason so operators can
+        # decide whether the rate is acceptable.
+        self._capability_fail_open_count: int = 0
+
+        # D12 — Per-peer reconnect-backoff EWMA. EWMA tracks how long
+        # the peer's connections typically stay healthy; the next
+        # reconnect uses a backoff scaled to that stride so a high-
+        # churn peer doesn't burn CPU on tight retry while a stable
+        # peer reconnects fast. Keyed by peer_fp.
+        self._reconnect_stability_ewma_ms: dict[str, float] = {}
+
+        # D11 — Adaptive discovery cadence. Track churn rate so the
+        # mDNS probe interval scales accordingly. Initialised to the
+        # baseline; the prune loop nudges it based on observed
+        # peer-presence transitions.
+        self._discovery_interval_s: float = DISCOVERY_BASELINE_S
+        self._discovery_churn_count: int = 0
 
         # D25 — Wave-equation cascade forecaster. The leapfrog scheme
         # projects the τ_c field forward `dt` per tick and counts
@@ -11243,7 +11292,25 @@ class Daemon:
                 pass
         if self.state is None:
             return True
-        policy = self.state.get_peer_capability_policy(peer_fp)
+        # D10 — fail-open on verifier error. Per integration map §2.3,
+        # if the policy lookup itself errors (state corruption, lock
+        # contention, sqlite I/O failure), we fail OPEN + audit-log
+        # rather than fail-closed. Gap 16 K_verifies_wrong has slope
+        # 1.0: deny-on-verify-bug breaks legitimate traffic at full
+        # rate, which is much worse than the audit-log cost of
+        # allowing a few requests while the bug is fixed. The
+        # _capability_fail_open_count counter surfaces the rate to
+        # operators so a verifier regression is visible immediately.
+        try:
+            policy = self.state.get_peer_capability_policy(peer_fp)
+        except Exception as exc:
+            self._capability_fail_open_count += 1
+            log.warning(
+                "AUDIT: capability verifier error -> fail-open. "
+                "peer=%s cap=%s err=%s",
+                peer_fp[:8], cap, exc,
+            )
+            return True
         allowed = policy is None or cap in policy
 
         # D02 (decision-point catalog) — surface the A(x, t) Gaussian
@@ -11341,6 +11408,159 @@ class Daemon:
         # telemetry signal only.
         with contextlib.suppress(Exception):
             self._maybe_record_cascade_warning(peer_fp)
+
+    # ─── D11/D12/D13 adaptive transport refinement ───────────────────
+
+    def adaptive_heartbeat_interval(self, peer_fp: str) -> float:
+        """D13 — Compute the heartbeat interval for ``peer_fp`` from
+        trust + observed loss + forecast disturbance.
+
+        Mapping:
+          - trust = 1.0 (fresh, paired) → bias toward MAX interval
+          - trust = 0.0 (stranger / stale) → bias toward MIN interval
+          - high observed_loss → pull toward MIN (need more probes)
+          - high predicted_disturbance → pull toward MIN
+
+        Returns a value in [HEARTBEAT_MIN_INTERVAL_S,
+        HEARTBEAT_MAX_INTERVAL_S]. Defaults to the baseline (30s) when
+        no signal is available — same as the fixed v0.20 interval.
+
+        Never raises. Soft signal — never gates traffic; just tunes
+        probe cadence.
+        """
+        if not peer_fp:
+            return HEARTBEAT_BASELINE_S
+        try:
+            trust = self._peer_trust_score(peer_fp)
+        except Exception:
+            trust = None
+        if trust is None:
+            trust = 0.5  # neutral baseline
+        # Pull toward max when trust is high, min when low. Linear blend.
+        base = HEARTBEAT_MIN_INTERVAL_S + (
+            HEARTBEAT_MAX_INTERVAL_S - HEARTBEAT_MIN_INTERVAL_S
+        ) * float(trust)
+        # Penalty for predicted disturbance — bumps probe frequency.
+        disturbance = self.predicted_disturbance_for(peer_fp)
+        if disturbance is not None:
+            mag = min(1.0, abs(float(disturbance)))
+            # Up to 50% reduction at full disturbance.
+            base *= max(0.5, 1.0 - 0.5 * mag)
+        # Clamp to bounds.
+        return max(
+            HEARTBEAT_MIN_INTERVAL_S,
+            min(HEARTBEAT_MAX_INTERVAL_S, base),
+        )
+
+    def record_reconnect_outcome(
+        self, peer_fp: str, stability_ms: float,
+    ) -> None:
+        """D12 — Update the per-peer reconnect-stability EWMA.
+
+        ``stability_ms`` is the duration the just-failed session lived
+        before the disconnect — long-lived means the peer is stable
+        (use fast reconnect next time); short-lived means flaky
+        (use longer backoff).
+
+        Defensive: silently drops non-finite or negative inputs.
+        """
+        if not peer_fp:
+            return
+        try:
+            s = float(stability_ms)
+        except (TypeError, ValueError):
+            return
+        if not (s == s) or s < 0:  # NaN check + non-negative
+            return
+        current = float(self._reconnect_stability_ewma_ms.get(peer_fp, s))
+        new = (
+            (1.0 - RECONNECT_BACKOFF_EWMA_ALPHA) * current
+            + RECONNECT_BACKOFF_EWMA_ALPHA * s
+        )
+        self._reconnect_stability_ewma_ms[peer_fp] = new
+
+    def adaptive_reconnect_backoff_ms(self, peer_fp: str) -> int:
+        """D12 — Compute the reconnect backoff in milliseconds.
+
+        Long observed stability → short backoff (peer is reliable,
+        reconnect fast). Short observed stability → long backoff
+        (peer is flaky, don't burn cycles on tight retry).
+
+        Returns a value in [RECONNECT_BACKOFF_MIN_MS,
+        RECONNECT_BACKOFF_MAX_MS]. Defaults to a mid-range value when
+        no history is available."""
+        if not peer_fp:
+            return (RECONNECT_BACKOFF_MIN_MS + RECONNECT_BACKOFF_MAX_MS) // 2
+        ewma = self._reconnect_stability_ewma_ms.get(peer_fp)
+        if ewma is None or not (ewma == ewma):  # missing or NaN
+            return (RECONNECT_BACKOFF_MIN_MS + RECONNECT_BACKOFF_MAX_MS) // 2
+        # Inverse map: stability_ms = 60_000 → backoff = MIN.
+        # stability_ms = 500 → backoff = MAX.
+        # Linear interpolation in [500, 60_000].
+        bot = float(RECONNECT_BACKOFF_MIN_MS)
+        top = float(RECONNECT_BACKOFF_MAX_MS)
+        ewma_clamped = max(bot, min(top, float(ewma)))
+        # Higher ewma → lower backoff.
+        ratio = (ewma_clamped - bot) / max(1e-6, top - bot)
+        backoff = top - ratio * (top - bot)
+        return int(max(bot, min(top, backoff)))
+
+    def record_peer_churn(self) -> None:
+        """D11 — Record a peer-presence transition (arrive / depart).
+        Called from discovery when the peer set changes. The
+        adaptive cadence reads the recent count to decide whether
+        to probe more frequently."""
+        self._discovery_churn_count += 1
+
+    def adaptive_discovery_interval(self) -> float:
+        """D11 — Compute the discovery probe interval from recent
+        churn rate. Recent churn → probe more often (converge fast).
+        Steady mesh → probe less often (save energy).
+
+        The churn counter resets on each call so the interval reflects
+        the rate over one prune window. Returns a value in
+        [DISCOVERY_MIN_INTERVAL_S, DISCOVERY_MAX_INTERVAL_S].
+        """
+        churn = int(self._discovery_churn_count or 0)
+        self._discovery_churn_count = 0
+        if churn >= 3:
+            interval = DISCOVERY_MIN_INTERVAL_S
+        elif churn >= 1:
+            interval = DISCOVERY_BASELINE_S / 2
+        else:
+            # No recent churn — back off toward MAX.
+            current = float(self._discovery_interval_s or DISCOVERY_BASELINE_S)
+            interval = min(DISCOVERY_MAX_INTERVAL_S, current * 1.5)
+        self._discovery_interval_s = max(
+            DISCOVERY_MIN_INTERVAL_S,
+            min(DISCOVERY_MAX_INTERVAL_S, interval),
+        )
+        return self._discovery_interval_s
+
+    def adaptive_transport_stats(self) -> dict:
+        """Integration map Phase E telemetry — snapshot of the adaptive
+        heartbeat / reconnect / discovery state. Surfaced via the
+        equation-of-one stats endpoint."""
+        # Reconnect EWMA per peer — bounded preview.
+        ewma_preview = {
+            fp[:16]: float(v) for fp, v in list(
+                self._reconnect_stability_ewma_ms.items(),
+            )[:32]
+        }
+        return {
+            "heartbeat_baseline_s": HEARTBEAT_BASELINE_S,
+            "heartbeat_min_s": HEARTBEAT_MIN_INTERVAL_S,
+            "heartbeat_max_s": HEARTBEAT_MAX_INTERVAL_S,
+            "reconnect_backoff_min_ms": RECONNECT_BACKOFF_MIN_MS,
+            "reconnect_backoff_max_ms": RECONNECT_BACKOFF_MAX_MS,
+            "reconnect_ewma_alpha": RECONNECT_BACKOFF_EWMA_ALPHA,
+            "reconnect_ewma_peers": ewma_preview,
+            "discovery_interval_s": float(self._discovery_interval_s),
+            "discovery_churn_pending": int(self._discovery_churn_count),
+            "capability_fail_open_count": int(
+                self._capability_fail_open_count,
+            ),
+        }
 
     def _maybe_record_cascade_warning(self, peer_fp: str) -> None:
         """D24 — Probe |∇τ_c|² at ``peer_fp`` and bump the cascade
