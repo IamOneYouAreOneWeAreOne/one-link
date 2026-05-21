@@ -12,10 +12,11 @@ use rand_core_06::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use ol_onion::{
-    build_onion as core_build_onion, pad_packet_to_transport,
+    build_cover_packet as core_build_cover_packet, build_onion as core_build_onion,
+    is_cover_payload as core_is_cover_payload, pad_packet_to_transport,
     peel_one_layer as core_peel_one_layer, unpad_packet_from_transport, Circuit, HopDescriptor,
-    OnionError, OnionPacket, PeelOutcome, HOP_ID_LEN, MAX_HOPS, MAX_USER_PAYLOAD,
-    TRANSPORT_PAD_HINT,
+    OnionError, OnionPacket, PeelOutcome, COVER_MAGIC, DEFAULT_COVER_BODY_LEN, HOP_ID_LEN,
+    MAX_HOPS, MAX_USER_PAYLOAD, TRANSPORT_PAD_HINT,
 };
 
 fn map_err(e: OnionError) -> PyErr {
@@ -147,15 +148,52 @@ fn unpad_from_transport<'py>(
     Ok(PyBytes::new_bound(py, &out))
 }
 
+/// D05 — Build a cover-traffic onion packet for `circuit`. Returns
+/// the same fixed-size on-wire bytes as a real packet of equivalent
+/// shape; the innermost plaintext starts with `COVER_MAGIC` so the
+/// destination can silently drop it.
+///
+/// `body_len = 0` uses the default body length (256 bytes).
+#[pyfunction]
+#[pyo3(signature = (circuit, body_len = 0))]
+fn build_cover_packet<'py>(
+    py: Python<'py>,
+    circuit: Vec<(Vec<u8>, Vec<u8>)>,
+    body_len: usize,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let hops: Result<Vec<HopDescriptor>, PyErr> = circuit.into_iter().map(parse_hop).collect();
+    let hops = hops?;
+    let c = Circuit::new(hops).map_err(map_err)?;
+    let body = if body_len == 0 {
+        DEFAULT_COVER_BODY_LEN
+    } else {
+        body_len
+    };
+    let packet = core_build_cover_packet(&c, body, &mut OsRng).map_err(map_err)?;
+    Ok(PyBytes::new_bound(py, &packet.encode()))
+}
+
+/// D05 — Check whether a decrypted innermost payload is a cover
+/// packet (starts with COVER_MAGIC). Destinations call this and
+/// silently drop cover packets before any application processing.
+#[pyfunction]
+fn is_cover_payload(payload: &[u8]) -> bool {
+    core_is_cover_payload(payload)
+}
+
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_onion, m)?)?;
     m.add_function(wrap_pyfunction!(peel_one_layer, m)?)?;
     m.add_function(wrap_pyfunction!(derive_pubkey, m)?)?;
     m.add_function(wrap_pyfunction!(pad_to_transport, m)?)?;
     m.add_function(wrap_pyfunction!(unpad_from_transport, m)?)?;
+    m.add_function(wrap_pyfunction!(build_cover_packet, m)?)?;
+    m.add_function(wrap_pyfunction!(is_cover_payload, m)?)?;
     m.add("MAX_HOPS", MAX_HOPS)?;
     m.add("MAX_USER_PAYLOAD", MAX_USER_PAYLOAD)?;
     m.add("HOP_ID_LEN", HOP_ID_LEN)?;
     m.add("TRANSPORT_PAD_HINT", TRANSPORT_PAD_HINT)?;
+    m.add("DEFAULT_COVER_BODY_LEN", DEFAULT_COVER_BODY_LEN)?;
+    m.add("COVER_MAGIC", PyBytes::new_bound(_py, &COVER_MAGIC))?;
     Ok(())
 }

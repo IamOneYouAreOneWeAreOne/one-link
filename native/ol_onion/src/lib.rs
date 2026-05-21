@@ -124,6 +124,7 @@
 pub mod build;
 pub mod canon;
 pub mod circuit;
+pub mod cover;
 pub mod errors;
 pub mod hop;
 pub mod keyderiv;
@@ -134,6 +135,10 @@ pub mod transport_obfs;
 
 pub use build::build_onion;
 pub use circuit::Circuit;
+pub use cover::{
+    build_cover_packet, build_default_cover_packet, is_cover_payload, COVER_MAGIC,
+    DEFAULT_COVER_BODY_LEN,
+};
 pub use errors::{OnionError, OnionResult};
 pub use hop::{HopDescriptor, HopId, HOP_ID_LEN};
 pub use packet::{
