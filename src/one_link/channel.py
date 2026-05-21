@@ -158,6 +158,16 @@ class Channel:
     # `derive_native_transfer_secret`, so we don't gate on DR
     # activation.
     _peer_native_transfer_capable: bool = False
+    # Pre-derived 32-byte native-transfer seed. Cached at handshake
+    # completion (or just before clearing _dr_shared in
+    # maybe_activate_ratchet) so that derive_native_transfer_secret
+    # works even after the DR bootstrap material has been wiped for
+    # forward-secrecy reasons. Without this, a channel that has
+    # activated the Double Ratchet can never derive a native
+    # transfer session — the first send_file gets
+    # "DR bootstrap material missing" and falls back to legacy
+    # FILE_BIN_CHUNK, losing Wave 2f QUIC and ratchet-binding.
+    _native_transfer_seed: Optional[bytes] = None
     # When non-None, channel is in ratchet mode. send/recv branch
     # to the ratchet path and the legacy AEADs go unused. Set
     # exactly once per channel by maybe_activate_ratchet.
@@ -200,18 +210,28 @@ class Channel:
         The same derivation runs on both peers (deterministic from
         ``transcript_hash`` + the DR bootstrap shared secret), so
         sender + receiver hold matching native sessions without
-        any wire-format change."""
+        any wire-format change.
+
+        The seed is cached on first derivation (or pre-derived in
+        ``maybe_activate_ratchet`` before the DR bootstrap is wiped
+        for forward secrecy), so callers after ratchet activation
+        still see a valid secret.
+        """
+        if self._native_transfer_seed is not None:
+            return self._native_transfer_seed
         if self._dr_shared is None:
             raise RuntimeError(
                 "channel cannot derive native transfer secret: DR "
                 "bootstrap material missing (handshake incomplete)"
             )
-        return HKDF(
+        seed = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
             salt=self.transcript_hash,
             info=b"OL1/native-transfer/seed|v1",
         ).derive(self._dr_shared)
+        self._native_transfer_seed = seed
+        return seed
 
     def get_or_create_native_transfer_session(
         self,
@@ -359,6 +379,21 @@ class Channel:
                 "channel ratchet activated for peer %s as %s",
                 self.peer_short_id, self._dr_role,
             )
+            # Pre-derive + cache the native-transfer seed BEFORE
+            # wiping the DR bootstrap material. Without this the
+            # first post-ratchet send_file would fail to build a
+            # NativeTransferSession ("DR bootstrap material missing")
+            # and degrade to legacy FILE_BIN_CHUNK, losing the
+            # Wave 2f QUIC fast path. The seed is a one-way HKDF
+            # output bound to a distinct domain tag, so caching it
+            # doesn't widen the forward-secrecy surface.
+            if self._native_transfer_seed is None:
+                self._native_transfer_seed = HKDF(
+                    algorithm=hashes.SHA256(),
+                    length=32,
+                    salt=self.transcript_hash,
+                    info=b"OL1/native-transfer/seed|v1",
+                ).derive(self._dr_shared)
             # Drop the legacy bootstrap material — we no longer need
             # the X25519 priv key once the ratchet is rolling.
             self._dr_x_priv = None

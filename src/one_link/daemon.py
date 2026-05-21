@@ -20764,12 +20764,39 @@ class Daemon:
                         # effects (cache store, write to disk,
                         # ledger update) don't depend on the
                         # channel object.
+                        # Look up the real live inbound channel for
+                        # this peer so FILE_NATIVE_CHUNK can derive
+                        # the matched native_transfer_session via the
+                        # channel's cached seed. Without this the
+                        # QUIC fast path can't decrypt native chunks
+                        # (the synth NoopChannel has no DR state),
+                        # and the receiver replies "native transfer
+                        # unavailable" — silently degrading every
+                        # QUIC-carried FILE_NATIVE_CHUNK back to
+                        # WebRTC FILE_BIN_CHUNK. We pick the most
+                        # recent live channel; if none, the proxy
+                        # raises and the handler degrades gracefully.
+                        _live_inbound = self._inbound_live_channels.get(peer_fp) or []
+                        _real_channel = _live_inbound[-1] if _live_inbound else None
+
                         class _NoopChannel:
                             async def send(self, _data: bytes) -> None:
                                 return None
                             peer_caps: dict = {}
                             peer_ed_pub: bytes = b""
                             peer_short_id: str = peer_sid
+
+                            def get_or_create_native_transfer_session(
+                                self, **kw,
+                            ):
+                                if _real_channel is None:
+                                    raise RuntimeError(
+                                        "no live inbound channel for peer "
+                                        "— cannot derive native session"
+                                    )
+                                return _real_channel.get_or_create_native_transfer_session(
+                                    **kw,
+                                )
                         synth_channel = _NoopChannel()
                         msg_type = str(msg.get("t") or "")
                         if msg_type == "FILE_NATIVE_CHUNK":

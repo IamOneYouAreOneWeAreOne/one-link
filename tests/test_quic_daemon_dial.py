@@ -169,22 +169,6 @@ def test_quic_ping_round_trip_between_daemons() -> None:
         assert result.get("response_len", 0) >= len(b"hello-quic")
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Wave 2f's QUIC fork lives in send_file's STREAM-MODE branch "
-        "(the ``else:`` of ``if can_offer_cdc and FILE_WANTS:``). Both "
-        "daemon_pair peers advertise FILE_CDC, so any non-trivial file "
-        "takes the CDC branch instead → the QUIC fast path never "
-        "fires on realistic workloads. A clean Wave 2f+ ships QUIC "
-        "into the CDC chunk loop too — my earlier attempt regressed "
-        "8 MiB transfers from 0.1 s to 222 s and was reverted. "
-        "Tracking the live path: the quic_ping E2E test "
-        "(test_quic_ping_round_trip_between_daemons) proves the "
-        "QUIC stack itself works; this test documents that file "
-        "transfers don't yet ride it."
-    ),
-    strict=False,
-)
 def test_send_file_stream_mode_actually_uses_quic_when_pinned() -> None:
     """Wave 2f integration end-to-end. Pin both directions, send
     a small file (small enough to skip CDC and route via the
