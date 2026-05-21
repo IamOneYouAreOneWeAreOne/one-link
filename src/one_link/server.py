@@ -1528,6 +1528,13 @@ class UIServer:
         r.add_get("/api/connect-info/qr.svg", self._guarded(self.api_connect_info_qr))
         r.add_get("/api/me", self._guarded(self.api_me))
         r.add_get("/api/one-health", self._guarded(self.api_one_health))
+        # Equation-of-ONE telemetry: per-event selector, cover-traffic,
+        # dedupe-site index, FUSE mount capability + selector decision
+        # distribution counters. One call, one dashboard payload.
+        r.add_get(
+            "/api/v1/equation-of-one/stats",
+            self._guarded(self.api_equation_of_one_stats),
+        )
         r.add_get("/api/setup", self._guarded(self.api_setup_status))
         r.add_post("/api/setup", self._guarded(self.api_update_setup))
         r.add_post("/api/setup/device-invite", self._guarded(self.api_setup_device_invite))
@@ -5122,6 +5129,54 @@ class UIServer:
 
     async def api_setup_status(self, request: web.Request) -> web.Response:
         return web.json_response(self._one_setup_snapshot())
+
+    async def api_equation_of_one_stats(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Equation-of-ONE telemetry dashboard.
+
+        Returns one JSON envelope with every per-event subsystem's
+        current state:
+          - selector: kind / availability / enforce / mode +
+            decision-distribution counters (transport, path, onion_hops,
+            cover_traffic, batch_decision, anchor_lay, predictor_warm,
+            f4_violations, derived cover_ratio + f4_violation_ratio)
+          - cover_traffic: F4 mode + env_gate + running + emitted +
+            errors + mandated/forbidden flags
+          - dedupe_sites: entries / records / hits / misses / TTL +
+            LRU evictions
+          - fuse: per-platform mount capability + readiness state
+          - user_mode: the F4 mode the daemon is currently honouring
+
+        Cheap to call (pure in-memory readouts); designed for polling
+        from the operator UI every few seconds. Never raises — any
+        sub-snapshot that fails is surfaced as an ``{"error": ...}``
+        leaf so the dashboard can still render the rest.
+        """
+        d = self.daemon
+        out: dict = {
+            "user_mode": getattr(d, "_user_mode_value", "normal"),
+        }
+        try:
+            out["selector"] = {
+                **d.selector_info(),
+                "decisions": d.selector_decision_stats(),
+            }
+        except Exception as exc:
+            out["selector"] = {"error": str(exc)}
+        try:
+            out["cover_traffic"] = d.cover_traffic_stats()
+        except Exception as exc:
+            out["cover_traffic"] = {"error": str(exc)}
+        try:
+            out["dedupe_sites"] = d.dedupe_sites_stats()
+        except Exception as exc:
+            out["dedupe_sites"] = {"error": str(exc)}
+        try:
+            out["fuse"] = d.fuse_capabilities()
+        except Exception as exc:
+            out["fuse"] = {"error": str(exc)}
+        return web.json_response(out)
 
     async def api_one_health(self, request: web.Request) -> web.Response:
         """Human-first readiness center for the whole One Link fabric."""
