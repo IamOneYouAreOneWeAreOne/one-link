@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -39,6 +40,20 @@ def _connect_control(timeout: float = 5.0) -> tuple[socket.socket, int]:
         )
     s.settimeout(timeout)
     return s, port
+
+
+def _force_kill_windows_pid(pid: int) -> None:
+    """Terminate a stale daemon process on Windows without invoking a shell."""
+    if pid <= 0:
+        raise ValueError("pid must be positive")
+    taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
+    subprocess.run(
+        [str(taskkill), "/F", "/PID", str(int(pid))],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=3,
+        check=False,
+    )
 
 
 def _request(cmd: str, *, timeout: float = 5.0, **kwargs) -> dict:
@@ -1231,7 +1246,7 @@ def daemon_stop():
             if pid_path.is_file():
                 pid = int(pid_path.read_text().strip())
                 if os.name == "nt":
-                    os.system(f'taskkill /F /PID {pid} >nul 2>&1')
+                    _force_kill_windows_pid(pid)
                 else:
                     try:
                         os.kill(pid, signal.SIGTERM)

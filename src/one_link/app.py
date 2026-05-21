@@ -195,8 +195,13 @@ def _terminate_pid(pid: int, timeout: float = 5.0) -> bool:
     if os.name == "nt":
         # Console-less children can ignore SIGTERM on Windows. Last resort.
         try:
+            taskkill = (
+                Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                / "System32"
+                / "taskkill.exe"
+            )
             subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                [str(taskkill), "/PID", str(int(pid)), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=3,

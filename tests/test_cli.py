@@ -112,6 +112,26 @@ def test_request_clean_error_when_daemon_drops_mid_command(monkeypatch):
     assert "resume after restart" in msg
 
 
+def test_windows_force_kill_uses_subprocess_not_shell(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(cli_mod.os, "environ", {"SystemRoot": r"C:\Windows"})
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+
+    cli_mod._force_kill_windows_pid(1234)
+
+    assert calls
+    argv, kwargs = calls[0]
+    assert argv[0].endswith(r"System32\taskkill.exe")
+    assert argv[1:] == ["/F", "/PID", "1234"]
+    assert kwargs["check"] is False
+    assert "shell" not in kwargs
+
+
 @pytest.mark.timeout(120)
 def test_full_cli_round_trip():
     """Two daemons via the harness; drive A's CLI as a subprocess."""

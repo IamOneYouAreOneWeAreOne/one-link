@@ -20,7 +20,7 @@ import pytest
 
 
 pytest.importorskip("onnxruntime")
-torch = pytest.importorskip("torch")
+torch = pytest.importorskip("torch", exc_type=(ImportError, OSError))
 
 VOICE_DIR = Path(__file__).resolve().parents[1] / "assets" / "models" / "voice_predictor_v3_librispeech"
 SCENE_DIR = Path(__file__).resolve().parents[1] / "assets" / "models" / "scene_predictor_v1"

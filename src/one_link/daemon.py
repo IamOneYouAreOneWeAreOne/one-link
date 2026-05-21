@@ -19052,7 +19052,7 @@ class Daemon:
                 outbound_alive: dict[str, bool] = {}
                 for fp, conn in self._quic_outbound.items():
                     try:
-                        outbound_alive[fp] = bool(conn.is_connected)
+                        outbound_alive[fp] = self._quic_connection_alive(conn)
                     except Exception:
                         outbound_alive[fp] = False
                 await self._reply(writer, {
@@ -20669,6 +20669,19 @@ class Daemon:
         except Exception as e:
             return {"ok": False, "error": f"frame round-trip failed: {e}"}
 
+    @staticmethod
+    def _quic_connection_alive(conn: object) -> bool:
+        """Best-effort liveness for cached native QUIC connections."""
+        if conn is None:
+            return False
+        state = getattr(conn, "is_connected", None)
+        if state is None:
+            return hasattr(conn, "send_frame_round_trip")
+        try:
+            return bool(state() if callable(state) else state)
+        except Exception:
+            return False
+
     async def _get_or_dial_quic(self, peer_fp: str, peer) -> object | None:
         """Wave 2e: return a cached outbound QUIC Connection to
         ``peer_fp`` or open a fresh one and cache it.
@@ -20684,7 +20697,7 @@ class Daemon:
         existing = self._quic_outbound.get(peer_fp)
         if existing is not None:
             try:
-                if existing.is_connected:
+                if self._quic_connection_alive(existing):
                     return existing
             except Exception:
                 pass
@@ -20711,7 +20724,7 @@ class Daemon:
             existing = self._quic_outbound.get(peer_fp)
             if existing is not None:
                 try:
-                    if existing.is_connected:
+                    if self._quic_connection_alive(existing):
                         return existing
                 except Exception:
                     pass

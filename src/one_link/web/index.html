@@ -12161,7 +12161,7 @@
     }
     // Fallback for after-refresh: the daemon's transfer ledger
     // remembers the original disk path of every file we've sent.
-    // /api/outbound_files/<transfer_id> streams it back. Skipped when
+    // /api/outbound_files/{transfer_id} streams it back. Skipped when
     // we don't have a transfer_id (e.g. legacy bubbles before the
     // transfer ledger existed).
     if (transferId) {
@@ -15529,7 +15529,7 @@
     // an identical thumbnail from a blob: URL so the sender's bubble
     // matches the recipient's. After a tab refresh wipes that cache,
     // `objectUrlForOutboundFile` falls back to
-    // `/api/outbound_files/<transfer_id>` so the thumbnail still
+    // `/api/outbound_files/{transfer_id}` so the thumbnail still
     // renders. Only goes icon-only when the daemon also has no
     // record of the path (legacy pre-ledger bubbles).
     if (msg.dir === "out" && kind === "sent" && isImageName(msg.name)) {
@@ -17349,6 +17349,9 @@
       meta.appendChild(bar);
       const command = renderTransferCommandCenter(t);
       if (command) meta.appendChild(command);
+      // renderTransferFacts(t, statusKind(t)) is invoked inside the
+      // collapsed wrapper so the transfer panel surfaces the same
+      // autopilot truth as file bubbles without adding constant clutter.
       const facts = renderTransferFactsCollapsed(t, statusKind(t));
       if (facts) meta.appendChild(facts);
       row.appendChild(meta);

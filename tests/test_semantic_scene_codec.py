@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 
-torch = pytest.importorskip("torch")
+torch = pytest.importorskip("torch", exc_type=(ImportError, OSError))
 
 CKPT_PATH = Path(__file__).resolve().parents[1] / "assets" / "models" / "scene_predictor_v1" / "checkpoint.pt"
 if not CKPT_PATH.exists():

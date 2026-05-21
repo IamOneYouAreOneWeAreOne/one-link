@@ -17,7 +17,7 @@ import pytest
 
 
 # Skip the whole module if torch is unavailable — the codec needs it.
-torch = pytest.importorskip("torch")
+torch = pytest.importorskip("torch", exc_type=(ImportError, OSError))
 
 CKPT_PATH = Path(__file__).resolve().parents[1] / "assets" / "models" / "voice_predictor_v3_librispeech" / "checkpoint.pt"
 

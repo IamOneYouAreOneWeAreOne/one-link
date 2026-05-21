@@ -25,9 +25,25 @@ if not peer_quic.HAS_NATIVE:  # pragma: no cover
     pytest.skip("one_link_native.quic not installed", allow_module_level=True)
 
 from tests.harness import daemon_pair, request
+from one_link.daemon import Daemon
 
 
 pytestmark = [pytest.mark.timeout(120), pytest.mark.soak]
+
+
+def test_quic_connection_alive_accepts_native_conn_without_state_flag() -> None:
+    class NativeConnLike:
+        def send_frame_round_trip(self, *_args):
+            return (241, b"pong")
+
+    assert Daemon._quic_connection_alive(NativeConnLike()) is True
+
+
+def test_quic_connection_alive_honors_explicit_false_state() -> None:
+    class ClosedConnLike:
+        is_connected = False
+
+    assert Daemon._quic_connection_alive(ClosedConnLike()) is False
 
 
 def test_quic_status_endpoint_returns_state() -> None:

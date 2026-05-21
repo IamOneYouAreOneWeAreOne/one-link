@@ -248,6 +248,34 @@ def test_desktop_launcher_waits_for_slow_packaged_daemon_startup():
     assert sig.parameters["timeout"].default >= 45.0
 
 
+def test_terminate_pid_windows_fallback_uses_absolute_taskkill(monkeypatch):
+    from one_link import app as app_mod
+
+    calls = []
+
+    def fake_kill(pid, sig):
+        if sig == 0:
+            return None
+        return None
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(app_mod.os, "name", "nt", raising=False)
+    monkeypatch.setattr(app_mod.os, "getpid", lambda: 9999)
+    monkeypatch.setattr(app_mod.os, "kill", fake_kill)
+    monkeypatch.setattr(app_mod.time, "time", iter([0.0, 10.0]).__next__)
+    monkeypatch.setattr(app_mod.subprocess, "run", fake_run)
+
+    assert app_mod._terminate_pid(1234, timeout=0.0) is True
+    assert calls
+    argv, kwargs = calls[0]
+    assert argv[0].endswith(r"System32\taskkill.exe")
+    assert argv[1:] == ["/PID", "1234", "/T", "/F"]
+    assert kwargs["check"] is False
+
+
 def test_spawn_daemon_uses_python_module_in_source_mode(tmp_path):
     from one_link import app as app_mod
 
