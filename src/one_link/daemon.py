@@ -86,6 +86,7 @@ from one_link import (
     align_native,
     blobstore,
     channel as ch,
+    cover_traffic as cover_traffic_module,
     dedupe_sites as dedupe_sites_module,
     field_observations_native,
     foldersync,
@@ -1580,6 +1581,16 @@ class Daemon:
         from collections import OrderedDict as _OD
         self._pending_selector_observations: _OD = _OD()
         self._pending_selector_observations_cap: int = 4096
+
+        # D05 wire-up — Cover-traffic emitter. Constructed lazily on
+        # the first set_user_mode / start because it needs the native
+        # sphinx scheduler. The env-gate flag is read here; F4 mode
+        # contract (paranoid mandates / battery_save forbids) is
+        # applied on every mode change via apply_mode_contract.
+        self._cover_traffic: Optional[Any] = None
+        self._cover_traffic_env_gate: bool = (
+            os.environ.get("ONE_LINK_COVER_TRAFFIC", "0") == "1"
+        )
 
     def _build_my_caps(self) -> dict:
         """Build a CAPS frame for THIS daemon. Includes our rendezvous
@@ -11172,7 +11183,97 @@ class Daemon:
             with contextlib.suppress(Exception):
                 self.state.set_setting("user_mode", canonical)
         self._user_mode_value = canonical
+        # D05 wire-up — propagate the mode change into the cover-traffic
+        # emitter so a paranoid switch instantly starts cover, and a
+        # battery_save switch instantly stops it. Never raises.
+        with contextlib.suppress(Exception):
+            self._apply_cover_traffic_mode_contract()
         return canonical
+
+    def _ensure_cover_traffic_emitter(self) -> Any:
+        """Lazily construct the cover-traffic daemon. Returns None when
+        the native sphinx module isn't installed (graceful degradation
+        — the daemon's other functionality remains intact)."""
+        if self._cover_traffic is not None:
+            return self._cover_traffic
+        if not cover_traffic_module.HAS_NATIVE:
+            return None
+        try:
+            self._cover_traffic = cover_traffic_module.CoverTrafficDaemon(
+                rate_hz=cover_traffic_module.DEFAULT_RATE_HZ,
+                emit_cover=self._emit_cover_packet_callback,
+            )
+        except Exception as exc:
+            log.info("cover-traffic emitter unavailable: %s", exc)
+            self._cover_traffic = None
+        return self._cover_traffic
+
+    def _emit_cover_packet_callback(self) -> None:
+        """Cover-traffic emit callback. Runs on the cover-traffic
+        background thread; must be short + thread-safe. For now this
+        is a no-op stub — the real routing wire-up (pick a peer +
+        build a Sphinx circuit + ship via outbound session) lands in
+        the next phase. The emitter's tick counter still increments,
+        so observability + scheduling are wired even before the
+        actual cover packet leaves the daemon."""
+        # Future: pick a paired peer, build a 3-hop Sphinx cover
+        # packet, ship via outbound session. For now we just count.
+        log.debug("cover-traffic tick fired (no-op stub)")
+
+    def _apply_cover_traffic_mode_contract(self) -> bool:
+        """Reconcile the cover-traffic emitter with the current F4
+        user_mode + env gate. Returns True iff a state transition
+        occurred. Never raises.
+
+        The emitter is constructed lazily so this is also the place
+        we instantiate it when paranoid mode first activates."""
+        # Quick check: if mode forbids cover AND emitter is None, skip.
+        mode = self._user_mode_value
+        env_gate = self._cover_traffic_env_gate
+        if cover_traffic_module.is_cover_forbidden(mode):
+            # Forbidden — if an emitter exists, force it off.
+            if self._cover_traffic is not None:
+                self._cover_traffic.set_user_mode(mode)
+                self._cover_traffic.set_env_gate(env_gate)
+                return self._cover_traffic.apply_mode_contract()
+            return False
+        # Mode allows / mandates cover. Build the emitter if needed.
+        if cover_traffic_module.should_run_cover(mode, env_gate):
+            emitter = self._ensure_cover_traffic_emitter()
+            if emitter is None:
+                return False
+            emitter.set_user_mode(mode)
+            emitter.set_env_gate(env_gate)
+            return emitter.apply_mode_contract()
+        # Mode allows but env gate is off + not paranoid -> no-op.
+        if self._cover_traffic is not None:
+            self._cover_traffic.set_user_mode(mode)
+            self._cover_traffic.set_env_gate(env_gate)
+            return self._cover_traffic.apply_mode_contract()
+        return False
+
+    def cover_traffic_stats(self) -> dict:
+        """Inspection: return the cover-traffic emitter's current
+        state. Returns ``{"available": False, ...}`` when the native
+        sphinx module isn't installed."""
+        if self._cover_traffic is None:
+            return {
+                "available": cover_traffic_module.HAS_NATIVE,
+                "user_mode": self._user_mode_value,
+                "env_gate": self._cover_traffic_env_gate,
+                "running": False,
+                "emitted": 0,
+                "errors": 0,
+            }
+        try:
+            stats = dict(self._cover_traffic.stats())
+        except Exception as exc:
+            return {
+                "available": cover_traffic_module.HAS_NATIVE,
+                "error": str(exc),
+            }
+        stats["available"] = True
+        return stats
 
     def _log_selector_decision_for_file(
         self,

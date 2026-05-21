@@ -61,6 +61,36 @@ except ImportError as exc:
 # conservative constant.
 DEFAULT_RATE_HZ: float = 0.5
 
+# F4 mode-contract integration:
+#   - paranoid     : cover ALWAYS on (per F4 paranoid_no_cover violation)
+#   - battery_save : cover ALWAYS off (per F4 battery_save_cover violation)
+#   - normal       : opt-in via env (ONE_LINK_COVER_TRAFFIC=1)
+#   - latency_strict: opt-in via env (cover-on permitted but not mandated)
+ALWAYS_ON_MODES: tuple[str, ...] = ("paranoid",)
+NEVER_ON_MODES: tuple[str, ...] = ("battery_save",)
+OPT_IN_MODES: tuple[str, ...] = ("normal", "latency_strict")
+
+
+def is_cover_mandated(user_mode: str) -> bool:
+    """True iff F4 mandates cover traffic for ``user_mode``."""
+    return (user_mode or "normal").strip().lower() in ALWAYS_ON_MODES
+
+
+def is_cover_forbidden(user_mode: str) -> bool:
+    """True iff F4 forbids cover traffic for ``user_mode``."""
+    return (user_mode or "normal").strip().lower() in NEVER_ON_MODES
+
+
+def should_run_cover(user_mode: str, env_gate: bool) -> bool:
+    """Effective on/off decision combining F4 mode contract with the
+    explicit env-gate flag. F4 mandates / forbids override the env
+    flag in both directions."""
+    if is_cover_forbidden(user_mode):
+        return False
+    if is_cover_mandated(user_mode):
+        return True
+    return bool(env_gate)
+
 
 class CoverTrafficNotInstalled(RuntimeError):
     """Raised when the daemon tries to start cover traffic but the
@@ -87,6 +117,9 @@ class CoverTrafficDaemon:
         "_stop_event",
         "_emitted",
         "_errors",
+        "_user_mode",
+        "_env_gate",
+        "_mode_lock",
     )
 
     def __init__(
@@ -119,6 +152,12 @@ class CoverTrafficDaemon:
         self._stop_event = threading.Event()
         self._emitted = 0
         self._errors = 0
+        # F4 mode-contract state. Defaults match the daemon's startup
+        # ("normal" mode, env gate off) so the emitter doesn't run
+        # until the daemon explicitly opts in or switches to paranoid.
+        self._user_mode: str = "normal"
+        self._env_gate: bool = False
+        self._mode_lock = threading.Lock()
 
     @property
     def rate_hz(self) -> float:
@@ -139,11 +178,60 @@ class CoverTrafficDaemon:
         t = self._thread
         return t is not None and t.is_alive()
 
+    # ---------- F4 mode-contract integration ----------
+
+    def set_user_mode(self, mode: str) -> None:
+        """Update the F4 mode. Mandated modes (paranoid) force the
+        emitter on; forbidden modes (battery_save) force it off — the
+        daemon is responsible for calling ``apply_mode_contract()``
+        after this if it wants the lifecycle to react synchronously."""
+        with self._mode_lock:
+            self._user_mode = (mode or "normal").strip().lower()
+
+    def set_env_gate(self, enabled: bool) -> None:
+        """Set the explicit env-gate flag. Honoured for opt-in modes;
+        overridden in both directions by mandated/forbidden modes."""
+        with self._mode_lock:
+            self._env_gate = bool(enabled)
+
+    @property
+    def effective_enabled(self) -> bool:
+        """Whether the F4 contract + env-gate combination says cover
+        traffic should currently be active."""
+        with self._mode_lock:
+            return should_run_cover(self._user_mode, self._env_gate)
+
+    def apply_mode_contract(self) -> bool:
+        """Reconcile the running state with the F4 contract + env-gate.
+        Returns True iff a state transition occurred (started or
+        stopped). Idempotent; safe to call on every mode-change
+        notification. The daemon should call this after
+        ``set_user_mode`` / ``set_env_gate`` so a paranoid switch
+        instantly turns the emitter on, and a battery_save switch
+        instantly turns it off."""
+        want = self.effective_enabled
+        running = self.is_running
+        if want and not running:
+            self.start()
+            return True
+        if not want and running:
+            self.stop()
+            return True
+        return False
+
     def start(self) -> None:
         """Start the worker thread. Idempotent: subsequent calls
-        while running are no-ops."""
+        while running are no-ops. Will refuse to start if the F4
+        contract forbids cover traffic (battery_save)."""
         if self.is_running:
             return
+        with self._mode_lock:
+            if is_cover_forbidden(self._user_mode):
+                log.info(
+                    "cover-traffic start refused: mode=%s forbids cover",
+                    self._user_mode,
+                )
+                return
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run,
@@ -160,6 +248,25 @@ class CoverTrafficDaemon:
         if t is not None:
             t.join(timeout=join_timeout)
             self._thread = None
+
+    def stats(self) -> dict:
+        """Inspection snapshot for ops telemetry / operator UI. Pure
+        readout — never raises."""
+        with self._mode_lock:
+            mode = self._user_mode
+            gate = self._env_gate
+            effective = should_run_cover(mode, gate)
+        return {
+            "rate_hz": self._rate_hz,
+            "user_mode": mode,
+            "env_gate": gate,
+            "effective_enabled": effective,
+            "running": self.is_running,
+            "emitted": self._emitted,
+            "errors": self._errors,
+            "mandated_by_mode": is_cover_mandated(mode),
+            "forbidden_by_mode": is_cover_forbidden(mode),
+        }
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
