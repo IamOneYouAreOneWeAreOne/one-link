@@ -113,8 +113,8 @@ AAD_PREFIX = b"OL1/data|"
 DR_CAP = "double_ratchet_v1"
 # Phase C-3 (ADR-0026): capability tag both peers must advertise to
 # enable the native chunk-store transport (FILE_NATIVE_CHUNK messages).
-# Keep in sync with `capabilities.NATIVE_TRANSFER_V1`.
-NATIVE_TRANSFER_CAP = "native_transfer_v1"
+# Keep in sync with `capabilities.NATIVE_TRANSFER_INDEXED_V1`.
+NATIVE_TRANSFER_CAP = "native_transfer_indexed_v1"
 # v0.8.2: HKDF info label for the ratchet-bootstrap root key. Distinct
 # from the legacy session-key derivation so the two are independent;
 # even if the legacy AEAD keys leak, they don't reveal the ratchet

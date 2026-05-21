@@ -95,15 +95,17 @@ def test_native_diagnostics_reports_all_subsystems():
         "routing",
         "homology",
         "native_transfer_v1",
+        "native_transfer_indexed_v1",
         "macaroon_dual_issue",
     }
     for sub in ("prefetch", "routing", "homology"):
         assert isinstance(diag[sub]["available"], bool)
     assert isinstance(diag["native_transfer_v1"]["advertised"], bool)
+    assert isinstance(diag["native_transfer_indexed_v1"]["advertised"], bool)
 
 
-def test_native_diagnostics_native_transfer_v1_advertised():
-    """When the daemon's LOCAL_CAPABILITIES includes NATIVE_TRANSFER_V1
+def test_native_diagnostics_native_transfer_indexed_v1_advertised():
+    """When LOCAL_CAPABILITIES includes NATIVE_TRANSFER_INDEXED_V1
     (the default), diagnostics should report `advertised=True`."""
     from one_link.daemon import Daemon
 
@@ -112,7 +114,8 @@ def test_native_diagnostics_native_transfer_v1_advertised():
         _last_minted_macaroon = None
 
     diag = Daemon.native_diagnostics(_Stub())  # type: ignore[arg-type]
-    assert diag["native_transfer_v1"]["advertised"] is True
+    assert diag["native_transfer_v1"]["advertised"] is False
+    assert diag["native_transfer_indexed_v1"]["advertised"] is True
 
 
 @pytest.mark.skipif(

@@ -33,15 +33,17 @@ pytestmark = pytest.mark.skipif(
 # --- capability constant + advertise ---------------------------------------
 
 
-def test_native_transfer_v1_in_local_capabilities():
+def test_native_transfer_indexed_v1_in_local_capabilities():
     """The capability must be in the daemon's advertised set so peers
     discover it via CAPS."""
     from one_link import capabilities
 
     assert "native_transfer_v1" == capabilities.NATIVE_TRANSFER_V1
-    assert capabilities.NATIVE_TRANSFER_V1 in capabilities.LOCAL_CAPABILITIES
+    assert "native_transfer_indexed_v1" == capabilities.NATIVE_TRANSFER_INDEXED_V1
+    assert capabilities.NATIVE_TRANSFER_V1 not in capabilities.LOCAL_CAPABILITIES
+    assert capabilities.NATIVE_TRANSFER_INDEXED_V1 in capabilities.LOCAL_CAPABILITIES
     # It's a transport-layer cap (not user-prompt-required).
-    assert capabilities.NATIVE_TRANSFER_V1 in capabilities.TRANSPORT_LAYER_CAPS
+    assert capabilities.NATIVE_TRANSFER_INDEXED_V1 in capabilities.TRANSPORT_LAYER_CAPS
 
 
 def test_channel_note_caps_records_native_transfer():
@@ -64,7 +66,7 @@ def test_channel_note_caps_records_native_transfer():
             transcript_hash=os.urandom(32),
         )
         assert c.peer_native_transfer_capable is False
-        c.note_caps_received(["double_ratchet_v1", "files", "native_transfer_v1"])
+        c.note_caps_received(["double_ratchet_v1", "files", "native_transfer_indexed_v1"])
         assert c.peer_native_transfer_capable is True
 
         c2 = Channel(
@@ -159,6 +161,7 @@ def test_file_native_chunk_wire_envelope_round_trips():
         "from": "alice",
         "blob": "deadbeef",
         "seq": 0,
+        "chunk_index": record.chunk_index,
         "chunk_id": record.chunk_id.hex(),
         "plaintext_len": record.plaintext_len,
         "data": base64.b64encode(record.ciphertext).decode("ascii"),
@@ -171,12 +174,78 @@ def test_file_native_chunk_wire_envelope_round_trips():
     # Receiver reconstructs the record from the wire dict.
     rebuilt = native_transfer.NativeChunkRecord(
         chunk_id=bytes.fromhex(decoded["chunk_id"]),
-        chunk_index=decoded["seq"],
+        chunk_index=decoded["chunk_index"],
         plaintext_len=decoded["plaintext_len"],
         ciphertext=base64.b64decode(decoded["data"]),
     )
     recovered = receiver.decrypt_chunk(rebuilt)
     assert recovered == plaintext
+
+
+def test_file_native_chunk_wire_keeps_session_chunk_index_across_files():
+    """Regression for the live 512 KiB every-other-transfer timeout.
+
+    FILE_NATIVE_CHUNK has two different counters:
+      * ``seq`` is the per-file order and resets to zero for each file.
+      * ``chunk_index`` is the native transfer session counter and keeps
+        increasing across repeated files on the same channel.
+
+    The receiver must decrypt with ``chunk_index``. Reusing ``seq`` as
+    the AEAD nonce works for the first file, then breaks the next one.
+    """
+    import base64
+
+    from one_link import native_transfer
+
+    alice, bob = _matched_channels()
+    sender = alice.get_or_create_native_transfer_session()
+    receiver = bob.get_or_create_native_transfer_session()
+
+    first = sender.encrypt_chunk_bytes(os.urandom(1024))
+    second_plaintext = os.urandom(2048)
+    second = sender.encrypt_chunk_bytes(second_plaintext)
+
+    first_wire = {
+        "seq": 0,
+        "chunk_index": first.chunk_index,
+        "chunk_id": first.chunk_id.hex(),
+        "plaintext_len": first.plaintext_len,
+        "data": base64.b64encode(first.ciphertext).decode("ascii"),
+    }
+    second_wire = {
+        "seq": 0,  # new file, so per-file sequence resets
+        "chunk_index": second.chunk_index,
+        "chunk_id": second.chunk_id.hex(),
+        "plaintext_len": second.plaintext_len,
+        "data": base64.b64encode(second.ciphertext).decode("ascii"),
+    }
+
+    first_rebuilt = native_transfer.NativeChunkRecord(
+        chunk_id=bytes.fromhex(first_wire["chunk_id"]),
+        chunk_index=first_wire["chunk_index"],
+        plaintext_len=first_wire["plaintext_len"],
+        ciphertext=base64.b64decode(first_wire["data"]),
+    )
+    assert receiver.decrypt_chunk(first_rebuilt) is not None
+
+    second_rebuilt = native_transfer.NativeChunkRecord(
+        chunk_id=bytes.fromhex(second_wire["chunk_id"]),
+        chunk_index=second_wire["chunk_index"],
+        plaintext_len=second_wire["plaintext_len"],
+        ciphertext=base64.b64decode(second_wire["data"]),
+    )
+    assert receiver.decrypt_chunk(second_rebuilt) == second_plaintext
+
+    broken_rebuilt = native_transfer.NativeChunkRecord(
+        chunk_id=bytes.fromhex(second_wire["chunk_id"]),
+        chunk_index=second_wire["seq"],
+        plaintext_len=second_wire["plaintext_len"],
+        ciphertext=base64.b64decode(second_wire["data"]),
+    )
+    fresh_receiver = bob.establish_native_transfer()
+    fresh_receiver.decrypt_chunk(first_rebuilt)
+    with pytest.raises(Exception):
+        fresh_receiver.decrypt_chunk(broken_rebuilt)
 
 
 def test_file_native_chunk_aead_tag_rejects_swapped_chunk_id():

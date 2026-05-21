@@ -46,6 +46,12 @@ DOUBLE_RATCHET_V1 = "double_ratchet_v1"
 # (no NATIVE_TRANSFER_V1 in caps) keep using FILE_CHUNK /
 # FILE_BIN_CHUNK transparently.
 NATIVE_TRANSFER_V1 = "native_transfer_v1"
+# Native transfer wire fix: FILE_NATIVE_CHUNK now carries the session's
+# native chunk_index separately from per-file seq. Peers must advertise
+# this cap before the sender uses FILE_NATIVE_CHUNK; legacy
+# native_transfer_v1 peers receive FILE_BIN_CHUNK instead so repeated
+# file sends cannot drift AEAD nonce/index state.
+NATIVE_TRANSFER_INDEXED_V1 = "native_transfer_indexed_v1"
 # Phase B Bloom-init handshake (ADR-pending): when both peers advertise
 # this, the receiver sends a Bloom filter of its locally-held chunk_ids
 # at transfer-offer time; the sender XORs it against the manifest and
@@ -147,7 +153,7 @@ LOCAL_CAPABILITIES = (
     SELF_MESH_MANIFEST,
     SELF_MESH_SEND,
     DOUBLE_RATCHET_V1,
-    NATIVE_TRANSFER_V1,
+    NATIVE_TRANSFER_INDEXED_V1,
     BLOOM_INIT_V1,
     QUIC_TRANSPORT_V1,
     FRAME_PROVENANCE_V1,
@@ -200,7 +206,7 @@ TRANSPORT_LAYER_CAPS = (
     FILE_ACK_BATCH,
     FILE_OFFER_BATCH_V1,
     DOUBLE_RATCHET_V1,
-    NATIVE_TRANSFER_V1,
+    NATIVE_TRANSFER_INDEXED_V1,
     BLOOM_INIT_V1,
     QUIC_TRANSPORT_V1,
     # FRAME_PROVENANCE_V1 is automatic safety metadata. It does not

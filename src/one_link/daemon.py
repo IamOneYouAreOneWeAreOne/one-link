@@ -109,6 +109,7 @@ from one_link.capabilities import (
     FOLDER_SYNC,
     FOLDER_SYNC_BIDI_V1,
     LOCAL_CAPABILITIES,
+    NATIVE_TRANSFER_INDEXED_V1,
     NATIVE_TRANSFER_V1,
     SELF_MESH_MANIFEST,
     SELF_MESH_SEND,
@@ -7772,6 +7773,10 @@ class Daemon:
             chunk_id = bytes.fromhex(chunk_id_hex)
             if len(chunk_id) != 32:
                 raise ValueError(f"chunk_id must be 32 bytes, got {len(chunk_id)}")
+            # Session chunk_index is distinct from per-file seq. Legacy
+            # senders (NATIVE_TRANSFER_V1, no _INDEXED) omit chunk_index,
+            # in which case fall back to seq to preserve compat.
+            chunk_index = int(msg.get("chunk_index", seq))
             plaintext_len = int(msg["plaintext_len"])
             ciphertext = base64.b64decode(msg["data"], validate=True)
         except (KeyError, ValueError, binascii.Error) as exc:
@@ -7790,6 +7795,14 @@ class Daemon:
         except Exception as exc:
             self._abort_incoming_file(blob, f)
             log.warning("native transfer session unavailable: %s", exc)
+            self._degradation_events.append({
+                "at_ms": int(time.time() * 1000),
+                "kind": "native_transfer_receiver_unavailable",
+                "peer_fp": peer_fp[:16] if peer_fp else None,
+                "reason": f"{type(exc).__name__}: {exc}",
+                "expected": "decrypt FILE_NATIVE_CHUNK",
+                "actual": "reject + abort",
+            })
             await channel.send(encode_msg(make_msg(
                 "ACK", self.me.short_id, of=msg.get("id"),
                 rejected="native_transfer_unavailable",
@@ -7797,7 +7810,7 @@ class Daemon:
             return
         record = _nt.NativeChunkRecord(
             chunk_id=chunk_id,
-            chunk_index=seq,
+            chunk_index=chunk_index,
             plaintext_len=plaintext_len,
             ciphertext=ciphertext,
         )
@@ -9931,6 +9944,18 @@ class Daemon:
             # Stash pump task on the writer so the OutboundSession
             # creator can attach it (see _get_outbound_session).
             setattr(writer, "_relay_pump_task", pump)
+            # Record the degradation only when direct WAS tried and
+            # failed. If the peer has no direct candidates, relay is
+            # the only option — not a degradation.
+            if direct_err is not None:
+                self._degradation_events.append({
+                    "at_ms": int(time.time() * 1000),
+                    "kind": "direct_dial_failed_relay_fallback",
+                    "peer_fp": fingerprint_of(peer.ed_pub)[:16],
+                    "reason": f"{type(direct_err).__name__}: {direct_err}",
+                    "expected": "direct LAN/Internet dial",
+                    "actual": "encrypted relay",
+                })
             return reader, writer, "relay"
 
         if direct_err is not None:
@@ -10132,8 +10157,8 @@ class Daemon:
           - prefetch.available: bool, prefetch.storage_entries: int
           - routing.available: bool, routing.aead_kind_default: str
             (when the native pipeline is loaded)
-          - native_transfer_v1.advertised: bool (whether THIS daemon
-            ships NATIVE_TRANSFER_V1 in its CAPS frame)
+          - native_transfer_indexed_v1.advertised: bool (whether THIS
+            daemon ships the fixed native-transfer wire in CAPS)
           - macaroon_dual_issue.last_minted: bool (whether any
             macaroon has been minted since startup)
 
@@ -10164,6 +10189,9 @@ class Daemon:
                 "endpoint_up": False,
             },
             "native_transfer_v1": {
+                "advertised": False,
+            },
+            "native_transfer_indexed_v1": {
                 "advertised": False,
             },
             "macaroon_dual_issue": {
@@ -10279,10 +10307,17 @@ class Daemon:
         # NATIVE_TRANSFER_V1 is advertised whenever it's in
         # LOCAL_CAPABILITIES — see capabilities.py for the source.
         try:
-            from one_link.capabilities import LOCAL_CAPABILITIES
+            from one_link.capabilities import (
+                LOCAL_CAPABILITIES,
+                NATIVE_TRANSFER_INDEXED_V1 as _NT_INDEXED,
+                NATIVE_TRANSFER_V1 as _NT_LEGACY,
+            )
 
             out["native_transfer_v1"]["advertised"] = (
-                NATIVE_TRANSFER_V1 in LOCAL_CAPABILITIES
+                _NT_LEGACY in LOCAL_CAPABILITIES
+            )
+            out["native_transfer_indexed_v1"]["advertised"] = (
+                _NT_INDEXED in LOCAL_CAPABILITIES
             )
         except Exception:  # pragma: no cover
             pass
@@ -17022,7 +17057,7 @@ class Daemon:
                 can_offer_cdc
                 and size > 0
                 and sel_transport == "quic_stream"
-                and NATIVE_TRANSFER_V1 in peer_features
+                and NATIVE_TRANSFER_INDEXED_V1 in peer_features
                 and self._quic_peer_ports.get(peer_fp)
             ):
                 can_offer_cdc = False
@@ -17035,7 +17070,7 @@ class Daemon:
             can_offer_cdc
             and size > 0
             and size <= QUIC_SMALL_FILE_THRESHOLD
-            and NATIVE_TRANSFER_V1 in peer_features
+            and NATIVE_TRANSFER_INDEXED_V1 in peer_features
             and self._quic_peer_ports.get(peer_fp)
         ):
             can_offer_cdc = False
@@ -17611,7 +17646,7 @@ class Daemon:
                         # _quic_outbound is empty.
                         if (
                             peer_fp_for_policy
-                            and NATIVE_TRANSFER_V1 in peer_feature_set
+                            and NATIVE_TRANSFER_INDEXED_V1 in peer_feature_set
                             and peer_fp_for_policy not in self._quic_outbound
                             and self._quic_peer_ports.get(peer_fp_for_policy)
                         ):
@@ -17621,7 +17656,7 @@ class Daemon:
                                 )
                         cdc_quic_eligible = (
                             peer_fp_for_policy is not None
-                            and NATIVE_TRANSFER_V1 in peer_feature_set
+                            and NATIVE_TRANSFER_INDEXED_V1 in peer_feature_set
                             and peer_fp_for_policy in self._quic_outbound
                         )
                         cdc_quic_batch: list[dict] = []
@@ -17784,6 +17819,15 @@ class Daemon:
                                             "falling back to WebRTC for "
                                             "remainder of %s", blob_hex[:8],
                                         )
+                                        self._degradation_events.append({
+                                            "at_ms": int(time.time() * 1000),
+                                            "kind": "cdc_quic_batch_failed",
+                                            "peer_fp": peer_fp_for_policy[:16]
+                                                if peer_fp_for_policy else None,
+                                            "reason": "send_chunk_via_quic batch returned not-ok",
+                                            "expected": "FILE_CDC_CHUNK over QUIC",
+                                            "actual": "FILE_CDC_CHUNK over WebRTC",
+                                        })
                                         cdc_quic_eligible = False
                                         for fb_msg, (fb_raw, fb_wire) in zip(
                                             cdc_quic_batch, cdc_quic_sizes,
@@ -17830,6 +17874,15 @@ class Daemon:
                                     "tailing through WebRTC for %s",
                                     blob_hex[:8],
                                 )
+                                self._degradation_events.append({
+                                    "at_ms": int(time.time() * 1000),
+                                    "kind": "cdc_quic_final_flush_failed",
+                                    "peer_fp": peer_fp_for_policy[:16]
+                                        if peer_fp_for_policy else None,
+                                    "reason": "send_chunk_via_quic final batch returned not-ok",
+                                    "expected": "FILE_CDC_CHUNK over QUIC",
+                                    "actual": "FILE_CDC_CHUNK over WebRTC",
+                                })
                                 for fb_msg, (fb_raw, fb_wire) in zip(
                                     cdc_quic_batch, cdc_quic_sizes,
                                 ):
@@ -17859,7 +17912,7 @@ class Daemon:
                     # / FILE_CHUNK transparently.
                     _native_env = os.environ.get("ONE_LINK_NATIVE_TRANSFER", "1")
                     native_transfer_used = (
-                        NATIVE_TRANSFER_V1 in peer_feature_set
+                        NATIVE_TRANSFER_INDEXED_V1 in peer_feature_set
                         and _native_env != "0"
                     )
                     native_session = None
@@ -18077,6 +18130,7 @@ class Daemon:
                                     self.me.short_id,
                                     blob=blob_hex,
                                     seq=seq,
+                                    chunk_index=record.chunk_index,
                                     chunk_id=record.chunk_id.hex(),
                                     plaintext_len=record.plaintext_len,
                                     data=base64.b64encode(record.ciphertext).decode("ascii"),
@@ -18131,6 +18185,18 @@ class Daemon:
                                             # chunk_msg dicts so the
                                             # receiver's ratchet
                                             # stays in lockstep.
+                                            self._degradation_events.append({
+                                                "at_ms": int(time.time() * 1000),
+                                                "kind": "stream_quic_batch_failed",
+                                                "peer_fp": peer_fp_for_policy[:16]
+                                                    if peer_fp_for_policy else None,
+                                                "reason": str(
+                                                    (qres or {}).get("error")
+                                                    or "send_chunks_via_quic_parallel returned not-ok"
+                                                ),
+                                                "expected": "FILE_NATIVE_CHUNK over QUIC",
+                                                "actual": "FILE_NATIVE_CHUNK over WebRTC",
+                                            })
                                             await _fallback_quic_batch_to_webrtc()
                                 if not quic_dispatched:
                                     queued_write = await _queue_or_send(
