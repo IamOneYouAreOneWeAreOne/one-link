@@ -178,6 +178,53 @@ async def test_collect_candidates_lan_only_when_no_rendezvous():
 
 
 @pytest.mark.asyncio
+async def test_collect_candidates_inserts_live_quic_same_port_before_stale_routes():
+    """A freshly learned same-port QUIC value is also the current peer
+    TCP port on new daemons. It must be tried before durable route memory
+    so a peer restart cannot leave send_file stuck on old verified ports.
+    """
+    me = _new_identity()
+    peer_id = _new_identity()
+    peer_fp = peer_id.fingerprint
+    daemon = Daemon(me)
+    daemon.rendezvous = None
+    daemon._quic_peer_ports[peer_fp] = 58739
+
+    class _State:
+        def prune_route_candidates(self):
+            return 0
+
+        def list_route_candidates(self, *_args, **_kwargs):
+            return [
+                {
+                    "route": "lan",
+                    "host": "192.168.1.26",
+                    "port": 61288,
+                    "verified": 1,
+                    "successes": 100,
+                    "failures": 0,
+                    "latency_ms": 4.0,
+                    "updated_ms": 1,
+                },
+            ]
+
+    daemon.state = _State()  # type: ignore[assignment]
+    peer = Peer(
+        short_id=peer_id.short_id,
+        hostname="Computer 2",
+        address="192.168.1.26",
+        port=61288,
+        ed_pub_hex=peer_id.public_bytes.hex(),
+    )
+
+    cands = await daemon._collect_dial_candidates(peer)
+    assert cands[:3] == [
+        ("192.168.1.26", 61288),
+        ("192.168.1.26", 58739),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_collect_candidates_dedupes_repeated_endpoints():
     """If the rendezvous reports the same endpoint as `peer.address` /
     `port`, it shouldn't appear twice in the candidate list."""

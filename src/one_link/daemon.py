@@ -10266,7 +10266,13 @@ class Daemon:
                 QUIC_TRANSPORT_V1 in LOCAL_CAPABILITIES
             )
             out["quic_transport"]["endpoint_up"] = (
-                getattr(self, "_quic_endpoint", None) is not None
+                getattr(self, "_quic_server_endpoint", None) is not None
+            )
+            out["quic_transport"]["local_port"] = getattr(
+                self, "_quic_local_port", None
+            )
+            out["quic_transport"]["known_peer_ports"] = len(
+                getattr(self, "_quic_peer_ports", {}) or {}
             )
         except ImportError:
             pass
