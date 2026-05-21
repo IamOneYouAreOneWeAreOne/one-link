@@ -1768,6 +1768,16 @@ class UIServer:
         r.add_post("/api/send", self._guarded(self.api_send))
         r.add_post("/api/send-file", self._guarded(self.api_send_file))
         r.add_get("/api/files", self._guarded(self.api_files))
+        # v0.21.x: serve the sender's own outbound file straight from
+        # the path the transfer ledger recorded. Lets the chat bubble
+        # re-open / preview / thumbnail the file after a browser tab
+        # refresh wiped the in-memory File cache. Security: only files
+        # that already shipped through send_file are reachable, scoped
+        # to the ledger row's recorded path — no traversal possible.
+        r.add_get(
+            r"/api/outbound_files/{transfer_id:.+}",
+            self._guarded(self.api_outbound_file_download),
+        )
         r.add_get("/api/transfers", self._guarded(self.api_transfers))
         r.add_post("/api/transfers/prune", self._guarded(self.api_prune_transfers))
         r.add_post(r"/api/transfers/{transfer_id:.+}/retry", self._guarded(self.api_retry_transfer))
@@ -12905,6 +12915,53 @@ class UIServer:
             return web.json_response({"error": "not found"}, status=404)
         mime = mimetypes.guess_type(safe)[0] or "application/octet-stream"
         return web.FileResponse(path, headers={"Content-Type": mime})
+
+    async def api_outbound_file_download(
+        self, request: web.Request,
+    ) -> web.StreamResponse:
+        """v0.21.x: serve a file the user previously sent, identified by
+        its transfer_id in the ledger. Used by the chat UI to re-open or
+        re-thumbnail outbound bubbles after a tab refresh wiped the in-
+        memory File cache. The transfer_id → path mapping is owned by
+        the daemon's state.db; the browser cannot reference arbitrary
+        disk paths through this endpoint, only paths the ledger
+        already remembers because send_file ran on them."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        transfer_id = request.match_info["transfer_id"]
+        rec = self.daemon.state.get_transfer(transfer_id)
+        if rec is None:
+            return web.json_response({"error": "transfer not found"}, status=404)
+        if rec.direction != "out":
+            return web.json_response(
+                {"error": "only outbound transfers can be served from disk"},
+                status=400,
+            )
+        path_str = (rec.metadata or {}).get("path")
+        if not path_str:
+            return web.json_response(
+                {"error": "source path not recorded for this transfer"},
+                status=410,
+            )
+        path = Path(path_str)
+        if not path.is_file():
+            return web.json_response(
+                {"error": f"source file is no longer on disk at {path}",
+                 "missing_path": str(path)},
+                status=410,
+            )
+        # Prefer the ledger-recorded original filename for the
+        # Content-Disposition header so downloads / Save As use the
+        # name the recipient saw, not whatever the on-disk basename is.
+        download_name = (rec.metadata or {}).get("name") or path.name
+        mime = mimetypes.guess_type(download_name)[0] or "application/octet-stream"
+        return web.FileResponse(
+            path,
+            headers={
+                "Content-Type": mime,
+                "Content-Disposition": f'inline; filename="{download_name}"',
+            },
+        )
 
     # v0.9.0: inline preview support. Whitelisted text-y extensions
     # only — defense-in-depth against the user clicking 'preview' on

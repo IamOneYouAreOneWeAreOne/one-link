@@ -12150,12 +12150,24 @@
       objectUrl: null,
     });
   }
-  function objectUrlForOutboundFile(name, size) {
+  function objectUrlForOutboundFile(name, size, transferId) {
+    // Hot path: the original File object is still in tab memory
+    // (uploaded this session). Return a blob: URL pointing at it.
     const key = _outboundFileKey(name, size);
     const ent = state.outboundFileCache.get(key);
-    if (!ent) return null;
-    if (!ent.objectUrl) ent.objectUrl = URL.createObjectURL(ent.file);
-    return ent.objectUrl;
+    if (ent) {
+      if (!ent.objectUrl) ent.objectUrl = URL.createObjectURL(ent.file);
+      return ent.objectUrl;
+    }
+    // Fallback for after-refresh: the daemon's transfer ledger
+    // remembers the original disk path of every file we've sent.
+    // /api/outbound_files/<transfer_id> streams it back. Skipped when
+    // we don't have a transfer_id (e.g. legacy bubbles before the
+    // transfer ledger existed).
+    if (transferId) {
+      return `/api/outbound_files/${encodeURIComponent(transferId)}`;
+    }
+    return null;
   }
   // Lightbox singleton. Created on first use, reused thereafter.
   function _ensureLightbox() {
@@ -12341,7 +12353,8 @@
           downloadName = fname;
         }
       } else {
-        url = objectUrlForOutboundFile(m.name, m.size || 0);
+        const t = transferForMessage(m);
+        url = objectUrlForOutboundFile(m.name, m.size || 0, t?.id);
       }
       if (!url) continue;
       if (m.id === currentMsg.id) activeIdx = entries.length;
@@ -12382,11 +12395,16 @@
       url = `/api/files/${encodeURIComponent(fname)}`;
       downloadName = fname;
     } else if (msg.dir === "out") {
-      url = objectUrlForOutboundFile(name, size);
+      const t = transferForMessage(msg);
+      url = objectUrlForOutboundFile(name, size, t?.id);
       if (!url) {
+        // No browser-side File AND no transfer_id we can ask the
+        // daemon for — should only happen on legacy pre-ledger
+        // bubbles. Be honest about the cause.
         toast(
-          "The original file isn't kept in the browser after a tab refresh. "
-          + "Drag and drop it again to re-share.",
+          "Can't preview this file — it predates the transfer ledger, "
+          + "so the daemon doesn't remember where it lived on disk. "
+          + "Drag the original in again to share another copy.",
           "info", 6000,
         );
         return;
@@ -15507,12 +15525,15 @@
     }
     // v0.21.x: outbound image thumbnail. The sender used to see no
     // preview of their own sent photo — only the recipient did. With
-    // the in-memory File cache populated at upload time, we can
-    // render an identical thumbnail from a blob: URL so the sender's
-    // bubble matches the recipient's. Falls back to the icon-only
-    // bubble if the File isn't cached (e.g. after a tab refresh).
+    // the in-memory File cache populated at upload time, we render
+    // an identical thumbnail from a blob: URL so the sender's bubble
+    // matches the recipient's. After a tab refresh wipes that cache,
+    // `objectUrlForOutboundFile` falls back to
+    // `/api/outbound_files/<transfer_id>` so the thumbnail still
+    // renders. Only goes icon-only when the daemon also has no
+    // record of the path (legacy pre-ledger bubbles).
     if (msg.dir === "out" && kind === "sent" && isImageName(msg.name)) {
-      const cachedUrl = objectUrlForOutboundFile(msg.name, msg.size || 0);
+      const cachedUrl = objectUrlForOutboundFile(msg.name, msg.size || 0, t?.id);
       if (cachedUrl) {
         const img = document.createElement("img");
         img.className = "img-preview";
