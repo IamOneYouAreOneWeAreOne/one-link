@@ -63,7 +63,7 @@
 //!
 //! ## End-to-end example
 //!
-//! ```
+//! ```no_run
 //! use rand::rngs::OsRng;
 //! use x25519_dalek::{PublicKey, StaticSecret};
 //! use ol_onion::{

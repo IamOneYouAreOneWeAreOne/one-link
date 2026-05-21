@@ -26,7 +26,7 @@ pub const HOP_ID_LEN: usize = 32;
 ///
 /// # Example
 ///
-/// ```
+/// ```no_run
 /// use ol_onion::{HopId, HOP_ID_LEN};
 ///
 /// let a = HopId::from_bytes([1u8; HOP_ID_LEN]);

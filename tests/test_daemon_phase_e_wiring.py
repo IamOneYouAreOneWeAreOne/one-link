@@ -11,6 +11,7 @@ Verifies the helpers added in Phase E:
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -27,6 +28,19 @@ def _bare_daemon():
     d._smart_selector = None
     d._selector_mode = "off"
     d._user_mode_value = "normal"
+    d.me = MagicMock()
+    d.me.fingerprint = "ff" * 32
+    d._is_pinned = MagicMock(return_value=True)
+    d._outbound_sessions = {}
+    d._selector_onion_bridge_counters = {
+        "circuits_built": 0,
+        "cover_packets_built": 0,
+        "cover_suppressed_by_selector": 0,
+        "fallback_random": 0,
+        "missing_destination_key": 0,
+        "insufficient_relays": 0,
+        "build_errors": 0,
+    }
     return d
 
 
@@ -298,6 +312,138 @@ def test_decision_for_file_passes_size_and_kind() -> None:
     call_kwargs = d._smart_selector.decide.call_args[1]
     assert call_kwargs["size"] == 99_999
     assert call_kwargs["kind"] == "FILE_CHUNK"
+
+
+# ---------- D22 — selector-to-onion bridge ----------
+
+
+def _onion_peer(fp: str, key_byte: int):
+    return SimpleNamespace(
+        fingerprint=fp,
+        short_id=fp[:8],
+        trust="pinned",
+        onion_pubkey=bytes([key_byte]) * 32,
+    )
+
+
+def test_selector_onion_hops_normalizes_to_contract_values() -> None:
+    d = _bare_daemon()
+    assert d._selector_onion_hops(None) == 3
+    assert d._selector_onion_hops({"onion_hops": 1}) == 1
+    assert d._selector_onion_hops({"onion_hops": 2}) == 3
+    assert d._selector_onion_hops({"onion_hops": 5}) == 5
+    assert d._selector_onion_hops({"onion_hops": "bad"}) == 3
+
+
+def test_selector_onion_circuit_uses_destination_and_relays() -> None:
+    d = _bare_daemon()
+    dest = _onion_peer("aa" * 32, 3)
+    relay_a = _onion_peer("11" * 32, 1)
+    relay_b = _onion_peer("22" * 32, 2)
+    d.state.get_peer.side_effect = lambda fp: dest if fp == dest.fingerprint else None
+    d.state.list_peers.return_value = [relay_b, dest, relay_a]
+
+    circuit = d._selector_onion_circuit_for_peer(
+        dest.fingerprint,
+        {"onion_hops": 3, "cover_traffic": True},
+    )
+
+    assert len(circuit) == 3
+    assert circuit[-1][1] == dest.onion_pubkey
+    assert [hop[1] for hop in circuit[:2]] == [
+        relay_a.onion_pubkey,
+        relay_b.onion_pubkey,
+    ]
+    assert d._selector_onion_bridge_counters["circuits_built"] == 1
+
+
+def test_selector_onion_circuit_gracefully_shortens_when_relays_missing() -> None:
+    d = _bare_daemon()
+    dest = _onion_peer("aa" * 32, 3)
+    d.state.get_peer.side_effect = lambda fp: dest if fp == dest.fingerprint else None
+    d.state.list_peers.return_value = [dest]
+
+    circuit = d._selector_onion_circuit_for_peer(
+        dest.fingerprint,
+        {"onion_hops": 5, "cover_traffic": True},
+    )
+
+    assert len(circuit) == 1
+    assert circuit[0][1] == dest.onion_pubkey
+    assert d._selector_onion_bridge_counters["insufficient_relays"] == 1
+
+
+def test_selector_onion_circuit_reports_missing_destination_key() -> None:
+    d = _bare_daemon()
+    dest = SimpleNamespace(fingerprint="aa" * 32, trust="pinned")
+    d.state.get_peer.return_value = dest
+    d.state.list_peers.return_value = [dest]
+
+    assert (
+        d._selector_onion_circuit_for_peer(dest.fingerprint, {"onion_hops": 3})
+        == []
+    )
+    assert d._selector_onion_bridge_counters["missing_destination_key"] == 1
+
+
+def test_selector_onion_circuit_uses_live_peer_rtc_key_over_state_record() -> None:
+    d = _bare_daemon()
+    fp = "aa" * 32
+    state_record = SimpleNamespace(fingerprint=fp, trust="pinned")
+    live_record = _onion_peer(fp, 7)
+    d.state.get_peer.return_value = state_record
+    d.state.list_peers.return_value = [state_record]
+    d.peer_rtc = MagicMock()
+    d.peer_rtc.get_peer.return_value = live_record
+    d.peer_rtc.list_peers.return_value = [live_record]
+
+    circuit = d._selector_onion_circuit_for_peer(
+        fp,
+        {"onion_hops": 1, "cover_traffic": True},
+    )
+
+    assert len(circuit) == 1
+    assert circuit[0][1] == live_record.onion_pubkey
+
+
+def test_selector_cover_packet_builds_real_packet_from_decision(monkeypatch) -> None:
+    d = _bare_daemon()
+    dest = _onion_peer("aa" * 32, 9)
+    d.state.get_peer.side_effect = lambda fp: dest if fp == dest.fingerprint else None
+    d.state.list_peers.return_value = [dest]
+    calls = []
+
+    def fake_build(circuit, cover_size):
+        calls.append((circuit, cover_size))
+        return b"sphinx-cover"
+
+    monkeypatch.setattr(
+        daemon_module.cover_traffic_module,
+        "build_cover_packet",
+        fake_build,
+    )
+    monkeypatch.setattr(daemon_module.cover_traffic_module, "HAS_NATIVE", True)
+
+    packet = d._selector_cover_packet_for_peer(
+        dest.fingerprint,
+        {"onion_hops": 1, "cover_traffic": True},
+        cover_size=16,
+    )
+
+    assert packet == b"sphinx-cover"
+    assert len(calls[0][0]) == 1
+    assert calls[0][1] >= 64
+    assert d._selector_onion_bridge_counters["cover_packets_built"] == 1
+
+
+def test_selector_cover_packet_suppresses_when_selector_says_no_cover() -> None:
+    d = _bare_daemon()
+    packet = d._selector_cover_packet_for_peer(
+        "aa" * 32,
+        {"onion_hops": 1, "cover_traffic": False},
+    )
+    assert packet is None
+    assert d._selector_onion_bridge_counters["cover_suppressed_by_selector"] == 1
 
 
 # ---------- D17 — dedupe_sites_for / dedupe_sites_stats ----------

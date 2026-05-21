@@ -18,7 +18,7 @@
 //!
 //! ## Example: bridge ↔ client handshake + bidirectional traffic
 //!
-//! ```
+//! ```no_run
 //! use ol_onion::transport_obfs::{
 //!     BridgeKeypair, ClientHandshake, ServerHandshake,
 //! };

@@ -1535,6 +1535,10 @@ class UIServer:
             "/api/v1/equation-of-one/stats",
             self._guarded(self.api_equation_of_one_stats),
         )
+        r.add_get(
+            "/api/v1/integration/readiness",
+            self._guarded(self.api_integration_readiness),
+        )
         # Integration map §6 — dedicated user_mode endpoint. POST sets
         # the F4 mode (paranoid / battery_save / latency_strict / normal),
         # GET reads it. The same mode is also reachable via the broader
@@ -5368,6 +5372,243 @@ class UIServer:
         except Exception as exc:
             out["fuse"] = {"error": str(exc)}
         return web.json_response(out)
+
+    async def api_integration_readiness(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Owner-only readiness gate for the Equation-of-ONE stack.
+
+        This is intentionally stricter than `/api/v1/equation-of-one/stats`.
+        Stats answers "what is the current state?"; readiness answers "is this
+        safe enough to promote from observability into enforcement?"
+        """
+        d = self.daemon
+
+        checks: list[dict] = []
+
+        def add_check(
+            key: str,
+            ok: bool,
+            *,
+            state: str,
+            detail: str,
+            required: bool = True,
+            data: Optional[dict] = None,
+        ) -> None:
+            checks.append({
+                "key": key,
+                "ok": bool(ok),
+                "state": state,
+                "required": bool(required),
+                "detail": detail,
+                "data": data or {},
+            })
+
+        selector = {}
+        try:
+            selector = dict(d.selector_info())
+            add_check(
+                "selector",
+                bool(selector.get("available")),
+                state=(
+                    "enforced" if selector.get("enforce")
+                    else ("observing" if selector.get("mode") != "off" else "available")
+                ),
+                detail="Per-event selector is installed and inspectable."
+                if selector.get("available")
+                else "Per-event selector native module is not available.",
+                data=selector,
+            )
+        except Exception as exc:
+            add_check(
+                "selector",
+                False,
+                state="error",
+                detail=f"Selector readiness failed: {exc}",
+            )
+
+        try:
+            decisions = d.selector_decision_stats()
+            add_check(
+                "selector_decisions",
+                "total" in decisions and "transport" in decisions,
+                state="ready",
+                detail="Selector decision counters are available.",
+                data={
+                    "total": decisions.get("total", 0),
+                    "cover_ratio": decisions.get("cover_ratio", 0.0),
+                    "f4_violation_ratio": decisions.get("f4_violation_ratio", 0.0),
+                },
+            )
+        except Exception as exc:
+            add_check(
+                "selector_decisions",
+                False,
+                state="error",
+                detail=f"Selector counter readiness failed: {exc}",
+            )
+
+        try:
+            cover = d.cover_traffic_stats()
+            add_check(
+                "cover_traffic",
+                bool(cover.get("available", True)),
+                state="running" if cover.get("running") else "available",
+                detail="Cover traffic subsystem is inspectable.",
+                required=False,
+                data={
+                    "running": bool(cover.get("running", False)),
+                    "effective_enabled": bool(cover.get("effective_enabled", False)),
+                    "errors": int(cover.get("errors", 0) or 0),
+                },
+            )
+        except Exception as exc:
+            add_check(
+                "cover_traffic",
+                False,
+                state="error",
+                detail=f"Cover traffic readiness failed: {exc}",
+                required=False,
+            )
+
+        radio_enabled = bool(getattr(d, "_radio_batcher_enabled", False))
+        radio_present = getattr(d, "_radio_batcher", None) is not None
+        add_check(
+            "radio_batcher",
+            radio_present,
+            state="enabled" if radio_enabled else "gated",
+            detail=(
+                "Radio batcher is present; promotion is gated by ONE_LINK_RADIO_BATCHER."
+                if radio_present
+                else "Radio batcher native module is not available."
+            ),
+            required=False,
+            data={
+                "enabled": radio_enabled,
+                "env": os.environ.get("ONE_LINK_RADIO_BATCHER", "0"),
+            },
+        )
+
+        try:
+            wave = d.wave_forecast_stats()
+            add_check(
+                "wave_forecast",
+                bool(wave.get("available", True)),
+                state="enabled" if wave.get("enabled") else "gated",
+                detail="Wave forecast is available; production route changes stay gated.",
+                required=False,
+                data={
+                    "enabled": bool(wave.get("enabled", False)),
+                    "steps": int(wave.get("steps", 0) or 0),
+                    "warnings": int(wave.get("warnings", 0) or 0),
+                },
+            )
+        except Exception as exc:
+            add_check(
+                "wave_forecast",
+                False,
+                state="error",
+                detail=f"Wave forecast readiness failed: {exc}",
+                required=False,
+            )
+
+        try:
+            dedupe = d.dedupe_sites_stats()
+            add_check(
+                "dedupe_sites",
+                "entries" in dedupe and "hits" in dedupe,
+                state="ready",
+                detail="Dedupe-site index is available.",
+                required=False,
+                data={
+                    "entries": int(dedupe.get("entries", 0) or 0),
+                    "hits": int(dedupe.get("hits", 0) or 0),
+                    "misses": int(dedupe.get("misses", 0) or 0),
+                },
+            )
+        except Exception as exc:
+            add_check(
+                "dedupe_sites",
+                False,
+                state="error",
+                detail=f"Dedupe readiness failed: {exc}",
+                required=False,
+            )
+
+        try:
+            adaptive = d.adaptive_transport_stats()
+            add_check(
+                "adaptive_transport",
+                isinstance(adaptive, dict),
+                state="ready",
+                detail="Adaptive heartbeat/reconnect telemetry is available.",
+                required=False,
+                data={
+                    "fail_open_count": int(
+                        adaptive.get("capability_fail_open_count", 0) or 0
+                    ),
+                    "discovery_interval_s": adaptive.get("discovery_interval_s"),
+                },
+            )
+        except Exception as exc:
+            add_check(
+                "adaptive_transport",
+                False,
+                state="error",
+                detail=f"Adaptive transport readiness failed: {exc}",
+                required=False,
+            )
+
+        call_ready = hasattr(self, "api_call_trace") and hasattr(d, "_call_registry")
+        add_check(
+            "call_trace",
+            call_ready,
+            state="ready" if call_ready else "missing",
+            detail="Privacy-safe call trace endpoint is wired."
+            if call_ready
+            else "Call registry or trace endpoint is not available.",
+            required=False,
+        )
+
+        required = [c for c in checks if c["required"]]
+        optional = [c for c in checks if not c["required"]]
+        required_ok = sum(1 for c in required if c["ok"])
+        optional_ok = sum(1 for c in optional if c["ok"])
+        required_score = required_ok / len(required) if required else 1.0
+        optional_score = optional_ok / len(optional) if optional else 1.0
+        score = int(round((required_score * 0.8 + optional_score * 0.2) * 100))
+
+        if required_score < 1.0:
+            status = "blocked"
+        elif any(c["state"] == "error" for c in checks):
+            status = "degraded"
+        elif any(c["state"] == "gated" for c in checks):
+            status = "ready_gated"
+        else:
+            status = "ready"
+
+        return web.json_response({
+            "ok": required_score == 1.0,
+            "status": status,
+            "score": score,
+            "user_mode": getattr(d, "_user_mode_value", "normal"),
+            "selector": selector,
+            "checks": checks,
+            "promotion": {
+                "selector_enforce": bool(selector.get("enforce", False)),
+                "radio_batcher_default_on": radio_enabled,
+                "wave_forecast_default_on": bool(
+                    next(
+                        (
+                            c.get("data", {}).get("enabled", False)
+                            for c in checks
+                            if c["key"] == "wave_forecast"
+                        ),
+                        False,
+                    )
+                ),
+            },
+        })
 
     async def api_one_health(self, request: web.Request) -> web.Response:
         """Human-first readiness center for the whole One Link fabric."""

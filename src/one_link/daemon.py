@@ -1627,6 +1627,19 @@ class Daemon:
         # Round-robin peer index for cover-packet dispatch so we don't
         # bias toward any single peer.
         self._cover_dispatch_rr_idx: int = 0
+        # D05/D22 bridge — selector onion_hops/cover_traffic decisions
+        # must drive real Sphinx circuit construction when onion keys
+        # are known. These counters show how often that bridge was able
+        # to build the requested circuit vs gracefully falling back.
+        self._selector_onion_bridge_counters: dict = {
+            "circuits_built": 0,
+            "cover_packets_built": 0,
+            "cover_suppressed_by_selector": 0,
+            "fallback_random": 0,
+            "missing_destination_key": 0,
+            "insufficient_relays": 0,
+            "build_errors": 0,
+        }
 
         # Integration map §11 — capability denial counter by reason.
         # Updated by every code path that REFUSES a capability grant
@@ -11920,24 +11933,282 @@ class Daemon:
             self._cover_traffic = None
         return self._cover_traffic
 
+    def _selector_onion_bridge_stats(self) -> dict:
+        c = getattr(self, "_selector_onion_bridge_counters", None)
+        if not isinstance(c, dict):
+            return {
+                "circuits_built": 0,
+                "cover_packets_built": 0,
+                "cover_suppressed_by_selector": 0,
+                "fallback_random": 0,
+                "missing_destination_key": 0,
+                "insufficient_relays": 0,
+                "build_errors": 0,
+            }
+        return {
+            "circuits_built": int(c.get("circuits_built", 0) or 0),
+            "cover_packets_built": int(c.get("cover_packets_built", 0) or 0),
+            "cover_suppressed_by_selector": int(
+                c.get("cover_suppressed_by_selector", 0) or 0
+            ),
+            "fallback_random": int(c.get("fallback_random", 0) or 0),
+            "missing_destination_key": int(
+                c.get("missing_destination_key", 0) or 0
+            ),
+            "insufficient_relays": int(c.get("insufficient_relays", 0) or 0),
+            "build_errors": int(c.get("build_errors", 0) or 0),
+        }
+
+    def _bump_selector_onion_bridge_counter(self, key: str) -> None:
+        c = getattr(self, "_selector_onion_bridge_counters", None)
+        if isinstance(c, dict) and key in c:
+            c[key] = int(c.get(key, 0) or 0) + 1
+
+    def _selector_onion_hops(self, decision: Optional[dict]) -> int:
+        """Normalize selector hop decisions to 1, 3, or 5 hops."""
+        try:
+            raw = int((decision or {}).get("onion_hops", 3))
+        except Exception:
+            return 3
+        if raw <= 1:
+            return 1
+        if raw <= 3:
+            return 3
+        return 5
+
+    def _peer_record_fingerprint(self, peer: Any) -> str:
+        for attr in ("fingerprint", "peer_fp", "fp", "id"):
+            with contextlib.suppress(Exception):
+                value = getattr(peer, attr, None)
+                if value:
+                    return str(value)
+        return ""
+
+    def _decode_onion_pubkey(self, value: Any) -> Optional[bytes]:
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            return bytes(value) if len(value) == 32 else None
+        if isinstance(value, bytearray):
+            b = bytes(value)
+            return b if len(b) == 32 else None
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+            with contextlib.suppress(Exception):
+                b = bytes.fromhex(s)
+                if len(b) == 32:
+                    return b
+            with contextlib.suppress(Exception):
+                b = base64.b64decode(s, validate=True)
+                if len(b) == 32:
+                    return b
+        return None
+
+    def _peer_onion_pubkey(self, peer: Any) -> Optional[bytes]:
+        for attr in (
+            "onion_pubkey",
+            "onion_public_key",
+            "sphinx_pubkey",
+            "sphinx_public_key",
+            "x25519_pubkey",
+        ):
+            with contextlib.suppress(Exception):
+                key = self._decode_onion_pubkey(getattr(peer, attr, None))
+                if key is not None:
+                    return key
+        return None
+
+    def _onion_hop_id_for_peer(self, peer_fp: str, peer: Any = None) -> bytes:
+        for attr in ("onion_hop_id", "hop_id", "node_id"):
+            with contextlib.suppress(Exception):
+                value = getattr(peer, attr, None) if peer is not None else None
+                if isinstance(value, (bytes, bytearray)) and len(value) == 32:
+                    return bytes(value)
+                if isinstance(value, str):
+                    b = bytes.fromhex(value.strip())
+                    if len(b) >= 32:
+                        return b[:32]
+        fp = str(peer_fp or self._peer_record_fingerprint(peer) or "")
+        with contextlib.suppress(Exception):
+            b = bytes.fromhex(fp)
+            if len(b) >= 32:
+                return b[:32]
+        return hashlib.blake2s(fp.encode("utf-8"), digest_size=32).digest()
+
+    def _iter_onion_peer_records(self) -> Iterable[Any]:
+        seen: set[int] = set()
+
+        def yield_one(candidate: Any):
+            if candidate is None:
+                return None
+            ident = id(candidate)
+            if ident in seen:
+                return None
+            seen.add(ident)
+            return candidate
+
+        state = getattr(self, "state", None)
+        if state is not None:
+            with contextlib.suppress(Exception):
+                for peer in list(state.list_peers() or []):
+                    item = yield_one(peer)
+                    if item is not None:
+                        yield item
+
+        prtc = getattr(self, "peer_rtc", None)
+        if prtc is not None:
+            with contextlib.suppress(Exception):
+                for peer in list(prtc.list_peers() or []):
+                    item = yield_one(peer)
+                    if item is not None:
+                        yield item
+            for attr in ("_peers", "peers"):
+                with contextlib.suppress(Exception):
+                    peers = getattr(prtc, attr, None)
+                    values = peers.values() if isinstance(peers, dict) else peers
+                    for peer in list(values or []):
+                        item = yield_one(peer)
+                        if item is not None:
+                            yield item
+
+        sessions = getattr(self, "_outbound_sessions", {}) or {}
+        if isinstance(sessions, dict):
+            for fp, sess in sessions.items():
+                for candidate in (
+                    sess,
+                    getattr(sess, "peer", None),
+                    getattr(sess, "record", None),
+                ):
+                    if candidate is None:
+                        continue
+                    if not self._peer_record_fingerprint(candidate):
+                        with contextlib.suppress(Exception):
+                            setattr(candidate, "fingerprint", str(fp))
+                    item = yield_one(candidate)
+                    if item is not None:
+                        yield item
+
+    def _find_onion_peer_record(self, peer_fp: str) -> Optional[Any]:
+        target = str(peer_fp or "")
+        if not target:
+            return None
+        state = getattr(self, "state", None)
+        if state is not None:
+            with contextlib.suppress(Exception):
+                rec = state.get_peer(target)
+                if rec is not None:
+                    return rec
+        prtc = getattr(self, "peer_rtc", None)
+        if prtc is not None:
+            with contextlib.suppress(Exception):
+                rec = prtc.get_peer(target)
+                if rec is not None:
+                    return rec
+        for peer in self._iter_onion_peer_records():
+            fp = self._peer_record_fingerprint(peer)
+            if fp == target or fp.startswith(target) or target.startswith(fp):
+                return peer
+        return None
+
+    def _selector_onion_circuit_for_peer(
+        self,
+        peer_fp: str,
+        decision: Optional[dict] = None,
+    ) -> list[tuple[bytes, bytes]]:
+        desired_hops = self._selector_onion_hops(decision)
+        dest = self._find_onion_peer_record(peer_fp)
+        dest_pk = self._peer_onion_pubkey(dest) if dest is not None else None
+        if dest_pk is None:
+            for candidate in self._iter_onion_peer_records():
+                fp = self._peer_record_fingerprint(candidate)
+                if not fp:
+                    continue
+                if fp == peer_fp or fp.startswith(peer_fp) or peer_fp.startswith(fp):
+                    candidate_pk = self._peer_onion_pubkey(candidate)
+                    if candidate_pk is not None:
+                        dest = candidate
+                        dest_pk = candidate_pk
+                        break
+        if dest_pk is None:
+            self._bump_selector_onion_bridge_counter("missing_destination_key")
+            return []
+
+        self_fp = str(getattr(getattr(self, "me", None), "fingerprint", "") or "")
+        relay_map: dict[str, tuple[str, Any, bytes]] = {}
+        for peer in self._iter_onion_peer_records():
+            fp = self._peer_record_fingerprint(peer)
+            if not fp or fp == peer_fp or fp == self_fp:
+                continue
+            pk = self._peer_onion_pubkey(peer)
+            if pk is None:
+                continue
+            if not self._is_pinned(fp):
+                continue
+            relay_map.setdefault(fp, (fp, peer, pk))
+
+        relay_count = max(0, desired_hops - 1)
+        relays = [relay_map[fp] for fp in sorted(relay_map)[:relay_count]]
+        if len(relays) < relay_count:
+            self._bump_selector_onion_bridge_counter("insufficient_relays")
+
+        circuit = [
+            (self._onion_hop_id_for_peer(fp, peer), pk)
+            for fp, peer, pk in relays
+        ]
+        circuit.append((self._onion_hop_id_for_peer(peer_fp, dest), dest_pk))
+        self._bump_selector_onion_bridge_counter("circuits_built")
+        return circuit
+
+    def _selector_cover_packet_for_peer(
+        self,
+        peer_fp: str,
+        decision: Optional[dict] = None,
+        *,
+        cover_size: Optional[int] = None,
+    ) -> Optional[bytes]:
+        if decision is not None and not bool(decision.get("cover_traffic", False)):
+            self._bump_selector_onion_bridge_counter("cover_suppressed_by_selector")
+            return None
+        circuit = self._selector_onion_circuit_for_peer(peer_fp, decision)
+        if not circuit:
+            return None
+        size = int(cover_size or 512)
+        if cover_traffic_module.HAS_NATIVE:
+            min_size = getattr(
+                getattr(cover_traffic_module, "_native_sphinx", None),
+                "COVER_PAYLOAD_MIN",
+                64,
+            )
+            size = max(size, int(min_size or 64))
+        try:
+            packet = cover_traffic_module.build_cover_packet(circuit, size)
+            self._bump_selector_onion_bridge_counter("cover_packets_built")
+            return packet
+        except Exception as exc:
+            self._bump_selector_onion_bridge_counter("build_errors")
+            log.debug("selector onion cover build failed: %s", exc)
+            return None
+
     def _emit_cover_packet_callback(self) -> None:
         """Cover-traffic emit callback. Runs on the cover-traffic
         background thread; must be short + thread-safe.
 
         Picks one paired peer with an active outbound session AND
         the COVER_TRAFFIC_V1 capability (round-robin so no peer is
-        biased), generates a small random payload, encodes as a
-        COVER_PACKET wire frame, and ships via the outbound session.
+        biased), asks the selector for the event posture, then ships
+        a real Sphinx cover packet when onion keys are known. If keys
+        are not known yet, it falls back to opaque random bytes so the
+        cover schedule still masks timing.
 
         Never raises — the cover-traffic thread must not die on any
         peer-specific failure. Errors are counted via the emitter's
         own ``errors`` counter (it wraps this call in try/except).
 
-        Future: replace the random payload with a real Sphinx onion
-        cover packet (native_onion.build_cover_packet) once peer
-        circuits are wired into the daemon. For now, opaque random
-        bytes are sufficient to mask traffic-pattern signal — the
-        receiver drops the frame without inspecting the payload.
+        The receiver drops the frame without inspecting the payload;
+        operator stats expose whether this tick used real Sphinx cover
+        or the random fallback.
         """
         peers = self._pick_cover_traffic_peers()
         if not peers:
@@ -11950,7 +12221,24 @@ class Daemon:
         # fingerprint cover packets by a fixed length.
         import secrets as _secrets
         size = 128 + (_secrets.randbits(10) & 0x3FF)  # ~128..1151 bytes
-        body = _secrets.token_bytes(size)
+        decision = self._selector_decision_for_file(
+            peer_fp=peer_fp,
+            size=size,
+            kind="COVER_PACKET",
+        )
+        if decision is not None and not bool(decision.get("cover_traffic", False)):
+            self._bump_selector_onion_bridge_counter(
+                "cover_suppressed_by_selector",
+            )
+            return
+        body = self._selector_cover_packet_for_peer(
+            peer_fp,
+            decision,
+            cover_size=size,
+        )
+        if body is None:
+            self._bump_selector_onion_bridge_counter("fallback_random")
+            body = _secrets.token_bytes(size)
         try:
             import base64 as _b64
             frame = encode_msg(make_msg(
@@ -12118,6 +12406,7 @@ class Daemon:
                 "errors": 0,
                 "packets_sent": packets_sent,
                 "packets_received": packets_received,
+                "onion_bridge": self._selector_onion_bridge_stats(),
             }
         try:
             stats = dict(self._cover_traffic.stats())
@@ -12127,10 +12416,12 @@ class Daemon:
                 "error": str(exc),
                 "packets_sent": packets_sent,
                 "packets_received": packets_received,
+                "onion_bridge": self._selector_onion_bridge_stats(),
             }
         stats["available"] = True
         stats["packets_sent"] = packets_sent
         stats["packets_received"] = packets_received
+        stats["onion_bridge"] = self._selector_onion_bridge_stats()
         return stats
 
     def _log_selector_decision_for_file(
@@ -12756,7 +13047,7 @@ class Daemon:
         Caller is responsible for honouring the decision; this is the
         single source of truth when ``_selector_enforce`` is True.
         """
-        if self._smart_selector is None:
+        if getattr(self, "_smart_selector", None) is None:
             return None
         try:
             peer_label = "stranger"

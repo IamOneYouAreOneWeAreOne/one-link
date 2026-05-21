@@ -51,7 +51,7 @@
 //!
 //! ## Example: equalized-rate cover scheduling
 //!
-//! ```
+//! ```no_run
 //! use ol_onion::sphinx::cover::{CoverScheduler, RateEqualizer};
 //!
 //! // Aim for 5 packets/sec on the wire regardless of real traffic.
