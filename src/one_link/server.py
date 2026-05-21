@@ -8354,6 +8354,9 @@ class UIServer:
                 _parse_int_or_none(s.get("safety_peer_active_transfers")) or 3
             ),
             "safety_peer_active_gb": _parse_int_or_none(s.get("safety_peer_active_gb")) or 2048,
+            # F1 — user-declared operating mode. Drives selector ΔC/ΔS
+            # weights once the selector becomes load-bearing.
+            "user_mode": s.get("user_mode", "normal"),
         })
 
     async def api_set_settings(self, request: web.Request) -> web.Response:
@@ -8617,6 +8620,38 @@ class UIServer:
                     self.daemon.state.delete_setting(key)
                 else:
                     self.daemon.state.set_setting(key, str(iv))
+        # F1 — user_mode (normal | paranoid | battery_save | latency_strict).
+        # Drives the selector's per-event ΔC/ΔS weights once the
+        # selector is load-bearing. Unknown labels return 400 rather
+        # than silently falling back so the UI can surface the error.
+        if "user_mode" in data:
+            v = data["user_mode"]
+            if v is None:
+                self.daemon.state.delete_setting("user_mode")
+            else:
+                if not isinstance(v, str):
+                    return web.json_response(
+                        {"error": "user_mode must be a string"},
+                        status=400,
+                    )
+                from one_link import selector_native
+                canonical = selector_native.normalize_user_mode(v)
+                # If the user passed something that didn't match a known
+                # mode AND wasn't blank, surface a 400 rather than
+                # silently normalizing to "normal".
+                if v.strip() and canonical == "normal" and v.strip().lower() not in (
+                    "normal", "n", ""
+                ):
+                    return web.json_response(
+                        {
+                            "error": (
+                                "user_mode must be one of "
+                                "normal|paranoid|battery_save|latency_strict"
+                            )
+                        },
+                        status=400,
+                    )
+                self.daemon.state.set_setting("user_mode", canonical)
         # v0.12.0: refresh the daemon's in-memory cache of settings
         # that affect hot paths (bandwidth pacer + auto-accept
         # rules). Cheap; runs once per save.

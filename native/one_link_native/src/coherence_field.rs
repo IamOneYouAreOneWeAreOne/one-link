@@ -16,6 +16,7 @@ use ol_coherence_field::{
     calibration::{bio_mesh_calibration, one_field_calibration, one_link_calibration},
     green_function, identity_dual_source, identity_dual_source_with_phase, inject_fragility_events,
     linear_source,
+    observations::{FieldObservations, ObservationError},
     pde::CgConfig,
     prefetch_priorities, rotation_cadence_multiplier, screening_length, solve_helmholtz,
     source::SupportPhaseConfig,
@@ -277,11 +278,106 @@ fn py_bio_mesh_calibration(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     calibration_to_dict(py, &bio_mesh_calibration())
 }
 
+/// pyo3 wrapper around `FieldObservations` (D23 / D24).
+///
+/// Per-peer τ_c observation buffer with trust-weighted EWMA updates
+/// (Gap 4 defense against field poisoning) + coherence-gradient
+/// computation (Gap 25 — currently RESEARCH-GRADE, surface as soft
+/// signal).
+#[pyclass(name = "FieldObservations", module = "one_link_native.coherence_field")]
+pub struct PyFieldObservations {
+    inner: FieldObservations,
+}
+
+#[pymethods]
+impl PyFieldObservations {
+    /// Construct with a given EWMA learning rate.
+    ///
+    /// `alpha` must be in (0, 1]; 0.05 is the typical default.
+    /// `initial_value` defaults to 0.5 (neutral cold-start).
+    #[new]
+    #[pyo3(signature = (alpha = 0.05, initial_value = 0.5))]
+    fn new(alpha: f32, initial_value: f32) -> PyResult<Self> {
+        let inner = FieldObservations::with_initial(alpha, initial_value)
+            .map_err(observation_err_to_py)?;
+        Ok(Self { inner })
+    }
+
+    /// Trust-weighted EWMA update for a peer.
+    ///
+    /// `trust_weight` in [0, 1]; 1.0 is the standard EWMA. The daemon
+    /// computes this from align_native.trust_for(...) before calling
+    /// this method.
+    #[pyo3(signature = (peer_id, observed_tau, trust_weight = 1.0))]
+    fn update(
+        &mut self,
+        peer_id: &str,
+        observed_tau: f32,
+        trust_weight: f32,
+    ) -> PyResult<()> {
+        self.inner
+            .update(peer_id, observed_tau, trust_weight)
+            .map_err(observation_err_to_py)
+    }
+
+    /// Current EWMA τ_c value for a peer, or None if never observed.
+    fn tau_at(&self, peer_id: &str) -> Option<f32> {
+        self.inner.tau_at(peer_id)
+    }
+
+    /// Replace the neighbor list used by gradient computation.
+    ///
+    /// Empty list disables gradient_at for that peer.
+    fn set_neighbors(&mut self, peer_id: &str, neighbors: Vec<String>) {
+        self.inner.set_neighbors(peer_id, neighbors);
+    }
+
+    /// Coherence-gradient magnitude squared at this peer (D24).
+    ///
+    /// Returns None if no neighbors configured or none observed.
+    /// RESEARCH-GRADE per Gap 25: surface as a soft signal, do not
+    /// gate production decisions on a binary threshold.
+    fn gradient_at(&self, peer_id: &str) -> Option<f32> {
+        self.inner.gradient_at(peer_id)
+    }
+
+    /// Number of peers with at least one observation.
+    #[getter]
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// True iff no peers observed yet.
+    #[getter]
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Configured EWMA learning rate.
+    #[getter]
+    fn alpha(&self) -> f32 {
+        self.inner.alpha()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "FieldObservations(len={}, alpha={})",
+            self.inner.len(),
+            self.inner.alpha()
+        )
+    }
+}
+
+fn observation_err_to_py(err: ObservationError) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
+
 /// Register the `coherence_field` submodule.
 pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", ol_coherence_field::VERSION)?;
     m.add("G_A_GALAXY_PLANCK", G_A_GALAXY_PLANCK)?;
     m.add_class::<PyGraphLaplacian>()?;
+    m.add_class::<PyFieldObservations>()?;
     m.add_function(wrap_pyfunction!(py_solve_helmholtz, m)?)?;
     m.add_function(wrap_pyfunction!(py_green_function, m)?)?;
     m.add_function(wrap_pyfunction!(py_be_rar, m)?)?;

@@ -54,6 +54,7 @@ pub mod calibration;
 pub mod couplings;
 pub mod green;
 pub mod interpolation;
+pub mod observations;
 pub mod pde;
 pub mod source;
 
@@ -65,6 +66,7 @@ pub use couplings::{
 };
 pub use green::{green_function, GreenError};
 pub use interpolation::{be_rar, BeRarError};
+pub use observations::{FieldObservations, ObservationError};
 pub use pde::{
     solve_helmholtz, solve_reaction_diffusion_steady, CgConfig, CgConfigF32, CgWorkspace,
     CgWorkspaceF32, FieldError, GraphLaplacian, HelmholtzSolver, HelmholtzSolverF32, SolveResult,

@@ -41,6 +41,10 @@ ol_pair_qr        = { path = "../ol_pair_qr" }
 ol_onion          = { path = "../ol_onion" }
 ol_pqsig          = { path = "../ol_pqsig" }
 ol_confidential   = { path = "../ol_confidential" }
+ol_align          = { path = "../ol_align" }
+ol_decide         = { path = "../ol_decide" }
+ol_selector       = { path = "../ol_selector" }
+ol_radio_batcher  = { path = "../ol_radio_batcher" }
 curve25519-dalek  = { version = "4", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
 ml-kem            = "0.2"
 hybrid-array      = "0.2"

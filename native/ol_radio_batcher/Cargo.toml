@@ -1,0 +1,20 @@
+[package]
+name = "ol_radio_batcher"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link: deterministic radio-aware batch scheduler — coalesces background traffic across the radio's DRX cycle to recover idle energy"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_radio_batcher"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

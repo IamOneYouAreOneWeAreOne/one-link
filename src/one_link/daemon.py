@@ -73,7 +73,15 @@ if TYPE_CHECKING:
     from one_link.server import UIServer
     from one_link_native.prefetch import Predictor as _NativePredictor
 
-from one_link import blobstore, channel as ch, foldersync
+from one_link import (
+    align_native,
+    blobstore,
+    channel as ch,
+    field_observations_native,
+    foldersync,
+    radio_batcher_native,
+    selector_native,
+)
 from one_link.build_identity import runtime_build_identity
 from one_link.capabilities import (
     CHAT,
@@ -419,6 +427,36 @@ def _stream_transfer_profile(size: int) -> dict[str, int]:
         "window_chunks": int(window_chunks),
         "window_bytes": int(window_chunks * chunk_size),
     }
+
+
+def _tau_for_transfer_status(status: str) -> Optional[float]:
+    """Map a transfer status label to a coarse τ_c observation in [0, 1].
+
+    Used by D23 field-state writes from `_update_transfer`. The mapping
+    is intentionally simple — the EWMA smooths noise across many
+    observations, so individual status -> τ mappings just need to be
+    monotone in "transfer healthiness."
+
+    Returns None for status values where we have no signal (queued,
+    waiting, etc.) so the caller skips the write.
+    """
+    s = (status or "").lower()
+    # Terminal success states — strong positive signal.
+    if s in ("done", "completed", "complete", "success", "finished"):
+        return 0.95
+    # Receiver-confirmed but not yet acknowledged — still positive.
+    if s in ("acked", "delivered", "received"):
+        return 0.85
+    # In-flight states — neutral.
+    if s in ("sending", "in_progress", "uploading", "downloading"):
+        return 0.55
+    # Soft errors / retry-able.
+    if s in ("paused", "retrying", "stalled"):
+        return 0.35
+    # Hard failures — strong negative signal.
+    if s in ("failed", "aborted", "rejected", "error", "timeout"):
+        return 0.05
+    return None
 
 
 def _final_stream_ack_deadline(size: int) -> float:
@@ -1439,6 +1477,60 @@ class Daemon:
         # Keep an in-memory issuer+nonce cache for the token TTL so a captured
         # hint cannot repeatedly trigger route-probe work.
         self._route_bootstrap_nonces: dict[tuple[str, str], int] = {}
+
+        # ────────────────────────────────────────────────────────────
+        # Equation-of-ONE integration surface (see `intergration map.txt`).
+        # All three components are conditionally initialized so the daemon
+        # boots cleanly when the native crates are not built (e.g. early
+        # dev environments). The capability test gate in __init__ already
+        # validates HAS_NATIVE; here we silently degrade.
+        # ────────────────────────────────────────────────────────────
+
+        # D23 / D24 — Per-peer τ_c observation buffer with trust-weighted
+        # EWMA + coherence-gradient. Fed by _update_transfer,
+        # _observe_prefetch, and record_relay_observation. Always-on
+        # (writes only; no decisions gated on values in this phase).
+        try:
+            self._field_obs: Any = field_observations_native.field_observations()
+        except RuntimeError:
+            self._field_obs = None
+
+        # D06 — Radio-aware batch scheduler. Opt-in via env flag so the
+        # default behavior (per-peer immediate send) is preserved for
+        # existing tests. Setting ONE_LINK_RADIO_BATCHER=1 routes
+        # background broadcasts through the batcher and drains on the
+        # _prune_loop tick.
+        try:
+            self._radio_batcher: Any = radio_batcher_native.radio_batcher()
+        except RuntimeError:
+            self._radio_batcher = None
+        self._radio_batcher_enabled: bool = (
+            os.environ.get("ONE_LINK_RADIO_BATCHER", "0") == "1"
+            and self._radio_batcher is not None
+        )
+
+        # D01 — Smart-Rules per-event selector. Opt-in via env flag.
+        # When ONE_LINK_SMART_SELECTOR is unset (default), the selector
+        # is constructed but its decisions are NOT consulted — the daemon
+        # falls through to the current static logic. When set to "log",
+        # decisions are computed and logged at debug level (observability
+        # mode). When set to "1" they would override the static logic
+        # (deferred until existing send_file tests are updated).
+        try:
+            self._smart_selector: Any = selector_native.smart_rules()
+        except RuntimeError:
+            self._smart_selector = None
+        self._selector_mode: str = os.environ.get(
+            "ONE_LINK_SMART_SELECTOR", "off"
+        ).lower()
+
+        # F1 — User-declared operating mode (one of normal | paranoid
+        # | battery_save | latency_strict). Persisted in the settings
+        # table; refreshed via refresh_runtime_settings(). Drives the
+        # selector's per-event ΔC/ΔS weights once we start gating
+        # decisions on it (deferred behind ONE_LINK_SMART_SELECTOR until
+        # Phase F2 ships).
+        self._user_mode_value: str = "normal"
 
     def _build_my_caps(self) -> dict:
         """Build a CAPS frame for THIS daemon. Includes our rendezvous
@@ -3198,6 +3290,12 @@ class Daemon:
                 e.strip().lstrip(".").lower()
                 for e in raw.split(",") if e.strip()
             }
+        # F1 — User mode setting. Validated via selector_native to
+        # match the Rust core's accepted vocabulary; unknown / missing
+        # values default to "normal" silently.
+        with contextlib.suppress(Exception):
+            raw = self.state.get_setting("user_mode")
+            self._user_mode_value = selector_native.normalize_user_mode(raw)
         with contextlib.suppress(Exception):
             max_tb = self.state.get_setting("safety_max_file_tb")
             reserve_mb = self.state.get_setting("safety_min_free_mb")
@@ -3370,6 +3468,29 @@ class Daemon:
         try:
             rec = self.state.update_transfer(transfer_id, **kwargs)
             self._broadcast_transfer(rec)
+            # D23 — write a τ_c observation from the transfer outcome.
+            # We map "status" semantics to a coherence score: terminal-
+            # success states near 1.0, in-progress states near 0.5,
+            # error states near 0.0. Mapping is deliberately coarse;
+            # the EWMA smooths noise over many observations.
+            try:
+                peer_fp = (
+                    kwargs.get("peer_fp")
+                    or kwargs.get("peer")
+                    or (rec.get("peer_fp") if isinstance(rec, dict) else None)
+                )
+                status = kwargs.get("status")
+                if peer_fp and status:
+                    tau = _tau_for_transfer_status(str(status))
+                    if tau is not None:
+                        self._write_field_observation(
+                            str(peer_fp),
+                            tau,
+                            source="transfer",
+                        )
+            except Exception:
+                # Field-state writes must never break transfer accounting.
+                pass
             return rec
         except Exception as e:
             log.warning("state.update_transfer failed: %s", e)
@@ -9266,6 +9387,12 @@ class Daemon:
                 return
             t_ms = int(time.time() * 1000)
             self._prefetch_predictor.observe(peer_bytes, file_bytes, t_ms)
+            # D23 — prefetch observation is a positive coherence signal:
+            # the peer interacted with this blob, so the cohold-registry
+            # τ for (peer, blob) should rise. Use a steady positive
+            # observation (0.8) rather than encoding richer signal here
+            # — the EWMA shapes the distribution across many obs.
+            self._write_field_observation(peer_fp, 0.8, source="prefetch")
         except Exception as exc:  # pragma: no cover — defensive
             log.debug("prefetch observe failed (%s)", exc)
 
@@ -10338,6 +10465,19 @@ class Daemon:
         cur["loss_rate"] = (1.0 - alpha) * prev_loss + alpha * obs_loss
         cur["last_observed_ms"] = now_ms
         self._relay_metrics[url] = cur
+        # D23 — write a τ_c observation for the relay path. The relay
+        # URL is used as a logical "peer" identifier in the field
+        # buffer (relays are first-class participants in the routing
+        # graph). τ derives from success + loss rate: a successful
+        # observation contributes ~1.0 dampened by EWMA loss, a failure
+        # contributes 0.0. Trust weight is 1.0 here because relay URLs
+        # are operator-configured; the dampening from `_peer_trust_score`
+        # only applies when the URL maps to a known PeerRecord.
+        try:
+            tau = 1.0 - float(cur.get("loss_rate", 0.0))
+            self._write_field_observation(url, tau, source="relay")
+        except Exception:
+            pass
 
     def _abort_incoming_file(self, blob: str, f: IncomingFile) -> None:
         with contextlib.suppress(Exception):
@@ -10534,7 +10674,293 @@ class Daemon:
         if self.state is None:
             return True
         policy = self.state.get_peer_capability_policy(peer_fp)
-        return policy is None or cap in policy
+        allowed = policy is None or cap in policy
+
+        # D02 (decision-point catalog) — surface the A(x, t) Gaussian
+        # alignment trust score as a SOFT signal. This call does NOT
+        # change the allow/deny outcome in this phase; it only logs
+        # the score so we can observe (in production) what a trust-
+        # gated policy WOULD have produced. Phase F will wire it into
+        # actual decisions once the user_mode + mode-contract surface
+        # ships.
+        if allowed:
+            try:
+                trust = self._peer_trust_score(peer_fp)
+                if trust is not None and trust < 0.3:
+                    log.info(
+                        "low-trust capability allow: peer=%s cap=%s trust=%.3f",
+                        peer_fp[:8],
+                        cap,
+                        trust,
+                    )
+            except Exception:
+                # Trust scoring must never break capability checks.
+                pass
+        return allowed
+
+    def _write_field_observation(
+        self,
+        peer_fp: str,
+        observed_tau: float,
+        *,
+        source: str = "unknown",
+    ) -> None:
+        """Trust-weighted write to the per-peer coherence-field buffer.
+
+        Wired into the three confirmed write sites from `intergration
+        map.txt` D23: `_update_transfer`, `_observe_prefetch`, and
+        `record_relay_observation`. Each write is dampened by the peer's
+        A(x, t) trust score so a compromised peer can't drag the field
+        into a sinkhole (Gap 4 defense; 92% reduction in poisoning
+        impact at 15% attacker fraction).
+
+        Pure observability. No decisions are gated on the field value
+        in this phase — the selector / relay-picker may consult it for
+        soft signals later. Silently no-ops when the native buffer is
+        unavailable or inputs are out of range. Never raises.
+        """
+        if self._field_obs is None or not peer_fp:
+            return
+        # Clamp defensively (callers compute from various ratios).
+        try:
+            tau = float(observed_tau)
+        except (TypeError, ValueError):
+            return
+        if not (tau == tau):  # NaN check
+            return
+        if tau < 0.0:
+            tau = 0.0
+        elif tau > 1.0:
+            tau = 1.0
+        # Trust weight from A(x, t). Default to 0.5 if the score can't
+        # be computed (unknown peer / no state) — moderate dampening.
+        trust = self._peer_trust_score(peer_fp)
+        if trust is None:
+            trust = 0.5
+        try:
+            self._field_obs.update(peer_fp, tau, trust)
+        except (ValueError, RuntimeError) as exc:
+            # Native rejected the input; log once and drop.
+            log.debug(
+                "field_obs update rejected (src=%s peer=%s tau=%s trust=%s): %s",
+                source,
+                peer_fp[:8],
+                tau,
+                trust,
+                exc,
+            )
+
+    def _drain_radio_batcher_tick(self) -> int:
+        """Drain any radio-batched outbound traffic on the prune tick.
+
+        Pure tick handler. Pulls entries whose DRX window has elapsed
+        from the batcher and dispatches them via `send_to`. Designed
+        to be safe against:
+          - native module not built (no-op)
+          - empty queue (cheap return)
+          - missing peer object (skip individual entry)
+          - send-side errors (log + continue)
+
+        Returns the number of entries successfully dispatched (for
+        tests + telemetry). Never raises.
+        """
+        if self._radio_batcher is None:
+            return 0
+        try:
+            if self._radio_batcher.is_empty:
+                return 0
+        except Exception:
+            return 0
+        now_ms = int(time.time() * 1000)
+        try:
+            entries, _outcome = self._radio_batcher.drain(now_ms)
+        except Exception:
+            return 0
+        dispatched = 0
+        for entry in entries:
+            try:
+                peer_fp = entry.get("peer_fp")
+                payload = entry.get("payload")
+                if not peer_fp or payload is None:
+                    continue
+                # Drain hook: schedule the actual send via the caller's
+                # registered handler. The default behavior is to log
+                # at debug (drained but not auto-routed) — explicit
+                # call sites that use the batcher register their own
+                # dispatch via _radio_batcher_dispatch (set per-site).
+                handler = getattr(self, "_radio_batcher_dispatch", None)
+                if callable(handler):
+                    try:
+                        handler(peer_fp, payload)
+                        dispatched += 1
+                    except Exception as exc:
+                        log.debug(
+                            "radio batcher dispatch failed (peer=%s): %s",
+                            peer_fp[:8] if isinstance(peer_fp, str) else "?",
+                            exc,
+                        )
+                else:
+                    log.debug(
+                        "radio batcher drained %d bytes for %s (no dispatch handler)",
+                        len(payload),
+                        peer_fp[:8] if isinstance(peer_fp, str) else "?",
+                    )
+            except Exception:
+                continue
+        return dispatched
+
+    @property
+    def user_mode(self) -> str:
+        """Current user-declared operating mode (F1).
+
+        One of "normal" | "paranoid" | "battery_save" | "latency_strict".
+        Drives selector ΔC/ΔS weights and mode-contract enforcement.
+        """
+        return self._user_mode_value
+
+    def set_user_mode(self, mode: str) -> str:
+        """Set + persist the user-declared mode.
+
+        Validates the label (unknowns silently fall back to "normal"),
+        writes to the settings table, and updates the in-memory cache
+        so subsequent selector calls see the new value immediately.
+
+        Returns the canonical label that was actually persisted.
+        """
+        canonical = selector_native.normalize_user_mode(mode)
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                self.state.set_setting("user_mode", canonical)
+        self._user_mode_value = canonical
+        return canonical
+
+    def _log_selector_decision_for_file(
+        self,
+        *,
+        peer: Any,
+        peer_fp: Optional[str],
+        size: int,
+    ) -> None:
+        """Compute + log the Smart-Rules selector's decision for a
+        send_file event, without changing actual routing behavior.
+
+        Gated by `ONE_LINK_SMART_SELECTOR=log|1`. The decision is
+        emitted at debug level with the full context so we can compare
+        against the static decision the daemon actually takes. When we
+        flip the default to use the selector (Phase F or later), this
+        observability call becomes the real decision point.
+
+        Never raises. The selector is constructed once at __init__
+        time; if it's None, this method silently returns.
+        """
+        if self._smart_selector is None:
+            return
+        try:
+            # Translate peer relationship from PeerRecord.trust label
+            # to the selector's vocabulary. Unknown / missing peers
+            # default to "stranger" (selector applies safe-default
+            # privacy posture).
+            peer_label = "stranger"
+            try:
+                if peer_fp and self.state is not None:
+                    rec = self.state.get_peer(peer_fp)
+                    if rec is not None and rec.trust:
+                        peer_label = str(rec.trust)
+            except Exception:
+                pass
+
+            # Pattern strength from the prefetch predictor, if available.
+            pattern_strength = 0.0
+            try:
+                preds = self.predict_next_files_for_peer(peer_fp, n=1)
+                if preds:
+                    # predictor returns list of (file_id_bytes, confidence)
+                    pattern_strength = float(preds[0][1])
+            except Exception:
+                pass
+
+            # Observed loss: ad-hoc 0.0 here; the relay-metrics EWMA
+            # would feed in if we had a relay path picked, but at this
+            # stage we haven't yet chosen a transport.
+            decision = self._smart_selector.decide(
+                kind="FILE_OFFER",
+                size=size,
+                peer=peer_label,
+                user_mode=self._user_mode_value,
+                pattern_strength=pattern_strength,
+            )
+            log.debug(
+                "selector(send_file): peer=%s size=%d -> %s",
+                (peer_fp or "?")[:8],
+                size,
+                decision,
+            )
+        except Exception as exc:
+            # Selector errors must never break send_file.
+            log.debug("selector eval failed: %s", exc)
+
+    def _peer_trust_score(self, peer_fp: str) -> Optional[float]:
+        """A(x, t) Gaussian alignment trust score for ``peer_fp`` in [0, 1].
+
+        Implements decision point D02 from ``intergration map.txt``:
+        a continuous trust value derived from the peer's relationship
+        tier (PeerRecord.trust) and the time since last contact.
+
+        Returns:
+            float in [0, 1] — 1.0 means freshly aligned, 0.0 means
+            trust fully exhausted; or None if the peer record is not
+            yet known to the daemon.
+
+        Hop distance is approximated by the relationship tier
+        (paired = 1, known = 3, stranger = 10) until the daemon
+        tracks per-peer mesh distance directly.
+        """
+        if self.state is None:
+            return None
+        try:
+            peer = self.state.get_peer(peer_fp)
+        except Exception:
+            return None
+        if peer is None:
+            return None
+
+        # Map relationship tier -> hop-distance approximation.
+        rel = (peer.trust or "").lower()
+        if rel in ("pinned", "paired"):
+            hop_distance = 1.0
+        elif rel in ("pending", "known"):
+            hop_distance = 3.0
+        else:
+            hop_distance = 10.0
+
+        # Staleness in seconds since last_seen.
+        now_ms = int(time.time() * 1000)
+        last_seen_ms = max(0, int(peer.last_seen_ms or 0))
+        staleness_seconds = max(0.0, (now_ms - last_seen_ms) / 1000.0)
+
+        # Compute trust via the native binding (with a Python fallback
+        # so calls work even if the native module isn't built).
+        try:
+            return float(
+                align_native.trust_for(rel, hop_distance, staleness_seconds)
+            )
+        except (RuntimeError, ValueError):
+            # Native unavailable or rejected input. Use pure-Python
+            # fallback with the relationship's default L_session.
+            l_session = {
+                "pinned": 100.0,
+                "paired": 100.0,
+                "pending": 30.0,
+                "known": 30.0,
+            }.get(rel, 5.0)
+            try:
+                return float(
+                    align_native.trust_score_python(
+                        hop_distance, staleness_seconds, l_session
+                    )
+                )
+            except (ValueError, ArithmeticError):
+                return None
 
     def _cap_authorized_via_chain(
         self,
@@ -12105,6 +12531,20 @@ class Daemon:
             {"host": e.host, "port": e.port}
             for e in local_endpoints[: self.MAX_ENDPOINTS_PER_ANNOUNCEMENT]
         ]
+        # D06 — Radio-batched path (opt-in via ONE_LINK_RADIO_BATCHER=1).
+        # Presence broadcasts are quintessentially background traffic
+        # the radio batcher was designed for. When opted in, every
+        # paired-peer enqueue is queued for the next _prune_loop tick
+        # rather than dialed immediately. Per Gap 4, this amortizes
+        # the radio's tail energy across the broadcast burst.
+        if self._radio_batcher_enabled:
+            queued = self._enqueue_endpoint_broadcasts(peers, endpoint_dicts)
+            if queued:
+                log.debug(
+                    "endpoint announcements: queued %d for radio batcher",
+                    queued,
+                )
+            return queued
         delivered = 0
         for rec in peers:
             if rec.trust != "pinned":
@@ -12150,6 +12590,95 @@ class Daemon:
                 delivered, sum(1 for r in peers if r.trust == "pinned"),
             )
         return delivered
+
+    def _enqueue_endpoint_broadcasts(
+        self,
+        peers,
+        endpoint_dicts: list[dict],
+    ) -> int:
+        """Enqueue endpoint-announcement frames for each paired peer
+        into the radio batcher. The batcher will drain them on the
+        next 20s `_prune_loop` tick via `_radio_batcher_dispatch`.
+
+        Returns the count enqueued (not yet sent). Never raises.
+        """
+        if self._radio_batcher is None:
+            return 0
+        # Register a dispatch handler that re-sends each drained entry
+        # via send_to. Doing it lazily here keeps the resolution
+        # cost on the drain tick rather than the enqueue burst.
+        if not getattr(self, "_radio_batcher_dispatch", None):
+            self._radio_batcher_dispatch = self._dispatch_endpoint_broadcast
+        now_ms = int(time.time() * 1000)
+        queued = 0
+        for rec in peers:
+            if rec.trust != "pinned":
+                continue
+            if rec.fingerprint == self.me.fingerprint:
+                continue
+            try:
+                extra_fields: dict = {}
+                if self._quic_local_port:
+                    extra_fields["quic_port"] = int(self._quic_local_port)
+                outer = make_msg(
+                    "ENDPOINT_UPDATE", self.me.short_id,
+                    endpoints=endpoint_dicts,
+                    **extra_fields,
+                )
+                payload = json.dumps(outer).encode("utf-8")
+                self._radio_batcher.enqueue(
+                    rec.fingerprint, payload, "background", now_ms
+                )
+                queued += 1
+            except (ValueError, OSError, TypeError) as exc:
+                log.debug(
+                    "radio batcher enqueue failed for %s: %s",
+                    rec.fingerprint[:8], exc,
+                )
+        return queued
+
+    def _dispatch_endpoint_broadcast(self, peer_fp: str, payload: bytes) -> None:
+        """Default dispatcher for radio-batched endpoint announcements.
+
+        Schedules the async send via `_send_batched_endpoint`. Called
+        synchronously by `_drain_radio_batcher_tick`, so it must return
+        immediately — long work goes into the scheduled task.
+        """
+        try:
+            outer = json.loads(payload.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            log.debug(
+                "radio batcher dispatch decode failed for %s: %s",
+                peer_fp[:8], exc,
+            )
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._send_batched_endpoint(peer_fp, outer))
+        except RuntimeError:
+            # No running loop (test environment) — skip.
+            pass
+
+    async def _send_batched_endpoint(self, peer_fp: str, outer: dict) -> None:
+        """Async send for a radio-batched endpoint announcement.
+
+        Mirrors the per-peer branch of `broadcast_endpoint_to_paired`:
+        resolve, send with the same 10s timeout, swallow errors.
+        """
+        try:
+            peer_obj = await self.resolve_for_send(peer_fp)
+            if peer_obj is None:
+                return
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    self.send_to(peer_obj, [outer]),
+                    timeout=10.0,
+                )
+        except Exception as exc:
+            log.debug(
+                "batched endpoint broadcast to %s failed: %s",
+                peer_fp[:8], exc,
+            )
 
     def _local_endpoint_announcement_signature(self) -> tuple[str, ...]:
         from one_link import rendezvous_client
@@ -13813,6 +14342,18 @@ class Daemon:
             raise RuntimeError(f"files capability disabled for peer {peer.short_id}")
         file_sig = self._file_cache_signature(path)
         size = int(file_sig["size"])
+        # D01 — observability call to the Smart-Rules selector.
+        # In `off` mode (default), no work is done. In `log` mode,
+        # the selector computes a decision and logs it at debug level
+        # so production telemetry can compare against the static
+        # decision before the selector becomes load-bearing. The
+        # actual routing logic below is unchanged.
+        if self._selector_mode in ("log", "1"):
+            self._log_selector_decision_for_file(
+                peer=peer,
+                peer_fp=peer_fp_for_policy,
+                size=size,
+            )
         cached_file_index: FileIndex | None = None
         cached_index_kind = "miss"
         cached = self._cached_file_index(file_sig)
@@ -16982,6 +17523,13 @@ class Daemon:
                         self._schedule_due_transfer_retries()
                     with contextlib.suppress(Exception):
                         await self.broadcast_endpoint_to_paired_if_changed()
+                    # D06 — drain any radio-batched outbound on this tick.
+                    # No-op when the batcher is empty or disabled. The
+                    # 20s _prune_loop cadence amortizes batched traffic
+                    # across the radio's DRX cycle; per Gap 11 the DRX
+                    # window itself is 50ms inside the batcher.
+                    with contextlib.suppress(Exception):
+                        self._drain_radio_batcher_tick()
             except asyncio.CancelledError:
                 pass
 

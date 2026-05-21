@@ -44,7 +44,10 @@
 use pyo3::prelude::*;
 
 mod aead;
+mod align;
 mod bandit;
+mod radio_batcher;
+mod selector;
 mod bloom;
 mod capability;
 mod chunk;
@@ -334,6 +337,42 @@ fn one_link_native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("one_link_native.obfs", obfs_mod)?;
+
+    // D02 — Gaussian alignment trust function A(x, t) = exp(-(x^2 +
+    // t^2) / L_session). Replaces ad-hoc trust thresholds across
+    // _capability_allowed and pair-trust gates with one continuous
+    // function from the Equation of ONE.
+    let align_mod = PyModule::new_bound(py, "align")?;
+    align::register(py, &align_mod)?;
+    m.add_submodule(&align_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.align", align_mod)?;
+
+    // D01 — Smart-Rules per-event selector. The 14-rule decision tree
+    // from Gap 17; -97% regret vs the daemon's static decision logic.
+    // Consumed by send_file at daemon.py:14020. Implements Decide<Decision>
+    // from ol_decide; future selector variants (UnifiedMin) plug in
+    // through the same trait without changing this surface.
+    let selector_mod = PyModule::new_bound(py, "selector")?;
+    selector::register(py, &selector_mod)?;
+    m.add_submodule(&selector_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.selector", selector_mod)?;
+
+    // D06 — Radio-aware batch scheduler. Coalesces background traffic
+    // across the radio's DRX cycle to recover idle energy. 22-44%
+    // per-event energy reduction in forge shootouts (Gap 4). 50ms DRX
+    // window per Gap 11; foreground urgent bypasses batching entirely
+    // per Gap 14. Consumed by broadcast_endpoint_to_paired at
+    // daemon.py:12137-12140 + drained on the 20s _prune_loop tick.
+    let radio_batcher_mod = PyModule::new_bound(py, "radio_batcher")?;
+    radio_batcher::register(py, &radio_batcher_mod)?;
+    m.add_submodule(&radio_batcher_mod)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("one_link_native.radio_batcher", radio_batcher_mod)?;
 
     Ok(())
 }

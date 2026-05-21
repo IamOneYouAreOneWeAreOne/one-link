@@ -49,6 +49,10 @@ members = [
     "ol_fuse",
     "ol_fskit",
     "ol_winfs",
+    "ol_align",
+    "ol_decide",
+    "ol_selector",
+    "ol_radio_batcher",
     "one_link_native",
     # Future crates (added as they ship):
     # Future Phase A2:

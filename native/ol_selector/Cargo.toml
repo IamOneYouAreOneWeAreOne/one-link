@@ -1,0 +1,21 @@
+[package]
+name = "ol_selector"
+version = "0.21.0-alpha.0"
+edition = "2021"
+description = "One Link: context-aware per-event selector (Smart-Rules + UnifiedMin) implementing the universal Decide<Decision> trait"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "ol_selector"
+crate-type = ["lib"]
+
+[dependencies]
+thiserror = { workspace = true }
+ol_decide = { path = "../ol_decide" }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true
