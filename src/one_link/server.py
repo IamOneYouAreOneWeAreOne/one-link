@@ -1535,6 +1535,27 @@ class UIServer:
             "/api/v1/equation-of-one/stats",
             self._guarded(self.api_equation_of_one_stats),
         )
+        # Integration map §6 — dedicated user_mode endpoint. POST sets
+        # the F4 mode (paranoid / battery_save / latency_strict / normal),
+        # GET reads it. The same mode is also reachable via the broader
+        # /api/settings endpoint for backwards compatibility.
+        r.add_get(
+            "/api/v1/user-mode",
+            self._guarded(self.api_get_user_mode),
+        )
+        r.add_post(
+            "/api/v1/user-mode",
+            self._guarded(self.api_set_user_mode),
+        )
+        # Integration map §6 — owner-only coherence-field snapshot.
+        # Returns mean/min/max τ_c across all observed peers plus
+        # per-peer τ_c so operators can inspect what the field
+        # routing is computing. Owner-only via the same UI token
+        # used by every other auth-gated endpoint.
+        r.add_get(
+            "/api/v1/coherence-field",
+            self._guarded(self.api_coherence_field),
+        )
         r.add_get("/api/setup", self._guarded(self.api_setup_status))
         r.add_post("/api/setup", self._guarded(self.api_update_setup))
         r.add_post("/api/setup/device-invite", self._guarded(self.api_setup_device_invite))
@@ -5130,6 +5151,142 @@ class UIServer:
     async def api_setup_status(self, request: web.Request) -> web.Response:
         return web.json_response(self._one_setup_snapshot())
 
+    async def api_get_user_mode(self, request: web.Request) -> web.Response:
+        """Integration map §6 — GET /api/v1/user-mode.
+
+        Returns the daemon's currently-honoured F4 mode + the set of
+        valid mode labels so the UI can render a picker without
+        hardcoding the list.
+        """
+        from one_link import selector_native
+        try:
+            current = str(getattr(
+                self.daemon, "_user_mode_value", "normal",
+            ) or "normal")
+        except Exception:
+            current = "normal"
+        return web.json_response({
+            "mode": current,
+            "valid": list(selector_native.VALID_USER_MODES),
+        })
+
+    async def api_set_user_mode(self, request: web.Request) -> web.Response:
+        """Integration map §6 — POST /api/v1/user-mode.
+
+        Body: {"mode": "normal|paranoid|battery_save|latency_strict"}.
+
+        Persists the mode + immediately reconciles dependent
+        subsystems (cover-traffic emitter, selector weights) via the
+        daemon's ``set_user_mode`` setter. Returns the canonical
+        mode that was actually persisted.
+
+        - Empty / missing body -> 400.
+        - Unknown mode label -> 400 (NOT silently normalised to "normal";
+          the UI surface should validate up front).
+        """
+        from one_link import selector_native
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "request body must be valid JSON"},
+                status=400,
+            )
+        if not isinstance(data, dict) or "mode" not in data:
+            return web.json_response(
+                {"error": "body must include 'mode' field"},
+                status=400,
+            )
+        raw = data["mode"]
+        if not isinstance(raw, str):
+            return web.json_response(
+                {"error": "mode must be a string"},
+                status=400,
+            )
+        # Reject unknown labels — only fall back to "normal" for the
+        # explicitly-empty case.
+        canonical = selector_native.normalize_user_mode(raw)
+        if raw.strip() and canonical == "normal" and raw.strip().lower() not in (
+            "normal", "n",
+        ):
+            return web.json_response(
+                {
+                    "error": (
+                        "mode must be one of "
+                        "normal|paranoid|battery_save|latency_strict"
+                    )
+                },
+                status=400,
+            )
+        try:
+            result = self.daemon.set_user_mode(raw)
+        except Exception as exc:
+            return web.json_response(
+                {"error": f"set_user_mode failed: {exc}"},
+                status=500,
+            )
+        return web.json_response({"ok": True, "mode": result})
+
+    async def api_coherence_field(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Integration map §6 — GET /api/v1/coherence-field (owner-only).
+
+        Returns a per-peer τ_c snapshot from the
+        FieldObservations buffer + summary statistics
+        (mean / min / max / count). Owner-only via the standard UI
+        token gate; never includes peer addresses or content.
+
+        Returns {"available": False, ...} when the native
+        field-observations module isn't installed.
+        """
+        d = self.daemon
+        snapshot: dict = {"available": True}
+        obs = getattr(d, "_field_obs", None)
+        if obs is None:
+            return web.json_response({
+                "available": False,
+                "reason": "field_observations not initialized",
+                "peers": {},
+                "summary": {"count": 0},
+            })
+        # Collect per-peer τ_c readings. The native FieldObservations
+        # surface exposes per-peer aggregates via tau_for_peer + a
+        # listing API; build the snapshot defensively in case any
+        # peer's accessor raises.
+        peers_snapshot: dict[str, float] = {}
+        peer_fps: list[str] = []
+        try:
+            if d.state is not None:
+                peer_fps = [
+                    p.fingerprint for p in d.state.list_peers()
+                    if getattr(p, "fingerprint", None)
+                ]
+        except Exception:
+            peer_fps = []
+        tau_values: list[float] = []
+        for fp in peer_fps:
+            try:
+                tau = obs.tau_for_peer(fp)
+                if tau is not None:
+                    f = float(tau)
+                    peers_snapshot[fp[:16]] = f
+                    tau_values.append(f)
+            except Exception:
+                continue
+        if tau_values:
+            summary = {
+                "count": len(tau_values),
+                "mean": sum(tau_values) / len(tau_values),
+                "min": min(tau_values),
+                "max": max(tau_values),
+            }
+        else:
+            summary = {"count": 0, "mean": None, "min": None, "max": None}
+        snapshot["peers"] = peers_snapshot
+        snapshot["summary"] = summary
+        return web.json_response(snapshot)
+
     async def api_equation_of_one_stats(
         self, request: web.Request,
     ) -> web.Response:
@@ -5158,12 +5315,28 @@ class UIServer:
             "user_mode": getattr(d, "_user_mode_value", "normal"),
         }
         try:
-            out["selector"] = {
+            sel_envelope = {
                 **d.selector_info(),
                 "decisions": d.selector_decision_stats(),
             }
+            # Integration map §11 — per-mode regret EWMA.
+            try:
+                sel_envelope["regret_ewma"] = d.selector_regret_ewma_stats()
+            except Exception:
+                sel_envelope["regret_ewma"] = {}
+            out["selector"] = sel_envelope
         except Exception as exc:
             out["selector"] = {"error": str(exc)}
+        # Integration map §11 — capability denial counters.
+        try:
+            out["capability_denials"] = d.capability_denial_stats()
+        except Exception as exc:
+            out["capability_denials"] = {"error": str(exc)}
+        # Integration map §11 — alignment-trust histogram.
+        try:
+            out["alignment_trust"] = d.alignment_trust_histogram()
+        except Exception as exc:
+            out["alignment_trust"] = {"error": str(exc)}
         try:
             out["cover_traffic"] = d.cover_traffic_stats()
         except Exception as exc:

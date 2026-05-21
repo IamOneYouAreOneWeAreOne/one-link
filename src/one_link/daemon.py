@@ -1601,6 +1601,40 @@ class Daemon:
         # bias toward any single peer.
         self._cover_dispatch_rr_idx: int = 0
 
+        # Integration map §11 — capability denial counter by reason.
+        # Updated by every code path that REFUSES a capability grant
+        # (seed_tamper / policy_denied / chain_unauthorized / etc).
+        # Exposed via capability_denial_stats() so operators can see
+        # whether real adversarial activity is hitting the daemon vs
+        # benign denials (e.g. an unpaired peer trying chat).
+        self._capability_denial_counters: dict = {
+            "total": 0,
+            "by_reason": {
+                "seed_tamper": 0,
+                "policy_denied": 0,
+                "low_trust_blocked": 0,
+                "scope_mismatch": 0,
+            },
+            "by_capability": {},
+        }
+
+        # Integration map §11 — per-mode regret EWMA. Updated by
+        # _maybe_feed_selector_observation when a learner observe()
+        # call fires. ema_alpha=0.1 = ~10-event memory; tunable.
+        self._selector_regret_ewma: dict = {
+            "normal": 0.0,
+            "paranoid": 0.0,
+            "battery_save": 0.0,
+            "latency_strict": 0.0,
+        }
+        self._selector_regret_ewma_alpha: float = 0.1
+
+        # Integration map §11 — alignment-trust distribution. Histogram
+        # buckets cover the [0, 1] range in 5 bins so the UI can render
+        # a simple "trust spread across mesh" chart. Updated on every
+        # _peer_trust_score evaluation. Counts only — no peer IDs.
+        self._alignment_trust_histogram: list[int] = [0, 0, 0, 0, 0]
+
         # Selector-decision telemetry. Every selector.decide() call from
         # _log_selector_decision_for_file or _selector_decision_for_file
         # increments these counters. Exposed via selector_decision_stats
@@ -11115,6 +11149,13 @@ class Daemon:
                         "identity OR investigate the FS-tamper origin."
                     )
                     self._seed_tamper_logged = True
+                # Integration map §11 — count this denial. Surfaces a
+                # very real attack pattern (seed swap) in the operator
+                # dashboard. Defensive — never breaks the deny path.
+                with contextlib.suppress(Exception):
+                    self._record_capability_denial(
+                        reason="seed_tamper", capability=cap,
+                    )
                 return False
         except Exception:
             pass
@@ -11171,16 +11212,30 @@ class Daemon:
         if allowed:
             try:
                 trust = self._peer_trust_score(peer_fp)
-                if trust is not None and trust < 0.3:
-                    log.info(
-                        "low-trust capability allow: peer=%s cap=%s trust=%.3f",
-                        peer_fp[:8],
-                        cap,
-                        trust,
-                    )
+                if trust is not None:
+                    # Integration map §11 — count every trust score
+                    # into the histogram so the dashboard can render
+                    # the trust spread across the mesh.
+                    with contextlib.suppress(Exception):
+                        self._record_alignment_trust_score(trust)
+                    if trust < 0.3:
+                        log.info(
+                            "low-trust capability allow: peer=%s cap=%s trust=%.3f",
+                            peer_fp[:8],
+                            cap,
+                            trust,
+                        )
             except Exception:
                 # Trust scoring must never break capability checks.
                 pass
+        else:
+            # Integration map §11 — count the denial. Reason is
+            # ``policy_denied`` because we reached the bottom of
+            # _capability_allowed without an earlier deny firing.
+            with contextlib.suppress(Exception):
+                self._record_capability_denial(
+                    reason="policy_denied", capability=cap,
+                )
         return allowed
 
     def _write_field_observation(
@@ -11839,7 +11894,11 @@ class Daemon:
     ) -> None:
         """Phase I — When a transfer reaches terminal status, pop the
         stashed decision + context and call selector.observe(...) if
-        the active selector is a learner. Never raises."""
+        the active selector is a learner. Never raises.
+
+        Also updates the integration map §11 per-mode regret EWMA so
+        the operator dashboard can chart how stable the learner is
+        running over time."""
         if self._smart_selector is None:
             return
         observe = getattr(self._smart_selector, "observe", None)
@@ -11852,6 +11911,12 @@ class Daemon:
         if stashed is None:
             return
         decision, context = stashed
+        # Integration map §11 — update the per-mode regret EWMA
+        # BEFORE the observe() call. Doing it here (not inside observe)
+        # means the EWMA is always accurate regardless of whether
+        # the learner accepts the kwarg surface.
+        with contextlib.suppress(Exception):
+            self._record_selector_regret(regret)
         try:
             observe(regret=float(regret), decision=decision, **context)
         except TypeError:
@@ -11927,6 +11992,114 @@ class Daemon:
             c["predictor_warm_on"] += 1
         else:
             c["predictor_warm_off"] += 1
+
+    def _record_capability_denial(self, *, reason: str, capability: str) -> None:
+        """Integration map §11 — record a capability denial.
+
+        ``reason`` should be one of the documented denial reasons:
+        ``seed_tamper``, ``policy_denied``, ``low_trust_blocked``,
+        ``scope_mismatch``. Unknown reasons are recorded under
+        ``other`` for visibility.
+
+        ``capability`` is the cap label that was denied (e.g.
+        ``files``, ``folder_sync``). Useful for spotting which
+        caps are hit hardest by attacker traffic.
+
+        Defensive against missing counter dict (test fixtures) so
+        this never breaks _capability_allowed.
+        """
+        c = getattr(self, "_capability_denial_counters", None)
+        if not isinstance(c, dict):
+            return
+        c["total"] = int(c.get("total", 0) or 0) + 1
+        by_reason = c.setdefault("by_reason", {})
+        key = reason if reason in by_reason else "other"
+        by_reason[key] = int(by_reason.get(key, 0) or 0) + 1
+        by_cap = c.setdefault("by_capability", {})
+        by_cap[capability] = int(by_cap.get(capability, 0) or 0) + 1
+
+    def capability_denial_stats(self) -> dict:
+        """Integration map §11 — capability denial telemetry snapshot.
+
+        Returns a fresh dict (caller can't mutate internal state).
+        Zeroed when the counter dict is missing.
+        """
+        c = getattr(self, "_capability_denial_counters", None)
+        if not isinstance(c, dict):
+            return {"total": 0, "by_reason": {}, "by_capability": {}}
+        return {
+            "total": int(c.get("total", 0) or 0),
+            "by_reason": dict(c.get("by_reason", {})),
+            "by_capability": dict(c.get("by_capability", {})),
+        }
+
+    def _record_selector_regret(self, regret: float) -> None:
+        """Integration map §11 — update the per-mode regret EWMA.
+
+        Called from _maybe_feed_selector_observation right before
+        the learner's observe() fires, so the EWMA reflects the
+        actual regret stream the learner is consuming.
+        """
+        ema = getattr(self, "_selector_regret_ewma", None)
+        if not isinstance(ema, dict):
+            return
+        alpha = float(getattr(self, "_selector_regret_ewma_alpha", 0.1))
+        mode = getattr(self, "_user_mode_value", "normal") or "normal"
+        try:
+            current = float(ema.get(mode, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            current = 0.0
+        try:
+            r = float(regret)
+        except (TypeError, ValueError):
+            return
+        # EWMA: new = (1-α) * old + α * sample
+        ema[mode] = (1.0 - alpha) * current + alpha * r
+
+    def selector_regret_ewma_stats(self) -> dict:
+        """Integration map §11 — per-mode regret EWMA snapshot."""
+        ema = getattr(self, "_selector_regret_ewma", None)
+        if not isinstance(ema, dict):
+            return {}
+        return dict(ema)
+
+    def _record_alignment_trust_score(self, score: float) -> None:
+        """Integration map §11 — update the alignment-trust histogram.
+
+        Buckets the [0, 1] score into 5 bins: [0-0.2), [0.2-0.4),
+        [0.4-0.6), [0.6-0.8), [0.8-1.0]. Counts only — no peer IDs."""
+        hist = getattr(self, "_alignment_trust_histogram", None)
+        if not isinstance(hist, list) or len(hist) != 5:
+            return
+        try:
+            s = float(score)
+        except (TypeError, ValueError):
+            return
+        if s < 0.0 or s > 1.0:
+            return
+        # Map to bucket 0..4. s==1.0 lands in bucket 4.
+        idx = min(int(s * 5), 4)
+        hist[idx] += 1
+
+    def alignment_trust_histogram(self) -> dict:
+        """Integration map §11 — alignment-trust distribution snapshot.
+
+        Returns {"buckets": [...counts...], "labels": [...ranges...]}.
+        """
+        hist = getattr(self, "_alignment_trust_histogram", None)
+        if not isinstance(hist, list) or len(hist) != 5:
+            hist = [0, 0, 0, 0, 0]
+        return {
+            "buckets": list(hist),
+            "labels": [
+                "[0.0-0.2)",
+                "[0.2-0.4)",
+                "[0.4-0.6)",
+                "[0.6-0.8)",
+                "[0.8-1.0]",
+            ],
+            "total": sum(hist),
+        }
 
     def selector_decision_stats(self) -> dict:
         """Return a snapshot of the selector-decision counters.
