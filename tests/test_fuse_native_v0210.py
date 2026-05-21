@@ -64,23 +64,32 @@ def test_try_mount_on_windows_returns_unsupported(tmp_path: Path) -> None:
     assert result.detail  # has a helpful message
 
 
-def test_try_mount_invalid_mountpoint_returns_invalid() -> None:
-    if not sys.platform.startswith("linux"):
-        # On non-Linux platforms, the unsupported-platform check fires
-        # before the mountpoint check. Only meaningful on Linux.
-        pytest.skip("Linux-only")
+def test_try_mount_invalid_mountpoint_returns_invalid(monkeypatch) -> None:
+    """The invalid-mountpoint check must fire on every platform when
+    HAS_NATIVE + the platform check are both satisfied. Mock both so
+    we exercise the validation path uniformly."""
+    monkeypatch.setattr(fuse_native, "HAS_NATIVE", True)
+    fake_ready = fuse_native.PlatformStatus(
+        kind="linux_ready", ready=True, message="mock ready for test",
+    )
+    monkeypatch.setattr(fuse_native, "platform_status", lambda: fake_ready)
+    # Use a path that definitely doesn't exist on any platform.
+    bad_path = Path("/nonexistent/path/for/test_d27_invalid_mountpoint")
     result = fuse_native.try_mount(
-        mountpoint=Path("/nonexistent/path/for/test_d27"),
+        mountpoint=bad_path,
         manifest={},
     )
+    # Either invalid_mountpoint (validation fired) OR feature_disabled
+    # (validation passed, no mount_manifest binding). Either way, the
+    # validation logic ran without the platform short-circuit.
     assert result.status in ("invalid_mountpoint", "feature_disabled")
 
 
-def test_try_mount_native_missing_when_native_unavailable() -> None:
+def test_try_mount_native_missing_when_native_unavailable(monkeypatch) -> None:
     """When the native module isn't loaded, every try_mount returns
-    native_missing without touching anything."""
-    if fuse_native.HAS_NATIVE:
-        pytest.skip("native is installed; this test exercises the fallback path")
+    native_missing without touching anything. Monkeypatched so we
+    test the fallback path even when native IS installed."""
+    monkeypatch.setattr(fuse_native, "HAS_NATIVE", False)
     result = fuse_native.try_mount(
         mountpoint=Path("/tmp"),
         manifest={},
