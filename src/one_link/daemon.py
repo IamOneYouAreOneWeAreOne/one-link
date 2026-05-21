@@ -104,6 +104,7 @@ from one_link.capabilities import (
     FILES,
     FILE_SWARM,
     BLOB_REQUEST_V1,
+    COVER_TRAFFIC_V1,
     FOLDER_SYNC,
     FOLDER_SYNC_BIDI_V1,
     LOCAL_CAPABILITIES,
@@ -1591,6 +1592,14 @@ class Daemon:
         self._cover_traffic_env_gate: bool = (
             os.environ.get("ONE_LINK_COVER_TRAFFIC", "0") == "1"
         )
+        # D05 wire-up — Counters for the COVER_PACKET wire frame.
+        # Surfaced via cover_traffic_stats() so operators can see
+        # cover traffic actually flowing in production.
+        self._cover_packets_sent: int = 0
+        self._cover_packets_received: int = 0
+        # Round-robin peer index for cover-packet dispatch so we don't
+        # bias toward any single peer.
+        self._cover_dispatch_rr_idx: int = 0
 
         # Selector-decision telemetry. Every selector.decide() call from
         # _log_selector_decision_for_file or _selector_decision_for_file
@@ -5315,6 +5324,14 @@ class Daemon:
                 self._emit_capability_request(peer_fp, peer_sid, FOLDER_SYNC)
                 return
             await self._handle_blob_request(channel, msg, peer_fp)
+        elif t == "COVER_PACKET":
+            # D05 wire-up — cover-traffic packet. Drop silently. No
+            # caps gate here: the frame carries no payload of interest
+            # (opaque random bytes) and the whole point is that an
+            # observer can't tell it's a cover packet from a real one.
+            # Only restriction: the sender must be pinned (otherwise a
+            # stranger could use the frame as a free DoS amplifier).
+            self._handle_cover_packet(channel, msg, peer_fp)
 
         # ─── FILE_PROVENANCE — inbound Reality-dot evidence ─────────────
         elif t == "FILE_PROVENANCE":
@@ -11327,15 +11344,97 @@ class Daemon:
 
     def _emit_cover_packet_callback(self) -> None:
         """Cover-traffic emit callback. Runs on the cover-traffic
-        background thread; must be short + thread-safe. For now this
-        is a no-op stub — the real routing wire-up (pick a peer +
-        build a Sphinx circuit + ship via outbound session) lands in
-        the next phase. The emitter's tick counter still increments,
-        so observability + scheduling are wired even before the
-        actual cover packet leaves the daemon."""
-        # Future: pick a paired peer, build a 3-hop Sphinx cover
-        # packet, ship via outbound session. For now we just count.
-        log.debug("cover-traffic tick fired (no-op stub)")
+        background thread; must be short + thread-safe.
+
+        Picks one paired peer with an active outbound session AND
+        the COVER_TRAFFIC_V1 capability (round-robin so no peer is
+        biased), generates a small random payload, encodes as a
+        COVER_PACKET wire frame, and ships via the outbound session.
+
+        Never raises — the cover-traffic thread must not die on any
+        peer-specific failure. Errors are counted via the emitter's
+        own ``errors`` counter (it wraps this call in try/except).
+
+        Future: replace the random payload with a real Sphinx onion
+        cover packet (native_onion.build_cover_packet) once peer
+        circuits are wired into the daemon. For now, opaque random
+        bytes are sufficient to mask traffic-pattern signal — the
+        receiver drops the frame without inspecting the payload.
+        """
+        peers = self._pick_cover_traffic_peers()
+        if not peers:
+            return
+        n = len(peers)
+        idx = self._cover_dispatch_rr_idx % n
+        self._cover_dispatch_rr_idx = (idx + 1) % n
+        peer_fp, sess = peers[idx]
+        # Random payload size in [128, 1024] so an observer can't
+        # fingerprint cover packets by a fixed length.
+        import secrets as _secrets
+        size = 128 + (_secrets.randbits(10) & 0x3FF)  # ~128..1151 bytes
+        body = _secrets.token_bytes(size)
+        try:
+            import base64 as _b64
+            frame = encode_msg(make_msg(
+                "COVER_PACKET", self.me.short_id,
+                payload=_b64.b64encode(body).decode("ascii"),
+            ))
+        except Exception as exc:
+            log.debug("cover-traffic encode failed: %s", exc)
+            return
+        channel = getattr(sess, "channel", None)
+        if channel is None:
+            return
+        loop = getattr(self, "_main_loop", None) or asyncio.get_event_loop()
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                channel.send(frame), loop,
+            )
+            # Don't block the cover-traffic thread on send completion;
+            # the wait_for() resolves on its own thread.
+            fut.result(timeout=2.0)
+            self._cover_packets_sent += 1
+        except Exception as exc:
+            log.debug(
+                "cover-traffic send to %s failed: %s",
+                peer_fp[:8] if len(peer_fp) >= 8 else peer_fp,
+                exc,
+            )
+
+    def _pick_cover_traffic_peers(self) -> list[tuple[str, Any]]:
+        """Return paired peers that (a) advertise COVER_TRAFFIC_V1 AND
+        (b) have an active outbound session. Used by the cover-traffic
+        dispatch loop to pick a target. Never raises."""
+        out: list[tuple[str, Any]] = []
+        try:
+            sessions = getattr(self, "_outbound_sessions", {}) or {}
+        except Exception:
+            return out
+        for peer_fp, sess in sessions.items():
+            try:
+                if not self._is_pinned(peer_fp):
+                    continue
+                features = list(
+                    self.state.get_peer_capabilities(peer_fp) or [],
+                ) if self.state is not None else []
+                if COVER_TRAFFIC_V1 not in features:
+                    continue
+                if getattr(sess, "channel", None) is None:
+                    continue
+                out.append((peer_fp, sess))
+            except Exception:
+                continue
+        return out
+
+    def _handle_cover_packet(self, channel, msg, peer_fp: str) -> None:
+        """D05 wire-up — receive a COVER_PACKET frame. Drops the
+        payload silently; increments the receive counter for ops
+        telemetry. Never raises."""
+        if not self._is_pinned(peer_fp):
+            # Strangers can't use the frame as a free DoS amplifier.
+            return
+        self._cover_packets_received += 1
+        # No further processing — the whole point is to drop it.
 
     def _apply_cover_traffic_mode_contract(self) -> bool:
         """Reconcile the cover-traffic emitter with the current F4
@@ -11419,7 +11518,18 @@ class Daemon:
     def cover_traffic_stats(self) -> dict:
         """Inspection: return the cover-traffic emitter's current
         state. Returns ``{"available": False, ...}`` when the native
-        sphinx module isn't installed."""
+        sphinx module isn't installed.
+
+        Always includes daemon-side wire counters
+        (``packets_sent`` + ``packets_received``) — these report how
+        many COVER_PACKET wire frames the daemon has actually
+        emitted + received in production, distinct from the
+        scheduler's tick count.
+        """
+        packets_sent = int(getattr(self, "_cover_packets_sent", 0) or 0)
+        packets_received = int(
+            getattr(self, "_cover_packets_received", 0) or 0,
+        )
         if self._cover_traffic is None:
             return {
                 "available": cover_traffic_module.HAS_NATIVE,
@@ -11428,6 +11538,8 @@ class Daemon:
                 "running": False,
                 "emitted": 0,
                 "errors": 0,
+                "packets_sent": packets_sent,
+                "packets_received": packets_received,
             }
         try:
             stats = dict(self._cover_traffic.stats())
@@ -11435,8 +11547,12 @@ class Daemon:
             return {
                 "available": cover_traffic_module.HAS_NATIVE,
                 "error": str(exc),
+                "packets_sent": packets_sent,
+                "packets_received": packets_received,
             }
         stats["available"] = True
+        stats["packets_sent"] = packets_sent
+        stats["packets_received"] = packets_received
         return stats
 
     def _log_selector_decision_for_file(

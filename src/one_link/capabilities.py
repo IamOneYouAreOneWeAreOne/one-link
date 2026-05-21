@@ -118,6 +118,15 @@ FOLDER_SYNC_BIDI_V1 = "folder_sync_bidi_v1"
 # that has the blob cached, not just the original sender.
 BLOB_REQUEST_V1 = "blob_request_v1"
 
+# D05 wire-up — Cover-traffic dispatch. When both peers advertise this,
+# the cover-traffic emitter can send COVER_PACKET frames to mask
+# real-traffic timing patterns. The frame carries opaque random bytes
+# that the receiver drops silently — it exists purely so an on-path
+# observer sees a steady stream of indistinguishable packets rather
+# than the bursty pattern of real messages. Old peers ignore the
+# unknown frame type (graceful interop with v0.20.x daemons).
+COVER_TRAFFIC_V1 = "cover_traffic_v1"
+
 LOCAL_CAPABILITIES = (
     CHAT,
     FILES,
@@ -132,6 +141,7 @@ LOCAL_CAPABILITIES = (
     FOLDER_SYNC,
     FOLDER_SYNC_BIDI_V1,
     BLOB_REQUEST_V1,
+    COVER_TRAFFIC_V1,
     MERKLE_SYNC,
     FUTURE_TRANSPORTS,
     SELF_MESH_MANIFEST,
@@ -210,6 +220,11 @@ TRANSPORT_LAYER_CAPS = (
     # the BLOB_REQUEST handler still gates on the same pinned-peer +
     # folder-share + capability checks as the existing BLOB_OFFER path.
     BLOB_REQUEST_V1,
+    # COVER_TRAFFIC_V1 is a privacy primitive — opaque random bytes
+    # the receiver drops silently. Adds no user-facing power; it
+    # only obscures traffic patterns. Sender + receiver gate on
+    # pairing (cover packets only flow between paired peers).
+    COVER_TRAFFIC_V1,
 )
 
 
