@@ -5342,6 +5342,12 @@ class UIServer:
             out["cascade_warnings"] = d.cascade_warning_stats()
         except Exception as exc:
             out["cascade_warnings"] = {"error": str(exc)}
+        # D25 — wave-equation forecaster snapshot (config + counters
+        # + per-peer predicted disturbance preview).
+        try:
+            out["wave_forecast"] = d.wave_forecast_stats()
+        except Exception as exc:
+            out["wave_forecast"] = {"error": str(exc)}
         try:
             out["cover_traffic"] = d.cover_traffic_stats()
         except Exception as exc:

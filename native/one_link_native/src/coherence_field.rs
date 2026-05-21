@@ -415,6 +415,26 @@ impl PyWaveStepper {
         self.inner = current.with_threshold(threshold);
     }
 
+    /// Configure a value clamp range [min, max]. Pass (min, max) to
+    /// enable, or omit to disable. step() will return an error when
+    /// any field value drifts outside the range.
+    #[pyo3(signature = (min=None, max=None))]
+    fn set_clamp_range(&mut self, min: Option<f32>, max: Option<f32>) {
+        let current = std::mem::take(&mut self.inner);
+        let range = match (min, max) {
+            (Some(lo), Some(hi)) => Some((lo, hi)),
+            _ => None,
+        };
+        self.inner = current.with_clamp_range(range);
+    }
+
+    /// Configure CFL enforcement. Default true; only disable for
+    /// advanced callers (e.g. golden-vector regression).
+    fn set_cfl_enforce(&mut self, enforce: bool) {
+        let current = std::mem::take(&mut self.inner);
+        self.inner = current.with_cfl_enforce(enforce);
+    }
+
     /// Seed the current snapshot from a {node_id: tau} dict.
     fn seed(&mut self, values: std::collections::HashMap<String, f32>) {
         self.inner.seed(&values);
@@ -462,6 +482,40 @@ impl PyWaveStepper {
 
     fn reset_warnings(&mut self) {
         self.inner.reset_warnings();
+    }
+
+    /// Number of successful step() calls since construction/seed.
+    #[getter]
+    fn step_count(&self) -> u64 {
+        self.inner.step_count()
+    }
+
+    /// Courant number `c·dt·√λ_max` for a given dt. Stability
+    /// requires this be ≤ 1.
+    fn courant_number(&self, dt: f32) -> f32 {
+        self.inner.courant_number(dt)
+    }
+
+    /// Maximum stable dt for this stepper's wave speed. Returns
+    /// +inf when wave_speed is 0.
+    fn max_stable_dt(&self) -> f32 {
+        self.inner.max_stable_dt()
+    }
+
+    /// Total field energy (kinetic + potential). Approximately
+    /// conserved when damping is zero; decays monotonically when
+    /// damping is positive.
+    fn total_energy(
+        &self,
+        dt: f32,
+        neighbors: std::collections::HashMap<String, Vec<String>>,
+    ) -> f32 {
+        self.inner.total_energy(dt, &neighbors)
+    }
+
+    /// Snapshot of all (node, ψ) pairs as a dict.
+    fn snapshot(&self) -> std::collections::HashMap<String, f32> {
+        self.inner.iter().map(|(k, &v)| (k.clone(), v)).collect()
     }
 }
 

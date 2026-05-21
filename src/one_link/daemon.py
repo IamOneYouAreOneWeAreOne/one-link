@@ -93,6 +93,7 @@ from one_link import (
     fuse_native,
     radio_batcher_native,
     selector_native,
+    wave_forecast_native,
 )
 from one_link.build_identity import runtime_build_identity
 from one_link.capabilities import (
@@ -1646,6 +1647,37 @@ class Daemon:
             os.environ.get("ONE_LINK_CASCADE_THRESHOLD", "0.5") or "0.5",
         )
         self._cascade_warning_count: int = 0
+
+        # D25 — Wave-equation cascade forecaster. The leapfrog scheme
+        # projects the τ_c field forward `dt` per tick and counts
+        # nodes whose disturbance crosses the threshold; this is the
+        # FORECAST counterpart to D24's gradient probe (which scores
+        # the present-state field). Both are RESEARCH-GRADE per the
+        # integration map; the selector consumes the disturbance
+        # signal as a SOFT input only.
+        #
+        # Gated by ONE_LINK_WAVE_FORECAST=1. Lazily constructed on
+        # first step so the daemon works fine without the native
+        # binding.
+        self._wave_forecast: Optional[Any] = None
+        self._wave_forecast_enabled: bool = (
+            os.environ.get("ONE_LINK_WAVE_FORECAST", "0") == "1"
+            and wave_forecast_native.HAS_NATIVE
+        )
+        # Forecast step counter (independent of the warning counter
+        # so we can compute warnings-per-step ratio for operators).
+        self._wave_forecast_steps: int = 0
+        self._wave_forecast_warnings: int = 0
+        # Per-peer cached predicted disturbance — Δψ from the latest
+        # forecast step. Selector reads this as a soft signal.
+        self._wave_predicted_disturbance: dict[str, float] = {}
+        # Forecast cadence: how often _wave_forecast_tick() runs
+        # (in seconds). Independent of the prune loop's 20s tick so
+        # operators can tune cascade response time without disturbing
+        # other maintenance work.
+        self._wave_forecast_dt: float = float(
+            os.environ.get("ONE_LINK_WAVE_FORECAST_DT", "0.5") or "0.5",
+        )
 
         # Selector-decision telemetry. Every selector.decide() call from
         # _log_selector_decision_for_file or _selector_decision_for_file
@@ -11338,6 +11370,214 @@ class Daemon:
         if grad_f > float(self._cascade_warning_threshold):
             self._cascade_warning_count += 1
 
+    # ─── D25 wave-equation forecast loop ──────────────────────────────
+
+    def _ensure_wave_forecaster(self) -> Optional[Any]:
+        """Lazily construct the WaveStepper. Returns None when the
+        native binding isn't available or the env gate is off.
+
+        Default parameters chosen for the τ_c domain:
+          - wave_speed = 0.5 (signal can traverse 1 graph hop per
+            ~1.4 dt, leaving headroom under the CFL bound)
+          - damping = 0.05 (~20-step forecast horizon before signal
+            decays into the floor — long enough to anticipate, short
+            enough that stale state doesn't dominate)
+          - clamp_range = (0.0, 1.0) — τ_c is bounded in [0, 1] so
+            any out-of-range value is a bug worth surfacing
+          - cascade_threshold = 0.15 (per Gap 28 calibration)
+        """
+        if not self._wave_forecast_enabled:
+            return None
+        if self._wave_forecast is not None:
+            return self._wave_forecast
+        if not wave_forecast_native.HAS_NATIVE:
+            return None
+        try:
+            w = wave_forecast_native.wave_stepper()
+            w.set_wave_speed(0.5)
+            w.set_damping(0.05)
+            w.set_threshold(0.15)
+            w.set_clamp_range(0.0, 1.0)
+            self._wave_forecast = w
+        except Exception as exc:
+            log.info(
+                "wave-forecast init failed (D25 disabled): %s", exc,
+            )
+            self._wave_forecast = None
+        return self._wave_forecast
+
+    def _build_field_neighbor_graph(self) -> dict[str, list[str]]:
+        """Construct the per-peer neighborhood graph the wave-stepper
+        uses for the Laplacian. Every paired peer is connected to
+        every other paired peer that the daemon also has an active
+        outbound session with — that's the "mesh of trust" the field
+        propagates across.
+
+        Returns ``{peer_fp: [neighbor_fp, ...]}``. Returns an empty
+        dict when state is unavailable. Never raises.
+
+        Future refinement: weight edges by τ_c-routing distance via
+        ``ol_routing`` for more accurate signal speed. For v1 a
+        uniform full-mesh-over-paired is the right scope — keeps the
+        forecast deterministic + fast.
+        """
+        if self.state is None:
+            return {}
+        try:
+            paired = [
+                p.fingerprint for p in self.state.list_peers()
+                if getattr(p, "trust", "") == "pinned"
+                and getattr(p, "fingerprint", None)
+            ]
+        except Exception:
+            return {}
+        if not paired:
+            return {}
+        # Full-mesh adjacency: each paired peer's neighbors are all
+        # other paired peers. Bounded by paired-peer count, which is
+        # typically O(10) — adjacency is O(N²) but small.
+        graph: dict[str, list[str]] = {}
+        paired_set = set(paired)
+        for peer_fp in paired:
+            graph[peer_fp] = [
+                other for other in paired_set if other != peer_fp
+            ]
+        return graph
+
+    def _snapshot_field_state(self) -> dict[str, float]:
+        """Read the current τ_c per-peer values from FieldObservations
+        so the wave-stepper can seed from the latest steady-state
+        observations. Returns an empty dict when the field-obs
+        module isn't installed."""
+        if self._field_obs is None or self.state is None:
+            return {}
+        out: dict[str, float] = {}
+        try:
+            for p in self.state.list_peers():
+                fp = getattr(p, "fingerprint", None)
+                if not fp:
+                    continue
+                try:
+                    tau = self._field_obs.tau_at(fp)
+                except Exception:
+                    continue
+                if tau is None:
+                    continue
+                try:
+                    out[fp] = float(tau)
+                except (TypeError, ValueError):
+                    continue
+        except Exception:
+            return {}
+        return out
+
+    def _wave_forecast_tick(self) -> int:
+        """Run one wave-stepper forecast step. Returns the number of
+        cascade warnings emitted during this step (0 when forecaster
+        is disabled / unavailable). Never raises.
+
+        Seeds the stepper from the current FieldObservations snapshot
+        on the FIRST call so the forecast tracks real τ_c values.
+        Subsequent calls let the leapfrog propagate forward; the
+        operator dashboard exposes the predicted disturbance per peer
+        via ``wave_forecast_stats()``.
+
+        Suitable to call from any maintenance loop (prune,
+        _wave_forecast_loop) — the call is bounded by the paired-peer
+        count (typically O(10)) and runs in microseconds.
+        """
+        w = self._ensure_wave_forecaster()
+        if w is None:
+            return 0
+        neighbors = self._build_field_neighbor_graph()
+        if not neighbors:
+            return 0
+        # First-call seed: pull initial τ_c values + seed the
+        # stepper.
+        if self._wave_forecast_steps == 0:
+            initial = self._snapshot_field_state()
+            if initial:
+                try:
+                    w.seed(initial)
+                except Exception as exc:
+                    log.debug("wave forecast seed failed: %s", exc)
+                    return 0
+        try:
+            warnings = int(w.step(self._wave_forecast_dt, neighbors))
+        except Exception as exc:
+            log.debug(
+                "wave forecast step failed: %s (forecaster may need re-seed)",
+                exc,
+            )
+            # On error, drop the stepper so the next tick re-seeds
+            # from the current FieldObservations state.
+            self._wave_forecast = None
+            self._wave_forecast_steps = 0
+            return 0
+        self._wave_forecast_steps += 1
+        self._wave_forecast_warnings += warnings
+        # Refresh the per-peer predicted-disturbance cache by reading
+        # the snapshot. Bounded to the paired-peer count.
+        try:
+            snapshot = w.snapshot()
+            initial = self._snapshot_field_state()
+            self._wave_predicted_disturbance = {
+                fp: float(snapshot.get(fp, 0.0)) - float(initial.get(fp, 0.0))
+                for fp in snapshot
+            }
+        except Exception:
+            pass
+        return warnings
+
+    def predicted_disturbance_for(self, peer_fp: str) -> Optional[float]:
+        """D25 soft signal — return the latest predicted disturbance
+        Δψ at ``peer_fp``, if the wave-forecast loop has run + this
+        peer is in the cached snapshot. Returns None otherwise.
+
+        The selector consumes this as a soft input: high predicted
+        disturbance suggests bumping anchor_lay probability or
+        choosing more redundant transport. NOT a binary gate — the
+        forecast is RESEARCH-GRADE per Gap 25.
+        """
+        if not peer_fp:
+            return None
+        try:
+            return self._wave_predicted_disturbance.get(peer_fp)
+        except Exception:
+            return None
+
+    def wave_forecast_stats(self) -> dict:
+        """Integration map §11 — wave-forecast telemetry snapshot.
+
+        Returns the stepper's configuration + step/warning counters +
+        the latest per-peer predicted disturbance (short-fp keys for
+        readability). Never raises."""
+        out = {
+            "enabled": bool(getattr(self, "_wave_forecast_enabled", False)),
+            "available": wave_forecast_native.HAS_NATIVE,
+            "steps": int(getattr(self, "_wave_forecast_steps", 0) or 0),
+            "warnings": int(getattr(self, "_wave_forecast_warnings", 0) or 0),
+            "dt": float(getattr(self, "_wave_forecast_dt", 0.5) or 0.5),
+        }
+        w = getattr(self, "_wave_forecast", None)
+        if w is not None:
+            try:
+                out["wave_speed"] = float(w.wave_speed)
+                out["damping"] = float(w.damping)
+                out["cascade_threshold"] = float(w.cascade_threshold)
+                out["max_stable_dt"] = float(w.max_stable_dt())
+                out["courant_number"] = float(
+                    w.courant_number(out["dt"]),
+                )
+            except Exception:
+                pass
+        # Bounded per-peer disturbance preview.
+        disturbance = getattr(self, "_wave_predicted_disturbance", {})
+        out["predicted_disturbance"] = {
+            fp[:16]: float(v) for fp, v in list(disturbance.items())[:32]
+        }
+        return out
+
     def cascade_warning_stats(self) -> dict:
         """Integration map §11 — cascade-warning telemetry snapshot.
 
@@ -11729,6 +11969,18 @@ class Daemon:
                 "user_mode": self._user_mode_value,
                 "pattern_strength": pattern_strength,
             }
+            # D25 soft signal — bump observed_loss when the wave
+            # forecaster predicts disturbance at this peer. The
+            # selector treats observed_loss as the consolidated
+            # "things-are-going-wrong" signal; we add a small
+            # contribution (capped at +0.3) so a forecasted cascade
+            # nudges decisions toward more conservative transport /
+            # anchor-lay without overriding direct relay measurements.
+            disturbance = self.predicted_disturbance_for(peer_fp or "")
+            if disturbance is not None and abs(float(disturbance)) > 0.05:
+                # Map [0.05, 1.0] → [0.0, 0.3] for the loss bump.
+                bump = min(0.3, max(0.0, abs(float(disturbance)) - 0.05))
+                decide_kwargs["observed_loss"] = bump
             decision = self._smart_selector.decide(**decide_kwargs)
             log.debug(
                 "selector(send_file): peer=%s size=%d -> %s",
@@ -12309,6 +12561,14 @@ class Daemon:
                 "user_mode": self._user_mode_value,
                 "pattern_strength": pattern_strength,
             }
+            # D25 soft signal — wave-forecast disturbance bumps the
+            # selector's observed_loss so a forecasted cascade nudges
+            # decisions toward more conservative posture. See the
+            # observability path for mapping rationale.
+            disturbance = self.predicted_disturbance_for(peer_fp or "")
+            if disturbance is not None and abs(float(disturbance)) > 0.05:
+                bump = min(0.3, max(0.0, abs(float(disturbance)) - 0.05))
+                decide_kwargs["observed_loss"] = bump
             decision = self._smart_selector.decide(**decide_kwargs)
             violations = selector_native.verify_contract(
                 decision, self._user_mode_value
@@ -19074,6 +19334,17 @@ class Daemon:
                     # window itself is 50ms inside the batcher.
                     with contextlib.suppress(Exception):
                         self._drain_radio_batcher_tick()
+                    # D25 — Wave-equation forecast tick. Projects the
+                    # τ_c field forward + counts cascade warnings. No-op
+                    # when ONE_LINK_WAVE_FORECAST is off (the default).
+                    # The forecast cadence (default 0.5s) is configured
+                    # via ONE_LINK_WAVE_FORECAST_DT; we run one step
+                    # per prune-loop iteration so the actual forecast
+                    # rate is 1 step per 20s. Operators that want
+                    # faster forecast can call _wave_forecast_tick()
+                    # from a dedicated loop.
+                    with contextlib.suppress(Exception):
+                        self._wave_forecast_tick()
             except asyncio.CancelledError:
                 pass
 
