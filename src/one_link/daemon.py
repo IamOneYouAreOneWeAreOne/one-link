@@ -1523,6 +1523,14 @@ class Daemon:
         self._selector_mode: str = os.environ.get(
             "ONE_LINK_SMART_SELECTOR", "off"
         ).lower()
+        # B2 — Enforce selector decisions at send_file. When set to "1",
+        # the selector's transport choice overrides the daemon's static
+        # QUIC_SMALL_FILE_THRESHOLD branch. Defaults off so v0.20 tests
+        # see no behavior change; flipping enforce on is the Phase F+
+        # cutover trigger.
+        self._selector_enforce: bool = (
+            os.environ.get("ONE_LINK_SMART_SELECTOR_ENFORCE", "0") == "1"
+        )
 
         # F1 — User-declared operating mode (one of normal | paranoid
         # | battery_save | latency_strict). Persisted in the settings
@@ -10914,6 +10922,67 @@ class Daemon:
             # Selector errors must never break send_file.
             log.debug("selector eval failed: %s", exc)
 
+    def _selector_decision_for_file(
+        self,
+        *,
+        peer_fp: Optional[str],
+        size: int,
+        kind: str = "FILE_OFFER",
+    ) -> Optional[dict]:
+        """B2 — Compute (but do not log) the Smart-Rules decision for
+        a send_file event, applying the F4 contract.
+
+        Returns the decision dict, or None if the selector is unavailable
+        or the call raises. Never raises.
+
+        Caller is responsible for honouring the decision; this is the
+        single source of truth when ``_selector_enforce`` is True.
+        """
+        if self._smart_selector is None:
+            return None
+        try:
+            peer_label = "stranger"
+            try:
+                if peer_fp and self.state is not None:
+                    rec = self.state.get_peer(peer_fp)
+                    if rec is not None and rec.trust:
+                        peer_label = str(rec.trust)
+            except Exception:
+                pass
+            pattern_strength = 0.0
+            try:
+                preds = self.predict_next_files_for_peer(peer_fp, n=1)
+                if preds:
+                    pattern_strength = float(preds[0][1])
+            except Exception:
+                pass
+            decision = self._smart_selector.decide(
+                kind=kind,
+                size=size,
+                peer=peer_label,
+                user_mode=self._user_mode_value,
+                pattern_strength=pattern_strength,
+            )
+            violations = selector_native.verify_contract(
+                decision, self._user_mode_value
+            )
+            if violations:
+                log.warning(
+                    "selector enforce: contract violation peer=%s mode=%s "
+                    "violations=%s -> falling back to safe_default",
+                    (peer_fp or "?")[:8],
+                    self._user_mode_value,
+                    violations,
+                )
+                try:
+                    return self._smart_selector.safe_default()
+                except Exception:
+                    return None
+            return decision
+        except Exception as exc:
+            log.debug("selector enforce eval failed: %s", exc)
+            return None
+
     def _peer_trust_score(self, peer_fp: str) -> Optional[float]:
         """A(x, t) Gaussian alignment trust score for ``peer_fp`` in [0, 1].
 
@@ -14386,6 +14455,15 @@ class Daemon:
                 peer_fp=peer_fp_for_policy,
                 size=size,
             )
+        # B2 — Smart-Rules enforcement. Gated by ONE_LINK_SMART_SELECTOR_ENFORCE.
+        # When on, the selector decision is computed once here and reused
+        # below to override the static QUIC_SMALL_FILE_THRESHOLD branch.
+        selector_decision: Optional[dict] = None
+        if self._selector_enforce:
+            selector_decision = self._selector_decision_for_file(
+                peer_fp=peer_fp_for_policy,
+                size=size,
+            )
         cached_file_index: FileIndex | None = None
         cached_index_kind = "miss"
         cached = self._cached_file_index(file_sig)
@@ -14591,7 +14669,27 @@ class Daemon:
         # files into stream mode + the QUIC fork when the peer also has
         # NATIVE_TRANSFER_V1 + a known QUIC port.
         QUIC_SMALL_FILE_THRESHOLD = 512 * 1024
-        if (
+        # B2 — When the selector is enforced and asks for quic_stream
+        # transport, we take the QUIC fast path regardless of size.
+        # When it asks for anything else (webrtc/relay/quic_datagram),
+        # we keep CDC mode (the default for the big-file path).
+        # Selector takes precedence over the static threshold.
+        if selector_decision is not None:
+            sel_transport = str(selector_decision.get("transport", ""))
+            if (
+                can_offer_cdc
+                and size > 0
+                and sel_transport == "quic_stream"
+                and NATIVE_TRANSFER_V1 in peer_features
+                and self._quic_peer_ports.get(peer_fp)
+            ):
+                can_offer_cdc = False
+                cdc_decision_reason = "selector_quic_stream"
+                log.debug(
+                    "selector enforce: peer=%s size=%d -> quic_stream",
+                    peer_fp[:8], size,
+                )
+        elif (
             can_offer_cdc
             and size > 0
             and size <= QUIC_SMALL_FILE_THRESHOLD

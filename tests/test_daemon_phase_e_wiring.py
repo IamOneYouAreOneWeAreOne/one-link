@@ -185,3 +185,116 @@ def test_selector_log_unknown_peer_defaults_stranger() -> None:
     )
     call_kwargs = d._smart_selector.decide.call_args[1]
     assert call_kwargs["peer"] == "stranger"
+
+
+# ---------- B2 — _selector_decision_for_file (enforce path) ----------
+
+
+_FULL_DECISION = {
+    "transport": "quic_stream",
+    "path": "classical",
+    "onion_hops": 3,
+    "cover_traffic": False,
+    "batch_decision": "emit_now",
+    "anchor_lay": False,
+    "predictor_warm": False,
+}
+
+
+def test_decision_for_file_returns_none_when_selector_missing() -> None:
+    d = _bare_daemon()
+    d._smart_selector = None
+    assert d._selector_decision_for_file(peer_fp="abc", size=100) is None
+
+
+def test_decision_for_file_returns_decision_dict() -> None:
+    d = _bare_daemon()
+    d._smart_selector = MagicMock()
+    d._smart_selector.decide.return_value = dict(_FULL_DECISION)
+    d.predict_next_files_for_peer = MagicMock(return_value=[])
+    d.state.get_peer.return_value = MagicMock(trust="pinned")
+    out = d._selector_decision_for_file(peer_fp="abc", size=10_000)
+    assert out is not None
+    assert out["transport"] == "quic_stream"
+    assert out["onion_hops"] == 3
+
+
+def test_decision_for_file_uses_user_mode() -> None:
+    d = _bare_daemon()
+    d._smart_selector = MagicMock()
+    d._smart_selector.decide.return_value = dict(_FULL_DECISION)
+    d._user_mode_value = "paranoid"
+    d.predict_next_files_for_peer = MagicMock(return_value=[])
+    d.state.get_peer.return_value = MagicMock(trust="pinned")
+    d._selector_decision_for_file(peer_fp="abc", size=100)
+    call_kwargs = d._smart_selector.decide.call_args[1]
+    assert call_kwargs["user_mode"] == "paranoid"
+
+
+def test_decision_for_file_falls_back_to_safe_default_on_violation(monkeypatch) -> None:
+    """When the selector returns a contract-violating decision, the
+    enforce path must NOT propagate it — fall back to safe_default."""
+    d = _bare_daemon()
+    d._user_mode_value = "paranoid"
+    bad_decision = dict(_FULL_DECISION)
+    bad_decision["onion_hops"] = 1  # violates paranoid (>=3 required)
+    bad_decision["cover_traffic"] = False  # violates paranoid (cover required)
+    safe = dict(_FULL_DECISION)
+    safe["onion_hops"] = 5
+    safe["cover_traffic"] = True
+    d._smart_selector = MagicMock()
+    d._smart_selector.decide.return_value = bad_decision
+    d._smart_selector.safe_default.return_value = safe
+    d.predict_next_files_for_peer = MagicMock(return_value=[])
+    d.state.get_peer.return_value = MagicMock(trust="stranger")
+
+    # Patch verify_contract to deterministically report violations.
+    from one_link import selector_native as sel_mod
+    monkeypatch.setattr(
+        sel_mod, "verify_contract",
+        lambda decision, mode: ["paranoid_under_hops", "paranoid_no_cover"],
+    )
+
+    out = d._selector_decision_for_file(peer_fp="abc", size=100)
+    assert out is not None
+    assert out["onion_hops"] == 5
+    assert out["cover_traffic"] is True
+
+
+def test_decision_for_file_survives_decide_exception() -> None:
+    d = _bare_daemon()
+    d._smart_selector = MagicMock()
+    d._smart_selector.decide.side_effect = RuntimeError("simulated")
+    d.predict_next_files_for_peer = MagicMock(return_value=[])
+    # Must not raise, must return None.
+    assert d._selector_decision_for_file(peer_fp="abc", size=100) is None
+
+
+def test_decision_for_file_survives_predictor_exception() -> None:
+    d = _bare_daemon()
+    d._smart_selector = MagicMock()
+    d._smart_selector.decide.return_value = dict(_FULL_DECISION)
+
+    def boom(*a, **kw):
+        raise RuntimeError("predictor broken")
+
+    d.predict_next_files_for_peer = boom
+    d.state.get_peer.return_value = MagicMock(trust="pinned")
+    # Decision returned, predictor exception swallowed.
+    out = d._selector_decision_for_file(peer_fp="abc", size=100)
+    assert out is not None
+    call_kwargs = d._smart_selector.decide.call_args[1]
+    # pattern_strength defaulted to 0.0 after predictor blew up.
+    assert call_kwargs["pattern_strength"] == 0.0
+
+
+def test_decision_for_file_passes_size_and_kind() -> None:
+    d = _bare_daemon()
+    d._smart_selector = MagicMock()
+    d._smart_selector.decide.return_value = dict(_FULL_DECISION)
+    d.predict_next_files_for_peer = MagicMock(return_value=[])
+    d.state.get_peer.return_value = MagicMock(trust="pinned")
+    d._selector_decision_for_file(peer_fp="abc", size=99_999, kind="FILE_CHUNK")
+    call_kwargs = d._smart_selector.decide.call_args[1]
+    assert call_kwargs["size"] == 99_999
+    assert call_kwargs["kind"] == "FILE_CHUNK"
