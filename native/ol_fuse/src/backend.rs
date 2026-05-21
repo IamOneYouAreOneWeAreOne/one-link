@@ -245,6 +245,169 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// D27 — Read-only adapter that bridges a daemon-supplied manifest +
+/// blob-reader closure to the FUSE [`FilesystemBackend`] trait.
+///
+/// The manifest is a flat ``path -> (size, mtime_ms, blob_hash)`` map;
+/// directory structure is inferred from the path separators. The
+/// blob reader is a closure that, given a 64-hex blob hash + offset
+/// + length, returns the slice of bytes. This split keeps ol_fuse
+/// crypto-free — the daemon already has the chunk-store + AEAD wired
+/// up and can supply a closure that walks them.
+///
+/// Writes return [`FsError::PermissionDenied`] for now; mounting a
+/// folder as read-only is the right v1 surface (the daemon's existing
+/// folder-sync engine is the authoritative writer). Read-write
+/// mounts will land in a follow-up with chunk-store cooperation.
+pub struct FolderManifestBackend {
+    files: BTreeMap<String, ManifestRow>,
+    blob_reader: BlobReader,
+}
+
+/// Row in the manifest passed to [`FolderManifestBackend::new`].
+#[derive(Debug, Clone)]
+pub struct ManifestRow {
+    /// Plaintext file size in bytes.
+    pub size: u64,
+    /// Last-modified time (milliseconds since Unix epoch).
+    pub mtime_ms: u64,
+    /// 64-hex BLAKE3 hash addressing the file in the blob store.
+    pub blob_hash: String,
+}
+
+/// Closure shape passed to the read-only backend for fetching bytes
+/// from a blob hash. `Send + Sync` so the backend itself is `Send +
+/// Sync` (FUSE callbacks fire from a kernel-driven thread pool).
+pub type BlobReader =
+    Box<dyn Fn(&str, u64, u32) -> Result<Vec<u8>, FsError> + Send + Sync>;
+
+impl FolderManifestBackend {
+    /// Build a backend from a manifest + a blob reader closure.
+    #[must_use]
+    pub fn new(
+        files: BTreeMap<String, ManifestRow>,
+        blob_reader: BlobReader,
+    ) -> Self {
+        Self {
+            files,
+            blob_reader,
+        }
+    }
+}
+
+impl std::fmt::Debug for FolderManifestBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FolderManifestBackend")
+            .field("files", &self.files.len())
+            .finish()
+    }
+}
+
+impl FilesystemBackend for FolderManifestBackend {
+    fn getattr(&self, path: &str) -> Result<Stat, FsError> {
+        if path.is_empty() || path == "/" {
+            return Ok(Stat {
+                kind: EntryKind::Directory,
+                size: 0,
+                mtime_ms: 0,
+                mode: 0o555,
+            });
+        }
+        let lookup = path.trim_start_matches('/').to_string();
+        if let Some(row) = self.files.get(&lookup) {
+            return Ok(Stat {
+                kind: EntryKind::File,
+                size: row.size,
+                mtime_ms: row.mtime_ms,
+                mode: 0o444,
+            });
+        }
+        let prefix = if lookup.ends_with('/') {
+            lookup
+        } else {
+            format!("{}/", lookup)
+        };
+        if self.files.keys().any(|k| k.starts_with(&prefix)) {
+            return Ok(Stat {
+                kind: EntryKind::Directory,
+                size: 0,
+                mtime_ms: 0,
+                mode: 0o555,
+            });
+        }
+        Err(FsError::NotFound)
+    }
+
+    fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, FsError> {
+        let trimmed = path.trim_start_matches('/');
+        let prefix = if trimmed.is_empty() {
+            String::new()
+        } else if trimmed.ends_with('/') {
+            trimmed.to_string()
+        } else {
+            format!("{}/", trimmed)
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for (key, row) in &self.files {
+            if !key.starts_with(&prefix) {
+                continue;
+            }
+            let tail = &key[prefix.len()..];
+            let bare = match tail.find('/') {
+                Some(idx) => &tail[..idx],
+                None => tail,
+            };
+            if bare.is_empty() || !seen.insert(bare.to_string()) {
+                continue;
+            }
+            let full = format!("{}{}", prefix, bare);
+            let stat = if let Some(r) = self.files.get(&full) {
+                Stat {
+                    kind: EntryKind::File,
+                    size: r.size,
+                    mtime_ms: r.mtime_ms,
+                    mode: 0o444,
+                }
+            } else {
+                let _ = row;
+                Stat {
+                    kind: EntryKind::Directory,
+                    size: 0,
+                    mtime_ms: 0,
+                    mode: 0o555,
+                }
+            };
+            out.push(DirEntry {
+                name: bare.to_string(),
+                stat,
+            });
+        }
+        if out.is_empty() && !prefix.is_empty() {
+            // Path doesn't resolve to either a known file or a known
+            // directory prefix.
+            return Err(FsError::NotFound);
+        }
+        Ok(out)
+    }
+
+    fn read(&self, path: &str, offset: u64, size: u32) -> Result<Vec<u8>, FsError> {
+        let lookup = path.trim_start_matches('/');
+        let row = self.files.get(lookup).ok_or(FsError::NotFound)?;
+        (self.blob_reader)(&row.blob_hash, offset, size)
+    }
+
+    fn write(&self, _path: &str, _offset: u64, _data: &[u8]) -> Result<u32, FsError> {
+        // Read-only v1 — writes are intentionally rejected so the
+        // FUSE mount doesn't race the folder-sync engine.
+        Err(FsError::PermissionDenied)
+    }
+
+    fn unlink(&self, _path: &str) -> Result<(), FsError> {
+        Err(FsError::PermissionDenied)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +490,165 @@ mod tests {
         assert_eq!(bytes.len(), 19);
         assert_eq!(&bytes[..16], &[0u8; 16][..]);
         assert_eq!(&bytes[16..], b"XYZ");
+    }
+
+    // ---- D27 FolderManifestBackend ----
+
+    fn _row(size: u64, mtime: u64, hash: &str) -> ManifestRow {
+        ManifestRow {
+            size,
+            mtime_ms: mtime,
+            blob_hash: hash.into(),
+        }
+    }
+
+    #[test]
+    fn folder_backend_getattr_root_is_dir() {
+        let mut files = BTreeMap::new();
+        files.insert("a.txt".to_string(), _row(3, 100, "hash_a"));
+        let fs = FolderManifestBackend::new(
+            files,
+            Box::new(|_, _, _| Ok(Vec::new())),
+        );
+        let root = fs.getattr("/").unwrap();
+        assert_eq!(root.kind, EntryKind::Directory);
+        // Read-only mode: dir is r-xr-xr-x.
+        assert_eq!(root.mode, 0o555);
+    }
+
+    #[test]
+    fn folder_backend_getattr_known_file() {
+        let mut files = BTreeMap::new();
+        files.insert("docs/a.txt".to_string(), _row(99, 1234, "hash_a"));
+        let fs = FolderManifestBackend::new(
+            files,
+            Box::new(|_, _, _| Ok(Vec::new())),
+        );
+        let stat = fs.getattr("docs/a.txt").unwrap();
+        assert_eq!(stat.kind, EntryKind::File);
+        assert_eq!(stat.size, 99);
+        assert_eq!(stat.mtime_ms, 1234);
+        // Read-only file mode.
+        assert_eq!(stat.mode, 0o444);
+    }
+
+    #[test]
+    fn folder_backend_getattr_intermediate_dir() {
+        let mut files = BTreeMap::new();
+        files.insert("docs/sub/x.txt".to_string(), _row(1, 0, "h"));
+        let fs = FolderManifestBackend::new(
+            files,
+            Box::new(|_, _, _| Ok(Vec::new())),
+        );
+        let d = fs.getattr("docs").unwrap();
+        assert_eq!(d.kind, EntryKind::Directory);
+        let d2 = fs.getattr("docs/sub").unwrap();
+        assert_eq!(d2.kind, EntryKind::Directory);
+    }
+
+    #[test]
+    fn folder_backend_getattr_unknown_path_notfound() {
+        let files = BTreeMap::new();
+        let fs = FolderManifestBackend::new(
+            files,
+            Box::new(|_, _, _| Ok(Vec::new())),
+        );
+        assert_eq!(fs.getattr("ghost"), Err(FsError::NotFound));
+    }
+
+    #[test]
+    fn folder_backend_readdir_root_lists_top() {
+        let mut files = BTreeMap::new();
+        files.insert("a.txt".to_string(), _row(1, 0, "ha"));
+        files.insert("b.txt".to_string(), _row(2, 0, "hb"));
+        files.insert("docs/x.txt".to_string(), _row(3, 0, "hd"));
+        let fs = FolderManifestBackend::new(
+            files,
+            Box::new(|_, _, _| Ok(Vec::new())),
+        );
+        let mut names: Vec<_> = fs
+            .readdir("/")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a.txt", "b.txt", "docs"]);
+    }
+
+    #[test]
+    fn folder_backend_read_calls_closure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let mut files = BTreeMap::new();
+        files.insert("x.bin".to_string(), _row(6, 0, "hash_x"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let fs = FolderManifestBackend::new(
+            files,
+            Box::new(move |hash, offset, size| {
+                calls_clone.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(hash, "hash_x");
+                assert_eq!(offset, 2);
+                assert_eq!(size, 3);
+                Ok(b"bcd".to_vec())
+            }),
+        );
+        let out = fs.read("x.bin", 2, 3).unwrap();
+        assert_eq!(out, b"bcd");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn folder_backend_read_unknown_path_notfound() {
+        let files = BTreeMap::new();
+        let fs = FolderManifestBackend::new(
+            files,
+            Box::new(|_, _, _| Ok(Vec::new())),
+        );
+        assert_eq!(
+            fs.read("missing", 0, 10),
+            Err(FsError::NotFound),
+        );
+    }
+
+    #[test]
+    fn folder_backend_write_rejected_read_only() {
+        let files = BTreeMap::new();
+        let fs = FolderManifestBackend::new(
+            files,
+            Box::new(|_, _, _| Ok(Vec::new())),
+        );
+        assert_eq!(
+            fs.write("anything", 0, b"x"),
+            Err(FsError::PermissionDenied),
+        );
+    }
+
+    #[test]
+    fn folder_backend_unlink_rejected_read_only() {
+        let files = BTreeMap::new();
+        let fs = FolderManifestBackend::new(
+            files,
+            Box::new(|_, _, _| Ok(Vec::new())),
+        );
+        assert_eq!(
+            fs.unlink("anything"),
+            Err(FsError::PermissionDenied),
+        );
+    }
+
+    #[test]
+    fn folder_backend_strips_leading_slash() {
+        let mut files = BTreeMap::new();
+        files.insert("a.txt".to_string(), _row(5, 0, "ha"));
+        let fs = FolderManifestBackend::new(
+            files,
+            Box::new(|_, _, _| Ok(b"hello".to_vec())),
+        );
+        // Both /a.txt and a.txt should resolve.
+        assert_eq!(fs.getattr("/a.txt").unwrap().size, 5);
+        assert_eq!(fs.getattr("a.txt").unwrap().size, 5);
     }
 }

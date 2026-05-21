@@ -89,6 +89,7 @@ from one_link import (
     dedupe_sites as dedupe_sites_module,
     field_observations_native,
     foldersync,
+    fuse_native,
     radio_batcher_native,
     selector_native,
 )
@@ -11059,6 +11060,97 @@ class Daemon:
             return self._dedupe_sites.stats()
         except Exception:
             return {}
+
+    # ─── D27 FUSE mount surface ───────────────────────────────────────
+
+    def fuse_capabilities(self) -> dict:
+        """D27 — Return the FUSE-mount platform status as a dict. Used
+        by the UI to decide whether to expose the "mount as folder"
+        button. Never raises."""
+        try:
+            return fuse_native.capabilities()
+        except Exception as exc:
+            return {
+                "platform": "error",
+                "ready": False,
+                "message": f"capability check failed: {exc}",
+                "native_loaded": False,
+            }
+
+    def mount_folder_as_fs(
+        self,
+        folder_name: str,
+        mountpoint: str,
+        *,
+        read_only: bool = True,
+        allow_other: bool = False,
+    ) -> dict:
+        """D27 — Attempt to expose ``folder_name`` as a filesystem at
+        ``mountpoint`` via the native FUSE adapter. Returns a dict
+        with ``status`` + ``detail``. Never raises.
+
+        Pre-conditions enforced here so callers can rely on the result:
+          - folder must exist in state
+          - mountpoint must be a directory
+          - native ol_fuse must be installed AND platform must support
+            kernel-level mounts (linux + linux-mount feature today)
+
+        On every other platform the call returns a structured
+        ``unsupported_platform`` / ``feature_disabled`` so the UI can
+        show "install WinFSP/FSKit" guidance without crashing.
+        """
+        from pathlib import Path as _Path
+
+        if self.folder_engine is None or self.state is None:
+            return {"status": "backend_error", "detail": "daemon not initialized"}
+        try:
+            f = self.state.get_folder(folder_name)
+        except Exception as exc:
+            return {"status": "backend_error", "detail": f"state lookup failed: {exc}"}
+        if not f:
+            return {
+                "status": "backend_error",
+                "detail": f"folder not found: {folder_name}",
+            }
+        # Build the flat manifest the native adapter expects. Skip
+        # tombstones (blob_hash is None / empty) — the read-only view
+        # shouldn't expose deleted files.
+        try:
+            entries = self.folder_engine.manifest_for(folder_name)
+        except Exception as exc:
+            return {"status": "backend_error", "detail": f"manifest_for: {exc}"}
+        manifest: dict[str, dict] = {}
+        for e in entries:
+            blob = e.get("blob_hash")
+            if not blob:
+                continue
+            manifest[str(e.get("file_path") or "").lstrip("/")] = {
+                "size": int(e.get("size") or 0),
+                "mtime_ms": int(e.get("mtime_ms") or 0),
+                "blob_hash": str(blob),
+            }
+        try:
+            result = fuse_native.try_mount(
+                mountpoint=_Path(mountpoint),
+                manifest=manifest,
+                fs_name=f"one_link_{folder_name}",
+                read_only=read_only,
+                allow_other=allow_other,
+            )
+        except Exception as exc:
+            return {"status": "backend_error", "detail": str(exc)}
+        return {"status": result.status, "detail": result.detail}
+
+    def unmount_folder_fs(self, mountpoint: str) -> dict:
+        """D27 — Best-effort unmount. Returns the structured status dict
+        from the native adapter. Never raises."""
+        from pathlib import Path as _Path
+
+        try:
+            result = fuse_native.unmount(mountpoint=_Path(mountpoint))
+        except Exception as exc:
+            return {"status": "backend_error", "detail": str(exc)}
+        return {"status": result.status, "detail": result.detail}
 
     def _selector_decision_for_file(
         self,

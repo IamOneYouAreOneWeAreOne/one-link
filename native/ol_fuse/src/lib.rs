@@ -49,8 +49,11 @@ mod mount;
 #[cfg(all(target_os = "linux", feature = "linux-mount"))]
 mod adapter;
 
-pub use backend::{DirEntry, EntryKind, FilesystemBackend, FsError, MemoryBackend, Stat};
-pub use mount::{mount, MountError, MountOptions};
+pub use backend::{
+    BlobReader, DirEntry, EntryKind, FilesystemBackend, FolderManifestBackend, FsError,
+    ManifestRow, MemoryBackend, Stat,
+};
+pub use mount::{mount, mount_platform_status, MountError, MountOptions, PlatformMountStatus};
 
 /// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

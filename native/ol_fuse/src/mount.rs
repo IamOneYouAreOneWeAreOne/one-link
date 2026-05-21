@@ -41,10 +41,71 @@ impl Default for MountOptions {
 pub enum MountError {
     #[error("FUSE not supported on this platform")]
     UnsupportedPlatform,
+    #[error(
+        "macOS does not ship a built-in FUSE driver; install FSKit-based \
+         filesystem helper (Apple-maintained, no monthly bill) or macFUSE \
+         (GPL+commercial, paid). The ol_fuse crate ships scaffold only \
+         for this platform."
+    )]
+    UnsupportedMacOS,
+    #[error(
+        "Windows requires WinFSP or Dokan to expose user-mode filesystems. \
+         The ol_fuse crate ships scaffold only for this platform — install \
+         WinFSP (free, open source) and ship the WinFSP-backed binding via \
+         ol_winfs (separate crate)."
+    )]
+    UnsupportedWindows,
     #[error("mountpoint does not exist or is not a directory: {0}")]
     InvalidMountpoint(PathBuf),
     #[error("fuser backend error: {0}")]
     Backend(String),
+}
+
+/// D27 — Per-platform mount-support status. Returned by
+/// [`mount_platform_status`] so callers can decide before they build a
+/// backend whether to even attempt a mount (or whether to surface a
+/// "FUSE unavailable on your platform; install WinFSP/FSKit" message).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum PlatformMountStatus {
+    /// libfuse-backed real mount is wired and ready to call.
+    LinuxFuserReady,
+    /// Running on Linux but the crate was built without the
+    /// ``linux-mount`` feature. Rebuild with
+    /// ``--features linux-mount`` to enable.
+    LinuxFuserDisabled,
+    /// macOS — needs FSKit / macFUSE; see [`MountError::UnsupportedMacOS`].
+    MacOsUnsupported,
+    /// Windows — needs WinFSP / Dokan; see [`MountError::UnsupportedWindows`].
+    WindowsUnsupported,
+    /// Any other Unix-like target — currently unsupported.
+    OtherUnsupported,
+}
+
+/// Report the platform mount status of this build. Pure introspection;
+/// never opens a file or touches the kernel.
+#[must_use]
+pub fn mount_platform_status() -> PlatformMountStatus {
+    #[cfg(all(target_os = "linux", feature = "linux-mount"))]
+    {
+        PlatformMountStatus::LinuxFuserReady
+    }
+    #[cfg(all(target_os = "linux", not(feature = "linux-mount")))]
+    {
+        PlatformMountStatus::LinuxFuserDisabled
+    }
+    #[cfg(target_os = "macos")]
+    {
+        PlatformMountStatus::MacOsUnsupported
+    }
+    #[cfg(target_os = "windows")]
+    {
+        PlatformMountStatus::WindowsUnsupported
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        PlatformMountStatus::OtherUnsupported
+    }
 }
 
 /// Mount `backend` at `opts.mountpoint`.
@@ -98,7 +159,15 @@ where
             "rebuild ol_fuse with --features linux-mount to enable FUSE".into(),
         ))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        Err(MountError::UnsupportedMacOS)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Err(MountError::UnsupportedWindows)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         Err(MountError::UnsupportedPlatform)
     }
@@ -130,13 +199,19 @@ mod tests {
         };
         let backend = MemoryBackend::new();
         let err = mount(backend, opts).unwrap_err();
-        // Non-Linux: UnsupportedPlatform. Linux without linux-mount
-        // feature: Backend(rebuild hint). Linux with feature but
-        // adapter not yet wired: Backend(Phase B pending). All three
-        // are "the kernel mount couldn't happen" — assert the negative.
+        // Per-platform error: Linux without feature => Backend(hint);
+        // Linux with feature => real fuser mount (test doesn't run);
+        // macOS => UnsupportedMacOS; Windows => UnsupportedWindows;
+        // exotic Unix => UnsupportedPlatform. All cases are "the
+        // kernel mount couldn't happen".
         match err {
-            MountError::UnsupportedPlatform | MountError::Backend(_) => {}
-            other => panic!("expected UnsupportedPlatform or Backend, got {other:?}"),
+            MountError::UnsupportedPlatform
+            | MountError::UnsupportedMacOS
+            | MountError::UnsupportedWindows
+            | MountError::Backend(_) => {}
+            other => panic!(
+                "expected platform-unsupported or Backend variant, got {other:?}"
+            ),
         }
     }
 
@@ -146,5 +221,20 @@ mod tests {
         assert!(!opts.read_only);
         assert!(!opts.allow_other);
         assert_eq!(opts.fs_name, "one_link_folder");
+    }
+
+    #[test]
+    fn mount_platform_status_returns_correct_variant() {
+        let s = mount_platform_status();
+        #[cfg(all(target_os = "linux", feature = "linux-mount"))]
+        assert_eq!(s, PlatformMountStatus::LinuxFuserReady);
+        #[cfg(all(target_os = "linux", not(feature = "linux-mount")))]
+        assert_eq!(s, PlatformMountStatus::LinuxFuserDisabled);
+        #[cfg(target_os = "macos")]
+        assert_eq!(s, PlatformMountStatus::MacOsUnsupported);
+        #[cfg(target_os = "windows")]
+        assert_eq!(s, PlatformMountStatus::WindowsUnsupported);
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        assert_eq!(s, PlatformMountStatus::OtherUnsupported);
     }
 }
