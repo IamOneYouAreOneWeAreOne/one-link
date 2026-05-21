@@ -102,6 +102,7 @@ from one_link.capabilities import (
     FILES,
     FILE_SWARM,
     FOLDER_SYNC,
+    FOLDER_SYNC_BIDI_V1,
     LOCAL_CAPABILITIES,
     NATIVE_TRANSFER_V1,
     SELF_MESH_MANIFEST,
@@ -8327,6 +8328,70 @@ class Daemon:
                 )
         return kept
 
+    async def _send_local_manifest_in_channel(
+        self,
+        *,
+        channel,
+        folder_name: str,
+        peer_fp: str,
+        request_reverse: bool = False,
+    ) -> None:
+        """D18 — Send a MANIFEST_PUSH for ``folder_name`` to ``peer_fp``
+        over an already-open channel. Used both by the bidirectional
+        sync handler (to push our manifest back in response to a
+        request_reverse=True) and by ``push_folder_to_peer`` (to drive
+        the outbound side of a bidi exchange).
+
+        Pre-conditions are validated here so it's safe to call from
+        either site without duplicating gates:
+          - folder must exist and be shared with the peer
+          - folder capability must allow "push"
+          - peer must be pinned
+
+        Never raises; failures are logged and the channel is left
+        intact for the caller to continue or close.
+        """
+        if (
+            self.folder_engine is None
+            or self.state is None
+            or not self._is_pinned(peer_fp)
+        ):
+            return
+        f = self.state.get_folder(folder_name)
+        if not f or peer_fp not in f["shared_with"]:
+            return
+        if not self.state.folder_peer_allows(folder_name, peer_fp, "push"):
+            return
+        try:
+            entries = self.folder_engine.manifest_for(folder_name)
+            merkle_root = self.folder_engine.manifest_root(folder_name)
+        except Exception as e:
+            log.warning(
+                "bidi: build manifest for %s failed: %s", folder_name, e,
+            )
+            return
+        try:
+            payload = {
+                "folder": folder_name,
+                "entries": entries,
+                "merkle_root": merkle_root,
+                "entry_count": len(entries),
+            }
+            if request_reverse:
+                payload["request_reverse"] = True
+            await channel.send(encode_msg(make_msg(
+                "MANIFEST_PUSH", self.me.short_id, **payload,
+            )))
+            log.info(
+                "bidi MANIFEST_PUSH to %s: folder=%s entries=%d request_reverse=%s",
+                peer_fp[:8], folder_name, len(entries), bool(request_reverse),
+            )
+        except Exception as e:
+            log.warning(
+                "bidi: sending MANIFEST_PUSH to %s failed: %s",
+                peer_fp[:8], e,
+            )
+
     async def _handle_manifest_push(self, channel, msg, peer_fp):
         if self.folder_engine is None or self.state is None:
             return
@@ -8401,6 +8466,21 @@ class Daemon:
         )))
         log.info("MANIFEST_PUSH from %s: %d entries, %d wants",
                  peer_fp[:8], len(entries), len(wants))
+        # D18 — Bidirectional folder sync. When the peer requested a
+        # reverse push AND both sides advertise FOLDER_SYNC_BIDI_V1,
+        # send our local manifest back over the same channel. The
+        # peer's _handle_manifest_push handler on their side will
+        # process the merge + reply with their own MANIFEST_WANTS, so
+        # blobs flow in both directions from one initiating cycle.
+        if msg.get("request_reverse"):
+            peer_caps_frame = getattr(channel, "peer_caps", None) or {}
+            peer_features = list(peer_caps_frame.get("features") or [])
+            if FOLDER_SYNC_BIDI_V1 in peer_features:
+                await self._send_local_manifest_in_channel(
+                    channel=channel,
+                    folder_name=folder_name,
+                    peer_fp=peer_fp,
+                )
 
     async def _handle_manifest_wants(self, channel, msg, peer_fp):
         if self.folder_engine is None or self.state is None:
@@ -14294,7 +14374,13 @@ class Daemon:
         return len(peers)
 
     # ─── folder sync orchestration ─────────────────────────────────────
-    async def push_folder_to_peer(self, peer: Peer, folder_name: str) -> dict:
+    async def push_folder_to_peer(
+        self,
+        peer: Peer,
+        folder_name: str,
+        *,
+        bidirectional: bool = False,
+    ) -> dict:
         """One-way folder push to peer. Single connection cycle:
             1. Open + handshake + caps
             2. Send our manifest for this folder
@@ -14302,7 +14388,13 @@ class Daemon:
             4. Stream BLOB_OFFER + BLOB_CHUNKs for each wanted blob
             5. Close
 
-        Reverse direction happens when peer initiates their own cycle.
+        D18 — when ``bidirectional=True`` AND both peers advertise
+        ``FOLDER_SYNC_BIDI_V1``, the MANIFEST_PUSH frame carries
+        ``request_reverse=True``. The peer responds by pushing their
+        own manifest back over the same channel, so both sides exchange
+        manifests + wants + blobs in one connection cycle. The
+        ``request_reverse`` field is unknown to legacy peers and is
+        silently ignored — graceful interop with v0.20.x daemons.
         """
         block = self._check_outbound_trust(peer)
         if block:
@@ -14369,10 +14461,23 @@ class Daemon:
             except Exception:
                 pass
 
+            push_payload = {
+                "folder": folder_name,
+                "entries": entries,
+                "merkle_root": merkle_root,
+                "entry_count": len(entries),
+            }
+            # D18 — if caller asked for bidi AND the peer advertises the
+            # capability, set the flag so the peer pushes their manifest
+            # back. Both sides must support it; legacy peers will ignore
+            # the unknown flag (graceful interop).
+            if bidirectional:
+                peer_caps_frame = getattr(channel, "peer_caps", None) or {}
+                peer_features = list(peer_caps_frame.get("features") or [])
+                if FOLDER_SYNC_BIDI_V1 in peer_features:
+                    push_payload["request_reverse"] = True
             await channel.send(encode_msg(make_msg(
-                "MANIFEST_PUSH", self.me.short_id,
-                folder=folder_name, entries=entries, merkle_root=merkle_root,
-                entry_count=len(entries),
+                "MANIFEST_PUSH", self.me.short_id, **push_payload,
             )))
 
             # Drain replies until MANIFEST_WANTS arrives (skipping CAPS).

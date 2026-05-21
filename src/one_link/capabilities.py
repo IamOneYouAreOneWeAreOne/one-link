@@ -102,6 +102,14 @@ SEMANTIC_SCENE_V1 = "semantic_scene_v1"
 VOICE_CALL = "voice_call"
 VIDEO_CALL = "video_call"
 
+# D18 — Bidirectional folder sync. When both peers advertise this, a
+# single MANIFEST_PUSH carrying ``request_reverse=True`` triggers the
+# receiver to push their own manifest back on the same channel, so
+# both sides exchange manifests + wants in one cycle instead of two.
+# Old peers ignore the unknown flag and behave as v0.20.x asymmetric
+# sync — graceful interop.
+FOLDER_SYNC_BIDI_V1 = "folder_sync_bidi_v1"
+
 LOCAL_CAPABILITIES = (
     CHAT,
     FILES,
@@ -114,6 +122,7 @@ LOCAL_CAPABILITIES = (
     FILE_ACK_BATCH,
     FILE_OFFER_BATCH_V1,
     FOLDER_SYNC,
+    FOLDER_SYNC_BIDI_V1,
     MERKLE_SYNC,
     FUTURE_TRANSPORTS,
     SELF_MESH_MANIFEST,
@@ -180,6 +189,13 @@ TRANSPORT_LAYER_CAPS = (
     # to what's already being sent. No user prompt; always on when
     # both peers support it.
     FRAME_PROVENANCE_V1,
+    # FOLDER_SYNC_BIDI_V1 is a protocol extension of FOLDER_SYNC. It
+    # doesn't grant any new permission; it just changes how an
+    # already-permitted folder sync proceeds (both sides exchange in
+    # one cycle instead of two). The underlying user-facing power
+    # (granting the peer access to the folder) is still gated by
+    # FOLDER_SYNC + the per-folder share-list.
+    FOLDER_SYNC_BIDI_V1,
 )
 
 
