@@ -242,6 +242,25 @@ def test_send_file_stream_mode_actually_uses_quic_when_pinned() -> None:
             f"a pinned peer. Outbound={outbound}"
         )
 
+        # The complementary check that the Wave 2f regression
+        # would have caught loudly: no silent native-transfer
+        # fallback fired. Reads `transfer_diagnostics` which
+        # daemon.send_file populates whenever native_transfer was
+        # advertised by the peer but the session derivation
+        # failed (e.g. the DR-wipe bug fixed in commit 28e264d).
+        # A clean run leaves the ring empty.
+        diag = request(p.a.control_port, cmd="transfer_diagnostics")
+        events = diag.get("degradation_events") or []
+        native_unavail = [
+            e for e in events
+            if e.get("kind") == "native_transfer_unavailable"
+        ]
+        assert not native_unavail, (
+            f"Silent native-transfer fallback fired despite peer "
+            f"advertising NATIVE_TRANSFER_V1 + QUIC. Events: "
+            f"{native_unavail}"
+        )
+
 
 def test_endpoint_announcement_carries_quic_port() -> None:
     """The ENDPOINT_UPDATE frame must include ``quic_port`` once

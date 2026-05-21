@@ -1187,6 +1187,18 @@ class Daemon:
         # by _handle_endpoint_update; consumed by the outbound
         # dial helper.
         self._quic_peer_ports: dict[str, int] = {}
+        # Bounded ring of "silent degradation" events — moments
+        # when a more-capable path (native transfer, QUIC, DR,
+        # CDC) was advertised by both peers but the actual
+        # transfer fell back to a less-capable path. Exposed via
+        # the ``transfer_diagnostics`` control command so tests
+        # can assert the fast path actually fired and operators
+        # can monitor degradation rates instead of having to
+        # grep through hours of WARNING-level logs. This is the
+        # broader fix for the Wave 2f silent-fallback class of
+        # bug (see commit `28e264d`).
+        from collections import deque as _deque
+        self._degradation_events: _deque[dict] = _deque(maxlen=512)
         # peer_fp_hex -> native QUIC Connection (inbound). Wave 2e.
         # Populated by the accept loop after binding the peer's
         # fingerprint via the recent-callback deque below.
@@ -9699,6 +9711,15 @@ class Daemon:
         _add(peer.address, peer.port)
 
         peer_fp = self._peer_fp_from_peer(peer)
+        # Newer daemons bind QUIC/UDP to the same numeric port as the
+        # peer TCP server. A CAPS/ENDPOINT_UPDATE quic_port is therefore
+        # also a fresh peer-port hint. Insert it before durable route
+        # candidates so old verified ports cannot poison send_file after a
+        # peer restart or mDNS expiry.
+        if peer_fp:
+            live_port_hint = self._quic_peer_ports.get(peer_fp)
+            if live_port_hint:
+                _add(peer.address, int(live_port_hint))
         if self.state is not None and peer_fp:
             with contextlib.suppress(Exception):
                 self.state.prune_route_candidates()
@@ -17853,13 +17874,25 @@ class Daemon:
                         try:
                             native_session = channel.get_or_create_native_transfer_session()
                         except Exception as exc:
+                            fallback_path = (
+                                "FILE_BIN_CHUNK" if binary_stream_used else "FILE_CHUNK"
+                            )
                             log.warning(
                                 "native transfer requested but unavailable (%s) — "
                                 "falling back to %s",
                                 exc,
-                                "FILE_BIN_CHUNK" if binary_stream_used else "FILE_CHUNK",
+                                fallback_path,
                             )
                             native_transfer_used = False
+                            self._degradation_events.append({
+                                "at_ms": int(time.time() * 1000),
+                                "kind": "native_transfer_unavailable",
+                                "peer_fp": peer_fp_for_policy[:16]
+                                    if peer_fp_for_policy else None,
+                                "reason": f"{type(exc).__name__}: {exc}",
+                                "expected": "FILE_NATIVE_CHUNK",
+                                "actual": fallback_path,
+                            })
                     if can_offer_cdc:
                         attempts = list(base_metadata.get("protocol_attempts") or [])
                         attempts.append({
@@ -18442,7 +18475,17 @@ class Daemon:
                         if self.discovery:
                             self.discovery.registry.remove(peer.short_id)
                         continue
-                await self._reply(writer, {"ok": False, "error": str(last_error)})
+                # An empty `str(last_error)` (e.g. `OSError()` with no
+                # message) used to surface as `{'error': ''}` from the
+                # control plane, masking real failures as silent
+                # no-ops. Always include the exception class so the
+                # client at least sees what kind of error happened.
+                err_repr = (
+                    f"{type(last_error).__name__}: {last_error}"
+                    if last_error is not None
+                    else "no peer succeeded (no transient errors recorded)"
+                )
+                await self._reply(writer, {"ok": False, "error": err_repr})
             elif cmd == "send_files":
                 # Phase B1: many-small workflow control surface. Takes a
                 # list of paths and dispatches send_file for each through
@@ -18899,6 +18942,22 @@ class Daemon:
                         "ok": False,
                         "error": str(e),
                     })
+            elif cmd == "transfer_diagnostics":
+                # Bounded ring of "silent degradation" events for
+                # operability + tests. Each entry is a structured
+                # record describing a moment when a more-capable
+                # transfer path was advertised by both peers but
+                # we fell back to a less-capable one. Tests can
+                # use this to assert the fast path actually fired
+                # (count == 0 after a successful native-QUIC send)
+                # without relying on log-string grep, and operators
+                # can monitor degradation rates instead of grepping
+                # WARNING-level lines.
+                await self._reply(writer, {
+                    "ok": True,
+                    "degradation_events": list(self._degradation_events),
+                    "count": len(self._degradation_events),
+                })
             elif cmd == "quic_status":
                 # Wave 2e/2f operational visibility. Returns a
                 # snapshot of the daemon's QUIC stack:
@@ -19258,7 +19317,17 @@ class Daemon:
         # mDNS catches up, so "send" does not fail right after daemon restart.
         if rec.last_address and rec.last_port:
             with contextlib.suppress(Exception):
-                port = int(rec.last_port)
+                # Prefer the freshest same-port QUIC hint when present.
+                # With same-port QUIC builds, the peer advertises its
+                # current TCP/UDP peer port through CAPS. This can be newer
+                # than state.peers.last_port when mDNS aged out or the peer
+                # restarted. Falling back to the stale last_port is exactly
+                # what caused live sends to keep trying a graveyard of old
+                # ports while the real peer was reachable on the new one.
+                port = int(
+                    self._quic_peer_ports.get(rec.fingerprint)
+                    or rec.last_port
+                )
                 if port > 0:
                     return Peer(
                         short_id=rec.short_id,

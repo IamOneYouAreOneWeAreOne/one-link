@@ -77,15 +77,24 @@ def request(control_port: int, *, timeout: float = 30.0, **req) -> dict:
 
     Under Windows TCP control-socket churn (documented in
     test_two_device_soak.py:85), a freshly-accepted connection can
-    drop EOF before the daemon's reader serves the request. This
-    surfaces as ``recv()`` returning 0 bytes, which downstream
-    callers see as an empty / malformed response. Retry ONCE on
-    that specific pattern; the daemon code is fine, the TCP stack
-    just hit accept-queue churn.
+    drop EOF before the daemon's reader serves the request, OR a
+    fresh connect() can hit ConnectionRefusedError when the
+    accept queue is briefly drained under suite-level resource
+    pressure. Both surface as either an empty response or a
+    refused connect.
+
+    Retry up to 3 times with exponential backoff (0.1, 0.4, 1.6s)
+    so an 11-minute suite under heavy subprocess churn doesn't
+    spuriously fail on transient TCP-stack hiccups. A real daemon
+    crash (proc.poll() != None) is undetectable from this side,
+    but the timeout still caps the total wait at ~timeout seconds.
     """
+    import time as _time
     last_buf = b""
     last_exc: Exception | None = None
-    for attempt in (0, 1):
+    backoff_s = (0.1, 0.4, 1.6)
+    max_attempts = len(backoff_s) + 1
+    for attempt in range(max_attempts):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         try:
@@ -99,24 +108,15 @@ def request(control_port: int, *, timeout: float = 30.0, **req) -> dict:
                         break
                     buf += chunk
             except (ConnectionAbortedError, ConnectionResetError, OSError) as e:
-                # Connection-level flake — retry once before giving up.
                 last_exc = e
                 buf = b""
         finally:
             s.close()
         last_buf = buf
-        # Empty / non-terminated response indicates EOF before
-        # service. Retry once. A real daemon response always ends
-        # with newline (the line-protocol invariant).
         if buf and buf.endswith(b"\n"):
             return json.loads(buf.decode("utf-8").strip() or "{}")
-        if attempt == 0:
-            # Brief backoff so the daemon's accept loop can drain.
-            import time as _time
-            _time.sleep(0.05)
-    # Both attempts came up empty. If a connection error was the
-    # cause, re-raise it so the test sees a real exception (matching
-    # pre-retry behaviour); otherwise surface the empty response.
+        if attempt < len(backoff_s):
+            _time.sleep(backoff_s[attempt])
     if last_exc is not None and not last_buf:
         raise last_exc
     return json.loads(last_buf.decode("utf-8").strip() or "{}")

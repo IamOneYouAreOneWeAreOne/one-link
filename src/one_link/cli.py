@@ -44,15 +44,21 @@ def _connect_control(timeout: float = 5.0) -> tuple[socket.socket, int]:
 def _request(cmd: str, *, timeout: float = 5.0, **kwargs) -> dict:
     """Single control-socket request/response round trip.
 
-    Retries ONCE on the documented Windows TCP control-socket churn
-    pattern (EOF before service — empty/non-newline-terminated
-    response). See ``tests/test_two_device_soak.py:85`` for the
-    pattern's origin; same one-shot retry is in ``tests/harness.py``.
-    Real daemon errors still surface as ClickException; only the
-    transient connection-churn case retries.
+    Retries up to 4 times with exponential backoff (0.1, 0.4, 1.6s)
+    on the documented Windows TCP control-socket churn pattern (EOF
+    before service, or ConnectionRefusedError when the accept queue
+    drains under suite-level subprocess churn). See
+    ``tests/test_two_device_soak.py:85`` for the pattern's origin;
+    the same retry policy lives in ``tests/harness.py``.
+    Real daemon errors still surface as ClickException; only
+    transient connection-churn cases retry.
     """
+    import time as _time
     last_buf = b""
-    for attempt in (0, 1):
+    backoff_s = (0.1, 0.4, 1.6)
+    max_attempts = len(backoff_s) + 1
+    last_conn_exc: Exception | None = None
+    for attempt in range(max_attempts):
         s, _ = _connect_control(timeout=timeout)
         try:
             try:
@@ -66,16 +72,8 @@ def _request(cmd: str, *, timeout: float = 5.0, **kwargs) -> dict:
                         break
                     buf += chunk
             except (ConnectionAbortedError, ConnectionResetError, OSError) as e:
-                if attempt == 0:
-                    # Transient — back off briefly + retry.
-                    import time as _time
-                    _time.sleep(0.05)
-                    continue
-                raise click.ClickException(
-                    f"daemon connection dropped while handling {cmd}; "
-                    "One Link will keep durable transfer work and resume after restart "
-                    f"({e})"
-                )
+                last_conn_exc = e
+                buf = b""
         finally:
             s.close()
         last_buf = buf
@@ -86,11 +84,15 @@ def _request(cmd: str, *, timeout: float = 5.0, **kwargs) -> dict:
                 raise click.ClickException(
                     f"daemon returned an invalid response while handling {cmd}: {e}"
                 )
-        # Empty / unterminated → retry once with brief backoff.
-        if attempt == 0:
-            import time as _time
-            _time.sleep(0.05)
-    # Both attempts came up empty.
+        if attempt < len(backoff_s):
+            _time.sleep(backoff_s[attempt])
+    # All attempts exhausted.
+    if last_conn_exc is not None and not last_buf:
+        raise click.ClickException(
+            f"daemon connection dropped while handling {cmd}; "
+            "One Link will keep durable transfer work and resume after restart "
+            f"({last_conn_exc})"
+        )
     try:
         return json.loads(last_buf.decode("utf-8").strip() or "{}")
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
