@@ -64,7 +64,16 @@ import zlib
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, Optional, Protocol, TypedDict, cast
+from typing import (
+    IO,
+    TYPE_CHECKING,
+    Any,
+    Iterable,
+    Optional,
+    Protocol,
+    TypedDict,
+    cast,
+)
 
 import blake3
 
@@ -77,6 +86,7 @@ from one_link import (
     align_native,
     blobstore,
     channel as ch,
+    dedupe_sites as dedupe_sites_module,
     field_observations_native,
     foldersync,
     radio_batcher_native,
@@ -1539,6 +1549,13 @@ class Daemon:
         # decisions on it (deferred behind ONE_LINK_SMART_SELECTOR until
         # Phase F2 ships).
         self._user_mode_value: str = "normal"
+
+        # D17 — Dedupe-site index. Tracks which peers have which chunks
+        # so the transfer engine can pick a closer source for a fetch.
+        # Always constructed (cheap in-memory adapter); populated by
+        # BLOB_OFFER handlers + folder manifest application. Lookup is
+        # opt-in by callers — no behavior change for existing paths.
+        self._dedupe_sites: Any = dedupe_sites_module.DedupeSiteIndex()
 
     def _build_my_caps(self) -> dict:
         """Build a CAPS frame for THIS daemon. Includes our rendezvous
@@ -8434,6 +8451,14 @@ class Daemon:
         size = msg.get("size", 0)
         if not self._valid_blob_hex(blob or ""):
             return
+        # D17 — record that this peer has the advertised blob. The
+        # claim is unverified here (only the hash on receipt verifies),
+        # but the index is advisory and the worst-case poison is a
+        # single wasted dial.
+        try:
+            self._dedupe_sites.record_have(blob, peer_fp)
+        except Exception:
+            pass
         if size < 0 or size > MAX_INCOMING_FILE_BYTES:
             return
         # M1: only accept blobs we explicitly requested from this peer via
@@ -8515,6 +8540,12 @@ class Daemon:
             # Drop the satisfied entry from the expected-pull set.
             self._expected_blob_pulls.get(peer_fp, set()).discard(blob)
             self.blob_store.path(got_hash)  # confirms it lives
+            # D17 — sender clearly has this blob (just sent it). Record
+            # for future dedupe lookups.
+            try:
+                self._dedupe_sites.record_have(got_hash, peer_fp)
+            except Exception:
+                pass
             # State + folder_engine are both initialised inside
             # ``start()`` before any chunk can land here; the wider
             # nullable typing is for the boot window.
@@ -10922,6 +10953,33 @@ class Daemon:
             # Selector errors must never break send_file.
             log.debug("selector eval failed: %s", exc)
 
+    def dedupe_sites_for(
+        self,
+        chunk_hash: str,
+        *,
+        exclude: Optional[Iterable[str]] = None,
+    ) -> tuple[str, ...]:
+        """D17 — Return peers that have claimed to hold ``chunk_hash``,
+        freshest first. Public surface for the transfer engine /
+        UI / debug API. Returns empty tuple if no live claims exist.
+
+        Safe to call from any thread; the index is RLock-guarded.
+        Never raises.
+        """
+        try:
+            return self._dedupe_sites.sites_for(
+                chunk_hash, exclude=exclude,
+            )
+        except Exception:
+            return ()
+
+    def dedupe_sites_stats(self) -> dict:
+        """D17 — Expose hit/miss/eviction counters for ops telemetry."""
+        try:
+            return self._dedupe_sites.stats()
+        except Exception:
+            return {}
+
     def _selector_decision_for_file(
         self,
         *,
@@ -12245,6 +12303,12 @@ class Daemon:
                 self._abort_incoming_file(blob, partial)
             with contextlib.suppress(OSError):
                 partial.out_path.unlink()
+        # D17 — drop the revoked peer's claims from the dedupe index
+        # so we never nominate them as a chunk source again.
+        try:
+            self._dedupe_sites.forget_peer(peer_fp)
+        except Exception:
+            pass
         # Step 5.
         if self.ui_server is not None:
             with contextlib.suppress(Exception):

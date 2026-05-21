@@ -298,3 +298,57 @@ def test_decision_for_file_passes_size_and_kind() -> None:
     call_kwargs = d._smart_selector.decide.call_args[1]
     assert call_kwargs["size"] == 99_999
     assert call_kwargs["kind"] == "FILE_CHUNK"
+
+
+# ---------- D17 — dedupe_sites_for / dedupe_sites_stats ----------
+
+
+def _daemon_with_dedupe():
+    from one_link import dedupe_sites as ds
+    d = _bare_daemon()
+    d._dedupe_sites = ds.DedupeSiteIndex()
+    return d
+
+
+def test_dedupe_sites_for_returns_empty_when_no_claims() -> None:
+    d = _daemon_with_dedupe()
+    assert d.dedupe_sites_for("nope") == ()
+
+
+def test_dedupe_sites_for_returns_recorded_peers() -> None:
+    d = _daemon_with_dedupe()
+    d._dedupe_sites.record_have("hashX", "peerA")
+    d._dedupe_sites.record_have("hashX", "peerB")
+    sites = d.dedupe_sites_for("hashX")
+    assert set(sites) == {"peerA", "peerB"}
+
+
+def test_dedupe_sites_for_respects_exclude() -> None:
+    d = _daemon_with_dedupe()
+    d._dedupe_sites.record_have("hashX", "peerA")
+    d._dedupe_sites.record_have("hashX", "peerB")
+    assert d.dedupe_sites_for("hashX", exclude=["peerA"]) == ("peerB",)
+
+
+def test_dedupe_sites_for_survives_internal_error() -> None:
+    d = _daemon_with_dedupe()
+    boom = MagicMock()
+    boom.sites_for.side_effect = RuntimeError("simulated")
+    d._dedupe_sites = boom
+    assert d.dedupe_sites_for("hashX") == ()
+
+
+def test_dedupe_sites_stats_returns_dict() -> None:
+    d = _daemon_with_dedupe()
+    d._dedupe_sites.record_have("h1", "p1")
+    s = d.dedupe_sites_stats()
+    assert "entries" in s
+    assert s["entries"] == 1
+
+
+def test_dedupe_sites_stats_survives_internal_error() -> None:
+    d = _daemon_with_dedupe()
+    boom = MagicMock()
+    boom.stats.side_effect = RuntimeError("simulated")
+    d._dedupe_sites = boom
+    assert d.dedupe_sites_stats() == {}
