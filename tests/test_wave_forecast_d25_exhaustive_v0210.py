@@ -42,11 +42,22 @@ def test_require_native_raises_when_unavailable(monkeypatch) -> None:
         wave_forecast_native._require_native()
 
 
-@pytest.mark.skipif(
-    not wave_forecast_native.HAS_NATIVE,
-    reason="native WaveStepper not installed",
-)
 def test_wave_stepper_factory_returns_instance() -> None:
+    # Re-probe HAS_NATIVE at runtime via the native module directly
+    # rather than the cached wave_forecast_native.HAS_NATIVE flag.
+    # The flag is set once at module-import time; a wheel rebuild
+    # that lands AFTER pytest collection won't flip the cached
+    # value to True without a reload. Re-probing the native module
+    # gives the true current state.
+    try:
+        from one_link_native import coherence_field as _cf
+        if not hasattr(_cf, "WaveStepper"):
+            pytest.skip("native WaveStepper not exposed by installed wheel")
+    except ImportError:
+        pytest.skip("one_link_native.coherence_field not importable")
+    # Force a refresh of HAS_NATIVE so the factory works.
+    import importlib
+    importlib.reload(wave_forecast_native)
     w = wave_forecast_native.wave_stepper()
     assert w is not None
     # Has the documented method surface.
