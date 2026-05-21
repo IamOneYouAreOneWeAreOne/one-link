@@ -1592,6 +1592,32 @@ class Daemon:
             os.environ.get("ONE_LINK_COVER_TRAFFIC", "0") == "1"
         )
 
+        # Selector-decision telemetry. Every selector.decide() call from
+        # _log_selector_decision_for_file or _selector_decision_for_file
+        # increments these counters. Exposed via selector_decision_stats
+        # so operators can see what the selector has been recommending
+        # in production. Useful both as a diagnostic + as a feedback
+        # signal for the cover-traffic adaptive-rate logic.
+        self._selector_decision_counters: dict = {
+            "total": 0,
+            "transport": {
+                "quic_stream": 0, "quic_datagram": 0,
+                "webrtc": 0, "relay": 0,
+            },
+            "path": {"classical": 0, "coherence": 0},
+            "onion_hops": {1: 0, 3: 0, 5: 0},
+            "cover_traffic_on": 0,
+            "cover_traffic_off": 0,
+            "batch_decision": {
+                "emit_now": 0, "batch": 0, "urgent_bypass": 0,
+            },
+            "anchor_lay_on": 0,
+            "anchor_lay_off": 0,
+            "predictor_warm_on": 0,
+            "predictor_warm_off": 0,
+            "f4_violations": 0,
+        }
+
     def _build_my_caps(self) -> dict:
         """Build a CAPS frame for THIS daemon. Includes our rendezvous
         URL list when the local `share_rendezvous` setting is True
@@ -11343,6 +11369,9 @@ class Daemon:
                 self._record_pending_selector_observation(
                     transfer_id, decision, decide_kwargs,
                 )
+            # Counter update happens AFTER the F4 verify_contract call
+            # below so the violation flag is accurate. Decision is also
+            # used after the violation block — pass through unmodified.
             # F4 — verify the decision respects the user's mode contract.
             # Log structured violations so production telemetry can
             # surface them; the SmartRules property test asserts this
@@ -11357,6 +11386,13 @@ class Daemon:
                     (peer_fp or "?")[:8],
                     self._user_mode_value,
                     violations,
+                )
+            # Counter update — happens here (post-violation-check) so
+            # the f4_violations counter is accurate. Defensive against
+            # any unexpected decision shape.
+            if isinstance(decision, dict):
+                self._record_selector_decision_counters(
+                    decision, had_violation=bool(violations),
                 )
         except Exception as exc:
             # Selector errors must never break send_file.
@@ -11582,6 +11618,115 @@ class Daemon:
         except Exception as exc:
             log.debug("selector.observe() failed: %s", exc)
 
+    def _record_selector_decision_counters(
+        self,
+        decision: dict,
+        *,
+        had_violation: bool = False,
+    ) -> None:
+        """Update the selector-decision counter dict from a fresh
+        ``decide()`` result. Defensive against missing keys / unexpected
+        values (a malformed decision shouldn't break the counters).
+
+        Counters surface what the selector is actually recommending in
+        production — diagnostic value (verify the rule tree behaves as
+        expected against real traffic distribution) + feedback signal
+        for the cover-traffic adaptive-rate logic in a future ship.
+        """
+        if not isinstance(decision, dict):
+            return
+        # Defensive: if the counter dict is missing (partially-initialized
+        # daemon from a test fixture), the recording is a no-op rather
+        # than an exception. Production daemons always have it set in
+        # __init__.
+        c = getattr(self, "_selector_decision_counters", None)
+        if not isinstance(c, dict):
+            return
+        c["total"] = int(c.get("total", 0) or 0) + 1
+        if had_violation:
+            c["f4_violations"] += 1
+        t = decision.get("transport")
+        if isinstance(t, str) and t in c["transport"]:
+            c["transport"][t] += 1
+        p = decision.get("path")
+        if isinstance(p, str) and p in c["path"]:
+            c["path"][p] += 1
+        h = decision.get("onion_hops")
+        try:
+            h_int = int(h)
+        except (TypeError, ValueError):
+            h_int = None
+        if h_int in c["onion_hops"]:
+            c["onion_hops"][h_int] += 1
+        if decision.get("cover_traffic"):
+            c["cover_traffic_on"] += 1
+        else:
+            c["cover_traffic_off"] += 1
+        b = decision.get("batch_decision")
+        if isinstance(b, str) and b in c["batch_decision"]:
+            c["batch_decision"][b] += 1
+        if decision.get("anchor_lay"):
+            c["anchor_lay_on"] += 1
+        else:
+            c["anchor_lay_off"] += 1
+        if decision.get("predictor_warm"):
+            c["predictor_warm_on"] += 1
+        else:
+            c["predictor_warm_off"] += 1
+
+    def selector_decision_stats(self) -> dict:
+        """Return a snapshot of the selector-decision counters.
+
+        Each call returns a fresh dict so the caller can't accidentally
+        mutate the internal counters. Includes derived ratios for the
+        usual "what fraction of decisions chose X" queries.
+
+        Returns a zeroed snapshot when the counter dict is missing
+        (test fixtures / partially-initialized daemons).
+        """
+        c = getattr(self, "_selector_decision_counters", None)
+        if not isinstance(c, dict):
+            return {
+                "total": 0,
+                "transport": {},
+                "path": {},
+                "onion_hops": {},
+                "cover_traffic_on": 0,
+                "cover_traffic_off": 0,
+                "batch_decision": {},
+                "anchor_lay_on": 0,
+                "anchor_lay_off": 0,
+                "predictor_warm_on": 0,
+                "predictor_warm_off": 0,
+                "f4_violations": 0,
+                "cover_ratio": 0.0,
+                "f4_violation_ratio": 0.0,
+            }
+        total = max(1, int(c.get("total", 0) or 0))
+        cover_on = int(c.get("cover_traffic_on", 0) or 0)
+        snapshot = {
+            "total": int(c["total"]),
+            "transport": dict(c["transport"]),
+            "path": dict(c["path"]),
+            "onion_hops": dict(c["onion_hops"]),
+            "cover_traffic_on": cover_on,
+            "cover_traffic_off": int(c["cover_traffic_off"]),
+            "batch_decision": dict(c["batch_decision"]),
+            "anchor_lay_on": int(c["anchor_lay_on"]),
+            "anchor_lay_off": int(c["anchor_lay_off"]),
+            "predictor_warm_on": int(c["predictor_warm_on"]),
+            "predictor_warm_off": int(c["predictor_warm_off"]),
+            "f4_violations": int(c["f4_violations"]),
+            # Derived ratios. cover_ratio is the fraction of recent
+            # decisions that recommended cover traffic — useful as a
+            # signal for the cover-traffic emitter's adaptive rate.
+            "cover_ratio": cover_on / total if c["total"] else 0.0,
+            "f4_violation_ratio": (
+                int(c["f4_violations"]) / total if c["total"] else 0.0
+            ),
+        }
+        return snapshot
+
     def _build_selector(self, kind: str) -> Any:
         """Construct a per-event selector instance for ``kind``.
 
@@ -11686,6 +11831,14 @@ class Daemon:
                     self._user_mode_value,
                     violations,
                 )
+                # Count the violation against the ORIGINAL decision
+                # before swapping in the safe-default; that's what the
+                # selector actually produced and what we want to
+                # surface in the diagnostic counter.
+                if isinstance(decision, dict):
+                    self._record_selector_decision_counters(
+                        decision, had_violation=True,
+                    )
                 try:
                     safe = self._smart_selector.safe_default()
                     # Phase I — stash the safe-default for observe()
@@ -11702,6 +11855,11 @@ class Daemon:
             if transfer_id and isinstance(decision, dict):
                 self._record_pending_selector_observation(
                     transfer_id, decision, decide_kwargs,
+                )
+            # Counter update — no violation.
+            if isinstance(decision, dict):
+                self._record_selector_decision_counters(
+                    decision, had_violation=False,
                 )
             return decision
         except Exception as exc:
