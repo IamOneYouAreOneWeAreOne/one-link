@@ -28351,12 +28351,15 @@
     callUI.lastSessionAuthorityMs = callUI.lastSessionAuthority.at_ms;
     if (key !== callUI.lastSessionAuthorityKey) {
       callUI.lastSessionAuthorityKey = key;
+      // doctrine-ok: §3.2.a internal state-machine value; user copy below stays calm.
       reportCallEvent("session_authority_seen", {
         reason: state,
         state: state === "reconnecting" ? "connecting" : state,
         ok: state === "connected" || state === "recovered",
       });
     }
+    // doctrine-ok: §3.2.a internal state-machine value; user copy uses
+    // "Holding the call..." / "Repairing media path..." (no "Reconnecting").
     if (state === "reconnecting") {
       const label = reason === "transport_disconnected" || reason === "network_offline"
         ? "Holding the call while the path recovers..."

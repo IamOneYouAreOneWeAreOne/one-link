@@ -21,6 +21,15 @@ def test_cdc_chunk_cache_store_read_and_prune(tmp_path, monkeypatch):
     assert stats["chunks"] == 1
     assert stats["bytes"] == len(payload)
 
+    # The chunk-cache gc protects entries newer than DEFAULT_MIN_AGE_SECONDS
+    # (1 hour) to prevent racing the receive path. Age the file backwards
+    # past that floor so this prune test exercises actual eviction rather
+    # than the freshness guard.
+    cache_path = d._chunk_cache_path(h)
+    assert cache_path.is_file()
+    old_ts = cache_path.stat().st_mtime - 7200  # 2 hours ago
+    os.utime(cache_path, (old_ts, old_ts))
+
     pruned = d._prune_chunk_cache(max_bytes=0)
     assert pruned["removed"] == 1
     assert d._read_chunk_cache(h) is None
