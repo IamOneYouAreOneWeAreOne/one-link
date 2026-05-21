@@ -10895,6 +10895,21 @@ class Daemon:
                 size,
                 decision,
             )
+            # F4 — verify the decision respects the user's mode contract.
+            # Log structured violations so production telemetry can
+            # surface them; the SmartRules property test asserts this
+            # is empty for every input, so any violation in production
+            # is a real bug worth investigating.
+            violations = selector_native.verify_contract(
+                decision, self._user_mode_value
+            )
+            if violations:
+                log.warning(
+                    "selector contract violation: peer=%s mode=%s violations=%s",
+                    (peer_fp or "?")[:8],
+                    self._user_mode_value,
+                    violations,
+                )
         except Exception as exc:
             # Selector errors must never break send_file.
             log.debug("selector eval failed: %s", exc)

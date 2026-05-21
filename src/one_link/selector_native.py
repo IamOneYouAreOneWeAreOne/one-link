@@ -64,6 +64,40 @@ def safe_default() -> Decision:
     return _native_selector.SmartRules().safe_default()
 
 
+def verify_contract(decision: Decision, user_mode: str) -> list[str]:
+    """F4 — verify a selector decision respects the user_mode contract.
+
+    Mirrors `ol_selector::Decision::verify_contract` but operates on the
+    Python dict shape returned by `SmartRules.decide`. Returns the list
+    of violation labels (empty list = pass). Useful for daemon-side
+    runtime enforcement / observability without crossing the pyo3
+    boundary again.
+
+    Returns labels matching `ContractViolation::as_str`:
+      - "paranoid_under_hops"
+      - "paranoid_no_cover"
+      - "battery_save_cover"
+      - "latency_strict_batched"
+      - "latency_strict_relay"
+    """
+    mode = normalize_user_mode(user_mode)
+    violations: list[str] = []
+    if mode == "paranoid":
+        if int(decision.get("onion_hops", 0)) < 3:
+            violations.append("paranoid_under_hops")
+        if not decision.get("cover_traffic", False):
+            violations.append("paranoid_no_cover")
+    elif mode == "battery_save":
+        if decision.get("cover_traffic", False):
+            violations.append("battery_save_cover")
+    elif mode == "latency_strict":
+        if decision.get("batch_decision") == "batch":
+            violations.append("latency_strict_batched")
+        if decision.get("transport") == "relay":
+            violations.append("latency_strict_relay")
+    return violations
+
+
 VALID_USER_MODES: tuple[str, ...] = (
     "normal",
     "paranoid",
