@@ -38,12 +38,16 @@
 pub mod decision;
 pub mod error;
 pub mod smart_rules;
+pub mod unified_min;
+pub mod weights;
 
 pub use decision::{
     BatchDecision, ContractMode, ContractViolation, Decision, OnionHops, Path, Transport,
 };
 pub use error::SelectorError;
 pub use smart_rules::SmartRules;
+pub use unified_min::UnifiedMin;
+pub use weights::Weights;
 
 /// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

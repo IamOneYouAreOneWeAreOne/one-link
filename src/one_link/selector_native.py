@@ -55,6 +55,25 @@ def smart_rules():
     return _native_selector.SmartRules()
 
 
+def unified_min(**weights):
+    """Construct a UnifiedMin selector — the Phase H continuous
+    energy-minimization variant.
+
+    Pass any of the 11 weight kwargs to override defaults:
+      alpha_coherence, privacy_weight, cover_penalty, anchor_cost,
+      batch_latency_cost, onion_hop_cost, relay_rtt_multiplier,
+      lambda_dynamic, dark_base, dark_coherence, dark_cover.
+
+    Returns a selector with the same decide(...) signature as
+    SmartRules — daemons can A/B test by constructing one of each
+    and routing per-event through whichever they want to compare.
+    """
+    _require_native()
+    if not weights:
+        return _native_selector.UnifiedMin()
+    return _native_selector.UnifiedMin.with_weights(**weights)
+
+
 def safe_default() -> Decision:
     """The conservative fallback decision: 5-hop onion, cover on,
     anchor laid, emit-now, classical path. Used when smart logic errors

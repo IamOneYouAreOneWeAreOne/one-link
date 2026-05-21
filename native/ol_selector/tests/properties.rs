@@ -6,7 +6,8 @@ use ol_decide::{
     Context, Decide, EventKind, NetworkType, PeerRelationship, RadioState, Urgency, UserMode,
 };
 use ol_selector::{
-    BatchDecision, ContractMode, Decision, OnionHops, Path, SmartRules, Transport,
+    BatchDecision, ContractMode, Decision, OnionHops, Path, SmartRules, Transport, UnifiedMin,
+    Weights,
 };
 use proptest::prelude::*;
 
@@ -215,5 +216,70 @@ proptest! {
             "mode={:?} produced violations: {:?}; context={:?}; decision={:?}",
             mode, violations, ctx, d,
         );
+    }
+
+    /// Phase H invariant: UnifiedMin output also respects every
+    /// user_mode contract. The constraint is built into candidate
+    /// generation (filter through verify_contract BEFORE energy
+    /// comparison), so this is structurally guaranteed; the property
+    /// test exists to catch any future refactor that breaks the
+    /// guarantee.
+    #[test]
+    fn unified_min_respects_mode_contract(ctx in arb_context()) {
+        let s = UnifiedMin::new();
+        let d = s.decide(&ctx);
+        let mode = match ctx.user_mode {
+            UserMode::Normal => ContractMode::Normal,
+            UserMode::Paranoid => ContractMode::Paranoid,
+            UserMode::BatterySave => ContractMode::BatterySave,
+            UserMode::LatencyStrict => ContractMode::LatencyStrict,
+        };
+        let violations = d.verify_contract(mode);
+        prop_assert!(
+            violations.is_empty(),
+            "UnifiedMin violated {:?}: {:?}; context={:?}; decision={:?}",
+            mode, violations, ctx, d,
+        );
+    }
+
+    /// UnifiedMin is deterministic: same (context, weights) → same
+    /// decision. No state, no clock reads, no randomness.
+    #[test]
+    fn unified_min_is_deterministic(ctx in arb_context()) {
+        let s = UnifiedMin::new();
+        let a = s.decide(&ctx);
+        let b = s.decide(&ctx);
+        prop_assert_eq!(a, b);
+    }
+
+    /// Weight tuning matters: cranking privacy_weight to ∞ flips
+    /// every Decision to cover_traffic=true when the mode allows it.
+    #[test]
+    fn high_privacy_weight_forces_cover_when_allowed(ctx in arb_context()) {
+        // Battery-save mode forbids cover regardless of weight, so
+        // skip that case. Latency-strict + small + non-paranoid is
+        // a mode the contract permits both options.
+        prop_assume!(ctx.user_mode != UserMode::BatterySave);
+        let mut w = Weights::defaults();
+        w.privacy_weight = 1_000_000.0;
+        w.cover_penalty = 1_000_000.0;
+        let s = UnifiedMin::with_weights(w);
+        let d = s.decide(&ctx);
+        // For modes that allow cover, the selector should pick it.
+        prop_assert!(
+            d.cover_traffic,
+            "extreme privacy weight should force cover_traffic=true; got {:?} for mode={:?}",
+            d, ctx.user_mode,
+        );
+    }
+
+    /// Total energy is finite and non-negative for any decision.
+    #[test]
+    fn total_energy_well_defined(ctx in arb_context()) {
+        let s = UnifiedMin::new();
+        let d = s.decide(&ctx);
+        let e = s.total_energy(&ctx, &d);
+        prop_assert!(e.is_finite());
+        prop_assert!(e >= 0.0);
     }
 }
