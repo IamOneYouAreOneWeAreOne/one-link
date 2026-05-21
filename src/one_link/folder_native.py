@@ -154,3 +154,125 @@ def file_path_to_id(file_path: str) -> bytes:
     """Public alias for :func:`file_id_for_path` — exposed for use
     by callers that interact with the native Folder directly."""
     return file_id_for_path(file_path)
+
+
+# ---------- D16 — lattice-authoritative merge ----------
+
+
+def merge_entries_via_native(
+    local: Optional[legacy_crdt.ManifestEntry],
+    remote: Optional[legacy_crdt.ManifestEntry],
+    *,
+    replica_id: bytes,
+    peer_replica_id: Optional[bytes] = None,
+) -> Optional[legacy_crdt.ManifestEntry]:
+    """D16 — Merge two manifest entries using the native ``ol_crdt``
+    add-wins OR-set as the presence authority.
+
+    Same business rules as :func:`one_link.crdt.merge_manifest_entries`,
+    but the present/tombstoned decision is delegated to the native
+    lattice. Metadata (blob_hash, size, mtime_ms, vclock) is resolved
+    with the same rules as the legacy merger (vclock dominance first,
+    then content-hash tiebreak, then mtime tiebreak for identical
+    content). The returned ManifestEntry's ``vclock`` is always the
+    pointwise merge of the two inputs.
+
+    Determinism: native folder tags are deterministic in
+    (replica_id, counter), so two daemons running this with the same
+    inputs produce the same result regardless of order.
+
+    ``peer_replica_id``: 32-byte fingerprint of the remote peer. When
+    None, a synthesised id distinct from ``replica_id`` is used so
+    OR-set tags don't collide; the (replica, peer)-stable tag property
+    is lost in that case.
+    """
+    if local is None and remote is None:
+        return None
+    if local is None:
+        return remote
+    if remote is None:
+        return local
+    if local.file_path != remote.file_path:
+        raise ValueError("merge_entries_via_native called on different paths")
+
+    # Build two single-entry native folders and merge them. Tombstones
+    # (blob_hash is None) become OR-set removes; live entries become adds.
+    rid_local = replica_id_for_fingerprint(replica_id)
+    rid_remote = (
+        replica_id_for_fingerprint(peer_replica_id)
+        if peer_replica_id is not None
+        else bytes(((b + 1) & 0xFF) for b in rid_local.ljust(32, b"\x00"))
+    )
+    local_folder = manifest_entries_to_native_folder(
+        [local], replica_id=rid_local,
+    )
+    remote_folder = manifest_entries_to_native_folder(
+        [remote], replica_id=rid_remote,
+    )
+    local_folder.merge(remote_folder)
+
+    fid = file_id_for_path(remote.file_path)
+    present_in_native = local_folder.contains(fid)
+    merged_clock = local.vclock.merge(remote.vclock)
+
+    # Lattice says: not present. Either both sides were tombstones, or
+    # the add-wins OR-set saw a clean dominance from a tombstone. The
+    # merged-clock tombstone is the canonical witness.
+    if not present_in_native:
+        return legacy_crdt.ManifestEntry(
+            file_path=local.file_path,
+            blob_hash=None,
+            size=None,
+            mtime_ms=max(local.mtime_ms or 0, remote.mtime_ms or 0),
+            vclock=merged_clock,
+        )
+
+    # Lattice says: present. Resolve metadata with the same rules as
+    # the legacy merger. First check vclock dominance.
+    if local.vclock == remote.vclock:
+        return local
+    if local.vclock.happens_before(remote.vclock):
+        return remote
+    if remote.vclock.happens_before(local.vclock):
+        return local
+
+    # Concurrent + present. Add-wins, so exactly-one-tombstone case
+    # means the live side won the lattice. Promote the live side's
+    # metadata onto the merged clock.
+    if local.blob_hash is None:
+        return legacy_crdt.ManifestEntry(
+            file_path=remote.file_path,
+            blob_hash=remote.blob_hash,
+            size=remote.size,
+            mtime_ms=remote.mtime_ms,
+            vclock=merged_clock,
+        )
+    if remote.blob_hash is None:
+        return legacy_crdt.ManifestEntry(
+            file_path=local.file_path,
+            blob_hash=local.blob_hash,
+            size=local.size,
+            mtime_ms=local.mtime_ms,
+            vclock=merged_clock,
+        )
+
+    # Both live + concurrent. Adversary-immune content-hash tiebreak
+    # (matches legacy H14 May 2026 audit fix). Identical content falls
+    # through to mtime-preserving local-pick.
+    l_h = local.blob_hash or ""
+    r_h = remote.blob_hash or ""
+    if l_h != r_h:
+        winner = local if l_h > r_h else remote
+    else:
+        winner = (
+            local
+            if (local.mtime_ms or 0) >= (remote.mtime_ms or 0)
+            else remote
+        )
+    return legacy_crdt.ManifestEntry(
+        file_path=winner.file_path,
+        blob_hash=winner.blob_hash,
+        size=winner.size,
+        mtime_ms=max(local.mtime_ms or 0, remote.mtime_ms or 0),
+        vclock=merged_clock,
+    )

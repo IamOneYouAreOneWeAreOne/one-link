@@ -208,6 +208,22 @@ class FolderEngine:
         # bit from legacy to native.
         self._native_reconcile_checks: int = 0
         self._native_reconcile_disagreements: int = 0
+        # D16 — Authoritative-CRDT swap. When ONE_LINK_FOLDER_CRDT_NATIVE=1
+        # is set, ``apply_remote_manifest`` resolves each (local, remote)
+        # pair through the native ``ol_crdt.Folder`` lattice rather than
+        # the legacy ``merge_manifest_entries``. The cross-check is still
+        # run so disagreements are surfaced in operator telemetry — but
+        # the native lattice's answer is the winner persisted to sqlite.
+        self._crdt_native_authoritative: bool = (
+            os.environ.get("ONE_LINK_FOLDER_CRDT_NATIVE", "0") == "1"
+            and _MIRROR_AVAILABLE
+        )
+        # D16 — counts of authoritative-native merges performed and times
+        # the native lattice's answer differed from the legacy merger.
+        # Disagreements are still applied (native is authoritative when
+        # the gate is on); the counter is for visibility.
+        self._crdt_native_authoritative_merges: int = 0
+        self._crdt_native_authoritative_overrides: int = 0
 
     # ─── lifecycle ────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -365,6 +381,46 @@ class FolderEngine:
         except ValueError:
             return False
         return acked == int(observed)
+
+    def _merge_via_native(
+        self,
+        local: Optional[ManifestEntry],
+        remote: Optional[ManifestEntry],
+        *,
+        peer_fp: Optional[str],
+    ) -> Optional[ManifestEntry]:
+        """D16 — Compute the authoritative merge result via
+        ``folder_native.merge_entries_via_native``. Falls back to the
+        legacy merger if the native module is unavailable or the call
+        raises — caller-visible behaviour is then unchanged.
+
+        ``peer_fp`` is the remote peer's fingerprint (hex string when
+        available); used to derive a deterministic remote replica id
+        so OR-set tags are stable across a peer pair.
+        """
+        if not _MIRROR_AVAILABLE:
+            return merge_manifest_entries(local, remote)
+        try:
+            replica = (
+                self.me_fp.encode("utf-8") if isinstance(self.me_fp, str) else self.me_fp
+            )
+            peer_replica: Optional[bytes] = None
+            if peer_fp:
+                peer_replica = (
+                    peer_fp.encode("utf-8") if isinstance(peer_fp, str) else peer_fp
+                )
+            return _folder_native.merge_entries_via_native(
+                local, remote,
+                replica_id=replica,
+                peer_replica_id=peer_replica,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "D16: native authoritative merge failed (%s); falling "
+                "back to legacy merger: %s",
+                getattr(remote, "file_path", "?"), exc,
+            )
+            return merge_manifest_entries(local, remote)
 
     def _native_reconcile_check(
         self,
@@ -558,14 +614,40 @@ class FolderEngine:
                 peer_fp=peer_fp,
             )
 
-            winner = merge_manifest_entries(local, remote)
+            legacy_winner = merge_manifest_entries(local, remote)
             # Phase D #3 (ADR-0022): active native reconciliation
             # cross-check. The OR-set add-wins lattice decides
             # independently; disagreement is logged + counted so we can
             # confirm zero-diff before flipping authoritative.
             self._native_reconcile_check(
-                folder_name, local, remote, winner, peer_fp=peer_fp,
+                folder_name, local, remote, legacy_winner, peer_fp=peer_fp,
             )
+            # D16 — authoritative-CRDT swap. When the env gate is on,
+            # the native lattice's merge result is the winner that gets
+            # persisted; the legacy result is computed only for the
+            # cross-check above. When the gate is off (default), the
+            # legacy winner is unchanged.
+            if self._crdt_native_authoritative:
+                native_winner = self._merge_via_native(
+                    local, remote, peer_fp=peer_fp,
+                )
+                self._crdt_native_authoritative_merges += 1
+                if (
+                    (native_winner is None) != (legacy_winner is None)
+                    or (
+                        native_winner is not None
+                        and legacy_winner is not None
+                        and native_winner.blob_hash != legacy_winner.blob_hash
+                    )
+                ):
+                    self._crdt_native_authoritative_overrides += 1
+                    log.info(
+                        "D16: native lattice overrode legacy merger for %s/%s",
+                        folder_name, remote.file_path,
+                    )
+                winner = native_winner
+            else:
+                winner = legacy_winner
             if winner is None:
                 continue
             self.state.upsert_manifest_entry(
