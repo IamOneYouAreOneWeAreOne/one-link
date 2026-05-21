@@ -700,6 +700,7 @@ def _build_caps(
     rendezvous_urls: list[str] | None = None,
     channel_bind: dict | None = None,
     presence: str | None = None,
+    quic_port: int | None = None,
 ) -> dict:
     """Build a CAPS frame.
 
@@ -708,6 +709,16 @@ def _build_caps(
     auto-inherit our rendezvous configuration. Pre-OL1.2 peers
     silently ignore it; we never put it on the wire if the local
     `share_rendezvous` setting is False.
+
+    `quic_port` (when set) tells the peer where to dial QUIC for
+    the Wave 2e/2f fast path. Previously only piggy-backed on
+    ENDPOINT_UPDATE messages which arrive AFTER the channel
+    handshake — meaning the first send_file to a freshly-opened
+    channel always missed the QUIC fast path because the receiver's
+    port wasn't yet known. Putting it in CAPS fixes that: a peer
+    can dial QUIC on the very first chunk of the very first send,
+    which is what unxfails ``test_send_file_stream_mode_actually_
+    uses_quic_when_pinned``.
     """
     extra: dict = {}
     if rendezvous_urls:
@@ -717,6 +728,8 @@ def _build_caps(
         extra["channel_bind"] = dict(channel_bind)
     if presence:
         extra["presence"] = presence
+    if isinstance(quic_port, int) and 0 < quic_port < 65536:
+        extra["quic_port"] = int(quic_port)
     # v0.7.x: advertise the build version so peers can show "your other
     # device is on an older version" before a wire-format mismatch
     # turns into a cryptic InvalidTag. Old peers ignore unknown fields.
@@ -1796,6 +1809,13 @@ class Daemon:
             self.me.short_id,
             rendezvous_urls=urls if share else None,
             presence=self._presence_for_wire(self.get_my_presence()),
+            # Wave 2f architectural fix — advertise our QUIC port
+            # directly in CAPS so peers know it immediately at
+            # handshake time. Previously this only flowed via a
+            # separate ENDPOINT_UPDATE that arrives AFTER the first
+            # send_file's pre-dial check, causing the fast path to
+            # miss every fresh-channel transfer.
+            quic_port=getattr(self, "_quic_local_port", None),
         )
 
     def _presence_for_wire(self, status: str) -> str:
@@ -4314,6 +4334,18 @@ class Daemon:
             # v0.10.4: peer's reported presence drives the UI dot.
             if msg.get("presence"):
                 self.record_peer_presence(peer_fp, msg.get("presence"))
+            # Wave 2f architectural fix — stash quic_port immediately
+            # when CAPS arrives (instead of waiting for the separate
+            # ENDPOINT_UPDATE). This lets the very first send_file's
+            # pre-dial check find the peer's port + open QUIC on the
+            # FIRST chunk, not just on subsequent transfers.
+            qp = msg.get("quic_port")
+            if isinstance(qp, int) and 0 < qp < 65536:
+                self._quic_peer_ports[peer_fp] = qp
+                log.debug(
+                    "Wave 2f: stashed peer QUIC port %d for %s from CAPS",
+                    qp, peer_fp[:8],
+                )
             if self.state is not None:
                 with contextlib.suppress(Exception):
                     self.state.set_peer_capabilities(peer_fp, features)
@@ -13607,6 +13639,12 @@ class Daemon:
                         with contextlib.suppress(Exception):
                             sess.channel.note_caps_received(features)
                             sess.channel.maybe_activate_ratchet()
+                        # Wave 2f — stash peer quic_port from CAPS
+                        # the moment it arrives, so the probe path
+                        # also primes the fast-path pre-dial state.
+                        qp = reply.get("quic_port")
+                        if isinstance(qp, int) and 0 < qp < 65536:
+                            self._quic_peer_ports[sess.peer_fp] = qp
                         if self.state is not None:
                             with contextlib.suppress(Exception):
                                 self.state.set_peer_capabilities(sess.peer_fp, features)
@@ -13805,6 +13843,11 @@ class Daemon:
                                         "session for %s",
                                         sess.peer_fp[:8],
                                     )
+                            # Wave 2f — stash peer quic_port from this
+                            # CAPS too. Same architectural fix.
+                            qp = ack.get("quic_port")
+                            if isinstance(qp, int) and 0 < qp < 65536:
+                                self._quic_peer_ports[sess.peer_fp] = qp
                             if self.state is not None:
                                 with contextlib.suppress(Exception):
                                     self.state.set_peer_capabilities(sess.peer_fp, features)
@@ -17275,6 +17318,13 @@ class Daemon:
                     with contextlib.suppress(Exception):
                         ch_.note_caps_received(features)
                         ch_.maybe_activate_ratchet()
+                    # Wave 2f architectural fix — stash peer's quic_port
+                    # from CAPS the moment it arrives on the send-file
+                    # receive loop too, so the very first batch's
+                    # pre-dial check sees a non-None port.
+                    qp = m.get("quic_port")
+                    if isinstance(qp, int) and 0 < qp < 65536:
+                        self._quic_peer_ports[peer_fp] = qp
                     if self.state is not None:
                         with contextlib.suppress(Exception):
                             self.state.set_peer_capabilities(peer_fp, features)
@@ -19819,6 +19869,68 @@ class Daemon:
         # below will overwrite if it gets a chance, but the default
         # now reflects reality.
         self._rendezvous_peer_port = peer_port
+        # QUIC self-healing: prefer binding the native QUIC UDP endpoint
+        # to the same numeric port as the TCP peer server. TCP and UDP have
+        # independent port spaces, so this removes the fragile dependency on
+        # a separately advertised random QUIC port. If same-port UDP bind is
+        # unavailable, keep the earlier random-port endpoint and rely on the
+        # endpoint-update advertisement fallback.
+        if (
+            os.environ.get("ONE_LINK_QUIC_TRANSPORT", "1") != "0"
+            and self._quic_local_port != peer_port
+        ):
+            try:
+                from one_link import peer_quic as _peer_quic
+                if _peer_quic.HAS_NATIVE:
+                    identity_pem = self.me.to_pkcs8_pem()
+
+                    def _quic_is_paired_same_port(fp: bytes) -> bool:
+                        try:
+                            self._quic_recent_paired.append(
+                                (int(time.time() * 1000), bytes(fp))
+                            )
+                        except Exception:
+                            pass
+                        if self.state is None:
+                            return False
+                        rec = self.state.get_peer(fp.hex())
+                        return rec is not None and rec.trust == "pinned"
+
+                    old_endpoint = self._quic_server_endpoint
+                    same_port_endpoint = _peer_quic.make_server_endpoint(
+                        identity_pem,
+                        _quic_is_paired_same_port,
+                        _peer_quic.QuicEndpointConfig(
+                            bind_addr=f"0.0.0.0:{int(peer_port)}"
+                        ),
+                    )
+                    addr_str = str(same_port_endpoint.local_addr)
+                    same_port = int(addr_str.rsplit(":", 1)[-1])
+                    if same_port == int(peer_port):
+                        if old_endpoint is not None:
+                            with contextlib.suppress(Exception):
+                                old_endpoint.close()
+                        self._quic_server_endpoint = same_port_endpoint
+                        self._quic_local_port = same_port
+                        log.info(
+                            "QUIC server endpoint rebound to peer port %s",
+                            addr_str,
+                        )
+                        if self._quic_accept_task is not None:
+                            self._quic_accept_task.cancel()
+                        self._quic_accept_task = asyncio.create_task(
+                            self._quic_accept_loop()
+                        )
+                    else:
+                        with contextlib.suppress(Exception):
+                            same_port_endpoint.close()
+            except Exception as e:
+                log.info(
+                    "QUIC same-port bind unavailable on TCP port %d; "
+                    "using advertised QUIC port fallback: %s",
+                    peer_port,
+                    e,
+                )
 
         self._control_server = await asyncio.start_server(
             self._handle_control, host="127.0.0.1", port=0
@@ -20432,9 +20544,12 @@ class Daemon:
             with contextlib.suppress(Exception):
                 existing.close(0, b"stale")
             self._quic_outbound.pop(peer_fp, None)
-        # Need both: peer advertised a port AND we have an
-        # outbound endpoint to dial from.
-        port = self._quic_peer_ports.get(peer_fp)
+        # Prefer an explicitly advertised QUIC port, but fall back to the
+        # peer's normal One Link port. Newer daemons bind QUIC/UDP to the
+        # same numeric port as the TCP peer server, which makes QUIC recover
+        # even when an ENDPOINT_UPDATE packet was missed or arrived before
+        # the QUIC endpoint existed.
+        port = self._quic_peer_ports.get(peer_fp) or getattr(peer, "port", None)
         if not port:
             return None
         peer_addr = getattr(peer, "address", None)
