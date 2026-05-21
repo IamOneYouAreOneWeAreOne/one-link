@@ -73,21 +73,53 @@ def _wait_port(port: int, timeout: float = 5.0) -> bool:
 
 
 def request(control_port: int, *, timeout: float = 30.0, **req) -> dict:
-    """Send a single control request and read one JSON response line."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect(("127.0.0.1", control_port))
-    try:
-        s.sendall((json.dumps(req) + "\n").encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode("utf-8").strip() or "{}")
-    finally:
-        s.close()
+    """Send a single control request and read one JSON response line.
+
+    Under Windows TCP control-socket churn (documented in
+    test_two_device_soak.py:85), a freshly-accepted connection can
+    drop EOF before the daemon's reader serves the request. This
+    surfaces as ``recv()`` returning 0 bytes, which downstream
+    callers see as an empty / malformed response. Retry ONCE on
+    that specific pattern; the daemon code is fine, the TCP stack
+    just hit accept-queue churn.
+    """
+    last_buf = b""
+    last_exc: Exception | None = None
+    for attempt in (0, 1):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            try:
+                s.connect(("127.0.0.1", control_port))
+                s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+                buf = b""
+                while not buf.endswith(b"\n"):
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+            except (ConnectionAbortedError, ConnectionResetError, OSError) as e:
+                # Connection-level flake — retry once before giving up.
+                last_exc = e
+                buf = b""
+        finally:
+            s.close()
+        last_buf = buf
+        # Empty / non-terminated response indicates EOF before
+        # service. Retry once. A real daemon response always ends
+        # with newline (the line-protocol invariant).
+        if buf and buf.endswith(b"\n"):
+            return json.loads(buf.decode("utf-8").strip() or "{}")
+        if attempt == 0:
+            # Brief backoff so the daemon's accept loop can drain.
+            import time as _time
+            _time.sleep(0.05)
+    # Both attempts came up empty. If a connection error was the
+    # cause, re-raise it so the test sees a real exception (matching
+    # pre-retry behaviour); otherwise surface the empty response.
+    if last_exc is not None and not last_buf:
+        raise last_exc
+    return json.loads(last_buf.decode("utf-8").strip() or "{}")
 
 
 def _spawn(home: Path, log: Path) -> tuple[subprocess.Popen, object]:

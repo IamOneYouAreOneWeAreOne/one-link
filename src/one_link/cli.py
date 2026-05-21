@@ -42,30 +42,61 @@ def _connect_control(timeout: float = 5.0) -> tuple[socket.socket, int]:
 
 
 def _request(cmd: str, *, timeout: float = 5.0, **kwargs) -> dict:
-    s, _ = _connect_control(timeout=timeout)
+    """Single control-socket request/response round trip.
+
+    Retries ONCE on the documented Windows TCP control-socket churn
+    pattern (EOF before service — empty/non-newline-terminated
+    response). See ``tests/test_two_device_soak.py:85`` for the
+    pattern's origin; same one-shot retry is in ``tests/harness.py``.
+    Real daemon errors still surface as ClickException; only the
+    transient connection-churn case retries.
+    """
+    last_buf = b""
+    for attempt in (0, 1):
+        s, _ = _connect_control(timeout=timeout)
+        try:
+            try:
+                s.sendall(
+                    (json.dumps({"cmd": cmd, **kwargs}) + "\n").encode("utf-8"),
+                )
+                buf = b""
+                while not buf.endswith(b"\n"):
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+            except (ConnectionAbortedError, ConnectionResetError, OSError) as e:
+                if attempt == 0:
+                    # Transient — back off briefly + retry.
+                    import time as _time
+                    _time.sleep(0.05)
+                    continue
+                raise click.ClickException(
+                    f"daemon connection dropped while handling {cmd}; "
+                    "One Link will keep durable transfer work and resume after restart "
+                    f"({e})"
+                )
+        finally:
+            s.close()
+        last_buf = buf
+        if buf and buf.endswith(b"\n"):
+            try:
+                return json.loads(buf.decode("utf-8").strip() or "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                raise click.ClickException(
+                    f"daemon returned an invalid response while handling {cmd}: {e}"
+                )
+        # Empty / unterminated → retry once with brief backoff.
+        if attempt == 0:
+            import time as _time
+            _time.sleep(0.05)
+    # Both attempts came up empty.
     try:
-        try:
-            s.sendall((json.dumps({"cmd": cmd, **kwargs}) + "\n").encode("utf-8"))
-            buf = b""
-            while not buf.endswith(b"\n"):
-                chunk = s.recv(65536)
-                if not chunk:
-                    break
-                buf += chunk
-        except (ConnectionAbortedError, ConnectionResetError, OSError) as e:
-            raise click.ClickException(
-                f"daemon connection dropped while handling {cmd}; "
-                "One Link will keep durable transfer work and resume after restart "
-                f"({e})"
-            )
-        try:
-            return json.loads(buf.decode("utf-8").strip() or "{}")
-        except (UnicodeDecodeError, json.JSONDecodeError) as e:
-            raise click.ClickException(
-                f"daemon returned an invalid response while handling {cmd}: {e}"
-            )
-    finally:
-        s.close()
+        return json.loads(last_buf.decode("utf-8").strip() or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise click.ClickException(
+            f"daemon returned an invalid response while handling {cmd}: {e}"
+        )
 
 
 @click.group()
