@@ -54,7 +54,7 @@
     --good:       #46d39a;
     --warn:       #f5c451;
     --bad:        #ff6b6b;
-    --bubble-in:  linear-gradient(135deg, #30375a 0%, #17415a 100%);
+    --bubble-in:  linear-gradient(135deg, #263f74 0%, #0f6670 100%);
     --bubble-out: linear-gradient(135deg, #6a4dff 0%, #4ec1ff 100%);
     --shadow:     0 6px 24px rgba(0,0,0,.35);
     --radius:     14px;
@@ -83,7 +83,7 @@
     --good:       #16a36b;
     --warn:       #b87f00;
     --bad:        #d04545;
-    --bubble-in:  linear-gradient(135deg, #30375a 0%, #17415a 100%);
+    --bubble-in:  linear-gradient(135deg, #263f74 0%, #0f6670 100%);
     --bubble-out: linear-gradient(135deg, #6a4dff 0%, #4ec1ff 100%);
     --shadow:     0 6px 24px rgba(20,30,60,.10);
   }
@@ -97,7 +97,7 @@
       --text: #1a1f2b; --text-dim: #5a6477; --text-dimmer: #8b94a8;
       --accent: #5b3eea; --accent-2: #1d92e6;
       --good: #16a36b; --warn: #b87f00; --bad: #d04545;
-      --bubble-in: linear-gradient(135deg, #30375a 0%, #17415a 100%);
+      --bubble-in: linear-gradient(135deg, #263f74 0%, #0f6670 100%);
       --bubble-out: linear-gradient(135deg, #6a4dff 0%, #4ec1ff 100%);
       --shadow: 0 6px 24px rgba(20,30,60,.10);
     }
@@ -774,7 +774,10 @@
     align-self: flex-start;
     background: var(--bubble-in);
     border-top-left-radius: 4px;
-    border: 1px solid rgba(78,193,255,.16);
+    border: 1px solid rgba(78,193,255,.28);
+    box-shadow:
+      0 8px 22px rgba(15,102,112,.20),
+      0 2px 6px rgba(0,0,0,.18);
   }
   .msg.out { align-self: flex-end;   background: var(--bubble-out); border-top-right-radius: 4px; color: white; }
   .msg .when { display: block; font-size: 10px; color: var(--text-dimmer); margin-top: 3px; }
