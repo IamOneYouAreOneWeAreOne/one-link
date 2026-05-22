@@ -468,6 +468,12 @@ class State:
     # column doesn't help an attacker pivot via the other.
     _PATH_PII_AAD_CHUNK_SOURCES = b"OL/state/chunk_sources/path|v1"
     _PATH_PII_AAD_FILE_INDEX = b"OL/state/file_index_cache/path|v1"
+    # 2026-05-22 audit T3-J: wrap the per-transfer source ``path``
+    # so the ledger row + on-disk DB don't carry the user's
+    # filesystem layout in plaintext. Distinct AAD per column so
+    # leaked chunk_sources / file_index_cache rows can't help
+    # decrypt this column even though many paths are the same.
+    _PATH_PII_AAD_TRANSFER = b"OL/state/transfers/path|v1"
 
     def _wrap_path(self, value: str, *, aad: bytes) -> str:
         if self._path_pii is None or not value:
@@ -3356,6 +3362,18 @@ class State:
             raise ValueError(f"invalid transfer status: {status!r}")
         total = int(size if total_bytes is None else total_bytes)
         now = _now_ms()
+        # 2026-05-22 audit T3-J: wrap the ``path`` field inside
+        # ``metadata`` before JSON-encoding. Other metadata fields
+        # stay cleartext (no PII risk + read paths consume them
+        # without going through unwrap). Wrap is a no-op when the
+        # path-PII encryptor isn't attached or the field is empty,
+        # so legacy rows + un-wrapped paths keep working.
+        meta_to_store = dict(metadata or {})
+        raw_path = meta_to_store.get("path")
+        if isinstance(raw_path, str) and raw_path:
+            meta_to_store["path"] = self._wrap_path(
+                raw_path, aad=self._PATH_PII_AAD_TRANSFER,
+            )
         with self._write_lock:
             self._conn.execute(
                 """
@@ -3385,7 +3403,7 @@ class State:
                     id, direction, peer_fp, kind, name, int(size), blob_hash,
                     status, int(progress_bytes), total, int(chunks_done),
                     int(chunks_total), int(raw_bytes), int(wire_bytes), now,
-                    json.dumps(metadata or {}, separators=(",", ":"), sort_keys=True),
+                    json.dumps(meta_to_store, separators=(",", ":"), sort_keys=True),
                 ),
             )
             row = self._conn.execute(
@@ -4804,6 +4822,14 @@ class State:
             metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
         except Exception:
             metadata = {}
+        # 2026-05-22 audit T3-J: unwrap ``metadata.path`` if it's
+        # wrapped on disk. ``_unwrap_path`` is a no-op for unwrapped
+        # values, so legacy rows / unwrapped paths pass through.
+        raw_path = metadata.get("path") if isinstance(metadata, dict) else None
+        if isinstance(raw_path, str) and raw_path:
+            metadata["path"] = self._unwrap_path(
+                raw_path, aad=self._PATH_PII_AAD_TRANSFER,
+            )
         return TransferRecord(
             id=row["id"],
             direction=row["direction"],
