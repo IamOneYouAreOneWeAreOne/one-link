@@ -16,6 +16,7 @@ Optional passphrase encryption-at-rest:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
@@ -386,22 +387,44 @@ def load_or_create(
                         raise RuntimeError(
                             "key file must hold an Ed25519 private key"
                         )
-                    # External audit 2026-05-18 ES-3: before _save_key
-                    # atomic-renames the new encrypted PEM into place,
-                    # overwrite the existing cleartext PEM file with
-                    # random bytes + fsync. Without this, the old
-                    # inode's cleartext bytes can survive in BTRFS /
-                    # ZFS-snapshots / NTFS-USN / journal free lists
-                    # and be recovered from a stolen disk image, even
-                    # though the user thinks they've migrated to
-                    # encrypted-at-rest. Best-effort: filesystem-level
-                    # guarantees are weak (SSDs may have already
-                    # written the bytes to a different physical
-                    # block), but this closes the in-place metadata
-                    # leak. _zero_overwrite_file is a no-op if the
-                    # path no longer exists by the time it runs.
-                    _zero_overwrite_file(p)
-                    _save_key(p, priv, pw)
+                    # 2026-05-21 audit T1-K: file-lock the migration
+                    # so two daemons starting at the same time don't
+                    # race ``_zero_overwrite_file → _save_key``. If
+                    # we lose the race (lock file already exists),
+                    # the other process wins — we just re-load.
+                    # Cross-platform via O_CREAT|O_EXCL.
+                    lock_path = p.with_suffix(p.suffix + ".migrate.lock")
+                    lock_fd = None
+                    try:
+                        try:
+                            lock_fd = os.open(
+                                str(lock_path),
+                                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                                0o600,
+                            )
+                        except FileExistsError:
+                            # Another process is migrating right now.
+                            # Re-read the file in a moment and trust
+                            # what they wrote. If their migration
+                            # crashes mid-way we'll need a lock-file
+                            # sweep, but a 5s-stale lock cleanup is
+                            # outside this fix's scope.
+                            pass
+                        else:
+                            # External audit 2026-05-18 ES-3: before
+                            # _save_key atomic-renames the new
+                            # encrypted PEM into place, overwrite
+                            # the existing cleartext PEM file with
+                            # random bytes + fsync. Closes the
+                            # cleartext-bytes-in-old-inode hole.
+                            _zero_overwrite_file(p)
+                            _save_key(p, priv, pw)
+                    finally:
+                        if lock_fd is not None:
+                            with contextlib.suppress(Exception):
+                                os.close(lock_fd)
+                            with contextlib.suppress(Exception):
+                                lock_path.unlink()
             except (TypeError, ValueError):
                 pass
         if priv is None:
