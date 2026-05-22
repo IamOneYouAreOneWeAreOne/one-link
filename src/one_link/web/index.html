@@ -744,7 +744,9 @@
   }
 
   .messages {
-    flex: 1; overflow-y: auto; padding: 18px 22px 14px;
+    flex: 1; overflow-y: auto;
+    padding: 18px 22px calc(96px + env(safe-area-inset-bottom, 0px));
+    scroll-padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px));
     display: flex; flex-direction: column; gap: 8px;
     background:
       radial-gradient(1200px 600px at 70% -10%, rgba(124,92,255,.07), transparent 60%),
@@ -9674,6 +9676,10 @@
 
 <script>
 (() => {
+  try {
+    if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+  } catch (_) {}
+
   // ── v0.14.2 - Phone-tier foundation ─────────────────────────────────
   // Detect form-factor at boot, set data-form-factor on <html>, and
   // re-evaluate on debounced resize. CSS in the page reads the
@@ -14466,6 +14472,19 @@
     _forceMessageBottomUntil = Math.max(_forceMessageBottomUntil, Date.now() + ms);
   }
 
+  function _forceMessagesBottomNowAndAfter(ms = 2500) {
+    _forceNextMessagesToBottom(ms);
+    const settle = () => {
+      const container = document.querySelector("#messages");
+      if (container) _scrollMessagesToVisualBottom(container);
+    };
+    settle();
+    requestAnimationFrame(settle);
+    for (const delay of [80, 250, 700, 1500]) {
+      setTimeout(settle, delay);
+    }
+  }
+
   function _scrollMessagesToVisualBottom(container) {
     if (!container) return;
     container.scrollTop = container.scrollHeight;
@@ -16195,7 +16214,7 @@
     // v0.21.1: reset the new-message pill on conversation switch.
     _hideNewMessagePill();
     _lastRenderedLen = 0;
-    _forceNextMessagesToBottom();
+    _forceMessagesBottomNowAndAfter();
     // v0.14.1 persist for boot-time restore.
     _saveLastSelection("group", gidHex);
     state.selectedGroup = gidHex;
@@ -18270,7 +18289,7 @@
     // would mislead the user about the new one.
     _hideNewMessagePill();
     _lastRenderedLen = 0;
-    _forceNextMessagesToBottom();
+    _forceMessagesBottomNowAndAfter();
     // v0.14.0 prefetch: record this switch in the Markov chain
     // and pre-warm the predicted next peer in idle time.
     _recordSwitch(shortId);

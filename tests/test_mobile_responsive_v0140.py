@@ -294,8 +294,11 @@ def test_chat_render_sticks_to_bottom_for_live_edge_and_own_sends(index_html: st
     """Sending a message or staying at the live edge must keep the newest
     bubble visible after the virtualized DOM rebuild."""
     assert "function _forceNextMessagesToBottom" in index_html
+    assert "function _forceMessagesBottomNowAndAfter" in index_html
     assert "function _isMessagesNearBottom" in index_html
     assert "function _scrollMessagesToVisualBottom" in index_html
+    assert 'history.scrollRestoration = "manual"' in index_html
+    assert "scroll-padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px));" in index_html
 
     scheduler_idx = index_html.find("function scheduleRenderMessages()")
     scheduler = index_html[scheduler_idx:scheduler_idx + 500]
@@ -310,7 +313,7 @@ def test_chat_render_sticks_to_bottom_for_live_edge_and_own_sends(index_html: st
     switch_idx = index_html.find("function selectPeer(shortId)")
     switch_path = index_html[switch_idx:switch_idx + 1100]
     assert "_lastRenderedLen = 0;" in switch_path
-    assert "_forceNextMessagesToBottom();" in switch_path
+    assert "_forceMessagesBottomNowAndAfter();" in switch_path
 
 
 def test_image_preview_load_preserves_bottom_scroll(index_html: str):
