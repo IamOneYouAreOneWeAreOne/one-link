@@ -366,6 +366,18 @@ def test_conversation_header_status_uses_live_peer_refresh(index_html: str):
     assert "renderConvHeaderTrust(cur);" in snippet
 
 
+def test_jump_to_date_has_validation_and_nearest_fallback(index_html: str):
+    """Jump-to-date must not silently fail on impossible or empty dates."""
+    assert "function _messagesForJumpDate()" in index_html
+    assert "function _localDateKeyFromMs(ms)" in index_html
+    assert "function _jumpToMessageNode(target, note)" in index_html
+    assert "class=\"jdp-hint\"" in index_html
+    assert "input.min = firstKey" in index_html
+    assert "input.max = lastKey" in index_html
+    assert "chosenYear < 2000 || chosenYear > 2100" in index_html
+    assert "Jumped to nearest message" in index_html
+
+
 def test_global_frame_budget_accessor(index_html: str):
     """window.__oneLinkFrameBudget is the API CI / Playwright tests
     will read to assert SLAs (p50/p95/p99/max)."""

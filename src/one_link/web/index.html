@@ -6897,6 +6897,12 @@
     font-weight: 600;
     cursor: pointer;
   }
+  .jump-date-popover .jdp-hint {
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.35;
+    max-width: 280px;
+  }
   /* v0.21.x: jump-to highlight on the target bubble. */
   .msg.jumped-to {
     animation: jumped-to 1.6s ease-out;
@@ -23761,19 +23767,77 @@
   // v0.21.x: jump to date. Click 📅 → tiny date-picker popover. On
   // pick, find the first message on (or after) that date and scroll
   // it into view. Toast if no messages exist on the chosen date.
+  function _localDateKeyFromMs(ms) {
+    const d = new Date(ms);
+    if (!Number.isFinite(d.getTime())) return "";
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function _friendlyDateKey(key) {
+    if (!key) return "";
+    const [y, m, d] = key.split("-").map((x) => parseInt(x, 10));
+    if (!y || !m || !d) return key;
+    return new Date(y, m - 1, d).toLocaleDateString();
+  }
+
+  function _messagesForJumpDate() {
+    if (state.selectedGroup) {
+      return (state.groupMessages || [])
+        .map((mm) => ({ ...mm, _jumpTs: mm.ts_ms || mm.ts }))
+        .filter((mm) => Number.isFinite(mm._jumpTs))
+        .sort((a, b) => a._jumpTs - b._jumpTs);
+    }
+    if (state.selectedPeer) {
+      return (state.messages || [])
+        .filter((mm) => mm.peer === state.selectedPeer)
+        .map((mm) => ({ ...mm, _jumpTs: mm.ts_ms || mm.ts }))
+        .filter((mm) => Number.isFinite(mm._jumpTs))
+        .sort((a, b) => a._jumpTs - b._jumpTs);
+    }
+    return [];
+  }
+
+  function _jumpToMessageNode(target, note) {
+    const node = target?.id
+      ? document.querySelector(`[data-msg-id="${CSS.escape(target.id)}"]`)
+      : null;
+    if (!node) {
+      toast("I found that date, but the message is not visible yet. Refreshing this conversation...", "info", 4000);
+      if (state.selectedGroup) renderGroupConversation();
+      else renderMessages();
+      setTimeout(() => _jumpToMessageNode(target, note), 120);
+      return;
+    }
+    node.scrollIntoView({ behavior: "smooth", block: "center" });
+    node.classList.add("jumped-to");
+    setTimeout(() => node.classList.remove("jumped-to"), 1800);
+    if (note) toast(note, "info", 5000);
+  }
+
   $("#btn-jump-date")?.addEventListener("click", (ev) => {
     ev.stopPropagation();
     document.querySelectorAll(".jump-date-popover").forEach((p) => p.remove());
-    if (!state.selectedPeer) {
-      toast("Pick a device first to jump within a conversation.", "info", 3500);
+    if (!state.selectedPeer && !state.selectedGroup) {
+      toast("Pick a chat first to jump within a conversation.", "info", 3500);
       return;
     }
+    const jumpMessages = _messagesForJumpDate();
+    if (!jumpMessages.length) {
+      toast("This conversation has no messages to jump through yet.", "info", 4000);
+      return;
+    }
+    const firstKey = _localDateKeyFromMs(jumpMessages[0]._jumpTs);
+    const lastKey = _localDateKeyFromMs(jumpMessages[jumpMessages.length - 1]._jumpTs);
     const pop = el("div", "jump-date-popover");
     pop.setAttribute("role", "dialog");
     pop.innerHTML = `
       <label class="jdp-label">Jump to date</label>
       <input type="date" class="jdp-input" />
       <button type="button" class="jdp-go">Jump</button>
+      <div class="jdp-hint"></div>
     `;
     document.body.appendChild(pop);
     const r = ev.currentTarget.getBoundingClientRect();
@@ -23781,6 +23845,11 @@
     pop.style.top = `${r.bottom + 6}px`;
     const input = pop.querySelector(".jdp-input");
     const go = pop.querySelector(".jdp-go");
+    const hint = pop.querySelector(".jdp-hint");
+    input.min = firstKey;
+    input.max = lastKey;
+    input.value = lastKey;
+    hint.textContent = `Available: ${_friendlyDateKey(firstKey)} - ${_friendlyDateKey(lastKey)}. If that day has no messages, I will jump to the nearest one.`;
     setTimeout(() => input.focus(), 60);
     function close() {
       pop.remove();
@@ -23795,24 +23864,38 @@
     }, 0);
     const jump = () => {
       const v = input.value;
-      if (!v) return;
-      const targetMs = Date.parse(v + "T00:00:00");
-      if (!targetMs) return;
-      const peerMsgs = state.messages.filter((mm) => mm.peer === state.selectedPeer);
-      const target = peerMsgs.find((mm) => (mm.ts || 0) >= targetMs);
-      close();
-      if (!target) {
-        toast(`No messages on or after ${v} in this conversation.`, "info", 4500);
+      if (!v) {
+        hint.textContent = "Choose a date first.";
         return;
       }
-      const node = document.querySelector(`[data-msg-id="${CSS.escape(target.id)}"]`);
-      if (node) {
-        node.scrollIntoView({ behavior: "smooth", block: "center" });
-        node.classList.add("jumped-to");
-        setTimeout(() => node.classList.remove("jumped-to"), 1800);
-      } else {
-        toast("Found a message but couldn't scroll to it.", "info", 3000);
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+      if (!match) {
+        hint.textContent = "Use the date picker or type a real YYYY-MM-DD date.";
+        return;
       }
+      const chosenYear = parseInt(match[1], 10);
+      if (chosenYear < 2000 || chosenYear > 2100) {
+        hint.textContent = "That year looks wrong. Pick a date inside the conversation range.";
+        return;
+      }
+      const exact = jumpMessages.find((mm) => _localDateKeyFromMs(mm._jumpTs) === v);
+      let target = exact;
+      let note = "";
+      if (!target) {
+        const after = jumpMessages.find((mm) => _localDateKeyFromMs(mm._jumpTs) > v);
+        const before = [...jumpMessages].reverse().find((mm) => _localDateKeyFromMs(mm._jumpTs) < v);
+        target = after || before || null;
+        if (target) {
+          const actual = _localDateKeyFromMs(target._jumpTs);
+          note = `No messages on ${_friendlyDateKey(v)}. Jumped to nearest message: ${_friendlyDateKey(actual)}.`;
+        }
+      }
+      close();
+      if (!target) {
+        toast("No messages found in this conversation.", "info", 4500);
+        return;
+      }
+      _jumpToMessageNode(target, note);
     };
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") jump(); });
     go.onclick = jump;
