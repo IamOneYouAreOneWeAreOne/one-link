@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -526,7 +527,25 @@ class NativeTransferSession:
                 ciphertext=record.ciphertext,
             )
         except Exception as exc:
+            # 2026-05-22 audit Batch W: chunk-store append failure
+            # silently disabled swarm-pull for the next peer that
+            # asked for this chunk (we'd have it on disk via the
+            # outbound transfer but the store's index never learned).
+            # Record on the session's _degradation_events so the
+            # daemon's diagnostics surface can show "this peer's
+            # chunk-store append is failing, swarm-dedupe degraded."
             log.warning("native chunk-store append failed (%s)", exc)
+            if not hasattr(self, "_store_failures"):
+                self._store_failures = []
+            self._store_failures.append({
+                "at_ms": int(time.time() * 1000),
+                "chunk_id_prefix": record.chunk_id.hex()[:16],
+                "reason": f"{type(exc).__name__}: {exc}"[:128],
+            })
+            # Bound the failure log so a totally broken store doesn't
+            # OOM us through this list.
+            if len(self._store_failures) > 256:
+                self._store_failures = self._store_failures[-256:]
 
     # ── receive side ────────────────────────────────────────────────
 

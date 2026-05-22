@@ -5223,8 +5223,11 @@ class Daemon:
                 self._broadcast_tail(ev)
                 self._incoming_files.pop(blob, None)
                 if not ok:
-                    with contextlib.suppress(OSError):
-                        f.out_path.unlink()
+                    # 2026-05-22 audit Batch W: quarantine before unlink
+                    # so operators can grab the partial bytes if needed.
+                    # Matches the M23 pattern from the binary path's
+                    # second EOF handler.
+                    self._quarantine_failed_inbox(f.out_path)
                     self._update_transfer(f.transfer_id, status="failed")
                 else:
                     self._update_transfer(
@@ -8108,8 +8111,8 @@ class Daemon:
             self._broadcast_tail(ev)
             self._incoming_files.pop(blob, None)
             if not ok:
-                with contextlib.suppress(OSError):
-                    f.out_path.unlink()
+                # 2026-05-22 audit Batch W: quarantine via the helper.
+                self._quarantine_failed_inbox(f.out_path)
                 self._update_transfer(f.transfer_id, status="failed")
             else:
                 self._update_transfer(
@@ -11548,6 +11551,30 @@ class Daemon:
             self._write_field_observation(url, tau, source="relay")
         except Exception:
             pass
+
+    def _quarantine_failed_inbox(self, out_path: Path) -> None:
+        """2026-05-22 audit Batch W: rename a corrupt / failed inbox
+        file to ``<name>.failed.<hex>`` BEFORE unlinking so an operator
+        chasing a transfer failure can grab the partial bytes from the
+        quarantine slot if the daemon hasn't reaped it yet. Mirrors the
+        existing pattern in the binary path's second EOF handler
+        (M23 quarantine discipline). Best-effort: any OSError silently
+        falls back to a direct unlink.
+        """
+        with contextlib.suppress(OSError, AttributeError, ValueError):
+            quarantine_target = out_path.with_name(
+                out_path.name + ".failed." + secrets.token_hex(4)
+            )
+            try:
+                out_path.rename(quarantine_target)
+            except OSError:
+                quarantine_target = None
+            if quarantine_target is not None:
+                with contextlib.suppress(OSError):
+                    quarantine_target.unlink()
+                return
+        with contextlib.suppress(OSError):
+            out_path.unlink()
 
     def _abort_incoming_file(self, blob: str, f: IncomingFile) -> None:
         with contextlib.suppress(Exception):
