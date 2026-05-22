@@ -1292,6 +1292,14 @@ class Daemon:
         self._tail_subs: set[asyncio.StreamWriter] = set()
         self._incoming_files: dict[str, IncomingFile] = {}
         self._incoming_blobs: dict[str, dict] = {}
+        # 2026-05-22 audit Batch CC: centralised background-task set.
+        # All fire-and-forget ``asyncio.create_task`` call sites
+        # should route through ``self._track(coro)`` so the task
+        # set is drainable in stop(). Without tracking, tasks leak
+        # past shutdown and asyncio reports "Task was destroyed but
+        # it is pending!". Each task auto-discards from the set on
+        # completion via add_done_callback.
+        self._background_tasks: set[asyncio.Task] = set()
         # Receiver-side resume: a small persistent sidecar per
         # in-progress CDC inbound transfer lets us survive a
         # daemon restart or a mid-transfer peer disconnect without
@@ -8927,7 +8935,9 @@ class Daemon:
             except Exception as e:
                 log.warning("background CDC finish failed for %s: %s", blob[:8], e)
 
-        asyncio.create_task(_runner())
+        # 2026-05-22 audit Batch CC: route through self._track() so
+        # stop() drains us cleanly.
+        self._track(_runner())
 
     # ─── folder sync handlers ──────────────────────────────────────────
     def _is_pinned(self, peer_fp: str) -> bool:
@@ -11662,6 +11672,24 @@ class Daemon:
             self._write_field_observation(url, tau, source="relay")
         except Exception:
             pass
+
+    def _track(self, coro) -> asyncio.Task:
+        """2026-05-22 audit Batch CC: register a fire-and-forget
+        background task on ``self._background_tasks`` so ``stop()``
+        can drain it. Auto-discards on completion via
+        ``add_done_callback``. Use INSTEAD OF bare
+        ``asyncio.create_task(coro)`` at fire-and-forget sites
+        (CDC finishers, endpoint helpers, control-plane shutdown
+        responders, etc.) so we never leak a pending task past
+        daemon shutdown.
+
+        Returns the created Task so callers can ``await`` it if
+        they later need to.
+        """
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     def _quarantine_failed_inbox(self, out_path: Path) -> None:
         """2026-05-22 audit Batch W: rename a corrupt / failed inbox
@@ -22045,6 +22073,21 @@ class Daemon:
                 except (asyncio.CancelledError, Exception):
                     pass
             self._endpoint_verify_tasks.clear()
+        # 2026-05-22 audit Batch CC: drain the centralised
+        # fire-and-forget task set. All call sites that route through
+        # self._track() land here for clean shutdown.
+        bg = getattr(self, "_background_tasks", None)
+        if bg:
+            snapshot = tuple(bg)
+            for task in snapshot:
+                if not task.done():
+                    task.cancel()
+            for task in snapshot:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            bg.clear()
         if self.ui_server is not None:
             try:
                 await self.ui_server.stop()
