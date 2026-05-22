@@ -83,8 +83,8 @@
     --good:       #16a36b;
     --warn:       #b87f00;
     --bad:        #d04545;
-    --bubble-in:  #eef0f6;
-    --bubble-out: linear-gradient(135deg, #5b3eea 0%, #1d92e6 100%);
+    --bubble-in:  #1f2533;
+    --bubble-out: linear-gradient(135deg, #6a4dff 0%, #4ec1ff 100%);
     --shadow:     0 6px 24px rgba(20,30,60,.10);
   }
   /* "auto" theme follows the OS prefers-color-scheme. We re-declare
@@ -97,8 +97,8 @@
       --text: #1a1f2b; --text-dim: #5a6477; --text-dimmer: #8b94a8;
       --accent: #5b3eea; --accent-2: #1d92e6;
       --good: #16a36b; --warn: #b87f00; --bad: #d04545;
-      --bubble-in: #eef0f6;
-      --bubble-out: linear-gradient(135deg, #5b3eea 0%, #1d92e6 100%);
+      --bubble-in: #1f2533;
+      --bubble-out: linear-gradient(135deg, #6a4dff 0%, #4ec1ff 100%);
       --shadow: 0 6px 24px rgba(20,30,60,.10);
     }
   }
@@ -11590,6 +11590,7 @@
       // unacked key-change event - a rotated key invalidates trust.
       const avWrap = el("div", "avatar-wrap");
       const av = el("div", "avatar", initials(p.display_name || p.hostname || p.short_id));
+      av.style.background = peerAccentColor(p);
       avWrap.appendChild(av);
       if ((p.key_change_unacked || 0) > 0) {
         const badge = el("span", "keychange-overlay", "!");
@@ -11769,7 +11770,9 @@
     const row = el("div", `peer archived ${p.online ? "online" : "offline"}`);
     row.dataset.short = p.short_id;
     const avWrap = el("div", "avatar-wrap");
-    avWrap.appendChild(el("div", "avatar", initials(p.display_name || p.hostname || p.short_id)));
+    const av = el("div", "avatar", initials(p.display_name || p.hostname || p.short_id));
+    av.style.background = peerAccentColor(p);
+    avWrap.appendChild(av);
     const txt = el("div", "text");
     txt.appendChild(el("div", "name", p.display_name || p.hostname || "(unknown)"));
     txt.appendChild(el("div", "sub", "Archived · click to unarchive"));
@@ -16381,6 +16384,24 @@
     "#7c4dff", "#3b82f6", "#06b6d4", "#10b981",
     "#facc15", "#f97316", "#ef4444", "#ec4899",
   ];
+  function _hashStringForAccent(input) {
+    let h = 2166136261;
+    const s = String(input || "");
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h >>> 0;
+  }
+  function deterministicAccentForId(id) {
+    const h = _hashStringForAccent(id);
+    return _GROUP_COLOR_PRESETS[h % _GROUP_COLOR_PRESETS.length];
+  }
+  function peerAccentColor(peer) {
+    return deterministicAccentForId(
+      peer?.fingerprint || peer?.ed_pub_hex || peer?.short_id || peer?.hostname,
+    );
+  }
   // v0.12.1 - chat-prefs cache. Source-of-truth for per-chat
   // cosmetic state (color, wallpaper, archived). Populated from
   // /api/chat-prefs at boot + kept in sync by chat_pref WS events.
@@ -16447,7 +16468,7 @@
 
   function getGroupColor(gid) {
     return _readChatPref("group", gid, "color")
-        || _GROUP_COLOR_PRESETS[0];
+        || deterministicAccentForId(gid);
   }
   function setGroupColor(gid, hex) {
     _writeChatPref("group", gid, "color", hex);

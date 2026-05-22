@@ -325,6 +325,20 @@ def test_image_preview_load_preserves_bottom_scroll(index_html: str):
     assert index_html.count("_keepMessagesBottomAfterMediaLoad(img);") >= 2
 
 
+def test_chat_colors_are_deterministic_across_devices(index_html: str):
+    """Message colors and peer accents should not depend on browser-local
+    cache unless the user explicitly saves a custom group color."""
+    assert "--bubble-in:  #1f2533;" in index_html
+    assert "--bubble-out: linear-gradient(135deg, #6a4dff 0%, #4ec1ff 100%);" in index_html
+    assert index_html.count("--bubble-in: #1f2533;") >= 1
+    assert index_html.count("--bubble-out: linear-gradient(135deg, #6a4dff 0%, #4ec1ff 100%);") >= 1
+    assert "function deterministicAccentForId(id)" in index_html
+    assert "function peerAccentColor(peer)" in index_html
+    assert "peer?.fingerprint || peer?.ed_pub_hex || peer?.short_id" in index_html
+    assert "av.style.background = peerAccentColor(p);" in index_html
+    assert "|| deterministicAccentForId(gid)" in index_html
+
+
 def test_clear_unread_rerenders_open_chat(index_html: str):
     """Unread dividers must disappear as soon as the open thread is read."""
     idx = index_html.find("function clearUnread(peerShortId)")
