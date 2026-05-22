@@ -285,6 +285,49 @@ def _bench_file_wants_bounds() -> dict:
     return _bench("file_wants_bounds_loop (T3-T)", run, iters=5_000)
 
 
+# ── state.update_transfer ──────────────────────────────────────────
+
+def _bench_update_transfer() -> dict:
+    """T3-K wrapped ``update_transfer`` in ``_write_lock`` across
+    read + write. Validate the added lock acquisition doesn't slow
+    the common (single-threaded) call by more than a few percent.
+    """
+    import tempfile
+    from one_link.state import State
+
+    td = tempfile.mkdtemp(prefix="ol_bench_state_")
+    state = State(db_path=Path(td) / "state.db")
+    # Seed a transfer to update.
+    state.upsert_transfer(
+        id="bench-t1",
+        direction="out",
+        peer_fp="deadbeef" * 8,
+        kind="file",
+        name="bench.bin",
+        size=1024,
+        blob_hash="deadbeef" * 8,
+        status="active",
+        progress_bytes=0,
+        total_bytes=1024,
+        chunks_done=0,
+        chunks_total=4,
+        raw_bytes=0,
+        wire_bytes=0,
+        metadata={"path": "/tmp/bench.bin"},
+    )
+    progress = {"n": 0}
+
+    def run() -> None:
+        progress["n"] += 1
+        state.update_transfer(
+            "bench-t1",
+            progress_bytes=progress["n"] % 1024,
+            chunks_done=progress["n"] % 4,
+        )
+
+    return _bench("update_transfer (T3-K lock)", run, iters=5_000)
+
+
 # ── Driver ─────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -295,6 +338,7 @@ def main() -> int:
         _bench_safe_transfer_name,
         _bench_csrf_origin_ok,
         _bench_file_wants_bounds,
+        _bench_update_transfer,
     ]
     print(f"{'name':<46} {'ns/op (med)':>14} {'ns/op (p95)':>14} {'ops/sec':>14}")
     print("-" * 92)
