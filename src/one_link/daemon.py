@@ -4387,7 +4387,9 @@ class Daemon:
             # pre-dial check find the peer's port + open QUIC on the
             # FIRST chunk, not just on subsequent transfers.
             qp = msg.get("quic_port")
-            if isinstance(qp, int) and 0 < qp < 65536:
+            # 2026-05-21 audit T2-P: require >= 1024 to refuse
+            # well-known-port redirection (UDP/53, UDP/123, etc).
+            if isinstance(qp, int) and 1024 <= qp < 65536:
                 self._quic_peer_ports[peer_fp] = qp
                 log.debug(
                     "Wave 2f: stashed peer QUIC port %d for %s from CAPS",
@@ -4643,6 +4645,22 @@ class Daemon:
                 "ACK", self.me.short_id, of=msg.get("id"),
                 batch_processed=processed,
             )))
+            return
+        elif t == "FILE_ABORT":
+            # 2026-05-21 audit T2-F: the sender tells us it can't
+            # finish (source file changed mid-transfer, capability
+            # revoked, user cancelled). Tear down our in-progress
+            # state for this blob so the sidecar doesn't try to
+            # resume forever. No ACK — the sender is bailing.
+            blob = str(msg.get("blob") or "")
+            f = self._incoming_files.get(blob) if blob else None
+            if f is not None:
+                reason = str(msg.get("reason") or "sender_abort")[:64]
+                log.info(
+                    "file abort from %s for %s: reason=%s",
+                    peer_sid, blob[:8], reason,
+                )
+                self._abort_incoming_file(blob, f)
             return
         elif t == "FILE_OFFER":
             if not self._capability_allowed(peer_fp, FILES):
@@ -6339,7 +6357,12 @@ class Daemon:
         #     LPT1-9, AUX, PRN). Match by stem so "CON.txt" is also
         #     rejected — Windows treats the device-name stem as the
         #     reserved meaning even with an extension.
-        clean = name.replace("\x00", "").rstrip(". ")
+        # 2026-05-21 audit T3-R: also strip the ``:`` separator. On
+        # NTFS, ``report.pdf:hidden.exe`` is a valid filename where
+        # ``:hidden.exe`` is an Alternate Data Stream — invisible to
+        # Explorer but executable. A paired peer could ship an
+        # executable hidden as a document attachment.
+        clean = name.replace("\x00", "").replace(":", "_").rstrip(". ")
         if not clean:
             return "unnamed.bin"
         if any(0 <= ord(c) <= 0x1f or ord(c) == 0x7f for c in clean):
@@ -14689,9 +14712,13 @@ class Daemon:
         # later outbound dialing. Sender's QUIC path consults
         # ``self._quic_peer_ports[peer_fp]`` to know which port
         # to dial. Validation: positive 16-bit int or ignored.
+        # 2026-05-21 audit T2-P: tighten the lower bound to 1024
+        # to refuse well-known ports (someone redirecting us to
+        # dial UDP/53, UDP/123, UDP/520 etc. as a reflection-
+        # amplification primer is a small-but-real abuse).
         try:
             quic_port_raw = msg.get("quic_port")
-            if isinstance(quic_port_raw, int) and 0 < quic_port_raw < 65536:
+            if isinstance(quic_port_raw, int) and 1024 <= quic_port_raw < 65536:
                 self._quic_peer_ports[peer_fp] = quic_port_raw
                 log.debug(
                     "stored QUIC port %d for peer %s",
@@ -17532,7 +17559,8 @@ class Daemon:
                     # receive loop too, so the very first batch's
                     # pre-dial check sees a non-None port.
                     qp = m.get("quic_port")
-                    if isinstance(qp, int) and 0 < qp < 65536:
+                    # 2026-05-21 audit T2-P: refuse well-known ports.
+                    if isinstance(qp, int) and 1024 <= qp < 65536:
                         self._quic_peer_ports[peer_fp] = qp
                     if self.state is not None:
                         with contextlib.suppress(Exception):
@@ -17638,10 +17666,27 @@ class Daemon:
                         await flush()
 
                 cdc_used = can_offer_cdc and first_reply.get("t") == "FILE_WANTS"
-                wanted_indexes = (
-                    {int(i) for i in first_reply.get("wants", [])}
-                    if cdc_used else set()
-                )
+                # 2026-05-21 audit T3-T: bound the FILE_WANTS index set
+                # to [0, len(cdc_chunks)). A misbehaving receiver
+                # claiming wants=[0, 9999, -1, 2**62] previously had
+                # those values flow into wanted_total / chunk_ack_batch
+                # math (degenerate window sizing) and the int(x)
+                # conversion accepted ANY 64-bit value. Strip out-of-
+                # range AND non-integer-like values before they touch
+                # the send loop.
+                if cdc_used:
+                    raw_wants = first_reply.get("wants", [])
+                    chunk_count = len(cdc_chunks)
+                    wanted_indexes: set[int] = set()
+                    for raw in raw_wants:
+                        try:
+                            i = int(raw)
+                        except (TypeError, ValueError):
+                            continue
+                        if 0 <= i < chunk_count:
+                            wanted_indexes.add(i)
+                else:
+                    wanted_indexes = set()
                 actual_method = (
                     "file_cdc"
                     if cdc_used
@@ -17909,7 +17954,25 @@ class Daemon:
                             f.seek(c.start)
                             data = f.read(c.size)
                             if len(data) != c.size or blake3.blake3(data).hexdigest() != c.hash:
-                                raise RuntimeError("source file changed during transfer")
+                                # 2026-05-21 audit T2-F: emit a wire
+                                # ABORT before raising so the receiver
+                                # tears down its in-progress state +
+                                # sidecar instead of sitting on a
+                                # transfer that can never complete.
+                                # Without this, the sidecar resumes on
+                                # next start and the same chunk is
+                                # requested forever.
+                                with contextlib.suppress(Exception):
+                                    await channel.send(encode_msg(make_msg(
+                                        "FILE_ABORT", self.me.short_id,
+                                        blob=blob_hex,
+                                        reason="source_changed",
+                                    )))
+                                raise RuntimeError(
+                                    f"source file {path.name} changed during "
+                                    f"transfer (size or hash mismatch at "
+                                    f"chunk index {c.index})"
+                                )
                             enc, payload = self._encode_payload(
                                 data,
                                 allow_compress=compression_enabled,
