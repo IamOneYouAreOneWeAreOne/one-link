@@ -87,6 +87,12 @@ def test_soak_chat_50_messages():
     50 + pacing is still hundreds of round-trips through the actual
     chat pipeline."""
     with daemon_pair() as p:
+        # 2026-05-21 audit T3-N: track exact counts via Counter so a
+        # bug that delivers the same body twice while losing another
+        # still surfaces as a failure (set diff would say "all there"
+        # if total count matches by coincidence).
+        from collections import Counter
+
         N = 50
         # A → B
         for i in range(N):
@@ -100,11 +106,14 @@ def test_soak_chat_50_messages():
             if m.get("t") == "TEXT" and m.get("dir") == "in"
             and m.get("body", "").startswith("a-msg-")
         ]
-        missing = (
-            set(f"a-msg-{i:03d}" for i in range(N))
-            - set(m["body"] for m in b_inbound)
-        )
+        expected = Counter(f"a-msg-{i:03d}" for i in range(N))
+        received = Counter(m["body"] for m in b_inbound)
+        missing = expected - received
+        duplicates = received - expected
         assert not missing, f"B missing {len(missing)} of {N}: {sorted(missing)[:10]}"
+        assert not duplicates, (
+            f"B got duplicate deliveries: {dict(duplicates)}"
+        )
         # B → A
         for i in range(N):
             res = request(p.b.control_port, cmd="send",
@@ -117,11 +126,14 @@ def test_soak_chat_50_messages():
             if m.get("t") == "TEXT" and m.get("dir") == "in"
             and m.get("body", "").startswith("b-msg-")
         ]
-        missing = (
-            set(f"b-msg-{i:03d}" for i in range(N))
-            - set(m["body"] for m in a_inbound)
-        )
+        expected_a = Counter(f"b-msg-{i:03d}" for i in range(N))
+        received_a = Counter(m["body"] for m in a_inbound)
+        missing = expected_a - received_a
+        duplicates = received_a - expected_a
         assert not missing, f"A missing {len(missing)} of {N}: {sorted(missing)[:10]}"
+        assert not duplicates, (
+            f"A got duplicate deliveries: {dict(duplicates)}"
+        )
 
 
 def test_soak_long_message():
@@ -380,20 +392,29 @@ def test_soak_bidi_interleaved():
             assert res_b["ok"], (i, "b", res_b)
             time.sleep(0.020)
         time.sleep(2.0)
-        a_in = {
+        # 2026-05-21 audit T3-N: Counter instead of set so we also
+        # surface duplicate deliveries in the bidi-interleaved path.
+        from collections import Counter
+        a_in = Counter(
             m["body"] for m in message_log(p.a.home)
             if m.get("t") == "TEXT" and m.get("dir") == "in"
             and m.get("body", "").startswith("b-")
-        }
-        b_in = {
+        )
+        b_in = Counter(
             m["body"] for m in message_log(p.b.home)
             if m.get("t") == "TEXT" and m.get("dir") == "in"
             and m.get("body", "").startswith("a-")
-        }
-        missing_a = set(f"b-{i:02d}" for i in range(N)) - a_in
-        missing_b = set(f"a-{i:02d}" for i in range(N)) - b_in
+        )
+        expected_a = Counter(f"b-{i:02d}" for i in range(N))
+        expected_b = Counter(f"a-{i:02d}" for i in range(N))
+        missing_a = expected_a - a_in
+        missing_b = expected_b - b_in
+        dup_a = a_in - expected_a
+        dup_b = b_in - expected_b
         assert not missing_a, f"A missing {missing_a}"
         assert not missing_b, f"B missing {missing_b}"
+        assert not dup_a, f"A duplicate deliveries: {dict(dup_a)}"
+        assert not dup_b, f"B duplicate deliveries: {dict(dup_b)}"
 
 
 def test_soak_long_body_round_trip():
