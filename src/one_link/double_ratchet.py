@@ -537,33 +537,86 @@ def decrypt(
       - May trigger a DH ratchet step if header.dh is new
       - Stashes any skipped keys we passed over
       - Records (header.dh, header.n) as consumed (replay defence)
+
+    Atomicity (2026-05-21 audit T1-A): any state mutation done before
+    the AEAD decrypt MUST be reverted on AEAD failure. Previously
+    ``_dh_ratchet`` was run before ``_aead_for(msg_key).decrypt``;
+    a forged frame with a random ``header.dh`` mutated ``root_key``,
+    ``recv_chain_key``, ``send_chain_key``, ``dh_send`` etc. before
+    the AEAD tag check failed — and the corrupted state was committed,
+    leaving the channel unable to decrypt the next legitimate frame.
+    That's a 1-packet DoS by any network-positioned attacker on a
+    paired pair. We now snapshot every field the path may mutate and
+    restore them on any failure (including AEAD ``InvalidTag``).
+    The hot path (no DH step, no skipped keys, AEAD succeeds) pays
+    one struct-of-scalars assignment for snapshot — negligible.
     """
     # Replay check before any state mutation.
     seen_key = (header.dh, header.n)
     if seen_key in state.decrypted_seen:
         raise RuntimeError("ratchet: replayed message rejected")
-    # 1. Try the skipped-key cache first (OOO delivery).
+    # 1. Try the skipped-key cache first (OOO delivery). Note that
+    # _try_skipped pops the key BEFORE its AEAD verify; we handle
+    # that revert below via the same snapshot.
+    _snap_skipped = state.skipped.copy()
     pt = _try_skipped(state, header, ciphertext, ad)
     if pt is not None:
         return pt
-    # 2. Fresh ephemeral from peer? Run DH ratchet.
-    if state.dh_recv_pub != header.dh:
-        _dh_ratchet(state, header)
-    # 3. Advance the receive chain to header.n, stashing skipped keys.
-    if header.n > state.recv_n:
-        _skip_recv_keys(state, header.n)
-    elif header.n < state.recv_n:
-        # An old-chain message? Should have been served from skipped.
-        raise RuntimeError(
-            f"ratchet: out-of-order delivery on current chain"
-            f" (n={header.n} < recv_n={state.recv_n}) — message lost"
-        )
-    if state.recv_chain_key is None:
-        raise RuntimeError("ratchet: receive chain not initialized")
-    state.recv_chain_key, msg_key = kdf_chain(state.recv_chain_key)
-    nonce = _aead_nonce(header.n)
-    aead_ad = header.encode() + (ad or b"")
-    pt = _aead_for(msg_key).decrypt(nonce, ciphertext, aead_ad)
+    # No skipped-key match; _try_skipped's pop was a no-op for the
+    # subsequent paths, but the snapshot is cheap to hold.
+
+    # 2-3. We may need to run a DH ratchet step and/or skip-recv-keys.
+    # Both mutate state. Snapshot every scalar BEFORE either runs so
+    # we can revert on AEAD failure.
+    _snap_root_key = state.root_key
+    _snap_recv_chain_key = state.recv_chain_key
+    _snap_send_chain_key = state.send_chain_key
+    _snap_recv_n = state.recv_n
+    _snap_send_n = state.send_n
+    _snap_prev_send_n = state.prev_send_n
+    _snap_dh_send = state.dh_send
+    _snap_dh_send_pub = state.dh_send_pub
+    _snap_dh_recv_pub = state.dh_recv_pub
+
+    try:
+        # 2. Fresh ephemeral from peer? Run DH ratchet.
+        if state.dh_recv_pub != header.dh:
+            _dh_ratchet(state, header)
+        # 3. Advance the receive chain to header.n, stashing skipped keys.
+        if header.n > state.recv_n:
+            _skip_recv_keys(state, header.n)
+        elif header.n < state.recv_n:
+            # An old-chain message? Should have been served from skipped.
+            raise RuntimeError(
+                f"ratchet: out-of-order delivery on current chain"
+                f" (n={header.n} < recv_n={state.recv_n}) — message lost"
+            )
+        if state.recv_chain_key is None:
+            raise RuntimeError("ratchet: receive chain not initialized")
+        state.recv_chain_key, msg_key = kdf_chain(state.recv_chain_key)
+        nonce = _aead_nonce(header.n)
+        aead_ad = header.encode() + (ad or b"")
+        pt = _aead_for(msg_key).decrypt(nonce, ciphertext, aead_ad)
+    except BaseException:
+        # ANY failure (AEAD InvalidTag, RuntimeError from our own
+        # validations, asyncio.CancelledError, etc.) reverts every
+        # mutation. Without this revert a single forged frame poisons
+        # the channel permanently — see T1-A above.
+        state.root_key = _snap_root_key
+        state.recv_chain_key = _snap_recv_chain_key
+        state.send_chain_key = _snap_send_chain_key
+        state.recv_n = _snap_recv_n
+        state.send_n = _snap_send_n
+        state.prev_send_n = _snap_prev_send_n
+        state.dh_send = _snap_dh_send
+        state.dh_send_pub = _snap_dh_send_pub
+        state.dh_recv_pub = _snap_dh_recv_pub
+        # Restore the skipped-key dict (preserves order in 3.7+).
+        state.skipped.clear()
+        state.skipped.update(_snap_skipped)
+        raise
+
+    # AEAD verified. Commit the trailing mutations + replay-cache entry.
     state.recv_n += 1
     # v0.20.7 (security audit H2): record the (dh, n) pair in
     # insertion order. On overflow, evict the OLDEST entry — never

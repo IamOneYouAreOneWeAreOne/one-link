@@ -343,6 +343,69 @@ def test_modified_ciphertext_fails():
         decrypt(bob, h, tampered)
 
 
+def test_decrypt_failure_reverts_state_t1a():
+    """Regression test for the 2026-05-21 audit T1-A finding.
+
+    BEFORE the fix: any failed decrypt (forged ``header.dh``, bad
+    AEAD tag) committed the DH-ratchet state mutation done in
+    ``_dh_ratchet`` before the AEAD check. A single forged frame
+    from any network-positioned attacker permanently broke the
+    channel — the receiver's ``root_key``, ``recv_chain_key``,
+    ``send_chain_key``, ``dh_send`` etc. were corrupted, so the
+    next legitimate frame couldn't decrypt either.
+
+    AFTER the fix: ``decrypt`` snapshots every mutable field and
+    reverts on any exception, so the channel survives forged
+    frames intact.
+    """
+    alice, bob = init_pair(_ss())
+
+    # Send + decrypt a real frame so both sides have ratchet state.
+    h1, ct1 = encrypt(alice, b"first")
+    assert decrypt(bob, h1, ct1) == b"first"
+
+    # Snapshot Bob's state.
+    snap = (
+        bob.root_key,
+        bob.recv_chain_key,
+        bob.send_chain_key,
+        bob.recv_n,
+        bob.send_n,
+        bob.prev_send_n,
+        bob.dh_send,
+        bob.dh_send_pub,
+        bob.dh_recv_pub,
+        dict(bob.skipped),
+    )
+
+    # Craft a forged frame with a brand-new dh + random ciphertext.
+    # The new dh triggers ``_dh_ratchet`` inside decrypt; the random
+    # ciphertext is guaranteed to fail AEAD. Without the T1-A fix,
+    # bob's state would be mutated and the next legitimate frame
+    # would not decrypt.
+    forged_dh = os.urandom(32)
+    forged_header = Header(v=1, flags=0, dh=forged_dh, pn=0, n=0)
+    forged_ct = os.urandom(64)  # any non-tag-valid ciphertext
+    with pytest.raises(Exception):
+        decrypt(bob, forged_header, forged_ct)
+
+    # Bob's state must be exactly what it was before the forged frame.
+    assert bob.root_key == snap[0]
+    assert bob.recv_chain_key == snap[1]
+    assert bob.send_chain_key == snap[2]
+    assert bob.recv_n == snap[3]
+    assert bob.send_n == snap[4]
+    assert bob.prev_send_n == snap[5]
+    assert bob.dh_send is snap[6]
+    assert bob.dh_send_pub == snap[7]
+    assert bob.dh_recv_pub == snap[8]
+    assert dict(bob.skipped) == snap[9]
+
+    # The clincher: a second legitimate frame from Alice still decrypts.
+    h2, ct2 = encrypt(alice, b"second")
+    assert decrypt(bob, h2, ct2) == b"second"
+
+
 def test_associated_data_must_match():
     alice, bob = init_pair(_ss())
     h, ct = encrypt(alice, b"hi", ad=b"context-A")
