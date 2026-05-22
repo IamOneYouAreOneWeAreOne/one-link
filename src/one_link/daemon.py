@@ -4421,6 +4421,35 @@ class Daemon:
             # already imported at module level and shadowing it would
             # cause UnboundLocalError on FILE_CHUNK handling later in
             # the same function (Python's local-name analysis).
+            # 2026-05-21 audit T1-J: previously this handler accepted
+            # CAPABILITY_GRANT from ANY channel-authenticated peer.
+            # A stranger / relay-routed peer / share-link redeem flow
+            # could mint usable grants against our local store. The
+            # _cap_store delegation walker then chains through any
+            # paired peer's existing grants up to max_depth=2, giving
+            # the granter the union of our paired peers' capabilities.
+            # Trust gate: only accept grants from peers we've
+            # explicitly pinned (post-SAS verification). The grant
+            # signature is verified inside _cap_store.accept either
+            # way; this is the upstream "is the granter someone we
+            # actually trust to grant capabilities?" gate.
+            if not self._is_pinned(peer_fp):
+                log.warning(
+                    "rejected capability grant from unpinned peer %s "
+                    "(grants only accepted from pinned peers)",
+                    peer_fp[:8],
+                )
+                with contextlib.suppress(Exception):
+                    await channel.send(encode_msg(make_msg(
+                        "ACK", self.me.short_id, of=msg.get("id"),
+                        rejected="grant_rejected: granter not pinned",
+                    )))
+                with contextlib.suppress(Exception):
+                    self._record_capability_denial(
+                        reason="grant_from_unpinned",
+                        capability="*",
+                    )
+                return
             try:
                 grant_b64 = msg.get("grant_b64", "")
                 if not isinstance(grant_b64, str) or not grant_b64:
@@ -4458,10 +4487,13 @@ class Daemon:
                     "rejected capability grant from %s: %s",
                     peer_fp[:8], e,
                 )
+                # 2026-05-21 audit T3-U: reflecting raw verifier errors
+                # back to the peer leaks internal cap-store state. Map
+                # to a coarse, non-informative reason.
                 with contextlib.suppress(Exception):
                     await channel.send(encode_msg(make_msg(
                         "ACK", self.me.short_id, of=msg.get("id"),
-                        rejected=f"grant_rejected: {e}",
+                        rejected="grant_rejected: invalid",
                     )))
             return
         if t == "SELF_MESH_PRESENCE":
@@ -7784,11 +7816,26 @@ class Daemon:
             return
         seq = int(msg.get("seq", -1))
         if seq != f.next_seq:
+            # 2026-05-21 audit T2-E: previously this raised
+            # RuntimeError, which propagated up through the
+            # _on_peer_message loop and TORE DOWN THE ENTIRE
+            # SECURE CHANNEL — killing chat + every concurrent
+            # transfer over a single reordered chunk on this one
+            # transfer. Match the FILE_CHUNK handler's behaviour:
+            # ACK-reject the chunk, abort just this transfer's
+            # in-progress state, and let the channel keep running.
             self._abort_incoming_file(blob, f)
-            raise RuntimeError(
-                f"FILE_NATIVE_CHUNK sequence mismatch for {blob[:8]}: "
-                f"expected {f.next_seq}, got {seq}"
+            log.warning(
+                "FILE_NATIVE_CHUNK sequence mismatch for %s: "
+                "expected %d, got %d (aborting transfer, channel alive)",
+                blob[:8], f.next_seq, seq,
             )
+            with contextlib.suppress(Exception):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="file_native_chunk_sequence_mismatch",
+                )))
+            return
         try:
             chunk_id_hex = str(msg["chunk_id"])
             chunk_id = bytes.fromhex(chunk_id_hex)
@@ -7927,11 +7974,22 @@ class Daemon:
             return
         seq = int(msg.get("seq", -1))
         if seq != f.next_seq:
+            # 2026-05-21 audit T2-E: keep the channel alive on chunk
+            # sequence mismatch. Mirror the FILE_CHUNK / FILE_NATIVE_CHUNK
+            # behaviour: ACK-reject the chunk, abort just this
+            # transfer's in-progress state, return.
             self._abort_incoming_file(blob, f)
-            raise RuntimeError(
-                f"FILE_BIN_CHUNK sequence mismatch for {blob[:8]}: "
-                f"expected {f.next_seq}, got {seq}"
+            log.warning(
+                "FILE_BIN_CHUNK sequence mismatch for %s: "
+                "expected %d, got %d (aborting transfer, channel alive)",
+                blob[:8], f.next_seq, seq,
             )
+            with contextlib.suppress(Exception):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="file_bin_chunk_sequence_mismatch",
+                )))
+            return
         data = msg.get("_binary_data")
         if not isinstance(data, (bytes, bytearray)):
             self._abort_incoming_file(blob, f)
