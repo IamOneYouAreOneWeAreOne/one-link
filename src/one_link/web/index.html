@@ -10410,6 +10410,8 @@
   // animation-frame callback so the UI updates smoothly.
   const _scheduled = { msgs: false, transfers: false, files: false, status: false };
   function scheduleRenderMessages() {
+    const m = document.querySelector("#messages");
+    if (m && _isMessagesNearBottom(m)) _forceNextMessagesToBottom(350);
     if (_scheduled.msgs) return;
     _scheduled.msgs = true;
     requestAnimationFrame(() => { _scheduled.msgs = false; renderMessages(); });
@@ -14383,13 +14385,25 @@
   const NEAR_BOTTOM_PX = 80;
   let _msgPillCount = 0;
   let _lastRenderedLen = 0;
+  let _forceMessageBottomUntil = 0;
+
+  function _isMessagesNearBottom(container, thresholdPx = NEAR_BOTTOM_PX) {
+    if (!container) return true;
+    const distFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    return distFromBottom <= thresholdPx;
+  }
+
+  function _forceNextMessagesToBottom(ms = 2500) {
+    _forceMessageBottomUntil = Math.max(_forceMessageBottomUntil, Date.now() + ms);
+  }
 
   function _captureScrollState(container) {
     if (!container) return { wasAtBottom: true, prevLen: 0 };
-    const distFromBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight;
+    const forceBottom = Date.now() <= _forceMessageBottomUntil;
     return {
-      wasAtBottom: distFromBottom <= NEAR_BOTTOM_PX,
+      wasAtBottom: forceBottom || _isMessagesNearBottom(container),
+      forceBottom,
       prevLen: _lastRenderedLen,
     };
   }
@@ -14401,6 +14415,7 @@
     if (before?.wasAtBottom) {
       // User was at the live edge - keep them there.
       container.scrollTop = container.scrollHeight;
+      _forceMessageBottomUntil = 0;
       _hideNewMessagePill();
       return;
     }
@@ -16086,6 +16101,7 @@
     // v0.21.1: reset the new-message pill on conversation switch.
     _hideNewMessagePill();
     _lastRenderedLen = 0;
+    _forceNextMessagesToBottom();
     // v0.14.1 persist for boot-time restore.
     _saveLastSelection("group", gidHex);
     state.selectedGroup = gidHex;
@@ -17749,6 +17765,7 @@
       _error: undefined,
       _attempts: (prev._attempts || 1) + 1,
     });
+    if (prev.peer === state.selectedPeer) _forceNextMessagesToBottom();
     const sendBody = {
       peer: prev.peer,
       body: prev.body,
@@ -18139,6 +18156,7 @@
     // would mislead the user about the new one.
     _hideNewMessagePill();
     _lastRenderedLen = 0;
+    _forceNextMessagesToBottom();
     // v0.14.0 prefetch: record this switch in the Markov chain
     // and pre-warm the predicted next peer in idle time.
     _recordSwitch(shortId);
@@ -21622,6 +21640,7 @@
           `/api/groups/${state.selectedGroup}/messages?limit=200`
         );
         state.groupMessages = r.messages || [];
+        _forceNextMessagesToBottom();
         renderGroupConversation();
       } catch (e) {
         toast(`Group send failed: ${errorToastBody(e)}`, "bad", 8000);
@@ -21713,6 +21732,7 @@
           optimistic.reply_to = state.replyTo.id;
         }
         state.messages.push(optimistic);
+        _forceNextMessagesToBottom();
         // Clear composer up-front so the bubble is visible where it
         // landed — no "did it send?" ambiguity.
         const replyToId = optimistic.reply_to;
