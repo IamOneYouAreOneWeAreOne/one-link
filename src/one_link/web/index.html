@@ -14448,6 +14448,30 @@
     _forceMessageBottomUntil = Math.max(_forceMessageBottomUntil, Date.now() + ms);
   }
 
+  function _scrollMessagesToVisualBottom(container) {
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+    requestAnimationFrame(() => {
+      container.scrollTop = container.scrollHeight;
+      const last = container.lastElementChild;
+      if (last && typeof last.scrollIntoView === "function") {
+        try { last.scrollIntoView({ block: "end", inline: "nearest" }); } catch {}
+      }
+      container.scrollTop = container.scrollHeight;
+    });
+  }
+
+  function _keepMessagesBottomAfterMediaLoad(mediaEl) {
+    const container = document.querySelector("#messages");
+    const shouldStick = !!container
+      && (Date.now() <= _forceMessageBottomUntil
+          || _isMessagesNearBottom(container, NEAR_BOTTOM_PX + 260));
+    if (!mediaEl || !shouldStick) return;
+    const settle = () => _scrollMessagesToVisualBottom(container);
+    mediaEl.addEventListener("load", settle, { once: true });
+    if (mediaEl.decode) mediaEl.decode().then(settle).catch(() => {});
+  }
+
   function _captureScrollState(container) {
     if (!container) return { wasAtBottom: true, prevLen: 0 };
     const forceBottom = Date.now() <= _forceMessageBottomUntil;
@@ -14464,7 +14488,7 @@
     _lastRenderedLen = newLen;
     if (before?.wasAtBottom) {
       // User was at the live edge - keep them there.
-      container.scrollTop = container.scrollHeight;
+      _scrollMessagesToVisualBottom(container);
       _forceMessageBottomUntil = 0;
       _hideNewMessagePill();
       return;
@@ -15668,6 +15692,7 @@
         img.className = "img-preview";
         img.src = `/api/files/${encodeURIComponent(fname)}`;
         img.alt = msg.name || "image";
+        _keepMessagesBottomAfterMediaLoad(img);
         img.onclick = (ev) => {
           ev.stopPropagation();
           const gal = _buildLightboxGalleryForCurrent(msg);
@@ -15698,6 +15723,7 @@
         img.className = "img-preview";
         img.src = cachedUrl;
         img.alt = msg.name || "image";
+        _keepMessagesBottomAfterMediaLoad(img);
         img.onclick = (ev) => {
           ev.stopPropagation();
           const gal = _buildLightboxGalleryForCurrent(msg);

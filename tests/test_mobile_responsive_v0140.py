@@ -295,6 +295,7 @@ def test_chat_render_sticks_to_bottom_for_live_edge_and_own_sends(index_html: st
     bubble visible after the virtualized DOM rebuild."""
     assert "function _forceNextMessagesToBottom" in index_html
     assert "function _isMessagesNearBottom" in index_html
+    assert "function _scrollMessagesToVisualBottom" in index_html
 
     scheduler_idx = index_html.find("function scheduleRenderMessages()")
     scheduler = index_html[scheduler_idx:scheduler_idx + 500]
@@ -310,6 +311,18 @@ def test_chat_render_sticks_to_bottom_for_live_edge_and_own_sends(index_html: st
     switch_path = index_html[switch_idx:switch_idx + 1100]
     assert "_lastRenderedLen = 0;" in switch_path
     assert "_forceNextMessagesToBottom();" in switch_path
+
+
+def test_image_preview_load_preserves_bottom_scroll(index_html: str):
+    """Large image thumbnails load after render; their load event must not
+    push the newest bubble under the composer."""
+    assert "function _keepMessagesBottomAfterMediaLoad(mediaEl)" in index_html
+    helper_idx = index_html.find("function _keepMessagesBottomAfterMediaLoad")
+    helper = index_html[helper_idx:helper_idx + 900]
+    assert "addEventListener(\"load\", settle" in helper
+    assert "mediaEl.decode()" in helper
+    assert "_scrollMessagesToVisualBottom(container)" in helper
+    assert index_html.count("_keepMessagesBottomAfterMediaLoad(img);") >= 2
 
 
 def test_clear_unread_rerenders_open_chat(index_html: str):
