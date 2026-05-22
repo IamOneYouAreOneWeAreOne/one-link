@@ -411,6 +411,62 @@ def _bench_cdc_empty_input() -> dict:
     return _bench("cdc_empty_input (T3-S)", run, iters=100_000)
 
 
+# ── T1-B candidate: per-chunk ratchet-keyed AEAD ───────────────────
+
+def _bench_native_aead_current() -> dict:
+    """Current production path: per-chunk encrypt uses session-static
+    ``shared_secret`` as AEAD key; ratchet output is discarded.
+    Measure the encrypt cost so we can compare with the T1-B candidate
+    that uses ratchet output as the per-chunk key (constructs a new
+    AEAD instance every call)."""
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+    shared_secret = b"\xaa" * 32
+    aead = ChaCha20Poly1305(shared_secret)
+    plaintext = b"\xcc" * (256 * 1024)
+    chunk_id = b"\xdd" * 32
+    state = {"idx": 0}
+
+    def run() -> None:
+        nonce = state["idx"].to_bytes(12, "little")
+        aead.encrypt(nonce, plaintext, chunk_id)
+        state["idx"] += 1
+
+    return _bench("native_aead current (static key, 256 KiB)", run, iters=200)
+
+
+def _bench_native_aead_t1b_candidate() -> dict:
+    """T1-B candidate: per-chunk key from a derived KDF. Mirrors the
+    cost of using ``ratchet.next_key()`` output instead of session-
+    static ``shared_secret``. The KDF call here is a stand-in;
+    ``chunk_ratchet.ChunkRatchet.next_key`` calls into a native BLAKE3
+    chain step.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+    import hashlib
+
+    base_secret = b"\xaa" * 32
+    plaintext = b"\xcc" * (256 * 1024)
+    chunk_id = b"\xdd" * 32
+    state = {"idx": 0, "ck": base_secret}
+
+    def run() -> None:
+        # KDF chain step (BLAKE3 stand-in via SHA256 since blake3 is
+        # already heavily benchmarked elsewhere).
+        ck = state["ck"]
+        chunk_key = hashlib.sha256(b"\x01" + ck).digest()
+        state["ck"] = hashlib.sha256(b"\x02" + ck).digest()
+        aead = ChaCha20Poly1305(chunk_key)
+        nonce = state["idx"].to_bytes(12, "little")
+        aead.encrypt(nonce, plaintext, chunk_id)
+        state["idx"] += 1
+
+    return _bench(
+        "native_aead T1-B candidate (per-chunk key, 256 KiB)",
+        run, iters=200,
+    )
+
+
 # ── Driver ─────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -425,6 +481,8 @@ def main() -> int:
         _bench_list_peer_files,
         _bench_content_disposition,
         _bench_cdc_empty_input,
+        _bench_native_aead_current,
+        _bench_native_aead_t1b_candidate,
     ]
     print(f"{'name':<46} {'ns/op (med)':>14} {'ns/op (p95)':>14} {'ops/sec':>14}")
     print("-" * 92)

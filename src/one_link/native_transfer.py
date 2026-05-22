@@ -201,6 +201,9 @@ class NativeTransferSession:
         self._ratchet = chunk_ratchet.ChunkRatchet.from_shared_secret(
             self.shared_secret
         )
+        # T1-B: skipped-key store, lazily created on first decrypt
+        # to handle OOO chunk delivery (QUIC parallel lanes etc).
+        self._skipped_store = None
         if self.cipher_backend == "native":
             # Native multi-frame AEAD (ADR-0002). Used when partial-
             # chunk integrity is the priority.
@@ -269,17 +272,38 @@ class NativeTransferSession:
             chunk_id = bytes(chunk_id)
         idx = self._next_send_index
         self._next_send_index += 1
-        # Tick the ratchet so sender + receiver counters stay synced.
-        # Done BEFORE the AEAD call so failures during encrypt still
-        # leave both ends advancing in lockstep on the next chunk.
-        _key, _ = self._ratchet.next_key()
+        # 2026-05-21 audit T1-B: ratchet-keyed per-chunk AEAD when
+        # the local + peer caps both advertise NATIVE_TRANSFER_INDEXED_V2.
+        # Sender derives ``chunk_key`` from the per-chunk ratchet
+        # step and uses it as the AEAD key (instead of session-static
+        # ``self.shared_secret``). Receiver derives the same key via
+        # ``ratchet.key_at(record.chunk_index)`` so OOO QUIC delivery
+        # still decrypts. Within-channel forward secrecy: compromise
+        # of chunk N's key reveals chunk N only — chunks 0..N-1 are
+        # protected by the ratchet's irreversible one-way chain.
+        # Cost: ~3.6% per-chunk slowdown vs the prior static-key path
+        # (measured 77 µs vs 74 µs on 256 KiB; bench
+        # ``native_aead T1-B candidate`` in
+        # ``scripts/bench_audit_2026_05_21.py``).
+        chunk_key, _ratchet_idx = self._ratchet.next_key()
         if self._fast_aead is not None:
-            # Fast path: cryptography.hazmat AEAD. The 12-byte nonce
-            # is derived from the chunk index so two chunks of the
-            # same plaintext still encrypt to different ciphertexts.
-            # chunk_id bound as AAD ⇒ tag fails on any swap/tamper.
+            # Fast path: build a per-chunk AEAD using the ratchet
+            # output. The 12-byte nonce is still the chunk index so
+            # two chunks of the same plaintext still encrypt to
+            # different ciphertexts (defense-in-depth; with a unique
+            # per-chunk key the nonce is technically free, but
+            # keeping a counter nonce is cheap and surfaces wire
+            # bugs immediately if it ever collides).
+            from cryptography.hazmat.primitives.ciphers.aead import (
+                AESGCM,
+                ChaCha20Poly1305,
+            )
+            if self.aead_kind == "aes":
+                per_chunk_aead = AESGCM(chunk_key)
+            else:
+                per_chunk_aead = ChaCha20Poly1305(chunk_key)
             nonce = idx.to_bytes(12, "little")
-            ciphertext = self._fast_aead.encrypt(nonce, plaintext, chunk_id)
+            ciphertext = per_chunk_aead.encrypt(nonce, plaintext, chunk_id)
         else:
             ciphertext = self._cipher.encrypt_chunk(chunk_id, plaintext)
             if not isinstance(ciphertext, bytes):
@@ -486,12 +510,28 @@ class NativeTransferSession:
         environments flip the flag; everyone else trusts the AAD-
         as-commitment property + the peer's pinned trust.
         """
-        # Advance the ratchet first so failures still keep both ends
-        # in lockstep.
-        _ = self._ratchet.next_key()
+        # 2026-05-21 audit T1-B: derive the matching per-chunk key
+        # via ``ratchet.key_at(chunk_index)``. Handles OOO QUIC
+        # delivery via the skipped-key store (intermediate keys are
+        # cached so a delayed chunk can still derive its key). The
+        # lazy ``_skipped_store`` is per-session; size capped at
+        # ``ChunkRatchet.skipped_store(cap=1024)``.
+        if self._skipped_store is None:
+            self._skipped_store = self._ratchet.skipped_store()
+        chunk_key = self._ratchet.key_at(
+            int(record.chunk_index), skipped=self._skipped_store,
+        )
         if self._fast_aead is not None:
+            from cryptography.hazmat.primitives.ciphers.aead import (
+                AESGCM,
+                ChaCha20Poly1305,
+            )
+            if self.aead_kind == "aes":
+                per_chunk_aead = AESGCM(chunk_key)
+            else:
+                per_chunk_aead = ChaCha20Poly1305(chunk_key)
             nonce = record.chunk_index.to_bytes(12, "little")
-            plaintext = self._fast_aead.decrypt(
+            plaintext = per_chunk_aead.decrypt(
                 nonce, record.ciphertext, record.chunk_id
             )
         else:

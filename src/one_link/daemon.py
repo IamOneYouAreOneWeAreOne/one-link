@@ -21110,6 +21110,32 @@ class Daemon:
                     self._quic_recent_paired.popleft()
                 else:
                     break
+            # 2026-05-21 audit T1-H: detect the FIFO-race window
+            # where multiple is_paired callbacks fire for distinct
+            # peers before accept_blocking returns. The popleft below
+            # binds the accepted Connection to the OLDEST queued fp,
+            # which may not match the connection's actual peer
+            # (cross-peer identity confusion). Until the native crate
+            # exposes peer-fp on the Connection, we surface the race
+            # to operators via a degradation event so a populated
+            # transfer_diagnostics ring reveals the symptom even
+            # when the race is otherwise invisible. A proper fix
+            # requires `Connection.peer_fingerprint()` in
+            # ``one_link_native.quic``; tracked in
+            # `AUDIT_2026-05-21.md` as native-crate work.
+            if len(self._quic_recent_paired) > 1:
+                self._degradation_events.append({
+                    "at_ms": now_ms,
+                    "kind": "quic_accept_fifo_race_window",
+                    "peer_fp": None,
+                    "reason": (
+                        f"is_paired fired {len(self._quic_recent_paired)} "
+                        f"times before accept_blocking returned; "
+                        f"FIFO order may be ambiguous"
+                    ),
+                    "expected": "1:1 paired→accepted ordering",
+                    "actual": f"queue depth {len(self._quic_recent_paired)}",
+                })
             if self._quic_recent_paired:
                 _ts, fp_bytes = self._quic_recent_paired.popleft()
                 peer_fp = fp_bytes.hex()
