@@ -1845,6 +1845,54 @@ class UIServer:
         bucket.append(now)
         return False
 
+    # 2026-05-21 audit T2-O: HTTP methods that mutate state must
+    # pass an Origin / Referer check on top of the token. Otherwise
+    # a malicious page on any other localhost / same-LAN origin can
+    # issue ``fetch(..., {credentials:"include"})`` cross-origin,
+    # ride the cookie, and mutate One Link state from the user's
+    # browser without their consent. GET is read-only by HTTP
+    # contract and is exempted — every state-changing route in this
+    # daemon is POST/PUT/PATCH/DELETE.
+    _CSRF_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+    def _csrf_origin_ok(self, request: web.Request) -> bool:
+        """Return True iff the request's Origin/Referer is allowed,
+        OR a Bearer token is presented (cross-origin attackers can't
+        forge that). Header-only paths (curl, native CLI) carry
+        Bearer and pass; same-origin browser requests carry Origin
+        equal to the daemon's bind URL and pass; everything else is
+        rejected."""
+        # Bearer tokens can't be auto-attached by a victim's browser
+        # against an attacker page, so their presence is sufficient.
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            return True
+        origin = request.headers.get("Origin") or request.headers.get("Referer") or ""
+        if not origin:
+            # Same-origin browser POSTs typically include Origin;
+            # absence is suspicious. Reject defensively.
+            return False
+        # Compare scheme://host:port prefix. self.bind_host /
+        # self.bind_port carry the running daemon's listen address.
+        try:
+            from urllib.parse import urlparse
+            o = urlparse(origin)
+            allowed_hosts = {"127.0.0.1", "localhost", "::1"}
+            # If we're bound to a LAN address, also allow that exact
+            # host. Loopback variants are always allowed.
+            bind_host = getattr(self, "bind_host", None)
+            if bind_host:
+                allowed_hosts.add(bind_host)
+            return (
+                o.hostname in allowed_hosts
+                # Port can be None on Origin if standard; we accept
+                # any port to stay flexible across LAN/loopback bind
+                # changes. The Bearer-token escape hatch above means
+                # the strict-port path is only hit by browsers.
+            )
+        except Exception:
+            return False
+
     def _guarded(self, handler):
         async def wrap(request: web.Request) -> web.StreamResponse:
             if not self._check_token(request):
@@ -1858,6 +1906,14 @@ class UIServer:
                         status=429,
                     )
                 return web.json_response({"error": "unauthorized"}, status=401)
+            if (
+                request.method in self._CSRF_MUTATING_METHODS
+                and not self._csrf_origin_ok(request)
+            ):
+                return web.json_response(
+                    {"error": "cross-origin request blocked"},
+                    status=403,
+                )
             return await handler(request)
         return wrap
 

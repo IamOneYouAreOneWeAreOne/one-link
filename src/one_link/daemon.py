@@ -1260,8 +1260,14 @@ class Daemon:
         self._share_links: ShareLinkRegistry = ShareLinkRegistry(data_dir())
         # Async lock to serialise per-peer dial attempts so two
         # concurrent send_files don't race to open duplicate
-        # connections.
-        self._quic_dial_lock: asyncio.Lock | None = None
+        # connections. 2026-05-21 audit T2-I: was a single global
+        # ``asyncio.Lock`` — one slow/dead peer stalled all other
+        # QUIC dials for up to 10s (the ``connect_blocking`` ceiling)
+        # because every dialer waited on the same mutex. Now keyed
+        # by ``peer_fp`` so each peer's dial-serialisation is
+        # independent. The dict is lazily populated; pruned on
+        # ``_drop_outbound_session`` to bound growth.
+        self._quic_dial_locks: dict[str, asyncio.Lock] = {}
         # Living Presence Tier α-pre — Cryptographic Reality Engine
         # store. Holds verified FrameProvenance state per blob_hex
         # so the UI can render the Reality dot. See
@@ -20952,9 +20958,14 @@ class Daemon:
         peer_addr = getattr(peer, "address", None)
         if not peer_addr:
             return None
-        if self._quic_dial_lock is None:
-            self._quic_dial_lock = asyncio.Lock()
-        async with self._quic_dial_lock:
+        # 2026-05-21 audit T2-I: per-peer dial lock. Previously a
+        # single global lock here meant one slow peer's 10s
+        # connect_blocking stalled every other peer's QUIC dial.
+        dial_lock = self._quic_dial_locks.get(peer_fp)
+        if dial_lock is None:
+            dial_lock = asyncio.Lock()
+            self._quic_dial_locks[peer_fp] = dial_lock
+        async with dial_lock:
             # Re-check the cache under the lock — another waiter
             # may have dialled while we waited.
             existing = self._quic_outbound.get(peer_fp)
