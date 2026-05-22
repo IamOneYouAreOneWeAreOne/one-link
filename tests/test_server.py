@@ -582,6 +582,23 @@ async def test_stale_index_token_still_rejects_subresource_request():
 
 
 @pytest.mark.asyncio
+async def test_local_document_reopen_without_query_token_refreshes_cookie():
+    with daemon_pair() as p:
+        base, _token = _server_addr(p.a.home)
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"{base}/",
+                headers={
+                    "Accept": "text/html",
+                    "Sec-Fetch-Dest": "document",
+                },
+            ) as r:
+                assert r.status == 200
+                assert any(c.key == "ol_ui" for c in r.cookies.values())
+                assert r.headers.get("Cache-Control") == "no-store"
+
+
+@pytest.mark.asyncio
 async def test_query_token_only_bootstraps_index_not_api():
     with daemon_pair() as p:
         base, token = _server_addr(p.a.home)

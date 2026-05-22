@@ -2121,7 +2121,29 @@ class UIServer:
             "base-uri 'self'; "
             "form-action 'none'"
         )
-        if bootstrap_ok or request.cookies.get(COOKIE_NAME) == self.token:
+        # Desktop/app-mode recovery: a user can reopen One Link from a
+        # cached browser tab, taskbar entry, or our own "fresh" helper
+        # URL without the ``?t=`` bootstrap token. On loopback, a
+        # top-level HTML document navigation is already local to this
+        # machine and cannot expose API data cross-origin (CORS is not
+        # enabled, mutating routes also require same-origin/Bearer CSRF
+        # checks). Refresh the HttpOnly UI cookie here so reopening the
+        # desktop app lands in a usable UI instead of a half-loaded
+        # "Sign-in needed" shell. Keep subresources and LAN-bound UI on
+        # the stricter token path.
+        local_document_reopen = (
+            not request.query.get("t")
+            and not hmac.compare_digest(
+                request.cookies.get(COOKIE_NAME, ""),
+                self.token,
+            )
+            and self._is_local_document_navigation(request)
+        )
+        if (
+            bootstrap_ok
+            or request.cookies.get(COOKIE_NAME) == self.token
+            or local_document_reopen
+        ):
             self._set_ui_cookie(request, resp)
         return resp
 
