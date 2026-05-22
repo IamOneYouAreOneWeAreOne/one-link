@@ -3304,7 +3304,8 @@ class Daemon:
                         path=str(path),
                         detail=f"queued {path.name}",
                     )
-            asyncio.create_task(
+            # 2026-05-22 audit Batch EE: route through _track() for stop() drain.
+            self._track(
                 self._execute_self_mesh_send_file_instruction(instr, peer, path)
             )
             return {
@@ -4730,7 +4731,8 @@ class Daemon:
                 if peers:
                     src_path = Path(link.source_path)
                     if src_path.is_file():
-                        asyncio.create_task(
+                        # 2026-05-22 audit Batch EE: route through _track().
+                        self._track(
                             self.send_file(peers[0], src_path)
                         )
                     else:
@@ -15222,7 +15224,8 @@ class Daemon:
                     quic_port_raw, peer_fp[:8],
                 )
                 if self._quic_local_port:
-                    asyncio.create_task(
+                    # 2026-05-22 audit Batch EE: route through _track().
+                    self._track(
                         self._reply_endpoint_update_to_peer(
                             peer_fp,
                             reason="quic_port_reciprocal",
@@ -19747,7 +19750,9 @@ class Daemon:
                     # forget; failure is non-fatal.
                     if trust == "pinned":
                         with contextlib.suppress(Exception):
-                            asyncio.create_task(
+                            # 2026-05-22 audit Batch EE: route through
+                            # _track() for stop() drain.
+                            self._track(
                                 self.broadcast_endpoint_to_paired()
                             )
                     await self._reply(writer, {
@@ -21024,7 +21029,10 @@ class Daemon:
                 log.debug("endpoint announcement at startup failed: %s", e)
 
         with contextlib.suppress(Exception):
-            asyncio.create_task(_delayed_announcement())
+            # 2026-05-22 audit Batch EE: route through _track() so the
+            # 1.5 s sleep inside the announcement doesn't survive past
+            # daemon shutdown as a pending task.
+            self._track(_delayed_announcement())
 
         with contextlib.suppress(Exception):
             self._schedule_due_transfer_retries()

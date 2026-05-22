@@ -33,11 +33,39 @@ pytestmark = [pytest.mark.timeout(120), pytest.mark.soak]
 
 
 def test_quic_connection_alive_accepts_native_conn_without_state_flag() -> None:
-    class NativeConnLike:
-        def send_frame_round_trip(self, *_args):
-            return (241, b"pong")
+    """2026-05-22 audit Batch DD: previously this used a hand-rolled
+    ``NativeConnLike`` mock with only ``send_frame_round_trip``,
+    locking in NO production attributes. A refactor of
+    ``_quic_connection_alive`` to inspect new attributes (e.g.
+    handshake state, _dr_shared, ratchet position) would still see
+    a happy mock and the test would pass on a regression.
 
-    assert Daemon._quic_connection_alive(NativeConnLike()) is True
+    Now drives a REAL ``Connection`` from a daemon pair so the
+    function is exercised against the actual attribute surface
+    the native crate provides.
+    """
+    with daemon_pair() as p:
+        # Drive a handshake so the QUIC dial caches a real Connection.
+        request(p.a.control_port, cmd="pin_peer", peer=p.b.short_id)
+        request(p.b.control_port, cmd="pin_peer", peer=p.a.short_id)
+        request(p.a.control_port, cmd="send",
+                peer=p.b.short_id, body="liveness-warmup")
+        # Wait for QUIC port to be learned, then ping to populate
+        # _quic_outbound[peer_fp].
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            ping = request(p.a.control_port, cmd="quic_ping",
+                           peer=p.b.short_id, payload="ping")
+            if ping.get("ok"):
+                break
+            time.sleep(0.2)
+        # Pull the cached connection via the diagnostics endpoint.
+        qs = request(p.a.control_port, cmd="quic_status")
+        outbound = qs.get("outbound") or []
+        assert outbound, f"no outbound QUIC connection cached: {qs}"
+        # ``alive`` here is the result of _quic_connection_alive
+        # against the real Connection inside the daemon.
+        assert outbound[0].get("alive") is True
 
 
 def test_quic_connection_alive_honors_explicit_false_state() -> None:
@@ -188,22 +216,52 @@ def test_quic_connection_exposes_peer_fingerprint_t1h() -> None:
 def test_daemon_brings_up_quic_endpoint() -> None:
     """After daemon_pair settles, both daemons must have a
     QUIC server endpoint up on a non-zero port. Without this the
-    Wave 2d bring-up is a no-op."""
+    Wave 2d bring-up is a no-op.
+
+    2026-05-22 audit Batch DD: previously this test just asserted
+    status=ok (which is true even when QUIC silently failed to
+    bind). Now it actively interrogates the quic_status endpoint
+    for both daemons + asserts ``available=True`` and a non-zero
+    local port. Catches the "QUIC bind silently failed" regression
+    that the old test would have missed.
+    """
     with daemon_pair() as p:
         # Send a probe message to drive the channel + caps exchange.
         request(p.a.control_port, cmd="send",
                 peer=p.b.short_id, body="quic-probe")
-        # Allow time for the endpoint announcement + processing
-        # round-trip.
-        time.sleep(2.0)
-        a_status = request(p.a.control_port, cmd="status")
-        b_status = request(p.b.control_port, cmd="status")
-        assert a_status.get("ok") is True
-        assert b_status.get("ok") is True
-        # The status endpoint may or may not surface the QUIC
-        # port explicitly â€” what matters here is the daemon
-        # didn't crash on QUIC bring-up. The actual port lookup
-        # happens in the next test against the in-process state.
+        # Poll until both daemons report a live QUIC endpoint, up
+        # to 10 s. Brittle ``time.sleep(2.0)`` was a CI-flake source.
+        # The quic_status endpoint surfaces:
+        #   - native_quic_available: bool — native crate installed
+        #   - server_up: bool — endpoint live
+        #   - local_port: int|None — listening port (None if down)
+        deadline = time.time() + 10.0
+        a_up = False
+        b_up = False
+        while time.time() < deadline:
+            a_qs = request(p.a.control_port, cmd="quic_status")
+            b_qs = request(p.b.control_port, cmd="quic_status")
+            a_up = (
+                a_qs.get("ok") is True
+                and a_qs.get("server_up") is True
+                and int(a_qs.get("local_port") or 0) > 0
+            )
+            b_up = (
+                b_qs.get("ok") is True
+                and b_qs.get("server_up") is True
+                and int(b_qs.get("local_port") or 0) > 0
+            )
+            if a_up and b_up:
+                break
+            time.sleep(0.1)
+        assert a_up, (
+            "A's QUIC endpoint did not come up "
+            f"(quic_status: {request(p.a.control_port, cmd='quic_status')})"
+        )
+        assert b_up, (
+            "B's QUIC endpoint did not come up "
+            f"(quic_status: {request(p.b.control_port, cmd='quic_status')})"
+        )
 
 
 def _wait_for_quic_peer_port(ctrl_port: int, target_fp_prefix: str, timeout: float = 30.0) -> bool:

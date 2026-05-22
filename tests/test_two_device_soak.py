@@ -410,6 +410,12 @@ def test_soak_large_file_round_trip(tmp_path):
                 break
             time.sleep(0.25)
         assert landed is not None, "10 MiB file never arrived in B's inbox"
+        # 2026-05-22 audit Batch DD: extend the T2-L silent-fallback
+        # regression net to the large-file path. A clean 10 MiB
+        # round-trip must not produce any of the silent-fallback
+        # kinds.
+        _assert_no_silent_fallback(p.a)
+        _assert_no_silent_fallback(p.b)
 
 
 def test_soak_message_after_reconnect():
@@ -503,6 +509,8 @@ def test_soak_bidi_interleaved():
         assert not missing_b, f"B missing {missing_b}"
         assert not dup_a, f"A duplicate deliveries: {dict(dup_a)}"
         assert not dup_b, f"B duplicate deliveries: {dict(dup_b)}"
+        _assert_no_silent_fallback(p.a)
+        _assert_no_silent_fallback(p.b)
 
 
 def test_soak_long_body_round_trip():

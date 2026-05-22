@@ -134,18 +134,27 @@ def test_concurrent_quic_ping_under_load() -> None:
         request(p.a.control_port, cmd="send",
                 peer=p.b.short_id, body="warm")
         # Wait for QUIC port advertisement.
-        deadline = time.time() + 30.0
+        # 2026-05-22 audit Batch DD: was ``pytest.skip`` on a 30 s
+        # timeout, which silently no-op'd this test under load —
+        # exactly the failure mode (advertisement losing a race)
+        # it was supposed to detect. Now hard-fails with a final
+        # diagnostic snapshot so flakiness surfaces.
+        deadline = time.time() + 60.0
         ready = False
         b_fp_prefix = a_pin["peer_fp"][:16]
+        last_status: dict = {}
         while time.time() < deadline:
             st = request(p.a.control_port, cmd="quic_status")
+            last_status = st
             if any(k.startswith(b_fp_prefix)
                    for k in (st.get("advertised_ports") or {})):
                 ready = True
                 break
             time.sleep(0.1)
-        if not ready:
-            pytest.skip("QUIC port advertisement didn't land in time")
+        assert ready, (
+            "QUIC port advertisement didn't land within 60 s. "
+            f"Final quic_status: {last_status}"
+        )
         # Fire 6 pings concurrently.
         results: list[dict] = []
         errors: list[BaseException] = []
