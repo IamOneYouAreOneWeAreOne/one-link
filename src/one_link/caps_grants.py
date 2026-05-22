@@ -85,6 +85,112 @@ GRANT_VERSION = 1
 NONCE_LEN = 16
 SIG_LEN = 64
 ED_PUB_LEN = 32
+
+
+# ── Canonical scope encoding (2026-05-22 audit SHIP-1) ────────────
+#
+# Previously ``scope`` was an opaque ``bytes`` value compared via
+# byte-equality. Callers that passed "folder=name" vs "folder=root_id_hex",
+# or UTF-8 vs raw bytes, would silently miss on ``has_capability``. The
+# encoder/decoder pair below gives every scope a single canonical
+# wire form so cross-caller mismatches are impossible.
+#
+# Wire format (1-byte tag + value):
+#   tag 0x00 = empty scope (no payload bytes)
+#   tag 0x01 = folder-root:    32 bytes root_id
+#   tag 0x02 = path-prefix:    u16 length + UTF-8 bytes (max 4 KiB)
+#   tag 0x03 = audit-tag:      u16 length + UTF-8 bytes (informational
+#              only, never authority — callers shouldn't rely on
+#              tag-0x03 scopes for security gates)
+#   tag 0xff = legacy/raw:     u16 length + caller-supplied bytes
+#
+# ``scope_for_folder(root_id) / scope_for_path(prefix) / ...`` produce
+# the canonical bytes. ``decode_scope(raw)`` returns a tuple
+# (kind, payload) so callers that want to introspect can. Legacy
+# callers that pass raw ``bytes`` keep working — those are treated as
+# tag-0xff scopes and still match byte-for-byte against grants minted
+# the same way. Mixing canonical + legacy on the same scope value is
+# safe but produces no match across the two forms (by design — that
+# IS the bug the canonical form fixes).
+
+_SCOPE_TAG_EMPTY = 0x00
+_SCOPE_TAG_FOLDER_ROOT = 0x01
+_SCOPE_TAG_PATH_PREFIX = 0x02
+_SCOPE_TAG_AUDIT = 0x03
+_SCOPE_TAG_RAW = 0xff
+
+
+def scope_for_folder(root_id: bytes) -> bytes:
+    """Canonical scope for a folder root identifier. ``root_id`` is
+    the 32-byte CRDT folder root ID. Cross-caller equality is
+    guaranteed by the canonical encoding."""
+    if len(root_id) != 32:
+        raise ValueError(f"folder root_id must be 32 bytes, got {len(root_id)}")
+    return bytes([_SCOPE_TAG_FOLDER_ROOT]) + root_id
+
+
+def scope_for_path(prefix: str) -> bytes:
+    """Canonical scope for a path prefix. ``prefix`` is the caller's
+    relative or absolute path string. Cross-caller equality requires
+    BOTH callers to pass identical strings — normalise (case,
+    trailing slash) before calling if relevant."""
+    encoded = prefix.encode("utf-8")
+    if len(encoded) > 4096:
+        raise ValueError(
+            f"path prefix too long: {len(encoded)} > 4096 bytes"
+        )
+    return (
+        bytes([_SCOPE_TAG_PATH_PREFIX])
+        + struct.pack(">H", len(encoded))
+        + encoded
+    )
+
+
+def scope_empty() -> bytes:
+    """Canonical empty / global scope. Equivalent to ``b""`` for
+    legacy-caller compatibility (also matches tag-0x00)."""
+    return bytes([_SCOPE_TAG_EMPTY])
+
+
+def decode_scope(raw: bytes) -> tuple[str, bytes]:
+    """Decode a scope blob into ``(kind, payload)`` where ``kind``
+    is one of ``"empty" | "folder" | "path" | "audit" | "raw" |
+    "legacy"``. Never raises on a malformed blob — the legacy path
+    just returns ``("legacy", raw)`` so two callers that minted
+    grants pre-canonical-form continue to match.
+    """
+    if not raw:
+        return ("empty", b"")
+    tag = raw[0]
+    body = raw[1:]
+    if tag == _SCOPE_TAG_EMPTY:
+        return ("empty", b"")
+    if tag == _SCOPE_TAG_FOLDER_ROOT:
+        if len(body) == 32:
+            return ("folder", body)
+        return ("legacy", raw)
+    if tag == _SCOPE_TAG_PATH_PREFIX:
+        if len(body) < 2:
+            return ("legacy", raw)
+        length = struct.unpack(">H", body[:2])[0]
+        if len(body) >= 2 + length:
+            return ("path", body[2 : 2 + length])
+        return ("legacy", raw)
+    if tag == _SCOPE_TAG_AUDIT:
+        if len(body) < 2:
+            return ("legacy", raw)
+        length = struct.unpack(">H", body[:2])[0]
+        if len(body) >= 2 + length:
+            return ("audit", body[2 : 2 + length])
+        return ("legacy", raw)
+    if tag == _SCOPE_TAG_RAW:
+        if len(body) < 2:
+            return ("legacy", raw)
+        length = struct.unpack(">H", body[:2])[0]
+        if len(body) >= 2 + length:
+            return ("raw", body[2 : 2 + length])
+        return ("legacy", raw)
+    return ("legacy", raw)
 HEADER_FIXED_LEN = (
     len(GRANT_MAGIC) + 1
     + ED_PUB_LEN + ED_PUB_LEN

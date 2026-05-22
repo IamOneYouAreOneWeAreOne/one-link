@@ -370,6 +370,78 @@ def test_parse_length_mismatch():
 # ── practical scenario ────────────────────────────────────────────
 
 
+# ── 2026-05-22 audit SHIP-1: canonical scope encoding ───────────
+
+
+def test_scope_canonical_round_trips():
+    """Each canonical scope kind round-trips through decode_scope."""
+    assert cg.decode_scope(cg.scope_empty()) == ("empty", b"")
+    root = b"R" * 32
+    assert cg.decode_scope(cg.scope_for_folder(root)) == ("folder", root)
+    assert cg.decode_scope(cg.scope_for_path("shared/photos")) == (
+        "path", b"shared/photos",
+    )
+
+
+def test_scope_canonical_legacy_compat():
+    """Pre-canonical-form bytes still decode (as 'legacy') so existing
+    grants remain matchable byte-for-byte against equally-encoded
+    queries."""
+    legacy = b"folder-X"
+    assert cg.decode_scope(legacy) == ("legacy", legacy)
+    # Empty bytes route to ``empty`` so b"" is interchangeable with
+    # the canonical empty scope.
+    assert cg.decode_scope(b"") == ("empty", b"")
+    assert cg.decode_scope(cg.scope_empty()) == ("empty", b"")
+
+
+def test_scope_canonical_disambiguates_path_vs_folder():
+    """A folder-root scope and a path-prefix scope encode to
+    DIFFERENT bytes even if their payloads look similar, so two
+    callers can't accidentally claim authority across scope kinds."""
+    root = b"X" * 32
+    folder_blob = cg.scope_for_folder(root)
+    path_blob = cg.scope_for_path("X" * 32)
+    assert folder_blob != path_blob
+    assert cg.decode_scope(folder_blob)[0] == "folder"
+    assert cg.decode_scope(path_blob)[0] == "path"
+
+
+def test_scope_folder_root_id_length_enforced():
+    with pytest.raises(ValueError, match="folder root_id must be 32 bytes"):
+        cg.scope_for_folder(b"too-short")
+
+
+def test_scope_path_prefix_length_bound():
+    """Path prefixes are bounded so an adversarial caller can't grow
+    the scope blob past the global ``MAX_SCOPE_LEN``."""
+    with pytest.raises(ValueError, match="path prefix too long"):
+        cg.scope_for_path("/" * 5000)
+
+
+def test_scope_grant_round_trip_with_canonical_folder():
+    """Mint a grant using ``scope_for_folder`` and verify the
+    receiver decodes the same canonical kind/payload."""
+    alice_seed, alice_pub = _gen_ed25519()
+    _, bob_pub = _gen_ed25519()
+    root = b"\xab" * 32
+    scope = cg.scope_for_folder(root)
+    now = _now_ms()
+    grant = cg.encode_grant(
+        granter_priv_seed=alice_seed,
+        granter_pub=alice_pub,
+        subject_pub=bob_pub,
+        capabilities=["files:read"],
+        not_before_ms=now,
+        not_after_ms=now + 3_600_000,
+        scope=scope,
+    )
+    parsed = cg.verify_grant(
+        grant, expected_subject_pub=bob_pub, now_ms=now + 1000,
+    )
+    assert cg.decode_scope(parsed.scope) == ("folder", root)
+
+
 def test_one_hour_delegation_workflow():
     """Realistic scenario: Alice grants Bob "files:read" on folder
     X for the next hour. Bob can use the grant within that window.
