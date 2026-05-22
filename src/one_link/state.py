@@ -3497,10 +3497,29 @@ class State:
                         current.id,
                     ),
                 )
-                row = self._conn.execute(
-                    "SELECT * FROM transfers WHERE id = ?", (current.id,)
-                ).fetchone()
-                return self._row_to_transfer(row) if row else None
+                # 2026-05-22 audit Batch CC perf: build the returned
+                # TransferRecord from the in-memory ``current`` + the
+                # merged updates instead of a second SELECT. The
+                # original metadata is preserved untouched (sentinel
+                # path), so just clone ``current`` with the new fields.
+                return TransferRecord(
+                    id=current.id,
+                    direction=current.direction,
+                    peer_fp=current.peer_fp,
+                    kind=current.kind,
+                    name=current.name,
+                    size=current.size,
+                    blob_hash=current.blob_hash,
+                    status=merged["status"],
+                    progress_bytes=int(merged["progress_bytes"]),
+                    total_bytes=int(merged["total_bytes"]),
+                    chunks_done=int(merged["chunks_done"]),
+                    chunks_total=int(merged["chunks_total"]),
+                    raw_bytes=int(merged["raw_bytes"]),
+                    wire_bytes=int(merged["wire_bytes"]),
+                    updated_ms=now,
+                    metadata=current.metadata,
+                )
             metadata = metadata_arg
             data = {
                 "id": current.id,
