@@ -99,7 +99,7 @@ def test_metric_tiles_have_aria_labels(index_html: str):
     idx = index_html.find('id="mesh-summary"')
     assert idx > 0
     snippet = index_html[idx:idx + 1500]
-    assert 'aria-label="View peers in Chat"' in snippet
+    assert 'aria-label="Show nearby devices"' in snippet
     assert 'aria-label="Open Files Sent tab"' in snippet
     assert 'aria-label="Filter activity to file transfers"' in snippet
     assert 'aria-label="Filter activity to trust events"' in snippet
@@ -134,13 +134,24 @@ def test_tile_handler_branches_for_all_four_kinds(index_html: str):
         assert f'kind === "{kind}"' in snippet, f"no branch for {kind}"
 
 
-def test_tile_online_jumps_to_chat(index_html: str):
+def test_tile_online_opens_nearby_panel(index_html: str):
     idx = index_html.find("function _handleMeshTile(")
     snippet = index_html[idx:idx + 1500]
     online_idx = snippet.find('kind === "online"')
     assert online_idx > 0
     branch = snippet[online_idx:online_idx + 400]
-    assert '[data-pane="convo"]' in branch
+    assert "_openActivityNearbyFromTile()" in branch
+    assert '[data-pane="convo"]' not in branch
+
+
+def test_nearby_rows_are_clickable_and_keyboard_accessible(index_html: str):
+    idx = index_html.find("function nearbyRow(")
+    assert idx > 0, "nearbyRow not present"
+    snippet = index_html[idx:idx + 1400]
+    assert 'row.setAttribute("role", "button")' in snippet
+    assert "row.tabIndex = 0" in snippet
+    assert "row.onkeydown" in snippet
+    assert 'ev.key !== "Enter" && ev.key !== " "' in snippet
 
 
 def test_tile_active_jumps_to_files_sent(index_html: str):

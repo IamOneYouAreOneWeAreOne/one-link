@@ -2726,6 +2726,16 @@
     border-radius: 7px;
     background: rgba(255,255,255,.035);
   }
+  .activity-nearby-row[role="button"] {
+    cursor: pointer;
+  }
+  .activity-nearby-row[role="button"]:hover {
+    background: rgba(124,92,255,.12);
+  }
+  .activity-nearby-row[role="button"]:focus-visible {
+    outline: 2px solid rgba(124,92,255,.85);
+    outline-offset: 2px;
+  }
   .activity-nearby-icon {
     width: 28px;
     height: 28px;
@@ -7787,7 +7797,7 @@
         </p>
       </details>
       <div class="mesh-summary" id="mesh-summary">
-        <div class="metric clickable" id="metric-tile-online" role="button" tabindex="0" data-mesh-tile="online" aria-label="View peers in Chat"><div class="num" id="metric-online">0</div><div class="lbl">nearby</div></div>
+        <div class="metric clickable" id="metric-tile-online" role="button" tabindex="0" data-mesh-tile="online" aria-label="Show nearby devices"><div class="num" id="metric-online">0</div><div class="lbl">nearby</div></div>
         <div class="metric clickable" id="metric-tile-active" role="button" tabindex="0" data-mesh-tile="active" aria-label="Open Files Sent tab"><div class="num" id="metric-active">0</div><div class="lbl">moving now</div></div>
         <div class="metric clickable" id="metric-tile-cache" role="button" tabindex="0" data-mesh-tile="cache" aria-label="Filter activity to file transfers"><div class="num" id="metric-cache">0 B</div><div class="lbl">saved chunks</div></div>
         <div class="metric clickable" id="metric-tile-sessions" role="button" tabindex="0" data-mesh-tile="sessions" aria-label="Filter activity to trust events"><div class="num" id="metric-sessions">0</div><div class="lbl">secure links</div></div>
@@ -17428,13 +17438,31 @@
     const row = el("div", "activity-nearby-row");
     row.appendChild(el("div", "activity-nearby-icon", icon));
     const meta = el("div", null);
-    meta.appendChild(el("div", "activity-nearby-name", name || "Nearby device"));
+    const label = name || "Nearby device";
+    meta.appendChild(el("div", "activity-nearby-name", label));
     meta.appendChild(el("div", "activity-nearby-sub", sub || "On your network"));
     row.appendChild(meta);
     const btn = el("button", null, actionLabel || "Open");
+    const runAction = () => {
+      if (onAction) onAction();
+    };
+    if (onAction) {
+      row.setAttribute("role", "button");
+      row.tabIndex = 0;
+      row.setAttribute("aria-label", `${actionLabel || "Open"} ${label}`);
+      row.onclick = (ev) => {
+        if (ev.target?.closest?.("button, a, input, select, textarea")) return;
+        runAction();
+      };
+      row.onkeydown = (ev) => {
+        if (ev.key !== "Enter" && ev.key !== " ") return;
+        ev.preventDefault();
+        runAction();
+      };
+    }
     btn.onclick = (ev) => {
       ev.stopPropagation();
-      if (onAction) onAction();
+      runAction();
     };
     row.appendChild(btn);
     return row;
@@ -17453,11 +17481,12 @@
       list.appendChild(nearbyRow(
         deviceKindLabel(p)?.icon || "💻",
         p.display_name || p.hostname || p.short_id,
-        `${reachLabel(p)} · trusted`,
+        `${reachLabel(p)} - trusted`,
         "Chat",
         () => {
           selectPeer(p.short_id);
           document.querySelector('[data-pane="convo"]')?.click();
+          toast(`Opened chat with ${p.display_name || p.hostname || p.short_id}.`, "info", 2500);
         },
       ));
     }
@@ -17471,7 +17500,7 @@
         _kindIcon(d.kind),
         d.hostname || peer.hostname || d.vendor || _kindLabel(d.kind),
         [d.ip, _kindLabel(d.kind), canPair ? "ready to pair" : "invite available"]
-          .filter(Boolean).join(" · "),
+          .filter(Boolean).join(" - "),
         canPair ? "Pair" : "Invite",
         () => {
           if (canPair) openPairModal(peer);
@@ -17703,19 +17732,32 @@
 
   // v0.10.6: clickable Activity tiles. Each of the four mesh
   // counters drills into the most useful surface for that number:
-  //   nearby      → Chat pane (sidebar lists online peers)
-  //   moving now  → Files → Sent tab
-  //   saved chunks→ Activity filter "transfer"
-  //   secure links→ Activity filter "trust"
+  //   nearby      -> Activity nearby device panel
+  //   moving now  -> Files Sent tab
+  //   saved chunks-> Activity filter "transfer"
+  //   secure links-> Activity filter "trust"
   function _activateActivityFilter(name) {
     const chip = document.querySelector(`[data-activity-filter="${name}"]`);
     if (chip) chip.click();
   }
+  async function _openActivityNearbyFromTile() {
+    const meshBtn = document.querySelector('[data-pane="mesh"]');
+    if (meshBtn && !_phoneCannotShow(meshBtn) && state.activePane !== "mesh") {
+      meshBtn.click();
+    }
+    await loadActivityNearby({ force: true });
+    const count = nearbyCount();
+    toast(
+      count ? `Found ${count} nearby device${count === 1 ? "" : "s"}.` : "Scanning nearby devices...",
+      "info",
+      3000,
+    );
+  }
   function _handleMeshTile(kind) {
     if (kind === "online") {
-      const convoBtn = document.querySelector('[data-pane="convo"]');
-      if (convoBtn && !_phoneCannotShow(convoBtn)) convoBtn.click();
-      toggleActivityNearby();
+      _openActivityNearbyFromTile().catch((e) => {
+        toast(`Nearby scan failed: ${errorToastBody(e)}`, "bad", 5000);
+      });
     } else if (kind === "active") {
       const filesBtn = document.querySelector('[data-pane="files"]');
       const sentBtn = document.querySelector('[data-files-mode="sent"]');
