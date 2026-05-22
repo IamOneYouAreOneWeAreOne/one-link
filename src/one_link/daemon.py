@@ -4471,6 +4471,37 @@ class Daemon:
                         capability="*",
                     )
                 return
+            # 2026-05-22 audit Batch P: per-peer rate-limit grants to
+            # 5/minute. A compromised paired peer otherwise gets to
+            # spam our _cap_store with valid-looking grants, forcing
+            # us through expensive verify+accept paths and filling
+            # the capability_audit table.
+            if not hasattr(self, "_capability_grant_per_peer"):
+                self._capability_grant_per_peer = {}
+            gwindow = self._capability_grant_per_peer.setdefault(
+                peer_fp, deque()
+            )
+            gnow = time.monotonic()
+            gcutoff = gnow - 60.0
+            while gwindow and gwindow[0] < gcutoff:
+                gwindow.popleft()
+            if len(gwindow) >= 5:
+                log.warning(
+                    "CAPABILITY_GRANT rate limit hit for %s (5/60s)",
+                    peer_fp[:8],
+                )
+                with contextlib.suppress(Exception):
+                    await channel.send(encode_msg(make_msg(
+                        "ACK", self.me.short_id, of=msg.get("id"),
+                        rejected="grant_rate_limited",
+                    )))
+                with contextlib.suppress(Exception):
+                    self._record_capability_denial(
+                        reason="grant_rate_limited",
+                        capability="*",
+                    )
+                return
+            gwindow.append(gnow)
             try:
                 grant_b64 = msg.get("grant_b64", "")
                 if not isinstance(grant_b64, str) or not grant_b64:
@@ -7953,11 +7984,23 @@ class Daemon:
             )))
             return
         if f.received + len(data) > f.size:
+            # 2026-05-22 audit T2-E follow-up: a malicious sender that
+            # transmits a chunk pushing the running total past the
+            # declared size must NOT take down the secure channel —
+            # other transfers + chat would die with it. Abort just
+            # this transfer; ACK-reject the offending chunk.
             self._abort_incoming_file(blob, f)
-            raise RuntimeError(
-                f"FILE_NATIVE_CHUNK exceeds declared size for {blob[:8]}: "
-                f"{f.received + len(data)} > {f.size}"
+            log.warning(
+                "FILE_NATIVE_CHUNK exceeds declared size for %s: "
+                "%d > %d (aborting transfer, channel alive)",
+                blob[:8], f.received + len(data), f.size,
             )
+            with contextlib.suppress(Exception):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="file_native_chunk_overruns_size",
+                )))
+            return
         f.handle.write(data)
         f.hasher.update(data)
         f.received += len(data)
@@ -8046,15 +8089,33 @@ class Daemon:
             return
         data = msg.get("_binary_data")
         if not isinstance(data, (bytes, bytearray)):
+            # 2026-05-22 audit T2-E follow-up: keep the channel alive.
             self._abort_incoming_file(blob, f)
-            raise RuntimeError("FILE_BIN_CHUNK missing binary payload")
+            log.warning(
+                "FILE_BIN_CHUNK missing binary payload for %s "
+                "(aborting transfer, channel alive)", blob[:8],
+            )
+            with contextlib.suppress(Exception):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="file_bin_chunk_missing_payload",
+                )))
+            return
         data = bytes(data)
         if f.received + len(data) > f.size:
+            # 2026-05-22 audit T2-E follow-up: keep the channel alive.
             self._abort_incoming_file(blob, f)
-            raise RuntimeError(
-                f"FILE_BIN_CHUNK exceeds declared size for {blob[:8]}: "
-                f"{f.received + len(data)} > {f.size}"
+            log.warning(
+                "FILE_BIN_CHUNK exceeds declared size for %s: "
+                "%d > %d (aborting transfer, channel alive)",
+                blob[:8], f.received + len(data), f.size,
             )
+            with contextlib.suppress(Exception):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="file_bin_chunk_overruns_size",
+                )))
+            return
         f.handle.write(data)
         f.hasher.update(data)
         f.received += len(data)
@@ -13536,6 +13597,23 @@ class Daemon:
                     continue
                 if intermediate in visited_intermediates:
                     continue
+                # 2026-05-22 audit Batch P: trust-filter intermediates.
+                # The walker must NOT traverse a chain through an
+                # intermediate peer that is no longer pinned. Without
+                # this filter, an attacker who was once paired (and
+                # whose grants we stored) but is now revoked can
+                # still bridge transitive trust via stale store
+                # entries to a fresh accomplice. revoke_granter is
+                # called on unpair, but a missed revoke (race, crash
+                # during revoke, restore from backup) leaves stale
+                # edges. Belt + suspenders: every recursion edge
+                # checks that the intermediate is currently pinned.
+                try:
+                    intermediate_fp = fingerprint_of(intermediate)
+                    if not self._is_pinned(intermediate_fp):
+                        continue
+                except Exception:
+                    continue
                 # Recurse with one fewer edge available, looking for
                 # a root → … → intermediate prefix.
                 if walk(
@@ -13741,7 +13819,15 @@ class Daemon:
         """v0.7.1: notify UI that a peer is asking for a capability
         the user hasn't granted. Rate-limited per (fp, cap) so a
         peer hammering offer-retries can't spam the UI. The user
-        responds via POST /api/peers/{fp}/capabilities/grant."""
+        responds via POST /api/peers/{fp}/capabilities/grant.
+
+        2026-05-22 audit Batch P: add a per-peer GLOBAL ceiling
+        on top of the per-(fp, cap) dedup. The prior dedup only
+        gated (fp, cap) pairs, so a peer cycling all 28 caps in
+        LOCAL_CAPABILITIES could fire 28 UI prompts before
+        anything throttled. Now: max 5 prompts per peer per
+        60-second window, regardless of which cap.
+        """
         if self.ui_server is None:
             return
         now = time.monotonic()
@@ -13749,6 +13835,23 @@ class Daemon:
         last = self._capability_request_seen.get(key, 0.0)
         if now - last < CAPABILITY_REQUEST_DEDUP_S:
             return
+        # Per-peer prompt budget. Maintained on the daemon under a
+        # bounded deque keyed by peer_fp.
+        from collections import deque as _deque
+        if not hasattr(self, "_capability_request_per_peer"):
+            self._capability_request_per_peer: dict[str, _deque] = {}
+        window = self._capability_request_per_peer.setdefault(peer_fp, _deque())
+        cutoff = now - 60.0
+        while window and window[0] < cutoff:
+            window.popleft()
+        if len(window) >= 5:
+            log.info(
+                "capability_request budget exceeded for %s "
+                "(5/60s); dropping prompt for cap=%s",
+                peer_fp[:8], cap,
+            )
+            return
+        window.append(now)
         self._capability_request_seen[key] = now
         with contextlib.suppress(Exception):
             self.ui_server.broadcast({
@@ -14685,6 +14788,22 @@ class Daemon:
             self._dedupe_sites.forget_peer(peer_fp)
         except Exception:
             pass
+        # 2026-05-22 audit Batch R: prune per-peer locks. The dial /
+        # session-create locks are lazily created on first use and
+        # keyed by ``peer_fp`` (see ``_get_or_create_outbound_session``
+        # at line 13988 and ``_get_or_dial_quic`` at line 21112).
+        # Without explicit pruning at revoke time, the lock dict
+        # grows monotonically with every paired-then-revoked peer
+        # the daemon ever talks to, and a fresh re-pair with the
+        # same fingerprint would inherit the stale lock object.
+        self._outbound_session_create_locks.pop(peer_fp, None)
+        self._quic_dial_locks.pop(peer_fp, None)
+        # Also clear capability-request/grant rate-limit windows so a
+        # fresh re-pair starts with a clean budget.
+        if hasattr(self, "_capability_request_per_peer"):
+            self._capability_request_per_peer.pop(peer_fp, None)
+        if hasattr(self, "_capability_grant_per_peer"):
+            self._capability_grant_per_peer.pop(peer_fp, None)
         # Step 5.
         if self.ui_server is not None:
             with contextlib.suppress(Exception):
@@ -18331,24 +18450,39 @@ class Daemon:
                             transfer keeps moving. Chunks have
                             already been encrypted via the
                             shared native_session, so the ratchet
-                            stays in sync."""
+                            stays in sync.
+
+                            2026-05-22 audit T2-J: wrap the fan-out
+                            in try/finally so the per-call batch
+                            buffers (``quic_pending_batch`` /
+                            ``quic_pending_sizes``) are always
+                            drained, even if a mid-iteration channel
+                            close raises out of _queue_or_send. Without
+                            this, the next iteration of the outer
+                            send loop would re-process the same
+                            chunk entries on top of the already-queued
+                            ``pending_sizes`` rows — double-counting
+                            wire bytes and tripping the in-flight cap.
+                            """
                             nonlocal queued_write
-                            for fb_msg, fb_size in zip(quic_pending_batch, quic_pending_sizes):
-                                queued_write = await _queue_or_send(
-                                    channel,
-                                    encode_msg(fb_msg),
-                                )
-                                pending_sizes.append((
-                                    str(fb_msg.get("id")),
-                                    fb_size,
-                                    time.perf_counter(),
-                                ))
-                                while not stream_scheduler.can_send(len(pending_sizes)):
-                                    await _flush_if_queued(channel, queued_write)
-                                    queued_write = False
-                                    await _settle_one_stream_ack()
-                            quic_pending_batch.clear()
-                            quic_pending_sizes.clear()
+                            try:
+                                for fb_msg, fb_size in zip(quic_pending_batch, quic_pending_sizes):
+                                    queued_write = await _queue_or_send(
+                                        channel,
+                                        encode_msg(fb_msg),
+                                    )
+                                    pending_sizes.append((
+                                        str(fb_msg.get("id")),
+                                        fb_size,
+                                        time.perf_counter(),
+                                    ))
+                                    while not stream_scheduler.can_send(len(pending_sizes)):
+                                        await _flush_if_queued(channel, queued_write)
+                                        queued_write = False
+                                        await _settle_one_stream_ack()
+                            finally:
+                                quic_pending_batch.clear()
+                                quic_pending_sizes.clear()
 
                         queued_write = False
                         while True:
@@ -21480,6 +21614,25 @@ class Daemon:
                 await self._prior_index_task
             except (asyncio.CancelledError, Exception):
                 pass
+        # 2026-05-22 audit Batch R: drain endpoint-verify probes
+        # scheduled by ENDPOINT_UPDATE handling. Without explicit
+        # cancellation, asyncio reports "Task was destroyed but it is
+        # pending!" at shutdown if any probe is mid-dial, and the
+        # native QUIC handle behind the probe can leak past the
+        # endpoint close above. add_done_callback drops each task
+        # from the set as it finishes; cancelling the snapshot is
+        # enough.
+        if self._endpoint_verify_tasks:
+            tasks_snapshot = tuple(self._endpoint_verify_tasks)
+            for task in tasks_snapshot:
+                if not task.done():
+                    task.cancel()
+            for task in tasks_snapshot:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            self._endpoint_verify_tasks.clear()
         if self.ui_server is not None:
             try:
                 await self.ui_server.stop()

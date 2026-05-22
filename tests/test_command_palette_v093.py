@@ -180,7 +180,14 @@ def test_handler_enriches_peer_display_names():
     fingerprints."""
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def api_global_search(")
-    snippet = src[idx:idx + 3000]
+    # 2026-05-22 audit Batch O: rate-limit block pushed
+    # peer_display_name past the original 3000-char window. Read
+    # to the next def or 6000 chars (whichever is shorter) so the
+    # structural check survives reasonable in-function additions.
+    end_idx = src.find("\n    async def ", idx + 30)
+    if end_idx == -1 or end_idx - idx > 6000:
+        end_idx = idx + 6000
+    snippet = src[idx:end_idx]
     assert "peer_display_name" in snippet
 
 

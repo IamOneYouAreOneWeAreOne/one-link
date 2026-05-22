@@ -202,7 +202,13 @@ def _is_small_order_x25519(pub: bytes) -> bool:
         # bool → int (0/1) via int(); OR into the accumulator without
         # short-circuiting. compare_digest itself is CT byte-wise.
         matched |= int(hmac.compare_digest(pub, entry))
-    return matched == 1
+    # 2026-05-22 audit Batch Q: use "!= 0" rather than "== 1". Today
+    # this is equivalent because compare_digest yields 0/1 and OR
+    # caps at 1, but a future refactor that switches to additive
+    # accumulation (e.g. summing match counts) would silently break
+    # the rejection on duplicate-entry hits. "!= 0" is the precise
+    # semantic check: ANY match means small-order.
+    return matched != 0
 
 
 def x25519_dh(priv: X25519PrivateKey, peer_pub: bytes) -> bytes:

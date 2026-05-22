@@ -59,9 +59,22 @@ def _mint(
 class _Walker:
     """Tiny shim exposing only ``_cap_store`` and the chain-walker
     method copied off ``Daemon`` — sufficient for the structural
-    test without spinning a full daemon process."""
-    def __init__(self, store):
+    test without spinning a full daemon process.
+
+    Audit Batch P May 2026 — the walker now intermediate-trust-filters
+    via ``_is_pinned``. Unit tests here are about chain-walking
+    structure, not pinning, so the shim returns True for any peer
+    fingerprint. The Batch P trust filter has its own dedicated
+    test in this file (test_unpinned_intermediate_rejected)."""
+    def __init__(self, store, *, pinned_filter=None):
         self._cap_store = store
+        # Callable: bytes pubkey or hex fp → bool. Default allow all.
+        self._pinned_filter = pinned_filter
+
+    def _is_pinned(self, fp):
+        if self._pinned_filter is None:
+            return True
+        return self._pinned_filter(fp)
 
     from one_link.daemon import Daemon as _Daemon
     _cap_authorized_via_chain = _Daemon._cap_authorized_via_chain
@@ -295,4 +308,49 @@ def test_cycle_in_grants_does_not_loop():
         root_granter_pub=me_pub,
         subject_pub=u_pub,
         capability="files:read",
+    )
+
+
+# ── audit Batch P May 2026: intermediate-trust filter ─────────────
+
+def test_unpinned_intermediate_rejected():
+    """A two-hop chain self → alice → bob must NOT authorize bob
+    when alice is not in the daemon's currently-pinned set, even
+    though both grants verify and were stored. Stale store entries
+    must not bridge transitive trust."""
+    from one_link.identity import fingerprint_of
+    me_seed, me_pub = _gen()
+    alice_seed, alice_pub = _gen()
+    _bob_seed, bob_pub = _gen()
+    store = cap_store.CapStore()
+    store.accept(
+        _mint(
+            granter_seed=me_seed, granter_pub=me_pub,
+            subject_pub=alice_pub, capabilities=["files:read"],
+        ),
+        expected_subject_pub=alice_pub,
+    )
+    store.accept(
+        _mint(
+            granter_seed=alice_seed, granter_pub=alice_pub,
+            subject_pub=bob_pub, capabilities=["files:read"],
+        ),
+        expected_subject_pub=bob_pub,
+    )
+    # Pinned filter: alice is NOT pinned.
+    alice_fp = fingerprint_of(alice_pub)
+    d = _Walker(store, pinned_filter=lambda fp: fp != alice_fp)
+    assert not d._cap_authorized_via_chain(
+        root_granter_pub=me_pub,
+        subject_pub=bob_pub,
+        capability="files:read",
+        max_depth=2,
+    )
+    # Sanity: with alice pinned, the chain authorizes.
+    d_ok = _Walker(store, pinned_filter=lambda fp: True)
+    assert d_ok._cap_authorized_via_chain(
+        root_granter_pub=me_pub,
+        subject_pub=bob_pub,
+        capability="files:read",
+        max_depth=2,
     )

@@ -192,6 +192,38 @@ class Channel:
     # `derive_native_transfer_secret`.
     _native_transfer_session: object = None  # NativeTransferSession
 
+    def __post_init__(self) -> None:
+        # 2026-05-22 audit T2-K: eagerly derive the native-transfer
+        # seed at handshake completion, BEFORE any send/recv path can
+        # call get_or_create_native_transfer_session. Without this,
+        # the CAPS-receive task and the first chunk-send task race
+        # through ``derive_native_transfer_secret``'s "if _seed is
+        # None" branch — and any await in either caller's code path
+        # opens an interleave window where both run. The derivation
+        # is deterministic (same transcript + same _dr_shared) so
+        # the worst case today is duplicated work; the lock-free
+        # contract here makes the racy attribute-write/wipe ordering
+        # impossible to observe at all.
+        if (
+            self._native_transfer_seed is None
+            and self._dr_shared is not None
+            and self.transcript_hash
+        ):
+            try:
+                self._native_transfer_seed = HKDF(
+                    algorithm=hashes.SHA256(),
+                    length=32,
+                    salt=self.transcript_hash,
+                    info=b"OL1/native-transfer/seed|v1",
+                ).derive(self._dr_shared)
+            except Exception as exc:
+                # Non-fatal: derive on demand later. Common path is
+                # tests that build a Channel with synthetic state.
+                log.debug(
+                    "Channel.__post_init__: eager seed derive failed "
+                    "(will lazy-derive on first use): %s", exc,
+                )
+
     def _nonce(self, seq: int) -> bytes:
         return seq.to_bytes(12, "little")
 
