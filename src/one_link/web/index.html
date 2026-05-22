@@ -13020,10 +13020,23 @@
     const meta = t.metadata || {};
     if (meta.doctor?.label) return meta.doctor.label;
     const stateName = meta.delivery_state || "";
+    // 2026-05-22 audit Batch AA: short-circuit the empty-file edge.
+    // Without this, total_bytes === 0 makes progress_pct = NaN ->
+    // the label sticks at "Sending… 0%" indefinitely. The daemon
+    // emits status=complete with progress_bytes=0/total_bytes=0 for
+    // empty files; the active-status label needs to handle the
+    // pre-complete pulse cleanly.
+    const isEmpty = (t.total_bytes === 0 || t.size === 0);
     if (t.status === "queued")   return stateName === "resuming" ? "Resuming" : "Waiting for device";
-    if (t.status === "offered")  return "Sending…";
-    if (t.status === "active")   return `Sending… ${Math.round(t.progress_pct || 0)}%`;
-    if (t.status === "complete") return t.direction === "in" ? "Received" : "Done";
+    if (t.status === "offered")  return isEmpty ? "Sending empty file" : "Sending…";
+    if (t.status === "active") {
+      if (isEmpty) return "Sending empty file";
+      return `Sending… ${Math.round(t.progress_pct || 0)}%`;
+    }
+    if (t.status === "complete") {
+      if (isEmpty) return t.direction === "in" ? "Empty file received" : "Empty file sent";
+      return t.direction === "in" ? "Received" : "Done";
+    }
     if (t.status === "paused")   return stateName === "resuming" ? "Resuming" : "Waiting for device";
     if (t.status === "failed")   return meta.transient ? "Waiting for device" : "Needs attention";
     return t.status || fallback;
@@ -18027,8 +18040,18 @@
   function _markBubbleState(msgId, sendingState, extras = {}) {
     const idx = state.messages.findIndex(x => x.id === msgId);
     if (idx < 0) return;
+    // 2026-05-22 audit Batch AA: don't overwrite send-state on a
+    // message that was already deleted out from under us — that
+    // would render "[message deleted]" with a ✓ "sent" tick.
+    // Both ``deleted_at_ms`` (server-side delete) and a body of
+    // ``[message deleted]`` (legacy client-side flag) are signals
+    // that the message has been tombstoned; don't decorate it.
+    const current = state.messages[idx];
+    if (current.deleted_at_ms || current.body === "[message deleted]") {
+      return;
+    }
     state.messages[idx] = {
-      ...state.messages[idx],
+      ...current,
       _sendingState: sendingState,
       ...extras,
     };
@@ -20943,7 +20966,26 @@
         if (idx >= 0) state.transfers.splice(idx, 1, m.transfer);
         else state.transfers.unshift(m.transfer);
         state.transfers.sort((a, b) => (b.updated_ms || 0) - (a.updated_ms || 0));
+        const evictedIds = state.transfers.slice(80).map(t => t.id);
         state.transfers = state.transfers.slice(0, 80);
+        // 2026-05-22 audit Batch AA: prune the by-id Map and the
+        // (dir|blob) index when entries fall off the 80-cap array.
+        // Previously the Map grew monotonically across a long
+        // session; thousands of stale transfer rows accumulated in
+        // memory because the array hard-cap had no symmetric
+        // delete. _trackTransferIndex maintains transferByDirBlob
+        // (used by transferForMessage O(1) lookup); both need
+        // cleanup or stale ids paper-over fresh ones.
+        for (const eid of evictedIds) {
+          state.transfersById.delete(eid);
+          if (state.transferByDirBlob) {
+            for (const [key, val] of state.transferByDirBlob) {
+              if (val && val.id === eid) {
+                state.transferByDirBlob.delete(key);
+              }
+            }
+          }
+        }
         state.transfersById.set(m.transfer.id, m.transfer);
         // T3-Z: keep the (dir|blob) index in sync with the
         // primary map so transferForMessage stays O(1).
