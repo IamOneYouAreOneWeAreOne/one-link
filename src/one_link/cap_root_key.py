@@ -133,3 +133,86 @@ def load_or_create_cap_root_key(data_dir: Path) -> tuple[bytes, bool]:
     key = secrets.token_bytes(CAP_ROOT_KEY_LEN_BYTES)
     store_cap_root_key(data_dir, key)
     return key, True
+
+
+CAP_ROOT_KEY_OLD_FILENAME = "cap_root.old.key"
+
+
+def rotate_cap_root_key(data_dir: Path) -> tuple[bytes, bytes | None]:
+    """2026-05-21 audit T2-S: in-place cap_root_key rotation.
+
+    Mints a fresh key, atomically swaps the active key file, and
+    preserves the previous key at ``cap_root.old.key`` so any
+    in-flight macaroons that haven't expired yet can still verify
+    during a brief grace window. Operators invoke this via a
+    privileged control-socket command (TBD) when a cap_root_key
+    compromise is suspected.
+
+    Returns ``(new_key, prior_key_or_None)``. The prior key is
+    None on first-ever rotation (no active key was present).
+
+    The OLD key file is best-effort persisted but not relied on:
+    callers that need durable rotation history should record it
+    themselves before calling.
+    """
+    data_dir = Path(data_dir)
+    prior = load_cap_root_key(data_dir)
+    if prior is not None:
+        # Preserve previous key to ``cap_root.old.key`` so the
+        # verifier can accept macaroons minted under it for a
+        # short overlap window.
+        old_path = data_dir / CAP_ROOT_KEY_OLD_FILENAME
+        if os.name == "nt":
+            from one_link.lockbox import _dpapi_protect
+            wrapped = _dpapi_protect(prior)
+            if wrapped is not None:
+                payload = wrapped
+            else:
+                payload = prior  # last-resort raw on DPAPI failure
+        else:
+            payload = prior
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".cap_root_key_old.tmp.", dir=str(data_dir),
+        )
+        try:
+            try:
+                os.write(fd, payload)
+            finally:
+                os.close(fd)
+            if os.name != "nt":
+                os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, old_path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    new_key = secrets.token_bytes(CAP_ROOT_KEY_LEN_BYTES)
+    store_cap_root_key(data_dir, new_key)
+    return new_key, prior
+
+
+def load_prior_cap_root_key(data_dir: Path) -> Optional[bytes]:
+    """Load the previously-active cap_root_key written by
+    ``rotate_cap_root_key`` (if any). Verifier helpers consult this
+    during the grace window so macaroons minted under the prior key
+    still verify until they expire / are revoked.
+    """
+    p = Path(data_dir) / CAP_ROOT_KEY_OLD_FILENAME
+    if not p.is_file():
+        return None
+    try:
+        blob = p.read_bytes()
+    except OSError:
+        return None
+    if not blob:
+        return None
+    if os.name == "nt":
+        from one_link.lockbox import _dpapi_unprotect
+        unwrapped = _dpapi_unprotect(blob)
+        if unwrapped is None or len(unwrapped) != CAP_ROOT_KEY_LEN_BYTES:
+            return None
+        return unwrapped
+    if len(blob) != CAP_ROOT_KEY_LEN_BYTES:
+        return None
+    return blob
