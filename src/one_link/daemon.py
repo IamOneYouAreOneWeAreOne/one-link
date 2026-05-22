@@ -5816,8 +5816,23 @@ class Daemon:
                 "peer": peer_fp,
                 **ui_dict,
             })
-        except Exception:
-            pass
+        except Exception as exc:
+            # 2026-05-22 audit Batch V: provenance is the auditable
+            # artifact for inbound files. Silent drop on broadcast
+            # failure (listener mid-removal, websocket dead, etc.)
+            # defeats the purpose; UI never learns the attestation
+            # was verified. Log + push to the degradation_events
+            # ring so operators can see why provenance disappeared.
+            log.warning("provenance broadcast failed: %s", exc)
+            with contextlib.suppress(Exception):
+                self._degradation_events.append({
+                    "at_ms": int(time.time() * 1000),
+                    "kind": "provenance_broadcast_failed",
+                    "peer_fp": peer_fp[:16] if peer_fp else None,
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "expected": "frame_provenance UI broadcast",
+                    "actual": "broadcast raised",
+                })
 
     async def _dispatch_living_presence_message(
         self,

@@ -227,6 +227,11 @@ CREATE TABLE IF NOT EXISTS transfers (
 );
 CREATE INDEX IF NOT EXISTS idx_transfers_updated ON transfers(updated_ms);
 CREATE INDEX IF NOT EXISTS idx_transfers_peer ON transfers(peer_fp);
+-- 2026-05-22 audit Batch V — prune_transfers filters on status,
+-- and on a long ledger that's a full table scan. Composite index
+-- on (status, updated_ms) lets the planner serve the prune query
+-- with an index seek + early-bound updated_ms range.
+CREATE INDEX IF NOT EXISTS idx_transfers_status ON transfers(status, updated_ms);
 
 -- v0.7.1: store-and-forward outbox. Holds chat messages addressed to
 -- a paired peer that's offline at send time. The daemon re-tries
@@ -591,6 +596,7 @@ class State:
                     (19, self._migrate_v19_self_mesh_enrollment),
                     (20, self._migrate_v20_self_mesh_performance),
                     (21, self._migrate_v21_device_guardian),
+                    (22, self._migrate_v22_transfer_status_index),
                 ]
                 for target_version, apply_fn in steps:
                     self._run_atomic_migration(
@@ -911,6 +917,19 @@ class State:
                 END
             WHERE revoked = 1 AND safety_state != 'revoked'
             """
+        )
+
+    def _migrate_v22_transfer_status_index(self, c: sqlite3.Cursor) -> None:
+        """2026-05-22 audit Batch V — composite ``(status, updated_ms)``
+        index on ``transfers``. ``prune_transfers`` filters on status
+        and on a long ledger that becomes a full table scan; the
+        composite index lets the planner serve the prune query with
+        an index seek + bounded updated_ms range. ``IF NOT EXISTS``
+        guards fresh DBs (which already created it via the schema
+        bootstrap)."""
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transfers_status "
+            "ON transfers(status, updated_ms)"
         )
 
     def _migrate_v15_file_index_cache(self, c: sqlite3.Cursor) -> None:
@@ -3427,11 +3446,62 @@ class State:
         # counters and metadata.path could regress. The lock is an
         # RLock so callers that already hold it (e.g. a chunk-ACK
         # batch processor) re-enter cleanly.
+        # 2026-05-22 audit Batch V: distinguish "caller did not pass
+        # metadata" from "caller passed empty metadata" via a sentinel.
+        # _row_to_transfer returns metadata={} when the stored JSON
+        # is corrupt (or path-PII unwrap fails), and previously the
+        # default fields.pop("metadata", current.metadata) inherited
+        # that empty dict, then upserted it back — permanently
+        # destroying the on-disk path field even when the caller
+        # only wanted to bump a status. Sentinel-path skips the
+        # metadata_json column entirely on the UPDATE statement so
+        # the raw on-disk blob is preserved verbatim.
+        _METADATA_UNSET = object()
         with self._write_lock:
             current = self.get_transfer(id)
             if current is None:
                 return None
-            metadata = fields.pop("metadata", current.metadata)
+            metadata_arg = fields.pop("metadata", _METADATA_UNSET)
+            if metadata_arg is _METADATA_UNSET:
+                # Partial UPDATE: don't touch metadata_json. Only
+                # the explicitly-named scalar fields (plus updated_ms)
+                # roll forward.
+                merged: dict[str, Any] = {
+                    "status": current.status,
+                    "progress_bytes": current.progress_bytes,
+                    "total_bytes": current.total_bytes,
+                    "chunks_done": current.chunks_done,
+                    "chunks_total": current.chunks_total,
+                    "raw_bytes": current.raw_bytes,
+                    "wire_bytes": current.wire_bytes,
+                }
+                merged.update(fields)
+                now = _now_ms()
+                self._conn.execute(
+                    """
+                    UPDATE transfers
+                    SET status = ?, progress_bytes = ?, total_bytes = ?,
+                        chunks_done = ?, chunks_total = ?, raw_bytes = ?,
+                        wire_bytes = ?, updated_ms = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        merged["status"],
+                        int(merged["progress_bytes"]),
+                        int(merged["total_bytes"]),
+                        int(merged["chunks_done"]),
+                        int(merged["chunks_total"]),
+                        int(merged["raw_bytes"]),
+                        int(merged["wire_bytes"]),
+                        now,
+                        current.id,
+                    ),
+                )
+                row = self._conn.execute(
+                    "SELECT * FROM transfers WHERE id = ?", (current.id,)
+                ).fetchone()
+                return self._row_to_transfer(row) if row else None
+            metadata = metadata_arg
             data = {
                 "id": current.id,
                 "direction": current.direction,

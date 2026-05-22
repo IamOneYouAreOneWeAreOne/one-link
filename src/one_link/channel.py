@@ -59,8 +59,11 @@ ratchet or both stay legacy.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -102,6 +105,52 @@ def v1_sig_fallback_summary() -> dict[str, int]:
     count. Read by the One Link Doctor health check and the
     Truth Dashboard."""
     return {pk.hex()[:16]: n for pk, n in _v1_sig_fallback_counts.items()}
+
+
+# 2026-05-22 audit Batch V — handshake nonce replay cache.
+#
+# An attacker who captures one valid HELLO frame from a paired peer
+# can re-mail it to the same responder N times. Each delivery forces
+# a fresh Ed25519 verify + X25519 ephemeral + HKDF + sig_r emission
+# — about 200 µs of unaccounted CPU per replay. Session keys end up
+# different (responder picks fresh ``x_priv`` each call) so the
+# attack is harmless to confidentiality, but it's a free CPU
+# amplifier: one captured HELLO → unbounded crypto work.
+#
+# Defence: per-(peer_ed_pub, nonce_i) → first-seen-ts cache, 60 s
+# window, bounded to 8 192 entries with FIFO eviction. A replay
+# inside the window is rejected before any signature work.
+#
+# The cache is module-local + thread-safe under CPython's GIL for
+# the OrderedDict ops we use. Cleared between processes; per-process
+# bounded; no persistence.
+_HANDSHAKE_REPLAY_WINDOW_S: float = 60.0
+_HANDSHAKE_REPLAY_MAX_ENTRIES: int = 8192
+_handshake_replay_cache: "OrderedDict[tuple[bytes, bytes], float]" = OrderedDict()
+
+
+def _handshake_replay_seen(peer_ed_pub: bytes, nonce: bytes, now: float) -> bool:
+    """Return True iff ``(peer_ed_pub, nonce)`` has been observed
+    inside the current replay window. Inserts the entry as a side
+    effect on first-seen. Bounded; FIFO-evicts when over the cap."""
+    cache = _handshake_replay_cache
+    cutoff = now - _HANDSHAKE_REPLAY_WINDOW_S
+    # Drop expired entries cheaply — only those at the head are
+    # candidates (insertion-ordered).
+    while cache:
+        oldest_k = next(iter(cache))
+        if cache[oldest_k] >= cutoff:
+            break
+        cache.popitem(last=False)
+    key = (peer_ed_pub, nonce)
+    if key in cache:
+        return True
+    cache[key] = now
+    if len(cache) > _HANDSHAKE_REPLAY_MAX_ENTRIES:
+        # FIFO eviction — same audit-defense pattern as cap_store.
+        with contextlib.suppress(KeyError):
+            cache.popitem(last=False)
+    return False
 
 
 PROTO = b"OL1"
@@ -807,6 +856,17 @@ async def respond(
     i_x = hello[32:64]
     nonce_i = hello[64 : 64 + NONCE_LEN]
     sig_i = hello[64 + NONCE_LEN :]
+    # 2026-05-22 audit Batch V — handshake nonce replay defence.
+    # Reject identical (peer_pubkey, nonce_i) inside the 60 s window
+    # BEFORE any signature / X25519 / HKDF work. An attacker who
+    # captured one valid HELLO would otherwise force unbounded
+    # Ed25519+X25519+HKDF cycles per replay. Stays single-µs on the
+    # happy path (hash + dict lookup).
+    if _handshake_replay_seen(i_ed, nonce_i, time.monotonic()):
+        raise RuntimeError(
+            "HELLO replay rejected (duplicate nonce inside "
+            f"{int(_HANDSHAKE_REPLAY_WINDOW_S)} s window)"
+        )
     # v0.20.7 (security audit M1): try the v2 sig (with our pubkey
     # bound in) first to defeat unknown-key-share. Fall back to the
     # v1 sig material only if v2 fails — that's the rolling-upgrade

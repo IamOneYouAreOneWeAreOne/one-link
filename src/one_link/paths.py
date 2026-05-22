@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -132,10 +133,27 @@ def _home_override() -> Path | None:
         return None
 
 
+def _restrict_dir_mode(p: Path) -> None:
+    """2026-05-22 audit Batch V — tighten POSIX permissions on a
+    daemon-owned directory. The umask-inherited 0o755 default lets
+    a second account on the same box ``ls`` the user's inbox + see
+    every received attachment's filename. T2-R chmod'd state.db
+    itself to 0o600 but the containing dir kept default permissions.
+
+    No-op on Windows where chmod does not adjust ACLs (the file
+    handle's owner_only attribute would need explicit SetSecurity
+    instead — out of scope here). Errors suppressed so a daemon
+    started in a directory it can't chmod doesn't crash."""
+    import os as _os
+    with contextlib.suppress(OSError, AttributeError):
+        _os.chmod(p, 0o700)
+
+
 def config_dir() -> Path:
     h = _home_override()
     p = (h / "config") if h else Path(user_config_dir(APP, AUTHOR))
     p.mkdir(parents=True, exist_ok=True)
+    _restrict_dir_mode(p)
     return p
 
 
@@ -143,6 +161,7 @@ def data_dir() -> Path:
     h = _home_override()
     p = (h / "data") if h else Path(user_data_dir(APP, AUTHOR))
     p.mkdir(parents=True, exist_ok=True)
+    _restrict_dir_mode(p)
     return p
 
 
@@ -177,10 +196,13 @@ def set_inbox_override(path: Path | None) -> None:
 def inbox_dir() -> Path:
     if _INBOX_OVERRIDE is not None:
         # User-chosen folder. mkdir is no-op if it exists.
+        # NOTE: we do NOT chmod a user-chosen inbox — the user picked
+        # the location and may legitimately want shared access.
         _INBOX_OVERRIDE.mkdir(parents=True, exist_ok=True)
         return _INBOX_OVERRIDE
     p = data_dir() / "inbox"
     p.mkdir(parents=True, exist_ok=True)
+    _restrict_dir_mode(p)
     return p
 
 
