@@ -193,7 +193,7 @@ fn verify_identity_cert(
     Ok(())
 }
 
-fn extract_pubkey_fingerprint(
+pub(crate) fn extract_pubkey_fingerprint(
     cert_der: &CertificateDer<'_>,
 ) -> Result<PeerFingerprint, RustlsError> {
     let (_, cert) = x509_parser::parse_x509_certificate(cert_der.as_ref())

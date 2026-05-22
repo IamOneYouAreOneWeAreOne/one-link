@@ -21103,42 +21103,62 @@ class Daemon:
             # accept_blocking return. Drop them before binding.
             peer_fp = ""
             now_ms = int(time.time() * 1000)
-            # Drop stale entries from the front first.
+            # Drop stale entries from the front first (kept as a
+            # fallback for older native crates that don't expose
+            # peer_fingerprint).
             while self._quic_recent_paired:
                 ts_ms, _ = self._quic_recent_paired[0]
                 if now_ms - ts_ms > 5000:
                     self._quic_recent_paired.popleft()
                 else:
                     break
-            # 2026-05-21 audit T1-H: detect the FIFO-race window
-            # where multiple is_paired callbacks fire for distinct
-            # peers before accept_blocking returns. The popleft below
-            # binds the accepted Connection to the OLDEST queued fp,
-            # which may not match the connection's actual peer
-            # (cross-peer identity confusion). Until the native crate
-            # exposes peer-fp on the Connection, we surface the race
-            # to operators via a degradation event so a populated
-            # transfer_diagnostics ring reveals the symptom even
-            # when the race is otherwise invisible. A proper fix
-            # requires `Connection.peer_fingerprint()` in
-            # ``one_link_native.quic``; tracked in
-            # `AUDIT_2026-05-21.md` as native-crate work.
-            if len(self._quic_recent_paired) > 1:
-                self._degradation_events.append({
-                    "at_ms": now_ms,
-                    "kind": "quic_accept_fifo_race_window",
-                    "peer_fp": None,
-                    "reason": (
-                        f"is_paired fired {len(self._quic_recent_paired)} "
-                        f"times before accept_blocking returned; "
-                        f"FIFO order may be ambiguous"
-                    ),
-                    "expected": "1:1 paired→accepted ordering",
-                    "actual": f"queue depth {len(self._quic_recent_paired)}",
-                })
-            if self._quic_recent_paired:
-                _ts, fp_bytes = self._quic_recent_paired.popleft()
-                peer_fp = fp_bytes.hex()
+            # 2026-05-22 audit T1-H FULL FIX: bind the accepted
+            # Connection to its GROUND-TRUTH peer fingerprint via
+            # ``conn.peer_fingerprint()`` (added in commit-pending).
+            # The Rust side extracts the fp directly from the
+            # negotiated TLS session's client cert, so there is no
+            # race window between is_paired callbacks and accept
+            # returns. The legacy FIFO deque path remains only as
+            # a fallback when the native method is unavailable
+            # (build that predates this fix) or returns None
+            # (mTLS off / non-rustls TLS provider).
+            fp_from_conn = None
+            with contextlib.suppress(Exception):
+                fp_bytes = conn.peer_fingerprint()
+                if isinstance(fp_bytes, (bytes, bytearray)) and len(fp_bytes) == 32:
+                    fp_from_conn = bytes(fp_bytes).hex()
+            if fp_from_conn:
+                peer_fp = fp_from_conn
+                # If we ALSO have a deque entry for this fp,
+                # consume it so the queue doesn't accumulate.
+                # Otherwise leave the deque alone — a stale entry
+                # from a failed handshake will age out via the
+                # 5s cutoff above.
+                for i, (_ts, qfp) in enumerate(self._quic_recent_paired):
+                    if qfp.hex() == fp_from_conn:
+                        del self._quic_recent_paired[i]
+                        break
+            else:
+                # Fallback: legacy deque-based binding. Detect the
+                # race window so operators can see when the
+                # fallback's binding might be ambiguous.
+                if len(self._quic_recent_paired) > 1:
+                    self._degradation_events.append({
+                        "at_ms": now_ms,
+                        "kind": "quic_accept_fifo_race_window",
+                        "peer_fp": None,
+                        "reason": (
+                            f"is_paired fired {len(self._quic_recent_paired)} "
+                            f"times before accept_blocking returned; "
+                            f"FIFO order may be ambiguous (native crate "
+                            f"didn't expose peer_fingerprint)"
+                        ),
+                        "expected": "ground-truth fp from Connection",
+                        "actual": f"FIFO queue depth {len(self._quic_recent_paired)}",
+                    })
+                if self._quic_recent_paired:
+                    _ts, fp_bytes = self._quic_recent_paired.popleft()
+                    peer_fp = fp_bytes.hex()
             if peer_fp:
                 # Replace any stale prior connection for this fp.
                 prior = self._quic_inbound.get(peer_fp)

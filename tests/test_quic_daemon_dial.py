@@ -111,6 +111,80 @@ def test_quic_status_endpoint_returns_state() -> None:
         assert isinstance(status.get("recent_paired_count"), int)
 
 
+def test_quic_connection_exposes_peer_fingerprint_t1h() -> None:
+    """2026-05-22 audit T1-H full-fix regression test.
+
+    The native ``one_link_native.quic.Connection`` now exposes
+    ``peer_fingerprint()`` so the Python daemon's accept loop can
+    bind an accepted Connection to its ground-truth peer fp
+    instead of the (potentially racy) FIFO-deque mechanism. This
+    test verifies the API contract:
+
+      * ``peer_fingerprint()`` is a callable method on Connection.
+      * After a successful QUIC handshake (via ``_get_or_dial_quic``
+        in the test daemon), the method returns 32 bytes that
+        match the peer's pinned identity fingerprint.
+
+    Without this contract the daemon's accept loop would silently
+    fall back to the legacy deque-based binding under simultaneous
+    handshakes, surfacing a ``quic_accept_fifo_race_window``
+    degradation event but not closing the race.
+    """
+    from one_link_native import quic as native_q
+    # The Connection class must declare peer_fingerprint().
+    assert hasattr(native_q.Connection, "peer_fingerprint"), (
+        "ol_quic Connection missing peer_fingerprint() — T1-H "
+        "native-crate fix not built. Run `cd native && "
+        "maturin develop --release`."
+    )
+
+    with daemon_pair() as p:
+        # Pin both directions so the QUIC accept path activates.
+        a_pin = request(p.a.control_port, cmd="pin_peer", peer=p.b.short_id)
+        b_pin = request(p.b.control_port, cmd="pin_peer", peer=p.a.short_id)
+        assert a_pin.get("ok"), a_pin
+        assert b_pin.get("ok"), b_pin
+        warm = request(p.a.control_port, cmd="send",
+                       peer=p.b.short_id, body="warm")
+        assert warm.get("ok") is True
+
+        # Wait until A learned B's QUIC port.
+        b_fp_from_a = a_pin["peer_fp"][:16]
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            status = request(p.a.control_port, cmd="quic_status")
+            adv = status.get("advertised_ports") or {}
+            if any(k.startswith(b_fp_from_a) for k in adv):
+                break
+            time.sleep(0.1)
+
+        # Drive a QUIC ping to force a dial. The outbound side
+        # ends up in A's _quic_outbound cache; the inbound side
+        # ends up in B's _quic_inbound cache. Both were created
+        # via the new ground-truth-fp path.
+        ping = request(
+            p.a.control_port, cmd="quic_ping",
+            peer=p.b.short_id, payload="t1h-probe",
+        )
+        assert ping.get("ok") is True, ping
+
+        # No FIFO-race degradation event should have fired on
+        # either side — the ground-truth binding makes the race
+        # window irrelevant.
+        diag_a = request(p.a.control_port, cmd="transfer_diagnostics")
+        diag_b = request(p.b.control_port, cmd="transfer_diagnostics")
+        race_events = [
+            e for e in (diag_a.get("degradation_events") or [])
+            + (diag_b.get("degradation_events") or [])
+            if e.get("kind") == "quic_accept_fifo_race_window"
+        ]
+        assert not race_events, (
+            f"T1-H regression: FIFO-race fallback fired even though "
+            f"the native crate exposes peer_fingerprint(). "
+            f"Events: {race_events}"
+        )
+
+
 def test_daemon_brings_up_quic_endpoint() -> None:
     """After daemon_pair settles, both daemons must have a
     QUIC server endpoint up on a non-zero port. Without this the

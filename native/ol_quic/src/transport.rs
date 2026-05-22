@@ -265,6 +265,30 @@ impl Connection {
         self.inner.remote_address()
     }
 
+    /// 2026-05-22 audit T1-H: extract the BLAKE3 fingerprint of the
+    /// peer's Ed25519 public key directly from the negotiated TLS
+    /// session.
+    ///
+    /// Returns `None` when the connection wasn't authenticated with
+    /// a client cert (server-only) or when the peer-identity object
+    /// isn't a rustls `CertificateDer` chain (different TLS provider
+    /// at runtime — shouldn't happen with our build, but we surface
+    /// `None` rather than panic).
+    ///
+    /// This closes the FIFO-race exposure where the Python daemon's
+    /// accept-loop bound an accepted `Connection` to whichever fp
+    /// was at the front of a "recently paired" deque. Now the daemon
+    /// can call `conn.peer_fingerprint()` after `accept_blocking()`
+    /// returns and bind by ground truth.
+    #[must_use]
+    pub fn peer_fingerprint(&self) -> Option<crate::identity::PeerFingerprint> {
+        use rustls::pki_types::CertificateDer;
+        let identity = self.inner.peer_identity()?;
+        let certs: Box<Vec<CertificateDer<'static>>> = identity.downcast().ok()?;
+        let first = certs.first()?;
+        crate::tls::extract_pubkey_fingerprint(first).ok()
+    }
+
     /// Round-trip: open a bidirectional stream, send a request frame,
     /// read a response frame, close the stream.
     ///

@@ -482,6 +482,22 @@ impl PyConnection {
         self.inner.remote_address().to_string()
     }
 
+    /// 2026-05-22 audit T1-H: BLAKE3 fingerprint of the peer's
+    /// Ed25519 pubkey, extracted from the negotiated TLS session.
+    /// Returns ``None`` when the connection wasn't authenticated
+    /// (mTLS off) or when the rustls peer-identity downcast fails.
+    ///
+    /// The daemon's accept loop calls this after ``accept_blocking``
+    /// returns to bind an inbound ``Connection`` to its ground-truth
+    /// peer fp — closing the FIFO-race window where a deque-based
+    /// mapping between ``is_paired`` callback events and accepted
+    /// connections could mis-assign identities under simultaneous
+    /// handshakes.
+    fn peer_fingerprint<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
+        let fp = self.inner.peer_fingerprint()?;
+        Some(PyBytes::new_bound(py, &fp))
+    }
+
     /// Round-trip: open a fresh bidirectional stream, send the request
     /// frame, read the response frame, close the stream.
     ///
