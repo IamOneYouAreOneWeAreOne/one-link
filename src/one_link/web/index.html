@@ -10129,12 +10129,30 @@
   // Snapshot the URL token before anything else runs. The server's
   // boot-scrub script runs in <head>; this is in the body's main
   // script which runs after but BEFORE any fetches.
+  //
+  // 2026-05-21 audit T3-C: previously the token survived in
+  // ``location.href`` after page load — landing in browser history,
+  // referrer headers, and any browser-sync the user had enabled.
+  // We now strip ``?t=...`` from the URL via ``history.replaceState``
+  // immediately after stashing the token in sessionStorage, shrinking
+  // the leak window to the few ms between page-load and this script.
+  // The token remains in the daemon's HTTP access log of the initial
+  // page-load request — the only place we can't help.
   (function _captureUrlToken() {
     try {
       const params = new URLSearchParams(location.search || "");
       const t = params.get("t");
       if (t) {
         sessionStorage.setItem("ol_session_token", t);
+        // Strip the token from the visible URL without triggering a
+        // navigation. After this line, ``location.href`` no longer
+        // contains the token so a subsequent click into history,
+        // a screen-capture, or a referrer-leaking navigation
+        // cannot expose it.
+        params.delete("t");
+        const cleanQs = params.toString();
+        const cleanUrl = location.pathname + (cleanQs ? "?" + cleanQs : "") + location.hash;
+        try { history.replaceState(null, "", cleanUrl); } catch (_) {}
       }
     } catch (_) {}
   })();
@@ -11754,7 +11772,8 @@
     } catch (e) {
       console.warn(e);
       const body = $("#discover-body");
-      if (body) body.innerHTML = `<div class="empty">Couldn't reach the service. ${e.message || e}</div>`;
+      // 2026-05-21 audit T3-A: e.message is server-controlled; escape it.
+      if (body) body.innerHTML = `<div class="empty">Couldn't reach the service. ${_escapeHtml(String(e?.message || e || ""))}</div>`;
     } finally {
       state.discoverLoading = false;
       if (refreshBtn) refreshBtn.classList.remove("spinning");
@@ -16754,8 +16773,12 @@
       conflicts = r.conflicts || [];
       total = r.unresolved_total || 0;
     } catch (e) {
+      // 2026-05-21 audit T3-A: e.message originates from server JSON
+      // and was injected raw — a hostile error string could XSS the
+      // dashboard. Escape before rendering.
+      const reason = _escapeHtml(String(e?.message || e || ""));
       $("#conflicts-list").innerHTML =
-        `<div class="empty">Failed to load conflicts: ${e.message || e}</div>`;
+        `<div class="empty">Failed to load conflicts: ${reason}</div>`;
       $("#conflicts-sub").textContent = "";
       return;
     }
@@ -18991,7 +19014,10 @@
       const r = await api.get(`/api/peers/${fp}/media`);
       _renderMediaGallery(host, r.items || []);
     } catch (e) {
-      host.innerHTML = `<p class="settings-help">Failed to load: ${errorToastBody(e)}</p>`;
+      // 2026-05-21 audit T3-A: errorToastBody returns server-controlled
+      // text (e.message + e.hint + e.error_detail); escape before
+      // injecting via innerHTML.
+      host.innerHTML = `<p class="settings-help">Failed to load: ${_escapeHtml(errorToastBody(e))}</p>`;
     }
   }
   function _renderMediaGallery(host, items) {
@@ -25073,7 +25099,8 @@
     try {
       r = await api.get("/api/storage/usage");
     } catch (e) {
-      totalsHost.innerHTML = `<span class="settings-help">Failed to load: ${errorToastBody(e)}</span>`;
+      // 2026-05-21 audit T3-A: escape server-controlled errorToastBody.
+      totalsHost.innerHTML = `<span class="settings-help">Failed to load: ${_escapeHtml(errorToastBody(e))}</span>`;
       tableHost.innerHTML = "";
       return;
     }
@@ -28932,8 +28959,9 @@
         fetch("/api/sovereignty/outbound?limit=50", { credentials: "include" }).then(r => r.json()),
       ]);
     } catch (e) {
-      body.innerHTML = `<div class="privacy-panel-loading">Couldn't load. (${
-        (e && e.message) || "network error"})</div>`;
+      // 2026-05-21 audit T3-A: e.message is server-controlled; escape.
+      const reason = _escapeHtml(String((e && e.message) || "network error"));
+      body.innerHTML = `<div class="privacy-panel-loading">Couldn't load. (${reason})</div>`;
       return;
     }
 
