@@ -17112,6 +17112,34 @@ class Daemon:
                     and (r.metadata or {}).get("mode") == "planning"
                 )
             ]
+            # 2026-05-22 audit Batch FF: when any paused transfer's
+            # doctor diagnosis is ``reopen_secure_session`` (ratchet
+            # desync / AEAD InvalidTag), invalidate the cached
+            # native-transfer seed on this peer's live channel BEFORE
+            # the retry. Without this, the resumed send re-derives the
+            # same cached seed → same ratchet position → same AEAD
+            # failure → infinite reopen loop. The user-message "One
+            # Link is refreshing the secure session" now actually does
+            # something instead of being a misleading label.
+            needs_seed_rotate = any(
+                (r.metadata or {}).get("auto_action") == "reopen_secure_session"
+                for r in paused
+            )
+            if needs_seed_rotate:
+                with contextlib.suppress(Exception):
+                    sess = self._outbound_sessions.get(peer_fp)
+                    ch = getattr(sess, "channel", None) if sess else None
+                    if ch is not None:
+                        # Drop both the seed cache + any native session
+                        # built from it; next send_file re-derives from
+                        # fresh DR root_key.
+                        ch._native_transfer_seed = None
+                        ch._native_transfer_session = None
+                        log.info(
+                            "transfer_doctor reopen_secure_session: "
+                            "invalidated native_transfer_seed for %s",
+                            peer_fp[:8],
+                        )
             resumed = 0
             errors = 0
             for r in paused:
