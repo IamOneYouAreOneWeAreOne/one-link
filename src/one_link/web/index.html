@@ -11458,6 +11458,54 @@
     `;
     document.body.appendChild(m);
   }
+  // 2026-05-21 audit T3-Q: global focus-trap for any modal that
+  // sets ``role="dialog"`` AND ``aria-modal="true"``. Without this,
+  // Tab from inside a modal lets focus escape into the underlying
+  // page (which is still ``aria-hidden=false``); screen-reader users
+  // and keyboard-only users lose context. Listener is installed
+  // once at script load; it cheaply no-ops when no modal is visible.
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Tab") return;
+    // Find the topmost visible modal. ``offsetParent !== null`` is
+    // the cheap "is this element rendered" check (works for
+    // ``.show`` toggles + display:none alike). We pick the LAST
+    // visible match so a stacked modal traps independently.
+    const dialogs = document.querySelectorAll(
+      '[role="dialog"][aria-modal="true"]'
+    );
+    let active = null;
+    for (const d of dialogs) {
+      if (d.offsetParent !== null) active = d;
+    }
+    if (!active) return;
+    // Collect focusable descendants in DOM order. Excludes
+    // disabled / aria-hidden / tabindex="-1" elements.
+    const focusables = active.querySelectorAll(
+      'a[href], button:not([disabled]), textarea:not([disabled]),'
+      + ' input:not([disabled]):not([type="hidden"]), select:not([disabled]),'
+      + ' [tabindex]:not([tabindex="-1"])'
+    );
+    if (focusables.length === 0) {
+      ev.preventDefault();
+      active.focus();
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const cur = document.activeElement;
+    if (ev.shiftKey && cur === first) {
+      ev.preventDefault();
+      last.focus();
+    } else if (!ev.shiftKey && cur === last) {
+      ev.preventDefault();
+      first.focus();
+    } else if (!active.contains(cur)) {
+      // Focus drifted outside the modal somehow; pull it back.
+      ev.preventDefault();
+      first.focus();
+    }
+  });
+
   function _escapeHtml(s) {
     return String(s)
       .replace(/&/g, "&amp;")
