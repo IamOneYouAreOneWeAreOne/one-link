@@ -312,6 +312,15 @@ def test_chat_render_sticks_to_bottom_for_live_edge_and_own_sends(index_html: st
     assert "_forceNextMessagesToBottom();" in switch_path
 
 
+def test_clear_unread_rerenders_open_chat(index_html: str):
+    """Unread dividers must disappear as soon as the open thread is read."""
+    idx = index_html.find("function clearUnread(peerShortId)")
+    snippet = index_html[idx:idx + 700]
+    assert "delete state.unreadByPeer[peerShortId]" in snippet
+    assert "state.selectedPeer === peerShortId" in snippet
+    assert "scheduleRenderMessages()" in snippet
+
+
 def test_global_frame_budget_accessor(index_html: str):
     """window.__oneLinkFrameBudget is the API CI / Playwright tests
     will read to assert SLAs (p50/p95/p99/max)."""

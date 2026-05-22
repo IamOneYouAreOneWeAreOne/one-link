@@ -10844,6 +10844,9 @@
     state.totalUnread = Math.max(0, (state.totalUnread || 0) - prev);
     _refreshUnreadSurfaces();
     try { renderPeers(); } catch {}
+    if (state.selectedPeer === peerShortId) {
+      try { scheduleRenderMessages(); } catch {}
+    }
   }
   function clearAllUnread() {
     if (!state.totalUnread) return;
