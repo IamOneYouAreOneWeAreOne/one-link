@@ -146,20 +146,38 @@ class CapStore:
 
     def revoke_subject(self, subject_pub: bytes) -> int:
         """Drop every grant directed at this subject. Used when a
-        peer is explicitly revoked (audit-fix path)."""
-        dead = [
-            k for k in self._grants if k[1] == subject_pub
-        ]
+        peer is explicitly revoked (audit-fix path).
+
+        2026-05-22 audit Batch Z: tombstone the revoked grants'
+        nonces so that a peer who re-presents the same blob (still
+        within ``not_after``) doesn't get it re-accepted. Persisting
+        the nonce into the replay-defense set means ``accept`` will
+        treat it as a duplicate and refuse, even after eviction
+        pressure could have rotated it out of the original
+        seen-nonce window."""
+        dead = []
+        for k, sg in self._grants.items():
+            if k[1] == subject_pub:
+                dead.append(k)
+                # Persist the tombstone — keep the nonce in the seen
+                # set so any future replay of the same grant blob is
+                # caught by verify_grant's seen-nonces check.
+                self.seen_nonces[sg.grant.nonce] = None
         for k in dead:
             self._grants.pop(k, None)
         return len(dead)
 
     def revoke_granter(self, granter_pub: bytes) -> int:
         """Drop every grant ISSUED BY this granter. Used when the
-        granter's authority itself is revoked."""
-        dead = [
-            k for k in self._grants if k[0] == granter_pub
-        ]
+        granter's authority itself is revoked.
+
+        2026-05-22 audit Batch Z: tombstone semantics — see
+        :py:meth:`revoke_subject`."""
+        dead = []
+        for k, sg in self._grants.items():
+            if k[0] == granter_pub:
+                dead.append(k)
+                self.seen_nonces[sg.grant.nonce] = None
         for k in dead:
             self._grants.pop(k, None)
         return len(dead)

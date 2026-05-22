@@ -9800,10 +9800,25 @@ class UIServer:
                 {"error": "folder sync not initialized"}, status=503,
             )
         name = request.match_info["name"]
+        # 2026-05-22 audit Batch Z: pre-validate name + map exceptions
+        # to a coarse error instead of reflecting raw str(e) (same
+        # class-of-fix as T3-E / T3-L / T3-U closed elsewhere).
+        if not isinstance(name, str) or not name:
+            return web.json_response(
+                {"error": "folder name required"}, status=400,
+            )
+        if self.daemon.state.get_folder(name) is None:
+            return web.json_response(
+                {"error": "no such folder"}, status=404,
+            )
         try:
             self.daemon.folder_engine.remove_folder(name)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            log.warning("folder remove failed (%s): %s", name, e)
+            return web.json_response(
+                {"error": "folder remove failed", "code": "folder_remove_failed"},
+                status=500,
+            )
         return web.json_response({"ok": True})
 
     async def api_share_folder(self, request: web.Request) -> web.Response:
@@ -9812,10 +9827,21 @@ class UIServer:
                 {"error": "folder sync not initialized"}, status=503,
             )
         name = request.match_info["name"]
+        if not isinstance(name, str) or not name:
+            return web.json_response(
+                {"error": "folder name required"}, status=400,
+            )
+        if self.daemon.state.get_folder(name) is None:
+            return web.json_response(
+                {"error": "no such folder"}, status=404,
+            )
         try:
             data = await request.json()
-        except Exception as e:
-            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        except Exception:
+            return web.json_response(
+                {"error": "bad json body", "code": "bad_json"},
+                status=400,
+            )
         peer_fp = (data.get("peer_fp") or "").strip()
         mode = (data.get("mode") or "rw").strip()
         if not peer_fp:
@@ -9826,10 +9852,17 @@ class UIServer:
             )
         try:
             self.daemon.folder_engine.share_with(name, peer_fp, mode=mode)
-        except KeyError as e:
-            return web.json_response({"error": str(e)}, status=404)
+        except KeyError:
+            return web.json_response({"error": "no such folder"}, status=404)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            log.warning(
+                "folder share failed (%s -> %s): %s",
+                name, peer_fp[:8], e,
+            )
+            return web.json_response(
+                {"error": "folder share failed", "code": "folder_share_failed"},
+                status=500,
+            )
         # v0.7.1 deny-by-default: sharing a folder = user consent for
         # folder/merkle traffic with this peer.
         self._ensure_folder_caps_for(

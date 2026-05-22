@@ -385,6 +385,101 @@ def _format_error(exc: BaseException) -> str:
     return f"{cls}: {msg}" if msg else cls
 
 
+def _supports_sparse_files(path: Path) -> bool:
+    """2026-05-22 audit Batch Z — does the filesystem hosting ``path``
+    treat ``truncate(N)`` as a sparse hole (NTFS / ext4 / APFS / btrfs /
+    XFS) or physically write N zero bytes (exFAT / FAT32)?
+
+    The pre-allocation hint used by the CDC stream-to-disk path costs
+    nothing on sparse-capable filesystems but blows up a 16 GB USB
+    stick when a peer offers a 16 TiB blob. Detected via the parent
+    directory's filesystem type:
+
+      * On POSIX: ``shutil.disk_usage`` works on any FS, but the
+        filesystem type comes from ``os.statvfs``/``/proc/mounts``.
+        ``statvfs`` doesn't expose the type name portably, so we fall
+        through to a probe: create a small file, ``truncate(2 MB)``,
+        ``stat().st_blocks`` — if blocks << expected, the FS is
+        sparse-capable. Probe cached per-mount.
+      * On Windows: distinguish by drive type. NTFS supports sparse
+        files; FAT32/exFAT do not. ``ctypes.windll.kernel32
+        .GetVolumeInformationW`` returns the FS name.
+
+    Returns ``True`` on any unknown / probe-failure path so we don't
+    regress sparse-capable filesystems. The defensive case is the
+    explicit exFAT/FAT32 hit.
+    """
+    import sys
+    try:
+        parent = path.parent if path else Path(".")
+        if sys.platform == "win32":
+            return _windows_fs_supports_sparse(parent)
+        # POSIX: probe via small truncate + st_blocks check.
+        return _posix_fs_supports_sparse(parent)
+    except Exception as e:
+        log.debug("sparse-file detect failed for %s: %s; assuming sparse", path, e)
+        return True
+
+
+_SPARSE_PROBE_CACHE: dict[str, bool] = {}
+
+
+def _windows_fs_supports_sparse(parent: Path) -> bool:
+    """Windows-specific: read the FS type via GetVolumeInformationW.
+    Cache per-drive."""
+    import ctypes
+    drive_root = str(parent.resolve().drive) + "\\"
+    if drive_root in _SPARSE_PROBE_CACHE:
+        return _SPARSE_PROBE_CACHE[drive_root]
+    fs_name_buf = ctypes.create_unicode_buffer(64)
+    vol_name_buf = ctypes.create_unicode_buffer(64)
+    ok = ctypes.windll.kernel32.GetVolumeInformationW(
+        ctypes.c_wchar_p(drive_root),
+        vol_name_buf, 64,
+        None, None, None,
+        fs_name_buf, 64,
+    )
+    if not ok:
+        _SPARSE_PROBE_CACHE[drive_root] = True
+        return True
+    fs_name = fs_name_buf.value.upper()
+    # NTFS, ReFS support sparse files; FAT/FAT32/exFAT do not.
+    is_sparse = fs_name in ("NTFS", "REFS")
+    _SPARSE_PROBE_CACHE[drive_root] = is_sparse
+    return is_sparse
+
+
+def _posix_fs_supports_sparse(parent: Path) -> bool:
+    """POSIX: probe via a small truncate + st_blocks check. Cache
+    per-mount (via dev id)."""
+    import os as _os
+    import tempfile
+    try:
+        dev = _os.stat(parent).st_dev
+    except OSError:
+        return True
+    cache_key = f"posix:{dev}"
+    if cache_key in _SPARSE_PROBE_CACHE:
+        return _SPARSE_PROBE_CACHE[cache_key]
+    with tempfile.NamedTemporaryFile(dir=parent, delete=False) as probe:
+        probe_path = probe.name
+    try:
+        with open(probe_path, "wb") as f:
+            f.truncate(2 * 1024 * 1024)  # 2 MB hole
+        st = _os.stat(probe_path)
+        # st_blocks is in 512-byte units. A sparse file shows
+        # near-zero blocks; a physically-allocated file shows
+        # ~4096 (2 MB / 512).
+        is_sparse = st.st_blocks < 256
+    except OSError:
+        is_sparse = True
+    finally:
+        with contextlib.suppress(OSError):
+            _os.unlink(probe_path)
+    _SPARSE_PROBE_CACHE[cache_key] = is_sparse
+    return is_sparse
+
+
 def _is_transient_send_error(exc: BaseException) -> bool:
     """v0.7.4: classify send_file failures so the resume-on-reconnect
     path knows when to mark a transfer 'paused' (auto-retry on next
@@ -5024,17 +5119,33 @@ class Daemon:
                     # treat the gap as sparse it costs nothing.
                     # Skip for non-CDC stream mode — those grow
                     # sequentially anyway.
+                    # 2026-05-22 audit Batch Z: skip the up-front
+                    # truncate on filesystems that treat the gap as
+                    # PHYSICAL zeros (exFAT, FAT32 — common for
+                    # removable USB inbox volumes). A 16 TiB offer
+                    # to a 16 GB USB stick otherwise exhausts the
+                    # volume before per-chunk admission can catch
+                    # it. NTFS, ext4, APFS, btrfs handle the gap as
+                    # sparse (zero cost); fall through to the
+                    # truncate there.
                     if cdc_chunks is not None and size > 0:
-                        try:
-                            handle.truncate(size)
-                        except OSError as e:
-                            # Truncate failure (disk full, perm) is
-                            # advisory — the transfer still works,
-                            # just without the contiguous-extent
-                            # hint. Log and continue.
+                        if _supports_sparse_files(out_path):
+                            try:
+                                handle.truncate(size)
+                            except OSError as e:
+                                # Truncate failure (disk full, perm)
+                                # is advisory — the transfer still
+                                # works, just without the contiguous-
+                                # extent hint. Log and continue.
+                                log.debug(
+                                    "pre-allocate %s -> %d bytes failed: %s",
+                                    out_path.name, size, e,
+                                )
+                        else:
                             log.debug(
-                                "pre-allocate %s -> %d bytes failed: %s",
-                                out_path.name, size, e,
+                                "pre-allocate skipped on non-sparse FS "
+                                "for %s (would pre-zero %d bytes)",
+                                out_path.name, size,
                             )
                     cdc_streamed_initial = set()  # case-3: empty
             if cdc_chunks:
