@@ -180,10 +180,19 @@ def test_pill_click_opens_files_pane(index_html: str):
 
 def test_ws_handler_calls_update_rate(index_html: str):
     """The transfer WS event handler must call updateTransferRate
-    on every event, otherwise the EWMA never advances."""
+    on every event, otherwise the EWMA never advances.
+
+    2026-05-22 audit Batch AA: the by-id Map prune block grew the
+    handler past the original 1200-char window. Read to the next
+    ``else if (m.type ===`` or 2400 chars (whichever is shorter)
+    so structural checks survive reasonable in-handler additions.
+    """
     idx = index_html.find('m.type === "transfer"')
     assert idx > 0
-    snippet = index_html[idx:idx + 1200]
+    end_idx = index_html.find('else if (m.type ===', idx + 30)
+    if end_idx == -1 or end_idx - idx > 2400:
+        end_idx = idx + 2400
+    snippet = index_html[idx:end_idx]
     assert "updateTransferRate(" in snippet
     assert "scheduleRenderTransferHeaderPill()" in snippet
 
