@@ -476,10 +476,24 @@ def load_or_create(
 
 
 def verify(public_bytes: bytes, signature: bytes, data: bytes) -> bool:
+    """Verify ``signature`` over ``data`` under ``public_bytes``.
+
+    2026-05-21 audit (crypto agent): the previous bare ``except Exception``
+    swallowed everything — InvalidSignature (the legitimate negative),
+    but also ``ValueError`` from a malformed pubkey length and any
+    library-internal exceptions. That meant a packing bug elsewhere
+    (e.g. ``public_bytes`` of length != 32) silently looked like a
+    signature-mismatch, which in ``channel.respond`` falls through
+    from the v2 attempt to the v1 attempt and accepts the legacy
+    HELLO sig. Narrow to ``InvalidSignature`` + ``ValueError`` (raised
+    by ``from_public_bytes`` on length mismatch) only; surface
+    anything else so the failure mode is loud, not a hidden downgrade.
+    """
+    from cryptography.exceptions import InvalidSignature
     try:
         Ed25519PublicKey.from_public_bytes(public_bytes).verify(signature, data)
         return True
-    except Exception:
+    except (InvalidSignature, ValueError):
         return False
 
 
