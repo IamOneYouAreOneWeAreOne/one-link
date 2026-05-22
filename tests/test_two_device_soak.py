@@ -103,6 +103,38 @@ def _count_inbound(handle) -> int:
     )
 
 
+# 2026-05-22 audit Batch X: shared silent-fallback assertion. Use at
+# the end of any happy-path integration test that sends a file / chat
+# message between two daemons. The degradation_events ring is the
+# loudest regression signal for the cascading-NULL / DR-wipe class of
+# bug — having it asserted everywhere is the cheapest possible net.
+_SILENT_FALLBACK_KINDS = frozenset({
+    "native_transfer_unavailable",
+    "native_transfer_receiver_unavailable",
+    "stream_quic_batch_failed",
+    "quic_accept_fifo_race_window",
+    "file_offer_batch_inner_failed",
+    "provenance_broadcast_failed",
+})
+
+
+def _assert_no_silent_fallback(handle, *, allow: tuple = ()) -> None:
+    """Assert that ``handle``'s daemon has not recorded any
+    silent-fallback event in its ``degradation_events`` ring. Pass
+    ``allow=("kind1", "kind2", ...)`` to whitelist kinds that the
+    specific test intentionally provokes."""
+    diag = request(handle.control_port, cmd="transfer_diagnostics")
+    events = diag.get("degradation_events") or []
+    bad = [
+        e for e in events
+        if e.get("kind") in _SILENT_FALLBACK_KINDS
+        and e.get("kind") not in allow
+    ]
+    assert not bad, (
+        f"Silent fallback fired on a happy-path send: {bad}"
+    )
+
+
 # ────────────────────────────────────────────────────────────────────
 # Phase A — chat soak
 # ────────────────────────────────────────────────────────────────────
@@ -185,15 +217,21 @@ def test_soak_unicode_emoji_burst():
             res = request(p.a.control_port, cmd="send",
                           peer=p.b.short_id, body=body)
             assert res["ok"]
-        time.sleep(1.5)
-        b_log = message_log(p.b.home)
-        received = {
-            m["body"] for m in b_log
-            if m.get("t") == "TEXT" and m.get("dir") == "in"
-            and m.get("body", "").startswith("msg-")
-        }
-        missing = set(bodies) - received
+        # 2026-05-22 audit Batch X: bounded polling instead of
+        # ``time.sleep(1.5)`` — under suite-level load the brittle
+        # window flakes; polling adapts. Counter (not set) so
+        # duplicate-delivery still surfaces — T3-N pattern.
+        inbound = _wait_for_inbound_text_count(
+            p.b.home, body_prefix="msg-", expected=len(bodies), timeout=15.0,
+        )
+        from collections import Counter
+        received = Counter(m["body"] for m in inbound)
+        missing = set(bodies) - set(received)
+        duplicates = {body: n for body, n in received.items() if n > 1}
         assert not missing, f"Dropped: {missing}"
+        assert not duplicates, f"Delivered more than once: {duplicates}"
+        _assert_no_silent_fallback(p.a)
+        _assert_no_silent_fallback(p.b)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -258,13 +296,21 @@ def test_soak_burst_10_messages():
             res = request(p.a.control_port, cmd="send",
                           peer=p.b.short_id, body=f"burst-{i}")
             assert res["ok"], (i, res)
-        time.sleep(1.5)
-        received = {
-            m["body"] for m in message_log(p.b.home)
-            if m.get("t") == "TEXT" and m.get("dir") == "in"
-            and m.get("body", "").startswith("burst-")
-        }
-        assert len(received) == 10, f"Got {len(received)}/10: {received}"
+        # 2026-05-22 audit Batch X: bounded polling + Counter so
+        # duplicate-delivery is visible (T3-N pattern).
+        inbound = _wait_for_inbound_text_count(
+            p.b.home, body_prefix="burst-", expected=10, timeout=15.0,
+        )
+        from collections import Counter
+        received = Counter(m["body"] for m in inbound)
+        assert sum(received.values()) == 10, (
+            f"Expected 10 distinct deliveries; got "
+            f"{sum(received.values())}: {dict(received)}"
+        )
+        duplicates = {body: n for body, n in received.items() if n > 1}
+        assert not duplicates, f"Delivered more than once: {duplicates}"
+        _assert_no_silent_fallback(p.a)
+        _assert_no_silent_fallback(p.b)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -279,14 +325,24 @@ def test_soak_peer_caps_advertised():
         # Trigger a single send to force a handshake.
         request(p.a.control_port, cmd="send",
                 peer=p.b.short_id, body="warmup")
-        time.sleep(2.0)
-        peers_a = request(p.a.control_port, cmd="peers")
-        assert peers_a["ok"], peers_a
-        b_in_a = next(
-            (pp for pp in peers_a["peers"] if pp["short_id"] == p.b.short_id),
-            None,
-        )
-        assert b_in_a is not None, "B not in A's peer list"
+        # 2026-05-22 audit Batch X: poll for B to appear in A's
+        # peer list instead of a fixed 2 s sleep. CAPS exchange
+        # completes within a fraction of a second on healthy mDNS;
+        # the brittle 2 s was a CI-flake source.
+        deadline = time.time() + 10.0
+        b_in_a = None
+        while time.time() < deadline:
+            peers_a = request(p.a.control_port, cmd="peers")
+            if peers_a.get("ok"):
+                b_in_a = next(
+                    (pp for pp in peers_a.get("peers", [])
+                     if pp.get("short_id") == p.b.short_id),
+                    None,
+                )
+                if b_in_a is not None:
+                    break
+            time.sleep(0.1)
+        assert b_in_a is not None, "B not in A's peer list after 10s"
         # The control-socket peers cmd may not echo app_version;
         # checking the field exists at all (even if None) confirms
         # the schema is right.

@@ -345,45 +345,45 @@ def test_corrupt_token_file_is_replaced_safely():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_load_or_create_token_unit():
-    """Unit test the token logic directly."""
+def test_load_or_create_token_unit(monkeypatch, tmp_path):
+    """Unit test the token logic directly.
+
+    2026-05-22 audit Batch X: use ``monkeypatch.setenv`` instead of
+    mutating ``os.environ`` directly + try/finally pop. Under
+    pytest-xdist the bare mutation surfaces as flakiness on
+    unrelated tests if a process is interrupted between set and pop.
+    """
     from one_link.server import UIServer
 
-    tmp = Path(tempfile.mkdtemp(prefix="ol_token_unit_"))
-    try:
-        os.environ["ONE_LINK_HOME"] = str(tmp)
-        # Force a re-import via direct module access; UIServer._load_or_create_token
-        # uses one_link.server._token_path() which honours ONE_LINK_HOME via paths.py.
-        # First call: no file → generates fresh
-        from one_link.paths import data_dir
-        token_path = data_dir() / "ui.token"
-        if token_path.exists():
-            token_path.unlink()
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    # Force a re-import via direct module access; UIServer._load_or_create_token
+    # uses one_link.server._token_path() which honours ONE_LINK_HOME via paths.py.
+    # First call: no file → generates fresh
+    from one_link.paths import data_dir
+    token_path = data_dir() / "ui.token"
+    if token_path.exists():
+        token_path.unlink()
 
-        t1 = UIServer._load_or_create_token()
-        assert len(t1) >= 32
-        # Second call: still no file written (token is only persisted on
-        # daemon start). Each call returns a fresh one.
-        t2 = UIServer._load_or_create_token()
-        assert len(t2) >= 32
+    t1 = UIServer._load_or_create_token()
+    assert len(t1) >= 32
+    # Second call: still no file written (token is only persisted on
+    # daemon start). Each call returns a fresh one.
+    t2 = UIServer._load_or_create_token()
+    assert len(t2) >= 32
 
-        # Now WRITE a valid token; load_or_create_token should return it.
-        token_path.write_text("a" * 50)
-        t3 = UIServer._load_or_create_token()
-        assert t3 == "a" * 50
+    # Now WRITE a valid token; load_or_create_token should return it.
+    token_path.write_text("a" * 50)
+    t3 = UIServer._load_or_create_token()
+    assert t3 == "a" * 50
 
-        # Corrupt token: too short → fresh one generated
-        token_path.write_text("nope")
-        t4 = UIServer._load_or_create_token()
-        assert t4 != "nope"
-        assert len(t4) >= 32
+    # Corrupt token: too short → fresh one generated
+    token_path.write_text("nope")
+    t4 = UIServer._load_or_create_token()
+    assert t4 != "nope"
+    assert len(t4) >= 32
 
-        # Corrupt token: invalid chars → fresh one generated
-        token_path.write_text("a" * 40 + "\n!@#$")
-        t5 = UIServer._load_or_create_token()
-        assert "!" not in t5
-        assert len(t5) >= 32
-    finally:
-        os.environ.pop("ONE_LINK_HOME", None)
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
+    # Corrupt token: invalid chars → fresh one generated
+    token_path.write_text("a" * 40 + "\n!@#$")
+    t5 = UIServer._load_or_create_token()
+    assert "!" not in t5
+    assert len(t5) >= 32
