@@ -189,6 +189,25 @@ def test_soak_small_file_round_trip(tmp_path):
             time.sleep(0.1)
         assert landed is not None, "small file never arrived in B's inbox"
 
+        # 2026-05-21 audit T2-L regression net: a clean small-file
+        # round-trip must leave the silent-fallback ring empty.
+        # Catches the DR-bootstrap-wipe / NoopChannel-proxy /
+        # native-session-on-receiver classes of bug that fall back
+        # silently instead of failing loudly.
+        diag = request(p.a.control_port, cmd="transfer_diagnostics")
+        events = diag.get("degradation_events") or []
+        unexpected = [
+            e for e in events
+            if e.get("kind") in (
+                "native_transfer_unavailable",
+                "native_transfer_receiver_unavailable",
+                "stream_quic_batch_failed",
+            )
+        ]
+        assert not unexpected, (
+            f"Silent fallback fired on a happy-path send: {unexpected}"
+        )
+
 
 # ────────────────────────────────────────────────────────────────────
 # Phase C — bursty send
@@ -243,18 +262,24 @@ def test_soak_peer_caps_advertised():
 # ────────────────────────────────────────────────────────────────────
 
 def test_soak_no_silent_drops():
-    """Aggregate sanity: across all soak phases above (which run
-    in the same pytest session), if any phase silently dropped
-    a body but reported ok=True on the control socket, the test
-    above would have failed. This phase exists to anchor the
-    contract: the soak harness MUST fail-loud on the
-    'shipped to source, broken in practice' pattern.
+    """Anchor the no-silent-fallback contract on a fresh daemon
+    pair. Brings up two daemons, pairs them via mDNS, then queries
+    ``transfer_diagnostics`` and asserts the ``degradation_events``
+    ring is empty. A fresh boot must NEVER carry events; if it
+    does, something silently degraded during startup
+    (cap-fail-open, native-transfer-unavailable, etc).
 
-    This is a tautological smoke test — its real value is that
-    its existence ensures the soak file is discovered by pytest
-    and runs in CI when the `-m soak` selector is applied.
+    2026-05-21 audit T2-N upgrade: previously this was a literal
+    ``assert True`` — passing on any state. Now it actively
+    interrogates the daemon's structured-degradation surface.
     """
-    assert True
+    with daemon_pair() as p:
+        diag_a = request(p.a.control_port, cmd="transfer_diagnostics")
+        diag_b = request(p.b.control_port, cmd="transfer_diagnostics")
+        events_a = diag_a.get("degradation_events") or []
+        events_b = diag_b.get("degradation_events") or []
+        assert not events_a, f"A had degradation events on fresh boot: {events_a}"
+        assert not events_b, f"B had degradation events on fresh boot: {events_b}"
 
 
 # ────────────────────────────────────────────────────────────────────
