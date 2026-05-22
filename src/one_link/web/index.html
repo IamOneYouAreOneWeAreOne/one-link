@@ -12535,8 +12535,8 @@
       err.appendChild(rows);
       body.replaceChildren(err);
     };
-    img.src = ent.url;
     body.appendChild(img);
+    img.src = ent.url;
     const openA = lb.querySelector(".file-lightbox-open");
     openA.href = ent.url;
     const dlA = lb.querySelector(".file-lightbox-download");
@@ -15934,7 +15934,6 @@
         img.alt = msg.name || "image";
         attachImagePreviewFallback(img, meta, msg, previewUrl,
           "The file arrived, but the local inbox route could not serve an image preview.");
-        img.src = previewUrl;
         _keepMessagesBottomAfterMediaLoad(img);
         img.onclick = (ev) => {
           ev.stopPropagation();
@@ -15948,6 +15947,7 @@
           });
         };
         meta.appendChild(img);
+        img.src = previewUrl;
       }
     }
     // v0.21.x: outbound image thumbnail. The sender used to see no
@@ -15967,7 +15967,6 @@
         img.alt = msg.name || "image";
         attachImagePreviewFallback(img, meta, msg, cachedUrl,
           "The transfer finished, but this browser or daemon could not reopen the sender-side image preview.");
-        img.src = cachedUrl;
         _keepMessagesBottomAfterMediaLoad(img);
         img.onclick = (ev) => {
           ev.stopPropagation();
@@ -15981,6 +15980,7 @@
           });
         };
         meta.appendChild(img);
+        img.src = cachedUrl;
       } else {
         meta.appendChild(renderImagePreviewFallback(
           msg,

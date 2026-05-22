@@ -378,6 +378,23 @@ def test_jump_to_date_has_validation_and_nearest_fallback(index_html: str):
     assert "Jumped to nearest message" in index_html
 
 
+def test_file_image_previews_fail_cleanly(index_html: str):
+    """Broken local image routes should show useful state, not a broken
+    image icon or an empty Details pane."""
+    assert "function renderImagePreviewFallback" in index_html
+    assert "function attachImagePreviewFallback" in index_html
+    assert "function renderFileBubbleDetails" in index_html
+    assert "Preview unavailable" in index_html
+    assert "Image preview unavailable" in index_html
+    assert "file-lightbox-error" in index_html
+    assert "file-bubble-details" in index_html
+    assert "img.onerror = () =>" in index_html
+    assert "body.appendChild(img);\n    img.src = ent.url;" in index_html
+    assert "meta.appendChild(img);\n        img.src = previewUrl;" in index_html
+    assert "meta.appendChild(img);\n        img.src = cachedUrl;" in index_html
+    assert "Open in new tab or save a copy" in index_html
+
+
 def test_global_frame_budget_accessor(index_html: str):
     """window.__oneLinkFrameBudget is the API CI / Playwright tests
     will read to assert SLAs (p50/p95/p99/max)."""
