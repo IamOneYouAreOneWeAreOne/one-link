@@ -6224,6 +6224,31 @@ class UIServer:
             pending = invite.get("pending_claim") if isinstance(invite, dict) else None
             if not isinstance(pending, dict):
                 raise ValueError("no pending device claim for this invite")
+            # 2026-05-21 audit T1-L: previously /confirm minted a
+            # device cert for any caller holding the bearer token
+            # and the pending claim — without verifying the SAS
+            # (Short Authentication String) the operator read off
+            # the claim screen. That made the SAS purely cosmetic.
+            # Require the SAS in the request body and constant-time-
+            # compare against ``pending["trust_code"]``. Both sides
+            # must show the same SAS, so the operator's confirmation
+            # is now load-bearing.
+            expected_sas = str(pending.get("trust_code") or "")
+            presented_sas = str(body.get("sas") or body.get("trust_code") or "")
+            if not expected_sas or not presented_sas:
+                raise ValueError("missing SAS confirmation (sas required)")
+            if not hmac.compare_digest(expected_sas, presented_sas):
+                # Audit-log the mismatch — looks-like an attacker
+                # probing the SAS without the live screen.
+                with contextlib.suppress(Exception):
+                    state.record_self_mesh_audit(
+                        event="setup_device_invite_sas_mismatch",
+                        severity="bad",
+                        root_pub=bytes(invite.get("root_pub", b"")),
+                        device_pub=bytes(pending.get("device_pub", b"")),
+                        detail="SAS rejected",
+                    )
+                raise ValueError("SAS mismatch")
             device_pub = bytes(pending["device_pub"])
             kind = str(pending.get("device_kind") or "remote-device")
             label = str(pending.get("label") or kind)
@@ -13103,13 +13128,30 @@ class UIServer:
         # Prefer the ledger-recorded original filename for the
         # Content-Disposition header so downloads / Save As use the
         # name the recipient saw, not whatever the on-disk basename is.
-        download_name = (rec.metadata or {}).get("name") or path.name
-        mime = mimetypes.guess_type(download_name)[0] or "application/octet-stream"
+        # 2026-05-21 audit T3-L: the ledger row's ``name`` is peer-
+        # supplied at FILE_OFFER time; a malicious sender could plant
+        # CR/LF/quote bytes that header-smuggle in the
+        # Content-Disposition field. Use RFC 5987 ``filename*`` with
+        # URL-encoding for any non-token character + emit an
+        # ASCII-only fallback ``filename=`` stripped of CRLF/quote.
+        from urllib.parse import quote as _urlquote
+        raw_name = (rec.metadata or {}).get("name") or path.name
+        # ASCII fallback: kill CR/LF/quote/control chars; clip to 200.
+        ascii_name = "".join(
+            c if 0x20 <= ord(c) < 0x7f and c not in ('"', "\\")
+            else "_"
+            for c in raw_name
+        )[:200] or "file"
+        encoded_name = _urlquote(raw_name, safe="")
+        mime = mimetypes.guess_type(ascii_name)[0] or "application/octet-stream"
         return web.FileResponse(
             path,
             headers={
                 "Content-Type": mime,
-                "Content-Disposition": f'inline; filename="{download_name}"',
+                "Content-Disposition": (
+                    f'inline; filename="{ascii_name}"; '
+                    f"filename*=UTF-8''{encoded_name}"
+                ),
             },
         )
 

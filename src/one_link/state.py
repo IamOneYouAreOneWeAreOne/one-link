@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import contextlib
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -427,6 +428,14 @@ class State:
         )
         self._conn.row_factory = sqlite3.Row
         self._write_lock = threading.RLock()
+        # 2026-05-21 audit T2-R: state.db holds DR chain keys, group
+        # sender keys, message bodies, peer trust state. On POSIX
+        # the default mkdir/file mode follows the process umask
+        # (often 0o022 → world-readable file). Lock it down to user-
+        # only. Best-effort: chmod silently no-ops on Windows where
+        # the permission model is ACL-based.
+        with contextlib.suppress(Exception):
+            os.chmod(self.db_path, 0o600)
         # v0.20.7 (security audit H21 + partial C5): optional
         # at-rest wrap for the highest-value secrets in the schema
         # (group sender chain_keys). Daemon wires a LockBox here at
@@ -3190,15 +3199,29 @@ class State:
         out.sort(key=lambda d: -d["msg_count"])
         return out
 
-    def list_peer_files(self, peer_fp: str) -> list[MessageRecord]:
+    def list_peer_files(
+        self, peer_fp: str, *, limit: int = 2000, offset: int = 0,
+    ) -> list[MessageRecord]:
         """v0.11.5: messages with file metadata for the media gallery.
-        Returns oldest → newest so the gallery scrolls naturally."""
+        Returns oldest → newest so the gallery scrolls naturally.
+
+        2026-05-21 audit T3-I: previously this scanned the entire
+        per-peer file-message history with no LIMIT. On a chatty peer
+        with 10k+ file messages, every gallery render shipped megabytes
+        and traversed the full table. The default 2000-row cap keeps
+        the gallery responsive; ``offset`` lets the UI paginate older
+        history on demand. Caller-supplied limits are clamped to a
+        sane ceiling (10k) to prevent control-plane DoS.
+        """
+        limit = max(1, min(int(limit), 10_000))
+        offset = max(0, int(offset))
         rows = self._conn.execute(
             "SELECT * FROM messages "
             "WHERE peer_fp = ? AND msg_type = 'file' "
             "  AND (deleted_at_ms IS NULL) "
-            "ORDER BY ts_ms ASC",
-            (peer_fp,),
+            "ORDER BY ts_ms ASC "
+            "LIMIT ? OFFSET ?",
+            (peer_fp, limit, offset),
         ).fetchall()
         return [self._row_to_msg(r) for r in rows]
 
