@@ -548,8 +548,19 @@ class BrowserPeerManager:
         if pc is not None:
             try:
                 # aiortc's pc.close is async; schedule it.
+                # 2026-05-22 audit Batch Y: track close tasks in
+                # ``self._pc_close_tasks`` so ``shutdown()`` can await
+                # them with a bounded timeout. Without tracking, the
+                # daemon-shutdown cancellation can interrupt aiortc
+                # mid-ICE-teardown; any attached MediaStream tracks
+                # then leak their underlying socket handles + worker
+                # threads (visible on call paths).
                 loop = asyncio.get_event_loop()
-                loop.create_task(pc.close())
+                if not hasattr(self, "_pc_close_tasks"):
+                    self._pc_close_tasks: set[asyncio.Task] = set()
+                close_task = loop.create_task(pc.close())
+                self._pc_close_tasks.add(close_task)
+                close_task.add_done_callback(self._pc_close_tasks.discard)
             except Exception as e:
                 log.debug("peer-rtc: pc.close error for %s: %s", peer.fingerprint, e)
         self._peers.pop(peer.fingerprint, None)

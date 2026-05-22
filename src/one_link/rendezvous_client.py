@@ -247,9 +247,18 @@ class RendezvousClient:
                     return result
             return None
         finally:
-            for t in tasks:
-                if not t.done():
-                    t.cancel()
+            # 2026-05-22 audit Batch Y: await the cancelled tasks so
+            # aiohttp's ``async with session.get`` exit handlers run
+            # before we leave this scope. Without the await, the
+            # cancelled coroutines schedule their cleanup after
+            # session.close() in shutdown races and surface as
+            # "Unclosed response" warnings under pytest -W error.
+            pending = [t for t in tasks if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                with contextlib.suppress(Exception):
+                    await asyncio.gather(*pending, return_exceptions=True)
 
     @property
     def observed_self(self) -> dict[str, RendezvousObservedSelf]:

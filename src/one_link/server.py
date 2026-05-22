@@ -3549,14 +3549,28 @@ class UIServer:
                         return ws
                     # Audit C1 defense-in-depth: record + cross-check
                     # the DTLS-SRTP fingerprint inside the SDP against
-                    # the per-pubkey history. Doesn't reject — the
-                    # envelope-signature path already does — but logs a
-                    # structured WARN if it changed.
+                    # the per-pubkey history. The envelope-signature
+                    # path already gates trust; this is the second
+                    # gate that catches a mid-session DTLS-cert swap.
+                    # 2026-05-22 audit Batch Y: a previously-attested
+                    # peer presenting a different DTLS fingerprint
+                    # mid-session should re-attest from scratch rather
+                    # than silently swap behind the application's back.
+                    # Clear attested_ms + close the live peer so the
+                    # next interaction goes through the full
+                    # pair-trust + envelope-sig gate.
                     sdp_for_check = envelope.get("sdp", "")
                     if isinstance(sdp_for_check, str):
-                        self.peer_rtc.record_dtls_fingerprint(
+                        _dtls_fp, _dtls_ok = self.peer_rtc.record_dtls_fingerprint(
                             pubkey=pubkey, sdp=sdp_for_check,
                         )
+                        if not _dtls_ok:
+                            existing_peer = self.peer_rtc._peers.get(fingerprint)
+                            if existing_peer is not None:
+                                with contextlib.suppress(Exception):
+                                    existing_peer.attested_ms = None
+                                with contextlib.suppress(Exception):
+                                    self.peer_rtc._close_peer(existing_peer)
                     # Trust check: pair_token OR known pubkey.
                     pair_token = envelope.get("pair_token") or ""
                     redeemed = self.peer_rtc.redeem_pairing_token(pair_token) if pair_token else None

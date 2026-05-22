@@ -16873,7 +16873,18 @@ class Daemon:
     def _schedule_outbox_flush(self, peer_fp: str) -> None:
         """Fire-and-forget background flush. Called from the
         session-up hook. Idempotent: if a flush for this peer is
-        already inflight, the new task no-ops."""
+        already inflight, the new task no-ops.
+
+        2026-05-22 audit Batch Y: claim the inflight slot BEFORE
+        creating the task, not inside ``flush_outbox_for``. Previously
+        N near-simultaneous session-up events on the same peer all
+        saw an empty set, all spawned a task, and all did their own
+        ``state.get_peer`` + ``resolve_for_send`` round-trip before
+        ``flush_outbox_for`` claimed the slot. Only one wins the
+        per-peer lock at a time, but the thundering-herd before the
+        lock wasted ~N-1 round-trips on session churn. Claiming at
+        schedule time collapses the herd to one task.
+        """
         if self.state is None or not peer_fp:
             return
         if peer_fp in self._outbox_flush_inflight:
@@ -16882,6 +16893,9 @@ class Daemon:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+        # Claim inflight slot now; _flush_outbox_swallow clears it on
+        # task completion (success OR exception).
+        self._outbox_flush_inflight.add(peer_fp)
         loop.create_task(self._flush_outbox_swallow(peer_fp))
 
     async def _flush_outbox_swallow(self, peer_fp: str) -> None:
@@ -16889,6 +16903,10 @@ class Daemon:
             await self.flush_outbox_for(peer_fp)
         except Exception as e:
             log.warning("outbox flush task errored for %s: %s", peer_fp[:8], e)
+        finally:
+            # Always clear the inflight slot — even if flush_outbox_for
+            # crashed before it would have cleared its own claim.
+            self._outbox_flush_inflight.discard(peer_fp)
 
     # ─── resume-on-reconnect (v0.7.4) ─────────────────────────────────
 
@@ -21434,6 +21452,21 @@ class Daemon:
         if endpoint is None:
             return
         while True:
+            # 2026-05-22 audit Batch Y: endpoint-identity guard.
+            # ``self._quic_server_endpoint`` can be swapped by the
+            # same-port rebind path. If rebind happens, the old
+            # accept loop keeps accept_blocking-ing on the closed
+            # endpoint, catches the generic exception, sleeps 0.5s,
+            # and spins forever (one task per generation). When the
+            # endpoint we captured at loop entry no longer matches
+            # the daemon's current endpoint, exit cleanly so the
+            # new loop is the only one accepting.
+            if self._quic_server_endpoint is not endpoint:
+                log.info(
+                    "QUIC accept loop: server endpoint replaced, exiting "
+                    "old loop cleanly"
+                )
+                return
             try:
                 # 5 s timeout so we periodically check the daemon
                 # is still meant to be running. Cheap loop.
@@ -21576,9 +21609,31 @@ class Daemon:
                     )
                     return
                 if result is None:
-                    # 30 s with no frames — peer's still
-                    # connected (otherwise the recv would have
-                    # raised), just idle. Continue.
+                    # 2026-05-22 audit Batch Y: ``None`` is the
+                    # documented timeout signal, BUT a remote-closed
+                    # connection often surfaces as None+is_disconnected
+                    # rather than as an exception. Probing the
+                    # connection's liveness before continuing avoids
+                    # an infinite spin on a dead handle (which would
+                    # poison ``_quic_inbound[peer_fp]`` until next
+                    # daemon restart). Best-effort: if ``is_connected``
+                    # isn't exposed, fall through to the legacy
+                    # "assume idle, loop" behaviour.
+                    is_connected_fn = getattr(conn, "is_connected", None)
+                    if callable(is_connected_fn):
+                        try:
+                            if not bool(is_connected_fn()):
+                                log.debug(
+                                    "QUIC inbound from %s: peer disconnected "
+                                    "(recv_frame_blocking returned None on "
+                                    "dead connection); ending frame loop",
+                                    remote,
+                                )
+                                return
+                        except Exception:
+                            # If liveness probe itself fails, treat as
+                            # dead.
+                            return
                     continue
                 stream_id, frame_kind, payload = result
                 if frame_kind == _peer_quic.FRAME_PING:
