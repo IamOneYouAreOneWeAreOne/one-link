@@ -13478,19 +13478,47 @@ class UIServer:
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Push an event to all connected UI clients. Safe to call from any
-        coroutine; closed sockets are pruned."""
+        coroutine; closed sockets are pruned.
+
+        2026-05-21 audit T2-H: previously fire-and-forget create_task
+        with no reference held. Every WS event spawned N orphan tasks
+        across N clients; CPython 3.11+ emits a "Task was destroyed but
+        is pending" warning on shutdown, send failures escape into the
+        loop default handler, and the set grew unbounded under a long-
+        lived UI tab. Now each task is held in ``self._ws_send_tasks``
+        with a done-callback that discards it AND a try/except wrapper
+        so a single failing send doesn't poison the loop.
+        """
+        if not hasattr(self, "_ws_send_tasks"):
+            self._ws_send_tasks: set[asyncio.Task] = set()
         dead: list[web.WebSocketResponse] = []
         for ws in list(self._ws_clients):
             if ws.closed:
                 dead.append(ws)
                 continue
             try:
-                # send_str is synchronous-ish — schedule it but don't await.
-                asyncio.create_task(ws.send_json(event))
+                task = asyncio.create_task(self._ws_send_safe(ws, event))
+                self._ws_send_tasks.add(task)
+                task.add_done_callback(self._ws_send_tasks.discard)
             except Exception:
                 dead.append(ws)
         for ws in dead:
             self._ws_clients.discard(ws)
+
+    async def _ws_send_safe(
+        self, ws: web.WebSocketResponse, event: dict,
+    ) -> None:
+        """Wrapper around ws.send_json that swallows transient errors
+        (closed socket between dispatch and write) so a single dead
+        client doesn't surface as a loop-default exception."""
+        try:
+            await ws.send_json(event)
+        except (ConnectionResetError, RuntimeError):
+            # Closed mid-send. The next broadcast() iteration will
+            # prune the dead handle via ws.closed.
+            return
+        except Exception as exc:  # pragma: no cover — diagnostic only
+            log.debug("ws send failed: %s", exc)
 
     # ─── lifecycle ────────────────────────────────────────────────────
     async def start(self) -> int:

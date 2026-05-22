@@ -372,6 +372,19 @@ MAX_PEER_CONNECTIONS_PER_FP = int(os.environ.get("ONE_LINK_MAX_PEERS_PER_FP", "4
 HANDSHAKE_LOOPBACK_IPS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
+def _format_error(exc: BaseException) -> str:
+    """2026-05-21 audit T3-E: format an exception for control-plane
+    + UI surfaces so the response never carries an empty
+    ``error`` string. ``str(exc)`` can be empty when the exception
+    has no message (e.g. bare ``OSError()``); ``type().__name__``
+    is always meaningful. Used by send_file's fallback formatter
+    + send_read_marker + send_typing + similar best-effort paths.
+    """
+    msg = str(exc)
+    cls = type(exc).__name__
+    return f"{cls}: {msg}" if msg else cls
+
+
 def _is_transient_send_error(exc: BaseException) -> bool:
     """v0.7.4: classify send_file failures so the resume-on-reconnect
     path knows when to mark a transfer 'paused' (auto-retry on next
@@ -16251,7 +16264,7 @@ class Daemon:
             return {"sent": m, "ack": acks[0] if acks else None}
         except Exception as e:
             log.debug("send_read_marker best-effort failed: %s", e)
-            return {"sent": m, "error": str(e)}
+            return {"sent": m, "error": _format_error(e)}
 
     async def send_typing(self, peer: Peer) -> dict:
         """v0.12.3: ephemeral 'I'm typing' indicator.
@@ -16286,7 +16299,7 @@ class Daemon:
             return {"sent": m}
         except Exception as e:
             log.debug("send_typing best-effort failed: %s", e)
-            return {"sent": m, "error": str(e)}
+            return {"sent": m, "error": _format_error(e)}
 
     async def send_reaction(
         self, peer: Peer, *, target_msg_id: str, emoji: str, op: str = "add",
@@ -18693,7 +18706,7 @@ class Daemon:
                 # no-ops. Always include the exception class so the
                 # client at least sees what kind of error happened.
                 err_repr = (
-                    f"{type(last_error).__name__}: {last_error}"
+                    _format_error(last_error)
                     if last_error is not None
                     else "no peer succeeded (no transient errors recorded)"
                 )
@@ -20916,6 +20929,15 @@ class Daemon:
                 if conn is None:
                     log.debug("QUIC dial to %s returned None", peer_fp[:8])
                     return None
+                # 2026-05-21 audit T2-Q: close any prior connection
+                # before overwriting the cache slot. Otherwise the
+                # prior Connection's native FD + accept thread leaks
+                # for the lifetime of the process (eventually
+                # exhausting file descriptors on a churn-heavy peer).
+                prior = self._quic_outbound.get(peer_fp)
+                if prior is not None and prior is not conn:
+                    with contextlib.suppress(Exception):
+                        prior.close(0, b"replaced by fresh outbound")
                 self._quic_outbound[peer_fp] = conn
                 log.info(
                     "QUIC outbound established to %s via %s",

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import contextlib
+import logging
 import sqlite3
 import threading
 import time
@@ -28,6 +29,8 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 from typing import Any, Iterable, Optional
 
 from one_link.paths import data_dir
@@ -487,6 +490,26 @@ class State:
         # does not linger in state.db-wal between application
         # checkpoints. 50 pages ~= ~200KB worst case.
         c.execute("PRAGMA wal_autocheckpoint = 50")
+        # 2026-05-21 audit T3-X: surface a corrupt state.db on boot
+        # instead of the first ad-hoc query crashing the daemon.
+        # ``quick_check`` validates page integrity + WAL consistency;
+        # full check would walk every index too (expensive). On a
+        # corrupt DB we LOG the failure and keep going — the operator
+        # can then decide whether to rename-and-rebootstrap. We do
+        # NOT auto-rename: silently rebuilding state.db would lose
+        # pinned peers / keys / audit log on a transient I/O blip.
+        try:
+            res = c.execute("PRAGMA quick_check").fetchone()
+            if res and res[0] != "ok":
+                log.error(
+                    "state.db integrity check FAILED: %s. "
+                    "The daemon will keep running but operations "
+                    "against the corrupted store may fail. Consider "
+                    "renaming the file and bootstrapping fresh.",
+                    res[0],
+                )
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("state.db integrity check raised: %s", exc)
         c.close()
 
     def _migrate(self) -> None:
@@ -1443,10 +1466,20 @@ class State:
         ).fetchone()
         if not row:
             return None
+        # 2026-05-21 audit T3-W: previously returned ``[]`` on JSON
+        # decode failure — that's "deny-all", which is asymmetric with
+        # the row-missing return of ``None`` ("allow-all-after-pair").
+        # A corrupt row could silently lock out a paired peer entirely.
+        # Raise instead: the caller (daemon ._capability_allowed) now
+        # catches and fails CLOSED with a loud audit-log entry, which
+        # is the correct safer default (T1-D).
         try:
             return list(json.loads(row["allowed_json"]))
-        except Exception:
-            return []
+        except Exception as exc:
+            raise RuntimeError(
+                f"peer_capability_policy.allowed_json corrupted for "
+                f"{fingerprint[:8]}: {exc}"
+            ) from exc
 
     # ─── capability / trust audit log (H1) ────────────────────────────
     def _record_capability_audit(
@@ -3300,29 +3333,38 @@ class State:
         bad = set(fields) - allowed
         if bad:
             raise ValueError(f"unknown transfer fields: {sorted(bad)!r}")
-        current = self.get_transfer(id)
-        if current is None:
-            return None
-        metadata = fields.pop("metadata", current.metadata)
-        data = {
-            "id": current.id,
-            "direction": current.direction,
-            "peer_fp": current.peer_fp,
-            "kind": current.kind,
-            "name": current.name,
-            "size": current.size,
-            "blob_hash": current.blob_hash,
-            "status": current.status,
-            "progress_bytes": current.progress_bytes,
-            "total_bytes": current.total_bytes,
-            "chunks_done": current.chunks_done,
-            "chunks_total": current.chunks_total,
-            "raw_bytes": current.raw_bytes,
-            "wire_bytes": current.wire_bytes,
-            "metadata": metadata,
-        }
-        data.update(fields)
-        return self.upsert_transfer(**data)
+        # 2026-05-21 audit T3-K: hold the write lock across both the
+        # read and the upsert. Without this, two concurrent updates
+        # to the same transfer (e.g. parallel chunk ACK + a status
+        # flip) each read the same `current`, each rebuild the full
+        # record, and the second write clobbers the first — progress
+        # counters and metadata.path could regress. The lock is an
+        # RLock so callers that already hold it (e.g. a chunk-ACK
+        # batch processor) re-enter cleanly.
+        with self._write_lock:
+            current = self.get_transfer(id)
+            if current is None:
+                return None
+            metadata = fields.pop("metadata", current.metadata)
+            data = {
+                "id": current.id,
+                "direction": current.direction,
+                "peer_fp": current.peer_fp,
+                "kind": current.kind,
+                "name": current.name,
+                "size": current.size,
+                "blob_hash": current.blob_hash,
+                "status": current.status,
+                "progress_bytes": current.progress_bytes,
+                "total_bytes": current.total_bytes,
+                "chunks_done": current.chunks_done,
+                "chunks_total": current.chunks_total,
+                "raw_bytes": current.raw_bytes,
+                "wire_bytes": current.wire_bytes,
+                "metadata": metadata,
+            }
+            data.update(fields)
+            return self.upsert_transfer(**data)
 
     def get_transfer(self, id: str) -> Optional[TransferRecord]:
         row = self._conn.execute(
