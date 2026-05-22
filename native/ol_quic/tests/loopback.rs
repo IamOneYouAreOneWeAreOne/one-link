@@ -295,3 +295,69 @@ async fn parallel_streams_no_head_of_line_blocking() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle).await;
     assert!(server_done.load(Ordering::SeqCst));
 }
+
+/// 2026-05-22 audit T1-H — `Connection::peer_fingerprint()` returns
+/// the ground-truth fp of the remote end on BOTH the server-accepted
+/// and client-dialed connections. This is the Rust-side gate for the
+/// daemon's accept-loop binding which previously relied on a FIFO
+/// deque populated by `is_paired` callbacks (cross-peer-confusion
+/// under simultaneous handshakes). Test pins the contract that:
+///
+///   * server-side `peer_fingerprint()` returns the CLIENT's fp,
+///   * client-side `peer_fingerprint()` returns the SERVER's fp.
+///
+/// Both must be 32 bytes and exactly match what the dial side used
+/// for `connect(addr, fp)`.
+#[tokio::test]
+async fn peer_fingerprint_returns_ground_truth_on_both_sides() {
+    let alice = Arc::new(Identity::generate().unwrap());
+    let bob = Arc::new(Identity::generate().unwrap());
+
+    let alice_fp = alice.fingerprint();
+    let bob_fp = bob.fingerprint();
+
+    let alice_registry = Arc::new(PairedRegistry {
+        permitted: vec![bob_fp],
+    });
+    let alice_server =
+        Endpoint::server_for_identity(alice.clone(), alice_registry, ipv4_loopback_config())
+            .unwrap();
+    let alice_addr = alice_server.local_addr().unwrap();
+
+    let bob_client = Endpoint::client_for_identity(bob.clone(), ipv4_loopback_config()).unwrap();
+
+    // Server-side: accept once and report the fp it sees on the wire.
+    let (server_fp_tx, server_fp_rx) = tokio::sync::oneshot::channel();
+    let server_handle = tokio::spawn(async move {
+        let conn = alice_server.accept().await.expect("incoming").unwrap();
+        let fp = conn.peer_fingerprint();
+        let _ = server_fp_tx.send(fp);
+        // Keep the connection alive until the client closes it so the
+        // pyo3 binding's equivalent path remains exercise-able.
+        let _ = conn.closed().await;
+    });
+
+    let client_conn = bob_client.connect(alice_addr, alice_fp).await.unwrap();
+    let client_seen_server_fp = client_conn.peer_fingerprint();
+
+    let server_seen_client_fp =
+        tokio::time::timeout(std::time::Duration::from_secs(5), server_fp_rx)
+            .await
+            .expect("server fp report timeout")
+            .expect("server fp channel dropped");
+
+    // Both sides must see the OTHER party's fp via ground-truth TLS.
+    assert_eq!(
+        server_seen_client_fp,
+        Some(bob_fp),
+        "server's view of client fp must equal bob.fingerprint()"
+    );
+    assert_eq!(
+        client_seen_server_fp,
+        Some(alice_fp),
+        "client's view of server fp must equal alice.fingerprint()"
+    );
+
+    client_conn.close(0, b"ok");
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server_handle).await;
+}
