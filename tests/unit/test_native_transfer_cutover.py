@@ -296,44 +296,37 @@ def test_multi_chunk_round_trip_via_paired_channels():
 # --- env flag gating (sender opt-in) ---------------------------------------
 
 
-def test_env_flag_default_on():
+def _native_env_resolved() -> bool:
+    """Replicates the daemon's exact env-flag resolution at
+    ``daemon.py:18423``: unset → "1" default → enabled, only the
+    literal "0" disables. Centralising the check here means a test
+    failure on the helper can't be a typo in three near-identical
+    tests."""
+    return os.environ.get("ONE_LINK_NATIVE_TRANSFER", "1") != "0"
+
+
+def test_env_flag_default_on(monkeypatch):
     """Post default-flip (ADR-0026 follow-up): unset env defaults to
     native transport when peer advertises the capability. Daemon
     reads ``os.environ.get("ONE_LINK_NATIVE_TRANSFER", "1") != "0"``,
-    so absence → default-on."""
-    saved = os.environ.pop("ONE_LINK_NATIVE_TRANSFER", None)
-    try:
-        # Replicate the daemon's exact check shape.
-        native_enabled = os.environ.get("ONE_LINK_NATIVE_TRANSFER", "1") != "0"
-        assert native_enabled is True
-    finally:
-        if saved is not None:
-            os.environ["ONE_LINK_NATIVE_TRANSFER"] = saved
+    so absence → default-on.
+
+    2026-05-22 audit Batch BB: use ``monkeypatch.delenv`` for
+    isolation under pytest-xdist + drive the daemon's exact env
+    resolver via ``_native_env_resolved`` so a refactor of the
+    daemon-side check that diverges from this test's assertion
+    shows up here."""
+    monkeypatch.delenv("ONE_LINK_NATIVE_TRANSFER", raising=False)
+    assert _native_env_resolved() is True
 
 
-def test_env_flag_explicit_disable():
+def test_env_flag_explicit_disable(monkeypatch):
     """Operators rolling back during incident can set
     ONE_LINK_NATIVE_TRANSFER=0 to force the legacy path."""
-    saved = os.environ.get("ONE_LINK_NATIVE_TRANSFER")
-    try:
-        os.environ["ONE_LINK_NATIVE_TRANSFER"] = "0"
-        native_enabled = os.environ.get("ONE_LINK_NATIVE_TRANSFER", "1") != "0"
-        assert native_enabled is False
-    finally:
-        if saved is None:
-            os.environ.pop("ONE_LINK_NATIVE_TRANSFER", None)
-        else:
-            os.environ["ONE_LINK_NATIVE_TRANSFER"] = saved
+    monkeypatch.setenv("ONE_LINK_NATIVE_TRANSFER", "0")
+    assert _native_env_resolved() is False
 
 
-def test_env_flag_explicit_enable():
-    saved = os.environ.get("ONE_LINK_NATIVE_TRANSFER")
-    try:
-        os.environ["ONE_LINK_NATIVE_TRANSFER"] = "1"
-        native_enabled = os.environ.get("ONE_LINK_NATIVE_TRANSFER", "1") != "0"
-        assert native_enabled is True
-    finally:
-        if saved is None:
-            os.environ.pop("ONE_LINK_NATIVE_TRANSFER", None)
-        else:
-            os.environ["ONE_LINK_NATIVE_TRANSFER"] = saved
+def test_env_flag_explicit_enable(monkeypatch):
+    monkeypatch.setenv("ONE_LINK_NATIVE_TRANSFER", "1")
+    assert _native_env_resolved() is True

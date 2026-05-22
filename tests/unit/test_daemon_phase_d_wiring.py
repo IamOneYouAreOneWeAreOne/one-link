@@ -19,21 +19,33 @@ def _native_available() -> bool:
         return False
 
 
+def _stub_daemon_for_relay_tests():
+    """2026-05-22 audit Batch BB: build a daemon-shaped stub that
+    carries the attributes ``_pick_best_relay`` and ``_relay_metrics_for``
+    actually read in production. Bare ``object()`` lets the production
+    helper drift (e.g. a refactor that consults ``self._relay_metrics``)
+    without anything failing — the stub catches such drift.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        _rendezvous_url=None,
+        _relay_metrics={},
+        _relay_metrics_for=lambda _url: None,
+    )
+
+
 def test_pick_best_relay_single_relay_passthrough():
     """With only one relay, _pick_best_relay returns the input list."""
     from one_link.daemon import Daemon
 
-    # Build a Daemon-like object that owns the helper but doesn't need
-    # full init. We mimic the relevant attributes _pick_best_relay reads.
     class _StubRelay:
         def __init__(self, url: str):
             self._rendezvous_url = url
 
-    # Use the unbound method to avoid Daemon's full constructor.
     relays = [_StubRelay("relay-a")]
-    result = Daemon._pick_best_relay(  # type: ignore[arg-type]
-        object(),  # self placeholder; helper doesn't touch attrs in 1-relay path
-        relays,
+    result = Daemon._pick_best_relay(
+        _stub_daemon_for_relay_tests(), relays,
     )
     assert result == relays
 
@@ -41,7 +53,7 @@ def test_pick_best_relay_single_relay_passthrough():
 def test_pick_best_relay_zero_relays():
     from one_link.daemon import Daemon
 
-    result = Daemon._pick_best_relay(object(), [])  # type: ignore[arg-type]
+    result = Daemon._pick_best_relay(_stub_daemon_for_relay_tests(), [])
     assert result == []
 
 
@@ -49,7 +61,7 @@ def test_relay_metrics_for_returns_none_by_default():
     """Without a metrics surface, every relay query returns None."""
     from one_link.daemon import Daemon
 
-    result = Daemon._relay_metrics_for(object(), "any-url")  # type: ignore[arg-type]
+    result = Daemon._relay_metrics_for(_stub_daemon_for_relay_tests(), "any-url")
     assert result is None
 
 

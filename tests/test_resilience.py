@@ -209,12 +209,31 @@ def test_two_daemons_in_same_home_second_fails_gracefully():
                 [sys.executable, "-m", "one_link.cli", "daemon", "-v"],
                 env=env, stdout=f1, stderr=subprocess.STDOUT,
             )
-            time.sleep(2.0)  # let p1 fully start
+            # 2026-05-22 audit Batch BB: poll for p1's instance-lock
+            # file ``daemon.lock`` to appear (or for stdout to settle)
+            # instead of a brittle ``time.sleep(2.0)``. Under slow CI
+            # the lock may not exist yet — false-pass; under fast CI
+            # the sleep wastes 2 s of wall time.
+            lock_file = home / "data" / "daemon.lock"
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                if lock_file.exists() and p1.poll() is None:
+                    break
+                if p1.poll() is not None:
+                    # p1 exited prematurely; let assertion below fire
+                    break
+                time.sleep(0.1)
             p2 = subprocess.Popen(
                 [sys.executable, "-m", "one_link.cli", "daemon", "-v"],
                 env=env, stdout=f2, stderr=subprocess.STDOUT,
             )
-            time.sleep(2.0)
+            # Poll for p2 to exit (instance-lock rejection should be
+            # fast — sub-second on healthy machines).
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                if p2.poll() is not None:
+                    break
+                time.sleep(0.1)
             try:
                 assert p1.poll() is None, "p1 unexpectedly exited"
                 assert p2.poll() is not None, "p2 should exit under instance lock"

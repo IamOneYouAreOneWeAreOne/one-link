@@ -471,7 +471,15 @@ def test_soak_bidi_interleaved():
                             peer=p.a.short_id, body=f"b-{i:02d}")
             assert res_b["ok"], (i, "b", res_b)
             time.sleep(0.020)
-        time.sleep(2.0)
+        # 2026-05-22 audit Batch BB: poll both directions to N
+        # instead of a fixed 2.0 s window (CI-flake source under
+        # load).
+        _wait_for_inbound_text_count(
+            p.a.home, body_prefix="b-", expected=N, timeout=15.0,
+        )
+        _wait_for_inbound_text_count(
+            p.b.home, body_prefix="a-", expected=N, timeout=15.0,
+        )
         # 2026-05-21 audit T3-N: Counter instead of set so we also
         # surface duplicate deliveries in the bidi-interleaved path.
         from collections import Counter
