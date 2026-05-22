@@ -328,6 +328,89 @@ def _bench_update_transfer() -> dict:
     return _bench("update_transfer (T3-K lock)", run, iters=5_000)
 
 
+# ── list_peer_files pagination ─────────────────────────────────────
+
+def _bench_list_peer_files() -> dict:
+    """T3-I added LIMIT/OFFSET. Confirm the paginated lookup is at
+    least as fast as the previous unbounded full-scan on a typical
+    population (1000 messages per peer)."""
+    import tempfile
+    import time as _time
+    from one_link.state import State
+
+    td = tempfile.mkdtemp(prefix="ol_bench_peer_files_")
+    state = State(db_path=Path(td) / "state.db")
+    peer_fp = "deadbeef" * 8
+    # Seed 1000 file messages via the public record_message API.
+    base_ts = int(_time.time() * 1000)
+    for i in range(1000):
+        state.record_message(
+            id=f"msg-{i:04d}",
+            ts_ms=base_ts + i,
+            direction="in",
+            peer_fp=peer_fp,
+            msg_type="file",
+            body=None,
+            metadata={
+                "name": f"file_{i}.bin",
+                "size": 1024,
+                "blob": f"{i:064x}",
+            },
+        )
+
+    def run() -> None:
+        # Default limit=2000 (bigger than population), exercises the
+        # SELECT + ORDER BY + LIMIT + OFFSET pipeline once per call.
+        state.list_peer_files(peer_fp)
+
+    return _bench("list_peer_files (T3-I LIMIT)", run, iters=500)
+
+
+# ── Content-Disposition build ──────────────────────────────────────
+
+def _bench_content_disposition() -> dict:
+    """T3-L: build Content-Disposition via RFC 5987 + ASCII fallback.
+    Validate the per-download cost is sub-µs."""
+    from urllib.parse import quote as _urlquote
+
+    test_names = [
+        "report.pdf",
+        "naïve résumé.docx",   # unicode in name
+        'evil"\n\r.exe',        # CRLF/quote injection bait
+        "very_long_" * 30 + ".bin",
+        "汉字文件.txt",         # CJK
+    ]
+    counter = {"i": 0}
+
+    def run() -> None:
+        raw_name = test_names[counter["i"] % len(test_names)]
+        counter["i"] += 1
+        ascii_name = "".join(
+            c if 0x20 <= ord(c) < 0x7f and c not in ('"', "\\")
+            else "_"
+            for c in raw_name
+        )[:200] or "file"
+        _ = f'inline; filename="{ascii_name}"; filename*=UTF-8\'\'{_urlquote(raw_name, safe="")}'
+
+    return _bench("content_disposition (T3-L)", run, iters=100_000)
+
+
+# ── CDC empty-file path ────────────────────────────────────────────
+
+def _bench_cdc_empty_input() -> dict:
+    """T3-S: empty input must now return an empty chunk tuple
+    (was: a single zero-length tail chunk)."""
+    from one_link.cdc import chunk_bytes
+
+    def run() -> None:
+        out = chunk_bytes(b"")
+        # Sanity: pure benchmark won't fail on a regression, but
+        # this assertion is a one-time correctness check.
+        assert out == (), f"empty input returned non-empty chunks: {out}"
+
+    return _bench("cdc_empty_input (T3-S)", run, iters=100_000)
+
+
 # ── Driver ─────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -339,6 +422,9 @@ def main() -> int:
         _bench_csrf_origin_ok,
         _bench_file_wants_bounds,
         _bench_update_transfer,
+        _bench_list_peer_files,
+        _bench_content_disposition,
+        _bench_cdc_empty_input,
     ]
     print(f"{'name':<46} {'ns/op (med)':>14} {'ns/op (p95)':>14} {'ops/sec':>14}")
     print("-" * 92)

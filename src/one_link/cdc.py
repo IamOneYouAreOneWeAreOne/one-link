@@ -300,7 +300,11 @@ def _chunk_bytes_native(data: bytes) -> tuple[Chunk, ...] | None:
         for cut in cuts:
             chunks.append(_make_chunk(len(chunks), start, cut, data))
             start = cut
-        if start < len(data) or not chunks:
+        # 2026-05-21 audit T3-S: same empty-input fix as the Python
+        # path. Empty input → empty chunk tuple, not a single
+        # zero-length chunk with the trivially-constructible
+        # ``BLAKE3(b"")`` hash.
+        if start < len(data) or (not chunks and len(data) > 0):
             chunks.append(_make_chunk(len(chunks), start, len(data), data))
         return tuple(chunks)
     except Exception:
