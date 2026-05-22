@@ -873,13 +873,14 @@ async def test_api_send_file_online_creates_durable_intent_before_send(
     assert body["ok"] is True
     assert body["result"]["transfer_id"] == "durable-online-1"
     assert queued and queued[0]["schedule_resume"] is False
-    assert queued[0]["path"].is_file() is False
     assert sends == [{
         "peer": "bbbbbbbb",
         "path": sends[0]["path"],
         "transfer_id": "durable-online-1",
         "exists_during_send": True,
     }]
+    assert queued and queued[0]["path"].is_file() is True
+    assert queued[0]["path"].read_bytes() == b"send me safely"
     state.close()
 
 

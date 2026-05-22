@@ -12756,7 +12756,12 @@ class UIServer:
                     upload_path,
                     transfer_id=durable_transfer_id,
                 )
-            keep_upload_for_resume = False
+            # Keep browser-upload bytes when they were attached to a
+            # durable transfer row. The outbound preview/open endpoint
+            # reads the completed row's metadata.path after a refresh;
+            # deleting this staged upload made delivered image bubbles
+            # look broken on the sender side.
+            keep_upload_for_resume = bool(durable_transfer_id)
             return web.json_response({"ok": True, "result": result})
         except Exception as e:
             transfer_id_attr = getattr(e, "transfer_id", None)
