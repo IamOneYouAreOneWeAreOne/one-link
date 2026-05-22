@@ -46,6 +46,35 @@ from tests.harness import (
 pytestmark = [pytest.mark.timeout(180), pytest.mark.soak]
 
 
+def _wait_for_inbound_text_count(
+    home,
+    *,
+    body_prefix: str,
+    expected: int,
+    timeout: float = 15.0,
+    poll_interval: float = 0.1,
+) -> list:
+    """2026-05-21 audit T3-M: replace fixed ``time.sleep(2.0)``
+    "allow last few to land" with bounded polling that returns as
+    soon as the receiver has the expected count. Under suite-level
+    load the brittle 2 s window was the dominant source of soak-
+    test flakes; polling adapts to the actual delivery time.
+    Returns the inbound message list when the count matches or
+    the deadline expires."""
+    deadline = time.time() + timeout
+    inbound: list = []
+    while time.time() < deadline:
+        inbound = [
+            m for m in message_log(home)
+            if m.get("t") == "TEXT" and m.get("dir") == "in"
+            and m.get("body", "").startswith(body_prefix)
+        ]
+        if len(inbound) >= expected:
+            return inbound
+        time.sleep(poll_interval)
+    return inbound
+
+
 # ────────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────────
@@ -100,12 +129,10 @@ def test_soak_chat_50_messages():
                           peer=p.b.short_id, body=f"a-msg-{i:03d}")
             assert res["ok"], (i, res)
             time.sleep(0.010)
-        time.sleep(2.0)  # allow last few to land
-        b_inbound = [
-            m for m in message_log(p.b.home)
-            if m.get("t") == "TEXT" and m.get("dir") == "in"
-            and m.get("body", "").startswith("a-msg-")
-        ]
+        # T3-M: poll until B's inbox carries N messages (or deadline).
+        b_inbound = _wait_for_inbound_text_count(
+            p.b.home, body_prefix="a-msg-", expected=N, timeout=15.0,
+        )
         expected = Counter(f"a-msg-{i:03d}" for i in range(N))
         received = Counter(m["body"] for m in b_inbound)
         missing = expected - received
@@ -120,12 +147,9 @@ def test_soak_chat_50_messages():
                           peer=p.a.short_id, body=f"b-msg-{i:03d}")
             assert res["ok"], (i, res)
             time.sleep(0.010)
-        time.sleep(2.0)
-        a_inbound = [
-            m for m in message_log(p.a.home)
-            if m.get("t") == "TEXT" and m.get("dir") == "in"
-            and m.get("body", "").startswith("b-msg-")
-        ]
+        a_inbound = _wait_for_inbound_text_count(
+            p.a.home, body_prefix="b-msg-", expected=N, timeout=15.0,
+        )
         expected_a = Counter(f"b-msg-{i:03d}" for i in range(N))
         received_a = Counter(m["body"] for m in a_inbound)
         missing = expected_a - received_a
