@@ -226,6 +226,20 @@ def test_static_ui_javascript_parses() -> None:
     assert not failures, "JavaScript syntax failures:\n" + "\n".join(failures)
 
 
+# 2026-05-22 audit T2-M (deferred): a proper undefined-call gate
+# for the inline JS needs a jsdom-based execution test that boots
+# the daemon's UI in a Node VM and walks the symbol table. A pure
+# regex-based static analyzer over a 30K-line file produces too
+# many false positives (object-literal shorthand methods, IIFEs,
+# nested-scope shadowing) to be useful. The existing
+# ``test_static_ui_javascript_parses`` catches SyntaxErrors;
+# integration tests catch wiring drift at the daemon-pair layer;
+# the ``transfer_diagnostics.degradation_events`` ring catches
+# silent fallbacks. Coverage of "function declared but never
+# called" / "call site references renamed identifier" is documented
+# in ``AUDIT_2026-05-21.md`` as a deferred follow-up.
+
+
 def test_trace_clearing_controls_are_exposed() -> None:
     html = (ROOT / "src" / "one_link" / "web" / "index.html").read_text(
         encoding="utf-8",
