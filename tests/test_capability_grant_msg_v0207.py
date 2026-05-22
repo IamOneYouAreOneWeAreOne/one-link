@@ -73,6 +73,7 @@ def _make_daemon():
     d._cap_store = cap_store.CapStore()
     # _on_peer_message reads several attributes; stub them.
     d._inbound_is_rejected = lambda fp: False
+    d._is_pinned = lambda fp: True
     d._stamp_pair_health = lambda fp, **kw: None
     d.record_peer_presence = lambda fp, presence: None
     return d

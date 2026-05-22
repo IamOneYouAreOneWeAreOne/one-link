@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,6 +45,46 @@ def test_quic_connection_alive_honors_explicit_false_state() -> None:
         is_connected = False
 
     assert Daemon._quic_connection_alive(ClosedConnLike()) is False
+
+
+@pytest.mark.asyncio
+async def test_quic_ping_drops_stale_cached_connection_fast(monkeypatch) -> None:
+    class HangingConn:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def is_connected(self) -> bool:
+            return True
+
+        def remote_address(self) -> str:
+            return "127.0.0.1:9"
+
+        def send_frame_round_trip(self, *_args):
+            time.sleep(1.0)
+            return (peer_quic.FRAME_PONG, b"late")
+
+        def close(self, *_args) -> None:
+            self.closed = True
+
+    daemon = Daemon(SimpleNamespace(short_id="me"))
+    peer_fp = "a" * 64
+    conn = HangingConn()
+    daemon._quic_outbound[peer_fp] = conn
+
+    async def fake_resolve(_peer_fp):
+        return SimpleNamespace(short_id="peer", address="127.0.0.1", port=None)
+
+    monkeypatch.setattr("one_link.daemon.QUIC_FRAME_DEADLINE_S", 0.05)
+    monkeypatch.setattr(daemon, "resolve_for_send", fake_resolve)
+
+    t0 = time.perf_counter()
+    result = await daemon.quic_ping(peer_fp, b"probe")
+    elapsed = time.perf_counter() - t0
+
+    assert result.get("ok") is False
+    assert elapsed < 0.5
+    assert conn.closed is True
+    assert peer_fp not in daemon._quic_outbound
 
 
 def test_quic_status_endpoint_returns_state() -> None:

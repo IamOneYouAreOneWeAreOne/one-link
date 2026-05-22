@@ -235,12 +235,12 @@ def test_discovery_caps_at_max() -> None:
     )
 
 
-# ─── D10 fail-open on capability verify error ───
+# ─── D10 capability verifier error continuity metric ───
 
 
-def test_capability_fail_open_on_state_exception() -> None:
+def test_capability_fails_closed_on_state_exception() -> None:
     """When state.get_peer_capability_policy raises, _capability_allowed
-    must fail OPEN (return True) + bump the audit counter."""
+    must fail CLOSED + bump the legacy continuity counter."""
     d = _bare_daemon()
     d.state.get_peer_capability_policy = MagicMock(
         side_effect=RuntimeError("simulated state corruption"),
@@ -253,7 +253,7 @@ def test_capability_fail_open_on_state_exception() -> None:
     d.me.public_bytes = b"\x00" * 32
     d._peer_pub_for_fp = MagicMock(return_value=None)
     out = d._capability_allowed("peerA", "files")
-    assert out is True
+    assert out is False
     assert d._capability_fail_open_count == 1
 
 

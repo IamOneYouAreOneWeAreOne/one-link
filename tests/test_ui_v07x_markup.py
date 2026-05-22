@@ -331,8 +331,11 @@ def test_file_bubble_uses_transfer_record_for_status():
     html = _read_local_index()
     fn_idx = html.find("function transferForMessage")
     assert fn_idx >= 0
-    body = html[fn_idx:fn_idx + 600]
-    assert "blob_hash" in body
+    end_idx = html.find("function statusLabel", fn_idx)
+    assert end_idx > fn_idx
+    body = html[fn_idx:end_idx]
+    assert "msg.blob" in body
+    assert "transferByDirBlob" in body
     assert "msg.dir" in body or "msg.dir ===" in body
     # And the renderer must consult it.
     assert "transferForMessage(msg)" in html

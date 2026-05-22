@@ -46,6 +46,10 @@ def _new_identity() -> Identity:
     )
 
 
+def test_timeout_errors_are_transient_send_errors() -> None:
+    assert _is_transient_send_error(asyncio.TimeoutError())
+
+
 class _DesyncedChannel:
     async def send(self, payload: bytes) -> None:
         return None

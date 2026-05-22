@@ -692,10 +692,17 @@ def test_foreground_send_prioritizes_user_message_before_outbox_flush():
     session creation scheduled an outbox flush immediately, and that flush
     could acquire the same session lock before the foreground send.
     """
-    import inspect
     import textwrap
+    from pathlib import Path
+    import one_link.daemon as daemon_module
 
-    source = textwrap.dedent(inspect.getsource(Daemon.send_to))
+    source = textwrap.dedent(
+        Path(daemon_module.__file__).read_text(encoding="utf-8")
+    )
+    source = source[
+        source.index("    async def send_to("):
+        source.index("    async def _send_control(")
+    ]
     get_session = source.find("_get_outbound_session(peer, flush_pending=False)")
     send_frame = source.find("_send_via_transport")
     flush_after = source.rfind("_schedule_outbox_flush(sess.peer_fp)")

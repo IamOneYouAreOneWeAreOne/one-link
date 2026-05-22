@@ -346,6 +346,14 @@ async def test_swarm_source_query_batches_large_manifests(tmp_path: Path, monkey
     me = _new_identity()
     them = _new_identity()
     daemon = Daemon(me)
+    state = State(db_path=tmp_path / "state.db")
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    daemon.state = state
     peer = Peer(them.short_id, "source", "127.0.0.1", 12345, them.public_bytes.hex())
     chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
     daemon._outbound_sessions[them.fingerprint] = OutboundSession(

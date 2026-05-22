@@ -228,9 +228,8 @@ def test_adaptive_heartbeat_shortens_under_predicted_cascade() -> None:
 # ─── Scenario 5: capability fail-open + denial counter ───
 
 
-def test_capability_fail_open_does_not_break_traffic() -> None:
-    """A verifier exception fails OPEN + bumps fail_open_count, NOT
-    the deny counter. Traffic continues."""
+def test_capability_verifier_error_fails_closed() -> None:
+    """A verifier exception fails CLOSED + bumps the continuity metric."""
     d = _build_e2e_daemon()
     d.state.get_peer_capability_policy = MagicMock(
         side_effect=RuntimeError("simulated"),
@@ -239,10 +238,9 @@ def test_capability_fail_open_does_not_break_traffic() -> None:
     d._cap_store = None
     d._peer_pub_for_fp = MagicMock(return_value=None)
     result = d._capability_allowed("peerA", "files")
-    assert result is True  # allowed despite verifier error
+    assert result is False
     assert d._capability_fail_open_count == 1
-    # Deny counter NOT bumped (the request wasn't denied).
-    assert d._capability_denial_counters["total"] == 0
+    assert d._capability_denial_counters["total"] == 1
 
 
 def test_capability_denial_counter_records_policy_deny() -> None:

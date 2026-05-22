@@ -226,10 +226,10 @@ def test_unknown_peer_fp_falls_through_to_policy():
     assert d._capability_allowed(unknown_fp, "files:read")
 
 
-def test_no_state_returns_true():
-    """Defensive: when state is None (very early boot), allow."""
+def test_no_state_returns_false():
+    """Defensive: when state is None (very early boot), fail closed."""
     from one_link.daemon import Daemon
     d = Daemon.__new__(Daemon)
     d.state = None
     d._cap_store = None  # type: ignore[assignment]
-    assert d._capability_allowed("ff" * 32, "files:read")
+    assert not d._capability_allowed("ff" * 32, "files:read")

@@ -1024,6 +1024,24 @@ async def test_api_files_lists_and_downloads():
 
 
 @pytest.mark.asyncio
+async def test_api_file_download_resolves_unique_collision_prefix():
+    with daemon_pair() as p:
+        inbox = p.b.home / "data" / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        stored = inbox / "8fcba10f_1779413794325_4efab5b0d8e5083e_image.png"
+        stored.write_bytes(b"png-bytes")
+
+        base_b, tok_b = _server_addr(p.b.home)
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"{base_b}/api/files/1779413794325_4efab5b0d8e5083e_image.png",
+                headers={"Authorization": f"Bearer {tok_b}"},
+            ) as r:
+                assert r.status == 200
+                assert await r.read() == b"png-bytes"
+
+
+@pytest.mark.asyncio
 async def test_api_file_download_blocks_path_traversal():
     """Defense in depth: even if a client crafts a URL that bypasses
     aiohttp's path normalization, the handler must refuse."""
