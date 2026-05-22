@@ -2045,7 +2045,14 @@ class UIServer:
 
     # ─── HTML index ───────────────────────────────────────────────────
     async def _index(self, request: web.Request) -> web.Response:
-        bootstrap_ok = request.query.get("t") == self.token
+        # 2026-05-22 audit O: constant-time compare on the bootstrap
+        # token path. The non-bootstrap ``_check_token`` already uses
+        # ``hmac.compare_digest``; this matched the same policy.
+        # ``==`` on token strings opens a (small but real) timing
+        # oracle on the index handler. ``hmac.compare_digest`` accepts
+        # ``str`` inputs.
+        _q_tok = request.query.get("t") or ""
+        bootstrap_ok = bool(_q_tok) and hmac.compare_digest(_q_tok, self.token)
         if request.query.get("t") and not bootstrap_ok:
             # A stale desktop tab commonly keeps an old bootstrap token in
             # its URL after the daemon restarts. Treat top-level loopback
@@ -9944,6 +9951,15 @@ class UIServer:
             depth = int(request.query.get("depth", "0"))
         except ValueError:
             depth = 0
+        # 2026-05-22 audit O: bound the result set so a million-entry
+        # folder can't OOM the daemon via one /api/folder-tree call.
+        # 10k entries is well above any realistic dashboard render
+        # need; the CLI consumes the JSON in one shot too.
+        try:
+            limit = int(request.query.get("limit", "10000"))
+        except ValueError:
+            limit = 10000
+        limit = max(1, min(limit, 50_000))
         entries_raw = self.daemon.state.list_manifest(name)
         # Filter by prefix.
         if prefix:
@@ -9963,7 +9979,12 @@ class UIServer:
             entries_raw = [
                 e for e in entries_raw if _at_or_above_depth(e["file_path"])
             ]
-        # Annotate with local-presence.
+        # Annotate with local-presence. Cap to ``limit`` so a
+        # million-entry folder can't OOM the daemon via one call.
+        total_entries_available = len(entries_raw)
+        truncated = total_entries_available > limit
+        if truncated:
+            entries_raw = entries_raw[:limit]
         out = []
         total_bytes = 0
         local_bytes = 0
@@ -9992,6 +10013,9 @@ class UIServer:
             "depth": depth,
             "entries": out,
             "total_entries": len(out),
+            "total_entries_available": total_entries_available,
+            "truncated": truncated,
+            "limit": limit,
             "total_bytes": total_bytes,
             "local_bytes": local_bytes,
         })
@@ -11108,6 +11132,18 @@ class UIServer:
         groups, and inbox files."""
         if self.daemon.state is None:
             return web.json_response({"error": "state not available"}, status=503)
+        # 2026-05-22 audit O: rate-limit search. FTS5 over a long
+        # message history + inbox-scan + peer-table scan is the
+        # single heaviest read on the daemon; a hostile / buggy
+        # caller spamming Ctrl+K can pin a core. 10/sec/client is
+        # well above any realistic UI cadence.
+        if self._rate_limited(
+            "search", self._client_rate_key(request),
+            limit=10, window_seconds=1.0,
+        ):
+            return web.json_response(
+                {"error": "search rate limited (10/sec)"}, status=429,
+            )
         q = (request.query.get("q") or "").strip()
         if not q:
             return web.json_response({
