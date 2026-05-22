@@ -123,6 +123,11 @@ def test_i6_monotonic_advance_accepted():
     """A second doc with a LATER issued_unix from the same vk
     advances the recorded high-water-mark."""
     mgr = peer_rtc.BrowserPeerManager(_FakeDaemon())
+    # 2026-05-22 audit Batch GG: clear any HWM the ES-44 disk-persist
+    # path loaded into the fresh manager. The on-disk file is shared
+    # across test runs in this process; new e2e tests below populate
+    # it, so reset to a known-empty state for inline-logic tests.
+    mgr._master_vk_last_issued_unix.clear()
     vk = b"V" * 1984
     # Simulate the inline update logic in _handle_attest_response.
     prev = mgr._master_vk_last_issued_unix.get(vk)
@@ -156,6 +161,161 @@ def test_i6_regression_flagged_as_fork():
     prev = 1_000_100
     new_issued = prev - 60  # 60s backwards, exceeds tolerance.
     assert new_issued + mgr.ATTESTATION_FORK_MAX_BACKWARDS_SECS < prev
+
+
+# ── I4 + I6 production wiring (drive _handle_attest_response) ─────
+#
+# 2026-05-22 audit Batch GG: the inline-logic tests above lock in the
+# data-structure semantics but never reach the production handler.
+# These tests build a minimal end-to-end environment where a fake
+# attestation envelope is dispatched through ``_handle_attest_response``
+# so the replay-cache + fork-detection wiring is exercised in situ.
+# A future refactor that splits the handler / changes the ordering of
+# the gates would surface here, not in the inline-logic tests.
+
+
+def test_i4_i6_end_to_end_replay_cache_blocks_in_handler(monkeypatch):
+    """Drive ``_handle_attest_response`` twice with the same envelope.
+    The first hit must advance ``_seen_doc_ids``; the second hit must
+    early-return at the replay check WITHOUT advancing
+    ``_master_vk_last_issued_unix`` again."""
+    from one_link import peer_rtc as prtc
+
+    # Build a minimal daemon-shaped namespace + manager.
+    daemon = SimpleNamespace(
+        peer_rtc=None,
+        _cover_recv_count=0,
+        _telemetry_lock=None,
+    )
+    mgr = prtc.BrowserPeerManager(daemon)
+    # Fake out the verify_doc path so we drive the gate logic without
+    # needing a real ML-DSA attestation.
+    # ``verify_doc`` is imported INSIDE the handler from
+    # ``handshake_attestation``; patch that module so the fake
+    # propagates through the local-import.
+    from one_link import handshake_attestation as _hsa
+    monkeypatch.setattr(_hsa, "verify_doc", lambda *_a, **_kw: True)
+
+    captured_doc = _fake_doc(
+        master_vk=b"V" * 1984,
+        master_sig=b"\xab" * 256,
+        issued_unix=1_000_200,
+    )
+    monkeypatch.setattr(
+        _hsa.AttestationWire,
+        "from_wire_dict",
+        classmethod(
+            lambda cls, _d: SimpleNamespace(to_doc=lambda: captured_doc)
+        ),
+    )
+
+    peer = SimpleNamespace(
+        fingerprint="e2e-replay-i4",
+        pubkey_bytes=b"\x00" * 32,
+        attestation_challenge=b"\x00" * 32,
+        attestation_challenge_dc_id=None,
+        control_dc=None,
+        dtls_pubkey_bytes=b"\x00" * 32,
+        attested_ms=None,
+        master_vk=None,
+        master_sig=None,
+        peer_master_vk=None,
+        attestation_deadline_unix=None,
+    )
+
+    envelope = {
+        "t": "attest_response",
+        "doc": {"placeholder": "filled-by-fake-from_wire_dict"},
+    }
+
+    # First dispatch — must record the doc + the HWM.
+    asyncio.run(mgr._handle_attest_response(peer, envelope))
+    assert len(mgr._seen_doc_ids) == 1, (
+        "first dispatch should record in replay-cache"
+    )
+    hwm_after_first = mgr._master_vk_last_issued_unix.get(b"V" * 1984)
+    assert hwm_after_first == 1_000_200
+
+    # Re-arm the per-peer challenge (cleared on successful dispatch)
+    # so we can verify the REPLAY-CACHE early-return, not the
+    # "no challenge" early-return.
+    peer.attestation_challenge = b"\x00" * 32
+
+    # Second dispatch with the SAME envelope — must hit the
+    # replay-cache early-return.
+    asyncio.run(mgr._handle_attest_response(peer, envelope))
+    assert len(mgr._seen_doc_ids) == 1, (
+        "duplicate dispatch must NOT add a second cache entry"
+    )
+    hwm_after_second = mgr._master_vk_last_issued_unix.get(b"V" * 1984)
+    assert hwm_after_second == 1_000_200, (
+        "replay-rejected dispatch must NOT advance HWM"
+    )
+
+
+def test_i6_end_to_end_fork_detected_in_handler(monkeypatch):
+    """Drive ``_handle_attest_response`` with two envelopes carrying
+    the same master_vk but a regressed issued_unix on the second.
+    The second must hit the fork-detection branch."""
+    from one_link import peer_rtc as prtc
+
+    daemon = SimpleNamespace(
+        peer_rtc=None,
+        _cover_recv_count=0,
+        _telemetry_lock=None,
+    )
+    mgr = prtc.BrowserPeerManager(daemon)
+    # ES-44 HWM persistence writes to disk via _persist_master_vk_hwm,
+    # which would otherwise leak state between tests. No-op it.
+    monkeypatch.setattr(mgr, "_persist_master_vk_hwm", lambda *_a, **_kw: None)
+    mgr._master_vk_last_issued_unix.clear()
+    # ``verify_doc`` is imported INSIDE the handler from
+    # ``handshake_attestation``; patch that module so the fake
+    # propagates through the local-import.
+    from one_link import handshake_attestation as _hsa
+    monkeypatch.setattr(_hsa, "verify_doc", lambda *_a, **_kw: True)
+
+    vk = b"F" * 1984
+    doc_a = _fake_doc(master_vk=vk, master_sig=b"\x01" * 256, issued_unix=1_000_300)
+    doc_b = _fake_doc(master_vk=vk, master_sig=b"\x02" * 256, issued_unix=1_000_100)
+    docs = iter([doc_a, doc_b])
+    monkeypatch.setattr(
+        _hsa.AttestationWire,
+        "from_wire_dict",
+        classmethod(
+            lambda cls, _d: SimpleNamespace(to_doc=lambda d=next(docs): d)
+        ),
+    )
+
+    # Track close_peer calls — fork detection closes the peer.
+    closed = []
+    monkeypatch.setattr(mgr, "_close_peer", lambda p: closed.append(p.fingerprint))
+
+    peer = SimpleNamespace(
+        fingerprint="e2e-fork-i6",
+        pubkey_bytes=b"\x00" * 32,
+        attestation_challenge=b"\x00" * 32,
+        attestation_challenge_dc_id=None,
+        control_dc=None,
+        dtls_pubkey_bytes=b"\x00" * 32,
+        attested_ms=None,
+        master_vk=None,
+        master_sig=None,
+        peer_master_vk=None,
+        attestation_deadline_unix=None,
+    )
+
+    envelope = {"t": "attest_response", "doc": {"placeholder": True}}
+    asyncio.run(mgr._handle_attest_response(peer, envelope))
+    assert mgr._master_vk_last_issued_unix.get(vk) == 1_000_300
+
+    # Re-arm the challenge so the handler doesn't bail at the
+    # "no prior challenge" gate (cleared on successful dispatch #1).
+    peer.attestation_challenge = b"\x00" * 32
+    asyncio.run(mgr._handle_attest_response(peer, envelope))
+    assert closed == ["e2e-fork-i6"], (
+        "regressed issued_unix should trigger fork-detection + close"
+    )
 
 
 # ── M8: cover-handler returns silently across non-success modes ───
