@@ -110,6 +110,35 @@ def test_record_message_idempotent(state: State):
     assert len(state.recent_messages(limit=10)) == 1
 
 
+def test_outbox_at_least_once_receiver_dedups_t3h(state: State):
+    """2026-05-21 audit T3-H contract test.
+
+    The outbox enqueue path (``enqueue_outbox`` + a redelivery on
+    reconnect) gives at-least-once semantics on the wire. Receivers
+    MUST dedup by ``msg_id`` so a peer that ACKs after the sender
+    already gave up + re-queued doesn't get the same message twice.
+    Anchor that contract here: the same ``msg_id`` recorded N times
+    yields exactly one row in ``messages``.
+    """
+    state.upsert_peer(
+        fingerprint="aa" * 32, short_id="alice",
+        pubkey=b"\x01" * 32,
+    )
+    # Simulate three deliveries of the same outbox entry — the
+    # contract is that the receiver's record_message dedups.
+    for _attempt in range(3):
+        state.record_message(
+            id="outbox-redelivery-msg-1",
+            ts_ms=1000,
+            direction="in",
+            peer_fp="aa" * 32,
+            msg_type="TEXT",
+            body="will only appear once",
+        )
+    rows = state.recent_messages(limit=10)
+    assert len([m for m in rows if m.body == "will only appear once"]) == 1
+
+
 # ───────── FTS5 search ────────────────────────────────────────────────
 
 def test_search_messages(state: State):

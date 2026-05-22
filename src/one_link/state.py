@@ -1519,6 +1519,51 @@ class State:
             ),
         )
 
+    def record_capability_grant_event(
+        self,
+        *,
+        kind: str,
+        granter_fp: str,
+        subject_fp: str | None = None,
+        capability: str | None = None,
+        scope_summary: str | None = None,
+        note: str | None = None,
+    ) -> None:
+        """2026-05-21 audit T3-V: durable audit row for signed-grant
+        ``accept`` / ``revoke_subject`` / ``revoke_granter`` events.
+
+        Previously the in-memory ``_cap_store`` swallowed every
+        accept/revoke and only the ``cap_policy_set`` / trust changes
+        landed in ``capability_audit``. A daemon restart wiped the
+        in-memory store; the revocation log was lost. This row
+        survives restart so an operator (and the audit dashboard)
+        can reconstruct who granted / revoked what + when.
+
+        Stored kinds: ``grant_accept``, ``grant_revoke_subject``,
+        ``grant_revoke_granter``. The ``fingerprint`` column is set
+        to the GRANTER's fp (queryable via the existing
+        ``idx_cap_audit_fp`` index); ``subject_fp`` + ``capability``
+        + ``scope_summary`` go into ``after_json``.
+        """
+        allowed_kinds = {
+            "grant_accept", "grant_revoke_subject", "grant_revoke_granter",
+        }
+        if kind not in allowed_kinds:
+            raise ValueError(f"unknown grant audit kind: {kind!r}")
+        with self._write_lock:
+            self._record_capability_audit(
+                fingerprint=granter_fp,
+                kind=kind,
+                before=None,
+                after={
+                    "subject_fp": subject_fp,
+                    "capability": capability,
+                    "scope_summary": scope_summary,
+                },
+                actor=None,
+                note=note,
+            )
+
     def recent_capability_audit(
         self,
         *,

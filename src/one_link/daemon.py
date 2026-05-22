@@ -4496,6 +4496,18 @@ class Daemon:
                     expected_subject_pub=self.me.public_bytes,
                     expected_granter_pub=channel.peer_ed_pub,
                 )
+                # 2026-05-21 audit T3-V: durable audit row so grants
+                # survive daemon restart in the operator's audit log.
+                # In-memory _cap_store alone loses the accept history
+                # on restart; capability_audit table preserves it.
+                if self.state is not None:
+                    with contextlib.suppress(Exception):
+                        self.state.record_capability_grant_event(
+                            kind="grant_accept",
+                            granter_fp=peer_fp,
+                            subject_fp=fingerprint_of(self.me.public_bytes),
+                            note=f"len_b64={len(grant_b64)}",
+                        )
                 await channel.send(encode_msg(make_msg(
                     "ACK", self.me.short_id, of=msg.get("id"), ok=True,
                 )))
@@ -14618,6 +14630,24 @@ class Daemon:
                 # cap_store keys grants by raw pubkey bytes.
                 self._cap_store.revoke_subject(rec.pubkey)
                 self._cap_store.revoke_granter(rec.pubkey)
+                # 2026-05-21 audit T3-V: durable audit row for the
+                # revoke events so an operator can later reconstruct
+                # which peers had their grants invalidated and when.
+                if self.state is not None:
+                    revoked_fp = fingerprint_of(rec.pubkey)
+                    with contextlib.suppress(Exception):
+                        self.state.record_capability_grant_event(
+                            kind="grant_revoke_subject",
+                            granter_fp=fingerprint_of(self.me.public_bytes),
+                            subject_fp=revoked_fp,
+                            note="peer revoked via revoke_peer",
+                        )
+                    with contextlib.suppress(Exception):
+                        self.state.record_capability_grant_event(
+                            kind="grant_revoke_granter",
+                            granter_fp=revoked_fp,
+                            note="peer revoked via revoke_peer",
+                        )
             except Exception as e:
                 log.debug("clearing cap store for revoked peer failed: %s", e)
         # v0.7.1: drop any queued outbox messages for the revoked
