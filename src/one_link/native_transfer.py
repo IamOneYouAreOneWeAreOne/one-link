@@ -87,6 +87,15 @@ AEAD_TAG_LEN: int = 16
 AEAD_FRAME_PLAINTEXT_LEN: int = 16 * 1024  # 16 KiB per AEAD frame
 SHARED_SECRET_LEN: int = 32
 
+# 2026-05-21 audit T2-D: opt-in chunk_id re-verify after decrypt.
+# Default OFF (the user's "no slowdowns" constraint). Operators in
+# adversarial-peer environments flip ``ONE_LINK_VERIFY_CHUNK_HASH=1``
+# to add a BLAKE3 pass per chunk that proves chunk_id == hash of
+# plaintext, defeating cache-poisoning via AAD-only commitment.
+_VERIFY_CHUNK_HASH: bool = (
+    __import__("os").environ.get("ONE_LINK_VERIFY_CHUNK_HASH") == "1"
+)
+
 
 # ─── Session state ─────────────────────────────────────────────────────────
 
@@ -458,26 +467,51 @@ class NativeTransferSession:
 
         Integrity is guaranteed by the AEAD tag binding ``chunk_id``
         as AAD: any chunk_id mismatch fails the tag check inside the
-        AEAD layer, raising before any plaintext is exposed. No
-        additional Python-level BLAKE3 recompute is needed; that
-        was a redundant full pass per chunk in the original
-        implementation.
+        AEAD layer, raising before any plaintext is exposed.
+
+        2026-05-21 audit T2-D: a paired-but-malicious peer could
+        legally craft a chunk whose ``chunk_id`` matches some other
+        blob's known hash and ship arbitrary plaintext encrypted
+        under that AAD. AEAD verifies "sender committed to this
+        chunk_id" but NOT "chunk_id == BLAKE3(plaintext)". With
+        convergent addressing the local chunk_store could then be
+        poisoned: another peer asking ``has_chunk(target_id)`` would
+        be served the attacker's bytes from our cache.
+
+        Defense: when ``ONE_LINK_VERIFY_CHUNK_HASH=1`` is set,
+        after decrypt we recompute ``BLAKE3(plaintext)`` and verify
+        ``== chunk_id`` before returning. Default off because
+        BLAKE3 over a 256 KiB chunk is ~85 µs (~33% slowdown on
+        the receive hot path). Operators in adversarial-peer
+        environments flip the flag; everyone else trusts the AAD-
+        as-commitment property + the peer's pinned trust.
         """
         # Advance the ratchet first so failures still keep both ends
         # in lockstep.
         _ = self._ratchet.next_key()
         if self._fast_aead is not None:
             nonce = record.chunk_index.to_bytes(12, "little")
-            return self._fast_aead.decrypt(
+            plaintext = self._fast_aead.decrypt(
                 nonce, record.ciphertext, record.chunk_id
             )
-        plaintext = self._cipher.decrypt_chunk(
-            record.chunk_id,
-            record.plaintext_len,
-            record.ciphertext,
-        )
-        if not isinstance(plaintext, bytes):
-            plaintext = bytes(plaintext)
+        else:
+            plaintext = self._cipher.decrypt_chunk(
+                record.chunk_id,
+                record.plaintext_len,
+                record.ciphertext,
+            )
+            if not isinstance(plaintext, bytes):
+                plaintext = bytes(plaintext)
+        # T2-D paranoid-mode hash re-verify.
+        if _VERIFY_CHUNK_HASH:
+            import blake3 as _blake3
+            actual = _blake3.blake3(plaintext).digest()
+            if actual != bytes(record.chunk_id):
+                raise ValueError(
+                    f"chunk_id mismatch on decrypt: declared "
+                    f"{bytes(record.chunk_id).hex()[:16]}, actual "
+                    f"{actual.hex()[:16]} (ONE_LINK_VERIFY_CHUNK_HASH=1)"
+                )
         return plaintext
 
     def decrypt_records_to_bytes(
