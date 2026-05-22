@@ -11687,7 +11687,13 @@ class Daemon:
 
         Returns the created Task so callers can ``await`` it if
         they later need to.
+
+        2026-05-22 audit Batch GG follow-up: lazy-init the set so
+        tests that construct a Daemon without going through the
+        full __init__ (or pre-Batch-CC pickled state) still work.
         """
+        if not hasattr(self, "_background_tasks"):
+            self._background_tasks = set()
         task = asyncio.create_task(coro)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
