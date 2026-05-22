@@ -351,6 +351,17 @@ def test_clear_unread_rerenders_open_chat(index_html: str):
     assert "scheduleRenderMessages()" in snippet
 
 
+def test_conversation_header_status_uses_live_peer_refresh(index_html: str):
+    """The sidebar and conversation header must use the same latency/reach
+    dot state after peer health refreshes."""
+    assert "function renderConversationPeerStatus(peer)" in index_html
+    assert "const lc = latencyClass(peer);" in index_html
+    idx = index_html.find("async function refreshPeers()")
+    snippet = index_html[idx:idx + 1200]
+    assert "renderConversationPeerStatus(cur);" in snippet
+    assert "renderConvHeaderTrust(cur);" in snippet
+
+
 def test_global_frame_budget_accessor(index_html: str):
     """window.__oneLinkFrameBudget is the API CI / Playwright tests
     will read to assert SLAs (p50/p95/p99/max)."""

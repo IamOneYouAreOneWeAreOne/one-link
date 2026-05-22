@@ -10019,6 +10019,36 @@
     if (ms != null) parts.push(`${Math.round(ms)} ms round-trip`);
     return parts.join(" · ");
   }
+  function renderConversationPeerStatus(peer) {
+    const subEl = $("#convo-sub");
+    if (!subEl || !peer) return;
+    subEl.innerHTML = "";
+    subEl.classList.remove("copyable");
+    subEl.title = "";
+    subEl.onclick = null;
+    if (peer.trust === "rejected") {
+      subEl.appendChild(document.createTextNode("Device chat Â· blocked"));
+      return;
+    }
+    subEl.appendChild(document.createTextNode("Device chat Â· "));
+    const lc = latencyClass(peer);
+    if (lc) {
+      const dot = el("span", `lat-dot ${lc}`);
+      dot.title = latencyTitle(peer);
+      subEl.appendChild(dot);
+    }
+    subEl.appendChild(document.createTextNode(reachLabel(peer)));
+    const ms = peer.health?.latency_ewma_ms;
+    if (ms != null) {
+      subEl.appendChild(document.createTextNode(` Â· ${Math.round(ms)} ms`));
+    }
+    const verBadge = renderPeerVersionBadge(peer);
+    if (verBadge) {
+      subEl.appendChild(document.createTextNode(" "));
+      subEl.appendChild(verBadge);
+    }
+  }
+
   function _fmtAgo(seconds) {
     if (seconds < 60) return `${seconds}s ago`;
     if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
@@ -19967,6 +19997,7 @@
       if (state.selectedPeer) {
         const cur = state.peers.get(state.selectedPeer);
         if (cur) {
+          renderConversationPeerStatus(cur);
           renderConvHeaderTrust(cur);
           renderConvKeyChangeBanner(cur);
         }
