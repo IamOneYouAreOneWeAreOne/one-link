@@ -22,14 +22,46 @@ def _index_html() -> str:
 
 
 def test_setup_api_routes_exist() -> None:
-    src = _server_src()
-    assert 'r.add_get("/api/setup", self._guarded(self.api_setup_status))' in src
-    assert 'r.add_post("/api/setup", self._guarded(self.api_update_setup))' in src
-    assert 'r.add_post("/api/setup/device-invite", self._guarded(self.api_setup_device_invite))' in src
-    assert 'r.add_post("/api/setup/device-invite/claim", self._guarded(self.api_setup_device_invite_claim))' in src
-    assert 'r.add_post("/api/setup/device-invite/confirm", self._guarded(self.api_setup_device_invite_confirm))' in src
-    assert 'r.add_post("/api/setup/device-invite/reject", self._guarded(self.api_setup_device_invite_reject))' in src
-    assert 'r.add_get("/api/setup/device-invite/qr.svg", self._guarded(self.api_setup_device_invite_qr))' in src
+    """2026-05-22 audit Batch HH: route-table introspection instead
+    of source-text grep. The grep version would still pass if a
+    route line were converted to a string literal in a comment or
+    moved into dead code; only execution against the real router
+    proves the route is dispatchable.
+
+    Builds a UIServer + real aiohttp app, then walks the resource
+    list. Faster than spinning a full daemon + serving requests,
+    and still proves the routes are wired.
+    """
+    from types import SimpleNamespace
+    from one_link.server import UIServer
+
+    # Minimum daemon shape UIServer.app builder touches.
+    daemon = SimpleNamespace(state=None, peer_rtc=None)
+    server = UIServer(daemon)
+    routes_by_path: dict[str, set[str]] = {}
+    for resource in server.app.router.resources():
+        info = resource.get_info()
+        path = info.get("path") or info.get("formatter") or ""
+        if not path:
+            continue
+        for route in resource:
+            routes_by_path.setdefault(path, set()).add(route.method)
+
+    expected = [
+        ("GET",  "/api/setup"),
+        ("POST", "/api/setup"),
+        ("POST", "/api/setup/device-invite"),
+        ("POST", "/api/setup/device-invite/claim"),
+        ("POST", "/api/setup/device-invite/confirm"),
+        ("POST", "/api/setup/device-invite/reject"),
+        ("GET",  "/api/setup/device-invite/qr.svg"),
+    ]
+    for method, path in expected:
+        methods = routes_by_path.get(path, set())
+        assert method in methods, (
+            f"missing route {method} {path}; got methods "
+            f"{sorted(methods)} for that path"
+        )
 
 
 def test_setup_snapshot_is_state_derived_and_human_first() -> None:
