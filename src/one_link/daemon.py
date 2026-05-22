@@ -4667,8 +4667,20 @@ class Daemon:
             outer_from = msg.get("from")
             outer_ts = msg.get("ts")
             processed = 0
+            # 2026-05-22 audit Batch S: surface inner-offer failures
+            # to the sender + degradation_events ring. Previously the
+            # per-offer exception was log.warning-only, the outer ACK
+            # only reported batch_processed=<int>, and the sender's
+            # resume protocol had no way to identify WHICH offers
+            # failed. Same silent-fallback class the degradation_events
+            # ring was created to defeat.
+            failed_offers: list[dict] = []
             for raw in raw_offers:
                 if not isinstance(raw, dict):
+                    failed_offers.append({
+                        "id": None,
+                        "reason": "non_dict_offer",
+                    })
                     continue
                 # Inject the outer envelope's from/ts when the
                 # offer body doesn't carry its own — keeps the
@@ -4684,15 +4696,36 @@ class Daemon:
                     await self._on_peer_message(channel, inner)
                     processed += 1
                 except Exception as e:
+                    inner_id = str(inner.get("id") or "")[:64]
+                    reason = f"{type(e).__name__}: {e}"[:128]
                     log.warning(
-                        "FILE_OFFER_BATCH inner offer failed: %s", e,
+                        "FILE_OFFER_BATCH inner offer %s failed: %s",
+                        inner_id[:8], reason,
                     )
+                    failed_offers.append({
+                        "id": inner_id,
+                        "reason": _format_error(e),
+                    })
+                    with contextlib.suppress(Exception):
+                        self._degradation_events.append({
+                            "at_ms": int(time.time() * 1000),
+                            "kind": "file_offer_batch_inner_failed",
+                            "peer_fp": peer_fp[:16] if peer_fp else None,
+                            "reason": reason,
+                            "expected": "FILE_OFFER inner dispatch",
+                            "actual": "per-offer exception",
+                        })
             # ACK the outer envelope so the sender's `await_ack`
             # for the batch frame completes. Per-offer ACKs already
             # went out in the recursive dispatch above.
+            ack_kwargs = {
+                "of": msg.get("id"),
+                "batch_processed": processed,
+            }
+            if failed_offers:
+                ack_kwargs["failed_offers"] = failed_offers
             await channel.send(encode_msg(make_msg(
-                "ACK", self.me.short_id, of=msg.get("id"),
-                batch_processed=processed,
+                "ACK", self.me.short_id, **ack_kwargs,
             )))
             return
         elif t == "FILE_ABORT":
@@ -7926,10 +7959,21 @@ class Daemon:
             chunk_id = bytes.fromhex(chunk_id_hex)
             if len(chunk_id) != 32:
                 raise ValueError(f"chunk_id must be 32 bytes, got {len(chunk_id)}")
-            # Session chunk_index is distinct from per-file seq. Legacy
-            # senders (NATIVE_TRANSFER_V1, no _INDEXED) omit chunk_index,
-            # in which case fall back to seq to preserve compat.
-            chunk_index = int(msg.get("chunk_index", seq))
+            # 2026-05-22 audit Batch T: require an explicit chunk_index
+            # on the wire. Previously a missing field fell back to
+            # per-file ``seq``, which collides across files on the same
+            # session: file #2's first chunk would decrypt at idx=0
+            # while the sender's session ratchet is well past 0, the
+            # AEAD tag fails, and the whole transfer aborts. Today the
+            # sender always emits ``chunk_index`` (only NATIVE_TRANSFER_
+            # INDEXED_V1 peers reach this path per the cap gate at
+            # daemon.py:18425), so the fallback is dead code in
+            # practice — but a hypothetical malformed/replay frame
+            # without chunk_index should be a hard reject, not a silent
+            # collision.
+            if "chunk_index" not in msg:
+                raise ValueError("FILE_NATIVE_CHUNK requires chunk_index")
+            chunk_index = int(msg["chunk_index"])
             plaintext_len = int(msg["plaintext_len"])
             ciphertext = base64.b64decode(msg["data"], validate=True)
         except (KeyError, ValueError, binascii.Error) as exc:
@@ -7969,6 +8013,22 @@ class Daemon:
         )
         try:
             data = session.decrypt_chunk(record)
+        except _nt.ReplayError as exc:
+            # 2026-05-22 audit Batch T: a replayed chunk_index is not
+            # a tamper signal — sender's ACK was lost or a relay
+            # double-delivered. Match T2-E discipline: ACK-reject + log
+            # but keep the transfer + channel alive. The next non-
+            # duplicate chunk continues the stream.
+            log.info(
+                "FILE_NATIVE_CHUNK replay for %s (chunk_index=%d): %s",
+                blob[:8], chunk_index, exc,
+            )
+            with contextlib.suppress(Exception):
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="native_chunk_replay",
+                )))
+            return
         except Exception as exc:
             # AEAD tag failure means the chunk was tampered, the
             # session secret diverged, or the chunk_id was swapped.
@@ -8212,10 +8272,64 @@ class Daemon:
                 "ACK", self.me.short_id, of=msg.get("id"), rejected="bad_cdc_chunk_index",
             )))
             return
-        if idx < 0 or idx >= len(f.cdc_chunks) or idx not in f.cdc_missing:
+        if idx < 0 or idx >= len(f.cdc_chunks):
             self._abort_incoming_file(blob, f)
             await channel.send(encode_msg(make_msg(
                 "ACK", self.me.short_id, of=msg.get("id"), rejected="unexpected_cdc_chunk",
+            )))
+            return
+        if idx not in f.cdc_missing:
+            # 2026-05-22 audit Batch T: idempotent duplicate-success.
+            # A sender whose ACK was lost will retry; receiver sees
+            # idx already streamed and previously this killed the
+            # transfer. Now: validate the retry payload matches the
+            # already-stored chunk hash, ACK as duplicate_success, and
+            # return WITHOUT aborting. Sender then drops the retry
+            # from its pending queue. If hash differs, an attacker is
+            # poking at a known-good index, so DO abort + reject.
+            expected_dup = f.cdc_chunks[idx]
+            try:
+                payload_dup = msg.get("_binary_data")
+                if isinstance(payload_dup, (bytes, bytearray)):
+                    data_dup = bytes(payload_dup)
+                else:
+                    data_dup = base64.b64decode(
+                        msg.get("data", ""), validate=True,
+                    )
+                max_chunk_out_dup = max(
+                    expected_dup["size"] + 64,
+                    CDC_MAX_CHUNK_BYTES + 64,
+                )
+                data_dup = self._decode_payload(
+                    str(msg.get("enc", "raw")),
+                    data_dup,
+                    max_bytes=max_chunk_out_dup,
+                )
+            except (binascii.Error, ValueError):
+                # Bad payload format on a duplicate — still keep the
+                # channel alive, just nudge the sender to stop sending
+                # this index.
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    rejected="bad_cdc_chunk_data",
+                )))
+                return
+            if (
+                len(data_dup) == expected_dup["size"]
+                and blake3.blake3(data_dup).hexdigest() == expected_dup["hash"]
+            ):
+                # Legit retry — ACK and move on.
+                await channel.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=msg.get("id"),
+                    duplicate_success=True,
+                    index=idx,
+                )))
+                return
+            # Hash differs at a known-good index — adversarial. Abort.
+            self._abort_incoming_file(blob, f)
+            await channel.send(encode_msg(make_msg(
+                "ACK", self.me.short_id, of=msg.get("id"),
+                rejected="cdc_chunk_retry_hash_mismatch",
             )))
             return
         expected = f.cdc_chunks[idx]
@@ -9063,6 +9177,27 @@ class Daemon:
             # in any shared folder (e.g. a file the peer received via
             # send_file earlier and is now refreshing).
             if not self._capability_allowed(peer_fp, FILES):
+                return
+            # 2026-05-22 audit Batch S: defeat cross-folder blob
+            # exposure. Previously a peer with FILES cap could pull
+            # any blob hash we held, even hashes belonging to a
+            # folder we never shared with them. Two peers in
+            # disjoint folders that both share folders with us
+            # could enumerate / gossip hashes and trick us into
+            # serving the other peer's blobs.
+            #
+            # Restrict the no-folder path to blobs THIS PEER has
+            # legitimate history with: either we sent it to them
+            # before (out-direction transfer row) or they sent it
+            # to us (in-direction). Without prior history, refuse
+            # silently — the peer's dedupe TTL will decay the
+            # ad and they'll stop asking.
+            if self.state is None or not self.state.peer_had_blob(peer_fp, blob):
+                with contextlib.suppress(Exception):
+                    self._record_capability_denial(
+                        reason="blob_request_no_folder_no_history",
+                        capability=FILES,
+                    )
                 return
         try:
             size = self.blob_store.size(blob)
@@ -11558,8 +11693,26 @@ class Daemon:
                         reason="seed_tamper", capability=cap,
                     )
                 return False
-        except Exception:
-            pass
+        except Exception as exc:
+            # 2026-05-22 audit Batch S: T1-D closed the verifier-
+            # exception + state=None fail-open paths but missed this
+            # one. The seed-tamper detector itself raising (file lock
+            # by antivirus, permission flip mid-call, FS race during
+            # rotation, stat() raising on a vanished symlink target)
+            # MUST fail-closed — same security contract as the rest of
+            # the cap-allowed gates. If the detector can't verify the
+            # seed is intact, we cannot honor capabilities.
+            if not getattr(self, "_seed_tamper_check_raised_logged", False):
+                log.warning(
+                    "seed_tamper_check raised %s: %s — failing closed",
+                    type(exc).__name__, exc,
+                )
+                self._seed_tamper_check_raised_logged = True
+            with contextlib.suppress(Exception):
+                self._record_capability_denial(
+                    reason="seed_tamper_check_failed", capability=cap,
+                )
+            return False
         # Bundle 56: a peer with a valid signed capability grant
         # (Bundle 44) for this exact (cap) is allowed regardless of
         # the binary pinned-policy state. Useful for one-shot
@@ -14804,6 +14957,14 @@ class Daemon:
             self._capability_request_per_peer.pop(peer_fp, None)
         if hasattr(self, "_capability_grant_per_peer"):
             self._capability_grant_per_peer.pop(peer_fp, None)
+        # 2026-05-22 audit Batch U: extend Batch R's lock-pruning to
+        # the other per-peer Lock dicts. These grow monotonically with
+        # the lifetime peer set; re-pair with the same fingerprint
+        # would otherwise inherit a stale Lock instance.
+        if hasattr(self, "_outbox_flush_locks"):
+            self._outbox_flush_locks.pop(peer_fp, None)
+        if hasattr(self, "_resume_lock_dict"):
+            self._resume_lock_dict.pop(peer_fp, None)
         # Step 5.
         if self.ui_server is not None:
             with contextlib.suppress(Exception):
@@ -20443,8 +20604,22 @@ class Daemon:
                             "QUIC server endpoint rebound to peer port %s",
                             addr_str,
                         )
-                        if self._quic_accept_task is not None:
-                            self._quic_accept_task.cancel()
+                        # 2026-05-22 audit Batch U: await the old
+                        # accept task's cancellation before spawning
+                        # the new loop. Without this, the cancelled
+                        # task can still be inside ``accept_blocking``
+                        # for up to 5 s and return a Connection AFTER
+                        # cancel was signalled, racing the new accept
+                        # loop's frame-receiver registration. Bounded
+                        # await with timeout so a misbehaving native
+                        # crate can't stall start().
+                        prior_accept = self._quic_accept_task
+                        if prior_accept is not None:
+                            prior_accept.cancel()
+                            try:
+                                await asyncio.wait_for(prior_accept, timeout=0.5)
+                            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                                pass
                         self._quic_accept_task = asyncio.create_task(
                             self._quic_accept_loop()
                         )
@@ -21116,9 +21291,20 @@ class Daemon:
         # same numeric port as the TCP peer server, which makes QUIC recover
         # even when an ENDPOINT_UPDATE packet was missed or arrived before
         # the QUIC endpoint existed.
-        port = self._quic_peer_ports.get(peer_fp) or getattr(peer, "port", None)
+        advertised_port = self._quic_peer_ports.get(peer_fp)
+        port = advertised_port or getattr(peer, "port", None)
         if not port:
             return None
+        # 2026-05-22 audit Batch U: when we're falling back to the
+        # peer's TCP port (no explicit ENDPOINT_UPDATE quic_port), use
+        # a SHORTER dial timeout. On peers where same-port binding
+        # failed (Windows firewall, port already held) the OS drops
+        # our UDP probe and connect_blocking() burns the full 10 s
+        # before WebRTC takes over — visible latency penalty on every
+        # first send for that peer. A 2 s speculative probe still
+        # gives same-port-binding peers plenty of headroom on real
+        # networks; failures fail fast.
+        dial_timeout_ms = 10_000 if advertised_port else 2_000
         peer_addr = getattr(peer, "address", None)
         if not peer_addr:
             return None
@@ -21162,7 +21348,7 @@ class Daemon:
                     client_ep.connect_blocking,
                     dial_addr,
                     expected_fp,
-                    10_000,
+                    dial_timeout_ms,
                 )
                 if conn is None:
                     log.debug("QUIC dial to %s returned None", peer_fp[:8])
@@ -21514,6 +21700,24 @@ class Daemon:
                 await accept
             except (asyncio.CancelledError, Exception):
                 pass
+        # 2026-05-22 audit Batch U: drain per-connection inbound
+        # frame-recv tasks before closing endpoints/connections.
+        # Without this, asyncio reports "Task was destroyed but it
+        # is pending!" at shutdown for any task still inside
+        # recv_frame_blocking, and the native connection handle
+        # behind the task can leak past close.
+        inbound_tasks = getattr(self, "_quic_inbound_tasks", None)
+        if inbound_tasks:
+            snapshot = tuple(inbound_tasks)
+            for task in snapshot:
+                if not task.done():
+                    task.cancel()
+            for task in snapshot:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            inbound_tasks.clear()
         for fp, conn in list(self._quic_outbound.items()):
             with contextlib.suppress(Exception):
                 conn.close(0, b"daemon stop")

@@ -528,9 +528,15 @@ async def test_share_folder_auto_grants_folder_caps(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_ensure_folder_caps_for_skips_legacy_none_policy(tmp_path: Path):
-    """If the peer is in legacy 'policy=None' mode (paired before
-    v0.7.1), don't switch them into strict mode by side effect."""
+async def test_ensure_folder_caps_for_materializes_consent_on_legacy_none(tmp_path: Path):
+    """2026-05-22 audit Batch T: even for default-allow-all (legacy)
+    peers, explicit user share = positive consent. Materialize the
+    policy row with FOLDER_SYNC + MERKLE_SYNC so that a future
+    strict-mode flip preserves what the user actually shared.
+
+    Previously this returned early, leaving policy=None, which
+    silently dropped the explicit-share consent on a strict-mode
+    flip (folder shares disappeared from the user's perspective)."""
     from one_link.server import UIServer
 
     them = _new_identity()
@@ -546,8 +552,10 @@ async def test_ensure_folder_caps_for_skips_legacy_none_policy(tmp_path: Path):
 
     server._ensure_folder_caps_for(them.fingerprint, note="test")
     policy = state.get_peer_capability_policy(them.fingerprint)
-    # Still None — we did not flip them into strict.
-    assert policy is None
+    # Consent is now durable.
+    assert policy is not None
+    assert FOLDER_SYNC in policy
+    assert MERKLE_SYNC in policy
     state.close()
 
 

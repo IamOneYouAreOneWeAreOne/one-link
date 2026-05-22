@@ -96,6 +96,23 @@ _VERIFY_CHUNK_HASH: bool = (
     __import__("os").environ.get("ONE_LINK_VERIFY_CHUNK_HASH") == "1"
 )
 
+# 2026-05-22 audit Batch T: max indices retained in the
+# replay-window seen-set. Tuned so that typical multi-file channels
+# (a few-thousand chunks per file × <10 concurrent files) stay
+# under the cap, but a long-lived channel doesn't accumulate unbounded
+# memory. FIFO eviction (OrderedDict.popitem(last=False)) drops the
+# OLDEST index — same audit-defense pattern as cap_store.seen_nonces
+# (M11) so an adversary that spams replays can't grind-evict an honest
+# index out of the set.
+_REPLAY_WINDOW_MAX: int = 16384
+
+
+class ReplayError(ValueError):
+    """Raised when ``decrypt_chunk`` receives a ``chunk_index`` that
+    was already decrypted on this session. Caller can map this to
+    an ACK-reject with reason=``native_chunk_replay`` to keep the
+    channel alive (matches T2-E / Batch P discipline)."""
+
 
 # ─── Session state ─────────────────────────────────────────────────────────
 
@@ -179,6 +196,18 @@ class NativeTransferSession:
     # Fast-path AEAD primitive (cryptography.hazmat) — None when using
     # the native multi-frame backend.
     _fast_aead: Any = field(default=None, init=False, repr=False)
+    # 2026-05-22 audit Batch T: per-session replay window. T1-B added
+    # per-chunk_index AEAD keys but the daemon's receive path still
+    # accepted wire-supplied ``chunk_index`` without a replay window
+    # or monotonicity gate. A sender (or relay) re-presenting an
+    # already-decrypted (index, ciphertext) tuple wastes bandwidth +
+    # confuses the per-file ``received`` accounting (which is bounded
+    # at the daemon level by T2-E follow-up but still wastes a decrypt).
+    # Track the SET of recently-decrypted indices and refuse a re-decrypt.
+    # Bounded at 16 384 entries (≈ 4 GB of chunked content) with FIFO
+    # eviction; the highest-water mark + window-size approach matches
+    # the Double Ratchet's MAX_SKIP_KEYS pattern.
+    _recent_decrypted_indices: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not HAS_NATIVE:
@@ -204,6 +233,12 @@ class NativeTransferSession:
         # T1-B: skipped-key store, lazily created on first decrypt
         # to handle OOO chunk delivery (QUIC parallel lanes etc).
         self._skipped_store = None
+        # Batch T: replay-window store. OrderedDict so eviction is
+        # FIFO (oldest decrypted index drops first, matching ratchet
+        # MAX_SKIP_KEYS semantics — adversary can't randomly purge an
+        # honest index from the seen set).
+        from collections import OrderedDict as _OD
+        self._recent_decrypted_indices = _OD()
         if self.cipher_backend == "native":
             # Native multi-frame AEAD (ADR-0002). Used when partial-
             # chunk integrity is the priority.
@@ -389,15 +424,24 @@ class NativeTransferSession:
             yield from self._encrypt_buffer(data, chunk_strategy, addr_kind)
             return
 
-        # Streaming path: read fixed blocks, encrypt each.
+        # 2026-05-22 audit Batch T: stop reading when ``size`` bytes
+        # have been yielded, even if the underlying file has grown
+        # mid-send. Without this cap, a growing source file produces
+        # extra encrypted chunks past the declared size; the receiver
+        # rejects them via the T2-E overrun-size guard but the
+        # sender's ratchet has already advanced for those extra
+        # chunks, desynchronising the next file on the channel.
+        bytes_sent = 0
         with path.open("rb") as f:
-            while True:
-                block = f.read(self.FIXED_CHUNK_SIZE)
+            while bytes_sent < size:
+                remaining = size - bytes_sent
+                block = f.read(min(self.FIXED_CHUNK_SIZE, remaining))
                 if not block:
                     break
                 chunk_id = self._compute_address(block, addr_kind)
                 record = self.encrypt_chunk_bytes(block, chunk_id=chunk_id)
                 self._maybe_store(record, address_kind=addr_kind)
+                bytes_sent += len(block)
                 yield record
 
     # ── address-kind dispatch (Phase B convergent encryption) ──────
@@ -510,6 +554,19 @@ class NativeTransferSession:
         environments flip the flag; everyone else trusts the AAD-
         as-commitment property + the peer's pinned trust.
         """
+        # 2026-05-22 audit Batch T: replay-window check. Reject a
+        # re-presented chunk_index BEFORE deriving keys + decrypting.
+        # T1-B made the AEAD safe under index reuse (different keys),
+        # but the daemon still wrote the duplicate payload to the
+        # blob's append handle, wasting bandwidth + CPU + flagging
+        # the file as size-overrun. With the seen-set short-circuit
+        # the duplicate is bounced free.
+        idx_key = int(record.chunk_index)
+        if idx_key in self._recent_decrypted_indices:
+            raise ReplayError(
+                f"chunk_index {idx_key} already decrypted this session "
+                f"(replay or duplicate delivery)"
+            )
         # 2026-05-21 audit T1-B: derive the matching per-chunk key
         # via ``ratchet.key_at(chunk_index)``. Handles OOO QUIC
         # delivery via the skipped-key store (intermediate keys are
@@ -552,6 +609,12 @@ class NativeTransferSession:
                     f"{bytes(record.chunk_id).hex()[:16]}, actual "
                     f"{actual.hex()[:16]} (ONE_LINK_VERIFY_CHUNK_HASH=1)"
                 )
+        # Batch T: record this index as decrypted, FIFO-evicting the
+        # oldest entry once the cap is hit.
+        self._recent_decrypted_indices[idx_key] = None
+        if len(self._recent_decrypted_indices) > _REPLAY_WINDOW_MAX:
+            with __import__("contextlib").suppress(KeyError):
+                self._recent_decrypted_indices.popitem(last=False)
         return plaintext
 
     def decrypt_records_to_bytes(

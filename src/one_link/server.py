@@ -9745,17 +9745,28 @@ class UIServer:
         """v0.7.1: explicit user share = positive consent for folder
         traffic. Add FOLDER_SYNC + MERKLE_SYNC to the peer's policy
         allowlist so the deny-by-default gate doesn't block the
-        immediately-following MANIFEST_PUSH/WANTS frames."""
+        immediately-following MANIFEST_PUSH/WANTS frames.
+
+        2026-05-22 audit Batch T: ALWAYS materialize a policy row on
+        first share even for default-allow-all peers. Previously
+        policy=None short-circuited "nothing to add"; if the operator
+        then flipped strict mode the explicit-folder-share consent
+        was silently lost (no row existed to carry it). The row now
+        captures the consent permanently so a future strict-mode
+        flip respects what the user actually shared."""
         if self.daemon.state is None or not peer_fp:
             return
         try:
             from one_link.capabilities import FOLDER_SYNC, MERKLE_SYNC
             current = self.daemon.state.get_peer_capability_policy(peer_fp)
             if current is None:
-                return  # policy=None means "default-allow legacy" — nothing to add
-            wanted = set(current) | {FOLDER_SYNC, MERKLE_SYNC}
-            if wanted == set(current):
-                return
+                # Default-allow-all peer — materialize the row so the
+                # consent persists across a future strict-mode flip.
+                wanted = {FOLDER_SYNC, MERKLE_SYNC}
+            else:
+                wanted = set(current) | {FOLDER_SYNC, MERKLE_SYNC}
+                if wanted == set(current):
+                    return
             new_policy = sorted(wanted)
             self.daemon.state.set_peer_capability_policy(
                 peer_fp, new_policy,

@@ -3482,6 +3482,25 @@ class State:
             cur = self._conn.execute("DELETE FROM transfers WHERE id = ?", (id,))
             return cur.rowcount > 0
 
+    def peer_had_blob(self, peer_fp: str, blob_hash: str) -> bool:
+        """2026-05-22 audit Batch S — has this peer ever legitimately
+        received (direction='out' to them) or sent (direction='in' from
+        them) the blob identified by ``blob_hash``?
+
+        Used to gate folder-less ``BLOB_REQUEST`` lookups: a peer can
+        only refresh a blob hash they were already authorized to hold,
+        not enumerate arbitrary hashes against our store.
+        """
+        if not peer_fp or not blob_hash:
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM transfers "
+            "WHERE peer_fp = ? AND blob_hash = ? "
+            "LIMIT 1",
+            (peer_fp, blob_hash),
+        ).fetchone()
+        return row is not None
+
     def prune_transfers(
         self,
         *,
