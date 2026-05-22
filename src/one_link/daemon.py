@@ -20990,8 +20990,14 @@ class Daemon:
                             await self.discovery.prune_unreachable(timeout=0.4)
                         except Exception as e:
                             log.warning("prune cycle failed: %s", e)
-                    with contextlib.suppress(Exception):
+                    # 2026-05-22 audit Batch II: log on chunk-cache
+                    # prune failure (was silent ``contextlib.suppress``).
+                    # Operators tracking disk-usage drift now have a
+                    # signal when the prune cycle stops running.
+                    try:
                         self._prune_chunk_cache()
+                    except Exception as e:
+                        log.warning("chunk cache prune failed: %s", e)
                     # v0.6.3: transfer-ledger watchdog. Any transfer
                     # in 'offered' or 'active' that hasn't progressed
                     # in 5 minutes is forcibly failed so the UI never
