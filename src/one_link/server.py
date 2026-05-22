@@ -12665,6 +12665,42 @@ class UIServer:
         files.sort(key=lambda x: int(x["mtime_ms"]), reverse=True)  # type: ignore[arg-type, call-overload]
         return web.json_response({"files": files})
 
+    def _resolve_inbox_api_file(self, safe_name: str) -> Path | None:
+        """Resolve an inbox file for /api/files routes.
+
+        Receiver-side storage may prefix a filename to avoid collisions, while
+        older chat bubbles can still link the original name. Exact match wins;
+        a single ``*_<name>`` suffix match is accepted as the same received
+        file so image lightbox and "open in new tab" links do not 404.
+
+        Defense in depth: ``safe_name`` is already guaranteed to not contain
+        path separators by the caller (``Path(name).name == name``), but a
+        symlink inside ``inbox_dir()`` could still point outside. After
+        ``resolve()`` every candidate must live under the inbox root.
+        """
+        if not safe_name:
+            return None
+        inbox = inbox_dir().resolve()
+
+        def _under_inbox(p: Path) -> bool:
+            try:
+                p.resolve(strict=True).relative_to(inbox)
+                return True
+            except (OSError, ValueError):
+                return False
+
+        exact = inbox / safe_name
+        if exact.is_file() and _under_inbox(exact):
+            return exact.resolve()
+        suffix = f"_{safe_name}"
+        matches = [
+            p for p in inbox.iterdir()
+            if p.is_file() and p.name.endswith(suffix) and _under_inbox(p)
+        ]
+        if len(matches) == 1:
+            return matches[0].resolve()
+        return None
+
     async def api_transfers(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:
             return web.json_response({"transfers": []})
@@ -12968,10 +13004,10 @@ class UIServer:
         safe = Path(name).name
         if safe != name or not safe:
             return web.json_response({"error": "bad name"}, status=400)
-        path = inbox_dir() / safe
-        if not path.is_file():
+        path = self._resolve_inbox_api_file(safe)
+        if path is None:
             return web.json_response({"error": "not found"}, status=404)
-        mime = mimetypes.guess_type(safe)[0] or "application/octet-stream"
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         return web.FileResponse(path, headers={"Content-Type": mime})
 
     async def api_outbound_file_download(
@@ -13062,9 +13098,10 @@ class UIServer:
         safe = Path(name).name
         if safe != name or not safe:
             return web.json_response({"error": "bad name"}, status=400)
-        path = inbox_dir() / safe
-        if not path.is_file():
+        path = self._resolve_inbox_api_file(safe)
+        if path is None:
             return web.json_response({"error": "not found"}, status=404)
+        safe = path.name
         ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else safe.lower()
         kind = self.PREVIEW_KINDS.get(ext)
         if kind is None:
@@ -13136,9 +13173,10 @@ class UIServer:
         safe = Path(name).name
         if safe != name or not safe:
             return web.json_response({"error": "bad name"}, status=400)
-        path = (inbox_dir() / safe).resolve()
-        if not path.is_file():
+        resolved = self._resolve_inbox_api_file(safe)
+        if resolved is None:
             return web.json_response({"error": "not found"}, status=404)
+        path = resolved.resolve()
         if self._reveal_throttled():
             return web.json_response({"ok": True, "throttled": True})
         # v0.7.x: ONE_LINK_DISABLE_REVEAL=1 short-circuits the actual

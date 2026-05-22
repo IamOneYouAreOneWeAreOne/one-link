@@ -299,6 +299,18 @@ PRIOR_INDEX_INTERVAL_S = 120.0
 # short (1.5s) so a real failure forces a fast reopen.
 OUTBOUND_SESSION_PING_AFTER_S = 30.0
 OUTBOUND_SESSION_PING_DEADLINE_S = 1.5
+# Foreground chat/control sends must not inherit OS/protocol dead-socket
+# timeouts. If a cached session stops answering, fail fast, drop it, and let
+# send_text() retry on a fresh session using the same message id.
+FOREGROUND_ACK_DEADLINE_S = float(
+    os.environ.get("ONE_LINK_FOREGROUND_ACK_DEADLINE_S", "2.0")
+)
+# Native QUIC can report a cached connection as structurally present even after
+# the path died. Bound diagnostics and one-off frame probes so a stale cached
+# path never blocks the user-facing fast path for tens of seconds.
+QUIC_FRAME_DEADLINE_S = float(
+    os.environ.get("ONE_LINK_QUIC_FRAME_DEADLINE_S", "2.0")
+)
 
 # D13 — Adaptive heartbeat bounds. Per integration map Phase E E3:
 # heartbeat interval scales with τ_c trust + observed_loss so a
@@ -11414,26 +11426,42 @@ class Daemon:
             except Exception:
                 pass
         if self.state is None:
-            return True
-        # D10 — fail-open on verifier error. Per integration map §2.3,
-        # if the policy lookup itself errors (state corruption, lock
-        # contention, sqlite I/O failure), we fail OPEN + audit-log
-        # rather than fail-closed. Gap 16 K_verifies_wrong has slope
-        # 1.0: deny-on-verify-bug breaks legitimate traffic at full
-        # rate, which is much worse than the audit-log cost of
-        # allowing a few requests while the bug is fixed. The
-        # _capability_fail_open_count counter surfaces the rate to
-        # operators so a verifier regression is visible immediately.
+            # 2026-05-21 audit T1-D: previously returned True (fail-OPEN)
+            # which silently allowed every cap when the state DB was
+            # missing — boot race, corrupt DB, tests nulling state.
+            # Combined with the policy=None default-allow at the bottom
+            # of this function, this gave attacker an exploitable
+            # "state-not-loaded" window. Fail closed.
+            log.warning(
+                "AUDIT: capability check refused (state unavailable). "
+                "peer=%s cap=%s",
+                peer_fp[:8], cap,
+            )
+            with contextlib.suppress(Exception):
+                self._record_capability_denial(
+                    reason="state_unavailable", capability=cap,
+                )
+            return False
+        # 2026-05-21 audit T1-D: previously this block fell open on any
+        # verifier error. That gave an attacker a way to trip allow by
+        # inducing SQLite lock contention or a malformed row. Slope
+        # arg from D10 still applies for legitimate ops bugs, but the
+        # safer default is fail-closed + loud audit log so operators
+        # see the problem instead of a silent-allow window.
         try:
             policy = self.state.get_peer_capability_policy(peer_fp)
         except Exception as exc:
-            self._capability_fail_open_count += 1
+            self._capability_fail_open_count += 1  # name kept for metric continuity
             log.warning(
-                "AUDIT: capability verifier error -> fail-open. "
+                "AUDIT: capability verifier error -> fail-closed. "
                 "peer=%s cap=%s err=%s",
                 peer_fp[:8], cap, exc,
             )
-            return True
+            with contextlib.suppress(Exception):
+                self._record_capability_denial(
+                    reason="verifier_error", capability=cap,
+                )
+            return False
         allowed = policy is None or cap in policy
 
         # D02 (decision-point catalog) — surface the A(x, t) Gaussian
@@ -13898,7 +13926,11 @@ class Daemon:
                         sess.peer_fp, sess.channel, encode_msg(m)
                     )
                     while True:
-                        ack = decode_msg(await sess.channel.recv())
+                        raw_ack = await asyncio.wait_for(
+                            sess.channel.recv(),
+                            timeout=FOREGROUND_ACK_DEADLINE_S,
+                        )
+                        ack = decode_msg(raw_ack)
                         ack_type = str(ack.get("t") or "")
                         if ack_type == "CAPS":
                             features = list(normalize_caps(ack.get("features", [])))
@@ -16838,7 +16870,19 @@ class Daemon:
         if block:
             raise RuntimeError(block)
         peer_fp_for_policy = self._peer_fp_from_peer(peer)
-        if peer_fp_for_policy and not self._capability_allowed(peer_fp_for_policy, FILES):
+        # 2026-05-21 audit T1-F: previously the cap check was gated on
+        # `if peer_fp_for_policy`, which silently bypassed the FILES
+        # gate when the peer fingerprint couldn't be derived (e.g.
+        # freshly-resolved relay-routed peer with empty ed_pub_hex).
+        # Without a fingerprint we can't consult the policy at all,
+        # so we MUST refuse — otherwise an attacker can send via a
+        # half-resolved peer record to defeat per-peer revocation.
+        if not peer_fp_for_policy:
+            raise RuntimeError(
+                f"send_file refused: peer fingerprint unresolved for "
+                f"{peer.short_id} (cannot verify FILES capability)"
+            )
+        if not self._capability_allowed(peer_fp_for_policy, FILES):
             raise RuntimeError(f"files capability disabled for peer {peer.short_id}")
         file_sig = self._file_cache_signature(path)
         size = int(file_sig["size"])
@@ -20573,12 +20617,15 @@ class Daemon:
             return {"ok": False, "error": f"encode failed: {e}"}
         try:
             t0 = time.perf_counter()
-            response_bytes = await asyncio.to_thread(
-                conn.send_frame_stream_round_trips_count_parallel,
-                _peer_quic.FRAME_CHUNK_REQUEST,
-                payloads,
-                _peer_quic.FRAME_CHUNK_RESPONSE,
-                int(max(1, min(lanes, 16))),
+            response_bytes = await asyncio.wait_for(
+                asyncio.to_thread(
+                    conn.send_frame_stream_round_trips_count_parallel,
+                    _peer_quic.FRAME_CHUNK_REQUEST,
+                    payloads,
+                    _peer_quic.FRAME_CHUNK_RESPONSE,
+                    int(max(1, min(lanes, 16))),
+                ),
+                timeout=max(QUIC_FRAME_DEADLINE_S, 5.0),
             )
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             return {
@@ -20638,10 +20685,13 @@ class Daemon:
             return {"ok": False, "error": f"encode failed: {e}"}
         try:
             t0 = time.perf_counter()
-            kind, response = await asyncio.to_thread(
-                conn.send_frame_round_trip,
-                _peer_quic.FRAME_CHUNK_REQUEST,
-                wire,
+            kind, response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    conn.send_frame_round_trip,
+                    _peer_quic.FRAME_CHUNK_REQUEST,
+                    wire,
+                ),
+                timeout=max(QUIC_FRAME_DEADLINE_S, 5.0),
             )
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             return {
@@ -20680,25 +20730,37 @@ class Daemon:
         peer = await self.resolve_for_send(peer_fp)
         if peer is None:
             return {"ok": False, "error": "peer not resolvable"}
-        conn = await self._get_or_dial_quic(peer_fp, peer)
-        if conn is None:
-            return {"ok": False, "error": "no QUIC connection available"}
-        try:
-            t0 = time.perf_counter()
-            kind, response = await asyncio.to_thread(
-                conn.send_frame_round_trip,
-                _peer_quic.FRAME_PING,
-                payload,
-            )
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            return {
-                "ok": True,
-                "rtt_ms": round(elapsed_ms, 3),
-                "response_frame": int(kind),
-                "response_len": len(response),
-            }
-        except Exception as e:
-            return {"ok": False, "error": f"frame round-trip failed: {e}"}
+        last_error = "no QUIC connection available"
+        for attempt in range(2):
+            conn = await self._get_or_dial_quic(peer_fp, peer)
+            if conn is None:
+                return {"ok": False, "error": last_error}
+            try:
+                t0 = time.perf_counter()
+                kind, response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        conn.send_frame_round_trip,
+                        _peer_quic.FRAME_PING,
+                        payload,
+                    ),
+                    timeout=QUIC_FRAME_DEADLINE_S,
+                )
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                return {
+                    "ok": True,
+                    "rtt_ms": round(elapsed_ms, 3),
+                    "response_frame": int(kind),
+                    "response_len": len(response),
+                }
+            except Exception as e:
+                last_error = f"frame round-trip failed: {e}"
+                with contextlib.suppress(Exception):
+                    conn.close(0, b"quic_ping stale")
+                self._quic_outbound.pop(peer_fp, None)
+                if attempt == 0:
+                    continue
+                return {"ok": False, "error": last_error}
+        return {"ok": False, "error": last_error}
 
     @staticmethod
     def _quic_connection_alive(conn: object) -> bool:
@@ -20709,7 +20771,16 @@ class Daemon:
         if state is None:
             return hasattr(conn, "send_frame_round_trip")
         try:
-            return bool(state() if callable(state) else state)
+            alive = bool(state() if callable(state) else state)
+            if not alive:
+                return False
+            remote_address = getattr(conn, "remote_address", None)
+            if callable(remote_address):
+                try:
+                    return remote_address() is not None
+                except Exception:
+                    return False
+            return True
         except Exception:
             return False
 
@@ -20968,15 +21039,41 @@ class Daemon:
                         # WebRTC FILE_BIN_CHUNK. We pick the most
                         # recent live channel; if none, the proxy
                         # raises and the handler degrades gracefully.
-                        _live_inbound = self._inbound_live_channels.get(peer_fp) or []
+                        _live_inbound = tuple(
+                            self._inbound_live_channels.get(peer_fp) or ()
+                        )
                         _real_channel = _live_inbound[-1] if _live_inbound else None
 
+                        # 2026-05-21 audit T1-G: previously this synth
+                        # channel exposed ``peer_ed_pub = b""``. The
+                        # FILE_OFFER dispatch path runs through
+                        # _on_peer_message, which re-derives the peer
+                        # fingerprint as ``fingerprint_of(channel.peer_ed_pub)``
+                        # — empty bytes → SAME fingerprint for every QUIC
+                        # FILE_OFFER, every transfer-id colliding into
+                        # one IncomingFile bucket. Proxy the real
+                        # channel's identity + caps so cap checks +
+                        # ledger keying work correctly.
+                        _real_ed_pub = (
+                            getattr(_real_channel, "peer_ed_pub", b"")
+                            if _real_channel is not None else b""
+                        )
+                        _real_peer_caps = (
+                            getattr(_real_channel, "peer_caps", None) or {}
+                            if _real_channel is not None else {}
+                        )
+
                         class _NoopChannel:
+                            # Per-instance state set in __init__ so two
+                            # concurrent QUIC inbounds for different
+                            # peers never share a mutable default dict.
+                            def __init__(self) -> None:
+                                self.peer_caps = dict(_real_peer_caps)
+                                self.peer_ed_pub = _real_ed_pub
+                                self.peer_short_id = peer_sid
+
                             async def send(self, _data: bytes) -> None:
                                 return None
-                            peer_caps: dict = {}
-                            peer_ed_pub: bytes = b""
-                            peer_short_id: str = peer_sid
 
                             def get_or_create_native_transfer_session(
                                 self, **kw,
