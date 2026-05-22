@@ -408,7 +408,20 @@ def _dh_ratchet(state: RatchetState, header: Header) -> None:
        send_chain_key. Reset send counters.
     """
     # 1. Skip-derive prior-chain keys.
+    # 2026-05-21 audit T2-C: cap the skip-derive loop to MAX_SKIP_KEYS
+    # per DH ratchet step. Without this an attacker who sends a frame
+    # with ``header.pn = 2**32`` forces 4 billion HKDF iterations
+    # before the MAX_MSG_PER_CHAIN safety raises. Even ``pn = 10_000``
+    # is 10k KDF calls per packet — a cheap CPU DoS amplifier. The
+    # cap mirrors ``_skip_recv_keys`` on the SAME chain; combined,
+    # one decrypt call can derive at most ``MAX_SKIP_KEYS`` (prior)
+    # + ``MAX_SKIP_KEYS`` (current) keys.
     if state.recv_chain_key is not None and state.dh_recv_pub is not None:
+        if header.pn > state.recv_n + MAX_SKIP_KEYS:
+            raise RuntimeError(
+                "ratchet: too many skipped messages on prior chain"
+                f" ({header.pn - state.recv_n} > {MAX_SKIP_KEYS})"
+            )
         while state.recv_n < header.pn:
             if state.recv_n >= MAX_MSG_PER_CHAIN:
                 raise RuntimeError("ratchet: prior chain past safety bound")

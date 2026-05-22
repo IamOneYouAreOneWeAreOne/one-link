@@ -291,6 +291,41 @@ def test_skipped_keys_bounded():
         decrypt(bob, forged, ct)
 
 
+def test_prior_chain_skipped_keys_bounded_t2c():
+    """Regression test for the 2026-05-21 audit T2-C finding.
+
+    BEFORE the fix: ``_dh_ratchet`` step (1) had no cap on the
+    prior-chain skip loop. An attacker who sent a frame with a
+    fresh ``header.dh`` AND ``header.pn`` set absurdly high
+    (e.g. 10_000) forced the receiver to derive 10_000 HKDF chain
+    keys per frame before any further work. Cheap CPU-DoS
+    amplifier (a single packet → 10k HKDFs).
+
+    AFTER the fix: the prior-chain skip loop is bounded by
+    ``MAX_SKIP_KEYS`` (1000), same as the current-chain
+    ``_skip_recv_keys`` cap. Frames with absurd ``pn`` are now
+    rejected with "too many skipped messages on prior chain".
+    """
+    alice, bob = init_pair(_ss())
+    # Establish bob.dh_recv_pub by sending one legitimate frame so
+    # the prior-chain branch in _dh_ratchet has somewhere to skip.
+    h1, ct1 = encrypt(alice, b"first")
+    assert decrypt(bob, h1, ct1) == b"first"
+    # Now craft a frame with a NEW dh (triggers a DH ratchet step)
+    # and an absurd ``pn`` (claims 5000 prior-chain messages were
+    # skipped). The pre-T2-C code would derive 5000 KDFs before
+    # AEAD failed; post-fix it raises immediately.
+    fake_dh = os.urandom(32)
+    # ``pn`` must exceed bob.recv_n + MAX_SKIP_KEYS to trip the cap.
+    bad_pn = bob.recv_n + MAX_SKIP_KEYS + 1
+    bad = Header(v=1, flags=0, dh=fake_dh, pn=bad_pn, n=0)
+    with pytest.raises(RuntimeError, match="too many skipped messages on prior chain"):
+        decrypt(bob, bad, os.urandom(64))
+    # The channel must survive that rejection — T1-A invariant.
+    h2, ct2 = encrypt(alice, b"second")
+    assert decrypt(bob, h2, ct2) == b"second"
+
+
 # ─── replay defence ────────────────────────────────────────────────
 
 def test_replay_of_same_header_rejected():
