@@ -356,6 +356,10 @@ def test_conversation_header_status_uses_live_peer_refresh(index_html: str):
     dot state after peer health refreshes."""
     assert "function renderConversationPeerStatus(peer)" in index_html
     assert "const lc = latencyClass(peer);" in index_html
+    helper_idx = index_html.find("function renderConversationPeerStatus(peer)")
+    helper = index_html[helper_idx:helper_idx + 1600]
+    assert "Device chat - " in helper
+    assert "Device chat Â·" not in helper
     idx = index_html.find("async function refreshPeers()")
     snippet = index_html[idx:idx + 1200]
     assert "renderConversationPeerStatus(cur);" in snippet

@@ -10027,10 +10027,10 @@
     subEl.title = "";
     subEl.onclick = null;
     if (peer.trust === "rejected") {
-      subEl.appendChild(document.createTextNode("Device chat Â· blocked"));
+      subEl.appendChild(document.createTextNode("Device chat - blocked"));
       return;
     }
-    subEl.appendChild(document.createTextNode("Device chat Â· "));
+    subEl.appendChild(document.createTextNode("Device chat - "));
     const lc = latencyClass(peer);
     if (lc) {
       const dot = el("span", `lat-dot ${lc}`);
@@ -10040,7 +10040,7 @@
     subEl.appendChild(document.createTextNode(reachLabel(peer)));
     const ms = peer.health?.latency_ewma_ms;
     if (ms != null) {
-      subEl.appendChild(document.createTextNode(` Â· ${Math.round(ms)} ms`));
+      subEl.appendChild(document.createTextNode(` - ${Math.round(ms)} ms`));
     }
     const verBadge = renderPeerVersionBadge(peer);
     if (verBadge) {
