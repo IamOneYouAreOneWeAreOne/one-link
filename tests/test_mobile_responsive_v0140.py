@@ -328,13 +328,13 @@ def test_image_preview_load_preserves_bottom_scroll(index_html: str):
 def test_chat_colors_are_deterministic_across_devices(index_html: str):
     """Message colors and peer accents should not depend on browser-local
     cache unless the user explicitly saves a custom group color."""
-    assert "--bubble-in:  linear-gradient(135deg, #252b3d 0%, #182f3a 100%);" in index_html
+    assert "--bubble-in:  linear-gradient(135deg, #30375a 0%, #17415a 100%);" in index_html
     assert "--bubble-out: linear-gradient(135deg, #6a4dff 0%, #4ec1ff 100%);" in index_html
-    assert index_html.count("--bubble-in: linear-gradient(135deg, #252b3d 0%, #182f3a 100%);") >= 1
+    assert index_html.count("--bubble-in: linear-gradient(135deg, #30375a 0%, #17415a 100%);") >= 1
     assert index_html.count("--bubble-out: linear-gradient(135deg, #6a4dff 0%, #4ec1ff 100%);") >= 1
     assert "function deterministicAccentForId(id)" in index_html
     assert "function peerAccentColor(peer)" in index_html
-    assert "peer?.fingerprint || peer?.ed_pub_hex || peer?.short_id" in index_html
+    assert "linear-gradient(135deg, #7c5cff 0%, #4ec1ff 100%)" in index_html
     assert "av.style.background = peerAccentColor(p);" in index_html
     assert "|| deterministicAccentForId(gid)" in index_html
 

@@ -54,7 +54,7 @@
     --good:       #46d39a;
     --warn:       #f5c451;
     --bad:        #ff6b6b;
-    --bubble-in:  linear-gradient(135deg, #252b3d 0%, #182f3a 100%);
+    --bubble-in:  linear-gradient(135deg, #30375a 0%, #17415a 100%);
     --bubble-out: linear-gradient(135deg, #6a4dff 0%, #4ec1ff 100%);
     --shadow:     0 6px 24px rgba(0,0,0,.35);
     --radius:     14px;
@@ -83,7 +83,7 @@
     --good:       #16a36b;
     --warn:       #b87f00;
     --bad:        #d04545;
-    --bubble-in:  linear-gradient(135deg, #252b3d 0%, #182f3a 100%);
+    --bubble-in:  linear-gradient(135deg, #30375a 0%, #17415a 100%);
     --bubble-out: linear-gradient(135deg, #6a4dff 0%, #4ec1ff 100%);
     --shadow:     0 6px 24px rgba(20,30,60,.10);
   }
@@ -97,7 +97,7 @@
       --text: #1a1f2b; --text-dim: #5a6477; --text-dimmer: #8b94a8;
       --accent: #5b3eea; --accent-2: #1d92e6;
       --good: #16a36b; --warn: #b87f00; --bad: #d04545;
-      --bubble-in: linear-gradient(135deg, #252b3d 0%, #182f3a 100%);
+      --bubble-in: linear-gradient(135deg, #30375a 0%, #17415a 100%);
       --bubble-out: linear-gradient(135deg, #6a4dff 0%, #4ec1ff 100%);
       --shadow: 0 6px 24px rgba(20,30,60,.10);
     }
@@ -768,7 +768,12 @@
     animation: pop .15s ease-out;
   }
   @keyframes pop { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-  .msg.in  { align-self: flex-start; background: var(--bubble-in); border-top-left-radius: 4px; }
+  .msg.in  {
+    align-self: flex-start;
+    background: var(--bubble-in);
+    border-top-left-radius: 4px;
+    border: 1px solid rgba(78,193,255,.16);
+  }
   .msg.out { align-self: flex-end;   background: var(--bubble-out); border-top-right-radius: 4px; color: white; }
   .msg .when { display: block; font-size: 10px; color: var(--text-dimmer); margin-top: 3px; }
   .msg.out .when { color: rgba(255,255,255,.75); }
@@ -10205,9 +10210,19 @@
         // reload - gentler UX. Polling tasks will pick up the
         // fresh cookie on their next tick.
         _resumeMainPollTimers();
-        try {
-          if (typeof refreshAll === "function") refreshAll();
-        } catch (_) {}
+        // 2026-05-22 audit T2-M: the prior code called
+        // ``refreshAll()`` here behind a ``typeof === "function"``
+        // guard, but no such function exists anywhere in the
+        // file — the guard hid the dead reference. The intent
+        // was an immediate post-recovery refresh; without it
+        // recovery would succeed but the user waited up to 30 s
+        // for the next polling tick. Call the real refresh
+        // functions directly. Each tolerates network errors so
+        // we don't need to chain catches.
+        try { refreshPeers(); } catch (_) {}
+        try { refreshTransfers(); } catch (_) {}
+        try { refreshStatus(); } catch (_) {}
+        try { refreshGroups(); } catch (_) {}
         return;
       }
       // Token also rejected → the daemon really minted a new
@@ -16398,9 +16413,11 @@
     return _GROUP_COLOR_PRESETS[h % _GROUP_COLOR_PRESETS.length];
   }
   function peerAccentColor(peer) {
-    return deterministicAccentForId(
-      peer?.fingerprint || peer?.ed_pub_hex || peer?.short_id || peer?.hostname,
-    );
+    // Keep device avatars in the One Link brand family. Earlier
+    // fingerprint hashing could make the same peer deterministically
+    // red/orange/etc., which was technically stable but visually
+    // surprising beside the purple-blue chat language.
+    return "linear-gradient(135deg, #7c5cff 0%, #4ec1ff 100%)";
   }
   // v0.12.1 - chat-prefs cache. Source-of-truth for per-chat
   // cosmetic state (color, wallpaper, archived). Populated from

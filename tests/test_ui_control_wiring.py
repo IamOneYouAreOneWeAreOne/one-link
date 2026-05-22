@@ -226,18 +226,60 @@ def test_static_ui_javascript_parses() -> None:
     assert not failures, "JavaScript syntax failures:\n" + "\n".join(failures)
 
 
-# 2026-05-22 audit T2-M (deferred): a proper undefined-call gate
-# for the inline JS needs a jsdom-based execution test that boots
-# the daemon's UI in a Node VM and walks the symbol table. A pure
-# regex-based static analyzer over a 30K-line file produces too
-# many false positives (object-literal shorthand methods, IIFEs,
-# nested-scope shadowing) to be useful. The existing
-# ``test_static_ui_javascript_parses`` catches SyntaxErrors;
-# integration tests catch wiring drift at the daemon-pair layer;
-# the ``transfer_diagnostics.degradation_events`` ring catches
-# silent fallbacks. Coverage of "function declared but never
-# called" / "call site references renamed identifier" is documented
-# in ``AUDIT_2026-05-21.md`` as a deferred follow-up.
+# 2026-05-22 audit T2-M: acorn-based scope-aware undefined-call
+# check for the daemon's inline JS. Catches the bug class the
+# 600+ substring-grep smoke tests miss: a function declared but
+# never called, a call site that references a renamed/misspelled
+# identifier, dead-code guarded by ``typeof === "function"``.
+# The analyzer is at ``tests/js/check_undefined_calls.js`` —
+# parses each <script> block with acorn, walks the lexical scope
+# chain (function / class / let / const / var hoisting, params,
+# destructuring, blocks, catch clauses, imports), and reports any
+# bare-identifier call site whose target isn't bound anywhere
+# across all script blocks (soft cross-script-scope resolution
+# matches the browser's runtime behaviour where script tags
+# share the global scope). Verified output: the prior
+# uncaught-bug example was ``refreshAll()`` in the auto-recovery
+# success path — a ``typeof === "function"`` guard hid the dead
+# reference and the post-recovery refresh never fired.
+
+JS_TEST_DIR = ROOT / "tests" / "js"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.skipif(
+    not (JS_TEST_DIR / "node_modules" / "acorn").is_dir(),
+    reason="acorn not installed in tests/js; run `cd tests/js && npm install`",
+)
+def test_inline_js_no_undefined_call_sites_t2m() -> None:
+    """T2-M acorn-scope-aware undefined-call gate.
+
+    Drives ``tests/js/check_undefined_calls.js`` (Node script using
+    acorn for AST + manual scope-chain resolution) against
+    ``index.html``. The script exits 0 when every bare-identifier
+    call resolves; 1 when one or more sites are unresolved.
+
+    To reproduce locally:
+        ``node tests/js/check_undefined_calls.js src/one_link/web/index.html``
+
+    To extend coverage: add the new globals / declarations to the
+    ``GLOBALS`` allowlist inside ``check_undefined_calls.js`` if
+    they're legitimate (browser API, library global, etc.). Real
+    undefined references should be fixed in the source.
+    """
+    target = ROOT / "src" / "one_link" / "web" / "index.html"
+    script = JS_TEST_DIR / "check_undefined_calls.js"
+    proc = subprocess.run(
+        ["node", str(script), str(target)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(
+            "T2-M undefined-call analyzer flagged sites:\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
 
 
 def test_trace_clearing_controls_are_exposed() -> None:
