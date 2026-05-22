@@ -10190,6 +10190,13 @@
   function _maybe401(status) {
     if (status !== 401) return;
     if (_sessionExpiredBannerShown) return;
+    // 2026-05-21 audit T3-P: pause the polling cluster while we
+    // try to recover so we don't fire six concurrent _maybe401
+    // → _attemptAutoRecovery chains. Recovery itself is guarded
+    // by ``_autoRecoveryInFlight`` but the polling timers still
+    // bombard the daemon with retries that immediately bounce on
+    // the dead cookie. Pause once; resume on success.
+    _pauseMainPollTimers();
     // Try silent auto-recovery FIRST. If it succeeds, the next
     // fetch should succeed too - no banner. If it fails (token
     // mismatch with new daemon), fall through to the banner.
@@ -10198,6 +10205,7 @@
         // Cookie refreshed. Reload the data without a full page
         // reload - gentler UX. Polling tasks will pick up the
         // fresh cookie on their next tick.
+        _resumeMainPollTimers();
         try {
           if (typeof refreshAll === "function") refreshAll();
         } catch (_) {}
@@ -10206,10 +10214,37 @@
       // Token also rejected → the daemon really minted a new
       // token (rare; only happens if the user explicitly
       // resets via tray "forget credentials"). Show the banner.
+      // Timers stay paused; the banner's "Sign in" button (or a
+      // page reload after authorize) resumes them.
       if (_sessionExpiredBannerShown) return;
       _sessionExpiredBannerShown = true;
       showSessionExpiredBanner();
     });
+  }
+
+  function _pauseMainPollTimers() {
+    const timers = state._mainPollTimers;
+    if (!Array.isArray(timers) || !timers.length) return;
+    for (const id of timers) {
+      try { clearInterval(id); } catch (_) {}
+    }
+    // Empty the array; ``_resumeMainPollTimers`` re-schedules
+    // fresh intervals so we don't accidentally double-fire after
+    // a partial pause/resume cycle.
+    state._mainPollTimers = [];
+    state._mainPollTimersPaused = true;
+  }
+  function _resumeMainPollTimers() {
+    if (!state._mainPollTimersPaused) return;
+    state._mainPollTimersPaused = false;
+    state._mainPollTimers = [
+      setInterval(refreshPeers, 5000),
+      setInterval(refreshTransfers, 4000),
+      setInterval(refreshStatus, 8000),
+      setInterval(refreshOneHealth, 15000),
+      setInterval(refreshFabricTruth, 30000),
+      setInterval(refreshGroups, 12000),
+    ];
   }
 
   function showSessionExpiredBanner() {
@@ -12038,9 +12073,25 @@
       // automatically sends the session cookie for same-origin
       // requests, so the auth gate accepts it transparently.
       const qrUrl = `/api/discover/invite/qr.svg?code=${encodeURIComponent(code)}`;
-      qrHost.innerHTML = `<img src="${qrUrl}" alt="Pair QR code" `
-        + `style="width:100%; height:100%; object-fit:contain;" `
-        + `onerror="this.parentNode.innerHTML='<div style=color:#c33;font-size:12px;>QR generation failed</div>'" />`;
+      // 2026-05-21 audit T3-B: replace inline ``onerror=`` handler
+      // with a programmatic listener so the daemon's CSP can drop
+      // ``unsafe-inline`` without breaking this fallback. Inline
+      // handlers also can't escape user-supplied content safely;
+      // building the DOM directly removes that surface entirely.
+      qrHost.replaceChildren();
+      const qrImg = document.createElement("img");
+      qrImg.src = qrUrl;
+      qrImg.alt = "Pair QR code";
+      qrImg.style.width = "100%";
+      qrImg.style.height = "100%";
+      qrImg.style.objectFit = "contain";
+      qrImg.addEventListener("error", () => {
+        const fail = el("div", null, "QR generation failed");
+        fail.style.color = "#c33";
+        fail.style.fontSize = "12px";
+        qrHost.replaceChildren(fail);
+      });
+      qrHost.appendChild(qrImg);
       // Live MM:SS countdown.
       _startInviteCountdown();
       // Tailor the action row to the platform.
@@ -19635,12 +19686,34 @@
     // immediate reconnect + daemon-version-drift check. Idempotent;
     // call once.
     LiveRefresh.attachWindowHandlers();
-    setInterval(refreshPeers, 5000);
-    setInterval(refreshTransfers, 4000);
-    setInterval(refreshStatus, 8000);
-    setInterval(refreshOneHealth, 15000);
-    setInterval(refreshFabricTruth, 30000);
-    setInterval(refreshGroups, 12000);
+    // 2026-05-21 audit T3-P: track the polling cluster so we can
+    // pause it on a 401 burst and resume on recovery. Without
+    // this, six concurrent timers keep firing through the
+    // session-expired banner — each one re-firing _maybe401 ->
+    // _attemptAutoRecovery -> Promise pileup. The auth-loss
+    // banner now stops the cluster; explicit recovery resumes.
+    state._mainPollTimers = state._mainPollTimers || [];
+    state._mainPollTimers.push(setInterval(refreshPeers, 5000));
+    state._mainPollTimers.push(setInterval(refreshTransfers, 4000));
+    state._mainPollTimers.push(setInterval(refreshStatus, 8000));
+    state._mainPollTimers.push(setInterval(refreshOneHealth, 15000));
+    state._mainPollTimers.push(setInterval(refreshFabricTruth, 30000));
+    state._mainPollTimers.push(setInterval(refreshGroups, 12000));
+    // T3-O: free in-tab File-cache blob URLs on page hide so a
+    // long-lived tab that sent 200+ photos doesn't accumulate
+    // 200+ retained Blob references. The daemon's
+    // /api/outbound_files/<id> endpoint makes the in-memory cache
+    // redundant for post-refresh use; on tab close we have no
+    // further need for these URLs.
+    addEventListener("pagehide", () => {
+      try {
+        for (const ent of state.outboundFileCache.values()) {
+          if (ent?.objectUrl) {
+            try { URL.revokeObjectURL(ent.objectUrl); } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    });
     maybeShowNotifBanner();
     // v0.21.x: check GitHub Releases for a newer version and surface
     // the update banner if one's out. Fire-and-forget - the banner
