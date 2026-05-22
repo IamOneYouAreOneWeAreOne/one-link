@@ -12421,7 +12421,7 @@
         // daemon for — should only happen on legacy pre-ledger
         // bubbles. Be honest about the cause.
         toast(
-          "Can't preview this file — it predates the transfer ledger, "
+          "Can't preview this file. It predates the transfer ledger, "
           + "so the daemon doesn't remember where it lived on disk. "
           + "Drag the original in again to share another copy.",
           "info", 6000,
@@ -12732,15 +12732,39 @@
   // Look up the transfer record matching a FILE_OFFER message.
   // FILE_OFFER carries `blob` (hex); transfer carries `blob_hash`.
   // Direction must match too (out vs in are distinct ledger rows).
+  // 2026-05-21 audit T3-Z: lookups for "is this file message
+  // associated with a known transfer" used to be O(N×M) — walking
+  // every entry of ``state.transfersById`` once per file bubble per
+  // re-render (~16k iterations/frame at typical scale). Maintain a
+  // secondary index ``state.transferByDirBlob`` keyed by
+  // ``"<dir>|<blob_hash>"`` so the lookup becomes O(1). Rebuilt
+  // whenever ``state.transfersById`` is mutated.
+  function _rebuildTransferByDirBlob() {
+    const idx = new Map();
+    for (const t of state.transfersById.values()) {
+      const blob = (t.blob_hash || "").toLowerCase();
+      if (!blob || !t.direction) continue;
+      idx.set(`${t.direction}|${blob}`, t);
+    }
+    state.transferByDirBlob = idx;
+  }
+  function _trackTransferIndex(t) {
+    // Incremental update path for the WS-event handler. Avoids a
+    // full rebuild on every transfer event.
+    if (!state.transferByDirBlob) {
+      _rebuildTransferByDirBlob();
+      return;
+    }
+    const blob = (t?.blob_hash || "").toLowerCase();
+    if (blob && t.direction) {
+      state.transferByDirBlob.set(`${t.direction}|${blob}`, t);
+    }
+  }
   function transferForMessage(msg) {
     const blob = (msg.blob || "").toLowerCase();
     if (!blob) return null;
-    for (const t of state.transfersById.values()) {
-      if (t.direction === msg.dir && (t.blob_hash || "").toLowerCase() === blob) {
-        return t;
-      }
-    }
-    return null;
+    if (!state.transferByDirBlob) _rebuildTransferByDirBlob();
+    return state.transferByDirBlob.get(`${msg.dir}|${blob}`) || null;
   }
 
   function statusLabel(t, fallback) {
@@ -17330,6 +17354,8 @@
       state.transfers = transfers || [];
       state.transfersById = new Map();
       for (const t of state.transfers) state.transfersById.set(t.id, t);
+      // T3-Z: rebuild the O(1) (dir|blob) → transfer lookup index.
+      _rebuildTransferByDirBlob();
       renderTransfers();
       renderCourierKit();
       // Status of file bubbles is driven by transfersById - re-render
@@ -20479,6 +20505,9 @@
         state.transfers.sort((a, b) => (b.updated_ms || 0) - (a.updated_ms || 0));
         state.transfers = state.transfers.slice(0, 80);
         state.transfersById.set(m.transfer.id, m.transfer);
+        // T3-Z: keep the (dir|blob) index in sync with the
+        // primary map so transferForMessage stays O(1).
+        _trackTransferIndex(m.transfer);
         // v0.8.8: update the per-transfer EWMA bytes-per-second
         // tracker so the chat bubble + header pill can show a live
         // rate. Cleared on terminal status (complete / failed).

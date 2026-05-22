@@ -104,7 +104,14 @@ def chunk_bytes(data: bytes) -> tuple[Chunk, ...]:
             start = end
             rolling = 0
 
-    if start < len(data) or not chunks:
+    # 2026-05-21 audit T3-S: skip the tail-chunk emission for empty
+    # input. Without this, ``_chunk_bytes`` returned a single
+    # zero-length chunk whose hash is the well-known
+    # ``BLAKE3(b"")`` — a peer could poison the chunk cache by
+    # claiming any blob "has" that hash. Zero-byte transfers are
+    # represented as an empty chunk list and handled by the
+    # caller's "transfer is empty" path.
+    if start < len(data) or (not chunks and len(data) > 0):
         chunks.append(_make_chunk(len(chunks), start, len(data), data))
     return tuple(chunks)
 
