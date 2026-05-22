@@ -467,6 +467,34 @@ def _bench_native_aead_t1b_candidate() -> dict:
     )
 
 
+# ── Real native_transfer encrypt+decrypt (post-T1-B) ───────────────
+
+def _bench_native_transfer_e2e() -> dict:
+    """End-to-end native_transfer.NativeTransferSession round-trip
+    using the REAL production code path (post-T1-B per-chunk
+    ratchet keying). 256 KiB plaintext, ChaCha20-Poly1305.
+    """
+    from one_link.native_transfer import (
+        NativeTransferSession,
+    )
+
+    secret = b"\xaa" * 32
+    sender = NativeTransferSession(
+        shared_secret=secret, cipher_backend="fast", aead_kind="chacha",
+    )
+    receiver = NativeTransferSession(
+        shared_secret=secret, cipher_backend="fast", aead_kind="chacha",
+    )
+    plaintext = b"\xcc" * (256 * 1024)
+
+    def run() -> None:
+        record = sender.encrypt_chunk_bytes(plaintext)
+        out = receiver.decrypt_chunk(record)
+        assert len(out) == len(plaintext), "round-trip plaintext length mismatch"
+
+    return _bench("native_transfer e2e post-T1-B (256 KiB)", run, iters=200)
+
+
 # ── Driver ─────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -483,6 +511,7 @@ def main() -> int:
         _bench_cdc_empty_input,
         _bench_native_aead_current,
         _bench_native_aead_t1b_candidate,
+        _bench_native_transfer_e2e,
     ]
     print(f"{'name':<46} {'ns/op (med)':>14} {'ns/op (p95)':>14} {'ops/sec':>14}")
     print("-" * 92)
