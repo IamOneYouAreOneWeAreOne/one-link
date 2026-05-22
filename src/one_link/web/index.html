@@ -7617,7 +7617,7 @@
         <div class="empty rich">
           <div class="rich-glyph">📥</div>
           <h4>Inbox is quiet</h4>
-          <p>Files from paired devices land here. We don't peek.</p>
+          <p>Files from paired devices land here.</p>
         </div>
       </div>
       <div class="panel-form">
@@ -8560,9 +8560,8 @@
                        spellcheck="false" />
               </div>
               <p class="settings-help">
-                Files land here. Yes, all of them, even the weird ones.
-                Leave blank for the built-in inbox. The folder must
-                already exist and be writable. We won't conjure it.
+                Files land here. Leave blank for the built-in inbox.
+                Pick a folder that already exists and is writable.
               </p>
             </div>
 
@@ -9101,8 +9100,8 @@
           <button class="btn-danger" id="group-clear-history">Clear local history</button>
         </div>
         <p class="settings-help">
-          Clears your local copy. Group members keep their own
-          histories on their own devices. We can't help you there.
+          Clears your local copy. Each member keeps their own
+          history on their own device.
         </p>
       </div>
 
@@ -9988,7 +9987,7 @@
     const parts = [];
     const cls = latencyClass(p);
     if (cls === "broken") {
-      parts.push("Channel needs renegotiation — sends will queue until both sides catch up.");
+      parts.push("Channel needs renegotiation. Sends will queue until both sides catch up.");
     } else if (cls === "stale") {
       const ago = lastAlive ? Math.round((Date.now() - lastAlive) / 1000) : null;
       parts.push(
@@ -11210,7 +11209,7 @@
       title = "Secure path needs renegotiation";
       lead = `Your daemon and ${peerLabel}'s daemon disagree on the wire format right now. Sends will queue until both sides catch up.`;
       steps = [
-        "Open One Link on the other device and let it run for a few seconds — the daemons re-handshake automatically.",
+        "Open One Link on the other device and let it run for a few seconds. The daemons re-handshake automatically.",
         "If it doesn't clear in 30 seconds, both sides probably need the same build. Update whichever side is older.",
         `Your build is v${myVer}. The other device reports v${theirVer || "unknown"}.`,
       ];
