@@ -168,6 +168,14 @@ class Channel:
     # "DR bootstrap material missing" and falls back to legacy
     # FILE_BIN_CHUNK, losing Wave 2f QUIC and ratchet-binding.
     _native_transfer_seed: Optional[bytes] = None
+    # 2026-05-21 audit T2-A: bound the legacy-AEAD fallback window
+    # post-DR-activation. The activation-race window allows at most
+    # ONE legacy-shaped frame in flight at the moment both sides
+    # flip to DR. After that, a peer that keeps sending legacy bytes
+    # is either misbehaving or replaying — refuse rather than
+    # accept indefinitely. Counts successful legacy decrypts that
+    # happened after DR activation.
+    _legacy_frames_post_dr: int = 0
     # When non-None, channel is in ratchet mode. send/recv branch
     # to the ratchet path and the legacy AEADs go unused. Set
     # exactly once per channel by maybe_activate_ratchet.
@@ -529,6 +537,24 @@ class Channel:
                     nonce = self._nonce(self.rx_seq)
                     pt = self.rx_aead.decrypt(nonce, payload, self._aad())
                     self.rx_seq += 1
+                    # 2026-05-21 audit T2-A: hard-cap how many legacy
+                    # frames we'll accept after DR activation. The
+                    # activation race window is one frame; a sustained
+                    # stream of legacy-shaped frames post-activation is
+                    # the attacker shape, not the race shape.
+                    self._legacy_frames_post_dr += 1
+                    if self._legacy_frames_post_dr > 1:
+                        log.warning(
+                            "channel %s: %d legacy frames accepted "
+                            "post-DR-activation — rejecting further "
+                            "legacy bytes",
+                            self.peer_short_id,
+                            self._legacy_frames_post_dr,
+                        )
+                        raise RuntimeError(
+                            "legacy AEAD frame after DR activation "
+                            "(beyond 1-frame race window)"
+                        )
                     return pt
                 except Exception:
                     raise dr_err
@@ -761,6 +787,23 @@ async def respond(
     if verify(i_ed, sig_i, sig_v2_material):
         pass  # v2 sig — UKS-defended path, the common case once peers upgrade.
     elif verify(i_ed, sig_i, sig_v1_material):
+        # 2026-05-21 audit T2-B: operators can now hard-reject the
+        # v1-sig rolling-upgrade hatch via ``ONE_LINK_REJECT_V1_HELLO=1``.
+        # That closes the UKS splice between paired peers (audit ES-1)
+        # the moment ops are confident both ends speak v2. Default
+        # remains accept-with-warning until the ``uks_v2_only`` CAPS
+        # flag-day ships.
+        if os.environ.get("ONE_LINK_REJECT_V1_HELLO") == "1":
+            v1_count = _bump_v1_sig_counter(i_ed)
+            log.warning(
+                "channel.respond: rejecting v1 HELLO sig from peer %s "
+                "(ONE_LINK_REJECT_V1_HELLO=1). v1-fallback count: %d.",
+                i_ed.hex()[:16], v1_count,
+            )
+            raise RuntimeError(
+                "HELLO signature invalid (v1 sig hard-rejected "
+                "by ONE_LINK_REJECT_V1_HELLO)"
+            )
         # External audit 2026-05-18 ES-1: this fallback was added as
         # a rolling-upgrade hatch (audit M1) but at v0.20.7 it's still
         # universally accepted. An attacker on a hostile LAN who MITMs
