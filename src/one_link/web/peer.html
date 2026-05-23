@@ -4735,25 +4735,35 @@
                 && !parsed.pending);
     } catch { return false; }
   }
+  // 2026-05-23 (user feedback): if the page reloads with a stale
+  // ?setup_device_invite=<old-token> in the URL AND we already have
+  // a valid cert, prefer relogin over re-claiming an expired invite.
+  // The cert is permanent; the invite token is single-use and 30-min
+  // TTL — so the cert path is always the right thing once it exists.
+  const _hasValidCert = _hasExistingPairCert();
   const _hasReturningPair = !_pairQuery && !_selfMeshQuery
-    && !_setupDeviceInviteQuery && _hasExistingPairCert();
+    && (!_setupDeviceInviteQuery || _hasValidCert)
+    && _hasValidCert;
 
   if (_pairQuery) {
     _showOnly("#autopair-card");
     _autopairSetState("dim", "starting", "Setting up your phone's identity…");
-  } else if (_selfMeshQuery || _setupDeviceInviteQuery) {
-    _showOnly("#selfmesh-enroll-card");
-    _selfMeshEnrollSetState("dim", "starting", "Loading this device...");
   } else if (_hasReturningPair) {
-    // Show autopair-card with a 'reconnecting' state. If the
-    // relogin succeeds the same card transitions through the
-    // existing autopair states (negotiating → connected). If it
-    // fails we fall back to the welcome card with an explanation.
+    // Cert-authed reconnect wins over a stale setup_device_invite
+    // query in the URL. Otherwise a Safari reload with the
+    // original pair URL still in history tries to re-claim a
+    // 30-min-expired invite and dead-ends at 'invite expired or
+    // not found' even though the permanent cert from the original
+    // pair is sitting in localStorage. Cert path always wins
+    // once it exists.
     _showOnly("#autopair-card");
     _autopairSetState(
       "dim", "reconnecting",
       "Restoring your live link to the laptop…",
     );
+  } else if (_selfMeshQuery || _setupDeviceInviteQuery) {
+    _showOnly("#selfmesh-enroll-card");
+    _selfMeshEnrollSetState("dim", "starting", "Loading this device...");
   } else {
     // v0.20.3 — default landing. No pair query → show the welcome
     // card explaining how to scan a QR. Identity provisioning still
@@ -4836,6 +4846,13 @@
   }
 
   boot().then(() => {
+    // 2026-05-23: order matters. Cert-authed reconnect MUST be
+    // checked before _setupDeviceInviteQuery so a Safari reload
+    // with the old pair URL in history doesn't re-claim a
+    // 30-min-expired invite when a permanent cert is already
+    // sitting in localStorage. The _hasReturningPair flag is
+    // already false when there's a fresh ?pair= query OR no cert
+    // exists, so this is safe.
     if (_pairQuery) {
       _runAutoPairFlow(_pairQuery).catch((e) => {
         console.error("autopair failed", e);
@@ -4843,6 +4860,28 @@
           "bad", "failed",
           `Pair flow crashed: ${e && e.message ? e.message : e}`,
         );
+      });
+    } else if (_hasReturningPair) {
+      _attemptReloginWithStoredCert().then((handoff) => {
+        if (handoff) {
+          // Strip any stale pair-query from the URL so a future
+          // reload doesn't try the relogin-then-stale-claim dance
+          // again.
+          try {
+            if (location.search) {
+              history.replaceState(
+                null, "", location.pathname + location.hash,
+              );
+            }
+          } catch {}
+          _runAutoPairFlow(handoff).catch((e) => {
+            console.error("autopair after relogin failed", e);
+            _autopairSetState(
+              "bad", "failed",
+              `Reconnect crashed: ${e && e.message ? e.message : e}`,
+            );
+          });
+        }
       });
     } else if (_setupDeviceInviteQuery) {
       _runSetupDeviceInviteFlow(_setupDeviceInviteQuery).catch((e) => {
@@ -4859,18 +4898,6 @@
           "bad", "failed",
           `Invite flow crashed: ${e && e.message ? e.message : e}`,
         );
-      });
-    } else if (_hasReturningPair) {
-      _attemptReloginWithStoredCert().then((handoff) => {
-        if (handoff) {
-          _runAutoPairFlow(handoff).catch((e) => {
-            console.error("autopair after relogin failed", e);
-            _autopairSetState(
-              "bad", "failed",
-              `Reconnect crashed: ${e && e.message ? e.message : e}`,
-            );
-          });
-        }
       });
     }
   });
