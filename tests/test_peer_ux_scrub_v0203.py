@@ -7,7 +7,7 @@ power-user surfaces with no scan-the-QR-and-be-done path.
 
 This ship hides every technical card behind data-tier="advanced"
 and shows ONE landing card by default: "Pair this device. On
-your laptop, open Settings -> About -> Add a phone or laptop."
+your laptop, open Settings -> Devices -> Add a phone or laptop."
 
   Reach:  default-mode user sees clear instructions + nothing
           else. Power-user user can flip "Advanced surfaces"
@@ -68,12 +68,12 @@ def test_welcome_card_starts_hidden(peer_html: str):
 
 def test_welcome_card_explains_qr_flow(peer_html: str):
     """The copy MUST tell the user exactly where to find the QR
-    on the laptop. 'About -> Add a phone or laptop -> Create device QR'.
+    on the laptop. 'Devices -> Add a phone or laptop -> Create device QR'.
     If the path moves, the test breaks loudly so we can update
     both surfaces."""
     idx = peer_html.find('id="welcome-card"')
     body = peer_html[idx:idx + 1500]
-    assert "About" in body
+    assert "Devices" in body
     assert "Add a phone or laptop" in body
     assert "Create device QR" in body
     assert "QR" in body

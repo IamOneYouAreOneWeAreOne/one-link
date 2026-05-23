@@ -8786,40 +8786,40 @@
       <div class="settings-body">
         <nav class="settings-nav" id="settings-nav" aria-label="Settings sections">
           <button class="settings-nav-item active" data-settings-pane="profile">
-            <span class="settings-nav-glyph">👤</span> Profile
+            <span class="settings-nav-glyph">P</span> Profile
           </button>
           <button class="settings-nav-item" data-settings-pane="setup">
             <span class="settings-nav-glyph">1</span> Setup
           </button>
           <button class="settings-nav-item" data-settings-pane="privacy">
-            <span class="settings-nav-glyph">🛡</span> Privacy
+            <span class="settings-nav-glyph">S</span> Privacy
           </button>
           <button class="settings-nav-item" data-settings-pane="notifications">
-            <span class="settings-nav-glyph">🔔</span> Notifications
+            <span class="settings-nav-glyph">N</span> Notifications
           </button>
           <button class="settings-nav-item" data-settings-pane="appearance">
-            <span class="settings-nav-glyph">🎨</span> Appearance
+            <span class="settings-nav-glyph">A</span> Appearance
           </button>
           <button class="settings-nav-item" data-settings-pane="chats">
-            <span class="settings-nav-glyph">💬</span> Chats
+            <span class="settings-nav-glyph">C</span> Chats
           </button>
           <button class="settings-nav-item desktop-only" data-settings-pane="network">
-            <span class="settings-nav-glyph">🌐</span> Network
+            <span class="settings-nav-glyph">W</span> Network
           </button>
           <button class="settings-nav-item" data-settings-pane="storage">
-            <span class="settings-nav-glyph">💾</span> Storage
+            <span class="settings-nav-glyph">D</span> Storage
           </button>
           <button class="settings-nav-item" data-settings-pane="devices">
-            <span class="settings-nav-glyph">🖥</span> Devices
+            <span class="settings-nav-glyph">M</span> Devices
           </button>
           <button class="settings-nav-item desktop-only" data-settings-pane="shortcuts">
-            <span class="settings-nav-glyph">⌨</span> Shortcuts
+            <span class="settings-nav-glyph">K</span> Shortcuts
           </button>
           <button class="settings-nav-item desktop-only" data-settings-pane="advanced">
-            <span class="settings-nav-glyph">⚙</span> Advanced
+            <span class="settings-nav-glyph">G</span> Advanced
           </button>
           <button class="settings-nav-item" data-settings-pane="about">
-            <span class="settings-nav-glyph">ⓘ</span> About
+            <span class="settings-nav-glyph">I</span> About
           </button>
         </nav>
         <div class="settings-pane-host">
@@ -8857,7 +8857,7 @@
                  background is the chosen color; initials are derived
                  from the display-name input live. -->
             <div class="profile-avatar-row">
-              <div class="profile-avatar-preview" id="profile-avatar-preview" aria-hidden="true">??</div>
+              <div class="profile-avatar-preview" id="profile-avatar-preview" aria-hidden="true">OL</div>
               <div class="profile-avatar-meta">
                 <div class="profile-avatar-label">Avatar color</div>
                 <div class="profile-color-swatches" id="profile-color-swatches">
@@ -8923,7 +8923,7 @@
               <div class="setup-mini-list" id="settings-one-setup-list"></div>
               <div class="mini-actions" style="margin-top:10px; flex-wrap:wrap;">
                 <button id="settings-one-setup-resume">Resume</button>
-                <button id="settings-one-setup-add-device">Add device</button>
+                <button id="settings-one-setup-add-device">Open device hub</button>
                 <button id="settings-one-setup-privacy">Privacy proof</button>
                 <button id="settings-one-setup-recovery">Set recovery</button>
               </div>
@@ -9519,7 +9519,7 @@
             <div class="settings-section">
               <div class="settings-section-h"><span>Quick actions</span></div>
               <div class="mini-actions wrap">
-                <button class="btn-ghost" id="settings-devices-pair" type="button">Pair a new device</button>
+                <button class="btn-ghost" id="settings-devices-pair" type="button">Open pairing hub</button>
                 <button class="btn-ghost" id="settings-devices-nearby" type="button">Show nearby devices</button>
                 <button class="btn-ghost" id="settings-devices-copy-roster" type="button">Copy device report</button>
               </div>
@@ -9529,6 +9529,45 @@
                 device drawer so the full context stays attached to that
                 peer.
               </p>
+            </div>
+            <div class="settings-section" id="pair-phone-section">
+              <div class="settings-section-h"><span>Add a phone or laptop</span></div>
+              <div id="pair-phone-body">
+                <p class="settings-help">
+                  Show this QR to your other device. It uses the same
+                  One Setup pairing flow everywhere, then asks you to
+                  confirm before the new device becomes trusted.
+                </p>
+                <div class="row" style="margin-top:10px; gap:8px;">
+                  <button class="btn-primary" id="btn-mint-pair">Create device QR</button>
+                  <button class="btn-ghost" id="btn-mint-pair-cancel" style="display:none;">Cancel</button>
+                </div>
+                <div id="pair-phone-qr-wrap" style="display:none; margin-top:14px;">
+                </div>
+                <details id="ios-trust-details" hidden style="margin-top:18px; border-top:1px solid var(--line); padding-top:14px;">
+                  <summary style="cursor:pointer; user-select:none; color:var(--text-dim);">
+                    iPhone first time? (one-time trust setup)
+                  </summary>
+                  <div style="margin-top:10px;">
+                    <p class="settings-help">
+                      iOS won't let Safari bypass a self-signed cert
+                      warning on a LAN address. To fix this once
+                      per phone, install the trust profile below.
+                      After install you can scan the regular pair QR
+                      with no warnings ever again on this phone.
+                    </p>
+                    <ol class="settings-help" style="padding-left:22px; margin-top:10px; line-height:1.7;">
+                      <li>Scan the trust-profile QR below, or copy the URL.</li>
+                      <li>When iOS asks to download a configuration profile, tap Allow.</li>
+                      <li>Open Settings - General - VPN &amp; Device Management, then install One Link Trust.</li>
+                      <li>Open Settings - General - About - Certificate Trust Settings, then trust One Link Root CA.</li>
+                      <li>Scan the pair QR above.</li>
+                    </ol>
+                    <div id="ios-trust-qr-wrap" style="margin-top:12px;">
+                    </div>
+                  </div>
+                </details>
+              </div>
             </div>
           </section>
 
@@ -9675,55 +9714,14 @@
           <!-- ── About ──────────────────────────────────────────── -->
           <section class="settings-pane" data-settings-pane="about">
             <h3>About</h3>
-            <!-- Unified add-device QR. This settings surface uses
-                 the same One Setup invite as Devices and first-run
-                 setup, so users always see one pairing model. -->
-            <div class="settings-section" id="pair-phone-section">
-              <div class="settings-section-h"><span>Add a phone or laptop</span></div>
-              <div id="pair-phone-body">
-                <p class="settings-help">
-                  Show this QR to your other device. It uses the
-                  same One Setup pairing flow as Devices, then asks
-                  you to confirm before the new device becomes trusted.
-                </p>
-                <div class="row" style="margin-top:10px; gap:8px;">
-                  <button class="btn-primary" id="btn-mint-pair">Create device QR</button>
-                  <button class="btn-ghost" id="btn-mint-pair-cancel" style="display:none;">Cancel</button>
-                </div>
-                <div id="pair-phone-qr-wrap" style="display:none; margin-top:14px;">
-                </div>
-
-                <!-- v0.20.6: iOS-first-time trust flow. iOS Safari
-                     refuses to bypass self-signed certs on LAN IPs
-                     (no "visit anyway" link). The fix is an iOS
-                     Configuration Profile that adds the daemon's
-                     cert to system-trusted roots. One-time setup
-                     per phone; takes ~30 seconds. After install +
-                     trust toggle, the regular pair QR works clean. -->
-                <details id="ios-trust-details" hidden style="margin-top:18px; border-top:1px solid var(--line); padding-top:14px;">
-                  <summary style="cursor:pointer; user-select:none; color:var(--text-dim);">
-                    iPhone first time? (one-time trust setup)
-                  </summary>
-                  <div style="margin-top:10px;">
-                    <p class="settings-help">
-                      iOS won't let Safari bypass a self-signed cert
-                      warning on a LAN address. To fix this once
-                      per phone, install the trust profile below.
-                      After install you can scan the regular pair QR
-                      with no warnings ever again on this phone.
-                    </p>
-                    <ol class="settings-help" style="padding-left:22px; margin-top:10px; line-height:1.7;">
-                      <li>Scan the trust-profile QR below (or copy the URL).</li>
-                      <li>iOS prompts <strong>"This website is trying to download a configuration profile."</strong> Tap <strong>Allow</strong>.</li>
-                      <li>iOS shows <strong>"Profile Downloaded."</strong> Tap <strong>Close</strong>.</li>
-                      <li>Open <strong>Settings → General → VPN &amp; Device Management</strong>. Tap <strong>One Link Trust</strong> → <strong>Install</strong>. Enter your passcode.</li>
-                      <li>Open <strong>Settings → General → About → Certificate Trust Settings</strong>. Toggle on for <strong>One Link Root CA</strong>. Tap <strong>Continue</strong> on the warning.</li>
-                      <li>Done. Now scan the pair QR above.</li>
-                    </ol>
-                    <div id="ios-trust-qr-wrap" style="margin-top:12px;">
-                    </div>
-                  </div>
-                </details>
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Device pairing</span></div>
+              <p class="settings-help">
+                Pairing, QR invites, nearby devices, and per-device trust
+                now live in one place: Devices.
+              </p>
+              <div class="mini-actions wrap">
+                <button class="btn-ghost" id="settings-about-open-devices" type="button">Open Devices</button>
               </div>
             </div>
             <!-- v0.20.4 - legacy "Connect another device" (URL-only
@@ -23657,7 +23655,7 @@
       list.innerHTML = "";
       for (const item of (setup.checklist || []).slice(0, 8)) {
         const row = el("div", `setup-check-item ${item.status === "done" ? "done" : ""}`);
-        row.appendChild(el("span", "status", item.status === "done" ? "✓" : "·"));
+        row.appendChild(el("span", "status", item.status === "done" ? "OK" : "-"));
         const text = el("div", null);
         text.appendChild(el("strong", null, item.label || ""));
         text.appendChild(el("div", "size", item.human || ""));
@@ -24199,11 +24197,15 @@
   });
   $("#one-setup-safety-panel")?.addEventListener("click", oneSetupReviewSafety);
   $("#settings-one-setup-resume")?.addEventListener("click", openOneSetupFromState);
-  $("#settings-one-setup-add-device")?.addEventListener("click", async () => {
-    await refreshOneSetup();
-    showOnboardingStep(4);
-    $("#onboarding-backdrop").style.display = "flex";
-    await oneSetupAddDevice();
+  function openSettingsDeviceHub() {
+    $("#btn-settings")?.click();
+    switchSettingsPane("devices");
+    setTimeout(() => {
+      $("#pair-phone-section")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }, 40);
+  }
+  $("#settings-one-setup-add-device")?.addEventListener("click", () => {
+    openSettingsDeviceHub();
   });
   $("#settings-one-setup-privacy")?.addEventListener("click", async () => {
     await api.setupAction("privacy_proof_viewed").catch(() => {});
@@ -27809,10 +27811,12 @@
     }
   });
 
-  $("#settings-devices-pair")?.addEventListener("click", async () => {
-    switchSettingsPane("setup");
-    await oneSetupAddDevice();
+  $("#settings-devices-pair")?.addEventListener("click", () => {
+    _resetPairPhoneCard();
+    $("#pair-phone-section")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    $("#btn-mint-pair")?.focus();
   });
+  $("#settings-about-open-devices")?.addEventListener("click", openSettingsDeviceHub);
 
   $("#settings-devices-nearby")?.addEventListener("click", async () => {
     settingsBackdrop?.classList.remove("show");

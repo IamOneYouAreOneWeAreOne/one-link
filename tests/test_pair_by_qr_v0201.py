@@ -97,12 +97,27 @@ def _snippet(html: str, needle: str, size: int = 2400) -> str:
 
 def test_pair_phone_section_present(index_html: str):
     """The desktop UI has a dedicated 'Pair a phone' section in
-    Settings → About — separate from the legacy 'Open desktop UI'
+    Settings -> Devices, separate from the legacy 'Open desktop UI'
     surface so the user has one obvious primary path."""
     assert 'id="pair-phone-section"' in index_html
     assert "Add a phone or laptop" in index_html
     assert 'id="btn-mint-pair"' in index_html
     assert 'id="pair-phone-qr-wrap"' in index_html
+
+
+def test_pair_phone_section_lives_in_devices_not_about(index_html: str):
+    """There must be exactly one QR-pairing surface, and it belongs
+    to Devices. About may link to Devices but must not own another
+    pairing flow."""
+    assert index_html.count('id="pair-phone-section"') == 1
+    assert index_html.count('id="btn-mint-pair"') == 1
+    devices_idx = index_html.index('<section class="settings-pane" data-settings-pane="devices"')
+    about_idx = index_html.index('<section class="settings-pane" data-settings-pane="about"')
+    pair_idx = index_html.index('id="pair-phone-section"')
+    assert devices_idx < pair_idx < about_idx
+    about_scope = index_html[about_idx:index_html.index('id="connect-info-section"', about_idx)]
+    assert 'id="settings-about-open-devices"' in about_scope
+    assert 'id="btn-mint-pair"' not in about_scope
 
 
 def test_legacy_connect_info_section_invisible(index_html: str):
@@ -143,7 +158,7 @@ def test_mint_pair_button_handler_calls_endpoint(index_html: str):
     a fresh single-use token. Don't let a refactor swap to the
     legacy /api/connect-info (which doesn't have the trust
     properties)."""
-    idx = index_html.find('"#btn-mint-pair"')
+    idx = index_html.find('$("#btn-mint-pair")?.addEventListener("click"')
     handler = index_html.find("addEventListener", idx)
     snippet = index_html[handler:handler + 4000]
     assert "api.setupDeviceInvite(" in snippet
@@ -153,7 +168,7 @@ def test_mint_pair_button_handler_calls_endpoint(index_html: str):
 def test_mint_response_renders_qr_via_pair_qr_endpoint(index_html: str):
     """The QR image src MUST point at /api/v1/peer-rtc/qr.svg with
     the lan_url passed via `u=`. Saves shipping a JS QR library."""
-    idx = index_html.find('"#btn-mint-pair"')
+    idx = index_html.find('$("#btn-mint-pair")?.addEventListener("click"')
     handler = index_html.find("addEventListener", idx)
     snippet = index_html[handler:handler + 4000]
     assert "info.qr_url" in snippet
@@ -163,7 +178,7 @@ def test_mint_response_renders_qr_via_pair_qr_endpoint(index_html: str):
 def test_mint_response_surfaces_lan_url_for_copy(index_html: str):
     """If the QR fails to render or the user can't scan, the URL
     is also shown as text + a Copy URL button."""
-    idx = index_html.find('"#btn-mint-pair"')
+    idx = index_html.find('$("#btn-mint-pair")?.addEventListener("click"')
     handler = index_html.find("addEventListener", idx)
     snippet = index_html[handler:handler + 4000]
     assert "info.peer_url" in snippet
@@ -174,7 +189,7 @@ def test_settings_pair_qr_opens_setup_confirmation(index_html: str):
     """The settings QR must not strand users after phone scan. It
     should poll One Setup and open the confirmation step when the
     other device is waiting."""
-    idx = index_html.find('"#btn-mint-pair"')
+    idx = index_html.find('$("#btn-mint-pair")?.addEventListener("click"')
     handler = index_html.find("addEventListener", idx)
     snippet = index_html[handler:handler + 6000]
     assert "Open pairing steps" in snippet
@@ -186,7 +201,7 @@ def test_settings_pair_qr_opens_setup_confirmation(index_html: str):
 def test_pair_phone_card_resets_on_settings_open(index_html: str):
     """Tokens expire in 5 min. We don't want a stale QR sitting
     around from a previous Settings open."""
-    snippet = _snippet(index_html, "function refreshSettingsAbout()", 1200)
+    snippet = _snippet(index_html, "$(\"#settings-devices-pair\")", 700)
     assert "_resetPairPhoneCard()" in snippet
     reset = _snippet(index_html, "function _resetPairPhoneCard", 1500)
     assert "_activePairToken = null" in reset

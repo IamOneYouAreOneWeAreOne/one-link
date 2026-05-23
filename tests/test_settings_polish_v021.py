@@ -27,7 +27,7 @@ def test_settings_setup_has_no_visible_mojibake() -> None:
     html = _index()
     setup_render = html[html.index("function renderOneSetup") : html.index("async function maybeShowOnboarding")]
     settings = _settings_shell(html)
-    combined = settings + setup_render
+    combined = re.sub(r"<!--.*?-->", "", settings + setup_render, flags=re.DOTALL)
     for bad in ("â", "Â", "Ã", "\ufffd", "âœ", "Â·"):
         assert bad not in combined
 

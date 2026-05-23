@@ -56,17 +56,17 @@ def test_nav_rail_present(index_html: str):
 
 
 @pytest.mark.parametrize("name,glyph", [
-    ("profile", "👤"),
-    ("privacy", "🛡"),
-    ("notifications", "🔔"),
-    ("appearance", "🎨"),
-    ("chats", "💬"),
-    ("network", "🌐"),
-    ("storage", "💾"),
-    ("devices", "🖥"),
-    ("shortcuts", "⌨"),
-    ("advanced", "⚙"),
-    ("about", "ⓘ"),
+    ("profile", "P"),
+    ("privacy", "S"),
+    ("notifications", "N"),
+    ("appearance", "A"),
+    ("chats", "C"),
+    ("network", "W"),
+    ("storage", "D"),
+    ("devices", "M"),
+    ("shortcuts", "K"),
+    ("advanced", "G"),
+    ("about", "I"),
 ])
 def test_each_section_has_nav_button(index_html: str, name: str, glyph: str):
     """Pin every section so a future refactor can't quietly remove
