@@ -916,6 +916,32 @@ def test_phone_chat_log_flexes_and_compose_sticks(peer_html: str):
     assert "font-size: 16px" in media_block
 
 
+def test_phone_auto_reconnect_on_boot(peer_html: str):
+    """2026-05-23 Wave 2: phone with a valid cert from a previous
+    pair MUST attempt auto-reconnect on boot via /relogin instead
+    of dead-ending at the welcome card. Failure cases (cert
+    expired, daemon root rotated, device revoked, network down)
+    MUST surface clearly, not silently.
+    """
+    # Detection helper checks the cert is non-pending and trusted.
+    assert "function _hasExistingPairCert(" in peer_html
+    assert "SELF_MESH_CERT_KEY" in peer_html
+    # The boot dispatcher routes through the returning-pair branch
+    # when no fresh-pair query is active but a cert exists.
+    assert "_hasReturningPair" in peer_html
+    # The relogin attempt: signs a 32-byte nonce, POSTs cert + nonce
+    # + sig to /api/setup/device-invite/relogin, runs the autopair
+    # bootstrap on success.
+    assert "async function _attemptReloginWithStoredCert(" in peer_html
+    assert "/api/setup/device-invite/relogin" in peer_html
+    assert "_signEd25519(" in peer_html
+    # Failure surfaces a clear next step rather than silently
+    # dropping the user on a blank welcome card.
+    snip = _snippet(peer_html, "async function _attemptReloginWithStoredCert(", 3500)
+    assert "Scan a fresh pair QR" in snip
+    assert "_runAutoPairFlow(" in peer_html  # called after success
+
+
 def test_show_only_helper_pinned_in_peer_html(peer_html: str):
     """2026-05-23 bugfix: strict single-pane navigation. _showOnly
     hides every top-level card then shows just one — replaces the

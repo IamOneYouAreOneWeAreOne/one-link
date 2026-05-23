@@ -194,6 +194,64 @@ def test_setup_device_invite_confirm_caches_webrtc_handoff() -> None:
     assert "**pair_handoff" in confirm
 
 
+def test_setup_device_invite_relogin_endpoint_pinned() -> None:
+    """2026-05-23: phone auto-reconnect after daemon restart.
+
+    Phone has long-lived device cert in localStorage. After a tab
+    reload / daemon restart, the WebRTC session is dead and the
+    original pair_token is gone. Without /relogin the only way
+    back is a fresh QR-scan pair — clunky enough that the user
+    experiences daemon restarts as 'the phone broke'.
+
+    Endpoint MUST:
+      * be public (cert + sig-on-nonce is the auth, not a UI bearer
+        token);
+      * accept POST with {cert_b64, nonce_b64, sig_b64};
+      * validate the cert chain against this daemon's root via
+        verify_device_cert;
+      * verify the sig over the nonce with the cert's device_pub
+        (proves the phone holds the private key);
+      * confirm the device is in the trusted roster (not revoked);
+      * return the same handoff shape /status confirmed returns so
+        the phone's existing autopair bootstrap accepts it unchanged;
+      * be IP-rate-limited.
+    """
+    src = _server_src()
+    # Route registration: must be public (no _guarded wrapper).
+    line_idx = src.find(
+        'r.add_post("/api/setup/device-invite/relogin",'
+    )
+    assert line_idx > 0
+    line_end = src.find("\n", line_idx)
+    route_line = src[line_idx:line_end]
+    assert "self._guarded(" not in route_line, (
+        "relogin must be PUBLIC — auth is the cert, not a UI token"
+    )
+
+    # Handler exists + implements the contract.
+    handler_idx = src.find("async def api_setup_device_invite_relogin(")
+    assert handler_idx > 0
+    handler = src[handler_idx:handler_idx + 8000]
+    # Validates inputs.
+    assert "cert_b64" in handler
+    assert "nonce_b64" in handler
+    assert "sig_b64" in handler
+    # Rate-limits (per IP, same bucket pattern as /claim + /status).
+    assert "_rate_limited(" in handler
+    assert "device_invite_relogin" in handler
+    # Calls verify_device_cert against this daemon's root.
+    assert "verify_device_cert" in handler
+    assert "list_self_mesh_roots" in handler
+    # Verifies sig on the nonce.
+    assert "Ed25519PublicKey" in handler
+    assert "InvalidSignature" in handler
+    # Checks device is in the trusted roster + not revoked.
+    assert "list_self_mesh_devices" in handler
+    assert "revoked" in handler
+    # Returns the same handoff bundle /status confirmed returns.
+    assert "_setup_device_invite_pair_handoff()" in handler
+
+
 def test_setup_device_invite_ttl_is_30_minutes() -> None:
     """2026-05-23 user feedback: 5 min invite expired during the iOS
     profile install walk. 30 min keeps the window security-bounded

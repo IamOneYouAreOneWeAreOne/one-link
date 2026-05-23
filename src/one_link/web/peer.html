@@ -4718,12 +4718,42 @@
   const _pairQuery = _detectPairQuery();
   const _selfMeshQuery = _detectSelfMeshInviteQuery();
   const _setupDeviceInviteQuery = _detectSetupDeviceInviteQuery();
+
+  // 2026-05-23: detect if this phone has a valid pair cert from a
+  // prior session. If yes (and no pair query is active), try to
+  // auto-reconnect via /api/setup/device-invite/relogin so a tab
+  // reload after a daemon restart doesn't dead-end at the welcome
+  // card. The cert proves identity; sig-on-nonce proves we hold
+  // the private key; daemon returns a fresh pair_token + handoff;
+  // _runAutoPairFlow takes it from there.
+  function _hasExistingPairCert() {
+    try {
+      const raw = localStorage.getItem(SELF_MESH_CERT_KEY);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw);
+      return !!(parsed && parsed.cert_b64 && parsed.trusted !== false
+                && !parsed.pending);
+    } catch { return false; }
+  }
+  const _hasReturningPair = !_pairQuery && !_selfMeshQuery
+    && !_setupDeviceInviteQuery && _hasExistingPairCert();
+
   if (_pairQuery) {
     _showOnly("#autopair-card");
     _autopairSetState("dim", "starting", "Setting up your phone's identity…");
   } else if (_selfMeshQuery || _setupDeviceInviteQuery) {
     _showOnly("#selfmesh-enroll-card");
     _selfMeshEnrollSetState("dim", "starting", "Loading this device...");
+  } else if (_hasReturningPair) {
+    // Show autopair-card with a 'reconnecting' state. If the
+    // relogin succeeds the same card transitions through the
+    // existing autopair states (negotiating → connected). If it
+    // fails we fall back to the welcome card with an explanation.
+    _showOnly("#autopair-card");
+    _autopairSetState(
+      "dim", "reconnecting",
+      "Restoring your live link to the laptop…",
+    );
   } else {
     // v0.20.3 — default landing. No pair query → show the welcome
     // card explaining how to scan a QR. Identity provisioning still
@@ -4731,6 +4761,80 @@
     // hidden behind data-tier="advanced".
     _showOnly("#welcome-card");
   }
+
+  // 2026-05-23: attempt cert-authed reconnect when the phone has
+  // a valid cert from a previous pair. Async — boot fires it in
+  // parallel with identity load and only runs if no fresh-pair
+  // query is active.
+  async function _attemptReloginWithStoredCert() {
+    let cert;
+    try {
+      cert = JSON.parse(localStorage.getItem(SELF_MESH_CERT_KEY) || "null");
+    } catch { return null; }
+    if (!cert || !cert.cert_b64) return null;
+    // Need an identity to sign the nonce.
+    const rec = await _waitForIdentity(8000);
+    if (!rec || !rec.private_key_jwk) {
+      _autopairSetState(
+        "bad", "no identity",
+        "Saved pair cert found but can't load this phone's key. " +
+        "Sign out and re-pair to start fresh.",
+      );
+      return null;
+    }
+    // Fresh 32-byte nonce — phone-side replay protection.
+    const nonce = new Uint8Array(32);
+    crypto.getRandomValues(nonce);
+    let sig;
+    try {
+      sig = await _signEd25519(rec.private_key_jwk, nonce);
+    } catch (e) {
+      _autopairSetState(
+        "bad", "sign failed",
+        `Couldn't sign reconnect challenge: ${e && e.message ? e.message : e}`,
+      );
+      return null;
+    }
+    let resp, payload;
+    try {
+      resp = await fetch("/api/setup/device-invite/relogin", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          cert_b64: cert.cert_b64,
+          nonce_b64: bytesToB64Url(nonce),
+          sig_b64: bytesToB64Url(sig),
+        }),
+      });
+      payload = await resp.json().catch(() => ({}));
+    } catch (e) {
+      _autopairSetState(
+        "bad", "offline",
+        `Couldn't reach the laptop: ${e && e.message ? e.message : e}. ` +
+        "Check Wi-Fi and reload.",
+      );
+      return null;
+    }
+    if (!resp.ok || !payload.ok) {
+      const hint = payload.hint || payload.error || `HTTP ${resp.status}`;
+      // Common case: the daemon restarted with a fresh root, or the
+      // device was revoked. Push the user to the welcome card with
+      // a clear message.
+      _showOnly("#welcome-card");
+      const status = $("#selfmesh-enroll-status");
+      if (status) {
+        status.textContent =
+          `Couldn't restore the previous pair: ${hint}. Scan a fresh pair QR.`;
+      }
+      return null;
+    }
+    return {
+      pair_token: payload.pair_token,
+      daemon_fingerprint: payload.daemon_fingerprint,
+      ws_url: payload.ws_signaling_url,
+    };
+  }
+
   boot().then(() => {
     if (_pairQuery) {
       _runAutoPairFlow(_pairQuery).catch((e) => {
@@ -4755,6 +4859,18 @@
           "bad", "failed",
           `Invite flow crashed: ${e && e.message ? e.message : e}`,
         );
+      });
+    } else if (_hasReturningPair) {
+      _attemptReloginWithStoredCert().then((handoff) => {
+        if (handoff) {
+          _runAutoPairFlow(handoff).catch((e) => {
+            console.error("autopair after relogin failed", e);
+            _autopairSetState(
+              "bad", "failed",
+              `Reconnect crashed: ${e && e.message ? e.message : e}`,
+            );
+          });
+        }
       });
     }
   });

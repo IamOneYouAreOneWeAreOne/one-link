@@ -1721,6 +1721,12 @@ class UIServer:
         # expired, so the phone learns the operator's decision
         # without needing a WebSocket back to this daemon.
         r.add_get("/api/setup/device-invite/status", self.api_setup_device_invite_status)
+        # 2026-05-23: /relogin is the phone's cert-authenticated
+        # reconnect path. Public (auth is the cert itself + a
+        # signed nonce). Lets a phone with a valid cert restore
+        # a live WebRTC session after a daemon restart / tab
+        # close without scanning a fresh pair QR.
+        r.add_post("/api/setup/device-invite/relogin", self.api_setup_device_invite_relogin)
         r.add_post("/api/setup/device-invite/confirm", self._guarded(self.api_setup_device_invite_confirm))
         r.add_post("/api/setup/device-invite/reject", self._guarded(self.api_setup_device_invite_reject))
         r.add_get("/api/setup/device-invite/qr.svg", self._guarded(self.api_setup_device_invite_qr))
@@ -7099,6 +7105,156 @@ class UIServer:
         # Invite exists but no claim yet — phone shouldn't normally
         # poll in this state but answer gracefully.
         return web.json_response({"status": "awaiting_claim"})
+
+    async def api_setup_device_invite_relogin(self, request: web.Request) -> web.Response:
+        """2026-05-23: cert-authenticated reconnect.
+
+        A phone that paired previously holds a long-lived device
+        cert (signed by this daemon's root) in localStorage. After
+        a daemon restart / tab close, that cert is still valid but
+        the WebRTC session is dead and the original pair_token has
+        expired. Without this endpoint the only way back is a fresh
+        QR-scan pair — clunky enough to feel broken.
+
+        Wire (public, IP-rate-limited):
+          POST /api/setup/device-invite/relogin
+          body: {cert_b64, nonce_b64, sig_b64}
+            cert_b64  — the device cert the phone has in
+                        localStorage SELF_MESH_CERT_KEY
+            nonce_b64 — fresh random nonce the phone generates
+            sig_b64   — Ed25519 sig over the nonce bytes, signed
+                        with the phone's OPFS private key (the
+                        public half is in the cert)
+
+          response:
+            200 {ok: True, pair_token, daemon_fingerprint,
+                 daemon_pubkey_b64u, ws_signaling_url,
+                 device_pub_b64, device_kind, label}
+              → phone runs _runAutoPairFlow with these fields
+                and the live link is restored.
+            400 {error: ..., hint: ...}
+              → bad cert / bad sig / device not in roster.
+              Phone falls back to welcome card + 'scan a fresh QR'.
+
+        Security model:
+          * Cert chain validation proves the cert was signed by
+            this daemon's root (private to this daemon).
+          * Sig-on-nonce proves the phone holds the cert's
+            matching private key — prevents replay if a cert was
+            ever exfiltrated.
+          * Per-IP rate limit prevents brute-force on the
+            nonce-sig path.
+          * Cert expiry is honored by verify_device_cert.
+        """
+        from one_link.identity_dag import verify_device_cert
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PublicKey,
+        )
+        from cryptography.exceptions import InvalidSignature
+        from one_link.self_mesh_enrollment import b64u, b64u_decode
+
+        if self._rate_limited(
+            "device_invite_relogin",
+            self._client_rate_key(request),
+            limit=MAX_FAILED_AUTH_ATTEMPTS,
+        ):
+            return web.json_response(
+                {"error": "too many relogin attempts"},
+                status=429,
+            )
+
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+
+        try:
+            body = await request.json()
+        except Exception as e:
+            return web.json_response(
+                {"error": "bad_body", "hint": f"json parse: {e}"},
+                status=400,
+            )
+
+        try:
+            cert_b64 = str(body.get("cert_b64") or "")
+            nonce_b64 = str(body.get("nonce_b64") or "")
+            sig_b64 = str(body.get("sig_b64") or "")
+            if not cert_b64 or not nonce_b64 or not sig_b64:
+                raise ValueError(
+                    "cert_b64, nonce_b64, sig_b64 all required"
+                )
+            cert_bytes = b64u_decode(cert_b64)
+            nonce_bytes = b64u_decode(nonce_b64)
+            sig_bytes = b64u_decode(sig_b64)
+            if len(nonce_bytes) < 16:
+                raise ValueError("nonce must be >= 16 bytes")
+            # Find this daemon's root pub. If there are multiple roots
+            # (shouldn't be — but be defensive), try each.
+            roots = state.list_self_mesh_roots()
+            if not roots:
+                raise ValueError("no self-mesh root on this daemon")
+            root_pubs = [bytes(r["root_pub"]) for r in roots if r.get("root_pub")]
+            parsed = None
+            last_err = None
+            for rp in root_pubs:
+                try:
+                    parsed = verify_device_cert(cert_bytes, expected_root_pub=rp)
+                    break
+                except ValueError as e:
+                    last_err = e
+                    continue
+            if parsed is None:
+                raise ValueError(
+                    f"cert doesn't match any root on this daemon: "
+                    f"{last_err}"
+                )
+            # The cert is valid against one of our roots. Now verify
+            # the phone actually holds the private key by checking
+            # the sig on the nonce.
+            try:
+                Ed25519PublicKey.from_public_bytes(parsed.device_pub).verify(
+                    sig_bytes, nonce_bytes,
+                )
+            except InvalidSignature:
+                raise ValueError("nonce signature invalid")
+            # Defensively: device should be in the trusted roster.
+            # If not, refuse — pair never completed or was revoked.
+            devices = state.list_self_mesh_devices(
+                root_pub=parsed.root_pub,
+            )
+            device_row = next(
+                (
+                    d for d in devices
+                    if bytes(d.get("device_pub", b"")) == parsed.device_pub
+                ),
+                None,
+            )
+            if device_row is None:
+                raise ValueError(
+                    "device not in trusted roster (revoked or never finished pair)"
+                )
+            if device_row.get("revoked"):
+                raise ValueError("device revoked")
+            # Mint a fresh WebRTC handoff. Same shape as /status
+            # confirmed returns, so the phone's existing autopair
+            # bootstrap accepts it unchanged.
+            handoff = self._setup_device_invite_pair_handoff()
+            return web.json_response({
+                "ok": True,
+                "device_pub_b64": b64u(parsed.device_pub),
+                "device_kind": str(device_row.get("device_kind") or ""),
+                "label": str(device_row.get("label") or ""),
+                "root_pub_b64": b64u(parsed.root_pub),
+                **handoff,
+            })
+        except Exception as exc:
+            return web.json_response(
+                {
+                    "error": "device_invite_relogin_rejected",
+                    "hint": str(exc),
+                },
+                status=400,
+            )
 
     async def api_setup_device_invite_confirm(self, request: web.Request) -> web.Response:
         from one_link.self_mesh_enrollment import b64u, mint_device_cert
