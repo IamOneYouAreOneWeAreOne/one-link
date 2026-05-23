@@ -354,11 +354,23 @@ def cert_fingerprint_sha256(cert_path_to_read: Path) -> Optional[str]:
 
 
 def _format_pem_for_plist(pem_bytes: bytes) -> bytes:
-    """The plist `<data>` field for a CertificatePEM payload wants
-    the raw PEM (with -----BEGIN CERTIFICATE----- markers + base64
-    body). plistlib base64-encodes the bytes for us; we just need
-    to pass clean PEM."""
-    return pem_bytes.strip()
+    """2026-05-23: iOS ``com.apple.security.root`` payload requires
+    DER-encoded cert bytes in ``PayloadContent`` (plistlib then
+    base64-wraps them inside ``<data>``). PEM with
+    ``-----BEGIN CERTIFICATE-----`` markers parses fine for the
+    profile install but does NOT register the cert as a root CA
+    candidate — the result is a profile that shows
+    ``Signed by: Not Signed`` in red and an EMPTY Certificate
+    Trust Settings page, blocking the trust toggle that makes
+    HTTPS actually work.
+
+    Convert PEM → DER via the cryptography library so the cert
+    lands as a proper root CA the user can toggle on.
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives.serialization import Encoding
+    cert = x509.load_pem_x509_certificate(pem_bytes.strip())
+    return cert.public_bytes(Encoding.DER)
 
 
 def build_mobileconfig(

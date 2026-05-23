@@ -56,9 +56,20 @@ def test_mobileconfig_outer_payload_is_configuration(tmp_path: Path):
 
 def test_mobileconfig_inner_payload_is_root_cert(tmp_path: Path):
     """The single inner payload MUST be a root-cert payload —
-    PayloadType 'com.apple.security.root' — carrying the PEM bytes
-    of the daemon's self-signed cert."""
+    PayloadType 'com.apple.security.root' — carrying the DER bytes
+    of the daemon's self-signed cert.
+
+    2026-05-23: iOS's ``com.apple.security.root`` payload type
+    REQUIRES DER-encoded bytes in PayloadContent. PEM with
+    ``-----BEGIN CERTIFICATE-----`` markers parses for the install
+    flow but does NOT register the cert as a trustable root —
+    the resulting profile shows "Signed by: Not Signed" in red
+    and an EMPTY Certificate Trust Settings page. DER bytes
+    register the cert correctly so the Certificate Trust toggle
+    appears for the user.
+    """
     from one_link.peer_https import build_mobileconfig
+    from cryptography import x509
     parsed = plistlib.loads(build_mobileconfig(tmp_path))
     inner = parsed["PayloadContent"]
     assert isinstance(inner, list)
@@ -66,11 +77,20 @@ def test_mobileconfig_inner_payload_is_root_cert(tmp_path: Path):
     cp = inner[0]
     assert cp["PayloadType"] == "com.apple.security.root"
     assert cp["PayloadVersion"] == 1
-    # PayloadContent is the cert PEM as bytes (plist <data>).
+    # PayloadContent is DER bytes (plistlib base64-wraps in <data>).
     cert_bytes = cp["PayloadContent"]
     assert isinstance(cert_bytes, bytes)
-    assert b"-----BEGIN CERTIFICATE-----" in cert_bytes
-    assert b"-----END CERTIFICATE-----" in cert_bytes
+    # DER starts with the SEQUENCE tag (0x30) — not the PEM
+    # "-----BEGIN" header. The cryptography library round-trips
+    # DER cleanly; if iOS can parse it, so can this.
+    assert cert_bytes[0:1] == b"\x30", (
+        "PayloadContent must be DER-encoded; current first byte "
+        f"is {cert_bytes[0:1]!r} (DER SEQUENCE is 0x30). PEM "
+        "in this slot triggers the iOS 'Not Signed' regression."
+    )
+    cert = x509.load_der_x509_certificate(cert_bytes)
+    assert cert.subject is not None
+    assert cert.public_key() is not None
 
 
 def test_mobileconfig_user_facing_strings_present(tmp_path: Path):
@@ -110,17 +130,38 @@ def test_mobileconfig_mints_cert_on_demand(tmp_path: Path):
 
 
 def test_mobileconfig_carries_actual_cert_bytes(tmp_path: Path):
-    """The PEM bytes embedded in the profile MUST equal the on-
-    disk cert byte-for-byte. A drift here means the phone trusts
-    a different cert than the one the daemon serves — TLS fails."""
+    """The cert embedded in the profile MUST be the same cert the
+    daemon serves over HTTPS. A drift here means the phone trusts
+    a different cert than the one the daemon serves — TLS fails.
+
+    2026-05-23: profile carries DER (see test above), on-disk is
+    PEM. Convert one to compare structurally — match on the
+    cert's public-key fingerprint, which is the load-bearing
+    identity for TLS pinning.
+    """
     from one_link.peer_https import (
         build_mobileconfig, cert_path, ensure_cert,
     )
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
     ensure_cert(tmp_path)
-    on_disk = cert_path(tmp_path).read_bytes().strip()
+    on_disk_pem = cert_path(tmp_path).read_bytes()
+    on_disk_cert = x509.load_pem_x509_certificate(on_disk_pem)
     parsed = plistlib.loads(build_mobileconfig(tmp_path))
-    embedded = parsed["PayloadContent"][0]["PayloadContent"]
-    assert embedded.strip() == on_disk
+    embedded_der = parsed["PayloadContent"][0]["PayloadContent"]
+    embedded_cert = x509.load_der_x509_certificate(embedded_der)
+    # Same public key = same identity = same TLS pin.
+    on_disk_pub = on_disk_cert.public_key().public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    embedded_pub = embedded_cert.public_key().public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    assert on_disk_pub == embedded_pub
+    # And same serial — catches a mint-then-rotate race.
+    assert on_disk_cert.serial_number == embedded_cert.serial_number
 
 
 # ───────── server endpoint + mint-pairing response ────────────────
