@@ -330,18 +330,39 @@ _CONNECT_LANDING_HTML_IOS = """<!doctype html>
   </div>
 
   <div class="step">
-    <h2><span class="step-num">1</span><span>Install trust (one tap)</span></h2>
-    <p>iOS needs to trust this computer's certificate before it can pair securely. This is a one-time install per network.</p>
+    <h2><span class="step-num">1</span><span>Download trust profile</span></h2>
+    <p>iOS needs this computer's certificate to pair securely. One-time install per network.</p>
     <a class="btn" href="{mobileconfig_url}">Download trust profile</a>
-    <p class="hint">After tapping: iOS shows "Profile Downloaded." Open
-    <strong>Settings</strong> at the top → tap the new profile → <strong>Install</strong> in the corner → enter your phone passcode. Come back here when done.</p>
+    <p class="hint">Safari pops up <strong>"This website is trying to download a configuration profile"</strong> → tap <strong>Allow</strong>, then tap <strong>Close</strong>.</p>
   </div>
 
   <div class="step">
-    <h2><span class="step-num">2</span><span>Pair this device</span></h2>
-    <p>Once trust is installed, tap below. Your computer will pop up a 5-word confirmation — tap "match" on both ends.</p>
+    <h2><span class="step-num">2</span><span>Install the profile in Settings</span></h2>
+    <p class="hint">Open the iOS <strong>Settings app</strong> and navigate:</p>
+    <ol class="hint" style="padding-left:22px; margin-top:6px; line-height:1.7;">
+      <li>Tap <strong>General</strong></li>
+      <li>Tap <strong>VPN &amp; Device Management</strong></li>
+      <li>Under "Downloaded Profile" tap <strong>One Link Trust</strong></li>
+      <li>Tap <strong>Install</strong> top-right → enter passcode → <strong>Install</strong> → <strong>Done</strong></li>
+    </ol>
+  </div>
+
+  <div class="step">
+    <h2><span class="step-num">3</span><span>Trust the certificate</span></h2>
+    <p class="hint">Installing the profile isn't enough — iOS won't trust it for HTTPS until you flip one more switch. Still in <strong>Settings app</strong>:</p>
+    <ol class="hint" style="padding-left:22px; margin-top:6px; line-height:1.7;">
+      <li>Tap <strong>General</strong></li>
+      <li>Tap <strong>About</strong></li>
+      <li>Scroll down, tap <strong>Certificate Trust Settings</strong></li>
+      <li>Flip the toggle ON for <strong>One Link Self-Signed CA</strong> → tap <strong>Continue</strong> on the warning</li>
+    </ol>
+  </div>
+
+  <div class="step">
+    <h2><span class="step-num">4</span><span>Pair this device</span></h2>
+    <p>Now you're set. Tap below — your computer pops up a 5-word confirmation. Tap "match" on both ends.</p>
     <a class="btn btn-secondary" href="{pair_url}">Continue to pair</a>
-    <p class="hint">If you see "Not Private" or "Connection failed" here, the trust profile wasn't installed in step 1. Tap Download again.</p>
+    <p class="hint">If you still see "Not Private" or "Connection failed," double-check step 3 — the Certificate Trust toggle for "One Link Self-Signed CA" is the most-commonly-missed step.</p>
   </div>
 </body>
 </html>
