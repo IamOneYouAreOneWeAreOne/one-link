@@ -170,6 +170,18 @@
   [data-tier="advanced"] { display: none; }
   html.show-advanced [data-tier="advanced"] { display: revert; }
 
+  /* 2026-05-23 BUG FIX: the HTML `hidden` attribute defaults to
+     `display: none` via the UA stylesheet, but that rule has the
+     LOWEST specificity. Any explicit display rule (e.g. the
+     #daemon-chat-card { display: flex } we added in Phase 4 for
+     mobile) wins, leaving the card visible even after JS sets
+     hidden=true. Symptom: Settings + Chat both rendering at
+     once after `_showOnly("#phone-settings-card")` ran.
+     `[hidden] { display: none !important }` re-asserts the
+     hide-when-hidden contract with the highest specificity so
+     nothing can override it accidentally. */
+  [hidden] { display: none !important; }
+
   /* 2026-05-23 phase 4: phone-first responsive pass.
      Below 700px (every phone, including landscape) the layout
      tightens: full-bleed cards, smaller header, sticky compose
