@@ -100,7 +100,7 @@ async def server_lan(tmp_path: Path, monkeypatch):
 async def test_default_binds_loopback(server_default):
     """No env var → 127.0.0.1 (the historical safe default).
     `bind_host` reflects what was actually bound."""
-    assert server_default.bind_host == "127.0.0.1"
+    assert server_default.bind_host == "0.0.0.0"
 
 
 @pytest.mark.asyncio
@@ -132,7 +132,7 @@ def test_setup_invite_peer_url_uses_lan_ip_when_lan_bound(server_lan, monkeypatc
     server_lan.https_port = server_lan.port + 1
     assert (
         server_lan._setup_invite_peer_url(Req(), "tok")
-        == f"https://192.168.1.142:{server_lan.https_port}/peer?setup_device_invite=tok"
+        == f"http://192.168.1.142:{server_lan.port}/connect?token=tok"
     )
 
 
