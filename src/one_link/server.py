@@ -2136,6 +2136,20 @@ class UIServer:
         if not peer.is_file():
             return web.Response(status=404, text="peer shell not bundled")
         body = peer.read_text(encoding="utf-8")
+        # 2026-05-23: build a content-hash ETag so cache busting is
+        # structural, not just policy. no-store alone wasn't enough
+        # on iOS Safari — back-button / saved-tab navigations
+        # restored a stale bundle anyway. With a hash-based ETag +
+        # must-revalidate, even those paths force a conditional GET
+        # that returns 304 for unchanged content and 200 + fresh
+        # body when the file changed (every code ship).
+        import hashlib
+        etag = '"' + hashlib.sha256(body.encode("utf-8")).hexdigest()[:16] + '"'
+        if request.headers.get("If-None-Match") == etag:
+            resp = web.Response(status=304)
+            resp.headers["ETag"] = etag
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return resp
         resp = web.Response(text=body, content_type="text/html", charset="utf-8")
         # Tight CSP for the peer shell. We allow only same-origin
         # scripts (the browser-peer logic is bundled inline below; no
@@ -2150,14 +2164,12 @@ class UIServer:
             "connect-src 'self' wss: https:; "
             "frame-ancestors 'none'"
         )
-        # 2026-05-23: previously max-age=3600 — but during active
-        # pair-flow iteration this means Safari serves a stale
-        # peer.html for an hour after the daemon ships a fix.
-        # User-visible symptom: 'Claim this device' button stuck
-        # on the trusted-pair screen even though the latest bundle
-        # hides it. no-store costs 140KB per visit which is fine
-        # for a UI that loads once-per-pair-attempt.
-        resp.headers["Cache-Control"] = "no-store"
+        # no-cache forces revalidation; must-revalidate refuses to
+        # serve stale from disk on any path. Combined with the
+        # content-hash ETag, every code change ships to every browser
+        # on the next load, no Clear-Website-Data dance.
+        resp.headers["ETag"] = etag
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
         return resp
 
     async def _dr_module(self, request: web.Request) -> web.StreamResponse:
@@ -6896,7 +6908,14 @@ class UIServer:
                 raise ValueError("root seed unavailable for setup invite")
             token = secrets.token_urlsafe(32)
             now = int(time.time() * 1000)
-            expires_ms = now + 5 * 60 * 1000
+            # 2026-05-23: 30 min not 5. User feedback: invite
+            # expired during the iOS profile install walk (download
+            # profile + Settings → install + passcode + Trust
+            # Settings toggle is realistic ~3-10 min, longer if
+            # the user is interrupted). 30 min keeps the window
+            # secure but eliminates the "expired before I could
+            # finish" dead-end.
+            expires_ms = now + 30 * 60 * 1000
             label = str(body.get("label") or "Add device")[:120]
             self._sweep_setup_device_invites()
             self._setup_device_invites[token] = {

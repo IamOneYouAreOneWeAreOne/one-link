@@ -194,6 +194,45 @@ def test_setup_device_invite_confirm_caches_webrtc_handoff() -> None:
     assert "**pair_handoff" in confirm
 
 
+def test_setup_device_invite_ttl_is_30_minutes() -> None:
+    """2026-05-23 user feedback: 5 min invite expired during the iOS
+    profile install walk. 30 min keeps the window security-bounded
+    while letting the realistic install flow finish (download
+    profile + Settings install + passcode + Trust Settings toggle
+    is 3-10 min, longer if the user is interrupted).
+    """
+    src = _server_src()
+    idx = src.find("async def api_setup_device_invite(")
+    assert idx > 0
+    snippet = src[idx:idx + 5000]
+    assert "expires_ms = now + 30 * 60 * 1000" in snippet, (
+        "invite TTL must be 30 min — 5 min expired before users "
+        "could finish the iOS profile install walk"
+    )
+
+
+def test_peer_shell_emits_etag_for_cache_busting() -> None:
+    """2026-05-23 bugfix: stale peer.html cached on iOS Safari
+    survived no-store and showed the OLD UI (with the wrong-flow
+    'Claim this device' button) after every fix. ETag based on
+    SHA-256 of the body bytes + no-cache/must-revalidate forces a
+    conditional GET on every load — 304 for unchanged, 200 +
+    fresh body the moment we ship a code change. Bullet-proof
+    cache busting without forcing the user to Clear-Website-Data.
+    """
+    src = _server_src()
+    idx = src.find("async def _peer_shell(")
+    assert idx > 0
+    snippet = src[idx:idx + 3000]
+    assert "ETag" in snippet
+    assert "hashlib.sha256" in snippet
+    assert "If-None-Match" in snippet
+    assert "no-cache" in snippet
+    assert "must-revalidate" in snippet
+    # And a 304 path must exist so unchanged content is cheap.
+    assert "status=304" in snippet
+
+
 def test_phone_facing_daemon_fingerprint_uses_wire_format() -> None:
     """2026-05-23: every place the daemon ships its identity
     fingerprint to peer.html MUST use ``me.wire_fingerprint``

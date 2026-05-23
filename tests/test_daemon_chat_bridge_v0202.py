@@ -916,6 +916,55 @@ def test_phone_chat_log_flexes_and_compose_sticks(peer_html: str):
     assert "font-size: 16px" in media_block
 
 
+def test_show_only_helper_pinned_in_peer_html(peer_html: str):
+    """2026-05-23 bugfix: strict single-pane navigation. _showOnly
+    hides every top-level card then shows just one — replaces the
+    ad-hoc show()/hide() pairs that allowed the 'JOIN MY DEVICES +
+    YOUR CHATS + CHAT all visible' multi-card stack the user hit.
+
+    The helper MUST exist, MUST iterate over _PHONE_TOP_LEVEL_CARDS,
+    and MUST be called by every flow that surfaces a top-level card."""
+    assert "function _showOnly(" in peer_html
+    assert "const _PHONE_TOP_LEVEL_CARDS" in peer_html
+    # Cards that the user hits during the pair-and-chat flow MUST
+    # all be in the list so _showOnly knows about them.
+    for cid in (
+        '"#welcome-card"',
+        '"#autopair-card"',
+        '"#selfmesh-enroll-card"',
+        '"#daemon-roster-card"',
+        '"#daemon-chat-card"',
+        '"#phone-settings-card"',
+    ):
+        assert cid in peer_html, f"{cid} missing from _PHONE_TOP_LEVEL_CARDS"
+    # And every flow that lands a user on one of those cards MUST
+    # go through _showOnly.
+    for call in (
+        '_showOnly("#welcome-card")',
+        '_showOnly("#autopair-card")',
+        '_showOnly("#selfmesh-enroll-card")',
+        '_showOnly("#daemon-roster-card")',
+        '_showOnly("#daemon-chat-card")',
+        '_showOnly("#phone-settings-card")',
+    ):
+        assert call in peer_html, (
+            f"{call} missing — that flow's card-show path bypasses "
+            f"single-pane navigation and will stack on top of prior cards"
+        )
+
+
+def test_open_daemon_chat_rejects_peer_without_fingerprint(peer_html: str):
+    """Defensive: _openDaemonChat MUST early-return on a stub peer
+    object missing the fingerprint field. Past bug: roster row
+    passed an empty stub, chat opened with title 'CHAT' (the h2
+    default) and an empty log because fetchDaemonMessages('') is a
+    no-op. This guard makes the failure observable instead of
+    silent."""
+    snippet = _snippet(peer_html, "async function _openDaemonChat", 900)
+    assert "if (!peer || !peer.fingerprint)" in snippet
+    assert "console.warn" in snippet
+
+
 def test_phone_touch_targets_meet_min_size(peer_html: str):
     """iOS HIG floor is 44pt; we bump to 48 for primary actions.
     Pinned so a future CSS refactor doesn't accidentally drop
@@ -1028,19 +1077,20 @@ def test_refresh_roster_renders_rows(peer_html: str):
 
 def test_open_daemon_chat_loads_messages(peer_html: str):
     """Tapping a peer row fetches messages + renders bubbles in the
-    chat log. Hides the roster, shows the chat card."""
+    chat log. Uses _showOnly so the chat card is the only top-level
+    card visible (previous show/hide pair allowed multi-card stacks)."""
     snippet = _snippet(peer_html, "async function _openDaemonChat", 3000)
     assert "fetchDaemonMessages(peer.fingerprint" in snippet
     assert "_renderDaemonMessageBubble(log, m)" in snippet
-    assert 'show($("#daemon-chat-card"))' in snippet
-    assert 'hide($("#daemon-roster-card"))' in snippet
+    assert '_showOnly("#daemon-chat-card")' in snippet
 
 
 def test_chat_back_button_returns_to_roster(peer_html: str):
-    """Back button hides chat card + shows roster + clears active peer."""
+    """Back button uses _showOnly to surface the roster + clears
+    the active-peer reference."""
     snippet = _snippet(peer_html, '"#btn-daemon-chat-back"', 800)
-    assert 'hide($("#daemon-chat-card"))' in snippet
-    assert 'show($("#daemon-roster-card"))' in snippet
+    assert '_showOnly("#daemon-roster-card")' in snippet
+    assert "daemon_active_peer = null" in snippet
     assert "state.daemon_active_peer = null" in snippet
 
 

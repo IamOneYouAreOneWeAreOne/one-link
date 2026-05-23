@@ -3134,22 +3134,58 @@
 
   // Hide every manual surface so the auto-pair UX feels like
   // "scan → connected" with nothing else on screen.
+  // 2026-05-23: every top-level card on peer.html. Single source
+  // of truth for the "what panels exist" list; _showOnly + the
+  // hide-manual-cards helper both read from here so adding a new
+  // card means updating one array.
+  const _PHONE_TOP_LEVEL_CARDS = [
+    "#welcome-card",
+    "#autopair-card",
+    "#selfmesh-enroll-card",
+    "#daemon-roster-card",
+    "#daemon-chat-card",
+    "#phone-settings-card",
+    "#identity-card",
+    "#status-card",
+    "#actions-card",
+    "#unlock-card",
+    "#rdz-card",
+    "#webrtc-card",
+    "#pair-card",
+    "#peers-card",
+    "#chat-card",
+  ];
+
   function _autopairHideManualCards() {
-    for (const id of [
-      "#welcome-card",
-      "#selfmesh-enroll-card",
-      "#identity-card",
-      "#status-card",
-      "#actions-card",
-      "#unlock-card",
-      "#rdz-card",
-      "#webrtc-card",
-      "#pair-card",
-      "#peers-card",
-      "#chat-card",
-    ]) {
+    // Legacy name; matches the cards that should disappear when
+    // an automated pair / chat flow takes the screen. Now backed
+    // by the single _PHONE_TOP_LEVEL_CARDS list so it can't drift.
+    for (const id of _PHONE_TOP_LEVEL_CARDS) {
+      // Don't hide cards that the active flow JUST showed —
+      // callers that need single-pane navigation should use
+      // _showOnly instead. This legacy helper preserves the
+      // older "hide manual surfaces" semantics for the pair
+      // flow's early stages.
+      if (id === "#autopair-card") continue;
+      if (id === "#selfmesh-enroll-card") continue;
       hide($(id));
     }
+  }
+
+  // 2026-05-23: strict single-pane navigation. Hides every
+  // top-level card then shows exactly one. Use this instead of
+  // ad-hoc show()/hide() pairs to enforce "one card at a time"
+  // and prevent the multi-card stack the user hit at the
+  // 'JOIN MY DEVICES + YOUR CHATS + CHAT all visible' bug.
+  function _showOnly(cardId) {
+    if (!cardId.startsWith("#")) cardId = "#" + cardId;
+    for (const id of _PHONE_TOP_LEVEL_CARDS) {
+      if (id === cardId) continue;
+      const el = $(id);
+      if (el) el.hidden = true;
+    }
+    const target = $(cardId);
+    if (target) target.hidden = false;
   }
 
   const SELF_MESH_CERT_KEY = "ol_peer.self_mesh_cert.v1";
@@ -3275,8 +3311,7 @@
   }
 
   async function _runSetupDeviceInviteFlow(query) {
-    _autopairHideManualCards();
-    show($("#selfmesh-enroll-card"));
+    _showOnly("#selfmesh-enroll-card");
     // 2026-05-23: actions row hosts the "Claim this device" button
     // for the OLDER self_mesh_invite flow. This setup_device_invite
     // flow never asks the user to click anything — claim is
@@ -3422,8 +3457,9 @@
         // but no live link and dead-ends at 'trusted' with
         // nowhere to go.
         if (payload.pair_token && payload.daemon_fingerprint && payload.ws_signaling_url) {
-          // Hide the enroll card so autopair-card takes the screen.
-          hide($("#selfmesh-enroll-card"));
+          // Single-pane: _runAutoPairFlow shows autopair-card.
+          // _showOnly enforces no overlap with enroll-card.
+          _showOnly("#autopair-card");
           await _runAutoPairFlow({
             pair_token: payload.pair_token,
             daemon_fingerprint: payload.daemon_fingerprint,
@@ -3524,8 +3560,7 @@
   }
 
   async function _runAutoPairFlow(pair) {
-    _autopairHideManualCards();
-    show($("#autopair-card"));
+    _showOnly("#autopair-card");
     show($("#autopair-actions"));
     _autopairSetState("dim", "starting", "Setting up your phone's identity…");
     _autopairShowHost(pair.daemon_fingerprint);
@@ -3889,11 +3924,12 @@
   }
 
   async function _refreshDaemonRoster() {
-    const card = $("#daemon-roster-card");
     const list = $("#daemon-peers-list");
     const status = $("#daemon-roster-status");
-    if (!card || !list) return;
-    show(card);
+    if (!list) return;
+    // Single-pane: roster takes the screen. Hides any prior
+    // autopair / enroll / chat / settings card.
+    _showOnly("#daemon-roster-card");
     text(status, "Fetching your chats from the laptop…");
     list.innerHTML = "";
     let peers;
@@ -3959,13 +3995,24 @@
   }
 
   async function _openDaemonChat(peer) {
+    // Defensive: never open the chat card without a real peer
+    // record. Past bug: roster row passed an empty stub, chat
+    // opened with title 'CHAT' and an empty log because
+    // fetchDaemonMessages("") returns nothing.
+    if (!peer || !peer.fingerprint) {
+      console.warn("_openDaemonChat called without peer.fingerprint", peer);
+      return;
+    }
     state.daemon_active_peer = peer;
-    hide($("#daemon-roster-card"));
-    show($("#daemon-chat-card"));
-    text(
-      $("#daemon-chat-title"),
-      peer.alias || peer.hostname || peer.fingerprint || "Chat",
-    );
+    // Single-pane: chat takes the screen.
+    _showOnly("#daemon-chat-card");
+    const titleText =
+      peer.alias || peer.hostname ||
+      (peer.short_id ? `Device ${peer.short_id}` : null) ||
+      (peer.fingerprint
+        ? peer.fingerprint.replace(/^sha256:/, "").slice(0, 12)
+        : "Chat");
+    text($("#daemon-chat-title"), titleText);
     text($("#daemon-chat-meta"),
       `${peer.fingerprint || ""}`);
     // 2026-05-23: refresh compose state for the new peer. Clear
@@ -4349,9 +4396,7 @@
   // from the ⚙ button on the chat roster.
 
   async function _openPhoneSettings() {
-    hide($("#daemon-roster-card"));
-    hide($("#daemon-chat-card"));
-    show($("#phone-settings-card"));
+    _showOnly("#phone-settings-card");
     const labelEl = $("#phone-settings-device-label");
     const fpEl = $("#phone-settings-device-fp");
     const pairedEl = $("#phone-settings-device-paired");
@@ -4418,8 +4463,7 @@
   }
 
   function _closePhoneSettings() {
-    hide($("#phone-settings-card"));
-    show($("#daemon-roster-card"));
+    _showOnly("#daemon-roster-card");
   }
 
   async function _handlePhoneSignOut() {
@@ -4509,9 +4553,8 @@
   }
 
   $("#btn-daemon-chat-back")?.addEventListener("click", () => {
-    hide($("#daemon-chat-card"));
-    show($("#daemon-roster-card"));
     state.daemon_active_peer = null;
+    _showOnly("#daemon-roster-card");
   });
 
   // ── hook pair handshake into existing WebRTC session lifecycle ────
@@ -4660,19 +4703,17 @@
   const _selfMeshQuery = _detectSelfMeshInviteQuery();
   const _setupDeviceInviteQuery = _detectSetupDeviceInviteQuery();
   if (_pairQuery) {
-    _autopairHideManualCards();
-    show($("#autopair-card"));
+    _showOnly("#autopair-card");
     _autopairSetState("dim", "starting", "Setting up your phone's identity…");
   } else if (_selfMeshQuery || _setupDeviceInviteQuery) {
-    _autopairHideManualCards();
-    show($("#selfmesh-enroll-card"));
+    _showOnly("#selfmesh-enroll-card");
     _selfMeshEnrollSetState("dim", "starting", "Loading this device...");
   } else {
     // v0.20.3 — default landing. No pair query → show the welcome
     // card explaining how to scan a QR. Identity provisioning still
     // runs (so a future ?pair= visit is instant) but its card stays
     // hidden behind data-tier="advanced".
-    show($("#welcome-card"));
+    _showOnly("#welcome-card");
   }
   boot().then(() => {
     if (_pairQuery) {
