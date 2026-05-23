@@ -194,12 +194,12 @@ def test_boot_shows_welcome_when_no_pair_query(peer_html: str):
     loads to a blank canvas — total UX failure."""
     idx = peer_html.find("const _pairQuery = _detectPairQuery();")
     snippet = peer_html[idx:idx + 1500]
-    assert "show($(\"#welcome-card\"))" in snippet
+    assert '_showOnly("#welcome-card")' in snippet
     # Welcome shows in the else branch (no pair query).
     else_idx = snippet.find("} else {")
     assert else_idx > 0
     after_else = snippet[else_idx:else_idx + 800]
-    assert '#welcome-card' in after_else
+    assert '_showOnly("#welcome-card")' in after_else
 
 
 def test_autopair_also_hides_welcome_card(peer_html: str):
@@ -207,8 +207,8 @@ def test_autopair_also_hides_welcome_card(peer_html: str):
     the user doesn't see 'scan a QR' copy briefly while the
     page transitions to connecting."""
     snippet = peer_html[
-        peer_html.find("function _autopairHideManualCards"):
-        peer_html.find("function _autopairHideManualCards") + 1500
+        peer_html.find("const _PHONE_TOP_LEVEL_CARDS"):
+        peer_html.find("const _PHONE_TOP_LEVEL_CARDS") + 1800
     ]
     assert '#welcome-card' in snippet
 

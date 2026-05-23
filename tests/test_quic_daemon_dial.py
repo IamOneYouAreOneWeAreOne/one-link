@@ -284,11 +284,11 @@ def test_quic_ping_round_trip_between_daemons() -> None:
     """Headline Wave 2e proof: control-API ``quic_ping`` against
     a paired peer returns ok with a real RTT. This exercises:
 
-      * Wave 2c Identity bridge â€” daemon PEM â†’ native Identity
-      * Wave 2d daemon QUIC bring-up â€” server endpoint up
-      * Wave 2d ENDPOINT_UPDATE â€” A's quic_port reaches B
-      * Wave 2e ``_get_or_dial_quic`` â€” B dials A successfully
-      * Wave 2e per-connection frame loop â€” A answers PING with PONG
+      * Wave 2c Identity bridge - daemon PEM to native Identity
+      * Wave 2d daemon QUIC bring-up - server endpoint up
+      * Wave 2d ENDPOINT_UPDATE - A's quic_port reaches B
+      * Wave 2e ``_get_or_dial_quic`` - B dials A successfully
+      * Wave 2e per-connection frame loop - A answers PING with PONG
 
     Frame round-trip is the simplest viable shape; once this is
     green the chunk routing can land on top of the same pipeline.
@@ -305,7 +305,7 @@ def test_quic_ping_round_trip_between_daemons() -> None:
                         peer=p.a.short_id)
         assert a_pin.get("ok"), a_pin
         assert b_pin.get("ok"), b_pin
-        # Warm up by sending a chat message â€” drives CAPS +
+        # Warm up by sending a chat message - drives CAPS +
         # session bringup so the broadcast_endpoint_to_paired
         # called by pin_peer has a live channel to push the
         # quic_port over.
@@ -315,7 +315,7 @@ def test_quic_ping_round_trip_between_daemons() -> None:
         # Poll quic_status on BOTH sides until each daemon's
         # ``advertised_ports`` map has an entry for the OTHER
         # peer's fingerprint. This replaces the brittle fixed
-        # sleep â€” we wait for the real signal that the wire
+        # sleep - we wait for the real signal that the wire
         # frame landed instead of guessing the timing.
         #
         # Note: ``a_pin["peer_fp"]`` is the peer's (B's) fingerprint
@@ -350,7 +350,7 @@ def test_quic_ping_round_trip_between_daemons() -> None:
         )
         assert "rtt_ms" in result
         assert isinstance(result["rtt_ms"], (int, float))
-        # On loopback RTT should be small â€” single-digit ms is
+        # On loopback RTT should be small - single-digit ms is
         # typical. Be generous (1000 ms) to tolerate CI noise.
         assert 0.0 < result["rtt_ms"] < 1000.0, (
             f"quic_ping returned unrealistic RTT: {result['rtt_ms']} ms"
@@ -366,7 +366,7 @@ def test_send_file_stream_mode_survives_with_quic_route_available() -> None:
 
       1. The file lands intact on the receiver.
       2. ``quic_status`` on the sender shows an outbound
-         Connection to the receiver â€” proves the QUIC dial fired
+         Connection to the receiver - proves the QUIC dial fired
          + the chunk-send path actually took the QUIC fork
          (the cache only populates via ``_get_or_dial_quic`` calls
          which run on the QUIC fast path).
@@ -439,7 +439,7 @@ def test_send_file_stream_mode_survives_with_quic_route_available() -> None:
 
 def test_endpoint_announcement_carries_quic_port() -> None:
     """The ENDPOINT_UPDATE frame must include ``quic_port`` once
-    the daemon has a QUIC endpoint up â€” paired peers consume
+    the daemon has a QUIC endpoint up - paired peers consume
     this to populate their _quic_peer_ports map."""
     with daemon_pair() as p:
         # Drive a CAPS exchange + endpoint announcement.

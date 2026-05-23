@@ -314,11 +314,17 @@ def test_autopair_uses_daemon_specific_dc_labels(peer_html: str):
 
 
 def test_autopair_hide_manual_cards_helper_present(peer_html: str):
-    """Auto-pair MUST hide every manual card (identity, rendezvous,
-    manual signaling, SAS, peers list, chat). User sees one
-    status line, no clutter."""
-    snippet = _snippet(peer_html, "function _autopairHideManualCards", 1500)
+    """Auto-pair MUST know every top-level card so single-pane
+    navigation can hide manual surfaces. User sees one status line,
+    no clutter."""
+    snippet = _snippet(peer_html, "const _PHONE_TOP_LEVEL_CARDS", 2400)
     for card_id in (
+        "#welcome-card",
+        "#autopair-card",
+        "#selfmesh-enroll-card",
+        "#daemon-roster-card",
+        "#daemon-chat-card",
+        "#phone-settings-card",
         "#identity-card",
         "#status-card",
         "#actions-card",
@@ -409,9 +415,9 @@ def test_boot_detects_pair_query_first(peer_html: str):
     flow. The user should never see the manual UX in pair mode."""
     idx = peer_html.find("const _pairQuery = _detectPairQuery();")
     assert idx >= 0
-    # And manual cards are hidden BEFORE boot is awaited.
+    # And the autopair card is shown before boot is awaited.
     snippet = peer_html[idx:idx + 1500]
-    assert "_autopairHideManualCards()" in snippet
+    assert '_showOnly("#autopair-card")' in snippet
     assert "boot()" in snippet
 
 

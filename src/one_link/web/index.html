@@ -7849,7 +7849,7 @@
   }
 
   /* v0.21.x: missed / ended call bubble. Centered-ish "system
-     message" feel — distinguishes from regular text/file bubbles
+     message" feel - distinguishes from regular text/file bubbles
      so the call log entry reads as metadata about the chat, not
      as a sent message. Missed calls get a soft red tint with
      Call back action. Ended calls render slimmer in muted color. */
@@ -7909,14 +7909,14 @@
     outline-offset: 2px;
   }
 
-  /* ── Click-to-copy affordance ──────────────────────────────────────── */
+  /* Click-to-copy affordance */
   .copyable {
     cursor: copy;
     transition: color .12s;
   }
   .copyable:hover { color: var(--accent-2); }
 
-  /* ── Keyboard shortcuts modal ──────────────────────────────────────── */
+  /* Keyboard shortcuts modal */
   .shortcuts-list {
     display: grid; grid-template-columns: auto 1fr; gap: 10px 16px;
     margin: 12px 0;
@@ -7965,7 +7965,7 @@
     <!-- v0.14.0 mobile: hamburger appears in the top header too,
          so users without a selected peer can open the sidebar
          drawer. CSS hides it on desktop. -->
-    <button class="mobile-hamburger" id="mobile-hamburger-top" aria-label="Open peers">☰</button>
+    <button class="mobile-hamburger" id="mobile-hamburger-top" aria-label="Open peers">Menu</button>
     <div class="brand">
       <!-- May 16 2026: the source one-glyph.png is 923x923; rendering
            it at 32x32 was a ~29x downscale, producing the granulated
@@ -7992,22 +7992,27 @@
     </nav>
     <div class="me">
       <!-- v0.10.4: presence pill replaces the static green dot.
-           Click → dropdown to change status. -->
+           Click -> dropdown to change status. -->
       <button class="presence-pill" id="presence-pill" title="Click to change status">
         <span class="dot" id="presence-dot"></span>
-        <span id="me-host">…</span>
-        <span class="presence-caret">▾</span>
+        <span id="me-host">...</span>
+        <span class="presence-caret">v</span>
       </button>
       <!-- May 15-16 2026 - Privacy lock icon. Opens the Privacy
            panel (which mode you're on + what this device is
            talking to + recent outside connections). Hidden by
            default to keep the main UI clean. Ctrl+Shift+P opens
-           it too. -->
+           it too.
+           2026-05-23: text labels 'Lock' / 'Settings' replaced
+           with icons. The 32px .gear buttons couldn't fit a 7-char
+           word legibly — labels overflowed the rounded square
+           and pushed against the presence pill. -->
       <button class="gear" id="btn-privacy"
-              title="Privacy (what this app talks to)"
-              aria-label="Open Privacy panel"
-              style="font-size: 15px;">🔒</button>
-      <button class="gear" id="btn-settings" title="Settings">⚙</button>
+              title="Privacy — what this app talks to (Ctrl+Shift+P)"
+              aria-label="Open Privacy panel">🔒</button>
+      <button class="gear" id="btn-settings"
+              title="Settings"
+              aria-label="Open Settings">⚙</button>
     </div>
     <!-- v0.10.4 presence dropdown menu - anchored to the pill;
          hidden by default. -->
@@ -8086,11 +8091,11 @@
           <!-- v0.14.0 mobile: hamburger to re-open the sidebar drawer.
                Hidden on desktop via CSS; rendered inline before
                #convo-who on phones. -->
-          <button class="mobile-hamburger" id="mobile-hamburger" aria-label="Open peers">☰</button>
+          <button class="mobile-hamburger" id="mobile-hamburger" aria-label="Open peers">Menu</button>
           <div class="who" id="convo-who" title="Open device settings">
             <div class="text">
-              <div class="name" id="convo-name">…</div>
-              <div class="sub"  id="convo-sub">…</div>
+              <div class="name" id="convo-name">...</div>
+              <div class="sub"  id="convo-sub">...</div>
             </div>
             <!-- v0.7.7: verified-in-person pill OR yellow "Verify in
                  person" CTA. Populated by renderConvHeaderTrust on
@@ -8099,16 +8104,16 @@
           </div>
           <div class="actions">
             <!-- v0.8.8: aggregate transfer pill - visible only while
-                 1+ transfers are active. Click → opens Files pane.
+                 1+ transfers are active. Click -> opens Files pane.
                  Empty by default; populated by renderTransferHeaderPill. -->
             <div class="transfer-pill" id="transfer-pill" style="display:none;"></div>
             <div class="search" id="search-wrap">
-              <span class="icon-trigger">⌕</span>
+              <span class="icon-trigger">Search</span>
               <input id="search-input" type="text" placeholder="Search this conversation…" />
             </div>
-            <button id="btn-search-toggle" title="Search">⌕</button>
+            <button id="btn-search-toggle" title="Search">Search</button>
             <!-- v0.21.x: jump to a specific date in this conversation. -->
-            <button id="btn-jump-date" title="Jump to date">📅</button>
+            <button id="btn-jump-date" title="Jump to date">Date</button>
             <button id="btn-unblock" style="display:none;">Allow device</button>
             <button id="btn-group-settings" style="display:none;">Group settings</button>
             <button id="btn-attach">Attach file</button>
@@ -8125,8 +8130,8 @@
              the conversation header while the active peer is
              typing; auto-hides at expires_at_ms. -->
         <div id="convo-typing" class="typing-banner" style="display:none;">
-          <span class="typing-dots"><span>·</span><span>·</span><span>·</span></span>
-          <span id="convo-typing-name">someone</span> is typing…
+          <span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>
+          <span id="convo-typing-name">someone</span> is typing...
         </div>
 
         <!-- v0.10.1: multi-select action bar. Slides in when 1+
@@ -8144,7 +8149,7 @@
         </div>
 
         <div id="search-banner" class="search-results-banner" style="display:none;">
-          <span id="search-banner-text">…</span>
+          <span id="search-banner-text">...</span>
           <button id="btn-clear-search">Clear</button>
         </div>
 
@@ -8153,7 +8158,7 @@
         <!-- v0.7.x: per-device Allow toggles (Chat/Files/Folders)
              moved into the Settings modal so the chat surface stays
              uncluttered. Open Settings (gear icon, top right, or
-             Ctrl+,) → "Permissions for this device". -->
+             Ctrl+,) -> "Permissions for this device". -->
 
         <div class="messages" id="messages"></div>
 
@@ -8165,7 +8170,7 @@
              via CSS position:absolute. -->
         <button id="msg-new-pill" class="msg-new-pill" hidden type="button"
                 aria-label="Jump to latest messages">
-          <span class="msg-new-pill-arrow" aria-hidden="true">↓</span>
+          <span class="msg-new-pill-arrow" aria-hidden="true">down</span>
           <span class="msg-new-pill-count" id="msg-new-pill-count">0</span>
           <span class="msg-new-pill-label">new</span>
         </button>
@@ -8174,15 +8179,15 @@
           <!-- v0.7.5: shows the message we're replying to. -->
           <div class="reply-bar" id="reply-bar"></div>
           <div class="attach-tray" id="attach-tray"></div>
-          <!-- v0.21.x final: one 📎 attach button opens a popover
-               menu with three sources (File · Camera · Paste from
+          <!-- v0.21.x final: one Attach button opens a popover
+               menu with three sources (File / Camera / Paste from
                clipboard). Drops the old standalone 📷 / 📸 icons
                which were visually identical and semantically
                confusing. Standard pattern from Telegram / Signal
                / WhatsApp. The keyboard Ctrl+V paste still works as
                a fast path (no popover; pasted images go straight
                to the attach tray). -->
-          <button class="icon-btn" id="btn-attach2" title="Attach (file, camera, or paste)">📎</button>
+          <button class="icon-btn" id="btn-attach2" title="Attach (file, camera, or paste)">Attach</button>
           <!-- Hidden invisible buttons kept for compat with code
                paths that still target #btn-screenshot or #btn-camera
                directly (slash commands, action sheets, etc.). The
@@ -8192,12 +8197,12 @@
           <!-- v0.9.2 voice messages - click to start recording, click
                again to stop. While recording, the icon flips to a
                red square + a timer/cancel overlay slides in. -->
-          <button class="icon-btn" id="btn-voice" title="Record voice message (Ctrl+Shift+M)">🎤</button>
+          <button class="icon-btn" id="btn-voice" title="Record voice message (Ctrl+Shift+M)">Mic</button>
           <!-- v0.21.x: open emoji picker against the composer
                textarea. Insert mode: click an emoji, it goes
                at the cursor position. -->
-          <button class="icon-btn" id="btn-emoji" title="Insert emoji">😀</button>
-          <textarea id="input" placeholder="Message your peer… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+          <button class="icon-btn" id="btn-emoji" title="Insert emoji">:)</button>
+          <textarea id="input" placeholder="Message your peer... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
           <button class="send" id="btn-send" disabled>Send</button>
         </div>
         <!-- v0.9.2 voice recording overlay - visible only while
@@ -8206,7 +8211,7 @@
         <div class="voice-overlay" id="voice-overlay" style="display:none;">
           <div class="vo-pulse"></div>
           <div class="vo-text">
-            <strong>Recording…</strong>
+            <strong>Recording...</strong>
             <span class="vo-timer" id="voice-timer">0:00</span>
           </div>
           <button class="btn-ghost" id="voice-cancel" title="Discard recording">Cancel</button>
@@ -8229,7 +8234,7 @@
       </div>
       <div id="filelist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
         <div class="empty rich">
-          <div class="rich-glyph">📥</div>
+          <div class="rich-glyph">Inbox</div>
           <h4>Inbox is quiet</h4>
           <p>Files from paired devices land here.</p>
         </div>
@@ -8537,7 +8542,7 @@
   <div class="drop-overlay desktop-only" id="drop-overlay">
     <div class="panel">
       <h2>Drop to send</h2>
-      <p id="drop-target">to <span id="drop-peer">…</span></p>
+      <p id="drop-target">to <span id="drop-peer">...</span></p>
     </div>
   </div>
 
@@ -8702,8 +8707,8 @@
       <div class="pair-peer-info" id="pair-peer-info">
         <div class="avatar" id="pair-peer-avatar">?</div>
         <div>
-          <div class="who-name" id="pair-peer-name">…</div>
-          <div class="who-sub"  id="pair-peer-sub">…</div>
+          <div class="who-name" id="pair-peer-name">...</div>
+          <div class="who-sub"  id="pair-peer-sub">...</div>
         </div>
       </div>
       <!-- v0.8.7: pair flow has two stages.
@@ -9039,7 +9044,7 @@
                 peers wonder. We think wondering is a feature.
               </p>
               <div class="settings-row">
-                <label for="set-display-typing">Show "is typing…" when peers are</label>
+                <label for="set-display-typing">Show "is typing..." when peers are</label>
                 <span class="toggle">
                   <input type="checkbox" id="set-display-typing" />
                   <span class="slider"></span>
@@ -9754,7 +9759,7 @@
             </p>
             <div class="settings-row">
               <label>Version</label>
-              <span class="settings-readonly" id="settings-about-version" data-long-press-diagnostics="1">…</span>
+              <span class="settings-readonly" id="settings-about-version" data-long-press-diagnostics="1">...</span>
             </div>
             <div class="settings-section">
               <div class="settings-section-h"><span>Build and support</span></div>
@@ -9787,11 +9792,11 @@
             </p>
             <div class="settings-row">
               <label>Protocol</label>
-              <span class="settings-readonly" id="settings-about-protocol">…</span>
+              <span class="settings-readonly" id="settings-about-protocol">...</span>
             </div>
             <div class="settings-row">
               <label>Schema</label>
-              <span class="settings-readonly" id="settings-about-schema">…</span>
+              <span class="settings-readonly" id="settings-about-schema">...</span>
             </div>
             <p class="settings-help">
               One Link is peer-to-peer LAN chat + file sync. End-to-end
@@ -13416,7 +13421,7 @@
   }
   // v0.21.x: lightbox is gallery-aware. When opened on an image
   // bubble in a conversation, it computes the set of other images
-  // in that conversation and lets ← / → / swipe move between them
+  // in that conversation and lets left / right / swipe move between them
   // without closing. Falls back to single-image mode if no
   // conversation context is supplied.
   const _lightboxState = { gallery: [], index: 0 };
@@ -13456,7 +13461,7 @@
       const err = el("div", "file-lightbox-error");
       err.appendChild(el("div", "title", "Image preview unavailable"));
       err.appendChild(el("div", "hint",
-        "Preview unavailable. One Link has the transfer record, but the local preview route did not return image bytes. Open in new tab or save a copy, or retry from the message details."));
+        "Preview unavailable on this device. One Link has the transfer record, but the local preview route did not return image bytes. Open in new tab or save a copy, or retry from the message details."));
       const rows = el("div", "file-detail-rows");
       rows.appendChild(_fileDetailRow("File", ent.name || "image"));
       rows.appendChild(_fileDetailRow("Size", ent.sizeBytes ? fmtBytes(ent.sizeBytes) : "-"));
@@ -13472,7 +13477,7 @@
     const dlA = lb.querySelector(".file-lightbox-download");
     dlA.href = ent.url;
     dlA.setAttribute("download", ent.downloadName || ent.name || "file");
-    // Nav button visibility — hidden when there's only one image.
+    // Nav button visibility - hidden when there's only one image.
     const prev = lb.querySelector(".file-lightbox-prev");
     const next = lb.querySelector(".file-lightbox-next");
     if (prev) prev.style.display = count > 1 ? "" : "none";
@@ -15749,8 +15754,8 @@
     if (num) num.textContent = "0";
   }
 
-  // Pill tap → smooth scroll to bottom + clear count.
-  // Messages container scroll → if user reached the bottom, clear pill.
+  // Pill tap -> smooth scroll to bottom + clear count.
+  // Messages container scroll -> if user reached the bottom, clear pill.
   // Both registered once at module load.
   (() => {
     const pill = document.querySelector("#msg-new-pill");
@@ -19827,7 +19832,7 @@
     }
   }
 
-  // v0.12.3: render the "user is typing…" banner for the active
+  // v0.12.3: render the "user is typing..." banner for the active
   // peer. Auto-hides via setInterval that re-runs every 500ms and
   // checks deadlines.
   function renderTypingBanner() {
@@ -25053,7 +25058,7 @@
   });
   clearSearch.onclick = () => { searchInput.value = ""; finishSearch(); };
 
-  // v0.21.x: jump to date. Click 📅 → tiny date-picker popover. On
+  // v0.21.x: jump to date. Click Date -> tiny date-picker popover. On
   // pick, find the first message on (or after) that date and scroll
   // it into view. Toast if no messages exist on the chosen date.
   function _localDateKeyFromMs(ms) {
