@@ -3739,6 +3739,111 @@
     word-break: break-all;
     max-width: 60%;
   }
+  .settings-copy-row {
+    align-items: start;
+  }
+  .settings-copy-field {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: start;
+  }
+  .settings-code {
+    display: block;
+    max-width: none;
+    line-height: 1.45;
+  }
+  .settings-copy-btn,
+  .settings-devices-refresh {
+    background: var(--bg-2);
+    color: var(--text);
+    border: 1px solid var(--line);
+    padding: 7px 10px;
+    border-radius: 7px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .settings-copy-btn:hover,
+  .settings-devices-refresh:hover {
+    background: var(--bg-3);
+  }
+  .settings-devices-refresh {
+    margin-left: auto;
+  }
+  .settings-devices-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .settings-device-row {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    border-radius: 9px;
+    background: linear-gradient(135deg, rgba(124,92,255,.10), rgba(78,193,255,.06));
+    border: 1px solid rgba(255,255,255,.06);
+  }
+  .settings-device-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    display: grid;
+    place-items: center;
+    background: rgba(124,92,255,.20);
+    color: var(--text);
+    font-weight: 700;
+    font-size: 18px;
+  }
+  .settings-device-name {
+    color: var(--text);
+    font-weight: 650;
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .settings-device-sub {
+    color: var(--text-dim);
+    font-size: 11px;
+    margin-top: 2px;
+  }
+  .settings-device-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+  .settings-device-actions button {
+    background: var(--bg-2);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 6px 9px;
+    font-size: 11px;
+  }
+  .settings-device-actions button:hover {
+    background: var(--bg-3);
+  }
+  .settings-device-empty {
+    padding: 12px;
+    border-radius: 9px;
+    background: var(--bg-2);
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  @media (max-width: 640px) {
+    .settings-copy-field,
+    .settings-device-row {
+      grid-template-columns: 1fr;
+    }
+    .settings-device-actions {
+      justify-content: flex-start;
+    }
+  }
   .settings-shortcuts {
     list-style: none;
     padding: 0; margin: 0;
@@ -8332,9 +8437,13 @@
               <input type="text" id="set-bio" maxlength="140" placeholder="Short status (what's up?)" />
             </div>
             <p class="settings-help" id="set-bio-counter">0 / 140</p>
-            <div class="settings-row">
+            <div class="settings-row settings-copy-row">
               <label>Identity</label>
-              <span class="settings-readonly" id="settings-identity-fp">…</span>
+              <div class="settings-copy-field">
+                <code class="settings-readonly settings-code" id="settings-identity-fp">…</code>
+                <button type="button" class="btn-ghost settings-copy-btn" id="settings-copy-identity"
+                        aria-label="Copy identity fingerprint">Copy</button>
+              </div>
             </div>
             <p class="settings-help">
               Your fingerprint is who you are, cryptographically. Share it
@@ -8772,13 +8881,34 @@
           <!-- ── Devices ────────────────────────────────────────── -->
           <section class="settings-pane" data-settings-pane="devices">
             <h3>Devices</h3>
-            <p class="settings-help">
-              Permissions, custom name, mute, and trust details for each
-              paired device live in that device's drawer. Click the gear
-              (⚙) next to a device in the sidebar, or the device card at
-              the top of a conversation, to open it. We could've put
-              this here. We didn't.
+            <p class="settings-pane-lede">
+              Manage paired devices, open per-device controls, copy IDs,
+              and jump to nearby discovery without hunting through the
+              sidebar.
             </p>
+            <div class="settings-section">
+              <div class="settings-section-h">
+                <span>Paired devices</span>
+                <button class="btn-ghost settings-devices-refresh" id="settings-devices-refresh"
+                        type="button">Refresh</button>
+              </div>
+              <div class="settings-devices-list" id="settings-devices-list">
+                <p class="settings-help">Loading devices...</p>
+              </div>
+            </div>
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Quick actions</span></div>
+              <div class="mini-actions wrap">
+                <button class="btn-ghost" id="settings-devices-pair" type="button">Pair a new device</button>
+                <button class="btn-ghost" id="settings-devices-nearby" type="button">Show nearby devices</button>
+              </div>
+              <p class="settings-help">
+                Device-specific permissions, mute, disappearing messages,
+                verification, and trust history still open in the focused
+                device drawer so the full context stays attached to that
+                peer.
+              </p>
+            </div>
           </section>
 
           <!-- ── Shortcuts ──────────────────────────────────────── -->
@@ -12053,7 +12183,7 @@
     if (d.vendor) subParts.push(d.vendor);
     subParts.push(_kindLabel(d.kind));
     if (d.ip) subParts.push(d.ip);
-    meta.appendChild(el("div", "sub", subParts.join(" · ")));
+    meta.appendChild(el("div", "sub", subParts.join(" - ")));
     const btn = el(
       "button",
       action === "pair" ? "pair-btn" : "pair-btn",
@@ -14659,7 +14789,7 @@
         msg.call_outcome || "", msg.call_end_label || "",
       ].join("|"));
     }
-    return parts.join("Â¶");
+    return parts.join("\u001f");
   }
 
   // ── v0.21.1 smart scroll-to-bottom + new-message pill ───────────
@@ -18616,9 +18746,9 @@
     subEl.title = "";
     subEl.onclick = null;
     if (peer.trust === "rejected") {
-      subEl.appendChild(document.createTextNode("Device chat · blocked"));
+      subEl.appendChild(document.createTextNode("Device chat - blocked"));
     } else {
-      subEl.appendChild(document.createTextNode("Device chat · "));
+      subEl.appendChild(document.createTextNode("Device chat - "));
       const lc = latencyClass(peer);
       if (lc) {
         const dot = el("span", `lat-dot ${lc}`);
@@ -18938,7 +19068,7 @@
     const subParts = [peer.short_id, reachLabel(peer)];
     if (kind) subParts.push(kind.label);
     const subEl = $("#device-drawer-sub");
-    if (subEl) subEl.textContent = subParts.join(" · ");
+    if (subEl) subEl.textContent = subParts.join(" - ");
 
     const aliasEl = $("#dev-alias");
     if (aliasEl) aliasEl.value = peer.local_alias || "";
@@ -19545,7 +19675,7 @@
       if (it.size != null) subBits.push(fmtBytes(it.size));
       if (it.direction) subBits.push(it.direction === "out" ? "Sent" : "Received");
       if (it.ts_ms) subBits.push(new Date(it.ts_ms).toLocaleString());
-      wrap.appendChild(el("div", "sub", subBits.join(" · ")));
+      wrap.appendChild(el("div", "sub", subBits.join(" - ")));
       row.appendChild(wrap);
       // For inbox files we have a direct download URL via /api/files.
       if (it.direction === "in" && it.name) {
@@ -20237,6 +20367,7 @@
       if ($("#activity-nearby-panel")?.classList.contains("show")) {
         renderActivityNearby();
       }
+      renderSettingsDevices();
       recordPeerCompatibility();
       // v0.7.7/v0.7.8: re-render trust + key-change surfaces for the
       // currently selected peer so a freshly-recorded event flips the
@@ -22679,7 +22810,7 @@
       settingsList.innerHTML = "";
       for (const item of (setup.checklist || []).slice(0, 8)) {
         const row = el("div", `setup-mini-row ${item.status === "done" ? "done" : ""}`);
-        row.appendChild(el("span", "dot", item.status === "done" ? "âœ“" : ""));
+        row.appendChild(el("span", "dot", item.status === "done" ? "✓" : ""));
         const text = el("span", null, item.label || "");
         text.title = item.human || "";
         row.appendChild(text);
@@ -25611,6 +25742,9 @@
     if (name === "storage") {
       refreshStorageUsage();
     }
+    if (name === "devices") {
+      renderSettingsDevices();
+    }
   }
   document.querySelectorAll(".settings-nav-item").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -26108,6 +26242,101 @@
     _resetPairPhoneCard();
   }
 
+  function renderSettingsDevices() {
+    const host = $("#settings-devices-list");
+    if (!host) return;
+    const peers = [...(state.peers?.values?.() || [])]
+      .filter((p) => p && p.trust !== "rejected")
+      .sort((a, b) => {
+        const ao = a.online ? 0 : 1;
+        const bo = b.online ? 0 : 1;
+        if (ao !== bo) return ao - bo;
+        const an = (a.display_name || a.hostname || a.short_id || "").toLowerCase();
+        const bn = (b.display_name || b.hostname || b.short_id || "").toLowerCase();
+        return an.localeCompare(bn);
+      });
+    host.innerHTML = "";
+    if (!peers.length) {
+      host.appendChild(el(
+        "div",
+        "settings-device-empty",
+        "No paired devices yet. Pair a device, or scan nearby devices from the action below.",
+      ));
+      return;
+    }
+    for (const p of peers) {
+      const name = p.display_name || p.hostname || p.short_id || "Device";
+      const kind = deviceKindLabel(p);
+      const row = el("div", "settings-device-row");
+      row.appendChild(el("div", "settings-device-avatar", kind?.icon || "💻"));
+
+      const meta = el("div", null);
+      meta.appendChild(el("div", "settings-device-name", name));
+      const bits = [
+        p.online ? "Online" : "Offline",
+        reachLabel(p),
+        p.health?.latency_ewma_ms == null ? null : `${Math.round(p.health.latency_ewma_ms)} ms`,
+        p.is_verified ? "Verified" : "Not verified",
+      ].filter(Boolean);
+      meta.appendChild(el("div", "settings-device-sub", bits.join(" - ")));
+      row.appendChild(meta);
+
+      const actions = el("div", "settings-device-actions");
+      const chat = el("button", null, "Chat");
+      chat.type = "button";
+      chat.onclick = () => {
+        selectPeer(p.short_id);
+        settingsBackdrop?.classList.remove("show");
+        document.querySelector('[data-pane="convo"]')?.click();
+        toast(`Opened chat with ${name}.`, "info", 1800);
+      };
+      const details = el("button", null, "Details");
+      details.type = "button";
+      details.onclick = () => openDeviceDrawer(p.short_id);
+      const copy = el("button", null, "Copy ID");
+      copy.type = "button";
+      copy.onclick = () => copyToClipboard(p.fingerprint || p.short_id || "", "device ID");
+      actions.appendChild(chat);
+      actions.appendChild(details);
+      actions.appendChild(copy);
+      row.appendChild(actions);
+      host.appendChild(row);
+    }
+  }
+
+  $("#settings-copy-identity")?.addEventListener("click", () => {
+    const txt = ($("#settings-identity-fp")?.textContent || "").trim();
+    if (!txt || txt === "…" || txt === "(unknown)") {
+      toast("Identity is still loading.", "info", 1800);
+      return;
+    }
+    copyToClipboard(txt, "identity fingerprint");
+  });
+
+  $("#settings-devices-refresh")?.addEventListener("click", async () => {
+    const btn = $("#settings-devices-refresh");
+    if (btn) btn.textContent = "Refreshing...";
+    try {
+      await refreshPeers();
+      renderSettingsDevices();
+      toast("Device list refreshed.", "good", 1600);
+    } finally {
+      if (btn) btn.textContent = "Refresh";
+    }
+  });
+
+  $("#settings-devices-pair")?.addEventListener("click", async () => {
+    switchSettingsPane("setup");
+    await oneSetupAddDevice();
+  });
+
+  $("#settings-devices-nearby")?.addEventListener("click", async () => {
+    settingsBackdrop?.classList.remove("show");
+    document.querySelector('[data-pane="activity"]')?.click();
+    await loadActivityNearby({ force: true });
+    toast("Nearby devices refreshed.", "info", 1800);
+  });
+
   // Settings -> About add-device QR. Uses the same One Setup device
   // invite as the primary pairing flow, and auto-opens confirmation
   // when the scanned device is waiting to be trusted.
@@ -26417,6 +26646,7 @@
     // Profile each open so the user always lands on a predictable
     // pane regardless of where they last navigated.
     refreshSettingsAbout();
+    renderSettingsDevices();
     refreshBlockedDevicesList();
     switchSettingsPane("profile");
     settingsBackdrop.classList.add("show");
