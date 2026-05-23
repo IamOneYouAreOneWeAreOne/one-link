@@ -64,6 +64,14 @@ def test_settings_profile_identity_has_copy_action() -> None:
     assert 'id="settings-copy-identity"' in settings
     assert "Copy identity fingerprint" in settings
     assert 'copyToClipboard(txt, "identity fingerprint")' in _index()
+    assert 'id="settings-identity-fp">...</code>' in settings
+
+
+def test_setup_status_uses_ascii_ok_to_avoid_mojibake() -> None:
+    html = _index()
+    setup_render = html[html.index("function renderOneSetup") : html.index("async function maybeShowOnboarding")]
+    assert 'item.status === "done" ? "OK" : ""' in setup_render
+    assert 'item.status === "done" ? "✓" : ""' not in setup_render
 
 
 def test_settings_devices_pane_is_real_device_management() -> None:

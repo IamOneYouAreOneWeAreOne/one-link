@@ -50,6 +50,37 @@ def test_settings_network_controls_have_handlers() -> None:
         ), control_id
 
 
+def test_settings_profile_has_production_command_center() -> None:
+    html = _index()
+    settings = _settings_shell(html)
+    for required in (
+        'id="settings-command-center"',
+        'id="settings-overview-health"',
+        'id="settings-readiness-list"',
+        'id="settings-overview-repair"',
+        'id="settings-overview-copy"',
+        'id="settings-overview-devices"',
+        'id="settings-overview-privacy"',
+        'id="settings-overview-storage"',
+        "function _settingsOverviewSnapshot",
+        "function renderSettingsOverview",
+        "function copySettingsOverviewReport",
+        "Live identity, device, network, privacy, storage, and diagnostic readiness",
+    ):
+        assert required in html if required.startswith("function") else required in settings
+
+
+def test_settings_overview_actions_are_wired_to_real_panes() -> None:
+    html = _index()
+    assert '$("#settings-overview-repair")?.addEventListener("click"' in html
+    assert '$("#settings-overview-copy")?.addEventListener("click"' in html
+    assert '$("#settings-overview-devices")?.addEventListener("click", () => switchSettingsPane("devices"))' in html
+    assert '$("#settings-overview-privacy")?.addEventListener("click", () => switchSettingsPane("privacy"))' in html
+    assert '$("#settings-overview-storage")?.addEventListener("click", () => switchSettingsPane("storage"))' in html
+    assert 'await refreshSettingsNetwork();' in html
+    assert 'copySettingsOverviewReport().catch' in html
+
+
 def test_settings_privacy_has_identity_and_proof_actions() -> None:
     html = _index()
     settings = _settings_shell(html)
