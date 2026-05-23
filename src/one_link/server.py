@@ -1979,7 +1979,7 @@ class UIServer:
         if not peer.is_file():
             return web.Response(status=404, text="peer shell not bundled")
         body = peer.read_text(encoding="utf-8")
-        resp = web.Response(text=body, content_type="text/html")
+        resp = web.Response(text=body, content_type="text/html", charset="utf-8")
         # Tight CSP for the peer shell. We allow only same-origin
         # scripts (the browser-peer logic is bundled inline below; no
         # third-party JS), inline styles (CSS lives in the same
@@ -2023,7 +2023,7 @@ class UIServer:
         if not p.is_file():
             return web.Response(status=404, text="dr_test.html not bundled")
         body = p.read_text(encoding="utf-8")
-        resp = web.Response(text=body, content_type="text/html")
+        resp = web.Response(text=body, content_type="text/html", charset="utf-8")
         # Self-test page: same-origin scripts only; no third-party fetches.
         resp.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
@@ -2061,7 +2061,7 @@ class UIServer:
             if not self._is_local_document_navigation(request):
                 return web.Response(status=401, text="unauthorized")
             html = self._stale_session_recovery_page()
-            resp = web.Response(text=html, content_type="text/html")
+            resp = web.Response(text=html, content_type="text/html", charset="utf-8")
             self._set_ui_cookie(request, resp)
             resp.headers["Cache-Control"] = "no-store"
             resp.headers["Referrer-Policy"] = "no-referrer"
@@ -2094,7 +2094,7 @@ class UIServer:
                 html = html.replace("</head>", scrub + "</head>", 1)
             else:
                 html += scrub
-        resp = web.Response(text=html, content_type="text/html")
+        resp = web.Response(text=html, content_type="text/html", charset="utf-8")
         resp.headers["Cache-Control"] = "no-store"
         resp.headers["Referrer-Policy"] = "no-referrer"
         # v0.20.7 (security audit H9): Content-Security-Policy on the
@@ -3266,6 +3266,7 @@ class UIServer:
         return web.Response(
             text=body,
             content_type="text/html",
+            charset="utf-8",
             headers={"Cache-Control": "no-store"},
         )
 

@@ -3866,6 +3866,15 @@
     border-top: 1px solid var(--line);
     background: var(--bg-2);
   }
+  .settings-save-status {
+    margin-right: auto;
+    align-self: center;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .settings-save-status.dirty { color: var(--warn); }
+  .settings-save-status.good { color: var(--good); }
+  .settings-save-status.bad { color: var(--bad); }
   /* v0.11.1 Profile pane - avatar preview + color picker. */
   .profile-avatar-row {
     display: flex; align-items: center; gap: 16px;
@@ -9159,6 +9168,7 @@
         </div>
       </div>
       <div class="settings-footer">
+        <span class="settings-save-status" id="settings-save-status" aria-live="polite">No changes yet.</span>
         <button class="btn-primary" id="settings-save">Save</button>
       </div>
     </div>
@@ -10231,7 +10241,7 @@
       parts.push("Channel slow");
     }
     if (ms != null) parts.push(`${Math.round(ms)} ms round-trip`);
-    return parts.join(" · ");
+    return parts.join(" - ");
   }
   function renderConversationPeerStatus(peer) {
     const subEl = $("#convo-sub");
@@ -15256,15 +15266,15 @@
   }
   function formatExpiryRemaining(expiresAt) {
     const ms = (expiresAt || 0) - Date.now();
-    if (ms <= 0) return "🔥 expired";
+    if (ms <= 0) return "expired";
     const s = Math.floor(ms / 1000);
-    if (s < 60) return `🔥 ${s}s`;
+    if (s < 60) return `${s}s`;
     const m = Math.floor(s / 60);
-    if (m < 60) return `🔥 ${m}m`;
+    if (m < 60) return `${m}m`;
     const h = Math.floor(m / 60);
-    if (h < 24) return `🔥 ${h}h`;
+    if (h < 24) return `${h}h`;
     const d = Math.floor(h / 24);
-    return `🔥 ${d}d`;
+    return `${d}d`;
   }
   // Per-second tick to keep every visible expiry-badge countdown
   // fresh. Cheap - N <= 200 visible bubbles, single innerText set
@@ -16040,7 +16050,7 @@
 
     // Size + status icon line
     const sizeLine = el("div", "size");
-    sizeLine.textContent = fmtBytes(msg.size) + " · ";
+    sizeLine.textContent = fmtBytes(msg.size) + " - ";
     const statusEl = el("span", `status-icon ${kind}`);
     statusEl.textContent = `${statusGlyph(kind)} ${label}`;
     sizeLine.appendChild(statusEl);
@@ -16064,12 +16074,12 @@
       ];
       if (bps > 0) parts.push(`${fmtMbps(bps)} (${fmtRate(bps)})`);
       if (bps > 0 && remaining > 0) parts.push(`ETA ${fmtEta(remaining, bps)}`);
-      detail.textContent = parts.join(" · ");
+      detail.textContent = parts.join(" - ");
       meta.appendChild(detail);
     } else if (kind === "paused" && t) {
       const detail = el("div", "transfer-detail");
       const autoMsg = t.user_message || t.metadata?.user_message || t.metadata?.doctor?.user_message || "One Link will keep trying automatically";
-      detail.textContent = `${fmtBytes(t.progress_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)} · ${autoMsg}`;
+      detail.textContent = `${fmtBytes(t.progress_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)} - ${autoMsg}`;
       meta.appendChild(detail);
     }
     meta.appendChild(renderFileBubbleDetails(msg, t, kind));
@@ -17990,7 +18000,7 @@
         const remaining = Math.max(0, (t.total_bytes || 0) - (t.progress_bytes || 0));
         if (remaining > 0) parts.push(`ETA ${fmtEta(remaining, rate)}`);
       }
-      meta.appendChild(el("div", "size", parts.join(" · ")));
+      meta.appendChild(el("div", "size", parts.join(" - ")));
       const bar = el("div", "bar");
       const fill = el("span");
       fill.style.width = `${Math.max(0, Math.min(100, t.progress_pct || 0))}%`;
@@ -18261,12 +18271,12 @@
       } else {
         reasonHint = "Will send when the path is healthy";
       }
-      wrap.appendChild(document.createTextNode(`Queued · ${reasonHint}`));
+      wrap.appendChild(document.createTextNode(`Queued - ${reasonHint}`));
       // Inline "Retry now" so impatient users don't have to wait on
       // the daemon's heal-and-drain loop. Re-uses the same retrySend
       // path the Failed state uses, so the state machine stays
       // single-source.
-      wrap.appendChild(document.createTextNode(" · "));
+      wrap.appendChild(document.createTextNode(" - "));
       const retryNow = document.createElement("button");
       retryNow.type = "button";
       retryNow.className = "send-retry";
@@ -18278,7 +18288,7 @@
       wrap.appendChild(retryNow);
     } else if (msg._sendingState === "failed") {
       const txt = msg._error || "Failed to send";
-      wrap.appendChild(document.createTextNode(`${txt} · `));
+      wrap.appendChild(document.createTextNode(`${txt} - `));
       const retry = document.createElement("button");
       retry.type = "button";
       retry.className = "send-retry";
@@ -18735,7 +18745,7 @@
     // header so the user always knows messages here have a TTL.
     const ttlHost = $("#convo-trust");
     if (ttlHost && peer.dm_ttl_ms) {
-      const dmPill = el("span", "dm-ttl-pill", `🔥 ${_humanTtl(peer.dm_ttl_ms)}`);
+      const dmPill = el("span", "dm-ttl-pill", `TTL ${_humanTtl(peer.dm_ttl_ms)}`);
       dmPill.title = `Messages disappear after ${_humanTtl(peer.dm_ttl_ms)}`;
       // ttlHost may already contain the verified-pill; append.
       ttlHost.appendChild(dmPill);
@@ -18758,7 +18768,7 @@
       subEl.appendChild(document.createTextNode(reachLabel(peer)));
       const ms = peer.health?.latency_ewma_ms;
       if (ms != null) {
-        subEl.appendChild(document.createTextNode(` · ${Math.round(ms)} ms`));
+        subEl.appendChild(document.createTextNode(` - ${Math.round(ms)} ms`));
       }
       // v0.21.x: peer-version comparison in the convo header. Same
       // semantics as the sidebar badge — only surfaces when there's
@@ -25724,6 +25734,27 @@
 
   // ── Settings modal ─────────────────────────────────────────────────
   const settingsBackdrop = $("#settings-backdrop");
+  let _settingsHydrating = false;
+  let _settingsDirty = false;
+
+  function setSettingsSaveStatus(text, kind = "") {
+    const status = $("#settings-save-status");
+    if (!status) return;
+    status.textContent = text;
+    status.classList.remove("dirty", "good", "bad");
+    if (kind) status.classList.add(kind);
+  }
+
+  function markSettingsDirty() {
+    if (_settingsHydrating) return;
+    _settingsDirty = true;
+    setSettingsSaveStatus("Unsaved changes.", "dirty");
+  }
+
+  function markSettingsClean(text = "No changes yet.") {
+    _settingsDirty = false;
+    setSettingsSaveStatus(text);
+  }
 
   // v0.11.0: settings nav-rail dispatcher. Click a nav button → show
   // the matching pane, hide the rest. Entirely DOM-local - no router,
@@ -25750,6 +25781,10 @@
     btn.addEventListener("click", () => {
       switchSettingsPane(btn.dataset.settingsPane);
     });
+  });
+  settingsBackdrop?.querySelectorAll("input, select, textarea").forEach((ctl) => {
+    ctl.addEventListener("input", markSettingsDirty);
+    ctl.addEventListener("change", markSettingsDirty);
   });
 
   // v0.21.x: search-as-you-type across all settings panes. Empty
@@ -26566,6 +26601,8 @@
   }
 
   $("#btn-settings").onclick = async () => {
+    _settingsHydrating = true;
+    markSettingsClean("Loading settings...");
     try {
       const r = await api.get("/api/settings");
       $("#set-name").value = r.display_name || "";
@@ -26649,6 +26686,8 @@
     renderSettingsDevices();
     refreshBlockedDevicesList();
     switchSettingsPane("profile");
+    _settingsHydrating = false;
+    markSettingsClean("No changes yet.");
     settingsBackdrop.classList.add("show");
   };
   $("#settings-cancel").onclick = () => {
@@ -26667,6 +26706,7 @@
     applyTheme(e.target.value);
   });
   $("#settings-save").onclick = async () => {
+    setSettingsSaveStatus("Saving...", "dirty");
     // v0.11.1 - pull avatar_color from the active swatch, bio from
     // the input. Both are optional; nullish skips the field on the
     // backend.
@@ -26731,6 +26771,7 @@
         avatar_color: payload.avatar_color || state.runtimeSettings?.avatar_color,
       };
     } catch (e) {
+      setSettingsSaveStatus("Save failed.", "bad");
       toast(`Save didn't work: ${errorToastBody(e)}`, "bad");
       return;
     }
@@ -26757,12 +26798,14 @@
           "good",
         );
       } catch (e) {
+        setSettingsSaveStatus("Rendezvous save failed.", "bad");
         toast(`Rendezvous save failed: ${e.message || e}`, "bad");
         return;
       }
     } else if (savedSettings) {
       toast("Settings saved. Smart move.", "good");
     }
+    markSettingsClean("Saved.");
 
     settingsBackdrop.classList.remove("show");
     returnToOneHealthGuideIfPending();
@@ -30401,7 +30444,7 @@
         return r;
       })();
       const latency = peer.latency_ms != null
-        ? ` · ${Math.round(peer.latency_ms)} ms`
+        ? ` - ${Math.round(peer.latency_ms)} ms`
         : "";
       route.textContent = `${regimeLabel}${latency}`;
     } catch (_) { /* silent - never block the call surface */ }
