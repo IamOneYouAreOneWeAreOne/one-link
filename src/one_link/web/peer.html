@@ -3869,7 +3869,62 @@
         pending.reject(new Error("daemon channel closed"));
       }
       state.daemon_pending.clear();
+      // 2026-05-23: auto-reconnect attempt. If the DC closed
+      // because of an oversized message / ICE failure / daemon
+      // restart, the user is now stuck with "no live channel"
+      // forever unless they manually reload. We have a valid
+      // cert; try the cert-authed relogin path immediately so
+      // the user keeps going.
+      _attemptDcAutoReconnect();
     });
+  }
+
+  let _phoneAutoReconnectInFlight = false;
+  async function _attemptDcAutoReconnect() {
+    if (_phoneAutoReconnectInFlight) return;
+    if (!_hasExistingPairCert()) {
+      // No cert to reconnect with — surface and bail.
+      const sendStatus = $("#daemon-chat-send-status");
+      if (sendStatus) {
+        sendStatus.textContent =
+          "Live link to the laptop dropped. Reload the page.";
+      }
+      return;
+    }
+    _phoneAutoReconnectInFlight = true;
+    const sendStatus = $("#daemon-chat-send-status");
+    if (sendStatus) sendStatus.textContent = "Live link dropped, reconnecting…";
+    try {
+      const handoff = await _attemptReloginWithStoredCert();
+      if (!handoff) {
+        if (sendStatus) sendStatus.textContent =
+          "Couldn't reconnect. Reload the page.";
+        return;
+      }
+      await _runAutoPairFlow(handoff);
+      if (sendStatus) sendStatus.textContent = "Reconnected.";
+      // Refresh the chat view since stale message state may have
+      // accumulated during the disconnect.
+      const peer = state.daemon_active_peer;
+      if (peer && peer.fingerprint) {
+        try {
+          const msgs = await fetchDaemonMessages(peer.fingerprint, 50);
+          const log = $("#daemon-chat-log");
+          if (log) {
+            log.innerHTML = "";
+            for (const m of msgs) _renderDaemonMessageBubble(log, m);
+            log.scrollTop = log.scrollHeight;
+          }
+        } catch (_e) {}
+      }
+    } catch (e) {
+      if (sendStatus) {
+        sendStatus.textContent =
+          `Couldn't reconnect: ${e && e.message ? e.message : e}. Reload.`;
+      }
+    } finally {
+      _phoneAutoReconnectInFlight = false;
+    }
   }
 
   function _routeDaemonDcMessage(raw) {
@@ -4164,11 +4219,20 @@
 
   // ── Phase 2: file send over daemon DC ─────────────────────────────
   // Chunked protocol: init → many chunk → complete. Server caps each
-  // chunk at 64KiB raw, files at 100MB. Cancel button aborts the loop
+  // chunk at 16 KiB raw, files at 100MB. Cancel button aborts the loop
   // and the server reaps the orphan upload via _sweep_phone_uploads
   // after PHONE_UPLOAD_IDLE_TIMEOUT_MS.
+  //
+  // 2026-05-23: chunk size was 64 KiB but the JSON envelope blew past
+  // aiortc's 64 KiB SCTP max-message-size, closing the channel
+  // mid-upload. 16 KiB raw → ~25 KiB envelope, safe everywhere.
   const _PHONE_FILE_MAX_BYTES = 100 * 1024 * 1024;
-  const _PHONE_FILE_CHUNK_SIZE = 64 * 1024;
+  const _PHONE_FILE_CHUNK_SIZE = 16 * 1024;
+  // SCTP send-buffer high-water mark. While bufferedAmount is above
+  // this, hold off sending more chunks so the in-flight queue can
+  // drain. Without throttling, a fast loop can flood the buffer and
+  // the underlying stream blocks (or worse, the channel resets).
+  const _PHONE_DC_BUFFER_HIGH = 256 * 1024;
   let _phoneFileUploadAborted = false;
 
   function _bytesToBase64Url(bytes) {
@@ -4185,6 +4249,25 @@
 
   async function _handleDaemonChatAttach() {
     $("#daemon-chat-file-input")?.click();
+  }
+
+  // Wait until the daemon DC's send buffer drops below the
+  // high-water mark. Backpressure for the chunked upload loop —
+  // without this a fast .send() loop can fill the SCTP buffer,
+  // the underlying transport blocks, and (with bad luck) the
+  // channel resets entirely. Caps wait at 5 s so a wedged channel
+  // surfaces as an error instead of an infinite spin.
+  async function _waitForDcDrain() {
+    const dc = state.daemon_dc;
+    if (!dc) return;
+    const deadline = Date.now() + 5000;
+    while (
+      dc.bufferedAmount > _PHONE_DC_BUFFER_HIGH &&
+      Date.now() < deadline &&
+      !_phoneFileUploadAborted
+    ) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
   }
 
   function _formatBytes(n) {
@@ -4263,6 +4346,11 @@
         if (_phoneFileUploadAborted) {
           throw new Error("cancelled");
         }
+        // Backpressure: don't pile chunks into the SCTP buffer
+        // faster than they can drain. Keeps the in-flight queue
+        // bounded so the channel never gets close to its hard
+        // message-rate / buffer limits.
+        await _waitForDcDrain();
         const end = Math.min(offset + chunkSize, file.size);
         const slice = file.slice(offset, end);
         const buf = new Uint8Array(await slice.arrayBuffer());

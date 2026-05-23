@@ -383,10 +383,17 @@ SETUP_DEVICE_INVITE_GRACE_MS = 5 * 60 * 1000
 # 2026-05-23: phone file-transfer protocol constants. Chunked
 # upload over the daemon DC so the phone can send files that
 # exceed the WebRTC max-message-size in a single frame.
-# 64 KiB raw → ~88 KiB base64 → comfortably under the 256 KiB
-# practical DC limit on every supported browser (Chrome / Edge /
-# Safari iOS 17+ / Firefox 130+).
-PHONE_UPLOAD_CHUNK_SIZE = 64 * 1024
+#
+# Originally 64 KiB raw — that's ~88 KiB after base64 + ~95 KiB
+# JSON envelope including the rid/upload_id/offset wrapper. THAT
+# EXCEEDS aiortc's default SCTP max-message-size (65535 bytes).
+# Symptom: phone uploads a file, DC closes mid-upload, every
+# subsequent send fails with "no live daemon channel."
+#
+# 16 KiB raw → ~22 KiB base64 → ~25 KiB JSON envelope. Solidly
+# under the 64 KiB floor on aiortc / Safari iOS / Chromium /
+# Firefox. More chunks per file but each ack is fast on LAN.
+PHONE_UPLOAD_CHUNK_SIZE = 16 * 1024
 PHONE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 PHONE_UPLOAD_IDLE_TIMEOUT_MS = 60 * 1000
 PHONE_UPLOAD_MAX_PER_PEER = 4
