@@ -1676,7 +1676,19 @@ class UIServer:
         r.add_get("/api/setup", self._guarded(self.api_setup_status))
         r.add_post("/api/setup", self._guarded(self.api_update_setup))
         r.add_post("/api/setup/device-invite", self._guarded(self.api_setup_device_invite))
-        r.add_post("/api/setup/device-invite/claim", self._guarded(self.api_setup_device_invite_claim))
+        # 2026-05-23: /claim is the bootstrap entry point for a NEW
+        # device that has no credentials yet. Its auth IS the
+        # ``setup_device_invite`` token in the request body, validated
+        # by the handler against ``_setup_device_invites``. Wrapping
+        # in ``_guarded`` requires the desktop UI's bearer token /
+        # cookie, which the phone (different Origin, no shared
+        # storage) cannot have — pairing dead-ended at HTTP 401
+        # "unauthorized" with the device sitting on the peer page
+        # showing "Couldn't add this device: unauthorized."
+        # Public + IP-rate-limited at the handler level instead.
+        # /confirm + /reject stay guarded because the DESKTOP calls
+        # them after the operator verbally compares the SAS.
+        r.add_post("/api/setup/device-invite/claim", self.api_setup_device_invite_claim)
         r.add_post("/api/setup/device-invite/confirm", self._guarded(self.api_setup_device_invite_confirm))
         r.add_post("/api/setup/device-invite/reject", self._guarded(self.api_setup_device_invite_reject))
         r.add_get("/api/setup/device-invite/qr.svg", self._guarded(self.api_setup_device_invite_qr))
@@ -6386,6 +6398,20 @@ class UIServer:
     async def api_setup_device_invite_claim(self, request: web.Request) -> web.Response:
         from one_link.pairing import compute_sas, format_sas
         from one_link.self_mesh_enrollment import b64u, b64u_decode
+
+        # 2026-05-23: this endpoint is intentionally PUBLIC (no UI
+        # token / cookie required) — see the route registration
+        # comment for why. Apply per-IP rate limiting so a noisy
+        # peer can't burn CPU spinning random invite tokens.
+        if self._rate_limited(
+            "device_invite_claim",
+            self._client_rate_key(request),
+            limit=MAX_FAILED_AUTH_ATTEMPTS,
+        ):
+            return web.json_response(
+                {"error": "too many claim attempts"},
+                status=429,
+            )
 
         state = self.daemon.state
         if state is None:

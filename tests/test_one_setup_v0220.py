@@ -126,6 +126,55 @@ def test_setup_device_invite_claim_requires_host_confirmation() -> None:
     assert "invite expired or not found" in snippet
 
 
+def test_device_invite_claim_route_is_public_not_ui_token_gated() -> None:
+    """2026-05-23: /api/setup/device-invite/claim is the bootstrap
+    endpoint for a NEW device that has no credentials yet. The
+    request body carries the ``setup_device_invite`` token, which
+    the handler validates against ``_setup_device_invites``. The
+    invite IS the auth. Wrapping the route in ``_guarded`` would
+    require the desktop UI's bearer/cookie token, which a phone
+    on a different Origin cannot have — pairing dead-ends at
+    HTTP 401 "unauthorized" with the device sitting on the peer
+    page showing "Couldn't add this device: unauthorized."
+
+    /confirm and /reject MUST stay guarded — they're called by
+    the desktop after the operator verbally compares the SAS.
+    """
+    src = _server_src()
+    # /claim line: no _guarded wrapper.
+    claim_line_idx = src.find(
+        'r.add_post("/api/setup/device-invite/claim",'
+    )
+    assert claim_line_idx > 0
+    # The route handler reference on that line must NOT be wrapped
+    # in self._guarded(...) — it must be a bare method reference.
+    line_end = src.find("\n", claim_line_idx)
+    claim_line = src[claim_line_idx:line_end]
+    assert "self._guarded(" not in claim_line, (
+        f"/claim route is gated by _guarded — phone bootstrap "
+        f"will 401. Line: {claim_line!r}"
+    )
+
+    # /confirm + /reject MUST stay guarded — these are
+    # desktop-initiated after the SAS match.
+    for guarded in ("/api/setup/device-invite/confirm", "/api/setup/device-invite/reject"):
+        idx = src.find(f'r.add_post("{guarded}",')
+        assert idx > 0
+        line = src[idx:src.find("\n", idx)]
+        assert "self._guarded(" in line, (
+            f"{guarded} must stay _guarded (desktop-initiated). "
+            f"Line: {line!r}"
+        )
+
+    # Handler must have its own IP-based rate limit to replace the
+    # one that lived in _guarded.
+    handler_idx = src.find("async def api_setup_device_invite_claim(")
+    snippet = src[handler_idx:handler_idx + 2000]
+    assert '"device_invite_claim"' in snippet
+    assert "_rate_limited(" in snippet
+    assert "too many claim attempts" in snippet
+
+
 def test_setup_device_invite_confirm_mints_cert_and_reject_blocks() -> None:
     src = _server_src()
     confirm_idx = src.find("async def api_setup_device_invite_confirm(")
