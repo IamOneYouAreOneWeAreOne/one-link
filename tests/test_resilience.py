@@ -270,3 +270,121 @@ def test_peer_disconnects_during_chunk_does_not_break_daemon():
         time.sleep(0.5)
         res = request(p.a.control_port, cmd="send", peer=p.b.short_id, body="post")
         assert res["ok"], res
+
+
+def test_burst_load_50_messages_no_silent_fallback():
+    """2026-05-22 audit Batch LL: 50 messages back-to-back stress
+    the per-peer send pipeline + ACK plumbing harder than the 10-
+    message burst soak. If the channel desyncs the ratchet, or
+    queues a request behind a stalled write, this exposes it.
+
+    Two regression nets are tighter than in the smaller soak test:
+
+      * Counter equality on the receive side (no missed AND no
+        duplicate deliveries — T3-N pattern extended).
+      * degradation_events ring empty on both daemons (T2-L
+        pattern extended) — silent native-transfer / QUIC fallback
+        would otherwise fire here and the message would still land,
+        masking the regression.
+    """
+    from collections import Counter
+    from tests.harness import message_log
+    with daemon_pair() as p:
+        N = 50
+        for i in range(N):
+            res = request(
+                p.a.control_port, cmd="send",
+                peer=p.b.short_id, body=f"stress-{i:03d}",
+            )
+            assert res.get("ok") is True, (i, res)
+        # Bounded polling for delivery via the harness's message_log
+        # helper which reads from state.db (not messages.jsonl).
+        deadline = time.time() + 30.0
+        delivered: Counter = Counter()
+        while time.time() < deadline:
+            delivered = Counter(
+                m["body"] for m in message_log(p.b.home)
+                if m.get("t") == "TEXT" and m.get("dir") == "in"
+                and isinstance(m.get("body"), str)
+                and m["body"].startswith("stress-")
+            )
+            if sum(delivered.values()) >= N:
+                break
+            time.sleep(0.1)
+        # Every body delivered exactly once.
+        expected = Counter(f"stress-{i:03d}" for i in range(N))
+        missing = expected - delivered
+        duplicates = {b: n for b, n in delivered.items() if n > 1}
+        assert not missing, f"missing {len(missing)}/{N}: {sorted(missing)[:5]}"
+        assert not duplicates, f"duplicate deliveries: {duplicates}"
+        # No silent-fallback events on either side.
+        for handle in (p.a, p.b):
+            diag = request(handle.control_port, cmd="transfer_diagnostics")
+            events = diag.get("degradation_events") or []
+            bad = [
+                e for e in events
+                if e.get("kind") in (
+                    "native_transfer_unavailable",
+                    "native_transfer_receiver_unavailable",
+                    "stream_quic_batch_failed",
+                    "file_offer_batch_inner_failed",
+                    "provenance_broadcast_failed",
+                )
+            ]
+            assert not bad, (
+                f"silent fallback fired during burst-50 on "
+                f"{handle.short_id}: {bad}"
+            )
+
+
+def test_bidi_concurrent_sends_no_deadlock():
+    """2026-05-22 audit Batch LL: stress per-peer send-lock contention.
+    Spawn 20 concurrent sends in BOTH directions simultaneously
+    using threads against the control socket. The per-peer send
+    pipeline must not deadlock under contention — every send
+    must return ``ok`` within the timeout.
+    """
+    import threading
+    with daemon_pair() as p:
+        a_results: list[dict] = []
+        b_results: list[dict] = []
+        errors: list[BaseException] = []
+        N = 20
+
+        def send_a(i: int) -> None:
+            try:
+                a_results.append(request(
+                    p.a.control_port, cmd="send",
+                    peer=p.b.short_id, body=f"a-{i:02d}",
+                ))
+            except BaseException as e:  # pragma: no cover
+                errors.append(e)
+
+        def send_b(i: int) -> None:
+            try:
+                b_results.append(request(
+                    p.b.control_port, cmd="send",
+                    peer=p.a.short_id, body=f"b-{i:02d}",
+                ))
+            except BaseException as e:  # pragma: no cover
+                errors.append(e)
+
+        threads = []
+        for i in range(N):
+            t1 = threading.Thread(target=send_a, args=(i,), daemon=True)
+            t2 = threading.Thread(target=send_b, args=(i,), daemon=True)
+            threads.append(t1)
+            threads.append(t2)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60.0)
+            assert not t.is_alive(), "send thread deadlocked"
+
+        assert not errors, f"send threads raised: {errors}"
+        assert len(a_results) == N, f"A: got {len(a_results)}/{N}"
+        assert len(b_results) == N, f"B: got {len(b_results)}/{N}"
+        for i, r in enumerate(a_results):
+            assert r.get("ok"), (i, "a", r)
+        for i, r in enumerate(b_results):
+            assert r.get("ok"), (i, "b", r)
