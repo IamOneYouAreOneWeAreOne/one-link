@@ -106,6 +106,36 @@ def test_settings_devices_controls_have_handlers() -> None:
         ), control_id
 
 
+def test_settings_advanced_summary_cards_are_real_actions() -> None:
+    html = _index()
+    settings = _settings_shell(html)
+    grid_start = settings.index('id="settings-advanced-support-grid"')
+    grid_end = settings.index('id="set-log-level"')
+    advanced_grid = settings[grid_start:grid_end]
+
+    for control_id in (
+        "settings-advanced-doctor",
+        "settings-advanced-bundle",
+        "settings-advanced-truth",
+        "settings-advanced-live",
+    ):
+        assert re.search(
+            rf'<button[^>]+id="{re.escape(control_id)}"',
+            advanced_grid,
+        ), control_id
+        assert re.search(
+            rf'\$\("#{re.escape(control_id)}"\)\?\.addEventListener\("click"',
+            html,
+        ), control_id
+
+    assert '<div class="settings-control-card flat">' not in advanced_grid
+    assert "_clickSettingsButton" in html
+    assert '"#settings-run-doctor"' in html
+    assert '"#settings-export-diagnostics"' in html
+    assert '"#settings-open-diagnostics"' in html
+    assert 'switchSettingsPane("about")' in html
+
+
 def test_settings_save_feedback_is_visible_and_wired() -> None:
     html = _index()
     settings = _settings_shell(html)

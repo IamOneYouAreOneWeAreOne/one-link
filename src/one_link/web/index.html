@@ -3998,6 +3998,22 @@
   .settings-health-card.flat {
     background: var(--bg-2);
   }
+  button.settings-control-card {
+    display: block;
+    width: 100%;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  button.settings-control-card:hover {
+    background: var(--bg-3);
+    border-color: rgba(124,92,255,.34);
+  }
+  button.settings-control-card:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
   .settings-card-kicker,
   .settings-health-label {
     color: var(--text-dim);
@@ -9629,34 +9645,38 @@
               deep health checks, and truth-status inspection.
             </p>
             <div class="settings-control-grid" id="settings-advanced-support-grid">
-              <div class="settings-control-card flat">
+              <button type="button" class="settings-control-card flat" id="settings-advanced-doctor"
+                aria-label="Run One Link Doctor">
                 <div class="settings-card-kicker">Health</div>
                 <div class="settings-card-title">Doctor first</div>
                 <div class="settings-card-detail">
                   Runs daemon, route, storage, peer, and UI readiness checks.
                 </div>
-              </div>
-              <div class="settings-control-card flat">
+              </button>
+              <button type="button" class="settings-control-card flat" id="settings-advanced-bundle"
+                aria-label="Download a redacted diagnostic bundle">
                 <div class="settings-card-kicker">Support</div>
                 <div class="settings-card-title">Redacted bundle</div>
                 <div class="settings-card-detail">
                   Exports only shape, version, and health metadata.
                 </div>
-              </div>
-              <div class="settings-control-card flat">
+              </button>
+              <button type="button" class="settings-control-card flat" id="settings-advanced-truth"
+                aria-label="Open the feature truth status matrix">
                 <div class="settings-card-kicker">Truth</div>
                 <div class="settings-card-title">Ship-state matrix</div>
                 <div class="settings-card-detail">
                   Shows what is proven, wired, exposed, and soak-tested.
                 </div>
-              </div>
-              <div class="settings-control-card flat">
+              </button>
+              <button type="button" class="settings-control-card flat" id="settings-advanced-live"
+                aria-label="Open live diagnostics">
                 <div class="settings-card-kicker">Runtime</div>
                 <div class="settings-card-title">Live diagnostics</div>
                 <div class="settings-card-detail">
                   Opens the local debug stream when something feels off.
                 </div>
-              </div>
+              </button>
             </div>
             <div class="settings-section">
               <div class="settings-section-h"><span>Log verbosity</span></div>
@@ -25798,6 +25818,32 @@
     }
     host.dataset.painted = "1";
   }
+  function _clickSettingsButton(id, unavailableMessage) {
+    const btn = $(id);
+    if (!btn) {
+      toast(unavailableMessage || "That tool is not available in this build.", "bad", 4500);
+      return false;
+    }
+    btn.click();
+    return true;
+  }
+  $("#settings-advanced-doctor")?.addEventListener("click", () => {
+    if (!_clickSettingsButton("#settings-run-doctor", "Doctor is not available in this build.")) return;
+    $("#doctor-results")?.scrollIntoView({ block: "center", behavior: "smooth" });
+  });
+  $("#settings-advanced-bundle")?.addEventListener("click", () => {
+    _clickSettingsButton("#settings-export-diagnostics", "Diagnostic export is not available in this build.");
+  });
+  $("#settings-advanced-truth")?.addEventListener("click", () => {
+    switchSettingsPane("about");
+    _renderTruthDashboard();
+    const target = $("#truth-grid") || document.querySelector(".truth-dashboard");
+    target?.scrollIntoView({ block: "center", behavior: "smooth" });
+    toast("Opened feature truth status.", "info", 2600);
+  });
+  $("#settings-advanced-live")?.addEventListener("click", () => {
+    _clickSettingsButton("#settings-open-diagnostics", "Live diagnostics are not available in this build.");
+  });
   // Paint truth dashboard whenever the About pane becomes visible.
   document.addEventListener("DOMContentLoaded", () => {
     const aboutPane = document.querySelector('[data-settings-pane="about"]');
