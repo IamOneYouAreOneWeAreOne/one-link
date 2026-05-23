@@ -333,12 +333,19 @@ def test_server_init_declares_https_attrs():
     """UIServer.__init__ MUST declare self.https_site,
     self.https_port, self.https_cert_fp_sha256 even before start()
     runs, so api_mint_pairing can read them safely on first
-    request without an AttributeError."""
+    request without an AttributeError.
+
+    2026-05-22: the bind_host comment block (LAN-bind default doc)
+    grew start() past the original 5000-char window. Read to the
+    next ``async def`` boundary or 10000 chars max so structural
+    checks survive reasonable in-function additions.
+    """
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def start(self)")
-    # The HTTPS-state init lives at the end of start() but should
-    # be set before the function returns the port.
-    snippet = src[idx:idx + 5000]
+    end_idx = src.find("\n    async def ", idx + 30)
+    if end_idx == -1 or end_idx - idx > 10000:
+        end_idx = idx + 10000
+    snippet = src[idx:end_idx]
     assert "self.https_site = None" in snippet
     assert "self.https_port = None" in snippet
     assert "self.https_cert_fp_sha256 = None" in snippet
