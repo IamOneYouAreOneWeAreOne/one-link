@@ -224,8 +224,16 @@ def generate_self_signed(
                 # with reality. Without it, iOS's PKI validator
                 # rejects the cert as "not a CA" and silently drops
                 # it from Certificate Trust Settings.
+                #
+                # crl_sign also enabled per Apple Developer Forums
+                # guidance: "Certificate Sign, CRL Sign" together
+                # are the canonical KeyUsage set for a CA-capable
+                # cert. The CRL isn't actually consulted (we don't
+                # publish one) but iOS's trust validator examines
+                # the bit and the missing flag silently drops the
+                # cert from the trust UI on some iOS 17+ versions.
                 key_cert_sign=True,
-                crl_sign=False,
+                crl_sign=True,
                 encipher_only=False,
                 decipher_only=False,
             ),
@@ -233,6 +241,23 @@ def generate_self_signed(
         )
         .add_extension(
             x509.ExtendedKeyUsage([x509.ExtendedKeyUsageOID.SERVER_AUTH]),
+            critical=False,
+        )
+        # 2026-05-23: subjectKeyIdentifier + authorityKeyIdentifier
+        # are required for iOS to index a self-signed root CA into
+        # its trust UI. The Apple TN2326 and openssl docs both flag
+        # these as load-bearing for CA recognition. Without them,
+        # iOS installs the cert via mobileconfig but the cert never
+        # surfaces in Settings > General > About > Certificate Trust
+        # Settings — symptom-equivalent to the missing-CA-flag bug
+        # but rooted in a different validator gate. For a self-signed
+        # cert the two identifiers MUST match (issuer == subject).
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()),
             critical=False,
         )
         .sign(key, hashes.SHA256())
