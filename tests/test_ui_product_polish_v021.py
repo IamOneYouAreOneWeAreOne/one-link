@@ -14,9 +14,13 @@ def test_jump_date_accepts_human_dates_and_reports_errors() -> None:
     html = _html()
     assert "function _normalizeJumpDateInput(raw)" in html
     assert "YYYY-MM-DD or MM/DD/YYYY" in html
+    assert "Years must be four digits" in html
+    assert 'id="jump-date-hint" role="status" aria-live="polite"' in html
+    assert 'input.setAttribute("aria-describedby", "jump-date-hint")' in html
     assert 'input.classList.toggle("invalid", kind === "bad")' in html
     assert 'toast(text, "bad", 4500)' in html
     assert "That calendar date does not exist." in html
+    assert "That date is outside this conversation" in html
 
 
 def test_first_conversation_render_forces_latest_messages_into_view() -> None:
@@ -40,11 +44,26 @@ def test_nearby_devices_have_explicit_details_and_chat_actions() -> None:
 def test_file_details_explain_open_route_and_actions() -> None:
     html = _html()
     assert "function fileAccessInfoForMessage(msg, t)" in html
+    assert "function _fileDiagnosticPayload(msg, t, access, kind)" in html
     assert '"Open route"' in html
     assert '"Source"' in html
     assert '"Needs"' in html
+    assert '"Preview route"' in html
     assert '"Save a copy"' in html
+    assert '"Copy file details"' in html
+    assert 'copyToClipboard(JSON.stringify(diagnostic, null, 2), "file details")' in html
     assert "Preview not available on this side" in html
+    assert "Preview unavailable on this device" in html
+
+
+def test_chat_file_preview_avoids_fragile_unicode_separators() -> None:
+    html = _html()
+    assert '? ` - ${_lightboxState.index + 1} of ${count}`' in html
+    assert '+ (ent.sizeBytes ? ` - ${fmtBytes(ent.sizeBytes)}` : "")' in html
+    assert 'prev.textContent = "<";' in html
+    assert 'next.textContent = ">";' in html
+    assert '? ` · ${_lightboxState.index + 1} of ${count}`' not in html
+    assert '+ (ent.sizeBytes ? ` · ${fmtBytes(ent.sizeBytes)}` : "")' not in html
 
 
 def test_launcher_and_tray_open_authenticated_owner_url() -> None:

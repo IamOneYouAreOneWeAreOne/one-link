@@ -12991,10 +12991,10 @@
     if (!ent) return;
     const count = _lightboxState.gallery.length;
     const indexLabel = count > 1
-      ? ` · ${_lightboxState.index + 1} of ${count}`
+      ? ` - ${_lightboxState.index + 1} of ${count}`
       : "";
     lb.querySelector(".file-lightbox-name").textContent = (ent.name || "image")
-      + (ent.sizeBytes ? ` · ${fmtBytes(ent.sizeBytes)}` : "")
+      + (ent.sizeBytes ? ` - ${fmtBytes(ent.sizeBytes)}` : "")
       + indexLabel;
     const body = lb.querySelector(".file-lightbox-body");
     body.replaceChildren();
@@ -13003,14 +13003,14 @@
     img.className = "file-lightbox-img";
     img.onerror = () => {
       const err = el("div", "file-lightbox-error");
-      err.appendChild(el("div", "title", "Image preview unavailable"));
+      err.appendChild(el("div", "title", "Preview unavailable on this device"));
       err.appendChild(el("div", "hint",
-        "The transfer record is present, but this device could not load the image bytes from the local preview endpoint."));
+        "One Link has the transfer record, but the local preview route did not return image bytes. Open or save below, or retry from the message details."));
       const rows = el("div", "file-detail-rows");
       rows.appendChild(_fileDetailRow("File", ent.name || "image"));
       rows.appendChild(_fileDetailRow("Size", ent.sizeBytes ? fmtBytes(ent.sizeBytes) : "-"));
-      rows.appendChild(_fileDetailRow("Source", ent.url || "-"));
-      rows.appendChild(_fileDetailRow("Try", "Open in new tab or save a copy. If that also fails, the local file route no longer has the image."));
+      rows.appendChild(_fileDetailRow("Preview route", ent.url || "No local preview route"));
+      rows.appendChild(_fileDetailRow("What to try", "Open in new tab, save a copy, or retry preview from the chat bubble."));
       err.appendChild(rows);
       body.replaceChildren(err);
     };
@@ -13040,13 +13040,13 @@
     prev.type = "button";
     prev.className = "file-lightbox-prev";
     prev.setAttribute("aria-label", "Previous image");
-    prev.textContent = "‹";
+    prev.textContent = "<";
     prev.onclick = (ev) => { ev.stopPropagation(); _stepLightbox(-1); };
     const next = document.createElement("button");
     next.type = "button";
     next.className = "file-lightbox-next";
     next.setAttribute("aria-label", "Next image");
-    next.textContent = "›";
+    next.textContent = ">";
     next.onclick = (ev) => { ev.stopPropagation(); _stepLightbox(1); };
     lb.appendChild(prev);
     lb.appendChild(next);
@@ -13679,6 +13679,19 @@
     row.appendChild(el("span", "v", value || "-"));
     return row;
   }
+  function _fileDiagnosticPayload(msg, t, access, kind) {
+    return {
+      file: msg.name || "file",
+      size: fmtBytes(msg.size || t?.total_bytes || 0),
+      status: statusLabel(t, kind === "sent" ? "Done" : kind),
+      direction: msg.dir === "out" ? "sent" : "received",
+      type: isImageName(msg.name || "") ? "image" : (isAudioName(msg.name || "") ? "audio" : "file"),
+      preview_route: access.route,
+      source: access.source,
+      problem: access.problem || "",
+      transfer_id: t?.id || "",
+    };
+  }
   function _filePreviewSourceLabel(msg, t) {
     if (msg.dir === "in") return "Received file on this computer";
     if (msg.dir === "out" && t?.id) return "Sender copy from transfer ledger";
@@ -13701,11 +13714,13 @@
     rows.appendChild(_fileDetailRow("Preview", _filePreviewSourceLabel(msg, t)));
     rows.appendChild(_fileDetailRow("Open route", access.route));
     rows.appendChild(_fileDetailRow("Source", access.source));
+    rows.appendChild(_fileDetailRow("Preview route", access.url ? "Ready on this device" : "Unavailable on this device"));
     if (access.problem) rows.appendChild(_fileDetailRow("Needs", access.problem));
     if (t?.id) rows.appendChild(_fileDetailRow("Transfer", String(t.id).slice(0, 12)));
     details.appendChild(rows);
 
     const actions = el("div", "actions");
+    const diagnostic = _fileDiagnosticPayload(msg, t, access, kind);
     if (access.url) {
       const open = el("a", "", "Open");
       open.href = access.url;
@@ -13720,6 +13735,14 @@
       const unavailable = el("span", "hint", "Preview not available on this side");
       actions.appendChild(unavailable);
     }
+    const copy = el("button", "", "Copy file details");
+    copy.type = "button";
+    copy.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      copyToClipboard(JSON.stringify(diagnostic, null, 2), "file details");
+    };
+    actions.appendChild(copy);
     details.appendChild(actions);
 
     const facts = renderTransferFacts(t, kind);
@@ -13728,13 +13751,14 @@
   }
   function renderImagePreviewFallback(msg, url, reason, onRetry) {
     const wrap = el("div", "file-preview-fallback");
-    wrap.appendChild(el("div", "title", "Preview unavailable"));
+    wrap.appendChild(el("div", "title", "Preview unavailable on this device"));
     wrap.appendChild(el("div", "hint",
       reason || "The transfer finished, but this device could not load the image preview from its local file endpoint."));
     const rows = el("div", "file-detail-rows");
     rows.appendChild(_fileDetailRow("File", msg.name || "image"));
     rows.appendChild(_fileDetailRow("Size", fmtBytes(msg.size || 0)));
-    rows.appendChild(_fileDetailRow("Source", url ? "Local preview route" : "No preview route"));
+    rows.appendChild(_fileDetailRow("Preview route", url ? "Local browser route" : "No preview route"));
+    rows.appendChild(_fileDetailRow("Why", reason || "The local route did not return image bytes."));
     wrap.appendChild(rows);
     const actions = el("div", "actions");
     if (url) {
@@ -24578,6 +24602,12 @@
   function _normalizeJumpDateInput(raw) {
     const v = String(raw || "").trim();
     if (!v) return { ok: false, reason: "Choose a date first." };
+    if (/(^|[\/-])\d{5,}($|[\/-])/.test(v)) {
+      return {
+        ok: false,
+        reason: "Years must be four digits. Use a date like 2026-05-21.",
+      };
+    }
     let y; let m; let d;
     let match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(v);
     if (match) {
@@ -24664,7 +24694,7 @@
       <label class="jdp-label">Jump to date</label>
       <input type="date" class="jdp-input" />
       <button type="button" class="jdp-go">Jump</button>
-      <div class="jdp-hint"></div>
+      <div class="jdp-hint" id="jump-date-hint" role="status" aria-live="polite"></div>
     `;
     document.body.appendChild(pop);
     const r = ev.currentTarget.getBoundingClientRect();
@@ -24676,8 +24706,13 @@
     input.min = firstKey;
     input.max = lastKey;
     input.value = lastKey;
+    input.setAttribute("aria-describedby", "jump-date-hint");
+    input.setAttribute("inputmode", "numeric");
     hint.textContent = `Available: ${_friendlyDateKey(firstKey)} - ${_friendlyDateKey(lastKey)}. If that day has no messages, I will jump to the nearest one.`;
-    setTimeout(() => input.focus(), 60);
+    setTimeout(() => {
+      input.focus();
+      try { input.showPicker?.(); } catch {}
+    }, 60);
     function setJumpHint(text, kind = "info") {
       hint.textContent = text;
       hint.classList.toggle("bad", kind === "bad");
@@ -24685,6 +24720,11 @@
       input.setAttribute("aria-invalid", kind === "bad" ? "true" : "false");
       if (kind === "bad") toast(text, "bad", 4500);
     }
+    input.addEventListener("input", () => {
+      hint.classList.remove("bad");
+      input.classList.remove("invalid");
+      input.setAttribute("aria-invalid", "false");
+    });
     function close() {
       pop.remove();
       document.removeEventListener("click", off, true);
@@ -24704,7 +24744,14 @@
       }
       const v = parsed.value;
       input.value = v;
-      setJumpHint(`Jumping to ${_friendlyDateKey(v)}...`);
+      if (v < firstKey || v > lastKey) {
+        setJumpHint(
+          `That date is outside this conversation. I will jump to the nearest message between ${_friendlyDateKey(firstKey)} and ${_friendlyDateKey(lastKey)}.`,
+          "info",
+        );
+      } else {
+        setJumpHint(`Jumping to ${_friendlyDateKey(v)}...`);
+      }
       const exact = jumpMessages.find((mm) => _localDateKeyFromMs(mm._jumpTs) === v);
       let target = exact;
       let note = "";
