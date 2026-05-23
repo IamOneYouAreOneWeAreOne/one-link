@@ -374,6 +374,12 @@ _CONNECT_LANDING_HTML_IOS = """<!doctype html>
 # secure protocol layer, keep the UI online instead of flickering offline.
 PEER_CONTACT_ONLINE_GRACE_MS = 2 * 60 * 1000
 
+# 2026-05-23: how long an invite record lingers after /confirm or
+# /reject so the claiming device can poll /status and pick up the
+# minted cert (or learn it was rejected). The pre-grace TTL is
+# 5 min; after operator action we extend by this many ms.
+SETUP_DEVICE_INVITE_GRACE_MS = 5 * 60 * 1000
+
 
 # v0.11.6 helpers for Storage + data settings.
 def _parse_int_or_none(raw):
@@ -1689,6 +1695,12 @@ class UIServer:
         # /confirm + /reject stay guarded because the DESKTOP calls
         # them after the operator verbally compares the SAS.
         r.add_post("/api/setup/device-invite/claim", self.api_setup_device_invite_claim)
+        # 2026-05-23: /status is the phone's poll surface — same
+        # public-by-design rationale as /claim. The token is the
+        # auth. Returns pending / confirmed (with cert) / rejected /
+        # expired, so the phone learns the operator's decision
+        # without needing a WebSocket back to this daemon.
+        r.add_get("/api/setup/device-invite/status", self.api_setup_device_invite_status)
         r.add_post("/api/setup/device-invite/confirm", self._guarded(self.api_setup_device_invite_confirm))
         r.add_post("/api/setup/device-invite/reject", self._guarded(self.api_setup_device_invite_reject))
         r.add_get("/api/setup/device-invite/qr.svg", self._guarded(self.api_setup_device_invite_qr))
@@ -5364,6 +5376,13 @@ class UIServer:
             pending = rec.get("pending_claim")
             if not isinstance(pending, dict):
                 continue
+            # 2026-05-23: skip records the operator has already
+            # acted on. They linger in the dict for the phone-poll
+            # grace window but the desktop snapshot should not
+            # keep prompting for a confirmation that already
+            # happened or was already rejected.
+            if rec.get("confirmed") or rec.get("rejected"):
+                continue
             pending_claims.append({
                 "token": token,
                 "label": pending.get("label") or rec.get("label") or "New device",
@@ -6282,9 +6301,16 @@ class UIServer:
         return web.json_response(self._one_setup_snapshot())
 
     def _sweep_setup_device_invites(self) -> None:
+        # 2026-05-23: only remove on expires_ms. Previously also
+        # removed on ``rec.get("claimed")`` immediately after confirm
+        # — which deleted the cert before the phone (which has no
+        # WebSocket back to this daemon and only learns about
+        # confirm via polling) could fetch it. /confirm now extends
+        # expires_ms by SETUP_DEVICE_INVITE_GRACE_MS so the phone
+        # has a window to pick up the cert via /status.
         now = int(time.time() * 1000)
         for token, rec in list(self._setup_device_invites.items()):
-            if int(rec.get("expires_ms") or 0) <= now or rec.get("claimed"):
+            if int(rec.get("expires_ms") or 0) <= now:
                 self._setup_device_invites.pop(token, None)
 
     def _setup_invite_deep_link(self, token: str) -> str:
@@ -6468,6 +6494,64 @@ class UIServer:
                 "hint": str(exc),
             }, status=400)
 
+    async def api_setup_device_invite_status(self, request: web.Request) -> web.Response:
+        """2026-05-23: public status surface for the claiming
+        device (phone) to poll after its /claim returned
+        pending=True. Token-in-query is the auth — same model as
+        /claim. Returns one of:
+
+          * ``{status: "pending", trust_code}`` — claim recorded,
+            operator hasn't acted yet
+          * ``{status: "confirmed", root_pub_b64, device_pub_b64,
+            cert_b64, label, device_kind, trusted}`` — operator
+            tapped Codes match; cert is the freshly-minted
+            device cert the phone should persist locally
+          * ``{status: "rejected", reason}`` — operator tapped
+            reject; phone should clear state and show a "scan a
+            fresh QR" message
+          * ``{status: "expired"}`` — invite not found (TTL
+            passed, or grace window after action elapsed)
+
+        Per-IP rate limited to match /claim. GET (no body) so
+        Safari can poll cheaply without CSRF concerns.
+        """
+        if self._rate_limited(
+            "device_invite_status",
+            self._client_rate_key(request),
+            limit=MAX_FAILED_AUTH_ATTEMPTS,
+        ):
+            return web.json_response(
+                {"error": "too many status polls"},
+                status=429,
+            )
+        token = request.query.get("token") or ""
+        self._sweep_setup_device_invites()
+        invite = self._setup_device_invites.get(token)
+        if invite is None:
+            return web.json_response({"status": "expired"})
+        if invite.get("rejected"):
+            return web.json_response({
+                "status": "rejected",
+                "reason": str(invite.get("reject_reason") or "rejected"),
+            })
+        if invite.get("confirmed"):
+            row = invite.get("device_row") or {}
+            return web.json_response({
+                "status": "confirmed",
+                **row,
+            })
+        pending = invite.get("pending_claim")
+        if isinstance(pending, dict):
+            return web.json_response({
+                "status": "pending",
+                "trust_code": pending.get("trust_code") or "",
+                "label": pending.get("label") or "",
+                "device_kind": pending.get("device_kind") or "",
+            })
+        # Invite exists but no claim yet — phone shouldn't normally
+        # poll in this state but answer gracefully.
+        return web.json_response({"status": "awaiting_claim"})
+
     async def api_setup_device_invite_confirm(self, request: web.Request) -> web.Response:
         from one_link.self_mesh_enrollment import b64u, mint_device_cert
 
@@ -6526,8 +6610,31 @@ class UIServer:
                 trusted=True,
                 metadata={"source": "one_setup_invite_confirmed"},
             )
+            # 2026-05-23: do NOT pop the invite immediately. The
+            # claiming device (phone) only learns about /confirm by
+            # polling /api/setup/device-invite/status — it has no
+            # WebSocket back to this daemon. Keep the invite alive
+            # for SETUP_DEVICE_INVITE_GRACE_MS with the cert cached
+            # so the phone can fetch the cert and complete the
+            # pair. ``_sweep_setup_device_invites`` removes purely
+            # on expires_ms now (no longer on ``claimed``).
             invite["claimed"] = True
-            self._setup_device_invites.pop(token, None)
+            invite["confirmed"] = True
+            invite["device_cert"] = bytes(cert)
+            invite["device_row"] = {
+                "root_pub_b64": b64u(bytes(invite["root_pub"])),
+                "device_pub_b64": b64u(device_pub),
+                "cert_b64": b64u(cert),
+                "device_kind": row["device_kind"],
+                "label": row["label"],
+                "trusted": row["trusted"],
+                "revoked": row["revoked"],
+            }
+            now_ms = int(time.time() * 1000)
+            invite["expires_ms"] = max(
+                int(invite.get("expires_ms") or 0),
+                now_ms + SETUP_DEVICE_INVITE_GRACE_MS,
+            )
             state.record_self_mesh_audit(
                 event="setup_device_invite_confirmed",
                 severity="good",
@@ -6566,18 +6673,31 @@ class UIServer:
         body = await request.json()
         try:
             token = str(body.get("token") or "")
-            invite = self._setup_device_invites.pop(token, None)
+            invite = self._setup_device_invites.get(token)
             if invite is None:
                 raise ValueError("invite expired or not found")
             pending = invite.get("pending_claim") or {}
             device_pub = pending.get("device_pub") if isinstance(pending, dict) else None
+            reason = str(body.get("reason") or "codes did not match")
+            # 2026-05-23: same grace pattern as /confirm — mark the
+            # invite as rejected and extend lifetime so the phone
+            # can poll /status and learn the rejection rather than
+            # spinning forever on "check code".
+            invite["rejected"] = True
+            invite["reject_reason"] = reason
+            invite["claimed"] = True  # prevents re-claiming under same token
+            now_ms = int(time.time() * 1000)
+            invite["expires_ms"] = max(
+                int(invite.get("expires_ms") or 0),
+                now_ms + SETUP_DEVICE_INVITE_GRACE_MS,
+            )
             state.record_self_mesh_audit(
                 event="setup_device_invite_rejected",
                 severity="warn",
                 root_pub=bytes(invite["root_pub"]),
                 device_pub=bytes(device_pub) if isinstance(device_pub, (bytes, bytearray)) else None,
                 detail=str(pending.get("label") or invite.get("label") or "rejected") if isinstance(pending, dict) else "rejected",
-                metadata={"reason": str(body.get("reason") or "codes did not match")},
+                metadata={"reason": reason},
             )
             return web.json_response({"ok": True, "rejected": True})
         except Exception as exc:
