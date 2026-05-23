@@ -175,6 +175,48 @@ def test_device_invite_claim_route_is_public_not_ui_token_gated() -> None:
     assert "too many claim attempts" in snippet
 
 
+def test_setup_device_invite_confirm_caches_webrtc_handoff() -> None:
+    """2026-05-23: when /confirm succeeds, the invite record must
+    cache the WebRTC handoff bundle (pair_token + daemon_fingerprint
+    + ws_signaling_url + daemon_pubkey_b64u) under device_row so
+    the phone's /status poll can pick them up and run
+    _runAutoPairFlow to actually open a live control channel.
+    Without these the phone ends with a device cert but no live
+    link and dead-ends at the 'trusted' card.
+    """
+    src = _server_src()
+    confirm_idx = src.find("async def api_setup_device_invite_confirm(")
+    assert confirm_idx > 0
+    confirm = src[confirm_idx:confirm_idx + 6000]
+    # The helper must be called and its result spread into
+    # device_row so /status can return it to the phone.
+    assert "_setup_device_invite_pair_handoff" in confirm
+    assert "**pair_handoff" in confirm
+
+
+def test_setup_device_invite_pair_handoff_shape() -> None:
+    """The handoff helper builds the same field set the autopair
+    QR mints. Phone-side peer.html relies on exactly:
+      pair_token, daemon_fingerprint, ws_signaling_url,
+      daemon_pubkey_b64u
+    Any rename here breaks the phone's WebRTC bootstrap silently.
+    """
+    src = _server_src()
+    helper_idx = src.find("def _setup_device_invite_pair_handoff(")
+    assert helper_idx > 0
+    helper = src[helper_idx:helper_idx + 2500]
+    for field in (
+        '"pair_token"',
+        '"daemon_fingerprint"',
+        '"daemon_pubkey_b64u"',
+        '"ws_signaling_url"',
+    ):
+        assert field in helper, f"handoff missing {field}"
+    # Must reuse mint_pairing_token (single-use signaling auth)
+    # rather than rolling its own token format.
+    assert "mint_pairing_token" in helper
+
+
 def test_setup_device_invite_confirm_mints_cert_and_reject_blocks() -> None:
     src = _server_src()
     confirm_idx = src.find("async def api_setup_device_invite_confirm(")

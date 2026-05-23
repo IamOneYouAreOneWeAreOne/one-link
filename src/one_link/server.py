@@ -6303,6 +6303,53 @@ class UIServer:
             )
         return web.json_response(self._one_setup_snapshot())
 
+    def _setup_device_invite_pair_handoff(self) -> dict:
+        """2026-05-23: build the WebRTC handoff bundle a freshly-
+        confirmed phone needs to open a control DataChannel back
+        to this daemon. Reuses the same machinery the older
+        autopair QR flow uses (``api_mint_pairing``):
+
+          pair_token       — single-use signaling auth
+          daemon_fingerprint — pinned identity
+          daemon_pubkey_b64u — pinned public key for offer-signature
+                                verification
+          ws_signaling_url  — wss endpoint for offer/answer exchange
+
+        Without this bundle the phone has a cryptographic device
+        cert but no live link to actually exchange messages /
+        fetch chats — the very dead-end the user hit at
+        ``Phone browser is now part of your One identity`` with
+        nowhere to go from there.
+        """
+        from one_link.peer_rtc import _b64u as _peer_b64u
+        pp = self.peer_rtc.mint_pairing_token()
+        daemon_pub = self.daemon.me.public_bytes
+        daemon_pub_b64u = _peer_b64u(daemon_pub)
+        daemon_fp = self.daemon.me.fingerprint
+        try:
+            host = self.bind_host
+            if host in ("0.0.0.0", "::", ""):  # nosec B104
+                from one_link.app import _detect_lan_ip
+                host = _detect_lan_ip()
+            if self.https_port:
+                ws_scheme = "wss"
+                ws_port = self.https_port
+            else:
+                ws_scheme = "ws"
+                ws_port = self.port
+        except Exception:
+            ws_scheme = "ws"
+            ws_port = self.port
+            host = self.bind_host
+        ws_url = f"{ws_scheme}://{host}:{ws_port}/api/v1/peer-rtc"
+        return {
+            "pair_token": pp.token,
+            "pair_token_ttl_ms": pp.ttl_ms,
+            "daemon_fingerprint": daemon_fp,
+            "daemon_pubkey_b64u": daemon_pub_b64u,
+            "ws_signaling_url": ws_url,
+        }
+
     def _sweep_setup_device_invites(self) -> None:
         # 2026-05-23: only remove on expires_ms. Previously also
         # removed on ``rec.get("claimed")`` immediately after confirm
@@ -6624,6 +6671,13 @@ class UIServer:
             invite["claimed"] = True
             invite["confirmed"] = True
             invite["device_cert"] = bytes(cert)
+            # 2026-05-23: bundle the WebRTC handoff fields so the
+            # phone-side /status poll can hand them straight to
+            # _runAutoPairFlow without a second round trip. Without
+            # this the phone has a device cert but no live channel
+            # to the daemon and dead-ends at 'trusted' with no
+            # path to actually use the app.
+            pair_handoff = self._setup_device_invite_pair_handoff()
             invite["device_row"] = {
                 "root_pub_b64": b64u(bytes(invite["root_pub"])),
                 "device_pub_b64": b64u(device_pub),
@@ -6632,6 +6686,7 @@ class UIServer:
                 "label": row["label"],
                 "trusted": row["trusted"],
                 "revoked": row["revoked"],
+                **pair_handoff,
             }
             now_ms = int(time.time() * 1000)
             invite["expires_ms"] = max(

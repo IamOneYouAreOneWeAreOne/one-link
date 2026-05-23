@@ -3137,22 +3137,37 @@
         _selfMeshEnrollSetState(
           "good",
           "trusted",
-          `${merged.label} is now part of your One identity.`,
+          `${merged.label} is part of your One identity. Opening live link…`,
         );
-        // 2026-05-23: try to load the daemon chat roster so the
-        // phone has somewhere to go after pair. This requires a
-        // live WebRTC control channel which the
-        // setup_device_invite flow doesn't yet open — if it
-        // throws, surface a clear "what's next" hint instead of
-        // a dead-end blank card.
-        try {
-          await _refreshDaemonRoster();
-        } catch (_e) {
-          _selfMeshEnrollSetState(
-            "good",
-            "trusted",
-            `${merged.label} is paired. The chat UI on this phone needs a live link to your laptop — open One Link on the laptop to start using it.`,
-          );
+        // 2026-05-23: bridge into the autopair WebRTC bootstrap
+        // so the phone gets a live control DataChannel + roster
+        // load. The /confirm handler returned pair_token +
+        // daemon_fingerprint + ws_signaling_url in device_row;
+        // build the pair object _runAutoPairFlow expects and
+        // hand off. Without this the phone has a device cert
+        // but no live link and dead-ends at 'trusted' with
+        // nowhere to go.
+        if (payload.pair_token && payload.daemon_fingerprint && payload.ws_signaling_url) {
+          // Hide the enroll card so autopair-card takes the screen.
+          hide($("#selfmesh-enroll-card"));
+          await _runAutoPairFlow({
+            pair_token: payload.pair_token,
+            daemon_fingerprint: payload.daemon_fingerprint,
+            ws_url: payload.ws_signaling_url,
+          });
+        } else {
+          // Fallback: no handoff fields (shouldn't happen post
+          // server fix, but defensive). Try roster directly; if
+          // it fails, surface a clear next-step.
+          try {
+            await _refreshDaemonRoster();
+          } catch (_e) {
+            _selfMeshEnrollSetState(
+              "good",
+              "trusted",
+              `${merged.label} is paired. Open One Link on the laptop to start using it.`,
+            );
+          }
         }
         return;
       }
