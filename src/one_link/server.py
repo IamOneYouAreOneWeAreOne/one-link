@@ -380,6 +380,17 @@ PEER_CONTACT_ONLINE_GRACE_MS = 2 * 60 * 1000
 # 5 min; after operator action we extend by this many ms.
 SETUP_DEVICE_INVITE_GRACE_MS = 5 * 60 * 1000
 
+# 2026-05-23: phone file-transfer protocol constants. Chunked
+# upload over the daemon DC so the phone can send files that
+# exceed the WebRTC max-message-size in a single frame.
+# 64 KiB raw → ~88 KiB base64 → comfortably under the 256 KiB
+# practical DC limit on every supported browser (Chrome / Edge /
+# Safari iOS 17+ / Firefox 130+).
+PHONE_UPLOAD_CHUNK_SIZE = 64 * 1024
+PHONE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+PHONE_UPLOAD_IDLE_TIMEOUT_MS = 60 * 1000
+PHONE_UPLOAD_MAX_PER_PEER = 4
+
 
 # v0.11.6 helpers for Storage + data settings.
 def _parse_int_or_none(raw):
@@ -972,6 +983,15 @@ class UIServer:
         self._courier_monitor_last_ms = 0
         self._courier_monitor_events = 0
         self._setup_device_invites: dict[str, dict[str, Any]] = {}
+        # 2026-05-23: in-progress phone file uploads. Keyed by
+        # upload_id (server-minted UUID hex). Value:
+        #   {"peer_fp": str, "filename": str, "mime": str,
+        #    "expected_size": int, "received_size": int,
+        #    "path": Path, "fh": file handle | None,
+        #    "client_msg_id": str | None,
+        #    "created_ms": int, "last_chunk_ms": int}
+        # Cleaned up by _sweep_phone_uploads on every init/chunk.
+        self._phone_uploads: dict[str, dict[str, Any]] = {}
         self._removable_event_detector = None
         self._removable_monitor_last_ms = 0
         self._removable_monitor_events = 0
@@ -4167,6 +4187,240 @@ class UIServer:
                 _err("send_failed", f"send_text: {e}")
             return
 
+        if msg_t == "send_file_init":
+            # 2026-05-23 phase 2: start a chunked file upload from
+            # the phone. Wire:
+            #   phone → daemon: {v, t:"send_file_init", rid,
+            #                    peer_fp, filename, mime, size_bytes,
+            #                    client_msg_id?}
+            #   daemon → phone: {v, t:"send_file_init_ack", rid,
+            #                    upload_id, chunk_size}
+            #            OR     {v, t:"error", rid, code, message}
+            self._sweep_phone_uploads()
+            peer_fp = envelope.get("peer_fp")
+            filename = envelope.get("filename") or "upload.bin"
+            mime = envelope.get("mime") or "application/octet-stream"
+            size_bytes = envelope.get("size_bytes")
+            client_msg_id_raw = envelope.get("client_msg_id")
+            if not isinstance(peer_fp, str) or not peer_fp:
+                _err("bad_peer_fp", "peer_fp required")
+                return
+            if not isinstance(size_bytes, int) or size_bytes < 0:
+                _err("bad_size", "size_bytes must be a non-negative int")
+                return
+            if size_bytes > PHONE_UPLOAD_MAX_BYTES:
+                _err(
+                    "file_too_large",
+                    f"max {PHONE_UPLOAD_MAX_BYTES} bytes",
+                )
+                return
+            # Per-peer concurrent-upload cap so a buggy / runaway
+            # phone can't flood data_dir/uploads.
+            in_flight = sum(
+                1 for u in self._phone_uploads.values()
+                if u.get("peer_fp") == peer_fp
+            )
+            if in_flight >= PHONE_UPLOAD_MAX_PER_PEER:
+                _err(
+                    "too_many_uploads",
+                    f"max {PHONE_UPLOAD_MAX_PER_PEER} concurrent uploads per peer",
+                )
+                return
+            client_msg_id: str | None = None
+            if isinstance(client_msg_id_raw, str):
+                stripped = client_msg_id_raw.strip()
+                if 8 <= len(stripped) <= 64 and all(
+                    c in "0123456789abcdefABCDEF-" for c in stripped
+                ):
+                    client_msg_id = stripped
+            safe_name = Path(str(filename)).name or "upload.bin"
+            if safe_name in (".", "..") or not safe_name:
+                safe_name = "upload.bin"
+            staging = data_dir() / "uploads"
+            try:
+                staging.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                _err("staging_unavailable", f"cannot create uploads dir: {e}")
+                return
+            upload_id = secrets.token_hex(16)
+            path = staging / (
+                f"{int(time.time() * 1000)}_{secrets.token_hex(8)}_{safe_name}"
+            )
+            try:
+                fh = open(path, "wb")
+            except Exception as e:
+                _err("staging_open_failed", f"cannot open staging file: {e}")
+                return
+            now_ms = int(time.time() * 1000)
+            self._phone_uploads[upload_id] = {
+                "peer_fp": peer_fp,
+                "filename": safe_name,
+                "mime": str(mime)[:200],
+                "expected_size": size_bytes,
+                "received_size": 0,
+                "path": path,
+                "fh": fh,
+                "client_msg_id": client_msg_id,
+                "created_ms": now_ms,
+                "last_chunk_ms": now_ms,
+            }
+            _send({
+                "t": "send_file_init_ack",
+                "upload_id": upload_id,
+                "chunk_size": PHONE_UPLOAD_CHUNK_SIZE,
+            })
+            return
+
+        if msg_t == "send_file_chunk":
+            # phone → daemon: {v, t:"send_file_chunk", rid,
+            #                  upload_id, offset, data_b64}
+            # daemon → phone: {v, t:"send_file_chunk_ack", rid,
+            #                  upload_id, offset, received_size}
+            upload_id = envelope.get("upload_id")
+            offset = envelope.get("offset")
+            data_b64 = envelope.get("data_b64")
+            if not isinstance(upload_id, str) or upload_id not in self._phone_uploads:
+                _err("unknown_upload", "upload_id not found (init first / expired)")
+                return
+            if not isinstance(offset, int) or offset < 0:
+                _err("bad_offset", "offset must be a non-negative int")
+                return
+            if not isinstance(data_b64, str) or not data_b64:
+                _err("bad_chunk", "data_b64 required")
+                return
+            rec = self._phone_uploads[upload_id]
+            try:
+                chunk = base64.urlsafe_b64decode(
+                    data_b64 + "=" * (-len(data_b64) % 4)
+                )
+            except Exception:
+                _err("bad_b64", "data_b64 is not valid base64url")
+                return
+            if len(chunk) > PHONE_UPLOAD_CHUNK_SIZE:
+                _err(
+                    "chunk_too_large",
+                    f"chunk exceeds {PHONE_UPLOAD_CHUNK_SIZE} bytes",
+                )
+                return
+            if offset != rec["received_size"]:
+                _err(
+                    "offset_mismatch",
+                    f"expected offset {rec['received_size']}, got {offset}",
+                )
+                return
+            if rec["received_size"] + len(chunk) > rec["expected_size"]:
+                _err(
+                    "size_overflow",
+                    "chunk would exceed declared size_bytes",
+                )
+                return
+            try:
+                rec["fh"].write(chunk)
+            except Exception as e:
+                _err("staging_write_failed", f"cannot write chunk: {e}")
+                return
+            rec["received_size"] += len(chunk)
+            rec["last_chunk_ms"] = int(time.time() * 1000)
+            _send({
+                "t": "send_file_chunk_ack",
+                "upload_id": upload_id,
+                "offset": offset,
+                "received_size": rec["received_size"],
+            })
+            return
+
+        if msg_t == "send_file_complete":
+            # phone → daemon: {v, t:"send_file_complete", rid, upload_id}
+            # daemon → phone: {v, t:"send_file_result", rid, ok,
+            #                  transfer_id, msg, queued?, paused?}
+            #          OR     {v, t:"error", rid, code, message}
+            upload_id = envelope.get("upload_id")
+            if not isinstance(upload_id, str) or upload_id not in self._phone_uploads:
+                _err("unknown_upload", "upload_id not found (init first / expired)")
+                return
+            rec = self._phone_uploads.pop(upload_id)
+            try:
+                rec["fh"].close()
+            except Exception:
+                pass
+            if rec["received_size"] != rec["expected_size"]:
+                with contextlib.suppress(OSError):
+                    Path(rec["path"]).unlink(missing_ok=True)
+                _err(
+                    "size_mismatch",
+                    f"got {rec['received_size']} of {rec['expected_size']} bytes",
+                )
+                return
+            # Now drive the same daemon machinery /api/send-file uses.
+            peer_fp = rec["peer_fp"]
+            upload_path = Path(rec["path"])
+            try:
+                target_peer = await self.daemon.resolve_for_send(peer_fp)
+                if target_peer is None:
+                    # Try durable queue (offline peer) — keeps the
+                    # bytes for auto-resume just like /api/send-file.
+                    try:
+                        durable = self.daemon.queue_file_transfer(
+                            peer_fp=peer_fp,
+                            path=upload_path,
+                            reason="waiting for device",
+                        )
+                        _send({
+                            "t": "send_file_result",
+                            "ok": True,
+                            "queued": True,
+                            "paused": True,
+                            "transfer_id": getattr(durable, "id", None),
+                            "filename": rec["filename"],
+                            "reason": "peer_offline",
+                        })
+                        return
+                    except Exception as e:
+                        with contextlib.suppress(OSError):
+                            upload_path.unlink(missing_ok=True)
+                        _err(
+                            "peer_offline_queue_failed",
+                            f"could not queue file: {e}",
+                        )
+                        return
+                durable_transfer_id = None
+                try:
+                    durable = self.daemon.queue_file_transfer(
+                        peer_fp=peer_fp,
+                        path=upload_path,
+                        reason="sending",
+                        schedule_resume=False,
+                    )
+                    durable_transfer_id = getattr(durable, "id", None)
+                except TypeError:
+                    durable = self.daemon.queue_file_transfer(
+                        peer_fp=peer_fp,
+                        path=upload_path,
+                        reason="sending",
+                    )
+                    durable_transfer_id = getattr(durable, "id", None)
+                except Exception as e:
+                    log.warning(
+                        "phone send_file: pre-queue failed, continuing direct: %s",
+                        e,
+                    )
+                result = await self.daemon.send_file(
+                    target_peer,
+                    upload_path,
+                    transfer_id=durable_transfer_id,
+                )
+                _send({
+                    "t": "send_file_result",
+                    "ok": True,
+                    "transfer_id": durable_transfer_id,
+                    "filename": rec["filename"],
+                    "result": result if isinstance(result, dict) else {"result": str(result)},
+                })
+            except Exception as e:
+                log.exception("phone send_file_complete failed: %s", e)
+                _err("send_file_failed", f"send_file: {e}")
+            return
+
         # Unknown wire kind — silently ignore. v0.19.2's chat protocol
         # also rides this channel and we don't want to error-spam those
         # frames.
@@ -6464,6 +6718,30 @@ class UIServer:
             "daemon_pubkey_b64u": daemon_pub_b64u,
             "ws_signaling_url": ws_url,
         }
+
+    def _sweep_phone_uploads(self) -> None:
+        """2026-05-23 phase 2: drop in-progress phone uploads that
+        have gone idle past PHONE_UPLOAD_IDLE_TIMEOUT_MS — phone
+        crashed mid-upload, tab closed, network died, etc. Without
+        this an abandoned upload would hold a file handle + temp
+        bytes in data_dir/uploads indefinitely.
+        """
+        now = int(time.time() * 1000)
+        cutoff = now - PHONE_UPLOAD_IDLE_TIMEOUT_MS
+        for upload_id, rec in list(self._phone_uploads.items()):
+            if int(rec.get("last_chunk_ms") or 0) > cutoff:
+                continue
+            try:
+                fh = rec.get("fh")
+                if fh:
+                    fh.close()
+            except Exception:
+                pass
+            path = rec.get("path")
+            if path:
+                with contextlib.suppress(OSError):
+                    Path(path).unlink(missing_ok=True)
+            self._phone_uploads.pop(upload_id, None)
 
     def _sweep_setup_device_invites(self) -> None:
         # 2026-05-23: only remove on expires_ms. Previously also

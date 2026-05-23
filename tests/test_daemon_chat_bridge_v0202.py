@@ -462,6 +462,249 @@ def test_phone_send_function_uses_send_message_kind(peer_html: str):
     assert "client_msg_id" in snip
 
 
+# ───────── send_file (chunked upload) wire path ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_file_init_requires_peer_fp(server_with_state):
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_init",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_init",
+         "rid": "f1", "filename": "x.txt", "size_bytes": 10},
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "bad_peer_fp"
+
+
+@pytest.mark.asyncio
+async def test_send_file_init_rejects_oversized(server_with_state):
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_init",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_init",
+         "rid": "f2", "peer_fp": "sha256:abc",
+         "filename": "huge.bin",
+         "size_bytes": 200 * 1024 * 1024},
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "file_too_large"
+
+
+@pytest.mark.asyncio
+async def test_send_file_init_returns_upload_id_and_chunk_size(
+    server_with_state, monkeypatch,
+):
+    server, _ = server_with_state
+    # Redirect uploads dir into tmp so we don't leave debris.
+    from one_link import server as srv_mod
+    import tempfile
+    tmpdir = tempfile.mkdtemp(prefix="ol_upload_test_")
+    monkeypatch.setattr(srv_mod, "data_dir", lambda: __import__("pathlib").Path(tmpdir))
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_init",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_init",
+         "rid": "f3", "peer_fp": "sha256:abc",
+         "filename": "hello.txt", "mime": "text/plain",
+         "size_bytes": 5},
+    )
+    reply = captured[0]
+    assert reply["t"] == "send_file_init_ack"
+    assert reply["rid"] == "f3"
+    assert isinstance(reply["upload_id"], str) and len(reply["upload_id"]) >= 16
+    assert reply["chunk_size"] > 0
+    # Server should now hold one in-flight upload.
+    assert len(server._phone_uploads) == 1
+
+
+@pytest.mark.asyncio
+async def test_send_file_chunk_offset_mismatch_errors(
+    server_with_state, monkeypatch,
+):
+    server, _ = server_with_state
+    from one_link import server as srv_mod
+    import tempfile, base64
+    tmpdir = tempfile.mkdtemp(prefix="ol_upload_test_")
+    monkeypatch.setattr(srv_mod, "data_dir", lambda: __import__("pathlib").Path(tmpdir))
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_init",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_init",
+         "rid": "f4", "peer_fp": "sha256:abc",
+         "filename": "a.bin", "size_bytes": 100},
+    )
+    uid = captured[0]["upload_id"]
+    captured.clear()
+    # Wrong offset (expected 0, send 50).
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_chunk",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_chunk",
+         "rid": "f5", "upload_id": uid, "offset": 50,
+         "data_b64": base64.urlsafe_b64encode(b"x" * 10).decode().rstrip("=")},
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "offset_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_send_file_chunk_size_overflow_errors(
+    server_with_state, monkeypatch,
+):
+    server, _ = server_with_state
+    from one_link import server as srv_mod
+    import tempfile, base64
+    tmpdir = tempfile.mkdtemp(prefix="ol_upload_test_")
+    monkeypatch.setattr(srv_mod, "data_dir", lambda: __import__("pathlib").Path(tmpdir))
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_init",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_init",
+         "rid": "f6", "peer_fp": "sha256:abc",
+         "filename": "a.bin", "size_bytes": 10},
+    )
+    uid = captured[0]["upload_id"]
+    captured.clear()
+    # Send 20 bytes when only 10 declared.
+    big = base64.urlsafe_b64encode(b"x" * 20).decode().rstrip("=")
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_chunk",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_chunk",
+         "rid": "f7", "upload_id": uid, "offset": 0,
+         "data_b64": big},
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "size_overflow"
+
+
+@pytest.mark.asyncio
+async def test_send_file_complete_calls_daemon_send_file(
+    server_with_state, monkeypatch,
+):
+    server, _ = server_with_state
+    from one_link import server as srv_mod
+    import tempfile, base64
+    tmpdir = tempfile.mkdtemp(prefix="ol_upload_test_")
+    monkeypatch.setattr(srv_mod, "data_dir", lambda: __import__("pathlib").Path(tmpdir))
+
+    class FakePeer:
+        fingerprint = "sha256:abc"
+
+    async def fake_resolve(needle):
+        return FakePeer()
+
+    def fake_queue(peer_fp=None, path=None, reason=None, schedule_resume=None):
+        class _Rec:
+            id = "tx-1"
+        return _Rec()
+
+    captured_send_args: dict = {}
+
+    async def fake_send_file(target, path, transfer_id=None):
+        captured_send_args.update(
+            target=target, path=str(path), transfer_id=transfer_id,
+        )
+        return {"ok": True, "transfer_id": transfer_id, "bytes": 11}
+
+    monkeypatch.setattr(server.daemon, "resolve_for_send", fake_resolve)
+    monkeypatch.setattr(server.daemon, "queue_file_transfer", fake_queue)
+    monkeypatch.setattr(server.daemon, "send_file", fake_send_file)
+
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_init",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_init",
+         "rid": "f8", "peer_fp": "sha256:abc",
+         "filename": "a.txt", "mime": "text/plain", "size_bytes": 11},
+    )
+    uid = captured[0]["upload_id"]
+    captured.clear()
+    body = b"hello world"  # 11 bytes
+    chunk_b64 = base64.urlsafe_b64encode(body).decode().rstrip("=")
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_chunk",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_chunk",
+         "rid": "f9", "upload_id": uid, "offset": 0,
+         "data_b64": chunk_b64},
+    )
+    assert captured[0]["t"] == "send_file_chunk_ack"
+    assert captured[0]["received_size"] == 11
+    captured.clear()
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_complete",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_complete",
+         "rid": "f10", "upload_id": uid},
+    )
+    assert captured[0]["t"] == "send_file_result"
+    assert captured[0]["ok"] is True
+    assert captured[0]["transfer_id"] == "tx-1"
+    assert captured_send_args["transfer_id"] == "tx-1"
+    # And the in-flight record is gone.
+    assert uid not in server._phone_uploads
+
+
+@pytest.mark.asyncio
+async def test_send_file_complete_size_mismatch_errors(
+    server_with_state, monkeypatch,
+):
+    server, _ = server_with_state
+    from one_link import server as srv_mod
+    import tempfile, base64
+    tmpdir = tempfile.mkdtemp(prefix="ol_upload_test_")
+    monkeypatch.setattr(srv_mod, "data_dir", lambda: __import__("pathlib").Path(tmpdir))
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_init",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_init",
+         "rid": "f11", "peer_fp": "sha256:abc",
+         "filename": "a.txt", "size_bytes": 100},
+    )
+    uid = captured[0]["upload_id"]
+    captured.clear()
+    # Only send 10 bytes of the promised 100, then complete.
+    chunk = base64.urlsafe_b64encode(b"x" * 10).decode().rstrip("=")
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_chunk",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_chunk",
+         "rid": "f12", "upload_id": uid, "offset": 0, "data_b64": chunk},
+    )
+    captured.clear()
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_complete",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_file_complete",
+         "rid": "f13", "upload_id": uid},
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "size_mismatch"
+    # And the in-flight record is gone (cleaned up on error).
+    assert uid not in server._phone_uploads
+
+
+def test_phone_compose_has_paperclip_and_progress(peer_html: str):
+    """Phase 2: chat surface MUST have a paperclip attach button,
+    a hidden file input, a progress bar, and a cancel button. The
+    HTML shape is what _handleDaemonChatFilePicked + the chunk
+    loop wire onto — any rename here silently breaks the UX."""
+    assert 'id="btn-daemon-chat-attach"' in peer_html
+    assert 'id="daemon-chat-file-input"' in peer_html
+    assert 'id="daemon-chat-upload-progress"' in peer_html
+    assert 'id="daemon-chat-upload-bar"' in peer_html
+    assert 'id="btn-daemon-chat-upload-cancel"' in peer_html
+
+
+def test_phone_file_uploader_uses_chunked_protocol(peer_html: str):
+    """The phone-side uploader MUST hit send_file_init,
+    send_file_chunk, and send_file_complete in that order via
+    _daemonRequest. Any drift drops the chunked semantics and
+    would corrupt the staged file."""
+    snip = _snippet(peer_html, "async function _handleDaemonChatFilePicked(", 6000)
+    assert '_daemonRequest("send_file_init"' in snip
+    assert '_daemonRequest("send_file_chunk"' in snip
+    assert '_daemonRequest("send_file_complete"' in snip
+
+
 # ───────── phone-side roster + chat surface ────────────────────────
 
 

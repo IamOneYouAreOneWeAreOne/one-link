@@ -285,10 +285,22 @@
       <!-- 2026-05-23: compose surface. Wired to send_message over
            the daemon DC (see _handle_browser_peer_request). The
            desktop send path treats outbound from the phone as
-           indistinguishable from its own /api/send. -->
+           indistinguishable from its own /api/send.
+           Phase 2 adds the paperclip + chunked file upload via
+           send_file_init / send_file_chunk / send_file_complete. -->
       <div id="daemon-chat-compose"
            style="display:flex; gap:8px; margin-top:12px;
                   align-items:flex-end;">
+        <button class="btn ghost"
+                id="btn-daemon-chat-attach"
+                title="Attach a file"
+                aria-label="Attach a file"
+                style="padding:10px 14px; min-height:42px;
+                       align-self:flex-end; font-size:18px;
+                       min-width:48px;">📎</button>
+        <input type="file"
+               id="daemon-chat-file-input"
+               style="display:none;" />
         <textarea id="daemon-chat-input"
                   placeholder="Message"
                   rows="2"
@@ -303,6 +315,29 @@
                        align-self:flex-end;"
                 aria-label="Send message"
                 disabled>Send</button>
+      </div>
+      <div id="daemon-chat-upload-progress"
+           style="margin-top:8px; display:none;
+                  background:var(--bg-3); padding:10px 12px;
+                  border-radius:10px; font-size:13px;">
+        <div style="display:flex; justify-content:space-between;
+                    align-items:center; gap:8px; margin-bottom:6px;">
+          <span id="daemon-chat-upload-name"
+                style="overflow:hidden; text-overflow:ellipsis;
+                       white-space:nowrap; flex:1 1 auto;"></span>
+          <button class="btn ghost"
+                  id="btn-daemon-chat-upload-cancel"
+                  style="padding:4px 10px; min-height:auto;
+                         font-size:12px;">Cancel</button>
+        </div>
+        <div style="background:var(--line); border-radius:6px;
+                    height:6px; overflow:hidden;">
+          <div id="daemon-chat-upload-bar"
+               style="background:var(--accent); height:100%;
+                      width:0%; transition:width 120ms ease;"></div>
+        </div>
+        <p id="daemon-chat-upload-detail"
+           style="margin:6px 0 0; font-size:11px; color:var(--text-dim);"></p>
       </div>
       <p class="help" id="daemon-chat-send-status"
          style="margin-top:6px; font-size:12px; min-height:1em;"></p>
@@ -3845,6 +3880,164 @@
       _handleDaemonChatSend();
     }
   });
+
+  // ── Phase 2: file send over daemon DC ─────────────────────────────
+  // Chunked protocol: init → many chunk → complete. Server caps each
+  // chunk at 64KiB raw, files at 100MB. Cancel button aborts the loop
+  // and the server reaps the orphan upload via _sweep_phone_uploads
+  // after PHONE_UPLOAD_IDLE_TIMEOUT_MS.
+  const _PHONE_FILE_MAX_BYTES = 100 * 1024 * 1024;
+  const _PHONE_FILE_CHUNK_SIZE = 64 * 1024;
+  let _phoneFileUploadAborted = false;
+
+  function _bytesToBase64Url(bytes) {
+    // Stream-friendly: btoa on a binary string, then convert to
+    // URL-safe alphabet without padding (matches the server's
+    // urlsafe_b64decode tolerant of missing padding).
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+  }
+
+  async function _handleDaemonChatAttach() {
+    $("#daemon-chat-file-input")?.click();
+  }
+
+  function _formatBytes(n) {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+    return `${(n / (1024 * 1024)).toFixed(2)} MiB`;
+  }
+
+  async function _handleDaemonChatFilePicked(ev) {
+    const peer = state.daemon_active_peer;
+    if (!peer || !peer.fingerprint) return;
+    const input = ev.target;
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    // Reset the input so picking the same file twice in a row works.
+    input.value = "";
+    if (file.size > _PHONE_FILE_MAX_BYTES) {
+      const sendStatus = $("#daemon-chat-send-status");
+      sendStatus && (sendStatus.textContent =
+        `File too large (${_formatBytes(file.size)}). Max 100 MiB.`);
+      return;
+    }
+    _phoneFileUploadAborted = false;
+    const progressEl = $("#daemon-chat-upload-progress");
+    const nameEl = $("#daemon-chat-upload-name");
+    const barEl = $("#daemon-chat-upload-bar");
+    const detailEl = $("#daemon-chat-upload-detail");
+    const sendStatus = $("#daemon-chat-send-status");
+    if (nameEl) nameEl.textContent = file.name;
+    if (barEl) barEl.style.width = "0%";
+    if (detailEl) detailEl.textContent = `0 / ${_formatBytes(file.size)}`;
+    if (progressEl) progressEl.style.display = "block";
+    if (sendStatus) sendStatus.textContent = "";
+
+    const log = $("#daemon-chat-log");
+    const optimisticId = _randomHexId();
+    _renderDaemonMessageBubble(log, {
+      id: optimisticId,
+      ts_ms: Date.now(),
+      direction: "outbound",
+      body: `📎 ${file.name} (${_formatBytes(file.size)})`,
+      msg_type: "file",
+    });
+    if (log) log.scrollTop = log.scrollHeight;
+
+    let initReply;
+    try {
+      initReply = await _daemonRequest("send_file_init", {
+        peer_fp: peer.fingerprint,
+        filename: file.name,
+        mime: file.type || "application/octet-stream",
+        size_bytes: file.size,
+        client_msg_id: optimisticId,
+      });
+    } catch (e) {
+      if (progressEl) progressEl.style.display = "none";
+      sendStatus && (sendStatus.textContent =
+        `Couldn't start upload: ${e && e.message ? e.message : e}`);
+      return;
+    }
+    const uploadId = initReply.upload_id;
+    const chunkSize = Math.min(
+      Math.max(initReply.chunk_size || _PHONE_FILE_CHUNK_SIZE, 1024),
+      _PHONE_FILE_CHUNK_SIZE,
+    );
+    if (!uploadId) {
+      if (progressEl) progressEl.style.display = "none";
+      sendStatus && (sendStatus.textContent =
+        "Upload init didn't return an upload_id.");
+      return;
+    }
+
+    let offset = 0;
+    try {
+      while (offset < file.size) {
+        if (_phoneFileUploadAborted) {
+          throw new Error("cancelled");
+        }
+        const end = Math.min(offset + chunkSize, file.size);
+        const slice = file.slice(offset, end);
+        const buf = new Uint8Array(await slice.arrayBuffer());
+        const b64 = _bytesToBase64Url(buf);
+        await _daemonRequest("send_file_chunk", {
+          upload_id: uploadId,
+          offset,
+          data_b64: b64,
+        });
+        offset = end;
+        const pct = Math.floor((offset / file.size) * 100);
+        if (barEl) barEl.style.width = `${pct}%`;
+        if (detailEl) {
+          detailEl.textContent =
+            `${_formatBytes(offset)} / ${_formatBytes(file.size)} · ${pct}%`;
+        }
+      }
+      // All bytes sent — finalize.
+      if (detailEl) detailEl.textContent = "Finalizing…";
+      const result = await _daemonRequest("send_file_complete", {
+        upload_id: uploadId,
+      });
+      if (progressEl) progressEl.style.display = "none";
+      if (result && result.queued) {
+        sendStatus && (sendStatus.textContent =
+          "Peer is offline. File queued for delivery.");
+      } else {
+        sendStatus && (sendStatus.textContent = `Sent ${file.name}`);
+      }
+      // Reconcile against the persisted messages view.
+      try {
+        const msgs = await fetchDaemonMessages(peer.fingerprint, 50);
+        if (log) {
+          log.innerHTML = "";
+          for (const m of msgs) _renderDaemonMessageBubble(log, m);
+          log.scrollTop = log.scrollHeight;
+        }
+      } catch (_e) { /* best-effort reconcile */ }
+    } catch (e) {
+      if (progressEl) progressEl.style.display = "none";
+      const reason = (e && e.message) || String(e);
+      if (reason === "cancelled") {
+        sendStatus && (sendStatus.textContent = "Upload cancelled.");
+      } else {
+        sendStatus && (sendStatus.textContent = `Upload failed: ${reason}`);
+      }
+    }
+  }
+
+  function _handleDaemonChatUploadCancel() {
+    _phoneFileUploadAborted = true;
+  }
+
+  $("#btn-daemon-chat-attach")?.addEventListener("click", _handleDaemonChatAttach);
+  $("#daemon-chat-file-input")?.addEventListener("change", _handleDaemonChatFilePicked);
+  $("#btn-daemon-chat-upload-cancel")?.addEventListener("click", _handleDaemonChatUploadCancel);
 
   function _renderDaemonMessageBubble(host, m) {
     if (!host) return;
