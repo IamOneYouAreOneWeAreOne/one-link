@@ -2130,11 +2130,14 @@ class UIServer:
             "connect-src 'self' wss: https:; "
             "frame-ancestors 'none'"
         )
-        # The peer page contains no PII per se — it's a shell that
-        # builds identity client-side — so caching the HTML for an
-        # hour is fine. The IDENTITY itself lives in OPFS, not the
-        # HTML, so a stale shell is just stale code, not stale auth.
-        resp.headers["Cache-Control"] = "max-age=3600"
+        # 2026-05-23: previously max-age=3600 — but during active
+        # pair-flow iteration this means Safari serves a stale
+        # peer.html for an hour after the daemon ships a fix.
+        # User-visible symptom: 'Claim this device' button stuck
+        # on the trusted-pair screen even though the latest bundle
+        # hides it. no-store costs 140KB per visit which is fine
+        # for a UI that loads once-per-pair-attempt.
+        resp.headers["Cache-Control"] = "no-store"
         return resp
 
     async def _dr_module(self, request: web.Request) -> web.StreamResponse:
