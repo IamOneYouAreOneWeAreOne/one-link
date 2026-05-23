@@ -196,8 +196,19 @@ def generate_self_signed(
             _build_subject_alt_names(short_id=short_id),
             critical=False,
         )
+        # 2026-05-23: mark the cert as a self-signed root CA. The cert
+        # serves a DUAL purpose — it's both the TLS server cert (used
+        # at handshake time) AND the root CA that the iOS device
+        # trusts via Certificate Trust Settings. Without ca=True +
+        # key_cert_sign=True, iOS installs the cert via mobileconfig
+        # but does NOT recognise it as a root-CA candidate: the
+        # Certificate Trust Settings page stays empty, the user
+        # cannot toggle trust, and HTTPS still fails with "Not
+        # Private." This is iOS Apple Root CA Trust documentation
+        # behaviour — the certificate trust list is filtered to
+        # CA-marked certs only.
         .add_extension(
-            x509.BasicConstraints(ca=False, path_length=None),
+            x509.BasicConstraints(ca=True, path_length=0),
             critical=True,
         )
         .add_extension(
@@ -206,14 +217,14 @@ def generate_self_signed(
                 content_commitment=False,
                 key_encipherment=False,
                 data_encipherment=False,
-                # v0.20.7 (security audit M11): drop key_agreement.
-                # ECDHE cipher suites use the ephemeral key for
-                # agreement; the cert's static key only signs the
-                # handshake, so the key_agreement bit is unused.
-                # Removing it shrinks the attestation surface and
-                # matches the modern TLS 1.3-only profile.
                 key_agreement=False,
-                key_cert_sign=False,
+                # 2026-05-23: enable key_cert_sign so iOS treats this
+                # as a trustable root. The cert self-signs itself
+                # (subject == issuer), so this bit is consistent
+                # with reality. Without it, iOS's PKI validator
+                # rejects the cert as "not a CA" and silently drops
+                # it from Certificate Trust Settings.
+                key_cert_sign=True,
                 crl_sign=False,
                 encipher_only=False,
                 decipher_only=False,

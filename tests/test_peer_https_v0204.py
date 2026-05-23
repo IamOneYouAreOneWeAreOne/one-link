@@ -118,6 +118,40 @@ def test_cert_ext_key_usage_server_auth(tmp_path: Path):
     assert ExtendedKeyUsageOID.SERVER_AUTH in eku
 
 
+def test_cert_is_marked_as_root_ca_for_ios_trust(tmp_path: Path):
+    """2026-05-23: iOS's Certificate Trust Settings page only lists
+    certs that are flagged as CAs (BasicConstraints.ca=True) AND
+    have key_cert_sign in their KeyUsage. The cert serves a DUAL
+    role — TLS server cert AND self-signed root CA the user can
+    trust via Settings. Without these flags, the cert installs via
+    mobileconfig but iOS silently drops it from the trust UI,
+    blocking the entire pair flow with "Not Private" warnings
+    that the user has no in-app way to dismiss.
+
+    Pin both flags so a future cert-shape refactor doesn't
+    re-introduce the regression.
+    """
+    from cryptography import x509
+    from one_link.peer_https import generate_self_signed
+    cp, _ = generate_self_signed(tmp_path)
+    cert = x509.load_pem_x509_certificate(cp.read_bytes())
+    bc = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+    assert bc.ca is True, (
+        "Cert MUST have BasicConstraints.ca=True so iOS lists it in "
+        "Certificate Trust Settings as a trustable root. ca=False "
+        "makes the trust UI silently drop the cert."
+    )
+    ku = cert.extensions.get_extension_for_class(x509.KeyUsage).value
+    assert ku.key_cert_sign is True, (
+        "Cert MUST have KeyUsage.key_cert_sign=True so iOS's PKI "
+        "validator accepts the cert as CA-capable. Without it the "
+        "Certificate Trust toggle never appears."
+    )
+    # Self-signed: subject == issuer is the load-bearing identity
+    # that makes the dual-purpose (server + root CA) cert work.
+    assert cert.subject == cert.issuer
+
+
 def test_needs_rotation_for_missing_file(tmp_path: Path):
     from one_link.peer_https import cert_path, needs_rotation
     assert needs_rotation(cert_path(tmp_path)) is True
