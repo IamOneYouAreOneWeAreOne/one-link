@@ -8078,6 +8078,20 @@
 
     <!-- SIDEBAR -->
     <aside class="side">
+      <!-- 2026-05-23: 'Your One identity' devices — this laptop +
+           paired phones / tablets. Lifted from Settings → Self-mesh
+           so the user can SEE their phone in the main UI without
+           digging. Each row has rename + prune inline. Currently
+           does not support direct desktop→phone chat — that's a
+           separate ship (needs a self-mesh chat wire protocol).
+           Hidden by default (display:none) and JS makes it visible
+           once there's at least one device. -->
+      <div class="section-h" id="self-mesh-section-h" style="display:none;">
+        <span>Your One identity</span>
+        <span class="count" id="self-mesh-count">0</span>
+      </div>
+      <div class="peerlist" id="self-mesh-sidebar" style="display:none;"></div>
+
       <div class="section-h">
         <span>My devices</span>
         <span class="count" id="peers-count">0</span>
@@ -14608,7 +14622,115 @@
       list.appendChild(card);
     }
     if (select && selectedBefore) select.value = selectedBefore;
+    // 2026-05-23: also render to the sidebar so the user SEES
+    // their paired iPhone / iPad / other-laptop without digging
+    // into Settings → Self-mesh. The 'i dont see it meshed or
+    // paired anywhere' UX problem.
+    renderSelfMeshSidebar(devices);
   }
+
+  function renderSelfMeshSidebar(devices) {
+    const wrap = $("#self-mesh-sidebar");
+    const heading = $("#self-mesh-section-h");
+    const count = $("#self-mesh-count");
+    if (!wrap || !heading) return;
+    // Hide the section entirely if there are no devices at all.
+    if (!devices || devices.length === 0) {
+      wrap.style.display = "none";
+      heading.style.display = "none";
+      return;
+    }
+    heading.style.display = "";
+    wrap.style.display = "";
+    if (count) count.textContent = devices.length;
+    wrap.replaceChildren();
+    for (const d of devices) {
+      const row = document.createElement("div");
+      row.className = "peer self-mesh-peer";
+      row.style.padding = "10px 12px";
+      row.style.borderRadius = "10px";
+      row.style.marginBottom = "6px";
+      row.style.background = "var(--bg-2)";
+      row.style.border = "1px solid var(--line)";
+      row.style.display = "flex";
+      row.style.alignItems = "center";
+      row.style.gap = "10px";
+
+      // Device-kind glyph.
+      const kind = (d.device_kind || "").toLowerCase();
+      let glyph = "🖥";
+      if (kind.includes("phone") || kind === "browser-peer") glyph = "📱";
+      else if (kind.includes("tablet") || kind === "ipad") glyph = "📋";
+      const icon = el("div", "");
+      icon.textContent = glyph;
+      icon.style.fontSize = "20px";
+      icon.style.flex = "0 0 auto";
+      icon.title = d.device_kind || "device";
+      row.appendChild(icon);
+
+      const info = el("div", "");
+      info.style.flex = "1 1 auto";
+      info.style.minWidth = "0";
+      const nameEl = el("div", "");
+      const label = d.label || d.device_kind || "Device";
+      nameEl.textContent = d.local ? `${label} · this device` : label;
+      nameEl.style.fontWeight = "600";
+      nameEl.style.fontSize = "13px";
+      nameEl.style.overflow = "hidden";
+      nameEl.style.textOverflow = "ellipsis";
+      nameEl.style.whiteSpace = "nowrap";
+      info.appendChild(nameEl);
+
+      const safety = d.safety_state || (d.revoked ? "revoked" : "trusted");
+      const presence = _selfMeshPresenceFor(d);
+      const statusText = d.local
+        ? "local"
+        : (presence && presence.state) || (safety === "trusted" ? "paired ✓" : safety);
+      const sub = el("div", "");
+      sub.textContent = statusText;
+      sub.style.fontSize = "11px";
+      sub.style.color = "var(--text-dim)";
+      info.appendChild(sub);
+      row.appendChild(info);
+
+      // Non-local: inline prune button (no Settings dive).
+      if (!d.local && d.root_pub_b64 && d.device_pub_b64) {
+        const pruneBtn = document.createElement("button");
+        pruneBtn.className = "btn-ghost";
+        pruneBtn.textContent = "×";
+        pruneBtn.title = `Prune ${label}`;
+        pruneBtn.setAttribute("aria-label", `Prune ${label}`);
+        pruneBtn.style.padding = "2px 8px";
+        pruneBtn.style.fontSize = "16px";
+        pruneBtn.style.minHeight = "auto";
+        pruneBtn.style.flex = "0 0 auto";
+        pruneBtn.style.color = "var(--text-dim)";
+        pruneBtn.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          if (!confirm(
+            `Prune "${label}"?\n\nRemoves the device from your ` +
+            `One identity's list. If the device is still online ` +
+            `it can re-join by pairing again.`
+          )) return;
+          pruneBtn.disabled = true;
+          try {
+            await api.post("/api/self-mesh/devices/delete", {
+              root_pub_b64: d.root_pub_b64,
+              device_pub_b64: d.device_pub_b64,
+            });
+            toast(`Pruned ${label}.`, "good", 2500);
+            await refreshSelfMesh();
+          } catch (e) {
+            toast(`Couldn't prune: ${errorToastBody(e)}`, "bad", 4000);
+            pruneBtn.disabled = false;
+          }
+        });
+        row.appendChild(pruneBtn);
+      }
+      wrap.appendChild(row);
+    }
+  }
+
   function oneHealthExplainers() {
     return {
       protection: {
