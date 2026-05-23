@@ -151,7 +151,7 @@ def test_open_resets_to_profile(index_html: str):
     asks 'where do I change my display name?'"""
     idx = index_html.find('$("#btn-settings").onclick')
     assert idx > 0, "settings open handler not found"
-    snippet = index_html[idx:idx + 4000]
+    snippet = index_html[idx:idx + 9000]
     assert 'switchSettingsPane("profile")' in snippet
 
 

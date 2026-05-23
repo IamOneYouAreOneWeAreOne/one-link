@@ -325,7 +325,14 @@ def index_html() -> str:
 def test_settings_modal_has_new_controls(index_html: str):
     for ctrl_id in ("set-theme", "set-download-folder", "set-dnd-enabled",
                     "set-dnd-start", "set-dnd-end", "set-sound",
-                    "set-log-level", "set-sound-test"):
+                    "set-log-level", "set-sound-test",
+                    "set-ui-density", "set-message-bubble-style",
+                    "set-font-scale", "set-motion-level",
+                    "set-chat-wallpaper", "set-accent-color",
+                    "set-enter-to-send", "set-auto-scroll",
+                    "set-compact-message-list", "set-show-message-seconds",
+                    "set-link-previews", "settings-copy-shortcuts",
+                    "settings-open-shortcuts", "settings-advanced-support-grid"):
         assert f'id="{ctrl_id}"' in index_html, f"missing {ctrl_id}"
 
 
@@ -347,6 +354,7 @@ def test_auto_theme_follows_system(index_html: str):
 
 def test_apply_theme_helper_present(index_html: str):
     assert "function applyTheme(" in index_html
+    assert "function applyAppearanceSettings(" in index_html
 
 
 def test_dnd_helper_handles_midnight_wrap(index_html: str):
@@ -371,15 +379,20 @@ def test_notify_incoming_respects_dnd(index_html: str):
     the desktop notification, otherwise DND would pop notifications
     that are then orphaned."""
     idx = index_html.find("function notifyIncoming(")
-    snippet = index_html[idx:idx + 2000]
+    snippet = index_html[idx:idx + 5000]
     assert "isQuietHoursActive()" in snippet
 
 
 def test_settings_save_includes_new_keys(index_html: str):
     idx = index_html.find('"#settings-save"')
-    snippet = index_html[idx:idx + 2000]
+    snippet = index_html[idx:idx + 5000]
     for k in ("theme", "download_folder", "dnd_enabled", "dnd_start",
-              "dnd_end", "notification_sound", "log_level"):
+              "dnd_end", "notification_sound", "log_level",
+              "ui_density", "message_bubble_style", "font_scale",
+              "motion_level", "accent_color", "chat_wallpaper",
+              "enter_to_send", "auto_scroll_new_messages",
+              "compact_message_list", "show_message_seconds",
+              "send_link_previews"):
         assert k in snippet, f"settings-save payload missing {k}"
 
 
@@ -394,6 +407,20 @@ def test_live_theme_preview_on_change(index_html: str):
     assert idx > 0, "missing change listener on theme dropdown"
     snippet = index_html[idx:idx + 400]
     assert "applyTheme(" in snippet
+
+
+def test_live_appearance_preview_on_change(index_html: str):
+    """Appearance controls must be live-previewed, not just saved."""
+    assert "collectAppearanceSettingsDraft" in index_html
+    assert "applyAppearanceSettings(collectAppearanceSettingsDraft())" in index_html
+    assert 'id="settings-accent-swatches"' in index_html
+
+
+def test_chat_behavior_toggles_are_not_dead_switches(index_html: str):
+    """New chat settings must feed real rendering/runtime branches."""
+    assert 'html.dataset.compactMessages = settings.compact_message_list === true ? "1" : "0"' in index_html
+    assert "const richPreviewsEnabled = state.runtimeSettings?.send_link_previews !== false;" in index_html
+    assert "const previewKind = richPreviewsEnabled ? previewKindForName(msg.name) : null;" in index_html
 
 
 def test_test_sound_button_bypasses_master_toggle(index_html: str):

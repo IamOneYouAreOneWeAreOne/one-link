@@ -117,6 +117,71 @@ async def test_get_settings_returns_persisted() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_settings_returns_appearance_and_chat_defaults() -> None:
+    srv = _ui_server_with_state()
+    req = MagicMock()
+    resp = await srv.api_get_settings(req)
+    import json
+    body = json.loads(resp.body.decode("utf-8"))
+    assert body["ui_density"] == "comfortable"
+    assert body["message_bubble_style"] == "gradient"
+    assert body["font_scale"] == "normal"
+    assert body["motion_level"] == "full"
+    assert body["accent_color"] == "#7c5cff"
+    assert body["chat_wallpaper"] == "soft"
+    assert body["enter_to_send"] is True
+    assert body["auto_scroll_new_messages"] is True
+    assert body["compact_message_list"] is False
+
+
+@pytest.mark.asyncio
+async def test_set_settings_persists_appearance_and_chat_controls() -> None:
+    srv = _ui_server_with_state()
+    req = _mock_request({
+        "ui_density": "compact",
+        "message_bubble_style": "solid",
+        "font_scale": "large",
+        "motion_level": "reduced",
+        "accent_color": "#46D39A",
+        "chat_wallpaper": "field",
+        "enter_to_send": False,
+        "auto_scroll_new_messages": True,
+        "compact_message_list": True,
+        "show_message_seconds": True,
+        "send_link_previews": False,
+    })
+    resp = await srv.api_set_settings(req)
+    assert resp.status == 200
+    srv.daemon.state.set_setting.assert_any_call("ui_density", "compact")
+    srv.daemon.state.set_setting.assert_any_call("message_bubble_style", "solid")
+    srv.daemon.state.set_setting.assert_any_call("font_scale", "large")
+    srv.daemon.state.set_setting.assert_any_call("motion_level", "reduced")
+    srv.daemon.state.set_setting.assert_any_call("accent_color", "#46d39a")
+    srv.daemon.state.set_setting.assert_any_call("chat_wallpaper", "field")
+    srv.daemon.state.set_setting.assert_any_call("enter_to_send", "false")
+    srv.daemon.state.set_setting.assert_any_call("compact_message_list", "true")
+    srv.daemon.state.set_setting.assert_any_call("show_message_seconds", "true")
+    srv.daemon.state.set_setting.assert_any_call("send_link_previews", "false")
+
+
+@pytest.mark.asyncio
+async def test_set_settings_rejects_bad_appearance_values() -> None:
+    bad_payloads = [
+        {"ui_density": "microscopic"},
+        {"message_bubble_style": "random"},
+        {"font_scale": "huge"},
+        {"motion_level": "warp"},
+        {"chat_wallpaper": "lava"},
+        {"accent_color": "purple"},
+    ]
+    for payload in bad_payloads:
+        srv = _ui_server_with_state()
+        req = _mock_request(payload)
+        resp = await srv.api_set_settings(req)
+        assert resp.status == 400, payload
+
+
+@pytest.mark.asyncio
 async def test_set_settings_refreshes_daemon_cache() -> None:
     srv = _ui_server_with_state()
     req = _mock_request({"user_mode": "paranoid"})
