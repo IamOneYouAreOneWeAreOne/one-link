@@ -3841,9 +3841,146 @@
     color: var(--text-dim);
     font-size: 12px;
   }
+  .settings-control-grid,
+  .settings-health-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin: 10px 0 12px;
+  }
+  .settings-health-grid.three {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .settings-control-card,
+  .settings-health-card {
+    min-width: 0;
+    padding: 12px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, rgba(124,92,255,.12), rgba(78,193,255,.07));
+    border: 1px solid rgba(255,255,255,.07);
+  }
+  .settings-control-card.flat,
+  .settings-health-card.flat {
+    background: var(--bg-2);
+  }
+  .settings-card-kicker,
+  .settings-health-label {
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .7px;
+  }
+  .settings-card-title,
+  .settings-health-value {
+    color: var(--text);
+    font-weight: 750;
+    font-size: 15px;
+    margin-top: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .settings-card-detail,
+  .settings-health-detail {
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.45;
+    margin-top: 5px;
+  }
+  .settings-action-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .settings-action-strip button {
+    background: var(--bg-2);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+  .settings-action-strip button:hover { background: var(--bg-3); }
+  .settings-pill-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .settings-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(255,255,255,.04);
+    color: var(--text-dim);
+    padding: 4px 8px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+  }
+  .settings-pill.good { color: var(--good); border-color: rgba(70,211,154,.22); }
+  .settings-pill.warn { color: var(--warn); border-color: rgba(255,204,102,.28); }
+  .settings-pill.bad { color: var(--bad); border-color: rgba(255,107,107,.30); }
+  .settings-code-line {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+    margin-top: 8px;
+  }
+  .settings-code-line code {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--text-dim);
+    padding: 7px 9px;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .settings-device-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin: 8px 0 12px;
+  }
+  .settings-device-stat {
+    padding: 10px;
+    border-radius: 9px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+  }
+  .settings-device-stat strong {
+    display: block;
+    color: var(--text);
+    font-size: 18px;
+    line-height: 1;
+  }
+  .settings-device-stat span {
+    display: block;
+    margin-top: 5px;
+    color: var(--text-dim);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .7px;
+  }
   @media (max-width: 640px) {
     .settings-copy-field,
     .settings-device-row {
+      grid-template-columns: 1fr;
+    }
+    .settings-control-grid,
+    .settings-health-grid,
+    .settings-health-grid.three,
+    .settings-device-summary {
       grid-template-columns: 1fr;
     }
     .settings-device-actions {
@@ -8529,6 +8666,31 @@
 
           <section class="settings-pane" data-settings-pane="privacy">
             <h3>Privacy</h3>
+            <p class="settings-pane-lede">
+              Your identity, receipts, typing indicators, and blocked devices
+              are controlled here. Nothing leaves this device unless a trusted
+              peer needs it to communicate.
+            </p>
+            <div class="settings-control-grid">
+              <div class="settings-control-card">
+                <div class="settings-card-kicker">Identity</div>
+                <div class="settings-card-title" id="privacy-identity-short">Loading...</div>
+                <div class="settings-card-detail">
+                  Copy or verify the fingerprint before trusting a new device.
+                </div>
+                <div class="settings-action-strip">
+                  <button type="button" id="settings-copy-identity-privacy">Copy identity</button>
+                  <button type="button" id="settings-open-privacy-proof">Privacy proof</button>
+                </div>
+              </div>
+              <div class="settings-control-card">
+                <div class="settings-card-kicker">Sharing behavior</div>
+                <div class="settings-card-title" id="privacy-sharing-summary">Private by default</div>
+                <div class="settings-card-detail" id="privacy-sharing-detail">
+                  Read receipts and typing indicators are under your control.
+                </div>
+              </div>
+            </div>
             <div class="settings-row">
               <label for="set-pair-allow-all">Trust new pairings fully</label>
               <span class="toggle">
@@ -8751,6 +8913,44 @@
                configuration; phone users get sane defaults at install. -->
           <section class="settings-pane desktop-only" data-settings-pane="network">
             <h3>Network</h3>
+            <p class="settings-pane-lede">
+              See the live LAN route, peer health, fabric readiness, relay
+              status, and the actions that fix stale or degraded paths.
+            </p>
+            <div class="settings-health-grid three" id="settings-network-health">
+              <div class="settings-health-card flat">
+                <div class="settings-health-label">Daemon</div>
+                <div class="settings-health-value">Checking...</div>
+                <div class="settings-health-detail">Local UI authority</div>
+              </div>
+              <div class="settings-health-card flat">
+                <div class="settings-health-label">Peers</div>
+                <div class="settings-health-value">Checking...</div>
+                <div class="settings-health-detail">Paired devices</div>
+              </div>
+              <div class="settings-health-card flat">
+                <div class="settings-health-label">Fabric</div>
+                <div class="settings-health-value">Checking...</div>
+                <div class="settings-health-detail">Best path engine</div>
+              </div>
+            </div>
+            <div class="settings-section">
+              <div class="settings-section-h">
+                <span>Live route report</span>
+              </div>
+              <div class="settings-control-card flat" id="settings-network-report">
+                <div class="settings-card-title">Waiting for status...</div>
+                <div class="settings-card-detail">
+                  Open Settings while One Link is running to populate route
+                  health, peer latency, transfer activity, and recovery state.
+                </div>
+              </div>
+              <div class="settings-action-strip">
+                <button type="button" id="settings-network-refresh">Refresh route health</button>
+                <button type="button" id="settings-network-copy-report">Copy network report</button>
+                <button type="button" id="settings-network-run-doctor">Run Doctor</button>
+              </div>
+            </div>
             <div class="settings-section">
               <div class="settings-section-h">
                 <span>Connect across networks</span>
@@ -8908,6 +9108,12 @@
               and jump to nearby discovery without hunting through the
               sidebar.
             </p>
+            <div class="settings-device-summary" id="settings-devices-summary">
+              <div class="settings-device-stat"><strong>0</strong><span>paired</span></div>
+              <div class="settings-device-stat"><strong>0</strong><span>online</span></div>
+              <div class="settings-device-stat"><strong>0</strong><span>verified</span></div>
+              <div class="settings-device-stat"><strong>0</strong><span>attention</span></div>
+            </div>
             <div class="settings-section">
               <div class="settings-section-h">
                 <span>Paired devices</span>
@@ -8923,6 +9129,7 @@
               <div class="mini-actions wrap">
                 <button class="btn-ghost" id="settings-devices-pair" type="button">Pair a new device</button>
                 <button class="btn-ghost" id="settings-devices-nearby" type="button">Show nearby devices</button>
+                <button class="btn-ghost" id="settings-devices-copy-roster" type="button">Copy device report</button>
               </div>
               <p class="settings-help">
                 Device-specific permissions, mute, disappearing messages,
@@ -9117,6 +9324,29 @@
             <div class="settings-row">
               <label>Version</label>
               <span class="settings-readonly" id="settings-about-version" data-long-press-diagnostics="1">…</span>
+            </div>
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Build and support</span></div>
+              <div class="settings-control-grid">
+                <div class="settings-control-card flat">
+                  <div class="settings-card-kicker">Runtime</div>
+                  <div class="settings-card-title" id="settings-about-runtime">Checking...</div>
+                  <div class="settings-card-detail" id="settings-about-runtime-detail">
+                    Version, protocol, and schema are loaded from the daemon.
+                  </div>
+                </div>
+                <div class="settings-control-card flat">
+                  <div class="settings-card-kicker">Support bundle</div>
+                  <div class="settings-card-title">Private diagnostics</div>
+                  <div class="settings-card-detail">
+                    Exported reports are redacted before they leave the browser.
+                  </div>
+                  <div class="settings-action-strip">
+                    <button type="button" id="settings-about-copy-diagnostics">Copy report</button>
+                    <button type="button" id="settings-about-download-diagnostics">Download report</button>
+                  </div>
+                </div>
+              </div>
             </div>
             <!-- v0.14.8: phone-only escape hatch hint. The long-press
                  handler above opens the diagnostics overlay so a
@@ -25926,6 +26156,15 @@
     if (name === "devices") {
       renderSettingsDevices();
     }
+    if (name === "network") {
+      refreshSettingsNetwork();
+    }
+    if (name === "privacy") {
+      renderSettingsPrivacySummary();
+    }
+    if (name === "about") {
+      refreshSettingsAbout();
+    }
   }
   document.querySelectorAll(".settings-nav-item").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -26404,6 +26643,126 @@
     host.appendChild(wrap);
   }
 
+  function renderSettingsPrivacySummary() {
+    const fp = state.me?.fingerprint || "";
+    const shortEl = $("#privacy-identity-short");
+    if (shortEl) shortEl.textContent = fp ? `${fp.slice(0, 12)}...${fp.slice(-8)}` : "Not loaded";
+    const s = state.runtimeSettings || {};
+    const receipts = s.send_read_receipts === false ? "receipts off" : "receipts on";
+    const typing = s.send_typing_indicators === false ? "typing off" : "typing on";
+    const summary = $("#privacy-sharing-summary");
+    const detail = $("#privacy-sharing-detail");
+    if (summary) summary.textContent = `${receipts}, ${typing}`;
+    if (detail) {
+      detail.textContent =
+        `You ${s.send_read_receipts === false ? "do not send" : "send"} read receipts and ` +
+        `${s.send_typing_indicators === false ? "hide" : "share"} typing indicators.`;
+    }
+  }
+
+  function _settingsNetworkSnapshot() {
+    const status = state.status || {};
+    const fabric = state.fabric || status.performance?.fabric || {};
+    const peers = [...(state.peers?.values?.() || [])].filter((p) => p && p.trust !== "rejected");
+    const pinned = peers.filter((p) => p.trust === "pinned");
+    const online = pinned.filter((p) => p.online);
+    const latencies = online
+      .map((p) => Number(p.health?.latency_ewma_ms ?? p.latency_ms))
+      .filter((n) => Number.isFinite(n) && n >= 0);
+    const avgLatency = latencies.length
+      ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)
+      : null;
+    const routeTruth = fabric.route_truth || {};
+    const route = routeTruth.kind || routeTruth.route || routeTruth.route_name || "Auto";
+    const transfers = Number(status.transfers?.active || 0);
+    const sessions = Number(status.performance?.sessions?.open || 0);
+    const cacheBytes = Number(status.performance?.cdc_cache?.bytes || 0);
+    const rdz = state.rendezvousUrls || [];
+    return {
+      daemon: status.app_version || status.version || state.me?.app_version || "unknown",
+      pinned: pinned.length,
+      online: online.length,
+      avgLatency,
+      route,
+      fabricOk: fabric.ok !== false,
+      fabricState: routeTruth.state || (fabric.ok === false ? "Needs attention" : "Autopilot ready"),
+      fabricReason: routeTruth.reason || fabric.no_router?.message || "One Link is checking every safe communication path.",
+      transfers,
+      sessions,
+      cacheBytes,
+      rendezvousCount: rdz.length,
+    };
+  }
+
+  function renderSettingsNetwork() {
+    const snap = _settingsNetworkSnapshot();
+    const health = $("#settings-network-health");
+    if (health) {
+      health.innerHTML = "";
+      const card = (label, value, detail, cls = "") => {
+        const c = el("div", `settings-health-card flat ${cls}`.trim());
+        c.appendChild(el("div", "settings-health-label", label));
+        c.appendChild(el("div", "settings-health-value", value));
+        c.appendChild(el("div", "settings-health-detail", detail));
+        health.appendChild(c);
+      };
+      card("Daemon", snap.daemon, "Local UI authority", "good");
+      card("Peers", `${snap.online}/${snap.pinned} online`,
+        snap.avgLatency == null ? "No live peer latency yet" : `${snap.avgLatency} ms average`);
+      card("Fabric", snap.fabricOk ? "Ready" : "Attention",
+        snap.fabricState, snap.fabricOk ? "good" : "warn");
+    }
+    const report = $("#settings-network-report");
+    if (report) {
+      report.innerHTML = "";
+      report.appendChild(el("div", "settings-card-kicker", "Current route"));
+      report.appendChild(el("div", "settings-card-title", `${snap.route} - ${snap.fabricState}`));
+      report.appendChild(el("div", "settings-card-detail", snap.fabricReason));
+      const pills = el("div", "settings-pill-row");
+      const add = (label, value, cls = "") => {
+        const p = el("span", `settings-pill ${cls}`.trim(), `${label}: ${value}`);
+        pills.appendChild(p);
+      };
+      add("peers", `${snap.online}/${snap.pinned}`, snap.online ? "good" : "warn");
+      add("latency", snap.avgLatency == null ? "unknown" : `${snap.avgLatency} ms`, snap.avgLatency == null ? "warn" : "good");
+      add("sessions", String(snap.sessions));
+      add("transfers", String(snap.transfers));
+      add("cache", fmtBytes(snap.cacheBytes));
+      add("rendezvous", snap.rendezvousCount ? String(snap.rendezvousCount) : "Wi-Fi only", snap.rendezvousCount ? "good" : "");
+      report.appendChild(pills);
+    }
+  }
+
+  async function refreshSettingsNetwork() {
+    try {
+      state.status = await api.status();
+      if (state.status?.performance?.fabric) state.fabric = state.status.performance.fabric;
+    } catch (e) {
+      console.warn("refreshSettingsNetwork status:", e);
+    }
+    try {
+      state.fabric = await api.fabric();
+      try { state.fabric.no_router = await api.noRouter(); } catch (_e) {}
+      try { state.fabric.mobile_reach = await api.mobileReach(); } catch (_e) {}
+    } catch (e) {
+      console.warn("refreshSettingsNetwork fabric:", e);
+    }
+    renderSettingsNetwork();
+  }
+
+  async function copySettingsNetworkReport() {
+    const snap = _settingsNetworkSnapshot();
+    const report = {
+      generated_at: new Date().toISOString(),
+      version: snap.daemon,
+      peers: { paired: snap.pinned, online: snap.online, average_latency_ms: snap.avgLatency },
+      route: { selected: snap.route, state: snap.fabricState, ok: snap.fabricOk },
+      activity: { sessions: snap.sessions, transfers: snap.transfers, cdc_cache_bytes: snap.cacheBytes },
+      rendezvous_configured: snap.rendezvousCount,
+    };
+    await copyToClipboard(JSON.stringify(report, null, 2), "network report");
+  }
+
   // v0.11.0: fill Profile + About panes from /api/me. Done up-front
   // (state.me is already loaded by init()) so opening Settings is
   // instant - no flash of empty fields.
@@ -26418,6 +26777,15 @@
     if (protoEl) protoEl.textContent = me.protocol_version || "?";
     const schemaEl = $("#settings-about-schema");
     if (schemaEl) schemaEl.textContent = String(me.schema_version ?? "?");
+    const runtimeEl = $("#settings-about-runtime");
+    if (runtimeEl) runtimeEl.textContent = `v${me.app_version || "unknown"}`;
+    const runtimeDetail = $("#settings-about-runtime-detail");
+    if (runtimeDetail) {
+      runtimeDetail.textContent =
+        `Protocol ${me.protocol_version || "?"}; schema ${String(me.schema_version ?? "?")}; ` +
+        `page ${PAGE_BUILT_FOR || "unknown"}.`;
+    }
+    renderSettingsPrivacySummary();
     // v0.20.5: do not call _refreshConnectInfo here. The legacy
     // connect-info section intentionally has no render target, so
     // the old UI QR cannot reappear beside the unified add-device QR.
@@ -26440,6 +26808,25 @@
         const bn = (b.display_name || b.hostname || b.short_id || "").toLowerCase();
         return an.localeCompare(bn);
       });
+    const pinned = peers.filter((p) => p.trust === "pinned");
+    const online = pinned.filter((p) => p.online);
+    const verified = pinned.filter((p) => p.is_verified);
+    const attention = pinned.filter((p) =>
+      !p.online || !p.is_verified || (p.compatibility && p.compatibility.compatible === false));
+    const summary = $("#settings-devices-summary");
+    if (summary) {
+      summary.innerHTML = "";
+      const stat = (value, label) => {
+        const box = el("div", "settings-device-stat");
+        box.appendChild(el("strong", null, String(value)));
+        box.appendChild(el("span", null, label));
+        summary.appendChild(box);
+      };
+      stat(pinned.length, "paired");
+      stat(online.length, "online");
+      stat(verified.length, "verified");
+      stat(attention.length, "attention");
+    }
     host.innerHTML = "";
     if (!peers.length) {
       host.appendChild(el(
@@ -26462,8 +26849,18 @@
         reachLabel(p),
         p.health?.latency_ewma_ms == null ? null : `${Math.round(p.health.latency_ewma_ms)} ms`,
         p.is_verified ? "Verified" : "Not verified",
+        p.app_version ? `v${p.app_version}` : null,
       ].filter(Boolean);
       meta.appendChild(el("div", "settings-device-sub", bits.join(" - ")));
+      if (p.fingerprint) {
+        const codeLine = el("div", "settings-code-line");
+        codeLine.appendChild(el("code", null, p.fingerprint));
+        const copyInline = el("button", "btn-ghost", "Copy");
+        copyInline.type = "button";
+        copyInline.onclick = () => copyToClipboard(p.fingerprint, "device fingerprint");
+        codeLine.appendChild(copyInline);
+        meta.appendChild(codeLine);
+      }
       row.appendChild(meta);
 
       const actions = el("div", "settings-device-actions");
@@ -26481,9 +26878,22 @@
       const copy = el("button", null, "Copy ID");
       copy.type = "button";
       copy.onclick = () => copyToClipboard(p.fingerprint || p.short_id || "", "device ID");
+      const exportBtn = el("button", null, "Export");
+      exportBtn.type = "button";
+      exportBtn.onclick = async () => {
+        try {
+          const fp = encodeURIComponent(p.fingerprint || "");
+          if (!fp) throw new Error("device fingerprint unavailable");
+          const r = await api.get(`/api/peers/${fp}/export`);
+          await copyToClipboard(JSON.stringify(r, null, 2), "device export");
+        } catch (e) {
+          toast(`Export failed: ${errorToastBody(e)}`, "bad", 5000);
+        }
+      };
       actions.appendChild(chat);
       actions.appendChild(details);
       actions.appendChild(copy);
+      if (p.fingerprint) actions.appendChild(exportBtn);
       row.appendChild(actions);
       host.appendChild(row);
     }
@@ -26496,6 +26906,42 @@
       return;
     }
     copyToClipboard(txt, "identity fingerprint");
+  });
+  $("#settings-copy-identity-privacy")?.addEventListener("click", () => {
+    const txt = (state.me?.fingerprint || $("#settings-identity-fp")?.textContent || "").trim();
+    if (!txt || txt === "..." || txt === "…" || txt === "(unknown)") {
+      toast("Identity is still loading.", "info", 1800);
+      return;
+    }
+    copyToClipboard(txt, "identity fingerprint");
+  });
+  $("#settings-open-privacy-proof")?.addEventListener("click", async () => {
+    await api.setupAction("privacy_proof_viewed").catch(() => {});
+    switchSettingsPane("setup");
+    $("#settings-one-setup-proof-list")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  });
+
+  $("#settings-network-refresh")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    btn.textContent = "Refreshing...";
+    try {
+      await refreshSettingsNetwork();
+      toast("Network report refreshed.", "good", 1800);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Refresh route health";
+    }
+  });
+  $("#settings-network-copy-report")?.addEventListener("click", () => {
+    copySettingsNetworkReport().catch((e) => {
+      toast(`Couldn't copy report: ${errorToastBody(e)}`, "bad", 4000);
+    });
+  });
+  $("#settings-network-run-doctor")?.addEventListener("click", async () => {
+    switchSettingsPane("advanced");
+    $("#settings-run-doctor")?.click();
+    $("#doctor-results")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   });
 
   $("#settings-devices-refresh")?.addEventListener("click", async () => {
@@ -26520,6 +26966,31 @@
     document.querySelector('[data-pane="activity"]')?.click();
     await loadActivityNearby({ force: true });
     toast("Nearby devices refreshed.", "info", 1800);
+  });
+  $("#settings-devices-copy-roster")?.addEventListener("click", async () => {
+    const peers = [...(state.peers?.values?.() || [])]
+      .filter((p) => p && p.trust !== "rejected")
+      .map((p) => ({
+        name: p.display_name || p.hostname || p.short_id || "Device",
+        short_id: p.short_id || null,
+        fingerprint: p.fingerprint || null,
+        trust: p.trust || "unknown",
+        online: !!p.online,
+        verified: !!p.is_verified,
+        route: reachLabel(p),
+        latency_ms: p.health?.latency_ewma_ms == null ? null : Math.round(p.health.latency_ewma_ms),
+        version: p.app_version || null,
+      }));
+    await copyToClipboard(
+      JSON.stringify({ generated_at: new Date().toISOString(), peers }, null, 2),
+      "device report",
+    );
+  });
+  $("#settings-about-copy-diagnostics")?.addEventListener("click", () => {
+    $("#settings-copy-diagnostics")?.click();
+  });
+  $("#settings-about-download-diagnostics")?.addEventListener("click", () => {
+    $("#settings-export-diagnostics")?.click();
   });
 
   // Settings -> About add-device QR. Uses the same One Setup device
@@ -26810,6 +27281,10 @@
         notification_sound: r.notification_sound !== false,
         bio: r.bio || "",
         avatar_color: r.avatar_color || "#7c4dff",
+        send_read_receipts: r.send_read_receipts !== false,
+        display_read_receipts: r.display_read_receipts !== false,
+        send_typing_indicators: r.send_typing_indicators !== false,
+        display_typing_indicators: r.display_typing_indicators !== false,
       };
     } catch (e) {
       $("#set-name").value = "";
@@ -26832,10 +27307,12 @@
     // v0.11.0: fill the new Profile + About panes + reset nav to
     // Profile each open so the user always lands on a predictable
     // pane regardless of where they last navigated.
+    switchSettingsPane("profile");
     refreshSettingsAbout();
     renderSettingsDevices();
+    renderSettingsNetwork();
+    refreshSettingsNetwork().catch((e) => console.warn("settings network refresh:", e));
     refreshBlockedDevicesList();
-    switchSettingsPane("profile");
     _settingsHydrating = false;
     markSettingsClean("No changes yet.");
     settingsBackdrop.classList.add("show");
@@ -26919,6 +27396,10 @@
         notification_sound: payload.notification_sound,
         bio: payload.bio,
         avatar_color: payload.avatar_color || state.runtimeSettings?.avatar_color,
+        send_read_receipts: payload.send_read_receipts,
+        display_read_receipts: payload.display_read_receipts,
+        send_typing_indicators: payload.send_typing_indicators,
+        display_typing_indicators: payload.display_typing_indicators,
       };
     } catch (e) {
       setSettingsSaveStatus("Save failed.", "bad");
