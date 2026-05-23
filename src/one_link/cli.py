@@ -179,6 +179,55 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
             name="one-link-tray-loader",
         ).start()
 
+    # 2026-05-22 UX: once the daemon binds, push the actual URL
+    # (with LAN IP, not loopback) into the tray so the hover-title
+    # tells the user where their phone should connect.
+    def _push_tray_url_when_ready() -> None:
+        import time as _t
+        import socket as _sk
+        from one_link.paths import data_dir as _data_dir
+        # Poll for server.port to appear, up to 10 s.
+        deadline = _t.time() + 10.0
+        port = None
+        port_file = _data_dir() / "server.port"
+        while _t.time() < deadline:
+            try:
+                if port_file.exists():
+                    port = int(port_file.read_text(encoding="utf-8").strip())
+                    break
+            except Exception:
+                pass
+            _t.sleep(0.1)
+        if port is None:
+            return
+        # Detect a LAN IP if the daemon is LAN-bound.
+        lan = "127.0.0.1"
+        try:
+            s = _sk.socket(_sk.AF_INET, _sk.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 1))
+            lan = s.getsockname()[0]
+            s.close()
+        except Exception:
+            pass
+        token = ""
+        try:
+            token = (_data_dir() / "ui.token").read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+        url = f"http://{lan}:{port}/" + (f"?t={token}" if token else "")
+        tray_icon = tray_icon_holder.get("icon")
+        if tray_icon is not None:
+            try:
+                tray_icon.set_url(url)
+            except Exception:
+                pass
+
+    threading.Thread(
+        target=_push_tray_url_when_ready,
+        daemon=True,
+        name="one-link-tray-url-pusher",
+    ).start()
+
     if open_browser:
         # Open the UI ~2.5 s after daemon boot starts. Long enough for
         # the local HTTP server to bind, short enough that the user
@@ -189,15 +238,17 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
             import webbrowser as _wb
             from one_link.paths import data_dir as _data_dir
             _t.sleep(2.5)
-            # Read the local port from the daemon's pidfile-style URL
-            # marker if it exists; otherwise default to 8765 (the
-            # current bind port used by the UI server).
-            port_file = _data_dir() / "ui_port.txt"
-            url = "http://127.0.0.1:8765/"
+            # Read the auth-gated UI port + token. Opening the bare
+            # URL can strand the user on "sign-in needed" after a
+            # restart; the bootstrap token is the supported owner path.
+            port_file = _data_dir() / "server.port"
+            token_file = _data_dir() / "ui.token"
+            url = "http://127.0.0.1:7117/"
             try:
                 if port_file.exists():
                     port = int(port_file.read_text(encoding="utf-8").strip())
-                    url = f"http://127.0.0.1:{port}/"
+                    token = token_file.read_text(encoding="utf-8").strip() if token_file.exists() else ""
+                    url = f"http://127.0.0.1:{port}/" + (f"?t={token}" if token else "")
             except Exception:
                 pass
             try:

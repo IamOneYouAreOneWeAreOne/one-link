@@ -21,12 +21,23 @@ import sys
 import threading
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
     import pystray
 
 log = logging.getLogger("one_link.tray")
+
+
+def _display_url(url: str) -> str:
+    """Return the tray-title version of a UI URL without auth query data."""
+    try:
+        parts = urlsplit(url)
+        path = parts.path.rstrip("/") or "/"
+        return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    except Exception:
+        return (url or "").split("?", 1)[0].rstrip("/") or url
 
 
 def _icon_image():
@@ -102,6 +113,11 @@ class TrayIcon:
         self._url = url
         if self._icon is not None:
             self._icon.menu = self._build_menu()
+            # 2026-05-22 UX: refresh the hover title too.
+            try:
+                self._icon.title = f"One Link - {_display_url(url)}"
+            except Exception:
+                pass
 
     def set_inbox_path(self, path: Path) -> None:
         self._inbox_path = path
@@ -147,6 +163,12 @@ class TrayIcon:
         from pystray import MenuItem, Menu
         items: list[MenuItem] = [
             MenuItem("Open One Link", self._on_open, default=True),
+            # 2026-05-22 UX: top-level "Connect a device" so a phone /
+            # second laptop pair flow is one click from the tray, not
+            # buried inside the Setup pane. Deep-link query param tells
+            # the web UI to auto-open the Add Device modal + mint a
+            # fresh QR on load.
+            MenuItem("Connect a device", self._on_connect_device),
         ]
         if self._inbox_path is not None:
             items.append(MenuItem("Open inbox folder", self._on_open_inbox))
@@ -161,6 +183,17 @@ class TrayIcon:
             webbrowser.open(self._url)
         except Exception as e:
             log.warning("tray: failed to open browser: %s", e)
+
+    def _on_connect_device(self, icon, item) -> None:
+        """Open the web UI with a deep-link the UI recognises and
+        auto-opens the Add Device modal + mints a fresh invite QR.
+        Same target as ``Open One Link`` plus ``?setup=add-device``."""
+        try:
+            separator = "&" if "?" in self._url else "?"
+            target = f"{self._url}{separator}setup=add-device"
+            webbrowser.open(target)
+        except Exception as e:
+            log.warning("tray: failed to open connect-device flow: %s", e)
 
     def _on_open_inbox(self, icon, item) -> None:
         if self._inbox_path is None:
@@ -204,10 +237,19 @@ class TrayIcon:
                 )
                 self._available = False
                 return
+            # 2026-05-22 UX: hovering over the tray icon shows the
+            # daemon's URL so the user always knows where to point
+            # a phone browser. Without this they'd have to dig into
+            # Settings or guess the port.
+            title = "One Link"
+            try:
+                title = f"One Link - {_display_url(self._url)}"
+            except Exception:
+                pass
             self._icon = Icon(
                 "one_link",
                 icon=base_icon,
-                title="One Link",
+                title=title,
                 menu=self._build_menu(),
             )
         except Exception as e:

@@ -2768,6 +2768,12 @@
     color: var(--text);
     background: rgba(255,255,255,.055);
   }
+  .activity-nearby-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
   .activity-help {
     margin: 6px 12px 0;
   }
@@ -7080,6 +7086,10 @@
     padding: 6px 8px;
     font-size: 13px;
   }
+  .jump-date-popover .jdp-input.invalid {
+    border-color: rgba(255, 114, 114, .85);
+    box-shadow: 0 0 0 2px rgba(255, 114, 114, .14);
+  }
   .jump-date-popover .jdp-go {
     background: var(--accent);
     color: white;
@@ -7094,6 +7104,9 @@
     font-size: 12px;
     line-height: 1.35;
     max-width: 280px;
+  }
+  .jump-date-popover .jdp-hint.bad {
+    color: #ffb8b8;
   }
   /* v0.21.x: jump-to highlight on the target bubble. */
   .msg.jumped-to {
@@ -12572,6 +12585,34 @@
     }
     return null;
   }
+  function fileAccessInfoForMessage(msg, t) {
+    const name = msg?.name || t?.name || "";
+    const fname = name || "file";
+    const size = msg?.size || t?.total_bytes || t?.size || 0;
+    if (msg?.dir === "in") {
+      return {
+        url: `/api/files/${encodeURIComponent(fname)}`,
+        route: "Receiver inbox endpoint",
+        source: "This computer's received-file store",
+        problem: "",
+      };
+    }
+    const url = objectUrlForOutboundFile(fname, size, t?.id);
+    if (url) {
+      return {
+        url,
+        route: url.startsWith("blob:") ? "Sender browser cache" : "Sender transfer ledger endpoint",
+        source: url.startsWith("blob:") ? "Original file object in this tab" : "Daemon transfer ledger",
+        problem: "",
+      };
+    }
+    return {
+      url: "",
+      route: "No local open route",
+      source: "Transfer completed, but this tab does not have the original file handle.",
+      problem: "Use Save/Open on the receiving computer, or resend the file to restore a sender-side preview.",
+    };
+  }
   // Lightbox singleton. Created on first use, reused thereafter.
   function _ensureLightbox() {
     let lb = document.getElementById("file-lightbox");
@@ -13362,6 +13403,7 @@
     const summary = document.createElement("summary");
     summary.textContent = "Details";
     details.appendChild(summary);
+    const access = fileAccessInfoForMessage(msg, t);
 
     const rows = el("div", "file-detail-rows");
     rows.appendChild(_fileDetailRow("Status", statusLabel(t, kind === "sent" ? "Done" : kind)));
@@ -13369,8 +13411,28 @@
     rows.appendChild(_fileDetailRow("Size", fmtBytes(msg.size || t?.total_bytes || 0)));
     rows.appendChild(_fileDetailRow("Type", isImageName(msg.name || "") ? "Image" : (isAudioName(msg.name || "") ? "Audio" : "File")));
     rows.appendChild(_fileDetailRow("Preview", _filePreviewSourceLabel(msg, t)));
+    rows.appendChild(_fileDetailRow("Open route", access.route));
+    rows.appendChild(_fileDetailRow("Source", access.source));
+    if (access.problem) rows.appendChild(_fileDetailRow("Needs", access.problem));
     if (t?.id) rows.appendChild(_fileDetailRow("Transfer", String(t.id).slice(0, 12)));
     details.appendChild(rows);
+
+    const actions = el("div", "actions");
+    if (access.url) {
+      const open = el("a", "", "Open");
+      open.href = access.url;
+      open.target = "_blank";
+      open.rel = "noopener";
+      actions.appendChild(open);
+      const save = el("a", "", "Save a copy");
+      save.href = access.url;
+      save.setAttribute("download", msg.name || "file");
+      actions.appendChild(save);
+    } else {
+      const unavailable = el("span", "hint", "Preview not available on this side");
+      actions.appendChild(unavailable);
+    }
+    details.appendChild(actions);
 
     const facts = renderTransferFacts(t, kind);
     if (facts) details.appendChild(facts);
@@ -14998,7 +15060,13 @@
     // Capture scroll position BEFORE we blow away the DOM so
     // _smartScrollAfter can preserve user position if they're
     // reading history, or snap to bottom if they're already there.
+    const firstRender = !m._renderSig || m._renderSig === "no-peer";
     const prevBottomState = _captureScrollState(m);
+    if (firstRender && state.searchResults == null) {
+      prevBottomState.wasAtBottom = true;
+      prevBottomState.forceBottom = true;
+      _forceNextMessagesToBottom(1800);
+    }
     m._renderSig = sig;
     m.innerHTML = "";
 
@@ -17107,7 +17175,14 @@
       `Group chat · ${g.member_count} member${g.member_count === 1 ? "" : "s"}`
     ));
     const m = $("#messages");
+    const firstRender = !m._renderGroupSig || m._renderGroupSig !== state.selectedGroup;
     const prevBottomState = _captureScrollState(m);
+    if (firstRender && state.searchResults == null) {
+      prevBottomState.wasAtBottom = true;
+      prevBottomState.forceBottom = true;
+      _forceNextMessagesToBottom(1800);
+    }
+    m._renderGroupSig = state.selectedGroup;
     m.innerHTML = "";
     if (state.groupMessages.length === 0) {
       m.appendChild(el("div", "day-sep", "No messages yet"));
@@ -17582,14 +17657,17 @@
     meta.appendChild(el("div", "activity-nearby-name", label));
     meta.appendChild(el("div", "activity-nearby-sub", sub || "On your network"));
     row.appendChild(meta);
-    const btn = el("button", null, actionLabel || "Open");
-    const runAction = () => {
-      if (onAction) onAction();
+    const actions = Array.isArray(actionLabel)
+      ? actionLabel
+      : [{ label: actionLabel || "Open", action: onAction }];
+    const primaryAction = actions[0]?.action || onAction;
+    const runAction = (action = primaryAction) => {
+      if (action) action();
     };
-    if (onAction) {
+    if (primaryAction) {
       row.setAttribute("role", "button");
       row.tabIndex = 0;
-      row.setAttribute("aria-label", `${actionLabel || "Open"} ${label}`);
+      row.setAttribute("aria-label", `${actions[0]?.label || "Open"} ${label}`);
       row.onclick = (ev) => {
         if (ev.target?.closest?.("button, a, input, select, textarea")) return;
         runAction();
@@ -17600,11 +17678,17 @@
         runAction();
       };
     }
-    btn.onclick = (ev) => {
-      ev.stopPropagation();
-      runAction();
-    };
-    row.appendChild(btn);
+    const buttonWrap = el("div", "activity-nearby-actions");
+    for (const item of actions) {
+      const btn = el("button", null, item.label || "Open");
+      btn.type = "button";
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
+        runAction(item.action);
+      };
+      buttonWrap.appendChild(btn);
+    }
+    row.appendChild(buttonWrap);
     return row;
   }
 
@@ -17622,11 +17706,26 @@
         deviceKindLabel(p)?.icon || "💻",
         p.display_name || p.hostname || p.short_id,
         `${reachLabel(p)} - trusted`,
-        "Chat",
+        [
+          {
+            label: "Details",
+            action: () => {
+              openDeviceDrawer(p.short_id);
+              toast(`Opened details for ${p.display_name || p.hostname || p.short_id}.`, "info", 2500);
+            },
+          },
+          {
+            label: "Chat",
+            action: () => {
+              selectPeer(p.short_id);
+              document.querySelector('[data-pane="convo"]')?.click();
+              toast(`Opened chat with ${p.display_name || p.hostname || p.short_id}.`, "info", 2500);
+            },
+          },
+        ],
         () => {
-          selectPeer(p.short_id);
-          document.querySelector('[data-pane="convo"]')?.click();
-          toast(`Opened chat with ${p.display_name || p.hostname || p.short_id}.`, "info", 2500);
+          openDeviceDrawer(p.short_id);
+          toast(`Opened details for ${p.display_name || p.hostname || p.short_id}.`, "info", 2500);
         },
       ));
     }
@@ -24188,6 +24287,41 @@
     return new Date(y, m - 1, d).toLocaleDateString();
   }
 
+  function _normalizeJumpDateInput(raw) {
+    const v = String(raw || "").trim();
+    if (!v) return { ok: false, reason: "Choose a date first." };
+    let y; let m; let d;
+    let match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(v);
+    if (match) {
+      y = parseInt(match[1], 10);
+      m = parseInt(match[2], 10);
+      d = parseInt(match[3], 10);
+    } else {
+      match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(v);
+      if (!match) {
+        return {
+          ok: false,
+          reason: "Use YYYY-MM-DD or MM/DD/YYYY, or pick a date from the calendar.",
+        };
+      }
+      m = parseInt(match[1], 10);
+      d = parseInt(match[2], 10);
+      y = parseInt(match[3], 10);
+    }
+    const chosenYear = y;
+    if (chosenYear < 2000 || chosenYear > 2100 || m < 1 || m > 12 || d < 1 || d > 31) {
+      return { ok: false, reason: "That date looks wrong. Pick a date inside the conversation range." };
+    }
+    const dt = new Date(y, m - 1, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) {
+      return { ok: false, reason: "That calendar date does not exist." };
+    }
+    return {
+      ok: true,
+      value: `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
+    };
+  }
+
   function _messagesForJumpDate() {
     if (state.selectedGroup) {
       return (state.groupMessages || [])
@@ -24256,6 +24390,13 @@
     input.value = lastKey;
     hint.textContent = `Available: ${_friendlyDateKey(firstKey)} - ${_friendlyDateKey(lastKey)}. If that day has no messages, I will jump to the nearest one.`;
     setTimeout(() => input.focus(), 60);
+    function setJumpHint(text, kind = "info") {
+      hint.textContent = text;
+      hint.classList.toggle("bad", kind === "bad");
+      input.classList.toggle("invalid", kind === "bad");
+      input.setAttribute("aria-invalid", kind === "bad" ? "true" : "false");
+      if (kind === "bad") toast(text, "bad", 4500);
+    }
     function close() {
       pop.remove();
       document.removeEventListener("click", off, true);
@@ -24268,21 +24409,14 @@
       document.addEventListener("keydown", esc);
     }, 0);
     const jump = () => {
-      const v = input.value;
-      if (!v) {
-        hint.textContent = "Choose a date first.";
+      const parsed = _normalizeJumpDateInput(input.value);
+      if (!parsed.ok) {
+        setJumpHint(parsed.reason, "bad");
         return;
       }
-      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
-      if (!match) {
-        hint.textContent = "Use the date picker or type a real YYYY-MM-DD date.";
-        return;
-      }
-      const chosenYear = parseInt(match[1], 10);
-      if (chosenYear < 2000 || chosenYear > 2100) {
-        hint.textContent = "That year looks wrong. Pick a date inside the conversation range.";
-        return;
-      }
+      const v = parsed.value;
+      input.value = v;
+      setJumpHint(`Jumping to ${_friendlyDateKey(v)}...`);
       const exact = jumpMessages.find((mm) => _localDateKeyFromMs(mm._jumpTs) === v);
       let target = exact;
       let note = "";
@@ -26962,6 +27096,43 @@
   });
 
   init();
+
+  // 2026-05-22 UX: tray "Connect a device" + first-launch onboarding
+  // both deep-link to ``/?setup=add-device``. Detect that here and
+  // auto-open the Add Device flow (mint a fresh QR + show the
+  // setup pane) so the user lands directly on the QR instead of
+  // having to navigate Settings → Setup → Add Device.
+  try {
+    const _setupParam = new URLSearchParams(location.search).get("setup");
+    if (_setupParam === "add-device") {
+      // Wait for init's async work to finish populating state.
+      const _tryOpen = () => {
+        const btn = document.getElementById("one-setup-add-device")
+          || document.getElementById("one-setup-add-device-panel")
+          || document.getElementById("settings-one-setup-add-device");
+        if (btn) {
+          // Open the panel + click the button to mint a fresh invite.
+          const panel = document.getElementById("setup-pane")
+            || document.querySelector('[data-pane="setup"]');
+          if (panel && typeof panel.scrollIntoView === "function") {
+            panel.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+          btn.click();
+          // Strip the query param so a refresh doesn't re-mint a new
+          // QR on every page reload.
+          try {
+            const url = new URL(location.href);
+            url.searchParams.delete("setup");
+            history.replaceState({}, "", url.toString());
+          } catch (_) { /* best-effort */ }
+        } else {
+          setTimeout(_tryOpen, 250);
+        }
+      };
+      // Give init() a beat to finish first.
+      setTimeout(_tryOpen, 100);
+    }
+  } catch (_) { /* ignore — deep-link is best-effort */ }
 
   // MAY 15 2026 - removed the diagnostic title-bar overlay that
   // previously surfaced viewport measurements like

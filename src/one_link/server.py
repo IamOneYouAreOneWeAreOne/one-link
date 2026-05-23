@@ -264,6 +264,86 @@ MAX_SIGNALING_ATTEMPTS = 24
 PREFERRED_UI_PORT = 7117
 UI_PORT_FALLBACK_RANGE = 16
 
+
+# 2026-05-22 UX — phone-friendly onboarding landing page.
+# Served from ``/connect`` over HTTP (no cert warning). iOS Safari
+# gets the install-trust-then-pair flow; Android / desktop get a
+# 302 to the HTTPS pair URL directly.
+_CONNECT_LANDING_HTML_IOS = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Connect to One Link</title>
+<style>
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro", system-ui, sans-serif;
+    background: #f7f6f0; color: #0a0c14;
+    margin: 0; padding: 32px 24px;
+    line-height: 1.5;
+  }}
+  h1 {{ font-size: 28px; margin: 0 0 24px; font-weight: 600; }}
+  p  {{ font-size: 17px; margin: 0 0 16px; color: #43454f; }}
+  ol {{ margin: 0 0 24px; padding-left: 24px; }}
+  ol li {{ margin-bottom: 12px; font-size: 16px; color: #43454f; }}
+  .step {{
+    background: #ffffff; border-radius: 16px; padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(10, 12, 20, 0.05);
+  }}
+  .step-num {{
+    display: inline-block; width: 28px; height: 28px;
+    border-radius: 14px; background: #0a0c14; color: #f7f6f0;
+    text-align: center; line-height: 28px; font-weight: 600;
+    margin-right: 12px; vertical-align: middle;
+  }}
+  .step h2 {{
+    font-size: 20px; margin: 0 0 12px; font-weight: 600;
+    display: flex; align-items: center;
+  }}
+  .step h2 span:not(.step-num) {{ vertical-align: middle; }}
+  a.btn {{
+    display: block; padding: 16px 24px; margin-top: 16px;
+    background: #0a0c14; color: #f7f6f0; text-decoration: none;
+    border-radius: 12px; font-size: 17px; font-weight: 600;
+    text-align: center;
+  }}
+  a.btn-secondary {{
+    background: transparent; color: #0a0c14;
+    border: 1.5px solid #0a0c14;
+  }}
+  .hint {{
+    color: #767889; font-size: 14px;
+    margin-top: 12px; line-height: 1.45;
+  }}
+  code {{
+    background: #ecebe2; padding: 2px 6px; border-radius: 4px;
+    font-family: -apple-system, "SF Mono", Menlo, monospace;
+    font-size: 14px;
+  }}
+</style>
+</head>
+<body>
+  <h1>Connect to One Link</h1>
+  <p>Two quick steps to finish pairing this device.</p>
+
+  <div class="step">
+    <h2><span class="step-num">1</span><span>Install trust profile</span></h2>
+    <p>This lets your phone talk to your laptop directly. One-time install — applies to this network only.</p>
+    <a class="btn" href="{mobileconfig_url}">Download trust profile</a>
+    <p class="hint">After download: open <strong>Settings → Profile Downloaded</strong> → <strong>Install</strong>. Then come back here.</p>
+  </div>
+
+  <div class="step">
+    <h2><span class="step-num">2</span><span>Finish pairing</span></h2>
+    <p>Once the profile is installed, tap below to pair this device.</p>
+    <a class="btn btn-secondary" href="{pair_url}">Continue to pair</a>
+    <p class="hint">If you see a security warning here, the trust profile wasn't installed in step 1. Go back and try the download again.</p>
+  </div>
+</body>
+</html>
+"""
+
 # Discovery is intentionally soft state: mDNS can miss packets, Windows can
 # leave stale network state around, and a peer may still be reachable through an
 # already-open encrypted session. If we have touched the peer recently at the
@@ -1446,6 +1526,15 @@ class UIServer:
         # since it's the same self-signed cert anyone on the LAN
         # would see during a TLS handshake anyway.
         r.add_get("/api/v1/peer-rtc/profile.mobileconfig", self._pair_profile)
+        # 2026-05-22 UX — phone-friendly onboarding landing.
+        # The HTTPS pair URL hits a self-signed cert which iOS Safari
+        # gates Web Crypto on. ``/connect`` is the HTTP landing page
+        # (no cert warning) that detects iOS UA + offers mobileconfig
+        # install as a one-tap flow before redirecting to the secure
+        # pair URL. For Android / desktop / iOS-with-trust-already-
+        # installed, falls through immediately to ``/peer``.
+        r.add_get("/connect", self._connect_landing)
+        r.add_get("/connect/", self._connect_landing)
         # May 15 2026 — sovereignty endpoint. Both index.html and
         # peer.html start with an empty ICE-server list (no calls
         # to third-party STUN by default) and ask this endpoint
@@ -3351,6 +3440,67 @@ class UIServer:
             },
             "sovereignty_default": len(servers) == 0,
         })
+
+    async def _connect_landing(self, request: web.Request) -> web.StreamResponse:
+        """2026-05-22 UX — phone-friendly onboarding landing page.
+
+        The HTTPS pair URL (``/peer?setup_device_invite=<token>``)
+        hits a self-signed cert. iOS Safari blocks Web Crypto under
+        an untrusted cert, so a phone that scans the bare HTTPS URL
+        cannot complete the pair flow. This HTTP landing page (no
+        cert warning) covers the gap:
+
+          * iOS Safari: render an "Install trust" tap target that
+            downloads the mobileconfig. Once installed (1 tap +
+            Settings → Profile Downloaded → Install), the page
+            offers a Continue link to the HTTPS pair URL.
+          * Android / desktop browsers: redirect immediately to the
+            HTTPS pair URL — they handle self-signed certs via a
+            standard "Advanced → Continue" warning the user can
+            click through once.
+
+        Auth: PUBLIC (no token gate). The pair flow's own
+        ``setup_device_invite`` token authorises the actual device
+        addition; this landing page just guides the phone there.
+        """
+        token = request.query.get("token") or request.query.get(
+            "setup_device_invite", ""
+        )
+        # Build the HTTPS pair URL we want the phone to land on.
+        # ``_lan_peer_base_url`` already encodes the LAN IP when the
+        # daemon is LAN-bound, so this works without manual config.
+        peer_base = self._lan_peer_base_url(request)
+        pair_url = (
+            f"{peer_base}/peer?setup_device_invite={token}"
+            if token else f"{peer_base}/peer"
+        )
+        # Build the HTTP URL to the mobileconfig on THIS daemon (use
+        # the request's host:port so the phone hits the same address
+        # it just succeeded with).
+        mobileconfig_url = (
+            f"{request.scheme}://{request.host}"
+            "/api/v1/peer-rtc/profile.mobileconfig"
+        )
+        # User-agent sniff — iOS Safari is the only one that needs
+        # the mobileconfig dance; everything else can fall through.
+        ua = (request.headers.get("User-Agent") or "").lower()
+        is_ios = (
+            "iphone" in ua or "ipad" in ua or "ipod" in ua
+            or ("mac" in ua and "mobile" in ua)
+        )
+        if not is_ios:
+            # Android / desktop — redirect immediately to the HTTPS
+            # pair URL. The browser handles the self-signed warning.
+            return web.Response(status=302, headers={"Location": pair_url})
+
+        # iOS Safari — render the install-trust-then-pair landing.
+        html = _CONNECT_LANDING_HTML_IOS.format(
+            mobileconfig_url=mobileconfig_url,
+            pair_url=pair_url,
+        )
+        resp = web.Response(text=html, content_type="text/html", charset="utf-8")
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     async def _pair_profile(self, request: web.Request) -> web.StreamResponse:
         """v0.20.6 — serve the iOS Configuration Profile that trusts
@@ -6123,7 +6273,21 @@ class UIServer:
         return f"{request.scheme}://{request.host}"
 
     def _setup_invite_peer_url(self, request: web.Request, token: str) -> str:
-        return f"{self._lan_peer_base_url(request)}/peer?setup_device_invite={token}"
+        # 2026-05-22 UX: route through ``/connect`` (HTTP, no cert
+        # warning) which detects iOS UA + offers mobileconfig
+        # install before the HTTPS pair URL. Android / desktop /
+        # iOS-with-trust-installed fall through to ``/peer``
+        # immediately via 302. Older agents that hit ``/peer``
+        # directly still work — this is the URL we encode in QR
+        # codes + share over chat, not a contract change.
+        port = self.port if self.port else PREFERRED_UI_PORT
+        bind = self.bind_host
+        if bind in ("127.0.0.1", "localhost", "::1"):
+            host = request.host
+        else:
+            lan = _detect_lan_ip()
+            host = f"{lan}:{port}" if lan != "127.0.0.1" else request.host
+        return f"http://{host}/connect?token={token}"
 
     async def api_setup_device_invite(self, request: web.Request) -> web.Response:
         """Create a short-lived One Setup invite for a new device.
@@ -13745,12 +13909,26 @@ class UIServer:
         self.runner = web.AppRunner(self.app, access_log=None)
         await self.runner.setup()
         # v0.15.2 — LAN-bind opt-in via env var. Default 127.0.0.1
-        # (loopback only, the historical safe default). Setting
-        # ONE_LINK_BIND_HOST=0.0.0.0 (or a specific LAN address)
-        # exposes the UI to the LAN so a phone on the same Wi-Fi
-        # can connect. The token still gates everything; the env
-        # var only changes which interface answers.
-        bind_host = os.environ.get("ONE_LINK_BIND_HOST") or "127.0.0.1"
+        # 2026-05-22 UX: the default is now ``0.0.0.0`` (LAN-bound)
+        # so a phone / second laptop on the same Wi-Fi can complete
+        # the device-invite QR pair flow WITHOUT the user having to
+        # set ``ONE_LINK_BIND_HOST=0.0.0.0`` first. Token auth +
+        # CSRF still gate every mutating endpoint; the bind change
+        # only changes which network interface answers — it does NOT
+        # widen authorization. Tests and headless / loopback-only
+        # deployments can still force ``127.0.0.1`` via the env var.
+        #
+        # Why this is safe:
+        #   * ``_guarded`` requires a valid bearer token on every
+        #     POST/PUT/PATCH/DELETE.
+        #   * ``_csrf_origin_ok`` (T2-O) checks Origin/CSRF for
+        #     non-GET routes.
+        #   * The device-invite tokens are short-lived (5 min) and
+        #     single-use.
+        #   * On Windows the firewall prompt scopes the daemon to
+        #     "Private networks only" by default; that closes
+        #     coffee-shop exposure even before token auth.
+        bind_host = os.environ.get("ONE_LINK_BIND_HOST") or "0.0.0.0"
         # Try the well-known port first so browser tabs survive restarts.
         # Fall through 7118..7132 if taken, then OS-assigned random as
         # last resort.
