@@ -164,6 +164,14 @@
   }
   button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 0; }
   input, textarea { font: inherit; color: inherit; }
+  /* 2026-05-23: defensive — the HTML `hidden` attribute defaults
+     to `display: none` via the UA stylesheet at the LOWEST
+     specificity, so any later `display: flex/grid/block` rule on
+     the same element wins and the "hidden" element still renders.
+     Same bug we hit on peer.html (Settings + Chat both visible
+     after _showOnly). Re-assert with !important so hidden=true
+     reliably hides regardless of layout rules elsewhere. */
+  [hidden] { display: none !important; }
 
   /* ── App layout ─────────────────────────────────────────────────────── */
   .app { display: grid; grid-template-rows: 56px 1fr; height: 100vh; }

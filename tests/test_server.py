@@ -622,7 +622,11 @@ async def test_local_document_reopen_without_query_token_refreshes_cookie():
             ) as r:
                 assert r.status == 200
                 assert any(c.key == "ol_ui" for c in r.cookies.values())
-                assert r.headers.get("Cache-Control") == "no-store"
+                # 2026-05-23: cache header is now no-cache+revalidate
+                # + ETag (same as bootstrap path). Bullet-proof cache
+                # busting for the desktop UI bundle.
+                assert r.headers.get("Cache-Control") == "no-cache, must-revalidate"
+                assert r.headers.get("ETag", "").startswith('"')
 
 
 @pytest.mark.asyncio
