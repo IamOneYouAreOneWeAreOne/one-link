@@ -4187,6 +4187,74 @@ class UIServer:
                 _err("send_failed", f"send_text: {e}")
             return
 
+        if msg_t == "set_peer_alias":
+            # 2026-05-23 phase 3a: phone renames a peer locally.
+            # Wire:
+            #   phone → daemon: {v, t:"set_peer_alias", rid,
+            #                    peer_fp, alias (str or null)}
+            #   daemon → phone: {v, t:"set_peer_alias_result", rid,
+            #                    ok, peer_fp, alias}
+            #          OR       {v, t:"error", rid, code, message}
+            peer_fp = envelope.get("peer_fp")
+            alias = envelope.get("alias")
+            if not isinstance(peer_fp, str) or not peer_fp:
+                _err("bad_peer_fp", "peer_fp required")
+                return
+            if alias is not None and not isinstance(alias, str):
+                _err("bad_alias", "alias must be a string or null")
+                return
+            if isinstance(alias, str) and len(alias) > 64:
+                _err("alias_too_long", "alias max 64 chars")
+                return
+            try:
+                rec = state.get_peer(peer_fp)
+                if rec is None:
+                    _err("peer_not_found", "peer not in roster")
+                    return
+                updated = state.set_peer_profile(peer_fp, local_alias=alias)
+            except Exception as e:
+                _err("update_failed", f"set_peer_profile: {e}")
+                return
+            _send({
+                "t": "set_peer_alias_result",
+                "ok": True,
+                "peer_fp": peer_fp,
+                "alias": getattr(updated, "local_alias", None),
+            })
+            return
+
+        if msg_t == "set_peer_mute":
+            # 2026-05-23 phase 3a: phone mutes/unmutes a peer.
+            # Wire:
+            #   phone → daemon: {v, t:"set_peer_mute", rid,
+            #                    peer_fp, muted (bool)}
+            #   daemon → phone: {v, t:"set_peer_mute_result", rid,
+            #                    ok, peer_fp, muted}
+            peer_fp = envelope.get("peer_fp")
+            muted = envelope.get("muted")
+            if not isinstance(peer_fp, str) or not peer_fp:
+                _err("bad_peer_fp", "peer_fp required")
+                return
+            if not isinstance(muted, bool):
+                _err("bad_muted", "muted must be true or false")
+                return
+            try:
+                rec = state.get_peer(peer_fp)
+                if rec is None:
+                    _err("peer_not_found", "peer not in roster")
+                    return
+                updated = state.set_peer_profile(peer_fp, muted=muted)
+            except Exception as e:
+                _err("update_failed", f"set_peer_profile: {e}")
+                return
+            _send({
+                "t": "set_peer_mute_result",
+                "ok": True,
+                "peer_fp": peer_fp,
+                "muted": bool(getattr(updated, "muted", muted)),
+            })
+            return
+
         if msg_t == "send_file_init":
             # 2026-05-23 phase 2: start a chunked file upload from
             # the phone. Wire:

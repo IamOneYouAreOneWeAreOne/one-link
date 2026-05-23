@@ -273,8 +273,47 @@
     <h2 id="daemon-chat-title">Chat</h2>
     <div class="body">
       <p class="help" id="daemon-chat-meta"></p>
-      <div class="row" style="margin-top:6px; margin-bottom:10px;">
+      <div class="row" style="margin-top:6px; margin-bottom:10px; gap:8px;">
         <button class="btn ghost" id="btn-daemon-chat-back" style="padding:6px 10px; min-height:auto; font-size:12px;">← Back</button>
+        <button class="btn ghost" id="btn-daemon-chat-info" style="padding:6px 10px; min-height:auto; font-size:12px;">⚙ Info</button>
+      </div>
+      <!-- 2026-05-23 phase 3a: peer info / mgmt strip. Hidden by
+           default, toggled by the Info button. Lets the phone
+           rename a peer locally + mute / unmute without going
+           back to the desktop. -->
+      <div id="daemon-chat-peer-info" hidden
+           style="background:var(--bg-3); border-radius:10px;
+                  padding:12px; margin-bottom:10px; font-size:13px;">
+        <p style="margin:0 0 8px; color:var(--text-dim); font-size:11px;
+                  text-transform:uppercase; letter-spacing:0.5px;">
+          Peer settings
+        </p>
+        <div style="margin-bottom:10px;">
+          <label for="daemon-chat-peer-alias"
+                 style="display:block; font-size:12px;
+                        color:var(--text-dim); margin-bottom:4px;">
+            Local alias (only you see this)
+          </label>
+          <div style="display:flex; gap:6px;">
+            <input id="daemon-chat-peer-alias" type="text" maxlength="64"
+                   placeholder="e.g. Laptop, Phone, Workstation"
+                   style="flex:1 1 auto; padding:6px 10px;
+                          border-radius:8px; border:1px solid var(--line);
+                          background:var(--bg-1); color:var(--text);
+                          font: inherit; font-size:13px;" />
+            <button class="btn" id="btn-daemon-chat-peer-alias-save"
+                    style="padding:6px 12px; min-height:auto;
+                           font-size:12px;">Save</button>
+          </div>
+        </div>
+        <label style="display:flex; align-items:center; gap:8px;
+                       font-size:13px; cursor:pointer;">
+          <input type="checkbox" id="daemon-chat-peer-mute-toggle" />
+          <span>Mute notifications from this peer</span>
+        </label>
+        <p id="daemon-chat-peer-info-status"
+           style="margin:6px 0 0; font-size:11px; color:var(--text-dim);
+                  min-height:1em;"></p>
       </div>
       <div id="daemon-chat-log"
            style="padding:12px; background:var(--bg-3); border-radius:10px;
@@ -3755,13 +3794,16 @@
       `${peer.fingerprint || ""}`);
     // 2026-05-23: refresh compose state for the new peer. Clear
     // any prior draft + status, enable Send only after the input
-    // has content.
+    // has content. Also hide the peer-info panel — stale alias /
+    // mute values from a previous peer would otherwise leak.
     const input = $("#daemon-chat-input");
     const sendBtn = $("#btn-daemon-chat-send");
     const sendStatus = $("#daemon-chat-send-status");
     if (input) input.value = "";
     if (sendStatus) sendStatus.textContent = "";
     if (sendBtn) sendBtn.disabled = true;
+    const infoPanel = $("#daemon-chat-peer-info");
+    if (infoPanel) infoPanel.hidden = true;
     const log = $("#daemon-chat-log");
     if (!log) return;
     log.innerHTML = "";
@@ -4038,6 +4080,93 @@
   $("#btn-daemon-chat-attach")?.addEventListener("click", _handleDaemonChatAttach);
   $("#daemon-chat-file-input")?.addEventListener("change", _handleDaemonChatFilePicked);
   $("#btn-daemon-chat-upload-cancel")?.addEventListener("click", _handleDaemonChatUploadCancel);
+
+  // ── Phase 3a: peer roster mgmt (rename + mute) ───────────────────
+  // Wired to set_peer_alias + set_peer_mute on the daemon side.
+  // UI lives inside daemon-chat-card under the Info toggle.
+
+  async function setDaemonPeerAlias(peerFp, alias) {
+    return _daemonRequest("set_peer_alias", {
+      peer_fp: peerFp,
+      alias: alias === "" ? null : alias,
+    });
+  }
+
+  async function setDaemonPeerMute(peerFp, muted) {
+    return _daemonRequest("set_peer_mute", {
+      peer_fp: peerFp,
+      muted: !!muted,
+    });
+  }
+
+  function _toggleDaemonChatPeerInfo() {
+    const panel = $("#daemon-chat-peer-info");
+    if (!panel) return;
+    const peer = state.daemon_active_peer;
+    if (!peer) return;
+    if (panel.hidden) {
+      // Pre-populate with current values.
+      const aliasInput = $("#daemon-chat-peer-alias");
+      const muteToggle = $("#daemon-chat-peer-mute-toggle");
+      if (aliasInput) aliasInput.value = peer.alias || "";
+      if (muteToggle) muteToggle.checked = !!peer.muted;
+      const statusEl = $("#daemon-chat-peer-info-status");
+      if (statusEl) statusEl.textContent = "";
+      panel.hidden = false;
+    } else {
+      panel.hidden = true;
+    }
+  }
+
+  async function _handleDaemonChatPeerAliasSave() {
+    const peer = state.daemon_active_peer;
+    const input = $("#daemon-chat-peer-alias");
+    const statusEl = $("#daemon-chat-peer-info-status");
+    if (!peer || !peer.fingerprint || !input) return;
+    const alias = (input.value || "").trim();
+    if (statusEl) statusEl.textContent = "Saving…";
+    try {
+      const reply = await setDaemonPeerAlias(peer.fingerprint, alias);
+      // Update the in-memory peer record so the chat title reflects
+      // the new alias without a full roster refetch.
+      peer.alias = reply.alias || "";
+      const titleEl = $("#daemon-chat-title");
+      if (titleEl) {
+        titleEl.textContent =
+          peer.alias || peer.hostname || peer.fingerprint || "Chat";
+      }
+      if (statusEl) statusEl.textContent = "Saved.";
+    } catch (e) {
+      if (statusEl) {
+        statusEl.textContent =
+          `Couldn't save alias: ${e && e.message ? e.message : e}`;
+      }
+    }
+  }
+
+  async function _handleDaemonChatPeerMuteToggle(ev) {
+    const peer = state.daemon_active_peer;
+    const statusEl = $("#daemon-chat-peer-info-status");
+    if (!peer || !peer.fingerprint) return;
+    const muted = !!ev.target.checked;
+    if (statusEl) statusEl.textContent = muted ? "Muting…" : "Unmuting…";
+    try {
+      const reply = await setDaemonPeerMute(peer.fingerprint, muted);
+      peer.muted = !!reply.muted;
+      if (statusEl) statusEl.textContent = peer.muted ? "Muted." : "Unmuted.";
+    } catch (e) {
+      // Roll back the toggle on failure.
+      ev.target.checked = !muted;
+      if (statusEl) {
+        statusEl.textContent =
+          `Couldn't update mute: ${e && e.message ? e.message : e}`;
+      }
+    }
+  }
+
+  $("#btn-daemon-chat-info")?.addEventListener("click", _toggleDaemonChatPeerInfo);
+  $("#btn-daemon-chat-peer-alias-save")?.addEventListener("click", _handleDaemonChatPeerAliasSave);
+  $("#daemon-chat-peer-mute-toggle")?.addEventListener("change", _handleDaemonChatPeerMuteToggle);
 
   function _renderDaemonMessageBubble(host, m) {
     if (!host) return;

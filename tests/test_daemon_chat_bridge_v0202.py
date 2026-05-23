@@ -705,6 +705,138 @@ def test_phone_file_uploader_uses_chunked_protocol(peer_html: str):
     assert '_daemonRequest("send_file_complete"' in snip
 
 
+# ───────── set_peer_alias + set_peer_mute (peer mgmt) ─────────────
+
+
+@pytest.mark.asyncio
+async def test_set_peer_alias_validates_inputs(server_with_state):
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    # Missing peer_fp.
+    await server._handle_browser_peer_request(
+        peer, "control", "set_peer_alias",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "set_peer_alias",
+         "rid": "a1", "alias": "Laptop"},
+    )
+    assert captured[-1]["code"] == "bad_peer_fp"
+    # Wrong alias type.
+    await server._handle_browser_peer_request(
+        peer, "control", "set_peer_alias",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "set_peer_alias",
+         "rid": "a2", "peer_fp": "sha256:abc", "alias": 123},
+    )
+    assert captured[-1]["code"] == "bad_alias"
+    # Too long.
+    await server._handle_browser_peer_request(
+        peer, "control", "set_peer_alias",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "set_peer_alias",
+         "rid": "a3", "peer_fp": "sha256:abc", "alias": "x" * 65},
+    )
+    assert captured[-1]["code"] == "alias_too_long"
+
+
+@pytest.mark.asyncio
+async def test_set_peer_alias_unknown_peer_errors(server_with_state):
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "set_peer_alias",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "set_peer_alias",
+         "rid": "a4", "peer_fp": "sha256:nonexistent",
+         "alias": "Laptop"},
+    )
+    assert captured[-1]["t"] == "error"
+    assert captured[-1]["code"] == "peer_not_found"
+
+
+@pytest.mark.asyncio
+async def test_set_peer_alias_happy_path_returns_updated(server_with_state):
+    server, state = server_with_state
+    state.upsert_peer(
+        fingerprint="sha256:peer1",
+        short_id="peer1",
+        hostname="other-laptop",
+        pubkey=b"\x01" * 32,
+    )
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "set_peer_alias",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "set_peer_alias",
+         "rid": "a5", "peer_fp": "sha256:peer1",
+         "alias": "My Laptop"},
+    )
+    reply = captured[-1]
+    assert reply["t"] == "set_peer_alias_result"
+    assert reply["ok"] is True
+    assert reply["peer_fp"] == "sha256:peer1"
+    assert reply["alias"] == "My Laptop"
+    # And the daemon state took the change.
+    rec = state.get_peer("sha256:peer1")
+    assert rec.local_alias == "My Laptop"
+
+
+@pytest.mark.asyncio
+async def test_set_peer_mute_validates_and_persists(server_with_state):
+    server, state = server_with_state
+    state.upsert_peer(
+        fingerprint="sha256:peer2",
+        short_id="peer2",
+        hostname="phone",
+        pubkey=b"\x02" * 32,
+    )
+    peer, captured = _capture_peer(server)
+    # Bad muted type.
+    await server._handle_browser_peer_request(
+        peer, "control", "set_peer_mute",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "set_peer_mute",
+         "rid": "m1", "peer_fp": "sha256:peer2", "muted": "yes"},
+    )
+    assert captured[-1]["code"] == "bad_muted"
+    # Happy path mute.
+    await server._handle_browser_peer_request(
+        peer, "control", "set_peer_mute",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "set_peer_mute",
+         "rid": "m2", "peer_fp": "sha256:peer2", "muted": True},
+    )
+    reply = captured[-1]
+    assert reply["t"] == "set_peer_mute_result"
+    assert reply["ok"] is True
+    assert reply["muted"] is True
+    rec = state.get_peer("sha256:peer2")
+    assert bool(rec.muted) is True
+    # Unmute.
+    await server._handle_browser_peer_request(
+        peer, "control", "set_peer_mute",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "set_peer_mute",
+         "rid": "m3", "peer_fp": "sha256:peer2", "muted": False},
+    )
+    assert captured[-1]["muted"] is False
+    rec = state.get_peer("sha256:peer2")
+    assert bool(rec.muted) is False
+
+
+def test_phone_chat_card_has_peer_info_strip(peer_html: str):
+    """Phase 3a: chat card MUST expose Info button + collapsible
+    peer-info panel with alias input, save button, mute toggle,
+    and status line."""
+    assert 'id="btn-daemon-chat-info"' in peer_html
+    assert 'id="daemon-chat-peer-info"' in peer_html
+    assert 'id="daemon-chat-peer-alias"' in peer_html
+    assert 'id="btn-daemon-chat-peer-alias-save"' in peer_html
+    assert 'id="daemon-chat-peer-mute-toggle"' in peer_html
+    assert 'id="daemon-chat-peer-info-status"' in peer_html
+
+
+def test_phone_peer_mgmt_uses_correct_wire_kinds(peer_html: str):
+    """The phone-side calls MUST hit set_peer_alias and
+    set_peer_mute via _daemonRequest. Any rename here drops the
+    correspondence with the server handler silently."""
+    alias_snip = _snippet(peer_html, "async function setDaemonPeerAlias(", 600)
+    assert '_daemonRequest("set_peer_alias"' in alias_snip
+    mute_snip = _snippet(peer_html, "async function setDaemonPeerMute(", 600)
+    assert '_daemonRequest("set_peer_mute"' in mute_snip
+
+
 # ───────── phone-side roster + chat surface ────────────────────────
 
 
