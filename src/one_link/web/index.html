@@ -11842,8 +11842,24 @@
       wrap.appendChild(glyph);
       wrap.appendChild(el("h4", "", "It's just you"));
       wrap.appendChild(el("p", "",
-        "Open One Link on another computer or phone, then tap " +
-        "“Pair a new device” above. We'll wave at you when it shows up."));
+        "Add a phone or another computer. Pairing takes 30 seconds."));
+      // 2026-05-22 UX: surface a one-click "Connect a device" button
+      // in the empty state so a brand-new user lands directly on
+      // the QR + invite without having to find Settings → Setup.
+      // Same target as the tray "Connect a device" menu item.
+      const btn = el("a", "empty-state-link");
+      btn.textContent = "Connect a device →";
+      btn.href = "?setup=add-device";
+      btn.style.fontWeight = "600";
+      btn.style.background = "var(--accent, #0a0c14)";
+      btn.style.color = "var(--accent-fg, #f7f6f0)";
+      btn.style.borderRadius = "12px";
+      btn.style.padding = "12px 18px";
+      btn.style.marginBottom = "12px";
+      btn.style.textDecoration = "none";
+      btn.style.display = "inline-block";
+      btn.style.textAlign = "center";
+      wrap.appendChild(btn);
       // v0.5.3: nudge to set up cross-network reach if no rendezvous configured.
       if (!state.rendezvousUrls || state.rendezvousUrls.length === 0) {
         const link = el("a", "empty-state-link",

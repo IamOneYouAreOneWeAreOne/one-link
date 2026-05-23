@@ -279,16 +279,14 @@ _CONNECT_LANDING_HTML_IOS = """<!doctype html>
   body {{
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro", system-ui, sans-serif;
     background: #f7f6f0; color: #0a0c14;
-    margin: 0; padding: 32px 24px;
+    margin: 0; padding: 32px 24px 64px;
     line-height: 1.5;
   }}
-  h1 {{ font-size: 28px; margin: 0 0 24px; font-weight: 600; }}
+  h1 {{ font-size: 28px; margin: 0 0 16px; font-weight: 600; }}
   p  {{ font-size: 17px; margin: 0 0 16px; color: #43454f; }}
-  ol {{ margin: 0 0 24px; padding-left: 24px; }}
-  ol li {{ margin-bottom: 12px; font-size: 16px; color: #43454f; }}
   .step {{
     background: #ffffff; border-radius: 16px; padding: 24px;
-    margin-bottom: 20px;
+    margin-bottom: 16px;
     box-shadow: 0 1px 3px rgba(10, 12, 20, 0.05);
   }}
   .step-num {{
@@ -301,9 +299,8 @@ _CONNECT_LANDING_HTML_IOS = """<!doctype html>
     font-size: 20px; margin: 0 0 12px; font-weight: 600;
     display: flex; align-items: center;
   }}
-  .step h2 span:not(.step-num) {{ vertical-align: middle; }}
   a.btn {{
-    display: block; padding: 16px 24px; margin-top: 16px;
+    display: block; padding: 18px 24px; margin-top: 16px;
     background: #0a0c14; color: #f7f6f0; text-decoration: none;
     border-radius: 12px; font-size: 17px; font-weight: 600;
     text-align: center;
@@ -316,29 +313,35 @@ _CONNECT_LANDING_HTML_IOS = """<!doctype html>
     color: #767889; font-size: 14px;
     margin-top: 12px; line-height: 1.45;
   }}
-  code {{
-    background: #ecebe2; padding: 2px 6px; border-radius: 4px;
-    font-family: -apple-system, "SF Mono", Menlo, monospace;
-    font-size: 14px;
+  .lede {{
+    background: #fff8d4; border-radius: 12px; padding: 14px 18px;
+    font-size: 14px; color: #6a5b00;
+    margin: -8px 0 24px;
   }}
 </style>
 </head>
 <body>
-  <h1>Connect to One Link</h1>
-  <p>Two quick steps to finish pairing this device.</p>
+  <h1>Add this device</h1>
+  <p>You're seconds away. Two taps on iPhone:</p>
 
-  <div class="step">
-    <h2><span class="step-num">1</span><span>Install trust profile</span></h2>
-    <p>This lets your phone talk to your laptop directly. One-time install — applies to this network only.</p>
-    <a class="btn" href="{mobileconfig_url}">Download trust profile</a>
-    <p class="hint">After download: open <strong>Settings → Profile Downloaded</strong> → <strong>Install</strong>. Then come back here.</p>
+  <div class="lede">
+    Make sure this phone is on the <strong>same Wi-Fi</strong> as the
+    computer you're pairing with. Cellular / different networks won't reach.
   </div>
 
   <div class="step">
-    <h2><span class="step-num">2</span><span>Finish pairing</span></h2>
-    <p>Once the profile is installed, tap below to pair this device.</p>
+    <h2><span class="step-num">1</span><span>Install trust (one tap)</span></h2>
+    <p>iOS needs to trust this computer's certificate before it can pair securely. This is a one-time install per network.</p>
+    <a class="btn" href="{mobileconfig_url}">Download trust profile</a>
+    <p class="hint">After tapping: iOS shows "Profile Downloaded." Open
+    <strong>Settings</strong> at the top → tap the new profile → <strong>Install</strong> in the corner → enter your phone passcode. Come back here when done.</p>
+  </div>
+
+  <div class="step">
+    <h2><span class="step-num">2</span><span>Pair this device</span></h2>
+    <p>Once trust is installed, tap below. Your computer will pop up a 5-word confirmation — tap "match" on both ends.</p>
     <a class="btn btn-secondary" href="{pair_url}">Continue to pair</a>
-    <p class="hint">If you see a security warning here, the trust profile wasn't installed in step 1. Go back and try the download again.</p>
+    <p class="hint">If you see "Not Private" or "Connection failed" here, the trust profile wasn't installed in step 1. Tap Download again.</p>
   </div>
 </body>
 </html>
