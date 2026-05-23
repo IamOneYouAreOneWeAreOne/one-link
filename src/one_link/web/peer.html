@@ -3003,9 +3003,16 @@
   async function _runSetupDeviceInviteFlow(query) {
     _autopairHideManualCards();
     show($("#selfmesh-enroll-card"));
+    // 2026-05-23: actions row hosts the "Claim this device" button
+    // for the OLDER self_mesh_invite flow. This setup_device_invite
+    // flow never asks the user to click anything — claim is
+    // automatic and the trust code shows up. Force-hide so a stale
+    // shown state from any prior path can't bleed through.
+    hide($("#selfmesh-enroll-actions"));
     _selfMeshEnrollSetState("dim", "checking", "Preparing this device...");
     const rec = await _waitForIdentity(8000);
     if (!rec || !rec.public_key_b64u) {
+      hide($("#selfmesh-enroll-actions"));
       _selfMeshEnrollSetState(
         "bad",
         state.boot_error_msg ? "boot failed" : "no identity",
@@ -3056,6 +3063,10 @@
           : `${record.label} is now part of your One identity.`,
       );
     } catch (e) {
+      // 2026-05-23: hide actions on failure too — prior shown
+      // state could otherwise leave a button that calls into the
+      // wrong flow's handler and silently no-ops on click.
+      hide($("#selfmesh-enroll-actions"));
       _selfMeshEnrollSetState(
         "bad",
         "failed",

@@ -13091,9 +13091,9 @@
     img.className = "file-lightbox-img";
     img.onerror = () => {
       const err = el("div", "file-lightbox-error");
-      err.appendChild(el("div", "title", "Preview unavailable on this device"));
+      err.appendChild(el("div", "title", "Image preview unavailable"));
       err.appendChild(el("div", "hint",
-        "One Link has the transfer record, but the local preview route did not return image bytes. Open or save below, or retry from the message details."));
+        "Preview unavailable. One Link has the transfer record, but the local preview route did not return image bytes. Open in new tab or save a copy, or retry from the message details."));
       const rows = el("div", "file-detail-rows");
       rows.appendChild(_fileDetailRow("File", ent.name || "image"));
       rows.appendChild(_fileDetailRow("Size", ent.sizeBytes ? fmtBytes(ent.sizeBytes) : "-"));
@@ -13839,9 +13839,9 @@
   }
   function renderImagePreviewFallback(msg, url, reason, onRetry) {
     const wrap = el("div", "file-preview-fallback");
-    wrap.appendChild(el("div", "title", "Preview unavailable on this device"));
+    wrap.appendChild(el("div", "title", "Image preview unavailable"));
     wrap.appendChild(el("div", "hint",
-      reason || "The transfer finished, but this device could not load the image preview from its local file endpoint."));
+      reason || "Preview unavailable. The transfer finished, but this device could not load the image preview from its local file endpoint."));
     const rows = el("div", "file-detail-rows");
     rows.appendChild(_fileDetailRow("File", msg.name || "image"));
     rows.appendChild(_fileDetailRow("Size", fmtBytes(msg.size || 0)));
@@ -23683,8 +23683,19 @@
   async function oneSetupConfirmPendingDevice() {
     const pending = state.oneSetup?.pending_setup_devices?.[0];
     if (!pending?.token) return toast("No pending device is waiting.", "info", 3000);
+    // 2026-05-23: /confirm requires the SAS in the body (audit
+    // T1-L). Without it the server returns 400 "missing SAS
+    // confirmation (sas required)" and the click silently fails
+    // (catch toast is fast). The trust_code is the SAS the
+    // operator just verbally matched — pass it back.
+    if (!pending.trust_code) {
+      return toast("Pending device has no trust code yet — refresh and retry.", "warn", 4000);
+    }
     try {
-      await api.confirmSetupDeviceInvite({ token: pending.token });
+      await api.confirmSetupDeviceInvite({
+        token: pending.token,
+        sas: pending.trust_code,
+      });
       toast(`${pending.label || "Device"} is trusted.`, "good", 3500);
       await refreshSelfMesh();
       await refreshOneSetup();
@@ -27097,6 +27108,7 @@
   // (state.me is already loaded by init()) so opening Settings is
   // instant - no flash of empty fields.
   function refreshSettingsAbout() {
+    _resetPairPhoneCard();
     const me = state.me || {};
     const fp = me.fingerprint || "";
     const fpEl = $("#settings-identity-fp");
@@ -27122,7 +27134,6 @@
     // v0.20.1: reset the pair-phone surface to the "click to mint"
     // state on every settings open. Tokens expire in 5 minutes; we
     // don't want a stale QR sitting around from a previous session.
-    _resetPairPhoneCard();
   }
 
   function _settingsDeviceHealth(peer) {
