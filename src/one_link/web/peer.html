@@ -278,10 +278,34 @@
       </div>
       <div id="daemon-chat-log"
            style="padding:12px; background:var(--bg-3); border-radius:10px;
-                  min-height:200px; max-height:60vh; overflow-y:auto;
+                  min-height:200px; max-height:55vh; overflow-y:auto;
                   display:flex; flex-direction:column; gap:8px;
                   font-size:14px; line-height:1.45;">
       </div>
+      <!-- 2026-05-23: compose surface. Wired to send_message over
+           the daemon DC (see _handle_browser_peer_request). The
+           desktop send path treats outbound from the phone as
+           indistinguishable from its own /api/send. -->
+      <div id="daemon-chat-compose"
+           style="display:flex; gap:8px; margin-top:12px;
+                  align-items:flex-end;">
+        <textarea id="daemon-chat-input"
+                  placeholder="Message"
+                  rows="2"
+                  style="flex:1 1 auto; padding:10px 12px;
+                         border-radius:10px; border:1px solid var(--line);
+                         background:var(--bg-3); color:var(--text);
+                         font: inherit; font-size:14px; line-height:1.4;
+                         resize:vertical; min-height:42px; max-height:30vh;"></textarea>
+        <button class="btn"
+                id="btn-daemon-chat-send"
+                style="padding:10px 18px; min-height:42px;
+                       align-self:flex-end;"
+                aria-label="Send message"
+                disabled>Send</button>
+      </div>
+      <p class="help" id="daemon-chat-send-status"
+         style="margin-top:6px; font-size:12px; min-height:1em;"></p>
     </div>
   </div>
 
@@ -3694,6 +3718,15 @@
     );
     text($("#daemon-chat-meta"),
       `${peer.fingerprint || ""}`);
+    // 2026-05-23: refresh compose state for the new peer. Clear
+    // any prior draft + status, enable Send only after the input
+    // has content.
+    const input = $("#daemon-chat-input");
+    const sendBtn = $("#btn-daemon-chat-send");
+    const sendStatus = $("#daemon-chat-send-status");
+    if (input) input.value = "";
+    if (sendStatus) sendStatus.textContent = "";
+    if (sendBtn) sendBtn.disabled = true;
     const log = $("#daemon-chat-log");
     if (!log) return;
     log.innerHTML = "";
@@ -3715,11 +3748,103 @@
       empty.className = "help";
       empty.textContent = "No messages yet.";
       log.appendChild(empty);
-      return;
+    } else {
+      for (const m of msgs) _renderDaemonMessageBubble(log, m);
+      log.scrollTop = log.scrollHeight;
     }
-    for (const m of msgs) _renderDaemonMessageBubble(log, m);
-    log.scrollTop = log.scrollHeight;
+    if (input) input.focus();
   }
+
+  // 2026-05-23: send a chat message from the phone to a daemon-side
+  // peer via the live DC. Mirrors the desktop /api/send wire shape:
+  // peer is identified by fingerprint, body is plain text (<=64KiB).
+  // client_msg_id lets us paint an optimistic bubble that the
+  // server's eventual echo can reconcile against.
+  async function sendDaemonMessage(peerFp, body, opts) {
+    const o = opts || {};
+    return _daemonRequest("send_message", {
+      peer_fp: peerFp,
+      body,
+      reply_to: o.reply_to || null,
+      client_msg_id: o.client_msg_id || _randomHexId(),
+    });
+  }
+
+  function _randomHexId() {
+    // 16 bytes → 32 hex chars; matches the daemon's client_msg_id
+    // validator (8 ≤ len ≤ 64, hex+dash). crypto.getRandomValues is
+    // present on every supported browser-as-peer target.
+    const buf = new Uint8Array(16);
+    crypto.getRandomValues(buf);
+    return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function _handleDaemonChatSend() {
+    const peer = state.daemon_active_peer;
+    const input = $("#daemon-chat-input");
+    const sendBtn = $("#btn-daemon-chat-send");
+    const sendStatus = $("#daemon-chat-send-status");
+    if (!peer || !peer.fingerprint || !input) return;
+    const body = (input.value || "").trim();
+    if (!body) return;
+    sendBtn && (sendBtn.disabled = true);
+    sendStatus && (sendStatus.textContent = "Sending…");
+    const optimisticId = _randomHexId();
+    const log = $("#daemon-chat-log");
+    // Optimistic bubble — replaced by server echo on next refresh
+    // OR left in place if the server confirms a matching id.
+    _renderDaemonMessageBubble(log, {
+      id: optimisticId,
+      ts_ms: Date.now(),
+      direction: "outbound",
+      body,
+      msg_type: "text",
+    });
+    if (log) log.scrollTop = log.scrollHeight;
+    try {
+      const reply = await sendDaemonMessage(peer.fingerprint, body, {
+        client_msg_id: optimisticId,
+      });
+      if (reply && reply.queued) {
+        sendStatus && (sendStatus.textContent =
+          "Peer is offline. Queued for delivery when they come back.");
+      } else {
+        sendStatus && (sendStatus.textContent = "Sent");
+      }
+      input.value = "";
+      // Pull the canonical view from the daemon to reconcile the
+      // optimistic bubble with the persisted record.
+      try {
+        const msgs = await fetchDaemonMessages(peer.fingerprint, 50);
+        if (log) {
+          log.innerHTML = "";
+          for (const m of msgs) _renderDaemonMessageBubble(log, m);
+          log.scrollTop = log.scrollHeight;
+        }
+      } catch (_e) { /* reconcile best-effort */ }
+    } catch (e) {
+      sendStatus && (sendStatus.textContent =
+        `Couldn't send: ${e && e.message ? e.message : e}`);
+    } finally {
+      sendBtn && (sendBtn.disabled = !((input.value || "").trim()));
+      input.focus();
+    }
+  }
+
+  // Wire compose listeners once on DOM-ready. Enter sends, Shift+Enter
+  // inserts a newline (standard chat ergonomics).
+  $("#btn-daemon-chat-send")?.addEventListener("click", _handleDaemonChatSend);
+  $("#daemon-chat-input")?.addEventListener("input", (ev) => {
+    const sendBtn = $("#btn-daemon-chat-send");
+    if (!sendBtn) return;
+    sendBtn.disabled = !((ev.target.value || "").trim());
+  });
+  $("#daemon-chat-input")?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      _handleDaemonChatSend();
+    }
+  });
 
   function _renderDaemonMessageBubble(host, m) {
     if (!host) return;

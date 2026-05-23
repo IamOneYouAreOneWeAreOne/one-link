@@ -4070,6 +4070,103 @@ class UIServer:
             })
             return
 
+        if msg_t == "send_message":
+            # 2026-05-23: phone-as-peer ride-along over the daemon DC.
+            # Wire:
+            #   phone → daemon:
+            #     {"v":"OL-PEER-1","t":"send_message","rid":"<uuid>",
+            #      "peer_fp":"<fp>","body":"<text>",
+            #      "reply_to":"<msg_id?>","client_msg_id":"<hex?>"}
+            #   daemon → phone:
+            #     {"v":"OL-PEER-1","t":"send_message_result",
+            #      "rid":"<echo>","ok":true,
+            #      "msg":{id,ts_ms,direction,body,...}}
+            #     OR
+            #     {"v":"OL-PEER-1","t":"send_message_result",
+            #      "rid":"<echo>","ok":true,"queued":true,
+            #      "outbox_id":"...","msg":{...}}
+            #     OR
+            #     {"v":"OL-PEER-1","t":"error","rid":"<echo>",
+            #      "code":"...","message":"..."}
+            #
+            # Reuses the same daemon.send_text + outbox machinery the
+            # desktop /api/send uses so semantics (capability gates,
+            # reply-to threads, outbox-on-offline, etc.) are identical
+            # — the phone is a first-class send surface, not a parallel
+            # half-implementation.
+            peer_fp = envelope.get("peer_fp")
+            body = envelope.get("body")
+            if not isinstance(peer_fp, str) or not peer_fp:
+                _err("bad_peer_fp", "peer_fp required")
+                return
+            if not isinstance(body, str) or not body:
+                _err("bad_body", "body required")
+                return
+            # Size cap matches the desktop send path's de facto cap
+            # (64 KiB plain text). Reject larger bodies at the wire
+            # so a malicious / buggy phone can't drown the daemon in
+            # a single oversized frame.
+            if len(body.encode("utf-8")) > 65536:
+                _err("body_too_large", "max 64 KiB UTF-8")
+                return
+            reply_to_raw = envelope.get("reply_to")
+            reply_to = (
+                str(reply_to_raw)
+                if isinstance(reply_to_raw, str) and reply_to_raw
+                else None
+            )
+            client_msg_id_raw = envelope.get("client_msg_id")
+            client_msg_id: str | None = None
+            if isinstance(client_msg_id_raw, str):
+                stripped = client_msg_id_raw.strip()
+                if 8 <= len(stripped) <= 64 and all(
+                    c in "0123456789abcdefABCDEF-" for c in stripped
+                ):
+                    client_msg_id = stripped
+            try:
+                target_peer = await self.daemon.resolve_for_send(peer_fp)
+                if target_peer is None:
+                    # Try outbox fallback for offline peers — same
+                    # policy as /api/send default (queue_on_failure=True).
+                    try:
+                        entry = self.daemon.enqueue_text_outbox(
+                            peer_fp, body, client_msg_id=client_msg_id,
+                        )
+                        _send({
+                            "t": "send_message_result",
+                            "ok": True,
+                            "queued": True,
+                            "outbox_id": entry["outbox_id"],
+                            "msg": entry["msg"],
+                            "reason": "peer_offline",
+                        })
+                        return
+                    except Exception as enqueue_err:
+                        _err(
+                            "peer_offline_enqueue_failed",
+                            f"could not queue: {enqueue_err}",
+                        )
+                        return
+                result = await asyncio.wait_for(
+                    self.daemon.send_text(
+                        target_peer, body,
+                        reply_to=reply_to,
+                        client_msg_id=client_msg_id,
+                    ),
+                    timeout=20.0,
+                )
+                _send({
+                    "t": "send_message_result",
+                    "ok": True,
+                    "msg": result if isinstance(result, dict) else {"result": str(result)},
+                })
+            except asyncio.TimeoutError:
+                _err("send_timeout", "send timed out after 20s")
+            except Exception as e:
+                log.exception("phone send_message failed: %s", e)
+                _err("send_failed", f"send_text: {e}")
+            return
+
         # Unknown wire kind — silently ignore. v0.19.2's chat protocol
         # also rides this channel and we don't want to error-spam those
         # frames.

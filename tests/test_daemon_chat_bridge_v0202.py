@@ -308,6 +308,160 @@ async def test_state_unavailable_yields_error(server_with_state):
     assert captured[0]["code"] == "no_state"
 
 
+# ───────── send_message wire path ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_message_requires_peer_fp(server_with_state):
+    """Missing/empty peer_fp returns a typed error, not a crash."""
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_message",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_message",
+         "rid": "s1", "body": "hi"},
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "bad_peer_fp"
+    assert captured[0]["rid"] == "s1"
+
+
+@pytest.mark.asyncio
+async def test_send_message_requires_body(server_with_state):
+    """Missing/empty body returns a typed error."""
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_message",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_message",
+         "rid": "s2", "peer_fp": "sha256:abc"},
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "bad_body"
+
+
+@pytest.mark.asyncio
+async def test_send_message_body_too_large(server_with_state):
+    """Bodies over 64 KiB UTF-8 are rejected at the wire — the
+    desktop send path uses a similar de facto cap and the phone
+    surface should not be a way around it."""
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    huge = "x" * (65 * 1024)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_message",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_message",
+         "rid": "s3", "peer_fp": "sha256:abc", "body": huge},
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "body_too_large"
+
+
+@pytest.mark.asyncio
+async def test_send_message_unknown_peer_falls_through_to_outbox_or_errors(
+    server_with_state, monkeypatch,
+):
+    """When the peer isn't resolvable (offline / unknown), the
+    handler should attempt the outbox fallback (matching desktop
+    /api/send default semantics). If even the outbox enqueue
+    fails (e.g. unknown fingerprint), surface a typed error
+    rather than a raw exception trace."""
+    server, _ = server_with_state
+
+    async def fake_resolve(needle):
+        return None
+
+    def fake_enqueue(target_fp, body, client_msg_id=None):
+        raise ValueError("unknown peer fingerprint")
+
+    monkeypatch.setattr(server.daemon, "resolve_for_send", fake_resolve)
+    monkeypatch.setattr(server.daemon, "enqueue_text_outbox", fake_enqueue)
+
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_message",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_message",
+         "rid": "s4", "peer_fp": "sha256:abc", "body": "hi"},
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "peer_offline_enqueue_failed"
+
+
+@pytest.mark.asyncio
+async def test_send_message_routes_through_daemon_send_text(
+    server_with_state, monkeypatch,
+):
+    """The happy path delegates to daemon.send_text — same call
+    site /api/send uses. Asserting this keeps the phone send
+    surface from quietly drifting into a parallel half-protocol."""
+    server, _ = server_with_state
+
+    class FakePeer:
+        fingerprint = "sha256:abc"
+
+    async def fake_resolve(needle):
+        return FakePeer()
+
+    captured_send_args: dict = {}
+
+    async def fake_send_text(target, body, reply_to=None, client_msg_id=None):
+        captured_send_args.update(
+            target=target, body=body, reply_to=reply_to,
+            client_msg_id=client_msg_id,
+        )
+        return {
+            "id": "msg-1",
+            "ts_ms": 12345,
+            "direction": "outbound",
+            "body": body,
+            "msg_type": "text",
+        }
+
+    monkeypatch.setattr(server.daemon, "resolve_for_send", fake_resolve)
+    monkeypatch.setattr(server.daemon, "send_text", fake_send_text)
+
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_message",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "send_message",
+         "rid": "s5", "peer_fp": "sha256:abc",
+         "body": "hello world",
+         "client_msg_id": "deadbeef" * 4},
+    )
+    assert captured[0]["t"] == "send_message_result"
+    assert captured[0]["rid"] == "s5"
+    assert captured[0]["ok"] is True
+    assert captured[0]["msg"]["body"] == "hello world"
+    assert captured_send_args["body"] == "hello world"
+    assert captured_send_args["client_msg_id"] == "deadbeef" * 4
+
+
+# ───────── phone-side compose surface ─────────────────────────────
+
+
+def test_daemon_chat_card_has_compose(peer_html: str):
+    """2026-05-23: the phone chat surface MUST include a compose
+    textarea + send button + status line. Without these the phone
+    is read-only and the user can't actually use One Link from
+    their phone."""
+    assert 'id="daemon-chat-compose"' in peer_html
+    assert 'id="daemon-chat-input"' in peer_html
+    assert 'id="btn-daemon-chat-send"' in peer_html
+    assert 'id="daemon-chat-send-status"' in peer_html
+
+
+def test_phone_send_function_uses_send_message_kind(peer_html: str):
+    """Pin the wire shape: sendDaemonMessage routes through
+    _daemonRequest with t='send_message' and the four expected
+    fields. Any drift here breaks the round trip silently."""
+    snip = _snippet(peer_html, "async function sendDaemonMessage(", 1200)
+    assert '_daemonRequest("send_message"' in snip
+    assert "peer_fp" in snip
+    assert "body" in snip
+    assert "reply_to" in snip
+    assert "client_msg_id" in snip
+
+
 # ───────── phone-side roster + chat surface ────────────────────────
 
 
