@@ -24103,17 +24103,37 @@
     if (!pending.trust_code) {
       return toast("Pending device has no trust code yet — refresh and retry.", "warn", 4000);
     }
+    const pairedLabel = pending.label || "Device";
     try {
       await api.confirmSetupDeviceInvite({
         token: pending.token,
         sas: pending.trust_code,
       });
-      toast(`${pending.label || "Device"} is trusted.`, "good", 3500);
+      // 2026-05-23 UX fix: previously this jumped to onboarding
+      // step 5 ('Send something to yourself') which the user
+      // experienced as a disconnected modal popping up RIGHT
+      // after pair — "I just paired, why is this asking me to
+      // send a test message?". Now: close the modal, surface a
+      // toast that names the device that was paired, and refresh
+      // the sidebar so the new device is visible. User can
+      // immediately click into the chat with the device they
+      // just paired.
+      toast(
+        `${pairedLabel} is paired and ready. Open it in the sidebar to chat.`,
+        "good", 5000,
+      );
       await refreshSelfMesh();
       await refreshOneSetup();
-      showOnboardingStep(5);
+      try { await refreshPeers(); } catch (_e) {}
+      // Close the onboarding modal — pair flow is done, user
+      // should be back in the main app to use what they just paired.
+      // The add-device milestone is tracked server-side by the device
+      // count (state.list_self_mesh_devices), so we don't need an
+      // explicit setupAction call here.
+      const backdrop = $("#onboarding-backdrop");
+      if (backdrop) backdrop.style.display = "none";
     } catch (e) {
-      toast(`Couldn't trust device: ${errorToastBody(e)}`, "bad", 6000);
+      toast(`Couldn't trust ${pairedLabel}: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
 

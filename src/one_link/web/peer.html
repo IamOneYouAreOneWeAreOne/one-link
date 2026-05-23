@@ -495,8 +495,11 @@
           </div>
         </div>
         <label style="display:flex; align-items:center; gap:8px;
-                       font-size:13px; cursor:pointer;">
-          <input type="checkbox" id="daemon-chat-peer-mute-toggle" />
+                       font-size:13px; cursor:pointer;"
+               for="daemon-chat-peer-mute-toggle">
+          <input type="checkbox"
+                 id="daemon-chat-peer-mute-toggle"
+                 aria-label="Mute notifications from this peer" />
           <span>Mute notifications from this peer</span>
         </label>
         <p id="daemon-chat-peer-info-status"
@@ -527,6 +530,7 @@
                        min-width:48px;">📎</button>
         <input type="file"
                id="daemon-chat-file-input"
+               aria-label="Pick a file to send"
                style="display:none;" />
         <textarea id="daemon-chat-input"
                   placeholder="Message"

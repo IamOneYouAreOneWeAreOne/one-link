@@ -186,7 +186,15 @@ def test_runtime_cache_includes_display_flag(index_html: str):
     every render, so it MUST land in that cache during
     loadAndApplySettings + the settings-open handler."""
     idx = index_html.find("async function loadAndApplySettings()")
-    snippet = index_html[idx:idx + 1500]
+    # 2026-05-23: snippet window expanded to next function boundary.
+    # The original 1500-byte cap was outgrown as loadAndApplySettings
+    # accumulated new settings keys (notifications, chat layout, etc.).
+    end_marker = index_html.find('\n  }\n', idx + 200)
+    snippet = (
+        index_html[idx:end_marker]
+        if end_marker > idx
+        else index_html[idx:idx + 10000]
+    )
     assert "display_read_receipts:" in snippet
 
 

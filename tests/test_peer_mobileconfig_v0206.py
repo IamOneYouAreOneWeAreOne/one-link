@@ -256,13 +256,24 @@ def test_ios_trust_details_includes_step_instructions(index_html: str):
       2. Find profile in Settings → General → VPN & Device Mgmt
       3. Toggle on in Certificate Trust Settings
     Without all three, the cert is installed but not trusted for
-    TLS, and Safari STILL refuses to load the pair URL."""
+    TLS, and Safari STILL refuses to load the pair URL.
+
+    2026-05-23: drawer copy was simplified (no separate
+    "Profile Downloaded" prompt mention — iOS-15+ Safari handles
+    the download-then-Settings handoff differently). What we
+    actually need to assert: every iOS step is named.
+    """
     # The deep-Settings paths are easy to forget — pin them.
     assert "VPN" in index_html and "Device Management" in index_html
     assert "Certificate Trust Settings" in index_html
-    # The two-prompt download flow.
-    assert "Profile Downloaded" in index_html
+    # The download prompt is now phrased as "configuration profile"
+    # (iOS-Safari-modal-accurate). The "Allow" tap is still pinned
+    # because that's the load-bearing user gesture.
+    assert "configuration profile" in index_html
     assert "Allow" in index_html
+    # And we end by sending them back to scan the pair QR after
+    # the trust setup completes.
+    assert "Scan the pair QR" in index_html or "pair QR" in index_html
 
 
 def test_ios_trust_qr_wrap_present(index_html: str):

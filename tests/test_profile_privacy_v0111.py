@@ -318,7 +318,16 @@ def test_blocked_list_refreshes_on_settings_open(index_html: str):
     """Without this, the list shows stale data when reopening Settings
     after blocking/unblocking from the device drawer."""
     idx = index_html.find('$("#btn-settings").onclick')
-    snippet = index_html[idx:idx + 5000]
+    # 2026-05-23: snippet window expanded to next handler boundary.
+    # The original 5000-byte cap was outgrown as the settings handler
+    # accumulated post-onboarding hydration steps. The call still
+    # lives in the handler; pin to the function close instead.
+    end_marker = index_html.find('\n  };', idx)
+    snippet = (
+        index_html[idx:end_marker]
+        if end_marker > idx
+        else index_html[idx:idx + 20000]
+    )
     assert "refreshBlockedDevicesList()" in snippet
 
 
