@@ -79,6 +79,35 @@ def test_settings_devices_report_and_summary_are_wired() -> None:
         assert required in html if required.startswith("/") or "JSON.stringify" in required or "device " in required else required in settings
 
 
+def test_settings_devices_have_real_management_actions() -> None:
+    html = _index()
+    for required in (
+        "function _settingsDeviceHealth",
+        "function _settingsRunDeviceAction",
+        "Device path refreshed",
+        "Device marked verified",
+        "Verification removed",
+        "Device muted",
+        "Device unmuted",
+        "Device blocked",
+        "/api/peers/prune",
+        "/resume",
+        "/verify",
+        "/mute",
+        "/profile",
+        "{ trust: \"rejected\" }",
+        "settings-device-quick",
+        "settings-device-advice",
+    ):
+        assert required in html
+
+
+def test_runtime_peer_titles_use_ascii_separator_to_avoid_mojibake() -> None:
+    html = _index()
+    assert "row.title = `${p.display_name || p.hostname || p.short_id} - ${reachLabel(p)}`;" in html
+    assert "` · ${reachLabel(p)}`" not in html
+
+
 def test_settings_about_support_bundle_is_not_hidden_in_advanced() -> None:
     html = _index()
     settings = _settings_shell(html)

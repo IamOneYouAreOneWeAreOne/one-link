@@ -3786,12 +3786,20 @@
   .settings-device-row {
     display: grid;
     grid-template-columns: 40px minmax(0, 1fr) auto;
-    align-items: center;
+    align-items: start;
     gap: 10px;
     padding: 10px;
     border-radius: 9px;
     background: linear-gradient(135deg, rgba(124,92,255,.10), rgba(78,193,255,.06));
     border: 1px solid rgba(255,255,255,.06);
+  }
+  .settings-device-row.warn {
+    border-color: rgba(255,204,102,.26);
+    background: linear-gradient(135deg, rgba(255,204,102,.08), rgba(78,193,255,.05));
+  }
+  .settings-device-row.bad {
+    border-color: rgba(255,107,107,.25);
+    background: linear-gradient(135deg, rgba(255,107,107,.08), rgba(124,92,255,.06));
   }
   .settings-device-avatar {
     width: 40px;
@@ -3822,6 +3830,7 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 6px;
+    max-width: 260px;
   }
   .settings-device-actions button {
     background: var(--bg-2);
@@ -3833,6 +3842,39 @@
   }
   .settings-device-actions button:hover {
     background: var(--bg-3);
+  }
+  .settings-device-actions button.danger {
+    color: var(--bad);
+    border-color: rgba(255,107,107,.25);
+  }
+  .settings-device-advice {
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.4;
+    margin-top: 7px;
+  }
+  .settings-device-quick {
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) auto;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .settings-device-quick input {
+    min-width: 0;
+    border: 1px solid var(--line);
+    background: var(--bg-2);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 7px 9px;
+    font-size: 12px;
+  }
+  .settings-device-quick button {
+    background: var(--bg-2);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 12px;
   }
   .settings-device-empty {
     padding: 12px;
@@ -12194,7 +12236,7 @@
         txt.appendChild(draftLine);
       }
 
-      row.title = `${p.display_name || p.hostname || p.short_id} · ${reachLabel(p)}`;
+      row.title = `${p.display_name || p.hostname || p.short_id} - ${reachLabel(p)}`;
       // v0.21.x: per-peer unread badge. Lives on the row so the user
       // sees WHICH conversation has waiting messages without opening
       // every one. Cap display at "99+".
@@ -26795,6 +26837,59 @@
     _resetPairPhoneCard();
   }
 
+  function _settingsDeviceHealth(peer) {
+    if (!peer) return { cls: "bad", label: "Unknown", detail: "Device record is missing." };
+    if (peer.compatibility && peer.compatibility.compatible === false) {
+      return {
+        cls: "bad",
+        label: "Version mismatch",
+        detail: "Update both devices before trusting this path for calls or large files.",
+      };
+    }
+    if (!peer.online) {
+      return {
+        cls: "warn",
+        label: "Offline",
+        detail: "Messages and files queue until this device is back on the network.",
+      };
+    }
+    const ms = Number(peer.health?.latency_ewma_ms ?? peer.latency_ms);
+    if (Number.isFinite(ms) && ms >= 250) {
+      return {
+        cls: "warn",
+        label: "Slow path",
+        detail: "The link is reachable, but latency is high. Try repair or keep both devices awake.",
+      };
+    }
+    if (!peer.is_verified) {
+      return {
+        cls: "warn",
+        label: "Not verified",
+        detail: "Works now, but verify the code before relying on this device for sensitive work.",
+      };
+    }
+    return {
+      cls: "good",
+      label: "Healthy",
+      detail: "Reachable, trusted, and verified. One Link can use this path automatically.",
+    };
+  }
+
+  async function _settingsRunDeviceAction(peer, label, fn) {
+    if (!peer?.fingerprint) {
+      toast("Device fingerprint unavailable.", "bad", 4000);
+      return;
+    }
+    try {
+      await fn();
+      await refreshPeers();
+      renderSettingsDevices();
+      toast(label, "good", 2200);
+    } catch (e) {
+      toast(`${label} failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
   function renderSettingsDevices() {
     const host = $("#settings-devices-list");
     if (!host) return;
@@ -26839,8 +26934,9 @@
     for (const p of peers) {
       const name = p.display_name || p.hostname || p.short_id || "Device";
       const kind = deviceKindLabel(p);
-      const row = el("div", "settings-device-row");
-      row.appendChild(el("div", "settings-device-avatar", kind?.icon || "💻"));
+      const health = _settingsDeviceHealth(p);
+      const row = el("div", `settings-device-row ${health.cls === "good" ? "" : health.cls}`.trim());
+      row.appendChild(el("div", "settings-device-avatar", kind?.icon || "PC"));
 
       const meta = el("div", null);
       meta.appendChild(el("div", "settings-device-name", name));
@@ -26852,6 +26948,12 @@
         p.app_version ? `v${p.app_version}` : null,
       ].filter(Boolean);
       meta.appendChild(el("div", "settings-device-sub", bits.join(" - ")));
+      const pills = el("div", "settings-pill-row");
+      pills.appendChild(el("span", `settings-pill ${health.cls}`, health.label));
+      pills.appendChild(el("span", `settings-pill ${p.online ? "good" : "warn"}`, p.online ? "reachable" : "queued"));
+      pills.appendChild(el("span", `settings-pill ${p.is_verified ? "good" : "warn"}`, p.is_verified ? "verified" : "needs verify"));
+      meta.appendChild(pills);
+      meta.appendChild(el("div", "settings-device-advice", health.detail));
       if (p.fingerprint) {
         const codeLine = el("div", "settings-code-line");
         codeLine.appendChild(el("code", null, p.fingerprint));
@@ -26860,6 +26962,25 @@
         copyInline.onclick = () => copyToClipboard(p.fingerprint, "device fingerprint");
         codeLine.appendChild(copyInline);
         meta.appendChild(codeLine);
+      }
+      if (p.fingerprint) {
+        const quick = el("div", "settings-device-quick");
+        const aliasInput = el("input");
+        aliasInput.type = "text";
+        aliasInput.maxLength = 64;
+        aliasInput.placeholder = "Custom name";
+        aliasInput.value = p.local_alias || "";
+        aliasInput.setAttribute("aria-label", `Custom name for ${name}`);
+        const aliasSave = el("button", null, "Rename");
+        aliasSave.type = "button";
+        aliasSave.onclick = () => _settingsRunDeviceAction(p, "Device renamed", async () => {
+          await api.post(`/api/peers/${encodeURIComponent(p.fingerprint)}/profile`, {
+            local_alias: aliasInput.value.trim(),
+          });
+        });
+        quick.appendChild(aliasInput);
+        quick.appendChild(aliasSave);
+        meta.appendChild(quick);
       }
       row.appendChild(meta);
 
@@ -26875,6 +26996,42 @@
       const details = el("button", null, "Details");
       details.type = "button";
       details.onclick = () => openDeviceDrawer(p.short_id);
+      const repair = el("button", null, "Repair");
+      repair.type = "button";
+      repair.title = "Refresh peers and resume queued work for this device.";
+      repair.onclick = () => _settingsRunDeviceAction(p, "Device path refreshed", async () => {
+        await api.post("/api/peers/prune", {});
+        await api.post(`/api/peers/${encodeURIComponent(p.fingerprint)}/resume`, {});
+      });
+      const verify = el("button", null, p.is_verified ? "Unverify" : "Verify");
+      verify.type = "button";
+      verify.onclick = () => _settingsRunDeviceAction(
+        p,
+        p.is_verified ? "Verification removed" : "Device marked verified",
+        async () => {
+          const fp = encodeURIComponent(p.fingerprint);
+          if (p.is_verified) {
+            await api.del(`/api/peers/${fp}/verify`);
+          } else {
+            await api.post(`/api/peers/${fp}/verify`, {
+              method: "manual",
+              note: "Marked from Settings after checking the device identity.",
+            });
+          }
+        },
+      );
+      const mutedNow = !!p.muted || p.muted_until_ms === 0 || Number(p.muted_until_ms || 0) > Date.now();
+      const mute = el("button", null, mutedNow ? "Unmute" : "Mute");
+      mute.type = "button";
+      mute.onclick = () => _settingsRunDeviceAction(
+        p,
+        mutedNow ? "Device unmuted" : "Device muted",
+        async () => {
+          const fp = encodeURIComponent(p.fingerprint);
+          if (mutedNow) await api.post(`/api/peers/${fp}/mute`, { muted: false, muted_until_ms: null });
+          else await api.post(`/api/peers/${fp}/mute`, { muted: true, muted_until_ms: 0 });
+        },
+      );
       const copy = el("button", null, "Copy ID");
       copy.type = "button";
       copy.onclick = () => copyToClipboard(p.fingerprint || p.short_id || "", "device ID");
@@ -26890,10 +27047,23 @@
           toast(`Export failed: ${errorToastBody(e)}`, "bad", 5000);
         }
       };
+      const block = el("button", "danger", "Block");
+      block.type = "button";
+      block.title = "Stop trusting this device. You can pair it again later.";
+      block.onclick = () => {
+        if (!confirm(`Block ${name}? Messages and files to this device will stop until you trust it again.`)) return;
+        _settingsRunDeviceAction(p, "Device blocked", async () => {
+          await api.post(`/api/peers/${encodeURIComponent(p.fingerprint)}/trust`, { trust: "rejected" });
+        });
+      };
       actions.appendChild(chat);
+      if (p.fingerprint) actions.appendChild(repair);
+      if (p.fingerprint) actions.appendChild(verify);
+      if (p.fingerprint) actions.appendChild(mute);
       actions.appendChild(details);
       actions.appendChild(copy);
       if (p.fingerprint) actions.appendChild(exportBtn);
+      if (p.fingerprint) actions.appendChild(block);
       row.appendChild(actions);
       host.appendChild(row);
     }
