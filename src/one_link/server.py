@@ -4108,7 +4108,7 @@ class UIServer:
                 return
             payload = []
             for m in msgs:
-                payload.append({
+                row = {
                     "id": getattr(m, "id", None),
                     "ts_ms": getattr(m, "ts_ms", None),
                     "direction": getattr(m, "direction", None),
@@ -4117,8 +4117,102 @@ class UIServer:
                     "room_id": getattr(m, "room_id", None),
                     "edited_at_ms": getattr(m, "edited_at_ms", None),
                     "deleted_at_ms": getattr(m, "deleted_at_ms", None),
-                })
+                }
+                # 2026-05-23 file-receive: surface file metadata so the
+                # phone can render an inline file bubble + download
+                # button. The metadata dict on file messages already
+                # carries name/size/blob_hash; we lift those into
+                # named top-level fields for easy access from
+                # peer.html's renderer. Strip the rest of metadata —
+                # it can include capability state, audit trail bits,
+                # and other server-internal stuff that doesn't need
+                # to cross to the phone.
+                meta = getattr(m, "metadata", None) or {}
+                mt = (row["msg_type"] or "").upper()
+                if mt in ("FILE", "FILE_DONE", "FILE_OFFER"):
+                    name = meta.get("name") or meta.get("filename") or ""
+                    size = meta.get("size") or meta.get("bytes") or 0
+                    blob_hash = (
+                        meta.get("blob_hash") or meta.get("hash") or ""
+                    )
+                    mime = meta.get("mime") or meta.get("content_type") or ""
+                    row["file"] = {
+                        "name": str(name),
+                        "size": int(size) if isinstance(size, (int, float)) else 0,
+                        "blob_hash": str(blob_hash),
+                        "mime": str(mime),
+                    }
+                payload.append(row)
             _send({"t": "messages", "peer_fp": peer_fp, "messages": payload})
+            return
+
+        if msg_t == "fetch_blob_chunk":
+            # 2026-05-23 phase A file-RECEIVE: phone downloads inbound
+            # files by polling the daemon for chunks.
+            # Wire:
+            #   phone → daemon: {v, t:"fetch_blob_chunk", rid,
+            #                    blob_hash, offset, length}
+            #   daemon → phone: {v, t:"blob_chunk", rid,
+            #                    blob_hash, offset, eof, data_b64}
+            #          OR       {v, t:"error", rid, code, message}
+            #
+            # Same 16 KiB safe chunk size as the upload path (under
+            # aiortc's 64 KiB SCTP cap). Public — no auth gate
+            # because (a) the DC already authenticates the peer via
+            # the WebRTC handshake, and (b) the blob_hash is a
+            # capability — only callers who already received the
+            # file message (which contains the hash) can request its
+            # bytes.
+            blob_hash = envelope.get("blob_hash")
+            offset = envelope.get("offset")
+            length = envelope.get("length")
+            if not isinstance(blob_hash, str) or len(blob_hash) != 64:
+                _err("bad_blob_hash", "blob_hash must be 64 hex chars")
+                return
+            if not isinstance(offset, int) or offset < 0:
+                _err("bad_offset", "offset must be a non-negative int")
+                return
+            if not isinstance(length, int) or length <= 0 or length > PHONE_UPLOAD_CHUNK_SIZE:
+                _err(
+                    "bad_length",
+                    f"length must be 1..{PHONE_UPLOAD_CHUNK_SIZE}",
+                )
+                return
+            blob_store = getattr(self.daemon, "blob_store", None)
+            if blob_store is None:
+                _err("no_blob_store", "blob store unavailable")
+                return
+            if not blob_store.has(blob_hash):
+                _err("blob_missing", "blob not in local store")
+                return
+            total = blob_store.size(blob_hash)
+            if offset >= total:
+                _send({
+                    "t": "blob_chunk",
+                    "blob_hash": blob_hash,
+                    "offset": offset,
+                    "eof": True,
+                    "data_b64": "",
+                    "total_size": total,
+                })
+                return
+            try:
+                with blob_store.open_read(blob_hash) as f:
+                    f.seek(offset)
+                    data = f.read(length)
+            except Exception as e:
+                _err("read_failed", f"blob read failed: {e}")
+                return
+            new_offset = offset + len(data)
+            _send({
+                "t": "blob_chunk",
+                "blob_hash": blob_hash,
+                "offset": offset,
+                "length": len(data),
+                "eof": new_offset >= total,
+                "data_b64": base64.urlsafe_b64encode(data).decode().rstrip("="),
+                "total_size": total,
+            })
             return
 
         if msg_t == "fetch_self":

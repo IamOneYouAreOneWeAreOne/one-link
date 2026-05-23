@@ -705,6 +705,162 @@ def test_phone_file_uploader_uses_chunked_protocol(peer_html: str):
     assert '_daemonRequest("send_file_complete"' in snip
 
 
+# ───────── fetch_blob_chunk (file-RECEIVE on phone) ───────────────
+
+
+@pytest.mark.asyncio
+async def test_fetch_messages_includes_file_metadata(server_with_state):
+    """File messages MUST surface name/size/blob_hash/mime as a
+    nested `file` field so the phone can render an inline file
+    bubble. Text messages MUST NOT include `file` (clean wire
+    surface)."""
+    server, state = server_with_state
+    state.upsert_peer(
+        fingerprint="sha256:peer1",
+        short_id="peer1",
+        hostname="other-laptop",
+        pubkey=b"\x01" * 32,
+    )
+    # Text message — no file field expected.
+    state.record_message(
+        id="m1", ts_ms=1000, direction="in", peer_fp="sha256:peer1",
+        msg_type="TEXT", body="hello",
+    )
+    # File message — name/size/blob_hash in metadata.
+    state.record_message(
+        id="m2", ts_ms=2000, direction="in", peer_fp="sha256:peer1",
+        msg_type="FILE", body="cat.jpg",
+        metadata={"name": "cat.jpg", "size": 1234,
+                  "blob_hash": "a" * 64, "mime": "image/jpeg"},
+    )
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "fetch_messages",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "fetch_messages",
+         "rid": "r1", "peer_fp": "sha256:peer1"},
+    )
+    reply = captured[0]
+    msgs = {m["id"]: m for m in reply["messages"]}
+    assert "file" not in msgs["m1"], "text messages MUST NOT include file field"
+    assert "file" in msgs["m2"], "file messages MUST surface file field"
+    f = msgs["m2"]["file"]
+    assert f["name"] == "cat.jpg"
+    assert f["size"] == 1234
+    assert f["blob_hash"] == "a" * 64
+    assert f["mime"] == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_fetch_blob_chunk_validates_inputs(server_with_state):
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    # Bad blob_hash (not 64 hex chars).
+    await server._handle_browser_peer_request(
+        peer, "control", "fetch_blob_chunk",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "fetch_blob_chunk",
+         "rid": "b1", "blob_hash": "tooshort",
+         "offset": 0, "length": 1024},
+    )
+    assert captured[-1]["code"] == "bad_blob_hash"
+    # Bad offset.
+    await server._handle_browser_peer_request(
+        peer, "control", "fetch_blob_chunk",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "fetch_blob_chunk",
+         "rid": "b2", "blob_hash": "a" * 64,
+         "offset": -1, "length": 1024},
+    )
+    assert captured[-1]["code"] == "bad_offset"
+    # Bad length (over the chunk cap).
+    await server._handle_browser_peer_request(
+        peer, "control", "fetch_blob_chunk",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "fetch_blob_chunk",
+         "rid": "b3", "blob_hash": "a" * 64,
+         "offset": 0, "length": 1024 * 1024},
+    )
+    assert captured[-1]["code"] == "bad_length"
+
+
+@pytest.mark.asyncio
+async def test_fetch_blob_chunk_no_blob_store(server_with_state):
+    server, _ = server_with_state
+    server.daemon.blob_store = None
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "fetch_blob_chunk",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "fetch_blob_chunk",
+         "rid": "b4", "blob_hash": "a" * 64,
+         "offset": 0, "length": 1024},
+    )
+    assert captured[-1]["t"] == "error"
+    assert captured[-1]["code"] == "no_blob_store"
+
+
+@pytest.mark.asyncio
+async def test_fetch_blob_chunk_streams_real_blob(server_with_state, tmp_path):
+    """Round-trip: put bytes into the blob store, fetch them back
+    in chunks, reassemble, verify they match. Pins the eof signal
+    and the offset/length math."""
+    server, _ = server_with_state
+    from one_link.blobstore import BlobStore
+    store = BlobStore(tmp_path / "blobs")
+    payload = b"the quick brown fox " * 50  # 1000 bytes
+    blob_hash = store.put_bytes(payload)
+    server.daemon.blob_store = store
+
+    peer, captured = _capture_peer(server)
+    chunks = []
+    offset = 0
+    while True:
+        await server._handle_browser_peer_request(
+            peer, "control", "fetch_blob_chunk",
+            {"v": PEER_DC_PROTOCOL_VERSION, "t": "fetch_blob_chunk",
+             "rid": f"b{offset}", "blob_hash": blob_hash,
+             "offset": offset, "length": 256},
+        )
+        reply = captured[-1]
+        assert reply["t"] == "blob_chunk"
+        assert reply["blob_hash"] == blob_hash
+        assert reply["total_size"] == len(payload)
+        import base64 as _b64
+        if reply.get("data_b64"):
+            std = reply["data_b64"].replace("-", "+").replace("_", "/")
+            pad = std + "=" * ((4 - len(std) % 4) % 4)
+            chunks.append(_b64.b64decode(pad))
+            offset += len(chunks[-1])
+        if reply.get("eof"):
+            break
+    assembled = b"".join(chunks)
+    assert assembled == payload
+    assert offset == len(payload)
+
+
+def test_phone_file_bubble_renders_for_inbound_files(peer_html: str):
+    """Phase A file-RECEIVE: phone MUST render inbound file
+    messages as a file bubble with a download button. Without this
+    the phone shows file messages as raw text and the user has no
+    way to retrieve the bytes."""
+    assert "function _renderFileBubbleBody(" in peer_html
+    assert "async function _downloadFileFromDaemon(" in peer_html
+    # The download path uses fetch_blob_chunk via _daemonRequest.
+    snip = _snippet(peer_html, "async function _downloadFileFromDaemon(", 2500)
+    assert '_daemonRequest("fetch_blob_chunk"' in snip
+    # Assembles chunks into a Blob and triggers browser download.
+    assert "new Blob(" in snip
+    assert "URL.createObjectURL" in snip
+    assert "a.download" in snip
+
+
+# ───────── set_peer_alias + set_peer_mute (peer mgmt) ─────────────
+    """The phone-side uploader MUST hit send_file_init,
+    send_file_chunk, and send_file_complete in that order via
+    _daemonRequest. Any drift drops the chunked semantics and
+    would corrupt the staged file."""
+    snip = _snippet(peer_html, "async function _handleDaemonChatFilePicked(", 6000)
+    assert '_daemonRequest("send_file_init"' in snip
+    assert '_daemonRequest("send_file_chunk"' in snip
+    assert '_daemonRequest("send_file_complete"' in snip
+
+
 # ───────── set_peer_alias + set_peer_mute (peer mgmt) ─────────────
 
 
