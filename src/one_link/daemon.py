@@ -11797,8 +11797,15 @@ class Daemon:
         for back-compat with any external callers; new code should use this
         explicitly-named version.
         """
+        # 2026-05-22 audit FO-2: state=None used to mean "not
+        # rejected" (return False → fall-through to accept). Same
+        # shape as T1-D in _capability_allowed. A boot-time
+        # state-DB outage / corruption window would let a peer
+        # the user previously revoked re-complete the inbound
+        # channel. Fail CLOSED: treat unavailable state as
+        # "we can't verify trust → don't accept".
         if self.state is None:
-            return False
+            return True
         rec = self.state.get_peer(peer_fp)
         return bool(rec and rec.trust == "rejected")
 
@@ -11828,8 +11835,12 @@ class Daemon:
 
     def _check_outbound_trust(self, peer: Peer) -> str | None:
         """Returns None if outbound is allowed; otherwise an error string."""
+        # 2026-05-22 audit FO-3: state=None used to mean "allow"
+        # (return None). Outbound counterpart of FO-2 / T1-D: a
+        # state-DB outage shouldn't let us send to a peer we
+        # previously revoked. Fail CLOSED.
         if self.state is None:
-            return None
+            return "trust check unavailable (state not loaded); refusing send"
         fp = self._peer_fp_from_peer(peer)
         if not fp:
             return None
@@ -21896,6 +21907,24 @@ class Daemon:
                             getattr(_real_channel, "peer_caps", None) or {}
                             if _real_channel is not None else {}
                         )
+                        # 2026-05-22 audit FO-1: QUIC-only peers
+                        # (mobile / fresh inbound that hasn't opened
+                        # a WebRTC channel) had ``_real_channel=None``,
+                        # leaving ``peer_ed_pub=b""``. Downstream
+                        # ``fingerprint_of(b"")`` then collapsed every
+                        # such peer to a single synthetic fingerprint,
+                        # colliding their IncomingFile keys and
+                        # ledger rows. We HAVE the authenticated
+                        # ``peer_fp`` from TLS (the rustls cert
+                        # provided it via T1-H), so resolve the real
+                        # Ed25519 pubkey from the state DB.
+                        if not _real_ed_pub:
+                            try:
+                                _real_ed_pub = (
+                                    self._peer_pub_for_fp(peer_fp) or b""
+                                )
+                            except Exception:
+                                _real_ed_pub = b""
 
                         class _NoopChannel:
                             # Per-instance state set in __init__ so two

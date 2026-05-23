@@ -165,10 +165,21 @@ def rotate_cap_root_key(data_dir: Path) -> tuple[bytes, bytes | None]:
         if os.name == "nt":
             from one_link.lockbox import _dpapi_protect
             wrapped = _dpapi_protect(prior)
-            if wrapped is not None:
-                payload = wrapped
-            else:
-                payload = prior  # last-resort raw on DPAPI failure
+            if wrapped is None:
+                # 2026-05-22 audit FO-4: REFUSE to silently write the
+                # prior key in plaintext when DPAPI wrap fails. The
+                # active key's ``store_cap_root_key`` raises on this
+                # same condition; rotation's old-key persistence must
+                # match that contract, not degrade to a plaintext
+                # file. Caller can retry rotation after the operator
+                # investigates DPAPI availability.
+                raise RuntimeError(
+                    "rotate_cap_root_key: cannot persist prior key — "
+                    "DPAPI wrap failed and we refuse to write key "
+                    "material in plaintext. Investigate DPAPI "
+                    "availability (Windows credential store) and retry."
+                )
+            payload = wrapped
         else:
             payload = prior
         fd, tmp_path = tempfile.mkstemp(
