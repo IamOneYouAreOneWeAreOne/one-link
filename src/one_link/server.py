@@ -2266,8 +2266,26 @@ class UIServer:
                 html = html.replace("</head>", scrub + "</head>", 1)
             else:
                 html += scrub
+        # 2026-05-23: content-hash ETag + must-revalidate. Same
+        # pattern as _peer_shell. User report: header showed cached
+        # 'Settings' / 'Lock' text labels even after the bundle on
+        # disk had 'Settings → ⚙' / 'Lock → 🔒'. no-store alone
+        # wasn't enough — Edge / Safari restored from disk cache on
+        # back-button + saved-tab navigations. ETag based on the
+        # rendered HTML (post-source-fingerprint substitution +
+        # post-scrub injection) forces a conditional GET; matched
+        # → 304, drift → 200 fresh body. Every code ship reaches
+        # every browser on the next load.
+        import hashlib
+        etag = '"' + hashlib.sha256(html.encode("utf-8")).hexdigest()[:16] + '"'
+        if request.headers.get("If-None-Match") == etag:
+            resp = web.Response(status=304)
+            resp.headers["ETag"] = etag
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return resp
         resp = web.Response(text=html, content_type="text/html", charset="utf-8")
-        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["ETag"] = etag
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
         resp.headers["Referrer-Policy"] = "no-referrer"
         # v0.20.7 (security audit H9): Content-Security-Policy on the
         # main UI. The previous response set X-Frame-Options + X-CTO

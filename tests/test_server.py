@@ -542,7 +542,34 @@ async def test_server_index_serves_html_and_sets_cookie():
                 txt = await r.text()
                 assert "<!doctype html>" in txt.lower() or "<html" in txt.lower()
                 assert any(c.key == "ol_ui" for c in r.cookies.values())
-                assert r.headers.get("Cache-Control") == "no-store"
+                # 2026-05-23: switched from no-store to
+                # no-cache+must-revalidate + ETag. Bullet-proof cache
+                # busting: every load is a conditional GET, 304 for
+                # unchanged content, 200 for any code change. no-store
+                # alone was insufficient on Edge / Safari which
+                # restored stale UI from disk cache on back-button
+                # and saved-tab navigations.
+                assert r.headers.get("Cache-Control") == "no-cache, must-revalidate"
+                assert r.headers.get("ETag", "").startswith('"')
+
+
+@pytest.mark.asyncio
+async def test_server_index_returns_304_on_matching_etag():
+    """Conditional GET with a matching If-None-Match must return
+    304 (no body) so unchanged content costs zero bandwidth on
+    every reload. Without this the ETag is decoration."""
+    with daemon_pair() as p:
+        base, token = _server_addr(p.a.home)
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{base}/?t={token}") as r:
+                etag = r.headers.get("ETag")
+                assert etag
+            async with s.get(
+                f"{base}/?t={token}",
+                headers={"If-None-Match": etag},
+            ) as r:
+                assert r.status == 304
+                assert r.headers.get("ETag") == etag
 
 
 @pytest.mark.asyncio
