@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -76,3 +77,25 @@ def test_launcher_and_tray_open_authenticated_owner_url() -> None:
     assert "def _display_url(url: str)" in tray
     assert "urlsplit(url)" in tray
     assert "_display_url(self._url)" in tray
+
+
+def test_composer_toolbar_uses_icons_not_text_labels() -> None:
+    html = _html()
+    composer_start = html.index('<div class="composer">')
+    composer_end = html.index('<!-- v0.9.2 voice recording overlay', composer_start)
+    composer = html[composer_start:composer_end]
+
+    for control_id in ("btn-attach2", "btn-voice", "btn-emoji"):
+        assert f'id="{control_id}"' in composer
+        assert "composer-icon" in composer
+        assert re.search(rf'id="{control_id}"[^>]+aria-label="', composer), control_id
+
+    assert ">Attach</button>" not in composer
+    assert ">Mic</button>" not in composer
+    assert ">:)</button>" not in composer
+    assert "COMPOSER_MIC_ICON" in html
+    assert "COMPOSER_STOP_ICON" in html
+    assert 'setVoiceButtonIcon(false)' in html
+    assert 'setVoiceButtonIcon(true)' in html
+    assert '$("#btn-voice").textContent = "Mic"' not in html
+    assert '$("#btn-voice").textContent = "Attach"' not in html

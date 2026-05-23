@@ -416,7 +416,7 @@ def test_boot_detects_pair_query_first(peer_html: str):
     idx = peer_html.find("const _pairQuery = _detectPairQuery();")
     assert idx >= 0
     # And the autopair card is shown before boot is awaited.
-    snippet = peer_html[idx:idx + 1500]
+    snippet = peer_html[idx:idx + 7000]
     assert '_showOnly("#autopair-card")' in snippet
     assert "boot()" in snippet
 
@@ -427,7 +427,7 @@ def test_boot_chains_autopair_after_identity(peer_html: str):
     .then() rather than awaiting before boot is fine because boot
     is what gives us state.rec."""
     idx = peer_html.find("const _pairQuery = _detectPairQuery();")
-    snippet = peer_html[idx:idx + 1500]
+    snippet = peer_html[idx:idx + 7000]
     assert "boot().then(" in snippet
     assert "_runAutoPairFlow(_pairQuery)" in snippet
 

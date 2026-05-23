@@ -193,7 +193,7 @@ def test_boot_shows_welcome_when_no_pair_query(peer_html: str):
     show($('#welcome-card'))) MUST fire. Without this, the page
     loads to a blank canvas — total UX failure."""
     idx = peer_html.find("const _pairQuery = _detectPairQuery();")
-    snippet = peer_html[idx:idx + 1500]
+    snippet = peer_html[idx:idx + 5000]
     assert '_showOnly("#welcome-card")' in snippet
     # Welcome shows in the else branch (no pair query).
     else_idx = snippet.find("} else {")

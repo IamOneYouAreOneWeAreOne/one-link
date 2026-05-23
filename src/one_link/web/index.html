@@ -910,6 +910,11 @@
     transition: background .12s, color .12s;
     font-size: 18px;
   }
+  .composer .icon-btn .composer-icon {
+    line-height: 1;
+    font-size: 19px;
+    font-weight: 800;
+  }
   /* Pin textarea to the named `comp` 1fr column and send to the
      named `send-col` auto column. Auto-flow puts icons into the
      leading auto tracks; hidden icons (mobile) collapse without
@@ -8220,7 +8225,10 @@
                / WhatsApp. The keyboard Ctrl+V paste still works as
                a fast path (no popover; pasted images go straight
                to the attach tray). -->
-          <button class="icon-btn" id="btn-attach2" title="Attach (file, camera, or paste)">Attach</button>
+          <button class="icon-btn" id="btn-attach2" title="Attach (file, camera, or paste)"
+                  aria-label="Attach file, camera, or paste">
+            <span class="composer-icon" aria-hidden="true">&#128206;</span>
+          </button>
           <!-- Hidden invisible buttons kept for compat with code
                paths that still target #btn-screenshot or #btn-camera
                directly (slash commands, action sheets, etc.). The
@@ -8230,11 +8238,17 @@
           <!-- v0.9.2 voice messages - click to start recording, click
                again to stop. While recording, the icon flips to a
                red square + a timer/cancel overlay slides in. -->
-          <button class="icon-btn" id="btn-voice" title="Record voice message (Ctrl+Shift+M)">Mic</button>
+          <button class="icon-btn" id="btn-voice" title="Record voice message (Ctrl+Shift+M)"
+                  aria-label="Record voice message">
+            <span class="composer-icon" aria-hidden="true">&#127908;</span>
+          </button>
           <!-- v0.21.x: open emoji picker against the composer
                textarea. Insert mode: click an emoji, it goes
                at the cursor position. -->
-          <button class="icon-btn" id="btn-emoji" title="Insert emoji">:)</button>
+          <button class="icon-btn" id="btn-emoji" title="Insert emoji"
+                  aria-label="Insert emoji">
+            <span class="composer-icon" aria-hidden="true">&#9786;</span>
+          </button>
           <textarea id="input" placeholder="Message your peer... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
           <button class="send" id="btn-send" disabled>Send</button>
         </div>
@@ -24576,6 +24590,17 @@
   state.voiceStartedAt = 0;     // ms epoch
   state.voiceTimerId = null;    // setInterval handle for the live timer
   state.voiceCancelled = false; // sticky flag so onstop knows not to send
+  const COMPOSER_MIC_ICON = '<span class="composer-icon" aria-hidden="true">&#127908;</span>';
+  const COMPOSER_STOP_ICON = '<span class="composer-icon" aria-hidden="true">&#9632;</span>';
+  function setVoiceButtonIcon(recording = false) {
+    const btn = $("#btn-voice");
+    if (!btn) return;
+    btn.innerHTML = recording ? COMPOSER_STOP_ICON : COMPOSER_MIC_ICON;
+    btn.setAttribute(
+      "aria-label",
+      recording ? "Stop and preview voice recording" : "Record voice message",
+    );
+  }
 
   // Pick the most-supported opus container. Prefer webm/opus (Chrome
   // + Edge native), fall back to ogg/opus (Firefox), then plain
@@ -24654,7 +24679,7 @@
       stopVoiceTimer();
       $("#voice-overlay").style.display = "none";
       $("#btn-voice").classList.remove("recording");
-      $("#btn-voice").textContent = "🎤";
+      setVoiceButtonIcon(false);
       const wasCancelled = state.voiceCancelled;
       const chunks = state.voiceChunks;
       const recMime = rec.mimeType || mime || "audio/webm";
@@ -24691,7 +24716,7 @@
       return;
     }
     $("#btn-voice").classList.add("recording");
-    $("#btn-voice").textContent = "⏹";
+    setVoiceButtonIcon(true);
     $("#voice-overlay").style.display = "flex";
     $("#voice-timer").textContent = "0:00";
     state.voiceTimerId = setInterval(updateVoiceTimer, 250);
