@@ -3062,6 +3062,16 @@
           ? `Check this code on the other device: ${body.trust_code || ""}`
           : `${record.label} is now part of your One identity.`,
       );
+      // 2026-05-23: when the daemon returns pending=true, the
+      // operator still has to tap "Codes match" on the desktop.
+      // The phone has no WebSocket back to the daemon, so we
+      // poll /api/setup/device-invite/status until the operator
+      // acts (or the invite expires). Without this poll the
+      // phone sits forever on "check code" even after the
+      // desktop confirms.
+      if (body.pending) {
+        _pollSetupDeviceInviteStatus(query.token, record);
+      }
     } catch (e) {
       // 2026-05-23: hide actions on failure too — prior shown
       // state could otherwise leave a button that calls into the
@@ -3073,6 +3083,84 @@
         `Couldn't add this device: ${e && e.message ? e.message : e}`,
       );
     }
+  }
+
+  // 2026-05-23: poll /api/setup/device-invite/status until the
+  // operator confirms or rejects, the invite expires, or we hit
+  // the overall deadline. 1.5s cadence matches the desktop
+  // refresh poll. We use _waitForIdentity-style backoff via
+  // setTimeout (not setInterval) so a slow response doesn't
+  // stack overlapping polls.
+  async function _pollSetupDeviceInviteStatus(token, baseRecord) {
+    const POLL_MS = 1500;
+    const DEADLINE_MS = Date.now() + 10 * 60 * 1000; // 10 min hard cap
+    while (Date.now() < DEADLINE_MS) {
+      await new Promise((r) => setTimeout(r, POLL_MS));
+      let payload;
+      try {
+        const resp = await fetch(
+          `/api/setup/device-invite/status?token=${encodeURIComponent(token)}`,
+          { method: "GET", headers: { "Accept": "application/json" } },
+        );
+        payload = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          // 429 = slow down; anything else = keep trying. Don't
+          // give up on a single transient network blip.
+          continue;
+        }
+      } catch (_e) {
+        // Network blip — keep polling until the deadline.
+        continue;
+      }
+      const status = payload && payload.status;
+      if (status === "confirmed") {
+        const merged = {
+          ...baseRecord,
+          pending: false,
+          cert_b64: payload.cert_b64 || baseRecord.cert_b64 || "",
+          device_pub_b64: payload.device_pub_b64 || baseRecord.device_pub_b64,
+          root_pub_b64: payload.root_pub_b64 || baseRecord.root_pub_b64,
+          label: payload.label || baseRecord.label,
+          device_kind: payload.device_kind || baseRecord.device_kind,
+          trusted: payload.trusted !== false,
+          trust_code: "",
+        };
+        localStorage.setItem(SELF_MESH_CERT_KEY, JSON.stringify(merged));
+        text(
+          $("#selfmesh-enroll-root"),
+          `${merged.label} · ${merged.root_pub_b64}`,
+        );
+        _selfMeshEnrollSetState(
+          "good",
+          "trusted",
+          `${merged.label} is now part of your One identity.`,
+        );
+        return;
+      }
+      if (status === "rejected") {
+        _selfMeshEnrollSetState(
+          "bad",
+          "rejected",
+          `The other device rejected this pair: ${payload.reason || "codes did not match"}. Scan a fresh QR to try again.`,
+        );
+        return;
+      }
+      if (status === "expired") {
+        _selfMeshEnrollSetState(
+          "warn",
+          "expired",
+          "This invite expired before the other device confirmed. Scan a fresh QR.",
+        );
+        return;
+      }
+      // status === "pending" or "awaiting_claim" — keep polling.
+    }
+    // Hit the overall deadline without resolution.
+    _selfMeshEnrollSetState(
+      "warn",
+      "timed out",
+      "Stopped waiting after 10 minutes. Scan a fresh QR to retry.",
+    );
   }
 
   async function _waitForIdentity(maxMs) {
