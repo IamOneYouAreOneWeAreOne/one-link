@@ -3945,6 +3945,72 @@
     font-size: 12px;
   }
   .settings-action-strip button:hover { background: var(--bg-3); }
+  .settings-overview-banner {
+    display: grid;
+    gap: 12px;
+    margin: 0 0 18px;
+    padding: 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(124,92,255,.28);
+    background:
+      radial-gradient(circle at top left, rgba(124,92,255,.18), transparent 42%),
+      linear-gradient(135deg, rgba(124,92,255,.12), rgba(69,183,209,.08));
+  }
+  .settings-overview-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .settings-overview-title {
+    color: var(--text);
+    font-size: 18px;
+    font-weight: 850;
+    margin-top: 3px;
+  }
+  .settings-overview-copy {
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.45;
+    max-width: 680px;
+    margin-top: 4px;
+  }
+  .settings-readiness-list {
+    display: grid;
+    gap: 8px;
+  }
+  .settings-readiness-row {
+    display: grid;
+    grid-template-columns: 60px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
+    border-radius: 10px;
+    border: 1px solid rgba(255,255,255,.07);
+    background: rgba(255,255,255,.035);
+  }
+  .settings-readiness-row .state {
+    font-size: 11px;
+    font-weight: 850;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .settings-readiness-row.good .state { color: var(--good); }
+  .settings-readiness-row.warn .state { color: var(--warn); }
+  .settings-readiness-row.bad .state { color: var(--bad); }
+  .settings-readiness-row .label {
+    color: var(--text);
+    font-weight: 780;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .settings-readiness-row .detail {
+    color: var(--text-dim);
+    font-size: 12px;
+    text-align: right;
+  }
   .settings-pill-row {
     display: flex;
     flex-wrap: wrap;
@@ -8613,6 +8679,28 @@
           <!-- ── Profile ────────────────────────────────────────── -->
           <section class="settings-pane active" data-settings-pane="profile">
             <h3>Profile</h3>
+            <div class="settings-overview-banner" id="settings-command-center">
+              <div class="settings-overview-top">
+                <div>
+                  <div class="settings-card-kicker">Command center</div>
+                  <div class="settings-overview-title" id="settings-overview-title">Checking One Link...</div>
+                  <div class="settings-overview-copy" id="settings-overview-copy">
+                    Live identity, device, network, privacy, storage, and diagnostic readiness in one place.
+                  </div>
+                </div>
+                <div class="settings-action-strip">
+                  <button type="button" id="settings-overview-repair">Repair</button>
+                  <button type="button" id="settings-overview-copy">Copy report</button>
+                </div>
+              </div>
+              <div class="settings-health-grid three" id="settings-overview-health"></div>
+              <div class="settings-readiness-list" id="settings-readiness-list"></div>
+              <div class="settings-action-strip">
+                <button type="button" id="settings-overview-devices">Devices</button>
+                <button type="button" id="settings-overview-privacy">Privacy</button>
+                <button type="button" id="settings-overview-storage">Storage</button>
+              </div>
+            </div>
             <p class="settings-pane-lede">
               Your display name + avatar are how nearby devices see you.
               The bio is shown in your device drawer.
@@ -8641,7 +8729,7 @@
             <div class="settings-row settings-copy-row">
               <label>Identity</label>
               <div class="settings-copy-field">
-                <code class="settings-readonly settings-code" id="settings-identity-fp">…</code>
+                <code class="settings-readonly settings-code" id="settings-identity-fp">...</code>
                 <button type="button" class="btn-ghost settings-copy-btn" id="settings-copy-identity"
                         aria-label="Copy identity fingerprint">Copy</button>
               </div>
@@ -9326,7 +9414,7 @@
                       <li>iOS prompts <strong>"This website is trying to download a configuration profile."</strong> Tap <strong>Allow</strong>.</li>
                       <li>iOS shows <strong>"Profile Downloaded."</strong> Tap <strong>Close</strong>.</li>
                       <li>Open <strong>Settings → General → VPN &amp; Device Management</strong>. Tap <strong>One Link Trust</strong> → <strong>Install</strong>. Enter your passcode.</li>
-                      <li>Open <strong>Settings → General → About → Certificate Trust Settings</strong>. Toggle on for <strong>One Link Self-Signed CA</strong>. Tap <strong>Continue</strong> on the warning.</li>
+                      <li>Open <strong>Settings → General → About → Certificate Trust Settings</strong>. Toggle on for <strong>One Link Root CA</strong>. Tap <strong>Continue</strong> on the warning.</li>
                       <li>Done. Now scan the pair QR above.</li>
                     </ol>
                     <div id="ios-trust-qr-wrap" style="margin-top:12px;">
@@ -23220,7 +23308,7 @@
       panelList.innerHTML = "";
       for (const item of (setup.checklist || []).slice(0, 5)) {
         const row = el("div", `setup-mini-row ${item.status === "done" ? "done" : ""}`);
-        row.appendChild(el("span", "dot", item.status === "done" ? "✓" : ""));
+        row.appendChild(el("span", "dot", item.status === "done" ? "OK" : ""));
         row.appendChild(el("span", null, item.label || ""));
         row.appendChild(el("span", "tag", item.status || ""));
         panelList.appendChild(row);
@@ -23231,7 +23319,7 @@
       settingsList.innerHTML = "";
       for (const item of (setup.checklist || []).slice(0, 8)) {
         const row = el("div", `setup-mini-row ${item.status === "done" ? "done" : ""}`);
-        row.appendChild(el("span", "dot", item.status === "done" ? "✓" : ""));
+        row.appendChild(el("span", "dot", item.status === "done" ? "OK" : ""));
         const text = el("span", null, item.label || "");
         text.title = item.human || "";
         row.appendChild(text);
@@ -26242,6 +26330,9 @@
     if (name === "storage") {
       refreshStorageUsage();
     }
+    if (name === "profile") {
+      renderSettingsOverview();
+    }
     if (name === "devices") {
       renderSettingsDevices();
     }
@@ -26783,6 +26874,155 @@
     };
   }
 
+  function _settingsOverviewSnapshot() {
+    const net = _settingsNetworkSnapshot();
+    const peers = [...(state.peers?.values?.() || [])].filter((p) => p && p.trust !== "rejected");
+    const paired = peers.filter((p) => p.trust === "pinned");
+    const online = paired.filter((p) => p.online);
+    const verified = paired.filter((p) => p.is_verified);
+    const setup = state.setup || {};
+    const identity = state.me?.fingerprint || "";
+    const setupDone = !!setup.completed || !!state.me?.one_setup_completed || !!state.me?.onboarding_completed;
+    const privacy = state.runtimeSettings || {};
+    const privacyMode = privacy.pair_default_allow_all === false ? "Approve each pairing" : "Trusted local pairing";
+    const routeReady = net.fabricOk && (online.length > 0 || paired.length === 0);
+    const storageBytes = Number(state.status?.performance?.cdc_cache?.bytes || net.cacheBytes || 0);
+    const overallBad = !identity || (paired.length > 0 && online.length === 0);
+    const overallWarn = !setupDone || !routeReady || (paired.length > 0 && verified.length < paired.length);
+    const overall = overallBad ? "Needs attention" : (overallWarn ? "Almost ready" : "Ready");
+    const generatedAt = new Date().toISOString();
+    return {
+      generatedAt,
+      overall,
+      identity,
+      setupDone,
+      peers: peers.length,
+      paired: paired.length,
+      online: online.length,
+      verified: verified.length,
+      privacyMode,
+      routeReady,
+      network: net,
+      storageBytes,
+      diagnosticsReady: true,
+      version: net.daemon,
+    };
+  }
+
+  function renderSettingsOverview() {
+    const host = $("#settings-overview-health");
+    const list = $("#settings-readiness-list");
+    if (!host && !list) return;
+    const snap = _settingsOverviewSnapshot();
+    const title = $("#settings-overview-title");
+    const copy = $("#settings-overview-copy");
+    if (title) title.textContent = `One Link is ${snap.overall.toLowerCase()}`;
+    if (copy) {
+      const latency = snap.network.avgLatency == null ? "latency pending" : `${snap.network.avgLatency} ms average`;
+      copy.textContent =
+        `${snap.online}/${snap.paired} trusted devices online, ${latency}, ` +
+        `${snap.privacyMode.toLowerCase()}, ${fmtBytes(snap.storageBytes)} saved locally.`;
+    }
+    if (host) {
+      host.innerHTML = "";
+      const card = (label, value, detail, cls = "") => {
+        const c = el("div", `settings-health-card flat ${cls}`.trim());
+        c.appendChild(el("div", "settings-health-label", label));
+        c.appendChild(el("div", "settings-health-value", value));
+        c.appendChild(el("div", "settings-health-detail", detail));
+        host.appendChild(c);
+      };
+      card("Identity", snap.identity ? "Loaded" : "Missing",
+        snap.identity ? `${snap.identity.slice(0, 12)}...${snap.identity.slice(-8)}` : "Reload One Link to restore identity",
+        snap.identity ? "good" : "bad");
+      card("Devices", `${snap.online}/${snap.paired} online`,
+        snap.paired ? `${snap.verified}/${snap.paired} verified` : "Pair your first device",
+        snap.online || !snap.paired ? "good" : "warn");
+      card("Network", snap.network.avgLatency == null ? snap.network.route : `${snap.network.avgLatency} ms`,
+        snap.network.fabricState, snap.routeReady ? "good" : "warn");
+      card("Storage", fmtBytes(snap.storageBytes),
+        "Local dedupe cache and received file metadata", "good");
+      card("Privacy", snap.privacyMode,
+        state.runtimeSettings?.send_read_receipts === false ? "Receipts hidden" : "Receipts and typing can be controlled", "good");
+      card("Diagnostics", "Ready",
+        "Copy this report when something feels wrong", "good");
+    }
+    if (list) {
+      list.innerHTML = "";
+      const rows = [
+        {
+          cls: snap.identity ? "good" : "bad",
+          state: snap.identity ? "OK" : "Fix",
+          label: "Identity",
+          detail: snap.identity ? "Fingerprint available" : "Security key expired or not loaded",
+        },
+        {
+          cls: snap.setupDone ? "good" : "warn",
+          state: snap.setupDone ? "OK" : "Check",
+          label: "One Setup",
+          detail: snap.setupDone ? "Setup receipt complete" : "Finish setup checklist",
+        },
+        {
+          cls: snap.paired ? "good" : "warn",
+          state: snap.paired ? "OK" : "Check",
+          label: "Paired devices",
+          detail: snap.paired ? `${snap.paired} trusted, ${snap.online} reachable` : "No trusted devices yet",
+        },
+        {
+          cls: snap.paired && snap.verified === snap.paired ? "good" : "warn",
+          state: snap.paired && snap.verified === snap.paired ? "OK" : "Check",
+          label: "Verification",
+          detail: snap.paired ? `${snap.verified}/${snap.paired} devices verified` : "Pair before verifying",
+        },
+        {
+          cls: snap.routeReady ? "good" : "warn",
+          state: snap.routeReady ? "OK" : "Check",
+          label: "Route health",
+          detail: snap.network.fabricReason,
+        },
+        {
+          cls: "good",
+          state: "OK",
+          label: "Diagnostics",
+          detail: "Network, device, privacy, and storage report available",
+        },
+      ];
+      for (const r of rows) {
+        const row = el("div", `settings-readiness-row ${r.cls}`);
+        row.appendChild(el("span", "state", r.state));
+        row.appendChild(el("span", "label", r.label));
+        row.appendChild(el("span", "detail", r.detail));
+        list.appendChild(row);
+      }
+    }
+  }
+
+  async function copySettingsOverviewReport() {
+    const snap = _settingsOverviewSnapshot();
+    const report = {
+      generated_at: snap.generatedAt,
+      app_version: snap.version,
+      overall: snap.overall,
+      identity_short: snap.identity ? `${snap.identity.slice(0, 12)}...${snap.identity.slice(-8)}` : null,
+      devices: {
+        visible: snap.peers,
+        paired: snap.paired,
+        online: snap.online,
+        verified: snap.verified,
+      },
+      network: snap.network,
+      privacy: {
+        mode: snap.privacyMode,
+        read_receipts: state.runtimeSettings?.send_read_receipts !== false,
+        typing_indicators: state.runtimeSettings?.send_typing_indicators !== false,
+      },
+      storage: {
+        cache_bytes: snap.storageBytes,
+      },
+    };
+    await copyToClipboard(JSON.stringify(report, null, 2), "settings health report");
+  }
+
   function renderSettingsNetwork() {
     const snap = _settingsNetworkSnapshot();
     const health = $("#settings-network-health");
@@ -26820,6 +27060,7 @@
       add("rendezvous", snap.rendezvousCount ? String(snap.rendezvousCount) : "Wi-Fi only", snap.rendezvousCount ? "good" : "");
       report.appendChild(pills);
     }
+    renderSettingsOverview();
   }
 
   async function refreshSettingsNetwork() {
@@ -26969,6 +27210,7 @@
       stat(verified.length, "verified");
       stat(attention.length, "attention");
     }
+    renderSettingsOverview();
     host.innerHTML = "";
     if (!peers.length) {
       host.appendChild(el(
@@ -27118,7 +27360,7 @@
 
   $("#settings-copy-identity")?.addEventListener("click", () => {
     const txt = ($("#settings-identity-fp")?.textContent || "").trim();
-    if (!txt || txt === "…" || txt === "(unknown)") {
+    if (!txt || txt === "..." || txt === "(unknown)") {
       toast("Identity is still loading.", "info", 1800);
       return;
     }
@@ -27126,7 +27368,7 @@
   });
   $("#settings-copy-identity-privacy")?.addEventListener("click", () => {
     const txt = (state.me?.fingerprint || $("#settings-identity-fp")?.textContent || "").trim();
-    if (!txt || txt === "..." || txt === "…" || txt === "(unknown)") {
+    if (!txt || txt === "..." || txt === "(unknown)") {
       toast("Identity is still loading.", "info", 1800);
       return;
     }
@@ -27160,6 +27402,17 @@
     $("#settings-run-doctor")?.click();
     $("#doctor-results")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   });
+  $("#settings-overview-repair")?.addEventListener("click", async () => {
+    switchSettingsPane("network");
+    await refreshSettingsNetwork();
+    $("#settings-network-run-doctor")?.click();
+  });
+  $("#settings-overview-copy")?.addEventListener("click", () => {
+    copySettingsOverviewReport().catch((e) => toast(`Copy failed: ${errorToastBody(e)}`, "bad", 5000));
+  });
+  $("#settings-overview-devices")?.addEventListener("click", () => switchSettingsPane("devices"));
+  $("#settings-overview-privacy")?.addEventListener("click", () => switchSettingsPane("privacy"));
+  $("#settings-overview-storage")?.addEventListener("click", () => switchSettingsPane("storage"));
 
   $("#settings-devices-refresh")?.addEventListener("click", async () => {
     const btn = $("#settings-devices-refresh");
@@ -27528,6 +27781,7 @@
     refreshSettingsAbout();
     renderSettingsDevices();
     renderSettingsNetwork();
+    renderSettingsOverview();
     refreshSettingsNetwork().catch((e) => console.warn("settings network refresh:", e));
     refreshBlockedDevicesList();
     _settingsHydrating = false;

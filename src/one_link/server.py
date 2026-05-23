@@ -354,7 +354,7 @@ _CONNECT_LANDING_HTML_IOS = """<!doctype html>
       <li>Tap <strong>General</strong></li>
       <li>Tap <strong>About</strong></li>
       <li>Scroll down, tap <strong>Certificate Trust Settings</strong></li>
-      <li>Flip the toggle ON for <strong>One Link Self-Signed CA</strong> → tap <strong>Continue</strong> on the warning</li>
+      <li>Flip the toggle ON for <strong>One Link Root CA</strong> → tap <strong>Continue</strong> on the warning</li>
     </ol>
   </div>
 
@@ -362,7 +362,7 @@ _CONNECT_LANDING_HTML_IOS = """<!doctype html>
     <h2><span class="step-num">4</span><span>Pair this device</span></h2>
     <p>Now you're set. Tap below — your computer pops up a 5-word confirmation. Tap "match" on both ends.</p>
     <a class="btn btn-secondary" href="{pair_url}">Continue to pair</a>
-    <p class="hint">If you still see "Not Private" or "Connection failed," double-check step 3 — the Certificate Trust toggle for "One Link Self-Signed CA" is the most-commonly-missed step.</p>
+    <p class="hint">If you still see "Not Private" or "Connection failed," double-check step 3 — the Certificate Trust toggle for "One Link Root CA" is the most-commonly-missed step.</p>
   </div>
 </body>
 </html>
@@ -3536,7 +3536,7 @@ class UIServer:
         Two-step flow on the user's iPhone:
           1. Safari → this URL → iOS prompts "Install Profile"
           2. After install: Settings → General → About → Certificate
-             Trust Settings → toggle on for "One Link Self-Signed CA"
+             Trust Settings → toggle on for "One Link Root CA"
 
         Both steps are required; Apple intentionally splits "install
         cert" from "trust cert for TLS." We surface this in the
