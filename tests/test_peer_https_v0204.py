@@ -288,6 +288,64 @@ def test_build_ssl_context_returns_loadable_context(tmp_path: Path):
     assert ctx.minimum_version >= ssl.TLSVersion.TLSv1_2
 
 
+def test_build_ssl_context_does_not_advertise_h2(tmp_path: Path):
+    """2026-05-23: server MUST NOT advertise h2 via ALPN.
+    aiohttp speaks HTTP/1.1 only — advertising h2 leads browsers
+    that prefer it (Safari, modern Chrome) to negotiate HTTP/2,
+    receive HTTP/1.x bytes back, treat the response as a protocol
+    violation, and tear the connection down reporting
+    NSURLErrorNetworkConnectionLost (-1005) on iOS or
+    ERR_HTTP2_PROTOCOL_ERROR on Chromium. curl with default
+    http/1.1 was succeeding the whole time, masking the bug.
+
+    The check uses the private ALPN protocols list from the
+    underlying OpenSSL context (Python doesn't expose a public
+    getter, so we re-negotiate against a stub client to read
+    back what the server would advertise).
+    """
+    import socket
+    import ssl as _ssl
+    import threading
+    from one_link.peer_https import build_ssl_context
+    server_ctx = build_ssl_context(tmp_path)
+    assert server_ctx is not None
+
+    selected: list = []
+
+    def server_thread(sock: socket.socket):
+        conn, _ = sock.accept()
+        try:
+            ss = server_ctx.wrap_socket(conn, server_side=True)
+            selected.append(ss.selected_alpn_protocol())
+            ss.close()
+        except Exception as e:
+            selected.append(("error", str(e)))
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    t = threading.Thread(target=server_thread, args=(srv,), daemon=True)
+    t.start()
+
+    client_ctx = _ssl.create_default_context()
+    client_ctx.check_hostname = False
+    client_ctx.verify_mode = _ssl.CERT_NONE
+    # Reproduce Safari: offer h2 first.
+    client_ctx.set_alpn_protocols(["h2", "http/1.1"])
+    with socket.create_connection(("127.0.0.1", port), timeout=3) as cs:
+        with client_ctx.wrap_socket(cs) as css:
+            client_selected = css.selected_alpn_protocol()
+
+    t.join(timeout=3)
+    srv.close()
+    # Server must NOT select h2 even when client offers it first.
+    assert client_selected != "h2", (
+        f"Server picked h2 via ALPN — will break Safari. "
+        f"client selected {client_selected!r}; server selected {selected!r}"
+    )
+
+
 def test_cert_fingerprint_sha256(tmp_path: Path):
     """Fingerprint helper returns a 64-char lowercase hex string."""
     from one_link.peer_https import (

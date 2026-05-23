@@ -499,7 +499,19 @@ def build_ssl_context(
     with contextlib.suppress(AttributeError):
         ctx.options |= ssl.OP_NO_TICKET
     try:
-        ctx.set_alpn_protocols(["h2", "http/1.1"])
+        # 2026-05-23: advertise http/1.1 ONLY. Previously we
+        # advertised ["h2", "http/1.1"] but aiohttp's server
+        # implementation does not speak HTTP/2 — when a browser
+        # offers h2 first (Safari, modern Chrome), the server
+        # selects h2 via ALPN but then can only respond in
+        # HTTP/1.x bytes, which the browser treats as a fatal
+        # protocol violation and tears the connection down
+        # reporting NSURLErrorNetworkConnectionLost (-1005) on
+        # iOS / ERR_HTTP2_PROTOCOL_ERROR on Chromium. curl with
+        # default http/1.1 succeeded the whole time, masking the
+        # bug behind every "works on curl" verification.
+        # Re-enable h2 only when the server actually speaks it.
+        ctx.set_alpn_protocols(["http/1.1"])
     except (NotImplementedError, ssl.SSLError):
         # Some platforms don't support ALPN on the server side
         # (rare); HTTP/1.1 fallback is still fine.
