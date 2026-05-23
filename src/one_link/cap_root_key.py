@@ -108,6 +108,13 @@ def store_cap_root_key(data_dir: Path, key: bytes) -> None:
     try:
         try:
             os.write(fd, payload)
+            # 2026-05-22 audit Batch KK: fsync before close so a
+            # power-loss / OS crash between write and rename can't
+            # leave a zero-byte or partial cap_root_key file. The
+            # rename is atomic on POSIX; without fsync, the rename
+            # may complete with the destination pointing at
+            # unflushed bytes.
+            os.fsync(fd)
         finally:
             os.close(fd)
         if os.name != "nt":
@@ -188,6 +195,10 @@ def rotate_cap_root_key(data_dir: Path) -> tuple[bytes, bytes | None]:
         try:
             try:
                 os.write(fd, payload)
+                # 2026-05-22 audit Batch KK: fsync the old-key file
+                # too so the grace-window verifier sees the full
+                # blob if power-loss / crash interrupts rotation.
+                os.fsync(fd)
             finally:
                 os.close(fd)
             if os.name != "nt":

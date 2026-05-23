@@ -409,25 +409,37 @@ def acquire_or_create_silent_drk(data_dir: Path) -> bytes:
         fresh = None
     if fresh is None:
         fresh = secrets.token_bytes(32)
+    # 2026-05-22 audit Batch KK: fsync-before-rename hygiene.
+    # ``tmp.write_bytes(...)`` opens + writes + closes but does NOT
+    # fsync, so a power-loss / OS crash between write and rename can
+    # leave a zero-byte or partial DRK file. Use the same O_WRONLY +
+    # os.write + os.fsync pattern as ``master_seed.store_seed`` /
+    # ``identity._save_key`` so the rename is atomic over fully-
+    # flushed bytes.
+    def _atomic_write_bytes(target: Path, payload: bytes) -> None:
+        tmp_p = target.with_name(target.name + ".tmp." + secrets.token_hex(4))
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        flags |= getattr(os, "O_BINARY", 0)
+        fd = os.open(str(tmp_p), flags, 0o600)
+        try:
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp_p, target)
     try:
         if os.name == "nt":
             wrapped = _dpapi_protect(fresh)
             if wrapped:
-                tmp = p.with_name(p.name + ".tmp." + secrets.token_hex(4))
-                tmp.write_bytes(wrapped)
-                os.replace(tmp, p)
+                _atomic_write_bytes(p, wrapped)
             else:
                 # DPAPI unavailable — write raw with the same
                 # Windows-DACL hardening as identity.key.
-                tmp = p.with_name(p.name + ".tmp." + secrets.token_hex(4))
-                tmp.write_bytes(fresh)
-                os.replace(tmp, p)
+                _atomic_write_bytes(p, fresh)
                 from one_link.identity import _restrict_windows_acl
                 _restrict_windows_acl(p)
         else:
-            tmp = p.with_name(p.name + ".tmp." + secrets.token_hex(4))
-            tmp.write_bytes(fresh)
-            os.replace(tmp, p)
+            _atomic_write_bytes(p, fresh)
             try:
                 os.chmod(p, 0o600)
             except OSError:
