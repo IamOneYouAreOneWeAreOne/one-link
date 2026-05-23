@@ -260,12 +260,84 @@
        the laptop's chats; tapping a row drills into the message
        view for that peer. -->
   <div class="card" id="daemon-roster-card" hidden>
-    <h2>Your chats</h2>
+    <div style="display:flex; align-items:center;
+                justify-content:space-between; gap:8px;">
+      <h2 style="margin:0;">Your chats</h2>
+      <button class="btn ghost" id="btn-phone-settings"
+              title="Phone settings"
+              aria-label="Phone settings"
+              style="padding:6px 10px; min-height:auto;
+                     font-size:14px;">⚙</button>
+    </div>
     <div class="body">
       <p class="help" id="daemon-roster-status"></p>
       <div id="daemon-peers-list"
            style="display:flex; flex-direction:column; gap:8px;
                   margin-top:12px;"></div>
+    </div>
+  </div>
+
+  <!-- 2026-05-23 phase 3b: phone-side Settings. Surfaces device
+       identity, the paired daemon, and a 'sign out and re-pair'
+       action that wipes the OPFS keypair + localStorage cert. -->
+  <div class="card" id="phone-settings-card" hidden>
+    <div style="display:flex; align-items:center;
+                justify-content:space-between; gap:8px;">
+      <h2 style="margin:0;">Settings</h2>
+      <button class="btn ghost" id="btn-phone-settings-back"
+              style="padding:6px 10px; min-height:auto;
+                     font-size:12px;">← Back</button>
+    </div>
+    <div class="body">
+      <div style="background:var(--bg-3); border-radius:10px;
+                  padding:14px; margin-bottom:12px;">
+        <p style="margin:0 0 4px; font-size:11px; color:var(--text-dim);
+                  text-transform:uppercase; letter-spacing:0.5px;">
+          This device
+        </p>
+        <p id="phone-settings-device-label"
+           style="margin:0; font-weight:600; font-size:15px;">—</p>
+        <p id="phone-settings-device-fp"
+           style="margin:4px 0 0; font-size:11px; color:var(--text-dim);
+                  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+                  overflow-wrap:anywhere;">—</p>
+        <p id="phone-settings-device-paired"
+           style="margin:6px 0 0; font-size:12px; color:var(--text-dim);">—</p>
+      </div>
+      <div style="background:var(--bg-3); border-radius:10px;
+                  padding:14px; margin-bottom:12px;">
+        <p style="margin:0 0 4px; font-size:11px; color:var(--text-dim);
+                  text-transform:uppercase; letter-spacing:0.5px;">
+          Paired with
+        </p>
+        <p id="phone-settings-daemon-label"
+           style="margin:0; font-weight:600; font-size:15px;">—</p>
+        <p id="phone-settings-daemon-fp"
+           style="margin:4px 0 0; font-size:11px; color:var(--text-dim);
+                  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+                  overflow-wrap:anywhere;">—</p>
+        <p id="phone-settings-daemon-status"
+           style="margin:6px 0 0; font-size:12px;">—</p>
+      </div>
+      <div style="background:var(--bg-3); border-radius:10px;
+                  padding:14px; border:1px solid var(--line);">
+        <p style="margin:0 0 6px; font-size:14px; font-weight:600;">
+          Sign out
+        </p>
+        <p style="margin:0 0 12px; font-size:12px; color:var(--text-dim);">
+          Removes this phone's identity and pair credentials from
+          this browser. You'll be back at the welcome screen and
+          can scan a fresh pair QR to re-join.
+        </p>
+        <button class="btn"
+                id="btn-phone-settings-signout"
+                style="background:#a44; color:white;
+                       padding:10px 18px; font-size:14px;
+                       width:100%;">Sign out and re-pair</button>
+        <p id="phone-settings-signout-status"
+           style="margin:8px 0 0; font-size:11px; color:var(--text-dim);
+                  min-height:1em;"></p>
+      </div>
     </div>
   </div>
 
@@ -4167,6 +4239,127 @@
   $("#btn-daemon-chat-info")?.addEventListener("click", _toggleDaemonChatPeerInfo);
   $("#btn-daemon-chat-peer-alias-save")?.addEventListener("click", _handleDaemonChatPeerAliasSave);
   $("#daemon-chat-peer-mute-toggle")?.addEventListener("change", _handleDaemonChatPeerMuteToggle);
+
+  // ── Phase 3b: phone Settings card ─────────────────────────────────
+  // Surfaces device identity + paired daemon + sign-out. Reachable
+  // from the ⚙ button on the chat roster.
+
+  async function _openPhoneSettings() {
+    hide($("#daemon-roster-card"));
+    hide($("#daemon-chat-card"));
+    show($("#phone-settings-card"));
+    const labelEl = $("#phone-settings-device-label");
+    const fpEl = $("#phone-settings-device-fp");
+    const pairedEl = $("#phone-settings-device-paired");
+    const daemonLabelEl = $("#phone-settings-daemon-label");
+    const daemonFpEl = $("#phone-settings-daemon-fp");
+    const daemonStatusEl = $("#phone-settings-daemon-status");
+    const signoutStatusEl = $("#phone-settings-signout-status");
+    if (signoutStatusEl) signoutStatusEl.textContent = "";
+
+    // Device identity from in-memory state + localStorage cert.
+    let cert = null;
+    try {
+      const raw = localStorage.getItem(SELF_MESH_CERT_KEY);
+      if (raw) cert = JSON.parse(raw);
+    } catch (_e) { cert = null; }
+    const rec = state.rec || {};
+    if (labelEl) {
+      labelEl.textContent = (cert && cert.label) || rec.label || "This device";
+    }
+    if (fpEl) {
+      fpEl.textContent = rec.fingerprint || (cert && cert.fingerprint) || "—";
+    }
+    if (pairedEl) {
+      if (cert && cert.claimed_ms) {
+        try {
+          const when = new Date(cert.claimed_ms).toLocaleString();
+          pairedEl.textContent = `Paired ${when}`;
+        } catch {
+          pairedEl.textContent = "Paired";
+        }
+      } else {
+        pairedEl.textContent = "Not yet paired";
+      }
+    }
+
+    // Daemon — pull a live fetch_self over the DC if registered,
+    // else fall back to the cert's root_pub_b64 (less useful).
+    if (daemonLabelEl) daemonLabelEl.textContent = "—";
+    if (daemonFpEl) daemonFpEl.textContent = "—";
+    if (daemonStatusEl) daemonStatusEl.textContent = "Checking link…";
+    try {
+      const selfReply = await _daemonRequest("fetch_self", {});
+      if (daemonLabelEl) {
+        daemonLabelEl.textContent =
+          selfReply.hostname || selfReply.short_id || "Laptop";
+      }
+      if (daemonFpEl) {
+        daemonFpEl.textContent = selfReply.fingerprint || "—";
+      }
+      if (daemonStatusEl) {
+        daemonStatusEl.innerHTML =
+          '<span style="color:#3a3;">● Connected</span>';
+      }
+    } catch (e) {
+      if (daemonStatusEl) {
+        daemonStatusEl.innerHTML =
+          '<span style="color:#a44;">● Not connected</span> ' +
+          `<span style="color:var(--text-dim);">— ${e && e.message ? e.message : e}</span>`;
+      }
+      if (cert && cert.root_pub_b64 && daemonFpEl) {
+        daemonFpEl.textContent = `root: ${cert.root_pub_b64}`;
+      }
+    }
+  }
+
+  function _closePhoneSettings() {
+    hide($("#phone-settings-card"));
+    show($("#daemon-roster-card"));
+  }
+
+  async function _handlePhoneSignOut() {
+    const statusEl = $("#phone-settings-signout-status");
+    if (!confirm(
+      "Sign out and re-pair?\n\n" +
+      "This device's identity in this browser will be removed. " +
+      "Other devices in your One identity will see this device " +
+      "as offline until you re-pair."
+    )) {
+      return;
+    }
+    if (statusEl) statusEl.textContent = "Removing local identity…";
+    try {
+      // Drop OPFS keypair so identity boot starts from scratch
+      // next visit.
+      try { await deleteIdentity(); } catch (_e) { /* may not exist */ }
+      // Drop pair-cert from localStorage so the welcome card shows
+      // instead of trying to re-use a stale cert.
+      try { localStorage.removeItem(SELF_MESH_CERT_KEY); } catch (_e) {}
+      // Best-effort drop of any saved daemon peer entry in OPFS.
+      try {
+        if (typeof savePeer === "function" && state._pendingDaemonPubkey) {
+          // No public deletePeer surface; OPFS cleanup will get the
+          // peer entry on the next pair attempt (savePeer overwrites
+          // by fingerprint).
+        }
+      } catch (_e) {}
+      if (statusEl) statusEl.textContent = "Signed out. Reloading…";
+      // Tiny pause so the user sees the confirmation, then hard
+      // reload so every in-memory state (DC, peers, roster) is
+      // dropped cleanly.
+      setTimeout(() => { window.location.reload(); }, 400);
+    } catch (e) {
+      if (statusEl) {
+        statusEl.textContent =
+          `Sign out failed: ${e && e.message ? e.message : e}`;
+      }
+    }
+  }
+
+  $("#btn-phone-settings")?.addEventListener("click", _openPhoneSettings);
+  $("#btn-phone-settings-back")?.addEventListener("click", _closePhoneSettings);
+  $("#btn-phone-settings-signout")?.addEventListener("click", _handlePhoneSignOut);
 
   function _renderDaemonMessageBubble(host, m) {
     if (!host) return;

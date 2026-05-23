@@ -837,6 +837,52 @@ def test_phone_peer_mgmt_uses_correct_wire_kinds(peer_html: str):
     assert '_daemonRequest("set_peer_mute"' in mute_snip
 
 
+# ───────── phase 3b: phone Settings card ──────────────────────────
+
+
+def test_phone_settings_card_present(peer_html: str):
+    """Phase 3b: phone exposes its own Settings card with device
+    info, paired daemon info, and a sign-out path. Without this
+    the phone has no way to inspect its identity or rotate it."""
+    assert 'id="phone-settings-card"' in peer_html
+    assert 'id="btn-phone-settings"' in peer_html
+    assert 'id="btn-phone-settings-back"' in peer_html
+    # Device identity surface.
+    assert 'id="phone-settings-device-label"' in peer_html
+    assert 'id="phone-settings-device-fp"' in peer_html
+    assert 'id="phone-settings-device-paired"' in peer_html
+    # Paired daemon surface.
+    assert 'id="phone-settings-daemon-label"' in peer_html
+    assert 'id="phone-settings-daemon-fp"' in peer_html
+    assert 'id="phone-settings-daemon-status"' in peer_html
+    # Sign-out action.
+    assert 'id="btn-phone-settings-signout"' in peer_html
+    assert 'id="phone-settings-signout-status"' in peer_html
+
+
+def test_phone_settings_uses_fetch_self_for_daemon_info(peer_html: str):
+    """The Settings card calls fetch_self over the DC to pull
+    the live daemon hostname + fingerprint. If the DC is dead
+    the catch surfaces 'Not connected', not a silent blank."""
+    snip = _snippet(peer_html, "async function _openPhoneSettings(", 3500)
+    assert '_daemonRequest("fetch_self"' in snip
+    assert "Connected" in snip
+    assert "Not connected" in snip
+
+
+def test_phone_signout_clears_local_state(peer_html: str):
+    """Sign-out MUST drop the OPFS keypair (via deleteIdentity)
+    AND the localStorage cert (SELF_MESH_CERT_KEY) AND reload
+    the page. Missing any one of these leaves the phone in a
+    half-signed-out state that the next pair attempt can't recover
+    from cleanly."""
+    snip = _snippet(peer_html, "async function _handlePhoneSignOut(", 2200)
+    assert "deleteIdentity(" in snip
+    assert "SELF_MESH_CERT_KEY" in snip
+    assert "removeItem" in snip
+    assert "window.location.reload" in snip
+
+
 # ───────── phone-side roster + chat surface ────────────────────────
 
 
