@@ -14531,15 +14531,61 @@
       trusted: true,
       device_pub_b64: "",
     }];
-    for (const d of rows.slice(0, 6)) {
+    // 2026-05-23: show ALL devices, not just the first 6. The
+    // earlier slice hid stale entries from view (user reported
+    // 11 paired phones; the list pretended only 6 existed and
+    // there was no prune surface). Each non-local row now has a
+    // prune button.
+    for (const d of rows) {
       const p = _selfMeshPresenceFor(d);
       const card = el("div", "sm-device");
       const label = d.label || d.device_kind || d.fingerprint || "Device";
       const stateLabel = p?.state || (d.local ? "awake" : "unknown");
       const safety = d.safety_state || (d.revoked ? "revoked" : "trusted");
       const route = p?.route ? ` via ${p.route}` : "";
-      card.appendChild(el("b", "", label));
+      // Device-kind glyph for at-a-glance distinction in a long list.
+      const kind = (d.device_kind || "").toLowerCase();
+      let glyph = "🖥";
+      if (kind.includes("phone") || kind === "browser-peer") glyph = "📱";
+      else if (kind.includes("tablet") || kind === "ipad") glyph = "📋";
+      else if (kind.includes("desktop") || kind === "desktop-daemon") glyph = "🖥";
+      const titleRow = el("b", "");
+      titleRow.textContent = `${glyph} ${label}`;
+      card.appendChild(titleRow);
       card.appendChild(el("span", "", `${stateLabel}${d.local ? " local" : ""}${route} · Guardian ${safety.replaceAll("_", " ")}`));
+      // Prune button on non-local rows. Local-self is server-side
+      // protected too, but UI also hides the button so the user
+      // doesn't try.
+      if (!d.local && d.root_pub_b64 && d.device_pub_b64) {
+        const pruneBtn = document.createElement("button");
+        pruneBtn.className = "btn-ghost";
+        pruneBtn.textContent = "Prune";
+        pruneBtn.title = "Remove this device entry from your One identity (does not affect the device itself)";
+        pruneBtn.style.marginTop = "6px";
+        pruneBtn.style.fontSize = "11px";
+        pruneBtn.style.padding = "4px 10px";
+        pruneBtn.addEventListener("click", async () => {
+          if (!confirm(
+            `Prune "${label}"?\n\n` +
+            "This removes the device from your One identity's list. " +
+            "If the device is still online it will be able to re-join " +
+            "by pairing again."
+          )) return;
+          pruneBtn.disabled = true;
+          try {
+            await api.post("/api/self-mesh/devices/delete", {
+              root_pub_b64: d.root_pub_b64,
+              device_pub_b64: d.device_pub_b64,
+            });
+            toast(`Pruned ${label}.`, "good", 2500);
+            await refreshSelfMesh();
+          } catch (e) {
+            toast(`Couldn't prune: ${errorToastBody(e)}`, "bad", 4000);
+            pruneBtn.disabled = false;
+          }
+        });
+        card.appendChild(pruneBtn);
+      }
       list.appendChild(card);
       if (select && d.device_pub_b64) {
         const opt = document.createElement("option");

@@ -380,6 +380,68 @@ PEER_CONTACT_ONLINE_GRACE_MS = 2 * 60 * 1000
 # 5 min; after operator action we extend by this many ms.
 SETUP_DEVICE_INVITE_GRACE_MS = 5 * 60 * 1000
 
+# 2026-05-23: smart-label parser for newly paired devices. The
+# phone or other browser passes a label string in the claim body
+# (default "Phone browser"). If the operator didn't customize it,
+# we parse the User-Agent and produce a human-readable label like
+# "iPhone (Safari)", "Mac (Chrome)", "Android (Firefox)". Without
+# this every pair attempt produces "Phone browser" and a Settings →
+# Devices list of seven of them is unparseable.
+def _smart_device_label_from_ua(ua: str, fallback_label: str = "") -> str:
+    """Best-effort: produce a human-friendly device label from a
+    User-Agent header. Empty / unparseable UAs return the fallback.
+
+    Resolution order:
+      1. Device family (iPhone / iPad / Android / Mac / Windows / Linux / ChromeOS)
+      2. Browser (Safari / Chrome / Edge / Firefox / Opera)
+    Combined as "<family> (<browser>)" e.g. "iPhone (Safari)".
+
+    The user can still override at pair time by typing a label; this
+    only kicks in when the supplied label is empty / default.
+    """
+    ua_low = (ua or "").lower()
+    # Family first — order matters; iPhone before generic "ios".
+    family = None
+    if "iphone" in ua_low:
+        family = "iPhone"
+    elif "ipad" in ua_low:
+        family = "iPad"
+    elif "ipod" in ua_low:
+        family = "iPod"
+    elif "android" in ua_low:
+        family = "Android"
+    elif "windows" in ua_low:
+        family = "Windows"
+    elif "mac os" in ua_low or "macintosh" in ua_low or "macos" in ua_low:
+        family = "Mac"
+    elif "cros" in ua_low or "chromeos" in ua_low:
+        family = "ChromeOS"
+    elif "linux" in ua_low:
+        family = "Linux"
+
+    # Browser detection — order matters; Edge before Chrome (UA contains both),
+    # Chrome before Safari (Chrome UA contains 'safari' too), Firefox last.
+    browser = None
+    if "edg/" in ua_low or "edge/" in ua_low:
+        browser = "Edge"
+    elif "opr/" in ua_low or "opera" in ua_low:
+        browser = "Opera"
+    elif "chrome/" in ua_low or "crios/" in ua_low:
+        browser = "Chrome"
+    elif "firefox/" in ua_low or "fxios/" in ua_low:
+        browser = "Firefox"
+    elif "safari/" in ua_low:
+        browser = "Safari"
+
+    if family and browser:
+        return f"{family} ({browser})"
+    if family:
+        return family
+    if browser:
+        return f"Browser ({browser})"
+    return fallback_label or "Browser"
+
+
 # 2026-05-23: phone file-transfer protocol constants. Chunked
 # upload over the daemon DC so the phone can send files that
 # exceed the WebRTC max-message-size in a single frame.
@@ -1765,6 +1827,12 @@ class UIServer:
         r.add_post("/api/self-mesh/devices/mint", self._guarded(self.api_self_mesh_mint_device))
         r.add_post("/api/self-mesh/devices/enroll", self._guarded(self.api_self_mesh_enroll_device))
         r.add_post("/api/self-mesh/devices/revoke", self._guarded(self.api_self_mesh_revoke_device))
+        # 2026-05-23: hard-delete a self-mesh device row. Distinct
+        # from revoke (which marks revoked=True but leaves the row
+        # in place). Delete is for the Settings → Devices prune UI
+        # cleaning up debris from failed pairs / regenerated phone
+        # identities / test artifacts. Local-self rows are protected.
+        r.add_post("/api/self-mesh/devices/delete", self._guarded(self.api_self_mesh_delete_device))
         r.add_post("/api/self-mesh/devices/safety", self._guarded(self.api_self_mesh_device_safety))
         r.add_post("/api/self-mesh/remote-instruct", self._guarded(self.api_self_mesh_remote_instruct))
         r.add_post("/api/self-mesh/enrollment-invite", self._guarded(self.api_self_mesh_enrollment_invite))
@@ -6961,6 +7029,63 @@ class UIServer:
             if int(rec.get("expires_ms") or 0) <= now:
                 self._setup_device_invites.pop(token, None)
 
+    def _ensure_local_self_mesh_device(self, root: dict) -> None:
+        """2026-05-23: backfill a self_mesh_devices row for THIS
+        daemon (the laptop) under the given root, marked
+        local=True. Idempotent: upsert on (root_pub, device_pub)
+        won't duplicate; updates label/kind on subsequent calls
+        if they changed.
+
+        Without this row:
+          * The desktop's own Settings → Devices list shows N
+            phones but no laptop.
+          * A phone querying state.list_self_mesh_devices over the
+            DC sees only itself + other phones; no laptop entry.
+          * "Pair another device" feels weird because the device
+            the user is sitting at isn't in the list it claims to
+            be managing.
+
+        Best-effort. If state writes fail (read-only fs, schema
+        skew), the outer caller logs and continues — the daemon
+        still works without the local-self row.
+        """
+        state = self.daemon.state
+        if state is None:
+            return
+        me = self.daemon.me
+        # Pick a stable kind label: 'desktop-daemon' to distinguish
+        # from 'browser-peer' phones in the list.
+        device_kind = "desktop-daemon"
+        host = me.hostname or "this device"
+        # Add a host hint: "WeareOne (Windows laptop)" vs raw "WeareOne".
+        # Detected once at boot.
+        import platform as _platform
+        system = _platform.system() or ""
+        plat_tag = ""
+        if "Windows" in system:
+            plat_tag = "Windows"
+        elif "Darwin" in system:
+            plat_tag = "Mac"
+        elif "Linux" in system:
+            plat_tag = "Linux"
+        label = f"{host} ({plat_tag})" if plat_tag else host
+        state.upsert_self_mesh_device(
+            root_pub=bytes(root["root_pub"]),
+            device_pub=bytes(me.public_bytes),
+            cert=None,
+            device_kind=device_kind,
+            label=label[:120],
+            local=True,
+            trusted=True,
+            revoked=False,
+            metadata={
+                "source": "auto_local_self",
+                "hostname": host,
+                "platform": system,
+                "short_id": me.short_id,
+            },
+        )
+
     def _setup_invite_deep_link(self, token: str) -> str:
         return f"one-link://setup/add-device?token={token}"
 
@@ -7031,6 +7156,19 @@ class UIServer:
                 root = state.get_self_mesh_root(created.root_pub, include_seed=True)
             if root is None or not root.get("root_seed"):
                 raise ValueError("root seed unavailable for setup invite")
+            # 2026-05-23: ensure this daemon (the laptop minting the
+            # invite) appears in its OWN self-mesh devices list as
+            # local=True. Without this, "Settings → Devices" on the
+            # desktop shows N phones but zero laptops — which makes
+            # the phone querying "what devices does my identity
+            # contain" think there are no laptops. Idempotent:
+            # upsert by (root_pub, device_pub) won't duplicate.
+            try:
+                self._ensure_local_self_mesh_device(root)
+            except Exception as e:
+                log.warning(
+                    "ensure_local_self_mesh_device failed (non-fatal): %s", e,
+                )
             token = secrets.token_urlsafe(32)
             now = int(time.time() * 1000)
             # 2026-05-23: 30 min not 5. User feedback: invite
@@ -7108,7 +7246,20 @@ class UIServer:
             if len(device_pub) != 32:
                 raise ValueError("device public key must be 32 bytes")
             kind = str(body.get("device_kind") or "remote-device")[:80]
-            label = str(body.get("label") or kind or "One Link device")[:120]
+            # 2026-05-23: smart label. If the operator didn't pass a
+            # custom label (or passed the generic "Phone browser"
+            # default the peer.html flow sends), parse the User-Agent
+            # and synthesize something readable like "iPhone (Safari)"
+            # so the Settings → Devices list doesn't end up as seven
+            # identical "Phone browser" rows.
+            raw_label = str(body.get("label") or "")
+            ua_header = request.headers.get("User-Agent") or ""
+            if not raw_label or raw_label.lower() in (
+                "phone browser", "browser", "browser-peer", "remote-device",
+                "device", "one link device", "one_link device",
+            ):
+                raw_label = _smart_device_label_from_ua(ua_header, raw_label)
+            label = (raw_label or kind or "One Link device")[:120]
             sas = compute_sas(self.daemon.me.public_bytes, device_pub)
             invite["pending_claim"] = {
                 "device_pub": device_pub,
@@ -8761,6 +8912,70 @@ class UIServer:
         except Exception as exc:
             return web.json_response({
                 "error": "self_mesh_revoke_rejected",
+                "hint": str(exc),
+            }, status=400)
+
+    async def api_self_mesh_delete_device(self, request: web.Request) -> web.Response:
+        """2026-05-23: hard-delete a self-mesh device row.
+
+        Distinct from revoke (which marks revoked=True but leaves
+        the row in place for audit). Delete physically removes the
+        row, surfaced via Settings → Devices prune UI. Local-self
+        rows (the daemon's own device) refuse delete — they'd just
+        get recreated on next pair anyway.
+
+        Body: {root_pub_b64, device_pub_b64}
+        """
+        from one_link.self_mesh_enrollment import b64u, b64u_decode
+
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return web.json_response({"error": "state_unavailable"}, status=503)
+        body = await request.json()
+        try:
+            root_pub = b64u_decode(str(body.get("root_pub_b64") or ""))
+            device_pub = b64u_decode(str(body.get("device_pub_b64") or ""))
+            # Capture the label BEFORE delete for the audit log.
+            existing = state.get_self_mesh_device(
+                root_pub=root_pub, device_pub=device_pub,
+            )
+            if existing is None:
+                raise ValueError("device not in roster")
+            if existing.get("local"):
+                raise ValueError(
+                    "cannot delete local-self device; "
+                    "use a different device to prune this one"
+                )
+            label = existing.get("label", "")
+            removed = state.delete_self_mesh_device(
+                root_pub=root_pub, device_pub=device_pub,
+            )
+            if not removed:
+                raise ValueError("device not removed (may be local-self)")
+            state.record_self_mesh_audit(
+                event="device_deleted",
+                severity="warn",
+                root_pub=root_pub,
+                device_pub=device_pub,
+                detail=label,
+                metadata={"hard_delete": True},
+            )
+            self.broadcast({
+                "type": "self_mesh_changed",
+                "event": "device_deleted",
+                "root_pub_b64": b64u(root_pub),
+                "device_pub_b64": b64u(device_pub),
+                "label": label,
+            })
+            return web.json_response({
+                "ok": True,
+                "root_pub_b64": b64u(root_pub),
+                "device_pub_b64": b64u(device_pub),
+                "deleted": True,
+            })
+        except Exception as exc:
+            return web.json_response({
+                "error": "self_mesh_delete_rejected",
                 "hint": str(exc),
             }, status=400)
 

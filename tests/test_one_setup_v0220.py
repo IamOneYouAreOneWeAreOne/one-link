@@ -252,6 +252,86 @@ def test_setup_device_invite_relogin_endpoint_pinned() -> None:
     assert "_setup_device_invite_pair_handoff()" in handler
 
 
+def test_smart_device_label_from_ua_basics() -> None:
+    """2026-05-23: at pair time, default labels like 'Phone browser'
+    get replaced with UA-parsed labels like 'iPhone (Safari)' so
+    the Settings → Devices list doesn't end up as N identical
+    'Phone browser' rows.
+
+    Picks family before browser; both is best ('iPhone (Safari)'),
+    family alone is fine ('iPhone'), browser alone is fallback
+    ('Browser (Chrome)'), empty UA returns the fallback string.
+    """
+    from one_link.server import _smart_device_label_from_ua
+
+    cases = [
+        # iPhone Safari
+        ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+         "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+         "Mobile/15E148 Safari/604.1", "iPhone (Safari)"),
+        # Android Chrome
+        ("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+         "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+         "Android (Chrome)"),
+        # Windows Edge
+        ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+         "Windows (Edge)"),
+        # Mac Chrome
+        ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/"
+         "537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+         "Mac (Chrome)"),
+        # Linux Firefox
+        ("Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:120.0) Gecko/"
+         "20100101 Firefox/120.0", "Linux (Firefox)"),
+        # Empty UA returns fallback.
+        ("", "Phone browser"),
+    ]
+    for ua, expected in cases:
+        got = _smart_device_label_from_ua(ua, "Phone browser")
+        assert got == expected, f"ua={ua!r}: expected {expected!r}, got {got!r}"
+
+
+def test_setup_device_invite_creates_local_self_entry() -> None:
+    """2026-05-23: the daemon minting an invite ALSO appears in
+    its own self_mesh_devices list as local=True. Otherwise the
+    desktop's Settings → Devices is 'N phones, zero laptops' which
+    misrepresents the user's actual mesh and makes the phone's
+    'who's in my One identity' query return everything except the
+    laptop they're sitting at.
+    """
+    src = _server_src()
+    idx = src.find("async def api_setup_device_invite(")
+    assert idx > 0
+    snippet = src[idx:idx + 6000]
+    assert "_ensure_local_self_mesh_device" in snippet
+    helper_idx = src.find("def _ensure_local_self_mesh_device(")
+    assert helper_idx > 0
+    helper = src[helper_idx:helper_idx + 3000]
+    assert "local=True" in helper
+    assert "upsert_self_mesh_device" in helper
+    # Distinct kind so the list can render it differently from
+    # browser-peer entries.
+    assert '"desktop-daemon"' in helper
+
+
+def test_self_mesh_delete_endpoint_pinned() -> None:
+    """2026-05-23 Settings → Devices prune surface. Hard-delete
+    (distinct from revoke). Protects local-self rows."""
+    src = _server_src()
+    # Route registered.
+    assert 'r.add_post("/api/self-mesh/devices/delete"' in src
+    # Handler implements the contract.
+    idx = src.find("async def api_self_mesh_delete_device(")
+    assert idx > 0
+    handler = src[idx:idx + 3500]
+    assert "delete_self_mesh_device" in handler
+    assert "local" in handler
+    assert "cannot delete local-self device" in handler
+    assert "device_deleted" in handler
+    assert "broadcast" in handler
+
+
 def test_setup_device_invite_ttl_is_30_minutes() -> None:
     """2026-05-23 user feedback: 5 min invite expired during the iOS
     profile install walk. 30 min keeps the window security-bounded
@@ -388,7 +468,15 @@ def test_setup_device_invite_qr_opens_peer_shell() -> None:
     assert "_setup_invite_peer_url(request, token)" in snippet
     assert "/peer?setup_device_invite=" in src
     invite_idx = src.find("async def api_setup_device_invite(")
-    invite_snippet = src[invite_idx:invite_idx + 3500]
+    # 2026-05-23: window grown so the auto-local-self-entry
+    # helper call + 30-min TTL comment don't push the assertion
+    # off the end. Pin to next handler boundary instead.
+    next_handler = src.find("\n    async def ", invite_idx + 10)
+    invite_snippet = (
+        src[invite_idx:next_handler]
+        if next_handler > invite_idx
+        else src[invite_idx:invite_idx + 8000]
+    )
     assert '"peer_url": self._setup_invite_peer_url(request, token)' in invite_snippet
 
 

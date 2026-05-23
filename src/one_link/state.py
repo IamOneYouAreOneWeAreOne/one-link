@@ -4134,6 +4134,38 @@ class State:
             )
         return self.get_self_mesh_device(root_pub=root_pub, device_pub=device_pub)
 
+    def delete_self_mesh_device(
+        self,
+        *,
+        root_pub: bytes,
+        device_pub: bytes,
+    ) -> bool:
+        """2026-05-23: hard-delete a self-mesh device row.
+
+        Distinct from revoke_self_mesh_device which leaves a tombstone
+        (revoked=True, safety_state='revoked'). Hard delete is for the
+        Settings / Devices prune UI — user wants the stale entry GONE,
+        not just marked. Use revoke when the device's keys may be
+        compromised and you want the audit trail; use delete when the
+        entry is debris (failed pair, regenerated identity, test
+        artifact) that should not clutter the UI.
+
+        Refuses to delete a row marked ``local=True`` — that's the
+        daemon's own self-mesh entry and removing it via UI would
+        instantly recreate on next boot anyway.
+
+        Returns True if a row was removed, False if no match.
+        """
+        self._validate_self_mesh_pub(root_pub, "root_pub")
+        self._validate_self_mesh_pub(device_pub, "device_pub")
+        with self._write_lock:
+            cur = self._conn.execute(
+                "DELETE FROM self_mesh_devices "
+                "WHERE root_pub = ? AND device_pub = ? AND local = 0",
+                (bytes(root_pub), bytes(device_pub)),
+            )
+            return cur.rowcount > 0
+
     def set_self_mesh_device_safety(
         self,
         *,
