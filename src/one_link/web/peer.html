@@ -169,6 +169,110 @@
      the welcome / auto-pair / chat surfaces. */
   [data-tier="advanced"] { display: none; }
   html.show-advanced [data-tier="advanced"] { display: revert; }
+
+  /* 2026-05-23 phase 4: phone-first responsive pass.
+     Below 700px (every phone, including landscape) the layout
+     tightens: full-bleed cards, smaller header, sticky compose
+     bar above the iOS keyboard, larger tap targets, fluid
+     typography. The desktop layout above is unaffected. */
+  @media (max-width: 700px) {
+    body {
+      /* Use dvh consistently so the layout stays put when iOS
+         shows/hides the URL bar. svh is the smallest stable
+         viewport so the compose bar never gets eaten. */
+      min-height: 100svh;
+    }
+    header {
+      padding: 10px 14px;
+      position: sticky;
+      top: env(safe-area-inset-top, 0);
+      background: var(--bg-0);
+      z-index: 10;
+    }
+    header h1 { font-size: 15px; }
+    header .tag { font-size: 9px; padding: 2px 8px; }
+    main {
+      padding: 14px 12px 24px;
+      max-width: 100%;
+      gap: 14px;
+    }
+    .card {
+      padding: 14px;
+      border-radius: 12px;
+    }
+    .card h2 { font-size: 12px; margin-bottom: 8px; }
+    .card .body { font-size: 15px; }
+    .btn {
+      /* iOS Human Interface Guidelines minimum is 44pt; bump to
+         48 for thumb comfort. Font 15 keeps the label readable
+         without dwarfing the chat bubbles. */
+      min-height: 48px;
+      font-size: 15px;
+      padding: 12px 18px;
+    }
+    .btn.ghost {
+      /* Ghost buttons in chat header / settings need to feel
+         tappable but not loud — smaller is fine here, but still
+         meet the 44pt floor. */
+      min-height: 44px;
+    }
+    .help { font-size: 14px; }
+    .mono { font-size: 11px; padding: 10px 12px; }
+    .pill { font-size: 10px; padding: 5px 10px; }
+    footer {
+      padding: 10px 14px env(safe-area-inset-bottom, 14px);
+      font-size: 10px;
+    }
+    /* Chat: log fills most of the screen, compose bar sticks to
+       the bottom (above the iOS keyboard, which iOS lifts the
+       viewport for automatically when the textarea focuses). */
+    #daemon-chat-card {
+      display: flex;
+      flex-direction: column;
+      /* Use dvh so URL-bar collapse doesn't break the layout,
+         but cap at the available screen height so we never push
+         the footer off. */
+      min-height: calc(100dvh - 90px);
+    }
+    #daemon-chat-card .body {
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
+      min-height: 0;  /* let chat-log flex-shrink */
+    }
+    #daemon-chat-log {
+      flex: 1 1 auto;
+      max-height: none !important;
+      min-height: 200px;
+    }
+    #daemon-chat-compose {
+      position: sticky;
+      bottom: env(safe-area-inset-bottom, 0);
+      background: var(--bg-1);
+      padding: 8px 0 0;
+      z-index: 5;
+    }
+    #daemon-chat-input {
+      font-size: 16px !important;  /* prevents iOS Safari zoom on focus */
+      min-height: 48px !important;
+    }
+    /* Roster rows: roomier so thumbs land cleanly. */
+    #daemon-peers-list button {
+      min-height: 64px !important;
+      padding: 14px 16px !important;
+    }
+    /* Settings card buttons need extra breathing room since the
+       sign-out is the destructive primary. */
+    #btn-phone-settings-signout {
+      min-height: 52px;
+      font-size: 15px;
+    }
+    /* Selfmesh enroll status text scales up so the pair flow
+       reads well under thumbs / parallax. */
+    #selfmesh-enroll-status, #autopair-status {
+      font-size: 15px;
+    }
+  }
 </style>
 </head>
 <body>

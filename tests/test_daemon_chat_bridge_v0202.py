@@ -883,6 +883,51 @@ def test_phone_signout_clears_local_state(peer_html: str):
     assert "window.location.reload" in snip
 
 
+# ───────── phase 4: mobile-first CSS ──────────────────────────────
+
+
+def test_phone_has_mobile_media_query(peer_html: str):
+    """Phase 4: the mobile breakpoint MUST exist so phones get the
+    full-bleed, touch-tuned layout instead of the desktop's
+    600px-centered cards. Without this the phone falls back to
+    desktop spacing, the chat log doesn't flex to fill the screen,
+    and the compose input gets eaten by the iOS keyboard."""
+    assert "@media (max-width: 700px)" in peer_html
+
+
+def test_phone_chat_log_flexes_and_compose_sticks(peer_html: str):
+    """The mobile chat layout MUST make the log flex-fill and pin
+    the compose bar to the bottom. Otherwise the input scrolls
+    off-screen as messages pile up — the single most common
+    'phone chat is broken' UX bug."""
+    # Roughly locate the @media block (it's the last block we
+    # emit before </style>).
+    idx = peer_html.find("@media (max-width: 700px)")
+    assert idx > 0
+    block_end = peer_html.find("</style>", idx)
+    media_block = peer_html[idx:block_end]
+    assert "#daemon-chat-log" in media_block
+    assert "flex: 1 1 auto" in media_block
+    assert "#daemon-chat-compose" in media_block
+    assert "position: sticky" in media_block
+    # Crucial: textarea font >= 16px so iOS Safari doesn't
+    # auto-zoom on focus (the zoom never undoes itself, leaving
+    # the chat unreadable).
+    assert "font-size: 16px" in media_block
+
+
+def test_phone_touch_targets_meet_min_size(peer_html: str):
+    """iOS HIG floor is 44pt; we bump to 48 for primary actions.
+    Pinned so a future CSS refactor doesn't accidentally drop
+    touch targets below the comfortable threshold."""
+    idx = peer_html.find("@media (max-width: 700px)")
+    block_end = peer_html.find("</style>", idx)
+    media_block = peer_html[idx:block_end]
+    assert "min-height: 48px" in media_block
+    # Roster rows should be even larger.
+    assert "min-height: 64px" in media_block
+
+
 # ───────── phone-side roster + chat surface ────────────────────────
 
 
