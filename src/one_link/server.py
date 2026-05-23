@@ -2433,7 +2433,13 @@ class UIServer:
         # Daemon's own identity surface for the browser to pin.
         daemon_pub = self.daemon.me.public_bytes
         daemon_pub_b64u = _peer_b64u(daemon_pub)
-        daemon_fp = self.daemon.me.fingerprint
+        # 2026-05-23: use the wire-format fingerprint (sha256:<hex>)
+        # so peer.html's _verifySignedDaemonAnswer cross-check passes.
+        # Browsers have SHA-256 in Web Crypto but not BLAKE3, so any
+        # fingerprint that travels to peer.html must be SHA-256. The
+        # internal ``me.fingerprint`` is BLAKE3 (faster) and stays
+        # everywhere else (audit logs, self-mesh state, etc.).
+        daemon_fp = self.daemon.me.wire_fingerprint
         # v0.20.4 — pair URLs MUST use https:// when the daemon has
         # an HTTPS listener up, because phones running Safari /
         # Chrome over plain HTTP to a LAN IP can't access Web Crypto
@@ -3916,7 +3922,13 @@ class UIServer:
                         "daemon_pubkey_b64u": _peer_rtc_mod._b64u(
                             self.daemon.me.public_bytes
                         ),
-                        "daemon_fingerprint": self.daemon.me.fingerprint,
+                        # 2026-05-23: wire_fingerprint (sha256:<hex>)
+                        # so peer.html's signed-answer verifier
+                        # accepts the envelope. The internal BLAKE3
+                        # form would silently fail this cross-check
+                        # because Web Crypto has SHA-256 but not
+                        # BLAKE3 — re-derivation never matches.
+                        "daemon_fingerprint": self.daemon.me.wire_fingerprint,
                         "dtls_fingerprint": _peer_rtc_mod._extract_dtls_fingerprint(sdp_text),
                         "ts": int(time.time() * 1000),
                     }
@@ -6325,7 +6337,13 @@ class UIServer:
         pp = self.peer_rtc.mint_pairing_token()
         daemon_pub = self.daemon.me.public_bytes
         daemon_pub_b64u = _peer_b64u(daemon_pub)
-        daemon_fp = self.daemon.me.fingerprint
+        # 2026-05-23: wire_fingerprint (sha256:<hex>) — see
+        # api_mint_pairing for the full rationale. peer.html
+        # verifies the daemon answer signature against this
+        # fingerprint; using the BLAKE3 internal fingerprint
+        # would make every phone fail with
+        # "daemon_fingerprint does not match sha256(daemon_pubkey)".
+        daemon_fp = self.daemon.me.wire_fingerprint
         try:
             host = self.bind_host
             if host in ("0.0.0.0", "::", ""):  # nosec B104
@@ -9362,6 +9380,19 @@ class UIServer:
             "pair_default_allow_all": pair_allow_all,
             # Theme: 'dark' (default) | 'light' | 'auto' (follow OS)
             "theme": s.get("theme", "dark"),
+            "ui_density": s.get("ui_density", "comfortable"),
+            "message_bubble_style": s.get("message_bubble_style", "gradient"),
+            "font_scale": s.get("font_scale", "normal"),
+            "motion_level": s.get("motion_level", "full"),
+            "accent_color": s.get("accent_color", "#7c5cff"),
+            "chat_wallpaper": s.get("chat_wallpaper", "soft"),
+            "enter_to_send": s.get("enter_to_send", "true") == "true",
+            "compact_message_list": s.get("compact_message_list", "false") == "true",
+            "show_message_seconds": s.get("show_message_seconds", "false") == "true",
+            "auto_scroll_new_messages": (
+                s.get("auto_scroll_new_messages", "true") == "true"
+            ),
+            "send_link_previews": s.get("send_link_previews", "true") == "true",
             # Download folder: empty string = default (inbox_dir())
             "download_folder": s.get("download_folder", ""),
             # Do-not-disturb: 24-hour HH:MM strings; off if not enabled
@@ -9472,6 +9503,29 @@ class UIServer:
                     {"error": "theme must be dark|light|auto"}, status=400,
                 )
             self.daemon.state.set_setting("theme", v)
+        for key, allowed, default in (
+            ("ui_density", ("comfortable", "compact", "spacious"), "comfortable"),
+            ("message_bubble_style", ("gradient", "solid", "minimal"), "gradient"),
+            ("font_scale", ("small", "normal", "large"), "normal"),
+            ("motion_level", ("full", "reduced", "off"), "full"),
+            ("chat_wallpaper", ("soft", "none", "field", "midnight"), "soft"),
+        ):
+            if key in data:
+                v = (data[key] or default)
+                if v not in allowed:
+                    return web.json_response(
+                        {"error": f"{key} must be one of {'|'.join(allowed)}"},
+                        status=400,
+                    )
+                self.daemon.state.set_setting(key, v)
+        if "accent_color" in data:
+            v = (data["accent_color"] or "#7c5cff").strip()
+            import re
+            if not re.fullmatch(r"#[0-9a-fA-F]{6}", v):
+                return web.json_response(
+                    {"error": "accent_color must be #RRGGBB"}, status=400,
+                )
+            self.daemon.state.set_setting("accent_color", v.lower())
         if "download_folder" in data:
             v = data["download_folder"]
             if v is not None and not isinstance(v, str):
@@ -9596,6 +9650,10 @@ class UIServer:
             "send_read_receipts", "display_read_receipts",
             # v0.12.3 typing indicator privacy.
             "send_typing_indicators", "display_typing_indicators",
+            # v0.21.x richer chat and appearance controls.
+            "enter_to_send", "compact_message_list",
+            "show_message_seconds", "auto_scroll_new_messages",
+            "send_link_previews",
         ):
             if key in data:
                 self.daemon.state.set_setting(

@@ -194,6 +194,56 @@ def test_setup_device_invite_confirm_caches_webrtc_handoff() -> None:
     assert "**pair_handoff" in confirm
 
 
+def test_phone_facing_daemon_fingerprint_uses_wire_format() -> None:
+    """2026-05-23: every place the daemon ships its identity
+    fingerprint to peer.html MUST use ``me.wire_fingerprint``
+    (sha256-tagged) — not ``me.fingerprint`` (BLAKE3 hex).
+    Browser-side _verifySignedDaemonAnswer re-derives sha256 from
+    the daemon's pubkey and compares to the envelope's
+    daemon_fingerprint; the BLAKE3 form fails this check
+    universally because Web Crypto has no BLAKE3.
+
+    Three call sites:
+      1. api_mint_pairing      (autopair QR flow)
+      2. peer_rtc signed-answer envelope
+      3. _setup_device_invite_pair_handoff (cert-pair handoff)
+
+    Any of them slipping back to me.fingerprint silently dead-ends
+    every phone pair attempt with "daemon_fingerprint does not
+    match sha256(daemon_pubkey)".
+    """
+    src = _server_src()
+
+    # Call site 1: api_mint_pairing.
+    idx = src.find("async def api_mint_pairing(")
+    assert idx > 0
+    snippet = src[idx:idx + 5000]
+    assert "wire_fingerprint" in snippet, (
+        "api_mint_pairing must use me.wire_fingerprint"
+    )
+    # Defensive: the bare me.fingerprint should NOT appear in
+    # this snippet anywhere outside of comments.
+    assert "self.daemon.me.fingerprint" not in snippet, (
+        "api_mint_pairing leaked me.fingerprint — use wire_fingerprint"
+    )
+
+    # Call site 2: peer_rtc answer envelope. Find the line where
+    # daemon_fingerprint is set in the answer dict.
+    answer_idx = src.find('"daemon_fingerprint": self.daemon.me.wire_fingerprint')
+    assert answer_idx > 0, (
+        "answer envelope still uses BLAKE3 daemon.me.fingerprint — "
+        "phone _verifySignedDaemonAnswer will fail"
+    )
+
+    # Call site 3: _setup_device_invite_pair_handoff helper.
+    idx = src.find("def _setup_device_invite_pair_handoff(")
+    assert idx > 0
+    snippet = src[idx:idx + 2500]
+    assert "wire_fingerprint" in snippet, (
+        "pair handoff helper must use me.wire_fingerprint"
+    )
+
+
 def test_setup_device_invite_pair_handoff_shape() -> None:
     """The handoff helper builds the same field set the autopair
     QR mints. Phone-side peer.html relies on exactly:

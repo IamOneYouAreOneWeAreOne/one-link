@@ -57,6 +57,23 @@ class Identity:
     def sign(self, data: bytes) -> bytes:
         return self.private.sign(data)
 
+    @property
+    def wire_fingerprint(self) -> str:
+        """Public protocol-wire fingerprint: ``sha256:<hex>``.
+
+        The internal ``fingerprint`` is BLAKE3 (faster, used
+        everywhere in audit logs and self-mesh state). But the
+        browser-peer pairing protocol (peer_rtc + setup_device_invite)
+        signs+verifies envelopes against a SHA-256 fingerprint —
+        browsers expose SHA-256 in Web Crypto but not BLAKE3, so
+        any fingerprint that crosses a wire to peer.html must be
+        SHA-256 tagged. Cross-check in peer.html's
+        _verifySignedDaemonAnswer reads exactly this format
+        (``sha256:<hex>``) and refuses anything else as MITM-suspect.
+        """
+        import hashlib
+        return "sha256:" + hashlib.sha256(self.public_bytes).hexdigest()
+
     def to_pkcs8_pem(self) -> str:
         """Serialise the private key as an unencrypted PKCS#8 PEM
         string. Used by the Wave 2c QUIC Identity bridge to hand
