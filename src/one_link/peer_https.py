@@ -72,12 +72,23 @@ log = logging.getLogger(__name__)
 
 # Sub-directory under data_dir for HTTPS material.
 HTTPS_DIR = "peer_https"
-CERT_FILE = "cert.pem"
-KEY_FILE = "key.pem"
+# 2026-05-23 (TN2326): cert.pem is now leaf+root chain (PEM-concat).
+# key.pem is the leaf key. root_ca.pem + root_ca_key.pem are the
+# long-lived trust anchor. The mobileconfig embeds the root, not the
+# leaf — iOS trusts the root, the chain validates the leaf at TLS
+# handshake. A dual-purpose self-signed cert (the old shape) passes
+# the Trust Settings toggle on most iOS versions but fails the
+# actual TLS handshake on some iOS 17/18 builds with a
+# "network connection lost" Safari error.
+CERT_FILE = "cert.pem"            # leaf + root chain
+KEY_FILE = "key.pem"              # leaf key
+ROOT_CA_FILE = "root_ca.pem"      # long-lived trust anchor (in mobileconfig)
+ROOT_CA_KEY_FILE = "root_ca_key.pem"  # signs the leaf on rotation
 
-# Cert lifetime + rotation thresholds.
-CERT_VALID_DAYS = 365
-CERT_ROTATE_WITHIN_DAYS = 30
+# Lifetime + rotation thresholds.
+CERT_VALID_DAYS = 365             # leaf lifetime
+CERT_ROTATE_WITHIN_DAYS = 30      # leaf rotation window
+ROOT_CA_VALID_DAYS = 365 * 10     # root lives 10 years; phones trust once
 
 
 def https_dir(base: Path) -> Path:
@@ -90,6 +101,14 @@ def cert_path(base: Path) -> Path:
 
 def key_path(base: Path) -> Path:
     return https_dir(base) / KEY_FILE
+
+
+def root_ca_path(base: Path) -> Path:
+    return https_dir(base) / ROOT_CA_FILE
+
+
+def root_ca_key_path(base: Path) -> Path:
+    return https_dir(base) / ROOT_CA_KEY_FILE
 
 
 def _detect_lan_addresses() -> list[str]:
@@ -149,38 +168,31 @@ def _build_subject_alt_names(
     return x509.SubjectAlternativeName(names)
 
 
-def generate_self_signed(
-    base: Path,
-    *,
-    valid_days: int = CERT_VALID_DAYS,
-    short_id: str = "",
-) -> tuple[Path, Path]:
-    """Mint a fresh ECDSA-P256 self-signed cert + key. Persists both
-    to <base>/peer_https/{cert.pem,key.pem} with 0o600 perms.
+def _mint_root_ca(
+    base: Path, *, short_id: str = "",
+) -> tuple[ec.EllipticCurvePrivateKey, x509.Certificate]:
+    """Mint the long-lived root CA. Lives 10 years and signs every
+    leaf TLS cert this daemon ever serves. The phone trusts THIS
+    via the mobileconfig — install once, never rotate.
 
-    Returns (cert_path, key_path). Idempotent — call as many times
-    as you want; each call writes a fresh cert.
-
-    v0.20.7 (security audit M12): the cert subject now includes
-    a per-daemon Common Name (``One Link Self-Signed (<short_id>)``)
-    so a phone trust store containing certs from multiple daemons
-    can identify which is which without inspecting fingerprints.
-    The Ed25519 short_id is the identity hint (8 hex chars).
+    Per Apple TN2326: the root has BasicConstraints CA=True, key
+    usage = certSign+crlSign, NO subjectAltName (it's a trust
+    anchor, not a TLS endpoint), NO extendedKeyUsage (leaves
+    declare their own purposes). SubjectKeyIdentifier present;
+    AuthorityKeyIdentifier == SubjectKeyIdentifier (self-issued).
     """
     d = https_dir(base)
     d.mkdir(parents=True, exist_ok=True)
-    cp = cert_path(base)
-    kp = key_path(base)
+    rcp = root_ca_path(base)
+    rkp = root_ca_key_path(base)
 
-    # ECDSA P-256 keypair.
     key = ec.generate_private_key(ec.SECP256R1())
-    cn_text = (
-        f"One Link Self-Signed ({short_id})"
-        if short_id else
-        "One Link Self-Signed"
+    cn = (
+        f"One Link Root CA ({short_id})"
+        if short_id else "One Link Root CA"
     )
     subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, cn_text),
+        x509.NameAttribute(NameOID.COMMON_NAME, cn),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "One Link"),
     ])
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -191,47 +203,18 @@ def generate_self_signed(
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(minutes=5))
-        .not_valid_after(now + datetime.timedelta(days=valid_days))
-        .add_extension(
-            _build_subject_alt_names(short_id=short_id),
-            critical=False,
-        )
-        # 2026-05-23: mark the cert as a self-signed root CA. The cert
-        # serves a DUAL purpose — it's both the TLS server cert (used
-        # at handshake time) AND the root CA that the iOS device
-        # trusts via Certificate Trust Settings. Without ca=True +
-        # key_cert_sign=True, iOS installs the cert via mobileconfig
-        # but does NOT recognise it as a root-CA candidate: the
-        # Certificate Trust Settings page stays empty, the user
-        # cannot toggle trust, and HTTPS still fails with "Not
-        # Private." This is iOS Apple Root CA Trust documentation
-        # behaviour — the certificate trust list is filtered to
-        # CA-marked certs only.
+        .not_valid_after(now + datetime.timedelta(days=ROOT_CA_VALID_DAYS))
         .add_extension(
             x509.BasicConstraints(ca=True, path_length=0),
             critical=True,
         )
         .add_extension(
             x509.KeyUsage(
-                digital_signature=True,
+                digital_signature=False,
                 content_commitment=False,
                 key_encipherment=False,
                 data_encipherment=False,
                 key_agreement=False,
-                # 2026-05-23: enable key_cert_sign so iOS treats this
-                # as a trustable root. The cert self-signs itself
-                # (subject == issuer), so this bit is consistent
-                # with reality. Without it, iOS's PKI validator
-                # rejects the cert as "not a CA" and silently drops
-                # it from Certificate Trust Settings.
-                #
-                # crl_sign also enabled per Apple Developer Forums
-                # guidance: "Certificate Sign, CRL Sign" together
-                # are the canonical KeyUsage set for a CA-capable
-                # cert. The CRL isn't actually consulted (we don't
-                # publish one) but iOS's trust validator examines
-                # the bit and the missing flag silently drops the
-                # cert from the trust UI on some iOS 17+ versions.
                 key_cert_sign=True,
                 crl_sign=True,
                 encipher_only=False,
@@ -239,19 +222,6 @@ def generate_self_signed(
             ),
             critical=True,
         )
-        .add_extension(
-            x509.ExtendedKeyUsage([x509.ExtendedKeyUsageOID.SERVER_AUTH]),
-            critical=False,
-        )
-        # 2026-05-23: subjectKeyIdentifier + authorityKeyIdentifier
-        # are required for iOS to index a self-signed root CA into
-        # its trust UI. The Apple TN2326 and openssl docs both flag
-        # these as load-bearing for CA recognition. Without them,
-        # iOS installs the cert via mobileconfig but the cert never
-        # surfaces in Settings > General > About > Certificate Trust
-        # Settings — symptom-equivalent to the missing-CA-flag bug
-        # but rooted in a different validator gate. For a self-signed
-        # cert the two identifiers MUST match (issuer == subject).
         .add_extension(
             x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
             critical=False,
@@ -263,27 +233,171 @@ def generate_self_signed(
         .sign(key, hashes.SHA256())
     )
 
-    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-    key_pem = key.private_bytes(
+    rcp.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    rkp.write_bytes(key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
+    ))
+    try:
+        os.chmod(rcp, 0o600)
+        os.chmod(rkp, 0o600)
+    except Exception:
+        pass
+    log.info(
+        "peer-https: minted root CA (valid_days=%d, sha256=%s)",
+        ROOT_CA_VALID_DAYS,
+        cert.fingerprint(hashes.SHA256()).hex()[:32],
     )
-    cp.write_bytes(cert_pem)
-    kp.write_bytes(key_pem)
-    # 0o600 — only the daemon-running user can read the private key.
-    # Best-effort; non-POSIX filesystems may ignore the chmod.
+    return key, cert
+
+
+def _load_root_ca(
+    base: Path,
+) -> tuple[ec.EllipticCurvePrivateKey, x509.Certificate]:
+    cert = x509.load_pem_x509_certificate(root_ca_path(base).read_bytes())
+    key = serialization.load_pem_private_key(
+        root_ca_key_path(base).read_bytes(), password=None
+    )
+    return key, cert
+
+
+def _mint_leaf_tls(
+    base: Path,
+    *,
+    root_key: ec.EllipticCurvePrivateKey,
+    root_cert: x509.Certificate,
+    valid_days: int = CERT_VALID_DAYS,
+    short_id: str = "",
+) -> tuple[Path, Path]:
+    """Mint a TLS server leaf cert signed by the root CA, write
+    chain (leaf || root) to cert.pem and leaf key to key.pem.
+
+    Per TN2326 the leaf has BasicConstraints CA=False, key usage
+    = digitalSignature, EKU = serverAuth, and the SubjectAlt names
+    must match the IP/hostnames the phone connects to. The leaf
+    rotates yearly; the root CA the phone trusts does not.
+    """
+    d = https_dir(base)
+    d.mkdir(parents=True, exist_ok=True)
+    cp = cert_path(base)
+    kp = key_path(base)
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    cn = (
+        f"One Link Daemon ({short_id})"
+        if short_id else "One Link Daemon"
+    )
+    subject = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, cn),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "One Link"),
+    ])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(root_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(days=valid_days))
+        .add_extension(
+            _build_subject_alt_names(short_id=short_id),
+            critical=False,
+        )
+        .add_extension(
+            x509.BasicConstraints(ca=False, path_length=None),
+            critical=True,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([x509.ExtendedKeyUsageOID.SERVER_AUTH]),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(root_cert.public_key()),
+            critical=False,
+        )
+        .sign(root_key, hashes.SHA256())
+    )
+
+    chain_pem = (
+        cert.public_bytes(serialization.Encoding.PEM)
+        + root_cert.public_bytes(serialization.Encoding.PEM)
+    )
+    cp.write_bytes(chain_pem)
+    kp.write_bytes(key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ))
     try:
         os.chmod(cp, 0o600)
         os.chmod(kp, 0o600)
     except Exception:
         pass
     log.info(
-        "peer-https: minted self-signed cert (valid_days=%d, sha256=%s)",
+        "peer-https: minted leaf TLS cert (valid_days=%d, sha256=%s)",
         valid_days,
         cert.fingerprint(hashes.SHA256()).hex()[:32],
     )
     return cp, kp
+
+
+def generate_self_signed(
+    base: Path,
+    *,
+    valid_days: int = CERT_VALID_DAYS,
+    short_id: str = "",
+) -> tuple[Path, Path]:
+    """Mint a fresh root-CA + leaf TLS chain (TN2326 two-cert shape).
+
+    Returns (chain_path, leaf_key_path). The chain.pem is leaf
+    followed by root; aiohttp's load_cert_chain serves both to
+    clients so iOS validates the leaf via the trusted root.
+
+    Idempotent for the root (re-used if already on disk and not
+    expired); always mints a fresh leaf so every call rotates.
+    """
+    rkp = root_ca_key_path(base)
+    rcp = root_ca_path(base)
+    have_root = rkp.is_file() and rcp.is_file()
+    if have_root:
+        try:
+            root_key, root_cert = _load_root_ca(base)
+            # Bail to a fresh root if the existing one is itself near
+            # expiry (10-year cert; only happens once a decade).
+            if needs_rotation(rcp, rotate_within_days=30):
+                root_key, root_cert = _mint_root_ca(base, short_id=short_id)
+        except Exception as e:
+            log.warning("peer-https: existing root CA unreadable, regenerating: %s", e)
+            root_key, root_cert = _mint_root_ca(base, short_id=short_id)
+    else:
+        root_key, root_cert = _mint_root_ca(base, short_id=short_id)
+    return _mint_leaf_tls(
+        base,
+        root_key=root_key,
+        root_cert=root_cert,
+        valid_days=valid_days,
+        short_id=short_id,
+    )
 
 
 def needs_rotation(
@@ -314,10 +428,38 @@ def needs_rotation(
 
 def ensure_cert(base: Path, *, short_id: str = "") -> tuple[Path, Path]:
     """Return (cert_path, key_path), generating fresh material if
-    the existing cert is missing, unparseable, or near expiry."""
+    the existing chain is missing, unparseable, or near expiry.
+
+    2026-05-23 (TN2326 migration): if cert.pem exists but root_ca.pem
+    does NOT, this is the pre-TN2326 single-cert layout. The existing
+    cert is a self-signed dual-purpose root+leaf; iOS will toggle it
+    as trusted but Safari rejects the TLS handshake on iOS 17/18.
+    Wipe it and regenerate the chain — the user will have to re-
+    install the mobileconfig once, but every connection thereafter
+    works.
+    """
     cp = cert_path(base)
     kp = key_path(base)
-    if needs_rotation(cp) or not kp.is_file():
+    rcp = root_ca_path(base)
+    rkp = root_ca_key_path(base)
+
+    # Migration: old single-cert layout (cert.pem exists, no root.pem).
+    if cp.is_file() and not rcp.is_file():
+        log.info(
+            "peer-https: migrating pre-TN2326 single-cert layout to two-cert chain"
+        )
+        with contextlib.suppress(Exception):
+            cp.unlink()
+        with contextlib.suppress(Exception):
+            kp.unlink()
+
+    needs_regen = (
+        not rcp.is_file()
+        or not rkp.is_file()
+        or not kp.is_file()
+        or needs_rotation(cp)
+    )
+    if needs_regen:
         return generate_self_signed(base, short_id=short_id)
     return cp, kp
 
@@ -436,25 +578,30 @@ def build_mobileconfig(
     import plistlib
     import uuid
 
-    cp = cert_path(base)
-    if not cp.is_file():
-        # Mint on demand — same flow as ensure_cert.
-        ensure_cert(base)
-    cert_pem = cp.read_bytes()
-    fp = cert_fingerprint_sha256(cp) or "unknown"
+    # 2026-05-23 (TN2326): embed the ROOT CA in the profile, not the
+    # leaf TLS cert. iOS trusts the root; the leaf is validated by
+    # chain at TLS handshake. The single-cert (dual-purpose) shape
+    # passes the Trust Settings toggle but Safari rejects the
+    # handshake on iOS 17/18 with a generic "network connection
+    # lost" error. Two-cert chain is Apple's recommended path.
+    ensure_cert(base)
+    rcp = root_ca_path(base)
+    root_pem = rcp.read_bytes()
+    fp = cert_fingerprint_sha256(rcp) or "unknown"
 
     cert_payload = {
         "PayloadType": "com.apple.security.root",
         "PayloadVersion": 1,
         "PayloadIdentifier": f"com.onelink.peer.cert.{fp[:16]}",
         "PayloadUUID": str(uuid.uuid4()).upper(),
-        "PayloadDisplayName": "One Link Self-Signed CA",
+        "PayloadDisplayName": "One Link Root CA",
         "PayloadDescription": (
-            "Trust the One Link daemon's self-signed certificate so "
-            "your phone can talk to it over HTTPS without warnings."
+            "Trust the One Link Root CA so your phone can talk to "
+            "any One Link daemon you pair with, over HTTPS, with no "
+            "warnings."
         ),
-        "PayloadCertificateFileName": "one-link.cer",
-        "PayloadContent": _format_pem_for_plist(cert_pem),
+        "PayloadCertificateFileName": "one-link-root.cer",
+        "PayloadContent": _format_pem_for_plist(root_pem),
     }
 
     outer = {

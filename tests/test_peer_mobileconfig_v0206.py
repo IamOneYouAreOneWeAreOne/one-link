@@ -129,39 +129,56 @@ def test_mobileconfig_mints_cert_on_demand(tmp_path: Path):
     assert cert_path(tmp_path).is_file()
 
 
-def test_mobileconfig_carries_actual_cert_bytes(tmp_path: Path):
-    """The cert embedded in the profile MUST be the same cert the
-    daemon serves over HTTPS. A drift here means the phone trusts
-    a different cert than the one the daemon serves — TLS fails.
+def test_mobileconfig_carries_root_ca_not_leaf(tmp_path: Path):
+    """2026-05-23 (TN2326): the profile carries the long-lived
+    ROOT CA — not the leaf TLS cert. iOS trusts the root via
+    install + toggle; the daemon serves the leaf (signed by the
+    root) at TLS handshake and the chain validates client-side.
 
-    2026-05-23: profile carries DER (see test above), on-disk is
-    PEM. Convert one to compare structurally — match on the
-    cert's public-key fingerprint, which is the load-bearing
-    identity for TLS pinning.
+    The leaf rotates yearly, the root does not — phones trust
+    once and stay trusted across leaf rotations. Embedding the
+    leaf here would defeat that and would also re-trigger the
+    iOS 17/18 'network connection lost' bug class on
+    dual-purpose self-signed certs.
     """
     from one_link.peer_https import (
-        build_mobileconfig, cert_path, ensure_cert,
+        build_mobileconfig, cert_path, ensure_cert, root_ca_path,
     )
     from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives import serialization
     ensure_cert(tmp_path)
-    on_disk_pem = cert_path(tmp_path).read_bytes()
-    on_disk_cert = x509.load_pem_x509_certificate(on_disk_pem)
+    on_disk_root = x509.load_pem_x509_certificate(
+        root_ca_path(tmp_path).read_bytes()
+    )
+    on_disk_leaf = x509.load_pem_x509_certificate(
+        cert_path(tmp_path).read_bytes()
+    )
     parsed = plistlib.loads(build_mobileconfig(tmp_path))
     embedded_der = parsed["PayloadContent"][0]["PayloadContent"]
-    embedded_cert = x509.load_der_x509_certificate(embedded_der)
-    # Same public key = same identity = same TLS pin.
-    on_disk_pub = on_disk_cert.public_key().public_bytes(
+    embedded = x509.load_der_x509_certificate(embedded_der)
+
+    # Match the ROOT — same serial + public key.
+    root_pub = on_disk_root.public_key().public_bytes(
         encoding=serialization.Encoding.DER,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
-    embedded_pub = embedded_cert.public_key().public_bytes(
+    embedded_pub = embedded.public_key().public_bytes(
         encoding=serialization.Encoding.DER,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
-    assert on_disk_pub == embedded_pub
-    # And same serial — catches a mint-then-rotate race.
-    assert on_disk_cert.serial_number == embedded_cert.serial_number
+    assert embedded_pub == root_pub, "profile must embed the root CA"
+    assert embedded.serial_number == on_disk_root.serial_number
+
+    # And explicitly NOT the leaf.
+    leaf_pub = on_disk_leaf.public_key().public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    assert embedded_pub != leaf_pub, (
+        "profile must NOT embed the leaf TLS cert — embedding the "
+        "leaf re-triggers the iOS 17/18 dual-purpose-cert handshake "
+        "failure"
+    )
 
 
 # ───────── server endpoint + mint-pairing response ────────────────

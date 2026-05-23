@@ -118,58 +118,125 @@ def test_cert_ext_key_usage_server_auth(tmp_path: Path):
     assert ExtendedKeyUsageOID.SERVER_AUTH in eku
 
 
-def test_cert_is_marked_as_root_ca_for_ios_trust(tmp_path: Path):
-    """2026-05-23: iOS's Certificate Trust Settings page only lists
-    certs that pass the FULL CA-recognition gate. Empirically
-    determined from Apple Developer Forums + TN2326 + openssl docs:
+def test_chain_is_two_cert_leaf_then_root(tmp_path: Path):
+    """2026-05-23 (TN2326): cert.pem is leaf + root concatenated.
+    aiohttp's load_cert_chain reads multi-cert PEM correctly — leaf
+    is the server cert, root is the trust anchor; iOS validates the
+    leaf via the chain when the root was installed via mobileconfig.
 
-      * BasicConstraints: critical, CA:TRUE, pathlen:0
-      * KeyUsage: critical, keyCertSign + crlSign + digitalSignature
-      * ExtendedKeyUsage: serverAuth (for dual-purpose TLS cert)
-      * subjectKeyIdentifier: hash of public key
-      * authorityKeyIdentifier: matches subjectKeyIdentifier
-        (self-signed)
-      * subject == issuer (self-signed)
-
-    If ANY of these is missing, iOS installs the cert via
-    mobileconfig but silently drops it from Certificate Trust
-    Settings — the user has no way to toggle trust, HTTPS pair
-    fails with "Not Private," entire flow dies.
-
-    Pin every flag so a future cert-shape refactor surfaces the
-    regression at test time.
+    Previous shape (single self-signed dual-purpose cert) passed
+    the iOS Certificate Trust Settings toggle but failed the actual
+    TLS handshake on iOS 17/18 with a generic "network connection
+    lost" Safari error. The two-cert chain is Apple's well-trodden
+    path per TN2326.
     """
     from cryptography import x509
     from one_link.peer_https import generate_self_signed
     cp, _ = generate_self_signed(tmp_path)
-    cert = x509.load_pem_x509_certificate(cp.read_bytes())
+    certs = x509.load_pem_x509_certificates(cp.read_bytes())
+    assert len(certs) == 2, "cert.pem must contain leaf + root"
+    leaf, root = certs
+    assert leaf.issuer == root.subject, "leaf must be issued by root"
+    assert root.issuer == root.subject, "root must be self-signed"
 
-    bc = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
-    assert bc.ca is True, "BasicConstraints.ca must be True"
 
-    ku = cert.extensions.get_extension_for_class(x509.KeyUsage).value
-    assert ku.key_cert_sign is True, "KeyUsage.key_cert_sign must be True"
-    assert ku.crl_sign is True, "KeyUsage.crl_sign must be True"
-    assert ku.digital_signature is True, (
-        "KeyUsage.digital_signature must be True so the same cert "
-        "can sign the TLS handshake (dual-purpose CA + server)"
-    )
+def test_root_ca_has_required_ios_trust_flags(tmp_path: Path):
+    """The ROOT CA (root_ca.pem, embedded in the mobileconfig) is
+    what iOS shows in Certificate Trust Settings. It must pass the
+    full CA-recognition gate:
 
-    eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
-    assert x509.ExtendedKeyUsageOID.SERVER_AUTH in eku
+      * BasicConstraints critical, CA:TRUE, pathlen:0
+      * KeyUsage critical, keyCertSign + crlSign (NO
+        digitalSignature — root never signs TLS messages directly)
+      * NO ExtendedKeyUsage (root is an anchor; constraining its
+        EKU narrows what leaves it can issue, but per TN2326 leave
+        the root unconstrained)
+      * subjectKeyIdentifier present
+      * authorityKeyIdentifier == subjectKeyIdentifier (self-issued)
+      * subject == issuer
+    """
+    from cryptography import x509
+    from one_link.peer_https import generate_self_signed, root_ca_path
+    generate_self_signed(tmp_path)
+    rcp = root_ca_path(tmp_path)
+    root = x509.load_pem_x509_certificate(rcp.read_bytes())
 
-    # SubjectKeyIdentifier + AuthorityKeyIdentifier are both required
-    # for iOS to index the cert as a trustable root. For self-signed
-    # the two must match.
-    ski_ext = cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier)
-    aki_ext = cert.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier)
+    bc = root.extensions.get_extension_for_class(x509.BasicConstraints).value
+    assert bc.ca is True, "root BasicConstraints.ca must be True"
+
+    ku = root.extensions.get_extension_for_class(x509.KeyUsage).value
+    assert ku.key_cert_sign is True, "root KeyUsage.key_cert_sign must be True"
+    assert ku.crl_sign is True, "root KeyUsage.crl_sign must be True"
+
+    ski_ext = root.extensions.get_extension_for_class(x509.SubjectKeyIdentifier)
+    aki_ext = root.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier)
     assert ski_ext.value.digest is not None
     assert aki_ext.value.key_identifier == ski_ext.value.digest, (
-        "AuthorityKeyIdentifier must match SubjectKeyIdentifier on "
-        "a self-signed root CA"
+        "root AuthorityKeyIdentifier must match SubjectKeyIdentifier"
     )
-    # Self-signed: subject == issuer.
-    assert cert.subject == cert.issuer
+    assert root.subject == root.issuer, "root must be self-signed"
+
+
+def test_leaf_tls_cert_shape(tmp_path: Path):
+    """The leaf TLS cert (first cert in cert.pem, what aiohttp
+    serves at handshake) must be a proper TN2326 end-entity:
+
+      * BasicConstraints critical, CA:FALSE
+      * KeyUsage critical, digitalSignature only (ECDSA P-256)
+      * ExtendedKeyUsage serverAuth
+      * subjectKeyIdentifier present
+      * authorityKeyIdentifier == ROOT's subjectKeyIdentifier
+      * issuer == ROOT's subject
+      * SAN includes the IP(s) and DNS name(s) the phone uses
+    """
+    from cryptography import x509
+    from one_link.peer_https import generate_self_signed, root_ca_path
+    cp, _ = generate_self_signed(tmp_path)
+    rcp = root_ca_path(tmp_path)
+    leaf = x509.load_pem_x509_certificate(cp.read_bytes())
+    root = x509.load_pem_x509_certificate(rcp.read_bytes())
+
+    bc = leaf.extensions.get_extension_for_class(x509.BasicConstraints).value
+    assert bc.ca is False, "leaf BasicConstraints.ca must be False"
+
+    ku = leaf.extensions.get_extension_for_class(x509.KeyUsage).value
+    assert ku.digital_signature is True
+    assert ku.key_cert_sign is False, "leaf must NOT be a CA"
+    assert ku.crl_sign is False
+
+    eku = leaf.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+    assert x509.ExtendedKeyUsageOID.SERVER_AUTH in eku
+
+    leaf_ski = leaf.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+    assert leaf_ski.digest is not None
+
+    leaf_aki = leaf.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier).value
+    root_ski = root.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+    assert leaf_aki.key_identifier == root_ski.digest, (
+        "leaf AuthorityKeyIdentifier must match root SubjectKeyIdentifier"
+    )
+
+    assert leaf.issuer == root.subject, "leaf must be issued by the root"
+
+
+def test_leaf_signature_verifies_under_root_pubkey(tmp_path: Path):
+    """The cryptographic chain check: the leaf's signature, when
+    re-verified with the root's public key, must validate. If this
+    fails, iOS will reject the TLS handshake regardless of the
+    Trust Settings toggle."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from one_link.peer_https import generate_self_signed, root_ca_path
+    cp, _ = generate_self_signed(tmp_path)
+    rcp = root_ca_path(tmp_path)
+    leaf = x509.load_pem_x509_certificate(cp.read_bytes())
+    root = x509.load_pem_x509_certificate(rcp.read_bytes())
+    # Will raise InvalidSignature on failure.
+    root.public_key().verify(
+        leaf.signature,
+        leaf.tbs_certificate_bytes,
+        ec.ECDSA(leaf.signature_hash_algorithm),
+    )
 
 
 def test_needs_rotation_for_missing_file(tmp_path: Path):
