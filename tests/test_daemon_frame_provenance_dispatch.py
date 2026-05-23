@@ -221,15 +221,22 @@ def test_dispatch_records_unverified_on_forged_signature(
     assert fp_events[0]["verified"] is False
 
 
-def test_dispatch_silently_drops_when_state_unknown(
+def test_dispatch_rejects_when_state_unknown(
     bob: Identity,
     alice: Identity,
     voice_blob: bytes,
     voice_blob_hex: str,
 ) -> None:
-    """When daemon.state is None (test fixture or rare race), the
-    dispatch must not crash. Provenance is dropped silently. No
-    tail event fires."""
+    """2026-05-22 audit FO-2: when daemon.state is None,
+    _inbound_is_rejected now returns True (fail-closed) so the
+    dispatch path raises ``rejected peer attempted message``.
+    The old contract was "drop silently"; the new contract is
+    "refuse with a hard error so a state-DB outage / corruption
+    window can't accept frames from peers we'd previously revoked".
+
+    Both behaviors leave the provenance store empty and the tail
+    event un-fired; the difference is fail-closed vs fail-silent.
+    """
     d = Daemon(me=bob)
     d.state = None  # explicitly unset
     p = build_provenance_for_file(identity=alice, file_bytes=voice_blob)
@@ -244,14 +251,15 @@ def test_dispatch_silently_drops_when_state_unknown(
 
     loop = asyncio.new_event_loop()
     try:
-        # Must not raise.
-        loop.run_until_complete(
-            d._on_peer_message(channel, msg)
-        )
+        with pytest.raises(RuntimeError, match="rejected peer"):
+            loop.run_until_complete(
+                d._on_peer_message(channel, msg)
+            )
     finally:
         loop.close()
 
-    # Nothing recorded, nothing broadcast.
+    # Nothing recorded, nothing broadcast — the dispatch was refused
+    # before it reached the provenance handler.
     assert len(d._provenance_store) == 0
     assert not any(e.get("type") == "frame_provenance" for e in tail_events)
 
