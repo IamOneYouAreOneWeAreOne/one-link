@@ -786,6 +786,28 @@ def restore_from_bundle(
         del seed
 
 
+# ── held-share import (guardian-side social recovery) ───────────────
+
+
+def parse_held_share_blob(blob: bytes) -> dict[str, Any]:
+    """Parse an incoming .olss wrapped-share file. Returns a dict
+    the state.insert_held_share helper can persist directly.
+
+    Validates magic + version + header length. Does NOT verify the
+    AEAD tag (that requires the guardian's private key; we defer
+    that check until unwrap-time so a guardian can import shares
+    on a device that doesn't have their key handy yet)."""
+    from one_link import social_recovery
+    wrapped = social_recovery.WrappedShare.parse(blob)
+    return {
+        "share_index": wrapped.share_index,
+        "threshold_k": wrapped.threshold,
+        "total_n": wrapped.total,
+        "setup_ms": wrapped.setup_ms,
+        "wrapped_blob": wrapped.encoded,
+    }
+
+
 def reset_all_recovery_state(state) -> None:
     """Wipe the per-track recovery settings. Called from the
     existing `reset` setup_action so the new state vanishes along

@@ -1817,6 +1817,14 @@ class UIServer:
         # an .olbak file decrypts with a given 24-word phrase. Mirrors
         # the phrase-test pattern; never writes to disk.
         r.add_post("/api/v1/recovery/bundle/test", self._guarded(self.api_recovery_bundle_test))
+        # v0.21.x social-share recovery (guardian side). The third
+        # restore path: a user imports .olss share files that other
+        # users distributed to them. Local-only manual flow (no new
+        # wire protocol); the guardian uses their own daemon to
+        # unwrap + deliver share bytes back to the recovering user.
+        r.add_post("/api/v1/recovery/shares/import", self._guarded(self.api_recovery_shares_import))
+        r.add_get("/api/v1/recovery/shares", self._guarded(self.api_recovery_shares_list))
+        r.add_delete("/api/v1/recovery/shares/{share_id}", self._guarded(self.api_recovery_shares_delete))
         r.add_get("/api/v1/recovery/backup/export", self._guarded(self.api_recovery_backup_export))
         r.add_get("/api/v1/recovery/social/candidates", self._guarded(self.api_recovery_social_candidates))
         r.add_post("/api/v1/recovery/social/issue", self._guarded(self.api_recovery_social_issue))
@@ -8190,6 +8198,112 @@ class UIServer:
             phrase=phrase, bundle_bytes=bundle_bytes,
         )
         resp = web.json_response({"ok": True, **result})
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_shares_import(self, request: web.Request) -> web.Response:
+        """Import an .olss share file. Body carries the wrapped-share
+        bytes as base64. Parses + validates the wrapper, persists to
+        held_recovery_shares, returns the new row id + metadata.
+
+        Idempotent on the wrapped bytes: re-importing the same .olss
+        file returns the existing row id rather than duplicating.
+
+        Body:
+          {
+            "blob_b64": "<base64 of .olss bytes>",
+            "label":    optional human-readable note,
+            "owner_hint": optional short fp of the owner,
+          }
+        """
+        from one_link import recovery_api
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        blob_b64 = data.get("blob_b64") or ""
+        if not blob_b64 or not isinstance(blob_b64, str):
+            return web.json_response({"error": "blob_b64 required"}, status=400)
+        # .olss files are tiny (~150 bytes). Cap aggressively so a
+        # hostile payload can't trigger memory pressure.
+        if len(blob_b64) > 4096:
+            return web.json_response(
+                {"error": "share blob exceeds 3 KiB cap"},
+                status=413,
+            )
+        import base64 as _b64
+        try:
+            blob_bytes = _b64.b64decode(blob_b64, validate=True)
+        except Exception as e:
+            return web.json_response(
+                {"error": f"blob_b64 not valid base64: {e}"},
+                status=400,
+            )
+        try:
+            parsed = recovery_api.parse_held_share_blob(blob_bytes)
+        except ValueError as e:
+            return web.json_response(
+                {"error": f"not a valid recovery share: {e}"},
+                status=400,
+            )
+        label = str(data.get("label") or "")[:200] or None
+        owner_hint = str(data.get("owner_hint") or "")[:128] or None
+        row_id = state.insert_held_share(
+            **parsed, label=label, owner_hint=owner_hint,
+        )
+        resp = web.json_response({
+            "ok": True,
+            "id": row_id,
+            "share_index": parsed["share_index"],
+            "threshold_k": parsed["threshold_k"],
+            "total_n": parsed["total_n"],
+            "setup_ms": parsed["setup_ms"],
+        })
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_shares_list(self, request: web.Request) -> web.Response:
+        """Return all held shares so the wizard can render the
+        'Held recovery shares' card. wrapped_blob is omitted from
+        the response (it's bytes; the UI doesn't need it for the
+        list view - unwrap is its own endpoint)."""
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        rows = state.list_held_shares()
+        resp = web.json_response({
+            "ok": True,
+            "shares": [
+                {
+                    "id": r["id"],
+                    "share_index": r["share_index"],
+                    "threshold_k": r["threshold_k"],
+                    "total_n": r["total_n"],
+                    "setup_ms": r["setup_ms"],
+                    "imported_ms": r["imported_ms"],
+                    "label": r["label"],
+                    "owner_hint": r["owner_hint"],
+                }
+                for r in rows
+            ],
+        })
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_shares_delete(self, request: web.Request) -> web.Response:
+        """Drop a held share (the user no longer wants to hold it)."""
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            share_id = int(request.match_info["share_id"])
+        except (KeyError, ValueError):
+            return web.json_response({"error": "bad share_id"}, status=400)
+        deleted = state.delete_held_share(share_id)
+        resp = web.json_response({"ok": True, "deleted": deleted})
         self._recovery_no_store_headers(resp)
         return resp
 

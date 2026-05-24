@@ -598,6 +598,7 @@ class State:
                     (21, self._migrate_v21_device_guardian),
                     (22, self._migrate_v22_transfer_status_index),
                     (23, self._migrate_v23_rotation_announcements),
+                    (24, self._migrate_v24_held_recovery_shares),
                 ]
                 for target_version, apply_fn in steps:
                     self._run_atomic_migration(
@@ -918,6 +919,53 @@ class State:
                 END
             WHERE revoked = 1 AND safety_state != 'revoked'
             """
+        )
+
+    def _migrate_v24_held_recovery_shares(self, c: sqlite3.Cursor) -> None:
+        """v0.21.x social-share recovery: guardian-side store of
+        recovery shares the user is holding for someone else.
+
+        When user X distributes Shamir shares of their identity to
+        guardians, each guardian receives an .olss file. This table
+        is the guardian's daemon's record of WHICH shares it holds
+        + the metadata needed to surface them in the UI ('You hold
+        share 3 of 5 for someone identified by SHA-256(master_pubkey)
+        starting ab12...'). The wrapped blob stays sealed to the
+        guardian's Ed25519 identity; only the guardian's daemon can
+        unwrap it when the original user asks for recovery help.
+
+        Schema:
+          id                    INTEGER PRIMARY KEY AUTOINCREMENT
+          share_index           INTEGER NOT NULL    -- 1..total_n
+          threshold_k           INTEGER NOT NULL    -- K of N
+          total_n               INTEGER NOT NULL
+          setup_ms              INTEGER NOT NULL    -- when share was minted
+          wrapped_blob          BLOB    NOT NULL    -- full .olss bytes
+          imported_ms           INTEGER NOT NULL    -- when guardian imported
+          label                 TEXT                -- user-supplied note
+          owner_hint            TEXT                -- short fp of owner if known
+
+        Indexed on imported_ms so list views fall back to insertion
+        order naturally.
+        """
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS held_recovery_shares (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                share_index    INTEGER NOT NULL,
+                threshold_k    INTEGER NOT NULL,
+                total_n        INTEGER NOT NULL,
+                setup_ms       INTEGER NOT NULL,
+                wrapped_blob   BLOB    NOT NULL,
+                imported_ms    INTEGER NOT NULL,
+                label          TEXT,
+                owner_hint     TEXT
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_held_shares_imported"
+            " ON held_recovery_shares(imported_ms)"
         )
 
     def _migrate_v23_rotation_announcements(self, c: sqlite3.Cursor) -> None:
@@ -2340,6 +2388,105 @@ class State:
                 (_now_ms(), new_fingerprint),
             )
             return cur.rowcount or 0
+
+    # ─── held recovery shares (v0.21.x social-share recovery) ──────────
+    # Guardian-side store of Shamir shares the user holds for someone
+    # else. Each row is one .olss file the user imported via the UI.
+
+    def insert_held_share(
+        self,
+        *,
+        share_index: int,
+        threshold_k: int,
+        total_n: int,
+        setup_ms: int,
+        wrapped_blob: bytes,
+        label: Optional[str] = None,
+        owner_hint: Optional[str] = None,
+        imported_ms: Optional[int] = None,
+    ) -> int:
+        """Persist one share. Idempotent on (wrapped_blob): re-importing
+        the same .olss file returns the existing id rather than
+        inserting a duplicate row. Returns the row id."""
+        if imported_ms is None:
+            imported_ms = _now_ms()
+        with self._write_lock:
+            existing = self._conn.execute(
+                "SELECT id FROM held_recovery_shares WHERE wrapped_blob = ?"
+                " LIMIT 1",
+                (wrapped_blob,),
+            ).fetchone()
+            if existing is not None:
+                return int(existing["id"])
+            cur = self._conn.execute(
+                """
+                INSERT INTO held_recovery_shares(
+                    share_index, threshold_k, total_n, setup_ms,
+                    wrapped_blob, imported_ms, label, owner_hint
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(share_index), int(threshold_k), int(total_n),
+                    int(setup_ms), wrapped_blob, int(imported_ms),
+                    label, owner_hint,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def list_held_shares(self) -> list[dict]:
+        """Return all stored shares, freshest-imported first. UI
+        iterates this to render the 'Held recovery shares' card."""
+        rows = self._conn.execute(
+            "SELECT id, share_index, threshold_k, total_n, setup_ms,"
+            " wrapped_blob, imported_ms, label, owner_hint"
+            " FROM held_recovery_shares"
+            " ORDER BY imported_ms DESC, id DESC"
+        ).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "share_index": int(r["share_index"]),
+                "threshold_k": int(r["threshold_k"]),
+                "total_n": int(r["total_n"]),
+                "setup_ms": int(r["setup_ms"]),
+                "wrapped_blob": bytes(r["wrapped_blob"]),
+                "imported_ms": int(r["imported_ms"]),
+                "label": r["label"],
+                "owner_hint": r["owner_hint"],
+            }
+            for r in rows
+        ]
+
+    def get_held_share(self, share_id: int) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT id, share_index, threshold_k, total_n, setup_ms,"
+            " wrapped_blob, imported_ms, label, owner_hint"
+            " FROM held_recovery_shares WHERE id = ?",
+            (int(share_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "share_index": int(row["share_index"]),
+            "threshold_k": int(row["threshold_k"]),
+            "total_n": int(row["total_n"]),
+            "setup_ms": int(row["setup_ms"]),
+            "wrapped_blob": bytes(row["wrapped_blob"]),
+            "imported_ms": int(row["imported_ms"]),
+            "label": row["label"],
+            "owner_hint": row["owner_hint"],
+        }
+
+    def delete_held_share(self, share_id: int) -> bool:
+        """Drop a share the user no longer wants to hold (e.g., the
+        owner asked them to discard, or they're cleaning up)."""
+        with self._write_lock:
+            cur = self._conn.execute(
+                "DELETE FROM held_recovery_shares WHERE id = ?",
+                (int(share_id),),
+            )
+            return (cur.rowcount or 0) > 0
 
     # ─── atomic peer fingerprint transition (v0.21.x rotation) ────────
     # When an inbound ROTATION_CERT verifies, the receiving daemon

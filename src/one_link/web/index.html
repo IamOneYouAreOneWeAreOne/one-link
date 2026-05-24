@@ -11708,6 +11708,18 @@
         phrase, bundle_b64: bundleB64,
       });
     },
+    // Social-share recovery (guardian side). Import an .olss file
+    // someone gave you so your daemon can later unwrap + deliver
+    // your share when they need help recovering.
+    recoveryHeldSharesList() { return this.get("/api/v1/recovery/shares"); },
+    recoveryHeldSharesImport(blobB64, label, ownerHint) {
+      return this.post("/api/v1/recovery/shares/import", {
+        blob_b64: blobB64, label, owner_hint: ownerHint,
+      });
+    },
+    recoveryHeldSharesDelete(shareId) {
+      return this.del(`/api/v1/recovery/shares/${shareId}`);
+    },
     recoverySocialCandidates() { return this.get("/api/v1/recovery/social/candidates"); },
     recoverySocialIssue(guardians, threshold_k) {
       return this.post("/api/v1/recovery/social/issue", { guardians, threshold_k });
@@ -24823,6 +24835,7 @@
           </div>
         </div>
         <div id="recwiz-track-rotate" class="recwiz-card" data-track="rotate"></div>
+        <div id="recwiz-track-held-shares" class="recwiz-card" data-track="held-shares"></div>
         <div class="recwiz-close-bar" style="justify-content:space-between;">
           <button type="button" class="recwiz-btn recwiz-btn-danger" data-recwiz-action="reset"
                   title="Clear the wizard's setup flags so each track can be re-run. Does not touch the master seed or peer state.">
@@ -24933,6 +24946,9 @@
     // the recovery-status snapshot - it's about queue state, not
     // backup/restore configuration.
     _recwizRenderRotateCard().catch(() => {});
+    // Held-shares card (guardian side of social-share recovery).
+    // Also pulls its own status from the dedicated endpoint.
+    _recwizRenderHeldSharesCard().catch(() => {});
   }
 
   function _recwizFormatRelative(ms) {
@@ -25664,6 +25680,175 @@
     } finally {
       btn.disabled = false;
       btn.textContent = origText;
+    }
+  }
+
+  // ── recovery wizard: HELD-SHARES card (guardian side of social) ─
+  // The third path of recovery. When user X distributes Shamir
+  // shares of their identity, the guardians (other users) get
+  // .olss files. This card lets a guardian import those files
+  // into their daemon so they can be unwrapped + delivered back
+  // when X needs to recover. Local-only flow: the guardian decides
+  // how to deliver (in person, USB, email).
+  async function _recwizRenderHeldSharesCard() {
+    const card = document.getElementById("recwiz-track-held-shares");
+    if (!card) return;
+    let res = null;
+    try { res = await api.recoveryHeldSharesList(); } catch (_) { /* ignore */ }
+    const shares = (res && res.shares) || [];
+    const count = shares.length;
+    const pillCls = count > 0 ? "ready" : "unavailable";
+    const pillText = count > 0
+      ? `${count} share${count === 1 ? "" : "s"} held`
+      : "None held";
+    const list = count > 0 ? `
+      <div class="recwiz-shares" style="margin-top:10px;">
+        ${shares.map((s) => {
+          const meta = s.label
+            ? escapeText(s.label)
+            : `share ${s.share_index} of ${s.total_n} (threshold ${s.threshold_k})`;
+          return `
+            <div class="recwiz-share-row">
+              <span class="recwiz-share-num">#${s.share_index}/${s.total_n}</span>
+              <span class="recwiz-share-name">${meta}</span>
+              <button type="button" class="recwiz-btn recwiz-btn-danger"
+                      data-recwiz-share-drop="${s.id}" title="Forget this share">Forget</button>
+            </div>`;
+        }).join("")}
+      </div>` : "";
+    card.innerHTML = `
+      <div class="recwiz-card-head">
+        <div class="recwiz-card-name">Recovery shares you hold for others</div>
+        <div class="recwiz-card-status ${pillCls}">${escapeText(pillText)}</div>
+      </div>
+      <p class="recwiz-card-desc">
+        If someone sent you a recovery share (a small .olss file)
+        for safekeeping, import it here. Your daemon stores it
+        encrypted to your key; only you can unwrap it when they
+        need help recovering.
+      </p>
+      <details class="recwiz-help">
+        <summary>How does this work?</summary>
+        <p>
+          When a friend sets up social-share recovery, they split
+          their identity into pieces and seal each piece to one
+          trusted contact's key. You are one of those contacts.
+          The .olss file you received is your piece, sealed so only
+          you can open it. When your friend needs to recover (e.g.,
+          lost their phone), you import this share, your daemon
+          unwraps it with your identity, and you deliver the raw
+          bytes back to them via whatever you trust (in person,
+          encrypted email, USB stick). Their daemon collects K
+          such pieces from K different friends and reconstructs
+          their identity.
+        </p>
+      </details>
+      ${list}
+      <div class="recwiz-card-actions" style="margin-top:10px;">
+        <button type="button" class="recwiz-btn recwiz-btn-primary"
+                data-recwiz-held="import">
+          Import a share file
+        </button>
+      </div>
+      <div class="recwiz-card-body" hidden></div>
+    `;
+    card.querySelector('[data-recwiz-held="import"]')
+      .addEventListener("click", () => _recwizHeldSharesImportStart());
+    card.querySelectorAll('[data-recwiz-share-drop]').forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = Number(btn.getAttribute("data-recwiz-share-drop"));
+        _recwizHeldShareDrop(id);
+      });
+    });
+  }
+
+  function _recwizHeldSharesImportStart() {
+    const card = document.getElementById("recwiz-track-held-shares");
+    const body = card.querySelector(".recwiz-card-body");
+    body.hidden = false;
+    card.classList.add("open");
+    body.innerHTML = `
+      <p class="recwiz-card-desc">
+        Pick the .olss file. Optionally add a label so future-you
+        remembers who sent it.
+      </p>
+      <input type="file" id="recwiz-held-file" accept=".olss"
+             aria-label="Recovery share file" />
+      <p class="recwiz-card-meta" id="recwiz-held-info" style="margin:6px 0;"></p>
+      <div class="recwiz-verify-row" style="flex-direction:column;align-items:stretch;gap:6px;">
+        <label for="recwiz-held-label" style="min-width:0;color:var(--text);">
+          Label (optional)
+        </label>
+        <input type="text" id="recwiz-held-label" class="recwiz-verify-input"
+               maxlength="200"
+               placeholder="e.g. Alice's recovery share #3" />
+      </div>
+      <p class="recwiz-feedback" id="recwiz-held-fb"></p>
+      <div class="recwiz-card-actions">
+        <button type="button" class="recwiz-btn" data-recwiz-held="hide">Cancel</button>
+        <button type="button" class="recwiz-btn recwiz-btn-primary" id="recwiz-held-submit" disabled>
+          Import share
+        </button>
+      </div>
+    `;
+    const file = body.querySelector("#recwiz-held-file");
+    const info = body.querySelector("#recwiz-held-info");
+    const labelInput = body.querySelector("#recwiz-held-label");
+    const submit = body.querySelector("#recwiz-held-submit");
+    const fb = body.querySelector("#recwiz-held-fb");
+    file.addEventListener("change", () => {
+      const f = file.files && file.files[0];
+      info.textContent = f ? `${f.name} (${_recwizHumanSize(f.size)})` : "";
+      submit.disabled = !f;
+    });
+    body.querySelector('[data-recwiz-held="hide"]').addEventListener("click", () => {
+      body.hidden = true; card.classList.remove("open"); body.innerHTML = "";
+    });
+    submit.addEventListener("click", async () => {
+      const f = file.files && file.files[0];
+      if (!f) return;
+      submit.disabled = true;
+      fb.className = "recwiz-feedback";
+      fb.textContent = "Reading file...";
+      let b64;
+      try { b64 = await _recwizFileToB64(f); }
+      catch (e) {
+        fb.className = "recwiz-feedback bad";
+        fb.textContent = `Could not read file: ${e.message || e}`;
+        submit.disabled = false;
+        return;
+      }
+      fb.textContent = "Importing...";
+      try {
+        await api.recoveryHeldSharesImport(
+          b64, labelInput.value.trim() || null, null,
+        );
+        toast("Share imported.", "good", 4000);
+        body.hidden = true; card.classList.remove("open"); body.innerHTML = "";
+        await _recwizRenderHeldSharesCard();
+      } catch (e) {
+        fb.className = "recwiz-feedback bad";
+        fb.textContent = errorToastBody(e) || "Import failed.";
+        submit.disabled = false;
+      }
+    });
+    setTimeout(() => file.focus(), 60);
+  }
+
+  async function _recwizHeldShareDrop(id) {
+    const ok = window.confirm(
+      "Forget this recovery share?\n\n" +
+      "Once forgotten you cannot help the owner recover with this " +
+      "share. If they later ask for help, you will have to import " +
+      "the share file again (if you still have it)."
+    );
+    if (!ok) return;
+    try {
+      await api.recoveryHeldSharesDelete(id);
+      toast("Share forgotten.", "info", 3000);
+      await _recwizRenderHeldSharesCard();
+    } catch (e) {
+      toast(`Drop failed: ${errorToastBody(e)}`, "bad", 5000);
     }
   }
 
