@@ -4493,6 +4493,48 @@
   }
   .update-banner .dismiss:hover { color: var(--text); }
 
+  /* v0.21.x: identity-rotation status banner. Same shape as
+     .update-banner (top-fixed, dismissible, accent-bordered) but
+     informational rather than calling for action. Shown whenever
+     pending_rotation_announcements has unacked rows so a user who
+     rotated yesterday and has the wizard closed still sees that
+     N of M peers haven't received the new key yet. Auto-hides
+     when all peers have acked. */
+  .rotation-banner {
+    display: none;
+    position: fixed; top: 0; left: 0; right: 0;
+    z-index: 9997;  /* one below update-banner so they stack cleanly
+                       if both fire on the same load */
+    background: linear-gradient(90deg, rgba(106, 138, 255, .22), rgba(106, 138, 255, .10));
+    border-bottom: 1px solid rgba(106, 138, 255, .55);
+    color: var(--text);
+    padding: 10px 18px;
+    font-size: 13px;
+    line-height: 1.5;
+    align-items: center; gap: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,.35);
+  }
+  .rotation-banner.show { display: flex; }
+  .rotation-banner strong { color: var(--accent); }
+  .rotation-banner .rb-text { flex: 1; min-width: 0; }
+  .rotation-banner .rb-actions { display: flex; gap: 8px; }
+  .rotation-banner button {
+    color: white;
+    background: var(--accent);
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 0;
+    cursor: pointer;
+  }
+  .rotation-banner .dismiss {
+    background: transparent;
+    color: var(--text-dim);
+    padding: 6px 10px;
+  }
+  .rotation-banner .dismiss:hover { color: var(--text); }
+
   /* v0.11.4 session-expired banner. Sits at the top of the viewport
      above all other UI so the user can't miss it. */
   .session-expired-banner {
@@ -8243,6 +8285,23 @@
     </div>
   </div>
 
+  <!-- v0.21.x rotation-in-progress banner. Shown whenever the
+       rotation queue has unacked peers so a user who rotated and
+       closed the wizard still sees that N peers haven't received
+       the new key yet. Click opens the rotation card in the
+       wizard; Dismiss hides for the session (the next render that
+       sees pending rows will re-show). -->
+  <div class="rotation-banner" id="rotation-banner" role="status">
+    <span class="rb-text">
+      <strong>Identity rotation in progress.</strong>
+      <span id="rotation-banner-text"></span>
+    </span>
+    <div class="rb-actions">
+      <button class="dismiss" id="rotation-banner-dismiss" type="button">Dismiss</button>
+      <button id="rotation-banner-open" type="button">Open rotation</button>
+    </div>
+  </div>
+
   <!-- v0.14.0 mobile scrim. Sits between sidebar drawer + page on
        narrow screens; tap to dismiss. CSS-driven - JS only flips
        .mobile-side-open on .app. -->
@@ -11903,6 +11962,62 @@
       } catch (_e) { /* swallow - best-effort */ }
       document.getElementById("update-banner")?.classList.remove("show");
     });
+  });
+
+  // v0.21.x rotation-in-progress banner. Polls /api/v1/recovery/rotate/status
+  // on load + on every rotation WS event (peer_rotated /
+  // rotation_announcement_acked, wired in the WS dispatcher) and
+  // shows the banner whenever summary.pending > 0. Dismiss hides
+  // for the session (sessionStorage so a daemon restart re-shows;
+  // the rotation isn't actually complete until peers ack).
+  async function refreshRotationBanner() {
+    const banner = document.getElementById("rotation-banner");
+    if (!banner) return;
+    if (sessionStorage.getItem("ol_rotation_banner_dismissed") === "1") {
+      banner.classList.remove("show");
+      return;
+    }
+    let status;
+    try { status = await api.recoveryRotateStatus(); }
+    catch { banner.classList.remove("show"); return; }
+    const sum = (status && status.summary) || { total: 0, pending: 0, acked: 0 };
+    if (!sum.pending) {
+      // No pending: hide. If the row was previously dismissed and
+      // a new rotation happens, clear the session flag so the new
+      // pending state re-shows.
+      banner.classList.remove("show");
+      sessionStorage.removeItem("ol_rotation_banner_dismissed");
+      return;
+    }
+    const text = document.getElementById("rotation-banner-text");
+    if (text) {
+      text.textContent =
+        `${sum.acked} of ${sum.total} peers acknowledged. ` +
+        `The remaining ${sum.pending} will pick up the new key the next time this device contacts them.`;
+    }
+    banner.classList.add("show");
+  }
+  _onReady(() => {
+    const dismiss = document.getElementById("rotation-banner-dismiss");
+    const open = document.getElementById("rotation-banner-open");
+    if (dismiss) {
+      dismiss.addEventListener("click", () => {
+        sessionStorage.setItem("ol_rotation_banner_dismissed", "1");
+        document.getElementById("rotation-banner")?.classList.remove("show");
+      });
+    }
+    if (open) {
+      open.addEventListener("click", () => {
+        document.getElementById("rotation-banner")?.classList.remove("show");
+        // Open the wizard; the rotation card lives inside it.
+        // _showRecoveryWizard exists in the recovery-wizard module.
+        if (typeof _showRecoveryWizard === "function") {
+          _showRecoveryWizard().catch(() => {});
+        }
+      });
+    }
+    // Initial check on page load.
+    refreshRotationBanner().catch(() => {});
   });
   function populateNotifSettings() {
     const btn = $("#set-notif");
@@ -22310,6 +22425,10 @@
         if (wiz && wiz.classList.contains("show")) {
           try { _recwizRenderRotateCard(); } catch (_) { /* defensive */ }
         }
+        // Refresh the home-screen rotation banner so it auto-hides
+        // when the last peer acks (or updates the X of Y count
+        // when only some peers acked).
+        try { refreshRotationBanner(); } catch (_) { /* defensive */ }
         if (m.type === "peer_rotated") {
           scheduleActivityRefresh();  // peer-rotation events show up in activity
         }

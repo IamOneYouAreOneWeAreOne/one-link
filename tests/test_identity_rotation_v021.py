@@ -712,6 +712,37 @@ def test_index_html_rotate_card_in_wizard():
     assert "_recwizRenderRotateCard" in html
 
 
+def test_home_screen_rotation_banner_exists_and_polls_status():
+    """The home-screen rotation banner must be wired so users who
+    rotated and closed the wizard still see 'X of Y peers acked'
+    without having to dig back into Settings. The banner element
+    + the poll function + the dismiss/open click handlers + the
+    WS-event refresh must all be present."""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "web" / "index.html").read_text(encoding="utf-8")
+    # CSS class.
+    assert ".rotation-banner" in html
+    # Banner element.
+    assert 'id="rotation-banner"' in html
+    assert 'id="rotation-banner-text"' in html
+    assert 'id="rotation-banner-dismiss"' in html
+    assert 'id="rotation-banner-open"' in html
+    # Poll function exists + reads rotation status.
+    assert "async function refreshRotationBanner()" in html
+    assert "api.recoveryRotateStatus()" in html
+    # Dismiss persists for the session (not localStorage - rotation
+    # IS incomplete until acks land, so re-show on restart is right).
+    assert 'sessionStorage.setItem("ol_rotation_banner_dismissed"' in html
+    # Open button hops into the recovery wizard so the user can see
+    # per-peer detail.
+    assert "_showRecoveryWizard()" in html
+    # WS dispatcher calls refreshRotationBanner on rotation events.
+    idx = html.find('m.type === "peer_rotated"')
+    assert idx > 0
+    body = html[idx:idx + 1500]
+    assert "refreshRotationBanner()" in body
+
+
 def test_ws_dispatcher_handles_peer_rotated_and_ack_events():
     """The daemon broadcasts peer_rotated when an inbound cert
     applies and rotation_announcement_acked when one of our certs
