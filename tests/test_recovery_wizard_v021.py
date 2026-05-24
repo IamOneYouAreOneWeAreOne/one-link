@@ -204,6 +204,66 @@ def test_phrase_test_handles_fresh_install_without_seed(tmp_path):
     assert res["matches_current_identity"] is False
 
 
+def test_daemon_shutdown_endpoint_registered_guarded_ratelimited():
+    """The /api/v1/daemon/shutdown endpoint exists, behind _guarded,
+    rate-limited (1 / 60s; accidental double-click safe), and refuses
+    without confirmed_shutdown=true."""
+    from types import SimpleNamespace
+    from one_link.server import UIServer
+    daemon = SimpleNamespace(state=None, peer_rtc=None)
+    server = UIServer(daemon)
+    methods: set[str] = set()
+    for resource in server.app.router.resources():
+        info = resource.get_info()
+        path = info.get("path") or info.get("formatter") or ""
+        if path == "/api/v1/daemon/shutdown":
+            for route in resource:
+                methods.add(route.method)
+    assert "POST" in methods
+
+    src = _server_src()
+    idx = src.find('"/api/v1/daemon/shutdown"')
+    assert idx > 0
+    line_start = src.rfind("\n", 0, idx) + 1
+    line_end = src.find("\n", idx)
+    assert "self._guarded(" in src[line_start:line_end]
+
+    handler_idx = src.find("async def api_daemon_shutdown(")
+    assert handler_idx > 0
+    body = src[handler_idx:handler_idx + 3000]
+    assert "_rate_limited(" in body
+    assert '"daemon_shutdown"' in body
+    assert "confirmed_shutdown" in body
+    # Reuses the auto-update path's response-then-exit pattern.
+    assert "_shutdown_soon" in body
+    assert "_os._exit(0)" in body
+
+
+def test_index_html_shutdown_button_wired_on_success_cards():
+    """Both the rotation success card AND the restore success card
+    must have a 'Shut down One Link now' button so the user can
+    complete restart with a click instead of an instruction. Both
+    use the shared _recwizShutdownDaemon helper, which posts to
+    /api/v1/daemon/shutdown behind a window.confirm."""
+    html = _index_html()
+    # API wrapper exists.
+    assert 'daemonShutdown(reason)' in html
+    assert '"/api/v1/daemon/shutdown"' in html
+    # Shared helper exists + confirms before calling.
+    assert "async function _recwizShutdownDaemon(" in html
+    idx = html.find("async function _recwizShutdownDaemon(")
+    body = html[idx:idx + 1500]
+    assert "window.confirm" in body
+    assert "api.daemonShutdown" in body
+    # Rotation success card wires it.
+    assert 'data-recwiz-rotate="restart"' in html
+    # Restore success card wires it.
+    assert 'id="recwiz-restore-restart"' in html
+    # Both call sites pass a reason hint (telemetry / log clarity).
+    assert '"rotation_restart"' in html
+    assert '"restore_restart"' in html
+
+
 def test_recovery_reset_endpoint_registered_guarded_ratelimited():
     """The /api/v1/recovery/reset endpoint exists, is behind
     _guarded, rate-limited (3 / 5min), and refuses without

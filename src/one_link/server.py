@@ -1841,6 +1841,12 @@ class UIServer:
         # acceptance + outbound delivery wire in subsequent commits.
         r.add_post("/api/v1/recovery/rotate", self._guarded(self.api_recovery_rotate))
         r.add_get("/api/v1/recovery/rotate/status", self._guarded(self.api_recovery_rotate_status))
+        # v0.21.x: graceful in-app daemon shutdown so post-recovery
+        # "Restart One Link to take effect" can be a button instead
+        # of an instruction. Reuses the auto-update path's
+        # response-then-exit pattern; no auto-restart (a launcher
+        # / tray / supervisor handles that if present).
+        r.add_post("/api/v1/daemon/shutdown", self._guarded(self.api_daemon_shutdown))
         r.add_get("/api/status", self._guarded(self.api_status))
         # ── Living Presence Tier α-pre — Call API ────────────────
         # Browser hits these to drive the per-call state machines.
@@ -16834,6 +16840,65 @@ class UIServer:
             await asyncio.sleep(0.5)
             log.info("auto-update: daemon exiting so updater can run")
             # Hard exit — the updater is responsible for restart.
+            _os._exit(0)
+        asyncio.create_task(_shutdown_soon())
+
+        return resp
+
+    async def api_daemon_shutdown(self, request: web.Request) -> web.Response:
+        """Gracefully shut down the daemon process. The UI uses this
+        after rotation / restore to let the user "Restart One Link"
+        with a button instead of an instruction.
+
+        The daemon exits with code 0 after the response flushes; a
+        launcher / system tray / supervisor (if present) handles the
+        restart. Without one, the user re-runs the daemon command
+        manually. Same trade-off as the auto-update path.
+
+        Per-token rate limit (1 / 60s) so an accidental double-click
+        OR a stolen UI token can't spam shutdowns. Requires
+        ``confirmed_shutdown=true`` in the body so a click-jacked
+        flow can't silently kill the daemon.
+        """
+        if self._rate_limited(
+            "daemon_shutdown",
+            self._client_rate_key(request),
+            limit=1,
+            window_seconds=60.0,
+        ):
+            return web.json_response(
+                {"error": "too many shutdown attempts; wait a minute"},
+                status=429,
+            )
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        if not bool(data.get("confirmed_shutdown")):
+            return web.json_response({
+                "error": "confirmed_shutdown=true required",
+                "hint": (
+                    "Shutdown stops the One Link daemon. Without a "
+                    "launcher / system tray watching, the user must "
+                    "re-run the daemon command manually. Set "
+                    "confirmed_shutdown=true to proceed."
+                ),
+            }, status=409)
+
+        reason = str(data.get("reason") or "user_request")[:64]
+        log.info("daemon shutdown requested via API (reason=%s)", reason)
+        resp = web.json_response({
+            "ok": True,
+            "message": (
+                "Daemon is shutting down. Restart One Link "
+                "(via your launcher / system tray, or re-run the "
+                "daemon command) to bring it back up."
+            ),
+        })
+
+        async def _shutdown_soon():
+            await asyncio.sleep(0.5)
+            log.info("daemon shutdown: exiting with code 0")
             _os._exit(0)
         asyncio.create_task(_shutdown_soon())
 

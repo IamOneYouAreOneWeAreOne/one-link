@@ -11740,6 +11740,15 @@
     },
     recoveryRotateStatus() { return this.get("/api/v1/recovery/rotate/status"); },
     recoveryReset() { return this.post("/api/v1/recovery/reset", { confirmed_reset: true }); },
+    // Graceful shutdown so 'Restart One Link to take effect' after
+    // rotation / restore can be a button instead of an instruction.
+    // A launcher / system tray (if present) brings the daemon back
+    // up; without one, the user re-runs the daemon command.
+    daemonShutdown(reason) {
+      return this.post("/api/v1/daemon/shutdown", {
+        confirmed_shutdown: true, reason: reason || "user_request",
+      });
+    },
     oneHealth() { return this.get("/api/one-health"); },
     setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); },
     claimSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/claim", body); },
@@ -24822,6 +24831,29 @@
     document.body.classList.remove("recwiz-open");
   }
 
+  // Shared 'Shut down One Link now' helper used by the rotation +
+  // restore success cards. window.confirm before the destructive
+  // call so an accidental click is recoverable. After shutdown the
+  // user is told to restart via launcher / re-run command - the
+  // daemon does NOT auto-restart (no supervisor assumption).
+  async function _recwizShutdownDaemon(reason) {
+    const ok = window.confirm(
+      "Shut down One Link now?\n\n" +
+      "This stops the daemon so the new identity loads on next " +
+      "start. If you launched One Link from a system tray, click " +
+      "the tray icon to start it again; otherwise re-run the " +
+      "daemon command. Your browser tab will reconnect once the " +
+      "fresh daemon is up."
+    );
+    if (!ok) return;
+    try {
+      await api.daemonShutdown(reason || "recovery_restart");
+      toast("Daemon shutting down. Restart One Link to come back.", "info", 8000);
+    } catch (e) {
+      toast(`Shutdown failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
+  }
+
   // 'Reset recovery setup' clears the per-track flags + rotation
   // queue so the wizard can be re-run with real intent. Native
   // window.confirm keeps the modal stack from getting too deep
@@ -25734,11 +25766,14 @@
       <div class="recwiz-words" aria-label="24 word recovery phrase">${wordCells}</div>
       <div class="recwiz-card-actions" style="justify-content:flex-end;">
         <button type="button" class="recwiz-btn" data-recwiz-rotate="print">Print</button>
+        <button type="button" class="recwiz-btn" data-recwiz-rotate="restart">Shut down One Link now</button>
         <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-action="close-rotate">Close</button>
       </div>
     `;
     body.querySelector('[data-recwiz-rotate="print"]')
       .addEventListener("click", () => _recwizPhrasePrint(words));
+    body.querySelector('[data-recwiz-rotate="restart"]')
+      .addEventListener("click", () => _recwizShutdownDaemon("rotation_restart"));
     toast(
       `Identity rotated. Restart One Link to take effect (queued for ${res.queued_peer_count || 0} peers).`,
       "good", 6000,
@@ -26029,9 +26064,12 @@
     body.innerHTML = `
       <div class="recwiz-restart-card">${successMsg}</div>
       <div class="recwiz-card-actions" style="justify-content:flex-end;">
+        <button type="button" class="recwiz-btn" id="recwiz-restore-restart">Shut down One Link now</button>
         <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-action="close-restore">Close</button>
       </div>
     `;
+    body.querySelector("#recwiz-restore-restart")
+      .addEventListener("click", () => _recwizShutdownDaemon("restore_restart"));
     toast(
       wantsBundle
         ? "Identity + backup restored. Restart One Link to finish."
