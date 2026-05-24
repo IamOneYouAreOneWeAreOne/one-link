@@ -25150,18 +25150,42 @@
     let status = null;
     try { status = await api.recoveryRotateStatus(); } catch (e) { /* ignore */ }
     const summary = (status && status.summary) || { total: 0, pending: 0, acked: 0 };
+    const rows = (status && status.rows) || [];
     const inFlight = summary.total > 0;
     const pillCls = !inFlight
       ? "unavailable"
       : summary.pending === 0 ? "ready" : "partial";
     const pillText = !inFlight
       ? "Idle"
-      : summary.pending === 0
-        ? `${summary.acked} of ${summary.total} acked`
-        : `${summary.acked} of ${summary.total} acked`;
-    const meta = inFlight
+      : `${summary.acked} of ${summary.total} acked`;
+    const meta = inFlight && summary.pending > 0
       ? `${summary.pending} peer${summary.pending === 1 ? "" : "s"} still need to receive your new key.`
-      : "";
+      : (inFlight ? "All paired peers have received and applied your new key." : "");
+    // Per-peer ack list: render each pending/acked row so the user
+    // can see exactly who is up-to-date. Sorted: pending first
+    // (the action items), then acked (the wins).
+    const sortedRows = rows.slice().sort((a, b) => {
+      const aAcked = a.acked_ms ? 1 : 0;
+      const bAcked = b.acked_ms ? 1 : 0;
+      if (aAcked !== bAcked) return aAcked - bAcked;  // pending first
+      return (b.queued_ms || 0) - (a.queued_ms || 0);  // newest first
+    });
+    const peerListHtml = inFlight ? `
+      <div class="recwiz-shares" style="margin-top:10px;">
+        ${sortedRows.map((r) => {
+          const acked = !!r.acked_ms;
+          const ackBadge = acked
+            ? `<span style="color:#2ec489;">acked ${escapeText(_recwizFormatRelative(r.acked_ms))}</span>`
+            : (r.attempt_count > 0
+                ? `<span style="color:var(--text-dim);">pending, ${r.attempt_count} attempt${r.attempt_count === 1 ? "" : "s"}</span>`
+                : `<span style="color:var(--text-dim);">pending, awaiting next contact</span>`);
+          return `
+            <div class="recwiz-share-row">
+              <span class="recwiz-share-name">${escapeText(r.peer_label || r.peer_fp.slice(0, 8))}</span>
+              <span class="recwiz-guardian-meta" style="text-align:right;">${ackBadge}</span>
+            </div>`;
+        }).join("")}
+      </div>` : "";
     card.innerHTML = `
       <div class="recwiz-card-head">
         <div class="recwiz-card-name">Rotate identity key</div>
@@ -25175,12 +25199,18 @@
         re-pair with them.
       </p>
       ${meta ? `<p class="recwiz-card-meta">${escapeText(meta)}</p>` : ""}
-      <div class="recwiz-card-actions">
+      ${peerListHtml}
+      <div class="recwiz-card-actions" style="margin-top:10px;">
         <button type="button" class="recwiz-btn" data-recwiz-action="open-rotate">
           ${inFlight ? "Rotate again" : "Rotate identity"}
         </button>
+        ${inFlight ? `<button type="button" class="recwiz-btn" data-recwiz-rotate-refresh="1">Refresh status</button>` : ""}
       </div>
     `;
+    const refresh = card.querySelector('[data-recwiz-rotate-refresh="1"]');
+    if (refresh) {
+      refresh.addEventListener("click", () => _recwizRenderRotateCard());
+    }
   }
 
   async function openRotationModal() {

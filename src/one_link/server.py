@@ -8431,12 +8431,33 @@ class UIServer:
     async def api_recovery_rotate_status(self, request: web.Request) -> web.Response:
         """Read the rotation-announcement queue summary so the UI can
         render 'X of Y peers acknowledged your new key'. Safe to call
-        any time, including post-restart."""
+        any time, including post-restart.
+
+        Each row also includes the peer's display label (alias >
+        hostname > short fingerprint) so the UI can render a
+        per-peer ack list without a second lookup."""
         state = self.daemon.state
         if state is None:
             return web.json_response({"error": "state not available"}, status=503)
         summary = state.rotation_announcement_summary()
         rows = state.list_pending_rotation_announcements(unacked_only=False, limit=128)
+        # Look up display labels for the rotation's TARGET peers.
+        # The peer's pinned fingerprint may already have transitioned
+        # (the peer rotated too, in the interval since we queued the
+        # announcement), so we tolerate misses.
+        labels: dict[str, str] = {}
+        with contextlib.suppress(Exception):
+            for p in (state.list_peers() or []):
+                fp = getattr(p, "fingerprint", "") or ""
+                if not fp:
+                    continue
+                label = (
+                    getattr(p, "local_alias", None)
+                    or getattr(p, "hostname", None)
+                    or getattr(p, "short_id", None)
+                    or fp[:8]
+                )
+                labels[fp] = str(label)
         resp = web.json_response({
             "ok": True,
             "summary": summary,
@@ -8444,6 +8465,7 @@ class UIServer:
                 {
                     "id": r["id"],
                     "peer_fp": r["peer_fp"],
+                    "peer_label": labels.get(r["peer_fp"], r["peer_fp"][:8]),
                     "new_fp": r["new_fp"],
                     "queued_ms": r["queued_ms"],
                     "last_attempt_ms": r["last_attempt_ms"],

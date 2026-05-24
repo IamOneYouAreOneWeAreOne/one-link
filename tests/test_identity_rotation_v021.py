@@ -680,6 +680,23 @@ def test_index_html_exposes_rotate_api_methods():
     assert 'recoveryRotateStatus() { return this.get("/api/v1/recovery/rotate/status"); }' in html
 
 
+def test_rotate_status_endpoint_attaches_peer_display_labels():
+    """The status endpoint must include a peer_label for every row so
+    the UI can render 'Alice acked' instead of '11ab...'. The label
+    falls back through alias > hostname > short_id > short fp."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "server.py").read_text(encoding="utf-8")
+    idx = src.find("async def api_recovery_rotate_status(")
+    assert idx > 0
+    body = src[idx:idx + 3000]
+    assert '"peer_label"' in body
+    # The fallback chain attribute lookups must all be present so
+    # peers without an alias still get a sensible label.
+    assert "local_alias" in body
+    assert "hostname" in body
+    assert "short_id" in body
+
+
 def test_index_html_rotate_card_in_wizard():
     """The wizard's modal must include the rotation card and route
     clicks on its 'Rotate identity' button through the same modal-
@@ -693,6 +710,25 @@ def test_index_html_rotate_card_in_wizard():
     assert "openRotationModal()" in html
     # Card renderer is called from the refresh.
     assert "_recwizRenderRotateCard" in html
+
+
+def test_index_html_rotate_card_renders_per_peer_ack_list():
+    """When rotations are in flight, the rotation card must show a
+    per-peer status row using peer_label so the user can see exactly
+    who is up to date. Otherwise an 'X of Y acked' counter alone
+    doesn't tell the user which peers need attention."""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "web" / "index.html").read_text(encoding="utf-8")
+    idx = html.find("async function _recwizRenderRotateCard()")
+    assert idx > 0
+    body = html[idx:idx + 5000]
+    # Renders peer rows from status.rows.
+    assert "status.rows" in body
+    assert "peer_label" in body
+    # Sorts pending before acked so action items rise to the top.
+    assert "pending first" in body
+    # Has a Refresh button when in flight (live polling without WS).
+    assert "data-recwiz-rotate-refresh" in body
 
 
 def test_index_html_rotate_modal_demands_confirm_checkbox_and_reason():
