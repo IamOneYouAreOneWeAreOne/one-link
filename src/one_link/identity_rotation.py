@@ -71,11 +71,12 @@ from __future__ import annotations
 
 import contextlib
 import enum
-import hashlib
 import json
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
+
+import blake3
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -145,12 +146,18 @@ class RotationCertificate:
         )
 
 
-# Fingerprint format: SHA-256(pubkey).hex(). Matches what the rest
-# of the daemon uses for peer fingerprints (state.py + peer_rtc.py).
+# Fingerprint format: BLAKE3(pubkey).hex(). Matches identity._fingerprint
+# / fingerprint_of which the rest of the daemon (state.py, peer_rtc.py,
+# the wire-handshake layer) uses to derive peer fingerprints from
+# Ed25519 pubkeys. Using a different hash here would make the cert's
+# old_fp + new_fp never line up with the peer's stored peers.fingerprint
+# column - every rotation would silently fail the apply_certificate_to_peer
+# old_fp == current_pinned_fp check. The two-daemon integration test
+# (tests/test_rotation_integration_v021.py) catches this regression.
 def fingerprint_for_pubkey(pubkey: bytes) -> str:
     if not isinstance(pubkey, (bytes, bytearray)) or len(pubkey) != 32:
         raise ValueError("pubkey must be 32 bytes")
-    return hashlib.sha256(bytes(pubkey)).hexdigest()
+    return blake3.blake3(bytes(pubkey)).hexdigest()
 
 
 def _canonicalize_cert_body(body: dict[str, Any]) -> bytes:

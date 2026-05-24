@@ -339,9 +339,14 @@ def test_apply_allows_first_application_without_pinned_hint():
 # ── fingerprint helper ─────────────────────────────────────────────
 
 
-def test_fingerprint_matches_sha256_of_pubkey():
+def test_fingerprint_matches_blake3_of_pubkey():
+    """Rotation fingerprints must use BLAKE3 - same hash function the
+    rest of the daemon (identity._fingerprint / fingerprint_of /
+    state.peers.fingerprint) uses. The two-daemon integration test
+    catches the bug if this drifts back to SHA-256."""
+    import blake3
     pub = b"\x00" * 32
-    expected = hashlib.sha256(pub).hexdigest()
+    expected = blake3.blake3(pub).hexdigest()
     assert fingerprint_for_pubkey(pub) == expected
 
 
