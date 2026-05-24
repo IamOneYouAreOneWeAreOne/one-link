@@ -656,10 +656,160 @@ def test_restore_modal_blocks_submit_until_24_words_and_confirm():
     # Submit posts to the restore endpoint.
     submit_idx = html.find("async function _recoveryRestoreSubmit(")
     assert submit_idx > 0
-    submit_body = html[submit_idx:submit_idx + 2500]
+    # The submit handler grew when the bundle path was added; widen
+    # the inspection window so the assertions cover the full function.
+    submit_body = html[submit_idx:submit_idx + 6000]
     assert "api.recoveryRestorePhrase" in submit_body
     # After success, prompts restart.
     assert "Restart One Link" in submit_body or "recwiz-restart-card" in submit_body
+
+
+# ── restore-from-bundle (.olbak + phrase) ────────────────────────────
+
+
+def test_restore_from_bundle_round_trips(tmp_path):
+    """Encode a real .olbak from a small data dir, then restore it
+    into a fresh empty data dir and confirm every plaintext byte
+    came back."""
+    import os
+    from one_link import backup_bundle, master_seed, mnemonic, recovery_api
+    # Original install: seed + a couple of payload files.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "state.db").write_bytes(b"SQLite format 3\x00" + os.urandom(2048))
+    (src / "master.seed").write_bytes(os.urandom(32))
+    (src / "data-root-key.bin").write_bytes(os.urandom(32))
+    (src / "lockbox.salt").write_bytes(os.urandom(16))
+    seed = (src / "master.seed").read_bytes()
+    phrase = mnemonic.encode(seed)
+    bundle = backup_bundle.create_bundle(seed=seed, data_dir=src)
+
+    # Recovery target: fresh dir.
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    result = recovery_api.restore_from_bundle(
+        data_dir=dst,
+        phrase=phrase,
+        bundle_bytes=bundle,
+        delete_identity_files=False,
+        overwrite=False,
+    )
+    assert result["file_count"] > 0
+    assert "state.db" in result["written"]
+    assert (dst / "state.db").read_bytes() == (src / "state.db").read_bytes()
+    assert (dst / "master.seed").read_bytes() == (src / "master.seed").read_bytes()
+
+
+def test_restore_from_bundle_rejects_wrong_phrase(tmp_path):
+    """Decryption fails BEFORE any disk write when the supplied
+    phrase decodes to a different seed than the bundle was created
+    under."""
+    import os
+    from one_link import backup_bundle, master_seed, mnemonic, recovery_api
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "state.db").write_bytes(b"data" + os.urandom(256))
+    seed_a = os.urandom(32)
+    bundle = backup_bundle.create_bundle(seed=seed_a, data_dir=src)
+    seed_b = os.urandom(32)  # different identity entirely
+    wrong_phrase = mnemonic.encode(seed_b)
+
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    with pytest.raises(ValueError):
+        recovery_api.restore_from_bundle(
+            data_dir=dst,
+            phrase=wrong_phrase,
+            bundle_bytes=bundle,
+            delete_identity_files=False,
+            overwrite=False,
+        )
+    # Nothing was written.
+    assert not (dst / "state.db").exists()
+
+
+def test_restore_from_bundle_rejects_tampered_bytes(tmp_path):
+    """A flipped byte in the AEAD ciphertext makes open_bundle raise
+    ValueError; the restore call propagates that."""
+    import os
+    from one_link import backup_bundle, mnemonic, recovery_api
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "state.db").write_bytes(b"data" + os.urandom(256))
+    seed = os.urandom(32)
+    phrase = mnemonic.encode(seed)
+    bundle = bytearray(backup_bundle.create_bundle(seed=seed, data_dir=src))
+    # Flip a byte deep in the ciphertext (well past the header).
+    bundle[-50] ^= 0x01
+
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    with pytest.raises(ValueError):
+        recovery_api.restore_from_bundle(
+            data_dir=dst,
+            phrase=phrase,
+            bundle_bytes=bytes(bundle),
+            delete_identity_files=False,
+            overwrite=False,
+        )
+
+
+def test_restore_bundle_endpoint_registered_guarded_ratelimited():
+    from one_link.server import UIServer
+    daemon = SimpleNamespace(state=None, peer_rtc=None)
+    server = UIServer(daemon)
+    methods: set[str] = set()
+    for resource in server.app.router.resources():
+        info = resource.get_info()
+        path = info.get("path") or info.get("formatter") or ""
+        if path == "/api/v1/recovery/restore/bundle":
+            for route in resource:
+                methods.add(route.method)
+    assert "POST" in methods
+
+    src = _server_src()
+    idx = src.find('"/api/v1/recovery/restore/bundle"')
+    assert idx > 0
+    line_start = src.rfind("\n", 0, idx) + 1
+    line_end = src.find("\n", idx)
+    line = src[line_start:line_end]
+    assert "self._guarded(" in line, f"not guarded: {line!r}"
+
+    handler_idx = src.find("async def api_recovery_restore_bundle(")
+    assert handler_idx > 0
+    body = src[handler_idx:handler_idx + 5000]
+    assert "_rate_limited(" in body
+    assert '"recovery_restore_bundle"' in body
+    assert "destructive_restore_requires_confirmation" in body
+    assert "MAX_B64_LEN" in body
+
+
+def test_index_html_exposes_bundle_restore_api_method():
+    html = _index_html()
+    assert "recoveryRestoreBundle(phrase, bundleB64, force, confirmedReplace)" in html
+    assert '"/api/v1/recovery/restore/bundle"' in html
+
+
+def test_index_html_restore_modal_offers_optional_bundle_file():
+    """The restore modal must include the optional 'I also have a
+    backup file' checkbox + file input + size info, and the submit
+    handler must branch on the checkbox to choose phrase-only vs
+    bundle restore."""
+    html = _index_html()
+    # Markup pieces.
+    assert 'id="recwiz-restore-has-bundle"' in html
+    assert 'id="recwiz-restore-bundle-row"' in html
+    assert 'id="recwiz-restore-bundle-file"' in html
+    assert 'accept=".olbak"' in html
+    # Submit handler branches on wantsBundle.
+    submit_idx = html.find("async function _recoveryRestoreSubmit(")
+    assert submit_idx > 0
+    submit_body = html[submit_idx:submit_idx + 4500]
+    assert "wantsBundle" in submit_body
+    assert "api.recoveryRestoreBundle" in submit_body
+    assert "api.recoveryRestorePhrase" in submit_body
+    # FileReader helper exists.
+    assert "function _recwizFileToB64(file)" in html
 
 
 # ── helpers ──────────────────────────────────────────────────────────

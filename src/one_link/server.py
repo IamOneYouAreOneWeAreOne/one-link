@@ -1819,6 +1819,11 @@ class UIServer:
         # users on a new install can recover without a terminal.
         r.add_get("/api/v1/recovery/restore/preflight", self._guarded(self.api_recovery_restore_preflight))
         r.add_post("/api/v1/recovery/restore/phrase", self._guarded(self.api_recovery_restore_phrase))
+        # v0.21.x restore-from-bundle: phrase + .olbak file together.
+        # The bundle key derives from the seed, so the same 24 words
+        # that restore identity also unlock the chat history +
+        # settings stored in the bundle.
+        r.add_post("/api/v1/recovery/restore/bundle", self._guarded(self.api_recovery_restore_bundle))
         r.add_get("/api/status", self._guarded(self.api_status))
         # ── Living Presence Tier α-pre — Call API ────────────────
         # Browser hits these to drive the per-call state machines.
@@ -8167,6 +8172,134 @@ class UIServer:
                 "Recovery phrase accepted. Restart One Link to complete "
                 "recovery; peers paired with the original device will "
                 "recognize you again."
+            ),
+        })
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_restore_bundle(self, request: web.Request) -> web.Response:
+        """Combined phrase + .olbak file restore. Decodes the 24-word
+        phrase, decrypts the bundle (the bundle key derives from the
+        same seed via HKDF), and atomically extracts the bundle's
+        plaintext archive into the daemon's data_dir.
+
+        Body shape (JSON):
+          {
+            "phrase": "abandon ability ...",   (24 words; either string OR list)
+            "bundle_b64": "<base64 of .olbak bytes>",
+            "force": bool,
+            "confirmed_replace": bool,
+          }
+
+        Same per-token rate limit as the phrase-only restore (5 /
+        60s). Same destructive-confirmation guard. Same
+        no-store-cache headers."""
+        from one_link import recovery_api
+        from one_link.paths import data_dir
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        if self._rate_limited(
+            "recovery_restore_bundle",
+            self._client_rate_key(request),
+            limit=5,
+            window_seconds=60.0,
+        ):
+            return web.json_response(
+                {"error": "too many restore attempts; wait a minute"},
+                status=429,
+            )
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        phrase = str(data.get("phrase") or "").strip()
+        if not phrase:
+            words = data.get("words")
+            if isinstance(words, list):
+                phrase = " ".join(str(w) for w in words)
+        if not phrase:
+            return web.json_response({"error": "phrase required"}, status=400)
+        bundle_b64 = data.get("bundle_b64") or ""
+        if not bundle_b64:
+            return web.json_response({"error": "bundle_b64 required"}, status=400)
+        # Bound the payload before decoding to bound memory + decode
+        # time. .olbak bundles for the default-include set are tens
+        # of MB max; users who shipped --include-files can hit
+        # multi-GB. We cap at 256 MiB here as a safety bound that
+        # still covers realistic backups; the UI warns about larger
+        # bundles before upload.
+        MAX_B64_LEN = 256 * 1024 * 1024 * 4 // 3 + 64  # ~341 MiB b64
+        if len(bundle_b64) > MAX_B64_LEN:
+            return web.json_response(
+                {"error": "bundle exceeds 256 MiB cap"},
+                status=413,
+            )
+        import base64 as _b64
+        try:
+            bundle_bytes = _b64.b64decode(str(bundle_b64), validate=True)
+        except Exception as e:
+            return web.json_response(
+                {"error": f"bundle_b64 not valid base64: {e}"},
+                status=400,
+            )
+        force = bool(data.get("force"))
+        confirmed = bool(data.get("confirmed_replace"))
+
+        clean, evidence = recovery_api.is_install_clean_for_restore(state)
+        from one_link import master_seed
+        has_seed = master_seed.has_seed(data_dir())
+        destructive = (not clean) or has_seed
+        if destructive and not (force and confirmed):
+            return web.json_response({
+                "error": "destructive_restore_requires_confirmation",
+                "evidence": evidence,
+                "has_existing_seed": has_seed,
+                "hint": (
+                    "This install already has identity state. Set "
+                    "force=true AND confirmed_replace=true to proceed; "
+                    "the existing identity will be replaced and "
+                    "current peers will see you as a different device "
+                    "until you re-pair."
+                ),
+            }, status=409)
+
+        try:
+            result = recovery_api.restore_from_bundle(
+                data_dir=data_dir(),
+                phrase=phrase,
+                bundle_bytes=bundle_bytes,
+                delete_identity_files=destructive,
+                overwrite=destructive,
+            )
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except FileExistsError as e:
+            # extract_bundle_to_dir refuses to clobber existing
+            # files unless overwrite=True; that path means the
+            # caller's destructive flag was False but the bundle
+            # would write over state. Surface as 409 so the UI can
+            # prompt for the destructive confirmation.
+            return web.json_response({
+                "error": "bundle_would_overwrite_existing_files",
+                "hint": str(e),
+            }, status=409)
+        except Exception as exc:
+            return web.json_response({
+                "error": "bundle_restore_failed",
+                "hint": str(exc),
+            }, status=500)
+
+        resp = web.json_response({
+            "ok": True,
+            "restart_required": True,
+            "was_destructive": destructive,
+            "file_count": result.get("file_count", 0),
+            "bundle_created_ms": result.get("bundle_created_ms", 0),
+            "message": (
+                "Recovery phrase + backup accepted. Restart One Link "
+                "to complete recovery; your chat history, identity, "
+                "and settings will be back."
             ),
         })
         self._recovery_no_store_headers(resp)

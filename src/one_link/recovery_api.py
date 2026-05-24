@@ -586,6 +586,73 @@ def restore_seed_from_phrase(
     return seed
 
 
+def restore_from_bundle(
+    *,
+    data_dir: Path,
+    phrase: str,
+    bundle_bytes: bytes,
+    delete_identity_files: bool,
+    overwrite: bool,
+) -> dict[str, Any]:
+    """Combined phrase + .olbak restore. Decodes the phrase to a
+    seed, decrypts the bundle (the bundle key derives from the
+    seed via HKDF, so the same phrase that restores the identity
+    also unlocks the chat history + settings), and extracts the
+    plaintext archive into ``data_dir``.
+
+    Returns a small descriptor: which files were written, plus the
+    bundle's created_ms timestamp so the UI can confirm "restored a
+    backup from 3 days ago."
+
+    Raises ``ValueError`` on bad phrase OR bad bundle (tampered /
+    wrong key / truncated).
+    """
+    from one_link import backup_bundle, master_seed, mnemonic
+    from one_link import paths
+    seed = mnemonic.decode(phrase)
+    if len(seed) != master_seed.SEED_LEN_BYTES:
+        raise ValueError(
+            f"decoded seed has wrong length {len(seed)}; "
+            f"expected {master_seed.SEED_LEN_BYTES}"
+        )
+    # Decrypt + length-check the bundle BEFORE touching the daemon's
+    # state. If decryption fails (wrong seed, tamper) we want the
+    # error to surface before we wipe identity.key + DRK.
+    header, plaintext = backup_bundle.open_bundle(
+        seed=seed, bundle_bytes=bundle_bytes,
+    )
+    # All-or-nothing: stage extraction to a temp dir, atomically
+    # promote. `extract_bundle_to_dir` already does this internally.
+    written = backup_bundle.extract_bundle_to_dir(
+        plaintext=plaintext,
+        target_dir=Path(data_dir),
+        overwrite=overwrite,
+    )
+    # The bundle's MANIFEST always rides as the first entry; users
+    # see the real payload list in `written`, so drop the metadata
+    # row from the visible list.
+    visible = [w for w in written if w != "MANIFEST"]
+    if delete_identity_files:
+        # Wipe identity.key + DRK so the daemon's next start
+        # re-derives both from the restored seed. The bundle
+        # already contains master.seed + data-root-key.bin, but
+        # identity.key lives in config_dir() and may not be in
+        # the bundle on a freshly-recovered install.
+        for f in (paths.key_path(), Path(data_dir) / "data-root-key.bin"):
+            with contextlib.suppress(OSError):
+                Path(f).unlink()
+    # Best-effort seed wipe.
+    try:
+        return {
+            "written": visible,
+            "file_count": len(visible),
+            "bundle_created_ms": int(header.created_ms),
+        }
+    finally:
+        seed = b"\x00" * len(seed)
+        del seed
+
+
 def reset_all_recovery_state(state) -> None:
     """Wipe the per-track recovery settings. Called from the
     existing `reset` setup_action so the new state vanishes along

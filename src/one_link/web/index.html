@@ -11631,6 +11631,12 @@
         phrase, force: !!force, confirmed_replace: !!confirmedReplace,
       });
     },
+    recoveryRestoreBundle(phrase, bundleB64, force, confirmedReplace) {
+      return this.post("/api/v1/recovery/restore/bundle", {
+        phrase, bundle_b64: bundleB64,
+        force: !!force, confirmed_replace: !!confirmedReplace,
+      });
+    },
     oneHealth() { return this.get("/api/one-health"); },
     setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); },
     claimSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/claim", body); },
@@ -25221,6 +25227,17 @@
                 autocomplete="off" spellcheck="false"
                 placeholder="abandon ability about ..."></textarea>
       <p class="recwiz-feedback" id="recwiz-restore-fb"></p>
+      <div class="recwiz-card-meta" style="margin-top:14px;">
+        <label class="recwiz-confirm-row" style="cursor:pointer;">
+          <input type="checkbox" id="recwiz-restore-has-bundle" />
+          <span>I also have an encrypted backup file (.olbak) to restore.</span>
+        </label>
+        <div id="recwiz-restore-bundle-row" hidden style="margin-top:8px;">
+          <input type="file" id="recwiz-restore-bundle-file" accept=".olbak"
+                 aria-label="Encrypted backup file" />
+          <p class="recwiz-card-meta" id="recwiz-restore-bundle-info" style="margin-top:6px;"></p>
+        </div>
+      </div>
       ${dangerBlock}
       <div class="recwiz-card-actions" style="justify-content:flex-end;">
         <button type="button" class="recwiz-btn" data-recwiz-action="close-restore">Cancel</button>
@@ -25233,12 +25250,18 @@
     const fb = body.querySelector("#recwiz-restore-fb");
     const submit = body.querySelector("#recwiz-restore-submit");
     const confirmBox = body.querySelector("#recwiz-restore-confirm");
+    const hasBundleBox = body.querySelector("#recwiz-restore-has-bundle");
+    const bundleRow = body.querySelector("#recwiz-restore-bundle-row");
+    const bundleFile = body.querySelector("#recwiz-restore-bundle-file");
+    const bundleInfo = body.querySelector("#recwiz-restore-bundle-info");
     function tokenize(s) {
       return String(s || "").trim().split(/\s+/).filter(Boolean);
     }
     function check() {
       ta.classList.remove("bad");
       const tokens = tokenize(ta.value);
+      const wantsBundle = hasBundleBox.checked;
+      const hasBundleFile = bundleFile.files && bundleFile.files.length > 0;
       if (tokens.length === 0) {
         fb.className = "recwiz-feedback";
         fb.textContent = "";
@@ -25258,13 +25281,41 @@
         submit.disabled = true;
         return;
       }
+      if (wantsBundle && !hasBundleFile) {
+        fb.className = "recwiz-feedback";
+        fb.textContent = "Pick your .olbak file to continue.";
+        submit.disabled = true;
+        return;
+      }
       fb.className = "recwiz-feedback good";
-      fb.textContent = "24 words detected. Checksum verifies on submit.";
+      fb.textContent = wantsBundle
+        ? "Ready to restore identity + backup."
+        : "24 words detected. Checksum verifies on submit.";
       const okToSubmit = !dirty || (confirmBox && confirmBox.checked);
+      submit.textContent = wantsBundle
+        ? (dirty ? "Replace + restore backup" : "Restore identity + backup")
+        : (dirty ? "Replace identity" : "Restore identity");
       submit.disabled = !okToSubmit;
     }
     ta.addEventListener("input", check);
     if (confirmBox) confirmBox.addEventListener("change", check);
+    hasBundleBox.addEventListener("change", () => {
+      bundleRow.hidden = !hasBundleBox.checked;
+      if (!hasBundleBox.checked) {
+        bundleFile.value = "";
+        bundleInfo.textContent = "";
+      }
+      check();
+    });
+    bundleFile.addEventListener("change", () => {
+      const f = bundleFile.files && bundleFile.files[0];
+      if (f) {
+        bundleInfo.textContent = `${f.name} (${_recwizHumanSize(f.size)})`;
+      } else {
+        bundleInfo.textContent = "";
+      }
+      check();
+    });
     submit.addEventListener("click", () => _recoveryRestoreSubmit(dirty));
     setTimeout(() => ta.focus(), 60);
   }
@@ -25275,6 +25326,8 @@
     const ta = body.querySelector("#recwiz-restore-phrase");
     const fb = body.querySelector("#recwiz-restore-fb");
     const submit = body.querySelector("#recwiz-restore-submit");
+    const hasBundleBox = body.querySelector("#recwiz-restore-has-bundle");
+    const bundleFile = body.querySelector("#recwiz-restore-bundle-file");
     const tokens = String(ta.value || "").trim().split(/\s+/).filter(Boolean);
     if (tokens.length !== 24) {
       fb.className = "recwiz-feedback bad";
@@ -25282,12 +25335,41 @@
       ta.classList.add("bad");
       return;
     }
+    const wantsBundle = hasBundleBox && hasBundleBox.checked;
+    const file = bundleFile && bundleFile.files && bundleFile.files[0];
+    if (wantsBundle && !file) {
+      fb.className = "recwiz-feedback bad";
+      fb.textContent = "Pick your .olbak file or untick the backup option.";
+      return;
+    }
     submit.disabled = true;
     fb.className = "recwiz-feedback";
-    fb.textContent = "Verifying phrase and restoring...";
+    fb.textContent = wantsBundle
+      ? "Reading backup file..."
+      : "Verifying phrase and restoring...";
+
+    let bundleB64 = null;
+    if (wantsBundle) {
+      try {
+        bundleB64 = await _recwizFileToB64(file);
+      } catch (e) {
+        fb.className = "recwiz-feedback bad";
+        fb.textContent = `Could not read file: ${e.message || e}`;
+        submit.disabled = false;
+        return;
+      }
+      fb.textContent = "Verifying phrase, decrypting backup, restoring...";
+    }
+
     let res;
     try {
-      res = await api.recoveryRestorePhrase(tokens.join(" "), dirty, dirty);
+      if (wantsBundle) {
+        res = await api.recoveryRestoreBundle(
+          tokens.join(" "), bundleB64, dirty, dirty,
+        );
+      } else {
+        res = await api.recoveryRestorePhrase(tokens.join(" "), dirty, dirty);
+      }
     } catch (e) {
       ta.classList.add("bad");
       fb.className = "recwiz-feedback bad";
@@ -25302,21 +25384,57 @@
       submit.disabled = false;
       return;
     }
-    // Show the restart card. The daemon wrote the seed; identity
-    // reload happens on next start.
+    // Success card. Tailor copy based on whether a bundle was
+    // restored too.
+    const fromAge = wantsBundle && res.bundle_created_ms
+      ? `from ${_recwizFormatRelative(res.bundle_created_ms)}`
+      : "";
+    const successMsg = wantsBundle
+      ? `<strong>Identity + backup restored.</strong> Your recovery
+         phrase was accepted, the master seed is in place, and
+         ${res.file_count || 0} file${res.file_count === 1 ? "" : "s"}
+         were extracted from your backup ${escapeText(fromAge)}.
+         Restart One Link to complete recovery; once it comes back
+         up, your chat history, identity, and settings will be back.`
+      : `<strong>Identity restored.</strong> Your recovery phrase was
+         accepted and the master seed is in place. Restart One Link
+         to complete recovery. Once it comes back up, peers paired
+         with the original device will recognize you again.`;
     body.innerHTML = `
-      <div class="recwiz-restart-card">
-        <strong>Identity restored.</strong>
-        Your recovery phrase was accepted and the master seed is in
-        place. Restart One Link to complete recovery. Once it comes
-        back up, peers paired with the original device will recognize
-        you again.
-      </div>
+      <div class="recwiz-restart-card">${successMsg}</div>
       <div class="recwiz-card-actions" style="justify-content:flex-end;">
         <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-action="close-restore">Close</button>
       </div>
     `;
-    toast("Identity restored. Restart One Link to finish recovery.", "good", 6000);
+    toast(
+      wantsBundle
+        ? "Identity + backup restored. Restart One Link to finish."
+        : "Identity restored. Restart One Link to finish recovery.",
+      "good", 6000,
+    );
+  }
+
+  // Promise-wrap FileReader.readAsArrayBuffer so we can await the
+  // bytes + base64 them for the JSON-bodied restore endpoint. Browser
+  // btoa works on binary strings; we chunk through Uint8Array to
+  // avoid the 64KB call-stack limit on String.fromCharCode.apply.
+  function _recwizFileToB64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error || new Error("read failed"));
+      reader.onload = () => {
+        try {
+          const buf = new Uint8Array(reader.result);
+          let s = "";
+          const CHUNK = 0x8000;
+          for (let i = 0; i < buf.length; i += CHUNK) {
+            s += String.fromCharCode.apply(null, buf.subarray(i, i + CHUNK));
+          }
+          resolve(btoa(s));
+        } catch (e) { reject(e); }
+      };
+      reader.readAsArrayBuffer(file);
+    });
   }
 
   async function openOneSetupFromState() {
