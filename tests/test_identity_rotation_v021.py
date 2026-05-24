@@ -348,3 +348,229 @@ def test_fingerprint_matches_sha256_of_pubkey():
 def test_fingerprint_rejects_non_32_byte_input():
     with pytest.raises(ValueError):
         fingerprint_for_pubkey(b"\x00" * 31)
+
+
+# ── state helpers (Commit B) ────────────────────────────────────────
+
+
+def _open_state(tmp_path):
+    """Open a temp State DB for the state-helper tests. Uses the same
+    sqlite store the daemon uses; full schema migrations run."""
+    from one_link.state import State
+    return State(tmp_path / "state.db")
+
+
+def test_queue_rotation_announcement_is_idempotent_on_peer_new_fp(tmp_path):
+    """Queueing the same (peer_fp, new_fp) twice returns the same
+    row id - we don't duplicate. A retry of the queue path (e.g. UI
+    re-submission, daemon restart in mid-rotation) is a no-op."""
+    state = _open_state(tmp_path)
+    a = state.queue_rotation_announcement(
+        peer_fp="aa" * 32, old_fp="bb" * 32, new_fp="cc" * 32,
+        cert_json='{"v":1}', sig_hex="00" * 64,
+    )
+    b = state.queue_rotation_announcement(
+        peer_fp="aa" * 32, old_fp="bb" * 32, new_fp="cc" * 32,
+        cert_json='{"v":1}', sig_hex="00" * 64,
+    )
+    assert a == b
+    rows = state.list_pending_rotation_announcements()
+    assert len(rows) == 1
+
+
+def test_list_pending_rotation_announcements_filters_acked(tmp_path):
+    state = _open_state(tmp_path)
+    state.queue_rotation_announcement(
+        peer_fp="aa" * 32, old_fp="bb" * 32, new_fp="cc" * 32,
+        cert_json='{"v":1}', sig_hex="00" * 64,
+    )
+    state.queue_rotation_announcement(
+        peer_fp="dd" * 32, old_fp="bb" * 32, new_fp="cc" * 32,
+        cert_json='{"v":1}', sig_hex="00" * 64,
+    )
+    state.ack_rotation_announcement(peer_fp="aa" * 32, new_fp="cc" * 32)
+    assert len(state.list_pending_rotation_announcements()) == 1  # unacked only
+    assert len(state.list_pending_rotation_announcements(unacked_only=False)) == 2
+
+
+def test_mark_rotation_attempt_increments_counter(tmp_path):
+    state = _open_state(tmp_path)
+    row_id = state.queue_rotation_announcement(
+        peer_fp="aa" * 32, old_fp="bb" * 32, new_fp="cc" * 32,
+        cert_json='{"v":1}', sig_hex="00" * 64,
+    )
+    state.mark_rotation_attempt(row_id)
+    state.mark_rotation_attempt(row_id)
+    state.mark_rotation_attempt(row_id)
+    rows = state.list_pending_rotation_announcements()
+    assert rows[0]["attempt_count"] == 3
+    assert rows[0]["last_attempt_ms"] is not None
+
+
+def test_ack_rotation_announcement_is_idempotent(tmp_path):
+    state = _open_state(tmp_path)
+    state.queue_rotation_announcement(
+        peer_fp="aa" * 32, old_fp="bb" * 32, new_fp="cc" * 32,
+        cert_json='{"v":1}', sig_hex="00" * 64,
+    )
+    n1 = state.ack_rotation_announcement(peer_fp="aa" * 32, new_fp="cc" * 32)
+    n2 = state.ack_rotation_announcement(peer_fp="aa" * 32, new_fp="cc" * 32)
+    assert n1 == 1
+    assert n2 == 0  # already acked, no-op
+
+
+def test_rotation_announcement_summary_counts(tmp_path):
+    state = _open_state(tmp_path)
+    state.queue_rotation_announcement(
+        peer_fp="aa" * 32, old_fp="bb" * 32, new_fp="cc" * 32,
+        cert_json='{}', sig_hex="00" * 64,
+    )
+    state.queue_rotation_announcement(
+        peer_fp="dd" * 32, old_fp="bb" * 32, new_fp="cc" * 32,
+        cert_json='{}', sig_hex="00" * 64,
+    )
+    state.queue_rotation_announcement(
+        peer_fp="ee" * 32, old_fp="bb" * 32, new_fp="cc" * 32,
+        cert_json='{}', sig_hex="00" * 64,
+    )
+    state.ack_rotation_announcement(peer_fp="aa" * 32, new_fp="cc" * 32)
+    summary = state.rotation_announcement_summary()
+    assert summary == {"total": 3, "pending": 2, "acked": 1}
+
+
+# ── perform_local_rotation orchestration ────────────────────────────
+
+
+def test_perform_local_rotation_persists_new_seed_and_clears_identity(tmp_path, monkeypatch):
+    """End-to-end of the orchestration: new seed written, identity.key
+    + DRK cleared, new phrase returned, cert minted under the OLD key."""
+    from one_link import identity_rotation, master_seed, paths
+    # Layout the daemon expects: seed lives in data_dir; identity.key
+    # lives in config_dir (which paths.key_path() resolves to).
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setattr(paths, "key_path", lambda: config_dir / "identity.key")
+    # Plant an "old" identity + seed.
+    old_seed = master_seed.load_or_create_seed(data_dir)[0]
+    old_priv = master_seed.derive_identity_priv(old_seed)
+    (config_dir / "identity.key").write_bytes(b"sentinel-identity")
+    (data_dir / "data-root-key.bin").write_bytes(b"sentinel-drk")
+
+    result = identity_rotation.perform_local_rotation(
+        data_dir=data_dir,
+        old_priv=old_priv,
+        pinned_peer_fingerprints=[],
+        reason=identity_rotation.RotationReason.COMPROMISE.value,
+    )
+
+    # New phrase round-trips.
+    assert len(result.new_phrase.split()) == 24
+    # Seed file replaced.
+    seed_on_disk = master_seed.load_seed(data_dir)
+    assert seed_on_disk is not None
+    assert seed_on_disk != old_seed
+    # Identity.key + DRK gone.
+    assert not (config_dir / "identity.key").exists()
+    assert not (data_dir / "data-root-key.bin").exists()
+    # Cert verifies under the OLD pubkey (proving the cert was signed
+    # with the old private key, NOT the new one).
+    identity_rotation.verify_certificate(
+        cert=result.cert,
+        expected_old_pubkey=old_priv.public_key().public_bytes_raw(),
+    )
+    # And the cert names the NEW pubkey derived from the new seed.
+    new_priv = master_seed.derive_identity_priv(seed_on_disk)
+    expected_new_pub = new_priv.public_key().public_bytes_raw()
+    assert result.cert.new_pub_hex == expected_new_pub.hex()
+
+
+def test_perform_local_rotation_queues_per_peer_announcements(tmp_path, monkeypatch):
+    """When state is passed, one row per pinned peer is queued, and
+    the cert blob in each row reconstructs to the SAME cert
+    perform_local_rotation returned."""
+    from one_link import identity_rotation, master_seed, paths
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setattr(paths, "key_path", lambda: config_dir / "identity.key")
+    old_seed = master_seed.load_or_create_seed(data_dir)[0]
+    old_priv = master_seed.derive_identity_priv(old_seed)
+
+    state = _open_state(tmp_path)
+    peers = ["aa" * 32, "bb" * 32, "cc" * 32]
+    result = identity_rotation.perform_local_rotation(
+        data_dir=data_dir,
+        old_priv=old_priv,
+        pinned_peer_fingerprints=peers,
+        state=state,
+    )
+    assert result.queued_peer_count == 3
+    rows = state.list_pending_rotation_announcements()
+    assert {r["peer_fp"] for r in rows} == set(peers)
+    # Reconstruct cert from a row and verify it under the old pubkey.
+    sample = rows[0]
+    rebuilt = identity_rotation.RotationCertificate.from_wire_dict({
+        "cert_json": sample["cert_json"],
+        "sig_hex": sample["sig_hex"],
+    })
+    identity_rotation.verify_certificate(
+        cert=rebuilt,
+        expected_old_pubkey=old_priv.public_key().public_bytes_raw(),
+    )
+
+
+def test_perform_local_rotation_rejects_unknown_reason(tmp_path, monkeypatch):
+    from one_link import identity_rotation, master_seed, paths
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setattr(paths, "key_path", lambda: config_dir / "identity.key")
+    seed = master_seed.load_or_create_seed(data_dir)[0]
+    priv = master_seed.derive_identity_priv(seed)
+    with pytest.raises(ValueError, match="reason must be"):
+        identity_rotation.perform_local_rotation(
+            data_dir=data_dir, old_priv=priv,
+            pinned_peer_fingerprints=[], reason="trust_me",
+        )
+
+
+# ── HTTP endpoint wiring ────────────────────────────────────────────
+
+
+def test_rotate_endpoint_registered_guarded_rate_limited():
+    """Routes /api/v1/recovery/rotate{,/status} exist, both _guarded,
+    rotate has a low rate limit (security-sensitive)."""
+    from types import SimpleNamespace
+    from one_link.server import UIServer
+    daemon = SimpleNamespace(state=None, peer_rtc=None)
+    server = UIServer(daemon)
+    methods: dict[str, set[str]] = {}
+    for resource in server.app.router.resources():
+        info = resource.get_info()
+        path = info.get("path") or info.get("formatter") or ""
+        if path in ("/api/v1/recovery/rotate", "/api/v1/recovery/rotate/status"):
+            for route in resource:
+                methods.setdefault(path, set()).add(route.method)
+    assert "POST" in methods.get("/api/v1/recovery/rotate", set())
+    assert "GET" in methods.get("/api/v1/recovery/rotate/status", set())
+
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "server.py").read_text(encoding="utf-8")
+    for path in ("/api/v1/recovery/rotate", "/api/v1/recovery/rotate/status"):
+        idx = src.find(f'"{path}"')
+        assert idx > 0
+        line_start = src.rfind("\n", 0, idx) + 1
+        line_end = src.find("\n", idx)
+        line = src[line_start:line_end]
+        assert "self._guarded(" in line, f"{path} not guarded: {line!r}"
+    handler_idx = src.find("async def api_recovery_rotate(")
+    assert handler_idx > 0
+    body = src[handler_idx:handler_idx + 5000]
+    assert "_rate_limited(" in body
+    assert '"recovery_rotate"' in body
+    assert "confirmed_rotate" in body
+    assert "_recovery_no_store_headers" in body

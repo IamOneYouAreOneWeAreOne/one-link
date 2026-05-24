@@ -69,6 +69,7 @@ exact bytes the signature covers.
 """
 from __future__ import annotations
 
+import contextlib
 import enum
 import hashlib
 import json
@@ -381,3 +382,113 @@ def apply_certificate_to_peer(
         ts_ms=cert.ts_ms,
         reason=cert.reason,
     )
+
+
+# ── local rotation orchestration ────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class LocalRotationResult:
+    """What perform_local_rotation returns to the HTTP handler. The
+    handler ships ``new_phrase`` back to the UI for paper backup and
+    sets ``restart_required=True`` in the response."""
+    new_phrase: str
+    cert: RotationCertificate
+    queued_peer_count: int
+    old_fp: str
+    new_fp: str
+
+
+def perform_local_rotation(
+    *,
+    data_dir,
+    old_priv: Ed25519PrivateKey,
+    pinned_peer_fingerprints: list[str],
+    reason: str = RotationReason.SCHEDULED.value,
+    state=None,
+    ts_ms: Optional[int] = None,
+) -> LocalRotationResult:
+    """Run a complete local rotation:
+
+      1. Generate a fresh master seed (32 bytes from os CSPRNG).
+      2. Derive the new Ed25519 identity from that seed.
+      3. Mint a rotation certificate signed by the OLD private key.
+      4. Persist the new seed atomically (master_seed.store_seed).
+      5. Clear identity.key + DRK so the daemon's NEXT start
+         re-derives them from the new seed.
+      6. Queue one row per pinned peer in
+         pending_rotation_announcements (when ``state`` provided).
+      7. Encode the new seed as a 24-word BIP-39 phrase and return
+         it so the UI can prompt the user to back it up.
+
+    The CALLER is responsible for telling the user to restart the
+    daemon - we don't shut down here. We DO clear the old identity
+    files because the new daemon must derive its identity from the
+    seed; leaving stale identity.key would cause the next start to
+    keep using the OLD identity (the file wins over the seed when
+    both are present).
+
+    Crypto property: the cert is signed by ``old_priv``, which is
+    the identity the running daemon was loaded with. Once we return,
+    the seed on disk no longer matches the in-memory identity; the
+    handler MUST tell the user to restart and the running daemon
+    must NOT use the old identity to sign anything else.
+    """
+    from pathlib import Path as _Path
+    from one_link import master_seed, mnemonic
+    from one_link import paths
+    if not isinstance(old_priv, Ed25519PrivateKey):
+        raise TypeError("old_priv must be Ed25519PrivateKey")
+    if reason not in VALID_REASONS:
+        raise ValueError(f"reason must be one of {sorted(VALID_REASONS)}")
+
+    # Step 1+2: new seed + new identity.
+    new_seed = mnemonic.generate_seed()
+    new_identity = master_seed.derive_identity_priv(new_seed)
+    new_pub = new_identity.public_key().public_bytes_raw()
+
+    # Step 3: sign cert with OLD key, BEFORE replacing on-disk state.
+    cert = mint_certificate(
+        old_priv=old_priv, new_pub=new_pub, reason=reason, ts_ms=ts_ms,
+    )
+
+    # Step 4+5: persist new seed + clear identity.key + DRK.
+    # store_seed is atomic (tmp + rename); persist BEFORE clearing
+    # the old identity so a crash in the middle still leaves a
+    # bootable daemon (either the old identity wins, or the new
+    # seed wins; never both gone).
+    master_seed.store_seed(_Path(data_dir), new_seed)
+    for f in (paths.key_path(), _Path(data_dir) / "data-root-key.bin"):
+        with contextlib.suppress(OSError):
+            _Path(f).unlink()
+
+    # Best-effort seed wipe in our reference; the on-disk copy is
+    # the canonical source going forward.
+    try:
+        # Step 6: queue per-peer announcements.
+        queued = 0
+        if state is not None:
+            wire = cert.to_wire_dict()
+            for peer_fp in pinned_peer_fingerprints:
+                with contextlib.suppress(Exception):
+                    state.queue_rotation_announcement(
+                        peer_fp=peer_fp,
+                        old_fp=cert.old_fp,
+                        new_fp=cert.new_fp,
+                        cert_json=wire["cert_json"],
+                        sig_hex=wire["sig_hex"],
+                    )
+                    queued += 1
+
+        # Step 7: encode the phrase for the UI.
+        new_phrase = mnemonic.encode(new_seed)
+        return LocalRotationResult(
+            new_phrase=new_phrase,
+            cert=cert,
+            queued_peer_count=queued,
+            old_fp=cert.old_fp,
+            new_fp=cert.new_fp,
+        )
+    finally:
+        new_seed = b"\x00" * len(new_seed)
+        del new_seed

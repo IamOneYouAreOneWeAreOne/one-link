@@ -1824,6 +1824,12 @@ class UIServer:
         # that restore identity also unlock the chat history +
         # settings stored in the bundle.
         r.add_post("/api/v1/recovery/restore/bundle", self._guarded(self.api_recovery_restore_bundle))
+        # v0.21.x identity rotation: mint a fresh identity + sign a
+        # rotation certificate with the OLD key, queue per-peer
+        # announcements for delivery on next start. Peer-side
+        # acceptance + outbound delivery wire in subsequent commits.
+        r.add_post("/api/v1/recovery/rotate", self._guarded(self.api_recovery_rotate))
+        r.add_get("/api/v1/recovery/rotate/status", self._guarded(self.api_recovery_rotate_status))
         r.add_get("/api/status", self._guarded(self.api_status))
         # ── Living Presence Tier α-pre — Call API ────────────────
         # Browser hits these to drive the per-call state machines.
@@ -8301,6 +8307,151 @@ class UIServer:
                 "to complete recovery; your chat history, identity, "
                 "and settings will be back."
             ),
+        })
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_rotate(self, request: web.Request) -> web.Response:
+        """Mint a new identity, sign a rotation certificate with the
+        OLD private key, persist the new seed, clear identity.key +
+        DRK so the daemon re-derives both from the new seed on next
+        start, and queue per-peer announcements for delivery.
+
+        Per-token rate limit (3 attempts / 5min): rotation is a
+        significant security event; a stolen UI token must not be
+        able to rotate identity repeatedly to spam peers or burn
+        through key history fast.
+
+        Body:
+          {
+            "reason": "compromise" | "scheduled" | "device_lost" | "other",
+            "confirmed_rotate": true,   # required acknowledgement
+          }
+
+        Returns:
+          {
+            "ok": true,
+            "new_phrase": "...",        # 24 words for paper backup
+            "new_fp": "...",
+            "old_fp": "...",
+            "queued_peer_count": int,
+            "restart_required": true,
+          }
+        """
+        from one_link import identity_rotation
+        from one_link.paths import data_dir
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        if self._rate_limited(
+            "recovery_rotate",
+            self._client_rate_key(request),
+            limit=3,
+            window_seconds=300.0,
+        ):
+            return web.json_response(
+                {"error": "too many rotation attempts; wait a few minutes"},
+                status=429,
+            )
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        reason = str(data.get("reason") or identity_rotation.RotationReason.SCHEDULED.value)
+        if reason not in identity_rotation.VALID_REASONS:
+            return web.json_response({
+                "error": "invalid reason",
+                "valid": sorted(identity_rotation.VALID_REASONS),
+            }, status=400)
+        if not bool(data.get("confirmed_rotate")):
+            return web.json_response({
+                "error": "confirmed_rotate=true required",
+                "hint": (
+                    "Rotation replaces this device's identity. Peers "
+                    "you have paired will see a signed key-change "
+                    "announcement and update automatically; peers "
+                    "that have not been paired (no pinned key) will "
+                    "see the new key as a stranger. Set "
+                    "confirmed_rotate=true to acknowledge."
+                ),
+            }, status=409)
+
+        # Collect pinned peer fingerprints so we can queue per-peer
+        # announcements. A "pinned" peer is one set_peer_trust=pinned.
+        # Skip any peer that doesn't have a pubkey we can verify
+        # against on their side (defensive; the wire protocol commit
+        # will use this).
+        pinned_fps: list[str] = []
+        try:
+            for p in (state.list_peers() or []):
+                if getattr(p, "trust", None) == "pinned":
+                    fp = getattr(p, "fingerprint", "") or ""
+                    if fp:
+                        pinned_fps.append(fp)
+        except Exception:
+            pass
+
+        if self.daemon.me is None or self.daemon.me.private is None:
+            return web.json_response({
+                "error": "daemon has no current identity to rotate from",
+            }, status=503)
+
+        try:
+            result = identity_rotation.perform_local_rotation(
+                data_dir=data_dir(),
+                old_priv=self.daemon.me.private,
+                pinned_peer_fingerprints=pinned_fps,
+                reason=reason,
+                state=state,
+            )
+        except Exception as exc:
+            return web.json_response({
+                "error": "rotation_failed",
+                "hint": str(exc),
+            }, status=500)
+
+        resp = web.json_response({
+            "ok": True,
+            "new_phrase": result.new_phrase,
+            "new_words": result.new_phrase.split(),
+            "old_fp": result.old_fp,
+            "new_fp": result.new_fp,
+            "queued_peer_count": result.queued_peer_count,
+            "restart_required": True,
+            "message": (
+                "Identity rotated. Write down your new 24 words now, "
+                "then restart One Link. Paired peers will receive a "
+                "signed key-change announcement and update "
+                "automatically when they next contact this daemon."
+            ),
+        })
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_rotate_status(self, request: web.Request) -> web.Response:
+        """Read the rotation-announcement queue summary so the UI can
+        render 'X of Y peers acknowledged your new key'. Safe to call
+        any time, including post-restart."""
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        summary = state.rotation_announcement_summary()
+        rows = state.list_pending_rotation_announcements(unacked_only=False, limit=128)
+        resp = web.json_response({
+            "ok": True,
+            "summary": summary,
+            "rows": [
+                {
+                    "id": r["id"],
+                    "peer_fp": r["peer_fp"],
+                    "new_fp": r["new_fp"],
+                    "queued_ms": r["queued_ms"],
+                    "last_attempt_ms": r["last_attempt_ms"],
+                    "attempt_count": r["attempt_count"],
+                    "acked_ms": r["acked_ms"],
+                }
+                for r in rows
+            ],
         })
         self._recovery_no_store_headers(resp)
         return resp

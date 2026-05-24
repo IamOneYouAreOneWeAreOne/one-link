@@ -597,6 +597,7 @@ class State:
                     (20, self._migrate_v20_self_mesh_performance),
                     (21, self._migrate_v21_device_guardian),
                     (22, self._migrate_v22_transfer_status_index),
+                    (23, self._migrate_v23_rotation_announcements),
                 ]
                 for target_version, apply_fn in steps:
                     self._run_atomic_migration(
@@ -917,6 +918,47 @@ class State:
                 END
             WHERE revoked = 1 AND safety_state != 'revoked'
             """
+        )
+
+    def _migrate_v23_rotation_announcements(self, c: sqlite3.Cursor) -> None:
+        """v0.21.x identity rotation: per-peer queue of rotation
+        certificates we owe delivery + ack on.
+
+        One row per (peer, rotation cert) the local daemon wants the
+        peer to apply. The background delivery task drains rows where
+        ``acked_ms IS NULL`` and updates ``last_attempt_ms`` on each
+        send. The inbound ack handler sets ``acked_ms`` when the peer
+        confirms application, at which point the UI can shrink the
+        'X of Y peers acknowledged your new key' counter.
+
+        Cert blob is stored as the wire JSON (cert_json + sig_hex
+        glued back together) so a replay of the canonical bytes
+        through Ed25519 verify still passes. Rows survive daemon
+        restart - this is the durable queue.
+        """
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_rotation_announcements (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                peer_fp         TEXT    NOT NULL,
+                old_fp          TEXT    NOT NULL,
+                new_fp          TEXT    NOT NULL,
+                cert_json       TEXT    NOT NULL,
+                sig_hex         TEXT    NOT NULL,
+                queued_ms       INTEGER NOT NULL,
+                last_attempt_ms INTEGER,
+                attempt_count   INTEGER NOT NULL DEFAULT 0,
+                acked_ms        INTEGER
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pra_peer_unacked"
+            " ON pending_rotation_announcements(peer_fp, acked_ms)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pra_unacked"
+            " ON pending_rotation_announcements(acked_ms)"
         )
 
     def _migrate_v22_transfer_status_index(self, c: sqlite3.Cursor) -> None:
@@ -2246,6 +2288,142 @@ class State:
                 (_now_ms(), new_fingerprint),
             )
             return cur.rowcount or 0
+
+    # ─── rotation announcements (v0.21.x) ─────────────────────────────
+    # Per-peer queue of rotation certificates we owe delivery + ack on.
+    # The background delivery task drains rows where ``acked_ms IS NULL``;
+    # the inbound ack handler sets ``acked_ms`` when a peer confirms
+    # application of the cert.
+
+    def queue_rotation_announcement(
+        self,
+        *,
+        peer_fp: str,
+        old_fp: str,
+        new_fp: str,
+        cert_json: str,
+        sig_hex: str,
+        now_ms: Optional[int] = None,
+    ) -> int:
+        """Insert one row. Returns the row id. Idempotent on (peer_fp,
+        new_fp): if a row already exists for this peer + this target
+        new_fp, we don't duplicate."""
+        if now_ms is None:
+            now_ms = _now_ms()
+        with self._write_lock:
+            existing = self._conn.execute(
+                "SELECT id FROM pending_rotation_announcements"
+                " WHERE peer_fp = ? AND new_fp = ?"
+                " ORDER BY id DESC LIMIT 1",
+                (peer_fp, new_fp),
+            ).fetchone()
+            if existing is not None:
+                return int(existing["id"])
+            cur = self._conn.execute(
+                """
+                INSERT INTO pending_rotation_announcements(
+                    peer_fp, old_fp, new_fp, cert_json, sig_hex,
+                    queued_ms, last_attempt_ms, attempt_count, acked_ms
+                ) VALUES(?, ?, ?, ?, ?, ?, NULL, 0, NULL)
+                """,
+                (peer_fp, old_fp, new_fp, cert_json, sig_hex, int(now_ms)),
+            )
+            return int(cur.lastrowid or 0)
+
+    def list_pending_rotation_announcements(
+        self,
+        *,
+        peer_fp: Optional[str] = None,
+        unacked_only: bool = True,
+        limit: int = 256,
+    ) -> list[dict]:
+        """Read pending rows for the background delivery task OR the
+        UI status panel ('X of Y peers acknowledged your new key')."""
+        sql = (
+            "SELECT id, peer_fp, old_fp, new_fp, cert_json, sig_hex,"
+            " queued_ms, last_attempt_ms, attempt_count, acked_ms"
+            " FROM pending_rotation_announcements"
+        )
+        clauses: list[str] = []
+        params: list[Any] = []
+        if peer_fp is not None:
+            clauses.append("peer_fp = ?")
+            params.append(peer_fp)
+        if unacked_only:
+            clauses.append("acked_ms IS NULL")
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY queued_ms ASC, id ASC LIMIT ?"
+        params.append(int(limit))
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "peer_fp": r["peer_fp"],
+                "old_fp": r["old_fp"],
+                "new_fp": r["new_fp"],
+                "cert_json": r["cert_json"],
+                "sig_hex": r["sig_hex"],
+                "queued_ms": int(r["queued_ms"]),
+                "last_attempt_ms": int(r["last_attempt_ms"]) if r["last_attempt_ms"] is not None else None,
+                "attempt_count": int(r["attempt_count"] or 0),
+                "acked_ms": int(r["acked_ms"]) if r["acked_ms"] is not None else None,
+            }
+            for r in rows
+        ]
+
+    def mark_rotation_attempt(self, row_id: int, *, now_ms: Optional[int] = None) -> None:
+        """Background-task hook: bump attempt_count + last_attempt_ms
+        after every send try, ack or not. UI surfaces the count so an
+        unreachable peer doesn't look idle in the status panel."""
+        if now_ms is None:
+            now_ms = _now_ms()
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE pending_rotation_announcements"
+                " SET last_attempt_ms = ?, attempt_count = attempt_count + 1"
+                " WHERE id = ?",
+                (int(now_ms), int(row_id)),
+            )
+
+    def ack_rotation_announcement(
+        self,
+        *,
+        peer_fp: str,
+        new_fp: str,
+        now_ms: Optional[int] = None,
+    ) -> int:
+        """Inbound-ack handler hook: mark every unacked row for this
+        (peer_fp, new_fp) acknowledged. Returns count of rows acked.
+        Idempotent: a duplicate ack is a no-op."""
+        if now_ms is None:
+            now_ms = _now_ms()
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE pending_rotation_announcements"
+                " SET acked_ms = ?"
+                " WHERE peer_fp = ? AND new_fp = ? AND acked_ms IS NULL",
+                (int(now_ms), peer_fp, new_fp),
+            )
+            return int(cur.rowcount or 0)
+
+    def rotation_announcement_summary(self) -> dict[str, int]:
+        """Single-row counters for the UI status panel: how many
+        announcements outstanding, how many acked. Used to render
+        'X of Y peers acknowledged your new key' without pulling
+        the full row list."""
+        row = self._conn.execute(
+            "SELECT"
+            " COUNT(*)                                          AS total,"
+            " SUM(CASE WHEN acked_ms IS NULL THEN 1 ELSE 0 END) AS pending,"
+            " SUM(CASE WHEN acked_ms IS NOT NULL THEN 1 ELSE 0 END) AS acked"
+            " FROM pending_rotation_announcements"
+        ).fetchone()
+        return {
+            "total": int(row["total"] or 0),
+            "pending": int(row["pending"] or 0),
+            "acked": int(row["acked"] or 0),
+        }
 
     # ─── groups (v0.6.2) ──────────────────────────────────────────────
     # `event` is a one_link.groups.GroupEvent — we serialize via to_wire().
