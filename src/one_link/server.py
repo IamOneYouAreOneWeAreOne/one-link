@@ -1808,6 +1808,11 @@ class UIServer:
         r.add_get("/api/v1/recovery/status", self._guarded(self.api_recovery_status))
         r.add_post("/api/v1/recovery/phrase", self._guarded(self.api_recovery_phrase))
         r.add_post("/api/v1/recovery/phrase/verify", self._guarded(self.api_recovery_phrase_verify))
+        # v0.21.x: 'Test my written phrase' - non-destructive check
+        # that a user's paper backup matches their current identity.
+        # Pasted phrase never writes any state; works on installs
+        # with or without an existing master seed.
+        r.add_post("/api/v1/recovery/phrase/test", self._guarded(self.api_recovery_phrase_test))
         r.add_get("/api/v1/recovery/backup/export", self._guarded(self.api_recovery_backup_export))
         r.add_get("/api/v1/recovery/social/candidates", self._guarded(self.api_recovery_social_candidates))
         r.add_post("/api/v1/recovery/social/issue", self._guarded(self.api_recovery_social_issue))
@@ -7984,6 +7989,57 @@ class UIServer:
             "ok": True,
             "verified_at_ms": verified_at_ms,
         })
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_phrase_test(self, request: web.Request) -> web.Response:
+        """Non-destructive check: does this 24-word phrase decode
+        cleanly AND match the current install's master seed?
+
+        Same per-token rate limit as phrase verify (5 / 60s) so a
+        stolen UI token can't brute the phrase via repeated tests.
+        Mnemonic checksum still gives 1-in-256 typo protection on
+        top per attempt.
+
+        Body: {"phrase": "abandon ability..."}  OR  {"words": [...]}
+        Returns: {
+          "ok": True,
+          "valid_checksum": bool,
+          "matches_current_identity": bool,
+          "has_current_identity": bool,
+          "error": str  (only set when valid_checksum is False)
+        }
+        """
+        from one_link import recovery_api
+        from one_link.paths import data_dir
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        if self._rate_limited(
+            "recovery_phrase_test",
+            self._client_rate_key(request),
+            limit=5,
+            window_seconds=60.0,
+        ):
+            return web.json_response(
+                {"error": "too many phrase-test attempts; wait a minute"},
+                status=429,
+            )
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        phrase = str(data.get("phrase") or "").strip()
+        if not phrase:
+            words = data.get("words")
+            if isinstance(words, list):
+                phrase = " ".join(str(w) for w in words)
+        if not phrase:
+            return web.json_response({"error": "phrase required"}, status=400)
+        result = recovery_api.test_phrase_against_current_seed(
+            data_dir=data_dir(), phrase=phrase,
+        )
+        resp = web.json_response({"ok": True, **result})
         self._recovery_no_store_headers(resp)
         return resp
 

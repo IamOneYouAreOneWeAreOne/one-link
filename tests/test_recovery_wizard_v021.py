@@ -144,6 +144,113 @@ def test_verify_phrase_positions_rejects_out_of_range(tmp_path):
         )
 
 
+def test_phrase_test_returns_matches_when_phrase_matches_current_seed(tmp_path):
+    """Happy path: paste the daemon's own phrase, get matches=true."""
+    from one_link import master_seed, mnemonic, recovery_api
+    seed = master_seed.load_or_create_seed(tmp_path)[0]
+    phrase = mnemonic.encode(seed)
+    res = recovery_api.test_phrase_against_current_seed(
+        data_dir=tmp_path, phrase=phrase,
+    )
+    assert res["valid_checksum"] is True
+    assert res["has_current_identity"] is True
+    assert res["matches_current_identity"] is True
+    assert res["error"] == ""
+
+
+def test_phrase_test_returns_mismatch_for_different_valid_phrase(tmp_path):
+    """A valid 24-word phrase that decodes to a DIFFERENT seed must
+    return valid_checksum=true, matches_current_identity=false. The
+    user sees 'valid words, wrong identity' instead of 'invalid'."""
+    from one_link import master_seed, mnemonic, recovery_api
+    master_seed.load_or_create_seed(tmp_path)
+    other_seed = mnemonic.generate_seed()
+    other_phrase = mnemonic.encode(other_seed)
+    res = recovery_api.test_phrase_against_current_seed(
+        data_dir=tmp_path, phrase=other_phrase,
+    )
+    assert res["valid_checksum"] is True
+    assert res["has_current_identity"] is True
+    assert res["matches_current_identity"] is False
+
+
+def test_phrase_test_returns_invalid_on_bad_checksum(tmp_path):
+    """A typo'd phrase fails the BIP-39 checksum; matches stays
+    false and error carries the human-readable reason."""
+    from one_link import master_seed, mnemonic, recovery_api
+    master_seed.load_or_create_seed(tmp_path)
+    seed = master_seed.load_seed(tmp_path)
+    words = mnemonic.encode(seed).split()
+    words[-1] = "zebra"  # break the checksum
+    res = recovery_api.test_phrase_against_current_seed(
+        data_dir=tmp_path, phrase=" ".join(words),
+    )
+    assert res["valid_checksum"] is False
+    assert res["matches_current_identity"] is False
+    assert res["error"]
+
+
+def test_phrase_test_handles_fresh_install_without_seed(tmp_path):
+    """A daemon with no master.seed yet: any valid 24-word phrase
+    returns valid_checksum=true + has_current_identity=false, so
+    the UI can say 'valid phrase, no identity to compare against'."""
+    from one_link import mnemonic, recovery_api
+    phrase = mnemonic.encode(mnemonic.generate_seed())
+    res = recovery_api.test_phrase_against_current_seed(
+        data_dir=tmp_path, phrase=phrase,
+    )
+    assert res["valid_checksum"] is True
+    assert res["has_current_identity"] is False
+    assert res["matches_current_identity"] is False
+
+
+def test_phrase_test_endpoint_registered_guarded_ratelimited():
+    """Route exists, behind _guarded, rate-limited like phrase verify."""
+    from types import SimpleNamespace
+    from one_link.server import UIServer
+    daemon = SimpleNamespace(state=None, peer_rtc=None)
+    server = UIServer(daemon)
+    methods: set[str] = set()
+    for resource in server.app.router.resources():
+        info = resource.get_info()
+        path = info.get("path") or info.get("formatter") or ""
+        if path == "/api/v1/recovery/phrase/test":
+            for route in resource:
+                methods.add(route.method)
+    assert "POST" in methods
+
+    src = _server_src()
+    idx = src.find('"/api/v1/recovery/phrase/test"')
+    assert idx > 0
+    line_start = src.rfind("\n", 0, idx) + 1
+    line_end = src.find("\n", idx)
+    assert "self._guarded(" in src[line_start:line_end]
+
+    handler_idx = src.find("async def api_recovery_phrase_test(")
+    assert handler_idx > 0
+    body = src[handler_idx:handler_idx + 2500]
+    assert "_rate_limited(" in body
+    assert '"recovery_phrase_test"' in body
+    assert "_recovery_no_store_headers" in body
+
+
+def test_index_html_phrase_test_button_and_handler():
+    """The phrase card has a 'Test my written phrase' button that
+    opens a paste flow + posts to the new endpoint."""
+    html = _index_html()
+    assert 'recoveryPhraseTest(phrase)' in html
+    assert '"/api/v1/recovery/phrase/test"' in html
+    assert 'data-recwiz-phrase="test"' in html
+    assert 'Test my written phrase' in html
+    assert 'function _recwizPhraseStartTest()' in html
+    # UI branches on the 3 result states.
+    idx = html.find("function _recwizPhraseStartTest()")
+    body = html[idx:idx + 4500]
+    assert "matches_current_identity" in body
+    assert "valid_checksum" in body
+    assert "has_current_identity" in body
+
+
 def test_verify_phrase_positions_no_seed_raises(tmp_path):
     from one_link import recovery_api as ra
     with pytest.raises(FileNotFoundError):

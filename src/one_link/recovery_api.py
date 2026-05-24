@@ -266,6 +266,68 @@ def verify_phrase_positions(
     return (len(mismatches) == 0, mismatches)
 
 
+def test_phrase_against_current_seed(
+    *, data_dir: Path, phrase: str,
+) -> dict[str, Any]:
+    """Non-destructive 'did I write down my 24 words correctly?' check.
+
+    Decodes the phrase via mnemonic.decode (validates the BIP-39
+    checksum) and, if a master seed exists on this install,
+    compares the decoded bytes against the on-disk seed in
+    constant time. Returns a small dict the UI renders as a
+    green/amber/red status.
+
+    Result shape:
+      {
+        "valid_checksum": True iff the phrase decodes cleanly,
+        "matches_current_identity": True iff bytes equal the
+          on-disk master.seed (only meaningful when checksum is
+          valid + a seed file exists),
+        "has_current_identity": True iff master.seed exists on
+          disk (False on a fresh install with no identity yet),
+        "error": short human-readable message on checksum failure,
+      }
+
+    Does NOT write any state. Does NOT touch identity.key or DRK.
+    Safe to call any number of times.
+    """
+    from one_link import master_seed, mnemonic
+    import secrets as _secrets
+    out: dict[str, Any] = {
+        "valid_checksum": False,
+        "matches_current_identity": False,
+        "has_current_identity": False,
+        "error": "",
+    }
+    try:
+        candidate = mnemonic.decode(phrase)
+    except (ValueError, TypeError) as e:
+        out["error"] = str(e)
+        return out
+    out["valid_checksum"] = True
+    try:
+        current = master_seed.load_seed(Path(data_dir))
+    except Exception:
+        current = None
+    if current is None:
+        return out
+    out["has_current_identity"] = True
+    # secrets.compare_digest is constant-time-ish; the bytes
+    # involved are 32 each, and Python's eq would short-circuit on
+    # the first differing byte. compare_digest doesn't.
+    try:
+        out["matches_current_identity"] = _secrets.compare_digest(
+            bytes(current), bytes(candidate),
+        )
+    finally:
+        # Best-effort wipe of the candidate seed we just decoded.
+        candidate = b"\x00" * len(candidate)
+        current = b"\x00" * len(current)
+        del candidate
+        del current
+    return out
+
+
 def mark_phrase_verified(state, now_ms: Optional[int] = None) -> int:
     """Record that the user successfully verified the phrase."""
     if now_ms is None:

@@ -11635,6 +11635,12 @@
     recoveryPhraseVerify(indices, words) {
       return this.post("/api/v1/recovery/phrase/verify", { indices, words });
     },
+    // Non-destructive 'did I write the phrase down correctly?'
+    // check. Decodes the phrase + compares to the current seed
+    // without writing any state.
+    recoveryPhraseTest(phrase) {
+      return this.post("/api/v1/recovery/phrase/test", { phrase });
+    },
     recoverySocialCandidates() { return this.get("/api/v1/recovery/social/candidates"); },
     recoverySocialIssue(guardians, threshold_k) {
       return this.post("/api/v1/recovery/social/issue", { guardians, threshold_k });
@@ -24751,6 +24757,7 @@
           ${ready ? "Show again" : "Show my 24 words"}
         </button>
         ${ready ? `<button type="button" class="recwiz-btn" data-recwiz-phrase="verify">Re-verify</button>` : ""}
+        <button type="button" class="recwiz-btn" data-recwiz-phrase="test">Test my written phrase</button>
       </div>
       <div class="recwiz-card-body" hidden></div>
     `;
@@ -24758,6 +24765,90 @@
       .addEventListener("click", () => _recwizPhraseShow());
     const reBtn = card.querySelector('[data-recwiz-phrase="verify"]');
     if (reBtn) reBtn.addEventListener("click", () => _recwizPhraseShow());
+    card.querySelector('[data-recwiz-phrase="test"]')
+      .addEventListener("click", () => _recwizPhraseStartTest());
+  }
+
+  // 'Test my written phrase' — non-destructive verify that the paper
+  // backup matches this install's identity. The phrase pastes into a
+  // textarea, posts to /api/v1/recovery/phrase/test, and renders a
+  // green/amber/red status based on (valid_checksum + matches).
+  function _recwizPhraseStartTest() {
+    const card = document.getElementById("recwiz-track-phrase");
+    const body = card.querySelector(".recwiz-card-body");
+    body.hidden = false;
+    card.classList.add("open");
+    body.innerHTML = `
+      <p class="recwiz-card-desc">
+        Paste your 24 words below to check the paper backup. Nothing
+        is written; the phrase never leaves this device.
+      </p>
+      <textarea class="recwiz-phrase-input" id="recwiz-phrase-test-input"
+                aria-label="24 word recovery phrase to test"
+                autocomplete="off" spellcheck="false"
+                placeholder="abandon ability about ..."></textarea>
+      <p class="recwiz-feedback" id="recwiz-phrase-test-fb"></p>
+      <div class="recwiz-card-actions">
+        <button type="button" class="recwiz-btn" data-recwiz-phrase="test-hide">Hide</button>
+        <button type="button" class="recwiz-btn recwiz-btn-primary" id="recwiz-phrase-test-submit" disabled>
+          Check phrase
+        </button>
+      </div>
+    `;
+    const ta = body.querySelector("#recwiz-phrase-test-input");
+    const submit = body.querySelector("#recwiz-phrase-test-submit");
+    const fb = body.querySelector("#recwiz-phrase-test-fb");
+    ta.addEventListener("input", () => {
+      const tokens = String(ta.value || "").trim().split(/\s+/).filter(Boolean);
+      submit.disabled = tokens.length < 24;
+      if (tokens.length === 0) {
+        fb.className = "recwiz-feedback";
+        fb.textContent = "";
+      } else if (tokens.length < 24) {
+        fb.className = "recwiz-feedback";
+        fb.textContent = `${tokens.length} of 24 words.`;
+      } else {
+        fb.className = "recwiz-feedback";
+        fb.textContent = "Ready to check.";
+      }
+    });
+    body.querySelector('[data-recwiz-phrase="test-hide"]')
+      .addEventListener("click", () => {
+        body.hidden = true; card.classList.remove("open"); body.innerHTML = "";
+      });
+    submit.addEventListener("click", async () => {
+      submit.disabled = true;
+      fb.className = "recwiz-feedback";
+      fb.textContent = "Checking...";
+      let res;
+      try {
+        res = await api.recoveryPhraseTest(ta.value.trim());
+      } catch (e) {
+        fb.className = "recwiz-feedback bad";
+        fb.textContent = errorToastBody(e) || "Check failed.";
+        submit.disabled = false;
+        return;
+      }
+      if (!res.valid_checksum) {
+        fb.className = "recwiz-feedback bad";
+        fb.textContent = `Not a valid 24-word phrase: ${res.error || "checksum failed"}.`;
+        submit.disabled = false;
+        return;
+      }
+      if (!res.has_current_identity) {
+        fb.className = "recwiz-feedback good";
+        fb.textContent = "Valid 24-word phrase. No current identity on this install to compare against.";
+      } else if (res.matches_current_identity) {
+        fb.className = "recwiz-feedback good";
+        fb.textContent = "Valid phrase and it matches this device's identity. Your paper backup is correct.";
+      } else {
+        fb.className = "recwiz-feedback";
+        fb.style.color = "#ffc400";
+        fb.textContent = "Valid 24-word phrase, but it does NOT match this device's identity. Check the paper against the phrase shown in the wizard.";
+      }
+      submit.disabled = false;
+    });
+    setTimeout(() => ta.focus(), 60);
   }
 
   async function _recwizPhraseShow() {
