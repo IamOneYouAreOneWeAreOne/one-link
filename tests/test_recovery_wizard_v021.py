@@ -862,6 +862,66 @@ def test_one_health_score_rewards_per_track_recovery_depth():
     assert '"tracks_ready"' in body
 
 
+def test_auth_failed_help_page_is_friendly_html_not_plain_text():
+    """When a user lands with a bad ?t= token, the daemon used to
+    respond with plain 'unauthorized' which left them staring at a
+    useless white page. Phase G a11y + Reach: the fallback now
+    renders a friendly HTML page with plain-English instructions
+    on what happened + how to recover."""
+    src = _server_src()
+    idx = src.find("def _auth_failed_help_page(")
+    assert idx > 0
+    body = src[idx:idx + 4500]
+    # Page covers what happened in plain language.
+    assert "could not authenticate" in body
+    # Names concrete recovery actions.
+    assert "system tray" in body
+    assert "re-launch" in body
+    # No-script / locked-down CSP because the request is untrusted.
+    # The page itself sets no cookies; just instructions.
+    assert "stale_token" in body
+    # The 401-fallback branch in the index handler routes browser
+    # navigations (Accept: text/html) to this page instead of
+    # plain text.
+    idx_branch = src.find("accept_html")
+    assert idx_branch > 0
+    branch_body = src[idx_branch:idx_branch + 800]
+    assert "_auth_failed_help_page" in branch_body
+    assert 'status=401' in branch_body
+    assert 'content_type="text/html"' in branch_body
+
+
+def test_recovery_modals_have_focus_management():
+    """Phase G a11y: every recovery modal must capture the trigger
+    element on open, move focus to the first interactive element
+    inside the modal pane, and return focus to the trigger on
+    close. Without these, keyboard + screen-reader users lose
+    their place every time a modal opens or closes."""
+    html = _index_html()
+    # Helpers exist + are well-named.
+    assert "function _recwizCaptureFocus(modal)" in html
+    assert "function _recwizSetInitialFocus(modal)" in html
+    assert "function _recwizReturnFocus(modal)" in html
+    # Wizard open path captures focus + sets initial; close path returns.
+    wiz_open = html[html.find("async function _showRecoveryWizard()"):html.find("async function _showRecoveryWizard()") + 600]
+    assert "_recwizCaptureFocus(modal)" in wiz_open
+    assert "_recwizSetInitialFocus(modal)" in wiz_open
+    wiz_close = html[html.find("function _recwizClose()"):html.find("function _recwizClose()") + 400]
+    assert "_recwizReturnFocus(modal)" in wiz_close
+    # Restore modal: same pattern.
+    restore_open = html[html.find("async function openRecoveryRestoreModal()"):html.find("async function openRecoveryRestoreModal()") + 1500]
+    assert "_recwizCaptureFocus(modal)" in restore_open
+    assert "_recwizSetInitialFocus(modal)" in restore_open
+    restore_close = html[html.find("function _closeRecoveryRestoreModal()"):html.find("function _closeRecoveryRestoreModal()") + 400]
+    assert "_recwizReturnFocus(modal)" in restore_close
+    # Rotate modal: same pattern.
+    rotate_open = html[html.find("async function openRotationModal()"):html.find("async function openRotationModal()") + 800]
+    assert "_recwizCaptureFocus(modal)" in rotate_open
+    assert "_recwizSetInitialFocus(modal)" in rotate_open
+    rotate_close = html[html.find("function _closeRotationModal()"):html.find("function _closeRotationModal()") + 400]
+    assert "_recwizReturnFocus(modal)" in rotate_close
+
+
 def test_recovery_wizard_each_card_has_plain_english_help_disclosure():
     """Phase D plain-English docs: every card in the recovery wizard
     must have a 'How does this work?' disclosure explaining what

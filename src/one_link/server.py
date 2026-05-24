@@ -2380,6 +2380,27 @@ class UIServer:
             # document navigations as recoverable, but keep API/subresource
             # requests locked down so the token gate remains meaningful.
             if not self._is_local_document_navigation(request):
+                # Browser-friendly help instead of plain 'unauthorized'
+                # when this looks at all like a browser navigation
+                # (Accept includes text/html). Strict API callers (no
+                # text/html in Accept) still get the bare 401 text so
+                # automated tools see a clear failure.
+                accept_html = (
+                    "text/html" in (request.headers.get("Accept") or "").lower()
+                )
+                if accept_html:
+                    page = self._auth_failed_help_page(reason="stale_token")
+                    resp = web.Response(text=page, status=401, content_type="text/html", charset="utf-8")
+                    resp.headers["Cache-Control"] = "no-store"
+                    resp.headers["Referrer-Policy"] = "no-referrer"
+                    resp.headers["Content-Security-Policy"] = (
+                        "default-src 'none'; "
+                        "style-src 'unsafe-inline'; "
+                        "base-uri 'none'; "
+                        "frame-ancestors 'none'; "
+                        "form-action 'none'"
+                    )
+                    return resp
                 return web.Response(status=401, text="unauthorized")
             html = self._stale_session_recovery_page()
             resp = web.Response(text=html, content_type="text/html", charset="utf-8")
@@ -2513,6 +2534,60 @@ class UIServer:
             max_age=86400,
             path="/",
         )
+
+    @staticmethod
+    def _auth_failed_help_page(*, reason: str = "stale_token") -> str:
+        """v0.21.x: friendly HTML for the auth-failed fallback path.
+        Plain 'unauthorized' text leaves users staring at a useless
+        white page. This page explains what happened + names the
+        recovery actions in plain language. No script, no fetches,
+        no cookies set (this path is for cases where we DON'T trust
+        the request enough to mint a session); just instructions."""
+        reason_copy = {
+            "stale_token": (
+                "The link you used has an old or invalid access token. "
+                "One Link generates a fresh token every time the daemon "
+                "starts, so an old browser tab or a hand-typed URL will "
+                "not work."
+            ),
+        }.get(reason, "Access to this One Link daemon was refused.")
+        return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>One Link &mdash; access denied</title>
+  <style>
+    html,body{{height:100%;margin:0;background:#080910;color:#f8f8ff;font-family:system-ui,-apple-system,Segoe UI,sans-serif}}
+    body{{display:grid;place-items:center;padding:20px;box-sizing:border-box}}
+    main{{width:min(540px,100%);padding:32px;border:1px solid #2b2f3d;border-radius:18px;background:#11131c;box-shadow:0 20px 80px rgba(0,0,0,.45)}}
+    h1{{font-size:22px;margin:0 0 12px;color:#fff}}
+    p{{margin:0 0 12px;color:#c8ccda;line-height:1.55;font-size:14px}}
+    ol{{margin:12px 0 0;padding-left:22px;color:#c8ccda;line-height:1.6;font-size:14px}}
+    li{{margin-bottom:6px}}
+    code{{background:#1a1d2a;padding:1px 6px;border-radius:4px;font-size:13px}}
+    .pill{{display:inline-block;padding:3px 10px;border-radius:999px;background:rgba(229,150,55,.18);color:#e59637;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:14px}}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="pill">Access denied</div>
+    <h1>One Link could not authenticate this tab</h1>
+    <p>{reason_copy}</p>
+    <p><strong>To get back in:</strong></p>
+    <ol>
+      <li>If One Link is running in your system tray, click the tray icon and pick &ldquo;Open&rdquo; &mdash; it will open a fresh tab with the current token.</li>
+      <li>Otherwise close this tab and re-launch One Link from your launcher / app icon.</li>
+      <li>If you started the daemon from a terminal, the launch log printed an <code>open:</code> line with the right URL &mdash; copy that.</li>
+    </ol>
+    <p style="margin-top:18px;color:#7d8194;font-size:12px">
+      One Link uses per-session tokens so a leaked URL goes stale
+      automatically the next time the daemon restarts. That is why
+      this happens.
+    </p>
+  </main>
+</body>
+</html>"""
 
     @staticmethod
     def _stale_session_recovery_page() -> str:
