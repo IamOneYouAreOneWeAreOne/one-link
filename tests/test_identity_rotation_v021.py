@@ -667,6 +667,256 @@ def test_transition_peer_fingerprint_rejects_same_fp_or_bad_input(tmp_path):
         )
 
 
+# ── wire protocol round-trip (Commit C-wire) ────────────────────────
+
+
+def test_end_to_end_cert_round_trip_through_state(tmp_path):
+    """Full simulated round-trip: sender mints cert under OLD key,
+    receiver looks up its pinned OLD pubkey, verifies cert, applies
+    transition via state.transition_peer_fingerprint. After the
+    round-trip the receiver's peer state has migrated from old_fp
+    to new_fp with all per-peer fields preserved."""
+    from one_link import identity_rotation
+    from one_link.state import State
+    # Sender's keys.
+    sender_old = Ed25519PrivateKey.generate()
+    sender_new_pub = Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+    sender_old_pub = sender_old.public_key().public_bytes_raw()
+    old_fp = identity_rotation.fingerprint_for_pubkey(sender_old_pub)
+    new_fp = identity_rotation.fingerprint_for_pubkey(sender_new_pub)
+
+    # Receiver state: pin the sender's OLD identity with rich per-peer state.
+    receiver = State(tmp_path / "receiver.db")
+    receiver.upsert_peer(
+        fingerprint=old_fp, short_id="snd", pubkey=sender_old_pub, hostname="sender.lan",
+    )
+    receiver.set_peer_trust(old_fp, "pinned")
+    receiver.set_peer_profile(old_fp, local_alias="My friend")
+    receiver.set_peer_verified(old_fp, method="sas-digits", note="met IRL")
+
+    # Sender mints + ships the cert as a wire dict.
+    cert = identity_rotation.mint_certificate(
+        old_priv=sender_old, new_pub=sender_new_pub,
+        reason=identity_rotation.RotationReason.SCHEDULED.value,
+    )
+    wire = cert.to_wire_dict()
+
+    # Receiver side: parse + verify + apply.
+    rebuilt = identity_rotation.RotationCertificate.from_wire_dict(wire)
+    pinned = receiver.get_peer(rebuilt.old_fp)
+    assert pinned is not None
+    applied = identity_rotation.apply_certificate_to_peer(
+        cert=rebuilt,
+        expected_old_pubkey=bytes(pinned.pubkey),
+        current_pinned_fp=pinned.fingerprint,
+    )
+    transitioned = receiver.transition_peer_fingerprint(
+        old_fp=applied.old_fp,
+        new_fp=applied.new_fp,
+        new_pubkey=applied.new_pubkey,
+    )
+    assert transitioned is True
+
+    # After round-trip: receiver knows the sender as new_fp,
+    # all per-peer state preserved.
+    migrated = receiver.get_peer(new_fp)
+    assert migrated is not None
+    assert migrated.pubkey == sender_new_pub
+    assert migrated.trust == "pinned"
+    assert migrated.local_alias == "My friend"
+    assert migrated.verified_method == "sas-digits"
+    assert receiver.get_peer(old_fp) is None
+
+
+def test_wire_dispatcher_registers_rotation_cert_branches():
+    """The dispatcher in daemon._on_peer_message must route both
+    ROTATION_CERT and ROTATION_CERT_ACK. Source-text gate so a
+    refactor that drops either branch surfaces as a test failure."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "daemon.py").read_text(encoding="utf-8")
+    # Both wire-type branches present.
+    assert 'elif t == "ROTATION_CERT":' in src
+    assert 'elif t == "ROTATION_CERT_ACK":' in src
+    assert "_handle_rotation_cert" in src
+    assert "_handle_rotation_cert_ack" in src
+    # Opportunistic-delivery hook fires at the end of CAPS.
+    assert "_drain_pending_rotation_certs_to" in src
+    # ROTATION_CERT_ACK carries the new_fp so the sender can find
+    # the right pending row to mark.
+    assert '"ROTATION_CERT_ACK"' in src
+
+
+def test_handle_rotation_cert_silent_drops_unknown_old_fp(tmp_path):
+    """If the receiver has no pinned record for cert.old_fp, the cert
+    isn't ours to apply - silent drop. The receiver state is not
+    modified; no exception leaks."""
+    import asyncio
+    from types import SimpleNamespace
+    from one_link import identity_rotation
+    from one_link.state import State
+
+    sender_old = Ed25519PrivateKey.generate()
+    sender_new = Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+    cert = identity_rotation.mint_certificate(old_priv=sender_old, new_pub=sender_new)
+
+    receiver = State(tmp_path / "r.db")
+    # No upsert_peer for cert.old_fp - the receiver doesn't know
+    # this sender's old identity.
+
+    # Build a minimal Daemon stub that has just the methods
+    # _handle_rotation_cert touches.
+    from one_link.daemon import Daemon
+    sent: list[bytes] = []
+
+    class _Chan:
+        async def send(self, frame): sent.append(frame)
+    daemon = Daemon.__new__(Daemon)
+    daemon.state = receiver
+    daemon.ui_server = None
+    daemon.me = SimpleNamespace(short_id="me")
+
+    asyncio.run(daemon._handle_rotation_cert(
+        _Chan(),
+        {"cert": cert.to_wire_dict(), "id": "x"},
+        peer_fp="ff" * 32,
+    ))
+    # No state mutation; no ack sent (silent drop on unknown old_fp).
+    assert receiver.get_peer(cert.old_fp) is None
+    assert receiver.get_peer(cert.new_fp) is None
+    assert sent == []
+
+
+def test_handle_rotation_cert_applies_and_acks_when_old_fp_pinned(tmp_path):
+    """Happy path through the inbound handler: cert verifies, state
+    transitions, ack is sent back to the sender."""
+    import asyncio
+    from types import SimpleNamespace
+    from one_link import identity_rotation
+    from one_link.state import State
+
+    sender_old = Ed25519PrivateKey.generate()
+    sender_new_pub = Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+    old_fp = identity_rotation.fingerprint_for_pubkey(
+        sender_old.public_key().public_bytes_raw(),
+    )
+    new_fp = identity_rotation.fingerprint_for_pubkey(sender_new_pub)
+    cert = identity_rotation.mint_certificate(
+        old_priv=sender_old, new_pub=sender_new_pub,
+    )
+
+    receiver = State(tmp_path / "r.db")
+    receiver.upsert_peer(
+        fingerprint=old_fp, short_id="snd",
+        pubkey=sender_old.public_key().public_bytes_raw(),
+        hostname="snd.lan",
+    )
+    receiver.set_peer_trust(old_fp, "pinned")
+
+    from one_link.daemon import Daemon
+    sent: list[dict] = []
+
+    class _Chan:
+        async def send(self, frame):
+            # Parse the encoded frame so the test can inspect it.
+            from one_link.wire import decode_msg
+            sent.append(decode_msg(frame))
+
+    daemon = Daemon.__new__(Daemon)
+    daemon.state = receiver
+    daemon.ui_server = None
+    daemon.me = SimpleNamespace(short_id="me")
+
+    asyncio.run(daemon._handle_rotation_cert(
+        _Chan(),
+        {"cert": cert.to_wire_dict(), "id": "x"},
+        peer_fp=new_fp,  # channel handshake gave us new identity
+    ))
+    # Transition applied.
+    assert receiver.get_peer(old_fp) is None
+    assert receiver.get_peer(new_fp) is not None
+    assert receiver.get_peer(new_fp).trust == "pinned"
+    # Ack frame emitted with the new_fp the receiver just pinned.
+    assert len(sent) == 1
+    ack = sent[0]
+    assert ack.get("t") == "ROTATION_CERT_ACK"
+    assert ack.get("new_fp") == new_fp
+    assert ack.get("of") == "x"
+
+
+def test_handle_rotation_cert_ack_marks_queue_row_acked(tmp_path):
+    """Sender-side ACK handler: receiving ROTATION_CERT_ACK from a
+    peer must mark the matching pending_rotation_announcements row
+    acknowledged so the drain doesn't re-send."""
+    import asyncio
+    from types import SimpleNamespace
+    from one_link.state import State
+
+    sender_state = State(tmp_path / "s.db")
+    peer_fp = "aa" * 32
+    sender_state.queue_rotation_announcement(
+        peer_fp=peer_fp, old_fp="bb" * 32, new_fp="cc" * 32,
+        cert_json='{}', sig_hex="00" * 64,
+    )
+
+    from one_link.daemon import Daemon
+
+    class _Chan:
+        async def send(self, frame): pass
+
+    daemon = Daemon.__new__(Daemon)
+    daemon.state = sender_state
+    daemon.ui_server = None
+
+    asyncio.run(daemon._handle_rotation_cert_ack(
+        _Chan(),
+        {"new_fp": "cc" * 32, "of": "x"},
+        peer_fp=peer_fp,
+    ))
+    # Row is acked - no longer in the unacked list.
+    assert sender_state.list_pending_rotation_announcements(peer_fp=peer_fp) == []
+    # But still in the all-rows list, with acked_ms set.
+    all_rows = sender_state.list_pending_rotation_announcements(
+        peer_fp=peer_fp, unacked_only=False,
+    )
+    assert len(all_rows) == 1
+    assert all_rows[0]["acked_ms"] is not None
+
+
+def test_drain_sends_one_cert_per_pending_row(tmp_path):
+    """The opportunistic-delivery helper sends one ROTATION_CERT
+    frame per unacked queue row + bumps attempt_count on each."""
+    import asyncio
+    from types import SimpleNamespace
+    from one_link.state import State
+
+    state = State(tmp_path / "s.db")
+    peer_fp = "aa" * 32
+    state.queue_rotation_announcement(
+        peer_fp=peer_fp, old_fp="bb" * 32, new_fp="cc" * 32,
+        cert_json='{"v":1}', sig_hex="00" * 64,
+    )
+
+    from one_link.daemon import Daemon
+    from one_link.wire import decode_msg
+    sent: list[dict] = []
+
+    class _Chan:
+        async def send(self, frame): sent.append(decode_msg(frame))
+
+    daemon = Daemon.__new__(Daemon)
+    daemon.state = state
+    daemon.ui_server = None
+    daemon.me = SimpleNamespace(short_id="me")
+
+    asyncio.run(daemon._drain_pending_rotation_certs_to(_Chan(), peer_fp))
+    assert len(sent) == 1
+    assert sent[0].get("t") == "ROTATION_CERT"
+    assert sent[0].get("new_fp") == "cc" * 32
+    # Attempt counter bumped.
+    rows = state.list_pending_rotation_announcements(peer_fp=peer_fp)
+    assert rows[0]["attempt_count"] == 1
+
+
 def test_rotate_endpoint_registered_guarded_rate_limited():
     """Routes /api/v1/recovery/rotate{,/status} exist, both _guarded,
     rotate has a low rate limit (security-sensitive)."""

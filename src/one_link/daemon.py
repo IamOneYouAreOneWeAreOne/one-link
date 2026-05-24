@@ -2899,6 +2899,164 @@ class Daemon:
             "ACK", self.me.short_id, of=msg.get("id"), ok=True,
         )))
 
+    # ─── identity rotation wire handlers (v0.21.x) ────────────────────
+
+    async def _handle_rotation_cert(
+        self, channel: ch.Channel, msg: dict, peer_fp: str,
+    ) -> None:
+        """Inbound ROTATION_CERT: a peer presents proof that the
+        holder of its OLD identity authorized the new one. If the
+        signature verifies under the OLD pinned pubkey, atomically
+        migrate our peer record so all per-peer state (alias, mute,
+        dm_ttl, trust, verified) AND chat history follow the rotated
+        identity. Send ROTATION_CERT_ACK with the new fingerprint so
+        the sender can drop its queue row.
+
+        Silent-drop on any verification failure (cert malformed,
+        signature bad, old_fp unknown, etc.) - the v0.7.8 hostname-
+        key-change detection layer still runs and will raise the
+        manual-confirm warning for a key change that arrives WITHOUT
+        a valid cert. That keeps the existing safety net intact for
+        the spoof scenarios rotation is meant to harden against.
+        """
+        if self.state is None:
+            return
+        from one_link import identity_rotation
+        wire = msg.get("cert") if isinstance(msg.get("cert"), dict) else None
+        if wire is None:
+            log.debug("ROTATION_CERT from %s missing 'cert' dict", peer_fp[:8])
+            return
+        try:
+            cert = identity_rotation.RotationCertificate.from_wire_dict(wire)
+        except ValueError as e:
+            log.info("ROTATION_CERT from %s rejected: %s", peer_fp[:8], e)
+            return
+        # Look up the pinned pubkey for the OLD identity the cert
+        # is rotating from. If we never knew this peer at old_fp,
+        # we can't verify - the rotation isn't ours to apply.
+        old_peer = self.state.get_peer(cert.old_fp)
+        if old_peer is None:
+            log.info(
+                "ROTATION_CERT from %s targets unknown old_fp %s",
+                peer_fp[:8], cert.old_fp[:8],
+            )
+            return
+        try:
+            applied = identity_rotation.apply_certificate_to_peer(
+                cert=cert,
+                expected_old_pubkey=bytes(old_peer.pubkey),
+                current_pinned_fp=cert.old_fp,
+            )
+        except identity_rotation.CertVerifyError as e:
+            log.warning(
+                "ROTATION_CERT verify failed from %s: %s",
+                peer_fp[:8], e,
+            )
+            return
+        try:
+            self.state.transition_peer_fingerprint(
+                old_fp=applied.old_fp,
+                new_fp=applied.new_fp,
+                new_pubkey=applied.new_pubkey,
+            )
+        except Exception as e:
+            log.warning(
+                "ROTATION_CERT transition failed from %s: %s",
+                peer_fp[:8], e,
+            )
+            return
+        log.info(
+            "ROTATION_CERT applied: %s -> %s (reason=%s)",
+            applied.old_fp[:8], applied.new_fp[:8], applied.reason,
+        )
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "peer_rotated",
+                    "old_fingerprint": applied.old_fp,
+                    "new_fingerprint": applied.new_fp,
+                    "reason": applied.reason,
+                    "ts_ms": applied.ts_ms,
+                })
+                self.ui_server.broadcast({"type": "peers_changed"})
+        # Ack so the sender can drop its queue row.
+        with contextlib.suppress(Exception):
+            await channel.send(encode_msg(make_msg(
+                "ROTATION_CERT_ACK", self.me.short_id,
+                of=msg.get("id"),
+                new_fp=applied.new_fp,
+                ok=True,
+            )))
+
+    async def _handle_rotation_cert_ack(
+        self, channel: ch.Channel, msg: dict, peer_fp: str,
+    ) -> None:
+        """Inbound ROTATION_CERT_ACK: the peer confirmed application
+        of the cert we sent them. Drop the queue row so we don't
+        re-send on the next channel-establishment."""
+        if self.state is None:
+            return
+        new_fp = msg.get("new_fp")
+        if not isinstance(new_fp, str) or len(new_fp) != 64:
+            return
+        try:
+            n = self.state.ack_rotation_announcement(
+                peer_fp=peer_fp, new_fp=new_fp,
+            )
+        except Exception as e:
+            log.warning("ROTATION_CERT_ACK from %s failed: %s", peer_fp[:8], e)
+            return
+        if n > 0:
+            log.info(
+                "rotation announcement acked by %s (new_fp=%s)",
+                peer_fp[:8], new_fp[:8],
+            )
+            if self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "rotation_announcement_acked",
+                        "peer_fp": peer_fp,
+                        "new_fp": new_fp,
+                    })
+
+    async def _drain_pending_rotation_certs_to(
+        self, channel: ch.Channel, peer_fp: str,
+    ) -> None:
+        """Opportunistic delivery: if we have rotation certs queued
+        for this peer, send them now while the channel is live.
+        Called from the CAPS handler so we know the channel is ready
+        for app-level frames.
+
+        Safe to call repeatedly - already-acked rows are skipped by
+        the unacked_only filter; unacked rows just get re-sent with
+        an attempt-count bump."""
+        if self.state is None:
+            return
+        try:
+            rows = self.state.list_pending_rotation_announcements(
+                peer_fp=peer_fp, unacked_only=True, limit=4,
+            )
+        except Exception:
+            return
+        for row in rows:
+            try:
+                await channel.send(encode_msg(make_msg(
+                    "ROTATION_CERT", self.me.short_id,
+                    cert={
+                        "cert_json": row["cert_json"],
+                        "sig_hex": row["sig_hex"],
+                    },
+                    old_fp=row["old_fp"],
+                    new_fp=row["new_fp"],
+                )))
+                self.state.mark_rotation_attempt(row["id"])
+            except Exception as e:
+                log.debug(
+                    "rotation cert send to %s failed: %s",
+                    peer_fp[:8], e,
+                )
+                break
+
     async def flush_call_api_response(self, response):
         """Side-effect step for a CallAPI / CallManager output.
 
@@ -4528,6 +4686,14 @@ class Daemon:
                 peer_sid, channel.peer_caps["protocol"],
                 channel.peer_caps["features"],
             )
+            # v0.21.x identity rotation: opportunistic delivery of
+            # any rotation certs we owe this peer. The channel is
+            # fully set up at this point (CAPS exchange done) so
+            # ROTATION_CERT frames will be processed by the peer's
+            # dispatcher. Safe to call every CAPS - already-acked
+            # certs are skipped.
+            with contextlib.suppress(Exception):
+                await self._drain_pending_rotation_certs_to(channel, peer_fp)
             return  # no ACK needed
         if t == "PRESENCE":
             # v0.10.4: peer reported a status change. No ACK needed.
@@ -5829,6 +5995,15 @@ class Daemon:
             )))
         elif t == _TRUST_SYNC_WIRE_TYPE:
             await self._handle_peer_verify_notice(channel, msg, peer_fp, peer_sid)
+        # v0.21.x identity rotation wire protocol.
+        # ROTATION_CERT     — sender presents a cert signed by its
+        #                     OLD identity authorizing the new one.
+        # ROTATION_CERT_ACK — recipient confirms it applied the cert
+        #                     so the sender can drop the queue row.
+        elif t == "ROTATION_CERT":
+            await self._handle_rotation_cert(channel, msg, peer_fp)
+        elif t == "ROTATION_CERT_ACK":
+            await self._handle_rotation_cert_ack(channel, msg, peer_fp)
 
     # ─── Living Presence wire dispatch helpers ─────────────────────────
 
