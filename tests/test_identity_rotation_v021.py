@@ -712,6 +712,25 @@ def test_index_html_rotate_card_in_wizard():
     assert "_recwizRenderRotateCard" in html
 
 
+def test_ws_dispatcher_handles_peer_rotated_and_ack_events():
+    """The daemon broadcasts peer_rotated when an inbound cert
+    applies and rotation_announcement_acked when one of our certs
+    gets acknowledged. The UI's WS dispatcher must handle both so
+    the rotation card refreshes live without the user clicking
+    'Refresh status'."""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "web" / "index.html").read_text(encoding="utf-8")
+    # Both event types branched in the dispatcher.
+    assert 'm.type === "peer_rotated"' in html
+    assert 'm.type === "rotation_announcement_acked"' in html
+    # The handler re-renders the rotation card when the wizard is open.
+    assert '_recwizRenderRotateCard()' in html
+    # And refreshes peers so the sidebar reflects the new identity.
+    # (refreshPeers is also called from many other branches; the
+    # check above + the rotation-card render together are the
+    # rotation-specific assertion.)
+
+
 def test_index_html_rotate_card_renders_per_peer_ack_list():
     """When rotations are in flight, the rotation card must show a
     per-peer status row using peer_label so the user can see exactly

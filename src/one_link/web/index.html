@@ -22293,6 +22293,25 @@
         // v0.7.8: another tab acknowledged. Refresh peers so the
         // banner / overlay clears for everyone live.
         refreshPeers();
+      } else if (
+        m.type === "peer_rotated" ||
+        m.type === "rotation_announcement_acked"
+      ) {
+        // v0.21.x identity rotation: a peer either rotated their
+        // key (inbound cert applied + atomic peer-fingerprint
+        // transition) OR acknowledged a rotation we're propagating
+        // to them. In both cases refresh peers so the sidebar
+        // shows the new identity, and re-render the rotation card
+        // in the recovery wizard if it's open so the per-peer
+        // ack list updates live without the user clicking Refresh.
+        refreshPeers();
+        const wiz = document.getElementById("recovery-wizard");
+        if (wiz && wiz.classList.contains("show")) {
+          try { _recwizRenderRotateCard(); } catch (_) { /* defensive */ }
+        }
+        if (m.type === "peer_rotated") {
+          scheduleActivityRefresh();  // peer-rotation events show up in activity
+        }
       } else if (m.type === "key_change_detected") {
         scheduleActivityRefresh();  // v0.9.1: surface in activity feed
         // v0.7.8: a hostname↔pubkey rotation just got logged. Pop
