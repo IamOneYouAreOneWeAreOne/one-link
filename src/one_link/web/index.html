@@ -11680,6 +11680,7 @@
       });
     },
     recoveryRotateStatus() { return this.get("/api/v1/recovery/rotate/status"); },
+    recoveryReset() { return this.post("/api/v1/recovery/reset", { confirmed_reset: true }); },
     oneHealth() { return this.get("/api/one-health"); },
     setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); },
     claimSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/claim", body); },
@@ -24661,7 +24662,11 @@
           </div>
         </div>
         <div id="recwiz-track-rotate" class="recwiz-card" data-track="rotate"></div>
-        <div class="recwiz-close-bar">
+        <div class="recwiz-close-bar" style="justify-content:space-between;">
+          <button type="button" class="recwiz-btn recwiz-btn-danger" data-recwiz-action="reset"
+                  title="Clear the wizard's setup flags so each track can be re-run. Does not touch the master seed or peer state.">
+            Reset recovery setup
+          </button>
           <button type="button" class="recwiz-btn" data-recwiz-action="close">Done</button>
         </div>
       </div>
@@ -24683,6 +24688,9 @@
         _recwizClose();
         openRotationModal();
       }
+      if (action === "reset") {
+        _recwizConfirmReset();
+      }
     });
     document.addEventListener("keydown", (ev) => {
       if (ev.key === "Escape" && m.classList.contains("show")) _recwizClose();
@@ -24693,6 +24701,29 @@
     const modal = document.getElementById("recovery-wizard");
     if (modal) modal.classList.remove("show");
     document.body.classList.remove("recwiz-open");
+  }
+
+  // 'Reset recovery setup' clears the per-track flags + rotation
+  // queue so the wizard can be re-run with real intent. Native
+  // window.confirm keeps the modal stack from getting too deep
+  // (the wizard is already a modal) and matches OS-level
+  // 'are you sure?' UX users already know.
+  async function _recwizConfirmReset() {
+    const ok = window.confirm(
+      "Reset recovery setup?\n\n" +
+      "This clears the wizard's setup flags so each track shows " +
+      "as 'not configured' and can be re-run. It does NOT touch " +
+      "the master seed, your identity, or any peer state."
+    );
+    if (!ok) return;
+    try {
+      await api.recoveryReset();
+      toast("Recovery setup reset. Re-run any track when ready.", "good", 5000);
+      await _recwizRefreshStatus();
+      await refreshOneSetup();
+    } catch (e) {
+      toast(`Reset failed: ${errorToastBody(e)}`, "bad", 6000);
+    }
   }
 
   async function _showRecoveryWizard() {

@@ -204,6 +204,59 @@ def test_phrase_test_handles_fresh_install_without_seed(tmp_path):
     assert res["matches_current_identity"] is False
 
 
+def test_recovery_reset_endpoint_registered_guarded_ratelimited():
+    """The /api/v1/recovery/reset endpoint exists, is behind
+    _guarded, rate-limited (3 / 5min), and refuses without
+    confirmed_reset=true so a click-jacked flow can't clear
+    setup state silently."""
+    from types import SimpleNamespace
+    from one_link.server import UIServer
+    daemon = SimpleNamespace(state=None, peer_rtc=None)
+    server = UIServer(daemon)
+    methods: set[str] = set()
+    for resource in server.app.router.resources():
+        info = resource.get_info()
+        path = info.get("path") or info.get("formatter") or ""
+        if path == "/api/v1/recovery/reset":
+            for route in resource:
+                methods.add(route.method)
+    assert "POST" in methods
+
+    src = _server_src()
+    idx = src.find('"/api/v1/recovery/reset"')
+    assert idx > 0
+    line_start = src.rfind("\n", 0, idx) + 1
+    line_end = src.find("\n", idx)
+    assert "self._guarded(" in src[line_start:line_end]
+
+    handler_idx = src.find("async def api_recovery_reset(")
+    assert handler_idx > 0
+    body = src[handler_idx:handler_idx + 2500]
+    assert "_rate_limited(" in body
+    assert '"recovery_reset"' in body
+    assert "confirmed_reset" in body
+    assert "reset_all_recovery_state" in body
+    assert "_recovery_no_store_headers" in body
+
+
+def test_index_html_reset_button_and_handler():
+    """The wizard footer has the reset button, the dispatcher routes
+    its click, and the handler calls api.recoveryReset() behind a
+    native confirm dialog."""
+    html = _index_html()
+    assert 'recoveryReset()' in html
+    assert '"/api/v1/recovery/reset"' in html
+    assert 'data-recwiz-action="reset"' in html
+    assert 'Reset recovery setup' in html
+    assert 'async function _recwizConfirmReset()' in html
+    # Dispatcher routes the reset action.
+    assert 'if (action === "reset")' in html
+    # Native confirm before destruction.
+    idx = html.find("async function _recwizConfirmReset()")
+    body = html[idx:idx + 1500]
+    assert "window.confirm" in body
+
+
 def test_phrase_test_endpoint_registered_guarded_ratelimited():
     """Route exists, behind _guarded, rate-limited like phrase verify."""
     from types import SimpleNamespace

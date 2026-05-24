@@ -1822,6 +1822,12 @@ class UIServer:
         # this for a while (`one-link backup restore`); the wizard
         # surfaces it next to the existing "Set recovery" entry so
         # users on a new install can recover without a terminal.
+        # v0.21.x: scoped reset of just the per-track recovery state
+        # so a user who tested the wizard during onboarding can clear
+        # and re-run with real intent. Does NOT touch the master seed
+        # or any peer state - only wipes the per-track 'configured'
+        # flags + the rotation announcement queue.
+        r.add_post("/api/v1/recovery/reset", self._guarded(self.api_recovery_reset))
         r.add_get("/api/v1/recovery/restore/preflight", self._guarded(self.api_recovery_restore_preflight))
         r.add_post("/api/v1/recovery/restore/phrase", self._guarded(self.api_recovery_restore_phrase))
         # v0.21.x restore-from-bundle: phrase + .olbak file together.
@@ -7988,6 +7994,65 @@ class UIServer:
         resp = web.json_response({
             "ok": True,
             "verified_at_ms": verified_at_ms,
+        })
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_reset(self, request: web.Request) -> web.Response:
+        """Clear the per-track recovery setup flags so the wizard can
+        be re-run with real intent (after a test pass during
+        onboarding, for example).
+
+        This does NOT touch the master seed, identity.key, DRK, or
+        any peer state. It only wipes:
+          - one_setup_recovery_phrase_verified_at_ms
+          - one_setup_recovery_backup_last_export_at_ms / _size
+          - one_setup_recovery_social_configured_at_ms / _count / _threshold_k
+          - one_setup_recovery_configured_at_ms (legacy any-track flag)
+          - pending_rotation_announcements rows (rotation queue)
+
+        Refuses without ``confirmed_reset=true`` so a click-jacked
+        flow can't silently clear setup state.
+
+        Rate-limited to 3 attempts / 5min like rotation - this isn't
+        destructive of the identity but it IS a flag-state reset that
+        a stolen UI token shouldn't be able to spam.
+        """
+        from one_link import recovery_api
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        if self._rate_limited(
+            "recovery_reset",
+            self._client_rate_key(request),
+            limit=3,
+            window_seconds=300.0,
+        ):
+            return web.json_response(
+                {"error": "too many reset attempts; wait a few minutes"},
+                status=429,
+            )
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        if not bool(data.get("confirmed_reset")):
+            return web.json_response({
+                "error": "confirmed_reset=true required",
+                "hint": (
+                    "Reset clears the wizard's setup flags so each "
+                    "track can be re-run. It does NOT touch the master "
+                    "seed, identity, or peer state."
+                ),
+            }, status=409)
+        recovery_api.reset_all_recovery_state(state)
+        resp = web.json_response({
+            "ok": True,
+            "message": (
+                "Recovery setup state cleared. The wizard's tracks "
+                "now show as 'not configured'; you can re-run each "
+                "track with real intent."
+            ),
         })
         self._recovery_no_store_headers(resp)
         return resp
