@@ -11753,6 +11753,12 @@
         force: !!force, confirmed_replace: !!confirmedReplace,
       });
     },
+    recoveryRestoreShares(shareLines, force, confirmedReplace) {
+      return this.post("/api/v1/recovery/restore/shares", {
+        share_lines: shareLines,
+        force: !!force, confirmed_replace: !!confirmedReplace,
+      });
+    },
     // v0.21.x identity rotation: mint a new identity, sign a cert
     // with the OLD key, queue per-peer delivery. UI flow prompts
     // the user to back up the new 24 words + restart.
@@ -26282,6 +26288,11 @@
             never leaves this device.
           </p>
         </details>
+        <p class="recwiz-card-meta" style="margin:0 0 8px;">
+          Lost the paper but you set up trusted contacts?
+          <a href="#" data-recwiz-restore-mode="shares"
+             style="color:var(--accent);">Restore from guardian shares instead.</a>
+        </p>
         <div class="recwiz-restore-body"></div>
       </div>
     `;
@@ -26293,12 +26304,154 @@
       if (t.getAttribute("data-recwiz-action") === "close-restore") {
         _closeRecoveryRestoreModal();
       }
+      // Swap between phrase-restore and shares-restore inside the
+      // same modal so users don't have to back out + pick a
+      // different track. Preflight already loaded; just re-render.
+      if (t.getAttribute("data-recwiz-restore-mode") === "shares") {
+        ev.preventDefault();
+        _renderRecoveryRestoreShares();
+      }
+      if (t.getAttribute("data-recwiz-restore-mode") === "phrase") {
+        ev.preventDefault();
+        api.recoveryRestorePreflight()
+          .then(_renderRecoveryRestoreInput)
+          .catch(() => { /* preflight already shown on open */ });
+      }
     });
     document.addEventListener("keydown", (ev) => {
       if (ev.key === "Escape" && m.classList.contains("show")) {
         _closeRecoveryRestoreModal();
       }
     });
+  }
+
+  // Shares-paste view inside the same restore modal. The recovering
+  // user collects K share lines (format `index:base64_bytes`) from
+  // K guardians and pastes them all into one textarea.
+  async function _renderRecoveryRestoreShares() {
+    const modal = document.getElementById("recovery-restore-modal");
+    const body = modal.querySelector(".recwiz-restore-body");
+    body.innerHTML = `<p class="recwiz-feedback">Checking install state...</p>`;
+    let preflight;
+    try {
+      preflight = await api.recoveryRestorePreflight();
+    } catch (e) {
+      body.innerHTML = `<p class="recwiz-feedback bad">${escapeText("Could not check install state: " + errorToastBody(e))}</p>`;
+      return;
+    }
+    const dirty = !!preflight.requires_force;
+    const ev = preflight.evidence || {};
+    const evParts = [];
+    if (ev.pinned_peers) evParts.push(`${ev.pinned_peers} paired peer${ev.pinned_peers === 1 ? "" : "s"}`);
+    if (ev.groups) evParts.push(`${ev.groups} group${ev.groups === 1 ? "" : "s"}`);
+    if (ev.self_mesh_devices) evParts.push(`${ev.self_mesh_devices} self-mesh device${ev.self_mesh_devices === 1 ? "" : "s"}`);
+    const evSummary = evParts.length
+      ? `Current install: ${evParts.join(", ")}.`
+      : "Current install has no identity state yet.";
+    const dangerBlock = dirty ? `
+      <div class="recwiz-danger-box">
+        <strong>This will replace the current identity.</strong>
+        ${escapeText(evSummary)}
+        After restore, peers paired with this device will need to be
+        re-paired.
+      </div>
+      <label class="recwiz-confirm-row">
+        <input type="checkbox" id="recwiz-restore-shares-confirm" />
+        <span>I understand my current identity will be replaced.</span>
+      </label>` : `
+      <p class="recwiz-card-meta">${escapeText(evSummary)}</p>`;
+    body.innerHTML = `
+      <p class="recwiz-lead">
+        Paste the shares your guardians sent back. One per line, in
+        the format <code>share_index:base64_bytes</code> (the format
+        each guardian's Unwrap modal copies to clipboard). You need
+        at least the threshold count the original split used (usually
+        3 of 5).
+      </p>
+      <p class="recwiz-card-meta" style="margin:0 0 8px;">
+        Have the 24-word phrase instead?
+        <a href="#" data-recwiz-restore-mode="phrase"
+           style="color:var(--accent);">Restore from phrase instead.</a>
+      </p>
+      <textarea class="recwiz-phrase-input" id="recwiz-restore-shares-input"
+                aria-label="Guardian-delivered shares"
+                autocomplete="off" spellcheck="false"
+                style="min-height:140px;"
+                placeholder="1:AAAA...
+3:BBBB...
+5:CCCC..."></textarea>
+      <p class="recwiz-feedback" id="recwiz-restore-shares-fb"></p>
+      ${dangerBlock}
+      <div class="recwiz-card-actions" style="justify-content:flex-end;">
+        <button type="button" class="recwiz-btn" data-recwiz-action="close-restore">Cancel</button>
+        <button type="button" class="recwiz-btn recwiz-btn-primary" id="recwiz-restore-shares-submit" disabled>
+          ${dirty ? "Replace identity from shares" : "Restore identity from shares"}
+        </button>
+      </div>
+    `;
+    const ta = body.querySelector("#recwiz-restore-shares-input");
+    const fb = body.querySelector("#recwiz-restore-shares-fb");
+    const submit = body.querySelector("#recwiz-restore-shares-submit");
+    const confirmBox = body.querySelector("#recwiz-restore-shares-confirm");
+    function countLines() {
+      return String(ta.value || "")
+        .split("\n").map(l => l.trim()).filter(Boolean).length;
+    }
+    function check() {
+      const n = countLines();
+      const okShape = n >= 2;
+      const okConfirm = !dirty || (confirmBox && confirmBox.checked);
+      submit.disabled = !(okShape && okConfirm);
+      if (n === 0) {
+        fb.className = "recwiz-feedback";
+        fb.textContent = "";
+      } else if (n < 2) {
+        fb.className = "recwiz-feedback";
+        fb.textContent = "Need at least 2 share lines.";
+      } else {
+        fb.className = "recwiz-feedback";
+        fb.textContent = `${n} share line${n === 1 ? "" : "s"} ready.`;
+      }
+    }
+    ta.addEventListener("input", check);
+    if (confirmBox) confirmBox.addEventListener("change", check);
+    submit.addEventListener("click", async () => {
+      submit.disabled = true;
+      fb.className = "recwiz-feedback";
+      fb.textContent = "Combining shares + restoring...";
+      let res;
+      try {
+        res = await api.recoveryRestoreShares(ta.value, dirty, dirty);
+      } catch (e) {
+        fb.className = "recwiz-feedback bad";
+        fb.textContent = errorToastBody(e) || "Restore failed.";
+        submit.disabled = false;
+        return;
+      }
+      if (!res || !res.ok) {
+        fb.className = "recwiz-feedback bad";
+        fb.textContent = (res && res.error) || "Restore failed.";
+        submit.disabled = false;
+        return;
+      }
+      body.innerHTML = `
+        <div class="recwiz-restart-card">
+          <strong>Identity restored from shares.</strong>
+          ${res.shares_combined || 0} share${res.shares_combined === 1 ? "" : "s"}
+          combined cleanly. Restart One Link to complete recovery;
+          peers paired with the original device will recognize you
+          again.
+        </div>
+        <div class="recwiz-card-actions" style="justify-content:flex-end;">
+          <button type="button" class="recwiz-btn" id="recwiz-restore-shares-restart">Shut down One Link now</button>
+          <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-action="close-restore">Close</button>
+        </div>
+      `;
+      body.querySelector("#recwiz-restore-shares-restart")
+        .addEventListener("click", () => _recwizShutdownDaemon("shares_restart"));
+      toast("Identity restored from shares. Restart One Link to finish.", "good", 6000);
+    });
+    setTimeout(() => ta.focus(), 60);
   }
 
   function _renderRecoveryRestoreInput(preflight) {

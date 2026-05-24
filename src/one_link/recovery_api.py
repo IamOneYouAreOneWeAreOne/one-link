@@ -789,6 +789,58 @@ def restore_from_bundle(
 # ── held-share import (guardian-side social recovery) ───────────────
 
 
+def restore_from_shares(
+    *,
+    data_dir: Path,
+    shares: list[tuple[int, bytes]],
+    delete_identity_files: bool,
+) -> bytes:
+    """Combine K unwrapped Shamir shares into the original master
+    seed and persist it. Mirrors restore_seed_from_phrase but takes
+    shares instead of a phrase: the recoverer's third path.
+
+    Each share is (share_index, share_bytes) as produced by the
+    guardian's unwrap_share call (or the unwrap HTTP endpoint).
+    Must supply at least K of N where K is the threshold the
+    original split used; the combine step infers K from the
+    supplied count.
+
+    Raises ValueError on malformed shares OR on combine failure
+    (e.g., shares from different splits, fewer than threshold).
+    Returns the 32-byte reconstructed seed (also persisted).
+    """
+    from one_link import master_seed, social_recovery
+    from one_link import paths
+    from pathlib import Path as _Path
+    if not shares or len(shares) < 2:
+        raise ValueError("need at least 2 shares to recover")
+    seed = social_recovery.combine_shares(shares)
+    if len(seed) != master_seed.SEED_LEN_BYTES:
+        raise ValueError(
+            f"reconstructed seed has wrong length {len(seed)}; "
+            f"expected {master_seed.SEED_LEN_BYTES}"
+        )
+    try:
+        if delete_identity_files:
+            for f in (paths.key_path(), _Path(data_dir) / "data-root-key.bin"):
+                with contextlib.suppress(OSError):
+                    _Path(f).unlink()
+        master_seed.store_seed(_Path(data_dir), seed)
+        return seed
+    finally:
+        # Best-effort wipe of our reference; on-disk copy is the
+        # canonical source going forward.
+        try:
+            seed_copy = seed
+            seed = b"\x00" * len(seed)
+            del seed
+            # Wipe the local var too (not perfect; Python bytes are
+            # immutable, but this drops our reference).
+            del seed_copy
+        except Exception:
+            pass
+
+
 def parse_held_share_blob(blob: bytes) -> dict[str, Any]:
     """Parse an incoming .olss wrapped-share file. Returns a dict
     the state.insert_held_share helper can persist directly.

@@ -349,6 +349,120 @@ def test_index_html_unwrap_button_and_modal():
     assert "recwiz-warn" in body
 
 
+# ── ship 3: recoverer-side combine ──────────────────────────────────
+
+
+def test_restore_from_shares_round_trips_through_unwrap(tmp_path):
+    """End-to-end of the third restore path: split seed into N
+    shares, unwrap K of them, combine via recovery_api.restore_from_shares,
+    confirm the on-disk seed matches the original."""
+    from one_link import master_seed, recovery_api, social_recovery
+    seed_in = os.urandom(32)
+    guardians = [Ed25519PrivateKey.generate() for _ in range(5)]
+    wrapped = social_recovery.split_and_wrap(
+        seed=seed_in,
+        contact_ed_pubs=[g.public_key().public_bytes_raw() for g in guardians],
+        threshold_k=3,
+        total_n=5,
+    )
+    # Unwrap 3 of 5 (the threshold).
+    unwrapped: list[tuple[int, bytes]] = []
+    for w, g in list(zip(wrapped, guardians))[:3]:
+        idx, share_bytes = social_recovery.unwrap_share(
+            wrapped=w.encoded, my_ed_priv_seed=g.private_bytes_raw(),
+        )
+        unwrapped.append((idx, share_bytes))
+
+    # No existing seed on this install.
+    assert not master_seed.has_seed(tmp_path)
+    seed_out = recovery_api.restore_from_shares(
+        data_dir=tmp_path,
+        shares=unwrapped,
+        delete_identity_files=False,
+    )
+    assert seed_out == seed_in
+    assert master_seed.has_seed(tmp_path)
+    assert master_seed.load_seed(tmp_path) == seed_in
+    # The identity derived from the restored seed must match the
+    # one the original install would have had.
+    restored_pub = master_seed.derive_identity_priv(seed_in)\
+        .public_key().public_bytes_raw()
+    on_disk_pub = master_seed.derive_identity_priv(master_seed.load_seed(tmp_path))\
+        .public_key().public_bytes_raw()
+    assert restored_pub == on_disk_pub
+
+
+def test_restore_from_shares_requires_threshold(tmp_path):
+    """Below-threshold combine fails with ValueError; the daemon
+    surfaces this as a 400 in the HTTP handler."""
+    from one_link import recovery_api, social_recovery
+    seed = os.urandom(32)
+    guardians = [Ed25519PrivateKey.generate() for _ in range(5)]
+    wrapped = social_recovery.split_and_wrap(
+        seed=seed,
+        contact_ed_pubs=[g.public_key().public_bytes_raw() for g in guardians],
+        threshold_k=3,
+        total_n=5,
+    )
+    # Only one share - well below threshold.
+    one_unwrapped = social_recovery.unwrap_share(
+        wrapped=wrapped[0].encoded,
+        my_ed_priv_seed=guardians[0].private_bytes_raw(),
+    )
+    with pytest.raises(ValueError):
+        recovery_api.restore_from_shares(
+            data_dir=tmp_path,
+            shares=[one_unwrapped],
+            delete_identity_files=False,
+        )
+
+
+def test_restore_shares_endpoint_registered_guarded_ratelimited():
+    from one_link.server import UIServer
+    daemon = SimpleNamespace(state=None, peer_rtc=None)
+    server = UIServer(daemon)
+    methods: set[str] = set()
+    for resource in server.app.router.resources():
+        info = resource.get_info()
+        path = info.get("path") or info.get("formatter") or ""
+        if path == "/api/v1/recovery/restore/shares":
+            for route in resource:
+                methods.add(route.method)
+    assert "POST" in methods
+    src = _server_src()
+    idx = src.find('"/api/v1/recovery/restore/shares"')
+    assert idx > 0
+    line_start = src.rfind("\n", 0, idx) + 1
+    line_end = src.find("\n", idx)
+    assert "self._guarded(" in src[line_start:line_end]
+    handler_idx = src.find("async def api_recovery_restore_shares(")
+    assert handler_idx > 0
+    body = src[handler_idx:handler_idx + 6000]
+    assert "_rate_limited(" in body
+    assert '"recovery_restore_shares"' in body
+    assert "destructive_restore_requires_confirmation" in body
+    assert "share_lines" in body
+    assert "_recovery_no_store_headers" in body
+
+
+def test_index_html_shares_restore_in_modal():
+    """The restore modal has a 'restore from shares' swap link AND
+    a renderer that paste-textarea-collects + posts to the new
+    endpoint AND a success card with the shutdown button."""
+    html = _index_html()
+    assert "recoveryRestoreShares(shareLines, force, confirmedReplace)" in html
+    assert '"/api/v1/recovery/restore/shares"' in html
+    assert "async function _renderRecoveryRestoreShares()" in html
+    assert 'data-recwiz-restore-mode="shares"' in html
+    assert 'data-recwiz-restore-mode="phrase"' in html
+    idx = html.find("async function _renderRecoveryRestoreShares()")
+    body = html[idx:idx + 6000]
+    assert "api.recoveryRestoreShares" in body
+    # Success card prompts restart + offers in-app shutdown.
+    assert "recwiz-restart-card" in body
+    assert "shares_restart" in body
+
+
 def test_index_html_held_shares_card_in_wizard():
     html = _index_html()
     assert 'id="recwiz-track-held-shares"' in html

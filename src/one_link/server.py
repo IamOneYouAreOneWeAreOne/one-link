@@ -1851,6 +1851,10 @@ class UIServer:
         # that restore identity also unlock the chat history +
         # settings stored in the bundle.
         r.add_post("/api/v1/recovery/restore/bundle", self._guarded(self.api_recovery_restore_bundle))
+        # v0.21.x social-share recovery ship 3: combine K guardian-
+        # delivered shares to restore the original master seed.
+        # The third restore path; mirrors restore/phrase + restore/bundle.
+        r.add_post("/api/v1/recovery/restore/shares", self._guarded(self.api_recovery_restore_shares))
         # v0.21.x identity rotation: mint a fresh identity + sign a
         # rotation certificate with the OLD key, queue per-peer
         # announcements for delivery on next start. Peer-side
@@ -8202,6 +8206,143 @@ class UIServer:
             phrase=phrase, bundle_bytes=bundle_bytes,
         )
         resp = web.json_response({"ok": True, **result})
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_restore_shares(self, request: web.Request) -> web.Response:
+        """Restore the master seed by combining K guardian-delivered
+        Shamir shares. The third restore path (phrase + bundle +
+        shares); mirrors the safety pattern of the other two:
+
+          - Same per-token rate limit (5 / 60s).
+          - Same destructive-confirmation guard (refuses to
+            overwrite existing identity unless force + confirm).
+          - Same restart_required response.
+
+        Body shape:
+          {
+            "shares": [
+              {"index": int, "bytes_b64": str},
+              ...
+            ],
+            "force": bool,
+            "confirmed_replace": bool,
+          }
+
+        Convenience parser: a "share_lines" field is also accepted
+        where each line is "index:bytes_b64" (the format the
+        guardian's unwrap modal emits). Lines are split + parsed
+        client-side OR server-side.
+        """
+        from one_link import recovery_api
+        from one_link.paths import data_dir
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        if self._rate_limited(
+            "recovery_restore_shares",
+            self._client_rate_key(request),
+            limit=5,
+            window_seconds=60.0,
+        ):
+            return web.json_response(
+                {"error": "too many restore attempts; wait a minute"},
+                status=429,
+            )
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+
+        # Parse share input. Accept either a structured "shares"
+        # list OR a free-form "share_lines" string the UI can pass
+        # straight from a paste textarea.
+        share_tuples: list[tuple[int, bytes]] = []
+        import base64 as _b64
+        raw_shares = data.get("shares")
+        if isinstance(raw_shares, list):
+            for s in raw_shares:
+                if not isinstance(s, dict):
+                    return web.json_response({"error": "shares[*] must be objects"}, status=400)
+                try:
+                    idx = int(s.get("index"))
+                    b = _b64.b64decode(str(s.get("bytes_b64") or ""), validate=True)
+                except Exception as e:
+                    return web.json_response({
+                        "error": f"share {s!r} malformed: {e}",
+                    }, status=400)
+                share_tuples.append((idx, b))
+        share_lines = data.get("share_lines")
+        if isinstance(share_lines, str):
+            for line in share_lines.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if ":" not in line:
+                    return web.json_response({
+                        "error": f"share line missing colon separator: {line[:32]!r}",
+                    }, status=400)
+                idx_s, b64_s = line.split(":", 1)
+                try:
+                    idx = int(idx_s.strip())
+                    b = _b64.b64decode(b64_s.strip(), validate=True)
+                except Exception as e:
+                    return web.json_response({
+                        "error": f"share line malformed: {e}",
+                    }, status=400)
+                share_tuples.append((idx, b))
+        if not share_tuples:
+            return web.json_response({
+                "error": "no shares supplied (need 'shares' list or 'share_lines' string)",
+            }, status=400)
+        if len(share_tuples) < 2:
+            return web.json_response({
+                "error": "need at least 2 shares to recover",
+            }, status=400)
+
+        force = bool(data.get("force"))
+        confirmed = bool(data.get("confirmed_replace"))
+
+        clean, evidence = recovery_api.is_install_clean_for_restore(state)
+        from one_link import master_seed
+        has_seed = master_seed.has_seed(data_dir())
+        destructive = (not clean) or has_seed
+        if destructive and not (force and confirmed):
+            return web.json_response({
+                "error": "destructive_restore_requires_confirmation",
+                "evidence": evidence,
+                "has_existing_seed": has_seed,
+                "hint": (
+                    "This install already has identity state. Set "
+                    "force=true AND confirmed_replace=true to proceed."
+                ),
+            }, status=409)
+
+        try:
+            recovery_api.restore_from_shares(
+                data_dir=data_dir(),
+                shares=share_tuples,
+                delete_identity_files=destructive,
+            )
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as exc:
+            return web.json_response({
+                "error": "shares_restore_failed",
+                "hint": str(exc),
+            }, status=500)
+
+        resp = web.json_response({
+            "ok": True,
+            "restart_required": True,
+            "was_destructive": destructive,
+            "shares_combined": len(share_tuples),
+            "message": (
+                "Identity reconstructed from guardian shares. "
+                "Restart One Link to complete recovery; peers paired "
+                "with the original device will recognize you again."
+            ),
+        })
         self._recovery_no_store_headers(resp)
         return resp
 
