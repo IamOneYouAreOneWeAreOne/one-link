@@ -25518,6 +25518,18 @@
     const meta = inFlight && summary.pending > 0
       ? `${summary.pending} peer${summary.pending === 1 ? "" : "s"} still need to receive your new key.`
       : (inFlight ? "All paired peers have received and applied your new key." : "");
+    // Surface the daemon's current identity fingerprint so a user
+    // who just rotated can visually verify the identity actually
+    // changed (or so a user mid-debug can spot which install they're
+    // running). Truncate to 16 hex chars (8 bytes) - enough that
+    // collisions are vanishingly unlikely while staying readable.
+    const myFp = state.me?.fingerprint || "";
+    const fpShort = myFp ? `${myFp.slice(0, 16)}…` : "(unknown)";
+    const fpRow = myFp
+      ? `<p class="recwiz-card-meta" style="font-family:var(--mono); margin:4px 0 8px;">
+           Current identity: <span style="color:var(--text);">${escapeText(fpShort)}</span>
+         </p>`
+      : "";
     // Per-peer ack list: render each pending/acked row so the user
     // can see exactly who is up-to-date. Sorted: pending first
     // (the action items), then acked (the wins).
@@ -25548,6 +25560,7 @@
         <div class="recwiz-card-name">Rotate identity key</div>
         <div class="recwiz-card-status ${pillCls}">${escapeText(pillText)}</div>
       </div>
+      ${fpRow}
       <p class="recwiz-card-desc">
         Replace this device's identity key. Useful if your key was
         compromised, on a scheduled rotation, or if a device was

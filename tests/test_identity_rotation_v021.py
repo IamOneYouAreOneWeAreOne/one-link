@@ -712,6 +712,24 @@ def test_index_html_rotate_card_in_wizard():
     assert "_recwizRenderRotateCard" in html
 
 
+def test_rotate_card_shows_current_identity_fingerprint():
+    """A user looking at the rotation card should see their CURRENT
+    identity fingerprint so they can: (a) verify which install
+    they're running as before clicking Rotate, and (b) visually
+    confirm post-rotation that the identity actually changed. The
+    card reads from state.me.fingerprint (already populated from
+    the existing /api/me response - no new endpoint needed)."""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "web" / "index.html").read_text(encoding="utf-8")
+    idx = html.find("async function _recwizRenderRotateCard()")
+    assert idx > 0
+    body = html[idx:idx + 5000]
+    assert "state.me?.fingerprint" in body
+    assert "Current identity" in body
+    # Truncated for readability so the row fits.
+    assert ".slice(0, 16)" in body
+
+
 def test_home_screen_rotation_banner_exists_and_polls_status():
     """The home-screen rotation banner must be wired so users who
     rotated and closed the wizard still see 'X of Y peers acked'
