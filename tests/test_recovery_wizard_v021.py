@@ -270,6 +270,104 @@ def test_index_html_shutdown_button_wired_on_success_cards():
     assert '"restore_restart"' in html
 
 
+def test_bundle_test_round_trips_with_matching_phrase(tmp_path):
+    """Happy path: encode a real .olbak from a seed, then verify it
+    decrypts cleanly with the corresponding phrase via the test
+    helper. file_count + created_ms surface correctly."""
+    import os
+    from one_link import backup_bundle, master_seed, mnemonic, recovery_api
+    src = tmp_path
+    (src / "state.db").write_bytes(b"SQLite format 3\x00" + os.urandom(512))
+    (src / "master.seed").write_bytes(os.urandom(32))
+    seed = (src / "master.seed").read_bytes()
+    phrase = mnemonic.encode(seed)
+    bundle = backup_bundle.create_bundle(seed=seed, data_dir=src)
+    res = recovery_api.test_bundle_against_phrase(
+        phrase=phrase, bundle_bytes=bundle,
+    )
+    assert res["valid_phrase"] is True
+    assert res["valid_bundle"] is True
+    assert res["bundle_created_ms"] > 0
+    # state.db + master.seed at least.
+    assert res["file_count"] >= 2
+    assert res["error"] == ""
+
+
+def test_bundle_test_returns_invalid_on_wrong_phrase(tmp_path):
+    """Right shape but wrong key: valid_phrase True, valid_bundle
+    False, error names the failure mode."""
+    import os
+    from one_link import backup_bundle, mnemonic, recovery_api
+    (tmp_path / "state.db").write_bytes(b"data" + os.urandom(256))
+    real_seed = os.urandom(32)
+    bundle = backup_bundle.create_bundle(seed=real_seed, data_dir=tmp_path)
+    wrong_seed = os.urandom(32)
+    wrong_phrase = mnemonic.encode(wrong_seed)
+    res = recovery_api.test_bundle_against_phrase(
+        phrase=wrong_phrase, bundle_bytes=bundle,
+    )
+    assert res["valid_phrase"] is True
+    assert res["valid_bundle"] is False
+    assert res["error"]
+
+
+def test_bundle_test_returns_invalid_on_bad_phrase(tmp_path):
+    """An invalid phrase fails decode; bundle test never runs."""
+    from one_link import recovery_api
+    res = recovery_api.test_bundle_against_phrase(
+        phrase="notabip39word " * 24, bundle_bytes=b"\x00" * 100,
+    )
+    assert res["valid_phrase"] is False
+    assert res["valid_bundle"] is False
+    assert res["error"]
+
+
+def test_bundle_test_endpoint_registered_guarded_ratelimited():
+    from types import SimpleNamespace
+    from one_link.server import UIServer
+    daemon = SimpleNamespace(state=None, peer_rtc=None)
+    server = UIServer(daemon)
+    methods: set[str] = set()
+    for resource in server.app.router.resources():
+        info = resource.get_info()
+        path = info.get("path") or info.get("formatter") or ""
+        if path == "/api/v1/recovery/bundle/test":
+            for route in resource:
+                methods.add(route.method)
+    assert "POST" in methods
+
+    src = _server_src()
+    idx = src.find('"/api/v1/recovery/bundle/test"')
+    assert idx > 0
+    line_start = src.rfind("\n", 0, idx) + 1
+    line_end = src.find("\n", idx)
+    assert "self._guarded(" in src[line_start:line_end]
+
+    handler_idx = src.find("async def api_recovery_bundle_test(")
+    assert handler_idx > 0
+    body = src[handler_idx:handler_idx + 3500]
+    assert "_rate_limited(" in body
+    assert '"recovery_bundle_test"' in body
+    assert "MAX_B64_LEN" in body
+    assert "_recovery_no_store_headers" in body
+
+
+def test_index_html_bundle_test_button_and_handler():
+    """Backup card has a 'Test a backup file' button + handler
+    posting to the new endpoint."""
+    html = _index_html()
+    assert "recoveryBundleTest(phrase, bundleB64)" in html
+    assert '"/api/v1/recovery/bundle/test"' in html
+    assert 'data-recwiz-backup="test"' in html
+    assert "Test a backup file" in html
+    assert "function _recwizBackupTestStart()" in html
+    idx = html.find("function _recwizBackupTestStart()")
+    body = html[idx:idx + 4500]
+    assert "api.recoveryBundleTest" in body
+    assert "valid_phrase" in body
+    assert "valid_bundle" in body
+
+
 def test_recovery_reset_endpoint_registered_guarded_ratelimited():
     """The /api/v1/recovery/reset endpoint exists, is behind
     _guarded, rate-limited (3 / 5min), and refuses without

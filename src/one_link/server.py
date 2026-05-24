@@ -1813,6 +1813,10 @@ class UIServer:
         # Pasted phrase never writes any state; works on installs
         # with or without an existing master seed.
         r.add_post("/api/v1/recovery/phrase/test", self._guarded(self.api_recovery_phrase_test))
+        # v0.21.x: 'Test a backup file' - non-destructive check that
+        # an .olbak file decrypts with a given 24-word phrase. Mirrors
+        # the phrase-test pattern; never writes to disk.
+        r.add_post("/api/v1/recovery/bundle/test", self._guarded(self.api_recovery_bundle_test))
         r.add_get("/api/v1/recovery/backup/export", self._guarded(self.api_recovery_backup_export))
         r.add_get("/api/v1/recovery/social/candidates", self._guarded(self.api_recovery_social_candidates))
         r.add_post("/api/v1/recovery/social/issue", self._guarded(self.api_recovery_social_issue))
@@ -8109,6 +8113,81 @@ class UIServer:
             return web.json_response({"error": "phrase required"}, status=400)
         result = recovery_api.test_phrase_against_current_seed(
             data_dir=data_dir(), phrase=phrase,
+        )
+        resp = web.json_response({"ok": True, **result})
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_bundle_test(self, request: web.Request) -> web.Response:
+        """Non-destructive check: does this .olbak file decrypt with
+        this 24-word phrase? AEAD-decrypts in memory and returns the
+        bundle's header timestamp + plaintext file count without
+        writing anything to disk.
+
+        Body:
+          {
+            "phrase":     "abandon ability ...",
+            "bundle_b64": "<base64 of .olbak bytes>",
+          }
+        Returns:
+          {
+            "ok":                True,
+            "valid_phrase":      bool,
+            "valid_bundle":      bool,
+            "bundle_created_ms": int  (only set when valid_bundle),
+            "file_count":        int,
+            "error":             str  (set on any failure),
+          }
+
+        Per-token rate limit (5 / 60s) so a stolen UI token can't
+        spam decrypt attempts at arbitrary bundles. Same 256 MiB
+        b64 cap as the restore endpoint so a hostile payload can't
+        trigger an OOM.
+        """
+        from one_link import recovery_api
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        if self._rate_limited(
+            "recovery_bundle_test",
+            self._client_rate_key(request),
+            limit=5,
+            window_seconds=60.0,
+        ):
+            return web.json_response(
+                {"error": "too many bundle-test attempts; wait a minute"},
+                status=429,
+            )
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        phrase = str(data.get("phrase") or "").strip()
+        if not phrase:
+            words = data.get("words")
+            if isinstance(words, list):
+                phrase = " ".join(str(w) for w in words)
+        if not phrase:
+            return web.json_response({"error": "phrase required"}, status=400)
+        bundle_b64 = data.get("bundle_b64") or ""
+        if not bundle_b64:
+            return web.json_response({"error": "bundle_b64 required"}, status=400)
+        MAX_B64_LEN = 256 * 1024 * 1024 * 4 // 3 + 64  # ~341 MiB b64
+        if len(bundle_b64) > MAX_B64_LEN:
+            return web.json_response(
+                {"error": "bundle exceeds 256 MiB cap"},
+                status=413,
+            )
+        import base64 as _b64
+        try:
+            bundle_bytes = _b64.b64decode(str(bundle_b64), validate=True)
+        except Exception as e:
+            return web.json_response(
+                {"error": f"bundle_b64 not valid base64: {e}"},
+                status=400,
+            )
+        result = recovery_api.test_bundle_against_phrase(
+            phrase=phrase, bundle_bytes=bundle_bytes,
         )
         resp = web.json_response({"ok": True, **result})
         self._recovery_no_store_headers(resp)

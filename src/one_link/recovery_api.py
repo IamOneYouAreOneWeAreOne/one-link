@@ -266,6 +266,77 @@ def verify_phrase_positions(
     return (len(mismatches) == 0, mismatches)
 
 
+def test_bundle_against_phrase(
+    *, phrase: str, bundle_bytes: bytes,
+) -> dict[str, Any]:
+    """Non-destructive 'will this backup decrypt with this phrase?'
+    check. Decodes the phrase via mnemonic.decode (validates the
+    BIP-39 checksum), derives the bundle key via the same HKDF the
+    exporter used, runs AEAD-decrypt on the bundle in memory, and
+    counts plaintext entries. Writes nothing to disk. Useful to
+    verify a backup file + paper phrase pair are still valid
+    without committing to a destructive restore.
+
+    Result shape:
+      {
+        "valid_phrase":        True iff phrase decodes cleanly,
+        "valid_bundle":        True iff AEAD-decrypt passes,
+        "bundle_created_ms":   header's created_ms (only set when
+                               valid_bundle is True),
+        "file_count":          number of plaintext archive entries
+                               (excluding MANIFEST),
+        "error":               short human-readable message on
+                               failure,
+      }
+    """
+    from one_link import backup_bundle, mnemonic
+    out: dict[str, Any] = {
+        "valid_phrase": False,
+        "valid_bundle": False,
+        "bundle_created_ms": 0,
+        "file_count": 0,
+        "error": "",
+    }
+    try:
+        seed = mnemonic.decode(phrase)
+    except (ValueError, TypeError) as e:
+        out["error"] = str(e)
+        return out
+    out["valid_phrase"] = True
+    try:
+        header, plaintext = backup_bundle.open_bundle(
+            seed=seed, bundle_bytes=bundle_bytes,
+        )
+    except ValueError as e:
+        out["error"] = str(e)
+        return out
+    finally:
+        seed = b"\x00" * len(seed)
+        del seed
+    out["valid_bundle"] = True
+    out["bundle_created_ms"] = int(header.created_ms)
+    # Count plaintext entries without writing to disk. The bundle's
+    # plaintext is a gzip-tar; iterate members so we can report the
+    # file count and skip the MANIFEST metadata row.
+    try:
+        import gzip as _gzip
+        import tarfile as _tarfile
+        from io import BytesIO as _BytesIO
+        names: list[str] = []
+        with _gzip.GzipFile(fileobj=_BytesIO(plaintext), mode="rb") as gz:
+            with _tarfile.open(fileobj=gz, mode="r") as tf:
+                for ti in tf.getmembers():
+                    if ti.isfile() and ti.name != "MANIFEST":
+                        names.append(ti.name)
+        out["file_count"] = len(names)
+    except Exception:
+        # Bundle decrypted but the inner archive was malformed.
+        # Still count valid_bundle=True (the AEAD passed); the
+        # zero file_count signals the inner structure is broken.
+        pass
+    return out
+
+
 def test_phrase_against_current_seed(
     *, data_dir: Path, phrase: str,
 ) -> dict[str, Any]:
