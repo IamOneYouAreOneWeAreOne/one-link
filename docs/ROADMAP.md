@@ -1,7 +1,7 @@
 # One Link Roadmap
 
 Status: living document. Updated as releases ship.
-Last updated: 2026-05-11.
+Last updated: 2026-05-23.
 
 > **File engine v2 status (2026-05-11)**: All four phases of
 > [`FILE_ENGINE_V2_PLAN.md`](./FILE_ENGINE_V2_PLAN.md) are structurally
@@ -249,6 +249,37 @@ Ordered by leverage:
    - v0.25.0 — Federated learning across the user's devices
    - **v1.0.0 — One Link Web** (the phone-only milestone)
 
+   **v1.0.0 acceptance gate — "open a URL, decrypt in your tab, no install."**
+   The recipient of a share link is a brand-new visitor who has
+   never heard of One Link. They click the URL in any browser, the
+   PWA loads in-tab, the file decrypts client-side, the download
+   completes. No daemon, no app install, no account. Two modes
+   share this acceptance gate:
+
+   - **Live-sender mode (preferred when sender is online).**
+     Sender stays in their tab; recipient's tab opens a WebRTC
+     DataChannel directly to the sender; chunks stream peer-to-peer
+     with per-chunk AEAD. No R2 hop, no cap. Sender closes tab,
+     transfer pauses; reopen resumes. Uses the same `ol_transfer`
+     fountain-coded pipeline that ships today, just bridged
+     through the PWA instead of the daemon.
+
+   - **Buffered mode (when sender wants fire-and-forget).** The
+     existing `/share/` flow extended from 25 MB to 5 GB via
+     streaming PUT to the `RELEASES` R2 bucket with chunked
+     transfer encoding (Worker streams body straight to R2 multi-
+     part upload, never buffers full payload). TTL raised from 24h
+     to 7 days when sender opts in (default stays 24h). Key in URL
+     fragment never leaves the two browsers; first GET deletes
+     the R2 object (one-shot semantics preserved).
+
+   Both modes terminate E2EE. The acceptance gate is binary: the
+   recipient is a non-installed stranger who completes a 1 GB
+   transfer without leaving their browser. This is the
+   WeTransfer-parity criterion that flips the "one-shot to a
+   stranger" use case from "fall back to WeTransfer" to "always
+   use One Link."
+
 6. **Defang ladder.** Per-ship corporate-substrate mitigations
    shipped alongside the PWA pivot:
 
@@ -271,6 +302,86 @@ Ordered by leverage:
    screen install via app stores for users who want App-Store
    discovery, and EU alternative-app-store distribution
    (sideload friendly).
+
+8. **Threshold recovery user-flow ("guardians").** The
+   primitive shipped: `native/ol_threshold_recovery` (Shamir
+   k-of-n share split + BN multi-sig with per-signer R values)
+   is wired into `src/one_link/social_recovery.py` per
+   `one_link_phase_f_partial_rows_finished.md`. The
+   end-user-facing flow is not. Without it, losing your only
+   paired device equals losing your identity, which is the
+   adoption ceiling for any user who doesn't keep two devices.
+   Frontier: a hide-the-engine surface where the user picks
+   3-5 already-paired contacts ("guardians"), and the daemon
+   shards the identity-unlock key (k-of-n, default 2-of-3) to
+   those guardians via a new `RECOVERY_SHARD_V1` capability.
+   Each shard is encrypted to the guardian's pubkey before
+   send; guardians store shards in a sandboxed inbox
+   (`~/.one-link/recovery_inbox/<sender-fp>.shard`) that the
+   daemon refuses to surface in any other UI and that no
+   capability except `RECOVERY_REQUEST_V1` can read. Restore
+   flow: new install on a fresh device, user enters their old
+   peer-fingerprint hash + a `RECOVERY_REQUEST_V1` is broadcast
+   to the registered guardian set, each guardian sees a "X is
+   requesting account recovery, approve?" prompt with a 5-word
+   verbal-confirmation challenge to authenticate the requester
+   out-of-band; on k approvals the daemon reconstructs the
+   identity key locally. Wire format: three new message kinds,
+   all capability-gated and audit-logged:
+   `RECOVERY_SHARD_V1` (issue),
+   `RECOVERY_REQUEST_V1` (restore broadcast),
+   `RECOVERY_APPROVAL_V1` (guardian consent).
+   Where: new orchestration module at
+   `src/one_link/recovery.py`; UI panel at Settings → Identity →
+   Recovery (introduces guardians, shows their status, allows
+   replace/remove with proper re-shard); TLA+ spec at
+   `docs/formal/recovery.tla` (liveness: any k cooperating
+   guardians always succeed; safety: any k-1 colluding
+   guardians cannot reconstruct + cannot impersonate the
+   requester). Surface: the words "shard", "Shamir",
+   "threshold" never appear; principle-2 audit gates the ship.
+   Acceptance gate: a non-technical user completes the split
+   in under 60 seconds; restore from 2 of 3 guardians completes
+   in under 2 minutes; failure modes (guardian denies, times
+   out, has lost their own device) each surface a clear next
+   step; replace-guardian flow preserves access without
+   re-pairing every device.
+
+9. **Group voice + group video + large groups (50-100+).**
+   Today group chat works (v0.8.0 group UI shipped); group
+   voice and group video do not. For mainstream adoption
+   (Signal / WhatsApp / Discord parity) the "30-person voice
+   call" use case is not optional. Foundation: MLS group
+   ratchet already sequenced into the PWA pivot at v0.21.0.
+   New crate: `native/ol_sfu` (Selective Forwarding Unit)
+   handling RTP forwarding + simulcast layer selection +
+   active-speaker detection + per-participant bandwidth
+   governance. Pattern: LiveKit-style SFU but with One Link
+   auth (the SFU is itself a One Link peer; calls are E2EE to
+   the participant set via MLS group ratchet; the SFU sees
+   only encrypted SRTP). Active SFU election: lowest-latency
+   volunteer relay carrying the `SFU_V1` capability, or
+   member-elected dedicated host. Sender-key rotation per MLS
+   epoch ensures post-compromise security per call.
+   Wire format: `CALL_INVITE_V1`, `CALL_ANSWER_V1`,
+   `CALL_HANGUP_V1`, `CALL_SFU_OFFER_V1`,
+   `CALL_SFU_ANSWER_V1`, plus an `SFU_V1` capability advertised
+   by qualifying relays. Where: new crate at `native/ol_sfu/`
+   (Rust, async-std, srtp + rtp-rs); existing
+   `src/one_link/peer_rtc.py` extended for multi-party offer
+   exchange; new `src/one_link/group_call.py` orchestrating
+   the SFU election + invite fanout; UI extension to the
+   existing group sidebar adds a "Call" button when the group
+   has `VOICE_GROUP_V1` or `VIDEO_GROUP_V1` advertised by all
+   members. Acceptance gate: 50-person voice call sustained
+   30 minutes at 64 kbps per participant on a single Hetzner
+   CX21 SFU; 8-person video call sustained 15 minutes at
+   720p / 8 fps with simulcast; active-speaker switching
+   under 200 ms; SFU operator (even a malicious one) cannot
+   read AV bytes (verified via a constant-time
+   plaintext-presence check + TLA+ spec at
+   `docs/formal/sfu.tla` proving the SFU operates only on
+   ciphertext + RTP headers, never plaintext samples).
 
 ### Track B — Connection
 
@@ -368,6 +479,49 @@ Ordered by leverage:
    Surface: zero. The kind of safety the user shouldn't think
    about.
 
+6. **Daemon corruption self-healing.** Production messengers
+   eat the cost of partial-sync / ratchet-out-of-sync / DB-wipe /
+   restored-from-backup scenarios. Today any of these drops the
+   user back to "reinstall + lose history," which is the
+   single worst recoverable-failure UX in the daemon and an
+   adoption ceiling for users who back up their phone or rotate
+   devices. Frontier: per-channel sequence-number gap detection
+   (if we expect message #N+1 from peer P and receive #N+5,
+   suspect corruption); a new `RESYNC_V1` capability that probes
+   the peer for "your last-sent index + your current ratchet
+   epoch," diffs against local state, and replays the missing
+   range from a bounded 30-day outbox cache (already exists
+   for `RELAY_OUTBOX_V1` from v0.7.1; extended retention +
+   at-rest encryption layer using the channel root key).
+   Restore-from-backup detection: backward time-jumps in
+   ratchet state at boot (Lamport-clock based check, not
+   wall-clock) trigger a key-change warning and a
+   re-pair-without-loss flow that preserves the visible message
+   history while rotating the long-term keys with peer consent.
+   Wire format: `RESYNC_PROBE_V1` (state-snapshot request),
+   `RESYNC_RESPONSE_V1` (state-snapshot answer with sealed
+   sequence-number summary), `RESYNC_REPLAY_V1` (chunked
+   ciphertext replay over the existing channel), all
+   capability-gated and ratchet-bound (the probe is itself
+   a ratcheted message, so an attacker cannot replay it to
+   force re-sync). Where: new crate `native/ol_resync` for
+   the state-diff + sequence-number logic + wire-format
+   encoding; new orchestration module
+   `src/one_link/resync.py`; extension of the existing
+   `src/one_link/outbox_store.py` to add a 30-day retention
+   window with at-rest encryption keyed off the channel root.
+   Surface: a thin "X messages caught up" toast when
+   reconciliation succeeds, nothing else. Any unrecoverable
+   message gets a single "this message could not be recovered"
+   placeholder so silent loss is structurally impossible.
+   Acceptance gate: corruption detected within 1 message
+   exchange; reconciliation completes under 5 seconds for a
+   gap under 100 messages; TLA+ spec at
+   `docs/formal/resync.tla` proves monotonicity (no ratchet
+   rewind ever; the rebuild path strictly forward-rolls keys)
+   + completeness (every message either delivers, is replayed,
+   or is explicitly flagged as lost — never silent).
+
 ---
 
 ### Track D — Coherence Mesh (sovereign network + multi-device identity)
@@ -428,10 +582,139 @@ acceptance gates per phase. Ordered by leverage:
    Memory / Intel SGX / AMD SEV-SNP / Windows TPM. Local malware
    with root cannot extract identity keys.
 
+9. **F9 — Relay-operator onramp (frictionless "run a relay"
+   funnel).** Sovereignty + censorship resistance require a
+   relay set that is diverse, geographically distributed, and
+   not operated by the One Link contributors. Today: relays
+   are word-of-mouth + anyone-can-but-few-do. The mesh-as-
+   sovereign-network story is only as strong as the diversity
+   + uptime of the non-contributor-operated relay set, and the
+   funnel for becoming an operator has to be at "10 minutes,
+   no developer skills" for that set to grow past the
+   enthusiast tier. Frontier:
+   - Published OCI image at
+     `oci.weareone-link.org/one-link-relay:latest` that runs
+     the relay daemon stand-alone (no chat client, no UI,
+     just the relay + operator-attestation endpoint).
+   - One-liner: `docker run -d --restart unless-stopped
+     -p 4040:4040 -v one-link-relay:/data
+     oci.weareone-link.org/one-link-relay`.
+   - Tested Raspberry Pi 4/5 image flash guide
+     (curl-pipe-bash installer + dd of a prebuilt SD image).
+   - Cloud-init recipes for DigitalOcean / Hetzner / Vultr /
+     Linode one-click deploys (one YAML per provider, signed).
+   - Public directory at `https://weareone-link.org/relays/`:
+     opt-in, signed self-attestation carrying operator name,
+     jurisdiction, uptime URL, capacity claim, donation method
+     (if any). Sortable by uptime / bandwidth / longevity.
+   - Hall-of-Relays page ranks the top operators by 90-day
+     uptime + bytes-forwarded; reciprocity badge for relays
+     that have stayed up through a censorship event.
+   - "Donate compute" affordance on each relay's directory
+     entry: route a portion of your own outbound through this
+     relay to credit its bandwidth budget without standing up
+     your own.
+   New crate: `native/ol_relay_operator` exposing a signed
+   `/api/operator` endpoint (capacity, uptime, bandwidth
+   stats, jurisdiction declaration, contact). Daemon-side:
+   each relay opts in via config; the endpoint signs its
+   response with the relay's release key so the directory
+   cannot lie about a relay's claims. Worker addition: new
+   `/relays/` route on the website + new `OPERATORS` Durable
+   Object that polls every registered relay's `/api/operator`
+   hourly and aggregates into the directory page. New repo
+   `IamOneYouAreOneWeAreOne/one-link-relay-deploy` carrying
+   the Docker compose file, Pi image build script,
+   cloud-init templates, and provider-specific one-click
+   deploy buttons. Defang contribution: a healthy
+   non-One-Link-operated relay set directly defangs
+   single-point takedown of the contributor-run relays;
+   listed in the Defang ladder at Track A item 6 as the
+   relay-diversity row. End-user surface: a tiny "via relay
+   X" hint when a message takes the relay path, clickable
+   for the relay's public attestation page (no PII; just
+   "operator-claimed jurisdiction + uptime + bandwidth").
+   Acceptance gate: a non-developer stands up a working
+   relay in under 10 minutes on Hetzner CX21 (verified by
+   recording the flow end to end); the directory page is
+   live with 10+ verified independent relays at first ship;
+   relay churn metrics published (mean uptime, percent
+   active in 7-day window); donate-compute path tested with
+   real traffic credit to a recipient relay.
+
 **End state**: capabilities no other consumer messenger ships
 (see comparison table in [`COHERENCE_MESH_PLAN.md`](./COHERENCE_MESH_PLAN.md)).
 The "everyone on any device, super easily" promise becomes
 literally what the architecture delivers.
+
+---
+
+## Track E — External assurance
+
+The internal red-team batches (May 9 / May 14 / May 21 sweeps)
+closed every finding raised in-tree. For the architectural
+claims to stand up under a hostile audience (journalists, NGOs,
+dissidents, regulators, supply-chain reviewers), at least one
+published third-party report has to exist. This is the one
+track the principles ladder does not gate at the code level
+(items here are contractor engagements + funding decisions,
+not code merges), but the roadmap owes them a slot because
+they are the only thing that converts "audit-ready" into
+"audited."
+
+1. **First external pentest** (Trail of Bits / NCC Group /
+   Cure53 / Quarkslab class). Scope: the protocol crates
+   (`ol_pair_qr`, `ol_ratchet`, `ol_onion`, `ol_capability`,
+   `ol_threshold_recovery`, `ol_pqsig`, `ol_pqkem`,
+   `ol_confidential`, `ol_resync`, `ol_sfu`, `ol_relay_operator`),
+   the Python daemon (pair flow, WebRTC, outbox, social
+   recovery, resync orchestration), the Worker code, the
+   website's signed-manifest verification pipeline, and a
+   sampled review of the WASM verifier path in the browser.
+   Funding: per `GOVERNANCE.md` (no acquisition-class capital;
+   community + grants are the funding lane); budget estimate
+   $50K to $300K depending on firm + depth. Output: published
+   report at
+   `https://weareone-link.org/audits/external/<firm>-<date>.pdf`
+   with a summary tile on the `/audits/` page; signed by the
+   release-key holder so the report is integrity-checkable
+   independently. Acceptance gate: report published, every
+   P0 and P1 finding closed, retest pass committed to git
+   history, summary tile live on `/audits/` page. Cadence:
+   re-engage annually or on every major version bump,
+   whichever is sooner.
+
+2. **Bug bounty live, funded.** Today the bounty intent is
+   on `/security/` ("we intend to pay"); the actual purse is
+   not funded. Land a real purse (community-funded line
+   item, donations + grants pool) with severity tiers
+   matching the published policy
+   (CRITICAL / HIGH / MEDIUM / LOW from `.well-known/security.txt`).
+   Lift the bounty intent on `/security/` from "intent" to
+   "active, funded, paying out." Per-finding payout published
+   in the report so the program's credibility scales with
+   each report. Where: new `/bounty/` page on website
+   (with the program rules), new line item on the
+   `GOVERNANCE.md` funding posture, optional Open Collective
+   or similar transparent treasury. Acceptance gate: at
+   least one CRITICAL or HIGH report paid out and published
+   (with the reporter's consent) within 6 months of going
+   live.
+
+3. **Reproducible-build verification (independent).** A
+   non-contributor builds every release from the public
+   source and publishes signed attestations that the bytes
+   match the release-key-signed binary. Pairs with the
+   Track-C item 5 reproducible-build CI; the external
+   attestation is the independent eyes on the same property
+   (the official CI is necessary but not sufficient — an
+   attacker who compromises the CI can pass that gate). Where:
+   a `/reproducible/` page on the website listing the
+   independent verifiers + their signed attestations per
+   release. Acceptance gate: at least three independent
+   verifiers (one per major release channel: Windows / Linux /
+   source-archive) reproducing bytes within 24h of each
+   tagged release; attestation chain published on the page.
 
 ---
 
@@ -476,3 +759,77 @@ companion exercise: every quarter, also audit this roadmap. Move
 items between tracks if their dominant gating principle has
 shifted; retire items that have shipped; promote items that
 should now be next based on what users actually hit.
+
+---
+
+## Scope decisions (the explicit "not in scope" list)
+
+Without this section, the same questions keep arriving. Each
+entry is a "no" with the reason it stays a no, so the answer
+is durable. If you find yourself proposing one of these,
+the burden is to overturn the reason, not just propose
+the feature.
+
+- **Contacts / address-book sync.** NOT in scope. Device
+  contacts are a third-party metadata surface (your full
+  social graph) that directly contradicts the architecture's
+  "no user database anywhere." If two users want a shared
+  address book, they can send each other a contacts file
+  via a normal One Link channel; building it as a primitive
+  would create the very database the architecture refuses
+  to hold.
+
+- **Calendar sync.** NOT in scope. Same reasoning as
+  contacts; calendar entries are a high-value metadata
+  surface (who you meet, when, where) and the right answer
+  is to use a local calendar app and send invitations as
+  files when needed.
+
+- **Email gateway / IMAP bridge.** NOT in scope. Email is
+  a clearnet protocol with persistent metadata trails at
+  every hop; bolting One Link onto SMTP would inherit the
+  worst properties of both. The right answer is "do not
+  use email for the things that belong on One Link."
+
+- **Payments / wallets / token rails.** NOT in scope. Money
+  systems are a different trust regime (regulatory, custody,
+  AML / KYC) and entangling them with the comms layer
+  creates surfaces (transaction graphs, regulatory data
+  requests, sanctions screening) that the comms layer is
+  architected to refuse. If you want a payment rail next
+  to your One Link chat, run a separate payment app.
+
+- **Hosted "One Link for Business" SaaS.** NOT in scope. A
+  managed-service offering inherits all the surfaces ("our
+  servers store your data," "our employees can access X,"
+  "we comply with subpoena Y") that the protocol exists to
+  eliminate. The federation answer is: each org runs its
+  own relay (see Track D F9, relay-operator onramp); the
+  trust posture stays "no operator can read what they
+  carry."
+
+- **Server-side AI features (auto-summarize, reply-suggest,
+  content moderation, semantic search across other users).**
+  NOT in scope at the daemon or relay level. If a user wants
+  those, they run them locally against their own message
+  store (the on-device model path in Track A item 5,
+  v0.24.0). The daemon refuses to ship features that need
+  to read plaintext server-side; doing so would undo the
+  entire architecture.
+
+- **Telemetry of any kind from the daemon or website.**
+  NOT in scope. This is the load-bearing privacy claim and
+  the architecture is designed so the claim is structural,
+  not policy. The only counters that exist are local + opt-
+  in (the operator-attestation endpoint on relays publishes
+  uptime + bandwidth, but only because the relay operator
+  chose to register).
+
+- **Mandatory account recovery via email or SMS.** NOT in
+  scope. Both create a fallback identity in a custodial
+  system (the email provider, the cell carrier) that
+  defeats the purpose of holding the identity locally.
+  Threshold recovery via guardians (Track A item 8) is the
+  one supported recovery path; users who want a custodial
+  fallback can designate themselves on a separate device as
+  one of their own guardians.
