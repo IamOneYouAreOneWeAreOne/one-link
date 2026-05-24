@@ -667,6 +667,73 @@ def test_transition_peer_fingerprint_rejects_same_fp_or_bad_input(tmp_path):
         )
 
 
+# ── UI symbols (Commit D) ───────────────────────────────────────────
+
+
+def test_index_html_exposes_rotate_api_methods():
+    """The UI's api wrapper has both endpoints the rotation flow
+    needs: trigger rotation + read live status counters."""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "web" / "index.html").read_text(encoding="utf-8")
+    assert "recoveryRotate(reason)" in html
+    assert '"/api/v1/recovery/rotate"' in html
+    assert 'recoveryRotateStatus() { return this.get("/api/v1/recovery/rotate/status"); }' in html
+
+
+def test_index_html_rotate_card_in_wizard():
+    """The wizard's modal must include the rotation card and route
+    clicks on its 'Rotate identity' button through the same modal-
+    opener function the tests reference."""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "web" / "index.html").read_text(encoding="utf-8")
+    assert 'id="recwiz-track-rotate"' in html
+    assert 'data-track="rotate"' in html
+    # Wizard's click dispatcher routes open-rotate to openRotationModal.
+    assert 'action === "open-rotate"' in html
+    assert "openRotationModal()" in html
+    # Card renderer is called from the refresh.
+    assert "_recwizRenderRotateCard" in html
+
+
+def test_index_html_rotate_modal_demands_confirm_checkbox_and_reason():
+    """The rotation modal must require explicit confirmation + offer
+    every documented reason value. Source-text gate so a refactor
+    that loses the checkbox surfaces immediately."""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "web" / "index.html").read_text(encoding="utf-8")
+    # Builder + symbols.
+    assert "function _ensureRotationModal()" in html
+    assert "async function openRotationModal()" in html
+    assert "function _renderRotationModalIntro()" in html
+    assert "async function _recwizRotateSubmit()" in html
+    # Reason picker covers every backend-validated value.
+    for reason in ("scheduled", "compromise", "device_lost", "other"):
+        assert f'value="{reason}"' in html
+    # Confirm checkbox + submit-disabled gating.
+    assert 'id="recwiz-rotate-confirm"' in html
+    assert 'submit.disabled = !confirmBox.checked' in html
+
+
+def test_index_html_rotate_success_shows_new_phrase_and_restart_prompt():
+    """After a successful rotation the modal renders the new 24
+    words AND prompts a restart - same UX shape the restore flow
+    uses so users learn one mental model."""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "web" / "index.html").read_text(encoding="utf-8")
+    idx = html.find("async function _recwizRotateSubmit(")
+    assert idx > 0
+    body = html[idx:idx + 4000]
+    assert "api.recoveryRotate" in body
+    # Renders the new 24 words.
+    assert "new_words" in body
+    assert "recwiz-words" in body
+    # Restart prompt.
+    assert "Restart One Link" in body
+    # Print path reuses the existing phrase-print helper from the
+    # setup wizard so we don't duplicate the print HTML.
+    assert "_recwizPhrasePrint" in body
+
+
 # ── wire protocol round-trip (Commit C-wire) ────────────────────────
 
 

@@ -11637,6 +11637,15 @@
         force: !!force, confirmed_replace: !!confirmedReplace,
       });
     },
+    // v0.21.x identity rotation: mint a new identity, sign a cert
+    // with the OLD key, queue per-peer delivery. UI flow prompts
+    // the user to back up the new 24 words + restart.
+    recoveryRotate(reason) {
+      return this.post("/api/v1/recovery/rotate", {
+        reason, confirmed_rotate: true,
+      });
+    },
+    recoveryRotateStatus() { return this.get("/api/v1/recovery/rotate/status"); },
     oneHealth() { return this.get("/api/one-health"); },
     setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); },
     claimSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/claim", body); },
@@ -24565,6 +24574,7 @@
             </button>
           </div>
         </div>
+        <div id="recwiz-track-rotate" class="recwiz-card" data-track="rotate"></div>
         <div class="recwiz-close-bar">
           <button type="button" class="recwiz-btn" data-recwiz-action="close">Done</button>
         </div>
@@ -24582,6 +24592,10 @@
         // stack. The restore modal handles its own open/close.
         _recwizClose();
         openRecoveryRestoreModal();
+      }
+      if (action === "open-rotate") {
+        _recwizClose();
+        openRotationModal();
       }
     });
     document.addEventListener("keydown", (ev) => {
@@ -24614,6 +24628,10 @@
     _recwizRenderPhraseCard(status.phrase || {});
     _recwizRenderSocialCard(status.social || {});
     _recwizRenderBackupCard(status.backup || {});
+    // Rotation card pulls its own status because it isn't part of
+    // the recovery-status snapshot - it's about queue state, not
+    // backup/restore configuration.
+    _recwizRenderRotateCard().catch(() => {});
   }
 
   function _recwizFormatRelative(ms) {
@@ -25117,6 +25135,197 @@
       btn.disabled = false;
       btn.textContent = origText;
     }
+  }
+
+  // ── recovery wizard: ROTATE-identity card + modal ──────────────
+  // Mint a fresh identity, sign a cert with the OLD key, queue
+  // per-peer delivery. The peer-side handler atomically migrates
+  // its pinned record so the user's friends keep recognizing them
+  // without manual re-pair. Backend lands the cert in
+  // pending_rotation_announcements; outbound delivery happens
+  // opportunistically on the next CAPS handshake to each peer.
+  async function _recwizRenderRotateCard() {
+    const card = document.getElementById("recwiz-track-rotate");
+    if (!card) return;
+    let status = null;
+    try { status = await api.recoveryRotateStatus(); } catch (e) { /* ignore */ }
+    const summary = (status && status.summary) || { total: 0, pending: 0, acked: 0 };
+    const inFlight = summary.total > 0;
+    const pillCls = !inFlight
+      ? "unavailable"
+      : summary.pending === 0 ? "ready" : "partial";
+    const pillText = !inFlight
+      ? "Idle"
+      : summary.pending === 0
+        ? `${summary.acked} of ${summary.total} acked`
+        : `${summary.acked} of ${summary.total} acked`;
+    const meta = inFlight
+      ? `${summary.pending} peer${summary.pending === 1 ? "" : "s"} still need to receive your new key.`
+      : "";
+    card.innerHTML = `
+      <div class="recwiz-card-head">
+        <div class="recwiz-card-name">Rotate identity key</div>
+        <div class="recwiz-card-status ${pillCls}">${escapeText(pillText)}</div>
+      </div>
+      <p class="recwiz-card-desc">
+        Replace this device's identity key. Useful if your key was
+        compromised, on a scheduled rotation, or if a device was
+        lost. Your paired peers receive a signed key-change
+        announcement and update automatically; you do not need to
+        re-pair with them.
+      </p>
+      ${meta ? `<p class="recwiz-card-meta">${escapeText(meta)}</p>` : ""}
+      <div class="recwiz-card-actions">
+        <button type="button" class="recwiz-btn" data-recwiz-action="open-rotate">
+          ${inFlight ? "Rotate again" : "Rotate identity"}
+        </button>
+      </div>
+    `;
+  }
+
+  async function openRotationModal() {
+    _ensureRotationModal();
+    const modal = document.getElementById("recovery-rotate-modal");
+    modal.classList.add("show");
+    document.body.classList.add("recwiz-open");
+    _renderRotationModalIntro();
+  }
+
+  function _closeRotationModal() {
+    const modal = document.getElementById("recovery-rotate-modal");
+    if (modal) modal.classList.remove("show");
+    document.body.classList.remove("recwiz-open");
+  }
+
+  function _ensureRotationModal() {
+    if (document.getElementById("recovery-rotate-modal")) return;
+    const m = document.createElement("div");
+    m.id = "recovery-rotate-modal";
+    m.className = "recwiz-modal";
+    m.setAttribute("role", "dialog");
+    m.setAttribute("aria-modal", "true");
+    m.setAttribute("aria-label", "Rotate identity key");
+    m.innerHTML = `
+      <div class="recwiz-backdrop" data-recwiz-close></div>
+      <div class="recwiz-pane">
+        <h2 class="recwiz-title">Rotate identity key</h2>
+        <p class="recwiz-lead">
+          This replaces your current identity key with a fresh one.
+          Paired peers will receive a signed key-change announcement
+          and update automatically when this device next talks to
+          them.
+        </p>
+        <div class="recwiz-rotate-body"></div>
+      </div>
+    `;
+    document.body.appendChild(m);
+    m.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (!(t instanceof Element)) return;
+      if (t.hasAttribute("data-recwiz-close")) _closeRotationModal();
+      if (t.getAttribute("data-recwiz-action") === "close-rotate") {
+        _closeRotationModal();
+      }
+    });
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && m.classList.contains("show")) {
+        _closeRotationModal();
+      }
+    });
+  }
+
+  function _renderRotationModalIntro() {
+    const modal = document.getElementById("recovery-rotate-modal");
+    const body = modal.querySelector(".recwiz-rotate-body");
+    body.innerHTML = `
+      <div class="recwiz-danger-box">
+        <strong>This is a security action.</strong>
+        After rotating, you will get a NEW 24-word recovery phrase.
+        You must write it down on paper; the old phrase no longer
+        recovers this identity. Unpaired peers (people you have
+        not yet trusted) will see your new key as a stranger and
+        need to be added again.
+      </div>
+      <div class="recwiz-verify-row" style="flex-direction:column; align-items:stretch; gap:6px;">
+        <label for="recwiz-rotate-reason" style="min-width:0; color:var(--text);">
+          Why are you rotating?
+        </label>
+        <select id="recwiz-rotate-reason" class="recwiz-verify-input">
+          <option value="scheduled">Scheduled rotation (defense in depth)</option>
+          <option value="compromise">My key may be compromised</option>
+          <option value="device_lost">A device with this key was lost</option>
+          <option value="other">Other reason</option>
+        </select>
+      </div>
+      <label class="recwiz-confirm-row">
+        <input type="checkbox" id="recwiz-rotate-confirm" />
+        <span>I understand my current identity will be replaced + I will write down the new phrase.</span>
+      </label>
+      <p class="recwiz-feedback" id="recwiz-rotate-fb"></p>
+      <div class="recwiz-card-actions" style="justify-content:flex-end;">
+        <button type="button" class="recwiz-btn" data-recwiz-action="close-rotate">Cancel</button>
+        <button type="button" class="recwiz-btn recwiz-btn-primary" id="recwiz-rotate-submit" disabled>
+          Rotate now
+        </button>
+      </div>
+    `;
+    const confirmBox = body.querySelector("#recwiz-rotate-confirm");
+    const submit = body.querySelector("#recwiz-rotate-submit");
+    confirmBox.addEventListener("change", () => {
+      submit.disabled = !confirmBox.checked;
+    });
+    submit.addEventListener("click", () => _recwizRotateSubmit());
+  }
+
+  async function _recwizRotateSubmit() {
+    const modal = document.getElementById("recovery-rotate-modal");
+    const body = modal.querySelector(".recwiz-rotate-body");
+    const reason = body.querySelector("#recwiz-rotate-reason").value;
+    const fb = body.querySelector("#recwiz-rotate-fb");
+    const submit = body.querySelector("#recwiz-rotate-submit");
+    submit.disabled = true;
+    fb.className = "recwiz-feedback";
+    fb.textContent = "Generating new identity + signing rotation cert...";
+    let res;
+    try {
+      res = await api.recoveryRotate(reason);
+    } catch (e) {
+      fb.className = "recwiz-feedback bad";
+      fb.textContent = errorToastBody(e) || "Rotation failed.";
+      submit.disabled = false;
+      return;
+    }
+    if (!res || !res.ok) {
+      fb.className = "recwiz-feedback bad";
+      fb.textContent = (res && res.error) || "Rotation failed.";
+      submit.disabled = false;
+      return;
+    }
+    const words = Array.isArray(res.new_words) ? res.new_words : [];
+    const wordCells = words.map((w, i) => (
+      `<span class="recwiz-word"><span class="recwiz-word-num">${i + 1}.</span>${escapeText(w)}</span>`
+    )).join("");
+    body.innerHTML = `
+      <div class="recwiz-restart-card">
+        <strong>Identity rotated.</strong>
+        Your new 24-word recovery phrase is below. Write it down on
+        paper. Anyone with these words can be you on a fresh install.
+        <br><br>
+        ${escapeText(`Queued for delivery to ${res.queued_peer_count || 0} paired peer${res.queued_peer_count === 1 ? "" : "s"}; they will pick up the new key the next time this device talks to them.`)}
+        Restart One Link now to start using the new identity.
+      </div>
+      <div class="recwiz-words" aria-label="24 word recovery phrase">${wordCells}</div>
+      <div class="recwiz-card-actions" style="justify-content:flex-end;">
+        <button type="button" class="recwiz-btn" data-recwiz-rotate="print">Print</button>
+        <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-action="close-rotate">Close</button>
+      </div>
+    `;
+    body.querySelector('[data-recwiz-rotate="print"]')
+      .addEventListener("click", () => _recwizPhrasePrint(words));
+    toast(
+      `Identity rotated. Restart One Link to take effect (queued for ${res.queued_peer_count || 0} peers).`,
+      "good", 6000,
+    );
   }
 
   // ── recovery wizard: RESTORE-from-phrase modal ─────────────────
