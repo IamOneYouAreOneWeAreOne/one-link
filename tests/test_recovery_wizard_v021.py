@@ -812,6 +812,106 @@ def test_index_html_restore_modal_offers_optional_bundle_file():
     assert "function _recwizFileToB64(file)" in html
 
 
+# ── end-to-end identity round-trip ───────────────────────────────────
+
+
+def test_identity_round_trips_through_recovery_phrase(tmp_path):
+    """The strongest 'flawless' gate on recovery: the Ed25519 identity
+    derived AFTER a phrase-restore must byte-equal the identity that
+    was present BEFORE the restore. If this passes, the user really
+    does come back as the same person to their peers; if it fails,
+    the recovery story is broken regardless of how many unit tests
+    pass at lower levels.
+    """
+    from one_link import master_seed, mnemonic, recovery_api
+    # Original install: create seed + derive identity.
+    seed_original, _ = master_seed.load_or_create_seed(tmp_path)
+    identity_original = master_seed.derive_identity_priv(seed_original)
+    pub_original = identity_original.public_key().public_bytes_raw()
+    phrase = mnemonic.encode(seed_original)
+
+    # Wipe the install (as if a fresh device).
+    (tmp_path / "master.seed").unlink()
+    assert not master_seed.has_seed(tmp_path)
+
+    # Restore via the same code path the HTTP endpoint calls.
+    recovery_api.restore_seed_from_phrase(
+        data_dir=tmp_path,
+        phrase=phrase,
+        delete_identity_files=False,
+    )
+    assert master_seed.has_seed(tmp_path)
+
+    # Identity derived from the restored seed must byte-match the
+    # original. If HKDF info strings drift, OR the seed encoding
+    # changes, OR the Ed25519 derivation grows a salt, this test
+    # catches it.
+    seed_restored = master_seed.load_seed(tmp_path)
+    assert seed_restored == seed_original
+    identity_restored = master_seed.derive_identity_priv(seed_restored)
+    pub_restored = identity_restored.public_key().public_bytes_raw()
+    assert pub_restored == pub_original, (
+        "Restored identity does not match original. Peers paired "
+        "with the original device would NOT recognize the restored "
+        "device. This breaks the entire 'restore your identity' "
+        "promise. Check whether master_seed.derive_identity_priv's "
+        "HKDF info string or mnemonic.{encode,decode} have changed."
+    )
+
+
+def test_identity_round_trips_through_bundle_restore(tmp_path):
+    """The same flawless gate, but through the .olbak path: identity
+    derived from the restored seed (which the bundle plaintext
+    contains) must match the original."""
+    import os
+    from one_link import backup_bundle, master_seed, mnemonic, recovery_api
+    src = tmp_path / "src"
+    src.mkdir()
+    seed_original = master_seed.load_or_create_seed(src)[0]
+    (src / "state.db").write_bytes(b"SQLite format 3\x00" + os.urandom(1024))
+    identity_original = master_seed.derive_identity_priv(seed_original)
+    pub_original = identity_original.public_key().public_bytes_raw()
+    phrase = mnemonic.encode(seed_original)
+    bundle = backup_bundle.create_bundle(seed=seed_original, data_dir=src)
+
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    recovery_api.restore_from_bundle(
+        data_dir=dst,
+        phrase=phrase,
+        bundle_bytes=bundle,
+        delete_identity_files=False,
+        overwrite=False,
+    )
+    # The bundle's plaintext contained master.seed; extracting it
+    # writes the same bytes into dst.
+    seed_restored = master_seed.load_seed(dst)
+    assert seed_restored == seed_original
+    identity_restored = master_seed.derive_identity_priv(seed_restored)
+    pub_restored = identity_restored.public_key().public_bytes_raw()
+    assert pub_restored == pub_original
+    # And the bundle payload is back too.
+    assert (dst / "state.db").read_bytes() == (src / "state.db").read_bytes()
+
+
+def test_drk_round_trips_through_recovery_phrase(tmp_path):
+    """At-rest encryption uses the DRK, which is HKDF-derived from
+    the master seed. After restore, the DRK must derive to the same
+    bytes so the user's stored chat history still decrypts."""
+    from one_link import master_seed, mnemonic, recovery_api
+    seed_original, _ = master_seed.load_or_create_seed(tmp_path)
+    drk_original = master_seed.derive_drk(seed_original)
+    phrase = mnemonic.encode(seed_original)
+
+    (tmp_path / "master.seed").unlink()
+    recovery_api.restore_seed_from_phrase(
+        data_dir=tmp_path, phrase=phrase, delete_identity_files=False,
+    )
+    seed_restored = master_seed.load_seed(tmp_path)
+    drk_restored = master_seed.derive_drk(seed_restored)
+    assert drk_restored == drk_original
+
+
 # ── helpers ──────────────────────────────────────────────────────────
 
 
