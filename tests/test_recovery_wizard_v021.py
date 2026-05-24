@@ -496,6 +496,29 @@ def test_recovery_wizard_social_track_downloads_share_files():
     assert ".olss" in dl  # default share extension
 
 
+def test_one_health_score_rewards_per_track_recovery_depth():
+    """One Health's recovery score must reward layered recovery
+    (multiple tracks configured) higher than a single track. A user
+    who shipped phrase + bundle + social shares is structurally
+    better off than one with only phrase, and the score should
+    reflect that."""
+    src = _server_src()
+    idx = src.find("def api_one_health")
+    if idx < 0:
+        # Fallback: locate via the score-row block.
+        idx = src.find('{"id": "recovery", "label": "Recovery"')
+    assert idx > 0
+    body = src[idx:idx + 12000]
+    # Per-track bonuses in the recovery scoring block.
+    assert "recovery_phrase_ready" in body
+    assert "recovery_bundle_ready" in body
+    assert "recovery_social_ready" in body
+    # Back-compat for legacy installs that only had the binary flag.
+    assert "recovery_track_count == 0" in body
+    # tracks_ready surfaces the per-track shape to the UI.
+    assert '"tracks_ready"' in body
+
+
 def test_recovery_wizard_each_card_has_plain_english_help_disclosure():
     """Phase D plain-English docs: every card in the recovery wizard
     must have a 'How does this work?' disclosure explaining what

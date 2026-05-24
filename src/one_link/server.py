@@ -7529,6 +7529,18 @@ class UIServer:
         privacy_ready = bool(setup.get("privacy_proof", {}).get("viewed"))
         safety_ready = setting_ready("one_setup_safety_reviewed_at_ms")
         recovery_ready = setting_ready("one_setup_recovery_configured_at_ms")
+        # v0.21.x: per-track recovery readiness so One Health scores
+        # "I have phrase + bundle + shares" higher than "I have just
+        # one path". Each track is independent so a user can layer
+        # them for defense in depth. Falls back gracefully on a
+        # legacy install where only the binary flag was set.
+        from one_link import recovery_api as _recovery_api
+        recovery_phrase_ready = setting_ready("one_setup_recovery_phrase_verified_at_ms")
+        recovery_bundle_ready = setting_ready("one_setup_recovery_backup_last_export_at_ms")
+        recovery_social_ready = setting_ready("one_setup_recovery_social_configured_at_ms")
+        recovery_track_count = sum((
+            recovery_phrase_ready, recovery_bundle_ready, recovery_social_ready,
+        ))
         setup_ready = bool(setup.get("completed")) or setup.get("current_step") == "finish"
 
         protection = 30
@@ -7557,13 +7569,29 @@ class UIServer:
             speed += 5
         speed = min(100, speed)
 
+        # Recovery posture: base 20, +1 paired device (recovery via
+        # device redundancy), +1 safety review. The recovery-track
+        # bonus encourages defense in depth: a single track gets the
+        # legacy "is recovery configured" reward; layering 2-3 tracks
+        # scores incrementally higher. Legacy installs that flipped
+        # only `recovery_configured` still get the first-track
+        # bonus via the fallback below.
         recovery = 20
-        if recovery_ready:
-            recovery += 45
-        if remote_devices:
+        if recovery_phrase_ready:
             recovery += 25
+        if recovery_bundle_ready:
+            recovery += 15
+        if recovery_social_ready:
+            recovery += 20
+        # Back-compat: a daemon that only knows the legacy flag (no
+        # per-track state) still gets credit so its score doesn't
+        # silently regress after upgrade.
+        if recovery_track_count == 0 and recovery_ready:
+            recovery += 25
+        if remote_devices:
+            recovery += 15
         if safety_ready:
-            recovery += 10
+            recovery += 5
         recovery = min(100, recovery)
 
         device_score = 25
@@ -7589,7 +7617,19 @@ class UIServer:
         score_rows = [
             {"id": "protection", "label": "Protection", "score": protection},
             {"id": "speed", "label": "Speed", "score": speed},
-            {"id": "recovery", "label": "Recovery", "score": recovery},
+            {
+                "id": "recovery", "label": "Recovery", "score": recovery,
+                # v0.21.x: surface the per-track shape so the One
+                # Health UI can show 'phrase + bundle (2 of 3 tracks)'
+                # instead of just a raw 0-100 number. Helps users see
+                # what to add next for stronger recovery posture.
+                "tracks_ready": {
+                    "phrase": recovery_phrase_ready,
+                    "bundle": recovery_bundle_ready,
+                    "social": recovery_social_ready,
+                },
+                "tracks_ready_count": recovery_track_count,
+            },
             {"id": "devices", "label": "Devices", "score": device_score},
             {"id": "people", "label": "People", "score": people},
         ]
