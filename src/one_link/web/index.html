@@ -11720,6 +11720,9 @@
     recoveryHeldSharesDelete(shareId) {
       return this.del(`/api/v1/recovery/shares/${shareId}`);
     },
+    recoveryHeldSharesUnwrap(shareId) {
+      return this.post(`/api/v1/recovery/shares/${shareId}/unwrap`, {});
+    },
     recoverySocialCandidates() { return this.get("/api/v1/recovery/social/candidates"); },
     recoverySocialIssue(guardians, threshold_k) {
       return this.post("/api/v1/recovery/social/issue", { guardians, threshold_k });
@@ -25711,6 +25714,9 @@
             <div class="recwiz-share-row">
               <span class="recwiz-share-num">#${s.share_index}/${s.total_n}</span>
               <span class="recwiz-share-name">${meta}</span>
+              <button type="button" class="recwiz-btn"
+                      data-recwiz-share-unwrap="${s.id}"
+                      title="Unwrap this share so you can deliver the bytes back to the owner">Unwrap</button>
               <button type="button" class="recwiz-btn recwiz-btn-danger"
                       data-recwiz-share-drop="${s.id}" title="Forget this share">Forget</button>
             </div>`;
@@ -25760,6 +25766,89 @@
         _recwizHeldShareDrop(id);
       });
     });
+    card.querySelectorAll('[data-recwiz-share-unwrap]').forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = Number(btn.getAttribute("data-recwiz-share-unwrap"));
+        _recwizHeldShareUnwrap(id);
+      });
+    });
+  }
+
+  async function _recwizHeldShareUnwrap(id) {
+    let res;
+    try {
+      res = await api.recoveryHeldSharesUnwrap(id);
+    } catch (e) {
+      toast(`Unwrap failed: ${errorToastBody(e)}`, "bad", 6000);
+      return;
+    }
+    if (!res || !res.ok) {
+      toast(`Unwrap failed: ${(res && res.error) || "unknown"}`, "bad", 6000);
+      return;
+    }
+    // Build a small modal showing the unwrapped (idx, bytes) for
+    // the user to copy + manually deliver. Reuses the recwiz-modal
+    // shell + a copy button.
+    let modal = document.getElementById("held-share-unwrap-modal");
+    if (!modal) {
+      modal = document.createElement("div");
+      modal.id = "held-share-unwrap-modal";
+      modal.className = "recwiz-modal";
+      modal.setAttribute("role", "dialog");
+      modal.setAttribute("aria-modal", "true");
+      modal.setAttribute("aria-label", "Unwrapped recovery share");
+      modal.innerHTML = `
+        <div class="recwiz-backdrop" data-held-share-close></div>
+        <div class="recwiz-pane">
+          <h2 class="recwiz-title">Unwrapped recovery share</h2>
+          <div class="recwiz-share-unwrap-body"></div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      modal.addEventListener("click", (ev) => {
+        const t = ev.target;
+        if (!(t instanceof Element)) return;
+        if (t.hasAttribute("data-held-share-close")) {
+          modal.classList.remove("show");
+          document.body.classList.remove("recwiz-open");
+        }
+      });
+    }
+    const payload = `${res.share_index}:${res.share_bytes_b64}`;
+    const body = modal.querySelector(".recwiz-share-unwrap-body");
+    body.innerHTML = `
+      <p class="recwiz-lead">
+        Share #${res.share_index} of ${res.total_n} (threshold
+        ${res.threshold_k}). The owner needs ${res.threshold_k}
+        such pieces from ${res.threshold_k} different guardians to
+        recover.
+      </p>
+      <p class="recwiz-warn">
+        Deliver these bytes to the owner via whatever you trust
+        (in person, encrypted email, USB). They paste it into
+        their recovery flow. Anyone who collects ${res.threshold_k}
+        such pieces can reconstruct the owner's identity, so
+        treat this with the same care you would the owner's
+        actual recovery phrase.
+      </p>
+      <textarea class="recwiz-phrase-input" readonly aria-label="Unwrapped share payload"
+                style="min-height:80px;">${escapeText(payload)}</textarea>
+      <p class="recwiz-card-meta">Format: <code>share_index:base64_share_bytes</code></p>
+      <div class="recwiz-card-actions" style="justify-content:flex-end;">
+        <button type="button" class="recwiz-btn" id="recwiz-share-copy">Copy</button>
+        <button type="button" class="recwiz-btn recwiz-btn-primary" data-held-share-close>Done</button>
+      </div>
+    `;
+    body.querySelector("#recwiz-share-copy").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(payload);
+        toast("Copied to clipboard.", "good", 3000);
+      } catch (e) {
+        toast(`Could not copy: ${e.message || e}`, "bad", 5000);
+      }
+    });
+    modal.classList.add("show");
+    document.body.classList.add("recwiz-open");
   }
 
   function _recwizHeldSharesImportStart() {

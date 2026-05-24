@@ -204,6 +204,151 @@ def test_index_html_held_shares_api_methods_exist():
     assert '"/api/v1/recovery/shares"' in html
 
 
+# ── ship 2: unwrap endpoint ─────────────────────────────────────────
+
+
+def test_unwrap_endpoint_registered_guarded_ratelimited():
+    from one_link.server import UIServer
+    daemon = SimpleNamespace(state=None, peer_rtc=None)
+    server = UIServer(daemon)
+    methods: set[str] = set()
+    for resource in server.app.router.resources():
+        info = resource.get_info()
+        path = info.get("path") or info.get("formatter") or ""
+        if path == "/api/v1/recovery/shares/{share_id}/unwrap":
+            for route in resource:
+                methods.add(route.method)
+    assert "POST" in methods
+
+    src = _server_src()
+    idx = src.find('"/api/v1/recovery/shares/{share_id}/unwrap"')
+    assert idx > 0
+    line_start = src.rfind("\n", 0, idx) + 1
+    line_end = src.find("\n", idx)
+    assert "self._guarded(" in src[line_start:line_end]
+
+    handler_idx = src.find("async def api_recovery_shares_unwrap(")
+    assert handler_idx > 0
+    body = src[handler_idx:handler_idx + 4000]
+    assert "_rate_limited(" in body
+    assert '"recovery_shares_unwrap"' in body
+    assert "social_recovery.unwrap_share" in body
+    assert "_recovery_no_store_headers" in body
+    # Wipes the local seed copy after unwrap.
+    assert 'b"\\x00" * len(my_seed)' in body
+
+
+def test_unwrap_endpoint_returns_unwrapped_share_via_handler(tmp_path):
+    """End-to-end: insert a real wrapped share into state, call the
+    handler with a daemon stub whose identity priv matches the
+    guardian pubkey used at wrap time, get back the same
+    (idx, share_bytes) that wrap+combine would produce."""
+    import asyncio
+    from one_link import social_recovery
+    from one_link.daemon import Daemon
+    from one_link.state import State
+    from one_link.wire import decode_msg
+
+    # Wrap a real share to a specific guardian keypair.
+    guardian_priv = Ed25519PrivateKey.generate()
+    guardian_pub = guardian_priv.public_key().public_bytes_raw()
+    seed = os.urandom(32)
+    shares = social_recovery.split_and_wrap(
+        seed=seed,
+        contact_ed_pubs=[guardian_pub, os.urandom(32) and Ed25519PrivateKey.generate().public_key().public_bytes_raw(), Ed25519PrivateKey.generate().public_key().public_bytes_raw()],
+        threshold_k=2,
+        total_n=3,
+    )
+    state = State(tmp_path / "r.db")
+    row_id = state.insert_held_share(
+        share_index=shares[0].share_index,
+        threshold_k=shares[0].threshold,
+        total_n=shares[0].total,
+        setup_ms=shares[0].setup_ms,
+        wrapped_blob=shares[0].encoded,
+    )
+
+    # Build a Daemon stub with the guardian identity in self.me.
+    daemon = Daemon.__new__(Daemon)
+    daemon.state = state
+
+    class _Me:
+        def __init__(self, priv):
+            self.private = priv
+            self.public_bytes = priv.public_key().public_bytes_raw()
+    daemon.me = _Me(guardian_priv)
+
+    # Build a minimal request stub for the aiohttp handler.
+    class _Request:
+        match_info = {"share_id": str(row_id)}
+        transport = None
+        @property
+        def remote(self): return "127.0.0.1"
+        headers = {}
+
+    # The handler uses self._rate_limited which lives on UIServer,
+    # so drive via the real UIServer.
+    from one_link.server import UIServer
+    srv = UIServer(daemon)
+    res = asyncio.run(srv.api_recovery_shares_unwrap(_Request()))
+    # The handler returns aiohttp web.Response. Parse the JSON body.
+    import json as _json
+    body = _json.loads(res.text)
+    assert body["ok"] is True
+    assert body["share_index"] == shares[0].share_index
+    decoded = base64.b64decode(body["share_bytes_b64"])
+    # Cross-check: the same unwrap done locally yields the same bytes.
+    expected_idx, expected_bytes = social_recovery.unwrap_share(
+        wrapped=shares[0].encoded,
+        my_ed_priv_seed=guardian_priv.private_bytes_raw(),
+    )
+    assert body["share_index"] == expected_idx
+    assert decoded == expected_bytes
+
+
+def test_unwrap_endpoint_404s_on_unknown_share_id(tmp_path):
+    import asyncio
+    from one_link.daemon import Daemon
+    from one_link.state import State
+    state = State(tmp_path / "r.db")
+    daemon = Daemon.__new__(Daemon)
+    daemon.state = state
+
+    class _Me:
+        private = Ed25519PrivateKey.generate()
+        public_bytes = private.public_key().public_bytes_raw()
+    daemon.me = _Me()
+
+    class _Request:
+        match_info = {"share_id": "99999"}
+        transport = None
+        @property
+        def remote(self): return "127.0.0.1"
+        headers = {}
+
+    from one_link.server import UIServer
+    srv = UIServer(daemon)
+    res = asyncio.run(srv.api_recovery_shares_unwrap(_Request()))
+    assert res.status == 404
+
+
+def test_index_html_unwrap_button_and_modal():
+    """Each held-share row has an Unwrap button + the modal exists
+    + shows the share bytes in a copy-able textarea + warns about
+    treating bytes as sensitive material."""
+    html = _index_html()
+    assert 'recoveryHeldSharesUnwrap(shareId)' in html
+    assert 'data-recwiz-share-unwrap' in html
+    assert "async function _recwizHeldShareUnwrap(" in html
+    idx = html.find("async function _recwizHeldShareUnwrap(")
+    body = html[idx:idx + 4000]
+    assert "api.recoveryHeldSharesUnwrap" in body
+    assert "share_bytes_b64" in body
+    assert "navigator.clipboard.writeText" in body
+    # Warns the user that the unwrapped bytes are sensitive.
+    assert "recwiz-warn" in body
+
+
 def test_index_html_held_shares_card_in_wizard():
     html = _index_html()
     assert 'id="recwiz-track-held-shares"' in html

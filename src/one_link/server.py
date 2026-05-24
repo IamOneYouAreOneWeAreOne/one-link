@@ -1825,6 +1825,10 @@ class UIServer:
         r.add_post("/api/v1/recovery/shares/import", self._guarded(self.api_recovery_shares_import))
         r.add_get("/api/v1/recovery/shares", self._guarded(self.api_recovery_shares_list))
         r.add_delete("/api/v1/recovery/shares/{share_id}", self._guarded(self.api_recovery_shares_delete))
+        # v0.21.x social-share recovery ship 2: unwrap a held share
+        # using the guardian's identity private key, return the raw
+        # (idx, share_bytes) for manual delivery back to the owner.
+        r.add_post("/api/v1/recovery/shares/{share_id}/unwrap", self._guarded(self.api_recovery_shares_unwrap))
         r.add_get("/api/v1/recovery/backup/export", self._guarded(self.api_recovery_backup_export))
         r.add_get("/api/v1/recovery/social/candidates", self._guarded(self.api_recovery_social_candidates))
         r.add_post("/api/v1/recovery/social/issue", self._guarded(self.api_recovery_social_issue))
@@ -8304,6 +8308,78 @@ class UIServer:
             return web.json_response({"error": "bad share_id"}, status=400)
         deleted = state.delete_held_share(share_id)
         resp = web.json_response({"ok": True, "deleted": deleted})
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_shares_unwrap(self, request: web.Request) -> web.Response:
+        """Unwrap a held share using the guardian's identity private
+        key. The recovering user later combines K such unwrapped
+        shares from K different guardians to reconstruct their seed.
+
+        Returns the raw (share_index, share_bytes) so the guardian
+        can deliver them to the owner via whatever medium they
+        trust (in person, encrypted email, USB). The share_bytes
+        is base64-encoded for safe ASCII transport.
+
+        Per-token rate limit (10 / 60s) so a stolen UI token can't
+        spam unwrap attempts to extract every held share at once.
+        """
+        from one_link import social_recovery
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        if self._rate_limited(
+            "recovery_shares_unwrap",
+            self._client_rate_key(request),
+            limit=10,
+            window_seconds=60.0,
+        ):
+            return web.json_response(
+                {"error": "too many unwrap attempts; wait a minute"},
+                status=429,
+            )
+        try:
+            share_id = int(request.match_info["share_id"])
+        except (KeyError, ValueError):
+            return web.json_response({"error": "bad share_id"}, status=400)
+        row = state.get_held_share(share_id)
+        if row is None:
+            return web.json_response({"error": "not found"}, status=404)
+        if self.daemon.me is None or self.daemon.me.private is None:
+            return web.json_response({
+                "error": "daemon has no identity to unwrap with",
+            }, status=503)
+        try:
+            my_seed = self.daemon.me.private.private_bytes_raw()
+        except Exception as exc:
+            return web.json_response({
+                "error": "could not access identity key",
+                "hint": str(exc),
+            }, status=500)
+        try:
+            try:
+                idx, share_bytes = social_recovery.unwrap_share(
+                    wrapped=row["wrapped_blob"],
+                    my_ed_priv_seed=my_seed,
+                )
+            except ValueError as e:
+                return web.json_response({
+                    "error": "unwrap_failed",
+                    "hint": str(e),
+                }, status=400)
+        finally:
+            with contextlib.suppress(Exception):
+                my_seed = b"\x00" * len(my_seed)
+                del my_seed
+        import base64 as _b64
+        resp = web.json_response({
+            "ok": True,
+            "share_index": int(idx),
+            "share_bytes_b64": _b64.b64encode(share_bytes).decode("ascii"),
+            "threshold_k": row["threshold_k"],
+            "total_n": row["total_n"],
+            "setup_ms": row["setup_ms"],
+        })
         self._recovery_no_store_headers(resp)
         return resp
 
