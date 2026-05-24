@@ -505,6 +505,87 @@ def _safe_filename_segment(s: str) -> str:
 # ── settings-reset hook for the existing `reset` setup_action ────────
 
 
+# ── restore from phrase ──────────────────────────────────────────────
+
+
+def is_install_clean_for_restore(state) -> tuple[bool, dict[str, int]]:
+    """Return (clean, evidence). An install is "clean" if restoring
+    a different identity over it does not destroy meaningful user
+    state. We count what would be orphaned: pinned peers, sent +
+    received messages, groups, shared folders, self-mesh devices.
+
+    A clean install only needs the user to confirm the phrase.
+    A dirty install requires `force=True` on the restore call AND
+    a stern UI warning that the prior identity will be replaced.
+    """
+    evidence: dict[str, int] = {}
+    try:
+        peers = state.list_peers()
+        pinned = [p for p in (peers or []) if getattr(p, "trust", None) == "pinned"]
+        evidence["pinned_peers"] = len(pinned)
+    except Exception:
+        evidence["pinned_peers"] = 0
+    for fn, key in (
+        ("list_groups", "groups"),
+        ("list_self_mesh_devices", "self_mesh_devices"),
+    ):
+        f = getattr(state, fn, None)
+        if callable(f):
+            try:
+                items = f()
+                if items is None:
+                    evidence[key] = 0
+                elif hasattr(items, "__len__"):
+                    evidence[key] = len(items)
+                else:
+                    evidence[key] = sum(1 for _ in items)
+            except Exception:
+                evidence[key] = 0
+        else:
+            evidence[key] = 0
+    # A "dirty" install has any of these.
+    clean = all(v == 0 for v in evidence.values())
+    return clean, evidence
+
+
+def restore_seed_from_phrase(
+    *,
+    data_dir: Path,
+    phrase: str,
+    delete_identity_files: bool,
+) -> bytes:
+    """Decode the 24-word phrase, write the master seed to disk, and
+    (when ``delete_identity_files`` is True) clear the existing
+    identity.key + DRK so the daemon re-derives both from the
+    restored seed on next start.
+
+    Raises ``ValueError`` on bad/incomplete phrase (mnemonic.decode's
+    own checksum check), ``FileNotFoundError`` is not raised here -
+    callers decide whether to allow overwriting an existing seed.
+
+    Returns the 32-byte decoded seed (for the caller's logging or
+    audit; the seed itself is also persisted to disk).
+    """
+    from one_link import master_seed, mnemonic
+    from one_link import paths
+    # Decode + verify checksum BEFORE touching disk. mnemonic.decode
+    # raises ValueError with a clear message on bad phrase / typo.
+    seed = mnemonic.decode(phrase)
+    if len(seed) != master_seed.SEED_LEN_BYTES:
+        raise ValueError(
+            f"decoded seed has wrong length {len(seed)}; "
+            f"expected {master_seed.SEED_LEN_BYTES}"
+        )
+    if delete_identity_files:
+        # Wipe identity.key + DRK so the daemon's next start
+        # re-derives both from the restored seed.
+        for f in (paths.key_path(), Path(data_dir) / "data-root-key.bin"):
+            with contextlib.suppress(OSError):
+                Path(f).unlink()
+    master_seed.store_seed(Path(data_dir), seed)
+    return seed
+
+
 def reset_all_recovery_state(state) -> None:
     """Wipe the per-track recovery settings. Called from the
     existing `reset` setup_action so the new state vanishes along

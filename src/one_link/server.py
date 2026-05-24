@@ -1811,6 +1811,14 @@ class UIServer:
         r.add_get("/api/v1/recovery/backup/export", self._guarded(self.api_recovery_backup_export))
         r.add_get("/api/v1/recovery/social/candidates", self._guarded(self.api_recovery_social_candidates))
         r.add_post("/api/v1/recovery/social/issue", self._guarded(self.api_recovery_social_issue))
+        # v0.21.x restore-from-phrase: the OTHER half of the recovery
+        # story. Setup ships the 24 words; restore types them on a
+        # fresh install and brings the identity back. CLI has had
+        # this for a while (`one-link backup restore`); the wizard
+        # surfaces it next to the existing "Set recovery" entry so
+        # users on a new install can recover without a terminal.
+        r.add_get("/api/v1/recovery/restore/preflight", self._guarded(self.api_recovery_restore_preflight))
+        r.add_post("/api/v1/recovery/restore/phrase", self._guarded(self.api_recovery_restore_phrase))
         r.add_get("/api/status", self._guarded(self.api_status))
         # ── Living Presence Tier α-pre — Call API ────────────────
         # Browser hits these to drive the per-call state machines.
@@ -8038,6 +8046,128 @@ class UIServer:
             "guardian_count": len(guardians),
             "threshold_k": threshold_k,
             "configured_at_ms": now_ms,
+        })
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_restore_preflight(self, request: web.Request) -> web.Response:
+        """Return whether restoring a different identity over this
+        install would destroy meaningful user state. The UI uses
+        this to pick the right copy + confirmation pattern: a
+        completely clean install gets a one-click "Restore" button;
+        an install with paired peers / groups / messages gets a
+        stern warning + explicit "I understand my current identity
+        will be replaced" checkbox + requires `force=true` on the
+        actual restore call."""
+        from one_link import recovery_api
+        from one_link import master_seed
+        from one_link.paths import data_dir
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        clean, evidence = recovery_api.is_install_clean_for_restore(state)
+        has_seed = master_seed.has_seed(data_dir())
+        resp = web.json_response({
+            "ok": True,
+            "clean": clean,
+            "has_existing_seed": has_seed,
+            "evidence": evidence,
+            "requires_force": (not clean) or has_seed,
+        })
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_restore_phrase(self, request: web.Request) -> web.Response:
+        """Decode a 24-word recovery phrase, write the master seed,
+        clear identity.key + DRK so the daemon re-derives both from
+        the restored seed on next start. Returns a flag telling the
+        UI to ask the user to restart the daemon.
+
+        Per-token rate-limited (5 attempts / 60s) so a stolen UI
+        token can't brute-force its way through phrase guesses on
+        a dirty install. The mnemonic checksum gives 1-in-256
+        protection against typos already; the rate limit defends
+        against scripted enumeration of valid 23-of-24 prefixes.
+
+        Refuses to overwrite an existing identity unless the caller
+        explicitly passes ``force=true`` AND the request's
+        ``confirmed_replace=true`` field is present. The two flags
+        match the UI's two-prompt pattern (button + checkbox)."""
+        from one_link import recovery_api
+        from one_link.paths import data_dir
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        if self._rate_limited(
+            "recovery_restore_phrase",
+            self._client_rate_key(request),
+            limit=5,
+            window_seconds=60.0,
+        ):
+            return web.json_response(
+                {"error": "too many restore attempts; wait a minute"},
+                status=429,
+            )
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        phrase = str(data.get("phrase") or "").strip()
+        # Also accept `words` as a list (UI convenience).
+        if not phrase:
+            words = data.get("words")
+            if isinstance(words, list):
+                phrase = " ".join(str(w) for w in words)
+        if not phrase:
+            return web.json_response({"error": "phrase required"}, status=400)
+        force = bool(data.get("force"))
+        confirmed = bool(data.get("confirmed_replace"))
+
+        clean, evidence = recovery_api.is_install_clean_for_restore(state)
+        from one_link import master_seed
+        has_seed = master_seed.has_seed(data_dir())
+        destructive = (not clean) or has_seed
+        if destructive and not (force and confirmed):
+            return web.json_response({
+                "error": "destructive_restore_requires_confirmation",
+                "evidence": evidence,
+                "has_existing_seed": has_seed,
+                "hint": (
+                    "This install already has identity state. Set "
+                    "force=true AND confirmed_replace=true to proceed; "
+                    "the existing identity will be replaced and "
+                    "current peers will see you as a different device "
+                    "until you re-pair."
+                ),
+            }, status=409)
+
+        try:
+            seed = recovery_api.restore_seed_from_phrase(
+                data_dir=data_dir(),
+                phrase=phrase,
+                delete_identity_files=destructive,
+            )
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as exc:
+            return web.json_response({
+                "error": "restore_failed",
+                "hint": str(exc),
+            }, status=500)
+        finally:
+            with contextlib.suppress(Exception):
+                seed = b"\x00" * len(seed)
+                del seed
+
+        resp = web.json_response({
+            "ok": True,
+            "restart_required": True,
+            "was_destructive": destructive,
+            "message": (
+                "Recovery phrase accepted. Restart One Link to complete "
+                "recovery; peers paired with the original device will "
+                "recognize you again."
+            ),
         })
         self._recovery_no_store_headers(resp)
         return resp

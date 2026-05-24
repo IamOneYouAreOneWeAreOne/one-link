@@ -506,6 +506,162 @@ def test_recovery_wizard_backup_track_streams_olbak_download():
     assert ".olbak" in body
 
 
+# ── restore-from-phrase ──────────────────────────────────────────────
+
+
+def test_restore_seed_from_phrase_round_trips(tmp_path):
+    """A fresh seed encoded as 24 words decodes back to the same
+    bytes and persists to disk."""
+    from one_link import master_seed, mnemonic, recovery_api
+    seed_in, _ = master_seed.load_or_create_seed(tmp_path)
+    phrase = mnemonic.encode(seed_in)
+    # Wipe the just-created seed file; restore should re-write it.
+    (tmp_path / "master.seed").unlink()
+    assert not master_seed.has_seed(tmp_path)
+    seed_out = recovery_api.restore_seed_from_phrase(
+        data_dir=tmp_path,
+        phrase=phrase,
+        delete_identity_files=False,
+    )
+    assert master_seed.has_seed(tmp_path)
+    assert master_seed.load_seed(tmp_path) == seed_in
+    assert seed_out == seed_in
+
+
+def test_restore_seed_from_phrase_rejects_bad_checksum(tmp_path):
+    """A typo in the phrase fails the BIP-39 checksum and raises
+    ValueError BEFORE touching disk."""
+    from one_link import master_seed, mnemonic, recovery_api
+    seed_in, _ = master_seed.load_or_create_seed(tmp_path)
+    phrase = mnemonic.encode(seed_in).split()
+    # Corrupt the last word to break the checksum.
+    phrase[-1] = "zebra"
+    bad = " ".join(phrase)
+    # Pre-existing seed should NOT change after a failed decode.
+    original_bytes = (tmp_path / "master.seed").read_bytes()
+    with pytest.raises(ValueError):
+        recovery_api.restore_seed_from_phrase(
+            data_dir=tmp_path, phrase=bad, delete_identity_files=False,
+        )
+    assert (tmp_path / "master.seed").read_bytes() == original_bytes
+
+
+def test_is_install_clean_for_restore_counts_each_dimension():
+    """The dirty signals: pinned peers, groups, self-mesh devices.
+    Any one of them flips the install from clean to dirty."""
+    from one_link import recovery_api as ra
+    state = _fake_state()
+    clean, ev = ra.is_install_clean_for_restore(state)
+    assert clean is True
+    assert ev["pinned_peers"] == 0
+
+    class _Peer:
+        def __init__(self, trust):
+            self.trust = trust
+            self.pubkey = b"\x00" * 32
+    state._peers = [_Peer("pinned")]
+    clean, ev = ra.is_install_clean_for_restore(state)
+    assert clean is False
+    assert ev["pinned_peers"] == 1
+
+
+def test_restore_phrase_endpoint_registered_and_guarded():
+    """Route registered + behind _guarded + rate-limited."""
+    from one_link.server import UIServer
+    daemon = SimpleNamespace(state=None, peer_rtc=None)
+    server = UIServer(daemon)
+    routes_by_path: dict[str, set[str]] = {}
+    for resource in server.app.router.resources():
+        info = resource.get_info()
+        path = info.get("path") or info.get("formatter") or ""
+        if not path:
+            continue
+        for route in resource:
+            routes_by_path.setdefault(path, set()).add(route.method)
+    assert "GET" in routes_by_path.get("/api/v1/recovery/restore/preflight", set())
+    assert "POST" in routes_by_path.get("/api/v1/recovery/restore/phrase", set())
+
+    src = _server_src()
+    for path in ("/api/v1/recovery/restore/preflight", "/api/v1/recovery/restore/phrase"):
+        idx = src.find(f'"{path}"')
+        assert idx > 0
+        line_start = src.rfind("\n", 0, idx) + 1
+        line_end = src.find("\n", idx)
+        line = src[line_start:line_end]
+        assert "self._guarded(" in line, f"{path} not guarded: {line!r}"
+
+    # Rate-limit on the destructive POST handler.
+    handler_idx = src.find("async def api_recovery_restore_phrase(")
+    assert handler_idx > 0
+    body = src[handler_idx:handler_idx + 4000]
+    assert "_rate_limited(" in body
+    assert '"recovery_restore_phrase"' in body
+    assert "too many restore attempts" in body
+
+
+def test_restore_phrase_handler_refuses_destructive_without_force():
+    """The destructive_restore_requires_confirmation guard must be
+    in the handler source so a future refactor can't silently turn
+    restore into a one-click identity-replace."""
+    src = _server_src()
+    idx = src.find("async def api_recovery_restore_phrase(")
+    assert idx > 0
+    body = src[idx:idx + 4000]
+    assert "destructive_restore_requires_confirmation" in body
+    assert "confirmed_replace" in body
+    assert "is_install_clean_for_restore" in body
+
+
+def test_index_html_exposes_restore_api_methods():
+    html = _index_html()
+    assert 'recoveryRestorePreflight() { return this.get("/api/v1/recovery/restore/preflight"); }' in html
+    assert "recoveryRestorePhrase(phrase, force, confirmedReplace)" in html
+    assert '"/api/v1/recovery/restore/phrase"' in html
+
+
+def test_index_html_restore_modal_wired_to_two_entry_points():
+    """Both entry points (onboarding step 3 'I already have one' and
+    the Settings wizard's Restore card) must route into the same
+    function `openRecoveryRestoreModal`."""
+    html = _index_html()
+    # The modal builder + opener exist.
+    assert "async function openRecoveryRestoreModal()" in html
+    assert "function _ensureRecoveryRestoreModal()" in html
+    assert 'm.id = "recovery-restore-modal"' in html
+
+    # Onboarding entry point: button id + click handler.
+    assert 'id="one-setup-restore-identity"' in html
+    assert '$("#one-setup-restore-identity")?.addEventListener("click", openRecoveryRestoreModal)' in html
+
+    # Wizard entry point: 4th card with data-recwiz-action="open-restore".
+    assert 'id="recwiz-track-restore"' in html
+    assert 'data-recwiz-action="open-restore"' in html
+    # And the wizard's click router dispatches it.
+    assert 'if (action === "open-restore")' in html
+
+
+def test_restore_modal_blocks_submit_until_24_words_and_confirm():
+    """The submit button must stay disabled unless tokens.length === 24,
+    AND (when dirty) the confirmation checkbox is ticked."""
+    html = _index_html()
+    idx = html.find("function _renderRecoveryRestoreInput(")
+    assert idx > 0
+    body = html[idx:idx + 5000]
+    # Validates token count.
+    assert "tokens.length < 24" in body
+    assert "tokens.length > 24" in body
+    # Dirty-install branch wires the checkbox into submit-disabled.
+    assert "recwiz-restore-confirm" in body
+    assert "confirmBox" in body
+    # Submit posts to the restore endpoint.
+    submit_idx = html.find("async function _recoveryRestoreSubmit(")
+    assert submit_idx > 0
+    submit_body = html[submit_idx:submit_idx + 2500]
+    assert "api.recoveryRestorePhrase" in submit_body
+    # After success, prompts restart.
+    assert "Restart One Link" in submit_body or "recwiz-restart-card" in submit_body
+
+
 # ── helpers ──────────────────────────────────────────────────────────
 
 

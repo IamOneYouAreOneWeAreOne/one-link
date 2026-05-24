@@ -7558,6 +7558,55 @@
     padding-top: 14px;
     border-top: 1px solid var(--line);
   }
+  /* v0.21.x restore-from-phrase modal. Reuses the recwiz-* shell
+     so the restore flow looks like a sibling of the setup wizard.
+     Adds just the textarea + warning + confirmation control. */
+  .recwiz-phrase-input {
+    width: 100%;
+    min-height: 110px;
+    margin: 10px 0;
+    background: var(--bg-1);
+    border: 1px solid var(--bg-3);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: var(--mono);
+    line-height: 1.6;
+    outline: none;
+    resize: vertical;
+    box-sizing: border-box;
+  }
+  .recwiz-phrase-input:focus { border-color: var(--accent); }
+  .recwiz-phrase-input.bad { border-color: #ff7777; }
+  .recwiz-danger-box {
+    margin: 12px 0;
+    padding: 12px 14px;
+    background: rgba(255, 119, 119, .08);
+    border-left: 3px solid #ff7777;
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  .recwiz-confirm-row {
+    display: flex; align-items: flex-start; gap: 10px;
+    margin: 10px 0;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .recwiz-confirm-row input { margin-top: 2px; accent-color: var(--accent); }
+  .recwiz-restart-card {
+    margin: 12px 0;
+    padding: 14px 16px;
+    background: rgba(46, 196, 137, .10);
+    border-left: 3px solid #2ec489;
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.6;
+  }
 
   /* v0.21.x: composer emoji picker. Floats above the composer; the
      anchor button computes positioning at open time. */
@@ -10608,7 +10657,7 @@
         <div class="onboarding-actions">
           <button class="btn-ghost" data-onboarding-go="2">Back</button>
           <button class="btn-primary" id="one-setup-create-identity">Create identity</button>
-          <button class="btn-ghost" data-onboarding-go="4">I already have one</button>
+          <button class="btn-ghost" id="one-setup-restore-identity">I already have one</button>
         </div>
       </div>
       <div class="onboarding-step" data-step="4" style="display:none;">
@@ -11571,6 +11620,16 @@
     recoveryBackupExportUrl(includeFiles) {
       if (includeFiles) return "/api/v1/recovery/backup/export?include_files=1";
       return "/api/v1/recovery/backup/export";
+    },
+    // Restore-from-phrase: the OTHER half of recovery. Setup writes
+    // the 24 words; restore types them on a new install + brings
+    // the identity back. Preflight reports whether the install is
+    // clean (one-click restore) or dirty (needs explicit force).
+    recoveryRestorePreflight() { return this.get("/api/v1/recovery/restore/preflight"); },
+    recoveryRestorePhrase(phrase, force, confirmedReplace) {
+      return this.post("/api/v1/recovery/restore/phrase", {
+        phrase, force: !!force, confirmed_replace: !!confirmedReplace,
+      });
     },
     oneHealth() { return this.get("/api/one-health"); },
     setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); },
@@ -24485,6 +24544,21 @@
         <div id="recwiz-track-phrase" class="recwiz-card" data-track="phrase"></div>
         <div id="recwiz-track-social" class="recwiz-card" data-track="social"></div>
         <div id="recwiz-track-backup" class="recwiz-card" data-track="backup"></div>
+        <div id="recwiz-track-restore" class="recwiz-card" data-track="restore">
+          <div class="recwiz-card-head">
+            <div class="recwiz-card-name">Restore an existing identity</div>
+          </div>
+          <p class="recwiz-card-desc">
+            Coming from another install with a recovery phrase? Type
+            the 24 words here to replace this identity with the one
+            you had before.
+          </p>
+          <div class="recwiz-card-actions">
+            <button type="button" class="recwiz-btn" data-recwiz-action="open-restore">
+              Restore from phrase
+            </button>
+          </div>
+        </div>
         <div class="recwiz-close-bar">
           <button type="button" class="recwiz-btn" data-recwiz-action="close">Done</button>
         </div>
@@ -24495,7 +24569,14 @@
       const t = ev.target;
       if (!(t instanceof Element)) return;
       if (t.hasAttribute("data-recwiz-close")) _recwizClose();
-      if (t.getAttribute("data-recwiz-action") === "close") _recwizClose();
+      const action = t.getAttribute("data-recwiz-action");
+      if (action === "close") _recwizClose();
+      if (action === "open-restore") {
+        // Close the setup wizard first so the two modals don't
+        // stack. The restore modal handles its own open/close.
+        _recwizClose();
+        openRecoveryRestoreModal();
+      }
     });
     document.addEventListener("keydown", (ev) => {
       if (ev.key === "Escape" && m.classList.contains("show")) _recwizClose();
@@ -25032,6 +25113,212 @@
     }
   }
 
+  // ── recovery wizard: RESTORE-from-phrase modal ─────────────────
+  // Symmetric counterpart to the SETUP wizard. Setup writes the 24
+  // words; restore types them on a fresh install to bring the
+  // identity back. The flow:
+  //   1. Preflight: ask the daemon whether this install is "clean"
+  //      (no peers/groups/messages) or "dirty" (would be replaced).
+  //   2. Modal collects 24 words in a textarea. Validates locally:
+  //      24 tokens, sane characters. The mnemonic checksum is
+  //      verified server-side.
+  //   3. If dirty: render a stern warning + explicit checkbox; submit
+  //      passes force=true + confirmed_replace=true.
+  //   4. On success, show "Restart One Link" card. The daemon writes
+  //      the seed and clears identity.key/DRK; identity reload
+  //      happens on next start.
+  // Both entry points (onboarding step 3 "I already have one" and
+  // Settings -> Setup -> Set recovery -> Restore card) call the same
+  // function below.
+  async function openRecoveryRestoreModal() {
+    _ensureRecoveryRestoreModal();
+    const modal = document.getElementById("recovery-restore-modal");
+    modal.classList.add("show");
+    document.body.classList.add("recwiz-open");
+    // Reset to the input view + load preflight in parallel.
+    const body = modal.querySelector(".recwiz-pane > .recwiz-restore-body");
+    body.innerHTML = `<p class="recwiz-feedback">Checking install state...</p>`;
+    let preflight;
+    try {
+      preflight = await api.recoveryRestorePreflight();
+    } catch (e) {
+      body.innerHTML = `<p class="recwiz-feedback bad">${escapeText("Could not check install state: " + errorToastBody(e))}</p>`;
+      return;
+    }
+    _renderRecoveryRestoreInput(preflight);
+  }
+
+  function _closeRecoveryRestoreModal() {
+    const modal = document.getElementById("recovery-restore-modal");
+    if (modal) modal.classList.remove("show");
+    document.body.classList.remove("recwiz-open");
+  }
+
+  function _ensureRecoveryRestoreModal() {
+    if (document.getElementById("recovery-restore-modal")) return;
+    const m = document.createElement("div");
+    m.id = "recovery-restore-modal";
+    m.className = "recwiz-modal";
+    m.setAttribute("role", "dialog");
+    m.setAttribute("aria-modal", "true");
+    m.setAttribute("aria-label", "Restore identity from recovery phrase");
+    m.innerHTML = `
+      <div class="recwiz-backdrop" data-recwiz-close></div>
+      <div class="recwiz-pane">
+        <h2 class="recwiz-title">Restore from recovery phrase</h2>
+        <p class="recwiz-lead">
+          Type or paste the 24 words you wrote down when you set up
+          One Link on your other device. Order matters; words are
+          separated by spaces.
+        </p>
+        <div class="recwiz-restore-body"></div>
+      </div>
+    `;
+    document.body.appendChild(m);
+    m.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (!(t instanceof Element)) return;
+      if (t.hasAttribute("data-recwiz-close")) _closeRecoveryRestoreModal();
+      if (t.getAttribute("data-recwiz-action") === "close-restore") {
+        _closeRecoveryRestoreModal();
+      }
+    });
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && m.classList.contains("show")) {
+        _closeRecoveryRestoreModal();
+      }
+    });
+  }
+
+  function _renderRecoveryRestoreInput(preflight) {
+    const modal = document.getElementById("recovery-restore-modal");
+    const body = modal.querySelector(".recwiz-restore-body");
+    const dirty = !!preflight.requires_force;
+    const ev = preflight.evidence || {};
+    const evParts = [];
+    if (ev.pinned_peers) evParts.push(`${ev.pinned_peers} paired peer${ev.pinned_peers === 1 ? "" : "s"}`);
+    if (ev.groups) evParts.push(`${ev.groups} group${ev.groups === 1 ? "" : "s"}`);
+    if (ev.self_mesh_devices) evParts.push(`${ev.self_mesh_devices} self-mesh device${ev.self_mesh_devices === 1 ? "" : "s"}`);
+    const evSummary = evParts.length
+      ? `Current install: ${evParts.join(", ")}.`
+      : "Current install has no identity state yet.";
+    const dangerBlock = dirty ? `
+      <div class="recwiz-danger-box">
+        <strong>This will replace the current identity.</strong>
+        ${escapeText(evSummary)}
+        After restore, peers paired with this device will need to be
+        re-paired. Messages encrypted to the old identity stay
+        encrypted to that old key.
+      </div>
+      <label class="recwiz-confirm-row">
+        <input type="checkbox" id="recwiz-restore-confirm" />
+        <span>I understand my current identity will be replaced.</span>
+      </label>` : `
+      <p class="recwiz-card-meta">${escapeText(evSummary)}</p>`;
+    body.innerHTML = `
+      <textarea class="recwiz-phrase-input" id="recwiz-restore-phrase"
+                aria-label="24 word recovery phrase"
+                autocomplete="off" spellcheck="false"
+                placeholder="abandon ability about ..."></textarea>
+      <p class="recwiz-feedback" id="recwiz-restore-fb"></p>
+      ${dangerBlock}
+      <div class="recwiz-card-actions" style="justify-content:flex-end;">
+        <button type="button" class="recwiz-btn" data-recwiz-action="close-restore">Cancel</button>
+        <button type="button" class="recwiz-btn recwiz-btn-primary" id="recwiz-restore-submit" disabled>
+          ${dirty ? "Replace identity" : "Restore identity"}
+        </button>
+      </div>
+    `;
+    const ta = body.querySelector("#recwiz-restore-phrase");
+    const fb = body.querySelector("#recwiz-restore-fb");
+    const submit = body.querySelector("#recwiz-restore-submit");
+    const confirmBox = body.querySelector("#recwiz-restore-confirm");
+    function tokenize(s) {
+      return String(s || "").trim().split(/\s+/).filter(Boolean);
+    }
+    function check() {
+      ta.classList.remove("bad");
+      const tokens = tokenize(ta.value);
+      if (tokens.length === 0) {
+        fb.className = "recwiz-feedback";
+        fb.textContent = "";
+        submit.disabled = true;
+        return;
+      }
+      if (tokens.length < 24) {
+        fb.className = "recwiz-feedback";
+        fb.textContent = `${tokens.length} of 24 words.`;
+        submit.disabled = true;
+        return;
+      }
+      if (tokens.length > 24) {
+        fb.className = "recwiz-feedback bad";
+        fb.textContent = `${tokens.length} words; expected exactly 24.`;
+        ta.classList.add("bad");
+        submit.disabled = true;
+        return;
+      }
+      fb.className = "recwiz-feedback good";
+      fb.textContent = "24 words detected. Checksum verifies on submit.";
+      const okToSubmit = !dirty || (confirmBox && confirmBox.checked);
+      submit.disabled = !okToSubmit;
+    }
+    ta.addEventListener("input", check);
+    if (confirmBox) confirmBox.addEventListener("change", check);
+    submit.addEventListener("click", () => _recoveryRestoreSubmit(dirty));
+    setTimeout(() => ta.focus(), 60);
+  }
+
+  async function _recoveryRestoreSubmit(dirty) {
+    const modal = document.getElementById("recovery-restore-modal");
+    const body = modal.querySelector(".recwiz-restore-body");
+    const ta = body.querySelector("#recwiz-restore-phrase");
+    const fb = body.querySelector("#recwiz-restore-fb");
+    const submit = body.querySelector("#recwiz-restore-submit");
+    const tokens = String(ta.value || "").trim().split(/\s+/).filter(Boolean);
+    if (tokens.length !== 24) {
+      fb.className = "recwiz-feedback bad";
+      fb.textContent = "Need exactly 24 words.";
+      ta.classList.add("bad");
+      return;
+    }
+    submit.disabled = true;
+    fb.className = "recwiz-feedback";
+    fb.textContent = "Verifying phrase and restoring...";
+    let res;
+    try {
+      res = await api.recoveryRestorePhrase(tokens.join(" "), dirty, dirty);
+    } catch (e) {
+      ta.classList.add("bad");
+      fb.className = "recwiz-feedback bad";
+      fb.textContent = errorToastBody(e) || "Restore failed.";
+      submit.disabled = false;
+      return;
+    }
+    if (!res || !res.ok) {
+      ta.classList.add("bad");
+      fb.className = "recwiz-feedback bad";
+      fb.textContent = (res && res.error) || "Restore failed.";
+      submit.disabled = false;
+      return;
+    }
+    // Show the restart card. The daemon wrote the seed; identity
+    // reload happens on next start.
+    body.innerHTML = `
+      <div class="recwiz-restart-card">
+        <strong>Identity restored.</strong>
+        Your recovery phrase was accepted and the master seed is in
+        place. Restart One Link to complete recovery. Once it comes
+        back up, peers paired with the original device will recognize
+        you again.
+      </div>
+      <div class="recwiz-card-actions" style="justify-content:flex-end;">
+        <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-action="close-restore">Close</button>
+      </div>
+    `;
+    toast("Identity restored. Restart One Link to finish recovery.", "good", 6000);
+  }
+
   async function openOneSetupFromState() {
     await refreshOneSetup();
     const setup = state.oneSetup || {};
@@ -25189,6 +25476,12 @@
     finishOnboarding();
   });
   $("#one-setup-create-identity")?.addEventListener("click", createOneSetupIdentity);
+  // v0.21.x: the "I already have one" button at onboarding step 3
+  // used to silently skip forward to step 4 (Add device) without
+  // doing anything useful. Now it opens the restore-from-phrase
+  // modal so a user on a fresh install can actually bring back
+  // their identity by typing their 24 words.
+  $("#one-setup-restore-identity")?.addEventListener("click", openRecoveryRestoreModal);
   $("#one-setup-add-device")?.addEventListener("click", oneSetupAddDevice);
   $("#one-setup-copy-invite")?.addEventListener("click", () => {
     const token = $("#one-setup-invite-token")?.value || "";
