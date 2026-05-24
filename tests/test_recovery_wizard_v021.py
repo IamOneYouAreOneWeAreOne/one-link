@@ -106,9 +106,12 @@ def test_verify_phrase_positions_round_trip(tmp_path):
     assert ok is True
     assert mismatches == []
 
-    # One wrong word -> reports the position.
+    # One wrong word -> reports the position. Use a guaranteed-not-
+    # in-BIP-39-wordlist token rather than swapping for a real word
+    # ("zebra" would coincidentally match the real word at position
+    # 11 once every 2048 random seeds and flake the assertion).
     bad_words = list(words)
-    bad_words[1] = "zebra"
+    bad_words[1] = "notabip39word"
     ok, mismatches = ra.verify_phrase_positions(
         data_dir=tmp_path, indices=indices, words=bad_words,
     )
@@ -174,14 +177,17 @@ def test_phrase_test_returns_mismatch_for_different_valid_phrase(tmp_path):
     assert res["matches_current_identity"] is False
 
 
-def test_phrase_test_returns_invalid_on_bad_checksum(tmp_path):
-    """A typo'd phrase fails the BIP-39 checksum; matches stays
-    false and error carries the human-readable reason."""
+def test_phrase_test_returns_invalid_on_bad_phrase(tmp_path):
+    """An invalid phrase fails decode; matches stays false and
+    error carries the human-readable reason. Use a guaranteed-
+    not-in-wordlist token rather than swapping for a real word
+    ('zebra' is in BIP-39 and would coincidentally pass the
+    checksum 1/256 times; the 'unknown word' path always rejects)."""
     from one_link import master_seed, mnemonic, recovery_api
     master_seed.load_or_create_seed(tmp_path)
     seed = master_seed.load_seed(tmp_path)
     words = mnemonic.encode(seed).split()
-    words[-1] = "zebra"  # break the checksum
+    words[-1] = "notabip39word"
     res = recovery_api.test_phrase_against_current_seed(
         data_dir=tmp_path, phrase=" ".join(words),
     )
@@ -767,11 +773,31 @@ def test_recovery_wizard_each_card_has_plain_english_help_disclosure():
     # CSS for the disclosure exists.
     assert ".recwiz-help" in html
     assert "How does this work?" in html
-    # Each track renderer / static card includes the disclosure.
-    # Count disclosure summaries - we expect at least one per card
-    # (phrase, social, backup, restore, rotate = 5+ minimum).
+    # Each track renderer / static card / modal includes the disclosure.
+    # Phrase, social, backup, restore card, rotate card, restore modal,
+    # rotate modal = 7+ minimum.
     n = html.count("<summary>How does this work?</summary>")
-    assert n >= 5, f"expected at least 5 'How does this work?' disclosures, found {n}"
+    assert n >= 7, f"expected at least 7 'How does this work?' disclosures, found {n}"
+
+
+def test_restore_and_rotate_modals_have_help_disclosures():
+    """Users who hit the restore OR rotate modal directly (e.g.,
+    onboarding 'I already have one' bypasses the wizard's restore
+    card) should still see the plain-English help. This pins
+    disclosures inside both modal builders."""
+    html = _index_html()
+    # Restore modal disclosure.
+    restore_idx = html.find("function _ensureRecoveryRestoreModal()")
+    assert restore_idx > 0
+    restore_body = html[restore_idx:restore_idx + 4000]
+    assert "<summary>How does this work?</summary>" in restore_body
+    assert "phrase itself" in restore_body or "never leaves this device" in restore_body
+    # Rotate modal disclosure.
+    rotate_idx = html.find("function _ensureRotationModal()")
+    assert rotate_idx > 0
+    rotate_body = html[rotate_idx:rotate_idx + 4000]
+    assert "<summary>How does this work?</summary>" in rotate_body
+    assert "cryptographic proof" in rotate_body or "authorized" in rotate_body
 
 
 def test_recovery_wizard_help_avoids_jargon():
@@ -830,14 +856,19 @@ def test_restore_seed_from_phrase_round_trips(tmp_path):
     assert seed_out == seed_in
 
 
-def test_restore_seed_from_phrase_rejects_bad_checksum(tmp_path):
-    """A typo in the phrase fails the BIP-39 checksum and raises
-    ValueError BEFORE touching disk."""
+def test_restore_seed_from_phrase_rejects_bad_phrase(tmp_path):
+    """An invalid phrase fails decode and raises ValueError BEFORE
+    touching disk. We use a non-BIP-39 token rather than swapping a
+    real word for another real word - swapping zebra for ability or
+    similar lands inside the wordlist and only fails the checksum
+    1/256 times by coincidence (the SHA-256 of the corrupted entropy
+    can match the swapped word's checksum bits, making the test
+    flaky in the full suite). 'notabip39word' is guaranteed-not-in-
+    wordlist so decode rejects it unconditionally."""
     from one_link import master_seed, mnemonic, recovery_api
     seed_in, _ = master_seed.load_or_create_seed(tmp_path)
     phrase = mnemonic.encode(seed_in).split()
-    # Corrupt the last word to break the checksum.
-    phrase[-1] = "zebra"
+    phrase[-1] = "notabip39word"
     bad = " ".join(phrase)
     # Pre-existing seed should NOT change after a failed decode.
     original_bytes = (tmp_path / "master.seed").read_bytes()

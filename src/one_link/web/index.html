@@ -25664,6 +25664,23 @@
           and update automatically when this device next talks to
           them.
         </p>
+        <details class="recwiz-help" style="margin-bottom:14px;">
+          <summary>How does this work?</summary>
+          <p>
+            Your daemon generates a fresh identity key and signs a
+            small certificate with the OLD key that authorizes the
+            change. That certificate is the cryptographic proof:
+            only someone who held the old key could have produced
+            it. The daemon queues the certificate for delivery to
+            every paired peer. When this device next talks to each
+            peer, the certificate goes along with the normal
+            handshake. The peer verifies the signature against
+            their pinned old key, atomically migrates their record
+            so your alias, mute, verified state, and chat history
+            all follow you to the new key, and sends an ack back
+            so the rotation card shows which peers are up to date.
+          </p>
+        </details>
         <div class="recwiz-rotate-body"></div>
       </div>
     `;
@@ -25838,6 +25855,18 @@
           One Link on your other device. Order matters; words are
           separated by spaces.
         </p>
+        <details class="recwiz-help" style="margin-bottom:14px;">
+          <summary>How does this work?</summary>
+          <p>
+            Your identity, encryption keys, and the bundle key for
+            your backup file are all derived from your 24-word
+            phrase. Typing the phrase on a fresh install re-derives
+            everything: peers paired with the original device
+            recognize you again, and an encrypted backup file you
+            also brought along decrypts cleanly. The phrase itself
+            never leaves this device.
+          </p>
+        </details>
         <div class="recwiz-restore-body"></div>
       </div>
     `;
