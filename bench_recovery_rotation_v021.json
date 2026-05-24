@@ -1,0 +1,93 @@
+[
+  {
+    "name": "mint_certificate",
+    "iters": 500,
+    "ns_per_op_median": 25747.4,
+    "ns_per_op_p95": 25932.8,
+    "ops_per_sec_median": 38838.87305125954
+  },
+  {
+    "name": "verify_certificate",
+    "iters": 1000,
+    "ns_per_op_median": 56928.1,
+    "ns_per_op_p95": 57291.8,
+    "ops_per_sec_median": 17566.017485213804
+  },
+  {
+    "name": "apply_certificate_to_peer",
+    "iters": 1000,
+    "ns_per_op_median": 57229.7,
+    "ns_per_op_p95": 58781.9,
+    "ops_per_sec_median": 17473.444732367985
+  },
+  {
+    "name": "mnemonic.encode",
+    "iters": 2000,
+    "ns_per_op_median": 2498.3,
+    "ns_per_op_p95": 2557.6,
+    "ops_per_sec_median": 400272.18508585833
+  },
+  {
+    "name": "mnemonic.decode",
+    "iters": 2000,
+    "ns_per_op_median": 3039.8,
+    "ns_per_op_p95": 3272.25,
+    "ops_per_sec_median": 328969.01111915254
+  },
+  {
+    "name": "backup_bundle.create_bundle (~1KB)",
+    "iters": 500,
+    "ns_per_op_median": 723344.0,
+    "ns_per_op_p95": 735643.2,
+    "ops_per_sec_median": 1382.468092636422
+  },
+  {
+    "name": "backup_bundle.open_bundle",
+    "iters": 500,
+    "ns_per_op_median": 6132.0,
+    "ns_per_op_p95": 7208.4,
+    "ops_per_sec_median": 163078.93020221786
+  },
+  {
+    "name": "social_recovery.split_and_wrap (3-of-5)",
+    "iters": 100,
+    "ns_per_op_median": 297772.0,
+    "ns_per_op_p95": 300814.0,
+    "ops_per_sec_median": 3358.2741157664254
+  },
+  {
+    "name": "social_recovery.unwrap_share",
+    "iters": 500,
+    "ns_per_op_median": 46864.8,
+    "ns_per_op_p95": 48345.4,
+    "ops_per_sec_median": 21337.97647701473
+  },
+  {
+    "name": "social_recovery.combine_shares (3-of-5)",
+    "iters": 500,
+    "ns_per_op_median": 1853.8,
+    "ns_per_op_p95": 1906.6,
+    "ops_per_sec_median": 539432.5169921243
+  },
+  {
+    "name": "transition_peer_fingerprint",
+    "iters": 200,
+    "ns_per_op_median": 216638.0,
+    "ns_per_op_p95": 223682.5,
+    "ops_per_sec_median": 4615.99534707669
+  },
+  {
+    "name": "test_phrase_against_current_seed",
+    "iters": 200,
+    "ns_per_op_median": 307113.5,
+    "ns_per_op_p95": 337427.0,
+    "ops_per_sec_median": 3256.1251784763613
+  },
+  {
+    "name": "test_bundle_against_phrase",
+    "iters": 500,
+    "ns_per_op_median": 167523.6,
+    "ns_per_op_p95": 246865.4,
+    "ops_per_sec_median": 5969.3082049335135
+  }
+]
