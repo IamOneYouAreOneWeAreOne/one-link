@@ -1088,6 +1088,37 @@ def test_drain_sends_one_cert_per_pending_row(tmp_path):
     assert rows[0]["attempt_count"] == 1
 
 
+def test_rotate_endpoint_refuses_double_rotate_without_restart():
+    """The rotate handler must refuse a second rotation in the same
+    session because:
+      1. self.me.private (used to sign cert#2) is still the ORIGINAL
+         identity, not the post-rotation-#1 identity.
+      2. perform_local_rotation would overwrite the on-disk seed,
+         losing the intermediate identity entirely.
+      3. The new cert names original->C while peers' pinned fp moves
+         to B after applying cert#1; cert#2 is then refused as a
+         rollback attempt and peers stay at B while the local daemon
+         loads C on restart - irrecoverable desync.
+
+    Guard: compare derive_identity_priv(load_seed()) vs the in-memory
+    pubkey; if they differ, refuse with restart_required_before_rotate.
+    This source-text gate pins the guard so a refactor that removes
+    it surfaces immediately."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "server.py").read_text(encoding="utf-8")
+    idx = src.find("async def api_recovery_rotate(")
+    assert idx > 0
+    body = src[idx:idx + 6000]
+    assert "restart_required_before_rotate" in body
+    assert "on_disk_seed" in body
+    assert "master_seed.load_seed" in body
+    assert "derive_identity_priv" in body
+    # 409 (conflict) is the right code - the request is valid but the
+    # current state forbids it; the same code we use for the
+    # destructive-restore-requires-confirmation guard.
+    assert "status=409" in body
+
+
 def test_rotate_endpoint_registered_guarded_rate_limited():
     """Routes /api/v1/recovery/rotate{,/status} exist, both _guarded,
     rotate has a low rate limit (security-sensitive)."""
@@ -1116,7 +1147,10 @@ def test_rotate_endpoint_registered_guarded_rate_limited():
         assert "self._guarded(" in line, f"{path} not guarded: {line!r}"
     handler_idx = src.find("async def api_recovery_rotate(")
     assert handler_idx > 0
-    body = src[handler_idx:handler_idx + 5000]
+    # 7000-char window covers the handler even after the double-
+    # rotation safety guard was added (which lives between the
+    # confirmed_rotate check and the perform_local_rotation call).
+    body = src[handler_idx:handler_idx + 7000]
     assert "_rate_limited(" in body
     assert '"recovery_rotate"' in body
     assert "confirmed_rotate" in body

@@ -8563,6 +8563,47 @@ class UIServer:
                 "error": "daemon has no current identity to rotate from",
             }, status=503)
 
+        # v0.21.x safety: refuse to rotate twice without a restart in
+        # between. After the first rotation, the on-disk seed has
+        # been replaced but the daemon's in-memory identity is still
+        # the OLD one. A second rotation would:
+        #   1. mint cert with old_priv = ORIGINAL identity, naming
+        #      the THIRD identity as target (skipping the second).
+        #   2. overwrite the on-disk seed (the SECOND identity's
+        #      seed) so it can never be re-derived.
+        #   3. queue cert(original -> third) alongside the still-
+        #      pending cert(original -> second) from the first
+        #      rotation.
+        # When peers process them in order they transition to second,
+        # then refuse cert(original -> third) because their pinned fp
+        # is now second's fp, not original's. Peers stay at SECOND
+        # while the local daemon (after restart) is at THIRD - a
+        # desync that the user cannot escape without re-pairing.
+        # Block the second rotation by comparing the on-disk seed's
+        # derived identity to the in-memory identity.
+        from one_link import master_seed
+        on_disk_seed = master_seed.load_seed(data_dir())
+        if on_disk_seed is not None:
+            try:
+                on_disk_pub = master_seed.derive_identity_priv(on_disk_seed)\
+                    .public_key().public_bytes_raw()
+            except Exception:
+                on_disk_pub = None
+            finally:
+                # Best-effort wipe of the local copy.
+                with contextlib.suppress(Exception):
+                    on_disk_seed = b"\x00" * len(on_disk_seed)
+            if on_disk_pub is not None and on_disk_pub != bytes(self.daemon.me.public_bytes):
+                return web.json_response({
+                    "error": "restart_required_before_rotate",
+                    "hint": (
+                        "Identity was already rotated in this session. "
+                        "Restart One Link to load the new identity "
+                        "before rotating again - otherwise peers stuck "
+                        "at the intermediate identity cannot follow."
+                    ),
+                }, status=409)
+
         try:
             result = identity_rotation.perform_local_rotation(
                 data_dir=data_dir(),
