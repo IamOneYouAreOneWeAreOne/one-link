@@ -225,6 +225,35 @@ def _bring_up(home: Path, log: Path, label: str) -> DaemonHandle:
         info = request(ctrl, cmd="peers")
         if not info.get("ok"):
             raise RuntimeError(f"daemon {label} 'peers' failed: {info}")
+        # The control socket coming up does NOT imply the HTTP server
+        # has finished initializing - control + HTTP run as separate
+        # tasks. ui.token + server.port get written by the HTTP server's
+        # startup hook, and tests that read those files via
+        # ``home/"data"/"ui.token"`` can race the writes under load.
+        # Wait up to 6s for both files to appear before returning so
+        # the test never sees a missing-file FileNotFoundError.
+        http_deadline = time.time() + 6.0
+        ui_token_path = home / "data" / "ui.token"
+        server_port_path = home / "data" / "server.port"
+        while time.time() < http_deadline:
+            if ui_token_path.is_file() and server_port_path.is_file():
+                # Files exist; one more guard against partial writes.
+                # Both files are tiny so any non-empty read is the
+                # finished write (atomic rename or single-write).
+                try:
+                    if (
+                        ui_token_path.stat().st_size > 0
+                        and server_port_path.stat().st_size > 0
+                    ):
+                        break
+                except OSError:
+                    pass
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(
+                f"daemon {label} HTTP server did not write ui.token + "
+                f"server.port within 6s\n--- log ---\n{_read_log(log)}"
+            )
         return DaemonHandle(
             home=home,
             log=log,
