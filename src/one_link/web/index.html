@@ -15313,6 +15313,27 @@
         card.title = "Open One Health guide";
         card.appendChild(el("b", "", `${s.score ?? "--"}`));
         card.appendChild(el("span", "", s.label || s.id || "score"));
+        // v0.21.x: recovery score row carries per-track readiness
+        // so the card can show 'phrase + bundle (2 of 3)' instead
+        // of just the raw score. Encourages users to add another
+        // recovery path for defense in depth.
+        if (s.id === "recovery" && s.tracks_ready) {
+          const tr = s.tracks_ready;
+          const parts = [];
+          if (tr.phrase) parts.push("phrase");
+          if (tr.bundle) parts.push("bundle");
+          if (tr.social) parts.push("shares");
+          const ready = Number(s.tracks_ready_count || 0);
+          const detail = parts.length
+            ? `${parts.join(" + ")} (${ready} of 3)`
+            : "no tracks yet";
+          const tracks = el("span", "one-health-tracks", detail);
+          tracks.style.fontSize = "10px";
+          tracks.style.color = "var(--text-dim)";
+          tracks.style.marginTop = "2px";
+          card.appendChild(tracks);
+          card.title = `Open recovery wizard — ${detail}`;
+        }
         grid.appendChild(card);
       }
     }

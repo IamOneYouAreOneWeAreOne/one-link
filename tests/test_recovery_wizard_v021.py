@@ -496,6 +496,25 @@ def test_recovery_wizard_social_track_downloads_share_files():
     assert ".olss" in dl  # default share extension
 
 
+def test_one_health_ui_renders_per_track_recovery_detail():
+    """The One Health card's recovery metric must consume the
+    `tracks_ready` field the score row now carries and render it
+    as 'phrase + bundle (N of 3)' so the user sees defense-in-depth
+    progress, not just a raw score."""
+    html = _index_html()
+    idx = html.find("function renderOneHealth(")
+    assert idx > 0
+    body = html[idx:idx + 4000]
+    assert 's.id === "recovery"' in body
+    assert "tracks_ready" in body
+    # Renders the per-track label parts in the same order the API
+    # ships them.
+    assert '"phrase"' in body
+    assert '"bundle"' in body
+    assert '"shares"' in body
+    assert "tracks_ready_count" in body
+
+
 def test_one_health_score_rewards_per_track_recovery_depth():
     """One Health's recovery score must reward layered recovery
     (multiple tracks configured) higher than a single track. A user
