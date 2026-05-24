@@ -541,6 +541,132 @@ def test_perform_local_rotation_rejects_unknown_reason(tmp_path, monkeypatch):
 # ── HTTP endpoint wiring ────────────────────────────────────────────
 
 
+def test_transition_peer_fingerprint_renames_in_place_when_new_fp_unknown(tmp_path):
+    """Happy path: rotation cert arrives, new_fp hasn't been seen
+    on this daemon yet, so the peers row is renamed in place + all
+    other tables cascade."""
+    state = _open_state(tmp_path)
+    old_fp = "11" * 32
+    new_fp = "22" * 32
+    new_pub = b"\x02" * 32
+    state.upsert_peer(
+        fingerprint=old_fp, short_id="oldshort",
+        pubkey=b"\x01" * 32, hostname="alice.lan",
+    )
+    state.set_peer_trust(old_fp, "pinned")
+    # Plant some downstream per-peer state.
+    state.queue_rotation_announcement(
+        peer_fp=old_fp, old_fp="ee" * 32, new_fp="ff" * 32,
+        cert_json='{"v":1}', sig_hex="00" * 64,
+    )
+
+    transitioned = state.transition_peer_fingerprint(
+        old_fp=old_fp, new_fp=new_fp, new_pubkey=new_pub,
+    )
+    assert transitioned is True
+
+    # peers row now has new_fp + new_pubkey.
+    old_peer = state.get_peer(old_fp)
+    new_peer = state.get_peer(new_fp)
+    assert old_peer is None
+    assert new_peer is not None
+    assert new_peer.pubkey == new_pub
+    assert new_peer.trust == "pinned"  # preserved
+    assert new_peer.hostname == "alice.lan"  # preserved
+
+    # Cascaded: pending_rotation_announcements moved with the peer.
+    rows = state.list_pending_rotation_announcements(peer_fp=new_fp)
+    assert len(rows) == 1
+
+
+def test_transition_peer_fingerprint_preserves_alias_mute_dm_ttl_verified(tmp_path):
+    """Every per-peer field the user has set must survive the
+    transition. A user who renamed their friend, muted them, and
+    verified them in person should still see all of that after the
+    rotation."""
+    state = _open_state(tmp_path)
+    old_fp = "33" * 32
+    new_fp = "44" * 32
+    state.upsert_peer(
+        fingerprint=old_fp, short_id="bob",
+        pubkey=b"\x03" * 32, hostname="bob.lan",
+    )
+    state.set_peer_trust(old_fp, "pinned")
+    import time as _time
+    now_ms = int(_time.time() * 1000)
+    state.set_peer_profile(old_fp, local_alias="Bob from work")
+    state.set_peer_muted_until(old_fp, now_ms + 86400000)
+    state.set_peer_verified(
+        old_fp, method="sas-digits", note="met at lunch",
+    )
+    state.set_peer_dm_ttl(old_fp, 60_000)
+
+    state.transition_peer_fingerprint(
+        old_fp=old_fp, new_fp=new_fp, new_pubkey=b"\x04" * 32,
+    )
+
+    new_peer = state.get_peer(new_fp)
+    assert new_peer is not None
+    assert new_peer.local_alias == "Bob from work"
+    assert new_peer.verified_method == "sas-digits"
+    assert new_peer.verified_note == "met at lunch"
+    assert new_peer.verified_at_ms is not None
+    assert new_peer.dm_ttl_ms == 60_000
+    assert new_peer.muted_until_ms is not None
+    assert new_peer.muted_until_ms > int(_time.time() * 1000)
+
+
+def test_transition_peer_fingerprint_returns_false_on_unknown_peer(tmp_path):
+    state = _open_state(tmp_path)
+    transitioned = state.transition_peer_fingerprint(
+        old_fp="aa" * 32, new_fp="bb" * 32, new_pubkey=b"\x00" * 32,
+    )
+    assert transitioned is False
+
+
+def test_transition_peer_fingerprint_merges_when_new_fp_already_exists(tmp_path):
+    """If a daemon hand-shook with the new identity BEFORE the cert
+    arrived, it has a peers row at new_fp already. Transition must
+    promote the OLD per-peer state onto the new row + delete the
+    old row."""
+    state = _open_state(tmp_path)
+    old_fp = "55" * 32
+    new_fp = "66" * 32
+    state.upsert_peer(
+        fingerprint=old_fp, short_id="x", pubkey=b"\x05" * 32, hostname="x.lan",
+    )
+    state.set_peer_trust(old_fp, "pinned")
+    state.set_peer_profile(old_fp, local_alias="X my friend")
+    state.upsert_peer(
+        fingerprint=new_fp, short_id="x2", pubkey=b"\x06" * 32, hostname="x.lan",
+    )
+    # new_fp is "pending" by default - rotation should bring the
+    # OLD pinned trust forward.
+
+    state.transition_peer_fingerprint(
+        old_fp=old_fp, new_fp=new_fp, new_pubkey=b"\x06" * 32,
+    )
+
+    # OLD row gone; NEW row inherited the alias + pinned trust.
+    assert state.get_peer(old_fp) is None
+    new_peer = state.get_peer(new_fp)
+    assert new_peer is not None
+    assert new_peer.trust == "pinned"
+    assert new_peer.local_alias == "X my friend"
+
+
+def test_transition_peer_fingerprint_rejects_same_fp_or_bad_input(tmp_path):
+    state = _open_state(tmp_path)
+    with pytest.raises(ValueError, match="must differ"):
+        state.transition_peer_fingerprint(
+            old_fp="aa" * 32, new_fp="aa" * 32, new_pubkey=b"\x00" * 32,
+        )
+    with pytest.raises(ValueError, match="32 bytes"):
+        state.transition_peer_fingerprint(
+            old_fp="aa" * 32, new_fp="bb" * 32, new_pubkey=b"\x00" * 31,
+        )
+
+
 def test_rotate_endpoint_registered_guarded_rate_limited():
     """Routes /api/v1/recovery/rotate{,/status} exist, both _guarded,
     rotate has a low rate limit (security-sensitive)."""

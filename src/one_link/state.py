@@ -2289,6 +2289,174 @@ class State:
             )
             return cur.rowcount or 0
 
+    # ─── atomic peer fingerprint transition (v0.21.x rotation) ────────
+    # When an inbound ROTATION_CERT verifies, the receiving daemon
+    # must atomically migrate every fingerprint reference for that
+    # peer from old_fp to new_fp so all of the user's per-peer state
+    # (alias, mute, dm_ttl, trust, verified_*) AND chat history
+    # follow the rotated identity. One transaction across every
+    # peer-keyed table.
+
+    def transition_peer_fingerprint(
+        self,
+        *,
+        old_fp: str,
+        new_fp: str,
+        new_pubkey: bytes,
+        new_short_id: Optional[str] = None,
+    ) -> bool:
+        """Cascade-update every fingerprint reference for a peer in
+        one SQLite transaction. Returns True if a row with old_fp
+        was found and migrated, False if there was no such peer.
+
+        Tables cascaded:
+          peers, messages, peer_capabilities, peer_capability_policy,
+          capability_audit, transfers, outbox, folder_audit,
+          message_reactions, route_memory, route_candidates,
+          self_mesh_audit, manifest_conflicts, peer_read_markers,
+          hostname_keys, pending_rotation_announcements.
+
+        Tables NOT cascaded (historical record; the transition
+        itself is the event being recorded):
+          key_change_events.
+
+        Per-peer state preserved on the peers row:
+          trust, local_alias, muted, verified_at_ms, verified_method,
+          verified_note, dm_ttl_ms, muted_until_ms, first_seen_ms.
+
+        Updated on the peers row: fingerprint, pubkey, short_id,
+        last_seen_ms.
+
+        If new_fp already exists in peers (the new identity has
+        already been seen, e.g. via a normal handshake before the
+        cert arrived), we MERGE: copy the OLD row's preserved
+        state onto the new row, then delete the old row. The
+        cascading on other tables still UPDATEs old_fp -> new_fp,
+        which is safe because their entries didn't yet exist for
+        new_fp (they used to use old_fp).
+        """
+        if not isinstance(old_fp, str) or not isinstance(new_fp, str):
+            raise TypeError("old_fp and new_fp must be strings")
+        if old_fp == new_fp:
+            raise ValueError("old_fp and new_fp must differ")
+        if not isinstance(new_pubkey, (bytes, bytearray)) or len(new_pubkey) != 32:
+            raise ValueError("new_pubkey must be 32 bytes")
+        new_pubkey = bytes(new_pubkey)
+        if new_short_id is None:
+            # The daemon's own short_id derivation is BLAKE3-based;
+            # fall back to a stable prefix of the new fingerprint so
+            # transitioned peers stay visible in the UI even when
+            # the caller forgets to compute the proper short_id.
+            new_short_id = new_fp[:8]
+        now = _now_ms()
+        with self._write_lock:
+            c = self._conn.cursor()
+            try:
+                c.execute("BEGIN IMMEDIATE")
+                try:
+                    old_row = c.execute(
+                        "SELECT * FROM peers WHERE fingerprint = ?",
+                        (old_fp,),
+                    ).fetchone()
+                    if old_row is None:
+                        c.execute("ROLLBACK")
+                        return False
+
+                    new_row = c.execute(
+                        "SELECT * FROM peers WHERE fingerprint = ?",
+                        (new_fp,),
+                    ).fetchone()
+
+                    if new_row is None:
+                        # Simple case: rename old peers row in place.
+                        c.execute(
+                            "UPDATE peers SET fingerprint = ?,"
+                            " pubkey = ?, short_id = ?, last_seen_ms = ?"
+                            " WHERE fingerprint = ?",
+                            (new_fp, new_pubkey, new_short_id, now, old_fp),
+                        )
+                    else:
+                        # Merge case: new_fp peer row already exists
+                        # (handshake under the new identity ran
+                        # before the cert arrived). Promote old
+                        # per-peer state onto the new row, then
+                        # delete the old row so the cascading
+                        # UPDATEs below find no rows for old_fp.
+                        c.execute(
+                            "UPDATE peers SET"
+                            " trust = ?, local_alias = ?, muted = ?,"
+                            " verified_at_ms = ?, verified_method = ?,"
+                            " verified_note = ?, dm_ttl_ms = ?,"
+                            " muted_until_ms = ?, first_seen_ms = ?,"
+                            " pubkey = ?, short_id = ?, last_seen_ms = ?"
+                            " WHERE fingerprint = ?",
+                            (
+                                old_row["trust"],
+                                old_row["local_alias"],
+                                old_row["muted"],
+                                old_row["verified_at_ms"],
+                                old_row["verified_method"],
+                                old_row["verified_note"],
+                                old_row["dm_ttl_ms"],
+                                old_row["muted_until_ms"],
+                                old_row["first_seen_ms"],
+                                new_pubkey, new_short_id, now,
+                                new_fp,
+                            ),
+                        )
+                        c.execute(
+                            "DELETE FROM peers WHERE fingerprint = ?",
+                            (old_fp,),
+                        )
+
+                    # Cascade-update every other peer-keyed table.
+                    # ON CONFLICT REPLACE for PK-collision tables so
+                    # a merge case doesn't blow up if the new_fp
+                    # also has a row in (say) peer_capabilities.
+                    for sql in (
+                        "UPDATE messages           SET peer_fp     = ? WHERE peer_fp     = ?",
+                        "UPDATE transfers          SET peer_fp     = ? WHERE peer_fp     = ?",
+                        "UPDATE outbox             SET peer_fp     = ? WHERE peer_fp     = ?",
+                        "UPDATE folder_audit       SET peer_fp     = ? WHERE peer_fp     = ?",
+                        "UPDATE message_reactions  SET peer_fp     = ? WHERE peer_fp     = ?",
+                        "UPDATE route_memory       SET peer_fp     = ? WHERE peer_fp     = ?",
+                        "UPDATE route_candidates   SET peer_fp     = ? WHERE peer_fp     = ?",
+                        "UPDATE self_mesh_audit    SET peer_fp     = ? WHERE peer_fp     = ?",
+                        "UPDATE manifest_conflicts SET peer_fp     = ? WHERE peer_fp     = ?",
+                        "UPDATE pending_rotation_announcements"
+                        "                          SET peer_fp     = ? WHERE peer_fp     = ?",
+                        "UPDATE capability_audit   SET fingerprint = ? WHERE fingerprint = ?",
+                        "UPDATE hostname_keys      SET fingerprint = ? WHERE fingerprint = ?",
+                    ):
+                        with contextlib.suppress(sqlite3.OperationalError):
+                            c.execute(sql, (new_fp, old_fp))
+
+                    # PK-collision tables: peer_capabilities,
+                    # peer_capability_policy, peer_read_markers. For
+                    # these we DELETE any pre-existing new_fp row
+                    # (the merge case promoted the OLD state already)
+                    # then UPDATE.
+                    for sql in (
+                        ("DELETE FROM peer_capabilities       WHERE fingerprint = ?",
+                         "UPDATE peer_capabilities       SET fingerprint = ? WHERE fingerprint = ?"),
+                        ("DELETE FROM peer_capability_policy  WHERE fingerprint = ?",
+                         "UPDATE peer_capability_policy  SET fingerprint = ? WHERE fingerprint = ?"),
+                        ("DELETE FROM peer_read_markers       WHERE peer_fp = ?",
+                         "UPDATE peer_read_markers       SET peer_fp = ? WHERE peer_fp = ?"),
+                    ):
+                        del_sql, upd_sql = sql
+                        with contextlib.suppress(sqlite3.OperationalError):
+                            c.execute(del_sql, (new_fp,))
+                            c.execute(upd_sql, (new_fp, old_fp))
+
+                    c.execute("COMMIT")
+                    return True
+                except Exception:
+                    c.execute("ROLLBACK")
+                    raise
+            finally:
+                c.close()
+
     # ─── rotation announcements (v0.21.x) ─────────────────────────────
     # Per-peer queue of rotation certificates we owe delivery + ack on.
     # The background delivery task drains rows where ``acked_ms IS NULL``;
