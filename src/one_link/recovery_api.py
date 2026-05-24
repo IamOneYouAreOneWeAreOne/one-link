@@ -1,0 +1,522 @@
+"""Recovery setup — the three real paths the UI offers.
+
+The wizard at Settings -> Setup -> Set recovery used to be a self-
+attestation form: a modal that asked the user to type "I have my
+recovery info" to confirm something they had no in-app way to
+actually do. The CLI shipped `one-link backup show / restore`,
+`social_recovery` shipped the Shamir 3-of-5 wrap, and
+`backup_bundle` shipped the encrypted `.olbak` exporter — but
+none of it was reachable from the UI. The button promised setup
+and delivered a flag flip.
+
+This module is the bridge. It exposes the three real recovery
+paths over HTTP, lets the UI run a real flow per track, and
+records per-track state in settings so the Setup checklist shows
+which paths are configured rather than a single global yes/no.
+
+The three tracks
+----------------
+1. **Recovery phrase** (BIP-39 24 words). The canonical sovereignty
+   primitive: paper-only, no transport, restorable on any fresh
+   install via `one-link backup restore`. Verified by re-typing
+   three random word positions so the user can't muscle-memory
+   through.
+
+2. **Trusted contacts** (Shamir 3-of-5 via `social_recovery`). User
+   picks N paired peers, daemon mints N wrapped share files each
+   sealed to its target guardian's Ed25519 identity, browser
+   downloads the share files. User delivers each file to its
+   guardian via whatever medium they trust (USB, email, in person).
+   We deliberately do NOT auto-ship over the daemon wire — that
+   would couple "setup" to "guardian's daemon online and accepts"
+   and add a new wire frame. The wrap is sealed; the medium does
+   not matter.
+
+3. **Encrypted backup file** (`.olbak` via `backup_bundle`). Daemon
+   creates the bundle, streams it to the browser as a download.
+   User puts the file somewhere safe (cloud, USB, second device).
+
+Each track sets its own state setting. The legacy
+`one_setup_recovery_configured_at_ms` setting stays for back-compat
+and is set when ANY track is configured. The Setup checklist
+checks each track individually for richer status text.
+
+Security posture
+----------------
+- All endpoints sit behind `_guarded` (auth + CSRF + rate-limit).
+- The phrase endpoint adds `Cache-Control: no-store, no-cache,
+  must-revalidate, max-age=0` + `Pragma: no-cache` so the 24
+  words never land in browser cache or service-worker storage.
+- Verification is per-token rate-limited (5 attempts / 60s) to
+  prevent brute-force on the verify path.
+- Bundle export streams via `Content-Disposition: attachment` so
+  it goes to disk, not into a tab the user might leave open.
+- Share files use a custom extension (`.olss`) + base64-encoded
+  blobs so they survive being pasted into email / chat.
+- No track touches the master seed if it does not exist —
+  legacy installs without `master.seed` (pre-mnemonic flow) get
+  a clear 503 with a "run `one-link backup init` first" message.
+"""
+from __future__ import annotations
+
+import base64
+import contextlib
+import secrets
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+
+# ── settings keys (per-track state) ──────────────────────────────────
+
+SETTING_PHRASE_VERIFIED_AT_MS = "one_setup_recovery_phrase_verified_at_ms"
+SETTING_BACKUP_LAST_EXPORT_AT_MS = "one_setup_recovery_backup_last_export_at_ms"
+SETTING_BACKUP_LAST_EXPORT_SIZE = "one_setup_recovery_backup_last_export_size"
+SETTING_SOCIAL_CONFIGURED_AT_MS = "one_setup_recovery_social_configured_at_ms"
+SETTING_SOCIAL_GUARDIAN_COUNT = "one_setup_recovery_social_guardian_count"
+SETTING_SOCIAL_THRESHOLD_K = "one_setup_recovery_social_threshold_k"
+SETTING_LEGACY_CONFIGURED_AT_MS = "one_setup_recovery_configured_at_ms"
+
+
+# ── data classes ─────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class TrackState:
+    """One row in the recovery status response."""
+    track: str
+    ready: bool
+    available: bool
+    last_action_at_ms: int
+    extra: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RecoveryStatus:
+    phrase: TrackState
+    social: TrackState
+    backup: TrackState
+
+    @property
+    def any_ready(self) -> bool:
+        return self.phrase.ready or self.social.ready or self.backup.ready
+
+    def to_dict(self) -> dict[str, Any]:
+        def t(ts: TrackState) -> dict[str, Any]:
+            return {
+                "track": ts.track,
+                "ready": ts.ready,
+                "available": ts.available,
+                "last_action_at_ms": ts.last_action_at_ms,
+                **ts.extra,
+            }
+        return {
+            "phrase": t(self.phrase),
+            "social": t(self.social),
+            "backup": t(self.backup),
+            "any_ready": self.any_ready,
+        }
+
+
+# ── status snapshot ──────────────────────────────────────────────────
+
+
+def _setting_int(state, key: str) -> int:
+    with contextlib.suppress(Exception):
+        return int(state.get_setting(key) or 0)
+    return 0
+
+
+def snapshot_status(state, data_dir: Path) -> RecoveryStatus:
+    """Build the per-track recovery snapshot the UI renders.
+
+    `available` means the prerequisites are in place to RUN the
+    flow now (e.g. a master seed exists for phrase + backup tracks,
+    paired peers exist for the social track).
+    `ready` means the user has actually completed that track at
+    least once.
+    """
+    from one_link import master_seed
+    has_master_seed = master_seed.has_seed(Path(data_dir))
+
+    phrase_verified = _setting_int(state, SETTING_PHRASE_VERIFIED_AT_MS)
+    backup_at = _setting_int(state, SETTING_BACKUP_LAST_EXPORT_AT_MS)
+    backup_size = _setting_int(state, SETTING_BACKUP_LAST_EXPORT_SIZE)
+    social_at = _setting_int(state, SETTING_SOCIAL_CONFIGURED_AT_MS)
+    social_count = _setting_int(state, SETTING_SOCIAL_GUARDIAN_COUNT)
+    social_k = _setting_int(state, SETTING_SOCIAL_THRESHOLD_K)
+
+    candidates = _social_candidate_count(state)
+
+    return RecoveryStatus(
+        phrase=TrackState(
+            track="phrase",
+            ready=phrase_verified > 0,
+            available=has_master_seed,
+            last_action_at_ms=phrase_verified,
+            extra={"requires_master_seed": True},
+        ),
+        social=TrackState(
+            track="social",
+            ready=social_at > 0,
+            available=has_master_seed and candidates >= 2,
+            last_action_at_ms=social_at,
+            extra={
+                "guardian_count": social_count,
+                "threshold_k": social_k,
+                "candidate_count": candidates,
+            },
+        ),
+        backup=TrackState(
+            track="backup",
+            ready=backup_at > 0,
+            available=has_master_seed,
+            last_action_at_ms=backup_at,
+            extra={"last_export_size_bytes": backup_size},
+        ),
+    )
+
+
+def is_any_track_ready(state) -> bool:
+    """Lightweight check used by the Setup checklist row."""
+    return any(
+        _setting_int(state, k) > 0
+        for k in (
+            SETTING_PHRASE_VERIFIED_AT_MS,
+            SETTING_BACKUP_LAST_EXPORT_AT_MS,
+            SETTING_SOCIAL_CONFIGURED_AT_MS,
+            SETTING_LEGACY_CONFIGURED_AT_MS,
+        )
+    )
+
+
+def configured_track_labels(state) -> list[str]:
+    """Human-readable track names the Setup checklist surfaces in
+    its 'how recovery is set up' summary line."""
+    out: list[str] = []
+    if _setting_int(state, SETTING_PHRASE_VERIFIED_AT_MS) > 0:
+        out.append("recovery phrase")
+    if _setting_int(state, SETTING_SOCIAL_CONFIGURED_AT_MS) > 0:
+        out.append("trusted contacts")
+    if _setting_int(state, SETTING_BACKUP_LAST_EXPORT_AT_MS) > 0:
+        out.append("encrypted backup")
+    if not out and _setting_int(state, SETTING_LEGACY_CONFIGURED_AT_MS) > 0:
+        out.append("manual confirmation")
+    return out
+
+
+# ── track 1: recovery phrase ─────────────────────────────────────────
+
+
+WORD_COUNT = 24
+
+
+def load_phrase_words(data_dir: Path) -> Optional[list[str]]:
+    """Return the 24 BIP-39 words for the current master seed, or
+    None if no seed file exists yet."""
+    from one_link import master_seed, mnemonic
+    seed = master_seed.load_seed(Path(data_dir))
+    if seed is None:
+        return None
+    try:
+        phrase = mnemonic.encode(seed)
+    finally:
+        # Best-effort. Python bytes are immutable, but this drops
+        # our reference; the GC collects on the next pass.
+        seed = b"\x00" * len(seed)
+        del seed
+    return phrase.split()
+
+
+def pick_verification_indices(rng: secrets.SystemRandom | None = None) -> list[int]:
+    """Pick three distinct 1-indexed positions in the 24-word phrase
+    that the user must type back to prove they wrote it down. We
+    pick from the full range; clustering would hint at "we only
+    ever ask about the first few" and be muscle-memorisable across
+    sessions.
+    """
+    r = rng or secrets.SystemRandom()
+    return sorted(r.sample(range(1, WORD_COUNT + 1), 3))
+
+
+def verify_phrase_positions(
+    *, data_dir: Path, indices: list[int], words: list[str],
+) -> tuple[bool, list[int]]:
+    """Check that `words[i]` matches the word at position `indices[i]`
+    in the daemon's current 24-word phrase. Returns (ok, mismatch_indices).
+
+    Comparison is case-insensitive + whitespace-stripped. Position
+    1 is the first word.
+    """
+    phrase_words = load_phrase_words(data_dir)
+    if phrase_words is None:
+        raise FileNotFoundError("no master seed on this install")
+    if len(indices) != len(words):
+        raise ValueError("indices and words must be same length")
+    if not indices:
+        raise ValueError("at least one position required")
+    mismatches: list[int] = []
+    for idx, supplied in zip(indices, words):
+        if not (1 <= idx <= WORD_COUNT):
+            raise ValueError(f"position out of range: {idx}")
+        canon = (supplied or "").strip().lower()
+        if canon != phrase_words[idx - 1]:
+            mismatches.append(idx)
+    return (len(mismatches) == 0, mismatches)
+
+
+def mark_phrase_verified(state, now_ms: Optional[int] = None) -> int:
+    """Record that the user successfully verified the phrase."""
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    state.set_setting(SETTING_PHRASE_VERIFIED_AT_MS, str(now_ms))
+    state.set_setting(SETTING_LEGACY_CONFIGURED_AT_MS, str(now_ms))
+    return now_ms
+
+
+# ── track 2: encrypted backup file (.olbak) ──────────────────────────
+
+
+def build_backup_bundle(
+    *, data_dir: Path, include_files: bool = False,
+) -> bytes:
+    """Return the encoded .olbak bundle bytes. Raises FileNotFoundError
+    if no master seed exists."""
+    from one_link import backup_bundle, master_seed
+    seed = master_seed.load_seed(Path(data_dir))
+    if seed is None:
+        raise FileNotFoundError("no master seed on this install")
+    try:
+        bundle = backup_bundle.create_bundle(
+            seed=seed,
+            data_dir=Path(data_dir),
+            include_files=include_files,
+        )
+    finally:
+        seed = b"\x00" * len(seed)
+        del seed
+    return bundle
+
+
+def mark_backup_exported(
+    state, *, size_bytes: int, now_ms: Optional[int] = None,
+) -> int:
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    state.set_setting(SETTING_BACKUP_LAST_EXPORT_AT_MS, str(now_ms))
+    state.set_setting(SETTING_BACKUP_LAST_EXPORT_SIZE, str(int(size_bytes)))
+    state.set_setting(SETTING_LEGACY_CONFIGURED_AT_MS, str(now_ms))
+    return now_ms
+
+
+def backup_filename(now_ms: int | None = None) -> str:
+    """Suggest a download filename. Stable shape so the user can
+    spot multiple exports by date."""
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    import datetime
+    ts = datetime.datetime.fromtimestamp(now_ms / 1000)
+    return f"one-link-backup-{ts.strftime('%Y%m%d-%H%M%S')}.olbak"
+
+
+# ── track 3: trusted contacts (social recovery) ──────────────────────
+
+
+# Trust values that mean "the user has pinned this peer as theirs"
+# in state.set_peer_trust calls across daemon.py. Anything else
+# (candidate / rejected / etc.) is not a sensible guardian target.
+_GUARDIAN_TRUST_VALUES = {"pinned"}
+
+
+def _social_candidate_count(state) -> int:
+    """Count of paired peers we can plausibly wrap shares to. The
+    UI uses this to decide whether to even surface the social track
+    ('You need at least 2 trusted contacts before you can set this
+    up')."""
+    try:
+        peers = state.list_peers()
+    except Exception:
+        return 0
+    n = 0
+    for p in peers or []:
+        if getattr(p, "trust", None) in _GUARDIAN_TRUST_VALUES:
+            pub = getattr(p, "pubkey", b"")
+            if isinstance(pub, (bytes, bytearray)) and len(pub) == 32:
+                n += 1
+    return n
+
+
+def list_social_candidates(state) -> list[dict[str, Any]]:
+    """Return the paired-peer roster the UI shows for guardian
+    selection. Each entry has id (fingerprint), label, pubkey_b64
+    (the Ed25519 32 bytes that share-wrap targets), and a hint so
+    the user can spot 'my own iPad' vs 'Bob'."""
+    out: list[dict[str, Any]] = []
+    try:
+        peers = state.list_peers()
+    except Exception:
+        return out
+    for p in peers or []:
+        if getattr(p, "trust", None) not in _GUARDIAN_TRUST_VALUES:
+            continue
+        pub = getattr(p, "pubkey", None)
+        if not isinstance(pub, (bytes, bytearray)) or len(pub) != 32:
+            continue
+        label = getattr(p, "display_name", None) or getattr(p, "short_id", None) or "Trusted device"
+        out.append({
+            "id": getattr(p, "fingerprint", "") or "",
+            "label": str(label),
+            "pubkey_b64": base64.b64encode(bytes(pub)).decode("ascii"),
+            "hostname": getattr(p, "hostname", "") or "",
+            "verified": bool(getattr(p, "verified_at_ms", None)),
+            "last_seen_ms": int(getattr(p, "last_seen_ms", 0) or 0),
+        })
+    return out
+
+
+def issue_social_shares(
+    *,
+    data_dir: Path,
+    guardians: list[dict[str, Any]],
+    threshold_k: int = 3,
+) -> list[dict[str, Any]]:
+    """Split the master seed into N Shamir shares, each sealed to
+    one guardian's Ed25519 pubkey. Returns N share descriptors the
+    UI can render + offer as downloads.
+
+    Each guardian dict must carry `label` (display string for the
+    UI / share filename) and either `pubkey_b64` (raw 32 bytes
+    base64-encoded) or `pubkey_hex`. Returned share descriptors:
+
+        {
+          "guardian_label": str,       # what the user picked
+          "share_index": int,          # 1..N, matches the Shamir x
+          "filename": str,             # suggested .olss filename
+          "blob_b64u": str,            # the wrapped share bytes
+          "threshold_k": int,          # K = required to combine
+          "total_n": int,              # N = total shares issued
+          "setup_ms": int,
+        }
+    """
+    from one_link import master_seed, social_recovery
+    if not guardians:
+        raise ValueError("at least 2 guardians required")
+    if threshold_k < 2:
+        raise ValueError("threshold_k must be at least 2")
+    if threshold_k > len(guardians):
+        raise ValueError(
+            f"threshold_k={threshold_k} cannot exceed guardian count {len(guardians)}"
+        )
+
+    seed = master_seed.load_seed(Path(data_dir))
+    if seed is None:
+        raise FileNotFoundError("no master seed on this install")
+    try:
+        # Normalise guardian shape: each needs (label, ed25519 pubkey bytes).
+        named_pubs: list[tuple[str, bytes]] = []
+        seen_pubs: set[bytes] = set()
+        for g in guardians:
+            label = str(g.get("label") or "Guardian").strip() or "Guardian"
+            pub_b64 = g.get("pubkey_b64")
+            pub_hex = g.get("pubkey_hex")
+            if pub_b64:
+                try:
+                    pub = base64.b64decode(str(pub_b64), validate=True)
+                except Exception as e:
+                    raise ValueError(f"bad pubkey_b64 for {label!r}: {e}")
+            elif pub_hex:
+                try:
+                    pub = bytes.fromhex(str(pub_hex))
+                except ValueError as e:
+                    raise ValueError(f"bad pubkey_hex for {label!r}: {e}")
+            else:
+                raise ValueError(f"guardian {label!r} missing pubkey")
+            if len(pub) != 32:
+                raise ValueError(
+                    f"guardian {label!r} pubkey must be 32 bytes, got {len(pub)}"
+                )
+            if pub in seen_pubs:
+                raise ValueError(
+                    f"guardian {label!r} pubkey duplicates another guardian"
+                )
+            seen_pubs.add(pub)
+            named_pubs.append((label, pub))
+
+        setup_ms = int(time.time() * 1000)
+        pairs = social_recovery.setup_social_recovery(
+            seed=seed,
+            guardians=named_pubs,
+            threshold_k=threshold_k,
+        )
+    finally:
+        seed = b"\x00" * len(seed)
+        del seed
+
+    total_n = len(pairs)
+    out: list[dict[str, Any]] = []
+    for label, share in pairs:
+        safe_label = _safe_filename_segment(label)
+        filename = (
+            f"one-link-share-{share.share_index}-of-{total_n}-{safe_label}.olss"
+        )
+        out.append({
+            "guardian_label": label,
+            "share_index": share.share_index,
+            "filename": filename,
+            "blob_b64u": base64.urlsafe_b64encode(share.encoded).decode("ascii"),
+            "threshold_k": share.threshold,
+            "total_n": share.total,
+            "setup_ms": share.setup_ms,
+        })
+    return out
+
+
+def mark_social_configured(
+    state,
+    *,
+    guardian_count: int,
+    threshold_k: int,
+    now_ms: Optional[int] = None,
+) -> int:
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    state.set_setting(SETTING_SOCIAL_CONFIGURED_AT_MS, str(now_ms))
+    state.set_setting(SETTING_SOCIAL_GUARDIAN_COUNT, str(int(guardian_count)))
+    state.set_setting(SETTING_SOCIAL_THRESHOLD_K, str(int(threshold_k)))
+    state.set_setting(SETTING_LEGACY_CONFIGURED_AT_MS, str(now_ms))
+    return now_ms
+
+
+def _safe_filename_segment(s: str) -> str:
+    """Reduce a label to a safe filename slug. ASCII letters,
+    digits, dash, underscore; spaces collapse to dashes; everything
+    else drops. Caps at 32 chars."""
+    out_chars: list[str] = []
+    for ch in s:
+        if ch.isalnum() or ch in {"-", "_"}:
+            out_chars.append(ch)
+        elif ch == " ":
+            out_chars.append("-")
+    slug = "".join(out_chars).strip("-_")[:32]
+    return slug or "guardian"
+
+
+# ── settings-reset hook for the existing `reset` setup_action ────────
+
+
+def reset_all_recovery_state(state) -> None:
+    """Wipe the per-track recovery settings. Called from the
+    existing `reset` setup_action so the new state vanishes along
+    with the rest of the one_setup flags."""
+    for key in (
+        SETTING_PHRASE_VERIFIED_AT_MS,
+        SETTING_BACKUP_LAST_EXPORT_AT_MS,
+        SETTING_BACKUP_LAST_EXPORT_SIZE,
+        SETTING_SOCIAL_CONFIGURED_AT_MS,
+        SETTING_SOCIAL_GUARDIAN_COUNT,
+        SETTING_SOCIAL_THRESHOLD_K,
+        SETTING_LEGACY_CONFIGURED_AT_MS,
+    ):
+        with contextlib.suppress(Exception):
+            state.delete_setting(key)

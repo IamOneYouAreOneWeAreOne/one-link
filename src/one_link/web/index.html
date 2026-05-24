@@ -7291,100 +7291,273 @@
     .msg.first-send-glow::before { animation: none; }
   }
 
-  /* v0.21.x: recovery-verify modal. Two-step verification before
-     marking recovery as configured — the user has to type a
-     phrase that proves they actually did the work. */
-  .rvm-modal {
+  /* v0.21.x: recovery wizard. Three real tracks the user can
+     actually run from the UI (paper phrase, trusted contacts,
+     encrypted backup file). Replaces the old self-attestation
+     modal that asked the user to type "I have my recovery info"
+     to confirm something they had no in-app way to actually do. */
+  .recwiz-modal {
     position: fixed; inset: 0;
     display: none;
     z-index: 9999;
     align-items: center; justify-content: center;
   }
-  .rvm-modal.show { display: flex; }
-  body.rvm-open { overflow: hidden; }
-  .rvm-backdrop {
+  .recwiz-modal.show { display: flex; }
+  body.recwiz-open { overflow: hidden; }
+  .recwiz-backdrop {
     position: absolute; inset: 0;
     background: rgba(0,0,0,.62);
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
   }
-  .rvm-pane {
+  .recwiz-pane {
     position: relative;
-    width: min(520px, 92vw);
+    width: min(640px, 94vw);
+    max-height: 88vh;
+    overflow-y: auto;
     background: var(--bg-1);
     border: 1px solid var(--line);
     border-radius: 14px;
     box-shadow: 0 12px 40px rgba(0,0,0,.5);
     padding: 22px 24px;
   }
-  .rvm-title {
+  .recwiz-title {
     margin: 0 0 10px;
-    font-size: 17px;
+    font-size: 18px;
     font-weight: 600;
     color: var(--text);
   }
-  .rvm-lead {
-    margin: 0 0 12px;
+  .recwiz-lead {
+    margin: 0 0 18px;
     color: var(--text-dim);
     font-size: 13px;
     line-height: 1.55;
   }
-  .rvm-checklist {
-    margin: 0 0 14px 18px;
-    padding: 0;
-    color: var(--text);
-    font-size: 13px;
-    line-height: 1.55;
-  }
-  .rvm-checklist li { margin: 0 0 4px; }
-  .rvm-prompt {
-    margin: 14px 0 8px;
-    color: var(--text);
-    font-size: 13px;
-  }
-  .rvm-challenge {
+  .recwiz-card {
     background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    transition: border-color .15s ease;
+  }
+  .recwiz-card.open { border-color: var(--accent); }
+  .recwiz-card-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
+  }
+  .recwiz-card-name {
+    font-size: 14px; font-weight: 600; color: var(--text);
+  }
+  .recwiz-card-status {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
     padding: 2px 8px;
-    border-radius: 6px;
+    border-radius: 999px;
+    color: var(--text-dim);
+    background: var(--bg-3);
+    white-space: nowrap;
+  }
+  .recwiz-card-status.ready {
+    background: rgba(46, 196, 137, .18);
+    color: #2ec489;
+  }
+  .recwiz-card-status.partial {
+    background: rgba(255, 196, 0, .15);
+    color: #ffc400;
+  }
+  .recwiz-card-status.unavailable {
+    background: rgba(180, 180, 180, .12);
+    color: var(--text-dim);
+  }
+  .recwiz-card-desc {
+    margin: 6px 0 10px;
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+  .recwiz-card-meta {
+    margin: 0 0 10px;
+    font-size: 11px;
+    color: var(--text-dim);
     font-family: var(--mono);
-    color: var(--accent);
   }
-  .rvm-input {
-    width: 100%;
-    background: var(--bg-2);
-    border: 1px solid var(--bg-3);
-    border-radius: 8px;
-    color: var(--text);
-    padding: 10px 12px;
-    font-size: 14px;
-    font-family: var(--mono);
-    outline: none;
-    margin-bottom: 14px;
+  .recwiz-card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .recwiz-card-body {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--line);
   }
-  .rvm-input:focus { border-color: var(--accent); }
-  .rvm-actions {
-    display: flex; justify-content: flex-end; gap: 8px;
-  }
-  .rvm-cancel, .rvm-confirm {
+  .recwiz-card-body[hidden] { display: none; }
+  .recwiz-btn {
     padding: 7px 14px;
     border-radius: 8px;
     font-size: 13px;
     cursor: pointer;
     border: 1px solid var(--line);
+    background: var(--bg-3);
+    color: var(--text);
   }
-  .rvm-cancel {
-    background: transparent;
-    color: var(--text-dim);
+  .recwiz-btn:hover:not(:disabled) {
+    background: var(--bg-1); border-color: var(--accent);
   }
-  .rvm-cancel:hover { background: var(--bg-3); color: var(--text); }
-  .rvm-confirm {
+  .recwiz-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .recwiz-btn-primary {
     background: var(--accent);
     color: white;
     border-color: var(--accent);
     font-weight: 600;
   }
-  .rvm-confirm:hover:not(:disabled) { filter: brightness(1.08); }
-  .rvm-confirm:disabled { opacity: .4; cursor: default; }
+  .recwiz-btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+  .recwiz-btn-danger {
+    background: transparent;
+    color: #ff7777;
+    border-color: rgba(255, 119, 119, .35);
+  }
+  .recwiz-btn-danger:hover:not(:disabled) {
+    background: rgba(255, 119, 119, .08);
+  }
+  .recwiz-words {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 12px;
+    margin: 12px 0;
+  }
+  @media (max-width: 520px) {
+    .recwiz-words { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  .recwiz-word {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+    padding: 4px 8px;
+    background: var(--bg-2);
+    border-radius: 6px;
+    user-select: text;
+    overflow-wrap: anywhere;
+  }
+  .recwiz-word-num {
+    color: var(--text-dim);
+    margin-right: 6px;
+    min-width: 1.8em;
+    display: inline-block;
+    text-align: right;
+  }
+  .recwiz-warn {
+    margin: 8px 0;
+    padding: 10px 12px;
+    background: rgba(255, 196, 0, .08);
+    border-left: 3px solid #ffc400;
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  .recwiz-verify-row {
+    display: flex; align-items: center; gap: 10px;
+    margin: 6px 0;
+    font-size: 13px;
+  }
+  .recwiz-verify-row label {
+    color: var(--text-dim);
+    font-family: var(--mono);
+    min-width: 5em;
+  }
+  .recwiz-verify-input {
+    flex: 1;
+    background: var(--bg-1);
+    border: 1px solid var(--bg-3);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: var(--mono);
+    outline: none;
+  }
+  .recwiz-verify-input:focus { border-color: var(--accent); }
+  .recwiz-verify-input.bad { border-color: #ff7777; }
+  .recwiz-feedback {
+    margin: 8px 0;
+    font-size: 12px;
+    color: var(--text-dim);
+    min-height: 1.2em;
+  }
+  .recwiz-feedback.bad { color: #ff7777; }
+  .recwiz-feedback.good { color: #2ec489; }
+  .recwiz-guardian-list {
+    margin: 10px 0;
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg-1);
+  }
+  .recwiz-guardian-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    cursor: pointer;
+  }
+  .recwiz-guardian-item:last-child { border-bottom: none; }
+  .recwiz-guardian-item:hover { background: var(--bg-2); }
+  .recwiz-guardian-item input { accent-color: var(--accent); }
+  .recwiz-guardian-label {
+    font-size: 13px;
+    color: var(--text);
+    flex: 1;
+  }
+  .recwiz-guardian-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+  }
+  .recwiz-threshold-row {
+    display: flex; align-items: center; gap: 10px;
+    margin: 10px 0;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .recwiz-threshold-input {
+    width: 56px;
+    background: var(--bg-1);
+    border: 1px solid var(--bg-3);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 4px 8px;
+    font-size: 13px;
+    font-family: var(--mono);
+    text-align: center;
+  }
+  .recwiz-shares {
+    margin-top: 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .recwiz-share-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    font-size: 12px;
+  }
+  .recwiz-share-row:last-child { border-bottom: none; }
+  .recwiz-share-num {
+    color: var(--text-dim);
+    font-family: var(--mono);
+    min-width: 3em;
+  }
+  .recwiz-share-name { flex: 1; color: var(--text); }
+  .recwiz-close-bar {
+    display: flex; justify-content: flex-end; gap: 8px;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
 
   /* v0.21.x: composer emoji picker. Floats above the composer; the
      anchor button computes positioning at open time. */
@@ -10453,6 +10626,7 @@
         <div class="setup-receipt" id="one-setup-pending-device" style="display:none;">
           <strong id="one-setup-pending-label">New device waiting</strong>
           <span>Check this code on both devices before trusting it.</span>
+          <span id="one-setup-pair-timing">Waiting for confirmation.</span>
           <div class="setup-code" id="one-setup-trust-code">000 000</div>
           <div class="onboarding-actions">
             <button class="btn-danger" id="one-setup-codes-no">Codes do not match</button>
@@ -11374,6 +11548,30 @@
     status() { return this.get("/api/status"); },
     setup() { return this.get("/api/setup"); },
     setupAction(action) { return this.post("/api/setup", { action }); },
+    setupRecoveryPhrase() { return this.post("/api/setup/recovery-phrase", {}); },
+    // v0.21.x recovery wizard. Replaces the self-attestation modal
+    // (which asked the user to type "I have my recovery info" to
+    // confirm something they had no in-app way to actually do)
+    // with three real flows backed by /api/v1/recovery/*.
+    recoveryStatus() { return this.get("/api/v1/recovery/status"); },
+    recoveryPhrase() { return this.post("/api/v1/recovery/phrase", {}); },
+    recoveryPhraseVerify(indices, words) {
+      return this.post("/api/v1/recovery/phrase/verify", { indices, words });
+    },
+    recoverySocialCandidates() { return this.get("/api/v1/recovery/social/candidates"); },
+    recoverySocialIssue(guardians, threshold_k) {
+      return this.post("/api/v1/recovery/social/issue", { guardians, threshold_k });
+    },
+    // Backup export streams a binary .olbak file. We bypass the
+    // JSON-aware `api.get` wrapper and use fetch directly so we
+    // can deliver the bytes to the browser as a download. URL is
+    // built as a constant + branch (not a template literal) so the
+    // route-contract test sees a clean string, not "${qs}" treated
+    // as a path-template placeholder.
+    recoveryBackupExportUrl(includeFiles) {
+      if (includeFiles) return "/api/v1/recovery/backup/export?include_files=1";
+      return "/api/v1/recovery/backup/export";
+    },
     oneHealth() { return this.get("/api/one-health"); },
     setupDeviceInvite(body) { return this.post("/api/setup/device-invite", body); },
     claimSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/claim", body); },
@@ -14475,11 +14673,89 @@
     const key = _selfMeshPubKey(device);
     return facts.find(p => _selfMeshPubKey(p) === key) || null;
   }
+  function _selfMeshDeviceLabel(device) {
+    return String(device?.label || device?.device_kind || device?.fingerprint || "Device").trim();
+  }
+  function _selfMeshDeviceRootKey(device) {
+    return String(device?.root_pub_b64 || device?.root_pub || "root").trim();
+  }
+  function _selfMeshIsBrowserPeer(device) {
+    const kind = String(device?.device_kind || "").toLowerCase();
+    return kind === "browser-peer" || kind.includes("browser") || kind.includes("phone");
+  }
+  function _selfMeshIsGenericBrowserLabel(label) {
+    const s = String(label || "").trim().toLowerCase();
+    return !s || [
+      "phone browser",
+      "browser",
+      "browser-peer",
+      "remote-device",
+      "device",
+      "one link device",
+      "one_link device",
+    ].includes(s);
+  }
+  function _selfMeshFreshness(device) {
+    return Math.max(
+      Number(device?.updated_ms || 0),
+      Number(device?.created_ms || 0),
+      Number(device?.claimed_ms || 0),
+      Number(device?.paired_ms || 0),
+    );
+  }
+  function _dedupeSelfMeshDevices(devices) {
+    const rows = Array.isArray(devices) ? devices.filter(Boolean) : [];
+    if (rows.length <= 1) return rows.slice();
+
+    const hasNamedBrowserByRoot = new Map();
+    for (const d of rows) {
+      if (d.local || d.revoked || !_selfMeshIsBrowserPeer(d)) continue;
+      const label = _selfMeshDeviceLabel(d);
+      if (_selfMeshIsGenericBrowserLabel(label)) continue;
+      hasNamedBrowserByRoot.set(_selfMeshDeviceRootKey(d), true);
+    }
+
+    const byKey = new Map();
+    const out = [];
+    for (const d of rows) {
+      const label = _selfMeshDeviceLabel(d);
+      const root = _selfMeshDeviceRootKey(d);
+      if (
+        !d.local &&
+        !d.revoked &&
+        _selfMeshIsBrowserPeer(d) &&
+        _selfMeshIsGenericBrowserLabel(label) &&
+        hasNamedBrowserByRoot.get(root)
+      ) {
+        continue;
+      }
+
+      const key = d.local
+        ? `local:${_selfMeshPubKey(d) || label}`
+        : (
+            _selfMeshIsBrowserPeer(d)
+              ? `browser:${root}:${label.toLowerCase()}`
+              : `${root}:${String(d.device_kind || "").toLowerCase()}:${label.toLowerCase()}`
+          );
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, { device: d, index: out.length });
+        out.push(d);
+        continue;
+      }
+      if (_selfMeshFreshness(d) >= _selfMeshFreshness(existing.device)) {
+        byKey.set(key, { device: d, index: existing.index });
+        out[existing.index] = d;
+      }
+    }
+    return out;
+  }
   function renderSelfMesh() {
     const host = $("#self-mesh-kit");
     if (!host) return;
     const mesh = state.selfMesh || {};
-    const devices = Array.isArray(mesh.devices) ? mesh.devices : [];
+    const rawDevices = Array.isArray(mesh.devices) ? mesh.devices : [];
+    const devices = _dedupeSelfMeshDevices(rawDevices);
     const facts = Array.isArray(mesh.presence) ? mesh.presence : [];
     const localCount = devices.filter(d => d.local && !d.revoked).length;
     const awake = facts.filter(p => p.state === "awake").length;
@@ -14626,7 +14902,7 @@
     // their paired iPhone / iPad / other-laptop without digging
     // into Settings → Self-mesh. The 'i dont see it meshed or
     // paired anywhere' UX problem.
-    renderSelfMeshSidebar(devices);
+    renderSelfMeshSidebar(rawDevices);
   }
 
   function renderSelfMeshSidebar(devices) {
@@ -14634,17 +14910,18 @@
     const heading = $("#self-mesh-section-h");
     const count = $("#self-mesh-count");
     if (!wrap || !heading) return;
+    const rows = _dedupeSelfMeshDevices(devices);
     // Hide the section entirely if there are no devices at all.
-    if (!devices || devices.length === 0) {
+    if (!rows || rows.length === 0) {
       wrap.style.display = "none";
       heading.style.display = "none";
       return;
     }
     heading.style.display = "";
     wrap.style.display = "";
-    if (count) count.textContent = devices.length;
+    if (count) count.textContent = rows.length;
     wrap.replaceChildren();
-    for (const d of devices) {
+    for (const d of rows) {
       const row = document.createElement("div");
       row.className = "peer self-mesh-peer";
       row.style.padding = "10px 12px";
@@ -23846,6 +24123,13 @@
     return state.oneSetup;
   }
 
+  function _oneSetupFormatDuration(ms) {
+    const total = Math.max(0, Math.round(Number(ms || 0) / 1000));
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+    return `${minutes}:${String(seconds).padStart(2, "0")}`;
+  }
+
   function renderOneSetup() {
     const setup = state.oneSetup || {};
     const name = $("#onboarding-name")?.value || state.me?.display_name || state.me?.hostname || "This device";
@@ -23872,6 +24156,12 @@
     if (pending) {
       $("#one-setup-pending-label").textContent = `${pending.label || "New device"} is waiting`;
       $("#one-setup-trust-code").textContent = pending.trust_code || "000 000";
+      const timing = $("#one-setup-pair-timing");
+      if (timing) {
+        const waited = _oneSetupFormatDuration(Number(pending.pair_elapsed_ms || 0));
+        const left = _oneSetupFormatDuration(Number(pending.remaining_ms || 0));
+        timing.textContent = `Waiting ${waited}. Invite expires in ${left}.`;
+      }
       if (rightState) rightState.textContent = "Waiting for code match";
     }
     const list = $("#one-setup-checklist");
@@ -23920,6 +24210,16 @@
         row.appendChild(el("span", "tag", item.status || ""));
         settingsList.appendChild(row);
       }
+    }
+    // v0.21.x: reflect recovery-track state on the settings sidebar
+    // button. Once any track is configured the button shifts from
+    // "Set recovery" to "Manage recovery" so it does not nag a user
+    // who already shipped recovery.
+    const recoveryBtn = $("#settings-one-setup-recovery");
+    if (recoveryBtn) {
+      const recoveryRow = (setup.checklist || []).find((it) => it.id === "recovery");
+      const ready = recoveryRow && recoveryRow.status === "done";
+      recoveryBtn.textContent = ready ? "Manage recovery" : "Set recovery";
     }
     const proof = setup.privacy_proof || {};
     const proofCopy = $("#settings-one-setup-proof-copy");
@@ -24146,117 +24446,590 @@
     }
   }
 
+  // v0.21.x recovery wizard. Replaces the self-attestation modal
+  // (which asked the user to type "I have my recovery info" to
+  // confirm something they had no in-app way to actually do) with
+  // three real flows backed by /api/v1/recovery/*:
+  //   1. Recovery phrase  - show the 24 words, verify 3 random
+  //                         positions, record verified_at.
+  //   2. Trusted contacts - pick guardians from pinned peers, mint
+  //                         sealed Shamir shares, download each
+  //                         share file for the user to deliver
+  //                         through whatever medium they trust.
+  //   3. Encrypted backup - stream a .olbak file the user keeps
+  //                         somewhere safe.
+  // The `oneSetupMarkRecoveryConfigured` symbol name stays for the
+  // setup-action click router elsewhere.
   async function oneSetupMarkRecoveryConfigured() {
-    // v0.21.x: verification challenge before marking recovery as
-    // "configured". The old path was a one-click "yes I did the
-    // thing" with no friction — a user could accidentally click
-    // it and have no way to actually recover later. New flow asks
-    // the user to type a confirmation phrase, so the click is
-    // deliberate and the user has at least read the explanation.
-    const confirmed = await _showRecoveryVerifyModal();
-    if (!confirmed) return;
-    try {
-      await api.setupAction("recovery_configured");
-      toast("Recovery marked ready. Keep that paper safe.", "good", 4000);
-      await refreshOneSetup();
-    } catch (e) {
-      toast(`Recovery update failed: ${errorToastBody(e)}`, "bad", 6000);
-    }
+    await _showRecoveryWizard();
+    await refreshOneSetup();
   }
-  // v0.21.x: recovery-verify modal. Two-step:
-  //   1. Explain WHY recovery matters in plain language.
-  //   2. Require user to type a short phrase to confirm.
-  // The phrase is randomized between two options so the user can't
-  // muscle-memory through. Resolves true on Confirm, false on
-  // Cancel / Escape / backdrop click.
-  function _showRecoveryVerifyModal() {
-    return new Promise((resolve) => {
-      _ensureRecoveryVerifyModal();
-      const modal = document.getElementById("recovery-verify-modal");
-      const challenges = [
-        "I wrote it down",
-        "I have my recovery info",
-      ];
-      const challenge = challenges[Math.floor(Math.random() * challenges.length)];
-      modal.querySelector(".rvm-challenge").textContent = challenge;
-      const input = modal.querySelector(".rvm-input");
-      const confirmBtn = modal.querySelector(".rvm-confirm");
-      const cancelBtn = modal.querySelector(".rvm-cancel");
-      input.value = "";
-      confirmBtn.disabled = true;
-      function checkMatch() {
-        const norm = (s) => s.trim().toLowerCase().replace(/\s+/g, " ");
-        confirmBtn.disabled = norm(input.value) !== norm(challenge);
-      }
-      input.addEventListener("input", checkMatch);
-      function cleanup() {
-        modal.classList.remove("show");
-        document.body.classList.remove("rvm-open");
-        input.removeEventListener("input", checkMatch);
-        confirmBtn.removeEventListener("click", onConfirm);
-        cancelBtn.removeEventListener("click", onCancel);
-        modal.removeEventListener("click", onBackdrop);
-        document.removeEventListener("keydown", onKey);
-      }
-      function onConfirm() {
-        if (confirmBtn.disabled) return;
-        cleanup();
-        resolve(true);
-      }
-      function onCancel() { cleanup(); resolve(false); }
-      function onBackdrop(ev) {
-        const t = ev.target;
-        if (t && t instanceof Element && t.hasAttribute("data-rvm-close")) onCancel();
-      }
-      function onKey(ev) {
-        if (ev.key === "Escape") onCancel();
-        if (ev.key === "Enter" && !confirmBtn.disabled) onConfirm();
-      }
-      confirmBtn.addEventListener("click", onConfirm);
-      cancelBtn.addEventListener("click", onCancel);
-      modal.addEventListener("click", onBackdrop);
-      document.addEventListener("keydown", onKey);
-      modal.classList.add("show");
-      document.body.classList.add("rvm-open");
-      setTimeout(() => input.focus(), 60);
-    });
-  }
-  function _ensureRecoveryVerifyModal() {
-    if (document.getElementById("recovery-verify-modal")) return;
+  function _ensureRecoveryWizard() {
+    if (document.getElementById("recovery-wizard")) return;
     const m = document.createElement("div");
-    m.id = "recovery-verify-modal";
-    m.className = "rvm-modal";
+    m.id = "recovery-wizard";
+    m.className = "recwiz-modal";
     m.setAttribute("role", "dialog");
     m.setAttribute("aria-modal", "true");
-    m.setAttribute("aria-label", "Confirm recovery setup");
+    m.setAttribute("aria-label", "Set up recovery");
     m.innerHTML = `
-      <div class="rvm-backdrop" data-rvm-close></div>
-      <div class="rvm-pane">
-        <h2 class="rvm-title">Confirm you set up recovery</h2>
-        <p class="rvm-lead">
-          If you lose every device with One Link installed, this is
-          the ONLY way back into your identity. There's no email
-          reset, no password recovery, no cloud backup we can
-          unlock for you.
+      <div class="recwiz-backdrop" data-recwiz-close></div>
+      <div class="recwiz-pane">
+        <h2 class="recwiz-title">Set up recovery</h2>
+        <p class="recwiz-lead">
+          If you lose every device with One Link, this is how you get
+          back in. There is no cloud reset, no password recovery, no
+          support email. Pick one path now. We recommend the recovery
+          phrase plus at least one of the others.
         </p>
-        <ul class="rvm-checklist">
-          <li>You wrote your recovery info on paper, OR</li>
-          <li>You set up trusted contacts (3 of 5 social recovery), OR</li>
-          <li>You stored an encrypted backup somewhere safe</li>
-        </ul>
-        <p class="rvm-prompt">
-          To confirm you actually did one of these, type:
-          <strong class="rvm-challenge">I wrote it down</strong>
-        </p>
-        <input type="text" class="rvm-input" aria-label="Confirmation phrase"
-               autocomplete="off" spellcheck="false" />
-        <div class="rvm-actions">
-          <button type="button" class="rvm-cancel">Not yet</button>
-          <button type="button" class="rvm-confirm" disabled>Mark configured</button>
+        <div id="recwiz-track-phrase" class="recwiz-card" data-track="phrase"></div>
+        <div id="recwiz-track-social" class="recwiz-card" data-track="social"></div>
+        <div id="recwiz-track-backup" class="recwiz-card" data-track="backup"></div>
+        <div class="recwiz-close-bar">
+          <button type="button" class="recwiz-btn" data-recwiz-action="close">Done</button>
         </div>
       </div>
     `;
     document.body.appendChild(m);
+    m.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (!(t instanceof Element)) return;
+      if (t.hasAttribute("data-recwiz-close")) _recwizClose();
+      if (t.getAttribute("data-recwiz-action") === "close") _recwizClose();
+    });
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && m.classList.contains("show")) _recwizClose();
+    });
+  }
+
+  function _recwizClose() {
+    const modal = document.getElementById("recovery-wizard");
+    if (modal) modal.classList.remove("show");
+    document.body.classList.remove("recwiz-open");
+  }
+
+  async function _showRecoveryWizard() {
+    _ensureRecoveryWizard();
+    const modal = document.getElementById("recovery-wizard");
+    modal.classList.add("show");
+    document.body.classList.add("recwiz-open");
+    await _recwizRefreshStatus();
+  }
+
+  async function _recwizRefreshStatus() {
+    let status;
+    try {
+      status = await api.recoveryStatus();
+    } catch (e) {
+      toast(`Could not load recovery status: ${errorToastBody(e)}`, "bad", 5000);
+      return;
+    }
+    _recwizRenderPhraseCard(status.phrase || {});
+    _recwizRenderSocialCard(status.social || {});
+    _recwizRenderBackupCard(status.backup || {});
+  }
+
+  function _recwizFormatRelative(ms) {
+    const v = Number(ms) || 0;
+    if (v <= 0) return "never";
+    const delta = Date.now() - v;
+    if (delta < 60000) return "just now";
+    if (delta < 3600000) return `${Math.floor(delta / 60000)} min ago`;
+    if (delta < 86400000) return `${Math.floor(delta / 3600000)} hr ago`;
+    return `${Math.floor(delta / 86400000)} d ago`;
+  }
+
+  function _recwizHumanSize(bytes) {
+    const b = Number(bytes) || 0;
+    if (!b) return "0 B";
+    const units = ["B", "KB", "MB", "GB"];
+    let v = b; let i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
+  }
+
+  // ── recovery wizard: PHRASE track ───────────────────────────────
+  function _recwizRenderPhraseCard(s) {
+    const card = document.getElementById("recwiz-track-phrase");
+    if (!card) return;
+    const ready = !!s.ready;
+    const avail = !!s.available;
+    const status = ready ? "Verified" : avail ? "Not verified" : "Unavailable";
+    const cls = ready ? "ready" : avail ? "partial" : "unavailable";
+    const last = ready
+      ? `Verified ${_recwizFormatRelative(s.last_action_at_ms)}.`
+      : "";
+    card.innerHTML = `
+      <div class="recwiz-card-head">
+        <div class="recwiz-card-name">Recovery phrase</div>
+        <div class="recwiz-card-status ${cls}">${escapeText(status)}</div>
+      </div>
+      <p class="recwiz-card-desc">
+        24 words on paper. The classic. Type them on a fresh install
+        and your identity comes back.
+      </p>
+      ${last ? `<p class="recwiz-card-meta">${escapeText(last)}</p>` : ""}
+      <div class="recwiz-card-actions">
+        <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-phrase="show">
+          ${ready ? "Show again" : "Show my 24 words"}
+        </button>
+        ${ready ? `<button type="button" class="recwiz-btn" data-recwiz-phrase="verify">Re-verify</button>` : ""}
+      </div>
+      <div class="recwiz-card-body" hidden></div>
+    `;
+    card.querySelector('[data-recwiz-phrase="show"]')
+      .addEventListener("click", () => _recwizPhraseShow());
+    const reBtn = card.querySelector('[data-recwiz-phrase="verify"]');
+    if (reBtn) reBtn.addEventListener("click", () => _recwizPhraseShow());
+  }
+
+  async function _recwizPhraseShow() {
+    const card = document.getElementById("recwiz-track-phrase");
+    const body = card.querySelector(".recwiz-card-body");
+    body.hidden = false;
+    card.classList.add("open");
+    body.innerHTML = `<p class="recwiz-feedback">Loading your phrase...</p>`;
+    let resp;
+    try {
+      resp = await api.recoveryPhrase();
+    } catch (e) {
+      body.innerHTML = `<p class="recwiz-feedback bad">${escapeText("Could not load: " + errorToastBody(e))}</p>`;
+      return;
+    }
+    const words = Array.isArray(resp?.words) ? resp.words : [];
+    if (words.length !== 24) {
+      body.innerHTML = `<p class="recwiz-feedback bad">Phrase did not contain 24 words.</p>`;
+      return;
+    }
+    const wordCells = words.map((w, i) => (
+      `<span class="recwiz-word"><span class="recwiz-word-num">${i + 1}.</span>${escapeText(w)}</span>`
+    )).join("");
+    body.innerHTML = `
+      <p class="recwiz-warn">
+        Anyone with these 24 words can be you on a fresh install.
+        Write them on paper. Not a screenshot. Not a note app. Not
+        the cloud. One Link does not store this phrase and cannot
+        recover it for you.
+      </p>
+      <div class="recwiz-words" aria-label="24 word recovery phrase">${wordCells}</div>
+      <div class="recwiz-card-actions">
+        <button type="button" class="recwiz-btn" data-recwiz-phrase="print">Print</button>
+        <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-phrase="verify-start">
+          I wrote it down
+        </button>
+        <button type="button" class="recwiz-btn" data-recwiz-phrase="hide">Hide</button>
+      </div>
+    `;
+    body.querySelector('[data-recwiz-phrase="print"]')
+      .addEventListener("click", () => _recwizPhrasePrint(words));
+    body.querySelector('[data-recwiz-phrase="verify-start"]')
+      .addEventListener("click", () => _recwizPhraseStartVerify());
+    body.querySelector('[data-recwiz-phrase="hide"]')
+      .addEventListener("click", () => {
+        body.hidden = true; card.classList.remove("open"); body.innerHTML = "";
+      });
+  }
+
+  function _recwizPhrasePrint(words) {
+    const w = window.open("", "_blank", "noopener,noreferrer");
+    if (!w) {
+      toast("Pop-up blocked. Allow pop-ups to print the phrase.", "warn", 5000);
+      return;
+    }
+    const generated = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const items = words.map((x) => `<li>${escapeText(x)}</li>`).join("");
+    const html = `<!doctype html>
+<html><head><meta charset="utf-8"><title>One Link recovery phrase</title>
+<style>
+  body { font-family: sans-serif; padding: 40px; color: #000; background: #fff; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  .stamp { color: #555; font-size: 12px; margin-bottom: 24px; }
+  ol { font-family: monospace; font-size: 18px; columns: 2; column-gap: 40px; }
+  ol li { margin: 4px 0; padding-right: 12px; break-inside: avoid; }
+  .warn { color: #b80000; font-weight: bold; margin: 24px 0; font-size: 13px; line-height: 1.5; }
+</style></head>
+<body>
+  <h1>One Link recovery phrase</h1>
+  <p class="stamp">Generated ${escapeText(generated)}</p>
+  <ol>${items}</ol>
+  <p class="warn">
+    Anyone with these 24 words can be you on a fresh install.
+    Store this paper somewhere only you can reach. Do not photograph it.
+    Do not store the digital version. One Link cannot recover this phrase.
+  </p>
+</body></html>`;
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => { try { w.print(); } catch (e) { /* user can ctrl+p */ } }, 300);
+  }
+
+  function _recwizPhraseStartVerify() {
+    const card = document.getElementById("recwiz-track-phrase");
+    const body = card.querySelector(".recwiz-card-body");
+    const positions = [];
+    while (positions.length < 3) {
+      const p = 1 + Math.floor(Math.random() * 24);
+      if (!positions.includes(p)) positions.push(p);
+    }
+    positions.sort((a, b) => a - b);
+    const rows = positions.map((p) => `
+      <div class="recwiz-verify-row">
+        <label for="recwiz-verify-${p}">Word ${p}</label>
+        <input type="text" id="recwiz-verify-${p}" class="recwiz-verify-input"
+               data-recwiz-pos="${p}" autocomplete="off" spellcheck="false" />
+      </div>`).join("");
+    body.innerHTML = `
+      <p class="recwiz-card-desc">
+        Type these three words from your paper to confirm you wrote
+        them correctly. Position 1 is the first word.
+      </p>
+      ${rows}
+      <p class="recwiz-feedback" id="recwiz-phrase-fb"></p>
+      <div class="recwiz-card-actions">
+        <button type="button" class="recwiz-btn" data-recwiz-phrase="cancel-verify">Back to phrase</button>
+        <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-phrase="submit-verify" disabled>
+          Confirm recovery
+        </button>
+      </div>
+    `;
+    const inputs = Array.from(body.querySelectorAll(".recwiz-verify-input"));
+    const submit = body.querySelector('[data-recwiz-phrase="submit-verify"]');
+    function check() {
+      submit.disabled = inputs.some((i) => !i.value.trim());
+      inputs.forEach((i) => i.classList.remove("bad"));
+    }
+    inputs.forEach((i) => i.addEventListener("input", check));
+    inputs[0].focus();
+    body.querySelector('[data-recwiz-phrase="cancel-verify"]')
+      .addEventListener("click", () => _recwizPhraseShow());
+    submit.addEventListener("click", async () => {
+      const submitted = inputs.map((i) => ({
+        pos: Number(i.dataset.recwizPos),
+        word: i.value.trim().toLowerCase(),
+      })).sort((a, b) => a.pos - b.pos);
+      submit.disabled = true;
+      const fb = body.querySelector("#recwiz-phrase-fb");
+      fb.className = "recwiz-feedback";
+      fb.textContent = "Checking...";
+      try {
+        const res = await api.recoveryPhraseVerify(
+          submitted.map((x) => x.pos),
+          submitted.map((x) => x.word),
+        );
+        if (res.ok) {
+          fb.className = "recwiz-feedback good";
+          fb.textContent = "Verified. Your recovery phrase is set up.";
+          toast("Recovery phrase verified.", "good", 4000);
+          await _recwizRefreshStatus();
+          await refreshOneSetup();
+        } else {
+          const mismatches = (res.mismatches || []).map(Number);
+          inputs.forEach((i) => {
+            const pos = Number(i.dataset.recwizPos);
+            i.classList.toggle("bad", mismatches.includes(pos));
+          });
+          fb.className = "recwiz-feedback bad";
+          fb.textContent = `Words ${mismatches.join(", ")} did not match. Re-check your paper.`;
+          submit.disabled = false;
+        }
+      } catch (e) {
+        fb.className = "recwiz-feedback bad";
+        fb.textContent = `Verify failed: ${errorToastBody(e)}`;
+        submit.disabled = false;
+      }
+    });
+  }
+
+  // ── recovery wizard: SOCIAL track ───────────────────────────────
+  function _recwizRenderSocialCard(s) {
+    const card = document.getElementById("recwiz-track-social");
+    if (!card) return;
+    const ready = !!s.ready;
+    const avail = !!s.available;
+    let status, cls;
+    if (ready) {
+      status = `${s.threshold_k} of ${s.guardian_count} ready`;
+      cls = "ready";
+    } else if (!avail) {
+      status = "Need 2+ contacts";
+      cls = "unavailable";
+    } else {
+      status = "Not set up";
+      cls = "partial";
+    }
+    const meta = ready
+      ? `Issued ${_recwizFormatRelative(s.last_action_at_ms)}. Any ${s.threshold_k} of ${s.guardian_count} guardians can help you recover.`
+      : "";
+    const btnLabel = ready ? "Re-issue shares" : "Pick guardians";
+    const disabled = avail ? "" : "disabled";
+    card.innerHTML = `
+      <div class="recwiz-card-head">
+        <div class="recwiz-card-name">Trusted contacts</div>
+        <div class="recwiz-card-status ${cls}">${escapeText(status)}</div>
+      </div>
+      <p class="recwiz-card-desc">
+        Split your recovery into shares and hand them to people you trust.
+        Any 3 of 5 (or whatever you pick) can help you back in. No single
+        contact can do it alone.
+      </p>
+      ${meta ? `<p class="recwiz-card-meta">${escapeText(meta)}</p>` : ""}
+      ${!avail ? `<p class="recwiz-feedback">Pair at least 2 trusted devices or people before you can use this track.</p>` : ""}
+      <div class="recwiz-card-actions">
+        <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-social="open" ${disabled}>
+          ${btnLabel}
+        </button>
+      </div>
+      <div class="recwiz-card-body" hidden></div>
+    `;
+    const btn = card.querySelector('[data-recwiz-social="open"]');
+    if (btn && !disabled) btn.addEventListener("click", () => _recwizSocialOpen());
+  }
+
+  async function _recwizSocialOpen() {
+    const card = document.getElementById("recwiz-track-social");
+    const body = card.querySelector(".recwiz-card-body");
+    body.hidden = false;
+    card.classList.add("open");
+    body.innerHTML = `<p class="recwiz-feedback">Loading your trusted contacts...</p>`;
+    let resp;
+    try {
+      resp = await api.recoverySocialCandidates();
+    } catch (e) {
+      body.innerHTML = `<p class="recwiz-feedback bad">${escapeText(errorToastBody(e))}</p>`;
+      return;
+    }
+    const candidates = resp.candidates || [];
+    if (candidates.length < 2) {
+      body.innerHTML = `<p class="recwiz-feedback bad">You need at least 2 pinned contacts before you can use this track. Pair more devices or people first.</p>`;
+      return;
+    }
+    const initialChecked = Math.min(candidates.length, resp.recommended_total_n || 5);
+    const initialK = Math.min(
+      resp.recommended_threshold_k || 3,
+      Math.max(2, initialChecked),
+    );
+    const rows = candidates.map((c, i) => `
+      <label class="recwiz-guardian-item">
+        <input type="checkbox" data-recwiz-guardian="${escapeAttr(c.id)}"
+               data-recwiz-guardian-label="${escapeAttr(c.label)}"
+               data-recwiz-guardian-pub="${escapeAttr(c.pubkey_b64)}"
+               ${i < initialChecked ? "checked" : ""} />
+        <span class="recwiz-guardian-label">${escapeText(c.label)}</span>
+        <span class="recwiz-guardian-meta">${c.verified ? "verified" : "trusted"}</span>
+      </label>`).join("");
+    body.innerHTML = `
+      <p class="recwiz-card-desc">
+        Pick the people who will help you recover. The share each
+        guardian receives is sealed to their device key: a leaked
+        share file is useless to anyone but that guardian.
+      </p>
+      <div class="recwiz-guardian-list" role="list">${rows}</div>
+      <div class="recwiz-threshold-row">
+        <span>Need</span>
+        <input type="number" id="recwiz-threshold" class="recwiz-threshold-input"
+               min="2" value="${initialK}" />
+        <span>of <span id="recwiz-guardian-count">${initialChecked}</span> to recover</span>
+      </div>
+      <p class="recwiz-feedback" id="recwiz-social-fb"></p>
+      <div class="recwiz-card-actions">
+        <button type="button" class="recwiz-btn" data-recwiz-social="hide">Cancel</button>
+        <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-social="issue">
+          Generate shares
+        </button>
+      </div>
+    `;
+    const checkboxes = Array.from(body.querySelectorAll('input[data-recwiz-guardian]'));
+    const thresholdInput = body.querySelector("#recwiz-threshold");
+    const countSpan = body.querySelector("#recwiz-guardian-count");
+    function recount() {
+      const n = checkboxes.filter((c) => c.checked).length;
+      countSpan.textContent = String(n);
+      let cur = Number(thresholdInput.value || 0);
+      if (cur > n) cur = Math.max(2, n);
+      if (cur < 2) cur = Math.min(2, n);
+      thresholdInput.value = String(cur);
+      thresholdInput.max = String(Math.max(2, n));
+    }
+    checkboxes.forEach((c) => c.addEventListener("change", recount));
+    recount();
+    body.querySelector('[data-recwiz-social="hide"]').addEventListener("click", () => {
+      body.hidden = true; card.classList.remove("open"); body.innerHTML = "";
+    });
+    body.querySelector('[data-recwiz-social="issue"]')
+      .addEventListener("click", () => _recwizSocialIssue(body));
+  }
+
+  async function _recwizSocialIssue(body) {
+    const fb = body.querySelector("#recwiz-social-fb");
+    const selected = Array.from(body.querySelectorAll('input[data-recwiz-guardian]:checked'))
+      .map((c) => ({
+        label: c.getAttribute("data-recwiz-guardian-label"),
+        pubkey_b64: c.getAttribute("data-recwiz-guardian-pub"),
+      }));
+    const thresholdK = Number(body.querySelector("#recwiz-threshold").value || 3);
+    if (selected.length < 2) {
+      fb.className = "recwiz-feedback bad";
+      fb.textContent = "Pick at least 2 guardians.";
+      return;
+    }
+    if (thresholdK < 2 || thresholdK > selected.length) {
+      fb.className = "recwiz-feedback bad";
+      fb.textContent = `Threshold must be 2 to ${selected.length}.`;
+      return;
+    }
+    fb.className = "recwiz-feedback";
+    fb.textContent = "Generating sealed shares...";
+    const issueBtn = body.querySelector('[data-recwiz-social="issue"]');
+    issueBtn.disabled = true;
+    let resp;
+    try {
+      resp = await api.recoverySocialIssue(selected, thresholdK);
+    } catch (e) {
+      fb.className = "recwiz-feedback bad";
+      fb.textContent = `Could not generate shares: ${errorToastBody(e)}`;
+      issueBtn.disabled = false;
+      return;
+    }
+    const shareRows = resp.shares.map((s) => `
+      <div class="recwiz-share-row">
+        <span class="recwiz-share-num">#${s.share_index}/${s.total_n}</span>
+        <span class="recwiz-share-name">${escapeText(s.guardian_label)}</span>
+        <button type="button" class="recwiz-btn" data-recwiz-share-dl="${s.share_index}">Download</button>
+      </div>`).join("");
+    body.innerHTML = `
+      <p class="recwiz-card-desc">
+        Your shares are ready. Download each one and deliver it to its
+        guardian via whatever you trust (USB stick, in person, encrypted
+        email). Each share is sealed to that specific guardian.
+      </p>
+      <div class="recwiz-shares">${shareRows}</div>
+      <p class="recwiz-warn">
+        Threshold: any ${resp.threshold_k} of ${resp.guardian_count} can
+        help you recover. Keep track of who holds which share number.
+        If you forget, your only path back is to ask every guardian.
+      </p>
+      <div class="recwiz-card-actions">
+        <button type="button" class="recwiz-btn" data-recwiz-social="downloadAll">Download all</button>
+        <button type="button" class="recwiz-btn" data-recwiz-social="done">Done</button>
+      </div>
+    `;
+    const shares = resp.shares || [];
+    shares.forEach((s) => {
+      const b = body.querySelector(`[data-recwiz-share-dl="${s.share_index}"]`);
+      if (b) b.addEventListener("click", () => _recwizDownloadShare(s));
+    });
+    body.querySelector('[data-recwiz-social="downloadAll"]').addEventListener("click", () => {
+      shares.forEach((s, i) => setTimeout(() => _recwizDownloadShare(s), i * 250));
+    });
+    body.querySelector('[data-recwiz-social="done"]').addEventListener("click", async () => {
+      body.hidden = true;
+      document.getElementById("recwiz-track-social").classList.remove("open");
+      body.innerHTML = "";
+      await _recwizRefreshStatus();
+      await refreshOneSetup();
+    });
+    await _recwizRefreshStatus();
+  }
+
+  function _recwizDownloadShare(share) {
+    const raw = String(share.blob_b64u || "");
+    const b64 = raw.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = (4 - (b64.length % 4)) % 4;
+    const padded = b64 + "=".repeat(pad);
+    let bytes;
+    try {
+      bytes = Uint8Array.from(atob(padded), (c) => c.charCodeAt(0));
+    } catch (e) {
+      toast(`Share download failed: ${e.message || e}`, "bad", 5000);
+      return;
+    }
+    const blob = new Blob([bytes], { type: "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = share.filename || `one-link-share-${share.share_index}.olss`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // ── recovery wizard: BACKUP track ───────────────────────────────
+  function _recwizRenderBackupCard(s) {
+    const card = document.getElementById("recwiz-track-backup");
+    if (!card) return;
+    const ready = !!s.ready;
+    const avail = !!s.available;
+    const status = ready ? "Exported" : avail ? "Not exported" : "Unavailable";
+    const cls = ready ? "ready" : avail ? "partial" : "unavailable";
+    const last = ready
+      ? `Last export ${_recwizFormatRelative(s.last_action_at_ms)} (${_recwizHumanSize(s.last_export_size_bytes)}).`
+      : "";
+    card.innerHTML = `
+      <div class="recwiz-card-head">
+        <div class="recwiz-card-name">Encrypted backup file</div>
+        <div class="recwiz-card-status ${cls}">${escapeText(status)}</div>
+      </div>
+      <p class="recwiz-card-desc">
+        A single sealed file (.olbak) with your identity, chat history,
+        and settings. Keep it on a USB stick, a second device, or an
+        encrypted cloud folder. It is encrypted under your recovery
+        phrase: without that phrase, the file is unreadable to anyone,
+        including us.
+      </p>
+      ${last ? `<p class="recwiz-card-meta">${escapeText(last)}</p>` : ""}
+      <div class="recwiz-card-actions">
+        <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-backup="export">
+          ${ready ? "Export new backup" : "Download backup"}
+        </button>
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim);">
+          <input type="checkbox" id="recwiz-backup-includefiles" />
+          Include received files
+        </label>
+      </div>
+    `;
+    card.querySelector('[data-recwiz-backup="export"]')
+      .addEventListener("click", () => _recwizBackupExport());
+  }
+
+  async function _recwizBackupExport() {
+    const card = document.getElementById("recwiz-track-backup");
+    const btn = card.querySelector('[data-recwiz-backup="export"]');
+    const includeFiles = !!card.querySelector("#recwiz-backup-includefiles")?.checked;
+    btn.disabled = true;
+    const origText = btn.textContent;
+    btn.textContent = "Preparing...";
+    try {
+      const r = await fetch(api.recoveryBackupExportUrl(includeFiles), {
+        credentials: "include",
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.error || `HTTP ${r.status}`);
+      }
+      const cd = r.headers.get("Content-Disposition") || "";
+      const m = cd.match(/filename="([^"]+)"/);
+      const filename = m ? m[1] : "one-link-backup.olbak";
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast(`Backup downloaded (${_recwizHumanSize(blob.size)}).`, "good", 4000);
+      await _recwizRefreshStatus();
+      await refreshOneSetup();
+    } catch (e) {
+      toast(`Backup failed: ${e.message || e}`, "bad", 6000);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
   }
 
   async function openOneSetupFromState() {

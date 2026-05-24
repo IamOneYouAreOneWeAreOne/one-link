@@ -55,6 +55,7 @@ def test_setup_api_routes_exist() -> None:
         ("POST", "/api/setup/device-invite/confirm"),
         ("POST", "/api/setup/device-invite/reject"),
         ("GET",  "/api/setup/device-invite/qr.svg"),
+        ("POST", "/api/setup/recovery-phrase"),
     ]
     for method, path in expected:
         methods = routes_by_path.get(path, set())
@@ -68,7 +69,7 @@ def test_setup_snapshot_is_state_derived_and_human_first() -> None:
     src = _server_src()
     idx = src.find("def _one_setup_snapshot(")
     assert idx > 0
-    snippet = src[idx:idx + 14000]
+    snippet = src[idx:idx + 16000]
     assert "state.list_self_mesh_roots()" in snippet
     assert "state.list_self_mesh_devices()" in snippet
     assert "state.list_self_mesh_presence()" in snippet
@@ -110,6 +111,38 @@ def test_setup_post_actions_cover_skip_complete_and_real_milestones() -> None:
         assert action in snippet
     assert 'state.set_setting("onboarding_completed", "true")' in snippet
     assert "unsupported setup action" in snippet
+
+
+def test_setup_recovery_phrase_endpoint_uses_master_seed_mnemonic() -> None:
+    src = _server_src()
+    idx = src.find("async def api_setup_recovery_phrase(")
+    assert idx > 0
+    snippet = src[idx:idx + 2400]
+    assert "master_seed.load_or_create_seed(data_dir())" in snippet
+    assert "mnemonic.encode(seed)" in snippet
+    assert '"word_count": 24' in snippet
+    assert "one_setup_recovery_phrase_generated_at_ms" in snippet
+
+
+def test_one_setup_recovery_wizard_displays_24_word_phrase() -> None:
+    """v0.21.x: the self-attestation modal was replaced by a real
+    wizard that shows the 24 words from the master seed. See
+    test_recovery_wizard_v021.py for the full surface; this test
+    pins the bit of behavior that used to live on the modal: the
+    UI loads the phrase via the daemon's /api/v1/recovery/phrase
+    endpoint and renders all 24 words for the user to write down.
+    """
+    html = _index_html()
+    # Phrase loader endpoint wired into the API surface.
+    assert 'recoveryPhrase() { return this.post("/api/v1/recovery/phrase", {}); }' in html
+    # Wizard's phrase track renders the 24 words.
+    idx = html.find("async function _recwizPhraseShow()")
+    assert idx > 0
+    body = html[idx:idx + 3500]
+    assert "api.recoveryPhrase()" in body
+    assert "words.length !== 24" in body
+    assert "recwiz-word-num" in body
+    assert "24 word recovery phrase" in body
 
 
 def test_setup_device_invite_claim_requires_host_confirmation() -> None:
@@ -332,6 +365,29 @@ def test_self_mesh_delete_endpoint_pinned() -> None:
     assert "broadcast" in handler
 
 
+def test_self_mesh_sidebar_dedupes_stale_phone_browser_rows() -> None:
+    """A stale generic `Phone browser` row and the newer smart-labeled
+    `iPhone (Safari)` row are the same physical browser pairing in
+    the common repair path. The sidebar should show the named row,
+    not make the user prune confusing duplicates by hand.
+    """
+    html = _index_html()
+    assert "function _dedupeSelfMeshDevices(" in html
+    helper_idx = html.find("function _dedupeSelfMeshDevices(")
+    assert helper_idx > 0
+    helper = html[helper_idx:helper_idx + 3500]
+    assert "_selfMeshIsGenericBrowserLabel(label)" in helper
+    assert "hasNamedBrowserByRoot.get(root)" in helper
+    assert "continue;" in helper
+    assert "browser:${root}:${label.toLowerCase()}" in helper
+
+    sidebar_idx = html.find("function renderSelfMeshSidebar(devices)")
+    assert sidebar_idx > 0
+    sidebar = html[sidebar_idx:sidebar_idx + 1200]
+    assert "const rows = _dedupeSelfMeshDevices(devices)" in sidebar
+    assert "count.textContent = rows.length" in sidebar
+
+
 def test_setup_device_invite_ttl_is_30_minutes() -> None:
     """2026-05-23 user feedback: 5 min invite expired during the iOS
     profile install walk. 30 min keeps the window security-bounded
@@ -347,6 +403,62 @@ def test_setup_device_invite_ttl_is_30_minutes() -> None:
         "invite TTL must be 30 min — 5 min expired before users "
         "could finish the iOS profile install walk"
     )
+
+
+def test_setup_device_invite_ttl_metadata_matches_30_minutes() -> None:
+    src = _server_src()
+    idx = src.find("async def api_setup_device_invite(")
+    assert idx > 0
+    snippet = src[idx:idx + 5000]
+    assert '"expires_in_seconds": 30 * 60' in snippet, (
+        "API metadata must match the 30-minute TTL; stale 300-second "
+        "metadata makes the cold-install pair flow lie to the UI"
+    )
+
+
+def test_setup_device_invite_exposes_stopwatch_timing() -> None:
+    """Cold-install pairing needs measured timing, not vibes.
+
+    The invite/status/confirm path should expose enough redacted timing
+    to see where users spend time without logging secrets or device data.
+    """
+    src = _server_src()
+    invite_idx = src.find("async def api_setup_device_invite(")
+    status_idx = src.find("async def api_setup_device_invite_status(")
+    confirm_idx = src.find("async def api_setup_device_invite_confirm(")
+    assert invite_idx > 0
+    assert status_idx > 0
+    assert confirm_idx > 0
+    invite = src[invite_idx:invite_idx + 5000]
+    status = src[status_idx:status_idx + 4500]
+    confirm = src[confirm_idx:confirm_idx + 7000]
+    assert '"remaining_ms": max(0, expires_ms - now)' in invite
+    for field in (
+        '"created_ms"',
+        '"claimed_ms"',
+        '"expires_ms"',
+        '"remaining_ms"',
+        '"pair_elapsed_ms"',
+        '"claim_elapsed_ms"',
+    ):
+        assert field in status
+    assert 'invite["confirmed_ms"] = confirmed_ms' in confirm
+    assert 'invite["pair_elapsed_ms"] = max(0, confirmed_ms - created_ms)' in confirm
+    assert 'invite["claim_to_confirm_ms"] = max(0, confirmed_ms - claimed_ms)' in confirm
+    assert '"pair_elapsed_ms": invite["pair_elapsed_ms"]' in confirm
+    assert '"claim_to_confirm_ms": invite["claim_to_confirm_ms"]' in confirm
+
+
+def test_one_setup_pending_pair_surface_shows_timing() -> None:
+    html = _index_html()
+    assert 'id="one-setup-pair-timing"' in html
+    assert "function _oneSetupFormatDuration(" in html
+    idx = html.find("function renderOneSetup()")
+    assert idx > 0
+    snippet = html[idx:idx + 3500]
+    assert "pending.pair_elapsed_ms" in snippet
+    assert "pending.remaining_ms" in snippet
+    assert "Invite expires in" in snippet
 
 
 def test_peer_shell_emits_etag_for_cache_busting() -> None:
@@ -450,7 +562,7 @@ def test_setup_device_invite_confirm_mints_cert_and_reject_blocks() -> None:
     reject_idx = src.find("async def api_setup_device_invite_reject(")
     assert confirm_idx > 0
     assert reject_idx > 0
-    confirm = src[confirm_idx:confirm_idx + 5000]
+    confirm = src[confirm_idx:confirm_idx + 6500]
     reject = src[reject_idx:reject_idx + 2500]
     assert "pending_claim" in confirm
     assert "mint_device_cert" in confirm
@@ -538,7 +650,16 @@ def test_one_setup_ui_contract_markers_present_after_build() -> None:
         'rejectSetupDeviceInvite(body) { return this.post("/api/setup/device-invite/reject", body); }',
         "Invite ready and copied.",
         "Invite expired. Create a fresh QR before adding another device.",
-        'api.setupAction("recovery_configured")',
+        # v0.21.x: the wizard no longer calls
+        # `setupAction("recovery_configured")` from the UI -- each
+        # track records its own state via dedicated endpoints
+        # (/api/v1/recovery/phrase/verify, /backup/export,
+        # /social/issue) which set the per-track settings AND the
+        # legacy any-track flag inside `mark_*` helpers. The
+        # `recovery_configured` action is still accepted server-side
+        # for back-compat; just nothing in the new wizard calls it.
+        "async function _showRecoveryWizard()",
+        'recoveryStatus() { return this.get("/api/v1/recovery/status"); }',
         "invite.peer_url",
         "hello-from-one-link.txt",
         "This moved through your private One Link fabric.",

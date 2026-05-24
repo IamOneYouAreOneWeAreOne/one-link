@@ -1799,6 +1799,18 @@ class UIServer:
         r.add_post("/api/setup/device-invite/confirm", self._guarded(self.api_setup_device_invite_confirm))
         r.add_post("/api/setup/device-invite/reject", self._guarded(self.api_setup_device_invite_reject))
         r.add_get("/api/setup/device-invite/qr.svg", self._guarded(self.api_setup_device_invite_qr))
+        r.add_post("/api/setup/recovery-phrase", self._guarded(self.api_setup_recovery_phrase))
+        # Recovery wizard (v0.21.x). Replaces the self-attestation
+        # modal at Settings -> Setup -> Set recovery with three real
+        # tracks: paper phrase, trusted contacts (Shamir 3-of-5),
+        # encrypted backup file. See `recovery_api.py` for the per-
+        # track design + state model.
+        r.add_get("/api/v1/recovery/status", self._guarded(self.api_recovery_status))
+        r.add_post("/api/v1/recovery/phrase", self._guarded(self.api_recovery_phrase))
+        r.add_post("/api/v1/recovery/phrase/verify", self._guarded(self.api_recovery_phrase_verify))
+        r.add_get("/api/v1/recovery/backup/export", self._guarded(self.api_recovery_backup_export))
+        r.add_get("/api/v1/recovery/social/candidates", self._guarded(self.api_recovery_social_candidates))
+        r.add_post("/api/v1/recovery/social/issue", self._guarded(self.api_recovery_social_issue))
         r.add_get("/api/status", self._guarded(self.api_status))
         # ── Living Presence Tier α-pre — Call API ────────────────
         # Browser hits these to drive the per-call state machines.
@@ -4137,6 +4149,76 @@ class UIServer:
             _err("no_state", "daemon state unavailable")
             return
 
+        if msg_t == "global_search":
+            query = str(envelope.get("query") or "").strip()
+            if not query:
+                _send({
+                    "t": "global_search_results",
+                    "query": "",
+                    "messages": [],
+                    "peers": [],
+                    "groups": [],
+                    "files": [],
+                })
+                return
+            if len(query) > 200:
+                _err("bad_query", "query too long")
+                return
+            limit = envelope.get("limit", 10)
+            if not isinstance(limit, int) or limit <= 0 or limit > 50:
+                limit = 10
+            try:
+                hits = state.global_search(query, per_kind_limit=limit)
+            except Exception as e:
+                _err("query_failed", f"global_search: {e}")
+                return
+            files: list[dict] = []
+            try:
+                ql = query.lower()
+                inbox = inbox_dir()
+                if inbox.is_dir():
+                    rows = []
+                    for f in inbox.iterdir():
+                        if not f.is_file() or ql not in f.name.lower():
+                            continue
+                        try:
+                            st = f.stat()
+                        except OSError:
+                            continue
+                        rows.append((
+                            f.name,
+                            int(st.st_size),
+                            int(st.st_mtime * 1000),
+                        ))
+                    rows.sort(key=lambda r: r[2], reverse=True)
+                    for name, size, mtime in rows[:limit]:
+                        files.append({
+                            "name": name,
+                            "size": size,
+                            "mtime_ms": mtime,
+                        })
+            except Exception as e:
+                log.warning("phone global search file scan failed: %s", e)
+            peer_lookup: dict[str, str] = {}
+            try:
+                for rec in state.list_peers():
+                    peer_lookup[rec.fingerprint] = rec.display_name
+            except Exception:
+                pass
+            messages = list(hits.get("messages") or [])
+            for m in messages:
+                if isinstance(m, dict):
+                    m["peer_display_name"] = peer_lookup.get(m.get("peer_fp"))
+            _send({
+                "t": "global_search_results",
+                "query": query,
+                "messages": messages,
+                "peers": list(hits.get("peers") or []),
+                "groups": list(hits.get("groups") or []),
+                "files": files,
+            })
+            return
+
         if msg_t == "fetch_peers":
             try:
                 peers = state.list_peers()
@@ -4161,6 +4243,485 @@ class UIServer:
             _send({"t": "peers", "peers": payload})
             return
 
+        if msg_t == "fetch_groups":
+            try:
+                gids = state.list_group_ids()
+            except Exception as e:
+                _err("query_failed", f"list_group_ids: {e}")
+                return
+            payload = []
+            for gid in gids:
+                mat = self._materialize_group(gid)
+                if mat and mat.get("is_member"):
+                    payload.append({
+                        "group_id": mat.get("group_id"),
+                        "name": mat.get("name") or "Group",
+                        "member_count": mat.get("member_count") or 0,
+                        "my_role": mat.get("my_role") or "",
+                    })
+            _send({"t": "groups", "groups": payload})
+            return
+
+        if msg_t == "fetch_group_detail":
+            group_id = str(envelope.get("group_id") or "").strip()
+            if len(group_id) != 32:
+                _err("bad_group_id", "group_id must be 16-byte hex")
+                return
+            try:
+                gid = bytes.fromhex(group_id)
+            except ValueError:
+                _err("bad_group_id", "group_id must be hex")
+                return
+            mat = self._materialize_group(gid)
+            if mat is None or not mat.get("is_member"):
+                _err("group_not_found", "group not found")
+                return
+            _send({"t": "group_detail", "group": mat})
+            return
+
+        if msg_t == "group_invite_link":
+            group_id = str(envelope.get("group_id") or "").strip()
+            if len(group_id) != 32:
+                _err("bad_group_id", "group_id must be 16-byte hex")
+                return
+            try:
+                gid = bytes.fromhex(group_id)
+            except ValueError:
+                _err("bad_group_id", "group_id must be hex")
+                return
+            mat = self._materialize_group(gid)
+            if mat is None or not mat.get("is_member"):
+                _err("group_not_found", "group not found")
+                return
+            issued_ms = int(time.time() * 1000)
+            payload = {
+                "v": 1,
+                "type": "one_link_group_invite",
+                "group_id": group_id,
+                "name": mat.get("name") or "",
+                "issuer_fp": self.daemon.me.fingerprint,
+                "issuer_pub_hex": self.daemon.me.public_bytes.hex(),
+                "issued_ms": issued_ms,
+                "expires_ms": issued_ms + 7 * 24 * 60 * 60 * 1000,
+                "nonce": secrets.token_urlsafe(18),
+            }
+            signed = json.dumps(
+                payload, separators=(",", ":"), sort_keys=True,
+            ).encode("utf-8")
+            sig_hex = self.daemon.me.sign(signed).hex()
+            token_raw = json.dumps(
+                {"payload": payload, "signature_hex": sig_hex},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            token = base64.urlsafe_b64encode(token_raw).decode("ascii").rstrip("=")
+            _send({
+                "t": "group_invite_link_result",
+                "ok": True,
+                "group_id": group_id,
+                "url": f"one-link://group-invite/{token}",
+                "token": token,
+                "expires_ms": payload["expires_ms"],
+            })
+            return
+
+        if msg_t == "add_group_member":
+            group_id = str(envelope.get("group_id") or "").strip()
+            peer_fp = str(envelope.get("peer_fp") or "").strip()
+            role = str(envelope.get("role") or "member").strip() or "member"
+            if len(group_id) != 32:
+                _err("bad_group_id", "group_id must be 16-byte hex")
+                return
+            try:
+                gid = bytes.fromhex(group_id)
+            except ValueError:
+                _err("bad_group_id", "group_id must be hex")
+                return
+            rec = state.get_peer(peer_fp)
+            if rec is None or rec.trust != "pinned" or not rec.pubkey:
+                _err("bad_member", "member must be a paired pinned peer")
+                return
+            try:
+                result = await asyncio.wait_for(
+                    self.daemon.add_group_member(
+                        group_id=gid, member_pubkey=rec.pubkey, role=role,
+                    ),
+                    timeout=20.0,
+                )
+                _send({
+                    "t": "add_group_member_result",
+                    "ok": True,
+                    "group_id": group_id,
+                    "peer_fp": peer_fp,
+                    "result": result,
+                })
+            except asyncio.TimeoutError:
+                _err("group_add_timeout", "group member add timed out after 20s")
+            except Exception as e:
+                _err("group_add_failed", str(e))
+            return
+
+        if msg_t == "remove_group_member":
+            group_id = str(envelope.get("group_id") or "").strip()
+            peer_fp = str(envelope.get("peer_fp") or "").strip()
+            if len(group_id) != 32:
+                _err("bad_group_id", "group_id must be 16-byte hex")
+                return
+            try:
+                gid = bytes.fromhex(group_id)
+            except ValueError:
+                _err("bad_group_id", "group_id must be hex")
+                return
+            rec = state.get_peer(peer_fp)
+            if rec is None or not rec.pubkey:
+                _err("bad_member", "unknown member")
+                return
+            try:
+                result = await asyncio.wait_for(
+                    self.daemon.remove_group_member(
+                        group_id=gid, member_pubkey=rec.pubkey,
+                    ),
+                    timeout=20.0,
+                )
+                _send({
+                    "t": "remove_group_member_result",
+                    "ok": True,
+                    "group_id": group_id,
+                    "peer_fp": peer_fp,
+                    "result": result,
+                })
+            except asyncio.TimeoutError:
+                _err("group_remove_timeout", "group member remove timed out after 20s")
+            except Exception as e:
+                _err("group_remove_failed", str(e))
+            return
+
+        if msg_t == "leave_group":
+            group_id = str(envelope.get("group_id") or "").strip()
+            if len(group_id) != 32:
+                _err("bad_group_id", "group_id must be 16-byte hex")
+                return
+            try:
+                gid = bytes.fromhex(group_id)
+            except ValueError:
+                _err("bad_group_id", "group_id must be hex")
+                return
+            try:
+                result = await asyncio.wait_for(
+                    self.daemon.remove_group_member(
+                        group_id=gid,
+                        member_pubkey=self.daemon.me.public_bytes,
+                    ),
+                    timeout=20.0,
+                )
+                _send({
+                    "t": "leave_group_result",
+                    "ok": True,
+                    "group_id": group_id,
+                    "result": result,
+                })
+            except asyncio.TimeoutError:
+                _err("group_leave_timeout", "group leave timed out after 20s")
+            except Exception as e:
+                _err("group_leave_failed", str(e))
+            return
+
+        if msg_t == "fetch_group_messages":
+            group_id = str(envelope.get("group_id") or "").strip()
+            if len(group_id) != 32:
+                _err("bad_group_id", "group_id must be 16-byte hex")
+                return
+            try:
+                gid = bytes.fromhex(group_id)
+            except ValueError:
+                _err("bad_group_id", "group_id must be hex")
+                return
+            limit = envelope.get("limit", 50)
+            if not isinstance(limit, int) or limit <= 0 or limit > 500:
+                limit = 50
+            try:
+                rows = state.recent_group_messages(group_id=gid, limit=limit)
+            except Exception as e:
+                _err("query_failed", f"recent_group_messages: {e}")
+                return
+            try:
+                reactions = state.list_reactions_for_messages([
+                    str(r.get("id")) for r in rows if r.get("id")
+                ])
+            except Exception:
+                reactions = {}
+            payload = []
+            for r in rows:
+                sender_pub = r.get("sender_pub")
+                item = {
+                    "id": r.get("id"),
+                    "group_id": group_id,
+                    "sender_pub_hex": (
+                        sender_pub.hex() if isinstance(sender_pub, bytes)
+                        else (str(sender_pub) if sender_pub else "")
+                    ),
+                    "direction": r.get("direction"),
+                    "body": r.get("body"),
+                    "reply_to": r.get("reply_to"),
+                    "edited_at_ms": r.get("edited_at_ms"),
+                    "deleted_at_ms": r.get("deleted_at_ms"),
+                    "ts_ms": r.get("ts_ms"),
+                }
+                rx = reactions.get(str(item.get("id"))) if item.get("id") else None
+                if rx:
+                    item["reactions"] = rx
+                payload.append(item)
+            _send({
+                "t": "group_messages",
+                "group_id": group_id,
+                "messages": payload,
+            })
+            return
+
+        if msg_t == "search_group_messages":
+            group_id = str(envelope.get("group_id") or "").strip()
+            query = str(envelope.get("query") or "").strip()
+            if len(group_id) != 32:
+                _err("bad_group_id", "group_id must be 16-byte hex")
+                return
+            try:
+                gid = bytes.fromhex(group_id)
+            except ValueError:
+                _err("bad_group_id", "group_id must be hex")
+                return
+            if not query:
+                _err("bad_query", "query required")
+                return
+            if len(query) > 200:
+                _err("bad_query", "query too long")
+                return
+            limit = envelope.get("limit", 50)
+            if not isinstance(limit, int) or limit <= 0 or limit > 100:
+                limit = 50
+            try:
+                rows = state.recent_group_messages(group_id=gid, limit=500)
+            except Exception as e:
+                _err("query_failed", f"recent_group_messages: {e}")
+                return
+            needle = query.casefold()
+            matches = [
+                r for r in rows
+                if needle in str(r.get("body") or "").casefold()
+            ][:limit]
+            try:
+                reactions = state.list_reactions_for_messages([
+                    str(r.get("id")) for r in matches if r.get("id")
+                ])
+            except Exception:
+                reactions = {}
+            payload = []
+            for r in matches:
+                sender_pub = r.get("sender_pub")
+                item = {
+                    "id": r.get("id"),
+                    "group_id": group_id,
+                    "sender_pub_hex": (
+                        sender_pub.hex() if isinstance(sender_pub, bytes)
+                        else (str(sender_pub) if sender_pub else "")
+                    ),
+                    "direction": r.get("direction"),
+                    "body": r.get("body"),
+                    "reply_to": r.get("reply_to"),
+                    "edited_at_ms": r.get("edited_at_ms"),
+                    "deleted_at_ms": r.get("deleted_at_ms"),
+                    "ts_ms": r.get("ts_ms"),
+                }
+                rx = reactions.get(str(item.get("id"))) if item.get("id") else None
+                if rx:
+                    item["reactions"] = rx
+                payload.append(item)
+            _send({
+                "t": "group_message_search_results",
+                "group_id": group_id,
+                "query": query,
+                "messages": payload,
+            })
+            return
+
+        if msg_t == "send_group_message":
+            group_id = str(envelope.get("group_id") or "").strip()
+            body = envelope.get("body")
+            if len(group_id) != 32:
+                _err("bad_group_id", "group_id must be 16-byte hex")
+                return
+            try:
+                gid = bytes.fromhex(group_id)
+            except ValueError:
+                _err("bad_group_id", "group_id must be hex")
+                return
+            if not isinstance(body, str) or not body.strip():
+                _err("bad_body", "body required")
+                return
+            if len(body.encode("utf-8")) > 65536:
+                _err("body_too_large", "max 64 KiB UTF-8")
+                return
+            reply_to_raw = envelope.get("reply_to")
+            reply_to = (
+                str(reply_to_raw)
+                if isinstance(reply_to_raw, str) and reply_to_raw
+                else None
+            )
+            try:
+                result = await asyncio.wait_for(
+                    self.daemon.send_group_message(
+                        group_id=gid, body=body.strip(), reply_to=reply_to,
+                    ),
+                    timeout=20.0,
+                )
+                _send({
+                    "t": "send_group_message_result",
+                    "ok": True,
+                    "group_id": group_id,
+                    "result": result,
+                })
+            except asyncio.TimeoutError:
+                _err("group_send_timeout", "group send timed out after 20s")
+            except Exception as e:
+                log.exception("phone send_group_message failed: %s", e)
+                _err("group_send_failed", f"send_group_message: {e}")
+            return
+
+        if msg_t == "react_group_message":
+            group_id = str(envelope.get("group_id") or "").strip()
+            msg_id = str(envelope.get("msg_id") or "").strip()
+            emoji = envelope.get("emoji")
+            op = str(envelope.get("op") or "add").strip().lower()
+            if len(group_id) != 32:
+                _err("bad_group_id", "group_id must be 16-byte hex")
+                return
+            try:
+                gid = bytes.fromhex(group_id)
+            except ValueError:
+                _err("bad_group_id", "group_id must be hex")
+                return
+            if not msg_id:
+                _err("bad_msg_id", "msg_id required")
+                return
+            if not isinstance(emoji, str) or not emoji or len(emoji) > 64:
+                _err("bad_emoji", "emoji must be a non-empty short string")
+                return
+            if op not in ("add", "remove"):
+                _err("bad_op", "op must be add or remove")
+                return
+            try:
+                result = await asyncio.wait_for(
+                    self.daemon.send_group_reaction(
+                        group_id=gid,
+                        target_msg_id=msg_id,
+                        emoji=emoji,
+                        op=op,
+                    ),
+                    timeout=20.0,
+                )
+                _send({
+                    "t": "react_group_message_result",
+                    "ok": True,
+                    "group_id": group_id,
+                    "msg_id": msg_id,
+                    "emoji": emoji,
+                    "op": op,
+                    "result": result,
+                })
+            except asyncio.TimeoutError:
+                _err("group_reaction_timeout", "group reaction timed out after 20s")
+            except Exception as e:
+                log.exception("phone react_group_message failed: %s", e)
+                _err("group_reaction_failed", f"send_group_reaction: {e}")
+            return
+
+        if msg_t == "edit_group_message":
+            group_id = str(envelope.get("group_id") or "").strip()
+            msg_id = str(envelope.get("msg_id") or "").strip()
+            new_body = envelope.get("body")
+            if len(group_id) != 32:
+                _err("bad_group_id", "group_id must be 16-byte hex")
+                return
+            try:
+                gid = bytes.fromhex(group_id)
+            except ValueError:
+                _err("bad_group_id", "group_id must be hex")
+                return
+            if not msg_id:
+                _err("bad_msg_id", "msg_id required")
+                return
+            if not isinstance(new_body, str) or not new_body.strip():
+                _err("bad_body", "body must be a non-empty string")
+                return
+            if len(new_body.encode("utf-8")) > 65536:
+                _err("body_too_large", "max 64 KiB UTF-8")
+                return
+            try:
+                result = await asyncio.wait_for(
+                    self.daemon.send_group_edit(
+                        group_id=gid,
+                        target_msg_id=msg_id,
+                        new_body=new_body.strip(),
+                    ),
+                    timeout=20.0,
+                )
+                updated = state.get_group_message(msg_id)
+                _send({
+                    "t": "edit_group_message_result",
+                    "ok": True,
+                    "group_id": group_id,
+                    "msg_id": msg_id,
+                    "result": result,
+                    "msg": updated,
+                })
+            except asyncio.TimeoutError:
+                _err("group_edit_timeout", "group edit timed out after 20s")
+            except RuntimeError as e:
+                _err("group_edit_rejected", str(e))
+            except Exception as e:
+                log.exception("phone edit_group_message failed: %s", e)
+                _err("group_edit_failed", f"send_group_edit: {e}")
+            return
+
+        if msg_t == "delete_group_message":
+            group_id = str(envelope.get("group_id") or "").strip()
+            msg_id = str(envelope.get("msg_id") or "").strip()
+            if len(group_id) != 32:
+                _err("bad_group_id", "group_id must be 16-byte hex")
+                return
+            try:
+                gid = bytes.fromhex(group_id)
+            except ValueError:
+                _err("bad_group_id", "group_id must be hex")
+                return
+            if not msg_id:
+                _err("bad_msg_id", "msg_id required")
+                return
+            try:
+                result = await asyncio.wait_for(
+                    self.daemon.send_group_delete(
+                        group_id=gid,
+                        target_msg_id=msg_id,
+                    ),
+                    timeout=20.0,
+                )
+                deleted = state.get_group_message(msg_id)
+                _send({
+                    "t": "delete_group_message_result",
+                    "ok": True,
+                    "group_id": group_id,
+                    "msg_id": msg_id,
+                    "result": result,
+                    "msg": deleted,
+                })
+            except asyncio.TimeoutError:
+                _err("group_delete_timeout", "group delete timed out after 20s")
+            except RuntimeError as e:
+                _err("group_delete_rejected", str(e))
+            except Exception as e:
+                log.exception("phone delete_group_message failed: %s", e)
+                _err("group_delete_failed", f"send_group_delete: {e}")
+            return
+
         if msg_t == "fetch_messages":
             peer_fp = envelope.get("peer_fp")
             if not isinstance(peer_fp, str) or not peer_fp:
@@ -4183,6 +4744,7 @@ class UIServer:
                     "msg_type": getattr(m, "msg_type", None),
                     "body": getattr(m, "body", None),
                     "room_id": getattr(m, "room_id", None),
+                    "reply_to": getattr(m, "reply_to", None),
                     "edited_at_ms": getattr(m, "edited_at_ms", None),
                     "deleted_at_ms": getattr(m, "deleted_at_ms", None),
                 }
@@ -4211,7 +4773,238 @@ class UIServer:
                         "mime": str(mime),
                     }
                 payload.append(row)
+            try:
+                reactions = state.list_reactions_for_messages([
+                    str(row.get("id")) for row in payload if row.get("id")
+                ])
+            except Exception:
+                reactions = {}
+            for row in payload:
+                rx = reactions.get(str(row.get("id"))) if row.get("id") else None
+                if rx:
+                    row["reactions"] = rx
             _send({"t": "messages", "peer_fp": peer_fp, "messages": payload})
+            return
+
+        if msg_t == "search_messages":
+            peer_fp = envelope.get("peer_fp")
+            if not isinstance(peer_fp, str) or not peer_fp:
+                _err("bad_peer_fp", "peer_fp required")
+                return
+            query = str(envelope.get("query") or "").strip()
+            if not query:
+                _err("bad_query", "query required")
+                return
+            if len(query) > 200:
+                _err("bad_query", "query too long")
+                return
+            limit = envelope.get("limit", 50)
+            if not isinstance(limit, int) or limit <= 0 or limit > 100:
+                limit = 50
+            try:
+                phrased = '"' + query.replace('"', '""') + '"'
+                msgs = state.search_messages(
+                    phrased, peer_fp=peer_fp, limit=limit,
+                )
+            except Exception as e:
+                _err("query_failed", f"search_messages: {e}")
+                return
+            payload = []
+            for m in msgs:
+                payload.append({
+                    "id": getattr(m, "id", None),
+                    "ts_ms": getattr(m, "ts_ms", None),
+                    "direction": getattr(m, "direction", None),
+                    "msg_type": getattr(m, "msg_type", None),
+                    "body": getattr(m, "body", None),
+                    "room_id": getattr(m, "room_id", None),
+                    "reply_to": getattr(m, "reply_to", None),
+                    "edited_at_ms": getattr(m, "edited_at_ms", None),
+                    "deleted_at_ms": getattr(m, "deleted_at_ms", None),
+                })
+            try:
+                reactions = state.list_reactions_for_messages([
+                    str(row.get("id")) for row in payload if row.get("id")
+                ])
+            except Exception:
+                reactions = {}
+            for row in payload:
+                rx = reactions.get(str(row.get("id"))) if row.get("id") else None
+                if rx:
+                    row["reactions"] = rx
+            _send({
+                "t": "message_search_results",
+                "peer_fp": peer_fp,
+                "query": query,
+                "messages": payload,
+            })
+            return
+
+        if msg_t == "react_message":
+            msg_id = str(envelope.get("msg_id") or "").strip()
+            peer_fp = envelope.get("peer_fp")
+            emoji = envelope.get("emoji")
+            op = str(envelope.get("op") or "add").strip().lower()
+            if not msg_id:
+                _err("bad_msg_id", "msg_id required")
+                return
+            if not isinstance(peer_fp, str) or not peer_fp:
+                _err("bad_peer_fp", "peer_fp required")
+                return
+            if not isinstance(emoji, str) or not emoji or len(emoji) > 64:
+                _err("bad_emoji", "emoji must be a non-empty short string")
+                return
+            if op not in ("add", "remove"):
+                _err("bad_op", "op must be add or remove")
+                return
+            try:
+                target_peer = await self.daemon.resolve_for_send(peer_fp)
+                if target_peer is None:
+                    if op == "add":
+                        state.record_reaction(
+                            target_msg_id=msg_id,
+                            peer_fp=self.daemon.me.fingerprint,
+                            emoji=emoji,
+                        )
+                    else:
+                        state.remove_reaction(
+                            target_msg_id=msg_id,
+                            peer_fp=self.daemon.me.fingerprint,
+                            emoji=emoji,
+                        )
+                    _send({
+                        "t": "react_message_result",
+                        "ok": True,
+                        "delivered": False,
+                        "msg_id": msg_id,
+                        "emoji": emoji,
+                        "op": op,
+                    })
+                    return
+                await asyncio.wait_for(
+                    self.daemon.send_reaction(
+                        target_peer,
+                        target_msg_id=msg_id,
+                        emoji=emoji,
+                        op=op,
+                    ),
+                    timeout=20.0,
+                )
+                _send({
+                    "t": "react_message_result",
+                    "ok": True,
+                    "delivered": True,
+                    "msg_id": msg_id,
+                    "emoji": emoji,
+                    "op": op,
+                })
+            except asyncio.TimeoutError:
+                _err("reaction_timeout", "reaction timed out after 20s")
+            except Exception as e:
+                log.exception("phone react_message failed: %s", e)
+                _err("reaction_failed", f"send_reaction: {e}")
+            return
+
+        if msg_t == "edit_message":
+            msg_id = str(envelope.get("msg_id") or "").strip()
+            peer_fp = envelope.get("peer_fp")
+            new_body = envelope.get("body")
+            if not msg_id:
+                _err("bad_msg_id", "msg_id required")
+                return
+            if not isinstance(peer_fp, str) or not peer_fp:
+                _err("bad_peer_fp", "peer_fp required")
+                return
+            if not isinstance(new_body, str) or not new_body.strip():
+                _err("bad_body", "body must be a non-empty string")
+                return
+            if len(new_body.encode("utf-8")) > 65536:
+                _err("body_too_large", "max 64 KiB UTF-8")
+                return
+            rec = state.get_message(msg_id)
+            if rec is None:
+                _err("message_not_found", "message not found")
+                return
+            if rec.direction != "out":
+                _err("not_outbound", "can only edit your own outbound messages")
+                return
+            try:
+                target_peer = await self.daemon.resolve_for_send(peer_fp)
+                if target_peer is None:
+                    _err("peer_offline", "peer offline")
+                    return
+                result = await asyncio.wait_for(
+                    self.daemon.send_edit(
+                        target_peer,
+                        target_msg_id=msg_id,
+                        new_body=new_body.strip(),
+                    ),
+                    timeout=20.0,
+                )
+                updated = state.get_message(msg_id)
+                _send({
+                    "t": "edit_message_result",
+                    "ok": True,
+                    "msg_id": msg_id,
+                    "result": result,
+                    "msg": _msg_record_to_event(updated) if updated else None,
+                })
+            except asyncio.TimeoutError:
+                _err("edit_timeout", "edit timed out after 20s")
+            except RuntimeError as e:
+                _err("edit_rejected", str(e))
+            except Exception as e:
+                log.exception("phone edit_message failed: %s", e)
+                _err("edit_failed", f"send_edit: {e}")
+            return
+
+        if msg_t == "delete_message":
+            msg_id = str(envelope.get("msg_id") or "").strip()
+            peer_fp = envelope.get("peer_fp")
+            if not msg_id:
+                _err("bad_msg_id", "msg_id required")
+                return
+            if not isinstance(peer_fp, str) or not peer_fp:
+                _err("bad_peer_fp", "peer_fp required")
+                return
+            rec = state.get_message(msg_id)
+            if rec is None:
+                _err("message_not_found", "message not found")
+                return
+            if rec.direction != "out":
+                _err("not_outbound", "can only delete your own outbound messages")
+                return
+            try:
+                target_peer = await self.daemon.resolve_for_send(peer_fp)
+                if target_peer is None:
+                    deleted_at = int(time.time() * 1000)
+                    state.delete_message(id=msg_id, deleted_at_ms=deleted_at)
+                    _send({
+                        "t": "delete_message_result",
+                        "ok": True,
+                        "delivered": False,
+                        "msg_id": msg_id,
+                        "deleted_at_ms": deleted_at,
+                    })
+                    return
+                result = await asyncio.wait_for(
+                    self.daemon.send_delete(target_peer, target_msg_id=msg_id),
+                    timeout=20.0,
+                )
+                deleted = state.get_message(msg_id)
+                _send({
+                    "t": "delete_message_result",
+                    "ok": True,
+                    "delivered": True,
+                    "msg_id": msg_id,
+                    "result": result,
+                    "msg": _msg_record_to_event(deleted) if deleted else None,
+                })
+            except asyncio.TimeoutError:
+                _err("delete_timeout", "delete timed out after 20s")
+            except Exception as e:
+                log.exception("phone delete_message failed: %s", e)
+                _err("delete_failed", f"send_delete: {e}")
             return
 
         if msg_t == "fetch_blob_chunk":
@@ -5890,7 +6683,17 @@ class UIServer:
         safety_reviewed = setting_int("one_setup_safety_reviewed_at_ms") > 0
         first_message = setting_int("one_setup_first_message_at_ms") > 0
         first_file = setting_int("one_setup_first_file_at_ms") > 0
-        recovery_ready = setting_int("one_setup_recovery_configured_at_ms") > 0
+        # Per-track recovery state. The legacy
+        # `one_setup_recovery_configured_at_ms` flag stays as a
+        # back-compat ANY-track ready signal; the per-track snapshot
+        # below tells the UI which path(s) actually shipped so the
+        # row can say "Recovery is set up via recovery phrase + 2
+        # trusted contacts" rather than the binary done/not done.
+        from one_link import recovery_api
+        from one_link.paths import data_dir as _recovery_data_dir
+        recovery_snap = recovery_api.snapshot_status(state, _recovery_data_dir())
+        recovery_ready = recovery_snap.any_ready or setting_int("one_setup_recovery_configured_at_ms") > 0
+        recovery_methods = recovery_api.configured_track_labels(state)
 
         items = [
             {
@@ -5970,13 +6773,24 @@ class UIServer:
             {
                 "id": "recovery",
                 "label": "Recovery",
-                "status": "done" if recovery_ready else "optional",
+                # v0.21.x: Recovery is RECOMMENDED (not OPTIONAL).
+                # The modal copy already tells the user this is the
+                # ONLY way back into their identity if every device
+                # is lost — pretending it's optional contradicts
+                # what the wizard then says.
+                "status": "done" if recovery_ready else "recommended",
                 "human": (
-                    "Recovery is configured."
+                    (
+                        f"Recovery is set up via {', '.join(recovery_methods)}."
+                        if recovery_methods else "Recovery is configured."
+                    )
                     if recovery_ready else
-                    "Choose a trusted way back in later."
+                    "Set up a way back into your identity if you lose every device."
                 ),
-                "action": "Set recovery",
+                "action": "Manage recovery" if recovery_ready else "Set recovery",
+                # Per-track snapshot the wizard renders so each card
+                # can show its own status independent of the others.
+                "tracks": recovery_snap.to_dict(),
             },
         ]
 
@@ -6030,6 +6844,16 @@ class UIServer:
                 "trust_code": pending.get("trust_code") or "",
                 "claimed_ms": pending.get("claimed_ms") or 0,
                 "expires_ms": rec.get("expires_ms") or 0,
+                "created_ms": rec.get("created_ms") or 0,
+                "remaining_ms": max(0, int(rec.get("expires_ms") or 0) - now),
+                "pair_elapsed_ms": max(
+                    0,
+                    now - int(rec.get("created_ms") or now),
+                ),
+                "claim_elapsed_ms": max(
+                    0,
+                    now - int(pending.get("claimed_ms") or now),
+                ),
             })
 
         setup_audit = [
@@ -6925,6 +7749,9 @@ class UIServer:
                 "onboarding_completed",
             ):
                 state.delete_setting(key)
+            # v0.21.x: per-track recovery state wipes alongside.
+            from one_link import recovery_api as _recovery_api
+            _recovery_api.reset_all_recovery_state(state)
         else:
             return web.json_response(
                 {
@@ -6938,6 +7765,282 @@ class UIServer:
                 status=400,
             )
         return web.json_response(self._one_setup_snapshot())
+
+    async def api_setup_recovery_phrase(self, request: web.Request) -> web.Response:
+        """Return the local 24-word recovery phrase for first-launch UX.
+
+        This endpoint is guarded by the desktop UI token and only speaks to
+        127.0.0.1. It mirrors ``one-link backup init/show`` for normal users:
+        provision the master seed if missing, encode it as the BIP-39 phrase,
+        and let the browser display it for paper backup.
+        """
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            from one_link import master_seed, mnemonic
+            seed, created = master_seed.load_or_create_seed(data_dir())
+            phrase = mnemonic.encode(seed)
+        except Exception as exc:
+            return web.json_response({
+                "error": "recovery_phrase_unavailable",
+                "hint": str(exc),
+            }, status=500)
+        now = int(time.time() * 1000)
+        state.set_setting("one_setup_recovery_phrase_generated_at_ms", str(now))
+        return web.json_response({
+            "ok": True,
+            "phrase": phrase,
+            "words": phrase.split(),
+            "word_count": 24,
+            "created": bool(created),
+            "generated_at_ms": now,
+            "message": (
+                "Write these 24 words on paper. One Link cannot recover "
+                "them for you."
+            ),
+        })
+
+    # ── recovery wizard (v0.21.x) ──────────────────────────────────
+    # The three real tracks: recovery phrase (BIP-39 24 words),
+    # trusted contacts (Shamir 3-of-5 via social_recovery), and
+    # encrypted backup file (.olbak via backup_bundle). See
+    # `recovery_api.py` for the per-track state model.
+
+    @staticmethod
+    def _recovery_no_store_headers(resp: web.StreamResponse) -> None:
+        """Belt-and-braces: any response carrying recovery material
+        (the 24 words, the .olbak bundle, the wrapped Shamir shares)
+        must not be cached by the browser, service worker, or any
+        intermediary. The auth bearer already keeps these private to
+        the local UI, but a stale cache entry would leak the secret
+        to anyone who later loaded that origin in the same browser
+        profile."""
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+
+    async def api_recovery_status(self, request: web.Request) -> web.Response:
+        from one_link import recovery_api
+        from one_link.paths import data_dir
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        snap = recovery_api.snapshot_status(state, data_dir())
+        resp = web.json_response({"ok": True, **snap.to_dict()})
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_phrase(self, request: web.Request) -> web.Response:
+        """Return the 24-word recovery phrase for the wizard's paper-
+        backup track. Provisions the seed on first call (same behavior
+        as `api_setup_recovery_phrase`) so a user who never ran the CLI
+        still gets a recoverable identity. The response carries
+        `Cache-Control: no-store` headers so the 24 words never land
+        in browser cache or service-worker storage."""
+        from one_link import master_seed, mnemonic
+        from one_link.paths import data_dir
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            seed, created = master_seed.load_or_create_seed(data_dir())
+            phrase = mnemonic.encode(seed)
+        except Exception as exc:
+            return web.json_response({
+                "error": "recovery_phrase_unavailable",
+                "hint": str(exc),
+            }, status=500)
+        finally:
+            with contextlib.suppress(Exception):
+                seed = b"\x00" * len(seed)
+                del seed
+        now = int(time.time() * 1000)
+        state.set_setting("one_setup_recovery_phrase_generated_at_ms", str(now))
+        resp = web.json_response({
+            "ok": True,
+            "words": phrase.split(),
+            "word_count": 24,
+            "created": bool(created),
+            "generated_at_ms": now,
+        })
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_phrase_verify(self, request: web.Request) -> web.Response:
+        """Verify three random word positions the wizard asked the user
+        to type back. Per-token rate limit prevents brute-force on the
+        verify path (5 attempts / 60s; on lockout the user can wait it
+        out + try again with a fresh 3-position challenge)."""
+        from one_link import recovery_api
+        from one_link.paths import data_dir
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        # Per-token rate limit. 5 attempts per minute is plenty for a
+        # human typing 3 words but cuts a scripted brute-force off.
+        if self._rate_limited(
+            "recovery_phrase_verify",
+            self._client_rate_key(request),
+            limit=5,
+            window_seconds=60.0,
+        ):
+            return web.json_response(
+                {"error": "too many verification attempts; wait a minute"},
+                status=429,
+            )
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        indices_raw = data.get("indices") or []
+        words_raw = data.get("words") or []
+        try:
+            indices = [int(x) for x in indices_raw]
+            words = [str(x) for x in words_raw]
+        except Exception:
+            return web.json_response({"error": "indices must be ints, words strings"}, status=400)
+        if len(indices) != len(words) or len(indices) < 3:
+            return web.json_response(
+                {"error": "supply at least 3 (index, word) pairs"},
+                status=400,
+            )
+        try:
+            ok, mismatches = recovery_api.verify_phrase_positions(
+                data_dir=data_dir(), indices=indices, words=words,
+            )
+        except FileNotFoundError:
+            return web.json_response(
+                {"error": "no recovery phrase on this install; request /api/v1/recovery/phrase first"},
+                status=503,
+            )
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        if not ok:
+            resp = web.json_response({"ok": False, "mismatches": mismatches})
+            self._recovery_no_store_headers(resp)
+            return resp
+        verified_at_ms = recovery_api.mark_phrase_verified(state)
+        resp = web.json_response({
+            "ok": True,
+            "verified_at_ms": verified_at_ms,
+        })
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_backup_export(self, request: web.Request) -> web.StreamResponse:
+        """Stream the encrypted .olbak bundle to the browser as a
+        download. The file decrypts only with the master seed (which
+        the user backed up as the 24-word phrase) — without the seed
+        the bundle bytes are indistinguishable from random.
+
+        Query: `include_files=1` to also archive the inbox contents
+        (larger bundle; default off since chat history is already
+        in state.db)."""
+        from one_link import recovery_api
+        from one_link.paths import data_dir
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        include_files = request.query.get("include_files", "0") in {"1", "true", "yes"}
+        try:
+            bundle = recovery_api.build_backup_bundle(
+                data_dir=data_dir(), include_files=include_files,
+            )
+        except FileNotFoundError:
+            return web.json_response(
+                {"error": "no master seed on this install; request /api/v1/recovery/phrase first"},
+                status=503,
+            )
+        except Exception as exc:
+            return web.json_response({
+                "error": "backup_export_failed",
+                "hint": str(exc),
+            }, status=500)
+        now_ms = int(time.time() * 1000)
+        recovery_api.mark_backup_exported(state, size_bytes=len(bundle), now_ms=now_ms)
+        filename = recovery_api.backup_filename(now_ms)
+        resp = web.Response(body=bundle, content_type="application/octet-stream")
+        resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        resp.headers["Content-Length"] = str(len(bundle))
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_social_candidates(self, request: web.Request) -> web.Response:
+        """Return the paired-peer roster the wizard's trusted-contacts
+        track shows for guardian selection. Each candidate is a peer
+        the user has previously pinned (set_peer_trust=pinned) and
+        whose Ed25519 pubkey we can wrap shares to."""
+        from one_link import recovery_api
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        candidates = recovery_api.list_social_candidates(state)
+        resp = web.json_response({
+            "ok": True,
+            "candidates": candidates,
+            "recommended_threshold_k": 3,
+            "recommended_total_n": 5,
+            "min_guardians": 2,
+        })
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_social_issue(self, request: web.Request) -> web.Response:
+        """Split the master seed into Shamir shares wrapped to each
+        chosen guardian's Ed25519 pubkey. Returns N share descriptors
+        the UI offers as file downloads. The user then delivers each
+        share to its target guardian via whatever medium they trust
+        (USB, email, in person) — the wrap is sealed; the medium does
+        not matter. No automatic wire delivery; that would couple
+        'setup is done' to 'every guardian's daemon is online and
+        accepted', which is exactly the kind of corporate-substrate
+        dependence we're avoiding."""
+        from one_link import recovery_api
+        from one_link.paths import data_dir
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        guardians = data.get("guardians") or []
+        if not isinstance(guardians, list):
+            return web.json_response({"error": "guardians must be a list"}, status=400)
+        threshold_k = int(data.get("threshold_k") or 3)
+        try:
+            shares = recovery_api.issue_social_shares(
+                data_dir=data_dir(),
+                guardians=guardians,
+                threshold_k=threshold_k,
+            )
+        except FileNotFoundError:
+            return web.json_response(
+                {"error": "no master seed on this install; request /api/v1/recovery/phrase first"},
+                status=503,
+            )
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as exc:
+            return web.json_response({
+                "error": "social_issue_failed",
+                "hint": str(exc),
+            }, status=500)
+        now_ms = recovery_api.mark_social_configured(
+            state,
+            guardian_count=len(guardians),
+            threshold_k=threshold_k,
+        )
+        resp = web.json_response({
+            "ok": True,
+            "shares": shares,
+            "guardian_count": len(guardians),
+            "threshold_k": threshold_k,
+            "configured_at_ms": now_ms,
+        })
+        self._recovery_no_store_headers(resp)
+        return resp
 
     def _setup_device_invite_pair_handoff(self) -> dict:
         """2026-05-23: build the WebRTC handoff bundle a freshly-
@@ -7206,7 +8309,8 @@ class UIServer:
                 "label": label,
                 "created_ms": now,
                 "expires_ms": expires_ms,
-                "expires_in_seconds": 300,
+                "expires_in_seconds": 30 * 60,
+                "remaining_ms": max(0, expires_ms - now),
             })
         except Exception as exc:
             return web.json_response({
@@ -7261,13 +8365,14 @@ class UIServer:
                 raw_label = _smart_device_label_from_ua(ua_header, raw_label)
             label = (raw_label or kind or "One Link device")[:120]
             sas = compute_sas(self.daemon.me.public_bytes, device_pub)
+            claimed_ms = int(time.time() * 1000)
             invite["pending_claim"] = {
                 "device_pub": device_pub,
                 "device_pub_b64": b64u(device_pub),
                 "device_kind": kind,
                 "label": label,
                 "trust_code": format_sas(sas),
-                "claimed_ms": int(time.time() * 1000),
+                "claimed_ms": claimed_ms,
             }
             state.record_self_mesh_audit(
                 event="setup_device_invite_pending",
@@ -7293,6 +8398,17 @@ class UIServer:
                 "label": label,
                 "trust_code": format_sas(sas),
                 "trusted": False,
+                "created_ms": int(invite.get("created_ms") or 0),
+                "claimed_ms": claimed_ms,
+                "expires_ms": int(invite.get("expires_ms") or 0),
+                "remaining_ms": max(
+                    0,
+                    int(invite.get("expires_ms") or 0) - claimed_ms,
+                ),
+                "pair_elapsed_ms": max(
+                    0,
+                    claimed_ms - int(invite.get("created_ms") or claimed_ms),
+                ),
             })
         except Exception as exc:
             return web.json_response({
@@ -7336,27 +8452,63 @@ class UIServer:
         if invite is None:
             return web.json_response({"status": "expired"})
         if invite.get("rejected"):
+            now_ms = int(time.time() * 1000)
             return web.json_response({
                 "status": "rejected",
                 "reason": str(invite.get("reject_reason") or "rejected"),
+                "created_ms": int(invite.get("created_ms") or 0),
+                "rejected_ms": int(invite.get("rejected_ms") or 0),
+                "expires_ms": int(invite.get("expires_ms") or 0),
+                "remaining_ms": max(0, int(invite.get("expires_ms") or 0) - now_ms),
             })
         if invite.get("confirmed"):
             row = invite.get("device_row") or {}
+            now_ms = int(time.time() * 1000)
             return web.json_response({
                 "status": "confirmed",
                 **row,
+                "created_ms": int(invite.get("created_ms") or 0),
+                "claimed_ms": int((invite.get("pending_claim") or {}).get("claimed_ms") or 0),
+                "confirmed_ms": int(invite.get("confirmed_ms") or 0),
+                "expires_ms": int(invite.get("expires_ms") or 0),
+                "remaining_ms": max(0, int(invite.get("expires_ms") or 0) - now_ms),
+                "pair_elapsed_ms": int(invite.get("pair_elapsed_ms") or 0),
+                "claim_to_confirm_ms": int(invite.get("claim_to_confirm_ms") or 0),
             })
         pending = invite.get("pending_claim")
         if isinstance(pending, dict):
+            now_ms = int(time.time() * 1000)
             return web.json_response({
                 "status": "pending",
                 "trust_code": pending.get("trust_code") or "",
                 "label": pending.get("label") or "",
                 "device_kind": pending.get("device_kind") or "",
+                "created_ms": int(invite.get("created_ms") or 0),
+                "claimed_ms": int(pending.get("claimed_ms") or 0),
+                "expires_ms": int(invite.get("expires_ms") or 0),
+                "remaining_ms": max(0, int(invite.get("expires_ms") or 0) - now_ms),
+                "pair_elapsed_ms": max(
+                    0,
+                    now_ms - int(invite.get("created_ms") or now_ms),
+                ),
+                "claim_elapsed_ms": max(
+                    0,
+                    now_ms - int(pending.get("claimed_ms") or now_ms),
+                ),
             })
         # Invite exists but no claim yet — phone shouldn't normally
         # poll in this state but answer gracefully.
-        return web.json_response({"status": "awaiting_claim"})
+        now_ms = int(time.time() * 1000)
+        return web.json_response({
+            "status": "awaiting_claim",
+            "created_ms": int(invite.get("created_ms") or 0),
+            "expires_ms": int(invite.get("expires_ms") or 0),
+            "remaining_ms": max(0, int(invite.get("expires_ms") or 0) - now_ms),
+            "pair_elapsed_ms": max(
+                0,
+                now_ms - int(invite.get("created_ms") or now_ms),
+            ),
+        })
 
     async def api_setup_device_invite_relogin(self, request: web.Request) -> web.Response:
         """2026-05-23: cert-authenticated reconnect.
@@ -7576,6 +8728,12 @@ class UIServer:
             # on expires_ms now (no longer on ``claimed``).
             invite["claimed"] = True
             invite["confirmed"] = True
+            confirmed_ms = int(time.time() * 1000)
+            claimed_ms = int(pending.get("claimed_ms") or confirmed_ms)
+            created_ms = int(invite.get("created_ms") or claimed_ms)
+            invite["confirmed_ms"] = confirmed_ms
+            invite["pair_elapsed_ms"] = max(0, confirmed_ms - created_ms)
+            invite["claim_to_confirm_ms"] = max(0, confirmed_ms - claimed_ms)
             invite["device_cert"] = bytes(cert)
             # 2026-05-23: bundle the WebRTC handoff fields so the
             # phone-side /status poll can hand them straight to
@@ -7594,7 +8752,7 @@ class UIServer:
                 "revoked": row["revoked"],
                 **pair_handoff,
             }
-            now_ms = int(time.time() * 1000)
+            now_ms = confirmed_ms
             invite["expires_ms"] = max(
                 int(invite.get("expires_ms") or 0),
                 now_ms + SETUP_DEVICE_INVITE_GRACE_MS,
@@ -7605,7 +8763,12 @@ class UIServer:
                 root_pub=bytes(invite["root_pub"]),
                 device_pub=device_pub,
                 detail=label,
-                metadata={"device_kind": kind, "trust_code": pending.get("trust_code")},
+                metadata={
+                    "device_kind": kind,
+                    "trust_code": pending.get("trust_code"),
+                    "pair_elapsed_ms": invite["pair_elapsed_ms"],
+                    "claim_to_confirm_ms": invite["claim_to_confirm_ms"],
+                },
             )
             with contextlib.suppress(Exception):
                 self.daemon._broadcast_self_mesh_changed(
@@ -7623,6 +8786,11 @@ class UIServer:
                 "label": row["label"],
                 "trusted": row["trusted"],
                 "revoked": row["revoked"],
+                "created_ms": created_ms,
+                "claimed_ms": claimed_ms,
+                "confirmed_ms": confirmed_ms,
+                "pair_elapsed_ms": invite["pair_elapsed_ms"],
+                "claim_to_confirm_ms": invite["claim_to_confirm_ms"],
             })
         except Exception as exc:
             return web.json_response({
@@ -7651,6 +8819,7 @@ class UIServer:
             invite["reject_reason"] = reason
             invite["claimed"] = True  # prevents re-claiming under same token
             now_ms = int(time.time() * 1000)
+            invite["rejected_ms"] = now_ms
             invite["expires_ms"] = max(
                 int(invite.get("expires_ms") or 0),
                 now_ms + SETUP_DEVICE_INVITE_GRACE_MS,
