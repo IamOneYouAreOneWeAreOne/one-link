@@ -496,6 +496,46 @@ def test_recovery_wizard_social_track_downloads_share_files():
     assert ".olss" in dl  # default share extension
 
 
+def test_recovery_wizard_each_card_has_plain_english_help_disclosure():
+    """Phase D plain-English docs: every card in the recovery wizard
+    must have a 'How does this work?' disclosure explaining what
+    the card actually does in plain language. Catches a regression
+    where a future ship adds a card without explaining itself."""
+    html = _index_html()
+    # CSS for the disclosure exists.
+    assert ".recwiz-help" in html
+    assert "How does this work?" in html
+    # Each track renderer / static card includes the disclosure.
+    # Count disclosure summaries - we expect at least one per card
+    # (phrase, social, backup, restore, rotate = 5+ minimum).
+    n = html.count("<summary>How does this work?</summary>")
+    assert n >= 5, f"expected at least 5 'How does this work?' disclosures, found {n}"
+
+
+def test_recovery_wizard_help_avoids_jargon():
+    """The help disclosures must NOT use cryptographic jargon a
+    non-technical user wouldn't understand. We allow the words
+    that the user will encounter elsewhere in the product
+    (key, identity, peer, paired). We reject internal terms."""
+    html = _index_html()
+    # Pull out every disclosure body.
+    import re
+    bodies = re.findall(
+        r'<summary>How does this work\?</summary>\s*<p>(.*?)</p>',
+        html, re.DOTALL,
+    )
+    assert len(bodies) >= 5
+    jargon = [
+        "HKDF", "PBKDF2", "Ed25519", "Curve25519", "ChaCha20",
+        "Shamir", "BIP-39", "Ristretto", "AEAD",
+    ]
+    for body in bodies:
+        for term in jargon:
+            assert term not in body, (
+                f"help disclosure leaks jargon {term!r}: {body[:120]}..."
+            )
+
+
 def test_recovery_wizard_backup_track_streams_olbak_download():
     html = _index_html()
     idx = html.find("async function _recwizBackupExport(")

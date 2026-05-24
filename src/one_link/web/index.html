@@ -7558,6 +7558,34 @@
     padding-top: 14px;
     border-top: 1px solid var(--line);
   }
+  /* v0.21.x: in-card "How does this work?" disclosure. Plain-English
+     help at the moment of decision; the user doesn't need to read
+     external docs to understand what each card actually does. */
+  .recwiz-help {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .recwiz-help summary {
+    cursor: pointer;
+    user-select: none;
+    color: var(--accent);
+    display: inline-block;
+    list-style: none;
+    padding: 2px 0;
+  }
+  .recwiz-help summary::-webkit-details-marker { display: none; }
+  .recwiz-help summary::before {
+    content: "▸ ";
+    transition: transform .15s ease;
+    display: inline-block;
+  }
+  .recwiz-help[open] summary::before { content: "▾ "; }
+  .recwiz-help summary:hover { filter: brightness(1.15); }
+  .recwiz-help p {
+    margin: 6px 0 0;
+    line-height: 1.55;
+  }
   /* v0.21.x restore-from-phrase modal. Reuses the recwiz-* shell
      so the restore flow looks like a sibling of the setup wizard.
      Adds just the textarea + warning + confirmation control. */
@@ -24568,6 +24596,18 @@
             the 24 words here to replace this identity with the one
             you had before.
           </p>
+          <details class="recwiz-help">
+            <summary>How does this work?</summary>
+            <p>
+              Your identity, encryption keys, and the bundle key for
+              your .olbak file are all derived from your 24-word
+              phrase. Typing the phrase on a fresh install re-derives
+              everything: peers paired with the original device
+              recognize you again, and an encrypted backup file you
+              also brought along decrypts cleanly. The phrase itself
+              never leaves this device.
+            </p>
+          </details>
           <div class="recwiz-card-actions">
             <button type="button" class="recwiz-btn" data-recwiz-action="open-restore">
               Restore from phrase
@@ -24673,6 +24713,17 @@
         24 words on paper. The classic. Type them on a fresh install
         and your identity comes back.
       </p>
+      <details class="recwiz-help">
+        <summary>How does this work?</summary>
+        <p>
+          The 24 words encode the secret your One Link identity is
+          derived from. Anyone who has those words can be you on a
+          fresh install: your peers will recognize them as you, your
+          encrypted chat history will decrypt. Write them on paper
+          and keep that paper somewhere only you can reach. We
+          cannot regenerate this phrase for you.
+        </p>
+      </details>
       ${last ? `<p class="recwiz-card-meta">${escapeText(last)}</p>` : ""}
       <div class="recwiz-card-actions">
         <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-phrase="show">
@@ -24879,6 +24930,19 @@
         Any 3 of 5 (or whatever you pick) can help you back in. No single
         contact can do it alone.
       </p>
+      <details class="recwiz-help">
+        <summary>How does this work?</summary>
+        <p>
+          Your secret gets mathematically split into N pieces with a
+          threshold K. Any K of those pieces can reconstruct the
+          secret; K-1 pieces are useless. Each piece is sealed to the
+          guardian you give it to, so a leaked piece is unreadable to
+          anyone except that one guardian. If you ever need to
+          recover, you contact K of your guardians and they help you
+          back in. No single guardian (and no central service) can
+          lock you out.
+        </p>
+      </details>
       ${meta ? `<p class="recwiz-card-meta">${escapeText(meta)}</p>` : ""}
       ${!avail ? `<p class="recwiz-feedback">Pair at least 2 trusted devices or people before you can use this track.</p>` : ""}
       <div class="recwiz-card-actions">
@@ -25084,6 +25148,18 @@
         phrase: without that phrase, the file is unreadable to anyone,
         including us.
       </p>
+      <details class="recwiz-help">
+        <summary>How does this work?</summary>
+        <p>
+          The file is an authenticated-encryption blob. The key to
+          decrypt it is derived from your 24-word phrase. Without the
+          phrase, the bytes look like random noise. With the phrase,
+          a fresh install can restore everything inside the bundle:
+          your identity, chat history, groups, settings. Keep the
+          file and the phrase in separate places so a single point
+          of failure does not lose both.
+        </p>
+      </details>
       ${last ? `<p class="recwiz-card-meta">${escapeText(last)}</p>` : ""}
       <div class="recwiz-card-actions">
         <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-backup="export">
@@ -25198,6 +25274,23 @@
         announcement and update automatically; you do not need to
         re-pair with them.
       </p>
+      <details class="recwiz-help">
+        <summary>How does this work?</summary>
+        <p>
+          Your daemon generates a fresh identity key and signs a
+          small certificate with the OLD key that authorizes the
+          change. That certificate is the cryptographic proof: only
+          someone who held the old key could have produced it. The
+          daemon queues the certificate for delivery to every paired
+          peer. When this device next talks to each peer, the
+          certificate goes along with the normal handshake. The peer
+          verifies the signature against their pinned old key,
+          atomically migrates their record so your alias, mute,
+          verified state, and chat history all follow you to the
+          new key, and sends an ack back so this card can show
+          which peers are up to date.
+        </p>
+      </details>
       ${meta ? `<p class="recwiz-card-meta">${escapeText(meta)}</p>` : ""}
       ${peerListHtml}
       <div class="recwiz-card-actions" style="margin-top:10px;">
