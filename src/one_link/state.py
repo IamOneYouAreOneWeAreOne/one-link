@@ -2277,6 +2277,58 @@ class State:
             )
             return cur.rowcount > 0
 
+    def record_authorized_rotation(
+        self,
+        *,
+        old_fingerprint: str,
+        new_fingerprint: str,
+        old_pub_hex: str,
+        new_pub_hex: str,
+        hostname: Optional[str] = None,
+        ts_ms: Optional[int] = None,
+    ) -> Optional[int]:
+        """v0.21.x: log an inbound peer-rotation that was applied via
+        a cryptographically-authorized cert. Reuses the v0.7.8
+        key_change_events table so the existing activity feed /
+        device-drawer key-history surfaces pick it up automatically,
+        but with severity='low' + acked_ms preset so the manual-
+        confirm warning UI does not fire (the cert provided proof,
+        the user already saw the toast).
+
+        Idempotent on (old_fingerprint, new_fingerprint): a
+        repeated cert delivery does not insert a duplicate audit
+        row. Returns the row id (or None if the row already existed).
+        """
+        if ts_ms is None:
+            ts_ms = _now_ms()
+        with self._write_lock:
+            existing = self._conn.execute(
+                "SELECT id FROM key_change_events"
+                " WHERE old_fingerprint = ? AND new_fingerprint = ?"
+                " LIMIT 1",
+                (old_fingerprint, new_fingerprint),
+            ).fetchone()
+            if existing is not None:
+                return None
+            cur = self._conn.execute(
+                """
+                INSERT INTO key_change_events(
+                    ts_ms, hostname,
+                    old_fingerprint, new_fingerprint,
+                    old_pub_hex, new_pub_hex,
+                    severity, acked_ms
+                ) VALUES(?, ?, ?, ?, ?, ?, 'low', ?)
+                """,
+                (
+                    int(ts_ms),
+                    hostname or "(rotation)",
+                    old_fingerprint, new_fingerprint,
+                    old_pub_hex, new_pub_hex,
+                    int(ts_ms),  # auto-acked
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
     def ack_all_key_change_events_for(self, new_fingerprint: str) -> int:
         """Bulk-ack every unacked event targeting a peer (used when
         the device drawer's 'Got it' button is clicked). Returns the

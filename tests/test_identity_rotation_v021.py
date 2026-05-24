@@ -978,6 +978,57 @@ def test_handle_rotation_cert_silent_drops_unknown_old_fp(tmp_path):
     assert sent == []
 
 
+def test_record_authorized_rotation_inserts_auto_acked_row(tmp_path):
+    """The state helper writes a key_change_events row with
+    severity='low' and acked_ms preset so existing surfaces
+    (activity feed, device drawer) show the rotation as a
+    historical event without the manual-confirm warning UI."""
+    state = _open_state(tmp_path)
+    row_id = state.record_authorized_rotation(
+        old_fingerprint="aa" * 32, new_fingerprint="bb" * 32,
+        old_pub_hex="00" * 32, new_pub_hex="01" * 32,
+        hostname="alice.lan", ts_ms=1_700_000_000_000,
+    )
+    assert row_id is not None and row_id > 0
+    rows = state.list_key_change_events()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["old_fingerprint"] == "aa" * 32
+    assert r["new_fingerprint"] == "bb" * 32
+    assert r["hostname"] == "alice.lan"
+    assert r["severity"] == "low"
+    # Pre-acked so the manual-confirm warning UI does not fire.
+    assert r["acked_ms"] == 1_700_000_000_000
+
+
+def test_record_authorized_rotation_is_idempotent(tmp_path):
+    """Repeated cert delivery for the same (old_fp, new_fp) must
+    not duplicate the audit row."""
+    state = _open_state(tmp_path)
+    state.record_authorized_rotation(
+        old_fingerprint="aa" * 32, new_fingerprint="bb" * 32,
+        old_pub_hex="00" * 32, new_pub_hex="01" * 32,
+    )
+    duplicate = state.record_authorized_rotation(
+        old_fingerprint="aa" * 32, new_fingerprint="bb" * 32,
+        old_pub_hex="00" * 32, new_pub_hex="01" * 32,
+    )
+    assert duplicate is None
+    rows = state.list_key_change_events()
+    assert len(rows) == 1
+
+
+def test_handle_rotation_cert_writes_authorized_rotation_audit():
+    """After applying a rotation cert the daemon handler writes a
+    key_change_events audit row so the activity feed picks it up."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "daemon.py").read_text(encoding="utf-8")
+    idx = src.find("async def _handle_rotation_cert(")
+    assert idx > 0
+    body = src[idx:idx + 5000]
+    assert "record_authorized_rotation" in body
+
+
 def test_handle_rotation_cert_applies_and_acks_when_old_fp_pinned(tmp_path):
     """Happy path through the inbound handler: cert verifies, state
     transitions, ack is sent back to the sender."""

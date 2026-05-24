@@ -2969,6 +2969,21 @@ class Daemon:
             "ROTATION_CERT applied: %s -> %s (reason=%s)",
             applied.old_fp[:8], applied.new_fp[:8], applied.reason,
         )
+        # v0.21.x: write an authorized-rotation audit row so the
+        # activity feed + device-drawer key-history surfaces show
+        # the rotation as a historical event even after the toast
+        # disappears. Severity='low' + auto-acked so the manual-
+        # confirm warning UI does not fire (the cert provided
+        # cryptographic proof).
+        with contextlib.suppress(Exception):
+            self.state.record_authorized_rotation(
+                old_fingerprint=applied.old_fp,
+                new_fingerprint=applied.new_fp,
+                old_pub_hex=bytes(old_peer.pubkey).hex(),
+                new_pub_hex=applied.new_pubkey.hex(),
+                hostname=old_peer.hostname,
+                ts_ms=applied.ts_ms,
+            )
         if self.ui_server is not None:
             with contextlib.suppress(Exception):
                 self.ui_server.broadcast({
