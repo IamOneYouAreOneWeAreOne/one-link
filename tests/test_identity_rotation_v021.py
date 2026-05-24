@@ -761,6 +761,27 @@ def test_home_screen_rotation_banner_exists_and_polls_status():
     assert "refreshRotationBanner()" in body
 
 
+def test_ws_dispatcher_toasts_peer_rotated_with_display_label():
+    """When a peer rotates, the user should see a calm informational
+    toast resolving the display label so they notice the change even
+    if they're looking at a different conversation. Source-text gate
+    pins the toast call + the alias > hostname > short_id fallback
+    chain + the safe-text fallback for unknown peers."""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "web" / "index.html").read_text(encoding="utf-8")
+    idx = html.find('m.type === "peer_rotated"')
+    assert idx > 0
+    body = html[idx:idx + 2500]
+    assert "rotated their identity key" in body
+    assert "local_alias" in body
+    assert "hostname" in body
+    assert "short_id" in body
+    # Tries both new and old fp to ride the race between the WS
+    # event and the peers refresh.
+    assert "new_fingerprint" in body
+    assert "old_fingerprint" in body
+
+
 def test_ws_dispatcher_handles_peer_rotated_and_ack_events():
     """The daemon broadcasts peer_rotated when an inbound cert
     applies and rotation_announcement_acked when one of our certs

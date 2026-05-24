@@ -22448,6 +22448,31 @@
         try { refreshRotationBanner(); } catch (_) { /* defensive */ }
         if (m.type === "peer_rotated") {
           scheduleActivityRefresh();  // peer-rotation events show up in activity
+          // Surface a calm informational toast so the user sees
+          // their friend rotated even when they're looking at a
+          // different conversation. Resolve a display label from
+          // the existing peers map (alias > hostname > short_id)
+          // so the toast says 'Alice rotated their identity key'
+          // not 'a1b2c3 rotated their identity key'.
+          try {
+            const newFp = m.new_fingerprint || "";
+            // state.peers is a Map keyed by fingerprint. Try the
+            // NEW fingerprint first (post-transition) then fall
+            // back to the OLD one if the WS event raced ahead of
+            // the peers refresh.
+            const peer = (newFp && state.peers && state.peers.get
+              ? state.peers.get(newFp) : null)
+              || (m.old_fingerprint && state.peers && state.peers.get
+                ? state.peers.get(m.old_fingerprint) : null);
+            const label = (peer && (
+              peer.local_alias || peer.alias || peer.display_name ||
+              peer.hostname || peer.short_id
+            )) || (newFp ? `${newFp.slice(0, 8)}…` : "A trusted peer");
+            toast(
+              `${label} rotated their identity key. Your trust transferred automatically.`,
+              "info", 6000,
+            );
+          } catch (_) { /* defensive - never let UI handler crash WS */ }
         }
       } else if (m.type === "key_change_detected") {
         scheduleActivityRefresh();  // v0.9.1: surface in activity feed
