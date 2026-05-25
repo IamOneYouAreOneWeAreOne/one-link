@@ -4939,9 +4939,16 @@ class UIServer:
             if not isinstance(limit, int) or limit <= 0 or limit > 100:
                 limit = 50
             try:
-                phrased = '"' + query.replace('"', '""') + '"'
+                # v0.21.x: rely on search_messages's built-in
+                # prefix-match normalizer (each token -> token*)
+                # so the phone's per-conversation search behaves
+                # the same as the desktop: typing 'k' finds 'kjg',
+                # 'kanye', etc. - not just messages with the
+                # standalone token 'k'. The normalizer also
+                # sanitises FTS5 special chars, so the prior
+                # defensive phrase-quoting is no longer needed.
                 msgs = state.search_messages(
-                    phrased, peer_fp=peer_fp, limit=limit,
+                    query, peer_fp=peer_fp, limit=limit,
                 )
             except Exception as e:
                 _err("query_failed", f"search_messages: {e}")

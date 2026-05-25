@@ -294,6 +294,30 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+# v0.21.x: forgiving FTS5 query builder. Plain users type 'k' and
+# expect to find messages with 'kanye' or 'kjg'; raw FTS5 token
+# matching only finds messages containing the standalone token 'k'.
+# Convert each alphanumeric token to a prefix-match ('k*') so
+# substring-feeling search works. Pass-through honors literal
+# phrase quotes ('"hello world"') for power users.
+_FTS5_TOKEN_RE = __import__("re").compile(r"\w+", __import__("re").UNICODE)
+
+
+def _normalize_user_query_to_fts5_prefix(raw: str) -> str:
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    # Pass through explicit phrase queries: "...".
+    if s.startswith('"') and s.endswith('"') and len(s) >= 2:
+        return s
+    tokens = _FTS5_TOKEN_RE.findall(s)
+    if not tokens:
+        return ""
+    # Each token becomes a prefix-match. Multi-token queries are
+    # implicit-AND in FTS5 (whitespace-separated terms).
+    return " ".join(f"{t}*" for t in tokens)
+
+
 @dataclass
 class PeerRecord:
     fingerprint: str
@@ -3461,9 +3485,28 @@ class State:
         limit: int = 50,
         peer_fp: Optional[str] = None,
         room_id: Optional[str] = None,
+        prefix_match: bool = True,
     ) -> list[MessageRecord]:
+        """FTS5 search over message bodies. When prefix_match=True
+        (default) the user's plain query is normalized so each
+        whitespace-separated token becomes an FTS5 prefix-match
+        (`token*`). That turns 'k' into 'k*' so it finds messages
+        containing 'kanye', 'kjg', 'oksana' - not just messages
+        with the standalone token 'k'. This matches naive-user
+        expectations.
+
+        Callers that pre-format the query for FTS5 (e.g. wrapping
+        in phrase quotes for global_search) should pass
+        prefix_match=False to bypass the normalizer.
+        """
+        if prefix_match:
+            fts_query = _normalize_user_query_to_fts5_prefix(query)
+            if not fts_query:
+                return []
+        else:
+            fts_query = query
         clauses = ["messages.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"]
-        params: list[Any] = [query]
+        params: list[Any] = [fts_query]
         if peer_fp:
             clauses.append("messages.peer_fp = ?")
             params.append(peer_fp)
@@ -3502,7 +3545,12 @@ class State:
         # parsed as field-restricted query).
         try:
             phrased = '"' + q.replace('"', '""') + '"'
-            msgs = self.search_messages(phrased, limit=per_kind_limit)
+            # global_search hand-rolls FTS5 phrase quoting above;
+            # opt out of the prefix-match normalizer so the literal
+            # phrase semantics are preserved.
+            msgs = self.search_messages(
+                phrased, limit=per_kind_limit, prefix_match=False,
+            )
         except Exception:
             msgs = []
         for m in msgs:
