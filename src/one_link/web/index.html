@@ -8480,7 +8480,7 @@
             <div class="transfer-pill" id="transfer-pill" style="display:none;"></div>
             <div class="search" id="search-wrap">
               <span class="icon-trigger" aria-hidden="true">🔍</span>
-              <input id="search-input" type="text" placeholder="Search this conversation…" />
+              <input id="search-input" type="text" placeholder="Search this conversation…" aria-label="Search this conversation" />
             </div>
             <button id="btn-search-toggle" title="Search">Search</button>
             <!-- v0.21.x: jump to a specific date in this conversation. -->
@@ -8655,12 +8655,12 @@
         </div>
       </div>
       <div class="panel-form">
-        <input id="folder-name" type="text" placeholder="Name, like Family Photos" />
+        <input id="folder-name" type="text" placeholder="Name, like Family Photos" aria-label="Folder name" />
         <!-- v0.10.6: path row gets an inline Browse… button so users
              can pick a folder via the OS native picker instead of
              typing a path. -->
         <div class="folder-path-row">
-          <input id="folder-path" type="text" placeholder="Folder location on this computer" />
+          <input id="folder-path" type="text" placeholder="Folder location on this computer" aria-label="Folder path on this computer" />
           <button id="btn-browse-folder" class="folder-browse-btn" title="Browse for a folder">Browse…</button>
         </div>
         <div class="mini-actions">
@@ -10748,7 +10748,7 @@
        doesn't see it again. -->
   <div class="onboarding-backdrop" id="onboarding-backdrop" style="display:none;">
     <div class="onboarding-card">
-      <button class="onboarding-skip" id="onboarding-skip" title="Skip onboarding">×</button>
+      <button class="onboarding-skip" id="onboarding-skip" title="Skip onboarding" aria-label="Skip onboarding">×</button>
       <div class="onboarding-progress" id="onboarding-progress">
         <span class="dot active"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>
       </div>
@@ -24632,7 +24632,7 @@
         <video class="ccm-video" autoplay playsinline muted></video>
         <div class="ccm-actions">
           <button type="button" class="ccm-close">Cancel</button>
-          <button type="button" class="ccm-swap" title="Switch camera">↻</button>
+          <button type="button" class="ccm-swap" title="Switch camera" aria-label="Switch camera">↻</button>
           <button type="button" class="ccm-snap">Snap</button>
         </div>
       </div>

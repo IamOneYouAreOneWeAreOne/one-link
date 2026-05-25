@@ -126,6 +126,36 @@ def _api_me(port: int, token: str, timeout: float = 5.0) -> dict | None:
         return None
 
 
+def _api_peers(port: int, token: str, timeout: float = 5.0) -> list | None:
+    """List peers visible to this daemon via mDNS discovery."""
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/peers?include_unpaired=1",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            return data.get("peers", [])
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return None
+
+
+def _wait_for_peer_via_discovery(
+    port: int, token: str, target_fp: str, timeout: float,
+) -> bool:
+    """Poll /api/peers until the target fingerprint appears.
+    Returns True if seen within timeout, False otherwise."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        peers = _api_peers(port, token, timeout=2.0)
+        if peers is not None:
+            for p in peers:
+                if p.get("fingerprint") == target_fp:
+                    return True
+        time.sleep(0.5)
+    return False
+
+
 def _now_ms() -> int:
     return int(time.monotonic() * 1000)
 
@@ -203,6 +233,37 @@ def run_one_pair(pair_id: int, tmpdir: Path) -> PairResult:
                 f"A and B derived the same fingerprint: {a_me['fingerprint']}"
             ))
             return result
+
+        # Step 6: each daemon can read its own peer list cleanly.
+        # /api/peers exercises a different code path than /api/me
+        # (state.list_peers + JSON serialization + auth on a
+        # query-param-bearing route). A regression in any of those
+        # would surface here. Note: this does NOT exercise mDNS
+        # cross-discovery - both daemons are bound to 127.0.0.1
+        # by design (we don't want CI runners broadcasting on
+        # the host's LAN), and mDNS doesn't traverse loopback.
+        # Real cross-daemon discovery is exercised by
+        # tests/test_integration.py + tests/test_pairing.py which
+        # use a different binding strategy.
+        t0 = _now_ms()
+        a_peers = _api_peers(a_port, a_tok)
+        if a_peers is None:
+            result.steps.append(StepTrace(
+                "api_peers_a", False, _now_ms() - t0,
+                "/api/peers returned no parseable response",
+            ))
+            return result
+        result.steps.append(StepTrace("api_peers_a", True, _now_ms() - t0))
+
+        t0 = _now_ms()
+        b_peers = _api_peers(b_port, b_tok)
+        if b_peers is None:
+            result.steps.append(StepTrace(
+                "api_peers_b", False, _now_ms() - t0,
+                "/api/peers returned no parseable response",
+            ))
+            return result
+        result.steps.append(StepTrace("api_peers_b", True, _now_ms() - t0))
 
         result.ok = all(s.ok for s in result.steps)
     finally:
