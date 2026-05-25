@@ -265,16 +265,20 @@ async def test_pick_folder_cancellation_returns_null_path(http):
 # ───────── native picker dispatch ──────────────────────────────────
 
 def test_native_picker_uses_powershell_on_windows(monkeypatch):
-    """On Windows the dispatcher must NOT call tkinter first — the
-    Tk dialog looks blurry on hi-DPI displays and shows the feather
-    icon instead of native chrome. PowerShell + WinForms is the
-    canonical Win10/11 picker."""
+    """When the modern IFileOpenDialog can't initialize, the
+    dispatcher falls through to PowerShell + WinForms, NOT
+    straight to tkinter (which looks blurry on hi-DPI displays
+    and shows the feather icon instead of native chrome)."""
     from one_link import server
     # These dispatch-routing tests need the kill switch off so we
     # can actually exercise the platform branches.
     monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "win32")
     called = {}
+    # Modern picker unavailable so we exercise the PS branch.
+    monkeypatch.setattr(
+        server, "_pick_win_ifiledialog", lambda t: server._PICKER_UNAVAILABLE,
+    )
     def fake_ps(title):
         called["ps"] = title
         return "C:/Picked"
@@ -296,6 +300,10 @@ def test_native_picker_falls_back_to_tk_when_powershell_missing(monkeypatch):
     from one_link import server
     monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "win32")
+    # Modern picker unavailable so the dispatcher reaches PS.
+    monkeypatch.setattr(
+        server, "_pick_win_ifiledialog", lambda t: server._PICKER_UNAVAILABLE,
+    )
     monkeypatch.setattr(server, "_pick_win_powershell", lambda t: None)
     monkeypatch.setattr(server, "_pick_tkinter_fallback", lambda t: "C:/Tk")
     assert server._native_folder_picker("hi") == "C:/Tk"
@@ -368,15 +376,45 @@ def test_windows_dispatcher_tries_modern_picker_first(monkeypatch):
 def test_windows_dispatcher_falls_back_to_legacy_when_modern_unavailable(monkeypatch):
     """If IFileOpenDialog can't initialize (ancient Windows, blocked
     COM, etc.), the dispatcher must fall back to the legacy
-    PowerShell picker rather than dead-clicking."""
+    PowerShell picker rather than dead-clicking. The modern picker
+    signals 'unavailable' via the _PICKER_UNAVAILABLE sentinel -
+    distinct from None (which means 'user cancelled')."""
     from one_link import server
     monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "win32")
-    monkeypatch.setattr(server, "_pick_win_ifiledialog", lambda t: None)
+    monkeypatch.setattr(
+        server, "_pick_win_ifiledialog", lambda t: server._PICKER_UNAVAILABLE,
+    )
     monkeypatch.setattr(
         server, "_pick_win_powershell", lambda t: "C:/Legacy/Fallback",
     )
     assert server._native_folder_picker("hi") == "C:/Legacy/Fallback"
+
+
+def test_windows_dispatcher_does_not_fall_through_when_modern_picker_cancelled(monkeypatch):
+    """CRITICAL: when the user CANCELS the modern picker, the
+    dispatcher MUST NOT pop the legacy picker as a second dialog.
+    The cancellation is a deliberate user action; surfacing a
+    second old-style dialog after they just dismissed the new one
+    is confusing UX. Pin the contract: None from the modern picker
+    means cancellation (no fall-through); _PICKER_UNAVAILABLE means
+    couldn't initialize (do fall through)."""
+    from one_link import server
+    monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
+    monkeypatch.setattr(server.sys, "platform", "win32")
+
+    # Modern picker shows dialog + user cancels.
+    monkeypatch.setattr(server, "_pick_win_ifiledialog", lambda t: None)
+    # Legacy picker MUST NOT be called - blow up if it is.
+    def _boom(t):
+        raise AssertionError(
+            "legacy picker was invoked after the modern picker "
+            "returned None (cancellation) - this would pop TWO "
+            "dialogs in a row, which is the bug we're preventing"
+        )
+    monkeypatch.setattr(server, "_pick_win_powershell", _boom)
+    monkeypatch.setattr(server, "_pick_tkinter_fallback", _boom)
+    assert server._native_folder_picker("hi") is None
 
 
 def test_modern_picker_uses_fos_pickfolders_options():
@@ -407,16 +445,39 @@ def test_modern_picker_uses_fos_pickfolders_options():
 
 
 def test_modern_picker_short_circuits_on_non_windows():
-    """A Linux/macOS caller of _pick_win_ifiledialog must return None
-    without raising. Defense in depth: the dispatcher already only
-    calls it on win32, but a future refactor that calls the helper
-    directly shouldn't blow up."""
+    """A Linux/macOS caller of _pick_win_ifiledialog must return
+    _PICKER_UNAVAILABLE without raising. Defense in depth: the
+    dispatcher already only calls it on win32, but a future
+    refactor that calls the helper directly shouldn't blow up."""
     from one_link import server
     import unittest.mock as _mock
     with _mock.patch.object(server.sys, "platform", "linux"):
-        assert server._pick_win_ifiledialog("hi") is None
+        assert server._pick_win_ifiledialog("hi") is server._PICKER_UNAVAILABLE
     with _mock.patch.object(server.sys, "platform", "darwin"):
-        assert server._pick_win_ifiledialog("hi") is None
+        assert server._pick_win_ifiledialog("hi") is server._PICKER_UNAVAILABLE
+
+
+def test_modern_picker_tries_broker_clsid_on_stripped_windows():
+    """Some Windows 11 builds register ONLY the BrokerFileOpenDialog
+    CLSID (3217B1B1-...), not the classic FileOpenDialog CLSID
+    (DC1C5A9C-...). The picker MUST try both - source-text gate
+    pins both CLSIDs are present + the broker is the explicit
+    REGDB_E_CLASSNOTREG fallback."""
+    from pathlib import Path as _Path
+    src = (_Path(__file__).resolve().parents[1] / "src" / "one_link" / "server.py").read_text(encoding="utf-8")
+    idx = src.find("def _pick_win_ifiledialog(")
+    end = src.find("\ndef _pick_win_powershell(", idx)
+    body = src[idx:end]
+    assert "DC1C5A9C-E88A-4ADE-A5A1-60F82A20AEF7" in body, (
+        "classic FileOpenDialog CLSID must be tried first"
+    )
+    assert "3217B1B1-5DC3-4590-9C62-EF9E2DF1C25D" in body, (
+        "BrokerFileOpenDialog CLSID must be the fallback for "
+        "Win11 installs that don't register the classic one"
+    )
+    # REGDB_E_CLASSNOTREG = 0x80040154 = -2147221164. The retry
+    # path must explicitly key on this error code.
+    assert "-2147221164" in body or "0x80040154" in body
 
 
 def test_powershell_picker_passes_dialog_title(monkeypatch):

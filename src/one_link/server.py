@@ -529,7 +529,10 @@ BIO_MAX_LENGTH = 140
 _PICK_TIMEOUT_S = 600  # 10-min hard cap, enough for slow browsing.
 
 
-def _pick_win_ifiledialog(title: str) -> Optional[str]:
+_PICKER_UNAVAILABLE = object()  # sentinel: "couldn't initialize"
+
+
+def _pick_win_ifiledialog(title: str):
     """Modern Windows folder picker via IFileOpenDialog +
     FOS_PICKFOLDERS. This is the same dialog File Explorer +
     Office + every modern Windows app uses - the Win10/11 file
@@ -540,15 +543,19 @@ def _pick_win_ifiledialog(title: str) -> Optional[str]:
     Runs in-process so it's also instant - no 1-2 second
     PowerShell startup penalty.
 
-    Returns absolute path on success, None on cancel/unavailable.
+    Returns one of three states so the dispatcher can distinguish
+    'user cancelled' from 'picker couldn't initialize':
+      - str (absolute path): user picked a folder
+      - None: dialog shown but user cancelled (DO NOT fall through)
+      - _PICKER_UNAVAILABLE: COM/CLSID setup failed, try next picker
     """
     if sys.platform != "win32":
-        return None
+        return _PICKER_UNAVAILABLE
     try:
         import ctypes as _ct
         from ctypes import wintypes as _wt, POINTER, byref, c_void_p
     except Exception:
-        return None
+        return _PICKER_UNAVAILABLE
 
     class _GUID(_ct.Structure):
         _fields_ = [
@@ -568,7 +575,15 @@ def _pick_win_ifiledialog(title: str) -> Optional[str]:
             g.Data4[i] = int(s[16 + 2 * i: 18 + 2 * i], 16)
         return g
 
-    CLSID_FileOpenDialog = _g("DC1C5A9C-E88A-4ADE-A5A1-60F82A20AEF7")
+    # Some Windows 11 builds do NOT register the classic
+    # CLSID_FileOpenDialog (DC1C5A9C-E88A-4ADE-A5A1-60F82A20AEF7),
+    # only the BrokerFileOpenDialog (3217B1B1-5DC3-4590-9C62-EF9E2DF1C25D)
+    # which implements the same IFileOpenDialog interface. Try the
+    # classic first; if CoCreateInstance returns REGDB_E_CLASSNOTREG
+    # (0x80040154), fall through to the broker CLSID. Either path
+    # gives the user the same modern Win10/11 file picker chrome.
+    CLSID_FileOpenDialog_classic = _g("DC1C5A9C-E88A-4ADE-A5A1-60F82A20AEF7")
+    CLSID_FileOpenDialog_broker = _g("3217B1B1-5DC3-4590-9C62-EF9E2DF1C25D")
     IID_IFileOpenDialog = _g("D57C7288-D4AD-4768-BE02-9D969532D960")
 
     CLSCTX_INPROC_SERVER = 0x1
@@ -585,7 +600,7 @@ def _pick_win_ifiledialog(title: str) -> Optional[str]:
     try:
         ole32 = _ct.WinDLL("ole32")
     except Exception:
-        return None
+        return _PICKER_UNAVAILABLE
 
     ole32.CoInitializeEx.restype = _ct.c_long
     ole32.CoInitializeEx.argtypes = [c_void_p, _wt.DWORD]
@@ -608,22 +623,37 @@ def _pick_win_ifiledialog(title: str) -> Optional[str]:
     )
     if hr not in (S_OK, S_FALSE) and hr != RPC_E_CHANGED_MODE:
         log.debug("CoInitializeEx failed: 0x%08X", hr & 0xFFFFFFFF)
-        return None
+        return _PICKER_UNAVAILABLE
 
     try:
         ppv = c_void_p()
         hr = ole32.CoCreateInstance(
-            byref(CLSID_FileOpenDialog), None,
+            byref(CLSID_FileOpenDialog_classic), None,
             CLSCTX_INPROC_SERVER,
             byref(IID_IFileOpenDialog),
             byref(ppv),
         )
+        # 0x80040154 = REGDB_E_CLASSNOTREG. Some Win11 builds
+        # only register the broker variant; retry with that.
+        if hr == -2147221164 or (hr != S_OK and not ppv.value):
+            log.debug(
+                "classic FileOpenDialog not registered (0x%08X); "
+                "trying broker CLSID",
+                hr & 0xFFFFFFFF,
+            )
+            ppv = c_void_p()
+            hr = ole32.CoCreateInstance(
+                byref(CLSID_FileOpenDialog_broker), None,
+                CLSCTX_INPROC_SERVER,
+                byref(IID_IFileOpenDialog),
+                byref(ppv),
+            )
         if hr != S_OK or not ppv.value:
             log.debug(
                 "CoCreateInstance(FileOpenDialog) failed: 0x%08X",
                 hr & 0xFFFFFFFF,
             )
-            return None
+            return _PICKER_UNAVAILABLE
 
         # Vtable layout: IUnknown(0..2), IModalWindow.Show(3),
         # IFileDialog(4..26), IFileOpenDialog(27..28).
@@ -638,13 +668,23 @@ def _pick_win_ifiledialog(title: str) -> Optional[str]:
             vtbl, 20, _ct.c_long, POINTER(c_void_p),
         )
 
-        if SetOptions(ppv, FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM) != S_OK:
+        hr_so = SetOptions(ppv, FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
+        if hr_so != S_OK:
+            log.debug(
+                "IFileDialog.SetOptions failed: 0x%08X", hr_so & 0xFFFFFFFF,
+            )
             Release(ppv)
-            return None
+            return _PICKER_UNAVAILABLE
         SetTitle(ppv, title)
 
         hr = Show(ppv, None)
+        # From here on, the dialog has been shown to the user.
+        # Any further failure (including user cancellation) returns
+        # None so the dispatcher DOES NOT fall through to the legacy
+        # picker - the user has already interacted with the modern
+        # dialog and would be confused by a second one popping up.
         if hr == CANCELLED_HR:
+            log.debug("user cancelled IFileOpenDialog")
             Release(ppv)
             return None
         if hr != S_OK:
@@ -655,6 +695,9 @@ def _pick_win_ifiledialog(title: str) -> Optional[str]:
         psi = c_void_p()
         hr = GetResult(ppv, byref(psi))
         if hr != S_OK or not psi.value:
+            log.debug(
+                "IFileDialog.GetResult failed: 0x%08X", hr & 0xFFFFFFFF,
+            )
             Release(ppv)
             return None
         try:
@@ -838,12 +881,17 @@ def _native_folder_picker(title: str) -> Optional[str]:
     if sys.platform == "win32":
         # v0.21.x: modern Win10/11 IFileOpenDialog first - matches
         # File Explorer's chrome and is instant (no subprocess).
+        # Returns _PICKER_UNAVAILABLE if COM/CLSID setup failed;
+        # str/None otherwise. Cancellation (None) MUST NOT fall
+        # through - the user just saw + dismissed a dialog, a
+        # second one popping up would be confusing.
         picked = _pick_win_ifiledialog(title)
-        if picked is not None:
-            return picked
+        if picked is not _PICKER_UNAVAILABLE:
+            return picked  # str (picked path) or None (cancelled)
         # Legacy PowerShell + WinForms FolderBrowserDialog as a
-        # second resort. Looks dated but works when the modern
-        # picker can't initialize (e.g. ancient Windows).
+        # second resort. Only reached when the modern picker
+        # failed to initialize (REGDB_E_CLASSNOTREG on stripped
+        # Windows installs, COM init failure, etc.).
         picked = _pick_win_powershell(title)
         if picked is not None:
             return picked
