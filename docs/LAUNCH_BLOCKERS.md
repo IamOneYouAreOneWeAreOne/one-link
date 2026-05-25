@@ -1,94 +1,104 @@
-# Launch blockers — items that need YOU
+# Launch blockers — what's left, and how we solve it ourselves
 
-This is the honest list of what's left before launch that I (the
-codebase) can't fix on my own. Some need money. Some need accounts.
-Some need a human on a fresh machine. None are surprises — they're
-the things you'd hit on day one of public launch and wish you'd
-done first.
+One Link is for the people. No accounts. No corporate
+gatekeepers. We build everything ourselves. This doc enumerates
+what's left before launch and the sovereign-by-design path
+through each one — not "go pay a corporation to bless us."
 
-## Hard blockers (loss of first-time-user trust)
+## The corporate-cert temptation, and why we refuse it
 
-### 1. Windows code-signing certificate
+The obvious "fix" for SmartScreen / Gatekeeper warnings is to
+buy a Windows code-signing certificate ($300-700/yr from
+DigiCert / Sectigo / Comodo) and join the Apple Developer
+Program ($99/yr) to notarize a macOS binary. We don't do this.
 
-**Why this matters:** Every Windows first-time user sees a
-SmartScreen warning ("Windows protected your PC") on the unsigned
-`.exe`. A normal user reads that as "this might be malware" and
-closes the dialog. You lose ~30% of installs at this gate.
+**Why:**
+- A corporate CA can revoke our cert under government pressure.
+  This has happened to other privacy tools.
+- Apple can revoke Developer ID at will. Same with Microsoft.
+- Either revocation kills the project's distribution overnight.
+- The whole point of One Link is that no one can take it away
+  from the people running it. Buying corporate blessing means
+  someone can take it away.
 
-**The website's SmartScreen guidance already exists** (good!), but
-it's a workaround, not a fix. Real fix: sign the binary so the
-warning never appears.
-
-**What you need:**
-- An EV code-signing certificate ($300–$700/year from
-  DigiCert / Sectigo / Comodo). Standard OV certs ($200/year)
-  reduce but don't eliminate the warning.
-- `signtool.exe` in the release workflow (`.github/workflows/
-  reproducible_release.yml`).
-- The cert's private key stored as a GitHub Actions secret
-  (`WINDOWS_CODE_SIGN_PFX` + passphrase).
-
-**Workflow change needed in `reproducible_release.yml`:** after
-the `build_windows_binary` step, add a `signtool sign /f
-$WINDOWS_PFX /p $WINDOWS_PFX_PASS /tr http://timestamp.digicert.com
-/td sha256 /fd sha256 dist/one-link.exe` step.
+**What we do instead:** treat the OS warning as the first
+chance to teach the user that this is a deliberate
+sovereignty stance, not an oversight.
 
 ---
 
-### 2. macOS notarization
+## What's left
 
-**Why this matters:** Every macOS first-time user sees Gatekeeper
-("cannot be opened because the developer cannot be verified"). The
-right-click-Open workaround exists on the website but the
-unverified-developer line still reads as "malware" to non-technical
-users.
+### 1. SmartScreen warning UX (Windows)
 
-**What you need:**
-- Apple Developer Program membership ($99/year).
-- A Developer ID Application certificate exported as `.p12`.
-- Notarytool credentials (Apple ID + app-specific password).
-- The `.dmg` build path in `release.yml` extended with
-  `codesign --deep --sign "Developer ID Application: ..." --options
-  runtime` + `xcrun notarytool submit ... --wait` + `xcrun stapler
-  staple`.
+**Today:** Windows users see "Windows protected your PC" on
+first launch. They click `More info → Run anyway` to proceed.
+A non-technical user may close the dialog thinking it's malware.
 
----
+**Our fix (build it ourselves):**
 
-### 3. Android testing — `⚠️ untested` everywhere
+- **Website download page already explains the warning** —
+  good. Audit found this is in place.
+- **Add a 30-second screenshot walkthrough** of the
+  click-through. Visual > text for non-technical users.
+- **First-launch in-app banner** that closes the loop: "Glad
+  you got past the SmartScreen warning. Here's why we don't
+  pay Microsoft to remove it. (Read more)" — turn the
+  friction into a moment of trust-building.
+- **`one-link verify-this-install` command** already ships
+  (rollup hash + Sigstore verify instructions). Users who
+  want to verify before running can.
 
-**Why this matters:** The ROADMAP capability table marks
-Android `⚠️ untested` for literally every feature. We don't
-actually know if it works. Could be 100% functional, could be
-totally broken. Shipping with "untested on Android" in the
-capability table is shipping on Hope.
-
-**What you need:**
-- An Android device or emulator (Android Studio + AVD).
-- 30 minutes to walk: install → pair with a desktop daemon → send
-  a message → send a photo → voice call attempt.
-- Update the ROADMAP table with the actual `✅` / `⚠️` /
-  `❌` per cell based on what you saw.
-- Likely outcome: some subset works, some doesn't. Document
-  what works in the website's download page so users have
-  honest expectations.
+We accept the install-rate cost of the warning in exchange for
+the property that no corporation can revoke our right to ship.
 
 ---
 
-### 4. Website: meta-description vs reality mismatch (P0)
+### 2. Gatekeeper warning UX (macOS)
 
-**Why this matters:** The homepage's meta description claims
-"Works on Windows, macOS, Linux, Android, iOS" but the
-download page (correctly) says "Windows + Linux ship today."
-A user finding One Link via search engines sees the meta
-description first and tries to download for their Mac, then
-hits the honest "in flight" status. First-impression damage.
+**Today:** macOS users see "cannot be opened because the
+developer cannot be verified." They right-click → Open to
+proceed. Same friction shape as #1.
 
-**Where:** `weareone-link.org` repo, paths approximately:
-- `content/weareone-link.org/index.cl` — homepage meta + hero
-- `content/weareone-link.org/download/index.cl` — download page
-- `content/weareone-link.org/features/index.cl` — features list
+**Our fix:** same shape as Windows — better website copy +
+in-app post-install confirmation + the verify-this-install
+command. We will never buy an Apple Developer membership to
+make this go away.
 
-**What to change (audit findings from 2026-05-25):**
+---
+
+### 3. Android — `⚠️ untested` everywhere
+
+**Today:** ROADMAP capability table marks every Android cell
+`⚠️ untested`. Nobody has actually tested it.
+
+**Our fix:** test it ourselves. An Android device (or AVD
+emulator from android-studio, which is open-source) is the
+only requirement. No Google Play account. No Play Store
+listing. We distribute via:
+
+- The website's download page (direct APK)
+- F-Droid (community-run, sovereign)
+- IPFS / Tor mirrors
+
+No corporate distribution gate.
+
+**Action:** 30 minutes on a device or emulator. Walk install
+→ pair → message → photo → call. Update the ROADMAP table
+with the actual `✅` / `⚠️` / `❌` per cell. Document the
+real install path on the website.
+
+---
+
+### 4. Website meta-vs-reality mismatch (P0)
+
+**Today:** Homepage meta description claims "Works on Windows,
+macOS, Linux, Android, iOS" but the download page (correctly)
+says "Windows + Linux ship today." First-impression damage
+for users searching from a Mac.
+
+**Our fix:** edit the website. These are website-repo edits,
+not daemon-repo. Audit findings (2026-05-25):
 
   | File:Line | Current | Suggested |
   |---|---|---|
@@ -97,104 +107,123 @@ hits the honest "in flight" status. First-impression damage.
   | `/features/index.html:98–99` | "Shared folders" unqualified | Add "(Desktop only today)" |
   | `/download/index.html:56` | "Detecting your device..." placeholder visible on load | Pre-detect or show a minimal spinner |
   | `/download/index.html:177, 241` | "ML-DSA-65 pending (lands v0.22)" | "Coming in next release" (no version pin in user copy) |
-  | `/features/index.html:167` | "What lands in v0.22" header | "What lands next" (no version pin) |
+  | `/features/index.html:167` | "What lands in v0.22" header | "What lands next" |
   | `/features/index.html:186` | "Last reviewed 2026-05-19" visible mid-page | Move to footer, or drop |
   | `/index.html:54` | Schema.org `operatingSystem: "Windows, macOS, Linux, Android, iOS"` | `"Windows, Linux"` (matches reality) |
   | `/roadmap/index.html:250–280` | "Will not build" section uses negative framing | Reframe as "What One Link stays focused on" |
 
-These are website-repo edits, not daemon-repo. Tackle in a
-separate session against `C:\Users\Josh\Projects\One_link_Website\`.
+These are find/replace edits against `C:\Users\Josh\Projects\One_link_Website\`. Bounded scope, ~1-2 hours.
 
 ---
 
 ### 5. Real human cold-install walk on each OS
 
-**Why this matters:** I (the codebase) measure cold-install
-stopwatch at 8 seconds on a dev box. I don't know what a real
-non-technical user sees on a fresh Windows machine that's
-never had One Link installed:
-- Does the download from GitHub actually land where they
-  expect?
-- Does SmartScreen scare them off, or do they read the
-  guidance?
-- Does the daemon start cleanly, or does the antivirus
-  quarantine it?
-- Does the system tray icon appear, or get hidden in the
-  overflow tray?
-- Does the browser tab open automatically, or do they have
-  to find the URL?
-- Does pairing actually work via QR, or is the QR too small
-  / too dim / cropped?
+**Today:** The codebase measures cold-install at 8 seconds
+end-to-end. That's daemon-spawn-to-chat-pane. It does NOT
+measure "download from website → SmartScreen warning →
+click through → see UI → pair phone via QR → send message."
+A real human on a fresh machine has never done this.
 
-**What you need:**
-- A clean Windows VM or borrowed laptop.
-- 30 minutes to walk through with a stopwatch.
-- A clean macOS device or VM (if you want to test Mac before
-  fix #2 lands).
-- Notes on every place you had to think, wait, or guess.
+**Our fix:** us. A clean Windows VM (free; built into Win10/11
+Pro via Hyper-V, or VirtualBox is free + open-source) + 30
+minutes. Walk the full flow. Notes every place you had to
+think, wait, or guess. We iterate until "non-technical
+friend can do this without asking."
 
 ---
 
-## Soft blockers (launchable without, but better with)
+### 6. Crash / error reporting — sovereign, not Sentry
 
-### 6. Production telemetry / crash reporting
+**Today:** Field failures surface only when users click "Copy
+error report" + paste into a GitHub issue. High-friction; most
+users won't bother.
 
-Right now, you find out about field failures only when users
-explicitly click "Copy error report" + paste it into a GitHub
-issue. That's a high-friction reporting path; most users won't
-do it. A small opt-in crash beacon (anonymized hash of the
-exception + version + OS) would surface 10x more bugs.
+**Our fix (build it ourselves):**
 
-**Options:**
-- Self-host (POST to a daemon endpoint you control) — preserves
-  sovereignty, requires running infra.
-- Sentry (paid past small free tier) — fastest to set up, adds
-  a third-party dependency for error data.
-
-### 7. Localization
-
-ROADMAP says English-only. The codebase has zero i18n
-infrastructure (no `i18next`, no message catalogs, no
-`{{translate}}` patterns). For an international launch, even a
-"Spanish + Portuguese + Mandarin" pass would 10x the addressable
-audience.
-
-### 8. Accessibility full sweep
-
-Some ARIA labels exist, some don't. No screen-reader walk has
-been done. No keyboard-only navigation test. No high-contrast
-mode validation. This is a category of work I can do part of
-(I'll do a quick pass in this session) but a real a11y audit
-needs human review.
-
-### 9. Group invite acceptance on phone
-
-Last Phase B gap per ROADMAP. Phone can see groups, send/edit/
-react/delete in groups, manage members, copy invites, leave —
-but cannot ACCEPT an invite link directly on the phone. Workaround:
-accept on desktop first. Phone-side acceptance closes Phase B.
+- **Self-hosted opt-in beacon.** A small endpoint in our own
+  daemon-cluster (or a peer-to-peer aggregator — the project
+  has CRDT primitives; an "anonymous error CRDT" is the
+  sovereign shape). Users explicitly opt in. Sanitized data
+  only. We never use Sentry / Datadog / Bugsnag / any
+  third-party processor.
+- **Until that ships:** the existing "Copy error report"
+  button + the GitHub issues link in Settings → About are
+  the path.
 
 ---
 
-## Recommendation: soft launch first
+### 7. Localization — community-driven
 
-Items 1, 2, 4, 5 are real blockers that will damage first
-impressions. Item 3 is unknown territory. Items 6–9 are
-nice-to-have.
+**Today:** English only.
 
-The lowest-risk path to a real launch:
+**Our fix:** community translations. The codebase doesn't ship
+with i18n infrastructure yet; first step is to externalize all
+user-facing strings into a message catalog (a one-time
+refactor of `peer.html` + `index.html` + the server's HTML
+templates). After that, native speakers submit translations as
+PRs. No paid translation service. No corporate CMS. The
+community owns the language coverage.
 
-1. **Fix #4 (website mismatch)** — 1-2 hours in the website repo.
-2. **Do #5 (cold-install walk)** on Windows + your own Mac — 1-2 hours.
-3. **Soft launch** to 10-20 friends/family. Tell them it's early
-   access. Watch what breaks. Fix it. Re-launch broader after a
-   week with confidence in the install path.
-4. **Pursue #1 + #2 in parallel** — code-signing has a long lead
-   time (cert validation can take a week+), notarization has a
-   shorter one (Apple is same-day once you have the account).
-5. **#3 (Android)** can wait until #1 + #2 are done — there's no
-   point announcing Android support if you have to walk users
-   through Chrome's cert workaround anyway.
+---
 
-The point of this list is to make the unfixable-by-me visible.
-None of it is a surprise. All of it is actionable.
+### 8. Accessibility — quick pass done, full audit needs human
+
+**Today:** We did a quick a11y pass this session (icon-only
+buttons + input aria-labels + modal a11y attrs + 4 new tests).
+A full WCAG-2 audit needs a human with a screen reader.
+
+**Our fix:** us, or a community member who uses a screen
+reader daily. Walk every major flow with VoiceOver / NVDA /
+Orca. File issues for everything that fails. No paid a11y
+consultancy.
+
+---
+
+### 9. Phone group invite acceptance
+
+**Today:** Last Phase B gap per ROADMAP. Phone can see groups,
+send/edit/react/delete in groups, manage members, copy invites,
+leave — but cannot ACCEPT an invite link directly on the phone.
+
+**Our fix:** code. Bounded ~1-2 hours of in-repo work.
+
+---
+
+## What this list is NOT
+
+It is not a list of "things you need to pay for." Every item
+above is solvable with code, infrastructure we already control,
+or our own time. Friction is acceptable. Corporate dependency
+is not.
+
+If a future contributor proposes "let's just buy a code-signing
+cert / Apple Developer membership / Sentry account to make this
+easier," the answer is no, and the reason is in
+`docs/GOVERNANCE.md`: the structure that keeps One Link free of
+corporate capture is the same structure that keeps users free.
+We don't shortcut around it for our own convenience.
+
+---
+
+## Recommended next-action order
+
+1. **Edit the website** (#4) — ~2 hours, biggest visible
+   impression-cost win. Bounded, you already own the repo.
+2. **Walk Windows cold-install on a fresh box** (#5) — ~30
+   minutes, surfaces real bugs nothing else will.
+3. **Test on an Android device or emulator** (#3) — ~30
+   minutes, updates the capability table with truth.
+4. **Walk macOS cold-install** (#5 again) — your call whether
+   to fix observed bugs before or after Android.
+5. **Soft launch** — 10-20 friends/family, week of bug
+   intake, fix, broaden.
+6. **#1 + #2 (SmartScreen / Gatekeeper UX polish)** —
+   sequence into website work as you learn what real users
+   ask about.
+7. **#7 (localization)** + **#8 (full a11y)** + **#9 (phone
+   group invite)** — post-soft-launch, prioritize by what
+   users actually request.
+
+The point is to ship, hear from users, iterate. Not to wait
+for a fictional "everything perfect" state that corporations
+sell you via paid blessings.
