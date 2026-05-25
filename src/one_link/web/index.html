@@ -9115,9 +9115,9 @@
           <div class="sas-art" id="pair-sas-art" style="display:none;"></div>
         </div>
         <div class="actions">
-          <button class="btn-danger" id="pair-mismatch">Codes don't match</button>
+          <button class="btn-danger" id="pair-mismatch">They don't match</button>
           <button class="btn-ghost"  id="pair-cancel">Cancel</button>
-          <button class="btn-primary" id="pair-match">Codes match</button>
+          <button class="btn-primary" id="pair-match">They match</button>
         </div>
       </div>
       <!-- Stage 2: post-pair verify nudge. Hidden until both
@@ -10192,6 +10192,35 @@
               Built on Coherence; yes, we drank our own kool-aid.
               <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link" target="_blank" rel="noopener" class="learn-more">Source on GitHub</a>
             </p>
+            <!-- v0.21.x: report a bug + see your daemon log -
+                 the two things a user reaches for when something
+                 misbehaves. Both surfaced explicitly so users
+                 don't have to ask 'where do I report this?' on
+                 chat. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>If something feels wrong</span></div>
+              <p class="settings-help">
+                Open a bug report on GitHub. The link opens in a new
+                tab; once it's open use the "Copy report" button
+                above to grab a sanitized diagnostic bundle you can
+                paste into the issue. We never know anything about
+                bugs you don't tell us about.
+              </p>
+              <div class="mini-actions wrap">
+                <a class="btn-ghost" id="settings-about-report-bug"
+                   href="https://github.com/IamOneYouAreOneWeAreOne/one-link/issues/new"
+                   target="_blank" rel="noopener noreferrer">
+                  Report a bug on GitHub
+                </a>
+                <button type="button" class="btn-ghost"
+                        id="settings-about-show-log-location"
+                        title="Show where this device's daemon log is on disk">
+                  Show daemon log location
+                </button>
+              </div>
+              <p class="settings-help" id="settings-about-log-location-out"
+                 style="display:none; margin-top:8px; font-family:var(--font-mono); font-size:12px;"></p>
+            </div>
             <!-- v0.21.x: re-open the welcome wizard for users who
                  skipped it on first launch or just want a refresher. -->
             <div class="settings-section">
@@ -10775,8 +10804,8 @@
           <span id="one-setup-pair-timing">Waiting for confirmation.</span>
           <div class="setup-code" id="one-setup-trust-code">000 000</div>
           <div class="onboarding-actions">
-            <button class="btn-danger" id="one-setup-codes-no">Codes do not match</button>
-            <button class="btn-primary" id="one-setup-codes-yes">Codes match</button>
+            <button class="btn-danger" id="one-setup-codes-no">They don't match</button>
+            <button class="btn-primary" id="one-setup-codes-yes">They match</button>
           </div>
         </div>
         <div class="onboarding-actions">
@@ -30990,6 +31019,51 @@
   });
   $("#settings-about-download-diagnostics")?.addEventListener("click", () => {
     $("#settings-export-diagnostics")?.click();
+  });
+
+  // v0.21.x: 'Show daemon log location' surfaces where the
+  // daemon writes its log file on disk + offers to copy the
+  // path to the clipboard. Avoids the common 'how do I find
+  // the log?' support question.
+  $("#settings-about-show-log-location")?.addEventListener("click", async () => {
+    const out = $("#settings-about-log-location-out");
+    if (!out) return;
+    out.style.display = "";
+    out.textContent = "Looking up log location…";
+    try {
+      // /api/me already includes the daemon's package + data
+      // roots. Log file lives at <data_dir>/data/daemon.log on
+      // every platform (the daemon writes it via debug_log on
+      // startup).
+      const me = await api.get("/api/me");
+      const dataDir = me?.data_dir
+        || me?.package_root
+        || "(unknown - check your One Link folder for daemon.log)";
+      const guess = dataDir.replace(/[\\/]+$/, "") + "/daemon.log";
+      out.innerHTML = "";
+      const path = document.createElement("code");
+      path.textContent = guess;
+      path.style.cssText = "user-select:all; word-break:break-all;";
+      out.appendChild(path);
+      out.appendChild(document.createElement("br"));
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "btn-ghost";
+      copyBtn.style.marginTop = "6px";
+      copyBtn.textContent = "Copy path";
+      copyBtn.onclick = async (ev) => {
+        ev.preventDefault();
+        try {
+          await navigator.clipboard.writeText(guess);
+          toast("Path copied. Paste into File Explorer or Finder.", "good", 3000);
+        } catch (e) {
+          toast(`Could not copy: ${errorToastBody(e)}`, "bad");
+        }
+      };
+      out.appendChild(copyBtn);
+    } catch (e) {
+      out.textContent = `Could not look up log location: ${errorToastBody(e)}`;
+    }
   });
 
   // Settings -> About add-device QR. Uses the same One Setup device

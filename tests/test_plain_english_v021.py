@@ -266,6 +266,45 @@ def test_device_not_ready_toast_explains_what_to_do(index_html):
     assert "That device is still starting up. Try again in a few seconds." in index_html
 
 
+def test_onboarding_codes_buttons_use_they_match_phrasing(index_html):
+    """Onboarding step 4's pair-confirm buttons used to say 'Codes
+    match' / 'Codes do not match'. The peer.html SAS card already
+    uses 'They match' / 'They don't match'; consistency matters.
+    Same audit category as the peer-side fix - awkward phrasing."""
+    assert '>They match<' in index_html
+    assert ">They don't match<" in index_html
+    # The old onboarding-button labels must be gone.
+    assert ">Codes match<" not in index_html
+    assert ">Codes do not match<" not in index_html
+
+
+def test_settings_about_has_report_a_bug_github_link(index_html):
+    """The launch checklist (docs/LAUNCH_CHECKLIST.md item E)
+    requires a discoverable in-app path to file a bug. Pin: the
+    Settings -> About surface has a 'Report a bug on GitHub' link
+    that opens issues/new in a new tab."""
+    assert 'id="settings-about-report-bug"' in index_html
+    # The link target is GitHub issues/new on the canonical repo.
+    assert "github.com/IamOneYouAreOneWeAreOne/one-link/issues/new" in index_html
+    assert 'target="_blank"' in index_html
+    # Surrounding copy points the user at the Copy report button so
+    # they include diagnostics with their issue.
+    assert 'Copy report' in index_html
+
+
+def test_settings_about_has_daemon_log_location_button(index_html):
+    """Same launch-checklist item: a user reaching for the log
+    should not have to ask 'where is it?' on chat. Pin the
+    Settings -> About surface that surfaces the log path +
+    copies it to clipboard on click."""
+    assert 'id="settings-about-show-log-location"' in index_html
+    assert "Show daemon log location" in index_html
+    # The handler is wired.
+    assert '#settings-about-show-log-location' in index_html
+    # And it offers a one-click copy-path action.
+    assert 'Paste into File Explorer or Finder.' in index_html
+
+
 def test_device_guardian_jargon_replaced_with_safety_language(index_html):
     """'Device Guardian' is an internal subsystem name that leaked
     into user-visible status text + error toasts. Replace with
