@@ -322,47 +322,68 @@ _CONNECT_LANDING_HTML_IOS = """<!doctype html>
 </head>
 <body>
   <h1>Add this device</h1>
-  <p>You're seconds away. Two taps on iPhone:</p>
+  <p>About 30 seconds. We'll walk you through every tap.</p>
 
   <div class="lede">
     Make sure this phone is on the <strong>same Wi-Fi</strong> as the
-    computer you're pairing with. Cellular / different networks won't reach.
+    computer you're pairing with. Cellular won't reach.
   </div>
 
   <div class="step">
-    <h2><span class="step-num">1</span><span>Download trust profile</span></h2>
-    <p>iOS needs this computer's certificate to pair securely. One-time install per network.</p>
-    <a class="btn" href="{mobileconfig_url}">Download trust profile</a>
-    <p class="hint">Safari pops up <strong>"This website is trying to download a configuration profile"</strong> → tap <strong>Allow</strong>, then tap <strong>Close</strong>.</p>
+    <h2><span class="step-num">1</span><span>Tap to download</span></h2>
+    <p>This gives your iPhone permission to talk securely to this one
+    specific computer. Nothing else changes on your phone.</p>
+    <a class="btn" href="{mobileconfig_url}">Get permission file</a>
+    <p class="hint">Safari will pop up: <strong>"This website is trying to download a configuration profile."</strong> Tap <strong>Allow</strong>, then tap <strong>Close</strong>.</p>
+    <details style="margin-top:10px;">
+      <summary class="hint" style="cursor:pointer;">Nothing happened when I tapped?</summary>
+      <p class="hint" style="margin-top:8px;">Make sure you're using Safari (not Chrome or another browser) - only Safari can install permission files on iPhone. Close this page in Chrome and re-open the QR link in Safari.</p>
+    </details>
   </div>
 
   <div class="step">
-    <h2><span class="step-num">2</span><span>Install the profile in Settings</span></h2>
-    <p class="hint">Open the iOS <strong>Settings app</strong> and navigate:</p>
-    <ol class="hint" style="padding-left:22px; margin-top:6px; line-height:1.7;">
+    <h2><span class="step-num">2</span><span>Open Settings → install it</span></h2>
+    <p class="hint">Switch to the <strong>Settings</strong> app on your iPhone. Then:</p>
+    <ol class="hint" style="padding-left:22px; margin-top:6px; line-height:1.9;">
       <li>Tap <strong>General</strong></li>
-      <li>Tap <strong>VPN &amp; Device Management</strong></li>
+      <li>Scroll down. Tap <strong>VPN &amp; Device Management</strong></li>
       <li>Under "Downloaded Profile" tap <strong>One Link Trust</strong></li>
-      <li>Tap <strong>Install</strong> top-right → enter passcode → <strong>Install</strong> → <strong>Done</strong></li>
+      <li>Tap <strong>Install</strong> in the top-right corner</li>
+      <li>Enter your iPhone passcode if it asks</li>
+      <li>Tap <strong>Install</strong> again on the warning screen, then <strong>Done</strong></li>
     </ol>
+    <details style="margin-top:10px;">
+      <summary class="hint" style="cursor:pointer;">I don't see "VPN &amp; Device Management"</summary>
+      <p class="hint" style="margin-top:8px;">This row only appears after you tap "Allow" in step 1. Go back to step 1, tap the button again, and tap Allow when Safari asks.</p>
+    </details>
   </div>
 
   <div class="step">
-    <h2><span class="step-num">3</span><span>Trust the certificate</span></h2>
-    <p class="hint">Installing the profile isn't enough — iOS won't trust it for HTTPS until you flip one more switch. Still in <strong>Settings app</strong>:</p>
-    <ol class="hint" style="padding-left:22px; margin-top:6px; line-height:1.7;">
-      <li>Tap <strong>General</strong></li>
+    <h2><span class="step-num">3</span><span>Turn on the trust switch</span></h2>
+    <p class="hint">One more flip and you're done. Still in the <strong>Settings</strong> app:</p>
+    <ol class="hint" style="padding-left:22px; margin-top:6px; line-height:1.9;">
+      <li>Tap <strong>General</strong> (top of Settings)</li>
       <li>Tap <strong>About</strong></li>
-      <li>Scroll down, tap <strong>Certificate Trust Settings</strong></li>
-      <li>Flip the toggle ON for <strong>One Link Root CA</strong> → tap <strong>Continue</strong> on the warning</li>
+      <li>Scroll all the way down. Tap <strong>Certificate Trust Settings</strong></li>
+      <li>Flip the <strong>One Link Root CA</strong> switch on (it turns green)</li>
+      <li>Tap <strong>Continue</strong> when iOS asks if you're sure</li>
     </ol>
+    <details style="margin-top:10px;">
+      <summary class="hint" style="cursor:pointer;">Why this extra step?</summary>
+      <p class="hint" style="margin-top:8px;">iOS plays it safe by default - installing the profile gets you partway, but the trust switch is what tells iPhone it's actually OK to use it for secure connections. It's a one-time switch per computer; you won't see this screen again unless you pair another laptop.</p>
+    </details>
   </div>
 
   <div class="step">
-    <h2><span class="step-num">4</span><span>Pair this device</span></h2>
-    <p>Now you're set. Tap below — your computer pops up a 5-word confirmation. Tap "match" on both ends.</p>
+    <h2><span class="step-num">4</span><span>Come back here and pair</span></h2>
+    <p>You're set. Tap below. Both your iPhone and the computer will
+    show the same 5 words - if they match, tap <strong>match</strong>
+    on both ends.</p>
     <a class="btn btn-secondary" href="{pair_url}">Continue to pair</a>
-    <p class="hint">If you still see "Not Private" or "Connection failed," double-check step 3 — the Certificate Trust toggle for "One Link Root CA" is the most-commonly-missed step.</p>
+    <details style="margin-top:10px;">
+      <summary class="hint" style="cursor:pointer;">I still see "Not Private" or "Connection failed"</summary>
+      <p class="hint" style="margin-top:8px;">Go back to step 3 and double-check the switch is on. The most-missed step is the trust switch - the profile is installed but iOS isn't using it yet.</p>
+    </details>
   </div>
 </body>
 </html>

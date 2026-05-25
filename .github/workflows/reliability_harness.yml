@@ -1,0 +1,78 @@
+name: reliability harness (50-pair soak)
+
+# Runs scripts/reliability_harness.py with --pairs 50 nightly. The
+# job replaces the ROADMAP's "⚠️ untested" entries with measured
+# truth: out of 50 fresh pair attempts on a clean runner, how many
+# complete cleanly?
+#
+# Per-step pass rates land in the artifact (monitor_result.json).
+# If overall_fail > 0, CI turns red + the JSON tells you which
+# step regressed (spawn timeout, port collision, identity
+# initialization race, etc).
+#
+# Why nightly + Windows/Linux:
+#   - Daemon-spawn races are timing-sensitive. Catching a 1-in-50
+#     regression needs N=50 every night.
+#   - Windows has tighter port-binding behavior than Linux; a
+#     regression that only manifests on Windows is invisible if
+#     CI only runs on Linux.
+
+on:
+  schedule:
+    - cron: "0 7 * * *"  # daily at 07:00 UTC
+  push:
+    branches: [master, main]
+    paths:
+      # Only re-run on push when something that could affect daemon
+      # lifecycle changed. Avoids burning Actions minutes on doc-
+      # only commits.
+      - "src/one_link/cli.py"
+      - "src/one_link/daemon.py"
+      - "src/one_link/server.py"
+      - "src/one_link/app.py"
+      - "src/one_link/state.py"
+      - "scripts/reliability_harness.py"
+      - ".github/workflows/reliability_harness.yml"
+  workflow_dispatch:
+    inputs:
+      pairs:
+        description: "Number of pair attempts"
+        default: "50"
+        required: false
+      parallel:
+        description: "Concurrent workers (>1 stresses port-bind)"
+        default: "1"
+        required: false
+
+jobs:
+  soak:
+    name: 50-pair soak / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: run reliability harness
+        run: |
+          python scripts/reliability_harness.py \
+            --pairs ${{ github.event.inputs.pairs || '50' }} \
+            --parallel ${{ github.event.inputs.parallel || '1' }} \
+            --out reliability_${{ matrix.os }}_${{ github.run_number }}.json
+      - name: upload reliability report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-${{ matrix.os }}-${{ github.run_number }}
+          path: reliability_${{ matrix.os }}_${{ github.run_number }}.json
+          retention-days: 90

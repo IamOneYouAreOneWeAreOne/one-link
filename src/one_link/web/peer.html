@@ -306,7 +306,7 @@
   <div class="card" id="autopair-card" hidden>
     <h2>Connecting your phone</h2>
     <div class="body">
-      <p class="help" id="autopair-status">Setting up secure link…</p>
+      <p class="help" id="autopair-status">Connecting to your laptop. This usually takes a few seconds.</p>
       <div class="row" style="margin-top:10px;">
         <span class="pill dim" id="autopair-pill">starting</span>
       </div>
@@ -702,16 +702,16 @@
         <button class="btn danger" id="btn-reset" type="button">Reset identity</button>
       </div>
       <p class="help" style="margin-top:10px;" id="passphrase-help">
-        Set a passphrase to wrap this device's keypair with AES-GCM
-        on disk. You'll be prompted to unlock on every visit. Without
-        a passphrase the keypair is plaintext (still origin-private,
-        but readable by anyone with same-user filesystem access).
+        Set a passphrase to encrypt this device's identity on disk.
+        You'll type it on every visit. Without one, anyone who can
+        log in as you on this phone could read your identity file -
+        which on a phone you trust is usually fine.
       </p>
       <p class="help" style="margin-top:10px;">
-        Reset wipes this device's identity from OPFS. After reset,
-        next reload generates a fresh keypair. You can't recover an
-        old identity from a new one — back it up first via Export
-        if you care about message continuity.
+        Reset wipes this device's identity. Next time you open the
+        page you'll get a fresh identity, so your laptop won't
+        recognize this phone until you re-pair. Export first if you
+        want to keep the chat history that's already on this phone.
       </p>
     </div>
   </div>
@@ -750,12 +750,11 @@
     <h2>Connect to mesh</h2>
     <div class="body">
       <p class="help">
-        Register with a One Link rendezvous server so other peers
-        can find this device. You can run your own rendezvous
-        (<code>python -m one_link.rendezvous_server</code>) or use
-        a public one. Registration is signed by your local Ed25519
-        keypair; the server stores presence only, no message
-        content.
+        Register with a meeting point so other devices can find this
+        phone when you're not on the same Wi-Fi. You can run your
+        own (<code>python -m one_link.rendezvous_server</code>) or
+        use a public one. The meeting point only knows you're
+        online - it never sees your messages or files.
       </p>
       <div class="row" style="margin-top:12px; gap:8px;">
         <input type="text"
@@ -833,27 +832,27 @@
        (or attacker who controls signaling) could MITM the
        channel. -->
   <div class="card" id="pair-card" data-tier="advanced" hidden>
-    <h2>Verify the connection</h2>
+    <h2>Confirm it's really you</h2>
     <div class="body">
-      <p class="help" id="pair-status">Setting up secure handshake…</p>
+      <p class="help" id="pair-status">Setting up the connection. One moment.</p>
 
       <div id="pair-sas-wrap" hidden style="margin-top:14px;">
-        <p class="help" style="margin-bottom:6px;">Verification code</p>
+        <p class="help" style="margin-bottom:6px;">Confirmation code</p>
         <div class="mono" id="pair-sas-digits"
              style="font-size:22px; letter-spacing:.18em; text-align:center; padding:14px;"></div>
-        <p class="help" style="margin-top:10px; margin-bottom:6px;">Visual art</p>
+        <p class="help" style="margin-top:10px; margin-bottom:6px;">Picture</p>
         <div id="pair-sas-art"
              style="display:grid; grid-template-columns:repeat(6, 1fr); gap:6px; padding:8px;
                     background:var(--bg-3); border-radius:10px; min-height:64px;"></div>
         <p class="help" style="margin-top:10px;">
-          Compare the code + art with the same surface on the other
-          device. They MUST be identical. Only confirm if you and the
-          other person can see them side-by-side (in person, video,
-          or trusted phone call).
+          Look at your other device. It shows the same numbers and
+          picture. They should match exactly. Only tap "They match"
+          if you can actually see the other device right now (in
+          person or on a call you trust).
         </p>
         <div class="row" style="margin-top:14px; gap:8px;">
-          <button class="btn" id="btn-pair-match">Codes match</button>
-          <button class="btn danger" id="btn-pair-mismatch">Don't match</button>
+          <button class="btn" id="btn-pair-match">They match</button>
+          <button class="btn danger" id="btn-pair-mismatch">They don't match</button>
         </div>
       </div>
 
@@ -1290,23 +1289,29 @@
     // restricted, and "no web crypto" is misleading in that case.
     if (!window.isSecureContext) {
       state.boot_error_msg = "page loaded over plain HTTP; Web Crypto needs HTTPS";
-      setPill("bad", "insecure context");
+      setPill("bad", "needs https");
       text($("#ident-status"),
-        "Browsers block Web Crypto on plain HTTP to a LAN address. " +
-        "Reopen the QR on your laptop to get an https:// link.");
+        "This page needs to load over https://, not http://. " +
+        "Open the QR code on your laptop again and scan it - the " +
+        "fresh link will work.");
       return;
     }
     if (!window.crypto || !crypto.subtle) {
       state.boot_error_msg = "Web Crypto not exposed";
-      setPill("bad", "no web crypto");
-      text($("#ident-status"), "This browser doesn't expose Web Crypto. Try Chrome, Edge, Safari 17+, or Firefox 130+.");
+      setPill("bad", "browser too old");
+      text($("#ident-status"),
+        "Your browser is too old to run One Link safely. " +
+        "Update Safari (iOS 17 or newer), Chrome, Edge, or " +
+        "Firefox, then try again.");
       return;
     }
     if (!navigator.storage || !navigator.storage.getDirectory) {
       state.boot_error_msg = "OPFS not exposed";
-      setPill("bad", "no opfs");
+      setPill("bad", "browser too old");
       text($("#ident-status"),
-        "This browser doesn't expose OPFS. Identity needs persistent storage. Try Chrome 86+, Edge 86+, Safari 15.2+, or Firefox 111+.");
+        "Your browser doesn't support the secure storage One Link " +
+        "uses to remember your identity. Update Safari (iOS 15.2+), " +
+        "Chrome (86+), Edge (86+), or Firefox (111+) and try again.");
       return;
     }
 
@@ -1422,7 +1427,7 @@
     text(status, "");
     const btn = $("#btn-unlock");
     if (btn) btn.disabled = true;
-    setDiag("deriving key (PBKDF2 600k iterations)…");
+    setDiag("Unlocking. This takes a second.");
     try {
       await _unlockWith(pass);
       input.value = "";
