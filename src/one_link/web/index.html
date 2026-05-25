@@ -7248,28 +7248,38 @@
   }
   .wnm-dismiss:hover { filter: brightness(1.08); }
 
-  /* v0.21.x: first-action chips on a paired-but-empty chat. */
-  .first-action-empty {
+  /* v0.21.x: first-action chips on a paired-but-empty chat.
+     .search-empty (zero search hits) reuses the same look so the
+     two empty states feel like one design language. */
+  .first-action-empty,
+  .search-empty {
     margin: auto;
     max-width: 420px;
     padding: 32px 24px;
     text-align: center;
     color: var(--text);
   }
-  .first-action-empty .empty-glyph {
+  .first-action-empty .empty-glyph,
+  .search-empty .empty-glyph {
     font-size: 36px;
     margin-bottom: 8px;
   }
-  .first-action-empty h3 {
+  .first-action-empty h3,
+  .search-empty h3 {
     margin: 0 0 8px;
     font-size: 16px;
     font-weight: 600;
   }
-  .first-action-empty p {
+  .first-action-empty p,
+  .search-empty p {
     margin: 0 0 18px;
     color: var(--text-dim);
     font-size: 13px;
     line-height: 1.5;
+  }
+  .search-empty-actions {
+    display: flex;
+    justify-content: center;
   }
   .first-action-chips {
     display: flex;
@@ -16732,9 +16742,48 @@
     m._renderSig = sig;
     m.innerHTML = "";
 
+    // v0.21.x: when the filtered list is empty, render one of two
+    // distinct empty states. A search with 0 hits is NOT the same
+    // as a paired-but-never-messaged chat - showing 'Send the first
+    // message' under a 'no matches' search banner is misleading
+    // (the user just searched, they know they CAN send messages).
+    if (filtered.length === 0 && state.searchResults != null) {
+      const wrap = el("div", "search-empty");
+      wrap.innerHTML = `
+        <div class="empty-glyph">🔍</div>
+        <h3>No matches</h3>
+        <p>Nothing in this conversation matches
+        "${_escapeHtml(state.searchQuery || "")}".</p>
+      `;
+      const actions = el("div", "search-empty-actions");
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "first-action-chip";
+      clear.innerHTML = `<span class="fac-icon">✕</span><span>Clear search</span>`;
+      clear.onclick = () => {
+        // Mirror the search banner's Clear button so the user has
+        // one obvious way out without scrolling back to the header.
+        if (typeof finishSearch === "function") {
+          finishSearch();
+        } else {
+          state.searchQuery = "";
+          state.searchPlain = "";
+          state.searchResults = null;
+          const sb = document.getElementById("search-banner");
+          if (sb) sb.style.display = "none";
+          renderMessages();
+        }
+      };
+      actions.appendChild(clear);
+      wrap.appendChild(actions);
+      m.appendChild(wrap);
+      _smartScrollAfter(m, prevBottomState, 0);
+      return;
+    }
+
     // v0.21.x: first-action chips for a paired-but-empty chat. When
-    // there's a selected peer + zero messages, surface three
-    // example actions. Auto-dismisses on first send.
+    // there's a selected peer + zero messages AND no search active,
+    // surface three example actions. Auto-dismisses on first send.
     if (filtered.length === 0) {
       const wrap = el("div", "first-action-empty");
       const peer = state.peers.get(state.selectedPeer);

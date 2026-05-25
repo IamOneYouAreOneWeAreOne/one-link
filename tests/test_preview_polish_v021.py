@@ -235,6 +235,61 @@ def test_html_preview_iframe_is_credential_less_sandboxed(index_html):
     )
 
 
+def test_search_zero_results_shows_no_matches_state_not_welcome(index_html):
+    """When a conversation search returns 0 hits, the chat area
+    must render a dedicated 'No matches' empty state - NOT the
+    paired-but-never-messaged welcome screen ('Send the first
+    message...'). The welcome screen is misleading after the
+    user has explicitly searched + sees the 0-results banner.
+
+    Pin: the search-empty branch (a) is GUARDED by the
+    state.searchResults != null check, (b) renders BEFORE the
+    first-action-empty welcome branch (otherwise the welcome
+    branch wins by virtue of running first), and (c) ships a
+    'Clear search' button so the user has an obvious way out
+    without scrolling back to the header."""
+    # Find renderMessages's filtered-empty handling.
+    idx = index_html.find("if (filtered.length === 0 && state.searchResults != null)")
+    assert idx > 0, (
+        "search-aware empty-state branch is missing from "
+        "renderMessages - filtered=[] would fall through to the "
+        "first-action-empty welcome screen even during search"
+    )
+    branch = index_html[idx:idx + 1800]
+    assert '"search-empty"' in branch, (
+        "search-empty branch must use the .search-empty class so "
+        "CSS reuses the empty-state look without showing the "
+        "welcome chips"
+    )
+    assert "No matches" in branch
+    assert "Clear search" in branch, (
+        "the no-results state needs a one-click escape - mirror "
+        "the search banner's Clear button"
+    )
+    # The search-empty branch must come BEFORE the first-action
+    # branch so it wins for the search-with-0-hits case.
+    welcome_idx = index_html.find("first-action-empty", idx)
+    assert welcome_idx > idx, (
+        "search-empty branch must be ordered BEFORE the "
+        "first-action-empty welcome branch or the welcome branch "
+        "still wins"
+    )
+
+
+def test_search_empty_state_shares_styling_with_welcome_state(index_html):
+    """CSS: .search-empty must reuse the .first-action-empty visual
+    treatment so the two empty states feel like one design
+    language. Pin: the selector list includes both."""
+    # Find the CSS rule.
+    css_idx = index_html.find(".first-action-empty,\n  .search-empty")
+    assert css_idx > 0, (
+        ".search-empty must be added to the .first-action-empty "
+        "selector list so the no-matches state inherits the "
+        "centered card layout instead of falling through to "
+        "browser defaults"
+    )
+
+
 def test_client_preview_kinds_match_server_preview_kinds(index_html, server_src):
     """The client-side PREVIEW_KINDS Map gates whether the 'Show
     preview' link APPEARS in a file bubble. If it lags behind the
