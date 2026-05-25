@@ -399,6 +399,79 @@ def test_phrase_against_current_seed(
     return out
 
 
+def test_shares_against_current_seed(
+    *, data_dir: Path, shares: list[tuple[int, bytes]],
+) -> dict[str, Any]:
+    """Non-destructive 'do my K guardian shares still reconstruct my
+    identity?' check.
+
+    Combines the supplied unwrapped Shamir shares and, if a master
+    seed exists on this install, compares the reconstructed bytes
+    against the on-disk seed in constant time. Returns the same
+    green/amber/red shape as test_phrase_against_current_seed so
+    the UI can render share verification with the same status badge.
+
+    Result shape:
+      {
+        "valid_recovery":          True iff combine succeeded and
+                                   yielded the right seed length,
+        "matches_current_identity": True iff reconstructed bytes
+                                    equal the on-disk master.seed,
+        "has_current_identity":    True iff master.seed exists,
+        "share_count":             number of shares the caller
+                                   supplied,
+        "error":                   short human-readable message on
+                                   combine/length failure,
+      }
+
+    Does NOT write any state. Does NOT touch identity.key or DRK.
+    Safe for a guardian to run repeatedly during a recovery setup
+    audit (e.g., 'every six months I'll verify a K-quorum of my
+    friends still hold valid shares').
+    """
+    from one_link import master_seed, social_recovery
+    import secrets as _secrets
+    out: dict[str, Any] = {
+        "valid_recovery": False,
+        "matches_current_identity": False,
+        "has_current_identity": False,
+        "share_count": len(shares) if shares else 0,
+        "error": "",
+    }
+    if not shares or len(shares) < 2:
+        out["error"] = "need at least 2 shares to verify"
+        return out
+    try:
+        candidate = social_recovery.combine_shares(shares)
+    except (ValueError, TypeError) as e:
+        out["error"] = str(e)
+        return out
+    if len(candidate) != master_seed.SEED_LEN_BYTES:
+        out["error"] = (
+            f"reconstructed seed has wrong length {len(candidate)}; "
+            f"expected {master_seed.SEED_LEN_BYTES}"
+        )
+        return out
+    out["valid_recovery"] = True
+    try:
+        current = master_seed.load_seed(Path(data_dir))
+    except Exception:
+        current = None
+    if current is None:
+        return out
+    out["has_current_identity"] = True
+    try:
+        out["matches_current_identity"] = _secrets.compare_digest(
+            bytes(current), bytes(candidate),
+        )
+    finally:
+        candidate = b"\x00" * len(candidate)
+        current = b"\x00" * len(current)
+        del candidate
+        del current
+    return out
+
+
 def mark_phrase_verified(state, now_ms: Optional[int] = None) -> int:
     """Record that the user successfully verified the phrase."""
     if now_ms is None:

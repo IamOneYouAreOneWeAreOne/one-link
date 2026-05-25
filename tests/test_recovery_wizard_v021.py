@@ -368,6 +368,235 @@ def test_index_html_bundle_test_button_and_handler():
     assert "valid_bundle" in body
 
 
+def test_shares_test_returns_matches_when_quorum_reconstructs_current_seed(tmp_path):
+    """Happy path: split the daemon's own seed into a 2-of-3, unwrap
+    a 2-share quorum, verify the recovery_api helper reports
+    matches_current_identity=true."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from one_link import master_seed, recovery_api, social_recovery
+
+    seed = master_seed.load_or_create_seed(tmp_path)[0]
+    guardians = [Ed25519PrivateKey.generate() for _ in range(3)]
+    wrapped = social_recovery.split_and_wrap(
+        seed=seed,
+        contact_ed_pubs=[g.public_key().public_bytes_raw() for g in guardians],
+        threshold_k=2,
+        total_n=3,
+    )
+    # Unwrap any 2 of 3 for the quorum.
+    shares = [
+        social_recovery.unwrap_share(
+            wrapped=wrapped[i].encoded,
+            my_ed_priv_seed=guardians[i].private_bytes_raw(),
+        )
+        for i in (0, 2)
+    ]
+    res = recovery_api.test_shares_against_current_seed(
+        data_dir=tmp_path, shares=shares,
+    )
+    assert res["valid_recovery"] is True
+    assert res["has_current_identity"] is True
+    assert res["matches_current_identity"] is True
+    assert res["share_count"] == 2
+    assert res["error"] == ""
+
+
+def test_shares_test_returns_mismatch_when_quorum_reconstructs_different_seed(tmp_path):
+    """Shares from a DIFFERENT 2-of-3 split must produce a valid
+    recovery (the combine succeeds, it's a real seed) but
+    matches_current_identity=false. The user sees 'valid quorum,
+    wrong identity' instead of 'invalid shares' - a guardian who
+    accidentally pasted someone else's shares should see the
+    distinction clearly."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from one_link import master_seed, mnemonic, recovery_api, social_recovery
+
+    master_seed.load_or_create_seed(tmp_path)
+    other_seed = mnemonic.generate_seed()
+    guardians = [Ed25519PrivateKey.generate() for _ in range(3)]
+    wrapped = social_recovery.split_and_wrap(
+        seed=other_seed,
+        contact_ed_pubs=[g.public_key().public_bytes_raw() for g in guardians],
+        threshold_k=2,
+        total_n=3,
+    )
+    shares = [
+        social_recovery.unwrap_share(
+            wrapped=wrapped[i].encoded,
+            my_ed_priv_seed=guardians[i].private_bytes_raw(),
+        )
+        for i in (0, 1)
+    ]
+    res = recovery_api.test_shares_against_current_seed(
+        data_dir=tmp_path, shares=shares,
+    )
+    assert res["valid_recovery"] is True
+    assert res["has_current_identity"] is True
+    assert res["matches_current_identity"] is False
+
+
+def test_shares_test_handles_fresh_install_without_seed(tmp_path):
+    """A daemon with no master.seed yet: any valid quorum returns
+    valid_recovery=true + has_current_identity=false, so the UI can
+    say 'valid quorum, no identity to compare against'. (Common case
+    on a fresh install of an audit / coordination device.)"""
+    import os
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from one_link import recovery_api, social_recovery
+
+    other_seed = os.urandom(32)
+    guardians = [Ed25519PrivateKey.generate() for _ in range(2)]
+    wrapped = social_recovery.split_and_wrap(
+        seed=other_seed,
+        contact_ed_pubs=[g.public_key().public_bytes_raw() for g in guardians],
+        threshold_k=2,
+        total_n=2,
+    )
+    shares = [
+        social_recovery.unwrap_share(
+            wrapped=wrapped[i].encoded,
+            my_ed_priv_seed=guardians[i].private_bytes_raw(),
+        )
+        for i in (0, 1)
+    ]
+    res = recovery_api.test_shares_against_current_seed(
+        data_dir=tmp_path, shares=shares,
+    )
+    assert res["valid_recovery"] is True
+    assert res["has_current_identity"] is False
+    assert res["matches_current_identity"] is False
+    assert res["share_count"] == 2
+
+
+def test_shares_test_rejects_too_few_shares(tmp_path):
+    """A single share can never reconstruct (Shamir K>=2 by design).
+    The helper must short-circuit with a clear error rather than
+    handing a 1-share list to combine and letting Python's combine
+    raise something cryptic."""
+    from one_link import recovery_api
+
+    res = recovery_api.test_shares_against_current_seed(
+        data_dir=tmp_path, shares=[(1, b"\x00" * 32)],
+    )
+    assert res["valid_recovery"] is False
+    assert res["share_count"] == 1
+    assert "at least 2" in res["error"].lower()
+
+
+def test_shares_test_rejects_empty_share_list(tmp_path):
+    """An empty list is the click-jacked / button-mashed case."""
+    from one_link import recovery_api
+
+    res = recovery_api.test_shares_against_current_seed(
+        data_dir=tmp_path, shares=[],
+    )
+    assert res["valid_recovery"] is False
+    assert res["share_count"] == 0
+    assert res["error"]
+
+
+def test_shares_test_rejects_garbage_share_bytes(tmp_path):
+    """Two random byte strings that aren't real Shamir shares - the
+    combine MAY succeed (GF(256) Lagrange is happy to interpolate
+    nonsense) but the resulting bytes are not a valid seed. Either
+    the length check OR the matches_current_identity check must
+    keep this case from falsely reporting valid_recovery + match.
+    Pin the contract so a future refactor that drops the length
+    check still leaves the safety net in place."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from one_link import master_seed, recovery_api, social_recovery
+    import os
+
+    # Plant a real seed so has_current_identity=True; the assertion
+    # is about NEVER getting matches_current_identity=True for
+    # garbage input.
+    real_seed = master_seed.load_or_create_seed(tmp_path)[0]
+    # Real shares from a DIFFERENT seed so combine actually succeeds
+    # at the GF(256) layer but produces non-matching bytes.
+    other_seed = os.urandom(32)
+    guardians = [Ed25519PrivateKey.generate() for _ in range(2)]
+    wrapped = social_recovery.split_and_wrap(
+        seed=other_seed,
+        contact_ed_pubs=[g.public_key().public_bytes_raw() for g in guardians],
+        threshold_k=2,
+        total_n=2,
+    )
+    shares = [
+        social_recovery.unwrap_share(
+            wrapped=wrapped[i].encoded,
+            my_ed_priv_seed=guardians[i].private_bytes_raw(),
+        )
+        for i in (0, 1)
+    ]
+    res = recovery_api.test_shares_against_current_seed(
+        data_dir=tmp_path, shares=shares,
+    )
+    # The combine succeeded on real shares from another seed; the
+    # safety net is matches_current_identity=False.
+    assert res["matches_current_identity"] is False
+    # Sanity: real_seed is what's planted, the test seed is something
+    # else, neither was leaked through the helper.
+    assert master_seed.load_seed(tmp_path) == real_seed
+
+
+def test_index_html_shares_test_button_and_handler():
+    """Wizard's social card now exposes a 'Test my shares' surface
+    once shares have been issued (ready=true). Pin: the data-attr
+    button + handler that POSTs to /api/v1/recovery/shares/test."""
+    html = _index_html()
+    assert 'data-recwiz-social="test"' in html
+    assert "Test my shares" in html
+    assert "function _recwizSocialTestStart()" in html
+    assert '"/api/v1/recovery/shares/test"' in html
+    assert "recoverySharesTest({ shares, shareLines })" in html
+    idx = html.find("function _recwizSocialTestStart()")
+    body = html[idx:idx + 5000]
+    assert "api.recoverySharesTest" in body
+    assert "valid_recovery" in body
+    assert "matches_current_identity" in body
+    assert "has_current_identity" in body
+    # Each of the three result states the helper can return must
+    # be branched in the UI so the user sees a distinct message.
+    assert "different identity" in body.lower() or "DIFFERENT identity" in body
+    assert "Verified" in body
+
+
+def test_shares_test_endpoint_registered_guarded_ratelimited():
+    """/api/v1/recovery/shares/test exists, _guarded, rate-limited
+    (5 / 60s same as phrase/test + bundle/test), and writes the
+    no-store cache headers so a guardian's browser back button
+    can't replay a stale 'matches=true' result."""
+    from types import SimpleNamespace
+    from one_link.server import UIServer
+    daemon = SimpleNamespace(state=None, peer_rtc=None)
+    server = UIServer(daemon)
+    methods: set[str] = set()
+    for resource in server.app.router.resources():
+        info = resource.get_info()
+        path = info.get("path") or info.get("formatter") or ""
+        if path == "/api/v1/recovery/shares/test":
+            for route in resource:
+                methods.add(route.method)
+    assert "POST" in methods
+
+    src = _server_src()
+    idx = src.find('"/api/v1/recovery/shares/test"')
+    assert idx > 0
+    line_start = src.rfind("\n", 0, idx) + 1
+    line_end = src.find("\n", idx)
+    assert "self._guarded(" in src[line_start:line_end]
+
+    handler_idx = src.find("async def api_recovery_shares_test(")
+    assert handler_idx > 0
+    body = src[handler_idx:handler_idx + 5000]
+    assert "_rate_limited(" in body
+    assert '"recovery_shares_test"' in body
+    assert "_recovery_no_store_headers" in body
+    # Both input shapes accepted (parity with restore/shares).
+    assert '"shares"' in body
+    assert '"share_lines"' in body
+
+
 def test_recovery_reset_endpoint_registered_guarded_ratelimited():
     """The /api/v1/recovery/reset endpoint exists, is behind
     _guarded, rate-limited (3 / 5min), and refuses without

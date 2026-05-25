@@ -1817,6 +1817,12 @@ class UIServer:
         # an .olbak file decrypts with a given 24-word phrase. Mirrors
         # the phrase-test pattern; never writes to disk.
         r.add_post("/api/v1/recovery/bundle/test", self._guarded(self.api_recovery_bundle_test))
+        # v0.21.x: 'Test my guardian shares' - non-destructive check
+        # that K combined shares still reconstruct the current
+        # identity. Lets a user audit their social recovery setup
+        # (every few months collect a K-quorum from friends, paste,
+        # confirm green) without committing to destructive restore.
+        r.add_post("/api/v1/recovery/shares/test", self._guarded(self.api_recovery_shares_test))
         # v0.21.x social-share recovery (guardian side). The third
         # restore path: a user imports .olss share files that other
         # users distributed to them. Local-only manual flow (no new
@@ -8279,6 +8285,103 @@ class UIServer:
             )
         result = recovery_api.test_bundle_against_phrase(
             phrase=phrase, bundle_bytes=bundle_bytes,
+        )
+        resp = web.json_response({"ok": True, **result})
+        self._recovery_no_store_headers(resp)
+        return resp
+
+    async def api_recovery_shares_test(self, request: web.Request) -> web.Response:
+        """Non-destructive 'do my K guardian shares still reconstruct
+        my identity?' check. Combines the supplied shares in memory
+        and (if a seed exists on this install) compares against the
+        on-disk master.seed in constant time. Writes nothing.
+
+        Symmetric with /api/v1/recovery/phrase/test and bundle/test.
+        Lets a guardian-coordinator verify that a K-quorum of their
+        guardians still hold valid shares without committing to a
+        destructive restore - e.g., a periodic 'recovery health'
+        check the user can run every few months.
+
+        Body shape:
+          {
+            "shares": [
+              {"index": int, "bytes_b64": str},
+              ...
+            ],
+            // OR: "share_lines": "1:b64...\\n3:b64..."
+          }
+
+        Returns:
+          {
+            "ok":                       True,
+            "valid_recovery":           bool,  // combine succeeded
+            "matches_current_identity": bool,  // bytes match seed
+            "has_current_identity":     bool,  // master.seed exists
+            "share_count":              int,
+            "error":                    str    // set on failure
+          }
+        """
+        from one_link import recovery_api
+        from one_link.paths import data_dir
+        state = self.daemon.state
+        if state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        if self._rate_limited(
+            "recovery_shares_test",
+            self._client_rate_key(request),
+            limit=5,
+            window_seconds=60.0,
+        ):
+            return web.json_response(
+                {"error": "too many shares-test attempts; wait a minute"},
+                status=429,
+            )
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        # Parse share input - exactly the same shape as restore so a
+        # client can ship the same payload to test/ then restore/.
+        share_tuples: list[tuple[int, bytes]] = []
+        import base64 as _b64
+        raw_shares = data.get("shares")
+        if isinstance(raw_shares, list):
+            for s in raw_shares:
+                if not isinstance(s, dict):
+                    return web.json_response({"error": "shares[*] must be objects"}, status=400)
+                try:
+                    idx = int(s.get("index"))
+                    b = _b64.b64decode(str(s.get("bytes_b64") or ""), validate=True)
+                except Exception as e:
+                    return web.json_response({
+                        "error": f"share {s!r} malformed: {e}",
+                    }, status=400)
+                share_tuples.append((idx, b))
+        share_lines = data.get("share_lines")
+        if isinstance(share_lines, str):
+            for line in share_lines.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if ":" not in line:
+                    return web.json_response({
+                        "error": f"share line missing colon separator: {line[:32]!r}",
+                    }, status=400)
+                idx_s, b64_s = line.split(":", 1)
+                try:
+                    idx = int(idx_s.strip())
+                    b = _b64.b64decode(b64_s.strip(), validate=True)
+                except Exception as e:
+                    return web.json_response({
+                        "error": f"share line malformed: {e}",
+                    }, status=400)
+                share_tuples.append((idx, b))
+        if not share_tuples:
+            return web.json_response({
+                "error": "no shares supplied (need 'shares' list or 'share_lines' string)",
+            }, status=400)
+        result = recovery_api.test_shares_against_current_seed(
+            data_dir=data_dir(), shares=share_tuples,
         )
         resp = web.json_response({"ok": True, **result})
         self._recovery_no_store_headers(resp)

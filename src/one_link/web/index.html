@@ -11708,6 +11708,19 @@
         phrase, bundle_b64: bundleB64,
       });
     },
+    // Non-destructive 'do my guardian shares still reconstruct my
+    // identity?' check. Combines K shares in memory + compares the
+    // reconstructed seed to the on-disk master.seed without writing
+    // anything. Lets a user audit their social-recovery setup
+    // periodically without committing to a destructive restore.
+    // Accepts either shares=[{index,bytes_b64}] OR the textarea
+    // shape share_lines="idx:b64\nidx:b64".
+    recoverySharesTest({ shares, shareLines }) {
+      const body = {};
+      if (Array.isArray(shares)) body.shares = shares;
+      if (typeof shareLines === "string") body.share_lines = shareLines;
+      return this.post("/api/v1/recovery/shares/test", body);
+    },
     // Social-share recovery (guardian side). Import an .olss file
     // someone gave you so your daemon can later unwrap + deliver
     // your share when they need help recovering.
@@ -25375,11 +25388,90 @@
         <button type="button" class="recwiz-btn recwiz-btn-primary" data-recwiz-social="open" ${disabled}>
           ${btnLabel}
         </button>
+        ${ready
+          ? `<button type="button" class="recwiz-btn" data-recwiz-social="test">Test my shares</button>`
+          : ""}
       </div>
       <div class="recwiz-card-body" hidden></div>
     `;
     const btn = card.querySelector('[data-recwiz-social="open"]');
     if (btn && !disabled) btn.addEventListener("click", () => _recwizSocialOpen());
+    const testBtn = card.querySelector('[data-recwiz-social="test"]');
+    if (testBtn) testBtn.addEventListener("click", () => _recwizSocialTestStart());
+  }
+
+  function _recwizSocialTestStart() {
+    const card = document.getElementById("recwiz-track-social");
+    const body = card.querySelector(".recwiz-card-body");
+    body.hidden = false;
+    card.classList.add("open");
+    body.innerHTML = `
+      <p class="recwiz-help-text">
+        Paste any K (or more) unwrapped shares your guardians sent
+        back. We'll combine them in memory and confirm they still
+        reconstruct your current identity. Nothing is written to
+        disk; this never replaces or restores anything.
+      </p>
+      <p class="recwiz-help-text" style="opacity:0.7;">
+        Each line: <code>index:base64-share-bytes</code>
+      </p>
+      <textarea class="recwiz-phrase-input" id="recwiz-social-test-ta"
+                rows="5" placeholder="1:base64...\n3:base64..."
+                spellcheck="false" autocapitalize="off"></textarea>
+      <p class="recwiz-feedback" id="recwiz-social-test-fb"></p>
+      <div class="recwiz-card-actions">
+        <button type="button" class="recwiz-btn" data-recwiz-social="test-hide">Hide</button>
+        <button type="button" class="recwiz-btn recwiz-btn-primary" id="recwiz-social-test-submit" disabled>
+          Verify shares
+        </button>
+      </div>
+    `;
+    const ta = body.querySelector("#recwiz-social-test-ta");
+    const fb = body.querySelector("#recwiz-social-test-fb");
+    const submit = body.querySelector("#recwiz-social-test-submit");
+    function refresh() {
+      const lines = ta.value.split("\n").filter(l => l.trim().includes(":"));
+      submit.disabled = lines.length < 2;
+    }
+    ta.addEventListener("input", refresh);
+    refresh();
+    body.querySelector('[data-recwiz-social="test-hide"]')
+      .addEventListener("click", () => {
+        body.hidden = true;
+        body.innerHTML = "";
+        card.classList.remove("open");
+      });
+    submit.addEventListener("click", async () => {
+      submit.disabled = true;
+      fb.className = "recwiz-feedback";
+      fb.textContent = "Verifying...";
+      let res;
+      try {
+        res = await api.recoverySharesTest({ shareLines: ta.value });
+      } catch (e) {
+        fb.className = "recwiz-feedback bad";
+        fb.textContent = errorToastBody(e);
+        submit.disabled = false;
+        return;
+      }
+      if (!res.valid_recovery) {
+        fb.className = "recwiz-feedback bad";
+        fb.textContent = res.error || "Shares didn't reconstruct a valid recovery.";
+        submit.disabled = false;
+        return;
+      }
+      if (!res.has_current_identity) {
+        fb.className = "recwiz-feedback";
+        fb.textContent = "Valid quorum (" + res.share_count + " shares), but this device has no identity to compare against.";
+      } else if (res.matches_current_identity) {
+        fb.className = "recwiz-feedback ok";
+        fb.textContent = "Verified. These " + res.share_count + " shares reconstruct your current identity.";
+      } else {
+        fb.className = "recwiz-feedback bad";
+        fb.textContent = "Valid quorum, but it reconstructs a DIFFERENT identity. These shares are from someone else's recovery setup.";
+      }
+      submit.disabled = false;
+    });
   }
 
   async function _recwizSocialOpen() {
