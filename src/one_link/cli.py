@@ -461,6 +461,106 @@ def backup_restore(phrase_words, force):
     )
 
 
+@backup.command("test")
+@click.argument("phrase_words", nargs=-1)
+def backup_test(phrase_words):
+    """Check whether a paper phrase matches the on-disk identity.
+
+    Decodes the 24-word BIP-39 phrase and compares it (in constant
+    time) to the master seed on this install. Writes nothing.
+
+    Use BEFORE running `backup restore` to confirm you wrote the
+    phrase down correctly. Useful as a periodic audit: every few
+    months, type the phrase from your paper backup and confirm it
+    still produces a green check.
+
+    Exit codes mirror the UI's three colors:
+      0 = green   (phrase matches the current identity)
+      2 = amber   (valid phrase, no current identity OR different identity)
+      1 = red     (phrase failed to decode)
+    """
+    from one_link import recovery_api
+    from one_link.paths import data_dir
+    if not phrase_words:
+        click.echo(
+            "Type the 24 words separated by spaces, then press Enter.\n"
+            "(Hidden input; the phrase will not be echoed.)"
+        )
+        raw = click.prompt("phrase", hide_input=True, prompt_suffix="> ")
+    else:
+        raw = " ".join(phrase_words)
+    res = recovery_api.test_phrase_against_current_seed(
+        data_dir=data_dir(), phrase=raw,
+    )
+    if not res["valid_checksum"]:
+        click.echo(f"INVALID PHRASE: {res['error']}", err=True)
+        raise click.exceptions.Exit(1)
+    if not res["has_current_identity"]:
+        click.echo(
+            "Valid 24-word phrase, but this device has no master seed "
+            "to compare against."
+        )
+        raise click.exceptions.Exit(2)
+    if res["matches_current_identity"]:
+        click.echo("VERIFIED: this phrase matches your current identity.")
+        return
+    click.echo(
+        "Valid 24-word phrase, but it does NOT match your current "
+        "identity. This is a phrase for a different install.",
+        err=True,
+    )
+    raise click.exceptions.Exit(2)
+
+
+@backup.command("test-bundle")
+@click.argument(
+    "bundle_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.argument("phrase_words", nargs=-1)
+def backup_test_bundle(bundle_path, phrase_words):
+    """Check whether a .olbak file decrypts with a 24-word phrase.
+
+    AEAD-decrypts the bundle in memory and reports the bundle's
+    header timestamp + plaintext file count. Writes nothing to disk;
+    the existing identity on this install is not touched.
+
+    Use BEFORE running `backup import` to confirm the bundle + phrase
+    pair is valid (e.g., after restoring a backup file from cold
+    storage you haven't touched in months).
+
+    Exit codes:
+      0 = bundle decrypted + plaintext archive readable
+      1 = phrase invalid OR bundle failed to decrypt
+    """
+    from one_link import recovery_api
+    bundle_bytes = Path(bundle_path).read_bytes()
+    if not phrase_words:
+        click.echo(
+            "Type the 24 words separated by spaces, then press Enter.\n"
+            "(Hidden input; the phrase will not be echoed.)"
+        )
+        raw = click.prompt("phrase", hide_input=True, prompt_suffix="> ")
+    else:
+        raw = " ".join(phrase_words)
+    res = recovery_api.test_bundle_against_phrase(
+        phrase=raw, bundle_bytes=bundle_bytes,
+    )
+    if not res["valid_phrase"]:
+        click.echo(f"INVALID PHRASE: {res['error']}", err=True)
+        raise click.exceptions.Exit(1)
+    if not res["valid_bundle"]:
+        click.echo(f"BUNDLE DECRYPT FAILED: {res['error']}", err=True)
+        raise click.exceptions.Exit(1)
+    created = res.get("bundle_created_ms", 0)
+    files = res.get("file_count", 0)
+    click.echo(
+        f"VERIFIED: bundle decrypts cleanly with this phrase.\n"
+        f"  created_ms: {created}\n"
+        f"  file_count: {files}"
+    )
+
+
 @backup.command("export")
 @click.argument("out_path", type=click.Path(dir_okay=False, path_type=Path))
 @click.option(
@@ -841,6 +941,77 @@ def recovery_restore(portable_shares: tuple[str, ...], force: bool) -> None:
         "will derive your identity + at-rest key from the recovered seed.\n"
         "Peers paired with the original device will recognize you."
     )
+
+
+@recovery.command("test-shares")
+@click.argument("portable_shares", nargs=-1)
+def recovery_test_shares(portable_shares: tuple[str, ...]) -> None:
+    """Check whether K guardian shares still reconstruct your identity.
+
+    Non-destructive verification: combines the supplied portable
+    shares in memory and compares the reconstructed seed against the
+    on-disk master.seed in constant time. Writes nothing. The current
+    identity on this device is not touched.
+
+    Use as a periodic recovery audit: every few months, ask K
+    guardians to send you their `recovery unwrap` output, paste them
+    here, and confirm a green check. Catches guardians who lost their
+    share BEFORE you actually need to recover.
+
+    PORTABLE_SHARES are the base64 strings produced by
+    `one-link recovery unwrap` on each guardian device (the same
+    format `recovery restore` accepts).
+
+    Exit codes mirror the UI's three colors:
+      0 = green   (shares reconstruct your current identity)
+      2 = amber   (valid quorum, no current identity OR different identity)
+      1 = red     (shares failed to combine / not enough shares)
+    """
+    import base64
+
+    from one_link import recovery_api
+    from one_link.paths import data_dir
+    if len(portable_shares) < 2:
+        raise click.ClickException(
+            "need at least 2 portable shares (from `recovery unwrap` on "
+            "each guardian device)"
+        )
+    decrypted: list[tuple[int, bytes]] = []
+    for s in portable_shares:
+        try:
+            pad = "=" * ((4 - len(s) % 4) % 4)
+            payload = base64.urlsafe_b64decode((s + pad).encode("ascii"))
+        except Exception as e:
+            raise click.ClickException(f"share {s[:8]}...: not valid base64 ({e})")
+        if len(payload) < 2:
+            raise click.ClickException(f"share {s[:8]}...: too short")
+        idx = payload[0]
+        share_bytes = payload[1:]
+        decrypted.append((idx, share_bytes))
+    res = recovery_api.test_shares_against_current_seed(
+        data_dir=data_dir(), shares=decrypted,
+    )
+    if not res["valid_recovery"]:
+        click.echo(f"COMBINE FAILED: {res['error']}", err=True)
+        raise click.exceptions.Exit(1)
+    n = res["share_count"]
+    if not res["has_current_identity"]:
+        click.echo(
+            f"Valid quorum ({n} shares), but this device has no master "
+            "seed to compare against."
+        )
+        raise click.exceptions.Exit(2)
+    if res["matches_current_identity"]:
+        click.echo(
+            f"VERIFIED: these {n} shares reconstruct your current identity."
+        )
+        return
+    click.echo(
+        f"Valid quorum ({n} shares), but it reconstructs a DIFFERENT "
+        "identity. These shares are from someone else's recovery setup.",
+        err=True,
+    )
+    raise click.exceptions.Exit(2)
 
 
 @cli.command("native-status")
