@@ -529,23 +529,209 @@ BIO_MAX_LENGTH = 140
 _PICK_TIMEOUT_S = 600  # 10-min hard cap, enough for slow browsing.
 
 
+def _pick_win_ifiledialog(title: str) -> Optional[str]:
+    """Modern Windows folder picker via IFileOpenDialog +
+    FOS_PICKFOLDERS. This is the same dialog File Explorer +
+    Office + every modern Windows app uses - the Win10/11 file
+    chooser, not the dated WinForms FolderBrowserDialog that
+    looks like Windows 95.
+
+    Pure ctypes (no subprocess, no PowerShell, no external deps).
+    Runs in-process so it's also instant - no 1-2 second
+    PowerShell startup penalty.
+
+    Returns absolute path on success, None on cancel/unavailable.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes as _ct
+        from ctypes import wintypes as _wt, POINTER, byref, c_void_p
+    except Exception:
+        return None
+
+    class _GUID(_ct.Structure):
+        _fields_ = [
+            ("Data1", _wt.DWORD),
+            ("Data2", _wt.WORD),
+            ("Data3", _wt.WORD),
+            ("Data4", _ct.c_ubyte * 8),
+        ]
+
+    def _g(s: str) -> "_GUID":
+        s = s.replace("-", "")
+        g = _GUID()
+        g.Data1 = int(s[0:8], 16)
+        g.Data2 = int(s[8:12], 16)
+        g.Data3 = int(s[12:16], 16)
+        for i in range(8):
+            g.Data4[i] = int(s[16 + 2 * i: 18 + 2 * i], 16)
+        return g
+
+    CLSID_FileOpenDialog = _g("DC1C5A9C-E88A-4ADE-A5A1-60F82A20AEF7")
+    IID_IFileOpenDialog = _g("D57C7288-D4AD-4768-BE02-9D969532D960")
+
+    CLSCTX_INPROC_SERVER = 0x1
+    COINIT_APARTMENTTHREADED = 0x2
+    COINIT_DISABLE_OLE1DDE = 0x4
+    S_OK = 0
+    S_FALSE = 1
+    RPC_E_CHANGED_MODE = -2147417850  # 0x80010106
+    CANCELLED_HR = -2147023673  # 0x800704C7
+    FOS_PICKFOLDERS = 0x20
+    FOS_FORCEFILESYSTEM = 0x40
+    SIGDN_FILESYSPATH = 0x80058000
+
+    try:
+        ole32 = _ct.WinDLL("ole32")
+    except Exception:
+        return None
+
+    ole32.CoInitializeEx.restype = _ct.c_long
+    ole32.CoInitializeEx.argtypes = [c_void_p, _wt.DWORD]
+    ole32.CoCreateInstance.restype = _ct.c_long
+    ole32.CoCreateInstance.argtypes = [
+        POINTER(_GUID), c_void_p, _wt.DWORD,
+        POINTER(_GUID), POINTER(c_void_p),
+    ]
+    ole32.CoUninitialize.restype = None
+    ole32.CoUninitialize.argtypes = []
+    ole32.CoTaskMemFree.restype = None
+    ole32.CoTaskMemFree.argtypes = [c_void_p]
+
+    def _vtable_method(vtbl, index, restype, *argtypes):
+        FN = _ct.WINFUNCTYPE(restype, c_void_p, *argtypes)
+        return FN(vtbl[index])
+
+    hr = ole32.CoInitializeEx(
+        None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE,
+    )
+    if hr not in (S_OK, S_FALSE) and hr != RPC_E_CHANGED_MODE:
+        log.debug("CoInitializeEx failed: 0x%08X", hr & 0xFFFFFFFF)
+        return None
+
+    try:
+        ppv = c_void_p()
+        hr = ole32.CoCreateInstance(
+            byref(CLSID_FileOpenDialog), None,
+            CLSCTX_INPROC_SERVER,
+            byref(IID_IFileOpenDialog),
+            byref(ppv),
+        )
+        if hr != S_OK or not ppv.value:
+            log.debug(
+                "CoCreateInstance(FileOpenDialog) failed: 0x%08X",
+                hr & 0xFFFFFFFF,
+            )
+            return None
+
+        # Vtable layout: IUnknown(0..2), IModalWindow.Show(3),
+        # IFileDialog(4..26), IFileOpenDialog(27..28).
+        vtbl = _ct.cast(
+            ppv, POINTER(POINTER(c_void_p)),
+        ).contents
+        Release = _vtable_method(vtbl, 2, _wt.ULONG)
+        Show = _vtable_method(vtbl, 3, _ct.c_long, _wt.HWND)
+        SetOptions = _vtable_method(vtbl, 9, _ct.c_long, _wt.DWORD)
+        SetTitle = _vtable_method(vtbl, 17, _ct.c_long, _wt.LPCWSTR)
+        GetResult = _vtable_method(
+            vtbl, 20, _ct.c_long, POINTER(c_void_p),
+        )
+
+        if SetOptions(ppv, FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM) != S_OK:
+            Release(ppv)
+            return None
+        SetTitle(ppv, title)
+
+        hr = Show(ppv, None)
+        if hr == CANCELLED_HR:
+            Release(ppv)
+            return None
+        if hr != S_OK:
+            log.debug("IFileOpenDialog.Show failed: 0x%08X", hr & 0xFFFFFFFF)
+            Release(ppv)
+            return None
+
+        psi = c_void_p()
+        hr = GetResult(ppv, byref(psi))
+        if hr != S_OK or not psi.value:
+            Release(ppv)
+            return None
+        try:
+            psi_vtbl = _ct.cast(
+                psi, POINTER(POINTER(c_void_p)),
+            ).contents
+            SI_Release = _ct.WINFUNCTYPE(_wt.ULONG, c_void_p)(psi_vtbl[2])
+            SI_GetDisplayName = _ct.WINFUNCTYPE(
+                _ct.c_long, c_void_p, _wt.DWORD, POINTER(c_void_p),
+            )(psi_vtbl[5])
+            name_ptr = c_void_p()
+            hr = SI_GetDisplayName(psi, SIGDN_FILESYSPATH, byref(name_ptr))
+            if hr != S_OK or not name_ptr.value:
+                return None
+            try:
+                return _ct.wstring_at(name_ptr.value)
+            finally:
+                ole32.CoTaskMemFree(name_ptr)
+        finally:
+            SI_Release(psi)
+            Release(ppv)
+    finally:
+        ole32.CoUninitialize()
+
+
 def _pick_win_powershell(title: str) -> Optional[str]:
     """Native Windows folder picker via PowerShell + WinForms.
-    Returns absolute path on success, None on cancel/unavailable."""
+    Returns absolute path on success, None on cancel/unavailable.
+
+    Compatibility notes:
+      - Windows PowerShell 5.1 (the default on Win10/11) ships with
+        an OLDER WinForms FolderBrowserDialog that lacks
+        UseDescriptionForTitle + AutoUpgradeEnabled (those landed
+        in .NET Framework 4.7.2's updated dialog). Setting them on
+        5.1 throws 'property cannot be found' and the script never
+        reaches ShowDialog. We use only properties that exist on
+        every .NET FolderBrowserDialog since .NET 1.1.
+      - The dialog is shown with a hidden TopMost owner form so it
+        comes up in FRONT of the browser (without an owner, the
+        Vista-style picker often appears behind the active window).
+      - Stderr is redirected to $null so non-terminating WinForms
+        warnings don't trigger Python's NativeCommandError handling.
+      - Result discrimination: exit code 0 with output = picked path,
+        exit code 0 with empty output = user cancelled, anything else
+        = dialog failed (caller falls back to tkinter).
+    """
     safe_title = title.replace("'", "''")
     script = (
-        "Add-Type -AssemblyName System.Windows.Forms | Out-Null\n"
-        "$d = New-Object System.Windows.Forms.FolderBrowserDialog\n"
-        f"$d.Description = '{safe_title}'\n"
-        "$d.UseDescriptionForTitle = $true\n"
-        "$d.AutoUpgradeEnabled = $true\n"
-        "$d.ShowNewFolderButton = $true\n"
-        "$null = $d.ShowDialog()\n"
-        "Write-Output $d.SelectedPath\n"
+        "$ErrorActionPreference = 'Stop'\n"
+        "try {\n"
+        "  Add-Type -AssemblyName System.Windows.Forms | Out-Null\n"
+        "  $owner = New-Object System.Windows.Forms.Form\n"
+        "  $owner.TopMost = $true\n"
+        "  $owner.ShowInTaskbar = $false\n"
+        "  $owner.WindowState = 'Minimized'\n"
+        "  $owner.Opacity = 0\n"
+        "  $owner.Show() | Out-Null\n"
+        "  $d = New-Object System.Windows.Forms.FolderBrowserDialog\n"
+        f"  $d.Description = '{safe_title}'\n"
+        "  $d.ShowNewFolderButton = $true\n"
+        "  $d.RootFolder = [System.Environment+SpecialFolder]::Desktop\n"
+        "  $result = $d.ShowDialog($owner)\n"
+        "  $owner.Close()\n"
+        "  $owner.Dispose()\n"
+        "  if ($result -eq [System.Windows.Forms.DialogResult]::OK) {\n"
+        "    Write-Output $d.SelectedPath\n"
+        "  }\n"
+        "  $d.Dispose()\n"
+        "} catch {\n"
+        "  [Console]::Error.WriteLine($_.Exception.Message)\n"
+        "  exit 1\n"
+        "}\n"
     )
     try:
         proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            ["powershell.exe", "-NoProfile", "-NonInteractive",
+             "-STA", "-Command", script],
             capture_output=True, text=True, timeout=_PICK_TIMEOUT_S,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
@@ -553,6 +739,10 @@ def _pick_win_powershell(title: str) -> Optional[str]:
         log.debug("powershell folder picker failed: %s", e)
         return None
     if proc.returncode != 0:
+        log.debug(
+            "powershell folder picker exit %d: %s",
+            proc.returncode, (proc.stderr or "").strip()[:200],
+        )
         return None
     out = (proc.stdout or "").strip()
     return out or None
@@ -646,6 +836,14 @@ def _native_folder_picker(title: str) -> Optional[str]:
     if os.environ.get("ONE_LINK_DISABLE_NATIVE_PICKER"):
         return None
     if sys.platform == "win32":
+        # v0.21.x: modern Win10/11 IFileOpenDialog first - matches
+        # File Explorer's chrome and is instant (no subprocess).
+        picked = _pick_win_ifiledialog(title)
+        if picked is not None:
+            return picked
+        # Legacy PowerShell + WinForms FolderBrowserDialog as a
+        # second resort. Looks dated but works when the modern
+        # picker can't initialize (e.g. ancient Windows).
         picked = _pick_win_powershell(title)
         if picked is not None:
             return picked

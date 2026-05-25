@@ -328,11 +328,95 @@ def test_kill_switch_returns_none_when_env_var_set(monkeypatch):
     # tells us the switch failed.
     def _boom(t):
         raise AssertionError("kill switch failed: platform helper invoked")
+    monkeypatch.setattr(server, "_pick_win_ifiledialog", _boom)
     monkeypatch.setattr(server, "_pick_win_powershell", _boom)
     monkeypatch.setattr(server, "_pick_mac_osascript", _boom)
     monkeypatch.setattr(server, "_pick_linux", _boom)
     monkeypatch.setattr(server, "_pick_tkinter_fallback", _boom)
     assert server._native_folder_picker("hi") is None
+
+
+def test_windows_dispatcher_tries_modern_picker_first(monkeypatch):
+    """v0.21.x: the modern IFileOpenDialog must be tried BEFORE the
+    legacy PowerShell + FolderBrowserDialog. The legacy picker is
+    the Windows-95 looking dialog; the modern one is what File
+    Explorer uses on Win10/11. Order matters - if the modern picker
+    works (returns a real path) we MUST NOT also pop the old one."""
+    from one_link import server
+    monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
+    monkeypatch.setattr(server.sys, "platform", "win32")
+    call_order: list[str] = []
+
+    def fake_modern(t):
+        call_order.append("modern")
+        return "C:/From/Modern/Picker"
+
+    def fake_legacy(t):
+        call_order.append("legacy")
+        return "C:/From/Legacy/Picker"
+
+    monkeypatch.setattr(server, "_pick_win_ifiledialog", fake_modern)
+    monkeypatch.setattr(server, "_pick_win_powershell", fake_legacy)
+    out = server._native_folder_picker("hi")
+    assert out == "C:/From/Modern/Picker"
+    assert call_order == ["modern"], (
+        "legacy picker must NOT run when the modern picker returns "
+        "a path - we'd pop two dialogs"
+    )
+
+
+def test_windows_dispatcher_falls_back_to_legacy_when_modern_unavailable(monkeypatch):
+    """If IFileOpenDialog can't initialize (ancient Windows, blocked
+    COM, etc.), the dispatcher must fall back to the legacy
+    PowerShell picker rather than dead-clicking."""
+    from one_link import server
+    monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
+    monkeypatch.setattr(server.sys, "platform", "win32")
+    monkeypatch.setattr(server, "_pick_win_ifiledialog", lambda t: None)
+    monkeypatch.setattr(
+        server, "_pick_win_powershell", lambda t: "C:/Legacy/Fallback",
+    )
+    assert server._native_folder_picker("hi") == "C:/Legacy/Fallback"
+
+
+def test_modern_picker_uses_fos_pickfolders_options():
+    """Source-text gate: the modern picker MUST set
+    FOS_PICKFOLDERS (0x20) + FOS_FORCEFILESYSTEM (0x40) on the
+    IFileDialog. Without FOS_PICKFOLDERS we'd get a file picker
+    instead of a folder picker; without FOS_FORCEFILESYSTEM the
+    dialog would let users pick virtual items like 'This PC'
+    that don't have a real filesystem path."""
+    from pathlib import Path as _Path
+    src = (_Path(__file__).resolve().parents[1] / "src" / "one_link" / "server.py").read_text(encoding="utf-8")
+    idx = src.find("def _pick_win_ifiledialog(")
+    assert idx > 0, "_pick_win_ifiledialog handler not found"
+    end = src.find("\ndef _pick_win_powershell(", idx)
+    body = src[idx:end if end > 0 else idx + 6000]
+    assert "FOS_PICKFOLDERS = 0x20" in body
+    assert "FOS_FORCEFILESYSTEM = 0x40" in body
+    assert "FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM" in body, (
+        "SetOptions must pass both flags - folder-picker mode AND "
+        "filesystem-only enforcement"
+    )
+    assert "CLSID_FileOpenDialog" in body
+    assert "IID_IFileOpenDialog" in body
+    # The CANCELLED HRESULT (0x800704C7) is the common case - user
+    # closed the dialog. Must be handled distinctly from real
+    # failures so cancellation returns None silently.
+    assert "CANCELLED_HR" in body or "0x800704C7" in body
+
+
+def test_modern_picker_short_circuits_on_non_windows():
+    """A Linux/macOS caller of _pick_win_ifiledialog must return None
+    without raising. Defense in depth: the dispatcher already only
+    calls it on win32, but a future refactor that calls the helper
+    directly shouldn't blow up."""
+    from one_link import server
+    import unittest.mock as _mock
+    with _mock.patch.object(server.sys, "platform", "linux"):
+        assert server._pick_win_ifiledialog("hi") is None
+    with _mock.patch.object(server.sys, "platform", "darwin"):
+        assert server._pick_win_ifiledialog("hi") is None
 
 
 def test_powershell_picker_passes_dialog_title(monkeypatch):
@@ -355,7 +439,24 @@ def test_powershell_picker_passes_dialog_title(monkeypatch):
     script = captured["args"][-1]
     assert "Choose a folder to share with One Link" in script
     assert "FolderBrowserDialog" in script
-    assert "AutoUpgradeEnabled = $true" in script
+    # v0.21.x: the script must NOT use UseDescriptionForTitle or
+    # AutoUpgradeEnabled - those properties don't exist on Windows
+    # PowerShell 5.1's bundled FolderBrowserDialog and setting them
+    # threw 'property cannot be found' errors that broke the picker.
+    assert "UseDescriptionForTitle" not in script, (
+        "PS 5.1 (default on Win10/11) doesn't have this property; "
+        "setting it crashes the script and the dialog never appears"
+    )
+    assert "AutoUpgradeEnabled" not in script, (
+        "PS 5.1 doesn't have this property either"
+    )
+    # The TopMost owner window pattern must be present so the
+    # picker comes up in FRONT of the browser, not behind it.
+    assert "TopMost" in script
+    assert "$d.ShowDialog($owner)" in script, (
+        "ShowDialog must be called with the hidden owner so the "
+        "picker is z-ordered correctly"
+    )
 
 
 def test_powershell_picker_returns_none_on_empty_path(monkeypatch):
