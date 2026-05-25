@@ -9197,6 +9197,14 @@
           <button class="settings-nav-item" data-settings-pane="devices">
             <span class="settings-nav-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/></svg></span> Devices
           </button>
+          <!-- v0.21.x: discoverable entry for the recovery wizard.
+               This is not a settings PANE (the wizard is a full
+               modal); the click handler closes Settings + opens
+               the wizard so users discover the feature without
+               having to know it exists. -->
+          <button class="settings-nav-item" id="settings-nav-open-recovery">
+            <span class="settings-nav-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2 4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6z"/><path d="m9 12 2 2 4-4"/></svg></span> Recovery
+          </button>
           <button class="settings-nav-item desktop-only" data-settings-pane="shortcuts">
             <span class="settings-nav-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h.01M11 9h.01M15 9h.01M19 9h.01M7 13h10M7 17h6"/></svg></span> Shortcuts
           </button>
@@ -11889,12 +11897,22 @@
   };
 
   function errorToastBody(e) {
-    const headline = (e && e.message) ? e.message : String(e);
+    let headline = (e && e.message) ? e.message : String(e);
     const hint = e?.hint;
     // v0.7.x: append the error_detail (server-side exception text)
     // for catch-all "Send didn't work." errors. Without this the user
     // just sees "Send didn't work." and the actual cause is invisible.
     const detail = e?.error_detail;
+    // v0.21.x: strip internal error codes / API-shaped fragments that
+    // sometimes show up in headlines from upstream catches. Users
+    // shouldn't see 'send_failed' / 'capability_disabled' / a raw
+    // 'request failed (500)' as the lead - the hint + detail carry
+    // the actionable info.
+    const internalCodePattern = /^(send_failed|capability_disabled|peer_rejected|handshake_failed|wire_version_mismatch|request failed \(\d+\)|fetch failed|TypeError|NetworkError)[:\s]*/i;
+    if (typeof headline === "string" && internalCodePattern.test(headline)) {
+      headline = headline.replace(internalCodePattern, "").trim()
+        || "Something went wrong";
+    }
     let body = hint ? `${headline} - ${hint}` : headline;
     if (detail && (e?.code === "send_failed" || !e?.code)) {
       body += ` (${detail})`;
@@ -13493,7 +13511,7 @@
       console.warn(e);
       const body = $("#discover-body");
       // 2026-05-21 audit T3-A: e.message is server-controlled; escape it.
-      if (body) body.innerHTML = `<div class="empty">Couldn't reach the service. ${_escapeHtml(String(e?.message || e || ""))}</div>`;
+      if (body) body.innerHTML = `<div class="empty">One Link isn't responding right now. Try restarting it from your system tray, or close + reopen this tab. <small style="display:block; margin-top:6px; opacity:0.6;">${_escapeHtml(String(e?.message || e || ""))}</small></div>`;
     } finally {
       state.discoverLoading = false;
       if (refreshBtn) refreshBtn.classList.remove("spinning");
@@ -19105,8 +19123,25 @@
       if (state.folders.length === 0) {
         list.appendChild(richEmpty(
           "📂", "No folders synced yet",
-          "Add a folder above to start syncing it with a paired device. CRDT detects concurrent edits.",
+          "A synced folder updates both ways. Name it, pick where it lives on this computer, and click Add. The form is right above.",
         ));
+        // v0.21.x: scroll the user to the Add Folder form so the
+        // 'add one above' callout is actually visible. On smaller
+        // viewports the empty-state can sit far below the form.
+        const addCta = document.createElement("button");
+        addCta.type = "button";
+        addCta.className = "btn-primary";
+        addCta.style.marginTop = "10px";
+        addCta.textContent = "Add a folder now";
+        addCta.onclick = (ev) => {
+          ev.preventDefault();
+          const nameInput = document.getElementById("folder-name");
+          if (nameInput) {
+            nameInput.scrollIntoView({ behavior: "smooth", block: "center" });
+            nameInput.focus();
+          }
+        };
+        list.appendChild(addCta);
         return;
       }
       for (const f of state.folders) {
@@ -29904,6 +29939,16 @@
   }
   document.querySelectorAll(".settings-nav-item").forEach((btn) => {
     btn.addEventListener("click", () => {
+      // v0.21.x: the 'Recovery' nav item is special - it doesn't
+      // switch panes (no recovery pane exists; the wizard is a
+      // full modal). Close Settings + open the wizard instead.
+      if (btn.id === "settings-nav-open-recovery") {
+        settingsBackdrop?.classList.remove("show");
+        if (typeof _showRecoveryWizard === "function") {
+          _showRecoveryWizard().catch(() => {});
+        }
+        return;
+      }
       switchSettingsPane(btn.dataset.settingsPane);
     });
   });

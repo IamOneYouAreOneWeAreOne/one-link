@@ -292,6 +292,75 @@ def test_settings_about_has_report_a_bug_github_link(index_html):
     assert 'Copy report' in index_html
 
 
+def test_recovery_is_discoverable_from_settings_nav(index_html):
+    """The recovery wizard exists but pre-launch was only
+    reachable via the rotation banner (only shown after rotation
+    occurs). Most users would never discover it. The Settings nav
+    must surface a 'Recovery' entry whose click handler opens the
+    wizard modal."""
+    assert 'id="settings-nav-open-recovery"' in index_html, (
+        "Settings nav missing 'Recovery' entry - users have no "
+        "discoverable path to set up recovery before they need it"
+    )
+    # The click handler routes to the wizard (not a pane switch).
+    assert 'settings-nav-open-recovery' in index_html
+    assert '_showRecoveryWizard()' in index_html
+
+
+def test_daemon_unreachable_message_tells_user_what_to_do(index_html):
+    """The previous 'Couldn't reach the service' message described
+    the failure without giving the user an action. The new message
+    says explicitly: restart from system tray or close + reopen
+    the tab."""
+    assert "Couldn't reach the service." not in index_html, (
+        "old vague 'Couldn't reach the service' message still "
+        "in HTML; users have no action to take"
+    )
+    assert "Try restarting it from your system tray" in index_html, (
+        "daemon-unreachable message must tell users what to do "
+        "(restart from tray / reopen tab)"
+    )
+
+
+def test_error_toast_body_strips_internal_codes(index_html):
+    """errorToastBody used to surface internal error codes
+    ('send_failed', 'capability_disabled', 'request failed (500)')
+    as the lead string of user toasts. Pin the strip-pattern so
+    a future refactor doesn't re-introduce the leak."""
+    idx = index_html.find("function errorToastBody(")
+    assert idx > 0
+    body = index_html[idx:idx + 1800]
+    assert "internalCodePattern" in body, (
+        "errorToastBody must strip internal codes; users were "
+        "seeing 'send_failed:' as the lead of every send toast"
+    )
+    # The pattern covers the main internal-code surface.
+    assert "send_failed" in body
+    assert "capability_disabled" in body
+    assert "wire_version_mismatch" in body
+
+
+def test_folders_empty_state_has_add_a_folder_cta(index_html):
+    """The folders empty state used to be 'No folders synced
+    yet' + a passive description that mentioned 'CRDT' (jargon!).
+    Now it has a concrete CTA button that scrolls + focuses the
+    Add Folder form."""
+    # CRDT jargon out of the empty-state description.
+    assert "CRDT detects concurrent edits" not in index_html, (
+        "folders empty state still leaks 'CRDT' jargon; users "
+        "have no context for what CRDT means"
+    )
+    # Add CTA button is constructed programmatically + the
+    # textContent + scroll behavior must be present.
+    assert 'addCta.textContent = "Add a folder now"' in index_html, (
+        "folders empty state missing the 'Add a folder now' "
+        "CTA button that scrolls the user to the Add form"
+    )
+    # Verify the scroll-to-form behavior is wired.
+    assert 'folder-name' in index_html
+    assert 'scrollIntoView' in index_html
+
+
 def test_settings_about_has_daemon_log_location_button(index_html):
     """Same launch-checklist item: a user reaching for the log
     should not have to ask 'where is it?' on chat. Pin the
