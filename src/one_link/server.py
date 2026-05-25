@@ -17014,7 +17014,21 @@ class UIServer:
         if path is None:
             return web.json_response({"error": "not found"}, status=404)
         mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        return web.FileResponse(path, headers={"Content-Type": mime})
+        # Inline previews (PDF, video, audio, SVG) load this endpoint
+        # as an <iframe>/<video>/<audio> src on the same origin as the
+        # parent UI. The global security middleware sets
+        # X-Frame-Options: DENY which blocks ALL framing - including
+        # same-origin previews. Override here with the modern CSP
+        # frame-ancestors 'self' AND the legacy X-Frame-Options
+        # SAMEORIGIN so older browsers also render the preview. The
+        # 'self' origin is the only one that can ever hit this route
+        # (loopback bound + token gate), so same-origin framing is
+        # the maximum safe widening.
+        return web.FileResponse(path, headers={
+            "Content-Type": mime,
+            "X-Frame-Options": "SAMEORIGIN",
+            "Content-Security-Policy": "frame-ancestors 'self'",
+        })
 
     async def api_outbound_file_download(
         self, request: web.Request,
@@ -17090,12 +17104,30 @@ class UIServer:
         # <iframe src=/api/files/{name}>. Server returns metadata
         # only (no content read) so a 100 MB PDF doesn't OOM.
         "pdf": "pdf",
+        # v0.21.x: video via HTML5 <video controls> - streams over the
+        # same /api/files/{name} endpoint with byte-range support
+        # courtesy of aiohttp's FileResponse. Browser handles the
+        # codec; if a codec is missing the user sees the standard
+        # 'cannot play' UI instead of a broken iframe.
+        "mp4": "video", "webm": "video", "mov": "video", "m4v": "video",
+        "mkv": "video", "ogv": "video",
+        # v0.21.x: audio via HTML5 <audio controls> for files the
+        # chat doesn't render as a first-class audio bubble (e.g.
+        # an attached .mp3 that wasn't recorded via the in-app
+        # voice-note flow).
+        "mp3": "audio", "wav": "audio", "ogg": "audio", "oga": "audio",
+        "m4a": "audio", "aac": "audio", "flac": "audio", "opus": "audio",
+        # v0.21.x: SVG rendered as an <img> (the daemon serves it as
+        # image/svg+xml; the browser displays it inline). HTML files
+        # render in a tightly-sandboxed iframe so a malicious sender
+        # can't run arbitrary JS in the host page's origin.
+        "svg": "image",
+        "html": "html-sandboxed", "htm": "html-sandboxed",
         # markdown variants → markdown renderer (subset)
         "md": "markdown", "markdown": "markdown", "mdown": "markdown",
         # code-ish: monospace + line numbers
         "py": "code", "js": "code", "mjs": "code", "cjs": "code",
         "ts": "code", "tsx": "code", "jsx": "code",
-        "html": "code", "htm": "code",
         "css": "code", "scss": "code", "sass": "code", "less": "code",
         "json": "code", "yaml": "code", "yml": "code", "toml": "code",
         "xml": "code", "ini": "code", "conf": "code", "cfg": "code",
@@ -17140,14 +17172,18 @@ class UIServer:
         # v0.9.5: PDFs render via the browser's built-in viewer
         # (<iframe src=/api/files/{name}>), not by reading the
         # bytes server-side. Return metadata only so a 100 MB PDF
-        # doesn't OOM the daemon.
-        if kind == "pdf":
+        # doesn't OOM the daemon. v0.21.x: video/audio/image/html
+        # follow the same stream pattern - the daemon hands the UI
+        # a URL it can drop into a <video>, <audio>, <img>, or
+        # <iframe> element. No bytes read here.
+        if kind in ("pdf", "video", "audio", "image", "html-sandboxed"):
+            from urllib.parse import quote as _urlquote
             return web.json_response({
                 "name": safe,
                 "extension": ext,
                 "kind": kind,
                 "size": size,
-                "stream_url": f"/api/files/{safe}",
+                "stream_url": f"/api/files/{_urlquote(safe, safe='')}",
             })
         cap = self.PREVIEW_MAX_BYTES
         truncated = size > cap
