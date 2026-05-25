@@ -335,6 +335,45 @@ def test_error_toast_separator_is_single_space_not_dash(index_html):
     assert "`${headline} ${hint}`" in body
 
 
+def test_recovery_wizard_render_helpers_in_script1_scope(index_html):
+    """CRITICAL bug found by visual sweep 2026-05-25: the recovery
+    wizard render functions (in Script 1's IIFE) call escapeText
+    + escapeAttr, but those were ONLY defined in Script 2's IIFE.
+    Result: every wizard render threw ReferenceError caught by
+    .catch() wrappers, leaving all 6 track cards empty + the
+    wizard non-functional.
+
+    Pin: Script 1 must have its own escapeText + escapeAttr so
+    the wizard renders. Aliases of the Script 2 implementations
+    are fine."""
+    # Find the FIRST escapeText definition (must be in Script 1,
+    # ie before line 32118 where Script 1 closes).
+    first_idx = index_html.find("function escapeText(")
+    assert first_idx > 0, "escapeText not defined anywhere"
+    # The Script 1 close tag is at line 32118; first def must be
+    # before that.
+    script1_close = index_html.find("\n</script>")
+    assert first_idx < script1_close, (
+        "escapeText is ONLY defined in Script 2; the recovery "
+        "wizard renders in Script 1 will fail with ReferenceError"
+    )
+
+
+def test_no_yelling_or_eula_jokes_in_settings_copy(index_html):
+    """The Chats + Notifications panes used to ship engineer-jokes
+    that read weird to non-technical users:
+      - 'Devices yelling on your local network...'
+      - '...like a person who reads EULAs'
+      - 'A muted peer never pings, no matter how loudly they yell'
+      - '(Yes, the word means what you hope it means.)'
+    All four replaced with calm explanatory copy. Pin so they
+    don't sneak back."""
+    assert "Devices yelling on your local network" not in index_html
+    assert "like a person who reads EULAs" not in index_html
+    assert "no matter how loudly they yell" not in index_html
+    assert "the word means what you hope it means" not in index_html
+
+
 def test_offline_transfer_status_explains_what_will_happen(index_html):
     """Audit P1: 'Waiting for device' was the queued-transfer status
     label. Vague - what's it waiting for? How long? Replaced with

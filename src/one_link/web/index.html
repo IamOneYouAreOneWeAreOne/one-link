@@ -9612,9 +9612,10 @@
               <button id="set-notif" class="btn-ghost">Enable</button>
             </div>
             <p class="settings-help">
-              Browser-level system notifications. Per-device mute (in the
-              device drawer) wins over this. A muted peer never pings, no
-              matter how loudly they yell.
+              System notifications from your browser. If you've muted a
+              specific device in its drawer, that mute always wins -
+              you won't get a notification from a muted device even
+              when this is on.
             </p>
 
             <!-- v0.14.4: data-tier="advanced". Lock-screen preview +
@@ -9828,9 +9829,9 @@
               </button>
             </div>
             <p class="settings-help">
-              Devices yelling on your local network are paired without
-              asking. Off: you approve each one manually, like a person
-              who reads EULAs.
+              Devices that show up on your local network are paired
+              automatically. Turn this off if you'd rather approve
+              each one yourself.
             </p>
             <p class="settings-help">
               Per-conversation settings (disappearing messages, mute,
@@ -9889,9 +9890,9 @@
               </div>
               <p class="settings-help">
                 One Link finds devices on your Wi-Fi by itself. To reach
-                devices on different networks, add one or more rendezvous
-                URLs. (Yes, the word means what you hope it means.)
-                <a href="#rdz-help" id="rdz-help-link" class="learn-more">What's a rendezvous?</a>
+                devices on different networks, add one or more meeting-
+                point URLs below.
+                <a href="#rdz-help" id="rdz-help-link" class="learn-more">What's a meeting point?</a>
               </p>
               <textarea id="set-rendezvous" rows="3"
                         placeholder="https://your-rendezvous.example.com&#10;https://backup-rendezvous.example.com"></textarea>
@@ -13384,6 +13385,22 @@
       first.focus();
     }
   });
+
+  // v0.21.x: aliases for the recovery-wizard render code which
+  // calls `escapeText` / `escapeAttr` (defined in the second
+  // <script> tag below). Without these, the wizard renders fail
+  // silently with ReferenceError caught by .catch() wrappers,
+  // leaving every track card empty. Real bug found 2026-05-25
+  // by visual sweep; the wizard had been shipping non-functional.
+  function escapeText(s) {
+    if (s == null) return "";
+    const div = document.createElement("div");
+    div.textContent = String(s);
+    return div.innerHTML;
+  }
+  function escapeAttr(s) {
+    return String(s == null ? "" : s).replace(/"/g, "&quot;");
+  }
 
   function _escapeHtml(s) {
     return String(s)
