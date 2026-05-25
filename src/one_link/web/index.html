@@ -9312,7 +9312,7 @@
                  placeholder="Search settings..."
                  aria-label="Search settings" />
         </div>
-        <button class="settings-close" id="settings-cancel" title="Close" aria-label="Close settings">x</button>
+        <button class="settings-close" id="settings-cancel" title="Close" aria-label="Close settings">×</button>
       </div>
       <div class="settings-body">
         <nav class="settings-nav" id="settings-nav" aria-label="Settings sections">
@@ -10970,7 +10970,7 @@
         </div>
       </div>
       <div class="onboarding-step" data-step="5" style="display:none;">
-        <div class="onboarding-glyph">GO</div>
+        <div class="onboarding-glyph">🚀</div>
         <h1>Send something to yourself</h1>
         <p>One Link will choose the best private path.</p>
         <div class="setup-receipt">
@@ -10985,7 +10985,7 @@
         </div>
       </div>
       <div class="onboarding-step" data-step="6" style="display:none;">
-        <div class="onboarding-glyph">OK</div>
+        <div class="onboarding-glyph">✓</div>
         <h1>One Link is ready</h1>
         <p>Your devices can now act as one private fabric.</p>
         <div class="setup-checklist" id="one-setup-checklist"></div>
@@ -11267,6 +11267,20 @@
     const parts = name.replace(/[^a-zA-Z0-9 _-]/g, " ").split(/[ _-]+/).filter(Boolean);
     return (parts[0]?.[0] || "?").toUpperCase() + (parts[1]?.[0] || "").toUpperCase();
   };
+  // v0.21.x: strip the internal collision-prefix from filenames
+  // before displaying them. The daemon prefixes every inbox file
+  // with `<13-digit-timestamp>_<16-hex-hash>_` to guarantee
+  // uniqueness when two peers send the same filename. That prefix
+  // is useful on disk but ugly in a chat bubble - users want to
+  // see 'paper1.pdf', not '1779676087532_0d1e262c1c60b45f_paper1.pdf'.
+  function displayFileName(name) {
+    if (!name) return name;
+    // Match the daemon's prefix shape exactly: 13 digits + _ +
+    // 16 hex chars + _. If the file doesn't carry the prefix
+    // (e.g. user-renamed, or older daemon format), pass through.
+    const m = String(name).match(/^\d{13}_[0-9a-fA-F]{16}_(.+)$/);
+    return m ? m[1] : name;
+  }
   const fileIcon = (name) => {
     const ext = (name.split(".").pop() || "").toLowerCase();
     if (["png","jpg","jpeg","gif","webp","bmp"].includes(ext)) return "🖼";
@@ -18085,7 +18099,7 @@
     const b = el("div", `msg ${msg.dir} file`);
     const icon = el("div", "icon", fileIcon(msg.name || ""));
     const meta = el("div", "meta");
-    meta.appendChild(el("div", "name", msg.name || "file"));
+    meta.appendChild(el("div", "name", displayFileName(msg.name || "file")));
     // v0.21.x: clicking a completed file bubble opens the file
     // (image → inline lightbox; anything else → new tab). Sender +
     // receiver supported via openMessageFile's source-routing. Only
@@ -18454,7 +18468,7 @@
         const row = el("div", "file-row");
         row.appendChild(el("div", "icon", fileIcon(f.name)));
         const meta = el("div", "meta");
-        const name = el("div", "name", f.display_name || f.name);
+        const name = el("div", "name", f.display_name || displayFileName(f.name));
         name.title = f.copies > 1
           ? `${f.display_name || f.name} - latest saved as ${f.name}`
           : (f.name || "");
@@ -32275,7 +32289,7 @@
   <div id="call-settings-popover" class="call-settings-popover" aria-label="Call settings">
     <div class="call-settings-title">
       <span>Call settings</span>
-      <button class="btn-ghost" id="btn-call-settings-close" type="button" aria-label="Close call settings">x</button>
+      <button class="btn-ghost" id="btn-call-settings-close" type="button" aria-label="Close call settings">×</button>
     </div>
     <div class="call-settings-row">
       <label for="call-mic-select">Microphone</label>
