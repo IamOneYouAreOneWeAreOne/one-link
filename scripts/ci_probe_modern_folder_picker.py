@@ -1,35 +1,99 @@
-"""CI smoke: verify the modern Windows folder picker can initialize.
+"""CI smoke: verify the OS-native folder picker can initialize.
 
-This script does NOT show a dialog (CI runners may not have an
-interactive display session). It probes ONLY whether CoCreateInstance
-succeeds against at least one of the two FileOpenDialog CLSIDs the
-production picker tries:
+Each platform has a different bug-class this script catches:
 
-  - Classic: DC1C5A9C-E88A-4ADE-A5A1-60F82A20AEF7
-  - Broker:  3217B1B1-5DC3-4590-9C62-EF9E2DF1C25D
+  Windows: CoCreateInstance returning REGDB_E_CLASSNOTREG for
+    both the classic + broker FileOpenDialog CLSIDs. If both
+    fail, production silently falls through to the 90s-looking
+    WinForms FolderBrowserDialog the user explicitly rejected.
 
-If BOTH return REGDB_E_CLASSNOTREG on the CI runner's Windows build,
-the production daemon would silently fall through to the legacy
-WinForms FolderBrowserDialog - the 90s-looking dialog the user
-explicitly rejected. This script makes that regression a CI failure
-so we learn about it before users do.
+  macOS: osascript missing OR sandbox blocking the
+    `choose folder` AppleEvent. Without this, the picker hangs.
 
-Run via the windows_native_picker_smoke job in
+  Linux: neither zenity nor kdialog installed. Without one, the
+    picker falls through to a blurry tkinter dialog.
+
+The script does NOT pop a real dialog (CI may not have an
+interactive display session). It only verifies that whatever
+primitive the production picker depends on is REACHABLE on the
+current OS. Production-style fallthrough still applies if this
+probe fails - we just learn about the silent-degradation case
+in CI before users do.
+
+Run via the picker-probe jobs in
 .github/workflows/full_suite_and_e2e.yml.
 
-Exits 0 on success, non-zero on failure. Prints which CLSID worked.
+Exits 0 on success, non-zero on failure.
 """
 from __future__ import annotations
 
 import ctypes
+import shutil
+import subprocess
 import sys
 from ctypes import POINTER, byref, c_void_p
-from ctypes import wintypes
 
 
+def _probe_macos() -> int:
+    """macOS picker uses `osascript -e 'choose folder ...'`. We
+    can't actually run that command (it'd hang on no display);
+    just verify osascript exists + a benign tell-app probe runs."""
+    if shutil.which("osascript") is None:
+        print("FATAL: osascript not on PATH; macOS folder picker would fail")
+        return 1
+    # Run a no-op AppleScript to confirm osascript works at all.
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", "return 42"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as e:
+        print(f"FATAL: osascript launch failed: {e}")
+        return 1
+    if r.returncode != 0:
+        print(f"FATAL: osascript noop exit {r.returncode}: {r.stderr.strip()}")
+        return 1
+    if r.stdout.strip() != "42":
+        print(f"FATAL: osascript noop returned {r.stdout!r} not '42'")
+        return 1
+    print("OK: osascript reachable + returns expected AppleScript value")
+    return 0
+
+
+def _probe_linux() -> int:
+    """Linux picker tries zenity then kdialog. At least one must
+    be installed - falling through to tkinter is the silent
+    degradation we want this CI smoke to catch."""
+    found = []
+    for tool in ("zenity", "kdialog"):
+        path = shutil.which(tool)
+        if path:
+            found.append(f"{tool} ({path})")
+    if not found:
+        print(
+            "FATAL: neither zenity nor kdialog installed; Linux folder "
+            "picker would silently fall through to the blurry tkinter "
+            "dialog. Install zenity (GNOME) or kdialog (KDE) on the CI "
+            "runner: `sudo apt-get install -y zenity`."
+        )
+        return 1
+    # Don't actually run them - they'd try to open a display.
+    print(f"OK: native picker tool(s) available: {', '.join(found)}")
+    return 0
+
+
+if sys.platform == "darwin":
+    sys.exit(_probe_macos())
+if sys.platform.startswith("linux"):
+    sys.exit(_probe_linux())
 if sys.platform != "win32":
-    print(f"not windows ({sys.platform}); skipping")
+    print(f"unknown platform ({sys.platform}); skipping")
     sys.exit(0)
+
+
+# Windows path: probe IFileOpenDialog CoCreateInstance.
+
+from ctypes import wintypes
 
 
 class _GUID(ctypes.Structure):

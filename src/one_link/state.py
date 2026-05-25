@@ -307,8 +307,15 @@ def _normalize_user_query_to_fts5_prefix(raw: str) -> str:
     s = (raw or "").strip()
     if not s:
         return ""
-    # Pass through explicit phrase queries: "...".
+    # Pass through explicit phrase queries: "...".  Reject the
+    # empty / whitespace-only phrase ('""', '"   "') - those would
+    # error or no-op against FTS5 MATCH; cleaner to return empty
+    # so the caller short-circuits without a DB hit. Hypothesis
+    # caught this edge with the '""' input.
     if s.startswith('"') and s.endswith('"') and len(s) >= 2:
+        inner = s[1:-1].strip()
+        if not inner:
+            return ""
         return s
     tokens = _FTS5_TOKEN_RE.findall(s)
     if not tokens:

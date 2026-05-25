@@ -48,7 +48,19 @@ tray = ["pystray>=0.19", "pillow>=12.2.0"]
 # because pulling aiohttp-socks adds the python-socks transitive
 # dep (~150KB) that users not running Tor never need.
 tor = ["aiohttp-socks>=0.10"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  # v0.21.x property-based testing for invariants that span
+  # huge input spaces (e.g. 'every BIP-39 seed round-trips';
+  # 'every random message body is findable by every prefix
+  # of every word in it'). Hypothesis runs 100-1000 generated
+  # examples per test by default; the bug-class it catches is
+  # 'I forgot to test the empty input / unicode edge / a value
+  # that happens to be 256 bytes long' that example-based tests
+  # systematically miss because the author didn't think of it.
+  "hypothesis>=6.100",
+]
 # v0.21.x browser-driven E2E harness. Catches UI bugs that no
 # amount of unit testing can: pixel overlap, iframe security
 # headers blocking inline previews, click handlers that hijack

@@ -115,26 +115,32 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  windows_native_picker_smoke:
-    name: real-OS native picker smoke (windows-only)
-    runs-on: windows-latest
+  native_picker_smoke:
+    name: real-OS native picker smoke / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
     timeout-minutes: 10
-    # This job exercises the real Windows folder-picker code path
-    # WITHOUT actually showing a dialog. It verifies the CoCreateInstance
-    # call succeeds against either CLSID (classic OR broker) on the
-    # CI runner's specific Windows build. Without this, a CLSID-not-
-    # registered regression like the one this session fixed is
-    # invisible to all the mocked unit tests.
+    # Each platform has its own bug-class:
+    #   - Windows: REGDB_E_CLASSNOTREG on the FileOpenDialog CLSIDs
+    #     would make production silently fall back to the 90s WinForms
+    #     dialog (the regression this session fixed).
+    #   - macOS: missing osascript or sandbox blocking AppleEvents
+    #     would hang the picker.
+    #   - Linux: neither zenity nor kdialog installed -> picker falls
+    #     through to blurry tkinter.
+    # Without this probe these regressions are invisible to all CI
+    # because every other folder-picker test mocks the dialog away.
 
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-      - name: probe IFileOpenDialog CoCreateInstance (no dialog)
-        shell: pwsh
+      - name: install zenity on ubuntu (matches a reasonable user install)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y zenity
+      - name: probe native picker primitive (no dialog)
         run: python scripts/ci_probe_modern_folder_picker.py
