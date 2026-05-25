@@ -292,6 +292,49 @@ def test_settings_about_has_report_a_bug_github_link(index_html):
     assert 'Copy report' in index_html
 
 
+def test_api_error_synthesizes_plain_english_per_status_code(index_html):
+    """When the server returns a non-JSON 5xx (or no body at all),
+    _apiError used to fall back to 'request failed (N)' - tells
+    the user nothing actionable. Now branches on common HTTP
+    statuses to surface plain-English defaults with a hint."""
+    idx = index_html.find("function _apiError(")
+    assert idx > 0
+    body = index_html[idx:idx + 3500]
+    # 401/403 - auth refreshed.
+    assert "One Link forgot who you are." in body
+    # 404 - not present here.
+    assert "That isn't on this device." in body
+    # 408/504 - timeout.
+    assert "Took too long to answer." in body
+    # 413 - too big.
+    assert "That's too big to send right now." in body
+    # 429 - rate-limited.
+    assert "Slowing things down for a second." in body
+    # 5xx - something on this device.
+    assert "Something went wrong on this device." in body
+    # 0 - browser-side network error.
+    assert "Can't reach One Link right now." in body
+    # 'request failed (N)' must not be the headline anymore.
+    # (We DO use it as a fallback for unknown statuses; that's fine.)
+    assert "request failed (" not in body or "Something went wrong (" in body
+
+
+def test_error_toast_separator_is_single_space_not_dash(index_html):
+    """The separator between headline + hint in errorToastBody was
+    ' - ' which produces awkward double-punctuation ('Took too
+    long. - The other device...'). Switched to a single space so
+    two complete sentences flow naturally. Pin so a future
+    refactor doesn't re-introduce the dash."""
+    idx = index_html.find("function errorToastBody(")
+    assert idx > 0
+    body = index_html[idx:idx + 2000]
+    assert "`${headline} - ${hint}`" not in body, (
+        "errorToastBody still uses ' - ' separator; produces "
+        "awkward double-punctuation in toasts"
+    )
+    assert "`${headline} ${hint}`" in body
+
+
 def test_offline_transfer_status_explains_what_will_happen(index_html):
     """Audit P1: 'Waiting for device' was the queued-transfer status
     label. Vague - what's it waiting for? How long? Replaced with
