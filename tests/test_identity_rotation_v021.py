@@ -1232,3 +1232,218 @@ def test_rotate_endpoint_registered_guarded_rate_limited():
     assert '"recovery_rotate"' in body
     assert "confirmed_rotate" in body
     assert "_recovery_no_store_headers" in body
+
+
+# ── inbound cert handler auto-acks v0.7.8 key-change banner ─────────
+
+
+def test_inbound_rotation_cert_handler_acks_pending_key_change_row(tmp_path):
+    """Behavioral test: plant a key_change_events row for new_fp
+    (simulating v0.7.8 detection firing first), drive a valid
+    rotation cert through the handler, then assert the row is
+    acked AND the UI server received a key_change_acked_all
+    broadcast so any open tab refreshes live.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from one_link.daemon import Daemon
+    from one_link.state import State
+    from one_link.identity_rotation import (
+        fingerprint_for_pubkey,
+        mint_certificate,
+    )
+
+    old = Ed25519PrivateKey.generate()
+    new = Ed25519PrivateKey.generate()
+    old_pub = old.public_key().public_bytes_raw()
+    new_pub = new.public_key().public_bytes_raw()
+    old_fp = fingerprint_for_pubkey(old_pub)
+    new_fp = fingerprint_for_pubkey(new_pub)
+
+    state = State(tmp_path / "ack.db")
+    state.upsert_peer(
+        fingerprint=old_fp, short_id="bench",
+        pubkey=old_pub, hostname="bench.lan",
+    )
+    state.set_peer_trust(old_fp, "pinned")
+
+    # Plant the v0.7.8 detection-layer row by hand: the handler
+    # doesn't care HOW it got there, only that ack_all... clears
+    # any unacked row keyed by new_fp.
+    with state._write_lock:  # noqa: SLF001 - test reaches into internals
+        state._conn.execute(  # noqa: SLF001
+            """
+            INSERT INTO key_change_events(
+                ts_ms, hostname,
+                old_fingerprint, new_fingerprint,
+                old_pub_hex, new_pub_hex,
+                severity, acked_ms
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                1_700_000_000_000, "bench.lan",
+                old_fp, new_fp,
+                old_pub.hex(), new_pub.hex(),
+                "high",
+            ),
+        )
+        state._conn.commit()  # noqa: SLF001
+
+    # Confirm the row is initially unacked.
+    pending_before = state.list_key_change_events(
+        unacked_only=True, new_fingerprint=new_fp, limit=10,
+    )
+    assert len(pending_before) == 1
+
+    cert = mint_certificate(
+        old_priv=old, new_pub=new_pub, ts_ms=1_700_000_001_000,
+    )
+
+    broadcasts: list[dict] = []
+
+    class _UI:
+        def broadcast(self, payload):
+            broadcasts.append(payload)
+
+    sent: list[bytes] = []
+
+    class _Chan:
+        async def send(self, frame):
+            sent.append(frame)
+
+    daemon = Daemon.__new__(Daemon)
+    daemon.state = state
+    daemon.ui_server = _UI()
+    daemon.me = SimpleNamespace(short_id="me")
+
+    asyncio.run(daemon._handle_rotation_cert(
+        _Chan(),
+        {"cert": cert.to_wire_dict(), "id": "frame-1"},
+        peer_fp=old_fp,
+    ))
+
+    # Row is now acked.
+    pending_after = state.list_key_change_events(
+        unacked_only=True, new_fingerprint=new_fp, limit=10,
+    )
+    assert pending_after == [], (
+        f"v0.7.8 key_change_events row for new_fp was not auto-acked "
+        f"after the rotation cert applied: {pending_after}"
+    )
+
+    # WS broadcast was emitted in the right shape.
+    types = [b.get("type") for b in broadcasts]
+    assert "key_change_acked_all" in types, (
+        f"handler did not broadcast key_change_acked_all; "
+        f"saw broadcasts: {types}"
+    )
+    ack_msg = next(b for b in broadcasts if b.get("type") == "key_change_acked_all")
+    assert ack_msg.get("fingerprint") == new_fp
+    assert ack_msg.get("count") == 1
+
+    state.close()
+
+
+def test_inbound_rotation_cert_handler_skips_broadcast_when_no_row(tmp_path):
+    """Symmetric: if no v0.7.8 row was pending (common case: the
+    cert arrived BEFORE detection fired, or detection ran on a
+    different fingerprint), the handler must NOT emit a no-op
+    key_change_acked_all WS broadcast. Pin so future refactors
+    don't spam every WS client on every cert."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from one_link.daemon import Daemon
+    from one_link.state import State
+    from one_link.identity_rotation import (
+        fingerprint_for_pubkey,
+        mint_certificate,
+    )
+
+    old = Ed25519PrivateKey.generate()
+    new = Ed25519PrivateKey.generate()
+    old_pub = old.public_key().public_bytes_raw()
+    new_pub = new.public_key().public_bytes_raw()
+    old_fp = fingerprint_for_pubkey(old_pub)
+
+    state = State(tmp_path / "noack.db")
+    state.upsert_peer(
+        fingerprint=old_fp, short_id="bench",
+        pubkey=old_pub, hostname="bench.lan",
+    )
+    state.set_peer_trust(old_fp, "pinned")
+    cert = mint_certificate(
+        old_priv=old, new_pub=new_pub, ts_ms=1_700_000_001_000,
+    )
+
+    broadcasts: list[dict] = []
+
+    class _UI:
+        def broadcast(self, payload):
+            broadcasts.append(payload)
+
+    class _Chan:
+        async def send(self, frame): pass
+
+    daemon = Daemon.__new__(Daemon)
+    daemon.state = state
+    daemon.ui_server = _UI()
+    daemon.me = SimpleNamespace(short_id="me")
+
+    asyncio.run(daemon._handle_rotation_cert(
+        _Chan(),
+        {"cert": cert.to_wire_dict(), "id": "frame-1"},
+        peer_fp=old_fp,
+    ))
+
+    types = [b.get("type") for b in broadcasts]
+    assert "key_change_acked_all" not in types, (
+        f"handler emitted no-op key_change_acked_all when no v0.7.8 "
+        f"row was pending; broadcasts: {types}"
+    )
+    # peer_rotated + peers_changed should still fire (those are
+    # always-on signals, not conditional on prior detection).
+    assert "peer_rotated" in types
+    assert "peers_changed" in types
+
+    state.close()
+
+
+def test_inbound_rotation_cert_handler_auto_acks_v078_key_change():
+    """When a peer rotates legitimately the v0.7.8 hostname/key-change
+    detection layer fires FIRST (red 'Did this peer really change
+    keys?' banner) before our ROTATION_CERT verifies. Once the cert
+    applies cleanly that banner is stale - the rotation was
+    cryptographically authorized.
+
+    The handler MUST bulk-ack any unacked key_change_events row
+    targeting the new fingerprint AND broadcast key_change_acked_all
+    so every open tab's banner self-clears live. Source-text gate so
+    a future refactor that drops either half surfaces in CI.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "daemon.py").read_text(encoding="utf-8")
+    idx = src.find("async def _handle_rotation_cert(")
+    assert idx > 0, "_handle_rotation_cert not found"
+    # Bound the search to this handler only; the next handler is
+    # _handle_rotation_cert_ack which begins right after.
+    end = src.find("async def _handle_rotation_cert_ack(", idx)
+    assert end > idx
+    body = src[idx:end]
+    assert "ack_all_key_change_events_for(applied.new_fp)" in body, (
+        "inbound rotation cert handler must bulk-ack v0.7.8 "
+        "key_change_events rows for the new fingerprint so the "
+        "stale red 'key change!' banner self-clears once the cert "
+        "verifies"
+    )
+    assert '"type": "key_change_acked_all"' in body, (
+        "handler must broadcast key_change_acked_all so the UI "
+        "banner refreshes across all open tabs live"
+    )
+    # The broadcast must be gated on acked_count > 0 to avoid
+    # firing a no-op WS event on every cert application.
+    assert "acked_count > 0" in body, (
+        "broadcast should be gated on acked_count > 0 to avoid "
+        "no-op WS traffic when no v0.7.8 row was pending"
+    )

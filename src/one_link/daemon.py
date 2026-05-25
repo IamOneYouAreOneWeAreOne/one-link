@@ -2984,6 +2984,17 @@ class Daemon:
                 hostname=old_peer.hostname,
                 ts_ms=applied.ts_ms,
             )
+        # v0.21.x: when a peer rotates legitimately the v0.7.8
+        # hostname/key-change detection layer fires FIRST (red
+        # 'Did this peer really change keys?' banner) before our
+        # cert arrives. Once the cert verifies, that warning is
+        # stale - the rotation was cryptographically authorized.
+        # Bulk-ack any unacked key_change_events row targeting the
+        # new fingerprint so the banner self-clears across all
+        # open tabs without the user having to click 'Got it'.
+        acked_count = 0
+        with contextlib.suppress(Exception):
+            acked_count = self.state.ack_all_key_change_events_for(applied.new_fp)
         if self.ui_server is not None:
             with contextlib.suppress(Exception):
                 self.ui_server.broadcast({
@@ -2994,6 +3005,15 @@ class Daemon:
                     "ts_ms": applied.ts_ms,
                 })
                 self.ui_server.broadcast({"type": "peers_changed"})
+                if acked_count > 0:
+                    # Mirror the bulk-ack endpoint's WS shape so the
+                    # existing key_change_acked_all UI handler picks
+                    # it up and refreshes the banner live.
+                    self.ui_server.broadcast({
+                        "type": "key_change_acked_all",
+                        "fingerprint": applied.new_fp,
+                        "count": int(acked_count),
+                    })
         # Ack so the sender can drop its queue row.
         with contextlib.suppress(Exception):
             await channel.send(encode_msg(make_msg(
