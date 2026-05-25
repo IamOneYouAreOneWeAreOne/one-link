@@ -10002,7 +10002,7 @@
                 <span class="settings-help">Counting your files…</span>
               </div>
               <div class="storage-table" id="storage-table">
-                <p class="settings-help">No conversations. Suspicious.</p>
+                <p class="settings-help">Files and chat history will show up here once you've sent or received anything. Right now you haven't.</p>
               </div>
             </div>
             <div class="settings-section">
@@ -14866,7 +14866,7 @@
     // empty files; the active-status label needs to handle the
     // pre-complete pulse cleanly.
     const isEmpty = (t.total_bytes === 0 || t.size === 0);
-    if (t.status === "queued")   return stateName === "resuming" ? "Resuming" : "Waiting for device";
+    if (t.status === "queued")   return stateName === "resuming" ? "Resuming" : "Will send when they're back online";
     if (t.status === "offered")  return isEmpty ? "Sending empty file" : "Sending…";
     if (t.status === "active") {
       if (isEmpty) return "Sending empty file";
@@ -14876,8 +14876,8 @@
       if (isEmpty) return t.direction === "in" ? "Empty file received" : "Empty file sent";
       return t.direction === "in" ? "Received" : "Done";
     }
-    if (t.status === "paused")   return stateName === "resuming" ? "Resuming" : "Waiting for device";
-    if (t.status === "failed")   return meta.transient ? "Waiting for device" : "Needs attention";
+    if (t.status === "paused")   return stateName === "resuming" ? "Resuming" : "Paused. Will retry when they're back.";
+    if (t.status === "failed")   return meta.transient ? "Will retry when they're back online" : "Needs attention";
     return t.status || fallback;
   }
 
@@ -15412,8 +15412,8 @@
         ? ` Route choice ${Number(perf.route_probe_avg_ms).toFixed(2)} ms.`
         : "";
       copy.textContent = devices.length
-        ? `${localCount || 1} local device${(localCount || 1) === 1 ? "" : "s"} can help move files for you. Duplicate request protection is ${mesh.remote_instruction_replay_protection ? "on" : "checking"}.${speed}`
-        : "This device is reporting local presence; add trusted personal devices to form a self-mesh.";
+        ? `${localCount || 1} of your devices ${(localCount || 1) === 1 ? "is" : "are"} ready to help move files. ${speed}`
+        : "Only this device so far. Open Settings → Devices and pair another one of yours to set up the safety net.";
     }
     if (!list) return;
     list.replaceChildren();
@@ -28144,7 +28144,7 @@
       const result = await api.upload(state.selectedPeer, file);
       sendingToast?.remove();
       if (result?.queued || result?.paused) {
-        toast(`Waiting for device - ${file.name} will send automatically.`, "info", 5000);
+        toast(`${file.name} will send when they're back online.`, "info", 5000);
       }
     } catch (e) {
       sendingToast?.remove();

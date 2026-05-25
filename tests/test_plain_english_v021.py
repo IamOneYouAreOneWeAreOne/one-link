@@ -292,6 +292,48 @@ def test_settings_about_has_report_a_bug_github_link(index_html):
     assert 'Copy report' in index_html
 
 
+def test_offline_transfer_status_explains_what_will_happen(index_html):
+    """Audit P1: 'Waiting for device' was the queued-transfer status
+    label. Vague - what's it waiting for? How long? Replaced with
+    'Will send when they're back online' (action + cause)."""
+    assert '"Will send when they\'re back online"' in index_html, (
+        "transfer-status helper missing the actionable 'will send "
+        "when they're back online' wording for queued transfers"
+    )
+    assert '"Will retry when they\'re back online"' in index_html, (
+        "transfer-status helper missing the same wording for "
+        "transient failures"
+    )
+    # The vague wording must be gone.
+    assert 'return stateName === "resuming" ? "Resuming" : "Waiting for device"' not in index_html
+
+
+def test_storage_pane_empty_state_is_friendly_not_suspicious(index_html):
+    """The storage pane used to read 'No conversations. Suspicious.'
+    on a fresh install - that's a snarky engineer joke that reads
+    weird to a first-time user. Replaced with calm + explanatory."""
+    assert "No conversations. Suspicious." not in index_html, (
+        "storage pane still ships the snarky 'Suspicious.' empty "
+        "state - confuses fresh-install users"
+    )
+    assert "Files and chat history will show up here" in index_html
+
+
+def test_self_mesh_empty_state_points_user_at_the_action(index_html):
+    """Audit P1: 'This device is reporting local presence; add
+    trusted personal devices to form a self-mesh.' tells the user
+    WHAT to do without telling them WHERE. New copy names the
+    Settings -> Devices path explicitly."""
+    assert "add trusted personal devices to form a self-mesh" not in index_html, (
+        "self-mesh empty state still uses jargon-y 'form a "
+        "self-mesh' language without telling the user where to go"
+    )
+    assert "Open Settings → Devices and pair another one of yours" in index_html, (
+        "self-mesh empty state should name the Settings → Devices "
+        "path so users have an actionable next step"
+    )
+
+
 def test_install_warning_banner_reframes_smartscreen_as_a_feature(index_html):
     """The 'Why isn't this app signed?' first-launch banner is the
     in-app moment that turns the SmartScreen / Gatekeeper warning
