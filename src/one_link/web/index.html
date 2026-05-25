@@ -10376,6 +10376,33 @@
               <p class="settings-help" id="settings-about-log-location-out"
                  style="display:none; margin-top:8px; font-family:var(--font-mono); font-size:12px;"></p>
             </div>
+            <!-- v0.21.x: auto-install toggle. Defaults ON so the
+                 user gets seamless updates; opting out leaves them
+                 to download new releases manually. Persisted as
+                 the 'auto_install_updates' setting in state.db. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Updates</span></div>
+              <p class="settings-help">
+                When a new One Link release is published, install it
+                automatically. The new binary is downloaded from
+                the official GitHub release, its SHA-256 is verified
+                against the published checksum, and your browser tab
+                reconnects when the new daemon is ready - you don't
+                lose your place. Turn this off if you'd rather pick
+                when to update yourself.
+              </p>
+              <div class="settings-row">
+                <label for="setting-auto-install-updates">Auto-install updates</label>
+                <label class="settings-toggle">
+                  <input
+                    type="checkbox"
+                    id="setting-auto-install-updates"
+                    aria-label="Auto-install updates"
+                  />
+                  <span class="settings-toggle-slider" aria-hidden="true"></span>
+                </label>
+              </div>
+            </div>
             <!-- v0.21.x: re-open the welcome wizard for users who
                  skipped it on first launch or just want a refresher. -->
             <div class="settings-section">
@@ -30198,18 +30225,21 @@
       refreshSettingsAbout();
     }
   }
+  // v0.21.x: the 'Recovery' nav item is special - it doesn't switch
+  // panes (no recovery pane exists; the wizard is a full modal).
+  // Close Settings + open the wizard instead. Wired directly by ID
+  // so the static UI-wiring contract recognizes it.
+  $("#settings-nav-open-recovery")?.addEventListener("click", () => {
+    settingsBackdrop?.classList.remove("show");
+    if (typeof _showRecoveryWizard === "function") {
+      _showRecoveryWizard().catch(() => {});
+    }
+  });
   document.querySelectorAll(".settings-nav-item").forEach((btn) => {
     btn.addEventListener("click", () => {
-      // v0.21.x: the 'Recovery' nav item is special - it doesn't
-      // switch panes (no recovery pane exists; the wizard is a
-      // full modal). Close Settings + open the wizard instead.
-      if (btn.id === "settings-nav-open-recovery") {
-        settingsBackdrop?.classList.remove("show");
-        if (typeof _showRecoveryWizard === "function") {
-          _showRecoveryWizard().catch(() => {});
-        }
-        return;
-      }
+      // Recovery is handled above; skip the pane-switch path so
+      // we don't try to swap to a nonexistent 'recovery' pane.
+      if (btn.id === "settings-nav-open-recovery") return;
       switchSettingsPane(btn.dataset.settingsPane);
     });
   });
@@ -31371,6 +31401,42 @@
       out.textContent = `Could not look up log location: ${errorToastBody(e)}`;
     }
   });
+
+  // v0.21.x: auto-install updates toggle. Defaults ON; reflects
+  // the daemon's persisted 'auto_install_updates' setting.
+  async function _refreshAutoInstallToggle() {
+    const cb = document.getElementById("setting-auto-install-updates");
+    if (!cb) return;
+    try {
+      const settings = await api.get("/api/settings");
+      const v = settings?.auto_install_updates;
+      // Default to true when unset (sovereignty default).
+      cb.checked = v === undefined ? true : !(v === false || v === "0" || v === "false");
+    } catch (_) {
+      cb.checked = true;
+    }
+  }
+  document.addEventListener("DOMContentLoaded", () => {
+    _refreshAutoInstallToggle().catch(() => {});
+  });
+  document.getElementById("setting-auto-install-updates")
+    ?.addEventListener("change", async (ev) => {
+      const enabled = !!ev.target.checked;
+      try {
+        await api.post("/api/settings", {
+          auto_install_updates: enabled ? "1" : "0",
+        });
+        toast(
+          enabled
+            ? "Auto-install on. New releases will install themselves when available."
+            : "Auto-install off. You'll get a notification when an update is available; click to install when ready.",
+          "good", 4500,
+        );
+      } catch (e) {
+        toast(`Could not save: ${errorToastBody(e)}`, "bad");
+        ev.target.checked = !enabled;
+      }
+    });
 
   // Settings -> About add-device QR. Uses the same One Setup device
   // invite as the primary pairing flow, and auto-opens confirmation

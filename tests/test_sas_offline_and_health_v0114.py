@@ -196,11 +196,14 @@ def test_api_wrappers_call_maybe401(index_html: str):
     """Every fetch path in the api object must invoke _maybe401 so
     a 401 from any endpoint surfaces the banner. Without this only
     /api/foo would trigger it; the global session-expired UX is
-    the whole point."""
+    the whole point. v0.21.x grew the per-verb bodies (AbortController
+    + _apiError plumbing) so each verb now spans more chars; the
+    search window needs to be wide enough to cover get + post + del
+    + upload (the 4 verbs that actually hit the network)."""
     idx = index_html.find("const api = {")
     assert idx > 0
-    snippet = index_html[idx:idx + 2500]
-    # Each verb should call _maybe401.
+    snippet = index_html[idx:idx + 4000]
+    # Each network-touching verb (get, post, del, upload) calls _maybe401.
     assert snippet.count("_maybe401(r.status)") >= 4
 
 

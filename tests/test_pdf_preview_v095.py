@@ -30,16 +30,29 @@ def test_pdf_in_preview_kinds():
 
 def test_pdf_handler_does_not_read_bytes():
     """A 100 MB PDF can't be read into memory. The handler must
-    short-circuit BEFORE the cap-read for kind='pdf'."""
+    short-circuit BEFORE the cap-read for kind='pdf'. v0.21.x
+    generalized the early-return to cover all stream kinds
+    (pdf / video / audio / image / html-sandboxed) since the
+    rationale (browser handles the stream natively, daemon should
+    NOT read bytes) is identical for all of them."""
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def api_file_preview(")
     snippet = src[idx:idx + 4000]
-    # The pdf-special-case branch must be reached BEFORE the cap read.
-    pdf_idx = snippet.find('if kind == "pdf":')
+    # The stream-kind branch must be reached BEFORE the cap read,
+    # and must mention "pdf" so PDFs short-circuit reliably.
+    stream_idx = snippet.find("if kind in (")
     read_idx = snippet.find("path.open(\"rb\")")
-    assert pdf_idx > 0
-    assert read_idx > 0
-    assert pdf_idx < read_idx
+    assert stream_idx > 0, "no stream-kind branch in api_file_preview"
+    assert read_idx > 0, "no cap-read in api_file_preview"
+    assert stream_idx < read_idx, (
+        "stream-kind branch must be evaluated BEFORE the byte-read "
+        "fallback, else PDFs would OOM the daemon"
+    )
+    # pdf must be in the early-return set.
+    early_clause = snippet[stream_idx:read_idx]
+    assert '"pdf"' in early_clause, (
+        "kind='pdf' must be in the stream-only short-circuit set"
+    )
 
 
 def test_pdf_response_has_stream_url():

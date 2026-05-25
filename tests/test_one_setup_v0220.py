@@ -595,7 +595,11 @@ def test_setup_device_invite_qr_opens_peer_shell() -> None:
 def test_me_surfaces_one_setup_compatibility_flags() -> None:
     src = _server_src()
     idx = src.find("async def api_me(")
-    snippet = src[idx:idx + 3200]
+    # 5000-char window covers the function body even after the
+    # v0.21.x autoinstall_enabled / opt-out / setting-read block
+    # was added between the setup-completed lookups and the
+    # return dict. Original window was 3200; bumping to 5000.
+    snippet = src[idx:idx + 5000]
     assert '"one_setup_completed": one_setup_completed' in snippet
     assert '"one_setup_skipped_at_ms": one_setup_skipped_at_ms' in snippet
     assert 'state.get_setting("one_setup_completed")' in snippet

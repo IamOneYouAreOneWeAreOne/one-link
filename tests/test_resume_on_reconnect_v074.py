@@ -794,5 +794,11 @@ def test_index_html_has_paused_status_renderer():
     p = Path(__file__).resolve().parent.parent / "src" / "one_link" / "web" / "index.html"
     text = p.read_text(encoding="utf-8")
     assert '"paused"' in text or "'paused'" in text
-    assert "Waiting for device" in text  # human-readable retry label
+    # Human-readable retry label (the copy has been polished to
+    # "Will retry when they're back" — defensible plain-English
+    # variant; still must show that retry is automatic).
+    assert "retry when they" in text, (
+        "paused state must surface a 'will retry automatically' "
+        "label so the user knows the transfer isn't dead"
+    )
     assert ".badge.paused" in text  # CSS pill style

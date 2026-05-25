@@ -7013,13 +7013,23 @@ class UIServer:
         except Exception:
             suggested_folder = ""
         # v0.21.x: surface whether the experimental one-click
-        # auto-install is enabled (ONE_LINK_EXPERIMENTAL_AUTOINSTALL=1
-        # in the daemon's env). UI uses this to decide whether to
-        # show the "Update now" button alongside "View release".
+        # v0.21.x: auto-install ON by default. The 'Update now' button
+        # in the update banner triggers the real install flow unless
+        # the user has explicitly disabled it in Settings, OR the
+        # operator has set ONE_LINK_EXPERIMENTAL_AUTOINSTALL=0 as a
+        # hard override (locked-down deployments).
         import os as _os
-        autoinstall_enabled = _os.environ.get(
-            "ONE_LINK_EXPERIMENTAL_AUTOINSTALL"
-        ) in ("1", "true", "yes")
+        env_gate = _os.environ.get("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", "")
+        if env_gate in ("0", "false", "no"):
+            autoinstall_enabled = False
+        else:
+            user_pref = "1"
+            if self.daemon.state is not None:
+                with contextlib.suppress(Exception):
+                    stored = self.daemon.state.get_setting("auto_install_updates")
+                    if stored is not None:
+                        user_pref = str(stored)
+            autoinstall_enabled = user_pref not in ("0", "false", "no")
         return web.json_response({
             "short_id": me.short_id,
             "fingerprint": me.fingerprint,
@@ -13001,10 +13011,20 @@ class UIServer:
         # v0.10.0 settings polish — surface theme + DND + sound +
         # log verbosity + custom download folder. Sane defaults so a
         # never-touched daemon Just Works.
+        # v0.21.x: auto-install updates defaults TRUE (the project's
+        # 'just works' / 'no corporate gate' stance). Users opt out
+        # explicitly via Settings -> About; the operator can also
+        # hard-disable via ONE_LINK_EXPERIMENTAL_AUTOINSTALL=0.
+        auto_install_raw = s.get("auto_install_updates")
+        auto_install = (
+            auto_install_raw is None
+            or auto_install_raw.lower() in ("1", "true", "yes")
+        )
         return web.json_response({
             "display_name": s.get("display_name"),
             "auto_accept_lan": s.get("auto_accept_lan", "false") == "true",
             "pair_default_allow_all": pair_allow_all,
+            "auto_install_updates": auto_install,
             # Theme: 'dark' (default) | 'light' | 'auto' (follow OS)
             "theme": s.get("theme", "dark"),
             "ui_density": s.get("ui_density", "comfortable"),
@@ -13112,6 +13132,16 @@ class UIServer:
                 "pair_default_allow_all",
                 "true" if data["pair_default_allow_all"] else "false",
             )
+        # v0.21.x: auto-install updates. '1'/'true' enables (default),
+        # '0'/'false' disables. The /api/update/install handler reads
+        # this setting + refuses to install when False.
+        if "auto_install_updates" in data:
+            v = data["auto_install_updates"]
+            if isinstance(v, bool):
+                stored = "1" if v else "0"
+            else:
+                stored = "0" if str(v).lower() in ("0", "false", "no") else "1"
+            self.daemon.state.set_setting("auto_install_updates", stored)
         # v0.9.4: persist onboarding completion server-side so a
         # fresh browser tab on a paired daemon doesn't re-pop the
         # wizard. Local storage is the primary gate; this is the
@@ -17679,15 +17709,39 @@ class UIServer:
     # auto-reconnect to the freshly-respawned daemon.
     async def api_update_install(self, request: web.Request) -> web.Response:
         import os as _os
-        gate = _os.environ.get("ONE_LINK_EXPERIMENTAL_AUTOINSTALL")
-        if gate not in ("1", "true", "yes"):
+        # v0.21.x: auto-install is ON by default. Users can opt out
+        # via Settings -> About -> 'Auto-install updates' toggle
+        # (persisted as the 'auto_install_updates' setting). The
+        # legacy ONE_LINK_EXPERIMENTAL_AUTOINSTALL env var still
+        # works as a hard override: setting it to '0' disables
+        # auto-install regardless of the user setting (for shared
+        # / locked-down deployments where the operator doesn't
+        # want users to update on their own).
+        env_gate = _os.environ.get("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", "")
+        if env_gate in ("0", "false", "no"):
             return web.json_response({
                 "status": "disabled",
                 "error": (
-                    "auto-install is experimental and disabled by default. "
-                    "Set ONE_LINK_EXPERIMENTAL_AUTOINSTALL=1 in the daemon's "
-                    "environment to enable, or run `pip install --upgrade "
-                    "one_link_native` manually."
+                    "Auto-install is disabled by your environment "
+                    "(ONE_LINK_EXPERIMENTAL_AUTOINSTALL=0). Download "
+                    "the latest release manually from the One Link "
+                    "GitHub releases page."
+                ),
+            }, status=503)
+        user_pref = "1"
+        if self.daemon.state is not None:
+            with contextlib.suppress(Exception):
+                stored = self.daemon.state.get_setting("auto_install_updates")
+                if stored is not None:
+                    user_pref = str(stored)
+        if user_pref in ("0", "false", "no"):
+            return web.json_response({
+                "status": "disabled",
+                "error": (
+                    "Auto-install is turned off in Settings. Turn "
+                    "'Auto-install updates' on in Settings -> About "
+                    "to enable, or download the latest release "
+                    "manually from the One Link GitHub releases page."
                 ),
             }, status=503)
 

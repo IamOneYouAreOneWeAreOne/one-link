@@ -362,11 +362,11 @@ def test_build_install_plan_unverified_when_no_sha256sums(monkeypatch):
 # ─── /api/update/install gate ─────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_api_update_install_disabled_by_default(monkeypatch):
-    """The destructive install path is opt-in. With the env var
-    unset, the endpoint must return 503 with a clear message and
-    never touch subprocess.Popen / pip / the filesystem."""
-    monkeypatch.delenv("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", raising=False)
+async def test_api_update_install_env_hard_disable(monkeypatch):
+    """v0.21.x: the env var is now a HARD DISABLE override, not an
+    opt-in gate. When the operator pins it to '0', the endpoint must
+    return 503 with a clear message and never touch the filesystem."""
+    monkeypatch.setenv("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", "0")
     from one_link.server import UIServer
 
     daemon = SimpleNamespace(
@@ -380,6 +380,30 @@ async def test_api_update_install_disabled_by_default(monkeypatch):
     body = json.loads(resp.text)
     assert body["status"] == "disabled"
     assert "ONE_LINK_EXPERIMENTAL_AUTOINSTALL" in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_api_update_install_default_proceeds_past_gate(monkeypatch):
+    """v0.21.x: with env unset + no user opt-out, the endpoint should
+    advance past the gate and return 409 'not prepared' (because no
+    plan was built in this test fixture) — NOT 503 disabled."""
+    monkeypatch.delenv("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", raising=False)
+    from one_link.server import UIServer
+
+    daemon = SimpleNamespace(
+        state=None, discovery=None,
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa",
+                           hostname="me"),
+    )
+    server = UIServer(daemon)
+    resp = await server.api_update_install(SimpleNamespace(query={}))
+    assert resp.status != 503, (
+        "v0.21.x default should be ENABLED — the gate must let the "
+        "request through to the install-plan path"
+    )
+    assert resp.status == 409
+    body = json.loads(resp.text)
+    assert body["status"] == "no_match"
 
 
 @pytest.mark.asyncio

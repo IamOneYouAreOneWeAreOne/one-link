@@ -90,10 +90,12 @@ def test_file_bubble_shows_rate_and_eta(index_html: str):
 
 def test_paused_bubble_shows_resume_hint(index_html: str):
     """Paused transfer bubble should explicitly mention the resume
-    behaviour so the user doesn't think it's stuck."""
+    behaviour so the user doesn't think it's stuck. renderFileBubble
+    grew with v0.21.x (image-preview + status pills + autopilot
+    facts) so the paused-branch is further down; widen the slice."""
     start = index_html.find("function renderFileBubble(msg)")
     assert start > 0
-    snippet = index_html[start:start + 4000]
+    snippet = index_html[start:start + 6000]
     assert "One Link will keep trying automatically" in snippet
 
 

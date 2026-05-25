@@ -140,8 +140,12 @@ def test_recording_uploads_via_existing_pipeline(index_html: str):
 # ───────── chat bubble surface ───────────────────────────────────────
 
 def test_inbound_audio_bubble_renders_player(index_html: str):
+    """renderFileBubble grew in v0.21.x with status-pill rendering,
+    autopilot facts, image-preview inline lightboxes etc. The
+    inbound-audio branch now sits further down the function. Widen
+    the search slice to cover it."""
     idx = index_html.find("function renderFileBubble(msg)")
-    snippet = index_html[idx:idx + 8000]
+    snippet = index_html[idx:idx + 12000]
     assert "isAudioName(" in snippet
     assert 'document.createElement("audio")' in snippet
     assert "audio.controls = true" in snippet
@@ -151,7 +155,7 @@ def test_audio_bubble_uses_files_endpoint(index_html: str):
     """Audio src must point at /api/files/{name} so the path
     matches the inbox dir on the daemon."""
     idx = index_html.find("function renderFileBubble(msg)")
-    snippet = index_html[idx:idx + 8000]
+    snippet = index_html[idx:idx + 12000]
     assert "/api/files/" in snippet
     assert "encodeURIComponent(fname)" in snippet
 
@@ -161,7 +165,7 @@ def test_outbound_audio_shows_status_note(index_html: str):
     voice bubbles show a 'Voice message sent' note instead of a
     broken player."""
     idx = index_html.find("function renderFileBubble(msg)")
-    snippet = index_html[idx:idx + 8000]
+    snippet = index_html[idx:idx + 12000]
     assert "Voice message sent" in snippet
 
 

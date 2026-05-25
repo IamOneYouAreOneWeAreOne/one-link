@@ -1,12 +1,12 @@
-"""Phase 3b: /api/me surfaces autoinstall_enabled, UI shows 'Update now'
-button when the gate is on.
+"""Phase 3b → v0.21.x: /api/me surfaces autoinstall_enabled, UI
+shows 'Update now' button when the gate is on.
 
 Defends the contract that:
-    * The 'Update now' button must be invisible when the daemon
-      doesn't have ONE_LINK_EXPERIMENTAL_AUTOINSTALL=1 set. If the
-      button leaks into the UI without the gate, clicking it just
-      shows a 503 — bad UX, but more importantly a footgun for a
-      future maintainer who forgets to set the env var.
+    * Pre-v0.21.x: autoinstall_enabled was opt-in (gated behind
+      ONE_LINK_EXPERIMENTAL_AUTOINSTALL=1). v0.21.x flips it: the
+      default is ON; the env var only hard-DISABLES when set to a
+      falsy value, and the per-user setting (`auto_install_updates`)
+      can override either way.
     * The button MUST be visible when the gate IS on, so the work
       we did in Phase 3 is reachable.
     * /api/me reports the flag honestly. The UI relies on its value.
@@ -31,7 +31,10 @@ WEB_INDEX = (
 # ─── /api/me autoinstall_enabled contract ─────────────────────────────
 
 @pytest.mark.asyncio
-async def test_api_me_reports_autoinstall_disabled_by_default(monkeypatch):
+async def test_api_me_reports_autoinstall_enabled_by_default(monkeypatch):
+    """v0.21.x: with the env var unset AND no per-user setting
+    stored, autoinstall_enabled defaults to TRUE. The 'just works'
+    sovereignty default; users opt out via Settings → About."""
     monkeypatch.delenv("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", raising=False)
     from one_link.server import UIServer
 
@@ -48,7 +51,7 @@ async def test_api_me_reports_autoinstall_disabled_by_default(monkeypatch):
     server = UIServer(daemon)
     resp = await server.api_me(SimpleNamespace(query={}))
     body = json.loads(resp.text)
-    assert body["autoinstall_enabled"] is False
+    assert body["autoinstall_enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -94,9 +97,11 @@ async def test_api_me_autoinstall_accepts_truthy_strings(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_api_me_autoinstall_rejects_falsy_strings(monkeypatch):
-    """'0', 'no', 'false', '' all leave the gate off. Anything but
-    explicitly truthy keeps the destructive endpoint disabled."""
+async def test_api_me_autoinstall_env_hard_disable_values(monkeypatch):
+    """v0.21.x: '0', 'no', 'false' are the ONLY env values that
+    hard-disable (operator override for locked-down deployments).
+    Anything else (including '' and 'maybe') passes through to the
+    per-user setting, which defaults to ON."""
     from one_link.server import UIServer
     me_stub = SimpleNamespace(
         short_id="aaaaaaaa", fingerprint="aa" * 32, hostname="laptop",
@@ -108,11 +113,23 @@ async def test_api_me_autoinstall_rejects_falsy_strings(monkeypatch):
     )
     server = UIServer(daemon)
 
-    for value in ("0", "no", "false", "", "maybe"):
+    # Explicit hard-disable values.
+    for value in ("0", "no", "false"):
         monkeypatch.setenv("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", value)
         resp = await server.api_me(SimpleNamespace(query={}))
         body = json.loads(resp.text)
-        assert body["autoinstall_enabled"] is False, f"value={value!r}"
+        assert body["autoinstall_enabled"] is False, (
+            f"env={value!r} must hard-disable"
+        )
+
+    # Pass-through values fall to per-user setting (default ON).
+    for value in ("", "maybe"):
+        monkeypatch.setenv("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", value)
+        resp = await server.api_me(SimpleNamespace(query={}))
+        body = json.loads(resp.text)
+        assert body["autoinstall_enabled"] is True, (
+            f"env={value!r} must pass through to user setting (default ON)"
+        )
 
 
 # ─── UI markup contract ────────────────────────────────────────────────

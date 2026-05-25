@@ -2560,6 +2560,14 @@ class Daemon:
                         status, _local_ver, version,
                     )
                 last_status, last_version = status, version
+                # v0.21.x: silent auto-install. When the poll surfaces
+                # a NEWER release + the user hasn't opted out + no
+                # active voice/video call would be interrupted, kick
+                # off the install in the background. The daemon
+                # restarts on its own; the user's browser tab
+                # auto-reconnects via the WS version-drift handler.
+                if status == "newer":
+                    await self._maybe_auto_install(version, _local_ver)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -2568,6 +2576,147 @@ class Daemon:
                 await asyncio.sleep(self.UPDATE_CHECK_INTERVAL_S)
             except asyncio.CancelledError:
                 raise
+
+    async def _maybe_auto_install(
+        self, latest_version: str | None, local_version: str,
+    ) -> None:
+        """Silent auto-install path. Called from _update_check_loop
+        when status='newer'. Skips when:
+
+          - User has 'auto_install_updates' setting OFF.
+          - ONE_LINK_EXPERIMENTAL_AUTOINSTALL=0 (operator override).
+          - Any voice/video call is active (would drop mid-call).
+          - Any active file transfer is in flight (would interrupt).
+          - We've already kicked off an install this process lifetime
+            (the in-flight install will restart the daemon; no point
+            racing two installers).
+
+        Returns nothing. Failures are logged + swallowed - the next
+        poll will retry.
+        """
+        # Already running? Don't double-install.
+        if getattr(self, "_auto_install_in_flight", False):
+            return
+        # Operator hard-disable check.
+        env_gate = os.environ.get("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", "")
+        if env_gate in ("0", "false", "no"):
+            return
+        # User opt-out check.
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                stored = self.state.get_setting("auto_install_updates")
+                if stored is not None and str(stored).lower() in ("0", "false", "no"):
+                    log.debug("auto-install: skipped (user opt-out)")
+                    return
+        # Active-call guard. Don't restart mid-call.
+        try:
+            active_calls = self._call_registry.active_call_ids()
+            if active_calls:
+                log.info(
+                    "auto-install: deferring (active call(s): %s)",
+                    list(active_calls),
+                )
+                return
+        except Exception:
+            pass
+        # Active-transfer guard. Don't restart mid-transfer.
+        if self.state is not None:
+            try:
+                recent = self.state.list_transfers(limit=20)
+                in_flight = [
+                    t for t in recent
+                    if getattr(t, "status", "") in ("offered", "active", "queued")
+                ]
+                if in_flight:
+                    log.info(
+                        "auto-install: deferring (%d active transfer(s))",
+                        len(in_flight),
+                    )
+                    return
+            except Exception:
+                pass
+
+        self._auto_install_in_flight = True
+        log.info(
+            "auto-install: starting silent install of %s "
+            "(current=%s); daemon will restart when ready",
+            latest_version or "?", local_version,
+        )
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "auto_install_starting",
+                    "latest_version": latest_version,
+                    "local_version": local_version,
+                })
+        loop = asyncio.get_running_loop()
+        try:
+            from one_link.updater import (
+                build_install_plan, download_to_temp, sha256_file,
+                write_updater_script, spawn_detached,
+            )
+            plan = await loop.run_in_executor(None, build_install_plan)
+            if plan.status != "ready" or plan.wheel is None:
+                log.info(
+                    "auto-install: no wheel for this host (%s); skipping",
+                    plan.error or plan.status,
+                )
+                self._auto_install_in_flight = False
+                return
+            wheel_path = await loop.run_in_executor(
+                None,
+                lambda: download_to_temp(
+                    plan.wheel.asset_url,
+                    expected_size=plan.wheel.size,
+                ),
+            )
+            expected = plan.wheel.expected_sha256
+            if not expected:
+                log.warning(
+                    "auto-install: SHA256SUMS missing wheel hash; "
+                    "refusing to install unverified binary"
+                )
+                with contextlib.suppress(OSError):
+                    wheel_path.unlink(missing_ok=True)
+                self._auto_install_in_flight = False
+                return
+            got = await loop.run_in_executor(None, sha256_file, wheel_path)
+            if got != expected:
+                log.warning(
+                    "auto-install: SHA256 mismatch (expected %s got %s); "
+                    "refusing to install",
+                    expected, got,
+                )
+                with contextlib.suppress(OSError):
+                    wheel_path.unlink(missing_ok=True)
+                self._auto_install_in_flight = False
+                return
+            script_path = await loop.run_in_executor(
+                None,
+                lambda: write_updater_script(
+                    wheel_path, parent_pid=os.getpid(),
+                ),
+            )
+            updater_pid = await loop.run_in_executor(
+                None, spawn_detached, script_path,
+            )
+            log.info(
+                "auto-install: updater spawned (pid=%s); daemon exiting",
+                updater_pid,
+            )
+            if self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "auto_install_complete",
+                        "latest_version": latest_version,
+                        "updater_pid": updater_pid,
+                    })
+            # Give the WS broadcast a beat to flush before exit.
+            await asyncio.sleep(0.5)
+            os._exit(0)
+        except Exception as e:
+            log.warning("auto-install failed: %s", e)
+            self._auto_install_in_flight = False
 
     # v0.10.4 presence helpers ─────────────────────────────────────
     PRESENCE_VALUES = ("online", "away", "dnd", "invisible")

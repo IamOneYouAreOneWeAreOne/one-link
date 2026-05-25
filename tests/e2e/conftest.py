@@ -128,28 +128,60 @@ def live_daemon(tmp_path: Path) -> Iterator[LiveDaemon]:
 def ui_page(live_daemon, page):
     """A Playwright `page` already navigated to the live daemon's
     UI with the bootstrap token applied + the first-launch
-    onboarding modal dismissed. Most tests want this over the
-    raw `page` fixture - it skips the boilerplate of
-    `page.goto(...)` + the onboarding click.
+    onboarding modal pre-dismissed via seeded localStorage.
+
+    Race-free dismissal pattern: register an init script BEFORE
+    the first navigation so the page boots with the
+    `onboarding_completed` localStorage flag already set. That
+    short-circuits maybeShowOnboarding() at the top, the backdrop
+    never opens, and no click in any subsequent test can be
+    intercepted by it. The post-goto skip-button click was racy:
+    if networkidle fired before the wizard reached the DOM, the
+    `count()` check returned 0 and the wizard popped up a beat
+    later, blocking every click in the actual test body.
     """
+    # The "what's new" modal pops on every version it hasn't seen
+    # yet; we'd seed it with the daemon's app_version but we don't
+    # know it until after navigation, so seed a sentinel that the
+    # daemon's version will never match - we don't WANT the modal
+    # to appear in tests, and we CSS-hide its backdrop below as a
+    # second line of defense.
+    page.add_init_script("""
+        try {
+            localStorage.setItem('one_link.onboarding_completed', '1');
+            // Seed both possible last-seen-version keys so the
+            // What's New modal doesn't pop. The script later in
+            // boot will compare daemon version to localStorage;
+            // a non-empty value short-circuits the first-launch
+            // seed branch and the subsequent !== comparison just
+            // updates the value silently.
+            if (!localStorage.getItem('one_link.last_seen_version')) {
+                localStorage.setItem('one_link.last_seen_version', 'e2e-suppress');
+            }
+        } catch (_e) {}
+    """)
     page.goto(live_daemon.auth_url, wait_until="networkidle")
     page.wait_for_selector("body", timeout=15000)
-    # Dismiss first-launch onboarding if it's blocking the UI.
-    # Fresh ONE_LINK_HOME means every E2E run hits the onboarding
-    # overlay; without dismissing it every click is intercepted
-    # by the backdrop's pointer-events: all.
-    if page.locator("#onboarding-skip").count():
-        try:
-            page.locator("#onboarding-skip").click(timeout=2000)
-            # Wait for the backdrop to actually go away.
-            page.wait_for_selector(
-                "#onboarding-backdrop",
-                state="hidden",
-                timeout=5000,
-            )
-        except Exception:
-            pass  # already dismissed or never shown
-    # Same for the one-setup modal (a second first-launch wizard).
+    # Belt-and-suspenders: if a different boot path managed to open
+    # either modal anyway, neutralize their pointer interception
+    # via CSS. visual_regression also hides them via add_style_tag
+    # so screenshots still capture the underlying surface.
+    page.add_style_tag(content="""
+        #onboarding-backdrop, #whatsnew-modal, .wnm-modal,
+        .wnm-backdrop {
+            display: none !important;
+            pointer-events: none !important;
+        }
+    """)
+    # If the What's New modal landed before our CSS injected (race
+    # with the boot path), tear it out of the DOM entirely so even
+    # event delegation can't fire on it.
+    page.evaluate("""() => {
+        document.getElementById('whatsnew-modal')?.remove();
+        document.body.classList.remove('wnm-open');
+    }""")
+    # Same for the one-setup modal (a second first-launch wizard)
+    # if anything dispatches it after our init script ran.
     if page.locator("#one-setup-skip, #btn-one-setup-skip").count():
         try:
             page.locator("#one-setup-skip, #btn-one-setup-skip").first.click(timeout=1500)
