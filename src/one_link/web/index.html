@@ -4535,6 +4535,94 @@
   }
   .rotation-banner .dismiss:hover { color: var(--text); }
 
+  /* v0.21.x first-launch install-warning explainer banner.
+     Same visual shape as the rotation banner but a calmer color
+     palette (green-ish, since the user just succeeded at
+     installing). Fires once per device. */
+  .install-warning-banner {
+    display: none;
+    position: fixed; top: 0; left: 0; right: 0;
+    z-index: 9996;
+    background: linear-gradient(90deg, rgba(80, 200, 140, .18), rgba(80, 200, 140, .08));
+    border-bottom: 1px solid rgba(80, 200, 140, .45);
+    color: var(--text);
+    padding: 10px 18px;
+    font-size: 13px;
+    line-height: 1.5;
+    align-items: center; gap: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,.35);
+  }
+  .install-warning-banner.show { display: flex; }
+  .install-warning-banner strong { color: rgb(80, 200, 140); }
+  .install-warning-banner .iwb-text { flex: 1; min-width: 0; }
+  .install-warning-banner .iwb-actions { display: flex; gap: 8px; }
+  .install-warning-banner button {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--line);
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .install-warning-banner button:hover {
+    background: var(--bg-3);
+    border-color: rgba(80, 200, 140, .55);
+  }
+  .install-warning-banner .dismiss {
+    color: var(--text-dim);
+    border-color: transparent;
+  }
+
+  .install-warning-modal-backdrop {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 10001;
+    align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .install-warning-modal-backdrop.show { display: flex; }
+  .install-warning-modal {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 28px;
+    max-width: 540px;
+    max-height: 80vh;
+    overflow-y: auto;
+    color: var(--text);
+    line-height: 1.55;
+  }
+  .install-warning-modal h2 {
+    margin: 0 0 14px;
+    font-size: 20px;
+    color: rgb(80, 200, 140);
+  }
+  .install-warning-modal p { margin: 0 0 12px; font-size: 14px; }
+  .install-warning-modal code {
+    background: var(--bg-3);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+  .install-warning-modal .iwb-modal-actions {
+    margin-top: 18px;
+    display: flex;
+    justify-content: flex-end;
+  }
+  .install-warning-modal .dismiss {
+    background: var(--accent);
+    color: white;
+    border: 0;
+    padding: 8px 18px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
   /* v0.11.4 session-expired banner. Sits at the top of the viewport
      above all other UI so the user can't miss it. */
   .session-expired-banner {
@@ -8309,6 +8397,64 @@
     <div class="rb-actions">
       <button class="dismiss" id="rotation-banner-dismiss" type="button">Dismiss</button>
       <button id="rotation-banner-open" type="button">Open rotation</button>
+    </div>
+  </div>
+
+  <!-- v0.21.x first-launch install-warning explainer. Fires ONCE,
+       gated by localStorage["one_link.install_warning_seen"]. Turns
+       the "Windows protected your PC" / "developer cannot be
+       verified" moment into a trust-building beat: we don't pay
+       Microsoft/Apple to bless this app because that would let
+       them un-bless it. See docs/LAUNCH_BLOCKERS.md + the
+       sovereign-by-design rationale. -->
+  <div class="install-warning-banner" id="install-warning-banner"
+       role="status" style="display:none;">
+    <span class="iwb-text">
+      <strong>Glad you got past the security warning.</strong>
+      One Link isn't signed by Microsoft or Apple. That's on purpose -
+      it means no company has the power to revoke your right to use
+      this app.
+    </span>
+    <div class="iwb-actions">
+      <button class="iwb-more" id="install-warning-banner-more" type="button">Why?</button>
+      <button class="dismiss" id="install-warning-banner-dismiss" type="button">Got it</button>
+    </div>
+  </div>
+  <div class="install-warning-modal-backdrop" id="install-warning-modal-backdrop"
+       style="display:none;">
+    <div class="install-warning-modal" role="dialog" aria-modal="true"
+         aria-labelledby="iwb-modal-title">
+      <h2 id="iwb-modal-title">Why isn't this app signed?</h2>
+      <p>
+        When you install most apps, Windows or macOS asks a
+        company (Microsoft, Apple, or a third-party Certificate
+        Authority) to vouch for the developer. That company can
+        also <em>un-vouch</em> at any time - revoke the signature
+        and stop your app from running.
+      </p>
+      <p>
+        One Link is built so no company can take it away from you.
+        That means we don't ask Microsoft or Apple for permission
+        to ship. The trade-off is the warning you saw when you
+        installed.
+      </p>
+      <p>
+        <strong>This isn't a bug. It's the foundation.</strong>
+        If we paid for those signatures and a government
+        pressured one of those companies to revoke them, your
+        copy of One Link would stop working overnight. That
+        scenario has happened to other privacy tools. We refuse
+        to be in that position.
+      </p>
+      <p>
+        You can verify the binary is exactly what we published
+        without trusting anyone. Run
+        <code>one-link verify-this-install</code> in a terminal
+        and compare the hash to the release notes.
+      </p>
+      <div class="iwb-modal-actions">
+        <button class="dismiss" id="install-warning-modal-close" type="button">Got it</button>
+      </div>
     </div>
   </div>
 
@@ -12144,6 +12290,52 @@
     }
     // Initial check on page load.
     refreshRotationBanner().catch(() => {});
+    // v0.21.x first-launch install-warning explainer. Show once
+    // per browser/device, dismissable. The banner reframes the
+    // SmartScreen / Gatekeeper warning as a trust-building beat
+    // (no corporation can revoke our right to ship). Pin: only
+    // fires when the user has NEVER seen it on this device, and
+    // never fires alongside the rotation banner (rotation is
+    // urgent + competing UX would confuse).
+    try {
+      const SEEN_KEY = "one_link.install_warning_seen";
+      const seen = (function () {
+        try { return localStorage.getItem(SEEN_KEY) === "1"; }
+        catch (_) { return true; /* no localStorage = silent skip */ }
+      })();
+      const iwb = document.getElementById("install-warning-banner");
+      const iwbDismiss = document.getElementById("install-warning-banner-dismiss");
+      const iwbMore = document.getElementById("install-warning-banner-more");
+      const iwbModal = document.getElementById("install-warning-modal-backdrop");
+      const iwbModalClose = document.getElementById("install-warning-modal-close");
+      if (iwb && !seen) {
+        iwb.classList.add("show");
+      }
+      function _hideIwb() {
+        try { localStorage.setItem(SEEN_KEY, "1"); } catch (_) {}
+        iwb?.classList.remove("show");
+      }
+      iwbDismiss?.addEventListener("click", _hideIwb);
+      iwbMore?.addEventListener("click", () => {
+        iwbModal?.classList.add("show");
+      });
+      iwbModalClose?.addEventListener("click", () => {
+        iwbModal?.classList.remove("show");
+        _hideIwb();
+      });
+      iwbModal?.addEventListener("click", (ev) => {
+        // Click outside the inner card closes.
+        if (ev.target === iwbModal) {
+          iwbModal.classList.remove("show");
+        }
+      });
+      // Escape closes the modal too.
+      document.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape" && iwbModal?.classList.contains("show")) {
+          iwbModal.classList.remove("show");
+        }
+      });
+    } catch (_) { /* defensive */ }
   });
   function populateNotifSettings() {
     const btn = $("#set-notif");
