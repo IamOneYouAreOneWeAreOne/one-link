@@ -3893,7 +3893,7 @@
     }
     _phoneAutoReconnectInFlight = true;
     const sendStatus = $("#daemon-chat-send-status");
-    if (sendStatus) sendStatus.textContent = "Live link dropped, reconnecting…";
+    if (sendStatus) sendStatus.textContent = "Reattaching…";
     try {
       const handoff = await _attemptReloginWithStoredCert();
       if (!handoff) {
@@ -5021,7 +5021,7 @@
     // once it exists.
     _showOnly("#autopair-card");
     _autopairSetState(
-      "dim", "reconnecting",
+      "dim", "restoring",
       "Restoring your live link to the laptop…",
     );
   } else if (_selfMeshQuery || _setupDeviceInviteQuery) {
