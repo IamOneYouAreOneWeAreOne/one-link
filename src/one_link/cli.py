@@ -1028,6 +1028,126 @@ def native_status():
         click.echo(f"reason:     {st.reason}")
 
 
+@cli.command("verify-this-install")
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit machine-readable JSON instead of human text.",
+)
+def verify_this_install(as_json):
+    """Show + verify the load-bearing identity of this install.
+
+    Prints the version, package root, a BLAKE3 content hash of every
+    load-bearing source file, and a hash-of-hashes that matches the
+    figure published in the release notes. Lets a user (or auditor)
+    confirm that the binary + source files have not been tampered
+    with since the signed release.
+
+    The hash-of-hashes is also visible via `/api/me` so a Web-UI
+    user can compare against the value here without leaving the
+    browser. A mismatch means either (a) you patched the install
+    locally (fine, just remember you did) or (b) someone else
+    modified the files on disk (investigate).
+
+    For Sigstore verification of the released artifact:
+
+        cosign verify-blob \\
+          --certificate-identity-regexp '.*' \\
+          --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\
+          --bundle one-link.exe.sigstore \\
+          one-link.exe
+
+    The verify-blob command + the publisher identity REGEX are
+    documented in docs/RELEASE_CHECKLIST.md.
+    """
+    import hashlib
+    import json as _json
+    import sys as _sys
+
+    from one_link import __version__
+    from one_link.build_identity import _FINGERPRINT_FILES, package_root
+
+    root = package_root()
+    file_hashes: dict[str, str] = {}
+    missing: list[str] = []
+    rollup = hashlib.blake2s(digest_size=16)
+    for rel in _FINGERPRINT_FILES:
+        path = root / rel
+        if not path.is_file():
+            file_hashes[rel] = "MISSING"
+            missing.append(rel)
+            rollup.update(rel.encode("utf-8") + b":MISSING\n")
+            continue
+        h = hashlib.blake2s(digest_size=16)
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        digest = h.hexdigest()
+        file_hashes[rel] = digest
+        rollup.update(rel.encode("utf-8") + b":" + digest.encode("ascii") + b"\n")
+
+    frozen_binary: Optional[str] = None
+    if getattr(_sys, "frozen", False) and hasattr(_sys, "executable"):
+        bin_path = Path(_sys.executable)
+        if bin_path.is_file():
+            bh = hashlib.blake2s(digest_size=32)
+            with bin_path.open("rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    bh.update(chunk)
+            frozen_binary = bh.hexdigest()
+
+    out = {
+        "version": __version__,
+        "package_root": str(root),
+        "files": file_hashes,
+        "missing": missing,
+        "rollup_blake2s_128": rollup.hexdigest(),
+        "frozen_binary_blake2s_256": frozen_binary,
+    }
+
+    if as_json:
+        click.echo(_json.dumps(out, indent=2, sort_keys=True))
+        return
+
+    click.echo(f"One Link version:   {__version__}")
+    click.echo(f"Package root:       {root}")
+    click.echo("")
+    click.echo("Load-bearing source files (BLAKE2s-128 content hash):")
+    name_w = max(len(n) for n in file_hashes)
+    for name, h in sorted(file_hashes.items()):
+        click.echo(f"  {name:<{name_w}}  {h}")
+    if missing:
+        click.echo("")
+        click.echo(
+            "WARNING: some load-bearing files are missing on disk.",
+            err=True,
+        )
+        for m in missing:
+            click.echo(f"  - {m}", err=True)
+        click.echo(
+            "This usually means the install is incomplete or "
+            "tampered. Re-install from a verified source.",
+            err=True,
+        )
+    click.echo("")
+    click.echo(f"Rollup (compare with release notes): {rollup.hexdigest()}")
+    if frozen_binary:
+        click.echo(f"Frozen binary BLAKE2s-256:           {frozen_binary}")
+        click.echo("")
+        click.echo("To verify this binary against the published Sigstore bundle:")
+        click.echo("  cosign verify-blob \\")
+        click.echo("    --certificate-identity-regexp '.*' \\")
+        click.echo(
+            "    --certificate-oidc-issuer "
+            "'https://token.actions.githubusercontent.com' \\"
+        )
+        click.echo(
+            f"    --bundle {Path(_sys.executable).name}.sigstore \\"
+        )
+        click.echo(f"    {Path(_sys.executable).name}")
+    else:
+        click.echo("(running from source; no frozen-binary hash to report)")
+
+
 @cli.command()
 def peers():
     """List discovered peers on the LAN."""

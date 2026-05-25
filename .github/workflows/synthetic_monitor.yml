@@ -1,0 +1,53 @@
+name: synthetic uptime monitor
+
+# Runs scripts/synthetic_monitor.py on a schedule + on every push to
+# master. The script spawns two daemons + exchanges health-check
+# probes between them, mirroring the user-facing pair-and-send
+# promise of the project.
+#
+# Why this exists: tests/ catches bugs in code-as-written. This
+# catches bugs in code-as-it-actually-runs-on-a-real-OS - the
+# class of regression where unit tests pass but a real install
+# can't even bring up two daemons (port conflicts, identity
+# initialization races, etc.).
+#
+# If this turns red, EVERY user pairing two devices today is
+# affected. Treat as a P0 alert.
+
+on:
+  push:
+    branches: [master, main]
+  schedule:
+    # Twice daily so a regression introduced overnight is caught
+    # before the next morning's PR cycle.
+    - cron: "0 6,18 * * *"
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    name: synthetic monitor / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: run synthetic monitor
+        run: python scripts/synthetic_monitor.py --out monitor_result.json
+      - name: upload monitor result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-monitor-${{ matrix.os }}-${{ github.run_number }}
+          path: monitor_result.json
+          retention-days: 30
